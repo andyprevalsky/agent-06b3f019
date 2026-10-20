@@ -6,9 +6,26 @@ import { withOwnedResumeTransport } from '../../providers/browser/resumeTranspor
  * Transient Steel SDK "Connection error" must backoff-retry rather than fail
  * the Kernel→Steel rotate ladder on the first flaky create.
  */
+import { __flushBroadcastQueueForTests } from '../../providers/chat/supabaseBroadcast';
 import { prisma } from '../../providers/database';
 import { validateSessionConnectionWithReason } from '../../providers/steel/sessionConnection';
+import type { withSteelLifecycleClaim } from '../../providers/steel/lifecycleClaim';
 import { navigateToSavedUrl, recreateSession } from '../../providers/steel/sessionResume';
+
+// These legacy cases mock DB/provider effects; ambiguity still needs exact terminal evidence.
+export const withReleasedFixtureLifecycleClaim: typeof withSteelLifecycleClaim = async (
+  _taskId,
+  callback
+) =>
+  callback(undefined!, undefined!, undefined!, async (id, inspect) => {
+    const native = await inspect();
+    return native.id === id && native.status === 'released';
+  });
+
+export const fixtureCandidateCleanup = {
+  prepareCandidateCleanup: async () => {},
+  settleCandidateCleanup: async () => {},
+};
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
@@ -97,13 +114,17 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
       'replacement-connection-retry-task',
       { forceManagedRotation: true },
       {
+        withLifecycleClaim: withReleasedFixtureLifecycleClaim,
+        inspectSession: async (id) => ({ id, status: 'released' }),
+        releaseSession: async () => {},
+        ...fixtureCandidateCleanup,
         createSession: async (input) => {
           connectionInputs.push(input as unknown as Record<string, unknown>);
           if (connectionInputs.length < 3) {
             throw new Error('Connection error');
           }
           return {
-            id: 'steel-after-connection-retry',
+            id: input.sessionId!,
             debugUrl: 'https://steel.example/debug',
             profileId: null,
             proxySource: 'steel',
@@ -113,7 +134,7 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
       }
     );
     assert(
-      connectionResult.sessionId === 'steel-after-connection-retry',
+      connectionResult.sessionId === connectionInputs[2]?.sessionId,
       'connection-error retry did not succeed'
     );
     assert(
@@ -149,12 +170,16 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
         'replacement-connection-retry-task',
         { forceManagedRotation: true },
         {
+          withLifecycleClaim: withReleasedFixtureLifecycleClaim,
+          inspectSession: async (id) => ({ id, status: 'released' }),
+          releaseSession: async () => {},
+          ...fixtureCandidateCleanup,
           createSession: async (input) => {
             const geo = (input as { useProxy?: { geolocation?: Record<string, unknown> } }).useProxy
               ?.geolocation;
             consecutiveStates.push(geo?.state);
             return {
-              id: `steel-rotation-${position}`,
+              id: input.sessionId!,
               debugUrl: 'https://steel.example/debug',
               profileId: null,
               proxySource: 'steel',
@@ -170,15 +195,59 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
         consecutiveStates[0] !== consecutiveStates[1],
       `consecutive rotations must request different states, got ${JSON.stringify(consecutiveStates)}`
     );
+    // A committed replacement is not handed off if its enclosing lifecycle claim
+    // rejects as it settles: close the kept validation transport exactly once
+    // (even when close itself fails) and forward the claim's original error.
+    const claimFailure = new Error('fixture lifecycle claim release failed');
+    let localCloses = 0;
+    let claimCreates = 0;
+    let claimReleases = 0;
+    const localBrowser = {
+      close: async () => {
+        localCloses++;
+        throw new Error('fixture local close failed');
+      },
+    } as unknown as import('playwright').Browser;
+    const priorSavedUrl = savedUrl;
+    savedUrl = null;
+    const claimRejection = await recreateSession(
+      'replacement-connection-retry-task',
+      { forceManagedRotation: true, keepValidationConnection: true },
+      {
+        withLifecycleClaim: (async (...args: Parameters<typeof withSteelLifecycleClaim>) => {
+          await withReleasedFixtureLifecycleClaim(...args);
+          throw claimFailure;
+        }) as typeof withSteelLifecycleClaim,
+        inspectSession: async (id) => ({ id, status: 'released' }),
+        releaseSession: async () => {
+          claimReleases++;
+        },
+        ...fixtureCandidateCleanup,
+        createSession: async (input) => {
+          claimCreates++;
+          return { id: input.sessionId!, debugUrl: 'https://steel.example/debug', profileId: null };
+        },
+        validateConnection: async () => ({ browser: localBrowser, failure: null }),
+      }
+    ).catch((error: unknown) => error);
+    savedUrl = priorSavedUrl;
+    assert(claimRejection === claimFailure, 'local close replaced the claim release error');
+    assert(localCloses === 1, 'unhanded owned validation connection was not closed exactly once');
+    assert(claimCreates === 1, 'claim release failure retried creation');
+    assert(claimReleases === 0, 'committed remote session was released');
     const resumeInputs: Array<Record<string, unknown>> = [];
     await recreateSession(
       'replacement-connection-retry-task',
       { forceManagedRotation: false },
       {
+        withLifecycleClaim: withReleasedFixtureLifecycleClaim,
+        inspectSession: async (id) => ({ id, status: 'released' }),
+        releaseSession: async () => {},
+        ...fixtureCandidateCleanup,
         createSession: async (input) => {
           resumeInputs.push(input as unknown as Record<string, unknown>);
           return {
-            id: 'steel-after-resume',
+            id: input.sessionId!,
             debugUrl: 'https://steel.example/debug',
             profileId: null,
             proxySource: 'steel',
@@ -207,8 +276,11 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
         'replacement-connection-retry-task',
         { forceManagedRotation: true },
         {
-          createSession: async () => ({
-            id: `steel-validation-timeout-${releasedSessions}`,
+          withLifecycleClaim: withReleasedFixtureLifecycleClaim,
+          inspectSession: async (id) => ({ id, status: 'released' }),
+          ...fixtureCandidateCleanup,
+          createSession: async (input) => ({
+            id: input.sessionId!,
             debugUrl: 'https://steel.example/debug',
             profileId: null,
           }),
@@ -237,8 +309,12 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
       'replacement-connection-retry-task',
       { forceManagedRotation: false, keepValidationConnection: true },
       {
-        createSession: async () => ({
-          id: 'retained-steel',
+        withLifecycleClaim: withReleasedFixtureLifecycleClaim,
+        inspectSession: async (id) => ({ id, status: 'released' }),
+        ...fixtureCandidateCleanup,
+        // The ownership contract adopts only the client-selected session ID.
+        createSession: async (input) => ({
+          id: input.sessionId!,
           debugUrl: 'https://steel.example/debug',
           profileId: null,
         }),
@@ -260,8 +336,11 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
         'replacement-connection-retry-task',
         { forceManagedRotation: false, keepValidationConnection: true },
         {
-          createSession: async () => ({
-            id: 'cas-losing-steel',
+          withLifecycleClaim: withReleasedFixtureLifecycleClaim,
+          inspectSession: async (id) => ({ id, status: 'released' }),
+          ...fixtureCandidateCleanup,
+          createSession: async (input) => ({
+            id: input.sessionId!,
             debugUrl: 'https://steel.example/debug',
             profileId: null,
           }),
@@ -278,6 +357,8 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
       casFailure instanceof Error && casReleases === 1 && transportCloses === 1,
       'CAS loss must close only its transport and release only its uncommitted session once'
     );
+    // Deliver this fixture's binding announcements before a later fixture observes broadcasts.
+    await __flushBroadcastQueueForTests();
   } finally {
     (
       prisma.browserSession as unknown as { findUnique: typeof prisma.browserSession.findUnique }

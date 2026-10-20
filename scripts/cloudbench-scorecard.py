@@ -246,16 +246,15 @@ def _window(card) -> float | None:
 
 
 CARD_PATTERN = re.compile(r"(^|/)\.?context/fleet/runs/([^/]+)/_batch/report-card\.json$")
-OWNED_PATTERN = re.compile(r"(^|/)\.?context/fleet/runs/[^/]+/(teardown-ownership/owned-clones\.(names|ids)|[^/]+/worker-clones\.ids)$")
 MACHINE_ID = re.compile(r"^[0-9a-f]{14}$")
-RELEASED_TERMINALS = {"CONTROLLER_RELEASE_VERIFIED", "DEAD_OWNER_CONTROLLER_RELEASE_VERIFIED"}
+RELEASED_TERMINALS = {"CONTROLLER_RELEASE_VERIFIED", "DEAD_OWNER_CONTROLLER_RELEASE_VERIFIED", "FAILED_BEFORE_SUPERVISOR_RELEASED"}
 SUMMARY_PATTERN = re.compile(r"(^|/)\.?context/benchmarks/campaigns/[^/]+/summary\.json$")
 
 
 def export_records(export: Path) -> dict:
-    """One pass over a verified controller export: campaign summary, fleet report cards
-    and the owned guest clone names/IDs recorded by each fleet's teardown ownership."""
-    records = {"summary": None, "cards": {}, "owned_names": set(), "owned_ids": set()}
+    """One pass over a verified controller export: campaign summary and fleet report cards.
+    Owned guest identities belong to scripts/cloudbench-native-release-audit.py."""
+    records = {"summary": None, "cards": {}}
     archive = Path(export) / "originals.tar.gz"
     if not (Path(export) / "disposable-export.verified.json").exists() or not archive.exists():
         return records
@@ -269,9 +268,6 @@ def export_records(export: Path) -> dict:
                 card = json.loads(stream.extractfile(member).read())
                 if isinstance(card, dict) and isinstance(card.get("run_id"), str):
                     records["cards"][card["run_id"]] = card
-            elif OWNED_PATTERN.search(member.name):
-                for line in stream.extractfile(member).read().decode(errors="replace").split():
-                    records["owned_ids" if MACHINE_ID.match(line) else "owned_names"].add(line)
     return records
 
 
@@ -366,7 +362,9 @@ def load_fleet(run_dir: Path) -> dict:
     exp["surface"] = "local" if local else "cloud"
     exp["id"] = card.get("run_id") or run_dir.name
     tasks = card.get("tasks") or {}
-    exp["scheduled_total"] = tasks.get("total") if isinstance(tasks.get("total"), int) else None
+    # The fleet's startup card lists starting tasks; later cards carry counts.
+    total = len(tasks) if isinstance(tasks, list) else tasks.get("total")
+    exp["scheduled_total"] = total if isinstance(total, int) else None
     code = str(card.get("code") or "")
     match = re.search(r"@([0-9a-f]{7,40})", code)
     exp["source_ref"] = match.group(1) if match else None
@@ -464,20 +462,29 @@ def _job_lifecycle(exp, audit=None, finished_after=None):
     released = sum(r.get("released") is True for r in terminal)
     checked = (audit or {}).get("checked") or {}
     usable = (isinstance(audit, dict) and audit.get("schema") == "cloudbench-native-release-audit-v1"
-              and isinstance(audit.get("present"), list) and checked.get("guest_names")
+              and isinstance(audit.get("present"), list)
+              # Registry/owner metadata can precede any recorded guest name; it still counts.
+              and (checked.get("guest_names") or checked.get("guest_ids") or checked.get("guest_volumes")
+                   or checked.get("owner_tokens") or checked.get("controller_ids") or audit.get("retained_owners"))
               and (not finished_after or (audit.get("observed_at") or 0) >= finished_after))
-    if usable and not audit["present"] and audit.get("released") is False:
+    lingering = (audit["present"] + (audit.get("present_volumes") or [])) if usable else []
+    retained = (audit.get("retained_owners") or []) if usable else []
+    if usable and (lingering or retained):
+        detail = []
+        if lingering:
+            detail.append(f"still present: {', '.join(str(m.get('name') or m.get('id')) for m in lingering[:4])}")
+        if retained:
+            detail.append(f"retained owners: {', '.join(token[:12] for token in retained[:4])}")
+        lifecycle_item(exp, "fail", "Guests released (native audit)", " · ".join(detail))
+    elif usable and audit.get("released") is False:
         # Nothing listed, but the audit did not check every shard's export.
         lifecycle_item(exp, "warn", "Guests released (native audit incomplete)",
                        f"{checked.get('verified_exports')}/{checked.get('expected_shards')} verified shard exports checked")
-    elif usable and not audit["present"]:
+    elif usable:
         exp["_audit_released"] = True
         lifecycle_item(exp, "ok", "Guests released (native audit)",
                        f"{pacific(audit['observed_at'])}: none present of {len(checked['guest_names'])} owned guests "
                        f"+ {len(checked.get('controller_ids') or [])} controllers")
-    elif usable:
-        lifecycle_item(exp, "fail", "Guests released (native audit)",
-                       f"still present: {', '.join(str(m.get('name') or m.get('id')) for m in audit['present'][:4])}")
     else:
         lifecycle_item(exp, "ok" if released == len(terminal) else "warn", "Guests released",
                        f"{released}/{len(terminal)} terminal jobs" + ("" if released == len(terminal) else " · no native audit"))
@@ -494,6 +501,37 @@ def shard_out(admission: Path, recorded: str) -> Path:
     if admission.name in parts:
         return admission.joinpath(*parts[parts.index(admission.name) + 1:])
     return path
+
+
+RELEASED_VOLUME = ("ABSENT", "pending_destroy", "destroyed")
+
+
+def canonical_release(export: Path) -> dict | None:
+    """The exact cleanup helper's ``disposable-controller.release.json``, bound to this export's
+    controller ownership record; the runner's terminal.json is absent when release ran outside it."""
+    receipt = read_json(export / "disposable-controller.release.json")
+    owned = read_json(export / "disposable-controller.ownership.json")
+    workspace = read_json(export / "workspace-volume.ownership.json")
+    if not (isinstance(receipt, dict) and isinstance(owned, dict)):
+        return None
+    mid, vid = receipt.get("machine_id"), receipt.get("volume_id")
+    if not (isinstance(mid, str) and MACHINE_ID.match(mid) and isinstance(vid, str) and vid
+            and receipt.get("machine_deleted") is True and receipt.get("volume_disposition") in RELEASED_VOLUME):
+        return None
+    if (owned.get("machine") or {}).get("id") != mid or (owned.get("volume") or {}).get("id") != vid:
+        return None
+    if isinstance(workspace, dict) and workspace.get("volume_id") != vid:
+        return None
+    return {"status": "CANONICAL_RELEASE_RECEIPT", "machine": mid, "volume_disposition": receipt["volume_disposition"]}
+
+
+def barrier_never_released(coordination: dict, outs: list[Path]) -> bool:
+    """The coordinator decided ABORT (never release), every runner joined, and every shard holds the
+    delivered global-abort.json with no global-release.json: no scheduled job could start."""
+    return bool(outs and coordination.get("aborted_at") and not coordination.get("released_at")
+                and coordination.get("finished_at")
+                and all((out / "global-abort.json").exists() and not (out / "global-release.json").exists()
+                        for out in outs))
 
 
 def load_sharded(run_dir: Path, deep: bool = True) -> dict:
@@ -559,12 +597,22 @@ def load_sharded(run_dir: Path, deep: bool = True) -> dict:
             exp["rows_source"] = abort[0]
         exp["rows_source"] = (exp["rows_source"] or abort[0]) + "; barrier ABORT acknowledged by every shard before release"
         exp["cancelled_before_release"] = True
+    observed = result.get("observed_jobs") if isinstance(result, dict) else None
+    if (not exp["rows"] and exp["scheduled_total"] and observed in (0, None)
+            and barrier_never_released(coordination, outs)):
+        # The coordinator never released the start barrier: every scheduled job stayed queued.
+        exp["rows"] = [{"status": "queued", "task_status": None, "infra_failure": None, "attempts": 0,
+                        "terminal_attempts": 0, "infra_attempts": 0, "synthetic": True}
+                       for _ in range(exp["scheduled_total"])]
+        exp["rows_source"] = "coordination.json barrier ABORT delivered to every shard before release"
+        exp["never_started"] = True
     if not exp["rows"]:
         infra = [((s.get("infra") or {}).get("infra_true")) for s in statuses]
         if infra and all(isinstance(v, int) for v in infra):
             exp["infra_jobs"] = sum(infra)
-    released = [t for t in terminals if isinstance(t, dict) and t.get("status") in RELEASED_TERMINALS]
-    failed = [t for t in terminals if isinstance(t, dict) and t.get("status") not in RELEASED_TERMINALS]
+    terminals = [t if isinstance(t, dict) else canonical_release(out / "export") for t, out in zip(terminals, outs)]
+    released = [t for t in terminals if isinstance(t, dict) and t.get("status") in RELEASED_TERMINALS | {"CANONICAL_RELEASE_RECEIPT"}]
+    failed = [t for t in terminals if isinstance(t, dict) and t not in released]
     exports = sum((out / "export/disposable-export.verified.json").exists() for out in outs)
     if coordination.get("released_at"):
         lifecycle_item(exp, "ok", "Global start barrier released", pacific(coordination["released_at"]))
@@ -575,9 +623,12 @@ def load_sharded(run_dir: Path, deep: bool = True) -> dict:
         lifecycle_item(exp, "pending", "Global start barrier", "waiting for every shard cohort")
     if exp.get("cancelled_before_release"):
         lifecycle_item(exp, "ok", "No task started", f"barrier ABORT acknowledged by {len(acks)}/{controllers} shards before release")
+    elif exp.get("never_started"):
+        lifecycle_item(exp, "ok", "No task started", f"barrier ABORT delivered to {len(outs)}/{controllers} shards; never released")
     else:
         _job_lifecycle(exp, read_json(run_dir / "native-release-audit.json"), finished_after=coordination.get("finished_at"))
-    statuses_seen = sorted({t.get("status") for t in released})
+    statuses_seen = sorted({t.get("status") if t.get("status") != "CANONICAL_RELEASE_RECEIPT" else
+                            "canonical release receipts (volume " + t["volume_disposition"] + ")" for t in released})
     lifecycle_item(exp, "ok" if len(released) == controllers else "fail" if failed else "pending",
                    "Controllers released", f"{len(released)}/{controllers} " + (" / ".join(statuses_seen) or "release receipts"))
     if not exp.get("cancelled_before_release"):
@@ -588,8 +639,10 @@ def load_sharded(run_dir: Path, deep: bool = True) -> dict:
     elif isinstance(result, dict):
         lifecycle_item(exp, "ok", "Results recorded", "result.json")
         published = result.get("hub_group_final_published")
+        reason = result.get("hub_group_final_error")
         lifecycle_item(exp, "ok" if published else "warn", "Hub group publication",
-                       "final group published" if published else "final group NOT published")
+                       "final group published" if published else "final group NOT published"
+                       + (f": {str(reason)[:160]}" if reason else ""))
     else:
         lifecycle_item(exp, "pending", "Results recorded", "result.json pending")
     finished = coordination.get("finished_at")
@@ -644,6 +697,14 @@ def load(run_dir: Path, deep: bool = True) -> dict:
         return load_campaign(run_dir)
     if (run_dir / "_batch/report-card.json").exists() or (run_dir / "report-card.json").exists():
         return load_fleet(run_dir)
+    abort = read_json(run_dir / "preallocation-abort.json")
+    if isinstance(abort, dict) and abort.get("allocated") is False:  # sharded launch refused before any Machine
+        exp = empty_experiment("sharded", run_dir)
+        exp["triggered_at"] = (read_json(run_dir / "admission-intent.private.json") or {}).get("started_at_epoch")
+        exp["state"], exp["state_reason"] = "ABORTED", str(abort.get("reason") or "aborted before allocation")[:160]
+        exp["ended_at"], exp["end_evidence"] = abort.get("ended_at"), "preallocation-abort.json"
+        lifecycle_item(exp, "ok", "No Machine allocated", "launch aborted before capacity admission")
+        return finish_experiment(exp)
     exp = empty_experiment("unknown", run_dir)
     exp["state"], exp["state_reason"] = "UNRECORDED", "no recorded benchmark artifacts in this directory"
     lifecycle_item(exp, "warn", "Recorded artifacts", "none found")
@@ -718,7 +779,8 @@ def _from_ledger(entry: dict) -> dict:
 def _history_row(exp: dict) -> dict:
     keys = ("number", "id", "label", "state", "state_reason", "triggered_at", "ended_at", "scheduled_total",
             "progress", "outcomes", "scored", "terminal_attempts", "infra_attempts", "infra_jobs", "cost",
-            "harness_classified", "released", "rows_source", "end_evidence", "cancelled_before_release")
+            "harness_classified", "released", "rows_source", "end_evidence", "cancelled_before_release",
+            "never_started")
     return {k: exp.get(k) for k in keys}
 
 
@@ -837,6 +899,19 @@ def _infra_text(exp) -> tuple[str, str, str]:
     return pct(infra, attempts), cls, f"{infra}/{attempts} terminal attempts"
 
 
+def _rate_text(card) -> str:
+    """experiments/day for the goal; ``warming`` until the goal clock spans RATE_MIN_DAYS."""
+    rate = card.get("rate")
+    if not rate:
+        return "experiments/day UNRECORDED (no ledger launch)"
+    launches = f'{rate["launches"]} launch{"es" if rate["launches"] != 1 else ""}'
+    if rate.get("warming"):
+        age = duration(card["generated_at"] - rate["goal_started_at"])
+        return f'experiments/day warming {age} · {launches} (rate after {ledger_mod.RATE_MIN_DAYS:g} d)'
+    return (f'{rate["per_day"]:.1f} experiments/day · {launches} / {rate["days"]:.2f} d'
+            + (" (lower bound)" if rate.get("backfilled") else ""))
+
+
 def render_html(card: dict) -> str:
     exp = card["experiment"]
     state = exp["state"]
@@ -856,9 +931,8 @@ def render_html(card: dict) -> str:
     since_html = (_span("run", "RUNNING") if since.get("state") == "RUNNING" else
                   f'<b>{e(duration(since["age"]))}</b> ago · {e(since["label"])} ended {e(pacific(since["at"]))}'
                   if since.get("state") == "ENDED" else _span("warn", "END UNRECORDED"))
-    rate_html = (f'<b>{rate["per_day"]:.1f}</b> experiments/day · {rate["launches"]} launch{"es" if rate["launches"] != 1 else ""} / {rate["days"]:.2f} d'
-                 + (" (lower bound)" if rate.get("backfilled") else "")
-                 if rate else _span("warn", "experiments/day UNRECORDED (no ledger launch)"))
+    rate_html = (_span("warn", _rate_text(card)) if not rate or rate.get("warming") else
+                 f'<b>{rate["per_day"]:.1f}</b> ' + e(_rate_text(card).split(" ", 1)[1]))
     goal_elapsed = (f' · goal elapsed {e(duration(card["generated_at"] - rate["goal_started_at"]))}' if rate else "")
     out.append('<section data-section="header"><div class="title">'
                f'<span>🧪 Experiment {e(number)}</span>'
@@ -881,6 +955,8 @@ def render_html(card: dict) -> str:
         prog_sub = f'Q {progress["queued"]} · IP {progress["in_progress"]} · C {progress["completed"]}' + (
             f' · unobserved {progress["unobserved"]}' if progress["unobserved"] else "")
         prog_cls = "ok" if total and progress["completed"] == total else "run"
+        if exp.get("never_started"):
+            prog_sub, prog_cls = prog_sub + " · never started", "na"
     else:
         prog_value, prog_sub, prog_cls = "UNMEASURED", "no job records yet", "warn"
     end_or_now = exp.get("ended_at") or (card["generated_at"] if state == "RUNNING" else None)
@@ -910,7 +986,8 @@ def render_html(card: dict) -> str:
         legend.append(f'<span class="{cls}">■ {category} {e(value)}</span>')
     pending = (progress["queued"] + progress["in_progress"] + progress["unobserved"]) if progress else 0
     if pending:
-        legend.append(f'<span class="run">■ not terminal {pending}</span>')
+        legend.append(f'<span class="na">■ never started {pending}</span>' if exp.get("never_started")
+                      else f'<span class="run">■ not terminal {pending}</span>')
     stop_note = (f'Stop at {threshold}/{total} unique infra-failed jobs (5% of scheduled); now {exp["infra_jobs"]}.'
                  if threshold and isinstance(exp.get("infra_jobs"), int) else
                  f"Stop at {threshold}/{total} unique infra-failed jobs (5% of scheduled)." if threshold
@@ -1038,7 +1115,8 @@ def _history_html(card) -> str:
         else:
             stats = "PASS UNMEASURED · HARNESS UNMEASURED · INFRA UNMEASURED"
         prog = h.get("progress")
-        prog_text = (f'Q {prog["queued"]} · IP {prog["in_progress"]} · C {prog["completed"]}/{total}' if prog and total else "progress UNMEASURED")
+        prog_text = (f'Q {prog["queued"]} · IP {prog["in_progress"]} · C {prog["completed"]}/{total}'
+                     + (" · never started" if h.get("never_started") else "") if prog and total else "progress UNMEASURED")
         cost = h.get("cost") or {}
         cost_text = f'💲 {money(cost["metered_usd"])} metered' if cost.get("metered_usd") is not None else "💲 UNMETERED"
         blocks.append(f'<div class="hist"><div class="l1"><span>{e(number)}</span><span class="{STATE_CLASS[state]}">'
@@ -1064,13 +1142,13 @@ def render_text(card: dict) -> str:
     lines = [f'🧪 EXPERIMENT #{card["number"] or "UNRECORDED"} · {STATE_ICON[state]} {state}',
              f'{exp["label"]} · {total or "UNRECORDED"} scheduled · {exp.get("surface")} · src {short_ref(exp.get("source_ref"))}',
              f'Triggered {pacific(exp.get("triggered_at"))}',
-             (f'{rate["per_day"]:.1f} experiments/day · {rate["launches"]} launch{"es" if rate["launches"] != 1 else ""} / {rate["days"]:.2f} d' if rate
-              else "experiments/day UNRECORDED (no ledger launch)")]
+             _rate_text(card)]
     since = card.get("since") or {}
     lines.append("Since last benchmark ended: " + ("RUNNING" if since.get("state") == "RUNNING" else
                  f'{duration(since["age"])} ({since["label"]})' if since.get("state") == "ENDED" else "END UNRECORDED"))
     prog = exp.get("progress")
     lines.append(f'QUEUED {prog["queued"]} · IN_PROGRESS {prog["in_progress"]} · COMPLETED {prog["completed"]}/{total}'
+                 + (" · never started (start barrier aborted before release)" if exp.get("never_started") else "")
                  if prog else "QUEUED / IN_PROGRESS / COMPLETED UNMEASURED")
     harness, _ = _harness(exp)
     infra_value, _, infra_sub = _infra_text(exp)
@@ -1103,7 +1181,8 @@ def render_text(card: dict) -> str:
                      + ("RUNNING" if h["state"] == "RUNNING" and not h.get("ended_at") else pacific(h["ended_at"], date=False) if h.get("ended_at") else "END UNRECORDED")
                      + ((f' · PASS {ho.get("PASS")}/{h.get("scored")}' if h.get("scored") else " · NO SCORED TASKS")
                         + (f' · INFRA {h.get("infra_attempts")}/{h.get("terminal_attempts")}' if h.get("terminal_attempts") else " · NO TERMINAL ATTEMPTS")
-                        + (f' · {ho["CANCELLED"]} cancelled' if ho.get("CANCELLED") else "") if ho else " · UNMEASURED"))
+                        + (f' · {ho["CANCELLED"]} cancelled' if ho.get("CANCELLED") else "")
+                        + (f' · {h["scheduled_total"]} never started' if h.get("never_started") else "") if ho else " · UNMEASURED"))
     lines.append("ACTIVE SUB-AGENTS / PARENT")
     lines += [f'  {a.get("status") or "🔄"} {a["name"]}' for a in card.get("agents") or []] or ["  No active agents"]
     lines.append("ISSUES / NEXT ACTION")

@@ -3539,3 +3539,51 @@ assert '--env "CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE=${CLOUDBENCH_EXPECTE
 assert 'echo "export CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE=$(printf \'%q\' "${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-}")"' in cloud
 PYWIRE
 ) || fail "a launcher-bound guest Temporal namespace must reject stale bench-app secrets"
+# Benchmark stacks route BACKEND_API_URL to their own isolated backend, whose
+# seeded database never holds a rotating Lantern grant. Without an explicit
+# credential, every people_search returned 404 LANTERN_NOT_CONNECTED and all 28
+# lantern-people-* cloud jobs hit the 300s backstop (original600-1792433794419199295).
+# Execute run.sh's actual fragment: benchmark stacks use the central broker,
+# explicit broker/bearer configuration wins, and ordinary dev stacks are unchanged.
+(
+  dir="$TMP_ROOT/people-credential-authority"
+  mkdir -p "$dir"
+  fragment="$(sed -n '/^# People credential authority\.$/,/^# End people credential authority\.$/p' "$ROOT_DIR/scripts/run.sh")"
+  [ -n "$fragment" ] || { echo "run.sh has no people credential authority fragment" >&2; exit 1; }
+  python3 - "$ROOT_DIR/scripts/run.sh" <<'PYWIRE'
+import sys
+from pathlib import Path
+run = Path(sys.argv[1]).read_text()
+start = run.index('# People credential authority.')
+assert run.index('export BENCHMARK_MODE BENCHMARK_ISOLATED_RUN') < start, 'fragment must follow the benchmark flag export'
+assert start < run.index('run_local_worker.sh'), 'fragment must run before any worker launch'
+PYWIRE
+  effective() {  # <benchmark-mode> <agents-env-file> [VAR=value...] -> worker-visible broker
+    local mode="$1" env_file="$2"; shift 2
+    env -i PATH="$PATH" "$@" bash -c '
+      set -eo pipefail
+      source "$1"; BENCHMARK_MODE="$2"; SCRIPT_DIR="$3"
+      eval "$4" >/dev/null
+      printf "%s" "${PEOPLE_CREDENTIAL_BROKER_URL:-}"
+    ' _ "$HELPER_SRC" "$mode" "$dir/scripts" "$fragment"
+  }
+  mkdir -p "$dir/scripts" "$dir/agents"
+  printf 'PEOPLE_API_URL="https://people.lantern.md"\nPEOPLE_API_TOKEN=""\nPEOPLE_CREDENTIAL_BROKER_URL=""\n' > "$dir/agents/.env"
+  [ "$(effective true "$dir/agents/.env")" = "https://navi-j9a9.onrender.com" ] \
+    || { echo "blank benchmark credentials must use the central broker" >&2; exit 1; }
+  [ -z "$(effective false "$dir/agents/.env")" ] \
+    || { echo "ordinary dev stacks must keep their configured credential path" >&2; exit 1; }
+  [ "$(effective true "$dir/agents/.env" PEOPLE_CREDENTIAL_BROKER_URL=https://broker.example)" = "https://broker.example" ] \
+    || { echo "an explicit broker in the environment must win" >&2; exit 1; }
+  [ -z "$(effective true "$dir/agents/.env" PEOPLE_API_TOKEN=explicit-bearer)" ] \
+    || { echo "an explicit bearer in the environment must not be overridden" >&2; exit 1; }
+  printf 'PEOPLE_API_TOKEN="explicit-bearer"\n' > "$dir/agents/.env"
+  [ -z "$(effective true "$dir/agents/.env")" ] \
+    || { echo "an explicit bearer in agents/.env must not be overridden" >&2; exit 1; }
+  printf "PEOPLE_CREDENTIAL_BROKER_URL='https://broker.example'\n" > "$dir/agents/.env"
+  [ -z "$(effective true "$dir/agents/.env")" ] \
+    || { echo "an explicit broker in agents/.env must be left for the worker to load" >&2; exit 1; }
+  rm "$dir/agents/.env"
+  [ "$(effective true "$dir/agents/.env")" = "https://navi-j9a9.onrender.com" ] \
+    || { echo "a missing agents/.env has no explicit Lantern credential" >&2; exit 1; }
+) || fail "benchmark stacks must give workers the central people credential broker"

@@ -1,4 +1,12 @@
 import {
+  testLinkedinSync_noAuth,
+  testLinkedinSync_missingAgentId,
+  testLinkedinSync_rejectsAnotherUsersAgent,
+  testLinkedinSync_runningAgentReadsSyncingThenSettles,
+  testLinkedinSync_chatAgentThatNeverStartedSettles,
+  testLinkedinSync_runningWorkflowStaysSyncingAndBlocksDuplicate,
+} from './integrations.linkedin-sync-1.cases';
+import {
   testEmailSend_missingFields,
   testEmailSend_noAuthCoverage,
   testEmailMessages_noAuthCoverage,
@@ -158,6 +166,24 @@ export function parallelTestsPart5() {
     {
       name: 'GET /compute-code/credentials/token duplicate tokenType -> 400',
       fn: testComputeTokenDuplicateProviderConstraint_returns400,
+    },
+    { name: 'POST /linkedin/sync no auth -> 401', fn: testLinkedinSync_noAuth },
+    { name: 'POST /linkedin/sync missing agent_id -> 400', fn: testLinkedinSync_missingAgentId },
+    {
+      name: "POST /linkedin/sync another user's agent -> 404",
+      fn: testLinkedinSync_rejectsAnotherUsersAgent,
+    },
+    {
+      name: 'POST /linkedin/sync SYNCING survives re-read, settles when agent ends',
+      fn: testLinkedinSync_runningAgentReadsSyncingThenSettles,
+    },
+    {
+      name: 'GET / LinkedIn sync whose chat agent never started reads SYNC_FAILED',
+      fn: testLinkedinSync_chatAgentThatNeverStartedSettles,
+    },
+    {
+      name: 'POST /linkedin/sync running workflow stays SYNCING and blocks a duplicate -> 409',
+      fn: testLinkedinSync_runningWorkflowStaysSyncingAndBlocksDuplicate,
     },
   ];
 }

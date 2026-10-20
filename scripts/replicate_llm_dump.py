@@ -304,27 +304,27 @@ async def replay_browser_use(data: dict[str, Any], *, exact: bool) -> dict[str, 
     gpt_auth = gpt_auth_from_dump(data)
 
     if exact:
-        messages = data.get("messages") or []
-        tools = data.get("tools") or config.get("tools") or []
-        response = await client.collect(
-            pool="rose-1-browser-use",
-            messages=messages,
-            tools=tools,
-            tool_choice=config.get("tool_choice") or "any",
-            max_tokens=config.get("max_tokens") or 16000,
-            temperature=config.get("temperature") if config.get("temperature") is not None else 1.0,
-            gpt_auth=gpt_auth,
-            agent_id=data.get("agent_id"),
-            call_site=call_site,
-        )
-        action = normalize_browser_use_tool_call(response.tool_calls[0]) if response.tool_calls else None
-        return {
-            "action": action,
-            "actual_model": response.actual_model,
-            "usage": response.usage,
-            "timing": response.timing,
-            "request_id": response.request_id,
+        # Replay the call as recorded: its pool, tools, sampling params and
+        # reasoning effort. A fixed browser pool without effort selects a
+        # different model and cannot reproduce the original decision.
+        effective = config.get("effective_params") if isinstance(config.get("effective_params"), dict) else {}
+        requested = dict(config.get("requested_params") or {})
+        for key in ("temperature", "max_tokens"):
+            if requested.get(key) is None and effective.get(key) is not None:
+                requested[key] = effective[key]
+        requested.setdefault("tool_choice", config.get("tool_choice") or "any")
+        recorded = {
+            **data,
+            "config": {
+                **config,
+                "requested_params": requested,
+                "reasoning_effort": config.get("reasoning_effort") or effective.get("reasoning_effort"),
+            },
         }
+        result = await replay_generic(recorded)
+        calls = result.get("tool_calls") or []
+        result["action"] = normalize_browser_use_tool_call(calls[0]) if calls else None
+        return result
 
     inputs = browser_replay_inputs(data)
     result = await client.complete_browser_use(

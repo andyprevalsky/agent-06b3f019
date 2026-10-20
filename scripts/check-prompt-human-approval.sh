@@ -101,9 +101,9 @@ while IFS= read -r file; do
       # `description:` and would otherwise miss the content scanner.
       PROMPT_FILES="${PROMPT_FILES}${file}"$'\n'
       ;;
-    agents/providers/rose/browser_use.py)
-      # Browser tool descriptions span multiple Python string literals, so a
-      # continuation-only edit does not match the diff scanner's assignment rule.
+    agents/providers/rose/browser_use.py|agents/domains/spawn_browser_agent_v3/service_crypto.py)
+      # Browser tool descriptions and auth options construct model-facing text;
+      # continuation-only edits can miss the diff scanner's assignment rule.
       PROMPT_FILES="${PROMPT_FILES}${file}"$'\n'
       ;;
     *smsSupervisor/contextBuilder.ts|*SmsSupervisor/contextBuilder.ts)

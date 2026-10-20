@@ -4,8 +4,8 @@ import assert from 'node:assert/strict';
 // Frozen from the pre-split source: exact name/function pairs and phase order.
 const expected = {
   parallelTests: {
-    count: 223,
-    hash: '197ba5b8b49db6eb2f09fb7507eb21f280d7fb3522369ea44bd4d74745db4d46',
+    count: 230,
+    hash: '084d1f78c6f4e40b1f0bbf43738a190299a5684b33f1d934d1e6d48d30aedfb0',
   },
   sequentialTests: {
     count: 6,

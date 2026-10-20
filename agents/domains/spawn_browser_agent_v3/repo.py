@@ -897,22 +897,44 @@ async def save_minted_account_password(config: Any, user_id: str, origin: str) -
     return bool(response.json().get("saved"))
 
 
+class BrowserSessionCloseError(RuntimeError):
+    """A failed exact-session cleanup request; no successor authority is implied."""
+
+    def __init__(self, session_id: str, pause: bool, status_code: Optional[int] = None):
+        self.session_id = session_id
+        self.pause = pause
+        self.status_code = status_code
+        super().__init__(
+            f"Browser session cleanup failed: session={session_id}, pause={pause}, HTTP={status_code}"
+        )
+
+    def receipt(self) -> Dict[str, Any]:
+        return {
+            "status": "failed",
+            "session_id": self.session_id,
+            "pause": self.pause,
+            "http_status": self.status_code,
+        }
+
+
 async def close_browser_session(config: Any, session_id: str, pause: bool = False, current_url: str = "") -> None:
-    """Close or pause a browser session."""
+    """Close only the named browser; propagate an unacknowledged cleanup request."""
     payload: Dict[str, Any] = {"session_id": session_id, "pause": pause}
     if current_url:
         payload["current_url"] = current_url
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            await client.post(
+            response = await client.post(
                 f"{config.backend.api_url}/api/browser-session/close",
                 headers={"x-api-key": config.backend.api_key or ""},
                 json=payload,
             )
-    except WorkflowGenerationSealed:
-        raise  # a replaced generation must stop, never be swallowed
+            if response.status_code != 200:
+                raise BrowserSessionCloseError(session_id, pause, response.status_code)
+    except (WorkflowGenerationSealed, BrowserSessionCloseError):
+        raise
     except Exception as e:
-        logger.warning(f"Failed to close/pause session: {e}")
+        raise BrowserSessionCloseError(session_id, pause) from e
 
 
 async def inject_local_storage(config: Any, session_id: str, origin: str) -> Optional[Dict[str, Any]]:

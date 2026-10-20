@@ -7,13 +7,14 @@ import { primitiveDomain } from '../../providers/primitive';
 import * as repo from './repo';
 import * as sites from './repoSites';
 import { AUTH_TEST_SITE_BASE_PATH, AUTH_TEST_SITE_REALM_PREFIX, fixtureApiKey } from './config';
+import { buildFixtureManifest } from './serviceManifest';
 import {
   NEEDS_MINTED_IDENTITY,
   planScenario,
   type PlanContext,
   type ScenarioPlan,
 } from './serviceScenarios';
-import { seedPasskey, seedSavedPasswords, seedSavedSession } from './serviceSeed';
+import { seedMintedLogin, seedPasskey, seedSavedPasswords, seedSavedSession } from './serviceSeed';
 import { recordAttempt } from './serviceSignIn';
 import {
   AuthTestSiteError,
@@ -154,6 +155,10 @@ function newSite(
     attempts: [],
     sessions: [],
     codes: [],
+    appApprovalDeviceKey:
+      plan.behavior.secondFactor === 'app_approval' ? randomBytes(32).toString('base64url') : null,
+    appApprovalNumber: String(10 + (randomBytes(1)[0] % 90)),
+    appApprovals: [],
     linkTokens: [],
     carts: {},
     guestCartTokens: [],
@@ -196,7 +201,10 @@ export async function createAuthTestSite(
       publicOrigin: publicBase.origin,
       nowMs,
     });
-    site.savedPasswords = await seedSavedPasswords(site, plan, nowMs);
+    site.savedPasswords = [
+      ...(await seedSavedPasswords(site, plan, nowMs)),
+      ...(await seedMintedLogin(site, plan, nowMs)),
+    ];
     await seedSavedSession(site, plan, nowMs);
     await seedPasskey(site, plan);
     preview = await previewAuthOptions(site);
@@ -226,22 +234,15 @@ export async function createAuthTestSite(
     minted_email: site.mintedEmail,
   });
 
-  return {
-    siteId,
-    scenario: input.scenario,
-    realm,
-    entryUrl,
-    savedPasswordUsernames: site.savedPasswords.map((record) => record.username),
-    mintedEmail: site.mintedEmail,
-    mintedPhone: site.mintedPhone,
-    expectedSignInEmail: plan.expectedSignInEmail,
-    expectedMemberNumber: plan.expectedMemberNumber,
-    namedAccountEmail: plan.namedAccountEmail,
-    userSignIn: plan.userSignIn,
-    savedSession: plan.savedSession?.state ?? null,
-    savedBrowserAuthHidden: benchmarkSavedBrowserAuthDisabled(),
-    authOptionsPreview: preview,
-  };
+  return buildFixtureManifest(
+    site,
+    plan,
+    preview,
+    benchmarkSavedBrowserAuthDisabled(),
+    site.appApprovalDeviceKey === null
+      ? null
+      : `${publicSiteUrl(site, '/device/approve')}&key=${site.appApprovalDeviceKey}`
+  );
 }
 
 function requireSite(siteId: string): AuthTestSite {

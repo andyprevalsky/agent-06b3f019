@@ -402,15 +402,20 @@ def request_term(api,mid,payload,identity,out):
  except BaseException as e:
   save(out/'supervisor-term.pending.json',dict(error=type(e).__name__,ambiguous=True,no_signal_retry=True));return None
 
-def cleanup_ready(gate_joined,probe,verified_export):return gate_joined and probe.get('state')=='JOINED' and verified_export
-def cleanup_mode(gate_joined,has_ownership,has_workspace,probe,verified_export):
+def supervisor_settled(probe,probed_after_join=False):
+ # The launcher publishes its identity and execs the supervisor under the PID the gate
+ # joins, and a verified export saw no live controller writer. An identity still absent
+ # when probed after that join can never appear: the startup ended before a supervisor.
+ return probe.get('state')=='JOINED' or(probe.get('state')=='NOT_PUBLISHED' and probed_after_join is True)
+def cleanup_ready(gate_joined,probe,verified_export,probed_after_join=False):return gate_joined and supervisor_settled(probe,probed_after_join) and verified_export
+def cleanup_mode(gate_joined,has_ownership,has_workspace,probe,verified_export,probed_after_join=False):
  if not gate_joined:return None
  if not has_ownership and has_workspace:return 'cleanup-workspace'
- if has_ownership and cleanup_ready(True,probe,verified_export):return 'cleanup'
+ if has_ownership and cleanup_ready(True,probe,verified_export,probed_after_join):return 'cleanup'
  return None
 
 
-def reconciled_release(out,export,authority,mid,action,gate_joined,probe):
+def reconciled_release(out,export,authority,mid,action,gate_joined,probe,probed_after_join=False):
  """Consume an exact canonical release without rewriting the first helper result."""
  need(gate_joined,'gate must be joined before release')
  intent=json.loads(read(out/'cleanup-call.intent.json'))
@@ -419,7 +424,8 @@ def reconciled_release(out,export,authority,mid,action,gate_joined,probe):
  r=json.loads(read(export/'disposable-controller.release.json'))
  need(r['volume_id']==v['volume_id'] and r['volume_disposition']in('ABSENT','pending_destroy','destroyed'),'wrong original workspace release')
  if action=='cleanup':
-  need(cleanup_ready(True,probe,(export/'disposable-export.verified.json').exists()) and intent['supervisor_joined']is True,'joined supervisor and verified export required')
+  settled=intent['supervisor_joined']is True or(intent.get('supervisor_state')=='NOT_PUBLISHED' and intent.get('probed_after_join')is True)
+  need(cleanup_ready(True,probe,(export/'disposable-export.verified.json').exists(),probed_after_join) and settled,'settled supervisor and verified export required')
   auth_sha=sha(read(authority));record=json.loads(read(export/'disposable-controller.ownership.json'))
   need(record['authority_sha256']==auth_sha and record['workspace_sha256']==sha(workspace_raw) and record['machine']['id']==mid and record['volume']['id']==v['volume_id'],'original controller ownership changed')
   raw=read(export/'disposable-export.verified.json');verified=json.loads(raw)
@@ -691,7 +697,7 @@ def run(config_path,config_sha,out,*,github_token=None):
   stream.close()
   for number,handler in old_handlers.items():signal.signal(number,handler)
   raise
- mid=None;probe={};attempt=0;cleanup=None;cleanup_action=None;last_error=None;next_probe=0;delivery={}
+ mid=None;probe={};probed_after_join=False;attempt=0;cleanup=None;cleanup_action=None;last_error=None;next_probe=0;delivery={}
  try:
   save(out/'caller.json',dict(pid=os.getpid(),birth=birth(os.getpid()),gate_pid=gate.pid,gate_birth=birth(gate.pid),source_ref=ref,task_ref=shard_task_ref(shard),epoch=epoch,deadline=epoch+5400,identity_path='/tmp/gate/repo/.context/'+identity_name,authority_sha256=sha(authority.read_bytes())))
   while True:
@@ -717,7 +723,7 @@ def run(config_path,config_sha,out,*,github_token=None):
    if cleanup is None and mid and time.monotonic()>=next_probe:
     payload=dict(machine=mid,source_ref=ref,epoch=epoch,identity_path='/tmp/gate/repo/.context/'+identity_name,action='PROBE')
     try:
-     probe=machine_control(api,mid,payload);save(out/('supervisor-probe-%06d.json'%attempt),probe);attempt+=1
+     probe=machine_control(api,mid,payload);probed_after_join=joined;save(out/('supervisor-probe-%06d.json'%attempt),probe);attempt+=1
      if(stop[0]or time.time()>=epoch+5400)and probe['state']=='LIVE':request_term(api,mid,payload,probe,out)
      if shard is not None:shard_status(out,probe,mid)
     except BaseException as e:
@@ -728,21 +734,22 @@ def run(config_path,config_sha,out,*,github_token=None):
     try:deliver_global(api,mid,dict(machine=mid,source_ref=ref,epoch=epoch,identity_path='/tmp/gate/repo/.context/'+identity_name),out,probe,delivery,stop[0]or time.time()>=epoch+5400)
     except (Exception,Deadline) as e:last_error=type(e).__name__ # retried next loop; never a cleanup or signal decision
    verified=export/'disposable-export.verified.json'
-   mode=cleanup_mode(joined,ownership.exists(),(export/'workspace-volume.ownership.json').exists(),probe,verified.exists())
+   mode=cleanup_mode(joined,ownership.exists(),(export/'workspace-volume.ownership.json').exists(),probe,verified.exists(),probed_after_join)
    if mode is not None and cleanup is None:
     cleanup_action=mode
-    save(out/'cleanup-call.intent.json',dict(machine=mid,action=mode,gate_joined=True,supervisor_joined=probe.get('state')=='JOINED',export_verified_file=sha(read(verified))if verified.exists()else None))
+    save(out/'cleanup-call.intent.json',dict(machine=mid,action=mode,gate_joined=True,supervisor_joined=probe.get('state')=='JOINED',supervisor_state=probe.get('state'),probed_after_join=probed_after_join,export_verified_file=sha(read(verified))if verified.exists()else None))
     args=[sys.executable,str(root/'scripts/cloudbench-disposable-controller.py'),mode,'--authority',str(authority),'--root',str(root),'--directory',str(export),'--workspace',str(export/'workspace-volume.ownership.json')]
-    cleanup=subprocess.Popen(args,cwd=root,env=env,stdout=log.open('ab'),stderr=subprocess.STDOUT)
+    with log.open('ab')as cleanup_log:cleanup=subprocess.Popen(args,cwd=root,env=env,stdout=cleanup_log,stderr=subprocess.STDOUT)
    release=export/'disposable-controller.release.json'
    if cleanup is not None and cleanup.poll()is not None:
     code=cleanup.wait()
     if release.exists():
-     r=reconciled_release(out,export,authority,mid,cleanup_action,joined,probe)
-     result=dict(status='CONTROLLER_RELEASE_VERIFIED'if cleanup_action=='cleanup'else'FAILED_STARTUP_WORKSPACE_RELEASED',gate_exit_code=gate.returncode,controller_cleanup_exit_code=code,externally_reconciled_after_helper_failure=code!=0,machine=mid,source_ref=ref,started_at_epoch=epoch,original_deadline=epoch+5400,release=r,benchmark_success_inferred=False)
+     r=reconciled_release(out,export,authority,mid,cleanup_action,joined,probe,probed_after_join)
+     status='FAILED_STARTUP_WORKSPACE_RELEASED'if cleanup_action!='cleanup'else'CONTROLLER_RELEASE_VERIFIED'if probe.get('state')=='JOINED'else'FAILED_BEFORE_SUPERVISOR_RELEASED'
+     result=dict(status=status,supervisor_state=probe.get('state'),gate_exit_code=gate.returncode,controller_cleanup_exit_code=code,externally_reconciled_after_helper_failure=code!=0,machine=mid,source_ref=ref,started_at_epoch=epoch,original_deadline=epoch+5400,release=r,benchmark_success_inferred=False)
      save(out/'terminal.json',result);return gate.returncode
     if not(out/'cleanup.pending.json').exists():save(out/'cleanup.pending.json',dict(status='PENDING_EXTERNAL_OWNER_LIVE',helper_exit_code=code,no_cleanup_retry=True))
-   if joined and not cleanup_ready(True,probe,verified.exists())and not(out/'gate.pending.json').exists():
+   if joined and not cleanup_ready(True,probe,verified.exists(),probed_after_join)and not(out/'gate.pending.json').exists():
     save(out/'gate.pending.json',dict(status='PENDING_EXTERNAL_OWNER_LIVE',gate_exit_code=gate.returncode,supervisor_state=probe.get('state'),export_verified=verified.exists(),no_host_destroy=True))
    # A failed export/provider action cannot authorize killing an active writer.
    # Remain the live cleanup authority; root can reconcile originals while observing this process.
@@ -775,7 +782,7 @@ def run(config_path,config_sha,out,*,github_token=None):
    if gate.poll()is not None and release.exists():
     try:
      action=cleanup_action or json.loads(read(out/'cleanup-call.intent.json'))['action']
-     reconciled_release(out,export,authority,mid,action,True,probe)
+     reconciled_release(out,export,authority,mid,action,True,probe,probed_after_join)
      return gate.wait()
     except BaseException:pass
    time.sleep(1)

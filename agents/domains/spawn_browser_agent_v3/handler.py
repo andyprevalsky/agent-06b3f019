@@ -18,6 +18,7 @@ import math
 import os
 import random
 import re
+import sys
 import time
 import traceback
 import uuid as uuid_module
@@ -67,6 +68,7 @@ from loop.activity_helper import call_temporal_activity_from_activity
 from providers.fast_cache.browser_use_cache import cached_browser_decision
 from providers.fast_cache.context import write_through_enabled_for_user
 from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
+from providers.rose.errors import BrowserModelOutputValidationError
 from providers.rose.browser_use import format_browser_state_for_tool
 from providers.rose.types import ComputeTokenSource
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
@@ -136,6 +138,7 @@ from .recording import (
     normalize_simulated_browser_frame,
 )
 from .repo import (
+    BrowserSessionCloseError,
     acknowledge_browser_user_control,
     close_browser_session,
     create_user_auth_assistance_request,
@@ -247,7 +250,7 @@ def _browser_task_terminal_metadata(
     task_id = source.get("task_id") or started_task_id
     if task_id:
         metadata["task_id"] = task_id
-    for key in ("browser_url", "session_id"):
+    for key in ("browser_url", "session_id", "browser_cleanup"):
         if source.get(key):
             metadata[key] = source[key]
     if code:
@@ -436,7 +439,7 @@ async def _await_bounded_browser_cleanup(
     timeout_s: float,
     timeout_message: str,
     failure_message: str,
-) -> None:
+) -> bool:
     """Run cleanup under a hard deadline that does not await cancellation.
 
     ``asyncio.wait_for`` cancels the inner awaitable and then waits for that
@@ -452,7 +455,7 @@ async def _await_bounded_browser_cleanup(
         exc = None if task.cancelled() else task.exception()
         if exc is not None:
             logger.warning(failure_message, error=extract_error_message(exc))
-        return
+        return not task.cancelled() and exc is None
     task.cancel()
     # Keep a strong reference + retrieve the eventual result so a late
     # non-CancelledError from session.stop() is not logged as "Task exception
@@ -467,11 +470,13 @@ async def _await_bounded_browser_cleanup(
     task.add_done_callback(_discard)
     logger.warning(timeout_message, timeout_s=timeout_s)
 
+    return False
 
 async def disconnect_browser_after_passkey_capture(
     dom_service: Any,
     capture_passkey_usage: Any,
-) -> None:
+    *, observe_parked_page: Any = None,
+) -> Any:
     """Capture credential evidence before a terminal browser disconnect.
 
     Both the passkey readback and BrowserSession.stop() talk to CDP. When the
@@ -482,18 +487,27 @@ async def disconnect_browser_after_passkey_capture(
     only BROWSER_CURSOR broadcasts, never reaching "Creating approval request").
     Bound both steps so approval/handoff paths always resume.
     """
-    await _await_bounded_browser_cleanup(
+    capture_complete = await _await_bounded_browser_cleanup(
         capture_passkey_usage(),
         timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
         timeout_message="Passkey usage capture timed out before disconnect",
         failure_message="Passkey usage capture failed before disconnect",
     )
-    await _await_bounded_browser_cleanup(
+    observation = None
+    if capture_complete and observe_parked_page is not None:
+        try:
+            observation = observe_parked_page()
+        except Exception as error:
+            # Optional observation failure supplies no park proof; disconnect
+            # remains owned here. Cancellation and other control signals escape.
+            logger.warning("Parked browser observation unavailable", error_type=type(error).__name__)
+    detached = await _await_bounded_browser_cleanup(
         dom_service.disconnect(),
         timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
         timeout_message="Browser disconnect timed out; continuing terminal return",
         failure_message="Browser disconnect failed; continuing terminal return",
     )
+    return observation if detached else None
 
 
 def _patch_cdp_use_websocket_proxy_default() -> None:
@@ -1155,19 +1169,39 @@ def _model_visible_browser_verifier_context(context: Any, dom_service: Any, brow
                                                secret_values_used=getattr(dom_service, "secret_values_used", False))
                 for message in context]
                if isinstance(context, list) else dom_service.model_visible_value(context))
+    if isinstance(context, list) and isinstance(visible, list):
+        for observation_index, (original, safe_message) in enumerate(zip(context, visible)):
+            metadata = original.get("metadata") if isinstance(original, dict) else None
+            if not isinstance(metadata, dict) or not isinstance(safe_message, dict):
+                continue
+            step = metadata.get("browser_action_step")
+            evidence = metadata.get("structured_response")
+            if (original.get("role") == "TOOL" and metadata.get("toolName") == "read_browser_state"
+                    and type(step) is int and isinstance(evidence, dict) and evidence.get("step") == step):
+                visible[observation_index] = {
+                    "role": "TOOL", "text": "",
+                    "metadata": {"toolName": "read_browser_state", "toolStatus": "FINISHED", "browser_action_step": step,
+                                 "structured_response": {"step": step, "formatted_state": dom_service.model_visible_value(evidence.get("formatted_state"))}},
+                }
     screenshot = browser_state.get("screenshot")
     if (getattr(dom_service, "secret_values_used", False) or browser_state.get("screenshot_placeholder")
             or not isinstance(screenshot, str) or not screenshot
             or not isinstance(context, list) or not context or not isinstance(visible, list)):
         return visible
-    original = context[-1]
+    # Final evidence precedes optional historical observations in admission.
+    final_index = next((index for index in range(len(context) - 1, -1, -1)
+                        if isinstance(context[index], dict)
+                        and (context[index].get("metadata") or {}).get("toolName") == "final_screenshot"), -1)
+    if final_index < 0:
+        return visible
+    original = context[final_index]
     if not isinstance(original, dict) or original.get("role") != "TOOL":
         return visible
     metadata = original.get("metadata")
     if (isinstance(metadata, dict) and metadata.get("toolName") == "final_screenshot"
-            and metadata.get("screenshot_b64") == screenshot and isinstance(visible[-1], dict)):
-        visible[-1]["role"] = "TOOL"
-        visible[-1]["metadata"] = {
+            and metadata.get("screenshot_b64") == screenshot and isinstance(visible[final_index], dict)):
+        visible[final_index]["role"] = "TOOL"
+        visible[final_index]["metadata"] = {
             **dom_service.model_visible_value(metadata),
             "toolName": "final_screenshot", "toolStatus": "FINISHED", "screenshot_b64": screenshot,
         }
@@ -1715,6 +1749,8 @@ async def _propagate_browser_credentials_with_progress(
                 action_type="credential_propagation",
                 tool_call_id=tool_call_id,
             )
+        except WorkflowGenerationSealed:
+            raise
         except Exception as save_error:
             logger.warning(
                 "Credential propagation diagnostic message was not saved",
@@ -2440,19 +2476,24 @@ async def _replace_browser_humanizer(
     return rebound_humanizer
 
 
-def _harvest_otp_poll(task: Optional["asyncio.Task[int]"]) -> Optional["asyncio.Task[int]"]:
+def _harvest_otp_poll(
+    task: Optional["asyncio.Task[int]"], *, propagate_sealed: bool = True
+) -> Optional["asyncio.Task[int]"]:
     """Collect a finished background OTP poll without ever waiting on it.
 
     Returns the task while it is still in flight, ``None`` once it has been
     harvested (or never started) so the caller can start the next poll. A
-    failed poll never fails the step.
+    transiently failed poll never fails the step. A sealed generation must stop.
     """
     if task is None or not task.done():
         return task
     if task.cancelled():
         return None
     error = task.exception()
-    if error is not None:
+    if isinstance(error, WorkflowGenerationSealed):
+        if propagate_sealed:
+            raise error
+    elif error is not None:
         logger.warning("Failed to fetch OTPs", error=str(error)[:200])
     elif task.result():
         logger.info("Appended OTP user messages", count=task.result())
@@ -2466,7 +2507,9 @@ async def _drain_otp_poll(task: Optional["asyncio.Task[int]"], *, grace_s: float
     if not task.done():
         await asyncio.wait({task}, timeout=grace_s)
         task.cancel()
-    task.add_done_callback(_harvest_otp_poll)
+    # The owner observes sealing synchronously; callbacks only consume exceptions.
+    task.add_done_callback(lambda done: _harvest_otp_poll(done, propagate_sealed=False))
+    _harvest_otp_poll(task)
 
 
 def _restored_indexes_unresolved(dom_service: Any, *, transcript_restored: bool) -> bool:
@@ -2807,6 +2850,7 @@ async def _append_new_otp_user_messages(
     seen_otp_codes: set[str],
     otp_user_messages: List[Dict[str, str]],
     credential_refs_by_secret_ref: Optional[Dict[str, Dict[str, str]]] = None,
+    pending_otp_ref_messages: Optional[Dict[tuple[str, str, str], str]] = None,
     agent_id: str,
     task_id: Optional[str],
     task_elapsed_seconds: Optional[float] = None,
@@ -2818,6 +2862,7 @@ async def _append_new_otp_user_messages(
     sends the agent to the site with a code the site never issued it.
     """
     new_count = 0
+    pending_refs = pending_otp_ref_messages if pending_otp_ref_messages is not None else {}
     for otp in otps:
         if not is_usable_email_otp(otp):
             logger.info(
@@ -2847,35 +2892,42 @@ async def _append_new_otp_user_messages(
 
         if otp.code in seen_otp_codes:
             continue
-
         seen_otp_codes.add(otp.code)
         message = format_otp_user_message(otp)
         otp_user_messages.append({"role": "user", "content": message})
         credential_ref = None
         if otp.credential_id:
-            credential_ref = {
-                "kind": otp.credential_kind,
-                "id": str(otp.credential_id),
-            }
+            credential_ref = {"kind": otp.credential_kind, "id": str(otp.credential_id)}
         else:
             logger.warning(
                 "OTP missing credential id; skipping credential-ref logging",
                 agent_id=agent_id,
                 source_message_id=otp.source_message_id,
             )
-
         if credential_ref and credential_refs_by_secret_ref is not None:
             credential_refs_by_secret_ref[otp.code] = credential_ref
         new_count += 1
-
         if task_id and credential_ref:
-            await save_browser_credential_ref_message(
-                agent_id=agent_id,
-                task_id=task_id,
-                message=message,
-                role="USER",
-                credential_ref=credential_ref,
-            )
+            ref_key = (otp.code, credential_ref["kind"], credential_ref["id"])
+            pending_refs.setdefault(ref_key, message)
+
+    # Persistence retries do not depend on the mailbox returning the OTP again.
+    # Each already-owned reference gets one attempt on this existing poll.
+    if task_id:
+        for ref_key, message in list(pending_refs.items()):
+            try:
+                accepted = await save_browser_credential_ref_message(
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    message=message,
+                    role="USER",
+                    credential_ref={"kind": ref_key[1], "id": ref_key[2]},
+                )
+            except WorkflowGenerationSealed:
+                pending_refs.clear()
+                raise
+            if accepted is True:
+                pending_refs.pop(ref_key, None)
 
     return new_count
 
@@ -2888,6 +2940,7 @@ async def _fetch_and_append_recent_otp_user_messages(
     seen_otp_codes: set[str],
     otp_user_messages: List[Dict[str, str]],
     credential_refs_by_secret_ref: Dict[str, Dict[str, str]],
+    pending_otp_ref_messages: Optional[Dict[tuple[str, str, str], str]] = None,
     agent_id: str,
     task_id: Optional[str],
     task_elapsed_seconds: Optional[float] = None,
@@ -2898,6 +2951,7 @@ async def _fetch_and_append_recent_otp_user_messages(
         seen_otp_codes=seen_otp_codes,
         otp_user_messages=otp_user_messages,
         credential_refs_by_secret_ref=credential_refs_by_secret_ref,
+        pending_otp_ref_messages=pending_otp_ref_messages,
         agent_id=agent_id,
         task_id=task_id,
         task_elapsed_seconds=task_elapsed_seconds,
@@ -2959,7 +3013,10 @@ async def _call_browser_use_with_rotation(
         task=task,
         browser_state=browser_state_for_llm,
         action_history=action_entries,
-        available_actions=AVAILABLE_ACTIONS,
+        available_actions=[
+            action for action in AVAILABLE_ACTIONS
+            if action != "screenshot" or getattr(dom_service, "secret_values_used", False) is not True
+        ],
         dynamic_system_context=dynamic_system_context,
         turn_messages=turn_messages,
         agent_id=agent_id,
@@ -3328,6 +3385,33 @@ async def _finalize_browser_recovery_action_result(
     )
     await browser_stream.finish_tools(status="FINISHED" if action_result.get("success") else "ERROR")
 
+
+
+def _feed_browser_model_output_validation_error_back(*, error, browser_turn_messages, dom_service):
+    """Preserve actual model output and explicit runtime feedback, without inventing actions."""
+    response = error.response
+    messages = []
+    if response.content:
+        messages.append({"role": "assistant", "content": response.content})
+    if response.tool_calls:
+        messages.append({"role": "assistant", "content": (
+            "Rejected provider tool-call records (untrusted model output; not executed):\n"
+            + json.dumps(response.tool_calls, ensure_ascii=False, default=str)
+        )})
+    feedback = (
+        "[Browser runtime output validation] The preceding completed model response "
+        "did not contain a valid browser action. This is runtime validation feedback, "
+        "not a user request. Return a valid action using the existing tools or supported "
+        "action JSON. No action was executed."
+    )
+    redact = getattr(dom_service, "model_visible_value", None)
+    if callable(redact):
+        messages = _model_visible_browser_turn_messages(
+            messages, redact, secret_values_used=getattr(dom_service, "secret_values_used", False),
+        )
+    browser_turn_messages.extend(messages)
+    # Transport role is not durable human authorship; no user ledger is written.
+    browser_turn_messages.append({"role": "user", "content": feedback})
 
 async def _feed_browser_tool_validation_error_back(
     *,
@@ -4383,6 +4467,7 @@ async def _generate_write_lock_notification(
         media_candidates=browser_state.get("media_candidates"),
     )
     extra_user_messages: List[Dict[str, Any]] = [{"role": "user", "content": prompt}]
+    browser_turn_messages = [dict(message) for message in browser_turn_messages]
     fork_result: Dict[str, Any] = {}
     validated_notification: Any = None
     # Same policy for every gate: retry with the error in context, then let the
@@ -4434,6 +4519,12 @@ async def _generate_write_lock_notification(
             except ValueError as error:
                 raise PurchaseApprovalContextError(str(error)) from error
             break
+        except BrowserModelOutputValidationError as fork_error:
+            if attempt >= _WRITE_LOCK_NOTIFICATION_FORK_ATTEMPTS - 1:
+                raise
+            _feed_browser_model_output_validation_error_back(
+                error=fork_error, browser_turn_messages=browser_turn_messages, dom_service=dom_service,
+            )
         except (BrowserToolArgsValidationError, PurchaseApprovalContextError, ValueError) as fork_error:
             logger.info(
                 "Write-lock notification fork failed; retrying with error in context",
@@ -4461,14 +4552,21 @@ async def _generate_write_lock_notification(
         system_name=system_name,
         fallback_question=fallback_question,
     )
-    return {
+    from browser_tools.control_projection import OperationalResult
+
+    # Normalize while still private and unmasked, before deriving either view.
+    notification_source = GenerateWriteLockNotificationTool.model_validate(
+        {"tool": "generate_write_lock_notification", **notification},
+        context={"trusted_page_urls": [*trusted_page_urls, current_url]},
+    )
+    return OperationalResult({
         "notification": notification,
         "question": question,
         "usage": fork_result.get("usage") or {},
         "actual_model": fork_result.get("actual_model"),
         "request_id": fork_result.get("request_id"),
         "mode": fork_result.get("mode"),
-    }
+    }, field="write_lock_notification", source=notification_source)
 
 
 # ========================================
@@ -4721,6 +4819,8 @@ async def _finalize_browser_recording_for_fe(
                     bytes=len(html_bytes),
                     has_pointer=bool(recording_file_pointer),
                 )
+        except WorkflowGenerationSealed:
+            raise
         except Exception as exc:  # recording upload is best-effort
             logger.warning(
                 "Browser recording upload failed",
@@ -4812,6 +4912,8 @@ async def _finalize_browser_recording_for_fe_resilient(
                 timeout_seconds=timeout_seconds,
             )
             return None
+        except WorkflowGenerationSealed:
+            raise
         except Exception as exc:  # final cleanup should not mask the activity result
             logger.warning(
                 "Browser recording finalization failed after cancellation",
@@ -4829,6 +4931,8 @@ async def _finalize_browser_recording_for_fe_resilient(
             timeout_seconds=timeout_seconds,
         )
         return None
+    except WorkflowGenerationSealed:
+        raise
     except Exception as exc:  # final cleanup should not mask the activity result
         logger.warning(
             "Browser recording finalization failed",
@@ -4866,6 +4970,8 @@ async def _finalize_browser_diagnostics_for_fe(
         archive_result = await browser_network_recorder.archive_diagnostics_artifacts()
         if isinstance(archive_result, dict):
             trace_archive_refs = archive_result
+    except WorkflowGenerationSealed:
+        raise
     except Exception as exc:
         logger.warning(
             "Browser diagnostics trace archive failed",
@@ -4888,6 +4994,8 @@ async def _finalize_browser_diagnostics_for_fe(
                 ),
                 timeout=15,
             )
+    except WorkflowGenerationSealed:
+        raise
     except Exception as exc:
         logger.warning(
             "Browser diagnostics attachment upload failed",
@@ -4933,6 +5041,17 @@ async def _finalize_browser_diagnostics_for_fe(
     return metadata
 
 
+@contextlib.contextmanager
+def _suppress_browser_cleanup_errors():
+    """Ordinary cleanup is best-effort; native generation fencing must escape."""
+    try:
+        yield
+    except WorkflowGenerationSealed:
+        raise
+    except Exception:
+        pass
+
+
 async def _emit_browser_task_terminal_for_fe(
     *,
     agent_id: str,
@@ -4942,6 +5061,7 @@ async def _emit_browser_task_terminal_for_fe(
     title: str = "Browser Session Closed",
     message: str = "Browser session closed",
     preparation_cancellation: Optional[Dict[str, Any]] = None,
+    cleanup_failure: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Close the FE live browser chip after recording/session teardown.
 
@@ -4960,19 +5080,20 @@ async def _emit_browser_task_terminal_for_fe(
     """
     if not task_id:
         return
-    with contextlib.suppress(Exception):
+    with _suppress_browser_cleanup_errors():
         await save_browser_action_message(
             agent_id=agent_id,
-            title=title,
+            title="Browser Session Cleanup Failed" if cleanup_failure else title,
             task_id=task_id,
-            message=message,
-            status=MessageStatus.FINISHED,
+            message="Browser session cleanup failed" if cleanup_failure else message,
+            status=MessageStatus.ERROR if cleanup_failure else MessageStatus.FINISHED,
             browser_url=browser_url or "",
             action_type="task_complete",
             tool_call_id=tool_call_id or str(uuid_module.uuid4()),
             is_completion_message=True,
             extra_metadata={
                 "excludeFromModel": True,
+                **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
                 **({"browser_preparation_cancellation": preparation_cancellation} if preparation_cancellation else {}),
             },
         )
@@ -4999,17 +5120,62 @@ def _schedule_browser_cleanup(
     playwright_driver_pid: Optional[int],
     tool_call_id: Optional[str] = None,
     emit_task_terminal: bool = True,
+    local_only: bool = False,
+    local_only_recorders: Optional[List[Any]] = None,
+    local_only_setup_tasks: tuple[Any, ...] = (),
     preparation_cancellation: Optional[Dict[str, Any]] = None,
+    cleanup_failure: Optional[Dict[str, Any]] = None,
 ) -> asyncio.Task:
     async def _cleanup() -> None:
         logger.info("Browser cleanup started in background", agent_id=agent_id, task_id=task_id)
         resolved_network_recorder = browser_network_recorder
-        try:
-            if cursor_streamer:
+        async def dispose_local() -> None:
+            nonlocal resolved_network_recorder
+            # Cancel setup before collecting its registered instances.
+            deadline = asyncio.get_running_loop().time() + BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS
+            owned_tasks = {task for task in (interaction_layer_task, network_recorder_task, *local_only_setup_tasks)
+                           if isinstance(task, asyncio.Task)}
+            if cursor_streamer is not None:
+                cursor_streamer.closed = True
+                if isinstance(cursor_streamer.flush_task, asyncio.Task):
+                    owned_tasks.add(cursor_streamer.flush_task)
+            for owned_task in owned_tasks:
+                owned_task.cancel()
+                owned_task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+            if owned_tasks:
+                await asyncio.wait(owned_tasks, timeout=max(0.0, deadline - asyncio.get_running_loop().time()))
+            if resolved_network_recorder is None and network_recorder_task is not None:
+                if network_recorder_task.done() and not network_recorder_task.cancelled():
+                    with contextlib.suppress(Exception):
+                        resolved_network_recorder = network_recorder_task.result()
+            recorders = [browser_recorder, resolved_network_recorder, *(local_only_recorders or [])]
+            aborted = set()
+            for recorder in recorders:
+                if recorder is not None and id(recorder) not in aborted:
+                    aborted.add(id(recorder))
+                    with contextlib.suppress(Exception):
+                        await recorder.abort_local(
+                            settle_timeout=max(0.0, deadline - asyncio.get_running_loop().time())
+                        )
+            if humanizer is not None:
                 with contextlib.suppress(Exception):
+                    await _bounded_browser_terminal_io(humanizer.close(), "sealed humanizer detach")
+            if dom_service is not None:
+                with contextlib.suppress(Exception):
+                    await _bounded_browser_terminal_io(dom_service.disconnect(), "sealed CDP detach")
+            await _stop_playwright_resources(
+                playwright_browser, playwright_instance, agent_id,
+                close_browser=False, driver_pid=playwright_driver_pid,
+            )
+        try:
+            if local_only:
+                await dispose_local()
+                return
+            if cursor_streamer:
+                with _suppress_browser_cleanup_errors():
                     await cursor_streamer.close()
             if input_page and _botsigged_diagnostics_enabled(start_url):
-                with contextlib.suppress(Exception):
+                with _suppress_browser_cleanup_errors():
                     capture = await _capture_botsigged_diagnostics(
                         input_page,
                         agent_id=agent_id,
@@ -5033,16 +5199,16 @@ def _schedule_browser_cleanup(
                             },
                         )
             if interaction_layer_task is not None and not interaction_layer_task.done():
-                with contextlib.suppress(Exception):
+                with _suppress_browser_cleanup_errors():
                     await asyncio.wait_for(asyncio.shield(interaction_layer_task), timeout=10)
             if humanizer:
-                with contextlib.suppress(Exception):
+                with _suppress_browser_cleanup_errors():
                     await humanizer.close()
             if network_recorder_task is not None:
-                with contextlib.suppress(Exception):
+                with _suppress_browser_cleanup_errors():
                     resolved_network_recorder = await asyncio.wait_for(network_recorder_task, timeout=10)
             if resolved_network_recorder:
-                with contextlib.suppress(Exception):
+                with _suppress_browser_cleanup_errors():
                     await _finalize_browser_diagnostics_for_fe(
                         browser_network_recorder=resolved_network_recorder,
                         agent_id=agent_id,
@@ -5062,7 +5228,7 @@ def _schedule_browser_cleanup(
             # Recording finalize alone does not close the FE live chip. Emit a
             # task_complete terminal so timeout/cancel cleanup cannot leave the
             # panel stuck on an IN_PROGRESS browser row (hotel k=5 hub chips).
-            if emit_task_terminal:
+            if emit_task_terminal and not local_only:
                 await _emit_browser_task_terminal_for_fe(
                     agent_id=agent_id,
                     task_id=task_id,
@@ -5071,6 +5237,7 @@ def _schedule_browser_cleanup(
                     title="Browser Session Closed",
                     message="Browser session closed after teardown",
                     preparation_cancellation=preparation_cancellation,
+                    cleanup_failure=cleanup_failure,
                 )
             if dom_service:
                 try:
@@ -5088,6 +5255,8 @@ def _schedule_browser_cleanup(
                 agent_id,
                 driver_pid=playwright_driver_pid,
             )
+        except WorkflowGenerationSealed:
+            await dispose_local()
         except Exception as exc:  # background cleanup must never crash the worker loop
             logger.warning(
                 "Browser cleanup failed in background",
@@ -5095,15 +5264,19 @@ def _schedule_browser_cleanup(
                 task_id=task_id,
                 error=extract_error_message(exc),
             )
-            if emit_task_terminal:
-                await _emit_browser_task_terminal_for_fe(
-                    agent_id=agent_id,
-                    task_id=task_id,
-                    tool_call_id=tool_call_id,
-                    browser_url=browser_url,
-                    title="Browser Session Closed",
-                    message="Browser session closed after teardown error",
-                )
+            if emit_task_terminal and not local_only:
+                try:
+                    await _emit_browser_task_terminal_for_fe(
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        tool_call_id=tool_call_id,
+                        browser_url=browser_url,
+                        title="Browser Session Closed",
+                        message="Browser session closed after teardown error",
+                        cleanup_failure=cleanup_failure,
+                    )
+                except WorkflowGenerationSealed:
+                    await dispose_local()
         finally:
             _clear_browser_activity_memory_buffers(
                 browser_recorder=browser_recorder,
@@ -6931,7 +7104,7 @@ async def _spawn_browser_agent_activity_v3_real(
         if isinstance(metadata, dict) and isinstance(trusted_credential_ref, dict):
             visible_ref = metadata.get("credential_ref")
             if isinstance(visible_ref, dict):
-                for key in ("kind", "id"):
+                for key in ("kind", "id", "username", "origin"):
                     if isinstance(trusted_credential_ref.get(key), str):
                         visible_ref[key] = trusted_credential_ref[key]
         auxiliary = kwargs.get("auxiliary")
@@ -6975,7 +7148,9 @@ async def _spawn_browser_agent_activity_v3_real(
             },
         )
 
-    def _visible_activity_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    def _visible_activity_result(
+        result: Dict[str, Any], *, operational_sources: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         # Archive references and routing IDs remain exact protocol values.
         auth_response = result.get("auth_assistance_request")
         payment_response = result.get("payment_request")
@@ -6984,7 +7159,19 @@ async def _spawn_browser_agent_activity_v3_real(
                     "message", "structured_response", "best_effort_response",
                     "browser_error_message"):
             if key in result:
-                result[key] = _redact_activity_value(result[key])
+                source = (operational_sources or {}).get(key)
+                if source is not None:
+                    from browser_tools.control_projection import project_operational_source
+                    result[key] = project_operational_source(source, _redact_activity_value)
+                else:
+                    result[key] = _redact_activity_value(result[key])
+        observation = result.get("browser_page_observation")
+        if isinstance(observation, dict):
+            # Routing/phase keys remain exact protocol; only location is page data.
+            result["browser_page_observation"] = {
+                **observation, "origin": _redact_activity_value(observation.get("origin")),
+                "path": _redact_activity_value(observation.get("path")),
+            }
         # Receipt image URLs are typed text, not raster attachments. Preserve
         # only their HTTP(S) strings through the same secret-value redactor;
         # arbitrary nested media and data-image payloads remain suppressed.
@@ -7212,6 +7399,9 @@ async def _spawn_browser_agent_activity_v3_real(
     # because a realm transition rebinds that dict while a poll is in flight.
     otp_credential_refs: Dict[str, Dict[str, str]] = {}
     seen_otp_codes: set[str] = set()
+    pending_otp_ref_messages: Dict[tuple[str, str, str], str] = {}
+    generation_sealed = False
+    locally_owned_recorders: List[Any] = []
     otp_task_started_monotonic = time.monotonic()
     available_file_paths: Dict[str, str] = {}
     passkey_ref_by_credential_id: Dict[str, Dict[str, str]] = {}
@@ -7299,6 +7489,22 @@ async def _spawn_browser_agent_activity_v3_real(
     # resumes in a later activity call and the FE chip must stay open.
     browser_task_paused_for_resume = False
     otp_poll_task: Optional["asyncio.Task[int]"] = None
+    cleanup_failure: Optional[Dict[str, Any]] = None
+
+    async def _close_browser_with_cleanup_receipt(
+        exact_session_id: str, pause: bool = False, current_url: str = ""
+    ) -> None:
+        nonlocal cleanup_failure
+        try:
+            options = {"pause": pause}
+            if current_url:
+                options["current_url"] = current_url
+            await close_browser_session(config, exact_session_id, **options)
+        except BrowserSessionCloseError as cleanup_error:
+            cleanup_failure = cleanup_error.receipt()
+        except asyncio.CancelledError:
+            cleanup_failure = BrowserSessionCloseError(exact_session_id, pause).receipt()
+            raise
     state_prefetch = BrowserStatePrefetch()
     # Bind before browser/event-bus tasks start; their inherited policy is
     # updated in place as private bindings are hydrated or realms change.
@@ -7346,6 +7552,8 @@ async def _spawn_browser_agent_activity_v3_real(
             try:
                 current = await fetch_session_info(config, task_id)
                 declined_session_id = str(current.get("session_id") or declined_session_id or "")
+            except WorkflowGenerationSealed:
+                raise
             except Exception as lookup_error:
                 logger.warning(
                     "Could not look up the declined task's current session; closing the saved one",
@@ -7353,12 +7561,13 @@ async def _spawn_browser_agent_activity_v3_real(
                     error=str(lookup_error),
                 )
             if declined_session_id:
-                await close_browser_session(config, declined_session_id, pause=False)
+                await _close_browser_with_cleanup_receipt(declined_session_id, pause=False)
             logger.info("User declined auth assistance; ending browser task", task_id=task_id)
             return _visible_activity_result({
                 "status": "completed",
                 "success": False,
                 "user_declined_auth": True,
+                **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
                 "message": f"User declined to sign in to {auth_realm or 'the site'}.",
                 "browser_url": browser_url,
                 "task_id": task_id,
@@ -7942,6 +8151,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 task_id=task_id,
                 session_id=session_id,
                 output_dir=recording_output_dir,
+                register_local_owner=locally_owned_recorders.append,
             )
             if recorder and recorder.persists_network_log and task_id:
                 await _save_browser_action_message(
@@ -8012,6 +8222,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     session_id=session_id,
                     browser_url=browser_url,
                     session_metadata=browser_session_metadata,
+                    register_local_owner=locally_owned_recorders.append,
                 ),
                 _apply_logo_hijack(dom_service),
             )
@@ -8599,7 +8810,10 @@ async def _spawn_browser_agent_activity_v3_real(
             # Persist the password for the page authorized at resolution time.
             credential_url = kwargs.get("current_url") or current_url
             try:
+                before_actions = len(action_history)
                 result = await execute_action(*args, **kwargs)
+                if len(action_history) > before_actions:
+                    result["action_step"] = action_history.last_action_step()
                 if MINTED_NEW_PASSWORD_REF in successful_secret_refs and credential_url:
                     try:
                         await save_minted_account_password(config, user_id, credential_url)
@@ -8614,7 +8828,10 @@ async def _spawn_browser_agent_activity_v3_real(
                 # values until this result is safe to log, persist, and submit.
                 if hasattr(dom_service, "model_visible_action_result"):
                     action = kwargs.get("action") or (args[2] if len(args) > 2 else {})
-                    result = dom_service.model_visible_action_result(action.get("action", ""), result)
+                    from browser_tools.control_projection import retain_operational_source
+                    result = retain_operational_source(
+                        result, dom_service.model_visible_action_result(action.get("action", ""), result),
+                    )
                 else:
                     for refs in redaction_refs:
                         result = mask_secret_values(result, refs)
@@ -8854,6 +9071,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         seen_otp_codes=seen_otp_codes,
                         otp_user_messages=otp_user_messages,
                         credential_refs_by_secret_ref=otp_credential_refs,
+                        pending_otp_ref_messages=pending_otp_ref_messages,
                         agent_id=agent_id,
                         task_id=task_id,
                         task_elapsed_seconds=time.monotonic() - otp_task_started_monotonic,
@@ -9073,6 +9291,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     step_timer.mark("llm_decision")
                 finally:
                     rose_client.set_thinking_stream(None)
+                    otp_poll_task = _harvest_otp_poll(otp_poll_task)
                     await browser_stream.finish()
                     if not decision_succeeded:
                         await browser_stream.finish_tools(status="ERROR")
@@ -9128,6 +9347,30 @@ async def _spawn_browser_agent_activity_v3_real(
                     logger.error(f"Aborting: {MAX_CONSECUTIVE_API_FAILURES} consecutive browser decision timeouts")
                     break
                 raise
+            except BrowserModelOutputValidationError as validation_error:
+                response = validation_error.response
+                usage = response.usage or {}
+                step_input_tokens = usage.get("prompt_tokens", 0) or 0
+                step_output_tokens = usage.get("completion_tokens", 0) or 0
+                total_input_tokens += step_input_tokens
+                total_output_tokens += step_output_tokens
+                accumulate_model_usage(
+                    usage_by_model, response.actual_model, step_input_tokens, step_output_tokens,
+                    cache_read_input_tokens=int(usage.get("cache_read_input_tokens") or 0),
+                    cache_creation_input_tokens=int(usage.get("cache_creation_input_tokens") or 0),
+                    from_fast_cache=bool(usage.get("from_fast_cache")),
+                    cache_sequence_id=usage.get("cache_sequence_id"),
+                )
+                _feed_browser_model_output_validation_error_back(
+                    error=validation_error, browser_turn_messages=browser_turn_messages, dom_service=dom_service,
+                )
+                consecutive_api_failures = 0
+                logger.warning(
+                    "Completed browser response failed output validation",
+                    iteration=iteration, request_id=response.request_id, actual_model=response.actual_model,
+                    consecutive_failures=consecutive_api_failures,
+                )
+                continue
             except BrowserToolArgsValidationError as validation_error:
                 # The model chose a real tool but supplied arguments its schema
                 # rejects. This is a model-output error, NOT a Rose transport/infra
@@ -9153,6 +9396,8 @@ async def _spawn_browser_agent_activity_v3_real(
                     browser_url=browser_url,
                 )
                 continue
+            except WorkflowGenerationSealed:
+                raise
             except Exception as e:
                 consecutive_api_failures += 1
                 logger.error(
@@ -9167,6 +9412,9 @@ async def _spawn_browser_agent_activity_v3_real(
                     break
                 await asyncio.sleep(2)
                 continue
+
+            # Observe a finished native poll before any decision side effects.
+            otp_poll_task = _harvest_otp_poll(otp_poll_task)
 
             # Reset consecutive failure counter on success
             consecutive_api_failures = 0
@@ -9244,6 +9492,26 @@ async def _spawn_browser_agent_activity_v3_real(
                 )
             action_name = unified_action.get("action", "")
             thinking = unified_action.get("thinking", "")
+
+            # Finish the already-owned inbox poll before transferring control,
+            # using the same bounded drain as activity shutdown. Admit any real
+            # eligible input it produced through the next ordinary model turn.
+            if action_name == "request_user_assistance_for_authentication":
+                await _drain_otp_poll(otp_poll_task)
+                otp_poll_task = None
+                if len(otp_user_messages) > otp_history_count:
+                    await browser_stream.finish_tools(status="ERROR")
+                    state_prefetch.discard()
+                    iteration, consecutive_budget_free, consecutive_keystroke_free = (
+                        adjust_iteration_after_action(
+                            iteration=iteration,
+                            action_name=action_name,
+                            consecutive_budget_free=consecutive_budget_free,
+                            consecutive_keystroke_free=consecutive_keystroke_free,
+                            action_executed=False,
+                        )
+                    )
+                    continue
 
             if thinking:
                 reasoning_messages.append(thinking)
@@ -9496,7 +9764,14 @@ async def _spawn_browser_agent_activity_v3_real(
                     tool_call_id=tool_call_id_action,
                 )
 
-                await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
+                parked_page = await disconnect_browser_after_passkey_capture(
+                    dom_service, record_passkey_usage_once,
+                    observe_parked_page=lambda: {
+                        **dom_service.get_parked_page_identity(), "phase": "park_time",
+                        "agent_id": agent_id, "user_id": user_id, "task_id": task_id,
+                        "session_id": session_id, "request_id": request_id, "tool_call_id": tool_call_id,
+                    },
+                )
                 dom_service = None
                 await _stop_playwright_resources(
                     playwright_browser,
@@ -9531,8 +9806,25 @@ async def _spawn_browser_agent_activity_v3_real(
                 )
                 await browser_stream.finish_tools(status="FINISHED")
 
+                # Public evidence needs location, not private URL query/fragment/userinfo.
+                public_parked_page = None
+                if isinstance(parked_page, dict) and isinstance(parked_page.get("url"), str):
+                    from urllib.parse import urlsplit
+                    try:
+                        page_parts = urlsplit(parked_page["url"])
+                        public_parked_page = {
+                            **{key: parked_page.get(key) for key in (
+                                "target_id", "phase", "agent_id", "user_id", "task_id",
+                                "session_id", "request_id", "tool_call_id",
+                            )},
+                            "origin": page_parts.scheme + "://" + page_parts.netloc.rsplit("@", 1)[-1],
+                            "path": page_parts.path,
+                        }
+                    except ValueError:
+                        pass  # Invalid optional measurement cannot fail the auth handoff.
                 resume_result = {
                     "status": "awaiting_auth_assistance",
+                    "browser_page_observation": public_parked_page,
                     "request_id": request_id,
                     "auth_assistance_request": request_info,
                     "base_site": base_site,
@@ -10280,7 +10572,7 @@ async def _spawn_browser_agent_activity_v3_real(
 
                         await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
                         dom_service = None
-                        await close_browser_session(config, session_id, pause=False)
+                        await _close_browser_with_cleanup_receipt(session_id, pause=False)
 
                         context_message = build_context_summary(
                             success=True,
@@ -10306,6 +10598,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             tool_call_id=tool_call_id,
                             is_completion_message=True,
                             output_schema=response_schema,
+                            extra_metadata={"browser_cleanup": cleanup_failure} if cleanup_failure else None,
                         )
 
                         usage_items = build_usage_items(
@@ -10332,6 +10625,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         return _visible_activity_result({
                             "status": "completed",
                             "success": True,
+                            **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
                             "message": context_message,
                             "browser_url": browser_url,
                             "task_id": task_id,
@@ -10426,7 +10720,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         thinking_preview=verifier_feedback_thinking[:200],
                     )
 
-                except (BrowserInstructionUnavailableError, WorkflowGenerationSealed):
+                except (BrowserSessionCloseError, BrowserInstructionUnavailableError, WorkflowGenerationSealed):
                     raise
                 except Exception as verifier_error:
                     completion_tool_status = "ERROR"
@@ -10521,8 +10815,7 @@ Based on this feedback, I need to continue working on the task and address the i
             step_timer.mark("pre_action_bookkeeping")
             step_timer.annotate(action=action_name)
             browser_activity_checkpoint(f"Step {iteration} - executing {action_name}")
-            try:
-                result = await asyncio.wait_for(
+            action_task = asyncio.create_task(
                     _execute_action(
                         dom_service,
                         action_history,
@@ -10545,10 +10838,30 @@ Based on this feedback, I need to continue working on the task and address the i
                         prepare_credentials_for_url=_prepare_credentials_for_url,
                         prefetched_browser_state=prefetched_browser_state,
                         auth_context_for_url=_auth_context_for_url,
-                    ),
+                    )
+            )
+            try:
+                result = await asyncio.wait_for(
+                    action_task,
                     timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:
+                from domains.spawn_browser_agent_v3.service_actions import BrowserEvaluateDeadlineExceeded
+
+                timeout_error = sys.exception()
+                action_timeout_seconds = (
+                    timeout_error.timeout_seconds
+                    if isinstance(timeout_error, BrowserEvaluateDeadlineExceeded)
+                    else BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS if action_task.cancelled() else None
+                )
+                timeout_description = (
+                    f"after {action_timeout_seconds:g}s"
+                    if action_timeout_seconds is not None
+                    else f"with unknown timeout source (configured supervisor cap {BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS:g}s)"
+                )
+                timeout_reason = (
+                    f"{action_timeout_seconds:g}s" if action_timeout_seconds is not None else "unknown_source"
+                )
                 # Any action can hang on a frozen renderer (Momence Konva waiver:
                 # evaluate OR click). Classify via browser-process CDP before soft
                 # recovery; soft bring_to_front alone cannot reclaim the page.
@@ -10580,7 +10893,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 )
                 renderer_frozen = stall.get("verdict") == "renderer_main_thread_blocked"
                 await _recover_browser_step(
-                    f"action_timeout_{action_name}_{BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS}s",
+                    f"action_timeout_{action_name}_{timeout_reason}",
                     reload_page=renderer_frozen,
                 )
                 if renderer_frozen:
@@ -10637,8 +10950,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 result = {
                     "success": False,
                     "error": (
-                        f"Browser action '{action_name}' timed out after "
-                        f"{BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS}s; "
+                        f"Browser action '{action_name}' timed out {timeout_description}; "
                         + (
                             "hard renderer recovery ran after CDP classified "
                             "renderer_main_thread_blocked."
@@ -10677,6 +10989,10 @@ Based on this feedback, I need to continue working on the task and address the i
                     "supervisor_recovered": True,
                 }
             step_timer.mark("execute_action")
+            # Retain only the validated producer source privately; history/forks use the safe view.
+            payment_operational_source = getattr(result, "operational_source", None) if (
+                getattr(result, "operational_field", None) == "payment_request"
+            ) else None
             # Nothing a tool read back from the page may carry a secret the tool typed.
             result = (
                 dom_service.model_visible_action_result(action_name, result)
@@ -10698,6 +11014,18 @@ Based on this feedback, I need to continue working on the task and address the i
                 and str(unified_action.get("params", {}).get("text", "")).strip().lower() in minted_account_labels
             ):
                 result["credential_ref"] = minted_credential_ref
+            if (
+                action_name == "input_text"
+                and isinstance(result.get("credential_ref"), dict)
+                and result["credential_ref"].get("kind") == "minted_account"
+            ):
+                # Post-run propagation saves the exact identifier that signed in
+                # as a passwordless login for this site, so record what was typed.
+                result["credential_ref"] = {
+                    **result["credential_ref"],
+                    "username": str(unified_action.get("params", {}).get("text", "")),
+                    "origin": str(current_url or ""),
+                }
 
             _append_browser_turn_messages(
                 browser_turn_messages,
@@ -10713,6 +11041,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     f"{system_name} wants to perform a write action. Approve?",
                 )
                 write_lock_notification = None
+                notification_operational_source = None
                 write_lock_notification_usage = None
                 write_lock_browser_state = None
 
@@ -10777,6 +11106,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         timeout=_notification_timeout_s,
                     )
                     write_lock_notification = notification_result.get("notification")
+                    notification_operational_source = getattr(notification_result, "operational_source", None)
                     write_lock_notification_usage = {
                         "usage": notification_result.get("usage", {}),
                         "actual_model": notification_result.get("actual_model"),
@@ -10866,7 +11196,9 @@ Based on this feedback, I need to continue working on the task and address the i
                     )),
                 }
                 browser_task_paused_for_resume = True
-                resume_result = _visible_activity_result(resume_result)
+                resume_result = _visible_activity_result(resume_result, operational_sources={
+                    "write_lock_notification": notification_operational_source,
+                })
                 return resume_result
 
             if result.get("status") in {"needs_payment_card_approval", "awaiting_payment_card_approval"}:
@@ -10910,6 +11242,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 # the payment approval renders #662's itemized purchase notification instead of a
                 # plain question. Best-effort — the workflow falls back to build_payment_question.
                 payment_write_lock_notification = None
+                payment_notification_operational_source = None
                 payment_write_lock_notification_usage = None
                 payment_notification_state = None
                 try:
@@ -10947,6 +11280,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         dom_service=dom_service,
                     )
                     payment_write_lock_notification = payment_notification_result.get("notification")
+                    payment_notification_operational_source = getattr(payment_notification_result, "operational_source", None)
                     payment_write_lock_notification_usage = {
                         "usage": payment_notification_result.get("usage", {}),
                         "actual_model": payment_notification_result.get("actual_model"),
@@ -11004,7 +11338,10 @@ Based on this feedback, I need to continue working on the task and address the i
                     )),
                 }
                 browser_task_paused_for_resume = True
-                resume_result = _visible_activity_result(resume_result)
+                resume_result = _visible_activity_result(resume_result, operational_sources={
+                    "payment_request": payment_operational_source,
+                    "write_lock_notification": payment_notification_operational_source,
+                })
                 return resume_result
 
             if result.get("success", True):
@@ -11034,6 +11371,10 @@ Based on this feedback, I need to continue working on the task and address the i
                 if result.get("credential_ref"):
                     auth_runtime_state.mark_credential_ref(result["credential_ref"])
                     extra_metadata = {"credential_ref": result["credential_ref"]}
+                # Preserve the same masked observation for credential classification.
+                # Metadata is not repeated in the parent planner's tool text.
+                if action_name == "read_browser_state" and result.get("formatted_state"):
+                    extra_metadata = {**(extra_metadata or {}), "browser_observation": result["formatted_state"]}
                 await _save_browser_action_message(
                     agent_id=agent_id,
                     title=title_done,
@@ -11253,7 +11594,7 @@ Based on this feedback, I need to continue working on the task and address the i
 
         await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
         dom_service = None
-        await close_browser_session(config, session_id, pause=False)
+        await _close_browser_with_cleanup_receipt(session_id, pause=False)
 
         context_message = build_context_summary(
             success=False,
@@ -11275,6 +11616,7 @@ Based on this feedback, I need to continue working on the task and address the i
             tool_call_id=tool_call_id,
             is_completion_message=True,
             output_schema=response_schema,
+            extra_metadata={"browser_cleanup": cleanup_failure} if cleanup_failure else None,
         )
 
         execution_time_ms = (safe_time() - start_time) * 1000
@@ -11312,6 +11654,7 @@ Based on this feedback, I need to continue working on the task and address the i
         return _visible_activity_result({
             "status": "max_iterations",
             "success": False,
+            **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
             "message": context_message,
             "browser_url": browser_url,
             "usage_items": usage_items,
@@ -11356,11 +11699,11 @@ Based on this feedback, I need to continue working on the task and address the i
                 await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
                 dom_service = None
 
-        if session_id:
-            await close_browser_session(config, session_id, pause=True, current_url=current_url)
+        if session_id and cleanup_failure is None:
+            await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
 
         if task_id:
-            with contextlib.suppress(Exception):
+            with _suppress_browser_cleanup_errors():
                 await _save_browser_action_message(
                     agent_id=agent_id,
                     title="Browser Session Cancelled",
@@ -11372,6 +11715,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     tool_call_id=tool_call_id,
                     is_completion_message=True,
                     output_schema=response_schema,
+                    extra_metadata={"browser_cleanup": cleanup_failure} if cleanup_failure else None,
                 )
 
         return {
@@ -11380,8 +11724,12 @@ Based on this feedback, I need to continue working on the task and address the i
             "session_id": session_id,
             "browser_url": browser_url,
             "message": "Browser agent cancelled by user",
+            **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
         }
 
+    except WorkflowGenerationSealed:
+        generation_sealed = True
+        raise
     except Exception as e:
         last_action = action_summary[-1] if action_summary else "initialization"
         logger.error(
@@ -11406,10 +11754,9 @@ Based on this feedback, I need to continue working on the task and address the i
                 await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
                 dom_service = None
 
-        if session_id:
+        if session_id and cleanup_failure is None:
             retryable_notification_error = isinstance(e, PurchaseApprovalNotificationRetryableError)
-            await close_browser_session(
-                config,
+            await _close_browser_with_cleanup_receipt(
                 session_id,
                 pause=retryable_notification_error,
                 current_url=current_url if retryable_notification_error else None,
@@ -11429,7 +11776,7 @@ Based on this feedback, I need to continue working on the task and address the i
         error_message = _redact_activity_value(error_message)
 
         if task_id:
-            with contextlib.suppress(Exception):
+            with _suppress_browser_cleanup_errors():
                 await _save_browser_action_message(
                     agent_id=agent_id,
                     title="Task Failed",
@@ -11442,6 +11789,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     is_completion_message=True,
                     output_schema=response_schema,
                     extra_metadata={
+                        **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
                         "browser_error_type": e.original_error_type if isinstance(e, BrowserInstructionUnavailableError) else type(e).__name__,
                         "browser_error_message": extract_error_message(e),
                         "browser_error_context": error_context,
@@ -11460,6 +11808,8 @@ Based on this feedback, I need to continue working on the task and address the i
                     success=False,
                     message=error_message,
                 )
+            except WorkflowGenerationSealed:
+                raise
             except Exception as propagation_error:
                 logger.warning(
                     "Credential propagation failed after browser error; preserving original browser error",
@@ -11489,16 +11839,30 @@ Based on this feedback, I need to continue working on the task and address the i
 
     finally:
         try:
+            generation_sealed = generation_sealed or isinstance(sys.exception(), WorkflowGenerationSealed)
+            if generation_sealed and otp_poll_task is not None:
+                otp_poll_task.cancel()
             stop_browser_activity_heartbeat(_heartbeat_token)
-            await _drain_otp_poll(otp_poll_task)
+            otp_generation_error = None
+            try:
+                await _drain_otp_poll(otp_poll_task)
+            except WorkflowGenerationSealed as error:
+                # Finish local resource cleanup before propagating the stop signal.
+                otp_generation_error = error
+                generation_sealed = True
             state_prefetch.discard()
             diagnostics_finalized = False
-            if browser_network_recorder is None and network_recorder_task is not None:
+            if not generation_sealed and browser_network_recorder is None and network_recorder_task is not None:
                 try:
                     browser_network_recorder = await asyncio.wait_for(
                         asyncio.shield(network_recorder_task),
                         timeout=10,
                     )
+                except WorkflowGenerationSealed as error:
+                    generation_sealed = True
+                    otp_generation_error = error
+                    if otp_poll_task is not None:
+                        otp_poll_task.cancel()
                 except Exception as diagnostics_resolve_error:
                     logger.warning(
                         "Browser diagnostics recorder was unavailable before activity return",
@@ -11506,7 +11870,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         task_id=task_id,
                         error=extract_error_message(diagnostics_resolve_error),
                     )
-            if browser_network_recorder is not None:
+            if not generation_sealed and browser_network_recorder is not None:
                 try:
                     await _finalize_browser_diagnostics_for_fe(
                         browser_network_recorder=browser_network_recorder,
@@ -11516,6 +11880,11 @@ Based on this feedback, I need to continue working on the task and address the i
                         browser_url=browser_url,
                     )
                     diagnostics_finalized = True
+                except WorkflowGenerationSealed as error:
+                    generation_sealed = True
+                    otp_generation_error = error
+                    if otp_poll_task is not None:
+                        otp_poll_task.cancel()
                 except Exception as diagnostics_error:
                     logger.warning(
                         "Browser diagnostics finalization failed before activity return",
@@ -11523,18 +11892,32 @@ Based on this feedback, I need to continue working on the task and address the i
                         task_id=task_id,
                         error=extract_error_message(diagnostics_error),
                     )
-            if browser_download_persister is None and download_persister_task is not None:
-                with contextlib.suppress(Exception):
+            if generation_sealed and download_persister_task is not None:
+                if download_persister_task.done() and not download_persister_task.cancelled():
+                    with contextlib.suppress(Exception):
+                        browser_download_persister = download_persister_task.result()
+                else:
+                    download_persister_task.cancel()
+            if not generation_sealed and browser_download_persister is None and download_persister_task is not None:
+                try:
                     browser_download_persister = await asyncio.wait_for(
                         asyncio.shield(download_persister_task),
                         timeout=10,
                     )
+                except WorkflowGenerationSealed as error:
+                    generation_sealed = True
+                    otp_generation_error = error
+                    if otp_poll_task is not None:
+                        otp_poll_task.cancel()
+                except Exception:
+                    pass
             if browser_download_persister is not None:
                 with contextlib.suppress(Exception):
                     await browser_download_persister.close()
             _schedule_browser_cleanup(
                 agent_id=agent_id,
                 preparation_cancellation=preparation_cancellation,
+                cleanup_failure=cleanup_failure,
                 task_id=task_id,
                 user_id=user_id,
                 browser_url=browser_url,
@@ -11557,7 +11940,10 @@ Based on this feedback, I need to continue working on the task and address the i
                 # hub-archive races still need cleanup as the terminal safety net.
                 # Pause-for-resume returns must keep the FE chip open for the next
                 # activity call (write / payment / auth assistance).
-                emit_task_terminal=not browser_task_paused_for_resume,
+                emit_task_terminal=not browser_task_paused_for_resume and not generation_sealed,
+                local_only=generation_sealed,
+                local_only_recorders=locally_owned_recorders,
+                local_only_setup_tasks=(download_persister_task,),
             )
             playwright_browser = None
             playwright_instance = None
@@ -11571,6 +11957,8 @@ Based on this feedback, I need to continue working on the task and address the i
                     browser_turn_messages,
                     otp_user_messages,
                     seen_otp_codes,
+                    pending_otp_ref_messages,
+                    otp_credential_refs,
                     visited_urls,
                     reasoning_messages,
                     action_summary,
@@ -11581,6 +11969,8 @@ Based on this feedback, I need to continue working on the task and address the i
                     browser_session_metadata,
                 ),
             )
+            if otp_generation_error is not None:
+                raise otp_generation_error
         except Exception as cleanup_error:
             safe_error = _redact_browser_activity_error(cleanup_error, _redact_activity_value)
             if safe_error is cleanup_error:
@@ -12686,6 +13076,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             metadata={
                                 "toolName": "spawn_browser_agent",
                                 "action_type": "auth_assistance",
+                                "browser_page_observation": result.get("browser_page_observation"),
                                 "task_id": result.get("task_id"),
                                 "requestUserAuthentication": {
                                     "requestId": request_id,
@@ -12839,6 +13230,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 final_metadata["authAssistanceDeclined"] = True
             for key in (
                 "task_id",
+                "browser_cleanup",
                 "browser_error_type",
                 "browser_error_message",
                 "world_model_simulated",

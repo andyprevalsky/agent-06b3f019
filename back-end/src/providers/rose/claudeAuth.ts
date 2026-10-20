@@ -34,7 +34,7 @@ import {
 import { parseAnthropicSSE } from './streaming';
 import { isUncachedContext, SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from './cache';
 import { applyAnthropicToolConfig, transformMessagesForAnthropic } from './transforms';
-import { postAnthropicApiKeyStream, postAnthropicStream } from './transport';
+import { anthropicErrorFields, postAnthropicApiKeyStream, postAnthropicStream } from './transport';
 import type { CompletionMessage, ResponseFormat, RoseStreamChunk } from './types';
 
 /**
@@ -480,7 +480,9 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
     }
 
     if (status === 400) {
-      throw new RoseInvalidRequest('Anthropic 400', status);
+      // Name the provider's error code so a fall-through reason is diagnosable.
+      const code = anthropicErrorFields(errorBody).error_code;
+      throw new RoseInvalidRequest(code ? `Anthropic 400 (${code})` : 'Anthropic 400', status);
     }
 
     if (status >= 500) {

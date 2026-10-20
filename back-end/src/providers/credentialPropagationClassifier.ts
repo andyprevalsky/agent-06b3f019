@@ -21,6 +21,9 @@ export type CredentialKind =
 export interface CredentialRef {
   kind: CredentialKind;
   id: string;
+  /** Minted refs: the exact identifier last typed with this credential, and its page. */
+  username?: string;
+  origin?: string;
 }
 
 export interface MessageForClassification {
@@ -166,8 +169,20 @@ export function extractCredentialRefs(
       const kind = normalizeKind(rawKind);
       if (kind === null) continue;
 
-      const credentialRef = { kind, id: rawId };
-      byKey.set(`${credentialRef.kind}:${credentialRef.id}`, credentialRef);
+      const credentialRef: CredentialRef = { kind, id: rawId };
+      if (kind === 'minted' && typeof ref.username === 'string' && typeof ref.origin === 'string') {
+        credentialRef.username = ref.username;
+        credentialRef.origin = ref.origin;
+      }
+      const key = `${credentialRef.kind}:${credentialRef.id}`;
+      // The last identifier typed with a minted credential is the one that signed in.
+      const previous = byKey.get(key);
+      byKey.set(
+        key,
+        credentialRef.username === undefined && previous?.username !== undefined
+          ? previous
+          : credentialRef
+      );
     }
   }
 

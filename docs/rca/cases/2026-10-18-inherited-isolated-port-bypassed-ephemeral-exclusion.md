@@ -16,8 +16,8 @@ tags:
   - regression
 sources:
   - commit 12c3f4b55e60a291ce6902b47e88fb2f1acc9307
-repro: agents/tests/blackbox/benchmark.blackbox.py test_local_automatic_port_range_excludes_reported_ephemeral_window
-status: open
+repro: agents/tests/blackbox/benchmark.blackbox.py test_local_workspace_derived_base_skips_reported_ephemeral_window
+status: fixed
 ---
 
 ## Problem
@@ -63,3 +63,16 @@ liabilities remain unchanged; the user override is not a cleanup waiver.
 Case remains OPEN follow-up until an integrated source and its required gates
 actually qualify. No replacement card allocation or dashboard sign-in is needed
 to replace the explicitly skipped result.
+
+## 2026-10-19 recurrence and landed fix
+
+The PR #1519 deploy's AgentCard lane derived 56060 + 200 = 56260 and its
+isolated backend failed both supervised starts with `listen EADDRINUSE :::56260`
+(22:31:54Z). No listener held the port afterwards; the holder is unknown.
+
+`build_service_stack` now takes the derived preference through
+`workspace_preferred_base`, which drops it when it overlaps the reported kernel
+ephemeral range, matching the design above. An explicit `--base-port` is
+unchanged. `test_local_workspace_derived_base_skips_reported_ephemeral_window`
+in the agents benchmark blackbox domain fails without the helper and passes
+with it.

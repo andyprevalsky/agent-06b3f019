@@ -2035,48 +2035,91 @@ async def _drain(gen):
     return out
 
 
-async def test_anthropic_transport_accepts_captured_client_version_requirement():
-    """The captured provider rejection must not recur on any direct OAuth request."""
-    from providers.rose.transport import post_anthropic_stream
+def _claude_oauth_client_contract() -> dict:
+    path = Path(__file__).resolve().parents[3] / "shared" / "claude-oauth-client" / "contract.json"
+    return json.loads(path.read_text())
 
-    captured_rejection = {
-        "type": "error",
-        "error": {
-            "type": "invalid_request_error",
-            "message": "Claude Code 2.1.81 does not support this model; version 2.1.251 or newer is required. Run 'claude update', or update the Claude desktop app, then try again.",
-            "details": {"error_code": "claude_code_version_too_old"},
-        },
-        "request_id": "req_011CevmJfH4uoGCZB6RutpU1",
-    }
-    seen_headers: list[dict[str, str]] = []
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in version.split("."))
+
+
+async def test_anthropic_transport_accepts_captured_client_version_requirement():
+    """Every configured claudeAuth model must accept the advertised OAuth client version.
+
+    The mock provider enforces each model's recorded minimum from the shared
+    contract and answers older clients with the captured live rejection. A new
+    claudeAuth model without a recorded live requirement fails here.
+    """
+    from providers.rose.pools import POOL_REGISTRY
+    from providers.rose.transport import ANTHROPIC_USER_AGENT, post_anthropic_stream
+
+    contract = _claude_oauth_client_contract()
+    configured = sorted({spec.claude_auth_model for spec in POOL_REGISTRY.values()})
+    missing = [model for model in configured if model not in contract["models"]]
+    assert not missing, f"claudeAuth models without a recorded live client-version requirement: {missing}"
+    seen: list[str] = []
 
     def handler(req):
         assert str(req.url) == "https://api.anthropic.com/v1/messages"
         assert req.headers["authorization"] == "Bearer version-test-token"
         assert "oauth-2025-04-20" in req.headers["anthropic-beta"]
-        seen_headers.append(dict(req.headers))
+        model = json.loads(req.content)["model"]
+        seen.append(model)
         advertised = req.headers["user-agent"].split("/", 1)[1].split(" ", 1)[0]
-        version = tuple(int(part) for part in advertised.split("."))
-        if version < (2, 1, 251):
-            return httpx.Response(400, json=captured_rejection)
+        minimum = contract["models"][model]["min_client_version"]
+        if _version_tuple(advertised) < _version_tuple(minimum):
+            return httpx.Response(400, json=contract["captured_rejection"])
         return httpx.Response(200, text='event: message_stop\ndata: {"type":"message_stop"}\n\n')
 
     set_mock_handler(handler)
-    async with post_anthropic_stream(
-        body={
-            "model": "claude-fable-5-1",
-            "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 16,
-            "stream": True,
-        },
-        claude_token="version-test-token",
-        request_id="r-client-version",
-    ) as response:
-        assert response.status_code == 200, (
-            "OAuth transport advertised a client version rejected by the captured provider contract"
-        )
-        assert await response.aread()
-    assert len(seen_headers) == 1
+    for model in configured:
+        async with post_anthropic_stream(
+            body={"model": model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 16, "stream": True},
+            claude_token="version-test-token",
+            request_id=f"r-client-version-{model}",
+        ) as response:
+            assert response.status_code == 200, (
+                f"OAuth transport advertised a client version {model} rejects (captured provider contract)"
+            )
+            assert await response.aread()
+    assert seen == configured
+    # One recorded identity, mirrored by back-end/src/providers/rose/transport.ts.
+    assert ANTHROPIC_USER_AGENT == f"claude-cli/{contract['client_version']} {contract['user_agent_suffix']}"
+
+
+async def test_claude_auth_surfaces_client_version_rejection():
+    """A provider client-version rejection is logged by its error code, not as an opaque 400."""
+    from structlog.testing import capture_logs
+
+    contract = _claude_oauth_client_contract()
+    set_mock_handler(lambda req: httpx.Response(400, json=contract["captured_rejection"]))
+    spec = get_pool("rose-1-ultra")
+    auth = ClaudeAuthContext(token="t", source="user", user_id="", max_rotations=3)
+    with capture_logs() as logs:
+        try:
+            await _drain(
+                claude_auth_complete(
+                    pool_spec=spec,
+                    messages=[{"role": "user", "content": "hi"}],
+                    auth=auth,
+                    request_id="r-version-too-old",
+                    max_tokens=16,
+                )
+            )
+        except RoseInvalidRequest as exc:
+            assert "claude_code_version_too_old" in str(exc)
+        else:
+            raise AssertionError("client-version rejection must raise RoseInvalidRequest")
+    transport_errors = [log for log in logs if log.get("event") == "rose.transport.anthropic.error"]
+    assert transport_errors and transport_errors[0]["error_code"] == "claude_code_version_too_old"
+    assert transport_errors[0]["error_type"] == "invalid_request_error"
+    surfaced = [log for log in logs if log.get("event") == "rose.transport.anthropic.client_version_too_old"]
+    assert len(surfaced) == 1, logs
+    assert surfaced[0]["log_level"] == "error"
+    assert surfaced[0]["model"] == spec.claude_auth_model
+    assert surfaced[0]["user_agent"].startswith(f"claude-cli/{contract['client_version']} ")
+    assert surfaced[0]["provider_message"] == contract["captured_rejection"]["error"]["message"]
 
 
 async def test_provider_transports_preserve_error_body_for_classification():
@@ -3207,6 +3250,50 @@ def test_build_codex_responses_body_contract():
         request_id="max-effort",
     )
     assert max_effort_body["reasoning"]["effort"] == "xhigh"
+
+
+    # Exercise the actual root-system producer, including its final boundary.
+    from utils.prompts import build_system_prompt, MAIN_SYSTEM_PROMPT
+    from utils.tool_schemas import create_agent_action_model, EXECUTE_PHASE_TOOLS
+
+    native_tools = build_anthropic_tools_from_response_model(create_agent_action_model(EXECUTE_PHASE_TOOLS))
+    literal_data = "keep __SYSTEM_PROMPT_DYNAMIC_BOUNDARY__ as user/tool data"
+    history = [
+        {"role": "user", "content": literal_data},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "call_boundary_data", "function": {"name": "spawn_agent", "arguments": {"goal": literal_data}}}]},
+        {"role": "tool", "tool_call_id": "call_boundary_data", "content": literal_data},
+    ]
+    fields = {"fields": [{"name": "observed_value", "type": "str", "required": True, "description": "Grounded fixture value."}]}
+    def produced(context="Fixture user context A", phase="EXECUTE", schema=fields):
+        return build_system_prompt(phase=phase, enabled_tools=EXECUTE_PHASE_TOOLS, user_context_section=context, response_schema=schema)
+    def wire(system, namespace="serializer-owner"):
+        return build_codex_responses_body(pool_spec=pool, messages=[{"role": "system", "content": system}, *history], tools=native_tools, cache_namespace=namespace, request_id="boundary-owner")
+    raw_system = produced()
+    native_body = wire(raw_system)
+    # Data and tool protocol survive system-only serialization unchanged.
+    reference = wire("plain system")
+    assert native_body["input"] == reference["input"]
+    assert native_body["tools"] == reference["tools"]
+    assert native_body["input"][0]["content"][0]["text"] == literal_data
+    assert any(row.get("call_id") == "call_boundary_data" and row.get("output") == literal_data for row in native_body["input"])
+    assert native_body["prompt_cache_key"] == wire(produced(context="Fixture user context B"))["prompt_cache_key"]
+    assert native_body["prompt_cache_key"] == wire(produced(phase="PLAN", schema=None))["prompt_cache_key"]
+    assert native_body["prompt_cache_key"] != wire(raw_system, namespace="other-owner")["prompt_cache_key"]
+    assert native_body["prompt_cache_key"] != wire(raw_system.replace(MAIN_SYSTEM_PROMPT.strip(), "different static rules", 1))["prompt_cache_key"]
+    sections = [MAIN_SYSTEM_PROMPT.strip(), "# User Context", "# Current Phase", "# Required Output Schema", "observed_value"]
+    positions = [native_body["instructions"].index(section) for section in sections]
+    assert positions == sorted(positions)
+    assert "Grounded fixture value." in native_body["instructions"]
+    inline = "ordinary __SYSTEM_PROMPT_DYNAMIC_BOUNDARY__ prose\r\nkeep\u2028Unicode separator"
+    assert wire(inline)["instructions"] == inline
+    assert wire("first\r\nline\n" + SYSTEM_PROMPT_DYNAMIC_BOUNDARY + "second\u2028section")["instructions"] == "first\r\nline\n\nsecond\u2028section"
+    assert wire("first\n \t__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__ \t\r\nsecond")["instructions"] == "first\n\nsecond"
+    multiple = build_codex_responses_body(pool_spec=pool, messages=[{"role": "system", "content": raw_system}, {"role": "system", "content": "extra system section"}, *history], tools=native_tools, request_id="multiple-system-owner")
+    assert "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__" not in multiple["instructions"]
+    assert multiple["instructions"].endswith("extra system section")
+    assert multiple["input"] == native_body["input"]
+    for system_variant in (raw_system, raw_system.rstrip(), SYSTEM_PROMPT_DYNAMIC_BOUNDARY + raw_system):
+        assert "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__" not in wire(system_variant)["instructions"], "reserved system-only boundary reached provider instructions"
 
 
 def test_codex_cache_scope_uses_canonical_session_headers():
@@ -9709,6 +9796,7 @@ async def run_all_tests():
     await r.record_async(
         "anthropic_transport_client_version", test_anthropic_transport_accepts_captured_client_version_requirement
     )
+    await r.record_async("claude_auth_client_version_rejection_surfaced", test_claude_auth_surfaces_client_version_rejection)
     await r.record_async(
         "provider_transport_error_body", test_provider_transports_preserve_error_body_for_classification
     )

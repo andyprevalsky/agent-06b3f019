@@ -17,6 +17,7 @@ import {
   __resetFoundryCooldowns,
   foundryComplete,
   foundryConfigured,
+  foundryModels,
   foundryRegions,
   foundryRoutePlan,
 } from '../../providers/rose/foundry';
@@ -311,6 +312,58 @@ async function main(): Promise<void> {
       'an incomplete region is not a region'
     );
     process.stdout.write('Foundry regions: secondary regions serve only listed models\n');
+
+    // A model listed only by another region never routes to region 1, whose
+    // deploymentless call for it is a terminal 400.
+    configure(ok, [R1, R2]);
+    process.env.AZURE_FOUNDRY_DEPLOYMENTS_2 = 'gpt-6.1-sol';
+    for (let i = 0; i < 200; i++) {
+      assert.deepEqual(planRegions(`agent-${i}`, 'gpt-6.1-sol'), [R2]);
+      assert.deepEqual(planRegions(`agent-${i}`, 'gpt-5.6-luna'), [R1]);
+    }
+    process.env.AZURE_FOUNDRY_DEPLOYMENTS_2 = 'gpt-6-sol';
+    assert.deepEqual(
+      planRegions('agent-1', 'gpt-6.1-sol'),
+      [R1],
+      'unlisted: deploymentless region 1'
+    );
+    process.stdout.write('Foundry regions: a model listed elsewhere skips region 1\n');
+
+    // GPT-6 Sol and GPT-6.1 Sol stand in for each other: ultra may use either.
+    configure(ok, [R1, R2]);
+    process.env.AZURE_FOUNDRY_DEPLOYMENTS_2 = 'gpt-6.1-sol';
+    const ultraModels = foundryModels(ULTRA);
+    assert.deepEqual(ultraModels, ['gpt-6-sol', 'gpt-6.1-sol']);
+    assert.deepEqual(foundryModels(POOL_REGISTRY['rose-1-flash']), ['gpt-5.6-luna']);
+    let r2First = 0;
+    let r1FirstKey = '';
+    for (let i = 0; i < 200; i++) {
+      const plan = foundryRoutePlan(foundryRegions(), ultraModels, `agent-${i}`);
+      assert.deepEqual(
+        plan.map(({ region, deployment }) => `${region.endpoint} ${deployment}`).sort(),
+        [`${R1} gpt-6-sol`, `${R2} gpt-6.1-sol`]
+      );
+      if (plan[0]?.region.endpoint === R2) r2First++;
+      else r1FirstKey ||= `agent-${i}`;
+    }
+    assert(r2First > 70 && r2First < 130, `ultra spreads over both Sol regions (${r2First}/200)`);
+    attempts = configure(
+      (region) =>
+        region === R1 ? new Response('', { status: 429, headers: { 'retry-after': '5' } }) : ok(),
+      [R1, R2]
+    );
+    process.env.AZURE_FOUNDRY_DEPLOYMENTS_2 = 'gpt-6.1-sol';
+    const solChunks = await drain(r1FirstKey);
+    assert.deepEqual(attempts, [
+      [R1, 'gpt-6-sol'],
+      [R2, 'gpt-6.1-sol'],
+    ]);
+    assert.equal(
+      solChunks[0]?.data.actual_model,
+      'gpt-6.1-sol-foundry',
+      'reports the served model'
+    );
+    process.stdout.write('Foundry regions: ultra fails over between Sol versions\n');
 
     // A non-HTTPS optional region is dropped (one warning naming its slot); the
     // healthy regions keep serving and foundryConfigured agrees with routing.

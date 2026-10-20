@@ -53,7 +53,7 @@ export default function Integrations() {
   const browser = useBrowserSync(handlers, data.fetchIntegrations);
   const passwords = usePasswordSync(handlers, data.fetchIntegrations);
   const compute = useComputeSync(handlers, data.fetchIntegrations);
-  const messages = useMessagesSync(handlers, data.fetchIntegrations);
+  const messages = useMessagesSync(handlers, data.fetchIntegrations, data.linkedinStatus);
   const fileUpload = useFileUpload();
   const gmail = useGmailConnect(data.fetchIntegrations);
   const plaid = usePlaidIntegration();

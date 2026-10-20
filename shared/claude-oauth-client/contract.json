@@ -1,0 +1,28 @@
+{
+  "description": "Claude OAuth client identity contract shared by agents/providers/rose/transport.py and back-end/src/providers/rose/transport.ts. Both transports must advertise client_version. Every claudeAuth model in either pool registry must list the minimum client version Anthropic was observed to require for it, with the live evidence. Adding a claudeAuth model or changing the version requires a live check through the real transport and an entry here.",
+  "client_version": "2.1.304",
+  "user_agent_suffix": "(external, sdk-ts, agent-sdk/0.2.75)",
+  "models": {
+    "claude-opus-5-5": {
+      "min_client_version": "2.1.280",
+      "evidence": "2026-10-20 live prod-token probe: 2.1.251 -> 400 claude_code_version_too_old (requires 2.1.280); 2.1.280 and 2.1.304 -> 200"
+    },
+    "claude-sonnet-5": {
+      "min_client_version": "2.1.251",
+      "evidence": "2026-10-20 live prod-token probe: 2.1.251 and 2.1.304 -> 200; no higher requirement observed"
+    },
+    "claude-haiku-4-5": {
+      "min_client_version": "2.1.251",
+      "evidence": "2026-10-20 live prod-token probe: 2.1.251 and 2.1.304 -> 200; no higher requirement observed"
+    }
+  },
+  "captured_rejection": {
+    "type": "error",
+    "error": {
+      "type": "invalid_request_error",
+      "message": "Claude Code 2.1.251 does not support this model; version 2.1.280 or newer is required. Run 'claude update', or update the Claude desktop app, then try again.",
+      "details": { "error_code": "claude_code_version_too_old" }
+    },
+    "request_id": "req_011CgCjZ8uAudifocJEHDuuS"
+  }
+}

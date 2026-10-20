@@ -52,13 +52,20 @@ def writers(roots, permitted):
         if not process.name.isdecimal() or int(process.name) in permitted:
             continue
         try:
-            paths = [os.readlink(process / "cwd")]
-            for fd in (process / "fd").iterdir():
-                try: paths.append(os.readlink(fd))
-                except FileNotFoundError: continue
-            for line in (process / "maps").read_text().splitlines():
-                fields = line.split(None, 5)
-                if len(fields) == 6 and "w" in fields[1]: paths.append(fields[5])
+            # A zombie leader keeps no cwd/fd/maps while its other threads can still
+            # write; read every live thread of the group, not only the leader.
+            paths = []
+            for task in (process / "task").iterdir():
+                try:
+                    paths.append(os.readlink(task / "cwd"))
+                    for fd in (task / "fd").iterdir():
+                        try: paths.append(os.readlink(fd))
+                        except FileNotFoundError: continue
+                    for line in (task / "maps").read_text().splitlines():
+                        fields = line.split(None, 5)
+                        if len(fields) == 6 and "w" in fields[1]: paths.append(fields[5])
+                except FileNotFoundError:
+                    continue
             if any(any(path == str(root) or path.startswith(str(root) + "/") for root in roots) for path in paths):
                 found.append({"pid": int(process.name), "birth": birth(int(process.name))})
         except FileNotFoundError:
@@ -278,6 +285,21 @@ def launch(args):
     sync_json(args.record, value)
 
 
+def writer_identity(row):
+    """Secret-free evidence for one writer row: state, parent and program name only."""
+    value = dict(row)
+    try:
+        stat_line = Path("/proc", str(row["pid"]), "stat").read_text()
+        comm = stat_line[stat_line.index("(") + 1:stat_line.rindex(")")]
+        fields = stat_line[stat_line.rindex(")") + 2:].split()
+        if birth(row["pid"]) == row["birth"]:
+            value.update(state=fields[0], ppid=int(fields[1]), comm=comm[:32],
+                         threads=len(os.listdir(Path("/proc", str(row["pid"]), "task"))))
+    except (OSError, ValueError):
+        value.update(state="gone")
+    return value
+
+
 def controller_active_writers(common, roots, permitted):
     active = writers(roots, permitted)
     ownership = common / "cloudbench-fleet-ownership"
@@ -475,12 +497,25 @@ def export(args):
         retire_disposable_hubs(repo, args.record.parent)
     record_sha256 = hashlib.sha256(args.record.read_bytes()).hexdigest()
     attempts = []
+    writer_deadline = time.monotonic() + EXPORT_WRITER_DRAIN_SECONDS
+    observed_writers = []
     for attempt in range(1, EXPORT_SNAPSHOT_ATTEMPTS + 1):
-        active = controller_active_writers(common, roots, permitted)
-        if active:
-            sync_json(args.pending, {"status":"pending", "reason":"live controller writers", "writers":active,
-                                     "record_sha256":record_sha256, **({"snapshot_attempts":attempts} if attempts else {})})
-            return 75
+        # Campaign teardown processes can still be exiting when the step returns.
+        # Wait for them within one bounded drain; a writer that outlives it fails closed.
+        while True:
+            active = controller_active_writers(common, roots, permitted)
+            if not active:
+                break
+            identities = [writer_identity(row) for row in active]
+            if not observed_writers or observed_writers[-1]["writers"] != identities:
+                observed_writers.append({"elapsed_s":round(EXPORT_WRITER_DRAIN_SECONDS - (writer_deadline - time.monotonic()), 1),
+                                         "writers":identities})
+            if time.monotonic() >= writer_deadline:
+                sync_json(args.pending, {"status":"pending", "reason":"live controller writers", "writers":active,
+                                         "record_sha256":record_sha256, "writer_observations":observed_writers[-32:],
+                                         **({"snapshot_attempts":attempts} if attempts else {})})
+                return 75
+            time.sleep(EXPORT_WRITER_POLL_SECONDS)
         # Complete delayed allocation first: ext4 writeback of the campaign's last
         # appends can add an extent block (st_blocks) without touching mtime/ctime.
         os.sync()
@@ -493,12 +528,17 @@ def export(args):
     # Every attempt still observed a change: fail closed with the exact evidence.
     sync_json(args.pending, {"status":"pending", "reason":"controller originals changed during export",
                              "record_sha256":record_sha256, "snapshot_attempts":attempts,
+                             **({"writer_observations":observed_writers[-32:]} if observed_writers else {}),
                              "resource_release_verified":False})
     return 75
 
 
 EXPORT_SNAPSHOT_ATTEMPTS = 3
 EXPORT_SETTLE_SECONDS = 10
+# Teardown orphans exited 5-10 s after the step in the original600 shards; a fleet
+# machine destroy is bounded at 60 s. Twice that bounds the whole writer drain.
+EXPORT_WRITER_DRAIN_SECONDS = 120
+EXPORT_WRITER_POLL_SECONDS = 1
 
 
 def export_snapshot(args, record, repo, common, roots, permitted, capture_tool):

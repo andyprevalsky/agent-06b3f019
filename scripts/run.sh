@@ -1,6 +1,16 @@
 #!/bin/bash
 set -eo pipefail
 
+for arg in "$@"; do
+    case "$arg" in
+        --help|-h)
+            printf '%s\n' 'Usage: bash scripts/run.sh [--benchmark]' \
+                'Start the configured local stack; --benchmark enables benchmark mode.'
+            exit 0
+            ;;
+    esac
+done
+
 # Parse flags
 BENCHMARK_MODE=false
 for arg in "$@"; do
@@ -62,6 +72,21 @@ BENCHMARK_ISOLATED_RUN="${BENCHMARK_ISOLATED_RUN:-false}"
 # Rose Agent Card instead of minting a real AgentCard. The isolated `run-bench`
 # path already exports BENCHMARK_ISOLATED_RUN; re-exporting here is idempotent.
 export BENCHMARK_MODE BENCHMARK_ISOLATED_RUN
+
+# People credential authority.
+# Local isolated and cloud benchmark stacks give the worker their own backend,
+# whose seeded database never holds a rotating Lantern grant. Point the worker
+# at the central broker, as production workers are, unless a broker or bearer
+# is configured explicitly.
+if $BENCHMARK_MODE; then
+    _people_broker="$(cloudbench_people_credential_broker_default "$SCRIPT_DIR/../agents/.env")"
+    if [ -n "$_people_broker" ]; then
+        export PEOPLE_CREDENTIAL_BROKER_URL="$_people_broker"
+        echo "🔑 People credentials: central broker $_people_broker"
+    fi
+    unset _people_broker
+fi
+# End people credential authority.
 
 # mac-app is Electron + requires nvm/Node 20.10.0; only runs on macOS.
 IS_MAC=false
@@ -1101,7 +1126,9 @@ fi
 # it — the old `[ ! -s ]` guard skipped the download whenever ANY dump existed, so
 # a hash-mismatched snapshot dump cold-synced every clone and starved the barrier.
 _SEED_DECISION="$(seed_cache_decision "$_SEED_DUMP" "$_SCHEMA_HASH" "$_SEED_CACHE_ENABLED" "$_SEED_CACHE_TOKEN")"
-if [ "$_SEED_DECISION" = "consult-remote" ]; then
+# 1 when this boot downloaded the dump; 0 when a matching local copy was reused.
+_SEED_PULLED_THIS_BOOT=0
+pull_canonical_seed_dump() {
     # Drop any stale local dump so a clean cache object lands in its place.
     rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" "${_SEED_DUMP}.cachetoken" 2>/dev/null || true
     echo "🔎 Checking shared seed-dump cache ($_SEED_CACHE_TOKEN)..."
@@ -1109,16 +1136,24 @@ if [ "$_SEED_DECISION" = "consult-remote" ]; then
         printf '%s' "$_SCHEMA_HASH" > "${_SEED_DUMP}.schemahash"
         printf '%s' "$_SEED_CACHE_TOKEN" > "${_SEED_DUMP}.cachetoken"
         _SEED_DECISION="restore-local"
+        _SEED_PULLED_THIS_BOOT=1
         echo "   ✅ pulled cached seed dump ($(du -h "$_SEED_DUMP" 2>/dev/null | awk '{print $1}')) — restoring instead of cold-syncing"
-    else
-        rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" "${_SEED_DUMP}.cachetoken" 2>/dev/null || true
-        echo "   ℹ️ canonical base fixture is unavailable for this schema/revision"
+        return 0
     fi
+    rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" "${_SEED_DUMP}.cachetoken" 2>/dev/null || true
+    _SEED_DECISION="consult-remote"
+    echo "   ℹ️ canonical base fixture is unavailable for this schema/revision"
+    return 1
+}
+if [ "$_SEED_DECISION" = "consult-remote" ]; then
+    pull_canonical_seed_dump || true
 fi
 if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ] && [ "$_SEED_DECISION" != "restore-local" ]; then
     fail_required_seed_dump "Benchmarks require the canonical base fixture; refusing a slow production cold-sync substitute."
 fi
-if [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SEED_DUMP" ]; then
+_SEED_RESTORE_ATTEMPT=0
+while [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SEED_DUMP" ]; do
+    _SEED_RESTORE_ATTEMPT=$((_SEED_RESTORE_ATTEMPT + 1))
     echo "🗜️  Restoring seeded DB from persistent dump ($_SEED_DUMP) — skipping schema push + seed..."
     _SEED_RESTORE_CONTAINER=""
     if ! $USE_SYSTEM_PG; then
@@ -1134,11 +1169,18 @@ if [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SE
         if [[ "$_SEED_CACHE_TOKEN" == *victoria-prod-sync-v1-whatsapp-v2* ]] && \
            ! PGPASSWORD=postgres bash scripts/validate-canonical-seed-dump.sh \
                 "$LOCAL_DB_NAME" localhost "$LOCAL_DB_ACTUAL_PORT" postgres; then
-            echo "   ⚠️ restored dump failed canonical WhatsApp content check — invalidating"
+            echo "   ⚠️ restored dump failed canonical content check (WhatsApp history + archived agent trajectories) — invalidating"
             rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" "${_SEED_DUMP}.cachetoken" 2>/dev/null || true
             DB_RESTORED=false
+            # A copy reused from a persistent volume can predate a corrective
+            # republication of the same key. Fetch the shared object once
+            # before failing closed; a freshly pulled failure is final.
+            if [ "$_SEED_PULLED_THIS_BOOT" = 0 ] && [ "$_SEED_CACHE_ENABLED" = 1 ]; then
+                echo "   🔁 local copy was reused from an earlier boot — re-pulling the shared canonical object once"
+                pull_canonical_seed_dump && continue
+            fi
             if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ]; then
-                fail_required_seed_dump "Required canonical base fixture restored but lacked reviewed WhatsApp history; refusing to continue on a poisoned substitute."
+                fail_required_seed_dump "Required canonical base fixture restored but lacked reviewed WhatsApp history or archived agent trajectories; refusing to continue on a poisoned substitute."
             fi
         else
             DB_RESTORED=true
@@ -1154,7 +1196,8 @@ if [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SE
             fail_required_seed_dump "Required canonical base fixture could not be restored; refusing a slow production cold-sync substitute."
         fi
     fi
-fi
+    break
+done
 release_seed_lock_if_held
 # END BENCHMARK_SEED_CONSUMER_CRITICAL_SECTION
 
@@ -1273,7 +1316,7 @@ if [ -n "$_SEED_DUMP" ]; then
             if [[ "$_SEED_CACHE_TOKEN" == *victoria-prod-sync-v1-whatsapp-v2* ]] && \
                ! PGPASSWORD=postgres bash scripts/validate-canonical-seed-dump.sh \
                     "$LOCAL_DB_NAME" localhost "$LOCAL_DB_ACTUAL_PORT" postgres; then
-                echo "   ❌ refusing to publish: DB failed canonical WhatsApp content check"
+                echo "   ❌ refusing to publish: DB failed canonical content check (WhatsApp history + archived agent trajectories)"
             elif (cd back-end && npx tsx scripts/seed-dump-cache.ts put "$_SEED_CACHE_TOKEN" "$_SEED_DUMP") >/dev/null 2>&1; then
                 printf '%s' "$_SEED_CACHE_TOKEN" > "${_SEED_DUMP}.cachetoken"
                 echo "   ☁️ published seed dump to shared cache ($_SEED_CACHE_TOKEN)"

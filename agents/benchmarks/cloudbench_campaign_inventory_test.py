@@ -633,6 +633,12 @@ def seed_fixture(tmp_path, monkeypatch):
     (root / "scripts/run-fleet-infra-canary").chmod(0o700)
     (root / ".context").mkdir()
     (root / ".context/fleet-infra-canary.last-pass").write_text("retained canonical PASS\n")
+    # The 50-member cohort's default cleanup floors (51 x (256 + 32) MiB) would
+    # tie these seed controls to ~15 GB of real host free space; size them like
+    # the owning cleanup-ticket campaign controls instead.
+    monkeypatch.setenv("CLOUDBENCH_CLEANUP_DISK_RESERVE_MB", "1")
+    monkeypatch.setenv("CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB", "1")
+    monkeypatch.setenv("CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB", "0")
     # The publisher's Machines list uses its direct HTTP transport; this offline
     # fixture controls only that boundary with an empty app inventory.
     (root / "scripts/cloudbench-campaign-machines.py").write_text("import sys\nsys.stdout.buffer.write(b'[]')\n")
@@ -1928,12 +1934,14 @@ def test_campaign_inventory_stress_create_dispatch_is_shared_and_retry_is_paced(
     environment, _ = stress_mutation_feed(tmp_path)
     environment['FIXTURE_EVENTS'] = str(tmp_path / 'events')
     # Healthy creates are admitted concurrently (8b608784f); only an actual
-    # provider rate response paces every independent wrapper's CREATE.
+    # provider rate response paces every independent wrapper's CREATE. Sample
+    # the clock before the backoff call: its retry-after window starts inside
+    # that subprocess, so a later sample would charge process exit to the pace.
+    published = time.monotonic()
     backoff = subprocess.run([sys.executable, str(ROOT / 'scripts/cloudbench-campaign-mutation.py'), 'backoff',
         '--app', 'fixture-app', '--root', str(tmp_path / 'capacity'), '--owner-pid', str(os.getpid()),
         '--response-code', '429', '--retry-after', '1'], env=environment, text=True, capture_output=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
     assert backoff.returncode == 0, backoff.stderr
-    published = time.monotonic()
     processes = [subprocess.Popen(['bash', str(subject)], env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)]
     for process in processes:
         stdout, stderr = process.communicate(timeout=FIXTURE_HOST_GUARD_SECONDS)

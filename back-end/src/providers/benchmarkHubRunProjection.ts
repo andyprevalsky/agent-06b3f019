@@ -2,6 +2,7 @@
 
 import type { HubRunSummary, HubRunTaskSummary } from './benchmarkHubTypes';
 import { groupAttempt, groupAttemptHistory, groupMembers } from './benchmarkHubGroupAttempts';
+import { BenchmarkHubInvalidRecordError } from './benchmarkHubErrors';
 
 export function normalizeAgentId(value: unknown): string | null {
   return (typeof value === 'string' ? value.trim() : '') || null;
@@ -60,7 +61,7 @@ export function finiteMetric(value: unknown): number | null {
 export function runGroupFields(bundle: Record<string, unknown>): Partial<HubRunSummary> {
   if (bundle.group_run_id === undefined) {
     if (bundle.group_attempt !== undefined)
-      throw new Error('Invalid Benchmark Hub group membership');
+      throw new BenchmarkHubInvalidRecordError('Invalid Benchmark Hub group membership');
     return {};
   }
   if (
@@ -84,7 +85,7 @@ export function runGroupFields(bundle: Record<string, unknown>): Partial<HubRunS
     bundle.group_timestamp.length > 40 ||
     !Number.isFinite(Date.parse(bundle.group_timestamp))
   )
-    throw new Error('Invalid Benchmark Hub group membership');
+    throw new BenchmarkHubInvalidRecordError('Invalid Benchmark Hub group membership');
   return {
     group_run_id: bundle.group_run_id,
     group_member_id: bundle.group_member_id,
@@ -105,7 +106,7 @@ export function runGroupSchedule(bundle: Record<string, unknown>): HubRunSummary
     bundle.run_group === null ||
     Array.isArray(bundle.run_group)
   ) {
-    throw new Error('Invalid Benchmark Hub group schedule');
+    throw new BenchmarkHubInvalidRecordError('Invalid Benchmark Hub group schedule');
   }
   const value = bundle.run_group as Record<string, unknown>;
   if (
@@ -115,12 +116,12 @@ export function runGroupSchedule(bundle: Record<string, unknown>): HubRunSummary
     typeof value.status !== 'string' ||
     !['running', 'passed', 'failed', 'cancelled'].includes(value.status)
   ) {
-    throw new Error('Invalid Benchmark Hub group schedule');
+    throw new BenchmarkHubInvalidRecordError('Invalid Benchmark Hub group schedule');
   }
   const seen = new Set<string>();
   const members = value.members.map((raw) => {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw))
-      throw new Error('Invalid Benchmark Hub group member');
+      throw new BenchmarkHubInvalidRecordError('Invalid Benchmark Hub group member');
     const member = raw as Record<string, unknown>;
     if (
       typeof member.member_id !== 'string' ||
@@ -132,20 +133,20 @@ export function runGroupSchedule(bundle: Record<string, unknown>): HubRunSummary
       !Number.isInteger(member.run_number) ||
       member.run_number < 1
     ) {
-      throw new Error('Invalid Benchmark Hub group member');
+      throw new BenchmarkHubInvalidRecordError('Invalid Benchmark Hub group member');
     }
     seen.add(member.member_id);
     return { member_id: member.member_id, name: member.name, run_number: member.run_number };
   });
   if (JSON.stringify(members).length > 10 * 1024 * 1024)
-    throw new Error('Benchmark Hub group schedule is oversized');
+    throw new BenchmarkHubInvalidRecordError('Benchmark Hub group schedule is oversized');
   const outcomes: NonNullable<HubRunSummary['run_group']>['outcomes'] = {};
   if (value.outcomes !== undefined) {
     if (!value.outcomes || typeof value.outcomes !== 'object' || Array.isArray(value.outcomes))
-      throw new Error('Invalid campaign controller outcomes');
+      throw new BenchmarkHubInvalidRecordError('Invalid campaign controller outcomes');
     for (const [id, raw] of Object.entries(value.outcomes as Record<string, unknown>)) {
       if (!seen.has(id) || !raw || typeof raw !== 'object' || Array.isArray(raw))
-        throw new Error('Invalid campaign controller outcome');
+        throw new BenchmarkHubInvalidRecordError('Invalid campaign controller outcome');
       const outcome = raw as Record<string, unknown>;
       if (
         typeof outcome.status !== 'string' ||
@@ -155,7 +156,7 @@ export function runGroupSchedule(bundle: Record<string, unknown>): HubRunSummary
             !Number.isInteger(outcome.controller_exit_code) ||
             Math.abs(outcome.controller_exit_code) > 65535))
       ) {
-        throw new Error('Invalid campaign controller outcome');
+        throw new BenchmarkHubInvalidRecordError('Invalid campaign controller outcome');
       }
       outcomes[id] = {
         status: outcome.status,
@@ -172,14 +173,14 @@ export function runGroupSchedule(bundle: Record<string, unknown>): HubRunSummary
     value.wall_clock_seconds !== undefined &&
     elapsed === null
   )
-    throw new Error('Invalid campaign elapsed time');
+    throw new BenchmarkHubInvalidRecordError('Invalid campaign elapsed time');
   const finished =
     value.finished_at === null || value.finished_at === undefined ? null : value.finished_at;
   if (
     finished !== null &&
     (typeof finished !== 'string' || finished.length > 40 || !Number.isFinite(Date.parse(finished)))
   )
-    throw new Error('Invalid campaign finish time');
+    throw new BenchmarkHubInvalidRecordError('Invalid campaign finish time');
   return {
     members,
     status: value.status,

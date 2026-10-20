@@ -12,10 +12,12 @@ import re
 from pathlib import Path
 import runpy
 import signal
+import ssl
 import stat
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 PINS = [
@@ -387,13 +389,45 @@ def observe_reuse_configs(
     return [observed.get(row["id"], row) for row in inventory]
 
 
+# Organization settings and the app list are read-only inventory: one slow or
+# failed read (live proof 1792433714160918322 lost its launch to a single 20 s
+# `flyctl apps list`) is retried; a persistent or non-transient failure still
+# refuses. The callers' I/O alarm (a BaseException) bounds every attempt.
+INVENTORY_READ_ATTEMPTS = 3
+INVENTORY_RETRY_PAUSES = (2, 5)
+
+
+def transient_read_error(error):
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code == 429 or error.code >= 500
+    if isinstance(error, urllib.error.URLError):
+        error = error.reason if isinstance(error.reason, BaseException) else error
+    if isinstance(error, (FileNotFoundError, PermissionError, ssl.SSLCertVerificationError)):
+        return False  # a missing flyctl or an untrusted endpoint does not heal on retry
+    return isinstance(error, (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError))
+
+
+def retried_read(label, read):
+    for attempt in range(1, INVENTORY_READ_ATTEMPTS + 1):
+        try:
+            return read()
+        except Exception as error:
+            if attempt == INVENTORY_READ_ATTEMPTS or not transient_read_error(error):
+                raise
+            print(json.dumps(dict(status='INVENTORY_READ_RETRY', read=label, attempt=attempt,
+                                  error=type(error).__name__)), file=sys.stderr, flush=True)
+            time.sleep(INVENTORY_RETRY_PAUSES[attempt - 1])
+
+
 def capacity_snapshot(api, token, org, directory, extra, summary=False):
     started = time.time()
     query = 'query { organization(slug:' + json.dumps(org) + ') { id slug settings billingStatus } }'
     req = urllib.request.Request('https://api.fly.io/graphql', data=json.dumps({'query': query}).encode(),
                                  headers={'Authorization': token_header(token), 'Content-Type': 'application/json'})
-    with urllib.request.urlopen(req, timeout=20) as response:
-        settings = json.load(response)
+    def read_settings():
+        with urllib.request.urlopen(req, timeout=20) as response:
+            return json.load(response)
+    settings = retried_read('organization settings', read_settings)
     if settings.get('errors') or not settings.get('data', {}).get('organization'):
         raise ValueError('complete organization settings required')
     organization = settings['data']['organization']
@@ -402,9 +436,8 @@ def capacity_snapshot(api, token, org, directory, extra, summary=False):
     limit = organization['settings']['machines_per_org_limit']
     if type(limit) is not int or not 1 <= limit <= 1000:
         raise ValueError('measured original organization limit required')
-    result = subprocess.run(['flyctl', 'apps', 'list', '--org', org, '--json'],
-                            capture_output=True, text=True, timeout=20, check=True)
-    apps = json.loads(result.stdout)
+    apps = json.loads(retried_read('organization apps', lambda: subprocess.run(
+        ['flyctl', 'apps', 'list', '--org', org, '--json'], capture_output=True, text=True, timeout=20, check=True)).stdout)
     if not isinstance(apps, list) or not apps or len({a['Name'] for a in apps}) != len(apps):
         raise ValueError('fresh complete organization app inventory required')
     if 'navi-whisper-lux-bench' not in {a['Name'] for a in apps}:
@@ -1256,11 +1289,11 @@ def experiment_fields(args, plan):
                 runs=plan['shards'][0]['runs'], scheduled_total=plan['copies'], controllers=plan['controllers'])
 
 
-def native_release_audit(root, directory, token, identities):
-    """Final read-only native audit of every owned guest/controller identity (never mutates)."""
+def native_release_audit(root, directory, token):
+    """Final read-only native audit of every owned guest/volume/controller identity (never mutates)."""
     capture = runpy.run_path(str(root / 'scripts/cloudbench-original-volume-capture.py'))
     audit = runpy.run_path(str(root / 'scripts/cloudbench-native-release-audit.py'))
-    return audit['run'](directory, capture['Fly']('navi-whisper-lux-bench', token), identities=identities)
+    return audit['run'](directory, capture['Fly']('navi-whisper-lux-bench', token))
 
 
 def publish_shard_group(root, directory, args, runner, group_id, started_at, shards, outcomes=None, finished=None):
@@ -1281,12 +1314,69 @@ def publish_shard_group(root, directory, args, runner, group_id, started_at, sha
     return campaign['publish_campaign_group'](root, group_dir, state, live=outcomes is None, stop_requested=lambda: False)
 
 
+def shard_group_status(merged, coordination):
+    """The Hub terminal status, mirroring a single campaign: operator stop, any failure, else passed."""
+    reason = coordination.get('terminate_reason') or coordination.get('abort_reason')
+    if isinstance(reason, str) and reason.startswith('operator '):
+        return 'cancelled'
+    codes = (coordination.get('exit_codes') or {}).values()
+    failed = merged['missing_jobs'] or reason or not codes or any(code != 0 for code in codes)
+    return 'failed' if failed else 'passed'
+
+
+def publish_final_shard_group(root, directory, args, runner, group_id, started_at, group_shards, summaries, merged,
+                              coordination):
+    """The operator's terminal Hub group from every joined shard summary and the coordination record.
+
+    Once reached, an unpublished group always carries its reason: the refusal, or the last line this
+    final publication appended to the publisher log (with its Hub request id).
+    """
+    outcomes = {job['job_id']: dict(status=job.get('status'), controller_exit_code=job.get('controller_exit_code'))
+                for summary in summaries if summary for job in summary.get('jobs') or []}
+    log = directory / 'hub-group' / 'hub-group-publication.private.log'
+    offset = log.stat().st_size if log.is_file() else 0  # the schedule registration shares this log
+    try:
+        published = publish_shard_group(
+            root, directory, args, runner, group_id, started_at, group_shards, outcomes,
+            dict(status=shard_group_status(merged, coordination),
+                 finished_at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                 wall_clock_seconds=round(time.time() - started_at, 3)))
+    except Exception as error:
+        return dict(hub_group_final_published=False, hub_group_final_error=f'{type(error).__name__}: {error}'[:500])
+    if published:
+        return dict(hub_group_final_published=True)
+    lines = []
+    if log.is_file():
+        with open(log, 'rb') as stream:
+            stream.seek(offset)
+            lines = [line for line in stream.read().decode(errors='replace').splitlines() if line.strip()]
+    last = lines[-1] if lines else ''
+    reason = last if last and not last.startswith('📤') else ' '.join(
+        ['final publication was not acknowledged'] + (['after: ' + last] if last else []))
+    return dict(hub_group_final_published=False, hub_group_final_log=str(log), hub_group_final_error=reason[:500])
+
+
 def hub_interpreter(args):
     """Interpreter for operator-side Hub publication; checked before any provider read."""
     hub_python = str(args.hub_python.absolute()) if getattr(args, 'hub_python', None) else sys.executable
     if subprocess.run([hub_python, '-c', 'import httpx'], capture_output=True, timeout=30).returncode:
         raise ValueError('Hub publication interpreter lacks httpx; pass --hub-python <agents venv python>')
     return hub_python
+
+
+def preallocation_abort(ledger, root, directory, runner, goal, error):
+    """End a launch that failed before any allocation as ABORTED, never as an UNRECORDED experiment."""
+    ended = time.time()
+    reason = ('before allocation: %s: %s' % (type(error).__name__, error))[:300]
+    try:
+        runner['save'](directory / 'preallocation-abort.json', dict(ended_at=ended, reason=reason, allocated=False))
+    except Exception as receipt_error:  # the ledger end below still closes the experiment
+        print(json.dumps(dict(status='PREALLOCATION_ABORT_RECEIPT_WARNING', error=type(receipt_error).__name__)),
+              file=sys.stderr, flush=True)
+    if ledger['record']('end', directory.name, root=root, goal=goal, ended_at=ended, state='ABORTED',
+                        abort_reason=reason, outcome=dict(allocated=False)) is None:
+        print(json.dumps(dict(status='PREALLOCATION_ABORT_LEDGER_WARNING', experiment=directory.name)),
+              file=sys.stderr, flush=True)
 
 
 def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
@@ -1321,81 +1411,85 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
     fields = experiment_fields(args, plan)
     ledger['record']('launch', directory.name, root=root, run_dir=str(directory), triggered_at=started_at, **fields)
     scorecard['print_instruction'](directory)
-    with runner['bounded'](min(110, admission_remaining(started_at + 5400))):
-        cap = capacity_snapshot(capture['Fly'], token, args.org, directory, args.extra_destroying_count)
-    cap.update(qualified_reuse_count=0, new_machine_demand=demand, qualified_ids=[], new_controller_slots=controllers,
-               requested_original_primary_slots=copies, worker_headroom=args.worker_headroom)
-    if cap['available_slots_conservative'] < demand:
-        raise ValueError('insufficient measured capacity: %d free Machine slots < %d required (%d copies + %d controllers + %d canary)'
-                         % (cap['available_slots_conservative'], demand, copies, controllers,
-                            coordinator['CANARY_MACHINES_PER_CONTROLLER'] * controllers))
-    runner['save'](directory / 'capacity-proof.private.json', cap)
-    cap['proof_path'] = str(directory / 'capacity-proof.private.json')  # every shard binds the one admission proof
-    bench_rows = json.loads(read_inventory(directory / 'navi-whisper-lux-bench.private.json'))
-    tasks = [task for shard in plan['shards'] for task in shard['tasks']]
-    planned, baseline = shared_cpu_plan(root, runner, tasks, plan['shards'][0]['runs'], bench_rows, bound_task_ref(args, runner))
-    env = coordinator['shard_runtime_env'](
-        machine_limit=cap['machine_limit'], other_app_objects=cap['total_active_inventory_objects'] - len(bench_rows),
-        extra_destroying=cap['conservative_extra_destroying_bench_objects'], planned_shared_cpus=planned,
-        baseline_shared_cpus=baseline, controllers=controllers)
-    group_id = 'original600-' + str(time.time_ns())
-    shards, shard_objects = [], {}
-    for item in plan['shards']:
-        shard_dir = directory / ('shard-%02d' % item['index'])
-        shard_dir.mkdir(mode=0o700)
-        shard = bound_shard(item, args, runner, group_id, copies, started_at)
-        config = prepare(args, root, pins, runner, shard_dir, cap, started_at=started_at, shard=shard,
-                         runtime_env=env, sibling_controller_slots=controllers - 1, scheduled_total=copies,
-                         guest_env=guest_env)
-        shard_objects[item['index']] = shard
-        shards.append(dict(index=item['index'], out=shard_dir / 'run', config=str(config),
-                           config_sha256=digest(runner['read'](config))))
-    runner['save'](directory / 'shards.private.json', dict(plan=plan, runtime_env=env, group_run_id=group_id,
-                   shards=[dict(s, out=str(s['out'])) for s in shards]))
-    runner['save'](directory / 'controller-launch.intent.json', dict(sharded=True, controllers=controllers,
-                   shards=[dict(config_path=s['config'], config_sha256=s['config_sha256'], run_directory=str(s['out']))
-                           for s in shards]))
-    group_shards = [dict(tasks=s['tasks'], task_indexes=s['task_indexes'], runs=s['runs']) for s in plan['shards']]
-    try:
-        group_registered = publish_shard_group(root, directory, args, runner, group_id, started_at, group_shards)
-    except Exception as error:  # Hub visibility is reported, never a reason to skip release or cleanup
-        group_registered = False
-        print(json.dumps(dict(status='HUB_GROUP_REGISTRATION_WARNING', error=type(error).__name__)), flush=True)
-    print(json.dumps(dict(directory=str(directory), status='LAUNCHING_SHARDS', controllers=controllers,
-                          source_ref=args.source_ref, hub_group=group_id, hub_group_registered=group_registered)), flush=True)
-    runner_path = root / 'scripts/cloudbench-original600-runner.py'
-
-    def spawn(shard):
-        env_vars = dict(os.environ, GITHUB_TOKEN=github, CLOUDBENCH_GATE_NAME_SUFFIX='s%02d' % shard['index'])
-        with open(Path(shard['out']).parent / 'runner.private.log', 'xb') as log:
-            return subprocess.Popen([sys.executable, str(runner_path), '--config', shard['config'], '--config-sha256',
-                                     shard['config_sha256'], '--output', str(shard['out'])],
-                                    cwd=root, env=env_vars, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-
-    def respawn(shard):
-        """A fresh attempt for a shard that created nothing (or verifiably released it) before release."""
-        index = shard['index']
-        shard_dir = directory / ('shard-%02d' % index)
-        attempt_dir = shard_dir / ('attempt-%02d' % (len(list(shard_dir.glob('attempt-[0-9]*'))) + 2))
-        attempt_dir.mkdir(mode=0o700)
-        bound = shard_objects[index]
-        slots = coordinator['capacity_demand'](len(bound['tasks']) * bound['runs'], 1)
+    try:  # nothing is allocated until coordinate() spawns the first runner
         with runner['bounded'](min(110, admission_remaining(started_at + 5400))):
-            fresh = capacity_snapshot(capture['Fly'], token, args.org, attempt_dir, args.extra_destroying_count,
-                                      summary=True)
-        fresh.update(qualified_reuse_count=0, new_machine_demand=slots, qualified_ids=[], new_controller_slots=1,
-                     requested_original_primary_slots=len(bound['tasks']) * bound['runs'], retry_of_shard=index)
-        if fresh['available_slots_conservative'] < slots:
-            raise ValueError('insufficient measured capacity for a shard retry')
-        runner['save'](attempt_dir / 'capacity-proof.private.json', fresh)
-        fresh['proof_path'] = str(attempt_dir / 'capacity-proof.private.json')
-        config = prepare(args, root, pins, runner, attempt_dir, fresh, started_at=started_at, shard=bound,
-                         runtime_env=env, sibling_controller_slots=controllers - 1, scheduled_total=copies,
-                         guest_env=guest_env)
-        replacement = dict(index=index, out=attempt_dir / 'run', config=str(config),
-                           config_sha256=digest(runner['read'](config)))
-        print(json.dumps(dict(status='SHARD_RETRY', shard=index, directory=str(attempt_dir))), flush=True)
-        return replacement, spawn(replacement)
+            cap = capacity_snapshot(capture['Fly'], token, args.org, directory, args.extra_destroying_count)
+        cap.update(qualified_reuse_count=0, new_machine_demand=demand, qualified_ids=[], new_controller_slots=controllers,
+                   requested_original_primary_slots=copies, worker_headroom=args.worker_headroom)
+        if cap['available_slots_conservative'] < demand:
+            raise ValueError('insufficient measured capacity: %d free Machine slots < %d required (%d copies + %d controllers + %d canary)'
+                             % (cap['available_slots_conservative'], demand, copies, controllers,
+                                coordinator['CANARY_MACHINES_PER_CONTROLLER'] * controllers))
+        runner['save'](directory / 'capacity-proof.private.json', cap)
+        cap['proof_path'] = str(directory / 'capacity-proof.private.json')  # every shard binds the one admission proof
+        bench_rows = json.loads(read_inventory(directory / 'navi-whisper-lux-bench.private.json'))
+        tasks = [task for shard in plan['shards'] for task in shard['tasks']]
+        planned, baseline = shared_cpu_plan(root, runner, tasks, plan['shards'][0]['runs'], bench_rows, bound_task_ref(args, runner))
+        env = coordinator['shard_runtime_env'](
+            machine_limit=cap['machine_limit'], other_app_objects=cap['total_active_inventory_objects'] - len(bench_rows),
+            extra_destroying=cap['conservative_extra_destroying_bench_objects'], planned_shared_cpus=planned,
+            baseline_shared_cpus=baseline, controllers=controllers)
+        group_id = 'original600-' + str(time.time_ns())
+        shards, shard_objects = [], {}
+        for item in plan['shards']:
+            shard_dir = directory / ('shard-%02d' % item['index'])
+            shard_dir.mkdir(mode=0o700)
+            shard = bound_shard(item, args, runner, group_id, copies, started_at)
+            config = prepare(args, root, pins, runner, shard_dir, cap, started_at=started_at, shard=shard,
+                             runtime_env=env, sibling_controller_slots=controllers - 1, scheduled_total=copies,
+                             guest_env=guest_env)
+            shard_objects[item['index']] = shard
+            shards.append(dict(index=item['index'], out=shard_dir / 'run', config=str(config),
+                               config_sha256=digest(runner['read'](config))))
+        runner['save'](directory / 'shards.private.json', dict(plan=plan, runtime_env=env, group_run_id=group_id,
+                       shards=[dict(s, out=str(s['out'])) for s in shards]))
+        runner['save'](directory / 'controller-launch.intent.json', dict(sharded=True, controllers=controllers,
+                       shards=[dict(config_path=s['config'], config_sha256=s['config_sha256'], run_directory=str(s['out']))
+                               for s in shards]))
+        group_shards = [dict(tasks=s['tasks'], task_indexes=s['task_indexes'], runs=s['runs']) for s in plan['shards']]
+        try:
+            group_registered = publish_shard_group(root, directory, args, runner, group_id, started_at, group_shards)
+        except Exception as error:  # Hub visibility is reported, never a reason to skip release or cleanup
+            group_registered = False
+            print(json.dumps(dict(status='HUB_GROUP_REGISTRATION_WARNING', error=type(error).__name__)), flush=True)
+        print(json.dumps(dict(directory=str(directory), status='LAUNCHING_SHARDS', controllers=controllers,
+                              source_ref=args.source_ref, hub_group=group_id, hub_group_registered=group_registered)), flush=True)
+        runner_path = root / 'scripts/cloudbench-original600-runner.py'
+
+        def spawn(shard):
+            env_vars = dict(os.environ, GITHUB_TOKEN=github, CLOUDBENCH_GATE_NAME_SUFFIX='s%02d' % shard['index'])
+            with open(Path(shard['out']).parent / 'runner.private.log', 'xb') as log:
+                return subprocess.Popen([sys.executable, str(runner_path), '--config', shard['config'], '--config-sha256',
+                                         shard['config_sha256'], '--output', str(shard['out'])],
+                                        cwd=root, env=env_vars, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+
+        def respawn(shard):
+            """A fresh attempt for a shard that created nothing (or verifiably released it) before release."""
+            index = shard['index']
+            shard_dir = directory / ('shard-%02d' % index)
+            attempt_dir = shard_dir / ('attempt-%02d' % (len(list(shard_dir.glob('attempt-[0-9]*'))) + 2))
+            attempt_dir.mkdir(mode=0o700)
+            bound = shard_objects[index]
+            slots = coordinator['capacity_demand'](len(bound['tasks']) * bound['runs'], 1)
+            with runner['bounded'](min(110, admission_remaining(started_at + 5400))):
+                fresh = capacity_snapshot(capture['Fly'], token, args.org, attempt_dir, args.extra_destroying_count,
+                                          summary=True)
+            fresh.update(qualified_reuse_count=0, new_machine_demand=slots, qualified_ids=[], new_controller_slots=1,
+                         requested_original_primary_slots=len(bound['tasks']) * bound['runs'], retry_of_shard=index)
+            if fresh['available_slots_conservative'] < slots:
+                raise ValueError('insufficient measured capacity for a shard retry')
+            runner['save'](attempt_dir / 'capacity-proof.private.json', fresh)
+            fresh['proof_path'] = str(attempt_dir / 'capacity-proof.private.json')
+            config = prepare(args, root, pins, runner, attempt_dir, fresh, started_at=started_at, shard=bound,
+                             runtime_env=env, sibling_controller_slots=controllers - 1, scheduled_total=copies,
+                             guest_env=guest_env)
+            replacement = dict(index=index, out=attempt_dir / 'run', config=str(config),
+                               config_sha256=digest(runner['read'](config)))
+            print(json.dumps(dict(status='SHARD_RETRY', shard=index, directory=str(attempt_dir))), flush=True)
+            return replacement, spawn(replacement)
+    except BaseException as error:
+        preallocation_abort(ledger, root, directory, runner, fields['goal'], error)
+        raise
 
     record = coordinator['coordinate'](shards, spawn, directory / 'coordination.json', scheduled_total=copies,
                                        infra_early_stop=args.infra_early_stop, respawn=respawn,
@@ -1408,26 +1502,16 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
                       for row in scorecard['compact_rows'](record['summary'], record['cards'])]
     merged.update(shards_without_summary=[s['index'] for s, v in zip(shards, summaries) if v is None],
                   coordination=record, hub_group=group_id)
-    outcomes = {job['job_id']: dict(status=job.get('status'), controller_exit_code=job.get('controller_exit_code'))
-                for summary in summaries if summary for job in summary.get('jobs') or []}
-    try:
-        merged['hub_group_final_published'] = publish_shard_group(
-            root, directory, args, runner, group_id, started_at, group_shards, outcomes,
-            dict(status='completed' if not merged['missing_jobs'] else 'failed',
-                 finished_at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-                 wall_clock_seconds=round(time.time() - started_at, 3)))
-    except Exception as error:
-        merged['hub_group_final_published'] = False
-        merged['hub_group_final_error'] = type(error).__name__
+    merged.update(publish_final_shard_group(root, directory, args, runner, group_id, started_at, group_shards,
+                                            summaries, merged, record))
     runner['save'](directory / 'result.json', merged)
     print(json.dumps(dict(directory=str(directory), status='SHARDS_JOINED', result=str(directory / 'result.json'),
                           observed_jobs=merged['observed_jobs'], missing_jobs=merged['missing_jobs'],
                           infra_failures=merged['infra_failures'])), flush=True)
-    owned = (set().union(*(r['owned_names'] for r in exports)), set().union(*(r['owned_ids'] for r in exports)),
-             sum(r['summary'] is not None for r in exports))
     try:
-        audit = native_release_audit(root, directory, token, owned)
+        audit = native_release_audit(root, directory, token)
         print(json.dumps(dict(status='NATIVE_RELEASE_AUDIT', released=audit['released'], present=audit['present'],
+                              present_volumes=audit['present_volumes'], retained_owners=audit['retained_owners'],
                               checked_guests=len(audit['checked']['guest_names']))), flush=True)
     except Exception as error:  # read-only evidence; its absence renders as an unverified release, never a pass
         print(json.dumps(dict(status='NATIVE_RELEASE_AUDIT_UNAVAILABLE', error=type(error).__name__)), flush=True)

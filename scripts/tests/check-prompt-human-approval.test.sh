@@ -221,6 +221,28 @@ rm "$browser_tool_continuation_repo/agents/providers/rose/browser_use.py.bak"
 expect_fail "$browser_tool_continuation_repo" "browser tool description continuation requires approval"
 expect_flag_pass "$browser_tool_continuation_repo" "approval flag permits a browser tool continuation edit"
 
+# Auth-option rendering is model-facing even when only a continuation changes.
+auth_options_continuation_repo="$(new_repo auth-options-continuation)"
+mkdir -p "$auth_options_continuation_repo/agents/domains/spawn_browser_agent_v3"
+cat >"$auth_options_continuation_repo/agents/domains/spawn_browser_agent_v3/service_crypto.py" <<'PYTHON'
+def build_auth_options_prompt_section(minted):
+    minted_phone = minted.get("phone")
+    phone_clause = f" | Phone -> {minted_phone}" if minted_phone else ""
+    return phone_clause
+PYTHON
+git -C "$auth_options_continuation_repo" add agents/domains/spawn_browser_agent_v3/service_crypto.py
+git -C "$auth_options_continuation_repo" commit -q -m "seed auth option renderer"
+cat >"$auth_options_continuation_repo/agents/domains/spawn_browser_agent_v3/service_crypto.py" <<'PYTHON'
+def build_auth_options_prompt_section(minted):
+    minted_phone = minted.get("phone")
+    phone_clause = f" | Phone -> {minted_phone}" if minted_phone else ""
+    if minted_phone and minted.get("phoneProvider") == "agentphone" and not minted.get("disabled"):
+        phone_clause += " (SMS codes sent here are read automatically)"
+    return phone_clause
+PYTHON
+expect_fail "$auth_options_continuation_repo" "auth option phone continuation requires approval"
+expect_flag_pass "$auth_options_continuation_repo" "fixture approval flag permits an auth option continuation edit"
+
 # Regression: 2026-08-04 Blue Bottle — SMS Tools.schemas.ts puts the description
 # string on the line AFTER `description:`, so assignment-line matching misses.
 multiline_tool_schema_repo="$(new_repo multiline-tools-schemas)"

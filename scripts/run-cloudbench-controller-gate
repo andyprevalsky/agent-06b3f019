@@ -431,10 +431,21 @@ from pathlib import Path
 with os.fdopen(os.open('/tmp/controller-host-workspace.json',os.O_RDONLY|os.O_NOFOLLOW),'rb') as source: raw=source.read()
 value=json.loads(raw)
 if hashlib.sha256(raw).hexdigest()!=os.environ['GATE_WORKSPACE_VOLUME_SHA256'] or value['volume_id']!=os.environ['GATE_WORKSPACE_VOLUME_ID'] or value['source_ref']!=os.environ['GATE_REF'] or value['app']!=os.environ['FLY_APP_NAME'] or value['mount_path']!='/tmp/gate': raise SystemExit('workspace ownership binding refused')
-parent=Path('/tmp/gate/repo/.context/controller-workspace-volume');parent.mkdir(mode=0o700,parents=True)
-fd=os.open(parent/'ownership.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+# Runs as root after /tmp/gate was handed to the runtime user, whose controller
+# writes its supervisor files under repo/.context: only the custody directory stays root's.
+# Every step after the open is relative to directory fds, so a runtime-user
+# rename or symlink cannot redirect the root-owned custody writes.
+repo=Path('/tmp/gate/repo');context=repo/'.context'
+try: os.mkdir(context)
+except FileExistsError: pass
+try: cfd=os.open(context,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+except OSError: raise SystemExit('workspace context must be a directory')
+owner=repo.stat();os.fchown(cfd,owner.st_uid,owner.st_gid)
+os.mkdir('controller-workspace-volume',0o700,dir_fd=cfd)
+pfd=os.open('controller-workspace-volume',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=cfd)
+fd=os.open('ownership.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=pfd)
 with os.fdopen(fd,'wb') as output: output.write(raw);output.flush();os.fsync(output.fileno())
-fd=os.open(parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
+os.fsync(pfd);os.close(pfd);os.fsync(cfd);os.close(cfd)
 PY_WORKSPACE_CUSTODY
   [ "$?" = 0 ] || { echo "GATE_RESULT exit=93 workspace_custody_failed"; exit 93; }
 fi
@@ -479,6 +490,19 @@ REMOTE_COMMAND_IDENTITY
     finalize_hubs=""
     [ -z "$DISPOSABLE_AUTHORITY" ] || finalize_hubs=" --finalize-disposable-hubs"
     printf '%s\n' 'bound_controller_export export'"$finalize_hubs"' --record /tmp/gate/controller-host-custody/launch.json --archive /tmp/gate/controller-host-custody/originals.tar.gz --manifest /tmp/gate/controller-host-custody/manifest.json --pending /tmp/gate/controller-host-custody/pending.json; export_rc=$?; echo "GATE_EXPORT exit=$export_rc"'
+    # The guest custody (and its pending.json) can be destroyed before anyone reads it;
+    # keep the refusal reason and writer identities (pid, state, parent, comm) in the log.
+    cat <<'REMOTE_EXPORT_PENDING'
+[ "$export_rc" -eq 0 ] || python3 -I -B - /tmp/gate/controller-host-custody/pending.json <<'PY_EXPORT_PENDING' || true
+import json,os,sys
+try: value=json.load(open(sys.argv[1]))
+except (OSError,ValueError): print('GATE_EXPORT_PENDING_DETAIL unreadable'); raise SystemExit
+keys=('pid','state','ppid','comm','threads')
+row=lambda w:dict({k:w[k] for k in keys if k in w},**({'registry':os.path.basename(str(w['registry']))[:40]} if w.get('registry') else {}))
+seen=[dict(elapsed_s=o.get('elapsed_s'),writers=[row(w) for w in o.get('writers',[])]) for o in value.get('writer_observations',[])[-8:]]
+print('GATE_EXPORT_PENDING_DETAIL '+json.dumps(dict(reason=str(value.get('reason'))[:200],writers=[w.get('pid') for w in value.get('writers',[])],writer_observations=seen,snapshot_attempts=len(value.get('snapshot_attempts',[])),changed=sum(a.get('changed_count',0) for a in value.get('snapshot_attempts',[]))),sort_keys=True))
+PY_EXPORT_PENDING
+REMOTE_EXPORT_PENDING
   fi
   echo 'echo "GATE_RESULT exit=$overall"'
   echo '# Fly returns ~100 log lines per read, so a failed suite'"'"'s tail is lost in the'

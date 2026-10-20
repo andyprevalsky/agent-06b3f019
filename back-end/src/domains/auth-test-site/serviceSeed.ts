@@ -39,6 +39,28 @@ export async function seedSavedPasswords(
 }
 
 /**
+ * Records the minted identity's existing account through the same writer a
+ * successful minted sign-in uses, so the fixture is a state production makes.
+ */
+export async function seedMintedLogin(
+  site: AuthTestSite,
+  plan: ScenarioPlan,
+  nowMs: number
+): Promise<SavedPasswordRecord[]> {
+  if (plan.mintedLogin === null || plan.mintedLogin === '') return [];
+  const username = plan.mintedLogin;
+  await repo.recordMintedPasswordlessLogin({
+    userId: site.userId,
+    origin: site.entryUrl,
+    username,
+    nowMs,
+  });
+  const id = await repo.findSavedPasswordId(site.userId, site.entryUrl, username);
+  if (id === null) throw new Error('the minted passwordless login was not recorded');
+  return [{ id, username, matchesAccount: true }];
+}
+
+/**
  * Saves a browser session for the site. A valid one is a live site session; an
  * expired one is a token the site remembers only well enough to say it expired.
  */

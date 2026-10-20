@@ -358,6 +358,7 @@ async def build_browser_verifier_context(
     payment_card_evidence: Optional[Dict[str, Any]] = None,
     browser_checkpoints: Optional[List[Dict[str, Any]]] = None,
     user_instruction_messages: Optional[List[Dict[str, str]]] = None,
+    verification_goal: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Assemble the verifier context from final-state browser ground truth.
 
@@ -398,17 +399,45 @@ async def build_browser_verifier_context(
         line = f"Step {step}: {ea} - {estatus}"
         if ea == "screenshot" and esuccess:
             line += " (visible viewport capture)"
+        # Native target mechanics live outside params. Preserve the already
+        # privacy-projected, step-owned attempt; a failed action proves no effect.
+        if type(step) is int and ea in AVAILABLE_ACTIONS:
+            target = {}
+            if type(entry.get("index")) is int and entry["index"] >= 0:
+                target["index"] = entry["index"]
+            coords = entry.get("coordinates")
+            if isinstance(coords, dict) and set(coords) == {"x", "y"} and all(
+                type(v) in (int, float) and float("-inf") < v < float("inf") for v in coords.values()
+            ):
+                target["coordinates"] = coords
+            if target:
+                if isinstance(entry.get("element_description"), str):
+                    target["element_description"] = entry["element_description"]
+                line += f"\n  Recorded target attempt (page data): {target}"
         eparams = entry.get("params", {})
         if eparams:
             display_params = {k: v for k, v in eparams.items() if k not in ["screenshot", "dom_tree"]}
             if display_params:
                 line += f"\n  Params: {display_params}"
-        display_result = {k: v for k, v in er.items() if k not in ["success", "error", "screenshot", "dom_tree"]}
+        display_result = {k: v for k, v in er.items() if k not in ["success", "error", "screenshot", "dom_tree", "formatted_state"]}
         if display_result:
             line += f"\n  Result: {display_result}"
         action_details_lines.append(line)
 
     actions_text = "\n\n".join(action_details_lines)
+    # Each delivered native observation keeps its own receipt identity and
+    # existing per-tool/aggregate verifier admission. Do not bury many DOM
+    # observations inside the single compact action-history TOOL_RESULT.
+    observation_evidence = [
+        {"role": "TOOL", "text": "",
+         "metadata": {"toolName": entry["action"], "toolStatus": "FINISHED", "browser_action_step": entry["step"],
+                      "structured_response": {"step": entry["step"], "formatted_state": entry["result"]["formatted_state"]}}}
+        for entry in reversed(all_action_entries)
+        if type(entry.get("step")) is int and entry.get("action") == "read_browser_state"
+        and isinstance((entry.get("result") or {}).get("formatted_state"), str)
+        and entry["result"]["formatted_state"]
+    ]
+
 
     page_stats = browser_state.get("page_stats", {})
     scroll_pos = browser_state.get("scroll_position", {})
@@ -417,9 +446,9 @@ async def build_browser_verifier_context(
 
     # C10: Browser verifier infers from action_history + final-state
     # ground truth. Multi-step browser tasks would balloon if we
-    # stuffed every step's DOM into the verifier prompt; instead
-    # we pass the action history (which logs URL transitions and
-    # tool inputs/outputs), the final-state DOM, and the final-state
+    # duplicated every raw step DOM inside compact history. Delivered native
+    # read observations now have separate exact-step evidence under the same
+    # verifier admission budgets; we retain final-state DOM and final-state
     # screenshot reference. The verifier reconstructs the journey
     # from action_history and grounds the answer in the FINAL state.
     #
@@ -492,7 +521,9 @@ async def build_browser_verifier_context(
         )
 
     user_prompt = (
-        f"Goal: {goal}\n\n"
+        f"Goal: {verification_goal or goal}\n\n"
+        + (f"Original browser task: {goal}\n\n" if verification_goal else "")
+        +
         "## Browser Ground Truth (FINAL STATE)\n"
         "Read the DOM independently and decide whether the goal is satisfied. "
         "Do NOT rely on what the agent reported - only on what the page actually shows. "
@@ -558,7 +589,7 @@ async def build_browser_verifier_context(
                 "screenshot_b64": final_screenshot_b64 or "",
             },
         },
-    ]
+    ] + observation_evidence
 
 
 def append_completion_evidence(

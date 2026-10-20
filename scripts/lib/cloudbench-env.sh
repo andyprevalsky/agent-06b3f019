@@ -2514,3 +2514,25 @@ PY
 cloudbench_mutation_admission() {
   python3 -S -c "$(cloudbench_mutation_launch_code)" "$@"
 }
+
+# Central Rose credential broker: the same origin production worker plans bind
+# (scripts/production_worker_process.py).
+CLOUDBENCH_PEOPLE_CREDENTIAL_BROKER_ORIGIN="https://navi-j9a9.onrender.com"
+
+# Prints the people credential broker a benchmark stack's worker must use, or
+# nothing when the operator configured one explicitly. Benchmark stacks route
+# BACKEND_API_URL to their own isolated backend, whose seeded database never
+# holds a rotating Lantern grant, so without an explicit bearer or broker every
+# people_search fails with LANTERN_NOT_CONNECTED. A nonblank value in the
+# process environment or the agents env file counts as explicit.
+cloudbench_people_credential_broker_default() {  # <agents-env-file>
+  local env_file="$1" key value
+  for key in PEOPLE_CREDENTIAL_BROKER_URL PEOPLE_API_TOKEN; do
+    value="${!key:-}"
+    if [ -z "$value" ] && [ -f "$env_file" ]; then
+      value="$(cloudbench_env_value "$env_file" "$key")"
+    fi
+    [ -n "${value//[[:space:]]/}" ] && return 0
+  done
+  printf '%s\n' "$CLOUDBENCH_PEOPLE_CREDENTIAL_BROKER_ORIGIN"
+}

@@ -164,7 +164,7 @@ prints; never type it by hand):
 🧪 EXPERIMENT #<number> · <state emoji> <STATE>
 <slice> · <scheduled> scheduled · <cloud/local> · src <checkpoint>
 Triggered <Month D, h:mm:ss AM/PM PDT/PST>
-<rate> experiments/day · <verified launches> launches / <elapsed days> d
+<rate> experiments/day · <verified launches> launches / <elapsed days> d | experiments/day warming <goal age> · <n> launches (rate after 1 d)
 Since last benchmark ended: <age (label) | RUNNING | END UNRECORDED>
 QUEUED <n> · IN_PROGRESS <n> · COMPLETED <n>/<scheduled>
 PASS <n>/<scored> <pct> · HARNESS <n/UNCLASSIFIED> · INFRA <pct> (<n>/<terminal attempts>)
