@@ -3501,7 +3501,13 @@ async def test_attempt_completion_result_reaches_the_verifier_as_authored_work()
         if expected:
             assert len(authored) == 1, seen[-1]
             assert authored[0]["role"] == "TOOL" and authored[0]["metadata"]["toolStatus"] == "FINISHED"
-            assert authored[0]["message"].endswith("Andy Prevalskii, Founder, Rose Labs")
+            # End to end through the verifier's own context builder (b056f571 rerun
+            # 46ce6f37: the row's text was empty there).
+            from helpers.llm import build_verifier_context_messages
+
+            rendered = "\n".join(str(m["content"]) for m in build_verifier_context_messages(seen[-1], "V"))
+            assert '"tool_name": "attempt_completion"' in rendered
+            assert "Andy Prevalskii, Founder, Rose Labs" in rendered, rendered
         else:
             assert authored == [], seen[-1]
 

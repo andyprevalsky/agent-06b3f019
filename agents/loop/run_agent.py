@@ -2804,7 +2804,7 @@ def _with_authored_result(context: List[Dict], authored_result: Optional[str], c
         *context,
         {
             "role": "TOOL",
-            "message": authored_result,
+            "text": authored_result,
             "timestamp": max(timestamps) if timestamps else "1970-01-01T00:00:00Z",
             "metadata": {
                 "toolName": "attempt_completion",
