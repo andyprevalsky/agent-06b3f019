@@ -1,34 +1,43 @@
 /**
- * Pure derivation of per-account chips from Integration rows, provider account
- * sources (email credentials, Plaid items) and IntegrationSyncProgress rows.
+ * Pure derivation of the sync-progress account of each Integration row.
  *
- *   rows ──► adapter.list ──► known accounts ─┐
- *                                              ├─► IntegrationAccount[] per provider
- *   progress rows (same provider+accountId) ──┘     (+ progress-only accounts)
+ *   Integration row ──► health (status + Google credential state) ─┐
+ *                                                                  ├─► ONE IntegrationAccount per row
+ *   IntegrationSyncProgress (same name + accountId) ───────────────┘
+ *   progress with no row yet (a first sync before its row write) ──► that provider's one account
  *
- * State precedence: a provider health of `needs_reconnect` always wins (only
- * re-consent fixes it); otherwise a progress row, when present, is
- * authoritative; otherwise the legacy health (row status / credential state;
- * a Gmail row's SYNCING lease makes an address without progress `idle`, never
- * `syncing`).
+ * State precedence:
+ *   1. the row needs the user: EXPIRED row, or a Google credential that needs
+ *      reconnecting (`needs_reconnect`) — the red dot, whatever a run says;
+ *   2. a live run (`syncing`, written within PROGRESS_STALE_AFTER_MS) or the
+ *      finished run of a connected row — the bar;
+ *   3. otherwise the row's own status (CONNECTED synced, SYNCING syncing,
+ *      SYNC_FAILED sync_failed, NOT_CONNECTED idle), with no bar.
+ * A disconnected (NOT_CONNECTED) row never shows a finished run's bar, and a
+ * run whose writer vanished mid-sync falls back to the row (no stuck bar).
  */
 
-import type { CookieProfileSource, EmailCredentialSource, PlaidItemSource } from './repo.accounts';
 import type { ProgressRow } from './repo.progress';
-import { derivedAccountLabel } from './service.accountLabels';
-import { resolveAccountAdapter } from './service.accountRegistry';
-import { asSyncState, iso, progressOf, snapshotOf } from './service.progressSnapshot';
+import { derivedRowLabel } from './service.accountLabels';
+import { asSyncState, iso, progressOf } from './service.progressSnapshot';
 import {
-  cookieAccountStorageId,
+  PROGRESS_STALE_AFTER_MS,
+  TERMINAL_SYNC_STATES,
   toWireAccountId,
+  type AccountState,
   type AccountsByProvider,
   type IntegrationAccount,
   type SyncState,
 } from './syncAccountsContract';
 
+interface EmailCredentialSource {
+  email: string | null;
+  state: string;
+  lastErrorReason: string | null;
+}
+
 /** Fields of an Integration row the account view reads (full or light rows fit). */
 export interface AccountViewRow {
-  id: string;
   name: string;
   accountId: string;
   accountEmail: string | null;
@@ -39,171 +48,116 @@ export interface AccountViewRow {
   emailCredentials?: EmailCredentialSource[];
 }
 
-interface KnownAccount {
-  provider: string;
-  storageAccountId: string;
-  rowId: string | null;
-  label: string | null;
-  health: SyncState;
-  lastSyncAt: Date | null;
-  lastError: string | null;
-}
-
-const ROW_STATUS_HEALTH: Record<string, SyncState> = {
+const ROW_STATUS_STATE: Record<string, AccountState> = {
   CONNECTED: 'synced',
   SYNCING: 'syncing',
-  SYNC_FAILED: 'failed',
-  EXPIRED: 'needs_reconnect',
+  SYNC_FAILED: 'sync_failed',
+  EXPIRED: 'EXPIRED',
   NOT_CONNECTED: 'idle',
 };
 
-function rowAccount(row: AccountViewRow): KnownAccount {
-  const health = ROW_STATUS_HEALTH[row.status] ?? 'idle';
+const RUN_STATE: Record<SyncState, AccountState> = {
+  idle: 'idle',
+  syncing: 'syncing',
+  synced: 'synced',
+  failed: 'sync_failed',
+  needs_reconnect: 'needs_reconnect',
+};
+
+const isTerminal = (state: SyncState) => TERMINAL_SYNC_STATES.includes(state);
+
+const keyOf = (provider: string, accountId: string) => `${provider}\u0000${accountId}`;
+
+function rowHealth(row: AccountViewRow): { state: AccountState; lastError: string | null } {
+  const reconnect = (row.emailCredentials ?? []).find((c) => c.state === 'needs_reconnect');
+  if (reconnect !== undefined) return { state: 'needs_reconnect', lastError: reconnect.lastErrorReason };
+  const state = ROW_STATUS_STATE[row.status] ?? 'idle';
+  const failed = state === 'sync_failed' || state === 'EXPIRED';
+  return { state, lastError: failed ? row.failureReason : null };
+}
+
+function connectedEmails(row: AccountViewRow): string[] {
+  return (row.emailCredentials ?? [])
+    .map((credential) => credential.email)
+    .filter((email): email is string => email !== null && email !== '');
+}
+
+/** A run still syncing whose writer has not written for too long lost its writer. */
+function isLiveOrFinished(progress: ProgressRow, now: Date): boolean {
+  const state = asSyncState(progress.state);
+  if (isTerminal(state)) return true;
+  return now.getTime() - progress.updatedAt.getTime() < PROGRESS_STALE_AFTER_MS;
+}
+
+function usableRun(
+  row: AccountViewRow,
+  progress: ProgressRow | null,
+  now: Date
+): ProgressRow | null {
+  if (progress === null || !isLiveOrFinished(progress, now)) return null;
+  const finished = isTerminal(asSyncState(progress.state));
+  return finished && row.status === 'NOT_CONNECTED' ? null : progress;
+}
+
+export function accountOfRow(
+  row: AccountViewRow,
+  progress: ProgressRow | null,
+  now: Date
+): IntegrationAccount {
+  const health = rowHealth(row);
+  const run = usableRun(row, progress, now);
+  const runState = run === null ? null : RUN_STATE[asSyncState(run.state)];
+  const needsUser = health.state === 'needs_reconnect' || health.state === 'EXPIRED';
+  const state = needsUser ? health.state : (runState ?? health.state);
+  const rowLastSync = row.lastSuccessfulSyncAt ?? row.lastSyncAt;
   return {
     provider: row.name,
-    storageAccountId: row.accountId,
-    rowId: row.id,
-    label: row.accountEmail ?? derivedAccountLabel(row.name, row.accountId),
-    health,
-    lastSyncAt: row.lastSuccessfulSyncAt ?? row.lastSyncAt,
-    lastError: health === 'failed' || health === 'needs_reconnect' ? row.failureReason : null,
+    accountId: toWireAccountId(row.accountId),
+    label: row.accountEmail ?? derivedRowLabel(row.name, connectedEmails(row)),
+    state,
+    progress: run === null ? null : progressOf(run),
+    lastSyncAt: iso(run?.lastSyncedAt ?? rowLastSync),
+    lastError: needsUser || run === null ? health.lastError : run.lastError,
   };
 }
 
-function credentialAccounts(row: AccountViewRow): KnownAccount[] {
-  const accounts: KnownAccount[] = [];
-  for (const credential of row.emailCredentials ?? []) {
-    if (credential.email === null || credential.email === '') continue;
-    // The shared row's SYNCING is a job lease, not a per-address claim: an address
-    // only reads `syncing` from its own progress row. Without one it is queued.
-    let health: SyncState = row.status === 'SYNCING' ? 'idle' : 'synced';
-    if (credential.state === 'needs_reconnect') health = 'needs_reconnect';
-    else if (credential.state === 'sync_failed') health = 'failed';
-    accounts.push({
-      provider: row.name,
-      storageAccountId: credential.email,
-      rowId: row.id,
-      label: credential.email,
-      health,
-      // The shared row's sync time is not a per-address claim.
-      lastSyncAt: null,
-      lastError:
-        health === 'failed' || health === 'needs_reconnect' ? credential.lastErrorReason : null,
-    });
-  }
-  return accounts;
-}
-
-function plaidAccounts(row: AccountViewRow, items: PlaidItemSource[]): KnownAccount[] {
-  return items
-    .filter((item) => item.integrationId === row.id)
-    .map((item) => {
-      let health: SyncState = item.cursor === null ? 'syncing' : 'synced';
-      if (item.status === 'REQUIRES_REAUTH') health = 'needs_reconnect';
-      else if (item.status === 'ERROR') health = 'failed';
-      return {
-        provider: row.name,
-        storageAccountId: item.id,
-        rowId: row.id,
-        label: item.institutionName,
-        health,
-        lastSyncAt: item.lastSyncAt,
-        lastError: health === 'failed' || health === 'needs_reconnect' ? item.errorMessage : null,
-      };
-    });
+/** A first sync that reported progress before its Integration row was written. */
+function accountOfRowlessRun(progress: ProgressRow, now: Date): IntegrationAccount | null {
+  const state = asSyncState(progress.state);
+  if (isTerminal(state) || !isLiveOrFinished(progress, now)) return null;
+  return {
+    provider: progress.provider,
+    accountId: toWireAccountId(progress.accountId),
+    label: derivedRowLabel(progress.provider, []),
+    state: RUN_STATE[state],
+    progress: progressOf(progress),
+    lastSyncAt: iso(progress.lastSyncedAt),
+    lastError: progress.lastError,
+  };
 }
 
 /**
- * A cookie provider row fans out to one account per synced browser profile.
- * A browser row with no stored cookies yet (connected but never synced, or
- * cookies only reported through progress) falls back to its single legacy
- * `default` account so the connected row never disappears.
+ * Every Integration row's account, grouped by provider (row name). A progress
+ * row with no Integration row is listed only while its run is live.
  */
-function cookieProfileAccounts(
-  row: AccountViewRow,
-  cookieProfiles: CookieProfileSource[]
-): KnownAccount[] {
-  const mine = cookieProfiles.filter((profile) => profile.browserSource === row.name);
-  if (mine.length === 0) return [rowAccount(row)];
-  return mine.map((profile) => ({
-    provider: row.name,
-    storageAccountId: cookieAccountStorageId(row.name, profile.browserProfile),
-    rowId: row.id,
-    label: profile.browserProfile === '' ? null : profile.browserProfile,
-    health: 'synced' as SyncState,
-    lastSyncAt: profile.lastSyncAt ?? row.lastSuccessfulSyncAt ?? row.lastSyncAt,
-    lastError: null,
-  }));
-}
-
-function knownAccountsOf(
-  row: AccountViewRow,
-  plaidItems: PlaidItemSource[],
-  cookieProfiles: CookieProfileSource[]
-): KnownAccount[] {
-  const kind = resolveAccountAdapter(row.name).list;
-  if (kind === 'email_credentials') return credentialAccounts(row);
-  if (kind === 'plaid_items') return plaidAccounts(row, plaidItems);
-  if (kind === 'browser_cookies') return cookieProfileAccounts(row, cookieProfiles);
-  return [rowAccount(row)];
-}
-
-function toAccount(known: KnownAccount, progress: ProgressRow | null): IntegrationAccount {
-  const progressState = progress === null ? null : asSyncState(progress.state);
-  const state =
-    known.health === 'needs_reconnect' ? 'needs_reconnect' : (progressState ?? known.health);
-  const lastSyncAt = progress?.lastSyncedAt ?? known.lastSyncAt;
-  return {
-    provider: known.provider,
-    accountId: toWireAccountId(known.storageAccountId),
-    label: known.label,
-    state,
-    progress: progressOf(progress, state),
-    lastSyncAt: iso(lastSyncAt),
-    lastError:
-      state === 'needs_reconnect' && known.health === 'needs_reconnect'
-        ? known.lastError
-        : (progress?.lastError ?? known.lastError),
-  };
-}
-
-/** Every account of every provider the user has a row or a progress report for. */
 export function buildAccountsView(input: {
   rows: AccountViewRow[];
-  plaidItems: PlaidItemSource[];
-  cookieProfiles: CookieProfileSource[];
   progress: ProgressRow[];
+  now: Date;
 }): AccountsByProvider {
-  const progressByKey = new Map(
-    input.progress.map((p) => [`${p.provider}\u0000${p.accountId}`, p])
-  );
+  const progressByKey = new Map(input.progress.map((p) => [keyOf(p.provider, p.accountId), p]));
   const accountsByProvider: AccountsByProvider = {};
   const push = (account: IntegrationAccount) => {
     (accountsByProvider[account.provider] ??= []).push(account);
   };
-
   for (const row of input.rows) {
-    for (const known of knownAccountsOf(row, input.plaidItems, input.cookieProfiles)) {
-      const key = `${known.provider}\u0000${known.storageAccountId}`;
-      push(toAccount(known, progressByKey.get(key) ?? null));
-      progressByKey.delete(key);
-    }
+    const key = keyOf(row.name, row.accountId);
+    push(accountOfRow(row, progressByKey.get(key) ?? null, input.now));
+    progressByKey.delete(key);
   }
-  // A first sync can report progress before its account row exists. An email
-  // address (Gmail) is always connected before its first sync, so its unmatched
-  // progress is a late write for a removed address, not a new account.
   for (const progress of progressByKey.values()) {
-    if (resolveAccountAdapter(progress.provider).list === 'email_credentials') continue;
-    const snapshot = snapshotOf(progress);
-    push({
-      provider: snapshot.provider,
-      accountId: snapshot.accountId,
-      label: derivedAccountLabel(progress.provider, progress.accountId),
-      state: snapshot.state,
-      progress: snapshot.progress,
-      lastSyncAt: snapshot.lastSyncAt,
-      lastError: snapshot.lastError,
-    });
+    const account = accountOfRowlessRun(progress, input.now);
+    if (account !== null) push(account);
   }
   return accountsByProvider;
 }

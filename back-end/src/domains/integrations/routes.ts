@@ -1,7 +1,7 @@
 /**
  * Integrations domain routes — main router + CRUD + mounts sub-routers.
  * Sub-routers: routes.upload.ts, routes.browser.ts, routes.email.ts, routes.claude.ts,
- * routes.compute.ts, routes.plaid.ts, routes.accounts.ts (per-account progress + delete)
+ * routes.compute.ts, routes.plaid.ts, routes.accounts.ts (sync progress + delete alias)
  */
 
 import { type Response, Router } from 'express';

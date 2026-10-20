@@ -1,6 +1,7 @@
 /**
- * Write path for per-account sync progress, shared by backend jobs (call
- * `reportIntegrationProgress` directly) and the Mac app (HTTP route).
+ * Write path for sync progress (one row per existing Integration row), shared
+ * by backend sync jobs (`reportProgressBestEffort` at their batch boundaries)
+ * and the Mac app (HTTP route).
  *
  *   input ─► validate key ─► lock(account) ─► read row ─► decideProgressWrite
  *        ─► create | update | (duplicate / coalesced / stale: no write) ─► snapshot
@@ -113,11 +114,25 @@ export async function reportIntegrationProgress(
   });
 }
 
-/** Drop one account's progress (after its data is gone). Returns rows removed. */
-export async function clearAccountProgress(userId: string, provider: string, accountId: string) {
-  return repo.deleteProgress({ userId, provider, accountId: toStorageAccountId(accountId) });
+/**
+ * The pipeline-side write: one progress report at an existing batch or phase
+ * boundary. Best-effort by contract — it never throws and never changes the
+ * sync's outcome; a failed write is logged and the next boundary supersedes it.
+ */
+export async function reportProgressBestEffort(params: ReportProgressParams): Promise<void> {
+  try {
+    await reportIntegrationProgress(params);
+  } catch (error: unknown) {
+    log.warn('Progress write failed (sync unaffected)', {
+      userId: params.userId,
+      provider: params.provider,
+      state: params.input.state,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
-export async function clearProviderProgress(userId: string, provider: string) {
-  return repo.deleteProviderProgress(userId, provider);
+/** Drop one row's progress (after the row is gone). Returns rows removed. */
+export async function clearAccountProgress(userId: string, provider: string, accountId: string) {
+  return repo.deleteProgress({ userId, provider, accountId: toStorageAccountId(accountId) });
 }

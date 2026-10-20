@@ -1,5 +1,6 @@
 /**
- * IntegrationSyncProgress persistence: one row per (userId, provider, accountId).
+ * IntegrationSyncProgress persistence: one row per (userId, provider, accountId),
+ * i.e. per existing Integration row.
  *
  * Every write runs inside a per-account advisory lock so the read → judge →
  * write sequence is serialized for that account only (10k rule: no lock or row
@@ -89,45 +90,4 @@ export async function listProgressForUser(userId: string): Promise<ProgressRow[]
 export async function deleteProgress(key: ProgressKey): Promise<number> {
   const { count } = await prisma.integrationSyncProgress.deleteMany({ where: key });
   return count;
-}
-
-export async function deleteProviderProgress(userId: string, provider: string): Promise<number> {
-  const { count } = await prisma.integrationSyncProgress.deleteMany({
-    where: { userId, provider },
-  });
-  return count;
-}
-
-/**
- * True when anything an account chip is derived from changed after `since`.
- * Tiny indexed existence probes; no row bodies are read. Rows named in
- * `settledWhileSyncing` derive their state at read time from other tables
- * (an export agent's lifecycle), so while one is SYNCING it always counts as changed.
- */
-export async function accountSourcesChangedSince(
-  userId: string,
-  since: Date,
-  settledWhileSyncing: string[]
-): Promise<boolean> {
-  const after = { gt: since };
-  const probes = await Promise.all([
-    prisma.integration.findFirst({
-      where: { userId, name: { in: settledWhileSyncing }, status: 'SYNCING' },
-      select: { id: true },
-    }),
-    prisma.integrationSyncProgress.findFirst({
-      where: { userId, updatedAt: after },
-      select: { id: true },
-    }),
-    prisma.integration.findFirst({ where: { userId, updatedAt: after }, select: { id: true } }),
-    prisma.emailIntegrationCredential.findFirst({
-      where: { userId, updatedAt: after },
-      select: { id: true },
-    }),
-    prisma.plaidItem.findFirst({ where: { userId, updatedAt: after }, select: { id: true } }),
-    // Cookie syncs change the per-profile browser accounts; `syncedAt` is the
-    // row's @updatedAt. Indexed existence probe, no row bodies read.
-    prisma.cookie.findFirst({ where: { userId, syncedAt: after }, select: { id: true } }),
-  ]);
-  return probes.some((probe) => probe !== null);
 }
