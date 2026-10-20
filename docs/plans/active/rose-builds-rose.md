@@ -81,12 +81,16 @@ ledger" in `rose-user-ui.md`). This file is the cross-cutting checklist, and
 | U12 | M | Mobile query box hugs the bottom screen curve (safe area plus matching radius) | W6 | in progress |
 | U13 | N | Chrome cleanup: Research/Careers removed; About/Privacy/Terms behind an info icon in the nub toolbar; pinned "Import Code Repo" goal | W6 | in progress |
 | U14 | N | Already merged, awaiting recordings: nub, white Join Waitlist, right app bar with Browser and Voice, Browser drawer replacing fullscreen, background fade, no wrappers | merged | recordings pending |
+| U15 | M | Home **is** the root project: the base workspace every agent and code session forks from (repo checkout, env files, startup script). Home shows the root chat; its gear opens that project's settings | L-NAV | open |
+| U16 | N | Right bar also gets **Files** and **Terminal** apps | L-NAV | open |
+| U17 | M | Panels and drawers open flush against their bar, full height, no gap, margin or floating card (fix the W3 Browser drawer's 12 px inset) | L-NAV | open |
+| U18 | N | Popular goal "Make me a website" | L-DEFAULTS | open |
 
 ## Performance (added by the parent agent; all M)
 
 | ID | Criterion | Eval |
 |----|-----------|------|
-| P1 | iPhone web app is fast: cold load LCP ≤ 2.5 s and TTI ≤ 3.5 s on simulated 4G, mid-tier iPhone CPU (4x throttle); warm load ≤ 1 s | Lighthouse mobile + WebKit Playwright (iPhone 15 profile); validate on the phone harness / real device when available |
+| P1 | iPhone web app is fast: cold load LCP ≤ 2.5 s and TTI ≤ 3.5 s on simulated 4G, mid-tier iPhone CPU (4x throttle); warm load ≤ 1 s | Lighthouse mobile + WebKit Playwright iPhone 15 emulation (no device rig exists; results labelled "emulation") |
 | P2 | Interactions: INP ≤ 200 ms on send, open agent, open drawer and switch tab | Playwright performance traces |
 | P3 | Smooth: ≥ 55 fps for drawer, nub and fade animations and for scrolling a 1,000-message trajectory; no long task > 50 ms during scroll | trace frame timing |
 | P4 | Realtime: agent message to on-screen p95 ≤ 500 ms | instrumented e2e |
