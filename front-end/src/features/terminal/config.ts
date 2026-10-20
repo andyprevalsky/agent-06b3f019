@@ -21,6 +21,8 @@ export const OPENING_MESSAGES: OpeningMessage[] = [
 // ── Popular goals carousel ────────────────────────────────────────────────
 
 export const POPULAR_GOALS: string[] = [
+  'Change my background photo',
+  'Make me a game',
   'Maximize my luck surface area',
   'Save children in Gaza',
   'Raise me 1 million dollars',
