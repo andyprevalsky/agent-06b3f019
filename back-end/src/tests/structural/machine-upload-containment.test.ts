@@ -58,6 +58,8 @@ const MACHINE_DATA_ROUTES: Record<string, string[]> = {
   'integrations/routes.passkeys.ts': ['/passkeys/upload'],
   'integrations/routes.lantern.ts': ['/lantern-people/credentials/upload'],
   'integrations/routes.documents.ts': ['/documents/upload'],
+  // The Mac app reports THIS machine's sync progress for an account.
+  'integrations/routes.accounts.ts': ['/:provider/accounts/:accountId/progress'],
   'upload/routes.ts': ['/'],
   'download-telemetry/routes.ts': ['/'],
   'imessage/routes.ts': ['/queue/pop', '/queue/:id/result'],

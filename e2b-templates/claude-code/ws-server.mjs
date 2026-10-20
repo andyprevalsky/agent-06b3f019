@@ -1091,6 +1091,14 @@ async function runClaudeCli(startupReport = null) {
   if (CODE_AGENT_SYSTEM_PROMPT) {
     args.push("--append-system-prompt", CODE_AGENT_SYSTEM_PROMPT);
   }
+  // Rose agent tools (display / send_message_to_user / request_user_approval)
+  // as an MCP server. The backend writes ~/.rose/mcp.json at session create;
+  // MCP calls have no Bash 2-minute limit, so blocking approvals can wait.
+  const roseMcpConfig = join(home, ".rose", "mcp.json");
+  if (existsSync(roseMcpConfig)) {
+    args.push("--mcp-config", roseMcpConfig);
+    args[args.indexOf("--allowedTools") + 1] += ",mcp__rose";
+  }
   const resumeSessionId = resolveResumeSessionId();
   if (resumeSessionId) {
     args.push("--resume", resumeSessionId);

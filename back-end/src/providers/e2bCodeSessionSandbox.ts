@@ -8,7 +8,9 @@ import { createLogger } from './logger';
 import {
   createLocalClaudeCodeSessionIfBillingBlocked,
   isLocalClaudeCodeFallbackEligible,
+  resolveLocalSessionWorkDir,
 } from './claudeCodeLocalSession';
+import { agentToolsForLocalHome } from './agentTools/workspace';
 import type { UserUiWorkspace } from './userUi/workspace';
 import type { ProjectRestoreReport, ProjectWorkspace } from './projects/types';
 import {
@@ -189,8 +191,12 @@ export async function createLocalCodeSessionFallback(
   if (!isLocalClaudeCodeFallbackEligible(err)) return null;
   const localHome = codeSession !== null ? await prepareLocalCodeSessionHome(codeSession) : null;
   const resumeId = localHome?.cliSessionId ?? null;
+  // Same-host session: loopback tools URL, MCP path under the session HOME
+  // (the persistent code-session HOME when there is one, else the task dir).
+  const toolsHome = localHome?.home ?? resolveLocalSessionWorkDir(params.taskId);
   const local = await createLocalClaudeCodeSessionIfBillingBlocked(err, {
     ...params,
+    userUiWorkspace: agentToolsForLocalHome(params.userUiWorkspace, toolsHome),
     envs:
       resumeId !== null ? { ...params.envs, CLAUDE_CODE_RESUME_SESSION_ID: resumeId } : params.envs,
     ...(localHome !== null ? { homeDir: localHome.home } : {}),

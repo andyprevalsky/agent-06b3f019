@@ -56,6 +56,7 @@ EXECUTE_PHASE_TOOLS = [
     "spawn_agent",  # Unified: type=browser|code|general_purpose|explore
     "wait_for",
     "send_message_to_user_execute_phase",
+    "display",
     "call_phone_number",
     "message_person",
     "attempt_completion",
@@ -780,6 +781,39 @@ class SendMessageToUserExecutePhaseTool(BaseModel):
     inline_view: Optional[InlineViewArg] = Field(default=None, description=INLINE_VIEW_DESCRIPTION)
 
 
+class DisplayOptionArg(BaseModel):
+    """One numbered answer for a pinned question."""
+
+    label: str = Field(description="Short answer label.")
+    description: Optional[str] = Field(default=None, description="One line explaining the option.")
+    recommended: Optional[bool] = Field(default=None, description="True for the option you recommend.")
+
+
+class DisplayTool(BaseModel):
+    """Show images, videos or HTML to the user inline, or pin a question with numbered options."""
+
+    tool: Literal["display"]
+    paths: Optional[List[str]] = Field(
+        default=None,
+        description="Files already in this agent's tree (attachments or outputs), by file name.",
+    )
+    urls: Optional[List[str]] = Field(default=None, description="Public http(s) URLs of images, videos or HTML pages.")
+    caption: Optional[str] = Field(
+        default=None,
+        description=user_facing_text_description('Caption shown with the media; for placement "pinned", the question.'),
+    )
+    placement: Optional[Literal["inline", "pinned"]] = Field(
+        default="inline",
+        description='"inline" posts in the trajectory; "pinned" asks a question (see the tool notes for who answers).',
+    )
+    options: Optional[List[DisplayOptionArg]] = Field(
+        default=None, description='Answers for placement "pinned", shown numbered (max 9).'
+    )
+    allow_other: Optional[bool] = Field(
+        default=None, description='For placement "pinned": offer a free-text "Other…" answer (default true).'
+    )
+
+
 class MessagePersonTool(BaseModel):
     """Drafts a personalized message and stages it for user approval. Approval is synchronous."""
 
@@ -1317,6 +1351,7 @@ TOOL_MODELS: ToolRegistry = {
     "google_workspace_run": GoogleOAuthDemoTool,
     "send_message_to_user": SendMessageToUserTool,
     "send_message_to_user_execute_phase": SendMessageToUserExecutePhaseTool,
+    "display": DisplayTool,
     "spawn_agent": SpawnAgentTool,
     "message_person": MessagePersonTool,
     # Plan phase tools

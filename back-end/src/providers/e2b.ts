@@ -19,7 +19,6 @@ import {
 } from './gptCredentials';
 import { buildCodeAgentSystemPrompt, buildCodexHarnessSystemPrompt } from './codeAgentPrompt';
 import { withAgentGraphInstructions } from './agentGraph/cli';
-import { withAgentGraphWorkspace } from './agentGraph/workspace';
 import { uploadAttachmentsToSandbox } from './e2bAttachments';
 import { overlayCodexRoseBridge } from './e2bCodexHarness';
 import { workDirForGithubRepo } from './e2bWorkDir';
@@ -44,11 +43,8 @@ import { restoreSandboxProject } from './projects/workspace';
 import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
 import { waitForSandboxWsServer } from './e2bWsReady';
 import { codeSessionTurnToken } from './codeSessionTurns';
-import {
-  applyUserUiSandboxEnvs,
-  prepareUserUiWorkspaceSafe,
-  writeUserUiWorkspaceToSandboxSafe,
-} from './userUi/workspace';
+import { applyUserUiSandboxEnvs, writeUserUiWorkspaceToSandboxSafe } from './userUi/workspace';
+import { prepareCodeSessionWorkspace } from './codeSessionWorkspace';
 import {
   isRefreshOnlyOauthEnvelope,
   resolveClaudeCodeAuthEnvs,
@@ -359,12 +355,7 @@ async function createClaudeCodeSessionUnlocked(
     log.info(`GitHub repo configured: ${githubRepoUrl}`);
   }
 
-  const userUiWorkspace = await withAgentGraphWorkspace(await prepareUserUiWorkspaceSafe(userId), {
-    userId,
-    ownerAgentId: agentId,
-    sessionId: taskId,
-    provider: 'claude',
-  });
+  const userUiWorkspace = await prepareCodeSessionWorkspace(userId, agentId, taskId, 'claude');
   applyUserUiSandboxEnvs(envs, userUiWorkspace);
 
   // Create sandbox first (before DB record) to avoid placeholder conflicts.
@@ -613,12 +604,7 @@ export async function createCodexCodeSession(
     log.info(`GitHub repo configured for Codex: ${githubRepoUrl}`);
   }
 
-  const userUiWorkspace = await withAgentGraphWorkspace(await prepareUserUiWorkspaceSafe(userId), {
-    userId,
-    ownerAgentId: agentId,
-    sessionId: taskId,
-    provider: 'codex',
-  });
+  const userUiWorkspace = await prepareCodeSessionWorkspace(userId, agentId, taskId, 'codex');
   applyUserUiSandboxEnvs(envs, userUiWorkspace);
 
   const { sandbox, resumedFrom, cliSessionId } = await acquireCodeSandbox(

@@ -190,7 +190,7 @@ before(async () => {
   globalThis.fetch = (async () => new Response('{}', { status: 200 })) as typeof fetch;
 
   const { default: router, sessionScopedRouter } =
-    await import('../../domains/claude-code/routes.directChat');
+    await import('../../domains/claude-code/routesDirectChat');
   const app = express();
   app.use(express.json());
   app.use('/api/agents', router);
