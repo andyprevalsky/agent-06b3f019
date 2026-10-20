@@ -62,16 +62,40 @@ export async function userExists(userId: string): Promise<boolean> {
   return (await prisma.user.count({ where: { userId } })) > 0;
 }
 
-export async function listProjects(userId: string): Promise<ProjectRecord[]> {
+export type ProjectWithCount = ProjectRecord & { _count: { envFiles: number } };
+
+/** One query: projects + env-file counts (no N+1). */
+export async function listProjects(userId: string): Promise<ProjectWithCount[]> {
   return prisma.project.findMany({
     where: { userId },
     orderBy: { createdAt: 'asc' },
     take: PROJECT_LIST_LIMIT,
+    include: { _count: { select: { envFiles: true } } },
   });
 }
 
 export async function findProject(userId: string, id: string): Promise<ProjectRecord | null> {
   return prisma.project.findFirst({ where: { id, userId } });
+}
+
+export async function countEnvFiles(projectId: string): Promise<number> {
+  return prisma.projectEnvFile.count({ where: { projectId } });
+}
+
+/** Project restored into a code session (null when the session has none). */
+export async function findSessionProject(
+  sessionId: string
+): Promise<{ projectId: string; userId: string } | null> {
+  const session = await prisma.claudeCodeSession.findUnique({
+    where: { id: sessionId },
+    select: { projectId: true },
+  });
+  if (!session?.projectId) return null;
+  const project = await prisma.project.findUnique({
+    where: { id: session.projectId },
+    select: { id: true, userId: true },
+  });
+  return project ? { projectId: project.id, userId: project.userId } : null;
 }
 
 export async function findProjectByName(
@@ -166,6 +190,22 @@ export async function findSyncSnapshot(projectId: string) {
   return prisma.projectSyncSnapshot.findUnique({ where: { projectId } });
 }
 
+/**
+ * Claim the next sync revision. Optimistic: returns null when another push
+ * already advanced the project past `baseRevision`.
+ */
+export async function claimSyncRevision(
+  projectId: string,
+  baseRevision: number,
+  extra: { repoUrl?: string } = {}
+): Promise<number | null> {
+  const claimed = await prisma.project.updateMany({
+    where: { id: projectId, syncRevision: baseRevision },
+    data: { syncRevision: baseRevision + 1, lastSyncedAt: new Date(), ...extra },
+  });
+  return claimed.count === 1 ? baseRevision + 1 : null;
+}
+
 export async function writeSyncSnapshot(
   projectId: string,
   revision: number,
@@ -185,17 +225,11 @@ export async function writeSyncSnapshot(
     encryptedUncommittedPatch: data.encryptedUncommittedPatch,
     patchFingerprint: data.patchFingerprint,
   };
-  await prisma.$transaction([
-    prisma.projectSyncSnapshot.upsert({
-      where: { projectId },
-      create: { projectId, ...row },
-      update: row,
-    }),
-    prisma.project.update({
-      where: { id: projectId },
-      data: { syncRevision: revision, lastSyncedAt: new Date() },
-    }),
-  ]);
+  await prisma.projectSyncSnapshot.upsert({
+    where: { projectId },
+    create: { projectId, ...row },
+    update: row,
+  });
 }
 
 export class ProjectWorkspaceError extends Error {}

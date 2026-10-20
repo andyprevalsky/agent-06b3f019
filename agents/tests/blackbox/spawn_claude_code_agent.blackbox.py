@@ -3747,6 +3747,10 @@ async def _run_all_tests():
         "format_code_events_transcript_failed_status",
         test_format_code_events_transcript_covers_failed_and_status_only_results,
     )
+    r.record(
+        "format_code_events_transcript_project_startup",
+        test_format_code_events_transcript_reports_project_startup,
+    )
     await r.record_async("repo_close_session_happy", test_repo_close_e2b_session_happy)
     await r.record_async("repo_close_session_non200", test_repo_close_e2b_session_non_200_returns_empty)
     await r.record_async("repo_health_happy", test_repo_check_sandbox_health_happy)
@@ -4063,6 +4067,26 @@ def test_format_code_events_transcript_skips_empty_tool_results():
     assert transcript.splitlines() == [
         "[Claude tool] Bash · ls",
         "[Claude result] command failed",
+    ]
+
+
+def test_format_code_events_transcript_reports_project_startup():
+    """PJ3: a project's startup outcome (ws-server event) is visible in the transcript."""
+    from domains.spawn_claude_code_agent.service import format_code_events_transcript
+
+    transcript = format_code_events_transcript(
+        [
+            {"type": "project_startup", "status": "running", "project": "Rose"},
+            {"type": "project_startup", "status": "ok", "project": "Rose", "durationMs": 12345},
+            {"type": "project_startup", "status": "failed", "project": "Rose", "exitCode": 3, "durationMs": 400},
+            {"type": "project_startup", "status": "timeout", "project": "Rose", "timeoutS": 120},
+            {"type": "project_startup", "status": "skipped"},
+        ]
+    )
+    assert transcript.splitlines() == [
+        "[Claude] Project startup (Rose): ok in 12.3s",
+        "[Claude] Project startup (Rose): failed (exit 3) in 0.4s",
+        "[Claude] Project startup (Rose): timed out after 120s",
     ]
 
 

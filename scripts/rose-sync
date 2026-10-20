@@ -1,0 +1,11 @@
+#!/usr/bin/env node
+// Codebase sync CLI (C9): capture this checkout (git state, env files incl.
+// symlinked ones, toolchain, setup hints), encrypt it client-side and upload
+// it to a Rose Project. Run `scripts/rose-sync help` for usage.
+import('./lib/rose-sync/cli.mjs')
+  .then(({ main }) => main(process.argv.slice(2)))
+  .then((code) => process.exit(code))
+  .catch((err) => {
+    process.stderr.write(`rose-sync: ${err && err.message ? err.message : String(err)}\n`);
+    process.exit(1);
+  });

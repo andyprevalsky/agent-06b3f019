@@ -76,3 +76,14 @@ ALTER TABLE "Project" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "ProjectEnvFile" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "ProjectSyncSnapshot" ENABLE ROW LEVEL SECURITY;
 
+-- AlterTable
+ALTER TABLE "Agent" ADD COLUMN "projectId" TEXT;
+
+-- AlterTable
+ALTER TABLE "ClaudeCodeSession" ADD COLUMN "projectId" TEXT;
+
+-- CreateIndex
+CREATE INDEX "Agent_projectId_idx" ON "Agent"("projectId");
+
+-- AddForeignKey
+ALTER TABLE "Agent" ADD CONSTRAINT "Agent_projectId_fkey" FOREIGN KEY ("projectId") REFERENCES "Project"("id") ON DELETE SET NULL ON UPDATE CASCADE;

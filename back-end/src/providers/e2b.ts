@@ -30,6 +30,15 @@ import {
   overlayCodexCodeWsServer,
 } from './e2bWsServerOverlay';
 import { createLocalClaudeCodeSessionIfBillingBlocked } from './claudeCodeLocalSession';
+import type { ProjectRestoreReport, ProjectWorkspace } from './projects/types';
+import {
+  e2bWorkspaceExecutor,
+  projectSessionEnv,
+  projectSessionPaths,
+  registerWorkspaceExecutor,
+  restoreWorkspace,
+} from './projects/workspace';
+import type { E2bSandboxLike } from './projects/workspaceExecutor';
 import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
 import {
   applyUserUiSandboxEnvs,
@@ -103,18 +112,25 @@ const DEFAULT_CODEX_CODE_TEMPLATE_ID = 'codex-code';
  * @param githubRepoUrl - Optional GitHub repo URL to clone before starting Claude
  * @returns Session info including WebSocket URL for terminal streaming
  */
+export interface ClaudeCodeSessionOptions {
+  /** Project restored into `~/workspace` before the CLI starts (PJ3 / C9). */
+  projectWorkspace?: ProjectWorkspace | null;
+}
+
 export async function createClaudeCodeSession(
   agentId: string,
   goal: string,
   attachments?: FilePointer[],
   githubRepoUrl?: string,
   userId?: string,
-  fastModeCacheEnabled?: boolean
+  fastModeCacheEnabled?: boolean,
+  options: ClaudeCodeSessionOptions = {}
 ): Promise<{
   wsUrl: string;
   taskId: string;
   sandboxId: string;
   uploadedFiles: string[];
+  projectRestore?: ProjectRestoreReport | null;
 }> {
   // Serialize creates — concurrent reserve-script calls stampede E2B redis.
   return withClaudeCodeCreateSlot(() =>
@@ -124,7 +140,8 @@ export async function createClaudeCodeSession(
       attachments,
       githubRepoUrl,
       userId,
-      fastModeCacheEnabled
+      fastModeCacheEnabled,
+      options
     )
   );
 }
@@ -135,13 +152,16 @@ async function createClaudeCodeSessionUnlocked(
   attachments?: FilePointer[],
   githubRepoUrl?: string,
   userId?: string,
-  fastModeCacheEnabled?: boolean
+  fastModeCacheEnabled?: boolean,
+  options: ClaudeCodeSessionOptions = {}
 ): Promise<{
   wsUrl: string;
   taskId: string;
   sandboxId: string;
   uploadedFiles: string[];
+  projectRestore?: ProjectRestoreReport | null;
 }> {
+  const projectWorkspace = options.projectWorkspace ?? null;
   log.info(`Creating Claude Code session for agent ${agentId}`);
 
   if (!process.env.E2B_API_KEY || !process.env.E2B_CLAUDE_CODE_TEMPLATE_ID) {
@@ -359,6 +379,7 @@ async function createClaudeCodeSessionUnlocked(
       envs,
       attachments,
       userUiWorkspace,
+      projectWorkspace,
       claudeTokenSource,
       claudeTokenIntegrationId:
         credentialMeta?.source === 'pool' ? (credentialMeta.poolTokenId ?? null) : null,
@@ -370,6 +391,7 @@ async function createClaudeCodeSessionUnlocked(
   log.info(`Created sandbox: ${sandbox.sandboxId}`);
   await overlayClaudeCodeWsServer(sandbox);
   await writeUserUiWorkspaceToSandboxSafe(sandbox, userUiWorkspace, agentId);
+  const project = await restoreSandboxProject(taskId, sandbox, projectWorkspace);
 
   const uploadedFiles = await uploadAttachmentsToSandbox(sandbox, attachments, 'Claude Code');
 
@@ -383,6 +405,7 @@ async function createClaudeCodeSessionUnlocked(
     .run('node /home/user/ws-server.mjs', {
       background: true,
       timeoutMs: 0,
+      ...(project.envs ? { envs: project.envs } : {}),
     })
     .catch((err) =>
       log.error('Failed to start WS server', {
@@ -433,6 +456,7 @@ async function createClaudeCodeSessionUnlocked(
       claudeTokenSource,
       claudeTokenIntegrationId:
         credentialMeta?.source === 'pool' ? (credentialMeta.poolTokenId ?? null) : null,
+      projectId: projectWorkspace?.project.id ?? null,
     },
   });
 
@@ -443,7 +467,21 @@ async function createClaudeCodeSessionUnlocked(
     taskId,
     sandboxId: sandbox.sandboxId,
     uploadedFiles,
+    projectRestore: project.report,
   };
+}
+
+/** Restore a project into an E2B sandbox; ws-server runs its startup on boot. */
+async function restoreSandboxProject(
+  taskId: string,
+  sandbox: E2bSandboxLike,
+  workspace: ProjectWorkspace | null
+): Promise<{ envs: Record<string, string> | null; report: ProjectRestoreReport | null }> {
+  if (!workspace) return { envs: null, report: null };
+  const home = '/home/user';
+  registerWorkspaceExecutor(taskId, e2bWorkspaceExecutor(sandbox, home));
+  const report = await restoreWorkspace(taskId, workspace);
+  return { envs: projectSessionEnv(projectSessionPaths(home), workspace.project.name), report };
 }
 
 export async function createCodexCodeSession(

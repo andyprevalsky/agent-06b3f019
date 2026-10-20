@@ -25,6 +25,8 @@ export const createSessionSchema = z.object({
   attachments: z.array(filePointerSchema).optional(),
   github_repo_url: z.string().optional(),
   user_id: z.string().uuid().optional(), // Required for GitHub repo access check
+  /** Project to restore; defaults to the agent's own (or its root's) project. */
+  project_id: z.string().uuid().optional(),
 });
 
 export const closeSessionSchema = z.object({

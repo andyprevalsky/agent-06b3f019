@@ -38,6 +38,7 @@ function toListItem(agent: ListedAgent) {
     fast_mode_cache_enabled: agent.fastModeCacheEnabled,
     world_model_mode: agent.worldModelMode,
     memory_enabled: agent.memoryEnabled,
+    project_id: agent.projectId,
     created_at: agent.createdAt,
     updated_at: agent.updatedAt,
   };
@@ -236,6 +237,7 @@ export async function getAgentDetail(agentId: string, options: AgentDetailOption
       fast_mode_cache_enabled: agent.fastModeCacheEnabled,
       world_model_mode: agent.worldModelMode,
       memory_enabled: agent.memoryEnabled,
+      project_id: agent.projectId,
       token_in_price_microdollars: agent.tokenInPriceMicrodollars,
       token_out_price_microdollars: agent.tokenOutPriceMicrodollars,
       created_at: agent.createdAt,
