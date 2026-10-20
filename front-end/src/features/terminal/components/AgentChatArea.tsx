@@ -125,8 +125,16 @@ function ChatColumn({
   const roseDesktop = useRoseDesktop();
   const readOnlyMessage = readOnlyNotice(a);
 
-  const codeAgentColumn = useCodeAgentColumn(a.selectedAgentId, readOnlyMessage);
-  if (codeAgentColumn !== null) return codeAgentColumn;
+  const codeAgent = useOpenCodeAgent(a.selectedAgentId);
+  if (codeAgent !== null) {
+    return (
+      <CodeAgentConversationView
+        key={codeAgent.taskId}
+        codeAgent={codeAgent}
+        readOnlyMessage={readOnlyMessage}
+      />
+    );
+  }
 
   const canSubmit = composerCanSubmit({
     selectedAgentId: a.selectedAgentId,
@@ -195,19 +203,6 @@ function readOnlyNotice(a: AgentSlice): string | null {
     return 'Loading agent details. Controls will be available when loading finishes.';
   }
   return null;
-}
-
-/** Rose Desktop: the selected (owner) agent's open code agent replaces the column. */
-function useCodeAgentColumn(selectedAgentId: string | null, readOnlyMessage: string | null) {
-  const open = useOpenCodeAgent(selectedAgentId);
-  if (open === null) return null;
-  return (
-    <CodeAgentConversationView
-      key={open.taskId}
-      codeAgent={open}
-      readOnlyMessage={readOnlyMessage}
-    />
-  );
 }
 
 function ReadOnlyNotice({ children }: { children: ReactNode }) {
