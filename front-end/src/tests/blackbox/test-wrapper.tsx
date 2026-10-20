@@ -10,6 +10,7 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { AppDataProvider } from '@/hooks/useAppData';
 import {
   AttentionRequestsProvider,
+  RoseAppsProvider,
   useAttentionRequests,
 } from '@/features/terminal-component-group';
 
@@ -49,7 +50,9 @@ function createTestWrapper(options: TestWrapperOptions = {}) {
                 initialEntries={options.route ? [options.route] : ['/']}
                 {...options.routerProps}
               >
-                {children}
+                {/* Mirrors TerminalLayout: the Browser drawer (which replaced the
+                    fullscreen browser) is mounted by the RoseApps provider. */}
+                <RoseAppsProvider>{children}</RoseAppsProvider>
               </MemoryRouter>
             </AttentionScope>
           </TooltipProvider>

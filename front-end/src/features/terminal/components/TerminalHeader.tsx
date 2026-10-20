@@ -3,6 +3,8 @@
  *
  * LAYOUT (by viewport):
  * [DESKTOP >= md] --> floating blur PILL, centered: brand + AttentionInbox bell
+ *                     (centered in the width left of the right app bar / open
+ *                     app drawer via --rose-apps-inset, 520ms ease)
  * [MOBILE  <  md] --> full-width FLUSH bar at y=0:
  *                        left   = brand (logo + Rose)
  *                        center = Research
@@ -172,7 +174,7 @@ function DesktopHeaderPill(props: TerminalHeaderProps) {
   const { dripStyles, blur, backgroundColors, borderColor, shadowIntensity } = props;
   return (
     <header
-      className="absolute top-4 left-1/2 -translate-x-1/2 z-50 flex items-center justify-between p-2 rounded-2xl border border-border/50 dark:border-navi-light-black/50 shadow-lg"
+      className="absolute top-4 left-[calc(50%_-_var(--rose-apps-inset,0px)/2_+_var(--rose-apps-inset-left,0px)/2)] -translate-x-1/2 z-50 transition-[left] duration-[520ms] ease-[cubic-bezier(.22,1,.36,1)] flex items-center justify-between p-2 rounded-2xl border border-border/50 dark:border-navi-light-black/50 shadow-lg"
       style={buildHeaderStyle({ dripStyles, blur, backgroundColors, borderColor, shadowIntensity })}
     >
       <MarbleBackground backgroundColors={backgroundColors} dripStyles={dripStyles} />

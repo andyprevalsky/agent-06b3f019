@@ -15,6 +15,9 @@
  *   currentView === 'agents'       → agent chat / landing
  *   open-agent deep link           → force 'agents' even from browse/settings
  *   agents + inspectionContext     → compact read-only pill in global control rail
+ *
+ * RIGHT APP BAR (RoseAppsProvider): Browser + Voice apps; their drawers slide
+ * in left of the bar and the main column re-centers via --rose-apps-inset.
  */
 
 import { useState, useMemo, lazy } from 'react';
@@ -23,6 +26,8 @@ import {
   AppSidebar,
   AttentionRequestsProvider,
   NetworkView,
+  RoseAppBar,
+  RoseAppsProvider,
   SIDEBAR_WIDTH_COLLAPSED,
   unansweredAgentIds,
   useAttentionRequests,
@@ -132,7 +137,17 @@ interface TerminalLayoutProps {
 
 function TerminalLayout(props: TerminalLayoutProps) {
   if (isBenchmarkSharedView()) return <SharedBenchmarkLayout {...props} />;
-  return <InteractiveTerminalLayout {...props} />;
+  return (
+    <RoseAppsProvider
+      agents={props.agents.agents}
+      selectedAgentId={props.agents.selectedAgentId}
+      onSelectAgent={props.agents.handleSelectAgent}
+      publishLayout
+    >
+      <InteractiveTerminalLayout {...props} />
+      <RoseAppBar />
+    </RoseAppsProvider>
+  );
 }
 
 function InteractiveTerminalLayout(props: TerminalLayoutProps) {

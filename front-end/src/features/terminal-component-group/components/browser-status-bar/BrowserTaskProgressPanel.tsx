@@ -1,21 +1,17 @@
 /**
- * TaskProgressSidebar — the task-progress panel for the fullscreen browser
- * view: schema chip, optional step-progress bar, scrollable MessageList, and
- * an optional pending write-lock approval.
+ * TaskProgressSidebar — the task-progress panel for an agent's live browser in
+ * the Browser app drawer: schema chip, optional step-progress bar, scrollable
+ * MessageList, and an optional pending write-lock approval.
  *
- * Presentation is layout-driven:
- *   desktop -> fixed-width left column beside the iframe (border-r)
- *   mobile  -> full width below the aspect-matched live browser in the same
- *              fixed view, with this panel owning the remaining scroll space
+ * Layout: full width below the letterboxed live browser (desktop drawer and
+ * mobile bottom sheet alike), owning the remaining scroll space.
  *
- * STATE MACHINE (presentation branch, driven by the isMobile/onClose props):
- * [DESKTOP]      -> fixed-width left column beside the iframe (no close button)
- * [MOBILE_STACKED] -> full-width panel always visible below the browser
+ * STATE MACHINE (presentation branch, driven by the onClose prop):
+ * [STACKED]        -> full-width panel always visible below the browser
  * [LEGACY_OVERLAY] -> optional close affordance only when parent supplies onClose
  */
 
 import { X } from 'lucide-react';
-import { cn } from '@/lib/utils';
 import { MessageList } from '../MessageList';
 import { SchemaChip } from '../SchemaChip';
 import type { BrowserControlState } from '../browserControlState';
@@ -29,7 +25,6 @@ interface TaskProgressSidebarProps {
   stepProgress: StepProgress | null;
   controlState: BrowserControlState;
   pendingWriteLockApproval: PendingWriteLockApproval | null;
-  isMobile?: boolean;
   onClose?: () => void;
 }
 
@@ -39,17 +34,12 @@ export function TaskProgressSidebar({
   stepProgress,
   controlState,
   pendingWriteLockApproval,
-  isMobile = false,
   onClose,
 }: TaskProgressSidebarProps) {
   return (
     <div
-      className={cn(
-        'h-full bg-muted/10 flex flex-col overflow-hidden',
-        isMobile
-          ? 'w-full'
-          : 'w-[min(320px,calc(100vw-60px))] border-r border-border flex-shrink-0',
-      )}
+      data-testid="task-progress-panel"
+      className="h-full w-full bg-muted/10 flex flex-col overflow-hidden"
       style={{ backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)' }}
     >
       <div className="p-3 border-b border-border">
@@ -59,7 +49,7 @@ export function TaskProgressSidebar({
           </h4>
           <div className="flex items-center gap-2">
             <SchemaChip outputSchema={outputSchema} size="sm" tooltipPosition="top" />
-            {isMobile && onClose && (
+            {onClose && (
               <button
                 onClick={onClose}
                 aria-label="Close task progress"

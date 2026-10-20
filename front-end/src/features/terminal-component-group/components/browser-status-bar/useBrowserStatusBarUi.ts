@@ -1,11 +1,12 @@
 /**
- * UI-state hook for BrowserStatusBar. Owns the expand/fullscreen/resume flags
- * and the event handlers the three presentational variants consume. Pulled
+ * UI-state hook for BrowserStatusBar. Owns the expand/resume flags, the
+ * Browser-drawer open/close handlers (the drawer replaced the old fullscreen
+ * view), and the event handlers the presentational variants consume. Pulled
  * out of BrowserStatusBar.tsx so the orchestrator stays under the 80-line
  * max-lines-per-function cap.
  */
 
-import { useCallback, useEffect, useState, type MouseEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
 import {
   readBrowserControlState,
   releaseBrowserControl,
@@ -16,10 +17,12 @@ import { getQueryParams } from '@/lib/url';
 import { resumeBrowserSession } from '../../hooks';
 import { useCompleteAuthAssistance } from './useCompleteAuthAssistance';
 import { useBrowserSessionBinding } from './useBrowserSessionBinding';
+import { useRoseApps } from '../rose-apps/roseAppsState';
 
 export interface BrowserStatusBarUi {
   isExpanded: boolean;
-  isFullscreen: boolean;
+  /** This task's live view is shown in the Browser app drawer (agent tab). */
+  isInDrawer: boolean;
   isResuming: boolean;
   isUserControlling: boolean;
   hasReconnected: boolean;
@@ -29,8 +32,8 @@ export interface BrowserStatusBarUi {
   onExpand: () => void;
   onCollapse: () => void;
   onThumbnailClick: (e: MouseEvent) => void;
-  onFullscreenToggle: (e: MouseEvent) => void;
-  onFullscreenClose: (e: MouseEvent) => void;
+  /** Open this task in the Browser drawer, or close the drawer if it is shown. */
+  onDrawerToggle: (e: MouseEvent) => void;
   onTakeControl: (isDisconnected: boolean) => void;
   onHandBackControl: () => void;
   onCompleteAuthAssistance: (requestId: string) => void;
@@ -259,31 +262,32 @@ function useBrowserSessionControl(
 
 function useBrowserPanelVisibility(
   taskId: string,
+  agentId: string | null,
   forceMinimized: boolean,
 ): Pick<
   BrowserStatusBarUi,
-  | 'isExpanded'
-  | 'isFullscreen'
-  | 'onExpand'
-  | 'onCollapse'
-  | 'onThumbnailClick'
-  | 'onFullscreenToggle'
-  | 'onFullscreenClose'
+  'isExpanded' | 'isInDrawer' | 'onExpand' | 'onCollapse' | 'onThumbnailClick' | 'onDrawerToggle'
 > {
+  const apps = useRoseApps();
   const [isExpandedState, setIsExpanded] = useState(false);
-  const [isFullscreenState, setIsFullscreen] = useState(() => {
-    if (typeof window === 'undefined') return false;
-    return getQueryParams().get('browser-id') === taskId;
-  });
+  const isInDrawer = apps?.isTaskInDrawer(agentId, taskId) ?? false;
+  const openInDrawer = useCallback(() => {
+    if (agentId !== null) apps?.openAgentBrowser(agentId, taskId);
+  }, [agentId, apps, taskId]);
+  const openRef = useRef(openInDrawer);
+  openRef.current = openInDrawer;
+
+  // Deep link (?browser-id=<task>) opens the drawer on this agent's tab.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (getQueryParams().get('browser-id') === taskId) openRef.current();
+  }, [taskId, agentId]);
 
   useEffect(() => {
     const handleOpenBrowser = (event: Event) => {
       const detail = (event as CustomEvent<{ taskId?: string }>).detail;
-      if (detail?.taskId === taskId) {
-        setIsFullscreen(true);
-      }
+      if (detail?.taskId === taskId) openRef.current();
     };
-
     window.addEventListener('navi-open-browser', handleOpenBrowser);
     return () => window.removeEventListener('navi-open-browser', handleOpenBrowser);
   }, [taskId]);
@@ -291,29 +295,30 @@ function useBrowserPanelVisibility(
   const onExpand = useCallback(() => setIsExpanded(true), []);
   const onCollapse = useCallback(() => setIsExpanded(false), []);
 
-  const onFullscreenToggle = useCallback((e: MouseEvent) => {
-    e.stopPropagation();
-    setIsFullscreen((prev) => !prev);
-  }, []);
+  const onDrawerToggle = useCallback(
+    (e: MouseEvent) => {
+      e.stopPropagation();
+      if (isInDrawer) apps?.closeApp();
+      else openInDrawer();
+    },
+    [apps, isInDrawer, openInDrawer],
+  );
 
-  const onThumbnailClick = useCallback((e: MouseEvent) => {
-    e.stopPropagation();
-    setIsFullscreen(true);
-  }, []);
-
-  const onFullscreenClose = useCallback((e: MouseEvent) => {
-    e.stopPropagation();
-    setIsFullscreen(false);
-  }, []);
+  const onThumbnailClick = useCallback(
+    (e: MouseEvent) => {
+      e.stopPropagation();
+      openInDrawer();
+    },
+    [openInDrawer],
+  );
 
   return {
     isExpanded: forceMinimized ? false : isExpandedState,
-    isFullscreen: forceMinimized ? false : isFullscreenState,
+    isInDrawer,
     onExpand,
     onCollapse,
     onThumbnailClick,
-    onFullscreenToggle,
-    onFullscreenClose,
+    onDrawerToggle,
   };
 }
 
@@ -329,7 +334,7 @@ export function useBrowserStatusBarUi(
   handoffBrowserUrl: string | null = null,
   readOnly = false,
 ): BrowserStatusBarUi {
-  const visibility = useBrowserPanelVisibility(taskId, forceMinimized);
+  const visibility = useBrowserPanelVisibility(taskId, agentId, forceMinimized);
   const control = useBrowserSessionControl(
     taskId,
     agentId,

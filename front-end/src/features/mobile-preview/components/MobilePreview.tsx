@@ -1,7 +1,8 @@
 /**
  * STATE MACHINE: MobilePreview (dev-only)
  *
- *   ?view=browser ─▶ render real <BrowserStatusBarFullscreen/> (fixed inset-0)
+ *   ?view=browser ─▶ render real <BrowserAgentPane/> (the Browser drawer's
+ *                    agent tab body) in a fixed inset-0 sheet
  *   default       ─▶ faux terminal backdrop + real <MobileAgentDrawer/>
  *                    (drawer opened by clicking its Menu trigger)
  *
@@ -10,10 +11,10 @@
  * agent. Not linked from anywhere; reachable at /mobile-preview in `vite` dev.
  */
 
-import { useState, type MouseEvent } from 'react';
+import { useState } from 'react';
 
 import MobileAgentDrawer from '@/features/terminal-component-group/components/MobileAgentDrawer';
-import { BrowserStatusBarFullscreen } from '@/features/terminal-component-group/components/browser-status-bar/BrowserStatusBarFullscreen';
+import { BrowserAgentPane } from '@/features/terminal-component-group/components/browser-status-bar/BrowserAgentPane';
 import type { Agent } from '@/features/terminal-component-group/hooks';
 import type { Message } from '@/lib/api/types';
 
@@ -159,25 +160,26 @@ export default function MobilePreview() {
 
   if (view === 'browser') {
     return (
-      <BrowserStatusBarFullscreen
-        agentId="a1"
-        taskId="task-preview"
-        browserUrl={FAKE_PAGE}
-        messages={MOCK_BROWSER_MESSAGES}
-        outputSchema={undefined}
-        browserSessionMetadata={{
-          provider: 'steel',
-          proxyLocation: { city: 'Ashburn', country: 'US' },
-        }}
-        stepProgress={{ stepsTaken: 8, totalSteps: 20 }}
-        isDisconnected={false}
-        isWaitingForAuthAssistance={false}
-        isResuming={false}
-        isUserControlling={isUserControlling}
-        pendingWriteLockApproval={null}
-        onClose={noop as (e: MouseEvent) => void}
-        onResume={() => setIsUserControlling((current) => !current)}
-      />
+      <div className="fixed inset-0 flex flex-col bg-background">
+        <BrowserAgentPane
+          agentId="a1"
+          taskId="task-preview"
+          browserUrl={FAKE_PAGE}
+          messages={MOCK_BROWSER_MESSAGES}
+          outputSchema={undefined}
+          browserSessionMetadata={{
+            provider: 'steel',
+            proxyLocation: { city: 'Ashburn', country: 'US' },
+          }}
+          stepProgress={{ stepsTaken: 8, totalSteps: 20 }}
+          isDisconnected={false}
+          isWaitingForAuthAssistance={false}
+          isResuming={false}
+          isUserControlling={isUserControlling}
+          pendingWriteLockApproval={null}
+          onResume={() => setIsUserControlling((current) => !current)}
+        />
+      </div>
     );
   }
 

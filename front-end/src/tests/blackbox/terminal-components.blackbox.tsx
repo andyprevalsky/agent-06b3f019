@@ -5,7 +5,7 @@
  * Components covered:
  *  - QueryInput: textarea, model selector, price-limit edit, submit/pause button
  *  - AttentionInbox: empty vs populated, accept / reject / skip actions
- *  - BrowserStatusBar: minimized / expanded / fullscreen + write-lock approval
+ *  - BrowserStatusBar: minimized / expanded / Browser drawer + write-lock approval
  *
  * The tests lean on the shared `renderWithProviders` wrapper from
  * `test-wrapper.tsx` (QueryClient, TooltipProvider, MemoryRouter, AppDataProvider)
@@ -153,6 +153,10 @@ function withAgentCtx(messages: Message[], children: React.ReactNode, agentId?: 
   if (agentId !== undefined) {
     context.agent = makeAgentDetail({ agent_id: agentId });
     context.selectedAgentId = agentId;
+  } else {
+    // A browser chip always belongs to the selected agent; the Browser drawer
+    // keys its tabs by that agent id.
+    context.selectedAgentId = 'agent-selected';
   }
   return <AgentContext.Provider value={context}>{children}</AgentContext.Provider>;
 }
@@ -1800,18 +1804,22 @@ describe('BrowserStatusBar (blackbox)', () => {
       withAgentCtx(messages, <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />),
     );
 
-    // Expand -> fullscreen
+    // Expand -> open in the Browser drawer
     await user.click(screen.getByText('Clicking around'));
     await waitFor(() => expect(screen.getByText("Agent's Browser")).toBeInTheDocument());
     const header = screen.getByText("Agent's Browser").closest('div')!.parentElement!;
     const hdrButtons = within(header).getAllByRole('button');
     await user.click(hdrButtons[hdrButtons.length - 2]);
 
-    // In fullscreen + not disconnected: "Take control" chip is visible
-    await waitFor(() => expect(screen.getByText('Take control')).toBeInTheDocument());
-    await user.click(screen.getByText('Take control'));
+    // In the Browser drawer + not disconnected: "Take control" chip is visible
+    // on the agent's live view (the fullscreen portal no longer exists).
+    const drawer = screen.getByTestId('browser-app-drawer');
+    await waitFor(() => expect(within(drawer).getByText('Take control')).toBeInTheDocument());
+    await user.click(within(drawer).getByText('Take control'));
     expect(resumeCalled).toBe(false);
-    expect(await screen.findByRole('button', { name: 'Hand back control' })).toBeInTheDocument();
+    expect(
+      await within(drawer).findByRole('button', { name: 'Hand back control' }),
+    ).toBeInTheDocument();
     expect(controlModes).toEqual(['user']);
     expect(controlStateReads).toBeLessThanOrEqual(1);
     expect(screen.getByTitle('Browser')).toHaveAttribute(
@@ -2141,7 +2149,7 @@ describe('BrowserStatusBar (blackbox)', () => {
       withAgentCtx(messages, <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />),
     );
 
-    // Expand -> fullscreen
+    // Expand -> open in the Browser drawer
     await user.click(screen.getByText('Paused'));
     await waitFor(() => expect(screen.getByText("Agent's Browser")).toBeInTheDocument());
     const header = screen.getByText("Agent's Browser").closest('div')!.parentElement!;
@@ -2322,7 +2330,7 @@ describe('BrowserStatusBar (blackbox)', () => {
     expect(await screen.findByRole('button', { name: 'Take control' })).toBeInTheDocument();
   });
 
-  it('closing fullscreen via X button returns to expanded view', async () => {
+  it('opens the Browser drawer on the agent tab and closing it returns to the expanded chip', async () => {
     const user = userEvent.setup();
     renderWithProviders(
       withAgentCtx([], <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />),
@@ -2334,19 +2342,22 @@ describe('BrowserStatusBar (blackbox)', () => {
     const hdrButtons = within(header).getAllByRole('button');
     await user.click(hdrButtons[hdrButtons.length - 2]);
 
-    // Fullscreen header has "Active" label (green dot label)
-    await waitFor(() => expect(screen.getByText('Active')).toBeInTheDocument());
+    // The drawer (not a fullscreen portal) shows this agent's live browser.
+    const drawer = screen.getByTestId('browser-app-drawer');
+    await waitFor(() => expect(drawer).toHaveAttribute('data-state', 'open'));
+    expect(within(drawer).getByTestId('browser-tab-agent-selected')).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(within(drawer).getByTestId('browser-agent-pane')).toBeInTheDocument();
+    expect(within(drawer).getByText('Active')).toBeInTheDocument();
 
-    // Click the X close button — it's the only button in the top bar of fullscreen
-    // Locate via the Active text's parent header
-    const fsHeader = screen.getByText('Active').closest('div')!.parentElement!;
-    const closeBtn = within(fsHeader).getByRole('button');
-    await user.click(closeBtn);
+    await user.click(within(drawer).getByRole('button', { name: 'Close browser' }));
 
-    // Back to expanded view — Task progress heading is present
-    await waitFor(() => {
-      expect(screen.getByText(/Task progress/i)).toBeInTheDocument();
-    });
+    await waitFor(() => expect(drawer).toHaveAttribute('data-state', 'closed'));
+    expect(screen.queryByTestId('browser-agent-pane')).not.toBeInTheDocument();
+    // Back to the expanded chip — Task progress heading is present.
+    expect(screen.getByText(/Task progress/i)).toBeInTheDocument();
   });
 
   it('shows SchemaChip with output_schema fields + hovering reveals the tooltip', async () => {
@@ -2442,9 +2453,9 @@ describe('OpeningMessageDisplay (blackbox)', () => {
 
 // ─── AsciiLoader CTA overlay (blackbox) ──────────────────────────────────
 describe('AsciiLoader CTA overlay (blackbox)', () => {
-  it('renders a transparent CTA whose pill tints the SAME frame chars + fills whitespace', () => {
+  it('renders a solid white CTA pill matching the left sidebar surface', () => {
     const onClick = vi.fn();
-    const { container } = renderWithProviders(
+    renderWithProviders(
       <AsciiLoader
         showWarmingUp={false}
         size="large"
@@ -2460,11 +2471,12 @@ describe('AsciiLoader CTA overlay (blackbox)', () => {
     expect(button).not.toHaveAttribute('href');
     fireEvent.click(button);
     expect(onClick).toHaveBeenCalledTimes(1);
-    // Transparent capsule with a 1px rose border, centered on the animation.
-    // No fill, no glow (drop shadow) — the border warms on hover.
-    expect(button.className).toContain('bg-transparent');
-    expect(button.className).toContain('border-[#E062CC]');
-    expect(button.className).not.toContain('shadow-');
+    // Solid white like the left sidebar: white fill + gray-200/60 border, no
+    // rose gradient border.
+    expect(button.className).toContain('bg-white');
+    expect(button.className).toContain('border-gray-200/60');
+    expect(button.className).not.toContain('bg-transparent');
+    expect(button.className).not.toContain('border-[#E062CC]');
     expect(button.style.top).toBe('calc(50% + 0px)');
     // Clickable despite the loader overlay's pointer-events-none wrapper.
     expect(button.className).toContain('pointer-events-auto');
@@ -2474,47 +2486,13 @@ describe('AsciiLoader CTA overlay (blackbox)', () => {
     expect(within(button).queryByTestId('opening-join-icon')).toBeNull();
     const label = within(button).getByTestId('opening-join-label') as HTMLElement;
     expect(label).toHaveTextContent('Join Waitlist');
-    expect(label.className).not.toContain('translate-y-[150%]');
     expect(label.className).not.toContain('opacity-0');
-    expect(label.className).not.toContain('group-hover:translate-y-0');
-    expect(label.className).not.toContain('group-hover:opacity-100');
-    // Plain white glyphs (no chrome gradient) so they don't fight the animation.
-    expect(label.style.color).toMatch(/#ffffff|rgb\(255,\s*255,\s*255\)|white/);
-
-    // The prism layer re-renders the SAME frame as the animation beneath —
-    // every real glyph keeps its exact position (no chars-on-chars) — and only
-    // whitespace cells are filled, so the pill is fully packed.
-    const prism = screen.getByTestId('opening-join-prism') as HTMLElement;
-    expect(prism).toHaveAttribute('aria-hidden');
-    const basePre = container.querySelector('pre:not([data-testid])') as HTMLElement;
-    const baseText = basePre.textContent || '';
-    const prismText = prism.textContent || '';
-    expect(prismText.length).toBe(baseText.length);
-    expect(prismText).not.toMatch(/ /); // whitespace filled, fully packed
-    for (let i = 0; i < baseText.length; i++) {
-      if (baseText[i] !== ' ' || baseText[i] === '\n') {
-        expect(prismText[i]).toBe(baseText[i]); // real glyphs align 1:1
-      }
-    }
-    // Rose gradient is background-clipped into the glyphs (no solid rectangle)
-    // and pill-clipped via clip-path (no border/frame on the region).
-    expect(prism.style.backgroundImage.toLowerCase()).toContain('gradient');
-    expect(prism.style.backgroundImage.toLowerCase()).toMatch(/#ff6b00|255,\s*107,\s*0/);
-    expect(prism.style.backgroundClip || prism.style.webkitBackgroundClip).toBe('text');
-    expect(prism.style.clipPath).toContain('round');
-
-    // The glyph shadow is gradient-colored: a twin gradient-clipped layer
-    // rendered beneath the prism, offset down + tightly blurred + dimmed (a
-    // single-color drop-shadow can't follow the gradient). Same content, so
-    // shadow shapes match glyphs 1:1; blur stays small (no haze between chars).
-    const shadow = screen.getByTestId('opening-join-prism-shadow') as HTMLElement;
-    expect(shadow).toHaveAttribute('aria-hidden');
-    expect(shadow.textContent).toBe(prism.textContent);
-    expect(shadow.style.backgroundImage).toBe(prism.style.backgroundImage);
-    expect(shadow.style.transform).toContain('translateY');
-    expect(shadow.style.filter).toContain('blur');
-    expect(shadow.style.clipPath).toContain('round');
-    expect(prism.compareDocumentPosition(shadow) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+    // Dark text, no text shadow.
+    expect(label.style.color).toMatch(/hsl\(240|rgb\(1[0-9],\s*1[0-9],\s*2[0-9]\)/);
+    expect(label.style.textShadow).toBe('');
+    // The rose prism layers are gone (a solid pill would hide them).
+    expect(screen.queryByTestId('opening-join-prism')).toBeNull();
+    expect(screen.queryByTestId('opening-join-prism-shadow')).toBeNull();
   });
 
   it('omits the CTA overlay entirely when no cta prop is passed', () => {
