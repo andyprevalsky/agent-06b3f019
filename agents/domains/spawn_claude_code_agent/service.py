@@ -724,6 +724,10 @@ _CODE_SESSION_FIELDS = (
     # Sandbox events already logged by an earlier attachment; the reattached
     # attempt logs only the ones that arrived while nobody was attached.
     "logged_events",
+    # A local (Mac) run: a reattaching attempt keeps the same target and device.
+    "target",
+    "device_id",
+    "device_name",
 )
 
 
@@ -2210,6 +2214,9 @@ async def spawn_claude_code_activity(
     gpt_token_pool_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     resume_session: Optional[Dict[str, Any]] = None,
+    target: str = "cloud",
+    local_device_id: Optional[str] = None,
+    local_device_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Claude Code agent activity using E2B Desktop Sandbox.
 
@@ -2237,6 +2244,11 @@ async def spawn_claude_code_activity(
         resume_session: Session returned by a drained attempt; its sandbox is reattached
             when still reachable. ``generation_yield=False`` keeps the run on this worker
             when its generation is superseded (no parked handoff is available).
+        target: "cloud" (E2B sandbox) or "local" (the same ws-server on the agent's Mac,
+            relayed by the backend; ``ws_url`` is then the backend relay URL). Everything
+            after session create is identical for both targets.
+        local_device_id / local_device_name: the Mac resolved by
+            ``resolve_code_agent_target_activity`` for a local run.
     """
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
 
@@ -2264,6 +2276,14 @@ async def spawn_claude_code_activity(
         raise ValueError(
             "output_schema is required for Claude Code agent - parent agent must provide structured output schema in tool call"
         )
+
+    if isinstance(attached, dict) and attached.get("target") == "local":
+        target = "local"
+        local_device_id = attached.get("device_id") or local_device_id
+        local_device_name = attached.get("device_name") or local_device_name
+    code_agent_meta: Dict[str, Any] = {"target": "local" if target == "local" else "cloud"}
+    if target == "local" and local_device_name:
+        code_agent_meta["device_name"] = local_device_name
 
     logger.info(
         "[ClaudeCode] Using response schema from tool call",
@@ -2337,6 +2357,8 @@ async def spawn_claude_code_activity(
                 github_repo_url=github_repo_url,
                 code_provider=code_provider,
                 fast_mode_cache_enabled=fast_mode_cache_enabled,
+                target=target,
+                local_device_id=local_device_id,
             )
             task_id = session_data["task_id"]
             sandbox_id = session_data["sandbox_id"]
@@ -2353,7 +2375,11 @@ async def spawn_claude_code_activity(
                 ws_url=ws_url[:100] if ws_url else None,
                 uploaded_files=len(uploaded_files),
             )
-            action_summary.append(f"Created E2B sandbox: {sandbox_id}")
+            action_summary.append(
+                f"Started local session on {local_device_name or 'the Mac'}: {sandbox_id}"
+                if target == "local"
+                else f"Created E2B sandbox: {sandbox_id}"
+            )
 
         session_record = {
             "task_id": task_id,
@@ -2365,6 +2391,9 @@ async def spawn_claude_code_activity(
             "loop_started_at": loop_started_at,
             "logged_events": int((attached or {}).get("logged_events") or 0),
         }
+        if target == "local":
+            # A drained/retried attempt must reattach to the same Mac, never the cloud.
+            session_record.update({"target": "local", "device_id": local_device_id, "device_name": local_device_name})
         # An attempt's first heartbeat goes out at once and later ones only every
         # throttle interval, so nothing may heartbeat before the session rides
         # along, and the session must ride along before anything else can fail:
@@ -2393,6 +2422,7 @@ async def spawn_claude_code_activity(
                 output_schema=output_schema,
                 github_repo_url=actual_github_repo_url,
                 code_provider=code_provider,
+                code_agent=code_agent_meta,
             )
 
             await save_claude_code_message(
@@ -2404,6 +2434,7 @@ async def spawn_claude_code_activity(
                 action_type="task_started",
                 tool_call_id=tool_call_id,
                 code_provider=code_provider,
+                code_agent=code_agent_meta,
             )
             action_summary.append(f"Started task: {goal[:100]}")
 
