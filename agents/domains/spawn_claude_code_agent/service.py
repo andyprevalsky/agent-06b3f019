@@ -219,6 +219,23 @@ def _tool_detail_from_event(event: dict[str, Any]) -> str:
     return ""
 
 
+def _project_startup_line(event: Dict[str, Any]) -> str | None:
+    """One line for a finished project startup (ws-server ``project_startup`` event)."""
+    status = str(event.get("status") or "").strip().lower()
+    if status in {"", "running", "skipped"}:
+        return None
+    project = str(event.get("project") or "").strip()
+    label = f"Project startup ({project})" if project else "Project startup"
+    duration_ms = event.get("durationMs")
+    has_duration = isinstance(duration_ms, (int, float)) and duration_ms > 0
+    seconds = f" in {duration_ms / 1000:.1f}s" if has_duration else ""
+    if status == "ok":
+        return f"{label}: ok{seconds}"
+    if status == "timeout":
+        return f"{label}: timed out after {event.get('timeoutS') or '?'}s"
+    return f"{label}: failed (exit {event.get('exitCode')}){seconds}"
+
+
 def format_code_events_transcript(
     code_events: list[Dict[str, Any]] | None = None,
     action_summary: list[str] | None = None,
@@ -241,6 +258,12 @@ def format_code_events_transcript(
             cwd = event.get("cwd") or event.get("working_directory")
             detail = f"Session started in {cwd}" if cwd else "Session started"
             lines.append(f"[{provider}] {detail}")
+            continue
+
+        if event_type == "project_startup":
+            line = _project_startup_line(event)
+            if line:
+                lines.append(f"[{provider}] {line}")
             continue
 
         if event_type in {"agent_message", "assistant"}:

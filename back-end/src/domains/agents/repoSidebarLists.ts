@@ -30,6 +30,7 @@ const AGENT_LIST_SELECT = {
   fastModeCacheEnabled: true,
   worldModelMode: true,
   memoryEnabled: true,
+  projectId: true,
   createdAt: true,
   updatedAt: true,
   deletedAt: true,
