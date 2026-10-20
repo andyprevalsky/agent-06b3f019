@@ -26,6 +26,8 @@ import type {
   ReadBrowserCookiesConfig,
   PasskeyEnrollParams,
   AutoFillSettingsResult,
+  LocalCodeGrantResult,
+  LocalCodeStatus,
 } from '../../../shared/types/ipc';
 import {
   buildEventBridge,
@@ -92,6 +94,27 @@ function buildGptCodeBridge(ipcRenderer: IpcRenderer): IPC['gptCode'] {
         success: boolean;
         message?: string;
       }>,
+  };
+}
+
+function buildLocalCodeBridge(ipcRenderer: IpcRenderer): IPC['localCode'] {
+  return {
+    getStatus: () => ipcRenderer.invoke('localCode:getStatus') as Promise<LocalCodeStatus>,
+    addGrant: (path?: string) =>
+      ipcRenderer.invoke('localCode:addGrant', path) as Promise<LocalCodeGrantResult>,
+    removeGrant: (grantId: string) =>
+      ipcRenderer.invoke('localCode:removeGrant', grantId) as Promise<LocalCodeGrantResult>,
+    setDefaultGrant: (grantId: string) =>
+      ipcRenderer.invoke('localCode:setDefaultGrant', grantId) as Promise<LocalCodeGrantResult>,
+    openTerminal: (taskId: string) =>
+      ipcRenderer.invoke('localCode:openTerminal', taskId) as Promise<{ success: boolean }>,
+    onStatus: (callback: (status: LocalCodeStatus) => void) => {
+      const listener = (_event: unknown, status: unknown) => callback(status as LocalCodeStatus);
+      ipcRenderer.on('localCode:status', listener);
+      return () => {
+        ipcRenderer.removeListener('localCode:status', listener);
+      };
+    },
   };
 }
 
@@ -276,6 +299,7 @@ export function buildIpcApi(ipcRenderer: IpcRenderer): IPC {
     claudeCode: buildClaudeCodeBridge(ipcRenderer),
     gptCode: buildGptCodeBridge(ipcRenderer),
     atlas: buildAtlasBridge(ipcRenderer),
+    localCode: buildLocalCodeBridge(ipcRenderer),
     passkeys: buildPasskeysBridge(ipcRenderer),
     whatsapp: buildWhatsAppBridge(ipcRenderer),
     telegram: buildTelegramBridge(ipcRenderer),

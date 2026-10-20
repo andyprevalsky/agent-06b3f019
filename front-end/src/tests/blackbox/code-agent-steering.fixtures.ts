@@ -26,6 +26,7 @@ export function msg(
     text: overrides.text ?? '',
     role: overrides.role ?? 'TOOL',
     metadata,
+    ...(overrides.file_pointer ? { file_pointer: overrides.file_pointer } : {}),
   };
 }
 
@@ -120,6 +121,18 @@ export const LIVE_EVENTS = [
   },
 ];
 
+/** `requestingAgent` the backend stamps on code-agent rows (agent-tools/service.ts). */
+export function codexRequester(taskId = 'task-1') {
+  return {
+    kind: 'code_agent',
+    agent_id: ROOT_AGENT_ID,
+    label: 'Codex',
+    provider: 'codex',
+    task_id: taskId,
+  };
+}
+
+/** `display` metadata of a pinned question (agent-tools/questionService.ts, L-DISPLAY b10b038c1). */
 export const QUESTION_DISPLAY = {
   placement: 'pinned',
   kind: 'question',
@@ -140,17 +153,38 @@ export const QUESTION_DISPLAY = {
   ],
   allow_other: true,
   question_id: 'q-1',
+  items: [],
+  deliver_to: 'user',
+  routed_agent_id: ROOT_AGENT_ID,
 };
 
-export function questionMessage(display: Record<string, unknown> = {}) {
+/**
+ * A code agent's pinned question exactly as the backend writes it: a TOOL row
+ * `display` (IN_PROGRESS → FINISHED when answered) in the session agent's
+ * trajectory, grouped under the code task.
+ */
+export function questionMessage(
+  display: Record<string, unknown> = {},
+  extra: Record<string, unknown> = {},
+) {
+  const merged = { ...QUESTION_DISPLAY, ...display };
   return msg(
     {
+      toolCallId: `agent-tools:${merged.question_id as string}`,
       toolName: 'display',
       toolStatus: 'IN_PROGRESS',
-      display: { ...QUESTION_DISPLAY, ...display },
-      from_code_agent: { provider: 'codex', task_id: 'task-1' },
+      title: 'Codex asks',
+      isUserAttentionMessage: true,
+      attentionMessage: merged.question,
+      attentionRequestId: merged.question_id,
+      display: merged,
+      requestingAgent: codexRequester(),
+      excludeFromModel: true,
+      subAgentId: 'task-1',
+      task_id: 'task-1',
+      ...extra,
     },
-    { text: QUESTION_DISPLAY.question },
+    { text: merged.question as string },
   );
 }
 
@@ -190,7 +224,7 @@ export function a2aTimelineMessage(
     : { id: 'task-1', kind: 'code', label: 'Codex' };
   return msg(
     {
-      a2a: { kind: 'message', message_id: messageId, from, to, direction },
+      a2a: { kind: 'message', message_id: messageId, from, to, text, direction },
       idempotencyKey: `a2a:${from.id}:${messageId}:${direction}`,
       title: sent ? 'Codex → Root agent' : 'Root agent → Codex',
       task_id: 'task-1',
@@ -200,7 +234,12 @@ export function a2aTimelineMessage(
       toolCallId: 'call-task-1',
       toolName: 'spawn_claude_code_agent',
     },
-    { text },
+    // Received rows keep the LLM framing in `text`; a2a.text holds the raw words.
+    {
+      text: sent
+        ? text
+        : `[Message from Root agent, agent_id ${ROOT_AGENT_ID}. Reply with send_message_to_agent if a reply is needed]\n\n${text}`,
+    },
   );
 }
 
@@ -222,6 +261,7 @@ export function a2aInboundUserMessage(
         message_id: `client-${kind}`,
         from: CODEX_PARTY,
         to: { id: to.id, kind: 'agent', label: to.label },
+        text,
       },
       idempotencyKey: `a2a:task-1:client-${kind}`,
       title: `Codex → ${to.label}`,

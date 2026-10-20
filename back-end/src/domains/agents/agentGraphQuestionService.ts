@@ -8,28 +8,20 @@
  * `questionRouteForCodeSession` is the decision L-DISPLAY's pinned display
  * calls; `askQuestion` also performs the agent delivery via the A2A send path.
  */
+import {
+  questionRouteBySpawner,
+  type QuestionRoute,
+} from '../../providers/agentGraph/questionRoute';
 import * as graphRepo from './repoGraph';
 import { AgentGraphError, type GraphCaller } from './agentGraphService';
 import { sendGraphMessage, type SendResult } from './agentGraphSendService';
 
-/**
- * Where a code agent's question goes:
- *   spawned by the root agent → `user` (the root pins it for the user)
- *   spawned by any other agent → `agent` (the spawning Rose agent answers
- *                                 from its context or escalates up the tree)
- */
-export interface QuestionRoute {
-  deliver_to: 'user' | 'agent';
-  agent_id: string;
-}
+export type { QuestionRoute };
 
 export async function questionRouteForSpawner(spawnerAgentId: string): Promise<QuestionRoute> {
   const spawner = await graphRepo.findGraphAgent(spawnerAgentId);
   if (spawner === null) throw new AgentGraphError(404, 'Agent not found');
-  return {
-    deliver_to: spawner.parentAgentId === null ? 'user' : 'agent',
-    agent_id: spawner.id,
-  };
+  return questionRouteBySpawner(spawner);
 }
 
 /** The routing decision for one code session (L-DISPLAY's pinned questions). */

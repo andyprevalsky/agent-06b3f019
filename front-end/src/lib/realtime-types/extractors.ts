@@ -12,9 +12,11 @@ import type {
   AttentionStreamPayload,
   PlanStreamPayload,
   ToolStreamPayload,
+  UserUiActiveChangedPayload,
 } from './stream-payloads';
 import type { AgentStateChangedPayload } from './bus-channel';
 import {
+  validateUserUiActiveChangedPayload,
   validateAgentModeStartedPayload,
   validateAgentStateChangedPayload,
   validateAssistantStreamPayload,
@@ -159,6 +161,19 @@ export function extractAgentModeStartedPayload(wrapper: unknown): AgentModeStart
     wrapper,
     'AGENT_MODE_STARTED',
     validateAgentModeStartedPayload,
+  );
+}
+
+/**
+ * Extract and validate USER_UI_ACTIVE_CHANGED payload.
+ */
+export function extractUserUiActiveChangedPayload(
+  wrapper: unknown,
+): UserUiActiveChangedPayload | null {
+  return extractAndValidate<UserUiActiveChangedPayload>(
+    wrapper,
+    'USER_UI_ACTIVE_CHANGED',
+    validateUserUiActiveChangedPayload,
   );
 }
 

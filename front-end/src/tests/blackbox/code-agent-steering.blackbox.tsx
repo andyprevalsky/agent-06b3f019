@@ -12,6 +12,7 @@ import ClaudeCodeChip from '@/features/terminal-component-group/components/Claud
 import ApprovalChip from '@/features/terminal-component-group/components/ApprovalChip';
 import { PinnedQuestionMount } from '@/features/terminal-component-group/components/PinnedQuestion';
 import { filterMessagesForSubAgent } from '@/features/terminal-component-group/components/useMessageFiltering';
+import { localFailureText } from '@/features/terminal-component-group/hooks/codeAgentContract';
 import { resetCodeAgentLocalState } from '@/features/terminal-component-group/hooks/codeAgentLocalState';
 import { derivePendingApproval } from '@/features/terminal/hooks/derivations';
 import type { Message } from '@/lib/api';
@@ -25,6 +26,7 @@ import {
   ROOT_AGENT_ID,
   WithAgent,
   chipMessage,
+  codexRequester,
   directTurnMessage,
   eventsMessage,
   msg,
@@ -297,58 +299,36 @@ describe('row 45: transcript, terminal and direct steering', () => {
 });
 
 describe('row 46: scorecards and approvals attributed to the code agent', () => {
+  // A scorecard is a user-published inline view: the backend pins its versionId.
   const scorecardMessage = (inlineView: Record<string, unknown>) =>
     msg(
       {
+        toolCallId: 'agent-tools:atq_scorecard',
         toolName: 'send_message_to_user',
         toolStatus: 'FINISHED',
         isUserAttentionMessage: true,
         attentionMessage: 'Speed button scorecard',
-        from_code_agent: { provider: 'codex', task_id: 'task-1' },
+        sendMessageToUser: { isQuestion: false, attentionKind: 'info', isWaitingForUser: false },
+        requestingAgent: codexRequester(),
+        subAgentId: 'task-1',
+        task_id: 'task-1',
         inlineView,
       },
       { text: 'Speed button scorecard' },
     );
-  const SCORECARD = {
-    view: 'scorecard',
-    props: {
-      title: 'Speed button · scorecard',
-      rows: [
-        { label: 'Blackbox tests', value: '41 / 41 pass', tone: 'pass' },
-        { label: 'Lint + types', value: 'clean', tone: 'fail' },
-        { label: 'Animation fps (P3)', value: 'not measured', tone: 'warn' },
-        { label: 'Bundle size', value: '+0.4%', tone: 'info' },
-        { label: 'Notes', value: 'none' },
-      ],
-    },
-  };
+  const SCORECARD = { view: 'scorecard', versionId: 'v3', props: { title: 'Speed button' } };
 
-  it('renders the scorecard attributed "Codex · via send_message_to_user" with colored values', () => {
+  it('renders the published scorecard view attributed "Codex · via send_message_to_user"', () => {
     renderItems([scorecardMessage(SCORECARD)]);
     expect(screen.getByTestId('code-agent-attribution')).toHaveTextContent(
       'Codex · via send_message_to_user',
     );
-    const card = screen.getByTestId('code-agent-scorecard');
-    expect(within(card).getByRole('heading', { name: 'Speed button · scorecard' })).toBeVisible();
-    const tones = within(card)
-      .getAllByTestId('scorecard-row')
-      .map((row) => row.getAttribute('data-tone'));
-    expect(tones).toEqual(['pass', 'fail', 'warn', 'info', 'none']);
-    expect(within(card).getByText('41 / 41 pass')).toHaveClass('text-green-600');
-    expect(within(card).getByText('clean')).toHaveClass('text-red-600');
-    expect(within(card).getByText('not measured')).toHaveClass('text-amber-600');
-    expect(within(card).getByText('+0.4%')).toHaveClass('text-blue-600');
+    expect(screen.getByTestId('user-ui-inline-view')).toHaveAttribute('data-inline-version', 'v3');
   });
 
-  it('a user-published view named scorecard (with versionId) is not replaced by the host card', () => {
-    renderItems([scorecardMessage({ ...SCORECARD, versionId: 'v3' })]);
-    expect(screen.queryByTestId('code-agent-scorecard')).not.toBeInTheDocument();
-  });
-
-  it('flag off: no attribution and no host scorecard', () => {
+  it('flag off: no attribution', () => {
     renderItems([scorecardMessage(SCORECARD)], { roseDesktop: false });
     expect(screen.queryByTestId('code-agent-attribution')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('code-agent-scorecard')).not.toBeInTheDocument();
     expect(screen.getByText('Speed button scorecard')).toBeInTheDocument();
   });
 
@@ -356,11 +336,16 @@ describe('row 46: scorecards and approvals attributed to the code agent', () => 
     msg(
       {
         toolName: 'request_user_approval',
-        toolCallId: 'approval-1',
+        toolCallId: 'agent-tools:attn-1',
         toolStatus: 'IN_PROGRESS',
+        title: '🔐 Codex requests approval',
         isUserAttentionMessage: true,
-        requestUserApproval: { toolApproval: true, attentionRequestId: 'attn-1' },
-        from_code_agent: { provider: 'codex', task_id: 'task-1' },
+        requestUserApproval: {
+          toolApproval: true,
+          attentionRequestId: 'attn-1',
+          requestingAgent: codexRequester(),
+        },
+        requestingAgent: codexRequester(),
       },
       { text: 'Merge rose-ui/polish/speed into rose-ui/polish?' },
     ),
@@ -481,12 +466,13 @@ describe('row 47: pinned question above the query box', () => {
     expect(screen.getByTestId('pinned-question')).toBeInTheDocument();
   });
 
-  it('dismiss hides the card without answering', async () => {
+  it('dismiss sends {dismiss: true} (no answer echo) and unpins', async () => {
     const answers = captureAnswers();
     renderPinned([chipMessage(), questionMessage()]);
     await userEvent.setup().click(screen.getByRole('button', { name: 'Dismiss question' }));
-    expect(screen.queryByTestId('pinned-question')).not.toBeInTheDocument();
-    expect(answers).toHaveLength(0);
+    await waitFor(() => expect(screen.queryByTestId('pinned-question')).not.toBeInTheDocument());
+    expect(answers.map((a) => a.body)).toEqual([{ dismiss: true }]);
+    expect(screen.getByTestId('code-agent-transcript')).not.toHaveTextContent('You → Codex');
   });
 
   it('keeps the question pinned and shows the error when the answer fails', async () => {
@@ -501,12 +487,8 @@ describe('row 47: pinned question above the query box', () => {
     expect(screen.getByTestId('pinned-question')).toBeInTheDocument();
   });
 
-  it('a durably answered question is not pinned', () => {
-    renderPinned([
-      chipMessage(),
-      questionMessage(),
-      msg({ question_answer: { question_id: 'q-1', answer: 'Everyone' } }, { role: 'USER' }),
-    ]);
+  it('a durably answered question (row FINISHED) is not pinned', () => {
+    renderPinned([chipMessage(), questionMessage({}, { toolStatus: 'FINISHED' })]);
     expect(screen.queryByTestId('pinned-question')).not.toBeInTheDocument();
   });
 
@@ -532,34 +514,99 @@ describe('row 51: execution target and local failures', () => {
     expect(screen.getByTestId('code-agent-target')).toHaveTextContent(/^Cloud$/);
   });
 
-  it('Mac app closed: exact canonical text in the red failure box', () => {
-    renderChip([
-      chipMessage({
-        target: 'local',
-        state: 'failed',
-        device_name: "Andy's MacBook Pro",
-        failure_kind: 'local_disconnected',
-        ended_at: '2026-10-20T12:00:01.000Z',
-      }),
-    ]);
+  /** The spawn tool's ERROR row for an unavailable local target (agents handler, L-LOCAL). */
+  function localUnavailableRow(text: string, deviceName?: string) {
+    return msg(
+      {
+        toolName: 'spawn_claude_code_agent',
+        toolCallId: 'call-local-1',
+        toolStatus: 'ERROR',
+        title: 'Code session failed',
+        code_provider: 'codex',
+        error_code: 'LOCAL_TARGET_UNAVAILABLE',
+        code_agent: { target: 'local', ...(deviceName ? { device_name: deviceName } : {}) },
+      },
+      { text },
+    );
+  }
+
+  function renderPendingChip(messages: Message[], roseDesktop = true) {
+    return renderWithProviders(
+      <WithAgent messages={messages}>
+        <ClaudeCodeChip taskId="pending" toolCallId="call-local-1" codeProvider="codex" />
+      </WithAgent>,
+      { roseDesktop },
+    );
+  }
+
+  const oracle = (text: { lead: string; rest: string }) => `${text.lead} ${text.rest}`;
+
+  it('Mac app closed: the LOCAL_TARGET_UNAVAILABLE message verbatim in the red failure box', () => {
+    const message = oracle(localFailureText('local_disconnected', "Andy's MacBook Pro"));
+    renderPendingChip([localUnavailableRow(message, "Andy's MacBook Pro")]);
     const box = screen.getByTestId('code-agent-failure');
-    expect(box).toHaveTextContent(
-      "Can't run locally: the Rose Mac app on Andy's MacBook Pro is closed or disconnected. Open the Rose Mac app and retry, or run this agent in the cloud.",
-    );
-    expect(box.querySelector('strong')).toHaveTextContent(
-      "Can't run locally: the Rose Mac app on Andy's MacBook Pro is closed or disconnected.",
-    );
+    expect(box.textContent).toBe(message);
     expect(box.closest('.border-red-500\\/30')).not.toBeNull();
     expect(screen.getByText('Codex Failed')).toBeInTheDocument();
+    expect(screen.getByTestId('code-agent-target')).toHaveAttribute('title', "Andy's MacBook Pro");
   });
 
-  it('web-initiated agent: exact canonical text for local runs', () => {
-    renderChip([
-      chipMessage({ target: 'local', state: 'failed', failure_kind: 'local_requires_mac_app' }),
-    ]);
-    expect(screen.getByTestId('code-agent-failure')).toHaveTextContent(
-      'Local runs need an agent started from the Rose Mac app. Start this agent from the Mac app, or run it in the cloud.',
+  it('web-initiated agent: the backend text verbatim, never re-worded client-side', () => {
+    const message = oracle(localFailureText('local_requires_mac_app', undefined));
+    renderPendingChip([localUnavailableRow(message)]);
+    expect(screen.getByTestId('code-agent-failure').textContent).toBe(message);
+    // Any other backend wording is shown as sent (no hardcoded client strings).
+    const custom =
+      "Can't run locally: no folder on Andy's Mac is shared with Rose. Share a folder in the Rose Mac app and retry, or run this agent in the cloud.";
+    renderPendingChip([localUnavailableRow(custom)]);
+    expect(screen.getAllByTestId('code-agent-failure')[1].textContent).toBe(custom);
+  });
+
+  it('real partial snapshot ({target, device_name, folder} + row task_id/provider) drives the desktop chip', () => {
+    const started = msg({
+      toolName: 'spawn_claude_code_agent',
+      toolCallId: 'call-task-1',
+      task_id: 'task-1',
+      action_type: 'claude_code_started',
+      toolStatus: 'IN_PROGRESS',
+      code_provider: 'codex',
+      code_agent: { target: 'local', device_name: 'Andy MBP', folder: '~/Developer/rose' },
+    });
+    renderChip([started]);
+    expect(screen.getByTestId('code-agent-chip')).toHaveAttribute('data-code-agent-state', 'live');
+    expect(screen.getByTestId('code-agent-target')).toHaveTextContent(
+      'This Mac · ~/Developer/rose',
     );
+    expect(screen.getByTestId('code-agent-target')).toHaveAttribute('title', 'Andy MBP');
+  });
+
+  it('Mac app: "Open in Terminal" on a live local session calls localCode.openTerminal(taskId); hidden on web and cloud', async () => {
+    const openTerminal = vi.fn().mockResolvedValue({ success: true });
+    const live = (target: 'local' | 'cloud') =>
+      msg({
+        toolName: 'spawn_claude_code_agent',
+        toolCallId: 'call-task-1',
+        task_id: 'task-1',
+        action_type: 'claude_code_started',
+        toolStatus: 'IN_PROGRESS',
+        code_provider: 'claude',
+        code_agent: { target, folder: '~/Developer/rose' },
+      });
+    const web = renderChip([live('local')]);
+    expect(screen.queryByRole('button', { name: 'Open in Terminal' })).not.toBeInTheDocument();
+    web.unmount();
+
+    window.api = { isElectron: true, localCode: { openTerminal } };
+    try {
+      const cloud = renderChip([live('cloud')]);
+      expect(screen.queryByRole('button', { name: 'Open in Terminal' })).not.toBeInTheDocument();
+      cloud.unmount();
+      renderChip([live('local')]);
+      await userEvent.setup().click(screen.getByRole('button', { name: 'Open in Terminal' }));
+      expect(openTerminal).toHaveBeenCalledWith('task-1');
+    } finally {
+      delete window.api;
+    }
   });
 
   it('other failures show failure_message verbatim', () => {

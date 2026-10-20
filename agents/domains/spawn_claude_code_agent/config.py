@@ -63,6 +63,12 @@ SDK_POST_RESULT_STRETCH_TOOL_NAMES: Final[frozenset[str]] = frozenset(
 # the *first* SDK result regardless of stretch/idle.
 SDK_POST_RESULT_EXIT_GRACE_S: Final[float] = 180.0
 
+# Structured transcript rows (utils/code_transcript.py) are persisted in batches at most
+# this often while new events arrive, plus once when monitoring ends. Live
+# token streaming reaches viewers over the sandbox ws (`code_agent_delta`);
+# the batches are the durable record, so ≤0.5 writes/s per active code agent.
+TRANSCRIPT_FLUSH_INTERVAL_S: Final[float] = 2.0
+
 # Maximum runtime before timeout.
 # Keep this well below long rose-bench task budgets (e.g. cuda-kernel 4200s).
 # A 60m cap let hung Claude Code sessions burn the whole bench with no parent
@@ -143,3 +149,26 @@ MAX_UNCHANGED_OUTPUTS: Final[int] = 3
 
 # E2B sandbox cost: $0.000028/second = 0.0028 cents/second
 E2B_COST_CENTS_PER_SECOND: Final[float] = 0.0028
+
+# ── Run target (C14: cloud sandbox vs the user's Mac) ──
+CODE_TARGET_CLOUD: Final[str] = "cloud"
+CODE_TARGET_LOCAL: Final[str] = "local"
+# Error type for a local (Mac) target that cannot start; matches the backend's
+# 409 ``code`` so the handler surfaces the exact text as the tool error.
+LOCAL_TARGET_UNAVAILABLE_CODE: Final[str] = "LOCAL_TARGET_UNAVAILABLE"
+# Reason codes shared with back-end/src/providers/localDevices/messages.ts.
+LOCAL_TARGET_NOT_MAC_ORIGIN: Final[str] = "not_mac_origin"
+LOCAL_TARGET_DEVICE_DISCONNECTED: Final[str] = "device_disconnected"
+# Exact user-facing tool errors (rose-builds-rose.md C14), shown in the chip's
+# red failure box. The backend owns the same templates;
+# code_agent_local_target.blackbox.py asserts the two never drift.
+LOCAL_TARGET_NOT_MAC_ORIGIN_MESSAGE: Final[str] = (
+    "Local runs need an agent started from the Rose Mac app. "
+    "Start this agent from the Mac app, or run it in the cloud."
+)
+LOCAL_TARGET_DISCONNECTED_TEMPLATE: Final[str] = (
+    "Can't run locally: the Rose Mac app on {device_name} is closed or disconnected. "
+    "Open the Rose Mac app and retry, or run this agent in the cloud."
+)
+# Only when a Mac-origin agent's device row has no name.
+LOCAL_TARGET_UNKNOWN_DEVICE_NAME: Final[str] = "your Mac"

@@ -43,8 +43,8 @@
  * [FITS]
  * Re-measured on scroll and on ResizeObserver resize.
  *
- * REQUESTER LABEL (Rose Desktop only): a request from a code agent
- * (`from_code_agent`) shows that agent's icon + name in the header.
+ * REQUESTER LABEL (Rose Desktop only): a request carrying `requestingAgent`
+ * shows that agent's name in the header (plus its icon for code agents).
  *
  * Props:
  * - pendingApproval: { attentionRequestId, question } | null
@@ -59,7 +59,7 @@ import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import type { RequestPaymentCardPayload } from '@/lib/realtime-types';
 import { respondToAttentionRequest, rejectAttentionRequest, useToast } from '../hooks';
 import { ApprovalScrollBody } from './ApprovalCardBody';
-import { codeAgentLabel, parseCodeAgentSender } from '../hooks/codeAgentContract';
+import { parseRequestingAgent } from '../hooks/codeAgentContract';
 import { ProviderIcon } from './claudeCodeChip.shared';
 
 interface PendingApproval {
@@ -67,7 +67,7 @@ interface PendingApproval {
   question: string;
   imageUrl?: string | null;
   requestPaymentCard?: RequestPaymentCardPayload;
-  fromCodeAgent?: unknown;
+  requestingAgent?: unknown;
 }
 
 interface ApprovalChipProps {
@@ -235,18 +235,19 @@ function useHasMoreBelow(resetKey?: string) {
   return { scrollerRef, contentRef, hasMoreBelow, onScroll: measure };
 }
 
-function RequesterLabel({ fromCodeAgent }: { fromCodeAgent: unknown }) {
+function RequesterLabel({ requestingAgent }: { requestingAgent: unknown }) {
   const roseDesktop = useRoseDesktop();
-  const sender = roseDesktop ? parseCodeAgentSender({ from_code_agent: fromCodeAgent }) : null;
-  if (!sender) return null;
-  const label = codeAgentLabel(sender.provider);
+  const requester = roseDesktop ? parseRequestingAgent(requestingAgent) : null;
+  if (!requester) return null;
   return (
     <span
       data-testid="approval-requester"
       className="ml-auto flex items-center gap-1.5 text-xs text-muted-foreground dark:text-[#a3a39d]"
     >
-      <ProviderIcon codeProvider={sender.provider} className="h-3.5 w-3.5" />
-      {label}
+      {requester.provider && (
+        <ProviderIcon codeProvider={requester.provider} className="h-3.5 w-3.5" />
+      )}
+      {requester.label}
     </span>
   );
 }
@@ -288,7 +289,7 @@ export default function ApprovalChip({ pendingApproval, onApprovalHandled }: App
               <div className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
               <span className="text-sm font-medium text-foreground">Approval Required</span>
             </div>
-            <RequesterLabel fromCodeAgent={pendingApproval.fromCodeAgent} />
+            <RequesterLabel requestingAgent={pendingApproval.requestingAgent} />
           </div>
           <ApprovalScrollBody
             scrollerRef={scrollerRef}

@@ -21,15 +21,21 @@
  *   - publish token: mint → publish as the owner; expired, wrong-scope and
  *     tampered tokens → 401
  *   - the shipped seed bundle + `rose-ui publish` CLI publish end to end
+ *   - a code agent's publish-with-activate broadcasts USER_UI_ACTIVE_CHANGED
+ *     {versionId, agentId} on agent:<code agent> and agent:<root>; activate:false
+ *     and a token naming another user's agent broadcast nothing
  *
  * Usage: bash scripts/run-blackbox-tests.sh user-ui
  */
 import { execFile } from 'child_process';
+import { randomUUID } from 'crypto';
 import { mkdtempSync, mkdirSync, rmSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { promisify } from 'util';
 import { config } from 'dotenv';
+import { prisma } from '../../providers/database';
+import { retryWithBackoff } from '../../providers/retry';
 import { mintUserUiPublishToken } from '../../providers/userUi/publishToken';
 import { USER_UI_CLI_SCRIPT, userUiSeedFiles } from '../../providers/userUi/seed';
 import {
@@ -143,6 +149,48 @@ async function active(auth: string) {
     manifest?: Record<string, unknown>;
     baseUrl?: string;
   };
+}
+
+interface BroadcastCapture {
+  id: number;
+  url: string;
+  requestBody: string | null;
+}
+
+async function captureCursor(): Promise<number> {
+  const res = await call('/api/test/captures');
+  expectStatus(res, 200, 'capture harness');
+  return Number(res.data.nextId) - 1;
+}
+
+/** USER_UI_ACTIVE_CHANGED messages captured after `cursor`, as topic → payload. */
+async function userUiBroadcasts(cursor: number) {
+  const res = await call(`/api/test/captures?after=${cursor}`);
+  expectStatus(res, 200, 'captures');
+  const found: { topic: string; payload: { versionId?: string; agentId?: string } }[] = [];
+  for (const capture of res.data.captures as BroadcastCapture[]) {
+    if (!capture.url.endsWith('/realtime/v1/api/broadcast') || !capture.requestBody) continue;
+    const body = JSON.parse(capture.requestBody) as {
+      messages?: { topic: string; event: string; payload: { record?: Record<string, string> } }[];
+    };
+    for (const m of body.messages ?? []) {
+      // The wire wraps every broadcast payload as { record }; the FE reads payload.record.
+      if (m.event === 'USER_UI_ACTIVE_CHANGED') {
+        found.push({ topic: m.topic, payload: m.payload.record ?? {} });
+      }
+    }
+  }
+  return found;
+}
+
+/** Broadcasts leave through a batching dispatcher; wait up to ~10 s for `count`. */
+function waitForUserUiBroadcasts(cursor: number, count: number) {
+  return retryWithBackoff(() => userUiBroadcasts(cursor), {
+    maxRetries: 50,
+    fixedDelays: Array.from({ length: 50 }, () => 200),
+    shouldRetryResult: (found) => found.length < count,
+    component: 'UserUiBlackbox',
+  });
 }
 
 let userA: Session;
@@ -379,6 +427,67 @@ const tests: { name: string; fn: () => Promise<void> }[] = [
     },
   },
   {
+    name: 'code-agent publish broadcasts USER_UI_ACTIVE_CHANGED on agent + root channels',
+    fn: async () => {
+      const rootId = randomUUID();
+      const codeId = randomUUID();
+      const foreignId = randomUUID();
+      await prisma.agent.create({
+        data: { id: rootId, userId: userA.userId, goal: 'ui root', status: 'ACTIVE' },
+      });
+      await prisma.agent.create({
+        data: {
+          id: codeId,
+          userId: userA.userId,
+          goal: 'ui code agent',
+          status: 'ACTIVE',
+          parentAgentId: rootId,
+          depth: 1,
+        },
+      });
+      await prisma.agent.create({
+        data: { id: foreignId, userId: userB.userId, goal: 'other user', status: 'ACTIVE' },
+      });
+      try {
+        const token = mintUserUiPublishToken(userA.userId, { agentId: codeId }).token;
+        const cursor = await captureCursor();
+        const res = await publish(token, validFiles({ 'live.txt': 'v-live' }));
+        expectStatus(res, 201, 'publish with agent token');
+        const versionId = String(res.data.versionId);
+        const seen = await waitForUserUiBroadcasts(cursor, 2);
+        const topics = seen
+          .filter((b) => b.payload.versionId === versionId && b.payload.agentId === codeId)
+          .map((b) => b.topic)
+          .sort();
+        const expected = [`agent:${codeId}`, `agent:${rootId}`].sort();
+        assert(
+          JSON.stringify(topics) === JSON.stringify(expected),
+          `expected broadcasts on ${expected.join(', ')}, got ${JSON.stringify(seen)}`
+        );
+
+        const quietCursor = await captureCursor();
+        const hidden = await publish(token, validFiles({ 'live.txt': 'hidden' }), false);
+        expectStatus(hidden, 201, 'publish activate:false');
+        const foreign = mintUserUiPublishToken(userA.userId, { agentId: foreignId }).token;
+        expectStatus(await publish(foreign, validFiles({ 'live.txt': 'f' })), 201, 'foreign');
+        const marker = await publish(token, validFiles({ 'live.txt': 'marker' }));
+        expectStatus(marker, 201, 'marker publish');
+        await waitForUserUiBroadcasts(quietCursor, 2);
+        const quiet = await userUiBroadcasts(quietCursor);
+        assert(
+          quiet.every((b) => b.payload.versionId === marker.data.versionId),
+          `activate:false / foreign-agent publishes must not broadcast: ${JSON.stringify(quiet)}`
+        );
+        assert(
+          !quiet.some((b) => b.topic === `agent:${foreignId}`),
+          'never broadcast on another user agent channel'
+        );
+      } finally {
+        await prisma.agent.deleteMany({ where: { id: { in: [codeId, rootId, foreignId] } } });
+      }
+    },
+  },
+  {
     name: 'seed bundle + rose-ui CLI publish end to end',
     fn: async () => {
       const home = mkdtempSync(join(tmpdir(), 'rose-ui-cli-'));
@@ -526,6 +635,7 @@ async function main(): Promise<void> {
   console.log(
     `\nResults: ${tests.length - failed} passed, ${failed} failed, ${tests.length} total`
   );
+  await prisma.$disconnect();
   process.exit(failed > 0 ? 1 : 0);
 }
 

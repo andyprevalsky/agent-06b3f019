@@ -155,14 +155,22 @@ describe('Rose Desktop integrations', () => {
     expect(within(chrome).queryByTestId('sync-progress')).not.toBeInTheDocument();
   });
 
-  it('animates live: refetches while syncing and flips when the server reaches 100%', async () => {
+  it('animates live: polls progress while syncing and flips when the server reaches 100%', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
-    let pct = 40;
-    serve(() => [chromeProfiles({ pct, done: pct, total: 100, unit: 'sites', eta_sec: 30 })]);
+    serve([chromeProfiles({ pct: 40, done: 40, total: 100, unit: 'sites', eta_sec: 30 })]);
+    const done = chromeProfiles({ pct: 100, done: 100, total: 100, unit: 'sites', eta_sec: 0 });
+    server.use(
+      http.get(`${API_BASE}/integrations/progress`, () =>
+        HttpResponse.json({
+          cursor: 'c1',
+          changed: true,
+          accountsByProvider: { chrome: done.accounts },
+        }),
+      ),
+    );
     await renderDesktop();
     const bar = await waitFor(() => within(rowEl('browser-chrome')).getByTestId('sync-progress'));
     expect(within(bar).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '40');
-    pct = 100;
     vi.advanceTimersByTime(5_000);
     await waitFor(() =>
       expect(
@@ -347,7 +355,7 @@ describe('integrations account parser', () => {
   it('parses full progress, total null, eta null and bad input', () => {
     expect(
       parseSyncProgress({ pct: 41, done: 88, total: 214, unit: 'sites', eta_sec: 60 }),
-    ).toEqual({ pct: 41, done: 88, total: 214, unit: 'sites', etaSec: 60 });
+    ).toEqual({ pct: 41, done: 88, total: 214, unit: 'sites', etaSec: 60, phase: null });
     expect(parseSyncProgress({ done: 50, total: 200, unit: 'emails' })).toMatchObject({ pct: 25 });
     expect(parseSyncProgress({ pct: 70, done: 5, total: null, unit: 'chats' })).toEqual({
       pct: null,
@@ -355,6 +363,7 @@ describe('integrations account parser', () => {
       total: null,
       unit: 'chats',
       etaSec: null,
+      phase: null,
     });
     expect(parseSyncProgress({ done: 3, total: 9, eta_sec: null })?.etaSec).toBeNull();
     expect(parseSyncProgress({ done: 3, total: 9 })?.unit).toBe('items');

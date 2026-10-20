@@ -308,10 +308,11 @@ describe('top-right app icons', () => {
     renderWithProviders(<RoseAppIcons />);
     await user.click(screen.getByTestId('rose-app-integrations'));
     const body = screen.getByTestId('rose-app-panel-integrations');
+    // Rose Desktop integrations: section headings (a row may repeat the same name).
     await waitFor(() =>
       expect(within(body).getByRole('heading', { name: 'Browser Cookies' })).toBeInTheDocument(),
     );
-    expect(within(body).getByText('Passwords')).toBeInTheDocument();
+    expect(within(body).getByRole('heading', { name: 'Passwords' })).toBeInTheDocument();
   });
 
   it('a healthy account shows no reconnect dot', async () => {

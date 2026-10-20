@@ -138,6 +138,22 @@ export interface AgentModeStartedPayload {
 }
 
 // -----------------------------------------------------------------------------
+// USER_UI_ACTIVE_CHANGED Event - a code agent published + activated a Rose UI
+// -----------------------------------------------------------------------------
+
+/**
+ * Sent on the publishing code agent's agent:<id> channel AND its root's
+ * (backend broadcastUserUiActiveChanged) after `rose-ui publish` activates a
+ * version. The open tab refetches GET /api/user-ui/active unless `versionId`
+ * is already applied.
+ */
+export interface UserUiActiveChangedPayload {
+  versionId: string;
+  /** The publishing (code) agent. */
+  agentId: string;
+}
+
+// -----------------------------------------------------------------------------
 // BROWSER_SESSION Event - a browser task's provider-session binding changed
 // -----------------------------------------------------------------------------
 

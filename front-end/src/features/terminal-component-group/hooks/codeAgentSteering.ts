@@ -4,7 +4,7 @@
  * live in ./codeAgentContract.ts.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { useAgentContext, type Message } from '../hooks';
 import type { ChipState } from '../types';
@@ -14,14 +14,16 @@ import {
   codeAgentToolCallId,
   collectCodeAgentEvents,
   latestCodeAgentMeta,
+  messageRequester,
   parseCodeAgentMeta,
-  parseCodeAgentSender,
+  parseDescendantPinnedQuestion,
   parsePinnedQuestion,
+  type AttentionRequestLike,
   type CodeAgentMeta,
   type CodeAgentProvider,
-  type CodeAgentSender,
   type CodeAgentTranscriptEvent,
   type PinnedQuestionDisplay,
+  type RequestingAgent,
 } from './codeAgentContract';
 import { useClosedQuestions } from './codeAgentLocalState';
 
@@ -62,12 +64,12 @@ export interface DesktopCodeAgent {
   toolCallId: string | undefined;
 }
 
-export function useDesktopCodeAgent(taskId: string): DesktopCodeAgent {
+export function useDesktopCodeAgent(taskId: string, spawnToolCallId?: string): DesktopCodeAgent {
   const roseDesktop = useRoseDesktop();
   const { messages } = useAgentContext();
   const meta = useMemo(
-    () => (roseDesktop ? latestCodeAgentMeta(messages, taskId) : null),
-    [messages, roseDesktop, taskId],
+    () => (roseDesktop ? latestCodeAgentMeta(messages, taskId, spawnToolCallId) : null),
+    [messages, roseDesktop, spawnToolCallId, taskId],
   );
   const events = useMemo(
     () => (meta ? collectCodeAgentEvents(messages, taskId) : []),
@@ -82,33 +84,77 @@ export function useDesktopCodeAgent(taskId: string): DesktopCodeAgent {
 
 export interface PendingQuestion {
   question: PinnedQuestionDisplay;
-  sender: CodeAgentSender | null;
+  requester: RequestingAgent | null;
+  /** Agent whose trajectory holds the pin (signs its media items). */
+  ownerAgentId: string | null;
 }
 
-/** Oldest pinned question not answered (durably) nor closed in this session. */
+/**
+ * Oldest pinned question of this trajectory that is still open (its row has not
+ * finished) and was not closed in this session.
+ */
 export function findPendingQuestion(
   messages: Message[],
   closed: ReadonlySet<string>,
+  ownerAgentId: string | null = null,
 ): PendingQuestion | null {
   const answered = answeredQuestionIds(messages);
   for (const message of messages) {
     const question = parsePinnedQuestion(message.metadata);
     if (!question) continue;
     if (answered.has(question.question_id) || closed.has(question.question_id)) continue;
-    return { question, sender: parseCodeAgentSender(message.metadata) };
+    return { question, requester: messageRequester(message.metadata), ownerAgentId };
   }
   return null;
 }
 
-export function usePendingQuestion(): { pending: PendingQuestion | null; agentId: string | null } {
+/**
+ * Oldest open pin a DESCENDANT agent routed to `rootAgentId`, read from the
+ * app-wide attention-request subscription (no extra channel or poll).
+ */
+export function findDescendantQuestion(
+  requests: readonly AttentionRequestLike[],
+  rootAgentId: string,
+  closed: ReadonlySet<string>,
+): PendingQuestion | null {
+  for (const request of requests) {
+    if (closed.has(request.id)) continue;
+    const parsed = parseDescendantPinnedQuestion(request, rootAgentId);
+    if (parsed) return { ...parsed, ownerAgentId: request.agent_id };
+  }
+  return null;
+}
+
+const NO_REQUESTS: readonly AttentionRequestLike[] = [];
+
+/** The app-wide attention subscription, when mounted (absent in shared views). */
+export interface AttentionSource {
+  requests: readonly AttentionRequestLike[];
+  refetch: () => Promise<void>;
+}
+
+export function usePendingQuestion(attention: AttentionSource | null): {
+  pending: PendingQuestion | null;
+  agentId: string | null;
+  refetchAttention: () => void;
+} {
   const roseDesktop = useRoseDesktop();
   const { messages, selectedAgentId, agent } = useAgentContext();
+  const requests = attention?.requests ?? NO_REQUESTS;
   const closed = useClosedQuestions();
-  const pending = useMemo(
-    () => (roseDesktop ? findPendingQuestion(messages, closed) : null),
-    [closed, messages, roseDesktop],
-  );
-  return { pending, agentId: selectedAgentId ?? agent?.agent_id ?? null };
+  const agentId = selectedAgentId ?? agent?.agent_id ?? null;
+  const pending = useMemo(() => {
+    if (!roseDesktop) return null;
+    return (
+      findPendingQuestion(messages, closed, agentId) ??
+      (agentId ? findDescendantQuestion(requests, agentId, closed) : null)
+    );
+  }, [agentId, closed, messages, requests, roseDesktop]);
+  const refetch = attention?.refetch;
+  const refetchAttention = useCallback(() => {
+    if (refetch) void refetch();
+  }, [refetch]);
+  return { pending, agentId, refetchAttention };
 }
 
 // ── Root status line under the chips (row 44) ───────────────────────────────
@@ -182,13 +228,10 @@ export function deriveRootWaitStatus(
 ): RootWaitStatus | null {
   const tasks = rollupCodeTasks(messages);
   const pending = findPendingQuestion(messages, closedQuestions);
-  if (pending?.sender) {
-    const task = pending.sender.task_id ? tasks.get(pending.sender.task_id) : undefined;
-    return {
-      kind: 'answer',
-      agent: codeAgentLabel(pending.sender.provider),
-      base: task?.meta?.base_branch,
-    };
+  if (pending?.requester) {
+    const taskId = pending.requester.task_id;
+    const task = taskId ? tasks.get(taskId) : undefined;
+    return { kind: 'answer', agent: pending.requester.label, base: task?.meta?.base_branch };
   }
   const live = [...tasks.values()].filter(isLive);
   if (live.length === 0) return null;

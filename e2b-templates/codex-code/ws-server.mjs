@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 import { WebSocketServer } from "ws";
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  rmSync,
+  writeFileSync,
+} from "fs";
 import { spawn, execFileSync } from "child_process";
 import { timingSafeEqual } from "crypto";
 import { createServer } from "http";
@@ -19,7 +25,9 @@ function log(level, message, data = {}) {
   }
 }
 
-const PORT = 3000;
+// E2B serves the template on 3000; a local run (tests, a local target) picks
+// its own port.
+const PORT = Number.parseInt(process.env.PORT || "3000", 10);
 const GOAL = process.env.CODEX_GOAL;
 const CODEX_AUTH_JSON = process.env.CODEX_AUTH_JSON;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -204,13 +212,28 @@ function renderCodexJsonLine(line) {
   const item = event.item;
   if (!item) return "";
 
+  // `item_id` pairs an item's started/completed events (transcript rows).
+  const itemId = typeof item.id === "string" ? item.id : null;
+
   if (item.type === "agent_message" && item.text) {
     appendEvent({
       type: "agent_message",
       raw_type: event.type,
       text: item.text,
+      item_id: itemId,
     });
     return `[Codex] ${item.text}\n`;
+  }
+
+  if (item.type === "reasoning" && event.type === "item.completed") {
+    appendEvent({
+      type: "thinking",
+      raw_type: event.type,
+      text: typeof item.text === "string" ? item.text : "",
+      redacted: !item.text,
+      item_id: itemId,
+    });
+    return "";
   }
 
   if (item.type === "file_change" && event.type === "item.completed") {
@@ -223,6 +246,7 @@ function renderCodexJsonLine(line) {
       status: item.status || "completed",
       changes: item.changes || [],
       paths,
+      item_id: itemId,
     });
     return `[Codex file_change ${item.status || "completed"}] ${describeFileChanges(item.changes)}\n`;
   }
@@ -234,6 +258,7 @@ function renderCodexJsonLine(line) {
         raw_type: event.type,
         status: "started",
         command: item.command,
+        item_id: itemId,
       });
       return `[Codex command started] ${item.command}\n`;
     }
@@ -245,6 +270,7 @@ function renderCodexJsonLine(line) {
       command: item.command,
       output: item.aggregated_output || "",
       exit_code: item.exit_code ?? null,
+      item_id: itemId,
     });
     const output = item.aggregated_output
       ? `\n${item.aggregated_output.replace(/\n?$/, "\n")}`
@@ -320,13 +346,23 @@ function handleUserTurn(msg) {
   return turnAck(id, "delivered");
 }
 
-wss.on("connection", (ws) => {
+wss.on("connection", (ws, req) => {
   log("info", "Client connected", { total: clients.size + 1 });
   clients.add(ws);
 
-  if (outputBuffer.length > 0)
+  // `?replay=0`: a control connection (direct-chat turn) skips the history.
+  let replay = true;
+  try {
+    replay =
+      new URL(req?.url || "/", "http://localhost").searchParams.get(
+        "replay",
+      ) !== "0";
+  } catch {
+    replay = true;
+  }
+  if (replay && outputBuffer.length > 0)
     ws.send(JSON.stringify({ type: "buffer", data: outputBuffer }));
-  if (eventBuffer.length > 0)
+  if (replay && eventBuffer.length > 0)
     ws.send(JSON.stringify({ type: "code_agent_events", data: eventBuffer }));
   if (processExited)
     ws.send(JSON.stringify({ type: "exit", code: exitCode ?? 0 }));
@@ -343,6 +379,9 @@ wss.on("connection", (ws) => {
         );
       } else if (msg.type === "user_turn") {
         ws.send(JSON.stringify(handleUserTurn(msg)));
+      } else if (msg.type === "hand_back") {
+        // Codex has no direct-chat hold: queued turns always run in order.
+        ws.send(JSON.stringify({ type: "hand_back_ack", status: "not_held" }));
       }
     } catch (err) {
       log("error", "Failed to parse message", { error: err.message });
@@ -482,9 +521,15 @@ let codexFastModeProxy = await startCodexFastModeProxy();
 
 const home = homedir();
 const codexHome = join(home, ".codex");
+// Same contract as the Claude Code ws-server: ROSE_PROJECT_WORKDIR names an
+// existing folder to work in (a restored project, or the folder a user granted
+// to the Rose Mac app). That folder is never cloned into or given an AGENTS.md,
+// and the session's scratch dirs stay under HOME.
+const PROJECT_WORKDIR = process.env.ROSE_PROJECT_WORKDIR || "";
+const projectMode = Boolean(PROJECT_WORKDIR) && existsSync(PROJECT_WORKDIR);
 mkdirSync(codexHome, { recursive: true });
-mkdirSync("/home/user/attachments", { recursive: true });
-mkdirSync("/home/user/output", { recursive: true });
+mkdirSync(join(home, "attachments"), { recursive: true });
+mkdirSync(join(home, "output"), { recursive: true });
 
 async function loginWithApiKey() {
   const login = spawn("codex", ["login", "--with-api-key"], {
@@ -520,9 +565,10 @@ if (CODEX_AUTH_JSON) {
   usingApiKey = true;
 }
 
-let workDir = "/home/user";
-const REPO_WORKDIR = "/home/user/workspace";
-if (GITHUB_REPO_URL) {
+// home is /home/user in the E2B template.
+let workDir = projectMode ? PROJECT_WORKDIR : home;
+const REPO_WORKDIR = join(home, "workspace");
+if (GITHUB_REPO_URL && !projectMode) {
   try {
     const parsed = new URL(GITHUB_REPO_URL);
     if (!parsed.pathname.split("/").filter(Boolean).pop()) {
@@ -554,7 +600,9 @@ if (GITHUB_REPO_URL) {
   }
 }
 
-if (!GITHUB_REPO_URL && CODE_AGENT_SYSTEM_PROMPT) {
+// A project's own AGENTS.md is never overwritten; the goal already carries the
+// code-agent instructions.
+if (!GITHUB_REPO_URL && !projectMode && CODE_AGENT_SYSTEM_PROMPT) {
   writeFileSync(join(workDir, "AGENTS.md"), CODE_AGENT_SYSTEM_PROMPT);
 }
 
@@ -593,6 +641,23 @@ function buildCodexArgs({ useFastModeProxy, resume = null }) {
     CODEX_MODEL,
     ...(resume ? ["resume", resume.threadId, resume.text] : [sanitizedGoal]),
   ];
+  // Rose agent tools as an MCP server (the backend writes ~/.rose/bin/rose at
+  // session create). --ignore-user-config skips config.toml, so register it
+  // with -c. Approvals and pinned questions block until answered; the tool
+  // call deadline is set past any real wait (C11: no code-agent timeouts).
+  const roseCli = join(home, ".rose", "bin", "rose");
+  if (existsSync(roseCli)) {
+    args.splice(
+      1,
+      0,
+      "-c",
+      'mcp_servers.rose.command="node"',
+      "-c",
+      `mcp_servers.rose.args=[${JSON.stringify(roseCli)},"mcp"]`,
+      "-c",
+      "mcp_servers.rose.tool_timeout_sec=31536000",
+    );
+  }
   if (useFastModeProxy && codexFastModeProxy) {
     args.splice(
       1,

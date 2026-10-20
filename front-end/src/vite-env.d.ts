@@ -12,9 +12,15 @@ interface ElectronAuthBridge {
   clear: () => Promise<{ success: boolean }>;
 }
 
+/** Mac app local code runner (mac-app/shared/types/ipc.ts `localCode`); the part the web UI calls. */
+interface ElectronLocalCodeBridge {
+  openTerminal: (taskId: string) => Promise<{ success: boolean }>;
+}
+
 interface ElectronApiBridge {
   isElectron?: boolean;
   auth?: ElectronAuthBridge;
+  localCode?: ElectronLocalCodeBridge;
 }
 
 declare interface Window {

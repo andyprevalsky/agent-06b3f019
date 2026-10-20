@@ -258,6 +258,11 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
     // Per-user UI runtime: inline trajectory views render beneath their message.
     'Cross-domain import: "@/features/user-ui"',
   ],
+  // Per-user UI runtime: displayed text/html reuses UserUiFrame's cross-origin,
+  // allow-scripts-only sandbox instead of a second copy of those security rules.
+  'features/terminal-component-group/components/inline-media/DisplayMediaGroup.tsx': [
+    'Cross-domain import: "@/features/user-ui"',
+  ],
   'features/terminal-component-group/components/MessageListView.tsx': [
     'components layer imports "../api"',
   ],

@@ -40,7 +40,7 @@ export { default as BrowserStatusBarCarousel } from './BrowserStatusBarCarousel'
 export * from './ClaudeCodeChip';
 export { default as ClaudeCodeChip } from './ClaudeCodeChip';
 export { PinnedQuestionCard, PinnedQuestionMount } from './PinnedQuestion';
-export { CodeAgentAttribution, ScorecardCard } from './CodeAgentScorecard';
+export { CodeAgentAttribution } from './CodeAgentAttribution';
 export * from './FilePointerDisplay';
 export * from './DocumentPreviewDrawer';
 export * from './documentPreview.utils';

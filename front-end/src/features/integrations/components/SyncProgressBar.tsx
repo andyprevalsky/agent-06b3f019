@@ -6,6 +6,7 @@
  *   [DETERMINATE]    pct < 100 → bar width = pct (animated), moving shimmer,
  *                    "N of M <unit>" + "~ETA left" (ETA hidden when unknown)
  *   [DONE]           pct >= 100 → not rendered (the chip has flipped to synced)
+ *   any state with progress.phase → "<phase> · " before the count text
  *
  * 4px track, rose→violet gradient (#ffb36b→#ff5f8f→#e43f9a→#9b4dff) with a
  * soft glow. Uses the existing `animate-shimmer` keyframes (tailwind config).
@@ -88,6 +89,7 @@ export function SyncProgressView({
       <div className="mt-1 flex justify-between gap-3 text-[11.5px] tabular-nums text-muted-foreground">
         <span className="min-w-0 truncate">
           {prefix !== undefined && `${prefix} · `}
+          {progress?.phase && <span data-testid="sync-phase">{progress.phase} · </span>}
           <ProgressText progress={progress} />
         </span>
         {progress !== null && progress.etaSec !== null && progress.etaSec > 0 && (

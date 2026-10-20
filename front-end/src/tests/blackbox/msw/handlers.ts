@@ -16,6 +16,10 @@ export const handlers = [
   // Rose Desktop Integrations icon reads integration health; nothing connected by default.
   http.get(`${API_BASE}/integrations`, () => HttpResponse.json({ integrations: [] })),
   http.get(`${API_BASE}/integrations/plaid/items`, () => HttpResponse.json({ items: [] })),
+  // L-INTEG-CORE cheap progress poll: nothing changed unless a test overrides.
+  http.get(`${API_BASE}/integrations/progress`, () =>
+    HttpResponse.json({ cursor: '2026-10-20T00:00:00.000Z', changed: false }),
+  ),
   // No persisted binding by default: live views fall back to the transcript URL.
   http.get(`${API_BASE}/browser-session/task/:taskId/live-view`, () =>
     HttpResponse.json({ error: 'Session not found' }, { status: 404 }),
@@ -251,6 +255,22 @@ export const handlers = [
   http.get(`${API_BASE}/attention-requests`, () => {
     return HttpResponse.json({ requests: [] });
   }),
+
+  // Pinned question answer (agent-tools questionService.answerQuestion RequestState)
+  http.post(
+    `${API_BASE}/agents/:agentId/questions/:questionId/answer`,
+    async ({ params, request }) => {
+      const body = (await request.json()) as { answer?: string; dismiss?: boolean };
+      return HttpResponse.json({
+        id: String(params.questionId),
+        kind: 'question',
+        status: body.dismiss === true ? 'rejected' : 'answered',
+        response: body.dismiss === true ? null : (body.answer ?? null),
+        selected_option: null,
+        answered_by: 'user',
+      });
+    },
+  ),
 
   http.post(`${API_BASE}/attention-requests/:requestId/respond`, () => {
     return HttpResponse.json({ success: true });

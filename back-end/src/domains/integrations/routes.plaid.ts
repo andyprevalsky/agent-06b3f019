@@ -15,6 +15,7 @@ import { type Response, Router } from 'express';
 import { type AuthRequest, authenticate } from '../../providers/auth';
 import { asyncHandler } from '../../utils/asyncHandler';
 import * as plaidService from './service.plaid';
+import { clearAccountProgress, clearProviderProgress } from './service.progress';
 import {
   handlePlaidWebhook,
   PlaidWebhookVerificationError,
@@ -190,6 +191,7 @@ router.delete(
 
     try {
       const result = await plaidService.disconnectPlaidItem(userId, itemId);
+      await clearAccountProgress(userId, 'plaid', itemId);
       return res.json(result);
     } catch (err) {
       if (err instanceof plaidService.PlaidItemNotFoundError) {
@@ -209,6 +211,7 @@ router.delete(
       return res.status(401).json({ error: 'User not authenticated' });
     }
     const result = await plaidService.disconnectAllPlaidItems(userId);
+    await clearProviderProgress(userId, 'plaid');
     return res.json(result);
   })
 );

@@ -61,6 +61,9 @@ esac
 # user-ui blackbox reads back published bytes); prod uses Supabase Storage.
 export USER_UI_STORAGE_BACKEND=local
 export USER_UI_STORAGE_LOCAL_DIR="${USER_UI_STORAGE_LOCAL_DIR:-$ROOT_DIR/.context/user-ui-storage}"
+# display-tool media (domains/display) uses the same hermetic local store.
+export DISPLAY_STORAGE_BACKEND=local
+export DISPLAY_STORAGE_LOCAL_DIR="${DISPLAY_STORAGE_LOCAL_DIR:-$ROOT_DIR/.context/display-storage}"
 
 # Read the effective value of KEY from back-end/.env using dotenv last-in-wins
 # semantics (quoted values keep '#'; unquoted values drop inline comments).

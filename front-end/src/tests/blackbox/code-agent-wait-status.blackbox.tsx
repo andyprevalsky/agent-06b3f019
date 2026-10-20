@@ -5,7 +5,7 @@
  * running and absent with the flag off.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { screen, within } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import { CodeAgentWaitStatus } from '@/features/terminal-component-group/components/CodeAgentWaitStatus';
@@ -137,17 +137,15 @@ describe('row 44: root status line under the chips', () => {
     expect(status()).toHaveAttribute('data-wait-kind', 'answer');
 
     await userEvent.setup().click(screen.getByRole('button', { name: 'Dismiss question' }));
-    expect(status()).toHaveTextContent(
-      'Rose is waiting on Codex, then merges rose-ui/polish/speed into rose-ui/polish',
+    await waitFor(() =>
+      expect(status()).toHaveTextContent(
+        'Rose is waiting on Codex, then merges rose-ui/polish/speed into rose-ui/polish',
+      ),
     );
   });
 
   it('a durably answered question no longer reads "waiting on your answer"', () => {
-    renderStatus([
-      chipMessage(BASE),
-      questionMessage(),
-      msg({ question_answer: { question_id: 'q-1', answer: 'Everyone' } }, { role: 'USER' }),
-    ]);
+    renderStatus([chipMessage(BASE), questionMessage({}, { toolStatus: 'FINISHED' })]);
     expect(status()).toHaveAttribute('data-wait-kind', 'one');
   });
 

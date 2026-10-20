@@ -78,6 +78,9 @@ export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$ROOT_DIR/.context}"
 # user-ui blackbox reads back published bytes); prod uses Supabase Storage.
 export USER_UI_STORAGE_BACKEND=local
 export USER_UI_STORAGE_LOCAL_DIR="${USER_UI_STORAGE_LOCAL_DIR:-$ARTIFACT_DIR/user-ui-storage}"
+# display-tool media (domains/display) uses the same hermetic local store.
+export DISPLAY_STORAGE_BACKEND=local
+export DISPLAY_STORAGE_LOCAL_DIR="${DISPLAY_STORAGE_LOCAL_DIR:-$ARTIFACT_DIR/display-storage}"
 export BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES="${BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES:-weekly}"
 export BLACKBOX_TEST_CAPTURE_OUTBOUND="${BLACKBOX_TEST_CAPTURE_OUTBOUND:-1}"
 
@@ -483,38 +486,62 @@ source "$SCRIPT_DIR/blackbox-auto-rca-env.sh"
 export FAST_MODE_ANTHROPIC_PROXY_URL="${BLACKBOX_FAST_MODE_ANTHROPIC_PROXY_URL:-}"
 export FAST_MODE_CODEX_PROXY_URL="${BLACKBOX_FAST_MODE_CODEX_PROXY_URL:-}"
 
-cat >"$MANIFEST_PATH" <<EOF
+launch_backend() {
+  cat >"$MANIFEST_PATH" <<EOF
 {"run_id":"$RUN_ID","mode":"isolated-blackbox-backend","base_url":"$TEST_BASE_URL","port":$PORT,"artifact_dir":"$ARTIFACT_DIR","backend_log":"$BACKEND_LOG","runner_log":"$RUNNER_LOG","disable_gmail_sync":true}
 EOF
 
-echo "Starting isolated backend for black-box tests on port $PORT"
-echo "Backend log: $BACKEND_LOG"
-echo "Artifacts: $ARTIFACT_DIR"
+  echo "Starting isolated backend for black-box tests on port $PORT"
+  echo "Backend log: $BACKEND_LOG"
+  echo "Artifacts: $ARTIFACT_DIR"
 
-# Defer cancellation only across the background-child ownership handoff.
-BACKEND_PENDING_SIGNAL=0
-trap 'BACKEND_PENDING_SIGNAL=130' INT
-trap 'BACKEND_PENDING_SIGNAL=143' TERM
+  # Defer cancellation only across the background-child ownership handoff.
+  BACKEND_PENDING_SIGNAL=0
+  trap 'BACKEND_PENDING_SIGNAL=130' INT
+  trap 'BACKEND_PENDING_SIGNAL=143' TERM
 
-PORT="$PORT" \
-DISABLE_GMAIL_SYNC=1 \
-npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
-BACKEND_PID=$!
-trap 'exit 130' INT
-trap 'exit 143' TERM
-if [[ "$BACKEND_PENDING_SIGNAL" != 0 ]]; then
-  exit "$BACKEND_PENDING_SIGNAL"
-fi
+  PORT="$PORT" \
+  DISABLE_GMAIL_SYNC=1 \
+  npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
+  BACKEND_PID=$!
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  if [[ "$BACKEND_PENDING_SIGNAL" != 0 ]]; then
+    exit "$BACKEND_PENDING_SIGNAL"
+  fi
+}
+launch_backend
 
 
 READY=0
+BIND_RETRIES=0
 for _ in $(seq 1 120); do
-  if curl -fsS -m 2 "$TEST_BASE_URL/health" >/dev/null 2>&1; then
+  # Port locks are per worktree, so another worktree's isolated backend can
+  # take the same port between the free-port probe and our bind. /health alone
+  # would then pass against THAT backend and every test would run against the
+  # wrong code. Ready means our own process logged that it serves this port.
+  if curl -fsS -m 2 "$TEST_BASE_URL/health" >/dev/null 2>&1 &&
+    grep -Eq "Server started.*port[\"=:]+ ?${PORT}([^0-9]|$)" "$BACKEND_LOG" 2>/dev/null; then
     READY=1
     break
   fi
 
   if ! kill -0 "$BACKEND_PID" >/dev/null 2>&1; then
+    # Another worktree's runner took this port between our free-port probe and
+    # the bind. Without an explicitly requested port, move to the next free one.
+    if [[ -z "${BLACKBOX_TEST_BACKEND_PORT:-${CONTRACT_TEST_BACKEND_PORT:-}}" ]] &&
+      [[ "$BIND_RETRIES" -lt 5 ]] && grep -q "EADDRINUSE" "$BACKEND_LOG" 2>/dev/null; then
+      BIND_RETRIES=$((BIND_RETRIES + 1))
+      echo "⚠️  Port $PORT was taken before the isolated backend bound it; retrying on the next free port"
+      wait "$BACKEND_PID" >/dev/null 2>&1 || true
+      BACKEND_PID=""
+      rmdir "$PORT_LOCK_DIR" >/dev/null 2>&1 || true
+      PORT_LOCK_DIR=""
+      reserve_port "$((PORT + 1))"
+      export TEST_BASE_URL="http://localhost:$PORT"
+      launch_backend
+      continue
+    fi
     echo "❌ Backend process exited before becoming ready"
     echo "Last backend log lines:"
     tail -n 80 "$BACKEND_LOG" || true

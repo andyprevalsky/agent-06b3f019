@@ -16,7 +16,6 @@ import {
   parseAgentToAgentMessage,
   parseCodeAgentMeta,
   parsePinnedQuestion,
-  parseScorecardInlineView,
 } from '@/features/terminal-component-group/hooks/codeAgentContract';
 
 import {
@@ -142,13 +141,15 @@ describe('agent-to-agent rows (L-A2A contract, rows 12 + 47b)', () => {
     expect(within(chip.container).queryByTestId('a2a-row')).not.toBeInTheDocument();
   });
 
-  it('adapter: explicit a2a.text wins; unknown parties fall back to stock rendering', () => {
-    const explicit = a2aInboundUserMessage('message', 'framed');
-    explicit.metadata = {
-      ...explicit.metadata,
-      a2a: { ...(explicit.metadata?.a2a as object), text: 'raw sender text' },
-    };
+  it('adapter: a2a.text (raw words) wins over the framed row text; older rows strip the frame', () => {
+    const explicit = a2aInboundUserMessage('message', 'raw sender text');
+    expect(explicit.text).toMatch(/^\[Message from Codex/);
     expect(parseAgentToAgentMessage(explicit)?.text).toBe('raw sender text');
+    const legacy = a2aInboundUserMessage('message', 'pre-ea93d584 row');
+    const { text: _dropped, ...legacyA2a } = legacy.metadata?.a2a as Record<string, unknown>;
+    expect(_dropped).toBe('pre-ea93d584 row');
+    legacy.metadata = { ...legacy.metadata, a2a: legacyA2a };
+    expect(parseAgentToAgentMessage(legacy)?.text).toBe('pre-ea93d584 row');
     const broken = a2aInboundUserMessage('message', 'x');
     broken.metadata = { ...broken.metadata, a2a: { message_id: 'm', from: { id: 'a' } } };
     expect(parseAgentToAgentMessage(broken)).toBeNull();
@@ -186,7 +187,7 @@ describe('contract adapter: absent or malformed metadata keeps the stock behavio
     expect(events.map((e) => e.text)).toEqual(['first', 'second']);
   });
 
-  it('rejects pinned questions and scorecards without their required fields', () => {
+  it('rejects pinned questions without their required fields', () => {
     expect(
       parsePinnedQuestion({ display: { ...QUESTION_DISPLAY, placement: 'inline' } }),
     ).toBeNull();
@@ -194,10 +195,6 @@ describe('contract adapter: absent or malformed metadata keeps the stock behavio
     expect(parsePinnedQuestion({ display: { ...QUESTION_DISPLAY, allow_other: false } })).toEqual(
       expect.objectContaining({ allow_other: false, options: expect.any(Array) }),
     );
-    expect(parseScorecardInlineView({ view: 'scorecard', props: { rows: [] } })).toBeNull();
-    expect(
-      parseScorecardInlineView({ view: 'chart', props: { rows: [{ label: 'a' }] } }),
-    ).toBeNull();
   });
 
   it('flag on with a malformed snapshot renders the stock chip', () => {

@@ -401,6 +401,57 @@ describe('user UI live refresh (Rose Desktop)', () => {
     expect(state.requests).toBe(1);
   });
 
+  it('USER_UI_ACTIVE_CHANGED on the root channel swaps the theme with one /active fetch; duplicates fire none', async () => {
+    const state: PublishedState = { versionId: 'v1', requests: 0 };
+    servePublishedUi(state);
+    const handlers = captureAgentHandlers();
+    renderOpenAgent(true);
+    await openAgentReady(state, handlers);
+    const pattern = screen.getByTestId('pattern');
+
+    // A code agent under agent-a ran `rose-ui publish`: the backend announces the
+    // new active version on the root's existing agent:<id> channel.
+    state.versionId = 'v2';
+    act(() => {
+      handlers.get('agent-a')?.onUserUiActiveChanged?.({ versionId: 'v2', agentId: 'code-1' });
+      handlers.get('agent-a')?.onUserUiActiveChanged?.({ versionId: 'v2', agentId: 'code-1' });
+    });
+    expect(await screen.findByTestId('user-ui-background-image')).toHaveAttribute(
+      'src',
+      `${V2_BASE}root/assets/matterhorn.jpg`,
+    );
+    await waitFor(() =>
+      expect(document.documentElement.style.getPropertyValue('--rose-accent')).toBe(
+        'rebeccapurple',
+      ),
+    );
+    expect(screen.getByTestId('pattern')).toBe(pattern);
+    expect(state.requests).toBe(2);
+
+    // The same version again (e.g. the publishing agent's own channel echo): no fetch.
+    act(() => {
+      handlers.get('agent-a')?.onUserUiActiveChanged?.({ versionId: 'v2', agentId: 'code-1' });
+    });
+    await sleep(REFRESH_WINDOW_MS + 250);
+    expect(state.requests).toBe(2);
+    expect(RealtimeMod.subscribeToAgent).toHaveBeenCalledTimes(1);
+    expect(RealtimeMod.subscribeToBus).not.toHaveBeenCalled();
+  });
+
+  it('flag off: USER_UI_ACTIVE_CHANGED causes no /active fetch', async () => {
+    const state: PublishedState = { versionId: 'v1', requests: 0 };
+    servePublishedUi(state);
+    const handlers = captureAgentHandlers();
+    renderOpenAgent(false);
+    await openAgentReady(state, handlers);
+    state.versionId = 'v2';
+    act(() => {
+      handlers.get('agent-a')?.onUserUiActiveChanged?.({ versionId: 'v2', agentId: 'code-1' });
+    });
+    await sleep(REFRESH_WINDOW_MS + 250);
+    expect(state.requests).toBe(1);
+  });
+
   it('flag off: realtime messages for the open agent cause no extra /active fetches', async () => {
     const state: PublishedState = { versionId: 'v1', requests: 0 };
     servePublishedUi(state);

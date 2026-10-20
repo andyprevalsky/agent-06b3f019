@@ -19,7 +19,6 @@ import {
 } from './gptCredentials';
 import { buildCodeAgentSystemPrompt, buildCodexHarnessSystemPrompt } from './codeAgentPrompt';
 import { withAgentGraphInstructions } from './agentGraph/cli';
-import { withAgentGraphWorkspace } from './agentGraph/workspace';
 import { uploadAttachmentsToSandbox } from './e2bAttachments';
 import { overlayCodexRoseBridge } from './e2bCodexHarness';
 import { workDirForGithubRepo } from './e2bWorkDir';
@@ -31,16 +30,17 @@ import {
   overlayClaudeCodeWsServer,
   overlayCodexCodeWsServer,
 } from './e2bWsServerOverlay';
-import { createLocalClaudeCodeSessionIfBillingBlocked } from './claudeCodeLocalSession';
+import {
+  createLocalClaudeCodeSessionIfBillingBlocked,
+  resolveLocalSessionWorkDir,
+} from './claudeCodeLocalSession';
 import type { ProjectRestoreReport, ProjectWorkspace } from './projects/types';
 import { restoreSandboxProject } from './projects/workspace';
 import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
 import { codeSessionTurnToken } from './codeSessionTurns';
-import {
-  applyUserUiSandboxEnvs,
-  prepareUserUiWorkspaceSafe,
-  writeUserUiWorkspaceToSandboxSafe,
-} from './userUi/workspace';
+import { applyUserUiSandboxEnvs, writeUserUiWorkspaceToSandboxSafe } from './userUi/workspace';
+import { agentToolsForLocalHome } from './agentTools/workspace';
+import { prepareCodeSessionWorkspace } from './codeSessionWorkspace';
 import {
   isRefreshOnlyOauthEnvelope,
   resolveClaudeCodeAuthEnvs,
@@ -357,12 +357,7 @@ async function createClaudeCodeSessionUnlocked(
     log.info(`GitHub repo configured: ${githubRepoUrl}`);
   }
 
-  const userUiWorkspace = await withAgentGraphWorkspace(await prepareUserUiWorkspaceSafe(userId), {
-    userId,
-    ownerAgentId: agentId,
-    sessionId: taskId,
-    provider: 'claude',
-  });
+  const userUiWorkspace = await prepareCodeSessionWorkspace(userId, agentId, taskId, 'claude');
   applyUserUiSandboxEnvs(envs, userUiWorkspace);
 
   // Create sandbox first (before DB record) to avoid placeholder conflicts.
@@ -386,7 +381,8 @@ async function createClaudeCodeSessionUnlocked(
       goal,
       envs,
       attachments,
-      userUiWorkspace,
+      // Same-host session: loopback tools URL, MCP path under the local HOME.
+      userUiWorkspace: agentToolsForLocalHome(userUiWorkspace, resolveLocalSessionWorkDir(taskId)),
       projectWorkspace,
       claudeTokenSource,
       claudeTokenIntegrationId:
@@ -624,12 +620,7 @@ export async function createCodexCodeSession(
     log.info(`GitHub repo configured for Codex: ${githubRepoUrl}`);
   }
 
-  const userUiWorkspace = await withAgentGraphWorkspace(await prepareUserUiWorkspaceSafe(userId), {
-    userId,
-    ownerAgentId: agentId,
-    sessionId: taskId,
-    provider: 'codex',
-  });
+  const userUiWorkspace = await prepareCodeSessionWorkspace(userId, agentId, taskId, 'codex');
   applyUserUiSandboxEnvs(envs, userUiWorkspace);
 
   const sandbox = await createSandboxWithRetry(

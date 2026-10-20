@@ -229,6 +229,18 @@ export function validateAgentModeStartedPayload(payload: unknown): string | null
   return null;
 }
 
+export function validateUserUiActiveChangedPayload(payload: unknown): string | null {
+  if (typeof payload !== 'object' || payload === null) {
+    return 'Payload is not an object';
+  }
+  const p = payload as Record<string, unknown>;
+  if (typeof p.versionId !== 'string' || p.versionId === '')
+    return `Missing or invalid 'versionId' (got ${typeof p.versionId})`;
+  if (typeof p.agentId !== 'string')
+    return `Missing or invalid 'agentId' (got ${typeof p.agentId})`;
+  return null;
+}
+
 /**
  * Validate BrowserSessionBindingPayload structure.
  * Returns error message if invalid, null if valid.

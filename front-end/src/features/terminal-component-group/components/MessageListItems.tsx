@@ -18,12 +18,15 @@
  * search's position (WebSearchGroupItem); the other searches render nothing.
  *
  * ROSE DESKTOP (flag on; stock rendering otherwise):
- *   send_message_to_user from a code agent → "<agent> · via send_message_to_user" above it
- *   inlineView { view: 'scorecard' } with no versionId → host ScorecardCard beneath it
+ *   send_message_to_user from a code agent (requestingAgent) → "<agent> · via
+ *     send_message_to_user" above it; its inlineView {view, versionId} renders as above
+ *   display media rows (ASSISTANT + file_pointer + display.kind 'media') → consecutive
+ *     rows of one requester form ONE DisplayMediaGroup at the first row (gallery +
+ *     sandboxed HTML frames); the other rows render nothing
  *   pinned question (display.placement 'pinned') → not inline; PinnedQuestionMount shows it
  *   metadata.a2a (USER or TOOL agent_message row) → AgentToAgentRow, never a user bubble
  */
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { InlineUserView, parseInlineViewMetadata } from '@/features/user-ui';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 
@@ -36,14 +39,17 @@ import {
 } from './useMessageFiltering';
 import { WebSearchGroupItem } from './WebSearchGroupItem';
 import {
+  isSendMessageToUserRow,
+  messageRequester,
   parseAgentToAgentMessage,
-  parseCodeAgentSender,
   type AgentToAgentMessage,
+  type DisplayMediaItem,
   parsePinnedQuestion,
-  parseScorecardInlineView,
 } from '../hooks/codeAgentContract';
 import { AgentToAgentRow } from './AgentToAgentRow';
-import { CodeAgentAttribution, ScorecardCard } from './CodeAgentScorecard';
+import { CodeAgentAttribution } from './CodeAgentAttribution';
+import { DisplayMediaGroup } from './inline-media/DisplayMediaGroup';
+import { EMPTY_DISPLAY_MEDIA_GROUPING, groupDisplayMedia } from './inline-media/displayMediaGroups';
 import { EMPTY_WEB_SEARCH_GROUPING, type WebSearchTurnGrouping } from './webSearchTurnGroups';
 
 interface MessageListItemsProps {
@@ -103,9 +109,33 @@ function getMessageRenderKey(message: Message): string {
   return message.message_id;
 }
 
-function isSendMessageToUser(message: Message): boolean {
-  const toolName = message.metadata?.toolName;
-  return toolName === 'send_message_to_user' || toolName === 'send_message_to_user_execute_phase';
+/** One display call's media at its first row; completes the typing chain like other bubbles. */
+function DisplayMediaListItem({
+  message,
+  items,
+  agentId,
+  shouldType,
+  onTypingComplete,
+}: {
+  message: Message;
+  items: DisplayMediaItem[];
+  agentId?: string;
+  shouldType: boolean;
+  onTypingComplete: () => void;
+}) {
+  useEffect(() => {
+    if (shouldType) onTypingComplete();
+  }, [shouldType, onTypingComplete]);
+  return (
+    <div
+      data-message-id={message.message_id}
+      data-message-role={message.role}
+      data-message-kind="display-media"
+      className="min-w-0 max-w-full"
+    >
+      <DisplayMediaGroup items={items} agentId={agentId} />
+    </div>
+  );
 }
 
 /** Agent-to-agent row in the trajectory; completes the typing chain like other bubbles. */
@@ -135,7 +165,7 @@ function AgentToAgentListItem({
   );
 }
 
-/** Stock message row (plus Rose Desktop attribution + host scorecard). */
+/** Stock message row (plus the Rose Desktop code-agent attribution). */
 function StockMessageListItem({
   roseDesktop,
   message,
@@ -168,9 +198,9 @@ function StockMessageListItem({
       ? rawAgentStartPhase
       : undefined;
   const inlineView = parseInlineViewMetadata(message.metadata?.inlineView);
-  const scorecard = roseDesktop ? parseScorecardInlineView(message.metadata?.inlineView) : null;
-  const sender = roseDesktop ? parseCodeAgentSender(message.metadata) : null;
-  const showAttribution = sender !== null && (scorecard !== null || isSendMessageToUser(message));
+  const requester = roseDesktop ? messageRequester(message.metadata) : null;
+  const attribution =
+    requester?.kind === 'code_agent' && isSendMessageToUserRow(message.metadata) ? requester : null;
 
   return (
     <div
@@ -184,7 +214,7 @@ function StockMessageListItem({
       data-agent-start-phase={agentStartPhase}
       className="min-w-0 max-w-full"
     >
-      {showAttribution && sender && <CodeAgentAttribution sender={sender} />}
+      {attribution && <CodeAgentAttribution requester={attribution} />}
       <MessageBubble
         message={message}
         shouldType={message.message_id === currentAnimatingId}
@@ -203,11 +233,6 @@ function StockMessageListItem({
         streamingMetricsBySubAgentId={streamingMetricsBySubAgentId}
       />
       {inlineView && <InlineUserView inlineView={inlineView} messageId={message.message_id} />}
-      {scorecard && (
-        <div className="mt-2">
-          <ScorecardCard scorecard={scorecard} />
-        </div>
-      )}
     </div>
   );
 }
@@ -239,10 +264,29 @@ export function MessageListItems({
   webSearchGrouping = EMPTY_WEB_SEARCH_GROUPING,
   ...itemProps
 }: MessageListItemsProps) {
+  const roseDesktop = useRoseDesktop();
+  const displayGrouping = useMemo(
+    () => (roseDesktop ? groupDisplayMedia(filteredMessages) : EMPTY_DISPLAY_MEDIA_GROUPING),
+    [filteredMessages, roseDesktop],
+  );
   return (
     <>
       {filteredMessages.map((message) => {
         if (webSearchGrouping.hiddenMessageIds.has(message.message_id)) return null;
+        if (displayGrouping.hiddenMessageIds.has(message.message_id)) return null;
+        const displayItems = displayGrouping.groupsByLeadId.get(message.message_id);
+        if (displayItems) {
+          return (
+            <DisplayMediaListItem
+              key={message.message_id}
+              message={message}
+              items={displayItems}
+              agentId={itemProps.selectedAgentId || undefined}
+              shouldType={message.message_id === itemProps.currentAnimatingId}
+              onTypingComplete={itemProps.onAnimationComplete}
+            />
+          );
+        }
         const group = webSearchGrouping.groupsByLeadId.get(message.message_id);
         if (group) {
           return (

@@ -5,7 +5,9 @@
  * contract (`integrations[].accounts`, hooks/integrationAccounts) and falls
  * back to today's per-row status when the backend does not send it:
  *
- *   contract present  → one chip per account; × = per-account DELETE (confirmed)
+ *   contract present  → one chip per account (an 'idle' account of a NOT_CONNECTED
+ *                       row is no chip; an unlabeled one uses the row's label);
+ *                       × = per-account DELETE (confirmed); 501 → reason under it
  *   contract absent   → one chip for a connected row; × = row DELETE (confirmed)
  *   Gmail / Plaid     → existing per-address / per-item flows, unchanged; the
  *                       contract only contributes sync tone and progress ids
@@ -27,6 +29,8 @@ import {
 export interface RemovalPort {
   request: (target: PendingRemoval) => void;
   removingKey: string | null;
+  /** removalKey → reason the backend cannot remove that account yet (DELETE 501). */
+  blockedReasons?: Readonly<Record<string, string>>;
 }
 
 export function rowStatusTone(row: ConnectedIntegration, localSyncing = false): AccountTone {
@@ -61,21 +65,29 @@ export function rowAccounts(
   if (row === undefined) return [];
   const contract = parseIntegrationAccounts(row);
   if (contract !== null) {
-    return contract.map((account) => ({
-      provider: row.name,
-      accountId: account.accountId,
-      label: account.label,
-      tone: account.tone,
-      detail: toneDetail(account.tone),
-      onRemove: () =>
-        removal.request({
-          name: row.name,
+    return contract
+      .filter((account) => !(account.state === 'idle' && row.status === 'NOT_CONNECTED'))
+      .map((account) => {
+        const label = account.unlabeled ? fallback.label : account.label;
+        const key = removalKey(row.name, account.accountId);
+        return {
+          provider: row.name,
           accountId: account.accountId,
-          label: `${fallback.displayName} · ${account.label}`,
-        }),
-      removeLabel: `Remove ${fallback.displayName} account ${account.label}`,
-      removing: removal.removingKey === removalKey(row.name, account.accountId),
-    }));
+          label,
+          tone: account.tone,
+          detail: toneDetail(account.tone),
+          title: account.lastError ?? undefined,
+          onRemove: () =>
+            removal.request({
+              name: row.name,
+              accountId: account.accountId,
+              label: `${fallback.displayName} · ${label}`,
+            }),
+          removeLabel: `Remove ${fallback.displayName} account ${label}`,
+          removing: removal.removingKey === key,
+          removeBlockedReason: removal.blockedReasons?.[key],
+        };
+      });
   }
   if (row.status === 'NOT_CONNECTED') return [];
   const tone = rowStatusTone(row, fallback.localSyncing);
