@@ -14,6 +14,11 @@
  *   Rose Desktop pinned question → PinnedQuestionMount directly above the
  *     approval/query box (renders nothing when flag off or none pending)
  *
+ * CODE AGENT VIEW (Rose Desktop, useOpenCodeAgent): a left-bar code-agent row
+ *   of the selected (owner) agent is open → CodeAgentConversationView replaces
+ *   the whole column (header + transcript/terminal + the query box as its
+ *   direct channel); closing it returns to this agent's chat below.
+ *
  * TEST OBSERVABILITY:
  *   terminal-input-area[data-chat-mode] mirrors the rendered chat/agent mode
  *   transition without changing interaction or visual behavior.
@@ -42,9 +47,11 @@ import { isBenchmarkSharedView } from '@/lib/benchmarkShare';
 
 import {
   ApprovalChip,
+  CodeAgentConversationView,
   PinnedQuestionMount,
   QueryInput,
   useAppView,
+  useOpenCodeAgent,
 } from '@/features/terminal-component-group';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { cn } from '@/lib/utils';
@@ -115,15 +122,11 @@ function ChatColumn({
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const opening = useOpeningAnimation(a.selectedAgentId, a.isLoadingNetwork);
   const { tickerOffset, tickerRef } = useTickerCarousel(a.selectedAgentId);
-  const sharedView = isBenchmarkSharedView();
   const roseDesktop = useRoseDesktop();
-  const readOnlyMessage = sharedView
-    ? 'Read-only benchmark recording'
-    : a.inspectionContext
-      ? 'Read-only account inspection. Switch to this account to control the agent.'
-      : a.selectedAgentId && a.isLoadingAgent
-        ? 'Loading agent details. Controls will be available when loading finishes.'
-        : null;
+  const readOnlyMessage = readOnlyNotice(a);
+
+  const codeAgentColumn = useCodeAgentColumn(a.selectedAgentId, readOnlyMessage);
+  if (codeAgentColumn !== null) return codeAgentColumn;
 
   const canSubmit = composerCanSubmit({
     selectedAgentId: a.selectedAgentId,
@@ -180,6 +183,30 @@ function ChatColumn({
 
       {!roseDesktop && <TerminalLegalFooter />}
     </>
+  );
+}
+
+function readOnlyNotice(a: AgentSlice): string | null {
+  if (isBenchmarkSharedView()) return 'Read-only benchmark recording';
+  if (a.inspectionContext) {
+    return 'Read-only account inspection. Switch to this account to control the agent.';
+  }
+  if (a.selectedAgentId && a.isLoadingAgent) {
+    return 'Loading agent details. Controls will be available when loading finishes.';
+  }
+  return null;
+}
+
+/** Rose Desktop: the selected (owner) agent's open code agent replaces the column. */
+function useCodeAgentColumn(selectedAgentId: string | null, readOnlyMessage: string | null) {
+  const open = useOpenCodeAgent(selectedAgentId);
+  if (open === null) return null;
+  return (
+    <CodeAgentConversationView
+      key={open.taskId}
+      codeAgent={open}
+      readOnlyMessage={readOnlyMessage}
+    />
   );
 }
 

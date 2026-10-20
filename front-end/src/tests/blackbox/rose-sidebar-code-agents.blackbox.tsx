@@ -14,17 +14,21 @@
  * rejects >50 ids like the server. Rows are on screen per a controllable
  * IntersectionObserver (jsdom has none). Flag off reads nothing.
  *
- * A running code agent shows the existing thinking.svg as a small bubble on its
- * icon's top-left, unless an unanswered attention request of its own (metadata
- * .requestingAgent.task_id) puts the amber alert there instead.
+ * A code-agent row is ONLY its provider icon + title: no done check, failed x,
+ * amber needs-input alert or thinking bubble in any state (supersedes ledger
+ * row 79). Agent (robot) rows keep their own status glyphs.
+ *
+ * With the CodeAgentViewProvider (as TerminalContent mounts it) a row opens
+ * that code agent's own conversation: the row is marked (color/weight), its
+ * owner row is not; any agent row (the owner without a reload) returns.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 
-import thinkingIcon from '@/assets/thinking.svg';
 import AppSidebar from '@/features/terminal-component-group/components/AppSidebar';
+import { CodeAgentViewProvider } from '@/features/terminal-component-group/components/code-agent-view/CodeAgentViewProvider';
 import { AttentionRequestsContext } from '@/features/terminal-component-group/components/attention-inbox/attentionRequestsContext';
 import type { Agent, AttentionRequest } from '@/lib/api';
 import type { CodeAgentListItem } from '@/lib/api/tree';
@@ -310,7 +314,7 @@ describe('Rose left bar code agents (flag on)', () => {
     );
   });
 
-  it('uses the Claude / Codex icon instead of the Bot glyph, with only the supported status glyphs', async () => {
+  it('uses the Claude / Codex icon instead of the Bot glyph: icon + title only', async () => {
     renderBar({}, { dark: true });
     const row = (id: string) => screen.getByTestId(`rose-code-agent-row-${id}`);
     await screen.findByTestId('rose-code-agent-row-cc-sub');
@@ -318,23 +322,13 @@ describe('Rose left bar code agents (flag on)', () => {
     for (const id of ['cc-build', 'cc-fix', 'cc-sub']) {
       expect(row(id).querySelector('[data-sidebar-agent-icon], svg.lucide-bot')).toBeNull();
     }
-    // Running Claude session = provider icon, no status glyph.
     expect(within(row('cc-build')).getByRole('img', { name: 'Claude Code' })).toBeInTheDocument();
-    expect(
-      within(row('cc-build')).queryByRole('img', { name: /Working|Completed|Failed/ }),
-    ).toBeNull();
-    // Failed Codex session = Codex icon + muted red x.
     expect(within(row('cc-fix')).getByRole('img', { name: 'Codex' })).toBeInTheDocument();
-    const failed = within(row('cc-fix')).getByRole('img', { name: 'Failed' });
-    expect(failed.querySelector('.text-red-400\\/80')).not.toBeNull();
-    // Legacy provider null defaults to Claude; done = muted check, green only in dark.
+    // Legacy provider null defaults to Claude.
     expect(row('cc-sub')).toHaveAttribute('data-provider', 'claude');
-    const check = within(row('cc-sub'))
-      .getByRole('img', { name: 'Completed' })
-      .querySelector('svg.lucide-check')!;
-    expect(check.getAttribute('class')).toContain('text-gray-400');
-    expect(check.getAttribute('class')).toContain('dark:text-[#22c55e]');
+    expect(within(row('cc-sub')).getByRole('img', { name: 'Claude Code' })).toBeInTheDocument();
     expect(row('cc-sub').className).toContain('dark:text-[#a3a39d]');
+    expect(row('cc-fix')).toHaveTextContent('Fix flaky test');
   });
 
   it("collapsed: code agents stay in their parent's group with no divider between them", async () => {
@@ -456,77 +450,125 @@ describe('Rose left bar code agents (flag on)', () => {
     expect(screen.queryByTestId('rose-code-agent-row-cc-build')).toBeNull();
     expect(codeAgentRequests()).toHaveLength(0);
     expect(treeRequests()).toHaveLength(0);
-    expect(screen.queryByTestId('rose-code-agent-thinking')).toBeNull();
   });
 });
 
-describe('running code agents show the thinking bubble (flag on)', () => {
-  const bubble = (id: string) =>
-    within(screen.getByTestId(`rose-code-agent-row-${id}`)).queryByTestId(
-      'rose-code-agent-thinking',
-    );
+describe('code-agent rows carry no status glyph (flag on)', () => {
+  /** Every image in a row (the provider icon is the only one allowed). */
+  const rowImages = (id: string) =>
+    within(screen.getByTestId(`rose-code-agent-row-${id}`))
+      .queryAllByRole('img')
+      .map((img) => img.getAttribute('aria-label') ?? img.getAttribute('alt'));
 
-  it('running: thinking.svg bubble on the icon top-left, no status glyph, collapsed and expanded', async () => {
-    renderBar();
-    await screen.findByTestId('rose-code-agent-row-cc-build');
-    const img = bubble('cc-build')!;
-    expect(img.tagName).toBe('IMG');
-    // The existing asset (Vite inlines it), not a new SVG.
-    expect(img.getAttribute('src')).toBe(thinkingIcon);
-    expect(img).toHaveAttribute('alt', '');
-    expect(img).toHaveAttribute('aria-hidden', 'true');
-    expect(img.className).toContain('absolute -left-1.5 -top-1');
-    expect(img.className).toContain('h-2.5 w-2.5');
-    // Identical in light and dark: no dark variant, no wrapper around it.
-    expect(img.className).not.toContain('dark:');
-    expect(img.parentElement).toBe(
-      within(screen.getByTestId('rose-code-agent-row-cc-build')).getByRole('img', {
-        name: 'Claude Code',
-      }).parentElement,
-    );
-    const row = screen.getByTestId('rose-code-agent-row-cc-build');
-    expect(
-      within(row).queryByRole('img', { name: /Needs your input|Completed|Failed/ }),
-    ).toBeNull();
-    expect(roseBar()).toHaveAttribute('data-expanded', 'false');
-    expandBar();
-    expect(bubble('cc-build')).not.toBeNull();
-  });
+  function expectIconOnly(id: string, provider: 'Claude Code' | 'Codex') {
+    const row = screen.getByTestId(`rose-code-agent-row-${id}`);
+    expect(rowImages(id)).toEqual([provider]);
+    // No check, x, alert, spinner or thinking.svg bubble.
+    expect(row.querySelectorAll('svg')).toHaveLength(0);
+    expect(row.querySelectorAll('img')).toHaveLength(1);
+    expect(within(row).queryByTestId('rose-code-agent-thinking')).toBeNull();
+  }
 
-  it('running + an open question from it: amber alert only, no bubble', async () => {
-    renderBar({}, { attention: [codeAgentQuestion('cc-build')] });
-    await screen.findByTestId('rose-code-agent-row-cc-build');
-    expect(bubble('cc-build')).toBeNull();
-    const row = screen.getByTestId('rose-code-agent-row-cc-build');
-    expect(within(row).getByRole('img', { name: 'Needs your input' })).toBeInTheDocument();
-  });
-
-  it('an answered question or another task’s question leaves the bubble', async () => {
-    renderBar(
-      {},
-      { attention: [codeAgentQuestion('cc-build', true), codeAgentQuestion('cc-other')] },
-    );
-    await screen.findByTestId('rose-code-agent-row-cc-build');
-    expect(bubble('cc-build')).not.toBeNull();
-  });
-
-  it('completed / closed (paused) / failed: no bubble, only their glyph', async () => {
-    renderBar({}, { dark: true });
+  it.each([
+    ['light', false],
+    ['dark', true],
+  ])('running, failed and completed rows show only the provider icon (%s)', async (_, dark) => {
+    renderBar({}, { dark });
     await screen.findByTestId('rose-code-agent-row-cc-sub');
     await screen.findByTestId('rose-code-agent-row-cc-fix');
-    expect(bubble('cc-sub')).toBeNull();
-    expect(bubble('cc-fix')).toBeNull();
+    expandBar();
+    expectIconOnly('cc-build', 'Claude Code');
+    expectIconOnly('cc-fix', 'Codex');
+    expectIconOnly('cc-sub', 'Claude Code');
+  });
+
+  it('a running code agent waiting on an unanswered question still shows no glyph', async () => {
+    renderBar({}, { attention: [codeAgentQuestion('cc-build')] });
+    await screen.findByTestId('rose-code-agent-row-cc-build');
+    expectIconOnly('cc-build', 'Claude Code');
+  });
+
+  it('a paused (CLOSED) session shows no glyph either', async () => {
+    mockCodeAgents([codeAgent({ code_agent_id: 'cc-paused', status: 'CLOSED', title: 'Paused' })]);
+    renderBar();
+    await screen.findByTestId('rose-code-agent-row-cc-paused');
+    expectIconOnly('cc-paused', 'Claude Code');
+  });
+
+  it('agent (robot) rows keep their status glyphs', async () => {
+    renderBar({}, { dark: true });
+    await screen.findByTestId('rose-code-agent-row-cc-fix');
     expect(
-      within(screen.getByTestId('rose-code-agent-row-cc-sub')).getByRole('img', {
+      within(screen.getByTestId('rose-agent-row-home-done')).getByRole('img', {
         name: 'Completed',
       }),
     ).toBeInTheDocument();
     expect(
-      within(screen.getByTestId('rose-code-agent-row-cc-fix')).getByRole('img', {
-        name: 'Failed',
-      }),
+      within(screen.getByTestId('rose-agent-row-rose-fail')).getByRole('img', { name: 'Failed' }),
     ).toBeInTheDocument();
-    // Dark mode keeps the running bubble identical.
-    expect(bubble('cc-build')!.className).not.toContain('dark:');
+  });
+});
+
+describe('a code-agent row opens its own conversation (flag on, view provider)', () => {
+  function renderWithView(selectedAgentId: string | null, onSelectAgent = vi.fn()) {
+    const user = signedInUser();
+    function Bar({ selected }: { selected: string | null }) {
+      return (
+        <CodeAgentViewProvider enabled selectedAgentId={selected} onSelectAgent={onSelectAgent}>
+          <AppSidebar
+            {...defaultProps({ agents: AGENTS, user, selectedAgentId: selected, onSelectAgent })}
+          />
+        </CodeAgentViewProvider>
+      );
+    }
+    const result = renderWithProviders(<Bar selected={selectedAgentId} />);
+    return {
+      ...result,
+      onSelectAgent,
+      rerenderWith: (id: string | null) => result.rerender(<Bar selected={id} />),
+    };
+  }
+
+  afterEach(() => window.history.replaceState({}, '', '/'));
+
+  it('marks the open row (aria-current, weight/color), not its owner; the owner row returns without re-selecting', async () => {
+    const user = userEvent.setup();
+    const { onSelectAgent } = renderWithView('home-run');
+    expandBar();
+    const row = await screen.findByTestId('rose-code-agent-row-cc-build');
+    const owner = screen.getByTestId('rose-agent-row-home-run');
+    expect(owner).toHaveAttribute('aria-current', 'true');
+    await user.click(row);
+    // Owner already selected: nothing re-selects it.
+    expect(onSelectAgent).not.toHaveBeenCalled();
+    expect(row).toHaveAttribute('aria-current', 'true');
+    expect(row).toHaveAttribute('data-selected', 'true');
+    expect(row.className).toContain('font-semibold');
+    expect(owner).not.toHaveAttribute('aria-current');
+    expect(new URL(window.location.href).searchParams.get('code-agent')).toBe('cc-build');
+
+    await user.click(owner);
+    expect(onSelectAgent).not.toHaveBeenCalled();
+    expect(row).not.toHaveAttribute('aria-current');
+    expect(owner).toHaveAttribute('aria-current', 'true');
+    expect(new URL(window.location.href).searchParams.get('code-agent')).toBeNull();
+  });
+
+  it("a sub-agent's code agent selects its owner first; another agent row leaves it", async () => {
+    const user = userEvent.setup();
+    const { onSelectAgent, rerenderWith } = renderWithView('home-run');
+    expandBar();
+    await user.click(await screen.findByTestId('rose-code-agent-row-cc-sub'));
+    expect(onSelectAgent).toHaveBeenCalledWith('rose-sub');
+    rerenderWith('rose-sub');
+    expect(screen.getByTestId('rose-code-agent-row-cc-sub')).toHaveAttribute(
+      'aria-current',
+      'true',
+    );
+
+    await user.click(screen.getByTestId('rose-agent-row-home-done'));
+    expect(onSelectAgent).toHaveBeenLastCalledWith('home-done');
+    rerenderWith('home-done');
+    expect(screen.getByTestId('rose-code-agent-row-cc-sub')).not.toHaveAttribute('aria-current');
   });
 });

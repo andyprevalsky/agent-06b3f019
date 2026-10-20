@@ -23,6 +23,10 @@
  *   - usePriceLimit      : edit/save/cancel cost-limit flow
  *   - useTopBarProps     : account/viewport gating shared by TopBar + NubToolbar
  *
+ * DIRECT CHANNEL (directChannel, the Rose Desktop code-agent view): the same
+ *   shell, attachments and send button with native session controls; no Rose nub tab
+ *   or pinned tools. Draft attachments clear only after confirmed delivery.
+ *
  * TAB REVEAL (Rose Desktop only): owned by `useToolbarReveal` (ToolbarNub.tsx)
  *   [CLOSED 4px lip] --hover/focus/tap--> [OPEN 18px strip] --leave/tap--> [CLOSED]
  *
@@ -77,16 +81,16 @@ export type { QueryInputProps };
 export type { DripStyles, PendingAttachment } from './query-input/types';
 
 export default function QueryInput(props: QueryInputProps) {
-  const { dripStyles = DEFAULT_DRIP_STYLES, drippiness = 0 } = props;
+  const { dripStyles = DEFAULT_DRIP_STYLES, drippiness = 0, directChannel = false } = props;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const attachments = useAttachments({ textareaRef });
+  const attachments = useAttachments({ textareaRef, draftKey: props.draftKey });
   const priceLimit = usePriceLimit({
     agentDetail: props.agentDetail,
     pendingPriceLimitCents: props.pendingPriceLimitCents ?? DEFAULT_PENDING_PRICE_LIMIT_CENTS,
     onPendingPriceLimitChange: props.onPendingPriceLimitChange,
     onAgentUpdate: props.onAgentUpdate,
   });
-  const handleSubmit = useSubmitHandler(attachments, props.onSubmit);
+  const handleSubmit = useSubmitHandler(attachments, props.onSubmit, directChannel);
   const topBarProps = useTopBarProps(props, attachments, priceLimit, textareaRef);
   const reveal = useToolbarReveal();
   const roseDesktop = useRoseDesktop();
@@ -98,7 +102,7 @@ export default function QueryInput(props: QueryInputProps) {
         data-testid="query-input-host"
         className={cn('max-w-4xl mx-auto', roseDesktop && 'relative mt-[14px]')}
       >
-        {roseDesktop && (
+        {roseDesktop && !directChannel && (
           <NubTab reveal={reveal}>
             <NubToolbar {...topBarProps} />
           </NubTab>
@@ -129,6 +133,7 @@ export default function QueryInput(props: QueryInputProps) {
 function useSubmitHandler(
   attachments: ReturnType<typeof useAttachments>,
   onSubmit: QueryInputProps['onSubmit'],
+  directChannel: boolean,
 ) {
   const { toast } = useToast();
   return () => {
@@ -144,8 +149,14 @@ function useSubmitHandler(
       });
       return;
     }
-    const pointers = attachments.collectDonePointersAndClear();
-    onSubmit(pointers.length > 0 ? pointers : undefined);
+    const pointers = directChannel
+      ? attachments.collectDonePointers()
+      : attachments.collectDonePointersAndClear();
+    const result = onSubmit(pointers.length > 0 ? pointers : undefined);
+    if (directChannel)
+      void Promise.resolve(result).then((delivered) => {
+        if (delivered === true) attachments.collectDonePointersAndClear();
+      });
   };
 }
 
@@ -180,16 +191,18 @@ function QueryInputBody(props: QueryInputBodyProps) {
     topBarProps,
     roseDesktop,
     roseDark,
+    directChannel = false,
   } = props;
   const agentCompleted = agentDetail?.status === 'COMPLETED' || agentDetail?.status === 'FAILED';
   const speed =
-    roseDesktop && topBarProps.showFastMode
+    roseDesktop && !directChannel && topBarProps.showFastMode
       ? { fastMode: topBarProps.fastMode ?? false, onFastModeChange: topBarProps.onFastModeChange }
       : undefined;
+  const toolbar = roseDesktop ? <PinnedTools {...topBarProps} /> : <TopBar {...topBarProps} />;
 
   return (
     <>
-      {roseDesktop ? <PinnedTools {...topBarProps} /> : <TopBar {...topBarProps} />}
+      {!directChannel && toolbar}
       <AttachmentList attachments={attachments.attachments} onRemove={attachments.remove} />
       <DragOverlay visible={attachments.isDragOver} />
       <InputContainer
@@ -208,10 +221,13 @@ function QueryInputBody(props: QueryInputBodyProps) {
         onModelChange={onModelChange}
         availableModels={availableModels}
         showModelSelector={showModelSelector}
+        hideModelSelector={directChannel}
         textareaRef={textareaRef}
         roseDesktop={roseDesktop}
         roseDark={roseDark}
         speed={speed}
+        attachable
+        sessionControls={props.sessionControls}
       />
     </>
   );

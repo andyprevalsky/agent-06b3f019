@@ -3,11 +3,22 @@
  *
  * LAYOUT (by viewport):
  * [DESKTOP >= md] --> floating blur PILL, centered: brand + AttentionInbox bell
- * [MOBILE  <  md] --> full-width FLUSH bar at y=0:
+ *                     (iPad portrait 768-834 / landscape 1024-1194 included; the
+ *                     app icons float top-right, the left rail is 64px)
+ * [MOBILE  <  md] stock --> full-width FLUSH bar at y=0:
  *                        left   = brand (logo + Rose)
  *                        center = Research (stock only; Rose Desktop accounts have
  *                                 no Research/Careers links — UI ledger #14)
  *                        right  = hamburger drawer (signed in) OR Login (signed out)
+ * [MOBILE  <  md] Rose Desktop --> transparent row at y=0 (safe-area aware):
+ *                        left   = hamburger (40px; opens the agents drawer from
+ *                                 the LEFT, the left bar's place)
+ *                        center = the Rose PILL (brand + bell), centered in the
+ *                                 space between hamburger and icons
+ *                        right  = the four app icons (RoseAppIcons placement
+ *                                 'header': Browser, Phone, Integrations + red
+ *                                 reconnect dot, Dark mode; 40px targets)
+ *                        fits 375-430px without overlap; light + dark
  *
  * MOBILE RIGHT ACTION:
  * [SIGNED_IN]  -- tap hamburger --> MobileAgentDrawer (opens from RIGHT; Agents +
@@ -34,7 +45,11 @@
 import { useNavigate } from 'react-router-dom';
 import type { CSSProperties } from 'react';
 
-import { AttentionInbox, MobileAgentDrawer } from '@/features/terminal-component-group';
+import {
+  AttentionInbox,
+  MobileAgentDrawer,
+  RoseAppIcons,
+} from '@/features/terminal-component-group';
 import type { Agent } from '@/features/terminal-component-group';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { useIsMobile } from '@/hooks/use-mobile';
@@ -255,7 +270,59 @@ function MobileHeaderBar(props: TerminalHeaderProps) {
   );
 }
 
+/** Rose dark mode only for the mobile pill (light keeps its translucent white). */
+const ROSE_MOBILE_PILL_CLASSES =
+  'flex h-11 min-w-0 items-center gap-1 rounded-2xl border border-border/50 bg-white/85 pl-2 pr-0.5 shadow-sm backdrop-blur-md dark:border-white/[0.08] dark:bg-[rgba(32,32,30,0.78)] dark:text-[#ececea]';
+
+/**
+ * Rose Desktop mobile (< md): hamburger left · Rose pill (brand + bell) centered
+ * between · the four app icons right. The row itself is transparent and lets
+ * taps through between its controls.
+ */
+function RoseMobileHeaderBar(props: TerminalHeaderProps) {
+  const { onCreateNewAgent, onSelectAgent, onLoginClick, isSignedIn } = props;
+  return (
+    <header
+      data-testid="rose-mobile-header"
+      className="pointer-events-none fixed inset-x-0 top-0 z-50 flex h-[var(--mobile-terminal-header-height)] items-center gap-1 px-1.5 pt-[var(--safe-area-inset-top)]"
+    >
+      <div className="pointer-events-auto flex-none">
+        <MobileAgentDrawer
+          roseHeader
+          agents={props.agents}
+          isLoadingAgents={props.isLoadingAgents}
+          selectedAgentId={props.selectedAgentId}
+          onSelectAgent={onSelectAgent}
+          onCreateAgent={onCreateNewAgent}
+          onRefreshAgents={props.onRefreshAgents}
+          isSignedIn={isSignedIn}
+          onLoginClick={onLoginClick}
+          onLogout={props.onLogout}
+        />
+      </div>
+      <div className="flex min-w-0 flex-1 justify-center">
+        <div
+          data-testid="rose-mobile-pill"
+          className={`pointer-events-auto ${ROSE_MOBILE_PILL_CLASSES}`}
+        >
+          <BrandButton onCreateNewAgent={onCreateNewAgent} />
+          <HeaderAuthAction
+            isSignedIn={isSignedIn}
+            onLoginClick={onLoginClick}
+            onSelectAgent={onSelectAgent}
+          />
+        </div>
+      </div>
+      <div className="pointer-events-auto flex-none">
+        <RoseAppIcons placement="header" />
+      </div>
+    </header>
+  );
+}
+
 export function TerminalHeader(props: TerminalHeaderProps) {
   const isMobile = useIsMobile();
-  return isMobile ? <MobileHeaderBar {...props} /> : <DesktopHeaderPill {...props} />;
+  const roseDesktop = useRoseDesktop();
+  if (!isMobile) return <DesktopHeaderPill {...props} />;
+  return roseDesktop ? <RoseMobileHeaderBar {...props} /> : <MobileHeaderBar {...props} />;
 }

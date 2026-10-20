@@ -31,6 +31,7 @@ import { InlineUserView, parseInlineViewMetadata } from '@/features/user-ui';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 
 import MessageBubble from './MessageBubble';
+import { dedupeCodeDisplays } from '../hooks/codeDisplayIdentity';
 import type { Message } from '../hooks';
 import type { ExploreStep, FeedbackData, WaitForCheck } from '../types';
 import {
@@ -265,13 +266,17 @@ export function MessageListItems({
   ...itemProps
 }: MessageListItemsProps) {
   const roseDesktop = useRoseDesktop();
-  const displayGrouping = useMemo(
-    () => (roseDesktop ? groupDisplayMedia(filteredMessages) : EMPTY_DISPLAY_MEDIA_GROUPING),
+  const visibleMessages = useMemo(
+    () => (roseDesktop ? dedupeCodeDisplays(filteredMessages) : filteredMessages),
     [filteredMessages, roseDesktop],
+  );
+  const displayGrouping = useMemo(
+    () => (roseDesktop ? groupDisplayMedia(visibleMessages) : EMPTY_DISPLAY_MEDIA_GROUPING),
+    [visibleMessages, roseDesktop],
   );
   return (
     <>
-      {filteredMessages.map((message) => {
+      {visibleMessages.map((message) => {
         if (webSearchGrouping.hiddenMessageIds.has(message.message_id)) return null;
         if (displayGrouping.hiddenMessageIds.has(message.message_id)) return null;
         const displayItems = displayGrouping.groupsByLeadId.get(message.message_id);

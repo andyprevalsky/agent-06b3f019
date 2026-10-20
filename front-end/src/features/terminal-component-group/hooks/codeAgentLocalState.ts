@@ -10,12 +10,22 @@
  * Keyed by task id / question id, bounded per task, never shared across agents.
  */
 
+import type { CodeTurnOptions } from './codeAgentContract';
 import { useSyncExternalStore } from 'react';
 
 export interface LocalEcho {
   text: string;
   at: number;
+  /** The direct turn's client_message_id (the session echoes it back as turn_id). */
+  id?: string;
 }
+
+export const pendingCodeTurns = new Map<string, { payload: string; id: string }>();
+const drafts = new Map<string, { text: string; options: CodeTurnOptions }>();
+export const getCodeDraft = (taskId: string) => drafts.get(taskId);
+export const setCodeDraft = (taskId: string, draft: { text: string; options: CodeTurnOptions }) => {
+  drafts.set(taskId, draft);
+};
 
 const MAX_ECHOES_PER_TASK = 50;
 const EMPTY: readonly LocalEcho[] = [];
@@ -33,8 +43,10 @@ function subscribe(listener: () => void) {
   return () => listeners.delete(listener);
 }
 
-export function addLocalEcho(taskId: string, text: string, at: number = Date.now()) {
-  const next = [...(echoesByTask.get(taskId) ?? EMPTY), { text, at }].slice(-MAX_ECHOES_PER_TASK);
+export function addLocalEcho(taskId: string, text: string, at: number = Date.now(), id?: string) {
+  const next = [...(echoesByTask.get(taskId) ?? EMPTY), { text, at, id }].slice(
+    -MAX_ECHOES_PER_TASK,
+  );
   echoesByTask = new Map(echoesByTask).set(taskId, next);
   emit();
 }
@@ -55,6 +67,8 @@ export function useClosedQuestions(): ReadonlySet<string> {
 
 /** Test-only reset between cases. */
 export function resetCodeAgentLocalState() {
+  drafts.clear();
+  pendingCodeTurns.clear();
   echoesByTask = new Map();
   closedQuestions = new Set();
   emit();

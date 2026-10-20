@@ -9,9 +9,12 @@
  *                              'usage_limit', retryable, usage_limit{provider},
  *                              retry{tool, type, code_session_id}; the activity's
  *                              own row has action_type 'usage_limit'. Shown as
- *                              "Paused - usage limit, resumes on <other CLI>".
- *                              No Retry button: the retry is the parent's
- *                              spawn_agent tool call; no user-callable route.
+ *                              "<CLI> Paused" (an older 'failed' state corrected)
+ *                              plus one muted line with the backend's text for the
+ *                              user: code_agent.failure_message when the producer
+ *                              wrote state 'paused', else the usage_limit details
+ *                              (never the parent's retry instruction). No Retry
+ *                              button: there is no user-callable retry/resume route.
  *   code_session               branch → merge_target, pushed, PR, merged.
  *   summary.merged_into        shown only when present.
  *
@@ -21,6 +24,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
+import { usageLimitDetails } from '@/features/terminal-component-group/hooks/codeAgentContract';
 import { resetCodeAgentLocalState } from '@/features/terminal-component-group/hooks/codeAgentLocalState';
 
 import { chipMessage, codeAgent, msg, renderChip, signIn } from './code-agent-steering.fixtures';
@@ -108,6 +112,9 @@ function finalRow(extra: Record<string, unknown>) {
 
 const USAGE_LIMIT_TEXT =
   "Code agent stopped: the Claude Code usage limit was reached (resets 2026-10-20T15:00:00Z). Its work is saved on branch rose/task-speed (checkpoint 3). Retry now with spawn_agent(type='code', code_session_id='5b1f0a52-8f3e-4f0c-9d43-2c6a1f2b7e10', goal=<the same goal>)";
+/** The user's line the paused producer writes (format_usage_limit_user_message). */
+const USER_PAUSE_TEXT = 'Paused: Claude usage limit reached (resets 3:00 PM). Work is saved.';
+const RESETS_AT = '2026-10-20T15:00:00Z';
 
 function usageLimitRow(provider: 'claude' | 'codex') {
   return finalRow({
@@ -327,21 +334,51 @@ describe('terminal rows: a real success never reads as failed', () => {
 });
 
 describe('W5b: usage-limit stop (C15)', () => {
-  it('Claude limit: "Paused - usage limit, resumes on Codex", not red, no Retry, no parent retry text', () => {
+  const note = () => screen.getByTestId('code-agent-paused-note');
+
+  it("older producer (state 'failed' + the parent's retry text): Paused with the limit details, never the retry text", () => {
     renderChip([chipMessage({ provider: 'claude' }), usageLimitRow('claude')]);
     const chip = screen.getByTestId('code-agent-chip');
     expect(chip).toHaveAttribute('data-code-agent-state', 'paused');
-    expect(within(chip).getByText('Paused - usage limit, resumes on Codex')).toBeInTheDocument();
+    expect(within(chip).getByText('Claude Code Paused')).toBeInTheDocument();
+    expect(note()).toHaveTextContent(
+      usageLimitDetails({ provider: 'claude', resets_at: RESETS_AT }),
+    );
+    expect(note()).toHaveTextContent(/^Claude Code usage limit reached · resets /);
+    expect(note().className).not.toMatch(/red/);
     expect(within(chip).queryByTestId('code-agent-failure')).not.toBeInTheDocument();
     expect(within(chip).queryByText(/spawn_agent/)).not.toBeInTheDocument();
     expect(chip.querySelector('svg.text-red-500')).toBeNull();
     // No user-callable retry route exists, so no Retry action is offered.
     expect(within(chip).queryByRole('button', { name: /retry/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/resumes on/)).not.toBeInTheDocument();
   });
 
-  it('Codex limit resumes on Claude Code', () => {
+  it("paused producer: the backend's user text verbatim, no Retry", () => {
+    renderChip([
+      chipMessage({ provider: 'claude' }),
+      finalRow({
+        code_provider: 'claude',
+        code_session: codeSession(),
+        code_agent: closedCodeAgent('paused', { failure_message: USER_PAUSE_TEXT }),
+        failure_kind: 'usage_limit',
+        retryable: true,
+        session_paused: true,
+        usage_limit: { provider: 'claude', resets_at: RESETS_AT },
+        retry: { tool: 'spawn_agent', type: 'code', code_session_id: SESSION_ID },
+      }),
+    ]);
+    const chip = screen.getByTestId('code-agent-chip');
+    expect(chip).toHaveAttribute('data-code-agent-state', 'paused');
+    expect(within(chip).getByText('Claude Code Paused')).toBeInTheDocument();
+    expect(note().textContent).toBe(USER_PAUSE_TEXT);
+    expect(within(chip).queryByRole('button', { name: /retry/i })).not.toBeInTheDocument();
+  });
+
+  it('Codex limit: Codex Paused with its own limit details', () => {
     renderChip([chipMessage({ provider: 'codex' }), usageLimitRow('codex')]);
-    expect(screen.getByText('Paused - usage limit, resumes on Claude Code')).toBeInTheDocument();
+    expect(screen.getByText('Codex Paused')).toBeInTheDocument();
+    expect(note()).toHaveTextContent(/^Codex usage limit reached · resets /);
   });
 
   it("the activity's own usage_limit row (action_type, state failed) already reads paused", () => {
@@ -358,7 +395,8 @@ describe('W5b: usage-limit stop (C15)', () => {
         code_agent: closedCodeAgent('failed', { failure_message: USAGE_LIMIT_TEXT }),
       }),
     ]);
-    expect(screen.getByText('Paused - usage limit, resumes on Codex')).toBeInTheDocument();
+    expect(screen.getByText('Claude Code Paused')).toBeInTheDocument();
+    expect(note()).toHaveTextContent('Claude Code usage limit reached');
     expect(screen.queryByTestId('code-agent-failure')).not.toBeInTheDocument();
   });
 
@@ -372,12 +410,22 @@ describe('W5b: usage-limit stop (C15)', () => {
       'data-code-agent-state',
       'failed',
     );
+    expect(screen.queryByTestId('code-agent-paused-note')).not.toBeInTheDocument();
   });
 
-  it('flag off: stock chip, no usage-limit pause text', () => {
+  it('an ordinary pause without backend text shows no note', () => {
+    renderChip([
+      chipMessage({ provider: 'claude' }),
+      finalRow({ code_session: codeSession(), code_agent: closedCodeAgent('paused') }),
+    ]);
+    expect(screen.getByText('Claude Code Paused')).toBeInTheDocument();
+    expect(screen.queryByTestId('code-agent-paused-note')).not.toBeInTheDocument();
+  });
+
+  it('flag off: stock chip, no paused note', () => {
     renderChip([chipMessage({ provider: 'claude' }), usageLimitRow('claude')], false);
     expect(screen.queryByTestId('code-agent-chip')).not.toBeInTheDocument();
-    expect(screen.queryByText(/usage limit, resumes on/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId('code-agent-paused-note')).not.toBeInTheDocument();
   });
 });
 

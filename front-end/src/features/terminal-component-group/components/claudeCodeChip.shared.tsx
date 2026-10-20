@@ -71,19 +71,16 @@ export function ProviderIcon({
 export function StatusDisplay({
   state,
   codeProvider,
-  text,
 }: {
   state: ChipState;
   codeProvider: CodeProvider;
-  /** Replaces the state's default text (e.g. the usage-limit pause). */
-  text?: string;
 }) {
   const config = STATUS_CONFIG[state];
   return (
     <>
       {config.indicator}
       <span className="truncate text-sm font-medium">
-        {text ?? config.text(providerLabel(codeProvider))}
+        {config.text(providerLabel(codeProvider))}
       </span>
     </>
   );

@@ -10,11 +10,15 @@
  *     labelled "Light mode". Outside a signed-in Rose Desktop theme the
  *     toggle is a no-op (stock stays light).
  *
- * There is no right bar: four bare icons (34px hit targets, tooltip on hover)
- * in the window's top-right corner — no bar, background, tile or ring. They
- * float above the full-height drawers (z 90), so clicking the active icon is
- * how a drawer closes (row 67). Hidden below md. Rendered only with the Rose
- * Desktop flag (stock website unchanged).
+ * PLACEMENT (one instance on screen per viewport, useIsMobile):
+ *   'corner' (md+)  four bare icons (34px hit targets, tooltip on hover) in the
+ *                   window's top-right corner — no bar, background, tile or
+ *                   ring. They float above the full-height drawers (z 90), so
+ *                   clicking the active icon is how a drawer closes (row 67).
+ *   'header' (< md) the same four icons inline at the right of the mobile
+ *                   header, 40px tap targets; drawers open full screen over
+ *                   them and close with their own X.
+ * Rendered only with the Rose Desktop flag (stock website unchanged).
  *
  * RECONNECT DOT (row 68): the Integrations page's status data
  * (GET /api/integrations + /api/integrations/plaid/items); when any
@@ -27,12 +31,15 @@ import { Globe, Moon, Plug, Smartphone, Sun, type LucideIcon } from 'lucide-reac
 
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useRoseTheme } from '@/features/rose-theme';
+import { useIsMobile } from '@/hooks/use-mobile';
 import { fetchIntegrationHealth, integrationsNeedingReconnect } from '@/lib/api/integrationHealth';
 
 import { APP_ICON_EDGE, APP_ICON_GAP, APP_ICON_SIZE } from './roseAppsLayout';
 import { useRoseApps, type RoseApp } from './roseAppsState';
 
 export const APP_ACTIVE_COLOR = '#e8507f';
+/** Mobile header tap target (>= 40px). */
+const HEADER_ICON_SIZE = 40;
 const IDLE_COLOR = 'hsl(240 8% 45%)';
 const IDLE_COLOR_DARK = '#a3a39d';
 
@@ -45,6 +52,7 @@ function IconButton({
   onClick,
   tooltip = label,
   alertDot = false,
+  size,
 }: {
   testId: string;
   label: string;
@@ -54,6 +62,7 @@ function IconButton({
   onClick: () => void;
   tooltip?: string;
   alertDot?: boolean;
+  size: number;
 }) {
   return (
     <Tooltip>
@@ -65,14 +74,15 @@ function IconButton({
           aria-pressed={pressed}
           onClick={onClick}
           className="relative grid cursor-pointer place-items-center focus-visible:outline-none"
-          style={{ width: APP_ICON_SIZE, height: APP_ICON_SIZE, color }}
+          style={{ width: size, height: size, color }}
         >
           <Icon className="h-[21px] w-[21px]" strokeWidth={1.7} />
           {alertDot && (
             <i
               data-testid={`${testId}-alert`}
               aria-hidden="true"
-              className="absolute right-[6px] top-[6px] block h-[7px] w-[7px] rounded-full bg-[#ef4444] shadow-[0_0_0_2px_#fff] dark:shadow-[0_0_0_2px_#262624]"
+              style={{ right: (size - 22) / 2, top: (size - 22) / 2 }}
+              className="absolute block h-[7px] w-[7px] rounded-full bg-[#ef4444] shadow-[0_0_0_2px_#fff] dark:shadow-[0_0_0_2px_#262624]"
             />
           )}
         </button>
@@ -100,19 +110,47 @@ function useReconnectNeeded(): string[] {
   return query.data === undefined ? [] : integrationsNeedingReconnect(query.data);
 }
 
-export function RoseAppIcons() {
+export function RoseAppIcons({ placement = 'corner' }: { placement?: 'corner' | 'header' }) {
   const apps = useRoseApps();
   const theme = useRoseTheme();
-  const reconnect = useReconnectNeeded();
-  if (apps === null) return null;
-  const idle = theme.isDark ? IDLE_COLOR_DARK : IDLE_COLOR;
+  const isMobile = useIsMobile();
+  const header = placement === 'header';
+  if (apps === null || header !== isMobile) return null;
   return (
     <nav
       aria-label="Apps"
       data-testid="rose-app-icons"
-      className="fixed z-[90] hidden items-center md:flex"
-      style={{ top: 11, right: APP_ICON_EDGE, gap: APP_ICON_GAP }}
+      data-placement={placement}
+      className={
+        header ? 'flex flex-none items-center' : 'fixed z-[90] hidden items-center md:flex'
+      }
+      style={header ? undefined : { top: 11, right: APP_ICON_EDGE, gap: APP_ICON_GAP }}
     >
+      <AppIconButtons
+        apps={apps}
+        isDark={theme.isDark}
+        onToggleTheme={theme.toggle}
+        size={header ? HEADER_ICON_SIZE : APP_ICON_SIZE}
+      />
+    </nav>
+  );
+}
+
+function AppIconButtons({
+  apps,
+  isDark,
+  onToggleTheme,
+  size,
+}: {
+  apps: NonNullable<ReturnType<typeof useRoseApps>>;
+  isDark: boolean;
+  onToggleTheme: () => void;
+  size: number;
+}) {
+  const reconnect = useReconnectNeeded();
+  const idle = isDark ? IDLE_COLOR_DARK : IDLE_COLOR;
+  return (
+    <>
       {APPS.map(({ app, label, icon }) => (
         <IconButton
           key={app}
@@ -128,16 +166,18 @@ export function RoseAppIcons() {
               ? `Integrations · reconnect ${reconnect.join(', ')}`
               : label
           }
+          size={size}
         />
       ))}
       <IconButton
         testId="rose-app-dark-mode"
-        label={theme.isDark ? 'Light mode' : 'Dark mode'}
-        icon={theme.isDark ? Sun : Moon}
-        pressed={theme.isDark}
+        label={isDark ? 'Light mode' : 'Dark mode'}
+        icon={isDark ? Sun : Moon}
+        pressed={isDark}
         color={idle}
-        onClick={theme.toggle}
+        onClick={onToggleTheme}
+        size={size}
       />
-    </nav>
+    </>
   );
 }

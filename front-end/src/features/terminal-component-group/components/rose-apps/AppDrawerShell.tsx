@@ -14,8 +14,9 @@
  *                    paused while dragging).
  *   variant 'full':  Browser — full height from the left bar (64px) to the
  *                    right edge; not resizable.
- * Mobile (< md): a full-height bottom sheet sliding up. The top-right icons
- * are hidden there, so the sheet keeps its own close X (top-right).
+ * Mobile (< md): full screen (edge to edge, below the status-bar safe area),
+ * sliding up. It covers the mobile header and its app icons, so the sheet
+ * keeps its own close X (top-right).
  */
 
 import { X } from 'lucide-react';
@@ -129,7 +130,7 @@ export function AppDrawerShell({
       className={cn(
         'fixed z-[66] flex flex-col overflow-hidden bg-white text-[hsl(240_15%_8%)] dark:bg-[#262624] dark:text-[#ecece8]',
         'border-l border-gray-200/95 shadow-[-12px_0_40px_rgba(20,20,40,0.08)] dark:border-white/[0.09]',
-        isMobile && 'inset-x-0 bottom-0 top-0 rounded-t-[14px]',
+        isMobile && 'inset-0 pt-[var(--safe-area-inset-top)]',
         !open && 'pointer-events-none',
       )}
       style={{
@@ -148,7 +149,7 @@ export function AppDrawerShell({
           type="button"
           aria-label={`Close ${label.toLowerCase()}`}
           onClick={apps.closeApp}
-          className="absolute right-3 top-3 z-10 rounded p-1 text-[hsl(240_8%_45%)] dark:text-[#a3a39d]"
+          className="absolute right-1.5 top-[calc(var(--safe-area-inset-top)+0.375rem)] z-10 grid h-10 w-10 place-items-center text-[hsl(240_8%_45%)] dark:text-[#a3a39d]"
         >
           <X className="h-4 w-4" />
         </button>

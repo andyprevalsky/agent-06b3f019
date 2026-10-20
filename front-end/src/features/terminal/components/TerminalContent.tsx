@@ -26,6 +26,10 @@
  * APP VIEW (AppViewProvider): a code-agent chip's live preview card opens the
  *   code session's preview full screen in place of the chat column (Rose
  *   Desktop only; AgentChatArea). It holds no list and reads nothing itself.
+ * CODE AGENT VIEW (CodeAgentViewProvider, flag on only): a left-bar code-agent
+ *   row (or ?agent-id=<owner>&code-agent=<task id>) opens that Claude Code /
+ *   Codex session as its own conversation in the chat column; the sidebar marks
+ *   its row and AgentChatArea renders it. Flag off: never opens.
  * THEME (RoseThemeProvider, Rose Desktop accounts only): light (default) <->
  *   dark via useRoseTheme().toggle() — the top-right Dark mode icon calls it,
  *   so RoseAppIcons renders inside the provider. Dark adds html.dark and the
@@ -37,6 +41,7 @@ import { useState, useMemo, lazy } from 'react';
 import {
   AppSidebar,
   AttentionRequestsProvider,
+  CodeAgentViewProvider,
   NetworkView,
   RoseAppIcons,
   RoseAppsProvider,
@@ -134,7 +139,13 @@ function TerminalLayout(props: TerminalLayoutProps) {
           onLogout={() => void props.agents.handleLogout()}
         >
           <AppViewProvider userId={props.agents.user?.id ?? null}>
-            <InteractiveTerminalLayout {...props} />
+            <CodeAgentViewProvider
+              enabled={roseDesktop}
+              selectedAgentId={props.agents.selectedAgentId}
+              onSelectAgent={props.agents.handleSelectAgent}
+            >
+              <InteractiveTerminalLayout {...props} />
+            </CodeAgentViewProvider>
           </AppViewProvider>
           {roseDesktop && <RoseAppIcons />}
         </RoseAppsProvider>

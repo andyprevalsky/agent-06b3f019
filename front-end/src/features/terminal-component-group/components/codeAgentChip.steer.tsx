@@ -8,26 +8,30 @@
  *              · agent-to-agent rows ("Codex → Rose" / "Rose → Codex"; questions as "<agent> asks")
  *   new rows → scroll to bottom
  *
- * STEER INPUT (POST /api/claude-code-session/:taskId/turns):
+ * STEER INPUT (POST /api/claude-code-session/:taskId/turns, hooks/codeAgentDirectTurn):
  *   [IDLE] → (Enter / send, non-empty) → [SENDING] → ok: echo + clear → [IDLE]
  *                                                  → error: keep text, show error → [IDLE]
  *   one client_message_id per text: retrying unchanged text reuses it (no second CLI turn);
  *   editing the text or a successful send starts a new one
+ *
+ * VARIANT: 'chip' (default) caps the transcript at 300px inside the chip;
+ *   'page' (the code-agent view) lets it grow with the chat column's scroll.
  */
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+
+import { cn } from '@/lib/utils';
 import { ArrowUp, ChevronRight, Loader2 } from 'lucide-react';
 
 import {
   codeAgentLabel,
   eventTimeMs,
-  newDirectTurnId,
-  sendCodeAgentMessage,
   type CodeAgentProvider,
   type CodeAgentToolCall,
   type CodeAgentTranscriptEvent,
 } from '../hooks/codeAgentContract';
-import { addLocalEcho, type LocalEcho } from '../hooks/codeAgentLocalState';
+import { useDirectTurn } from '../hooks/codeAgentDirectTurn';
+import { type LocalEcho } from '../hooks/codeAgentLocalState';
 import { AgentToAgentRow } from './AgentToAgentRow';
 
 const MUTED = 'text-muted-foreground dark:text-[#a3a39d]';
@@ -116,10 +120,12 @@ export function CodeAgentTranscript({
   events,
   echoes,
   provider,
+  variant = 'chip',
 }: {
   events: CodeAgentTranscriptEvent[];
   echoes: readonly LocalEcho[];
   provider: CodeAgentProvider;
+  variant?: 'chip' | 'page';
 }) {
   const label = codeAgentLabel(provider);
   const rows = useMemo(() => buildRows(events, echoes), [events, echoes]);
@@ -127,14 +133,20 @@ export function CodeAgentTranscript({
 
   useEffect(() => {
     const node = scrollRef.current;
-    if (node) node.scrollTop = node.scrollHeight;
-  }, [rows.length]);
+    if (!node) return;
+    // The page variant scrolls with the chat column: bring its newest row into view.
+    if (variant === 'page') node.lastElementChild?.scrollIntoView?.({ block: 'end' });
+    else node.scrollTop = node.scrollHeight;
+  }, [rows.length, variant]);
 
   return (
     <div
       ref={scrollRef}
       data-testid="code-agent-transcript"
-      className="flex max-h-[300px] flex-col gap-2 overflow-auto px-3.5 pb-1 pt-2.5 text-[13.5px]"
+      className={cn(
+        'flex flex-col gap-2 px-3.5 pb-1 pt-2.5',
+        variant === 'chip' ? 'max-h-[300px] overflow-auto text-[13.5px]' : 'text-[14.5px]',
+      )}
     >
       {rows.length === 0 && <div className={`text-[13px] ${MUTED}`}>Waiting for {label}…</div>}
       {rows.map((row, index) => {
@@ -203,32 +215,11 @@ export function CodeAgentSteerInput({
 }) {
   const label = codeAgentLabel(provider);
   const [text, setText] = useState('');
-  const [sending, setSending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const turn = useRef<{ text: string; id: string } | null>(null);
+  const { send, sending, error } = useDirectTurn(taskId, toolCallId);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    const value = text.trim();
-    if (!value || sending) return;
-    if (turn.current?.text !== value) turn.current = { text: value, id: newDirectTurnId() };
-    setSending(true);
-    setError(null);
-    try {
-      await sendCodeAgentMessage({
-        taskId,
-        text: value,
-        clientMessageId: turn.current.id,
-        toolCallId,
-      });
-      turn.current = null;
-      addLocalEcho(taskId, value);
-      setText('');
-    } catch (err) {
-      setError(`Couldn't reach ${label}: ${err instanceof Error ? err.message : 'send failed'}`);
-    } finally {
-      setSending(false);
-    }
+    if (await send(text)) setText('');
   };
 
   return (
@@ -262,7 +253,7 @@ export function CodeAgentSteerInput({
       </form>
       {error && (
         <p role="alert" className="mt-1 text-xs text-red-600 dark:text-red-400">
-          {error}
+          Couldn&apos;t reach {label}: {error}
         </p>
       )}
     </div>

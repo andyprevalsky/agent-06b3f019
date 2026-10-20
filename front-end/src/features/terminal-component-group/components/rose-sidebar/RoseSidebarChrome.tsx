@@ -3,7 +3,7 @@
  * account row: signed in = cursive initial + name (Rose profile name first, see
  * accountDisplayName; member icon while the profile loads), anonymous = member
  * icon (both open Settings); no session = member icon labelled "Sign in" (opens login).
- * Home (root project), the raw black "New Super Agent" button (row 76; dark mode
+ * Home (label just "Home"), the raw black "New Super Agent" button (row 76; dark mode
  * inverts it: #f2f2ef fill, #1f1f1d label/plus, mock panels/dark.js .nb), the
  * Search row, plain nav rows (Archived, Browse, Health) and the account row. Stateless.
  *
@@ -46,12 +46,7 @@ export function RoseHomeRow({ isExpanded, onClick }: { isExpanded: boolean; onCl
       className={cn(ROW, 'font-semibold text-[hsl(240_15%_8%)] dark:text-[#ecece8]')}
     >
       <Home className="h-[21px] w-[21px] flex-none" strokeWidth={1.7} />
-      <Label isExpanded={isExpanded}>
-        Home{' '}
-        <span className="font-normal text-[hsl(240_6%_58%)] dark:text-[#a3a39d]">
-          · root project
-        </span>
-      </Label>
+      <Label isExpanded={isExpanded}>Home</Label>
     </button>
   );
 }

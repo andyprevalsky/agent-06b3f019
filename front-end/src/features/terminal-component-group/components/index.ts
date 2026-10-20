@@ -29,6 +29,13 @@ export { useRoseApps } from './rose-apps/roseAppsState';
 export { AppViewProvider } from './app-view/AppViewProvider';
 export { AppViewScreen, type AppQueryBoxBinding } from './app-view/AppViewScreen';
 export { useAppView, type AppViewTarget } from './app-view/appViewState';
+export { CodeAgentViewProvider } from './code-agent-view/CodeAgentViewProvider';
+export { CodeAgentConversationView } from './code-agent-view/CodeAgentConversationView';
+export {
+  useCodeAgentView,
+  useOpenCodeAgent,
+  type OpenCodeAgent,
+} from './code-agent-view/codeAgentViewState';
 export * from './agentRunState';
 export * from './formatElapsed';
 export { default as AgentStatusIndicator } from './AgentStatusIndicator';

@@ -27,6 +27,11 @@
  *
  * Desktop is unaffected: TerminalHeader renders this only below the md
  * breakpoint (the desktop AttentionInbox bell owns notifications there).
+ *
+ * ROSE HEADER (roseHeader, the Rose Desktop mobile header): the hamburger sits
+ * on the header's LEFT with a 40px target and opens the drawer from the LEFT
+ * (the left bar's place); no count badge on it — the pill's bell carries the
+ * unanswered count. The drawer content is unchanged.
  */
 
 import { useRef, useState } from 'react';
@@ -70,6 +75,8 @@ interface MobileAgentDrawerProps {
   isSignedIn: boolean;
   onLoginClick: () => void;
   onLogout: () => void;
+  /** Rose Desktop mobile header: left trigger/side, 40px target, no trigger badge. */
+  roseHeader?: boolean;
 }
 
 function CountBadge({ count, className }: { count: number; className?: string }) {
@@ -124,6 +131,7 @@ export default function MobileAgentDrawer({
   isSignedIn,
   onLoginClick,
   onLogout,
+  roseHeader = false,
 }: MobileAgentDrawerProps) {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<DrawerTab>('agents');
@@ -179,14 +187,19 @@ export default function MobileAgentDrawer({
         <button
           type="button"
           aria-label="Open menu"
-          className="relative flex h-9 w-9 items-center justify-center rounded-lg transition-colors hover:bg-muted md:hidden"
+          className={cn(
+            'relative flex items-center justify-center rounded-lg transition-colors md:hidden',
+            roseHeader
+              ? 'h-10 w-10 text-[hsl(240_8%_45%)] hover:text-foreground dark:text-[#a3a39d] dark:hover:text-[#ecece8]'
+              : 'h-9 w-9 hover:bg-muted',
+          )}
         >
-          <Menu className="h-5 w-5 text-foreground" />
-          <CountBadge count={notifCount} className="absolute -right-1 -top-1" />
+          <Menu className={cn('h-5 w-5', !roseHeader && 'text-foreground')} />
+          {!roseHeader && <CountBadge count={notifCount} className="absolute -right-1 -top-1" />}
         </button>
       </SheetTrigger>
       <SheetContent
-        side="right"
+        side={roseHeader ? 'left' : 'right'}
         onCloseAutoFocus={handleCloseAutoFocus}
         className="flex w-[min(340px,88vw)] flex-col p-0 pt-[var(--safe-area-inset-top)]"
       >
