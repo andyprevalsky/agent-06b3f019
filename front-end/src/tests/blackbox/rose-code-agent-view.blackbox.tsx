@@ -141,6 +141,19 @@ function serveBackend({
       });
     }),
     http.post(`${API_BASE}/claude-code-session/:taskId/turns`, turns),
+    http.get(`${API_BASE}/claude-code-session/:taskId/capabilities`, () =>
+      HttpResponse.json({
+        effective_settings: { model: 'gpt-test', effort: 'medium', speed: 'standard' },
+        models: [
+          {
+            model: 'gpt-test',
+            label: 'Test Codex',
+            efforts: ['medium', 'high'],
+            speeds: ['standard', 'fast'],
+          },
+        ],
+      }),
+    ),
     // The chip's closed-session fallback (owner chat) reads the Codex session once.
     http.get(`${API_BASE}/codex-code-session/:taskId`, () =>
       HttpResponse.json({ status: 'RUNNING', output: '' }),
@@ -212,9 +225,11 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
 
     // The full transcript: thinking, assistant message, tool rows.
     const transcript = within(page).getByTestId('code-agent-transcript');
-    expect(within(transcript).getByRole('button', { name: /Thinking · 6s/ })).toBeInTheDocument();
+    expect(within(transcript).getAllByTestId('code-work-slot')).toHaveLength(1);
+    expect(transcript).toHaveTextContent('Explored 1 file, edited 1 file, ran 1 command');
+    expect(transcript.querySelectorAll('[data-message-id]')).toHaveLength(1);
+    await user.click(within(transcript).getByRole('button', { name: /Working/ }));
     expect(transcript).toHaveTextContent('widen the existing toggle to three states');
-    expect(within(transcript).getAllByTestId('code-agent-tool-row')).toHaveLength(3);
     // The page transcript grows with the column (no 300px chip cap).
     expect(transcript.className).not.toContain('max-h-[300px]');
     // Transcript / Terminal tabs as in the chip.
@@ -237,7 +252,7 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
     // Text only: no nub tab, pinned tools, model selector or paperclip.
     expect(box.queryByTestId('query-toolbar-nub')).toBeNull();
     expect(box.queryByTestId('query-pinned-tools')).toBeNull();
-    expect(box.queryByRole('button', { name: 'Attach files' })).toBeNull();
+    expect(box.getByRole('button', { name: 'Attach files' })).toBeInTheDocument();
     expect(urlParams().get('agent-id')).toBe(OWNER);
     expect(urlParams().get('code-agent')).toBe(TASK);
   });
@@ -273,10 +288,117 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
     });
     const transcript = screen.getByTestId('code-agent-transcript');
     await within(transcript).findByText('Keep the 26px button');
-    expect(transcript).toHaveTextContent('You → Codex: Keep the 26px button');
+    expect(
+      within(transcript).getByText('Keep the 26px button').closest('[data-message-role]'),
+    ).toHaveAttribute('data-message-role', 'USER');
     expect(input).toHaveValue('');
     // Straight to the session: the owner Rose agent gets no chat message.
     expect(requests('POST', `/api/agents/${OWNER}/messages`)).toHaveLength(0);
+  });
+
+  it('keeps attachments and settings draft through failed delivery, then applies native ACK', async () => {
+    const file = {
+      id: 'uploaded-fe16',
+      storage_path: 'user/notes.txt',
+      original_filename: 'notes.txt',
+      mime_type: 'text/plain',
+      size_bytes: 5,
+      created_at: '2026-10-20T12:00:00Z',
+    };
+    let attempts = 0;
+    serveBackend({
+      turns: () =>
+        ++attempts === 1
+          ? HttpResponse.json({ error: 'Native turn unavailable' }, { status: 503 })
+          : HttpResponse.json({
+              status: 'delivered',
+              delivery_mode: 'steer',
+              turn_id: 'native-1',
+              effective_settings: { model: 'gpt-test', effort: 'high', speed: 'fast' },
+            }),
+    });
+    server.use(http.post(`${API_BASE}/upload`, () => HttpResponse.json({ file_pointer: file })));
+    const user = await renderOnOwner();
+    await openFromRow(user);
+    const composer = screen.getByTestId('code-agent-view-composer');
+    await user.selectOptions(await screen.findByLabelText('Reasoning effort'), 'high');
+    await user.selectOptions(screen.getByLabelText('Code speed'), 'fast');
+    await user.upload(
+      composer.querySelector('input[type="file"]') as HTMLInputElement,
+      new File(['hello'], 'notes.txt', { type: 'text/plain' }),
+    );
+    await within(composer).findByText('notes.txt');
+    const input = screen.getByPlaceholderText('Message Codex…');
+    await user.type(input, 'Inspect this{Enter}');
+    await screen.findByText('Native turn unavailable');
+    expect(input).toHaveValue('Inspect this');
+    expect(within(composer).getByText('notes.txt')).toBeInTheDocument();
+    expect(within(composer).getByRole('status')).toHaveTextContent('medium · standard');
+    await user.keyboard('{Escape}');
+    await openFromRow(user);
+    expect(screen.getByPlaceholderText('Message Codex…')).toHaveValue('Inspect this');
+    expect(screen.getByText('notes.txt')).toBeInTheDocument();
+    await user.click(screen.getByPlaceholderText('Message Codex…'));
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(screen.getByPlaceholderText('Message Codex…')).toHaveValue(''));
+    const turns = requests('POST', `/api/claude-code-session/${TASK}/turns`);
+    expect(turns).toHaveLength(2);
+    expect((turns[1].body as Record<string, unknown>).client_message_id).toBe(
+      (turns[0].body as Record<string, unknown>).client_message_id,
+    );
+    expect(turns[1].body).toMatchObject({
+      attachments: [file],
+      reasoning_effort: 'high',
+      speed: 'fast',
+    });
+    expect(screen.queryByText('notes.txt')).toBeNull();
+    expect(
+      within(screen.getByTestId('code-agent-view-composer')).getByRole('status'),
+    ).toHaveTextContent('high · fast');
+  });
+
+  it('keeps the composer intact below a native approval and resolves the exact request', async () => {
+    serveBackend({
+      ownerMessages: ownerChat([
+        ...liveRows(),
+        msg(
+          {
+            task_id: TASK,
+            toolName: 'request_user_approval',
+            toolCallId: 'native-approval-call',
+            toolStatus: 'IN_PROGRESS',
+            isUserAttentionMessage: true,
+            requestingAgent: {
+              kind: 'code_agent',
+              task_id: TASK,
+              agent_id: OWNER,
+              label: 'Codex',
+              provider: 'codex',
+            },
+            requestUserApproval: { toolApproval: true, attentionRequestId: 'native-approval-1' },
+          },
+          { text: 'Allow this command?' },
+        ),
+      ]),
+    });
+    server.use(
+      http.post(`${API_BASE}/attention-requests/native-approval-1/respond`, () =>
+        HttpResponse.json({ success: true }),
+      ),
+    );
+    const user = await renderOnOwner();
+    await openFromRow(user);
+    const composer = screen.getByPlaceholderText('Message Codex…');
+    await user.type(composer, 'Keep this draft');
+    const accept = screen.getByRole('button', { name: 'Accept' });
+    expect(
+      accept.compareDocumentPosition(composer) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    await user.click(accept);
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Accept' })).toBeNull());
+    expect(composer).toHaveValue('Keep this draft');
+    expect(requests('POST', '/api/attention-requests/native-approval-1/respond')).toHaveLength(1);
+    expect(requests('POST', `/api/claude-code-session/${TASK}/turns`)).toHaveLength(0);
   });
 
   it('a completed session stays open; a send shows the backend error as one plain line', async () => {
@@ -291,7 +413,11 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
     const user = await renderOnOwner();
     const page = await openFromRow(user);
     expect(within(page).getByTestId('code-agent-view-state')).toHaveTextContent('Completed');
-    expect(within(page).getAllByTestId('code-agent-tool-row')).toHaveLength(3);
+    expect(within(page).getAllByTestId('code-work-slot')).toHaveLength(1);
+    expect(within(page).getByRole('button', { name: /Worked/ })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    );
     const input = screen.getByPlaceholderText('Message Codex…');
     await user.type(input, 'One more tweak{Enter}');
     const error = await screen.findByTestId('code-agent-view-error');

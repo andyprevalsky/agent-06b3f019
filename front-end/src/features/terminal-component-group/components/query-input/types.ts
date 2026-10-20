@@ -37,7 +37,7 @@ export interface DripStyles {
 export interface QueryInputProps {
   value: string;
   onChange: (value: string) => void;
-  onSubmit: (attachments?: FilePointer[]) => void;
+  onSubmit: (attachments?: FilePointer[]) => void | Promise<boolean>;
   disabled?: boolean;
   placeholder?: string;
   selectedModel?: string;
@@ -66,10 +66,12 @@ export interface QueryInputProps {
   pendingPriceLimitCents?: number;
   onPendingPriceLimitChange?: (cents: number) => void;
   /**
-   * Rose Desktop code-agent view: the box is a text-only direct channel to a
-   * code session — no nub tab, pinned tools, model/speed or attachments.
+   * Rose Desktop code-agent view: native direct delivery with attachments and
+   * session controls; excludes the Rose-only nub tab and pinned tools.
    */
   directChannel?: boolean;
+  draftKey?: string;
+  sessionControls?: React.ReactNode;
 }
 
 export const DEFAULT_DRIP_STYLES: DripStyles = {

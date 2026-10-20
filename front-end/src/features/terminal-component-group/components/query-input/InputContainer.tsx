@@ -59,6 +59,7 @@ interface InputContainerProps {
   onModelChange?: (model: string) => void;
   availableModels: Model[];
   showModelSelector: boolean;
+  hideModelSelector?: boolean;
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
   roseDesktop?: boolean;
   /** Rose Desktop dark mode: dark textarea + model chip. */
@@ -67,6 +68,7 @@ interface InputContainerProps {
   speed?: { fastMode: boolean; onFastModeChange?: (enabled: boolean) => void };
   /** false = text only (code-agent direct channel): no paperclip. */
   attachable?: boolean;
+  sessionControls?: React.ReactNode;
 }
 
 export function InputContainer(props: InputContainerProps) {
@@ -117,14 +119,17 @@ export function InputContainer(props: InputContainerProps) {
               onClick={() => fileInputRef.current?.click()}
             />
           )}
-          <ModelSelector
-            selectedModel={selectedModel}
-            onModelChange={onModelChange}
-            availableModels={availableModels}
-            showModelSelector={showModelSelector}
-            roseDesktop={roseDesktop}
-            roseDark={roseDark}
-          />
+          {!props.hideModelSelector && (
+            <ModelSelector
+              selectedModel={selectedModel}
+              onModelChange={onModelChange}
+              availableModels={availableModels}
+              showModelSelector={showModelSelector}
+              roseDesktop={roseDesktop}
+              roseDark={roseDark}
+            />
+          )}
+          {props.sessionControls}
           {speed && (
             <SpeedToggle
               fastMode={speed.fastMode}

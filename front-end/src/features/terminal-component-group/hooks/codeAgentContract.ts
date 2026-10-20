@@ -38,7 +38,8 @@
  *     └─ metadata.agentTools {kind 'question', deliverTo 'user', routedAgentId = root} on a
  *        DESCENDANT agent → that sub-agent's pin shows above the root's query box
  *   POST /api/claude-code-session/:taskId/turns → steer the CLI session
- *        {client_message_id, text, tool_call_id?}; idempotent per client_message_id
+ *        {client_message_id, text, attachments?, model?, reasoning_effort?, speed?, tool_call_id?};
+ *        idempotent per client_message_id, confirmed by delivered/duplicate ACK
  *   POST /api/agents/:id/questions/:questionId/answer {answer} | {dismiss: true}
  *        → 2xx (first answer wins) | 404 gone | 403 other account | 400 invalid answer
  *
@@ -56,6 +57,7 @@ import {
   type CodeSessionFacts,
 } from './codeAgentSession';
 
+export { collectCodeAgentEvents } from './codeSessionTranscript';
 export { pausedNote, usageLimitDetails } from './codeAgentSession';
 
 export type {
@@ -434,64 +436,6 @@ export function latestCodeAgentMeta(
   return { ...meta, code_session: fold.session, usage_limit: fold.usageLimit, pause_message };
 }
 
-function parseEvent(value: unknown): CodeAgentTranscriptEvent | null {
-  const r = rec(value);
-  if (!r) return null;
-  const type = r.type === 'thinking' || r.type === 'message' || r.type === 'tool' ? r.type : null;
-  const ts = time(r.ts);
-  if (!type || ts === undefined) return null;
-  const toolRec = rec(r.tool);
-  const toolName = str(toolRec?.name);
-  const tool: CodeAgentToolCall | undefined =
-    toolRec && toolName
-      ? {
-          name: toolName,
-          target: typeof toolRec.target === 'string' ? toolRec.target : '',
-          added: num(toolRec.added),
-          removed: num(toolRec.removed),
-          result: str(toolRec.result),
-          ok: typeof toolRec.ok === 'boolean' ? toolRec.ok : undefined,
-        }
-      : undefined;
-  if (type === 'tool' && !tool) return null;
-  if (type !== 'tool' && !str(r.text)) return null;
-  return { type, ts, text: str(r.text), tool, role: r.role === 'user' ? 'user' : 'assistant' };
-}
-
-/** Transcript events for one task, ordered by time (stable for equal times). */
-export function collectCodeAgentEvents(
-  messages: Message[],
-  taskId: string,
-): CodeAgentTranscriptEvent[] {
-  const events: CodeAgentTranscriptEvent[] = [];
-  for (const message of messages) {
-    const metadata = message.metadata;
-    if (!metadata || metadata.task_id !== taskId) continue;
-    // These action types are not in the shared ClaudeCodeActionType union yet; read untyped.
-    const actionType: unknown = metadata.action_type;
-    if (actionType === 'agent_message') {
-      const a2a = parseAgentToAgentMessage(message);
-      if (a2a) events.push({ type: 'agent_message', ts: message.timestamp, a2a });
-      continue;
-    }
-    if (actionType === 'user_direct_turn') {
-      const text = str(message.text);
-      if (text) events.push({ type: 'message', role: 'user', ts: message.timestamp, text });
-      continue;
-    }
-    const raw = metadata.code_agent_events;
-    if (!Array.isArray(raw)) continue;
-    for (const entry of raw) {
-      const event = parseEvent(entry);
-      if (event) events.push(event);
-    }
-  }
-  return events
-    .map((event, index) => ({ event, index, at: eventTimeMs(event.ts) ?? 0 }))
-    .sort((a, b) => a.at - b.at || a.index - b.index)
-    .map(({ event }) => event);
-}
-
 /**
  * The backend labels Rose agents "Root agent" / "Agent" when untitled; the
  * desktop UI calls every Rose agent "Rose" unless it carries its own title.
@@ -547,6 +491,7 @@ export function parseRequestingAgent(value: unknown): RequestingAgent | null {
 export function messageRequester(metadata: Message['metadata']): RequestingAgent | null {
   return (
     parseRequestingAgent(metadata?.requestingAgent) ??
+    parseRequestingAgent(metadata?.displayedBy) ??
     parseRequestingAgent(rec(metadata?.requestUserApproval)?.requestingAgent)
   );
 }
@@ -750,7 +695,7 @@ export function agentToAgentCodeProvider(a2a: AgentToAgentMessage): CodeAgentPro
 
 // ── Writes ──────────────────────────────────────────────────────────────────
 
-async function postJson(path: string, body: Record<string, string | undefined>): Promise<void> {
+async function postJson(path: string, body: Record<string, unknown>): Promise<unknown> {
   const res = await fetch(`${API_BASE_WITH_PATH}${path}`, {
     method: 'POST',
     headers: getAuthHeaders(),
@@ -760,6 +705,7 @@ async function postJson(path: string, body: Record<string, string | undefined>):
     const error = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(error.error || `Request failed (${res.status})`);
   }
+  return res.json();
 }
 
 /**
@@ -767,17 +713,33 @@ async function postJson(path: string, body: Record<string, string | undefined>):
  * directChatService). Retrying with the same `clientMessageId` never starts a
  * second CLI turn.
  */
-export function sendCodeAgentMessage(args: {
+export interface CodeTurnOptions {
+  attachments?: FilePointer[];
+  model?: string;
+  reasoning_effort?: string;
+  speed?: string;
+}
+
+export async function sendCodeAgentMessage(args: {
   taskId: string;
   text: string;
   clientMessageId: string;
   toolCallId?: string;
+  options?: CodeTurnOptions;
 }) {
-  return postJson(`/claude-code-session/${encodeURIComponent(args.taskId)}/turns`, {
+  const ack = (await postJson(`/claude-code-session/${encodeURIComponent(args.taskId)}/turns`, {
     client_message_id: args.clientMessageId,
     text: args.text,
     tool_call_id: args.toolCallId,
-  });
+    ...args.options,
+  })) as {
+    status?: string;
+    effective_settings?: { model?: string; effort?: string; speed?: string };
+  };
+  if (ack.status !== 'delivered' && ack.status !== 'duplicate') {
+    throw new Error('The code session has not confirmed delivery. Your draft is kept.');
+  }
+  return ack;
 }
 
 /** The spawn tool call that owns a code task's chip (sent with direct turns). */

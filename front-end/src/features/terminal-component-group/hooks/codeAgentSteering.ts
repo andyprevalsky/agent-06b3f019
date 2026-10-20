@@ -12,7 +12,6 @@ import {
   answeredQuestionIds,
   codeAgentLabel,
   codeAgentToolCallId,
-  collectCodeAgentEvents,
   latestCodeAgentMeta,
   messageRequester,
   parseCodeAgentMeta,
@@ -26,6 +25,7 @@ import {
   type RequestingAgent,
 } from './codeAgentContract';
 import { useClosedQuestions } from './codeAgentLocalState';
+import { collectCodeAgentEvents } from './codeSessionTranscript';
 
 export function formatElapsed(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));

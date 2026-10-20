@@ -13,7 +13,7 @@
  * `remove()` revokes the URL for the removed item.
  */
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useSyncExternalStore } from 'react';
 import {
   uploadAttachment,
   MAX_FILE_SIZE,
@@ -32,6 +32,7 @@ interface UseAttachmentsResult {
   processFiles: (files: FileList | File[]) => Promise<void>;
   remove: (id: string) => void;
   collectDonePointersAndClear: () => FilePointer[];
+  collectDonePointers: () => FilePointer[];
   isDragOver: boolean;
   dragHandlers: {
     onDragOver: (e: React.DragEvent) => void;
@@ -40,14 +41,44 @@ interface UseAttachmentsResult {
   };
 }
 
+const drafts = new Map<string, PendingAttachment[]>();
+const listeners = new Set<() => void>();
+const EMPTY_ATTACHMENTS: PendingAttachment[] = [];
+const subscribe = (listener: () => void) => {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+};
+
 interface UseAttachmentsOptions {
+  draftKey?: string;
   /** Ref to the textarea — paste events only trigger when it has focus. */
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
 }
 
-export function useAttachments({ textareaRef }: UseAttachmentsOptions): UseAttachmentsResult {
+export function useAttachments({
+  textareaRef,
+  draftKey,
+}: UseAttachmentsOptions): UseAttachmentsResult {
   const { toast } = useToast();
-  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [localAttachments, setLocalAttachments] = useState<PendingAttachment[]>([]);
+  const saved = useSyncExternalStore(subscribe, () =>
+    draftKey ? (drafts.get(draftKey) ?? EMPTY_ATTACHMENTS) : EMPTY_ATTACHMENTS,
+  );
+  const attachments = draftKey ? saved : localAttachments;
+  const setAttachments: SetAttachments = useCallback(
+    (action) => {
+      if (!draftKey) {
+        setLocalAttachments(action);
+        return;
+      }
+      const previous = drafts.get(draftKey) ?? EMPTY_ATTACHMENTS;
+      drafts.set(draftKey, typeof action === 'function' ? action(previous) : action);
+      for (const listener of listeners) listener();
+    },
+    [draftKey],
+  );
   const [isDragOver, setIsDragOver] = useState(false);
   const attachmentsRef = useRef(attachments);
   attachmentsRef.current = attachments;
@@ -64,17 +95,24 @@ export function useAttachments({ textareaRef }: UseAttachmentsOptions): UseAttac
         await uploadOne(file, setAttachments);
       }
     },
-    [toast],
+    [toast, setAttachments],
   );
 
-  const remove = useCallback((id: string) => {
-    setAttachments((prev) => {
-      const toRemove = prev.find((a) => a.id === id);
-      if (toRemove?.thumbnailUrl) URL.revokeObjectURL(toRemove.thumbnailUrl);
-      return prev.filter((a) => a.id !== id);
-    });
-  }, []);
+  const remove = useCallback(
+    (id: string) => {
+      setAttachments((prev) => {
+        const toRemove = prev.find((a) => a.id === id);
+        if (toRemove?.thumbnailUrl) URL.revokeObjectURL(toRemove.thumbnailUrl);
+        return prev.filter((a) => a.id !== id);
+      });
+    },
+    [setAttachments],
+  );
 
+  const collectDonePointers = () =>
+    attachmentsRef.current
+      .filter((a) => a.status === 'done' && a.filePointer)
+      .map((a) => a.filePointer as FilePointer);
   const collectDonePointersAndClear = useCallback((): FilePointer[] => {
     const pointers = attachmentsRef.current
       .filter((a) => a.status === 'done' && a.filePointer)
@@ -84,7 +122,7 @@ export function useAttachments({ textareaRef }: UseAttachmentsOptions): UseAttac
     });
     setAttachments([]);
     return pointers;
-  }, []);
+  }, [setAttachments]);
 
   usePasteFiles(textareaRef, processFiles);
   const dragHandlers = useDragHandlers(setIsDragOver, processFiles);
@@ -96,6 +134,7 @@ export function useAttachments({ textareaRef }: UseAttachmentsOptions): UseAttac
     processFiles,
     remove,
     collectDonePointersAndClear,
+    collectDonePointers,
     isDragOver,
     dragHandlers,
   };

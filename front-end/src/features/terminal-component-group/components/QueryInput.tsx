@@ -24,8 +24,8 @@
  *   - useTopBarProps     : account/viewport gating shared by TopBar + NubToolbar
  *
  * DIRECT CHANNEL (directChannel, the Rose Desktop code-agent view): the same
- *   shell, textarea and send button only — no nub tab, pinned tools, model,
- *   speed, paperclip, paste or drop (the code session takes text only).
+ *   shell, attachments and send button with native session controls; no Rose nub tab
+ *   or pinned tools. Draft attachments clear only after confirmed delivery.
  *
  * TAB REVEAL (Rose Desktop only): owned by `useToolbarReveal` (ToolbarNub.tsx)
  *   [CLOSED 4px lip] --hover/focus/tap--> [OPEN 18px strip] --leave/tap--> [CLOSED]
@@ -81,21 +81,17 @@ import './query-input/roseQueryBox.css';
 export type { QueryInputProps };
 export type { DripStyles, PendingAttachment } from './query-input/types';
 
-/** Direct channel: no paste target and no drop zone (text only). */
-const NO_TEXTAREA = { current: null };
-const NO_DROP = { onDragOver: () => {}, onDragLeave: () => {}, onDrop: () => {} };
-
 export default function QueryInput(props: QueryInputProps) {
   const { dripStyles = DEFAULT_DRIP_STYLES, drippiness = 0, directChannel = false } = props;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const attachments = useAttachments({ textareaRef: directChannel ? NO_TEXTAREA : textareaRef });
+  const attachments = useAttachments({ textareaRef, draftKey: props.draftKey });
   const priceLimit = usePriceLimit({
     agentDetail: props.agentDetail,
     pendingPriceLimitCents: props.pendingPriceLimitCents ?? DEFAULT_PENDING_PRICE_LIMIT_CENTS,
     onPendingPriceLimitChange: props.onPendingPriceLimitChange,
     onAgentUpdate: props.onAgentUpdate,
   });
-  const handleSubmit = useSubmitHandler(attachments, props.onSubmit);
+  const handleSubmit = useSubmitHandler(attachments, props.onSubmit, directChannel);
   const topBarProps = useTopBarProps(props, attachments, priceLimit, textareaRef);
   const reveal = useToolbarReveal();
   const roseDesktop = useRoseDesktop();
@@ -116,7 +112,7 @@ export default function QueryInput(props: QueryInputProps) {
           dripStyles={dripStyles}
           drippiness={drippiness}
           isDragOver={attachments.isDragOver}
-          dragHandlers={directChannel ? NO_DROP : attachments.dragHandlers}
+          dragHandlers={attachments.dragHandlers}
           opaqueSurface={props.opaqueSurface === true}
           aboveTab={roseDesktop}
           roseDark={roseDark}
@@ -139,6 +135,7 @@ export default function QueryInput(props: QueryInputProps) {
 function useSubmitHandler(
   attachments: ReturnType<typeof useAttachments>,
   onSubmit: QueryInputProps['onSubmit'],
+  directChannel: boolean,
 ) {
   const { toast } = useToast();
   return () => {
@@ -154,8 +151,14 @@ function useSubmitHandler(
       });
       return;
     }
-    const pointers = attachments.collectDonePointersAndClear();
-    onSubmit(pointers.length > 0 ? pointers : undefined);
+    const pointers = directChannel
+      ? attachments.collectDonePointers()
+      : attachments.collectDonePointersAndClear();
+    const result = onSubmit(pointers.length > 0 ? pointers : undefined);
+    if (directChannel)
+      void Promise.resolve(result).then((delivered) => {
+        if (delivered === true) attachments.collectDonePointersAndClear();
+      });
   };
 }
 
@@ -220,11 +223,13 @@ function QueryInputBody(props: QueryInputBodyProps) {
         onModelChange={onModelChange}
         availableModels={availableModels}
         showModelSelector={showModelSelector}
+        hideModelSelector={directChannel}
         textareaRef={textareaRef}
         roseDesktop={roseDesktop}
         roseDark={roseDark}
         speed={speed}
-        attachable={!directChannel}
+        attachable
+        sessionControls={props.sessionControls}
       />
     </>
   );

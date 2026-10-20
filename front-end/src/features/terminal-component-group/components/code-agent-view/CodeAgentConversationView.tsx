@@ -1,22 +1,10 @@
 /**
- * STATE MACHINE: CodeAgentConversationView (Rose Desktop; replaces the chat
- * column while a left-bar code-agent row is open — CodeAgentViewProvider)
- *
- * HEADER: provider icon · title · target/branch ("Cloud · rose-ui/polish/speed")
- *   · state text: [Running] spinning_up/live/verifying · [Paused] · [Completed] · [Failed]
- *   [Failed] → the backend's failure text (red box, verbatim)
- *   [Paused] → one muted line with the backend's text for the user (usage-limit
- *              stop included); no Retry (no user-callable resume route)
- * BODY: TAB [TRANSCRIPT] (default) ⇄ [TERMINAL] (the chip's xterm, kept mounted)
- *   transcript = thinking · messages · tool rows · agent-to-agent · "You → <agent>"
- *   ended: code-session line (branch → target · pushed · PR · merged) + summary
- * QUERY BOX (the normal one, text only, placeholder "Message <agent>…"):
- *   [IDLE] --Enter--> [SENDING] (POST /api/claude-code-session/:taskId/turns)
- *     --ok--> "You → <agent>" row in the transcript, box cleared → [IDLE]
- *     --error--> the backend's message as one plain line (a finished session's
- *               409 "This code session has finished…"), text kept → [IDLE]
- *   read-only views (shared recording, inspection, loading) → notice, no box
- * ESCAPE (not consumed by a dialog/menu) → close() (back to the owner's chat).
+ * Code-agent conversation: existing main-chat messages with one work slot per
+ * native turn. Running activity updates in place; terminal history collapses
+ * above its answer. User messages, displays and A2A rows stay outside the slot.
+ * The existing QueryInput sends directly with attachments and native settings;
+ * questions and approvals sit above it without replacing the draft. Read-only
+ * views keep the transcript and show a notice instead of the composer.
  */
 
 import { useEffect, useState } from 'react';
@@ -24,13 +12,17 @@ import { useEffect, useState } from 'react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
 
-import { useDirectTurn } from '../../hooks/codeAgentDirectTurn';
+import { useAgentContext } from '../../hooks';
+import { messageRequester } from '../../hooks/codeAgentContract';
+import { derivePendingApproval } from '@/features/terminal/hooks/derivations';
+import ApprovalChip from '../ApprovalChip';
+import { CodeSessionMessages } from './CodeSessionMessages';
+import { CodeSessionComposer } from './CodeSessionComposer';
 import { useLocalEchoes } from '../../hooks/codeAgentLocalState';
 import { ProviderIcon, TerminalSurface } from '../claudeCodeChip.shared';
 import { FailureBox, PausedNote, SessionLine, Summary } from '../codeAgentChip.desktop';
-import { ChipTabs, CodeAgentTranscript, type ChipTab } from '../codeAgentChip.steer';
+import { ChipTabs, type ChipTab } from '../codeAgentChip.steer';
 import { PinnedQuestionMount } from '../PinnedQuestion';
-import QueryInput from '../QueryInput';
 import { useCodeAgentView, type OpenCodeAgent } from './codeAgentViewState';
 import { useCodeAgentConversation, type CodeAgentConversation } from './useCodeAgentConversation';
 
@@ -90,12 +82,7 @@ function Body({ c, taskId }: { c: CodeAgentConversation; taskId: string }) {
     <>
       <ChipTabs tab={tab} onChange={setTab} />
       <div className={tab === 'transcript' ? '' : 'hidden'}>
-        <CodeAgentTranscript
-          events={c.events}
-          echoes={echoes}
-          provider={c.provider}
-          variant="page"
-        />
+        <CodeSessionMessages c={c} taskId={taskId} echoes={echoes} />
       </div>
       <div className={tab === 'terminal' ? 'px-3 pt-2' : 'hidden'}>
         <TerminalSurface
@@ -109,52 +96,11 @@ function Body({ c, taskId }: { c: CodeAgentConversation; taskId: string }) {
   );
 }
 
-function Composer({
-  c,
-  taskId,
-  opaqueSurface,
-}: {
-  c: CodeAgentConversation;
-  taskId: string;
-  opaqueSurface: boolean;
-}) {
-  const [text, setText] = useState('');
-  const { send, sending, error } = useDirectTurn(taskId, c.toolCallId);
-  const submit = async () => {
-    if (await send(text)) setText('');
-  };
-  return (
-    <div data-testid="code-agent-view-composer" className="relative z-10">
-      <QueryInput
-        directChannel
-        opaqueSurface={opaqueSurface}
-        value={text}
-        onChange={setText}
-        onSubmit={() => void submit()}
-        disabled={sending}
-        placeholder={`Message ${c.label}…`}
-        showModelSelector={false}
-        canSubmit
-      />
-      {error && (
-        <p
-          role="alert"
-          data-testid="code-agent-view-error"
-          className="mx-auto mt-1.5 max-w-4xl px-1 text-[13px] text-red-600 dark:text-red-400"
-        >
-          {error}
-        </p>
-      )}
-    </div>
-  );
-}
-
 const NOOP = () => {};
 
 export function CodeAgentConversationView({
   codeAgent,
   readOnlyMessage,
-  opaqueSurface = false,
 }: {
   codeAgent: OpenCodeAgent;
   /** Shared recording / inspection / loading: a notice replaces the query box. */
@@ -162,6 +108,12 @@ export function CodeAgentConversationView({
   opaqueSurface?: boolean;
 }) {
   const c = useCodeAgentConversation(codeAgent);
+  const { messages } = useAgentContext();
+  const [handledApprovals, setHandledApprovals] = useState<Set<string>>(() => new Set());
+  const pending = derivePendingApproval(
+    messages.filter((message) => messageRequester(message.metadata)?.task_id === codeAgent.taskId),
+  );
+  const approval = pending && !handledApprovals.has(pending.attentionRequestId) ? pending : null;
   useEscapeToClose(useCodeAgentView()?.close ?? NOOP);
   return (
     <>
@@ -188,7 +140,17 @@ export function CodeAgentConversationView({
         ) : (
           <>
             <PinnedQuestionMount />
-            <Composer c={c} taskId={codeAgent.taskId} opaqueSurface={opaqueSurface} />
+            {approval && (
+              <ApprovalChip
+                pendingApproval={approval}
+                onApprovalHandled={() =>
+                  setHandledApprovals((previous) =>
+                    new Set(previous).add(approval.attentionRequestId),
+                  )
+                }
+              />
+            )}
+            <CodeSessionComposer key={codeAgent.taskId} c={c} taskId={codeAgent.taskId} />
           </>
         )}
       </div>

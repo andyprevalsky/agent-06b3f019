@@ -12,11 +12,11 @@ import { PinnedQuestionMount } from '@/features/terminal-component-group/compone
 import { filterMessagesForSubAgent } from '@/features/terminal-component-group/components/useMessageFiltering';
 import { resetCodeAgentLocalState } from '@/features/terminal-component-group/hooks/codeAgentLocalState';
 import {
-  collectCodeAgentEvents,
   parseAgentToAgentMessage,
   parseCodeAgentMeta,
   parsePinnedQuestion,
 } from '@/features/terminal-component-group/hooks/codeAgentContract';
+import { collectCodeAgentEvents } from '@/features/terminal-component-group/hooks/codeSessionTranscript';
 
 import {
   LIVE_EVENTS,

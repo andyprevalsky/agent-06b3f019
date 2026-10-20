@@ -12,8 +12,8 @@
 
 import { useCallback, useRef, useState } from 'react';
 
-import { sendCodeAgentMessage } from './codeAgentContract';
-import { addLocalEcho } from './codeAgentLocalState';
+import { sendCodeAgentMessage, type CodeTurnOptions } from './codeAgentContract';
+import { addLocalEcho, pendingCodeTurns } from './codeAgentLocalState';
 
 /** A fresh idempotency key (`client_message_id`) for one direct turn. */
 function newDirectTurnId(): string {
@@ -22,30 +22,49 @@ function newDirectTurnId(): string {
 
 export interface DirectTurn {
   /** Resolves true once delivered (the caller clears its input). */
-  send: (text: string) => Promise<boolean>;
+  send: (text: string, options?: CodeTurnOptions) => Promise<boolean>;
+  effective: CodeTurnOptions | null;
   sending: boolean;
   /** The backend's error text for the last failed send (e.g. a finished session's 409). */
   error: string | null;
 }
 
 export function useDirectTurn(taskId: string, toolCallId?: string): DirectTurn {
+  const [effective, setEffective] = useState<CodeTurnOptions | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const turn = useRef<{ text: string; id: string } | null>(null);
   const inFlight = useRef(false);
 
   const send = useCallback(
-    async (raw: string) => {
+    async (raw: string, options?: CodeTurnOptions) => {
       const text = raw.trim();
-      if (!text || inFlight.current) return false;
-      if (turn.current?.text !== text) turn.current = { text, id: newDirectTurnId() };
+      if ((!text && !options?.attachments?.length) || inFlight.current) return false;
+      const payload = JSON.stringify({ text, ...options });
+      if (pendingCodeTurns.get(taskId)?.payload !== payload)
+        pendingCodeTurns.set(taskId, { payload, id: newDirectTurnId() });
       inFlight.current = true;
       setSending(true);
       setError(null);
       try {
-        await sendCodeAgentMessage({ taskId, text, clientMessageId: turn.current.id, toolCallId });
-        turn.current = null;
-        addLocalEcho(taskId, text);
+        const id = pendingCodeTurns.get(taskId)!.id;
+        const ack = await sendCodeAgentMessage({
+          taskId,
+          text,
+          clientMessageId: id,
+          toolCallId,
+          options,
+        });
+        setEffective(
+          ack.effective_settings
+            ? {
+                model: ack.effective_settings.model,
+                reasoning_effort: ack.effective_settings.effort,
+                speed: ack.effective_settings.speed,
+              }
+            : null,
+        );
+        pendingCodeTurns.delete(taskId);
+        addLocalEcho(taskId, text, Date.now(), id);
         return true;
       } catch (err) {
         setError(err instanceof Error ? err.message : 'send failed');
@@ -58,5 +77,5 @@ export function useDirectTurn(taskId: string, toolCallId?: string): DirectTurn {
     [taskId, toolCallId],
   );
 
-  return { send, sending, error };
+  return { send, sending, error, effective };
 }

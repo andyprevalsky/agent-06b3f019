@@ -14,12 +14,12 @@ import {
   codeAgentLabel,
   codeAgentTargetLabel,
   codeAgentToolCallId,
-  collectCodeAgentEvents,
   latestCodeAgentMeta,
   type CodeAgentMeta,
   type CodeAgentProvider,
   type CodeAgentTranscriptEvent,
 } from '../../hooks/codeAgentContract';
+import { collectCodeAgentEvents } from '../../hooks/codeSessionTranscript';
 import { desktopChipState } from '../../hooks/codeAgentSteering';
 import type { ChipState } from '../../types';
 import { useClaudeCodeChip, type ClaudeCodeChipVM } from '../claudeCodeChip.hooks';
