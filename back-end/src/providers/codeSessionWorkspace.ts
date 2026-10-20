@@ -1,14 +1,18 @@
 /**
  * Everything a code-agent session gets in its HOME, assembled in one place:
  *
- *   prepareUserUiWorkspaceSafe(userId, agentId)  rose_user_ui/ + rose-ui CLI (W1)
+ *   prepareUserUiWorkspaceSafe(userId, agentId)  rose-ui CLI + publish env (W1; no UI folder:
+ *     │                                          the agent runs `rose-ui pull` when it needs one)
  *     └─ withAgentGraphWorkspace(...)       rose-agents CLI + graph token   (L-A2A)
  *          └─ withAgentTools(...)           rose CLI / MCP + tools token    (L-DISPLAY)
  *               └─ withCodePreview(...)     rose-preview CLI + env, Rose Desktop accounts only (A1)
+ *                    └─ withRoseSkills(...) ~/.rose/skills + ~/.claude/skills + ~/.agents/skills (C17)
  *
  * Each step is best-effort (never throws); a failed step leaves the others.
- * The rose_user_ui step and the Rose Desktop tool set apply to Rose Desktop
- * accounts only (utils/roseDesktop); `roseDesktop` defaults to that flag.
+ * The rose-ui step, rose-preview and the Rose Desktop tool set apply to Rose
+ * Desktop accounts only (utils/roseDesktop); `roseDesktop` defaults to that
+ * flag and also picks the installed skills, which the code-agent prompt's
+ * table of contents lists (codeAgentPrompt, same installedRoseSkills()).
  */
 import { withAgentGraphWorkspace } from './agentGraph/workspace';
 import { withAgentTools } from './agentTools/workspace';
@@ -19,6 +23,11 @@ import {
   codePreviewToolFiles,
 } from './codePreview/preview';
 import { createLogger } from './logger';
+import {
+  installedRoseSkills,
+  isRoseSkillWorkspacePath,
+  roseSkillWorkspaceFiles,
+} from './roseSkills/skills';
 import {
   prepareUserUiWorkspaceSafe,
   userUiPublishBaseUrl,
@@ -57,6 +66,32 @@ export function withCodePreview(
   }
 }
 
+/**
+ * Install the account group's Rose skills (C17): every skill under
+ * ~/.rose/skills/<name>/, mirrored into Claude Code's ~/.claude/skills/ and
+ * Codex's ~/.agents/skills/. The prompt's table of contents lists the same set.
+ */
+export function withRoseSkills(
+  workspace: UserUiWorkspace | null,
+  roseDesktop: boolean
+): UserUiWorkspace | null {
+  try {
+    const base: UserUiWorkspace = workspace ?? { files: [], envs: {}, source: { kind: 'seed' } };
+    return {
+      ...base,
+      files: [
+        ...base.files.filter((file) => !isRoseSkillWorkspacePath(file.path)),
+        ...roseSkillWorkspaceFiles(installedRoseSkills(roseDesktop)),
+      ],
+    };
+  } catch (err) {
+    log.error('Failed to add the Rose skills', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return workspace;
+  }
+}
+
 export async function prepareCodeSessionWorkspace(
   userId: string | undefined,
   agentId: string,
@@ -73,9 +108,12 @@ export async function prepareCodeSessionWorkspace(
       provider,
     }
   );
-  return withCodePreview(
-    withAgentTools(graph, { userId, agentId, taskId, provider, roseDesktop }),
-    userId,
+  return withRoseSkills(
+    withCodePreview(
+      withAgentTools(graph, { userId, agentId, taskId, provider, roseDesktop }),
+      userId,
+      roseDesktop
+    ),
     roseDesktop
   );
 }

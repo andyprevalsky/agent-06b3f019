@@ -14,6 +14,7 @@ import { createLogger } from '../logger';
 import { fetchClaudeCodeCredentialsWithMeta } from '../claudeCredentials';
 import { fetchGptCodeCredentialsWithMeta } from '../gptCredentials';
 import { buildLocalCodeAgentSystemPrompt } from '../codeAgentPrompt';
+import { isRoseDesktopUser } from '../../utils/roseDesktop';
 import {
   LocalSessionStartError,
   localDeviceHub,
@@ -111,7 +112,10 @@ export async function buildLocalSessionEnvs(params: {
   integrationId: string | null;
 }> {
   // The Mac sets ROSE_LOCAL_WORKDIR to the granted folder (the CLI's cwd).
-  const systemPrompt = buildLocalCodeAgentSystemPrompt();
+  // The session HOME gets the same account-group skills (homeFiles → prepareCodeSessionWorkspace).
+  const systemPrompt = buildLocalCodeAgentSystemPrompt({
+    roseDesktop: isRoseDesktopUser(params.userId),
+  });
   const noCredentials = (): LocalTargetUnavailableError =>
     new LocalTargetUnavailableError(
       'no_own_credentials',

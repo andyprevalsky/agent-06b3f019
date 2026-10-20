@@ -19,7 +19,6 @@ import {
 } from './gptCredentials';
 import { buildCodeAgentSystemPrompt, buildCodexHarnessSystemPrompt } from './codeAgentPrompt';
 import { isRoseDesktopUser } from '../utils/roseDesktop';
-import { withAgentGraphInstructions } from './agentGraph/cli';
 import { uploadAttachmentsToSandbox } from './e2bAttachments';
 import { overlayCodexRoseBridge } from './e2bCodexHarness';
 import { workDirForGithubRepo } from './e2bWorkDir';
@@ -185,16 +184,16 @@ async function createClaudeCodeSessionUnlocked(
     `wrapper:${fileHash(findLocalClaudeCodeWsServer())}`,
     `env:${process.env.FAST_MODE_CODE_AGENT_ENV_FINGERPRINT ?? 'default'}`,
   ].join('|');
-  const systemPrompt = withAgentGraphInstructions(
-    buildCodeAgentSystemPrompt({
-      githubRepoUrl,
-      workDir,
-      branch: codeSession?.branch,
-      mergeTarget: codeSession?.mergeTarget,
-      roseDesktop: isRoseDesktopUser(userId),
-      roseRepo: isRoseRepoUrl(projectWorkspace?.project.repoUrl ?? githubRepoUrl),
-    })
-  );
+  // The Rose skills table of contents (agent graph, talking to the user, ...)
+  // lists the skills prepareCodeSessionWorkspace installs for this account.
+  const systemPrompt = buildCodeAgentSystemPrompt({
+    githubRepoUrl,
+    workDir,
+    branch: codeSession?.branch,
+    mergeTarget: codeSession?.mergeTarget,
+    roseDesktop: isRoseDesktopUser(userId),
+    roseRepo: isRoseRepoUrl(projectWorkspace?.project.repoUrl ?? githubRepoUrl),
+  });
 
   // Build environment variables for sandbox
   const envs: Record<string, string> = {
@@ -512,15 +511,13 @@ export async function createCodexCodeSession(
           roseUserId: userId,
           anchorAgentId: agentId,
         })
-      : withAgentGraphInstructions(
-          buildCodeAgentSystemPrompt({
-            githubRepoUrl,
-            workDir,
-            branch: codeSession?.branch,
-            mergeTarget: codeSession?.mergeTarget,
-            roseDesktop: isRoseDesktopUser(userId),
-          })
-        );
+      : buildCodeAgentSystemPrompt({
+          githubRepoUrl,
+          workDir,
+          branch: codeSession?.branch,
+          mergeTarget: codeSession?.mergeTarget,
+          roseDesktop: isRoseDesktopUser(userId),
+        });
 
   const credentialMeta: GptCodeCredentialEnvelopeResult | null =
     await fetchGptCodeCredentialsWithMeta(userId);

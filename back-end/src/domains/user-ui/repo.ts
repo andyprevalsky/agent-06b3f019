@@ -5,6 +5,7 @@ export {
   findActiveUserUiVersion,
   listUserUiVersions,
   readUserUiFile,
+  readUserUiVersionFiles,
   userExists,
   userUiAnnounceAgentIds,
   type UserUiVersionRecord,

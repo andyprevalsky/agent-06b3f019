@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 'use strict';
 /**
- * rose-ui — the code agent's CLI for its user's `rose_user_ui` folder.
+ * rose-ui — the code agent's CLI for its user's Rose app UI bundle.
  * Installed by Rose at ~/.rose/bin/rose-ui and regenerated every session; do not edit.
+ * How to use it is the rose-ui skill (~/.rose/skills/rose-ui/SKILL.md).
  *
- *   rose_user_ui/ ──► preview servers (this process)
+ *   pull [<dir>] ──► GET $ROSE_UI_BUNDLE_URL (publish token) ──► the published bundle in <dir>
+ *                    (default ~/rose_user_ui; later commands use the pulled folder, or --dir)
+ *   <dir>/ ──► preview servers (this process)
  *                       host     http://127.0.0.1:<A>/          mock Rose chrome + bridge
  *                       content  http://127.0.0.1:<B>/c/<path>  your files, production CSP
  *                         │  <iframe sandbox="allow-scripts"> on a different origin
@@ -23,7 +26,7 @@ const zlib = require('zlib');
 const crypto = require('crypto');
 const { execFileSync, spawnSync } = require('child_process');
 
-const CLI_VERSION = '4';
+const CLI_VERSION = '5';
 const KB = 1024;
 const MB = 1024 * KB;
 const MAX_FILE = 10 * MB;
@@ -56,7 +59,7 @@ const DEFAULT_BUDGETS = Object.freeze({
 const STANDARD_REFRESH_HZ = [24, 30, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 240];
 /** 1-minute load average per CPU above which fps cannot be judged fairly. */
 const HOST_BUSY_LOAD_PER_CORE = 1.25;
-/** Session-start captures: CSS viewport x device scale = PNG pixels. */
+/** `screenshot --current` captures: CSS viewport x device scale = PNG pixels. */
 const CURRENT_VIEWPORTS = [
   { name: 'desktop', width: 1280, height: 800, scale: 2 },
   { name: 'mobile', width: 390, height: 844, scale: 3 },
@@ -139,8 +142,29 @@ function numberFlag(value, fallback, name, { min = 0, max = Infinity } = {}) {
   return n;
 }
 
+/** Default bundle folder when nothing was pulled and no --dir / $ROSE_UI_DIR is given. */
+const DEFAULT_DIR_NAME = 'rose_user_ui';
+/** `rose-ui pull` records the folder here so later commands find it. */
+const PULLED_DIR_FILE = () => path.join(os.homedir(), '.rose', 'rose-ui-dir');
+/** Written into the pulled folder (a dotfile, so it is never published). */
+const PULL_RECORD = '.rose-pull.json';
+/** --dir for this invocation (set by main). */
+let dirFlag = null;
+
+function pulledDir() {
+  try {
+    const dir = fs.readFileSync(PULLED_DIR_FILE(), 'utf8').trim();
+    return dir || null;
+  } catch {
+    return null;
+  }
+}
+
+/** The bundle folder: --dir, then $ROSE_UI_DIR, then the last pulled folder, then ~/rose_user_ui. */
 function uiRoot() {
-  return path.resolve(process.env.ROSE_UI_DIR || path.join(os.homedir(), 'rose_user_ui'));
+  if (dirFlag) return path.resolve(dirFlag);
+  if (process.env.ROSE_UI_DIR) return path.resolve(process.env.ROSE_UI_DIR);
+  return path.resolve(pulledDir() || path.join(os.homedir(), DEFAULT_DIR_NAME));
 }
 
 function routeSlug(route) {
@@ -932,7 +956,7 @@ async function captureCurrent({ quiet, json } = {}) {
   const versionId = process.env.ROSE_UI_PUBLISHED_VERSION_ID || null;
   const index = { versionId, publishedBaseUrl: publishedBaseUrl(), capturedAt: new Date().toISOString(), host: 'rose-ui preview host', files: [] };
   if (!index.publishedBaseUrl) {
-    index.note = 'The user has no published rose_user_ui version; they see the stock Rose UI.';
+    index.note = 'The user has no published Rose app UI version; they see the stock Rose UI.';
     fs.writeFileSync(path.join(dir, 'index.json'), `${JSON.stringify(index, null, 2)}\n`);
     out({ quiet, json }, index.note, index);
     return 0;
@@ -952,23 +976,6 @@ async function captureCurrent({ quiet, json } = {}) {
   return 0;
 }
 
-/** Lazy session-start capture: runs once per published version, before the first browser command. */
-async function ensureCurrentScreenshots() {
-  const base = publishedBaseUrl();
-  if (!base || process.env.ROSE_UI_SKIP_CURRENT === '1') return;
-  const dir = path.join(uiRoot(), 'screenshots', 'current');
-  try {
-    const index = readJson(path.join(dir, 'index.json'));
-    if (index.versionId === (process.env.ROSE_UI_PUBLISHED_VERSION_ID || null) && index.files && index.files.length > 0) return;
-  } catch { /* missing or unreadable → capture */ }
-  try {
-    const done = await captureCurrentLocked({ quiet: true }, { waitIfBusy: false, notice: true });
-    if (done === null) process.stderr.write('rose-ui: the published UI is being captured in the background → screenshots/current/\n');
-  } catch (err) {
-    process.stderr.write(`rose-ui: could not capture published screenshots: ${err.message}\n`);
-  }
-}
-
 /** O_EXCL lock file; a lock older than 2 minutes belongs to a dead capture. */
 function takeLock(lock) {
   try {
@@ -984,11 +991,10 @@ function takeLock(lock) {
 }
 
 /**
- * One capture of screenshots/current/ at a time. The lazy path skips when another
- * capture (the session-start one) holds the lock; `screenshot --current` waits for
- * it and then captures again. Returns null when skipped.
+ * One capture of screenshots/current/ at a time: `screenshot --current` waits for
+ * a concurrent capture to finish and then captures again. Returns null when skipped.
  */
-async function captureCurrentLocked(opts, { waitIfBusy, notice = false }) {
+async function captureCurrentLocked(opts, { waitIfBusy }) {
   const dir = path.join(uiRoot(), 'screenshots', 'current');
   fs.mkdirSync(dir, { recursive: true });
   const lock = path.join(dir, '.capturing');
@@ -998,7 +1004,6 @@ async function captureCurrentLocked(opts, { waitIfBusy, notice = false }) {
     if (!takeLock(lock)) throw new Error('another capture holds screenshots/current/.capturing');
   }
   try {
-    if (notice) process.stderr.write('rose-ui: capturing the user\'s published UI → screenshots/current/ (first run this session)\n');
     return await captureCurrent(opts);
   } finally {
     fs.rmSync(lock, { force: true });
@@ -1215,6 +1220,65 @@ function collect(root) {
   return { files, total };
 }
 
+/**
+ * Write the user's published bundle (or the starting bundle) into a folder.
+ * Refuses to overwrite a folder that already has bundle files unless --force;
+ * with --force, bundle files missing from the published version are removed.
+ * screenshots/ and dotfiles are left alone.
+ */
+async function cmdPull(opts) {
+  const publishUrl = process.env.ROSE_UI_PUBLISH_URL || '';
+  const url = process.env.ROSE_UI_BUNDLE_URL || publishUrl.replace(/\/versions\/?$/, '/bundle');
+  const token = process.env.ROSE_UI_PUBLISH_TOKEN;
+  if (!url || !token) throw new Error('ROSE_UI_BUNDLE_URL and ROSE_UI_PUBLISH_TOKEN must be set (they are injected into Rose code sessions)');
+  // --force and --json take no value: `pull --force <dir>` still names the folder.
+  const positional = [...opts._];
+  for (const flag of ['force', 'json']) {
+    if (typeof opts[flag] === 'string') positional.push(opts[flag]);
+  }
+  const force = opts.force !== undefined;
+  const named = positional[0] || dirFlag || process.env.ROSE_UI_DIR;
+  const target = path.resolve(named || path.join(os.homedir(), DEFAULT_DIR_NAME));
+  const existing = fs.existsSync(target) ? listFiles(target) : [];
+  if (existing.length > 0 && !force) {
+    throw new UsageError(`${target} already has ${existing.length} bundle file(s); pass --force to replace them with the published version`);
+  }
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  const text = await res.text();
+  let body;
+  try { body = JSON.parse(text); } catch { body = { error: text.slice(0, 500) }; }
+  if (!res.ok) {
+    process.stderr.write(`pull failed (${res.status}): ${body.error || text}\n`);
+    return 1;
+  }
+  const files = Array.isArray(body.files) ? body.files : [];
+  for (const f of files) {
+    if (!f || typeof f.path !== 'string' || !isPublishablePath(f.path) || typeof f.contentBase64 !== 'string') {
+      throw new Error(`refusing to write bundle entry ${f && f.path}`);
+    }
+  }
+  fs.mkdirSync(target, { recursive: true });
+  const incoming = new Set(files.map((f) => f.path));
+  for (const f of existing) if (!incoming.has(f.path)) fs.rmSync(f.abs, { force: true });
+  let total = 0;
+  for (const f of files) {
+    const abs = path.join(target, f.path);
+    const content = Buffer.from(f.contentBase64, 'base64');
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, content);
+    total += content.length;
+  }
+  const record = { versionId: body.versionId || null, source: body.source || null, pulledAt: new Date().toISOString(), files: files.length, bytes: total, dir: target };
+  fs.writeFileSync(path.join(target, PULL_RECORD), `${JSON.stringify(record, null, 2)}\n`);
+  fs.mkdirSync(path.dirname(PULLED_DIR_FILE()), { recursive: true });
+  fs.writeFileSync(PULLED_DIR_FILE(), `${target}\n`);
+  const human = record.versionId
+    ? `pulled published version ${record.versionId} (${files.length} files, ${fmtBytes(total)}) → ${target}`
+    : `the user has no published UI yet; wrote the starting bundle (${files.length} files) → ${target}`;
+  out({ ...opts, json: opts.json !== undefined }, human, record);
+  return 0;
+}
+
 async function cmdPublish(opts) {
   const activate = !opts['no-activate'];
   const url = process.env.ROSE_UI_PUBLISH_URL;
@@ -1236,18 +1300,21 @@ async function cmdPublish(opts) {
   return 0;
 }
 
-const USAGE = `usage: rose-ui <command> [options]
+const USAGE = `usage: rose-ui <command> [options] [--dir <dir>]
 
-  publish [--no-activate]              publish this folder (and show it to the user)
+  pull [<dir>] [--force] [--json]      the user's published bundle (or a starting bundle) into <dir>
+                                       (default ~/rose_user_ui); later commands use that folder
+  publish [--no-activate]              publish the folder (and show it to the user)
   dev [--port 5170] [--published]      live preview host for your local, unpublished files
   screenshot [--route /] [--viewport 1440x900] [--scale 2] [--out file.png] [--published] [--json]
-  screenshot --current                 re-capture screenshots/current/ from the published UI
+  screenshot --current                 capture the user's published UI into screenshots/current/
   record [--route /] [--seconds 5] [--viewport 1280x800] [--out file.mp4]   MP4 + frame strip
   perf [--entry path.html | --route /] [--seconds 3] [--viewport 1280x800] [--full] [--out file.json]
                                        (--route measures the route's first user frame; --full adds hidden + reduced-motion)
   check [entry.html ...] [--examples] [--json] [--out report.json]   exits 1 on budget violations
 
-routes: / (home)  /agent  /inline/<view>  /slot/<name>  /shell  /file/<path>   add ?safe=1 for stock UI`;
+routes: / (home)  /agent  /inline/<view>  /slot/<name>  /shell  /file/<path>   add ?safe=1 for stock UI
+the folder: --dir, then $ROSE_UI_DIR, then the last pulled folder, then ~/rose_user_ui`;
 
 async function main(argv) {
   const [cmd, ...rest] = argv;
@@ -1257,10 +1324,12 @@ async function main(argv) {
     return cmd === undefined || cmd === '--help' || cmd === 'help' || opts.help ? 0 : 1;
   }
   if (cmd === '--version') { process.stdout.write(`${CLI_VERSION}\n`); return 0; }
+  if (opts.dir === true) throw new UsageError('--dir needs a folder');
+  dirFlag = typeof opts.dir === 'string' ? opts.dir : null;
+  if (cmd === 'pull') return cmdPull(opts);
   if (cmd === 'publish') return cmdPublish(opts);
   const commands = { dev: cmdDev, screenshot: cmdScreenshot, record: cmdRecord, perf: cmdPerf, check: cmdCheck };
   if (!commands[cmd]) { process.stderr.write(`${USAGE}\n`); return 1; }
-  if (!(cmd === 'screenshot' && opts.current)) await ensureCurrentScreenshots();
   return commands[cmd](opts);
 }
 
@@ -1272,7 +1341,7 @@ if (require.main === module) {
 }
 
 module.exports = {
-  CLI_VERSION, USERCONTENT_CSP, DEFAULT_BUDGETS, CURRENT_VIEWPORTS, CURRENT_ROUTES, LOCAL_ONLY_DIRS,
+  CLI_VERSION, USERCONTENT_CSP, DEFAULT_BUDGETS, CURRENT_VIEWPORTS, CURRENT_ROUTES, LOCAL_ONLY_DIRS, USAGE,
   parseArgs, parseViewport, routeSlug, isPublishablePath, listFiles, manifestEntries, lintTheme,
   auditEntryFiles, frameStats, cumulativeLayoutShift, evaluateBudgets, decodePng, pngStats, diffFraction, startPreview, main,
 };

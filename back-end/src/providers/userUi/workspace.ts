@@ -1,20 +1,20 @@
 /**
- * Materialize a user's `rose_user_ui/` folder (+ the `rose-ui` CLI) into a
- * code-agent session home.
+ * The `rose-ui` CLI (+ its publish env) for a code-agent session home. There is
+ * no pre-materialized UI folder: the rose-ui skill (assets/rose-skills/rose-ui)
+ * has the agent pull the bundle when it needs one (C17).
  *
  *   createClaudeCodeSession(userId)
  *     └─ prepareUserUiWorkspace(userId)
- *          active version files (storage) ─┐
- *          or seed (README + manifest +    ├─► files under ~/rose_user_ui/
- *          theme + examples)               ┘   README.md always regenerated
  *          rose-ui CLI + preview host ───────► ~/.rose/bin/rose-ui, ~/.rose/lib/rose-ui/
  *          fresh publish token ──────────────► ROSE_UI_PUBLISH_URL / _TOKEN env
+ *          bundle download URL ──────────────► ROSE_UI_BUNDLE_URL env
  *          active version usercontent URL ──► ROSE_UI_PUBLISHED_BASE_URL / _VERSION_ID env
- *     └─ (sandbox) background `rose-ui screenshot --current`
- *          → ~/rose_user_ui/screenshots/current/*.png of the published UI
- *          (the CLI also captures lazily on its first browser command)
+ *     └─ agent, on demand:
+ *          rose-ui pull [<dir>]  ──► GET /api/user-ui/bundle (active version files, or the
+ *                                    starting bundle) into <dir>, default ~/rose_user_ui
+ *          rose-ui screenshot --current ──► <dir>/screenshots/current/*.png
  *
- * The folder lives in the session HOME (not the repo workDir) so a GitHub clone
+ * Everything lives in the session HOME (not the repo workDir) so a GitHub clone
  * into the workDir never collides with it.
  */
 import { chmod, mkdir, writeFile } from 'fs/promises';
@@ -23,22 +23,15 @@ import { createLogger } from '../logger';
 import { isRoseDesktopUser } from '../../utils/roseDesktop';
 import type { UserUiBundleFile } from './manifest';
 import { mintUserUiPublishToken } from './publishToken';
-import {
-  USER_UI_CLI_BIN_DIR,
-  USER_UI_CLI_NAME,
-  USER_UI_DIR_NAME,
-  userUiReadme,
-  userUiSeedFiles,
-  userUiToolFiles,
-} from './seed';
-import { findActiveUserUiVersion, readUserUiVersionFiles } from './store';
+import { USER_UI_CLI_BIN_DIR, USER_UI_CLI_NAME, userUiToolFiles } from './seed';
+import { findActiveUserUiVersion } from './store';
 
 const log = createLogger('UserUiWorkspace');
 
 export { USER_UI_CLI_BIN_DIR };
 
 export interface UserUiWorkspace {
-  /** Files relative to the session HOME (rose_user_ui/..., .rose/bin/rose-ui, .rose/lib/...). */
+  /** Files relative to the session HOME (.rose/bin/..., .rose/lib/..., .rose/skills/...). */
   files: UserUiBundleFile[];
   /** Env injected into the session for `rose-ui publish` and published-UI screenshots. */
   envs: Record<string, string>;
@@ -67,42 +60,35 @@ export function userUiPublishBaseUrl(): string {
   return `http://localhost:${process.env.PORT || 3001}`;
 }
 
+/** `rose-ui pull` downloads the bundle here (same publish token as POST /versions). */
+export const USER_UI_BUNDLE_ROUTE = '/api/user-ui/bundle';
+
 export async function prepareUserUiWorkspace(
   userId: string,
   agentId?: string
 ): Promise<UserUiWorkspace> {
   const active = await findActiveUserUiVersion(userId);
-  const bundle = active ? await readUserUiVersionFiles(userId, active.id) : userUiSeedFiles();
-  const withReadme = [
-    ...bundle.filter((file) => file.path !== 'README.md'),
-    { path: 'README.md', content: Buffer.from(userUiReadme(), 'utf8') },
-  ];
   const { token } = mintUserUiPublishToken(userId, { agentId });
   const envs: Record<string, string> = {
     ROSE_UI_PUBLISH_URL: `${userUiPublishBaseUrl()}/api/user-ui/versions`,
     ROSE_UI_PUBLISH_TOKEN: token,
+    ROSE_UI_BUNDLE_URL: `${userUiPublishBaseUrl()}${USER_UI_BUNDLE_ROUTE}`,
   };
   if (active) {
     envs.ROSE_UI_PUBLISHED_VERSION_ID = active.id;
     envs.ROSE_UI_PUBLISHED_BASE_URL = userUiPublishedBaseUrl(active.id, userUiPublishBaseUrl());
   }
   return {
-    files: [
-      ...withReadme.map((file) => ({
-        path: `${USER_UI_DIR_NAME}/${file.path}`,
-        content: file.content,
-      })),
-      ...userUiToolFiles(),
-    ],
+    files: userUiToolFiles(),
     envs,
     source: active ? { kind: 'active', versionId: active.id } : { kind: 'seed' },
   };
 }
 
 /**
- * Best-effort wrapper: a UI-folder failure must never block a code session.
- * rose_user_ui is the Rose Desktop app UI (utils/roseDesktop): every other
- * account gets no folder, no `rose-ui` CLI and no publish token. `roseDesktop`
+ * Best-effort wrapper: a rose-ui failure must never block a code session.
+ * The user's Rose app UI is a Rose Desktop surface (utils/roseDesktop): every
+ * other account gets no `rose-ui` CLI and no publish token. `roseDesktop`
  * defaults to the account's flag; tests pass it to exercise either group.
  */
 export async function prepareUserUiWorkspaceSafe(
@@ -113,7 +99,7 @@ export async function prepareUserUiWorkspaceSafe(
   if (!userId || !roseDesktop) return null;
   try {
     const workspace = await prepareUserUiWorkspace(userId, agentId);
-    log.info('Prepared rose_user_ui workspace', {
+    log.info('Prepared rose-ui workspace', {
       userId,
       source: workspace.source.kind,
       versionId: workspace.source.kind === 'active' ? workspace.source.versionId : null,
@@ -121,7 +107,7 @@ export async function prepareUserUiWorkspaceSafe(
     });
     return workspace;
   } catch (err) {
-    log.error('Failed to prepare rose_user_ui workspace', {
+    log.error('Failed to prepare rose-ui workspace', {
       userId,
       error: err instanceof Error ? err.message : String(err),
     });
@@ -174,26 +160,15 @@ export async function writeUserUiWorkspaceToSandbox(
   );
   const bins = cliBinPaths(workspace).map((bin) => `${home}/${bin}`);
   if (bins.length === 0) return;
+  // No session-start capture: the agent runs `rose-ui screenshot --current`
+  // when it needs the published UI (rose-ui skill).
   await sandbox.commands.run(`chmod 755 ${bins.join(' ')}`, { timeoutMs: 10_000 });
-  if (workspace.source.kind === 'active') {
-    await sandbox.commands.run(currentScreenshotsCommand(home), { timeoutMs: 10_000 });
-  }
-}
-
-/**
- * Detached session-start capture of the published UI. It needs Playwright +
- * Chromium in the template; when they are missing it fails into its log and
- * `rose-ui` retries lazily on the agent's first browser command.
- */
-export function currentScreenshotsCommand(home: string): string {
-  const cli = `${home}/${USER_UI_CLI_BIN_DIR}/${USER_UI_CLI_NAME}`;
-  return `nohup ${cli} screenshot --current --quiet > ${home}/.rose/current-screenshots.log 2>&1 &`;
 }
 
 const SANDBOX_HOME = '/home/user';
 const SANDBOX_DEFAULT_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
 
-/** Inject the rose-ui publish env and put `~/.rose/bin` on the E2B sandbox PATH. */
+/** Inject the session env (rose-ui, tools, graph) and put `~/.rose/bin` on the E2B sandbox PATH. */
 export function applyUserUiSandboxEnvs(
   envs: Record<string, string>,
   workspace: UserUiWorkspace | null
@@ -203,7 +178,7 @@ export function applyUserUiSandboxEnvs(
   envs.PATH = `${SANDBOX_HOME}/${USER_UI_CLI_BIN_DIR}:${SANDBOX_HOME}/.local/bin:${SANDBOX_DEFAULT_PATH}`;
 }
 
-/** Best-effort E2B write: the rose_user_ui folder never blocks a code session. */
+/** Best-effort E2B write: the session HOME files never block a code session. */
 export async function writeUserUiWorkspaceToSandboxSafe(
   sandbox: SandboxFiles,
   workspace: UserUiWorkspace | null,
@@ -212,9 +187,13 @@ export async function writeUserUiWorkspaceToSandboxSafe(
   if (!workspace) return;
   try {
     await writeUserUiWorkspaceToSandbox(sandbox, SANDBOX_HOME, workspace);
-    log.info('Materialized rose_user_ui in sandbox', { agentId, source: workspace.source.kind });
+    log.info('Materialized session HOME files in sandbox', {
+      agentId,
+      source: workspace.source.kind,
+      fileCount: workspace.files.length,
+    });
   } catch (err) {
-    log.error('Failed to materialize rose_user_ui in sandbox', {
+    log.error('Failed to materialize session HOME files in sandbox', {
       agentId,
       error: err instanceof Error ? err.message : String(err),
     });
@@ -235,12 +214,17 @@ export async function materializeUserUiInLocalHome(
   try {
     await writeUserUiWorkspaceToDir(homeDir, workspace);
     const loopback = `http://127.0.0.1:${process.env.PORT || 3001}`;
-    // A tools-only workspace (no rose_user_ui: not a Rose Desktop account) gets no rose-ui env.
+    // A workspace without the rose-ui CLI (not a Rose Desktop account) gets no rose-ui env.
     const hasUserUi = workspace.files.some(
       (file) => file.path === `${USER_UI_CLI_BIN_DIR}/${USER_UI_CLI_NAME}`
     );
     const envs: Record<string, string> = {
-      ...(hasUserUi ? { ROSE_UI_PUBLISH_URL: `${loopback}/api/user-ui/versions` } : {}),
+      ...(hasUserUi
+        ? {
+            ROSE_UI_PUBLISH_URL: `${loopback}/api/user-ui/versions`,
+            ROSE_UI_BUNDLE_URL: `${loopback}${USER_UI_BUNDLE_ROUTE}`,
+          }
+        : {}),
       ...workspace.localEnvs,
     };
     if (workspace.source.kind === 'active') {
@@ -251,7 +235,7 @@ export async function materializeUserUiInLocalHome(
     }
     return { binDir: join(homeDir, USER_UI_CLI_BIN_DIR), envs };
   } catch (err) {
-    log.error('Failed to materialize local rose_user_ui', {
+    log.error('Failed to materialize the local session HOME files', {
       agentId,
       error: err instanceof Error ? err.message : String(err),
     });
