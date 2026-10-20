@@ -3,7 +3,6 @@
  *
  *   [IDLE]       all app icons grey
  *   --click Browser--> [BROWSER_OPEN] globe turns #e8507f, Browser drawer slides in
- *   --click Voice----> [VOICE_OPEN]   orb's mic turns #e8507f, Voice drawer slides in
  *   --click the open app again--> [IDLE]
  *
  * Mirrors the left sidebar: fixed to the right edge, 64px, solid white with a
@@ -15,8 +14,6 @@
 import { Globe } from 'lucide-react';
 import { useRoseApps, type RoseApp } from './roseAppsState';
 import { APP_BAR_WIDTH } from './roseAppsLayout';
-import { RoseVoiceOrb } from './RoseVoiceOrb';
-import { VOICE_PRESETS, useSelectedVoice } from './voicePresets';
 
 export const APP_ACTIVE_COLOR = '#e8507f';
 
@@ -51,9 +48,7 @@ function AppButton({
 
 export function RoseAppBar() {
   const apps = useRoseApps();
-  const [voice] = useSelectedVoice();
   if (apps === null) return null;
-  const hue = VOICE_PRESETS.find((v) => v.id === voice)?.hue ?? 0;
   return (
     <nav
       aria-label="Apps"
@@ -68,19 +63,6 @@ export function RoseAppBar() {
         onClick={() => apps.toggleApp('browser')}
       >
         <Globe className="h-[22px] w-[22px]" strokeWidth={1.7} />
-      </AppButton>
-      <AppButton
-        app="voice"
-        label="Voice"
-        active={apps.openApp === 'voice'}
-        onClick={() => apps.toggleApp('voice')}
-      >
-        <RoseVoiceOrb
-          size={34}
-          hue={hue}
-          mic
-          micColor={apps.openApp === 'voice' ? APP_ACTIVE_COLOR : '#ffffff'}
-        />
       </AppButton>
     </nav>
   );

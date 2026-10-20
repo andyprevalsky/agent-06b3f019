@@ -42,6 +42,10 @@ ledger" in `rose-user-ui.md`). This file is the cross-cutting checklist, and
 | C8 | M | Code-capability benchmarks in `tasks.json` (repo bug fix, feature, refactor, front-end build). The Rose code agent matches the underlying CLI run directly (within ±1 task or 5%), and results reproduce across 3 runs | new `rose-bench` code tasks + parity runner | L-BENCH | open |
 | C9 | M | Codebase sync integration (like boxes.dev): pick up a local dev checkout, including env files, secrets, symlinks and the dependency setup the cloud needs, so a cloud code session runs it. Secrets are never committed or logged | mac-app/CLI blackbox: fixture repo with symlinked `.env` → cloud session `run.sh` health OK; secret-leak scan | L-SYNC | open |
 | C10 | M | Bug detection runs on Rose infra: auto-RCA (`slack-auto-rca`) spawns a Rose code agent on the Rose repo instead of a GitHub Actions dispatch, and its result posts back | backend blackbox (signed Slack event → Rose agent created with RCA goal) + live smoke | L-RCA | open |
+| C11 | M | **No timeouts for code agents** (UI ledger row 48). Liveness is heartbeat-only; when activity stops, the session sleeps (E2B pause, resumable per C1) instead of failing. Limits to remove or convert (audit 2026-10-20): `MAX_RUNTIME_S=1800` (`spawn_claude_code_agent/config.py`, enforced in `service.py` loop); `SDK_IDLE_TIMEOUT_S=180` and `SDK_WAIT_TOOL_IDLE_TIMEOUT_S=900` idle kills (idle → pause, not fail); `SDK_POST_RESULT_EXIT_GRACE_S=180`; activity `start_to_close_timeout=50 min` + `maximum_attempts=5` (`handler.py:360`; keep `heartbeat_timeout`); E2B `SANDBOX_TIMEOUT_MS=30 min` (`back-end/src/providers/e2b.ts`; use autoPause instead of kill); Codex `rose-bridge.mjs` poll deadline 900 s; ws-server "Forced exit after timeout" and `CLAUDE_STREAM_IDLE_TIMEOUT_MS` (`e2b-templates/*/ws-server.mjs`). Short control-plane calls (health 5 s, chmod 10 s, verifier ≥ 60 s) stay. Benchmark task timeouts are separate and unchanged | agents blackbox: a session idle past every old limit is paused, not failed, then resumes; structural check that the code-agent activity has no start_to_close/schedule_to_close limit | W5 (with C1) | open |
+| C13 | M | Branch model: new agents get an isolated worktree and a branch cut from the project's default branch; sub-agents get an isolated worktree and a branch cut from the parent's branch and merge back into it; only "New agent in this branch" shares the parent's worktree/session; every result reports the branch (see `code-agent-persistent-sessions.md` §1b) | agents + backend blackbox: branch names, merge targets, shared-session case | W5 + L-SYNC | open |
+| C14 | M | Local laptop control, about 90% shared code with cloud (UI ledger row 51). The code-agent tool takes `target: "cloud" \| "local"`, default cloud. Local means the Mac app runs the same `ws-server.mjs` as the E2B template inside a folder the user granted, and relays it to the worker; `claudeCodeLocalSession.ts` already proves this on localhost. Transcript, steering, questions, display, branch model and no timeouts all stay the same. Local also opens a local Terminal window on the Mac, attached to that session. It is offered only to agents started from the Mac app; agents created on the web or PWA get cloud only. If the Mac app is closed or disconnected, a local code agent fails immediately with a clear tool error: no waiting and no silent cloud fallback (this is a disconnect, not a timeout; C11 still applies). Exact error text, shown in the chip's red failure box and returned as the tool error: Mac app closed or disconnected → "Can't run locally: the Rose Mac app on <device name> is closed or disconnected. Open the Rose Mac app and retry, or run this agent in the cloud."; web/PWA-started agent asking for local → "Local runs need an agent started from the Rose Mac app. Start this agent from the Mac app, or run it in the cloud." Folder grants live in the Mac app (`MAC-APP-RELEASE` label). The chip header shows the target; Files and Terminal apps get a This Mac / Cloud switch | mac-app blackbox (grant, relay, local Terminal opens, disconnect → immediate tool error, web-created agent gets cloud only) + agents blackbox (target routing; cloud unchanged); mac-app tests run on macOS | L-LOCAL (new) | open |
+| C12 | M | Code agents talk to the user only through Rose tools inside the sandbox (rows 45–47): `send_message_to_user` (text + `inline_view`, e.g. scorecards), `request_user_approval` (existing ApprovalChip above the query box, labelled with the agent; the answer returns to the CLI as the tool result and the agent blocks until answered), and `display(..., placement: "pinned", options: [{label, description, recommended?}], allow_other)` for questions: pinned above the query box ("<agent> asks", dismiss), answers listed vertically and numbered 1/2/3 (bold label + one-line description), then a numbered "Other…" input; click or press the number to pick, Enter sends Other; the query box is not hijacked. Routing by spawner: a code agent spawned by root pins for the user; one spawned by any other agent sends the question to its parent via A2A, which answers or escalates up the tree, and only root pins; the exchange shows in both transcripts. Prompt rule: never rely on the user reading the raw terminal. The chip's default tab is a parsed Transcript (Claude Code stream-json / Codex `exec --json`); Terminal is tab 2 | agents + FE blackbox; approval round trip blocks then resumes the CLI | L-DIRECT + L-DISPLAY + L-A2A | open |
 
 ## Projects (replaces "folders"/Apps naming)
 
@@ -81,12 +85,16 @@ ledger" in `rose-user-ui.md`). This file is the cross-cutting checklist, and
 | U12 | M | Mobile query box hugs the bottom screen curve (safe area plus matching radius) | W6 | in progress |
 | U13 | N | Chrome cleanup: Research/Careers removed; About/Privacy/Terms behind an info icon in the nub toolbar; pinned "Import Code Repo" goal | W6 | in progress |
 | U14 | N | Already merged, awaiting recordings: nub, white Join Waitlist, right app bar with Browser and Voice, Browser drawer replacing fullscreen, background fade, no wrappers | merged | recordings pending |
+| U15 | M | Home **is** the root project: the base workspace every agent and code session forks from (repo checkout, env files, startup script). Home shows the root chat; its gear opens that project's settings | L-NAV | open |
+| U16 | N | Right bar also gets **Files** and **Terminal** apps | L-NAV | open |
+| U17 | M | Panels and drawers open flush against their bar, full height, no gap, margin or floating card (fix the W3 Browser drawer's 12 px inset) | L-NAV | open |
+| U18 | N | Popular goal "Make me a website" | L-DEFAULTS | open |
 
 ## Performance (added by the parent agent; all M)
 
 | ID | Criterion | Eval |
 |----|-----------|------|
-| P1 | iPhone web app is fast: cold load LCP ≤ 2.5 s and TTI ≤ 3.5 s on simulated 4G, mid-tier iPhone CPU (4x throttle); warm load ≤ 1 s | Lighthouse mobile + WebKit Playwright (iPhone 15 profile); validate on the phone harness / real device when available |
+| P1 | iPhone web app is fast: cold load LCP ≤ 2.5 s and TTI ≤ 3.5 s on simulated 4G, mid-tier iPhone CPU (4x throttle); warm load ≤ 1 s | Lighthouse mobile + WebKit Playwright iPhone 15 emulation (no device rig exists; results labelled "emulation") |
 | P2 | Interactions: INP ≤ 200 ms on send, open agent, open drawer and switch tab | Playwright performance traces |
 | P3 | Smooth: ≥ 55 fps for drawer, nub and fade animations and for scrolling a 1,000-message trajectory; no long task > 50 ms during scroll | trace frame timing |
 | P4 | Realtime: agent message to on-screen p95 ≤ 500 ms | instrumented e2e |
@@ -104,6 +112,7 @@ ledger" in `rose-user-ui.md`). This file is the cross-cutting checklist, and
 - **L-BENCH:** code benchmarks and parity.
 - **L-SYNC:** codebase sync integration.
 - **L-RCA:** bug detection on Rose infra.
+- **L-LOCAL:** local laptop target through the Mac app (C14).
 - **L-APPS:** Rose-in-Rose and Apps (after W5).
 - **L-DISPLAY:** the display tool.
 - **L-BROWSER:** root browser and world state.
@@ -116,7 +125,8 @@ ledger" in `rose-user-ui.md`). This file is the cross-cutting checklist, and
 
 ## Deploy approvals (collect at `/deploy`)
 
-- Harness: user tools in root toolset (W4); `display` tool (A5); code-agent graph tools (C6); `code_session_id` tool param (C1).
+- Harness: user tools in root toolset (W4); `display` tool with `placement` (A5); code-agent graph tools (C6); `code_session_id` tool param (C1); code-agent Rose tools + approval blocking (C12); removing code-agent Temporal/sandbox timeouts (C11); code-agent `target` param (C14); root routes coding work to code agents (UI ledger 41).
+- Prompt text: code-agent "never rely on the raw terminal" rule (C12).
 - Prompt text: code-agent template commit/merge guidance (C3); tool descriptions added by each lane.
 - Schemas: `rose-ui.json` and `tool.json` validation; any new Zod schemas.
 - Env and prod: `USERCONTENT_BASE_URL` (separate origin), `USER_UI_TOKEN_SECRET`, E2B template rebuild.

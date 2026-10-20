@@ -25,4 +25,11 @@ describe('top-right account control ownership', () => {
     expect(inspectionBadge).not.toMatch(/className="[^"]*\bfixed\b/);
     expect(adminSwitcher).not.toMatch(/className="[^"]*\bfixed\b/);
   });
+
+  it('keeps the rail clear of the right app bar and open app drawers on md+', () => {
+    // Regression: at 1440x900 the account pill covered the Browser globe and
+    // the drawer close X (2026-10-20 recording).
+    const rail = source('components/TopRightControls.tsx');
+    expect(rail).toContain('md:right-[calc(var(--rose-apps-inset,0px)+1rem)]');
+  });
 });
