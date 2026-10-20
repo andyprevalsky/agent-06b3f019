@@ -77,8 +77,8 @@ Andy: "sub agent for each". There is one lane per integration that syncs today, 
 
 | ID | Tier | Criterion | Eval (minimum) | Lane | Status |
 |----|------|-----------|----------------|------|--------|
-| A1 | M | Rose-in-Rose: a code session on the Rose repo runs vite HMR. Andy sees the edited Rose on screen about 1 s after a write. Publish opens a PR; ships only via `/deploy`; dev accounts only | e2e: agent write → preview DOM change ≤ 3 s; non-dev account 403 | L-APPS | blocked on W5 |
-| A2 | N | Lovable-style Apps: "Make me an app", "+ new app", Apps section on the left bar (Rose first). Full-screen app with the floating query box and Popular Goals hidden; live-preview card in the trajectory; History restore; per-user publish URL | FE blackbox + e2e (UI ledger) | L-APPS | blocked on W5 |
+| A1 | M | Rose-in-Rose: a code session on the Rose repo runs vite HMR. Andy sees the edited Rose on screen about 1 s after a write. Publish opens a PR; ships only via `/deploy`; dev accounts only | e2e: agent write → preview DOM change ≤ 3 s; non-dev account 403 | L-APPS | **backend built** (L-APPS, see Deploy approvals): `rose-preview` CLI in dev sessions (vite on 5173 in E2B, Rose-repo cloud sessions autostart `front-end/`); `GET /api/claude-code-session/:taskId/preview` + `POST .../publish` (push branch + PR via the C4 GitHub helper, never merges), 403 `ROSE_DEV_ONLY` for non-dev; `code_agent.preview_url`. `code-preview` blackbox 9/9 ×5: real vite on a copy of the Rose front-end, 25 edits over 5 runs: write→DOM p50 224 ms, max 929 ms (first edit of a cold run; budget 3 s), hot update without reload; agents `code_sessions` ×5. Open: live E2B run (proxy WebSockets, first `npm install`), preview sign-in on the preview origin (UI) |
+| A2 | N | Lovable-style Apps: "Make me an app", "+ new app", Apps section on the left bar (Rose first). Full-screen app with the floating query box and Popular Goals hidden; live-preview card in the trajectory; History restore; per-user publish URL | FE blackbox + e2e (UI ledger) | L-APPS | **backend built** (L-APPS): `apps` in rose-ui.json (`apps/<slug>/`, `rose` reserved), `GET /api/user-ui/apps` (Rose first for dev accounts with its live preview, then published apps with per-user usercontent URLs), History = `/versions` + activate; user-ui blackbox 20/20 ×5. UI open (UI thread); stable app alias URL not built |
 | A3 | N | `rose_user_ui` per user: `root/` changes the whole app, `inline/` renders in the trajectory (version pinned), `tools/` adds root-agent tools whose results render inline; safe mode | W1/W2/W4 suites (passing) + recordings | merged | code merged; recordings pending |
 | A4 | N | Code agents get UI instructions, current screenshots and `rose-ui screenshot/record/perf/check` | E2B template test | L-APPS | **built** (43de031b5): rose-ui dev/screenshot/record/perf/check, screenshots/current/, six examples; unit + smoke + blackbox 5× green; live E2B check after template rebuild |
 | A5 | M | `display(paths\|urls, caption?)` tool for root, sub-agents and code agents; media posts inline in that agent's trajectory; idempotent per content hash | agents blackbox | L-DISPLAY | **done** (b10b038c1; display 14 cases ×5) — approval at deploy |
@@ -161,8 +161,8 @@ Status: **done** = merged into `feat/rose-user-ui` with tests; **running** = a l
 | 12 | Browser app follows selected agent; drawer replaces fullscreen, smooth | U14 | W3 | done (legacy fullscreen kept for non-flag accounts) |
 | 13 | Root browser always available; agents splice by world state | A6 | L-BROWSER | queued |
 | 14 | **"Another app should be sent to the agent working on the demo video"** | — | parent | **gap: no demo-video thread found; asked UI thread to get Andy's answer** |
-| 15 | Rose in Rose: sync Rose repo, live HMR preview on screen, Publish = PR | A1 | L-APPS | queued (needs W5) |
-| 16 | Apps (Lovable-style), "Make me an app", "+ new app", Rose is one app | A2 | L-APPS + UI | queued (needs W5) |
+| 15 | Rose in Rose: sync Rose repo, live HMR preview on screen, Publish = PR | A1 | L-APPS | backend built (L-APPS); UI + live E2B run open |
+| 16 | Apps (Lovable-style), "Make me an app", "+ new app", Rose is one app | A2 | L-APPS + UI | backend built (L-APPS); UI open |
 | 17 | Recordings of it working | — | UI thread | flow 1 pass; flows 2–3 fail → #24 |
 | 18 | Codex tool to talk to other agents in the Rose graph | C6 | L-A2A | done (6d1b49779: rose-agents CLI list/send/grep, exactly-once delivery, spawner routing; 5/5); root-side tool pending A2A-thread merge |
 | 19 | Talking to the coding agent directly (is relaying clunky?) | C7 | L-DIRECT | running |
@@ -204,6 +204,8 @@ Per the 2026-10-20 goal ("make intelligent guesses; keep critical ones for revie
 5. **Backend API default model stays `rose-1-ultra`**; rose-flash + ultrafast are the default *selections* in the front-end (UI thread), so other accounts' API calls and benchmarks don't change.
 6. **Join Waitlist for signed-out visitors stays stock** (only Andy's account changes; relayed by the UI thread).
 7. **User tools v1 are read-only and run on the worker**; side-effecting tools and the in-code-session executor are queued (L-TOOLS2).
+8. **Rose-in-Rose (L-APPS)**: dev accounts = the front-end Rose Desktop list (`utils/roseDevAccess.ts`, pinned by a structural test; `ROSE_DEV_USER_IDS_EXTRA` for test stacks). The preview talks to the backend through vite's `/api` proxy (`VITE_BACKEND_SAME_ORIGIN=true`), so no CORS change. Publish pushes from the session's own checkout and opens a PR against the merge target; it refuses to push the merge target itself.
+9. **Apps (L-APPS)** are static bundles in `rose_user_ui/apps/<slug>/`; the publish URL is the immutable usercontent version URL (changes per publish; a stable alias is a follow-up). A built vite app is copied in.
 
 ## Deploy approvals (collect at `/deploy`)
 
@@ -265,6 +267,11 @@ Per the 2026-10-20 goal ("make intelligent guesses; keep critical ones for revie
   - Harness: removed `MAX_RUNTIME_S`, `SDK_IDLE_TIMEOUT_S`, `SDK_WAIT_TOOL_IDLE_TIMEOUT_S`, the 15-min ws-server linger and the rose-bridge 900 s default; activity `start_to_close` → `CODE_AGENT_ACTIVITY_NO_DEADLINE`; retries unlimited with a 5-attempt self-error cap; idle pause, keepalive, provider fall-over.
   - Zod: claude/codex create `code_session_id`, `lease_owner`, `base_branch`; close `reason`; `codeSessionCheckpointSchema`, `codeTaskUsageLimitSchema`, `credentialAvailabilityQuerySchema` (+`own_only`), `codeAgentsQuerySchema`; `createAgentSchema.share_code_session_with`.
   - Migration `20261020150000_code_sessions`: `CodeSession`, `CodeSessionShare` (RLS); `ClaudeCodeSession` + `codeSessionId`, `codeProvider`, `awaitingParent`; drops the unique constraint on `sandboxId`.
+- L-APPS (A1, A2; branch worktree-agent-a1dc54f70d0a4394c):
+  - Prompt text: dev-only "Live preview and apps" block in `codeAgentPrompt.ts` (`ROSE_IN_ROSE_INSTRUCTIONS_VERSION` `code-agent-rose-in-rose-apps.v1`; non-dev prompts byte-identical); rose_user_ui README "Apps" section and manifest example.
+  - Zod: `apps` in `userUiManifestSchema`; `codePublishSchema`.
+  - Harness (watched file, metadata only): `spawn_claude_code_agent/service.py` carries `preview_url` into `code_agent`.
+  - New dev-only routes `GET/POST /api/claude-code-session/:taskId/{preview,publish}` and `GET /api/user-ui/apps`; E2B dev sessions get `rose-preview` + `ROSE_PREVIEW_*` env and a detached autostart for the Rose repo. No migration, no prod env, no template rebuild.
 - I7 passwords (merged 0b5fb9db7):
   - Migration `20261020220000_browser_password_source_profile_key`: drop `BrowserPassword_userId_origin_username_key`, create unique on `(userId, origin, username, browserSource, browserProfile)`. The old instance's password upload returns 500 during the Render cutover until it drains; Mac retries are idempotent.
   - Agent-visible: credential readers return one login per origin+username (enabled → user-synced → most recently used → most recently synced).
