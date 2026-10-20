@@ -6249,6 +6249,22 @@ def _final_context_violations_for_result(
 # ============================================================
 
 
+def _resolve_task_attachment_path(attach_filename: str, cleanup_paths: list) -> str:
+    """Return the local file for a task attachment.
+
+    ``code-bench/<fixture>.tar.gz`` entries are built from
+    ``fixtures/code_bench`` into a private temp dir (registered for cleanup);
+    every other name is a static asset under ``TEST_ASSETS_DIR``.
+    """
+    from benchmarks import code_bench
+
+    if not attach_filename.startswith(code_bench.ATTACHMENT_PREFIX):
+        return os.path.join(TEST_ASSETS_DIR, attach_filename)
+    build_dir = tempfile.mkdtemp(prefix="code-bench-attachment-")
+    cleanup_paths.append(build_dir)
+    return str(code_bench.resolve_attachment(attach_filename, Path(build_dir)))
+
+
 def slice_csv(filepath: str, row_start: int, row_end: int) -> str:
     """
     Slice a CSV file to only include data rows [row_start, row_end] (1-indexed, inclusive).
@@ -13324,6 +13340,21 @@ def _completion_summary_file_outputs_check(data: dict, check: dict) -> tuple[boo
     return True, f"Found {len(matched)} matching file_pointer output(s)"
 
 
+async def _hydrate_code_bench_results(task: BenchmarkTask, data: dict) -> None:
+    """Grade the returned code-bench archive once, before static checks and the screenshot judge."""
+    from benchmarks import code_bench
+
+    fixture_ids, needs_screenshot = code_bench.needed_fixtures(task.evaluators)
+    if not fixture_ids:
+        return
+    pointers = [
+        pointer
+        for card in _completion_cards_for_static_check(data, include_first_level_gps=False)
+        for pointer in _iter_completion_output_file_pointers(card.get("outputs"))
+    ]
+    await code_bench.hydrate(data, fixture_ids, pointers, capture_screenshot=needs_screenshot)
+
+
 async def _hydrate_completion_sms_events(data: dict) -> None:
     """Attach durable completion-SMS provider receipts for static evaluators."""
     agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
@@ -14061,6 +14092,13 @@ def _run_declared_static_check(
             ):
                 return False, f"{observed_kind}: {_approval_request_detail_failure(kind_check)}"
             continue
+        if check_type == "code_bench_hidden_tests":
+            from benchmarks.code_bench import static_check as code_bench_static_check
+
+            ok, reason = code_bench_static_check(data, check)
+            if not ok:
+                return False, reason
+            continue
         if check_type == "claude_code_session_output":
             sessions = benchmark_state.get("claude_code_sessions") or []
             min_sessions = int(check.get("min_sessions", 1))
@@ -14111,6 +14149,9 @@ async def _run_declared_evaluators(
 
     if _task_declares_static_check(task, auth_test_site.AUTH_TEST_SITE_OUTCOME_CHECK):
         await _hydrate_auth_test_site_evidence(data, base_url, task=task)
+
+    if task.name.startswith("code-bench-"):
+        await _hydrate_code_bench_results(task, data)
 
     from benchmarks.semantic_evaluator_evidence import messages_have_code_agent_grounding
 
@@ -14165,6 +14206,14 @@ async def _run_declared_evaluators(
                 score = float(judged.get("score", 0.0))
                 reasoning = str(judged.get("reasoning") or "Judge returned no reasoning")
                 usage = judged.get("usage")
+                passed = score >= float(evaluator.get("pass_threshold", 1.0))
+            elif method == "code_bench_screenshot_judge":
+                # Rendered-page judge for code-bench front-end fixtures (benchmarks/code_bench.py).
+                from benchmarks.code_bench import run_screenshot_judge
+
+                judged = await run_screenshot_judge(evaluator, data)
+                score = float(judged.get("score", 0.0))
+                reasoning = str(judged.get("reasoning") or "screenshot judge returned no reasoning")
                 passed = score >= float(evaluator.get("pass_threshold", 1.0))
             elif method == "polar":
                 # Isolated Odysseys-faithful path — see benchmarks/polar_evaluator.py.
@@ -14605,7 +14654,7 @@ async def _run_single_task_as_run_user(
             if all_attachments:
                 file_pointers = []
                 for attach_filename in all_attachments:
-                    filepath = os.path.join(TEST_ASSETS_DIR, attach_filename)
+                    filepath = _resolve_task_attachment_path(attach_filename, temp_csv_paths)
                     if not os.path.exists(filepath):
                         raise FileNotFoundError(f"Test asset not found: {filepath}")
 
@@ -15372,7 +15421,10 @@ async def _run_single_task_as_run_user(
             await phone_callee.cleanup()
         for tmp in temp_csv_paths:
             try:
-                os.unlink(tmp)
+                if os.path.isdir(tmp):
+                    shutil.rmtree(tmp)
+                else:
+                    os.unlink(tmp)
             except OSError:
                 pass
         if plaid_transactions_fixture_action == "apply" and os.environ.get("BENCHMARK_CLEANUP_PLAID_FIXTURE") == "1":
