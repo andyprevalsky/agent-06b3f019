@@ -41,7 +41,7 @@ export interface SyncEvent {
  */
 export interface Integration {
   name: string;
-  /** Provider-side account id (`''` / absent = the legacy single-account row). */
+  /** Provider-side account of a multi-account integration ('' = legacy single row). */
   accountId?: string;
   status: string;
   isActive?: boolean;

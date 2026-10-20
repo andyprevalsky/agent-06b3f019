@@ -77,7 +77,6 @@ function transformToContactToUpsert(
       message: msg.text,
       // iMessage ROWID for deduplication, namespaced by the Mac it came from.
       externalId: accountId === '' ? String(msg.id) : `${accountId}:${msg.id}`,
-      ...(accountId !== '' && { sourceAccountId: accountId }),
     })),
   };
 }
@@ -137,7 +136,16 @@ export async function parseIMessageData(
   const contactsToUpsert = sanitizedContacts.map((contact) =>
     transformToContactToUpsert(contact, accountId)
   );
-  const result = await upsertPersonAndMessageRecords(userId, contactsToUpsert, jobId);
+  // Device accounts insert under their Integration row (sourceAccountId set, and
+  // stopped by MessageAccountRemovedError once that row is deleted).
+  const result = await upsertPersonAndMessageRecords(
+    userId,
+    contactsToUpsert,
+    jobId,
+    undefined,
+    undefined,
+    accountId === '' ? undefined : { sourceAccountId: accountId, integrationId: integration.id }
+  );
 
   // Update Integration metadata
   const existingConfig =

@@ -5,11 +5,11 @@
  *     connect ─► own row? ─no─► legacy row? ─yes─► adopt legacy messages, claim the row
  *        │                         └─no──► create the device row
  *     sync ───► own row? ─no─► IMessageAccountRemovedError (410, nothing stored)
- *     store the batch (keys `<id>:<ROWID>`, sourceAccountId = id) BEFORE answering
- *     own row gone meanwhile? ─► remove what this batch stored, 410
+ *     store the batch (keys `<id>:<ROWID>`, sourceAccountId = id) BEFORE answering;
+ *     inserts hold KEY SHARE on the account row, so a racing delete stops them (410)
  *
  *   DELETE /api/integrations/imessage/accounts/:id ─► deleteIMessageAccount
- *     row first, then its messages, so a batch racing the delete is compensated.
+ *     row first (waits for in-flight inserts), then exactly its messages.
  *
  * 10k rule: per batch one row lookup, one upsert and the batch's own inserts;
  * deletes and the one-time legacy adoption touch only that account's rows.
@@ -21,6 +21,7 @@ import {
   parseIMessageData,
   type ContactWithMessages,
 } from '../../services/integrations/iMessageParser';
+import { MessageAccountRemovedError } from '../../services/integrations/personMessageManager';
 import { findIntegrationAccount, upsertIntegrationAccount } from './repo.accounts';
 import { adoptLegacyIMessages, deleteIMessagesForAccount } from './repo.imessageAccounts';
 import * as integrationRepo from './repo.integration';
@@ -93,6 +94,9 @@ export async function processIMessageDeviceUpload(
   try {
     stored = await parseIMessageData(userId, contacts, jobId, account.id);
   } catch (error: unknown) {
+    if (error instanceof MessageAccountRemovedError) {
+      throw new IMessageAccountRemovedError(account.id);
+    }
     const row = await findIntegrationAccount(userId, PROVIDER, account.id);
     if (row === null) throw new IMessageAccountRemovedError(account.id);
     await integrationRepo.updateIntegration(row.id, {
@@ -103,11 +107,8 @@ export async function processIMessageDeviceUpload(
     throw error;
   }
   const row = await findIntegrationAccount(userId, PROVIDER, account.id);
-  if (row === null) {
-    // Deleted while this batch was stored: the delete already ran, so undo ours.
-    await deleteIMessagesForAccount(userId, account.id);
-    throw new IMessageAccountRemovedError(account.id);
-  }
+  // Deleted after the last insert: the delete removed this batch's rows too.
+  if (row === null) throw new IMessageAccountRemovedError(account.id);
   const now = new Date();
   await integrationRepo.updateIntegration(row.id, {
     status: IntegrationStatus.CONNECTED,

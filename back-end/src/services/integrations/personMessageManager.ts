@@ -9,12 +9,55 @@ const MESSAGE_BATCH_SIZE = 10000;
 
 class DisconnectedGoogleCredentialError extends Error {}
 
+/** The account a batch belongs to was removed while its upload was in flight. */
+export class MessageAccountRemovedError extends Error {
+  constructor() {
+    super('The integration account was removed during the upload');
+  }
+}
+
+/**
+ * Attribution for messages synced by ONE provider-side account (a Telegram
+ * user id, an iMessage Mac device id). Rows carry `sourceAccountId`; inserts stop once `integrationId`
+ * (that account's Integration row) is deleted.
+ */
+export interface MessageAccountScope {
+  sourceAccountId: string;
+  integrationId: string;
+}
+
+async function createAccountScopedBatch(
+  data: Prisma.MessageRecordCreateManyInput[],
+  userId: string,
+  scope: MessageAccountScope
+): Promise<void> {
+  await runTransactionWithRetry(
+    async (tx) => {
+      // KEY SHARE conflicts only with the account row's DELETE (not with status
+      // or config updates), so an account delete waits for this insert and
+      // every later batch sees no row and stops.
+      const active = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "Integration"
+        WHERE "id" = ${scope.integrationId} AND "userId" = ${userId}
+        FOR KEY SHARE`;
+      if (active.length === 0) throw new MessageAccountRemovedError();
+      await tx.messageRecord.createMany({ data, skipDuplicates: true });
+    },
+    { timeout: 30_000 }
+  );
+}
+
 async function createMessageBatch(
   data: Prisma.MessageRecordCreateManyInput[],
   userId: string,
   googleAccountEmail?: string,
-  googleCredentialId?: string
+  googleCredentialId?: string,
+  accountScope?: MessageAccountScope
 ): Promise<void> {
+  if (accountScope !== undefined) {
+    await createAccountScopedBatch(data, userId, accountScope);
+    return;
+  }
   if (googleAccountEmail === undefined) {
     await prisma.messageRecord.createMany({ data, skipDuplicates: true });
     return;
@@ -60,8 +103,6 @@ export interface ContactToUpsert {
     timestamp: Date;
     message: string;
     externalId?: string; // Platform-native message ID for deduplication
-    /** Integration account the message came from (e.g. an iMessage Mac device id). */
-    sourceAccountId?: string;
   }>;
 }
 
@@ -134,7 +175,8 @@ export async function upsertPersonAndMessageRecords(
   contacts: ContactToUpsert[],
   jobId: string,
   googleAccountEmail?: string,
-  googleCredentialId?: string
+  googleCredentialId?: string,
+  accountScope?: MessageAccountScope
 ): Promise<{ contacts: number; messages: number }> {
   const totalMessages = contacts.reduce((sum, c) => sum + c.messages.length, 0);
   log.info('Processing messages', {
@@ -242,12 +284,13 @@ export async function upsertPersonAndMessageRecords(
               timestamp: msg.timestamp,
               message: msg.message,
               externalId: msg.externalId,
-              sourceAccountId: msg.sourceAccountId ?? null,
               googleAccountEmail: googleAccountEmail?.toLowerCase() ?? null,
+              sourceAccountId: accountScope?.sourceAccountId ?? null,
             })),
             userId,
             googleAccountEmail,
-            googleCredentialId
+            googleCredentialId,
+            accountScope
           );
         }
 
@@ -272,7 +315,12 @@ export async function upsertPersonAndMessageRecords(
           totalMessages,
         });
       } catch (error) {
-        if (error instanceof DisconnectedGoogleCredentialError) throw error;
+        if (
+          error instanceof DisconnectedGoogleCredentialError ||
+          error instanceof MessageAccountRemovedError
+        ) {
+          throw error;
+        }
         log.error('Error processing contact', {
           jobId,
         });

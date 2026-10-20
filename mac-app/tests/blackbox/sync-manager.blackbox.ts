@@ -96,6 +96,7 @@ vi.mock('../../main/services/messaging/platforms/telegram/TelegramSync', () => (
     hasApiCredentials: vi.fn(() => false),
     isConnected: vi.fn(() => false),
     connectWithExistingSession: vi.fn(async () => false),
+    registerConnectedAccounts: vi.fn(async () => 1),
     syncHistorical: vi.fn(async () => 0),
     disconnect: vi.fn(async () => {}),
   },
@@ -300,8 +301,12 @@ describe('sync-manager blackbox', () => {
       await SyncManager.startAll();
 
       expect(vi.mocked(TelegramSync.connectWithExistingSession)).toHaveBeenCalledTimes(1);
-      // After connect, historical sync is kicked off.
+      // Every account gets its backend row first; then historical sync is kicked off.
+      expect(vi.mocked(TelegramSync.registerConnectedAccounts)).toHaveBeenCalledTimes(1);
       expect(vi.mocked(TelegramSync.syncHistorical)).toHaveBeenCalledTimes(1);
+      expect(
+        vi.mocked(TelegramSync.registerConnectedAccounts).mock.invocationCallOrder[0]
+      ).toBeLessThan(vi.mocked(TelegramSync.syncHistorical).mock.invocationCallOrder[0]);
     });
 
     it('connects WhatsApp realtime when credentials + integration both present', async () => {
