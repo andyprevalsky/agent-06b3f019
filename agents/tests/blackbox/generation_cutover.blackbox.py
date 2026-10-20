@@ -203,6 +203,18 @@ async def test_matching_pointer_wait_seconds_completes_without_handoff() -> None
     assert all(event.get("status") != "ERROR" for event in events), events
 
 
+async def _wait_for_first_workflow_task(handle: Any) -> None:
+    """Return once the workflow's first task completed (its park timer is scheduled)."""
+    from temporalio.api.enums.v1 import EventType
+
+    for _ in range(600):
+        history = await handle.fetch_history()
+        if any(event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED for event in history.events):
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("workflow never completed its first task")
+
+
 async def test_idle_park_reads_no_pointer_for_minutes_then_hands_off_on_signal() -> None:
     """10k idle agents: a parked agent schedules zero pointer activities until signalled.
 
@@ -222,6 +234,10 @@ async def test_idle_park_reads_no_pointer_for_minutes_then_hands_off_on_signal()
                 task_queue=OLD_QUEUE,
                 execution_timeout=timedelta(hours=2),
             )
+            # Start the 19 simulated minutes only once the park is in place: the
+            # fixture times the handoff from its first workflow task, which a
+            # loaded worker can pick up after the test's clock already started.
+            await _wait_for_first_workflow_task(handle)
             await env.sleep(timedelta(minutes=19))
             assert _pointer["fetches"] == 0, f"idle park polled the pointer: {_pointer['fetches']} reads in 19 minutes"
             _pointer["locked"] = NEW_QUEUE
