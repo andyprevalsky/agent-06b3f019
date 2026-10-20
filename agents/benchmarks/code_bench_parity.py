@@ -388,10 +388,42 @@ async def run_raw_attempt(
 # ---------------------------------------------------------------------------
 
 
+# run_benchmark's own lifecycle reasons that are not a task verdict: the run was
+# interrupted, or owned-resource cleanup could not be verified after the stack
+# died (live 2026-10-20: the devbox memory watchdog TERMed the local backend).
+# Such rows are INFRA; the task is rerun and the row never counts as a failure.
+ROSE_INFRA_REASON_PREFIXES = ("Cloud cleanup failed", "Benchmark interrupted")
+
+
+def rose_row_is_infra(row: dict) -> bool:
+    if row.get("passed"):
+        return False
+    reason = str(row.get("failure_reason") or "")
+    return row.get("status") == "CANCELLED" or reason.startswith(ROSE_INFRA_REASON_PREFIXES)
+
+
+def rose_infra_rows(paths: Iterable[Path], task_names: Iterable[str]) -> list[dict]:
+    wanted = list(task_names)
+    rows = []
+    for path in paths:
+        for row in json.loads(Path(path).read_text()).get("tasks") or []:
+            if row.get("name") in wanted and rose_row_is_infra(row):
+                rows.append(
+                    {
+                        "task": row.get("name"),
+                        "agent_id": row.get("agent_id") or "",
+                        "status": row.get("status"),
+                        "reason": str(row.get("failure_reason") or "")[:300],
+                        "record": str(path),
+                    }
+                )
+    return rows
+
+
 def rose_outcomes_from_records(
     paths: Iterable[Path], task_names: Iterable[str]
 ) -> tuple[dict[str, list[bool]], dict[str, list[str]]]:
-    """Per-task outcomes in record order. SKIPPED rows are not attempts."""
+    """Per-task verdicts in record order. SKIPPED and INFRA rows are not verdicts."""
     wanted = list(task_names)
     outcomes: dict[str, list[bool]] = {}
     agents: dict[str, list[str]] = {}
@@ -399,7 +431,7 @@ def rose_outcomes_from_records(
         record = json.loads(Path(path).read_text())
         for row in record.get("tasks") or []:
             name = row.get("name")
-            if name not in wanted or row.get("status") == "SKIPPED":
+            if name not in wanted or row.get("status") == "SKIPPED" or rose_row_is_infra(row):
                 continue
             outcomes.setdefault(name, []).append(bool(row.get("passed")))
             agents.setdefault(name, []).append(str(row.get("agent_id") or ""))
@@ -831,6 +863,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             },
             "rose_links_verified": bool(verified_links),
             "rose_skipped": bool(args.skip_rose or not rose_records),
+            "rose_infra_rows": rose_infra_rows(rose_records, tasks),
             "raw_cost_usd": round(
                 sum(
                     float((a.get("cli_run") or {}).get("cost_usd") or 0) for runs in raw_attempts.values() for a in runs
@@ -851,6 +884,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             "\nnote: the raw CLI loaded host hooks/plugins/MCP servers (managed settings); "
             "see raw_attempts[].cli_run in parity.json"
         )
+    if report["rose_infra_rows"]:
+        text += f"\nRose INFRA rows excluded (rerun; not verdicts): {len(report['rose_infra_rows'])}"
     if report["rose_skipped"]:
         text += "\nnote: Rose leg not run; parity_ok needs --run-rose local or --rose-records"
     (out_dir / "parity.txt").write_text(text + "\n")

@@ -815,3 +815,65 @@ def test_parity_openrouter_gateway_matches_the_rose_sandbox_transport(tmp_path, 
     assert f"process.env.CODEX_CODE_MODEL || '{parity.DEFAULT_MODELS['codex']}'" in e2b
     with pytest.raises(SystemExit):
         parity._parse_args(["--openrouter-gateway", "--lease-claude-token"])
+
+
+def test_parity_rose_infra_rows_are_rerun_not_failures(tmp_path):
+    """Live 2026-10-20: the memory watchdog killed the local backend mid-run.
+
+    Rows that passed evaluation then failed owned cleanup, rows killed mid-task and
+    never-started rows are INFRA; only genuine verdicts count, so a later rerun
+    supplies that task's next verdict.
+    """
+    task, other = "code-bench-debug-stacktrace-orders", "code-bench-bugfix-invoice-rounding"
+    run2 = {
+        "tasks": [
+            {"name": other, "passed": True, "status": "COMPLETED", "agent_id": "a2"},
+            {
+                "name": task,
+                "passed": False,
+                "status": "COMPLETED",
+                "agent_id": "a2x",
+                "failure_reason": "Cloud cleanup failed: provider: provider verification database is not the owned "
+                "local stack; payment: provider verification database is not the owned local stack",
+            },
+        ]
+    }
+    run3 = {
+        "tasks": [
+            {
+                "name": other,
+                "passed": False,
+                "status": "CANCELLED",
+                "agent_id": "",
+                "failure_reason": "Benchmark interrupted before task produced logs: ",
+            },
+            {
+                "name": task,
+                "passed": False,
+                "status": "ACTIVE",
+                "agent_id": "a3x",
+                "failure_reason": "Cloud cleanup failed: provider: exact provider ownership was not verified",
+            },
+        ]
+    }
+    rerun = {
+        "tasks": [
+            {
+                "name": task,
+                "passed": False,
+                "status": "COMPLETED",
+                "agent_id": "a4",
+                "failure_reason": "1/4 code-bench checks failed; first: run:python3 -m unittest",
+            }
+        ]
+    }
+    paths = []
+    for name, record in (("run2", run2), ("run3", run3), ("rerun", rerun)):
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps(record))
+        paths.append(path)
+    outcomes, agents = parity.rose_outcomes_from_records(paths, [task, other])
+    assert outcomes == {other: [True], task: [False]}  # the genuine hidden-test failure still counts
+    assert agents[task] == ["a4"]
+    infra = parity.rose_infra_rows(paths, [task, other])
+    assert [(r["task"], r["agent_id"]) for r in infra] == [(task, "a2x"), (other, ""), (task, "a3x")]
