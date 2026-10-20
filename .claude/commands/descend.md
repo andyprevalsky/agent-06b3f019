@@ -798,6 +798,15 @@ per-run observed mechanism, not the count, grants membership.
 - For a killed or stalled span, decode its last `llm.context.dumped` payload
   to recover the exact final decision and the action history. It contains a
   leased token, so never paste the raw dump.
+- Prove resource starvation with the provider's own counters before
+  attributing to it, for example Fly `fly_instance_cpu_throttle`, `steal`,
+  `cpu_balance` and `cpu_baseline`, which outlive destroyed guests. Line up
+  the stall onset with the moment the burst balance runs out.
+- When a supervisor timeout "never fired", check separately: did the timer
+  fire, compared with another timer on the same loop; and what did the code
+  after it wait on (the cancelled child settling, a post-timeout classifier)?
+  Prefer deadlines that report and move on without waiting for the hung
+  child, as codex `exec.rs` and claude-code `withTimeout` do.
 - Check that a suspected cause separates failures from passes before ranking
   it. In Polar batch 1, the Foundry failover share did not separate them,
   while prompt growth and activity kills did.
@@ -816,7 +825,12 @@ per-run observed mechanism, not the count, grants membership.
   result omits the page state its contract promises". A growing value, a
   slow step or a high count ("context grows", "31% of turns observe",
   "CPU at 22%") is a measurement. Keep digging until you find the defect, or
-  label it a design gap or an open observability gap.
+  label it a design gap or an open observability gap. For growth, attribute
+  it by measured tokens per source rather than by raw characters (base64
+  characters overstated screenshot growth about 40×). Then find the
+  single-step jumps and the exact tool result behind each one: in Polar batch
+  1, five evaluate results that the harness returned uncapped and twice
+  produced every jump of at least 100k tokens.
 - **Be exact about limits.** Say which limit fired, who enforces it and
   where it is set. For example: "Temporal StartToClose of 30 minutes kills
   the activity; the loop itself has no time check".
