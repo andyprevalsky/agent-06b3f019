@@ -23,7 +23,7 @@ const zlib = require('zlib');
 const crypto = require('crypto');
 const { execFileSync, spawnSync } = require('child_process');
 
-const CLI_VERSION = '3';
+const CLI_VERSION = '4';
 const KB = 1024;
 const MB = 1024 * KB;
 const MAX_FILE = 10 * MB;

@@ -15,14 +15,20 @@ System context (docs/plans/active/rose-user-ui.md, "User tools")::
             ▼
     LLM calls user__<t>(input)
             │ handler.run_user_tool (workflow side)
-            │   run_user_tool_activity(agent_id, user_id, version_id, name, input, base_url, spec)
-            │     download handler files for the pinned version (worker disk cache by version)
-            │     subprocess (node|python), temp cwd, minimal env, timeout, 256KB stdout cap
-            │     validate input/output against JSON Schema
+            │   side_effects: key = sha256(root workflow id, tool call id)
+            │   run_user_tool_activity(agent_id, user_id, version_id, name, input, base_url, spec[, key])
+            │     validate input against JSON Schema
+            │     side_effects: claim key  (backend ToolSideEffect, /api/user-ui/tool-calls)
+            │     executor USER_TOOLS_EXECUTOR:
+            │       code_session  POST /api/user-ui/tools/run → handler runs in the user's own
+            │                     persistent code session sandbox (resumed/leased, W5b)
+            │       local         worker subprocess (dev default off Fly)
+            │     per-call timeout, 256KB stdout cap, minimal env (no secrets)
+            │     side_effects: store the run record before returning (retry → replay)
+            │     validate output against JSON Schema
             ▼
     TOOL message (FINISHED | ERROR); metadata.inlineView = {view, versionId, props} when render.view set
 
-v1 limits: executor ``local`` only (worker subprocess, disabled on Fly unless
-``USER_TOOLS_EXECUTOR=local``); ``side_effects: true`` tools are rejected because no
-backend idempotency record exists yet; sub-agents never get user tools.
+Limits: on Fly the executor must be explicit (``code_session`` in production);
+sub-agents never get user tools.
 """

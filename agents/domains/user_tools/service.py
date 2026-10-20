@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from .config import RUN_ACTIVITY_MARGIN_SECONDS, RUN_ACTIVITY_MAX_ATTEMPTS
 from .repo import resolve_user_tools_activity, run_user_tool_activity
-from .types import empty_pinned
+from .types import empty_pinned, user_tool_call_key
 
 __all__ = [
     "RUN_ACTIVITY_MARGIN_SECONDS",
@@ -13,6 +13,7 @@ __all__ = [
     "resolve_user_tools_activity",
     "run_user_tool_activity",
     "run_activity_timeout_seconds",
+    "user_tool_call_key",
 ]
 
 
