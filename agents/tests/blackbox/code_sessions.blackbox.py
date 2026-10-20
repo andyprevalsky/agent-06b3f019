@@ -142,7 +142,11 @@ class _SessionHome:
         }
         with self.log_path.open("a") as log:
             self.process = subprocess.Popen(
-                [node, str(_WS_SERVER)], cwd=self.home, env=full_env, stdout=log, stderr=subprocess.STDOUT,
+                [node, str(_WS_SERVER)],
+                cwd=self.home,
+                env=full_env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
         for _ in range(300):
@@ -257,10 +261,21 @@ class _Backend:
                 "checkpoint_seq": len(self.closed),
                 "branch": "rose/write-answer-0a1b2c3d",
                 "merge_target": "main",
-                "repo": {"head": "a" * 40, "localCommits": 1, "pushed": False, "dirtyFiles": 1,
-                         "files": [{"path": "notes.txt", "added": 1, "removed": 0}]},
-                "merge": {"head": "a" * 40, "local_commits": 1, "pushed": False, "pr": None,
-                          "merged": False, "merge_target_contains_head": False},
+                "repo": {
+                    "head": "a" * 40,
+                    "localCommits": 1,
+                    "pushed": False,
+                    "dirtyFiles": 1,
+                    "files": [{"path": "notes.txt", "added": 1, "removed": 0}],
+                },
+                "merge": {
+                    "head": "a" * 40,
+                    "local_commits": 1,
+                    "pushed": False,
+                    "pr": None,
+                    "merged": False,
+                    "merge_target_contains_head": False,
+                },
             },
         }
 
@@ -367,10 +382,20 @@ class _Backend:
 
 # The backend's stored view of the user's accounts on a usage limit (no provider calls).
 _ACCOUNTS = [
-    {"provider": "claude", "label": "me@example.com", "status": "limited",
-     "limited_until": "2026-10-03T00:50:00.000Z", "this_run": True},
-    {"provider": "codex", "label": "codex@example.com", "status": "available",
-     "limited_until": None, "this_run": False},
+    {
+        "provider": "claude",
+        "label": "me@example.com",
+        "status": "limited",
+        "limited_until": "2026-10-03T00:50:00.000Z",
+        "this_run": True,
+    },
+    {
+        "provider": "codex",
+        "label": "codex@example.com",
+        "status": "available",
+        "limited_until": None,
+        "this_run": False,
+    },
 ]
 _SHARED_CLAUDE_LEASE = {"provider": "claude", "label": None, "available_now": True, "available_at": None}
 _CODEX_LEASE = {"provider": "codex", "label": "codex@example.com", "available_now": True, "available_at": None}
@@ -387,8 +412,22 @@ _MAC_FOLDER = "~/Developer/rose"
 
 def _activity_args(*, code_session_request=None, tool_call_id="tc-code", local=False) -> list:
     return [
-        "user-code", "agent-code", "Write answer.txt with the answer", tool_call_id, _SCHEMA, None,
-        "rose-labs/rose-1-flash", None, None, "claude", None, None, None, None, False, None,
+        "user-code",
+        "agent-code",
+        "Write answer.txt with the answer",
+        tool_call_id,
+        _SCHEMA,
+        None,
+        "rose-labs/rose-1-flash",
+        None,
+        None,
+        "claude",
+        None,
+        None,
+        None,
+        None,
+        False,
+        None,
         code_session_request,
         *(["local", "dev-1", _MAC] if local else []),
     ]
@@ -451,7 +490,9 @@ async def test_idle_past_every_old_limit_is_paused_not_failed_then_resumes():
             resumed = await asyncio.wait_for(
                 ActivityEnvironment().run(
                     service.spawn_claude_code_activity,
-                    *_activity_args(code_session_request={"code_session_id": paused["code_session"]["code_session_id"]}),
+                    *_activity_args(
+                        code_session_request={"code_session_id": paused["code_session"]["code_session_id"]}
+                    ),
                 ),
                 timeout=30,
             )
@@ -757,7 +798,9 @@ async def test_local_session_idle_pauses_in_the_mac_folder():
     backend = _Backend(session_home)
     try:
         with backend.patched(clock=_virtual_clock(2000.0)):
-            run = asyncio.create_task(ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args(local=True)))
+            run = asyncio.create_task(
+                ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args(local=True))
+            )
             await _wait_until(lambda: session_home.runs(), "the CLI to start")
             await asyncio.sleep(1.0)  # ~2000 virtual seconds with Bash in flight
             assert not run.done(), f"an in-flight tool keeps a Mac session attached too: {run.result()}"
@@ -771,7 +814,10 @@ async def test_local_session_idle_pauses_in_the_mac_folder():
         assert [call.get("reason") for call in backend.closed] == ["idle"], backend.closed
         meta = paused["code_agent"]
         assert (meta["target"], meta["device_name"], meta["folder"], meta["state"]) == (
-            "local", _MAC, _MAC_FOLDER, "paused"
+            "local",
+            _MAC,
+            _MAC_FOLDER,
+            "paused",
         ), meta
         assert backend.keepalives >= 1, backend.keepalives
         assert backend.availability_own_only == [True], "a Mac run only counts the user's own logins"
@@ -833,15 +879,24 @@ def test_usage_limit_detection_reads_structured_events_only():
     """Only the CLIs' structured limit signals count; printed limit text never does (rule 25b)."""
     from domains.spawn_claude_code_agent.service import usage_limit_from_event
 
-    rejected = {"type": "cli_message", "raw_type": "rate_limit_event",
-                "cli_message": {"type": "rate_limit_event",
-                                "rate_limit_info": {"status": "rejected", "resetsAt": 5, "rateLimitType": "five_hour"}}}
+    rejected = {
+        "type": "cli_message",
+        "raw_type": "rate_limit_event",
+        "cli_message": {
+            "type": "rate_limit_event",
+            "rate_limit_info": {"status": "rejected", "resetsAt": 5, "rateLimitType": "five_hour"},
+        },
+    }
     assert usage_limit_from_event(rejected) == {"provider": "claude", "resets_at": 5, "limit_type": "five_hour"}
     warning = json.loads(json.dumps(rejected))
     warning["cli_message"]["rate_limit_info"]["status"] = "allowed_warning"
     assert usage_limit_from_event(warning) is None
-    codex = {"provider": "codex", "type": "error", "message": "x",
-             "usage_limit": {"reached_type": "rate_limit_reached", "resets_at": 9}}
+    codex = {
+        "provider": "codex",
+        "type": "error",
+        "message": "x",
+        "usage_limit": {"reached_type": "rate_limit_reached", "resets_at": 9},
+    }
     assert usage_limit_from_event(codex) == {"provider": "codex", "resets_at": 9, "limit_type": "rate_limit_reached"}
     for prose in (
         {"type": "agent_message", "text": "You've hit your limit · resets 5pm (UTC)"},
@@ -877,12 +932,28 @@ def test_usage_limit_parent_message_without_a_free_account_names_the_earliest_re
         code_provider="codex",
         resets_at_iso="2026-10-20T18:00:00.000Z",
         facts=facts,
-        accounts=[{"provider": "codex", "label": "Codex account 1", "status": "limited",
-                   "limited_until": "2026-10-20T18:00:00.000Z", "this_run": False},
-                  {"provider": "claude", "label": "me@example.com", "status": "reconnect",
-                   "limited_until": None, "this_run": False}],
-        next_lease={"provider": "codex", "label": "Codex account 1", "available_now": False,
-                    "available_at": "2026-10-20T18:00:00.000Z"},
+        accounts=[
+            {
+                "provider": "codex",
+                "label": "Codex account 1",
+                "status": "limited",
+                "limited_until": "2026-10-20T18:00:00.000Z",
+                "this_run": False,
+            },
+            {
+                "provider": "claude",
+                "label": "me@example.com",
+                "status": "reconnect",
+                "limited_until": None,
+                "this_run": False,
+            },
+        ],
+        next_lease={
+            "provider": "codex",
+            "label": "Codex account 1",
+            "available_now": False,
+            "available_at": "2026-10-20T18:00:00.000Z",
+        },
     )
     assert blocked == (
         "Code agent stopped: the Codex usage limit was reached (resets 2026-10-20T18:00:00.000Z). "
@@ -900,7 +971,10 @@ def test_usage_limit_parent_message_without_a_free_account_names_the_earliest_re
         "the respawn leases an account that is not rate-limited and resumes from the latest checkpoint."
     ), unknown
     shared = format_usage_limit_message(
-        code_provider="claude", resets_at_iso=None, facts=facts, accounts=[],
+        code_provider="claude",
+        resets_at_iso=None,
+        facts=facts,
+        accounts=[],
         next_lease={"provider": "claude", "label": None, "available_now": True, "available_at": None},
     )
     assert "\nConnected accounts: none.\n" in shared and "(now a shared Claude Code account)" in shared, shared
@@ -964,28 +1038,45 @@ async def test_tool_result_reports_branch_and_merged_only_when_confirmed():
     )
     open_pr = {
         "code_session": {
-            "code_session_id": "cs-1", "state": "PAUSED", "checkpoint_seq": 3, "branch": "rose/a--b-123456",
-            "merge_target": "rose/a", "repo": {"head": "b" * 40, "dirtyFiles": 0, "files": []},
-            "merge": {"head": "b" * 40, "local_commits": 0, "pushed": True,
-                      "pr": {"number": 7, "state": "open", "url": "https://github.com/o/r/pull/7", "merged": False},
-                      "merged": False, "merge_target_contains_head": False},
+            "code_session_id": "cs-1",
+            "state": "PAUSED",
+            "checkpoint_seq": 3,
+            "branch": "rose/a--b-123456",
+            "merge_target": "rose/a",
+            "repo": {"head": "b" * 40, "dirtyFiles": 0, "files": []},
+            "merge": {
+                "head": "b" * 40,
+                "local_commits": 0,
+                "pushed": True,
+                "pr": {"number": 7, "state": "open", "url": "https://github.com/o/r/pull/7", "merged": False},
+                "merged": False,
+                "merge_target_contains_head": False,
+            },
         }
     }
     facts = service._merge_close_code_session_facts(spawn, open_pr)
     text = service.format_code_session_summary(facts)
     assert "Branch: rose/a--b-123456 (merges into rose/a)" in text, text
     assert "PR: #7 open" in text and "Merged: no" in text, text
-    meta = service.build_code_agent_metadata(task_id="t", provider="claude", state="completed", started_at=0, facts=facts)
+    meta = service.build_code_agent_metadata(
+        task_id="t", provider="claude", state="completed", started_at=0, facts=facts
+    )
     assert meta["branch"] == "rose/a--b-123456" and "merged_into" not in meta["summary"], meta
     assert meta["base_branch"] == "rose/a", meta
 
     merged = json.loads(json.dumps(open_pr))
     merged["code_session"]["merge"].update(
-        {"merged": True, "merge_target_contains_head": True, "pr": {**open_pr["code_session"]["merge"]["pr"], "merged": True}}
+        {
+            "merged": True,
+            "merge_target_contains_head": True,
+            "pr": {**open_pr["code_session"]["merge"]["pr"], "merged": True},
+        }
     )
     facts = service._merge_close_code_session_facts(spawn, merged)
     assert "Merged: yes" in service.format_code_session_summary(facts)
-    meta = service.build_code_agent_metadata(task_id="t", provider="claude", state="completed", started_at=0, facts=facts)
+    meta = service.build_code_agent_metadata(
+        task_id="t", provider="claude", state="completed", started_at=0, facts=facts
+    )
     assert meta["summary"]["merged_into"] == "rose/a", meta
     assert meta["state"] == "completed" and meta["target"] == "cloud" and meta["started_at"].endswith("Z"), meta
     assert "failure_message" not in meta, meta
@@ -1040,13 +1131,20 @@ async def test_ws_server_checks_out_the_code_session_branch():
         cases = [
             ({"CODE_AGENT_BRANCH": "rose/child-bbbb", "CODE_AGENT_BASE_BRANCH": ""}, "rose/child-bbbb", main_sha),
             (
-                {"CODE_AGENT_BRANCH": "rose/parent-aaaa--speed-cccc", "CODE_AGENT_BASE_BRANCH": "rose/parent-aaaa",
-                 "CODE_AGENT_MERGE_TARGET": "rose/parent-aaaa"},
+                {
+                    "CODE_AGENT_BRANCH": "rose/parent-aaaa--speed-cccc",
+                    "CODE_AGENT_BASE_BRANCH": "rose/parent-aaaa",
+                    "CODE_AGENT_MERGE_TARGET": "rose/parent-aaaa",
+                },
                 "rose/parent-aaaa--speed-cccc",
                 parent_sha,
             ),
             # Resume of a pushed branch: the existing remote branch wins over its base.
-            ({"CODE_AGENT_BRANCH": "rose/parent-aaaa", "CODE_AGENT_BASE_BRANCH": "main"}, "rose/parent-aaaa", parent_sha),
+            (
+                {"CODE_AGENT_BRANCH": "rose/parent-aaaa", "CODE_AGENT_BASE_BRANCH": "main"},
+                "rose/parent-aaaa",
+                parent_sha,
+            ),
         ]
         for env, branch, head in cases:
             session_home = _SessionHome(extra_env={"STUB_MODE": "finish"}, git_config=git_config)
@@ -1158,7 +1256,9 @@ async def _run_all_tests():
         "local_usage_limit_retries_on_the_mac",
         test_local_usage_limit_retries_on_the_mac_with_the_other_login,
     )
-    await r.record_async("tool_result_reports_branch_and_merge", test_tool_result_reports_branch_and_merged_only_when_confirmed)
+    await r.record_async(
+        "tool_result_reports_branch_and_merge", test_tool_result_reports_branch_and_merged_only_when_confirmed
+    )
     await r.record_async("ws_server_checks_out_session_branch", test_ws_server_checks_out_the_code_session_branch)
     await r.record_async("preview_url_rides_every_code_agent_block", test_preview_url_rides_every_code_agent_block)
     teardown_mock()
