@@ -129,12 +129,9 @@ function publishWrapper(name: string, real: string): string {
   ].join('\n');
 }
 
-const GH_WRAPPER = [
-  '#!/bin/sh',
-  `echo "gh is blocked: ${READ_ONLY_NOTE}." >&2`,
-  'exit 1',
-  '',
-].join('\n');
+const GH_WRAPPER = ['#!/bin/sh', `echo "gh is blocked: ${READ_ONLY_NOTE}." >&2`, 'exit 1', ''].join(
+  '\n'
+);
 
 const BLOCKING_HOOK = [
   '#!/bin/sh',

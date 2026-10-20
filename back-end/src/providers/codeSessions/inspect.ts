@@ -156,11 +156,11 @@ function cliTimeoutS(): number {
 
 function inspectModel(provider: InspectProvider): string {
   if (provider === 'codex') {
-    return (
-      process.env.CODE_INSPECT_CODEX_MODEL || process.env.CODEX_CODE_MODEL || 'gpt-5.6-terra'
-    );
+    return process.env.CODE_INSPECT_CODEX_MODEL || process.env.CODEX_CODE_MODEL || 'gpt-5.6-terra';
   }
-  return process.env.CODE_INSPECT_CLAUDE_MODEL || process.env.CLAUDE_CODE_MODEL || 'claude-sonnet-5';
+  return (
+    process.env.CODE_INSPECT_CLAUDE_MODEL || process.env.CLAUDE_CODE_MODEL || 'claude-sonnet-5'
+  );
 }
 
 interface ProviderAuth {
@@ -174,17 +174,22 @@ async function providerAuth(provider: InspectProvider, userId: string): Promise<
   if (provider === 'codex') {
     const meta = await fetchGptCodeCredentialsWithMeta(userId);
     const funded = process.env.GPT_API_KEY;
-    const onCooldown = funded !== undefined && funded !== '' ? await isGptApiKeyOnCooldown() : false;
+    const onCooldown =
+      funded !== undefined && funded !== '' ? await isGptApiKeyOnCooldown() : false;
     return { envs: resolveCodexCodeAuthEnvs(meta, funded, onCooldown), claude: null };
   }
   const meta = await fetchClaudeCodeCredentialsWithMeta(userId);
   const shared = process.env.ANTHROPIC_API_KEY;
   const sharedOnCooldown = shared ? await isAnthropicApiKeyOnCooldown() : false;
-  const transport = resolveClaudeCodeSandboxApiKey(process.env.CLAUDE_CODE_ANTHROPIC_API_KEY, shared, {
-    anthropicBaseUrl: process.env.ANTHROPIC_BASE_URL,
-    openrouterApiKey: process.env.OPENROUTER_API_KEY,
-    sharedKeyOnCooldown: sharedOnCooldown,
-  });
+  const transport = resolveClaudeCodeSandboxApiKey(
+    process.env.CLAUDE_CODE_ANTHROPIC_API_KEY,
+    shared,
+    {
+      anthropicBaseUrl: process.env.ANTHROPIC_BASE_URL,
+      openrouterApiKey: process.env.OPENROUTER_API_KEY,
+      sharedKeyOnCooldown: sharedOnCooldown,
+    }
+  );
   const envs: Record<string, string> = {};
   if (!shouldSkipSandboxAnthropicGatewayForOauth(meta) && transport.baseUrl) {
     envs.ANTHROPIC_BASE_URL = transport.baseUrl;
@@ -323,7 +328,11 @@ async function inspectOnce(
     });
     const timeoutS = cliTimeoutS();
     await fs.exec(
-      inspectRunScript({ provider, workDir, model: inspectModel(provider), timeoutS }, paths, fs.home),
+      inspectRunScript(
+        { provider, workDir, model: inspectModel(provider), timeoutS },
+        paths,
+        fs.home
+      ),
       { timeoutMs: (timeoutS + 30) * 1000 }
     );
     const read = async (path: string) =>
