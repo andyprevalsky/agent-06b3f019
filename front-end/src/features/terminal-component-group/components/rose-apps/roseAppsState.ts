@@ -11,9 +11,16 @@ import type { Agent } from '../../hooks';
  * Everything that opens in the right-panel slot (one at a time):
  *   browser       full screen between the left bar and the right edge
  *   phone         floating device, no panel
- *   integrations | benchmarks | feedback | settings   flush right panels
+ *   integrations | benchmarks | feedback | health | settings   flush right panels
  */
-export type RoseApp = 'browser' | 'phone' | 'integrations' | 'benchmarks' | 'feedback' | 'settings';
+export type RoseApp =
+  | 'browser'
+  | 'phone'
+  | 'integrations'
+  | 'benchmarks'
+  | 'feedback'
+  | 'health'
+  | 'settings';
 
 export interface AgentBrowserTab {
   agentId: string;

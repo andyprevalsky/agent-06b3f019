@@ -8,7 +8,7 @@
  *                drawn in diagonal-by-diagonal from the top-left corner
  *                (the ONLY animated state)
  *   [needs-help] static amber alert glyph (no motion — a stuck row sits still)
- *   [done]       static muted check, or a muted x when the run failed
+ *   [done]       static muted check (green #22c55e in dark mode), or a muted x when the run failed
  *
  * The three differ by silhouette AND color, not just motion — a 3x3 grid, a
  * ringed "!", and a check/x read apart instantly at 14px, and only needs-help is
@@ -112,7 +112,7 @@ function DoneGlyph({ failed }: { failed: boolean }) {
       {failed ? (
         <X className="h-3 w-3 text-red-400/80" strokeWidth={2.5} />
       ) : (
-        <Check className="h-3 w-3 text-gray-400" strokeWidth={2.5} />
+        <Check className="h-3 w-3 text-gray-400 dark:text-[#22c55e]" strokeWidth={2.5} />
       )}
     </span>
   );

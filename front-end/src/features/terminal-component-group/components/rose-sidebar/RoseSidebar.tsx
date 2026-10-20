@@ -10,15 +10,15 @@
  * LAYOUT (top → bottom, rows 17/30/57/59/63):
  *   Home (root project) · New Agent (black) · Search
  *   agents grouped by project (RoseAgentGroups) · + New project
- *   ── Feedback · [Benchmarks, admins] · Archived · [Browse] · [Health] ·
- *      account row. Feedback, Benchmarks and the account row (Settings) open in
- *      the right-panel slot (RoseAppsProvider); clicking again closes it.
+ *   ── Feedback · [Biz health, admins] · Archived · [Browse] · account row.
+ *      Feedback, Biz health and the account row (Settings) open in the
+ *      right-panel slot (RoseAppsProvider); clicking again closes it.
  *
  * PANELS: project settings beside the bar (useRoseSidebarProjects); archive dialog;
  * rename dialog (useAgentRowActions); delete-project confirm dialog.
  */
 
-import { Activity, Archive, FlaskConical, Globe, Megaphone } from 'lucide-react';
+import { Activity, Archive, Globe, Megaphone } from 'lucide-react';
 import { useState, type FocusEvent } from 'react';
 
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -102,9 +102,10 @@ export default function RoseSidebar(props: AppSidebarProps) {
     onViewChange(view);
     onSelectAgent(null);
   };
-  const openPanel = (app: 'feedback' | 'benchmarks' | 'settings') => {
+  const openPanel = (app: 'feedback' | 'health' | 'settings') => {
     if (apps !== null) apps.toggleApp(app);
-    else if (app !== 'feedback') goToView(app);
+    else if (app === 'health') goToView('admin-health');
+    else if (app === 'settings') goToView('settings');
   };
   const { isExpanded } = expansion;
   return (
@@ -145,15 +146,12 @@ export default function RoseSidebar(props: AppSidebarProps) {
         {isExpanded && props.userUi?.menuSlot}
         <div className="flex flex-none flex-col pb-2">
           <RoseNavRow icon={<Megaphone className="h-5 w-5" strokeWidth={1.7} />} label="Feedback" isExpanded={isExpanded} isActive={apps?.openApp === 'feedback'} onClick={() => openPanel('feedback')} />
-          {props.showBenchmarks === true && (
-            <RoseNavRow icon={<FlaskConical className="h-5 w-5" strokeWidth={1.7} />} label="Benchmarks" isExpanded={isExpanded} isActive={apps?.openApp === 'benchmarks'} onClick={() => openPanel('benchmarks')} />
+          {props.showAdminHealth === true && (
+            <RoseNavRow icon={<Activity className="h-5 w-5" strokeWidth={1.7} />} label="Biz health" isExpanded={isExpanded} isActive={apps?.openApp === 'health'} onClick={() => openPanel('health')} />
           )}
           <RoseNavRow icon={<Archive className="h-5 w-5" strokeWidth={1.7} />} label="Archived" isExpanded={isExpanded} onClick={() => setIsArchiveOpen(true)} />
           {props.showBrowse === true && (
             <RoseNavRow icon={<Globe className="h-5 w-5" strokeWidth={1.7} />} label="Browse" isExpanded={isExpanded} isActive={currentView === 'browse'} onClick={() => goToView('browse')} />
-          )}
-          {props.showAdminHealth === true && (
-            <RoseNavRow icon={<Activity className="h-5 w-5" strokeWidth={1.7} />} label="Health" isExpanded={isExpanded} isActive={currentView === 'admin-health'} onClick={() => goToView('admin-health')} />
           )}
           <RoseAccountRow
             user={props.user}

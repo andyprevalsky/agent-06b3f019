@@ -1,20 +1,30 @@
 /**
  * STATE MACHINE: RoseAppPanelDrawer (the right-panel slot for non-browser apps)
  *
- *   openApp ∈ {integrations, benchmarks, feedback, settings} --> [OPEN(app)]
+ *   openApp ∈ {integrations, benchmarks, feedback, health, settings} --> [OPEN(app)]
  *   anything else --> [CLOSED] (the shell keeps the last body while it slides out)
- *   [OPEN] --close X | Escape | its trigger again--> [CLOSED]
+ *   [OPEN] --Escape | its trigger again (icon / left-bar row)--> [CLOSED]
  *
- * Header = icon + title + close. Bodies reuse existing pages (loaded lazily
- * through the pages layer; features never import other features):
+ * Header = icon + title; no close X (the triggers toggle, UI ledger row 67).
+ * Bodies reuse existing pages (loaded lazily through the pages layer; features
+ * never import other features):
  *   integrations → Integrations page   benchmarks → BenchmarksView
+ *   health       → AdminHealth page ("Biz health", admins only)
  *   settings     → Settings page with its own tabs (Customization · Personal
  *                  Info · Billing · API Keys); Billing adds the payments UI the
  *                  stock left bar's card icon showed; Sign out below the tabs
  *   feedback     → FeedbackAppPanel (existing submitFeedback)
  */
 
-import { FlaskConical, Loader2, Megaphone, Plug, Settings as SettingsIcon, X, type LucideIcon } from 'lucide-react';
+import {
+  Activity,
+  FlaskConical,
+  Loader2,
+  Megaphone,
+  Plug,
+  Settings as SettingsIcon,
+  type LucideIcon,
+} from 'lucide-react';
 import { lazy, Suspense, useState, type ReactNode } from 'react';
 
 import SidebarCreditIndicator from '../SidebarCreditIndicator';
@@ -25,13 +35,15 @@ import { useRoseApps, type RoseApp } from './roseAppsState';
 const IntegrationsPage = lazy(() => import('@/pages/Integrations'));
 const BenchmarksPage = lazy(() => import('@/pages/Benchmarks'));
 const SettingsPage = lazy(() => import('@/pages/Settings'));
+const AdminHealthPage = lazy(() => import('@/pages/AdminHealth'));
 
-type PanelApp = Extract<RoseApp, 'integrations' | 'benchmarks' | 'feedback' | 'settings'>;
+type PanelApp = Extract<RoseApp, 'integrations' | 'benchmarks' | 'feedback' | 'health' | 'settings'>;
 
 const PANELS: Record<PanelApp, { title: string; icon: LucideIcon }> = {
   integrations: { title: 'Integrations', icon: Plug },
   benchmarks: { title: 'Benchmarks', icon: FlaskConical },
   feedback: { title: 'Feedback', icon: Megaphone },
+  health: { title: 'Biz health', icon: Activity },
   settings: { title: 'Settings', icon: SettingsIcon },
 };
 
@@ -74,6 +86,7 @@ function PanelBody({ app }: { app: PanelApp }): ReactNode {
   if (app === 'integrations') return <IntegrationsPage />;
   if (app === 'benchmarks') return <BenchmarksPage onOpenAgent={apps?.openAgent} />;
   if (app === 'feedback') return <FeedbackAppPanel />;
+  if (app === 'health') return <AdminHealthPage />;
   return <SettingsBody onLogout={apps?.onLogout} />;
 }
 
@@ -93,14 +106,6 @@ export function RoseAppPanelDrawer() {
           <div className="flex flex-none items-center gap-2.5 border-b border-gray-200/90 px-3.5 py-3 text-[13px] dark:border-white/[0.09]">
             <meta.icon className="h-[18px] w-[18px] flex-none" strokeWidth={1.7} />
             <b className="font-semibold">{meta.title}</b>
-            <button
-              type="button"
-              aria-label={`Close ${meta.title.toLowerCase()}`}
-              onClick={apps.closeApp}
-              className="ml-auto rounded p-1 text-[hsl(240_8%_45%)] hover:text-[hsl(240_15%_8%)] dark:text-[#a3a39d] dark:hover:text-[#ecece8]"
-            >
-              <X className="h-4 w-4" />
-            </button>
           </div>
           <div data-testid={`rose-app-panel-${shown}`} className="min-h-0 flex-1 overflow-y-auto">
             <Suspense fallback={<Fallback />}>

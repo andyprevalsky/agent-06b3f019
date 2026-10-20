@@ -13,6 +13,8 @@ export const handlers = [
   http.get(`${API_BASE}/user-ui/versions`, () => HttpResponse.json({ versions: [] })),
   // Rose Desktop left bar groups agents by project; none unless a test overrides.
   http.get(`${API_BASE}/projects`, () => HttpResponse.json([])),
+  // Rose Desktop Integrations icon reads integration health; nothing connected by default.
+  http.get(`${API_BASE}/integrations`, () => HttpResponse.json({ integrations: [] })),
   // No persisted binding by default: live views fall back to the transcript URL.
   http.get(`${API_BASE}/browser-session/task/:taskId/live-view`, () =>
     HttpResponse.json({ error: 'Session not found' }, { status: 404 }),

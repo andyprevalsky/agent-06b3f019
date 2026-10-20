@@ -12,9 +12,11 @@
  *   click tab --> selectBrowserTab(agentId | null) (agent tabs also select the agent)
  *
  *   Header: globe + "Browser" + LIVE badge while the shown agent session is live.
+ *   No close X: the top-right Browser icon (floating over this corner) and
+ *   Escape close it (UI ledger row 67).
  */
 
-import { Globe, X } from 'lucide-react';
+import { Globe } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { Agent } from '../../hooks';
 import { AppDrawerShell } from './AppDrawerShell';
@@ -110,14 +112,6 @@ export function BrowserAppDrawer() {
             LIVE
           </span>
         )}
-        <button
-          type="button"
-          aria-label="Close browser"
-          onClick={apps.closeApp}
-          className="ml-auto rounded p-1 text-[hsl(240_8%_45%)] transition-colors hover:bg-muted"
-        >
-          <X className="h-4 w-4" />
-        </button>
       </div>
       <div
         role="tablist"

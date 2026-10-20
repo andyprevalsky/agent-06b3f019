@@ -9,14 +9,13 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
-import { renderWithProviders } from './test-wrapper';
 import { server } from './msw/server';
 import AppSidebar from '@/features/terminal-component-group/components/AppSidebar';
 import {
   SIDEBAR_WIDTH_EXPANDED,
   SIDEBAR_WIDTH_STORAGE_KEY,
 } from '@/features/terminal-component-group/config';
-import { defaultProps, makeAgent, mockSession, openRowMenu } from './app-sidebar.fixtures';
+import { defaultProps, makeAgent, mockSession, openRowMenu, renderStockSidebar } from './app-sidebar.fixtures';
 
 describe('AppSidebar rows', () => {
   beforeEach(() => {
@@ -38,7 +37,7 @@ describe('AppSidebar rows', () => {
       }),
       makeAgent({ agent_id: 'untitled', goal: 'Short raw goal', title: null }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     expect(await screen.findByText('Soho Sushi Reservation')).toBeInTheDocument();
     // The long goal is not rendered as the label...
@@ -53,7 +52,7 @@ describe('AppSidebar rows', () => {
   it('preserves the full fallback goal and lets the row truncate only at its real edge', async () => {
     const longGoal =
       'Order another conditioner from Purador on Amazon and confirm the total and delivery date';
-    renderWithProviders(
+    renderStockSidebar(
       <AppSidebar
         {...defaultProps({
           agents: [makeAgent({ agent_id: 'long-fallback', goal: longGoal, title: null })],
@@ -85,7 +84,7 @@ describe('AppSidebar rows', () => {
         pinned_at: '2026-01-01T00:00:00Z',
       }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     const nodes = await screen.findAllByRole('heading', { level: 3 });
     expect(nodes.map((n) => n.textContent)[0]).toBe('Older but pinned');
@@ -100,7 +99,7 @@ describe('AppSidebar rows', () => {
       makeAgent({ agent_id: 'a1', goal: 'Unselected row', status: 'ACTIVE' }),
       makeAgent({ agent_id: 'a2', goal: 'Selected row', status: 'ACTIVE' }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents, selectedAgentId: 'a2' })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents, selectedAgentId: 'a2' })} />);
 
     const row = (text: string) =>
       screen.getByText(text).closest('div[class*="group/row"]') as HTMLElement;
@@ -121,7 +120,7 @@ describe('AppSidebar rows', () => {
 
   it('keeps expanded agent rows compact', async () => {
     const agents = [makeAgent({ agent_id: 'a1', goal: 'Compact row', status: 'ACTIVE' })];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     const row = (await screen.findByText('Compact row')).closest(
       'div[class*="group/row"]',
@@ -142,7 +141,7 @@ describe('AppSidebar rows', () => {
       makeAgent({ agent_id: 'finished', goal: 'Finished now', status: 'COMPLETED' }),
       makeAgent({ agent_id: 'broken', goal: 'Broken now', status: 'FAILED' }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     // The indicator carries the state; the name must not. A title that changes
     // colour or weight as a run progresses makes the list feel unstable.
@@ -166,7 +165,7 @@ describe('AppSidebar rows', () => {
         created_at: new Date(Date.now() - 4 * 60_000).toISOString(),
       }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     // The active row carries its elapsed label; a finished row must not, since a
     // frozen timer reads as a stalled agent.
@@ -184,7 +183,7 @@ describe('AppSidebar rows', () => {
         created_at: new Date(Date.now() - 4 * 60_000).toISOString(),
       }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     const elapsed = await screen.findByText('4m');
     const archive = screen.getByLabelText('Archive Running now');
@@ -206,7 +205,7 @@ describe('AppSidebar rows', () => {
 
   it('keeps row actions focusable for keyboard users', async () => {
     const agents = [makeAgent({ agent_id: 'a1', goal: 'Keyboard row', status: 'ACTIVE' })];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     const archive = await screen.findByLabelText('Archive Keyboard row');
     // Hidden by opacity, never by `hidden`/display:none — the latter would drop
@@ -227,7 +226,7 @@ describe('AppSidebar rows', () => {
       }),
       makeAgent({ agent_id: 'plain', goal: 'Plain row', status: 'COMPLETED' }),
     ];
-    const { container } = renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    const { container } = renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
     await screen.findByText('Pinned row');
 
     // A resting pin marker, distinct from the hover-only pin BUTTON — without it
@@ -246,7 +245,7 @@ describe('AppSidebar rows', () => {
         created_at: new Date(Date.now() - (2 * 24 * 60 + 4 * 60) * 60_000).toISOString(),
       }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
     expect(await screen.findByText('2d 4h')).toBeInTheDocument();
   });
 
@@ -266,7 +265,7 @@ describe('AppSidebar rows', () => {
         created_at: '2024-01-01T00:00:00Z',
       }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     const nodes = await screen.findAllByRole('heading', { level: 3 });
     // Older, but blocked on the user — a needs-help row buried under active runs
@@ -283,7 +282,7 @@ describe('AppSidebar rows', () => {
         temporal_workflow_id: null,
       }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     expect(await screen.findByText('20g to floz')).toBeInTheDocument();
     expect(screen.getByLabelText('Completed')).toBeInTheDocument();
@@ -300,7 +299,7 @@ describe('AppSidebar rows', () => {
       }),
       makeAgent({ agent_id: 'u1', goal: 'Unpinned one', status: 'ACTIVE' }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     expect(await screen.findByText('Pinned')).toBeInTheDocument();
     const headings = screen.getAllByRole('heading', { level: 3 }).map((n) => n.textContent);
@@ -309,7 +308,7 @@ describe('AppSidebar rows', () => {
 
   it('hides the Pinned header when nothing is pinned', async () => {
     const agents = [makeAgent({ agent_id: 'u1', goal: 'Unpinned one', status: 'ACTIVE' })];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
     await screen.findByText('Unpinned one');
     // An empty "Pinned" label is just a wasted row.
     expect(screen.queryByText('Pinned')).not.toBeInTheDocument();
@@ -321,7 +320,7 @@ describe('AppSidebar rows', () => {
       makeAgent({ agent_id: 'a1', goal: 'Book a flight to Tokyo', title: 'Tokyo trip' }),
       makeAgent({ agent_id: 'a2', goal: 'Order groceries', title: 'Grocery run' }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
     await screen.findByText('Tokyo trip');
 
     await u.type(screen.getByLabelText('Search agents'), 'grocer');
@@ -350,7 +349,7 @@ describe('AppSidebar rows', () => {
         return HttpResponse.json({ agents: [contentMatch] });
       }),
     );
-    renderWithProviders(
+    renderStockSidebar(
       <AppSidebar
         {...defaultProps({
           agents: [makeAgent({ agent_id: 'other', goal: 'Order groceries' })],
@@ -368,7 +367,7 @@ describe('AppSidebar rows', () => {
   it('tells the user when a search matches nothing', async () => {
     const u = userEvent.setup();
     const agents = [makeAgent({ agent_id: 'a1', goal: 'Book a flight' })];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
     await screen.findByText('Book a flight');
 
     await u.type(screen.getByLabelText('Search agents'), 'zzzz');
@@ -377,14 +376,14 @@ describe('AppSidebar rows', () => {
   });
 
   it('advertises no keyboard shortcut it does not bind', async () => {
-    renderWithProviders(<AppSidebar {...defaultProps()} />);
+    renderStockSidebar(<AppSidebar {...defaultProps()} />);
     const search = await screen.findByLabelText('Search agents');
     expect(search).toBeInTheDocument();
     expect(screen.queryByText(/⌘K|Ctrl\+K/i)).not.toBeInTheDocument();
   });
 
   it('opens a row context menu with Rename, Copy Link, Pin and Archive', async () => {
-    renderWithProviders(
+    renderStockSidebar(
       <AppSidebar {...defaultProps({ agents: [makeAgent({ goal: 'Row A' })] })} />,
     );
 
@@ -397,7 +396,7 @@ describe('AppSidebar rows', () => {
 
   it('offers Unpin for an already-pinned row', async () => {
     const agents = [makeAgent({ goal: 'Row A', pinned_at: '2026-01-01T00:00:00Z' })];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     const menu = await openRowMenu('Row A');
     expect(within(menu).getByText('Unpin')).toBeInTheDocument();
@@ -406,7 +405,7 @@ describe('AppSidebar rows', () => {
 
   it('labels the pin hover action with a tooltip', async () => {
     const u = userEvent.setup();
-    renderWithProviders(
+    renderStockSidebar(
       <AppSidebar {...defaultProps({ agents: [makeAgent({ goal: 'Row A' })] })} />,
     );
 
@@ -416,7 +415,7 @@ describe('AppSidebar rows', () => {
 
   it('labels the archive hover action with a tooltip', async () => {
     const u = userEvent.setup();
-    renderWithProviders(
+    renderStockSidebar(
       <AppSidebar {...defaultProps({ agents: [makeAgent({ goal: 'Row A' })] })} />,
     );
 
@@ -438,7 +437,7 @@ describe('AppSidebar rows', () => {
     );
     const onRefreshAgents = vi.fn().mockResolvedValue(undefined);
     const agents = [makeAgent({ agent_id: 'a1', goal: 'Row A' })];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents, onRefreshAgents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents, onRefreshAgents })} />);
 
     const menu = await openRowMenu('Row A');
     await u.click(within(menu).getByText('Rename'));
@@ -464,7 +463,7 @@ describe('AppSidebar rows', () => {
         return HttpResponse.json({ agent: makeAgent() });
       }),
     );
-    renderWithProviders(
+    renderStockSidebar(
       <AppSidebar {...defaultProps({ agents: [makeAgent({ goal: 'Row A' })] })} />,
     );
 
@@ -478,7 +477,7 @@ describe('AppSidebar rows', () => {
     const u = userEvent.setup();
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
-    renderWithProviders(
+    renderStockSidebar(
       <AppSidebar {...defaultProps({ agents: [makeAgent({ agent_id: 'a1', goal: 'Row A' })] })} />,
     );
 
@@ -502,7 +501,7 @@ describe('AppSidebar rows', () => {
     );
     const onRefreshAgents = vi.fn().mockResolvedValue(undefined);
     const agents = [makeAgent({ agent_id: 'a1', goal: 'Row A' })];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents, onRefreshAgents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents, onRefreshAgents })} />);
 
     await u.click(await screen.findByLabelText('Archive Row A'));
 
@@ -515,7 +514,7 @@ describe('AppSidebar rows', () => {
     server.use(http.delete('*/api/agents/:agentId', () => new HttpResponse(null, { status: 204 })));
     const onSelectAgent = vi.fn();
     const agents = [makeAgent({ agent_id: 'a1', goal: 'Row A' })];
-    renderWithProviders(
+    renderStockSidebar(
       <AppSidebar {...defaultProps({ agents, onSelectAgent, selectedAgentId: 'a1' })} />,
     );
 
@@ -535,7 +534,7 @@ describe('AppSidebar rows', () => {
       }),
     );
     const agents = [makeAgent({ agent_id: 'a1', goal: 'Row A' })];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     const menu = await openRowMenu('Row A');
     await u.click(within(menu).getByText('Archive'));
@@ -563,7 +562,7 @@ describe('AppSidebar rows', () => {
         return HttpResponse.json({ success: true });
       }),
     );
-    renderWithProviders(<AppSidebar {...defaultProps()} />);
+    renderStockSidebar(<AppSidebar {...defaultProps()} />);
 
     await u.click(screen.getByLabelText('Show archived agents'));
 
@@ -576,7 +575,7 @@ describe('AppSidebar rows', () => {
   it('shows an empty state when nothing is archived', async () => {
     const u = userEvent.setup();
     server.use(http.get('*/api/agents/archived', () => HttpResponse.json({ agents: [] })));
-    renderWithProviders(<AppSidebar {...defaultProps()} />);
+    renderStockSidebar(<AppSidebar {...defaultProps()} />);
 
     await u.click(screen.getByLabelText('Show archived agents'));
 
@@ -591,7 +590,7 @@ describe('AppSidebar rows', () => {
       makeAgent({ agent_id: 'c', goal: 'Out of credits', status: 'OUT_OF_CREDITS' }),
       makeAgent({ agent_id: 'l', goal: 'Cost limited', status: 'COST_LIMIT_REACHED' }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     await screen.findByText('In progress');
     expect(screen.queryByText('42%')).not.toBeInTheDocument();
@@ -605,7 +604,7 @@ describe('AppSidebar rows', () => {
 
   it('offers no pause/resume control, even for a paused agent', async () => {
     const agents = [makeAgent({ agent_id: 'a1', goal: 'Paused row', status: 'PAUSED' })];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     // Run control belongs to the agent view. A play button in a navigation list
     // sat right where you scan and invited mis-clicks.

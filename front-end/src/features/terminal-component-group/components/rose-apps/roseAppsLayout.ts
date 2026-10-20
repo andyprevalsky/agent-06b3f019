@@ -1,16 +1,14 @@
 /**
  * Layout constants + pure helpers for the Rose Desktop app icons and panels
- * (UI ledger rows 22/58/66). There is no right bar: the app icons sit bare in
- * the window's top-right corner and panels open flush against the right edge,
- * below that icon row. Kept pure so width clamping is unit-testable.
+ * (UI ledger rows 22/58/66/67). There is no right bar: the app icons sit bare
+ * in the window's top-right corner and float over full-height drawers that
+ * open flush against the right edge. Kept pure so width clamping is testable.
  */
 
 /** Rose left bar resting width (the only bar). */
 export const LEFT_BAR_WIDTH = 64;
-/** Panels start below the top-right icon row. */
-export const APP_PANEL_TOP = 56;
-/** Only the panel's top-left corner is rounded; every other edge is flush. */
-export const APP_PANEL_RADIUS = 12;
+/** Drawers are full height (row 67): the icon row floats over their top-right corner. */
+export const APP_PANEL_TOP = 0;
 /** The phone floats this far from the window's right edge. */
 export const PHONE_EDGE_GAP = 24;
 /** Icon hit target in the top-right row. */

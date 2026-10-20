@@ -6,13 +6,14 @@
  *             cubic-bezier(.22,1,.36,1))
  *   [OPEN] --close--> [CLOSED]
  *
- * Desktop (md+), UI ledger rows 22/66 — no right bar, no gap, no floating card:
- *   variant 'panel': flush against the window's right edge, top 56px (below the
- *                    app icon row) to the bottom, only the top-left corner
- *                    rounded (12px). Left-edge handle / arrow keys resize it
- *                    (clamped >= 420px; transitions paused while dragging).
- *   variant 'full':  Browser — from the left bar (64px) to the right edge,
- *                    below the icon row; not resizable.
+ * Desktop (md+), UI ledger rows 22/66/67 — no right bar, gap or floating card:
+ *   variant 'panel': full height, flush against the window's right edge; the
+ *                    top-right app icons float over its top-right corner and
+ *                    toggle it (no close X of its own). Left-edge handle /
+ *                    arrow keys resize it (clamped >= 420px; transitions
+ *                    paused while dragging).
+ *   variant 'full':  Browser — full height from the left bar (64px) to the
+ *                    right edge; not resizable.
  * Mobile (< md): a full-height bottom sheet sliding up.
  */
 
@@ -21,7 +22,6 @@ import { useIsMobile } from '@/hooks/use-mobile';
 import { cn } from '@/lib/utils';
 import { useRoseApps } from './roseAppsState';
 import {
-  APP_PANEL_RADIUS,
   APP_PANEL_TOP,
   DRAWER_DURATION_MS,
   DRAWER_EASE,
@@ -84,7 +84,7 @@ function DrawerResizeHandle({ label }: { label: string }) {
 type DrawerVariant = 'panel' | 'full';
 
 function desktopGeometry(variant: DrawerVariant, width: number): React.CSSProperties {
-  const base = { top: APP_PANEL_TOP, bottom: 0, right: 0, borderTopLeftRadius: APP_PANEL_RADIUS };
+  const base = { top: APP_PANEL_TOP, bottom: 0, right: 0 };
   return variant === 'full' ? { ...base, left: LEFT_BAR_WIDTH } : { ...base, width };
 }
 
@@ -126,7 +126,7 @@ export function AppDrawerShell({
       data-variant={variant}
       className={cn(
         'fixed z-[66] flex flex-col overflow-hidden bg-white text-[hsl(240_15%_8%)] dark:bg-[#262624] dark:text-[#ecece8]',
-        'border-l border-t border-gray-200/95 shadow-[-12px_0_40px_rgba(20,20,40,0.08)] dark:border-white/[0.09]',
+        'border-l border-gray-200/95 shadow-[-12px_0_40px_rgba(20,20,40,0.08)] dark:border-white/[0.09]',
         isMobile && 'inset-x-0 bottom-0 top-0 rounded-t-[14px]',
         !open && 'pointer-events-none',
       )}

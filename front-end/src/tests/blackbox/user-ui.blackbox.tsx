@@ -34,6 +34,7 @@ import Terminal from '@/pages/Terminal';
 
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
+import { renderStockSidebar } from './app-sidebar.fixtures';
 import { BackdropHarness } from './user-ui-backdrop-harness';
 
 const API_BASE = 'http://localhost:3001/api';
@@ -228,7 +229,7 @@ describe('opaque chrome over a user background', () => {
       onLogout: () => {},
       onLoginClick: () => {},
     };
-    const { rerender } = renderWithProviders(<AppSidebar {...props} />);
+    const { rerender } = renderStockSidebar(<AppSidebar {...props} />);
     const rail = screen.getByRole('complementary', { hidden: true });
     expect(rail).toHaveAttribute('data-surface', 'translucent');
     expect(rail).toHaveClass('bg-white/95');
