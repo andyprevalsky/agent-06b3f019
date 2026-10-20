@@ -295,6 +295,14 @@ def _local_executor():
 
 
 _BACKENDS: List[FakeUserUiBackend] = []
+_TEMP_DIRS: List[Path] = []
+
+
+def _counter_path() -> Path:
+    """A run-counter file in a temp dir removed when the suite finishes."""
+    directory = Path(tempfile.mkdtemp(prefix="user-tools-counter-"))
+    _TEMP_DIRS.append(directory)
+    return directory / "runs.txt"
 
 
 @contextlib.contextmanager
@@ -742,7 +750,7 @@ async def test_side_effect_tool_contract():
     """side_effects tools are declared; idempotency_key_field is validated; a call without its key never runs."""
     from domains.user_tools.repo import run_user_tool_activity
 
-    counter = Path(tempfile.mkdtemp(prefix="user-tools-counter-")) / "runs.txt"
+    counter = _counter_path()
     with _local_executor():
         backend = _charge_backend(counter)
         backend.publish(
@@ -783,7 +791,7 @@ async def test_side_effect_tool_contract():
 
 
 async def _side_effect_retry_runs_once(executor: Any) -> None:
-    counter = Path(tempfile.mkdtemp(prefix="user-tools-counter-")) / "runs.txt"
+    counter = _counter_path()
     with executor():
         backend = _charge_backend(counter)
         pinned = await _resolve()
@@ -816,7 +824,7 @@ async def test_side_effect_lost_completion_under_temporal_runs_once():
     from domains.user_tools.types import user_tool_call_key
     from helpers.workflow_sandbox import production_workflow_runner
 
-    counter = Path(tempfile.mkdtemp(prefix="user-tools-counter-")) / "runs.txt"
+    counter = _counter_path()
     attempts: List[int] = []
     keys: List[Optional[str]] = []
 
@@ -867,7 +875,7 @@ async def test_side_effect_lost_completion_under_temporal_runs_once():
 
 
 async def _concurrent_duplicates_run_once(executor: Any) -> None:
-    counter = Path(tempfile.mkdtemp(prefix="user-tools-counter-")) / "runs.txt"
+    counter = _counter_path()
     with executor():
         _charge_backend(counter)
         pinned = await _resolve()
@@ -890,7 +898,7 @@ async def test_concurrent_duplicate_side_effect_calls_run_once():
 
 async def test_stale_side_effect_claim_is_outcome_unknown_not_rerun():
     """A claim left STARTED by an attempt that died mid-run is never re-run; the call reports outcome_unknown."""
-    counter = Path(tempfile.mkdtemp(prefix="user-tools-counter-")) / "runs.txt"
+    counter = _counter_path()
     with _local_executor():
         backend = _charge_backend(counter, timeout_s=1)
         pinned = await _resolve()
@@ -919,7 +927,7 @@ async def test_stale_side_effect_claim_is_outcome_unknown_not_rerun():
 async def test_lost_run_response_replays_the_stored_record():
     """The code-session run stored its record but the response was lost: the activity
     returns that record (no second run, no error) by consulting the claim."""
-    counter = Path(tempfile.mkdtemp(prefix="user-tools-counter-")) / "runs.txt"
+    counter = _counter_path()
     with _code_session_executor():
         backend = _charge_backend(counter)
         backend.lose_run_responses = True
@@ -945,7 +953,7 @@ async def test_code_session_busy_waits_then_reports_structured_error():
     assert waited["ok"] and waited["result"]["city"] == "Bern", waited
     assert len(backend.run_bodies) == 3
 
-    counter = Path(tempfile.mkdtemp(prefix="user-tools-counter-")) / "runs.txt"
+    counter = _counter_path()
     with _code_session_executor(), patch.object(repo_mod, "CODE_SESSION_BUSY_WAIT_SECONDS", 0.5):
         backend = _charge_backend(counter)
         backend.busy_runs = 1000
@@ -980,7 +988,7 @@ async def test_side_effect_call_from_workflow_passes_stable_key():
     """The workflow handler derives the key from (root workflow id, tool call id) and passes it."""
     from domains.user_tools.handler import pin_user_tools, run_user_tool
 
-    counter = Path(tempfile.mkdtemp(prefix="user-tools-counter-")) / "runs.txt"
+    counter = _counter_path()
     calls: List[Any] = []
     with _code_session_executor():
         _charge_backend(counter)
@@ -1207,6 +1215,9 @@ async def run_all_tests():
         for backend in _BACKENDS:
             shutil.rmtree(backend.root, ignore_errors=True)
         _BACKENDS.clear()
+        for directory in _TEMP_DIRS:
+            shutil.rmtree(directory, ignore_errors=True)
+        _TEMP_DIRS.clear()
     return r.all_passed
 
 
