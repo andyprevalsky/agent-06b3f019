@@ -20,7 +20,6 @@ set -euo pipefail
 #   bash scripts/test.sh front-end                     # frontend tests only
 #   bash scripts/test.sh mac-app                       # mac-app tests only
 #   bash scripts/test.sh mac-app onboarding            # mac-app blackbox: onboarding domain
-#   bash scripts/test.sh --auto-rca-changed-from=<sha> # trusted diff-scoped Auto-RCA offline gate
 #   bash scripts/test.sh --list                        # list available repos/domains
 #   bash scripts/test.sh -v                            # verbose — show all output
 
@@ -42,8 +41,6 @@ VERBOSE=false
 PROMPT_HUMAN_APPROVAL_RETRIEVED=false
 AGENT_BEHAVIOR_APPROVAL_RETRIEVED=false
 LLM_TRAJECTORY_INJECTION_APPROVAL_RETRIEVED=false
-DEFER_APPROVAL_TO_EXACT_HEAD_REVIEW=false
-AUTO_RCA_BASE_SHA=""
 FULL_MAX_CONCURRENCY="${BENCHMARK_PROD_MAX_CONCURRENCY:-5}"
 
 for arg in "$@"; do
@@ -71,12 +68,6 @@ for arg in "$@"; do
     llm-trajectory-injection-approval-retrieved=false|--llm-trajectory-injection-approval-retrieved=false)
       LLM_TRAJECTORY_INJECTION_APPROVAL_RETRIEVED=false
       ;;
-    defer-human-approval-to-exact-head-pr-review=true|--defer-human-approval-to-exact-head-pr-review=true)
-      DEFER_APPROVAL_TO_EXACT_HEAD_REVIEW=true
-      ;;
-    --auto-rca-changed-from=*)
-      AUTO_RCA_BASE_SHA="${arg#--auto-rca-changed-from=}"
-      ;;
     -*)
       echo "Unknown flag: $arg"
       echo "Usage: bash scripts/test.sh [repo] [domain] [--full] [--no-smoke] [--port=N] [--list] [-v] [--mandatory-human-approval-retrieved=true] [--agent-behavior-approval-retrieved=true] [--llm-trajectory-injection-approval-retrieved=true]"
@@ -91,28 +82,6 @@ for arg in "$@"; do
       ;;
   esac
 done
-
-AUTO_RCA_MODE=false
-AUTO_RCA_CHANGED=""
-if [ -n "$AUTO_RCA_BASE_SHA" ]; then
-  [[ "$AUTO_RCA_BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
-    echo "ERROR: --auto-rca-changed-from requires a full commit SHA."
-    exit 1
-  }
-  git cat-file -e "$AUTO_RCA_BASE_SHA^{commit}" || {
-    echo "ERROR: Auto-RCA baseline commit is unavailable: $AUTO_RCA_BASE_SHA"
-    exit 1
-  }
-  AUTO_RCA_MODE=true
-  SMOKE=false
-  AUTO_RCA_CHANGED="$(git diff --name-only "$AUTO_RCA_BASE_SHA" HEAD)"
-  [ -n "$AUTO_RCA_CHANGED" ] || {
-    echo "ERROR: Auto-RCA offline gate requires a non-empty baseline diff."
-    exit 1
-  }
-  echo "Auto-RCA changed paths:"
-  printf '%s\n' "$AUTO_RCA_CHANGED" | sed 's/^/  - /'
-fi
 
 # ── List mode ──
 if $LIST; then
@@ -271,44 +240,20 @@ collect_bg_suites() {
 # ── Run suites ──
 
 should_run() {
-  if $AUTO_RCA_MODE; then
-    printf '%s\n' "$AUTO_RCA_CHANGED" | grep -Eq "^$1/"
-    return
-  fi
   [ -z "$REPO" ] || [ "$REPO" = "$1" ]
 }
 
-auto_rca_changed() {
-  local pattern="$1"
-  ! $AUTO_RCA_MODE || printf '%s\n' "$AUTO_RCA_CHANGED" | grep -Eq "$pattern"
-}
-
-if $DEFER_APPROVAL_TO_EXACT_HEAD_REVIEW; then
-  if $PROMPT_HUMAN_APPROVAL_RETRIEVED || $AGENT_BEHAVIOR_APPROVAL_RETRIEVED || $LLM_TRAJECTORY_INJECTION_APPROVAL_RETRIEVED; then
-    echo "ERROR: human approval cannot be both retrieved and deferred."
-    exit 1
-  fi
-  run_suite "Prompt Human Approval Guard" bash scripts/check-prompt-human-approval.sh \
-    --defer-human-approval-to-exact-head-pr-review=true
-  run_suite "Agent Behavior Approval Guard" bash scripts/check-agent-behavior-approval.sh \
-    --defer-human-approval-to-exact-head-pr-review=true
-  run_suite "LLM Trajectory Injection Approval Guard" bash scripts/check-llm-trajectory-injection-approval.sh \
-    --defer-human-approval-to-exact-head-pr-review=true
-elif $PROMPT_HUMAN_APPROVAL_RETRIEVED; then
+if $PROMPT_HUMAN_APPROVAL_RETRIEVED; then
   run_suite "Prompt Human Approval Guard" bash scripts/check-prompt-human-approval.sh mandatory-human-approval-retrieved=true
 else
   run_suite "Prompt Human Approval Guard" bash scripts/check-prompt-human-approval.sh
 fi
-if $DEFER_APPROVAL_TO_EXACT_HEAD_REVIEW; then
-  : # All three approval guards ran together above.
-elif $AGENT_BEHAVIOR_APPROVAL_RETRIEVED; then
+if $AGENT_BEHAVIOR_APPROVAL_RETRIEVED; then
   run_suite "Agent Behavior Approval Guard" bash scripts/check-agent-behavior-approval.sh mandatory-human-approval-retrieved=true
 else
   run_suite "Agent Behavior Approval Guard" bash scripts/check-agent-behavior-approval.sh
 fi
-if $DEFER_APPROVAL_TO_EXACT_HEAD_REVIEW; then
-  :
-elif $LLM_TRAJECTORY_INJECTION_APPROVAL_RETRIEVED; then
+if $LLM_TRAJECTORY_INJECTION_APPROVAL_RETRIEVED; then
   run_suite "LLM Trajectory Injection Approval Guard" bash scripts/check-llm-trajectory-injection-approval.sh mandatory-human-approval-retrieved=true
 else
   run_suite "LLM Trajectory Injection Approval Guard" bash scripts/check-llm-trajectory-injection-approval.sh
@@ -324,8 +269,6 @@ run_suite "RCA Model Intelligence Contract" bash scripts/tests/rca-model-intelli
 run_suite "RCA Prompt-Edit Abstraction Contract" bash scripts/tests/rca-prompt-edit-abstraction.test.sh
 run_suite "RCA Archive New Command" bash scripts/tests/rca-archive-new.test.sh
 run_suite "Claude Review Fallback" bash scripts/tests/claude-review-fallback.test.sh
-run_suite "Auto RCA Workflow Contract" bash scripts/tests/auto-rca-workflow.test.sh
-run_suite "Auto RCA Lifecycle Blackbox" bash scripts/tests/auto-rca-lifecycle.blackbox.test.sh
 run_suite "Semantic Deploy Gate" bash scripts/tests/semantic-deploy-gate.test.sh
 run_suite "Descend Command" bash scripts/tests/descend-command.test.sh
 run_suite "Benchmark Live Results" python3 scripts/tests/benchmark-live-results.test.py
@@ -379,61 +322,53 @@ run_suite "Local Port Probe Without lsof" bash scripts/tests/port-probe.test.sh
 run_suite "Agent Workflow Surface Hash" bash scripts/tests/agent-surface-hash.test.sh
 run_suite "Fly Cutover Clone Recovery" bash scripts/tests/deploy-agent-clone-recovery.test.sh
 run_suite "Mac App Release Drift" bash scripts/tests/mac-app-release-drift.test.sh
-if auto_rca_changed '^(scripts/(run\.sh|run-in-new-session\.py|run-bench|run-bench-cloud|run-bench-fleet|run-predeploy-(cloud|local)|create-worktree-patch\.sh|cloudbench-|lib/cloudbench-|tests/cloudbench-)|agents/benchmarks/(cloud_batch_cleanup_test|cloudbench_(dependency_sync|recovery_review|codex_auth)_test|run_benchmark|wall_clock_backstop_test)\.py)'; then
-  run_suite "Cloud Benchmark Environment" bash scripts/tests/cloudbench-env.test.sh
-  run_suite "Cloud Benchmark Controller GitHub Token" bash scripts/tests/cloudbench-controller-github-token.test.sh
-  run_suite "Cloud Benchmark Mandatory Autoscale" bash scripts/tests/cloudbench-acceptance-autoscale.test.sh
-  run_suite "Benchmark Execution Backstop" agents/venv/bin/python -m pytest -q agents/benchmarks/wall_clock_backstop_test.py
-  run_suite "Cloud Benchmark Lifecycle" agents/venv/bin/python -m pytest -q agents/benchmarks/cloud_batch_cleanup_test.py agents/benchmarks/cloudbench_dependency_sync_test.py agents/benchmarks/cloudbench_recovery_review_test.py agents/benchmarks/cloudbench_codex_auth_test.py
-  run_suite "Cloud Benchmark Git Fetch" bash scripts/tests/cloudbench-fetch-ref.test.sh
-  run_suite "Cloud Benchmark GitHub Token" bash scripts/tests/cloudbench-github-token.test.sh
-  run_suite "Cloud Benchmark Explicit Idle Admission" python3 scripts/tests/cloudbench-explicit-idle-admission.test.py
-  run_suite "Cloud Benchmark Fixed Native Worker" python3 scripts/tests/cloudbench-fixed-native-worker.test.py
-  run_suite "Cloud Benchmark Cleanup Admission Scans" python3 scripts/tests/cloudbench-cleanup-admission-scans.test.py
-  run_suite "Cloud Benchmark Cleanup Admission Parallel" python3 scripts/tests/cloudbench-cleanup-admission-parallel.test.py
-  run_suite "Cloud Benchmark Cleanup Admission Tickets" python3 scripts/tests/cloudbench-cleanup-admission-tickets.test.py
-  run_suite "Cloud Benchmark Cohort Stale Reconciliation" python3 scripts/tests/cloudbench-cohort-reconcile.test.py
-  run_suite "Cloud Benchmark Shared Relay" python3 scripts/tests/cloudbench-shared-transport-integration.test.py
-  run_suite "Cloud Benchmark Cleanup Ticket Campaign" python3 scripts/tests/cloudbench-cleanup-ticket-campaign.test.py
-  run_suite "Cloud Benchmark Clone Rate Response" python3 scripts/tests/cloudbench-clone-rate-response.test.py
-  run_suite "Cloud Benchmark Controller Client" python3 scripts/tests/cloudbench-controller-client-path.test.py
-  run_suite "Cloud Benchmark Disposable Hub Finalization" python3 scripts/tests/cloudbench-disposable-hub-finalize.test.py
-  run_suite "Cloud Benchmark Disposable Controller" python3 scripts/tests/cloudbench-disposable-controller.test.py
-  run_suite "Cloud Benchmark Disposable Volume Backups" python3 scripts/tests/cloudbench-disposable-volume.test.py
-  run_suite "Cloud Benchmark Parallel Mutation Admission" python3 scripts/tests/cloudbench-parallel-mutation.test.py
-  run_suite "Cloud Benchmark Disposable Volume CLI" python3 scripts/tests/cloudbench-disposable-volume-cli.test.py
-  run_suite "Cloud Benchmark Original 600 Supervisor" python3 scripts/tests/cloudbench-original600-supervisor.test.py
-  run_suite "Cloud Benchmark Disposable Recovery" python3 scripts/tests/cloudbench-disposable-recovery.test.py
-  run_suite "Cloud Benchmark Disposable Decisions" python3 scripts/tests/cloudbench-disposable-lifecycle.test.py
-  run_suite "Cloud Benchmark Retained Successor Completion" python3 scripts/tests/cloudbench-retained-successor.test.py
-  run_suite "Cloud Benchmark Disposable Outer Lifecycle" env CLOUDBENCH_TEST_DISPOSABLE_ONLY=1 bash scripts/tests/cloudbench-multi-workstream.test.sh
-  run_suite "Cloud Benchmark App Stop All" python3 scripts/tests/cloudbench-stop-all.test.py
-  run_suite "Cloud Benchmark Reclaim Stopped Machines" python3 scripts/tests/cloudbench-reclaim-stopped.test.py
-  run_suite "Cloud Benchmark Unstaged Worker Recovery" python3 scripts/tests/cloudbench-unstaged-worker-recovery.test.py
-  run_suite "Cloud Benchmark Protected Resource Union" python3 scripts/tests/cloudbench-protected-resources.test.py
-  run_suite "Cloud Benchmark Pool Run Token" python3 scripts/tests/cloudbench-pool-run-token.test.py
-  run_suite "Cloud Benchmark Live Primary Return" python3 scripts/tests/cloudbench-live-primary-return.test.py
-  run_suite "Cloud Benchmark Exact Shape Reuse" python3 scripts/tests/cloudbench-primary-exact-shape-reuse.test.py
-  run_suite "Cloud Benchmark Maintenance Env" python3 scripts/tests/cloudbench-maintenance-env.test.py
-  run_suite "Cloud Benchmark Multi-Workstream" bash scripts/tests/cloudbench-multi-workstream.test.sh
-  run_suite "Fleet Infra Canary" bash scripts/tests/fleet-infra-canary.test.sh
-  run_suite "Cloud Benchmark App-Env Lock" bash scripts/tests/cloudbench-app-env-lock.test.sh
-  run_suite "Cloud Benchmark Seed Budget" bash scripts/tests/cloudbench-seed-budget.test.sh
-  run_suite "Cloud Benchmark Restore Readiness" bash scripts/tests/cloudbench-restore-readiness.test.sh
-  run_suite "Cloud Benchmark Orphan-Proxy Reaper" bash scripts/tests/fleet-orphan-proxy-reaper.test.sh
-  run_suite "Cloud Benchmark Status-Service Shutdown" python3 scripts/tests/run-cloudbench-controller-linux.py --fixture status-service-shutdown
-fi
-if auto_rca_changed '^(scripts/(seed-|setup-db|cloud-build)|back-end/(prisma/|scripts/seed))'; then
-  run_suite "Seed-Dump Cache Decision" bash scripts/tests/seed-cache-decision.test.sh
-  run_suite "Canonical Seed WhatsApp Content" bash scripts/tests/canonical-seed-whatsapp-content.test.sh
-  run_suite "Seed-Dump Toolchain Compatibility" bash scripts/tests/seed-dump-toolchain.test.sh
-fi
-if auto_rca_changed '^(scripts/(run\.sh|setup-db|seed-|fast-mode)|back-end/)'; then
-  run_suite "Fast-Mode Cache Schema Retry" bash scripts/tests/fast-mode-cache-schema-retry.test.sh
-fi
-if auto_rca_changed '^scripts/run\.sh$'; then
-  run_suite "System Postgres Pool Budget" bash scripts/tests/run-system-pg-pool-budget.test.sh
-fi
+run_suite "Cloud Benchmark Environment" bash scripts/tests/cloudbench-env.test.sh
+run_suite "Cloud Benchmark Controller GitHub Token" bash scripts/tests/cloudbench-controller-github-token.test.sh
+run_suite "Cloud Benchmark Mandatory Autoscale" bash scripts/tests/cloudbench-acceptance-autoscale.test.sh
+run_suite "Benchmark Execution Backstop" agents/venv/bin/python -m pytest -q agents/benchmarks/wall_clock_backstop_test.py
+run_suite "Cloud Benchmark Lifecycle" agents/venv/bin/python -m pytest -q agents/benchmarks/cloud_batch_cleanup_test.py agents/benchmarks/cloudbench_dependency_sync_test.py agents/benchmarks/cloudbench_recovery_review_test.py agents/benchmarks/cloudbench_codex_auth_test.py
+run_suite "Cloud Benchmark Git Fetch" bash scripts/tests/cloudbench-fetch-ref.test.sh
+run_suite "Cloud Benchmark GitHub Token" bash scripts/tests/cloudbench-github-token.test.sh
+run_suite "Cloud Benchmark Explicit Idle Admission" python3 scripts/tests/cloudbench-explicit-idle-admission.test.py
+run_suite "Cloud Benchmark Fixed Native Worker" python3 scripts/tests/cloudbench-fixed-native-worker.test.py
+run_suite "Cloud Benchmark Cleanup Admission Scans" python3 scripts/tests/cloudbench-cleanup-admission-scans.test.py
+run_suite "Cloud Benchmark Cleanup Admission Parallel" python3 scripts/tests/cloudbench-cleanup-admission-parallel.test.py
+run_suite "Cloud Benchmark Cleanup Admission Tickets" python3 scripts/tests/cloudbench-cleanup-admission-tickets.test.py
+run_suite "Cloud Benchmark Cohort Stale Reconciliation" python3 scripts/tests/cloudbench-cohort-reconcile.test.py
+run_suite "Cloud Benchmark Shared Relay" python3 scripts/tests/cloudbench-shared-transport-integration.test.py
+run_suite "Cloud Benchmark Cleanup Ticket Campaign" python3 scripts/tests/cloudbench-cleanup-ticket-campaign.test.py
+run_suite "Cloud Benchmark Clone Rate Response" python3 scripts/tests/cloudbench-clone-rate-response.test.py
+run_suite "Cloud Benchmark Controller Client" python3 scripts/tests/cloudbench-controller-client-path.test.py
+run_suite "Cloud Benchmark Disposable Hub Finalization" python3 scripts/tests/cloudbench-disposable-hub-finalize.test.py
+run_suite "Cloud Benchmark Disposable Controller" python3 scripts/tests/cloudbench-disposable-controller.test.py
+run_suite "Cloud Benchmark Disposable Volume Backups" python3 scripts/tests/cloudbench-disposable-volume.test.py
+run_suite "Cloud Benchmark Parallel Mutation Admission" python3 scripts/tests/cloudbench-parallel-mutation.test.py
+run_suite "Cloud Benchmark Disposable Volume CLI" python3 scripts/tests/cloudbench-disposable-volume-cli.test.py
+run_suite "Cloud Benchmark Original 600 Supervisor" python3 scripts/tests/cloudbench-original600-supervisor.test.py
+run_suite "Cloud Benchmark Disposable Recovery" python3 scripts/tests/cloudbench-disposable-recovery.test.py
+run_suite "Cloud Benchmark Disposable Decisions" python3 scripts/tests/cloudbench-disposable-lifecycle.test.py
+run_suite "Cloud Benchmark Retained Successor Completion" python3 scripts/tests/cloudbench-retained-successor.test.py
+run_suite "Cloud Benchmark Disposable Outer Lifecycle" env CLOUDBENCH_TEST_DISPOSABLE_ONLY=1 bash scripts/tests/cloudbench-multi-workstream.test.sh
+run_suite "Cloud Benchmark App Stop All" python3 scripts/tests/cloudbench-stop-all.test.py
+run_suite "Cloud Benchmark Reclaim Stopped Machines" python3 scripts/tests/cloudbench-reclaim-stopped.test.py
+run_suite "Cloud Benchmark Unstaged Worker Recovery" python3 scripts/tests/cloudbench-unstaged-worker-recovery.test.py
+run_suite "Cloud Benchmark Protected Resource Union" python3 scripts/tests/cloudbench-protected-resources.test.py
+run_suite "Cloud Benchmark Pool Run Token" python3 scripts/tests/cloudbench-pool-run-token.test.py
+run_suite "Cloud Benchmark Live Primary Return" python3 scripts/tests/cloudbench-live-primary-return.test.py
+run_suite "Cloud Benchmark Exact Shape Reuse" python3 scripts/tests/cloudbench-primary-exact-shape-reuse.test.py
+run_suite "Cloud Benchmark Maintenance Env" python3 scripts/tests/cloudbench-maintenance-env.test.py
+run_suite "Cloud Benchmark Multi-Workstream" bash scripts/tests/cloudbench-multi-workstream.test.sh
+run_suite "Fleet Infra Canary" bash scripts/tests/fleet-infra-canary.test.sh
+run_suite "Cloud Benchmark App-Env Lock" bash scripts/tests/cloudbench-app-env-lock.test.sh
+run_suite "Cloud Benchmark Seed Budget" bash scripts/tests/cloudbench-seed-budget.test.sh
+run_suite "Cloud Benchmark Restore Readiness" bash scripts/tests/cloudbench-restore-readiness.test.sh
+run_suite "Cloud Benchmark Orphan-Proxy Reaper" bash scripts/tests/fleet-orphan-proxy-reaper.test.sh
+run_suite "Cloud Benchmark Status-Service Shutdown" python3 scripts/tests/run-cloudbench-controller-linux.py --fixture status-service-shutdown
+run_suite "Seed-Dump Cache Decision" bash scripts/tests/seed-cache-decision.test.sh
+run_suite "Canonical Seed WhatsApp Content" bash scripts/tests/canonical-seed-whatsapp-content.test.sh
+run_suite "Seed-Dump Toolchain Compatibility" bash scripts/tests/seed-dump-toolchain.test.sh
+run_suite "Fast-Mode Cache Schema Retry" bash scripts/tests/fast-mode-cache-schema-retry.test.sh
+run_suite "System Postgres Pool Budget" bash scripts/tests/run-system-pg-pool-budget.test.sh
 run_suite "Workspace Dependency Preflight" bash scripts/tests/workspace-dependencies.test.sh
 
 # ── Build checks (run in parallel with blackbox tests) ──
@@ -455,7 +390,7 @@ cleanup_bg() {
 }
 trap cleanup_bg EXIT
 
-if should_run "front-end" && ! $SMOKE && ! $AUTO_RCA_MODE; then
+if should_run "front-end" && ! $SMOKE; then
   FE_BUILD_LOG="$TMPDIR_BASE/fe_build.log"
   NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=4096}" \
     bash -c "cd front-end && npx vite build" > "$FE_BUILD_LOG" 2>&1 &
@@ -475,61 +410,42 @@ fi
 # ── Blackbox tests (parallel) ──
 
 if should_run "agents"; then
-  if $AUTO_RCA_MODE; then
-    run_suite "Agents Structural" bash scripts/tests/agents-structural.test.sh
-    run_suite "Agents Coverage and Blackbox" bash -c "cd agents && source venv/bin/activate && AGENTS_COVERAGE_CONCURRENCY=3 bash scripts/run-coverage.sh"
-  else
-    bg_suite "Agents Structural" bash scripts/tests/agents-structural.test.sh
+  bg_suite "Agents Structural" bash scripts/tests/agents-structural.test.sh
 
-    if [ -n "$DOMAIN" ] && [ "$REPO" = "agents" ]; then
-      bg_suite "Agents Blackbox ($DOMAIN)" bash -c "cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py $DOMAIN"
-    else
-      bg_suite "Agents Blackbox" bash -c "cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py"
-    fi
+  if [ -n "$DOMAIN" ] && [ "$REPO" = "agents" ]; then
+    bg_suite "Agents Blackbox ($DOMAIN)" bash -c "cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py $DOMAIN"
+  else
+    bg_suite "Agents Blackbox" bash -c "cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py"
   fi
 fi
 
 if should_run "back-end"; then
-  if $AUTO_RCA_MODE; then
-    run_suite "Backend Structural" bash -c "cd back-end && npm run test:structural"
-    run_suite "Backend Coverage and Blackbox" bash -c "cd back-end && npm run test:coverage"
-  else
-    bg_suite "Backend Structural" bash -c "cd back-end && npm run test:structural"
+  bg_suite "Backend Structural" bash -c "cd back-end && npm run test:structural"
 
-    if [ -n "$DOMAIN" ] && [ "$REPO" = "back-end" ]; then
-      bg_suite "Backend Blackbox ($DOMAIN)" bash -c "cd back-end && bash scripts/run-blackbox-tests.sh $DOMAIN"
-    else
-      bg_suite "Backend Blackbox" bash -c "cd back-end && bash scripts/run-blackbox-tests.sh"
-    fi
+  if [ -n "$DOMAIN" ] && [ "$REPO" = "back-end" ]; then
+    bg_suite "Backend Blackbox ($DOMAIN)" bash -c "cd back-end && bash scripts/run-blackbox-tests.sh $DOMAIN"
+  else
+    bg_suite "Backend Blackbox" bash -c "cd back-end && bash scripts/run-blackbox-tests.sh"
   fi
 fi
 
 if should_run "front-end"; then
-  if $AUTO_RCA_MODE; then
-    run_suite "Frontend Coverage and Blackbox" bash -c "cd front-end && npm run test:coverage -- --maxWorkers=2"
-    run_suite "Frontend Build" bash -c "cd front-end && NODE_OPTIONS=--max-old-space-size=4096 npx vite build"
-  else
-    bg_suite "Frontend Structural" bash -c "cd front-end && npx vitest run src/tests/structural"
+  bg_suite "Frontend Structural" bash -c "cd front-end && npx vitest run src/tests/structural"
 
-    if [ -n "$DOMAIN" ] && [ "$REPO" = "front-end" ]; then
-      bg_suite "Frontend Blackbox ($DOMAIN)" bash -c "cd front-end && bash scripts/run-blackbox-tests.sh $DOMAIN"
-    else
-      bg_suite "Frontend Blackbox" bash -c "cd front-end && bash scripts/run-blackbox-tests.sh"
-    fi
+  if [ -n "$DOMAIN" ] && [ "$REPO" = "front-end" ]; then
+    bg_suite "Frontend Blackbox ($DOMAIN)" bash -c "cd front-end && bash scripts/run-blackbox-tests.sh $DOMAIN"
+  else
+    bg_suite "Frontend Blackbox" bash -c "cd front-end && bash scripts/run-blackbox-tests.sh"
   fi
 fi
 
 if should_run "mac-app"; then
-  if $AUTO_RCA_MODE; then
-    run_suite "Mac App Coverage and Blackbox" bash -c "cd mac-app && npm run test:coverage -- --maxWorkers=1"
-  else
-    bg_suite "Mac App Structural" bash -c "cd mac-app && npm run test:structural"
+  bg_suite "Mac App Structural" bash -c "cd mac-app && npm run test:structural"
 
-    if [ -n "$DOMAIN" ] && [ "$REPO" = "mac-app" ]; then
-      bg_suite "Mac App Blackbox ($DOMAIN)" bash -c "cd mac-app && bash scripts/run-blackbox-tests.sh $DOMAIN"
-    else
-      bg_suite "Mac App Blackbox" bash -c "cd mac-app && bash scripts/run-blackbox-tests.sh"
-    fi
+  if [ -n "$DOMAIN" ] && [ "$REPO" = "mac-app" ]; then
+    bg_suite "Mac App Blackbox ($DOMAIN)" bash -c "cd mac-app && bash scripts/run-blackbox-tests.sh $DOMAIN"
+  else
+    bg_suite "Mac App Blackbox" bash -c "cd mac-app && bash scripts/run-blackbox-tests.sh"
   fi
 fi
 

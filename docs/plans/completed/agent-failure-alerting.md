@@ -1,5 +1,12 @@
 # Agent Failure Alerting + Auto-RCA
 
+> **Superseded RCA leg (2026-10-20).** The GitHub Actions auto-RCA described
+> below (`repository_dispatch` → `auto-rca*.yml` → `scripts/auto-rca-tool`) is
+> retired. The `#errors` card now drives a Rose RCA agent through the backend
+> `slack-auto-rca` domain (`/api/webhooks/slack/auto-rca`; criterion C10 in
+> `docs/plans/active/rose-builds-rose.md`). The alerting surfaces, throttling and
+> `/health/deep` sections still describe current behavior.
+
 ## Goal
 
 When anything user-facing breaks in prod — an **agent breaks**, the **chat loop**

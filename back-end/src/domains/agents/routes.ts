@@ -16,7 +16,6 @@ import * as queryService from './agentQueryService';
 import messageRoutes from './routes.messages';
 import exploreEvidenceRoutes from './routes.exploreEvidence';
 import batchRoutes from './routes.batch';
-import alertRoutes from './routes.alerts';
 import statusRoutes from './routes.status';
 import archiveRoutes from './routes.archive';
 import reportBugRoutes from './routes.reportBug';
@@ -85,7 +84,6 @@ router.get(
 );
 
 router.use('/', archiveRoutes);
-router.use('/', alertRoutes);
 router.use('/', reportBugRoutes);
 
 router.get(

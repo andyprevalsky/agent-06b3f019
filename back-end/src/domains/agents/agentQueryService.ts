@@ -328,15 +328,3 @@ export async function getAgentStatus(agentId: string) {
     status: agent.status,
   };
 }
-
-/** Resolve the internal, minimal context used to render an agent failure alert. */
-export async function getAgentAlertContext(agentId: string) {
-  const context = await repo.findAgentAlertContext(agentId);
-  if (!context) return null;
-
-  return {
-    agent_id: context.id,
-    affected_user_name: context.userName,
-    current_agent_status: context.status,
-  };
-}

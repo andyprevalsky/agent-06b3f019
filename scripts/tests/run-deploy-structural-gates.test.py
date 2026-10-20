@@ -316,14 +316,12 @@ class StructuralGateRunnerTests(unittest.TestCase):
             if gate.name
             in {
                 "descend-command",
-                "auto-rca-workflow",
                 "semantic-deploy",
             }
         )
         cases = (
             (None, None),
             ("descend-command", None),
-            ("auto-rca-workflow", None),
             (None, "missing"),
             (None, "duplicate"),
             (None, "wrong-command"),
@@ -343,7 +341,6 @@ class StructuralGateRunnerTests(unittest.TestCase):
                 calls = root / "calls"
                 for name, filename in (
                     ("descend-command", "descend-command.test.sh"),
-                    ("auto-rca-workflow", "auto-rca-workflow.test.sh"),
                 ):
                     (scripts / filename).write_text(
                         f"printf '%s\\n' {name!r} >> \"$GATE_CALLS\"\n"
@@ -354,8 +351,8 @@ class StructuralGateRunnerTests(unittest.TestCase):
                     registry_path = root / "registry.py"
                     faults = {
                         "missing": 'GATES = tuple(gate for gate in GATES if gate.name != "descend-command")',
-                        "duplicate": 'GATES += (Gate("duplicate", ("bash", "scripts/tests/auto-rca-workflow.test.sh")),)',
-                        "wrong-command": 'GATES = tuple(Gate(gate.name, ("bash", "wrong-owner.sh")) if gate.name == "auto-rca-workflow" else gate for gate in GATES)',
+                        "duplicate": 'GATES += (Gate("duplicate", ("bash", "scripts/tests/descend-command.test.sh")),)',
+                        "wrong-command": 'GATES = tuple(Gate(gate.name, ("bash", "wrong-owner.sh")) if gate.name == "descend-command" else gate for gate in GATES)',
                     }
                     registry_path.write_text(
                         RUNNER.read_text() + "\n" + faults[registry_fault] + "\n"
@@ -363,7 +360,6 @@ class StructuralGateRunnerTests(unittest.TestCase):
                 (scripts / "semantic-deploy-gate.test.sh").write_text(
                     "set -euo pipefail\n"
                     f"DESCEND_COMMAND_TEST={str(scripts / 'descend-command.test.sh')!r}\n"
-                    f"AUTO_RCA_WORKFLOW_TEST={str(scripts / 'auto-rca-workflow.test.sh')!r}\n"
                     f"DEPLOY_COMMAND={str(DEPLOY_MD)!r}\n"
                     f"DEPLOY_STRUCTURAL_RUNNER={str(registry_path)!r}\n"
                     'fail() { echo "FAIL: $1" >&2; exit 1; }\n'
@@ -380,7 +376,7 @@ class StructuralGateRunnerTests(unittest.TestCase):
                 observed = calls.read_text().splitlines()
                 self.assertEqual(
                     sorted(observed),
-                    ["auto-rca-workflow", "descend-command"],
+                    ["descend-command"],
                     output.getvalue(),
                 )
                 self.assertEqual(

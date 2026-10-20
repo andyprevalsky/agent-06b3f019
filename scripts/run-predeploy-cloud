@@ -76,12 +76,8 @@ run_predeploy_stage "focused cloud lifecycle regression" \
     "$ROOT_DIR/agents/venv/bin/python" -m pytest -q \
     "$ROOT_DIR/agents/benchmarks/cloudbench_dependency_sync_test.py" \
     -k 'data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or production_only_cloud_route'
-if [ "${AUTO_RCA_SKIP_CLOUD_CONTROLLER_REGRESSION:-false}" = true ]; then
-    echo "Diff-scoped Auto-RCA: cloud-controller concurrency regression not selected."
-else
-    run_predeploy_stage "cloud multi-workstream concurrency regression" \
-        bash "$ROOT_DIR/scripts/tests/cloudbench-multi-workstream.test.sh"
-fi
+run_predeploy_stage "cloud multi-workstream concurrency regression" \
+    bash "$ROOT_DIR/scripts/tests/cloudbench-multi-workstream.test.sh"
 
 HUB_URL="${HUB_URL:-https://navi-j9a9.onrender.com}"
 HUB_USER_ID="${HUB_USER_ID:-1f85ff25-6e29-4c1b-8739-f917bd101a30}"
