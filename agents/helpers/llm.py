@@ -4701,7 +4701,7 @@ async def _call_llm_verifier(
         response_schema,
         messages,
     )
-    parsed = response_model.model_validate(parsed_json).model_dump(exclude_unset=True)
+    parsed = _validate_verifier_response(response_model, parsed_json)
 
     usage = {
         "prompt_tokens": prompt_toks,
@@ -5612,6 +5612,41 @@ def _verifier_field_annotation(field_type: Optional[str]) -> Any:
     if field_type == "list[session_file_pointer]":
         return List[VerifierSessionFilePointer]
     return str
+
+
+def _validate_verifier_response(response_model: Type[BaseModel], parsed_json: Any) -> Dict[str, Any]:
+    """Validate a verifier reply; an ``output`` that breaks the schema is a rejection, not a verifier failure.
+
+    The verifier could not fill the declared output (e.g. fewer list items than
+    ``minItems`` because the evidence only supports two): its verdict is kept
+    with the score capped below acceptance and the violated bounds appended to
+    its feedback, so the agent can gather what is missing. A reply whose
+    ``reasoning`` / ``score`` themselves are invalid still raises.
+    """
+    try:
+        return response_model.model_validate(parsed_json).model_dump(exclude_unset=True)
+    except ValidationError as exc:
+        errors = exc.errors()
+        if (
+            not isinstance(parsed_json, dict)
+            or not errors
+            or any(not error.get("loc") or error["loc"][0] != "output" for error in errors)
+        ):
+            raise
+        verdict = _build_verifier_response_model(None).model_validate(
+            {"reasoning": parsed_json.get("reasoning"), "score": parsed_json.get("score")}
+        )
+        violations = "; ".join(f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}" for error in errors)
+        logger.warning(
+            "Verifier output violates the response schema; treating as rejection", violations=violations[:300]
+        )
+        return {
+            "reasoning": (
+                f"{verdict.reasoning}\n\nThe output that the evidence supports does not meet the required "
+                f"output schema ({violations}), so completion cannot pass yet."
+            ),
+            "score": min(float(verdict.score), 0.5),
+        }
 
 
 def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

@@ -249,6 +249,44 @@ def test_optional_output_keys_can_be_omitted_but_present_values_are_typed():
         pass
 
 
+def test_verifier_output_breaking_schema_bounds_is_a_rejection_not_a_failure():
+    """Evidence for only 2 of minItems=3 drafts: the verifier's reply is feedback (score < 1), never a raise."""
+    from pydantic import ValidationError
+    from helpers.llm import _build_verifier_response_model, _validate_verifier_response
+
+    schema = {
+        "fields": [
+            {
+                "name": "drafts",
+                "type": "list[object]",
+                "minItems": 3,
+                "properties": [{"name": "investor", "type": "str"}],
+            }
+        ]
+    }
+    model = _build_verifier_response_model(schema)
+    reply = {
+        "output": {"drafts": [{"investor": "A"}, {"investor": "B"}]},
+        "reasoning": "Two drafts are grounded; the third drafter failed.",
+        "score": 1.0,
+    }
+    parsed = _validate_verifier_response(model, reply)
+    assert parsed["score"] == 0.5 and "output" not in parsed, parsed
+    assert parsed["reasoning"].startswith("Two drafts are grounded; the third drafter failed.")
+    assert "output.drafts: List should have at least 3 items" in parsed["reasoning"], parsed["reasoning"]
+    assert not parsed["reasoning"].startswith("Progress check failed")
+    low = _validate_verifier_response(model, {**reply, "score": 0.0})
+    assert low["score"] == 0.0
+    ok = _validate_verifier_response(model, {**reply, "output": {"drafts": reply["output"]["drafts"] * 2}})
+    assert ok["score"] == 1.0 and len(ok["output"]["drafts"]) == 4
+    for broken in ({**reply, "score": "high"}, {"output": reply["output"], "score": 1.0}):
+        try:
+            _validate_verifier_response(model, broken)
+            raise AssertionError("an invalid verdict (score / reasoning) must still raise")
+        except ValidationError:
+            pass
+
+
 def test_verifier_enforces_size_bounds_and_nullable_nested_fields():
     from pydantic import ValidationError
     from helpers.llm import _build_verifier_json_schema, _build_verifier_response_model
@@ -9980,6 +10018,10 @@ async def run_all_tests():
     r.record(
         "verifier_enforces_size_bounds_and_nullable_nested_fields",
         test_verifier_enforces_size_bounds_and_nullable_nested_fields,
+    )
+    r.record(
+        "verifier_output_breaking_schema_bounds_is_a_rejection",
+        test_verifier_output_breaking_schema_bounds_is_a_rejection_not_a_failure,
     )
     r.record("structured_output_schema_respects_constraints", test_structured_output_schema_respects_constraints)
     if os.getenv("SCHEMA_GEN_LIVE_GOAL_FILE"):
