@@ -231,3 +231,27 @@ def test_cli_serving_only_flag_reaches_push_and_is_push_only(tmp_path: Path, mon
     assert calls == [{"name": "rose-archive-serving", "serving_only": True}]
     with pytest.raises(SystemExit):
         wmh_build_cache.main(["pull", "--serving-only", "--build-dir", str(tmp_path)])
+
+
+def test_push_never_replaces_a_cache_of_the_other_kind(tmp_path: Path) -> None:
+    # Shared names: the full cache seeds the next incremental build, the
+    # serving cache is what every donor refresh restores. A push of the other
+    # kind must not replace either; the same kind still republishes.
+    bucket = _FakeBucket()
+    store = (bucket, "test-bucket")
+    full = _build_dir(tmp_path / "full")
+    serving = tmp_path / "serving" / "build"
+    (serving / "experiential").mkdir(parents=True)
+    (serving / "models" / "rose-archive").mkdir(parents=True)
+    (serving / "models" / "rose-archive" / "experiential.json").write_text("{}")
+    (serving / "build.manifest.json").write_text("{}")
+    wmh_build_cache.push(full, name="rose-archive-native", store=store, part_bytes=4096, log=_quiet)
+    wmh_build_cache.push(serving, name="rose-archive-serving", serving_only=True, store=store, log=_quiet)
+    before = dict(bucket.objects)
+    with pytest.raises(ValueError, match="holds a full build"):
+        wmh_build_cache.push(serving, name="rose-archive-native", serving_only=True, store=store, log=_quiet)
+    with pytest.raises(ValueError, match="holds a serving-only build"):
+        wmh_build_cache.push(full, name="rose-archive-serving", store=store, part_bytes=4096, log=_quiet)
+    assert bucket.objects == before, "a refused push must not upload any part"
+    republished = wmh_build_cache.push(full, name="rose-archive-native", store=store, part_bytes=4096, log=_quiet)
+    assert wmh_build_cache.read_manifest("rose-archive-native", store=store) == republished

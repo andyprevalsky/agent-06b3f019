@@ -166,6 +166,17 @@ def push(
     elif not (build_dir / "delta-index.json").is_file():
         raise FileNotFoundError(f"{build_dir} is not a WMH build directory (no delta-index.json)")
     client, bucket = store or _default_store()
+    # Cache names are shared by every workstream: a serving-only push over the
+    # full cache (the next incremental build's base), or a full push over the
+    # serving cache that --refresh-wmh restores onto the donor, silently
+    # replaces another consumer's artifact kind. Refuse that before uploading.
+    current = read_manifest(name, store=(client, bucket))
+    if current is not None and bool(current.get("serving_only")) != serving_only:
+        current_kind = "serving-only" if current.get("serving_only") else "full"
+        raise ValueError(
+            f"cache {name!r} holds a {current_kind} build; refusing to replace it with a"
+            f" {'serving-only' if serving_only else 'full'} push (use a different --name)"
+        )
     upload_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + f"-{os.getpid()}"
     parts: list[dict[str, Any]] = []
     for index, chunk in enumerate(_tar_chunks(build_dir, part_bytes, entries)):
