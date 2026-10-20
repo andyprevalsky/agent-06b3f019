@@ -64,14 +64,14 @@ Andy: "sub agent for each". There is one lane per integration that syncs today, 
 | ID | Criterion | Eval (minimum) | Lane | Status |
 |----|-----------|----------------|------|--------|
 | I0 | **Shared core.** A per-account progress model `(userId, provider, accountId) → { pct, done, total, unit, eta_sec, state, startedAt, updatedAt }`, writable by Mac-app uploads and backend jobs while a sync runs. Exposed on `GET /api/integrations`, one entry per account. Generic per-account delete (`DELETE /api/integrations/:provider/accounts/:accountId`) that removes that account's data. Connecting again creates a new account. Indeterminate progress (no total) is reported as `total: null`, not faked. 10k rule: one row per account and O(1) writes per batch | backend blackbox (progress round trip, two accounts per provider, delete one keeps the other, owner scoping) | L-INTEG-CORE | **done** (639e3baf5; integration-accounts 19/19 ×5) |
-| I1 | iMessage: total from `chat.db` count; per-batch progress; one account per Mac (device id) | mac-app main tests (mac CI) + backend blackbox | L-INT-IMESSAGE | running |
+| I1 | iMessage: total from `chat.db` count; per-batch progress; one account per Mac (device id) | mac-app main tests (mac CI) + backend blackbox | L-INT-IMESSAGE | **built + merged** (87d5c0ec2): one account per Mac (`macDeviceId()`), chat.db COUNT total, 500-row batches with resume; backend 38/38 ×5, Mac 247/247 ×5 on the Linux harness; real Mac run pending |
 | I2 | WhatsApp: Baileys `progress` surfaced; multi-account (one auth dir and socket per account) | mac-app main + backend | L-INT-WHATSAPP | running |
-| I3 | Gmail: per-address progress using `messagesTotal`; `SYNCING` per address, not per row; incremental save during a full sync | backend blackbox | L-INT-GMAIL | running |
+| I3 | Gmail: per-address progress using `messagesTotal`; `SYNCING` per address, not per row; incremental save during a full sync | backend blackbox | L-INT-GMAIL | **built + merged** (a22e8a0b4): per-address scanning → saving → synced against `messagesTotal`, batch saves with resume cursor, no double syncs; integration-accounts 40/40 ×5, integrations 272/272 |
 | I4 | LinkedIn: honest phases (export requested → waiting → uploading → parsing with counts); multi-account | backend blackbox | L-INT-LINKEDIN | running |
-| I5 | Plaid: per-item progress (indeterminate total → counts + state); multi-item already exists | backend blackbox | L-INT-PLAID | running |
-| I6 | Browser cookies: account = browser profile (profile detection beyond Chrome); progress from known counts; delete removes the cookie rows | mac-app main + backend | L-INT-COOKIES | running |
+| I5 | Plaid: per-item progress (indeterminate total → counts + state); multi-item already exists | backend blackbox | L-INT-PLAID | **built + merged** (9ab236225): per-Item progress, `total: null` + transaction counts, `waiting_for_plaid`, `needs_reconnect`; integration-accounts 26/26 ×5, plaid 17/17 incl. live sandbox |
+| I6 | Browser cookies: account = browser profile (profile detection beyond Chrome); progress from known counts; delete removes the cookie rows | mac-app main + backend | L-INT-COOKIES | **built + merged** (e1e6c5eea): account = `<browser>:<profile>`, all Chromium profiles + Safari, per-profile delete; backend 22/22 ×5, Mac 31/31 ×5 on the Linux harness; better-sqlite3 cases need a real Mac |
 | I7 | Passwords and passkeys: fix `BrowserPassword` unique key (add source + profile; migration); per-source account; delete | backend blackbox + migration | L-INT-PASSWORDS | running |
-| I8 | Telegram: progress from chat-list total; multi-account sessions | mac-app main + backend | L-INT-TELEGRAM | running |
+| I8 | Telegram: progress from chat-list total; multi-account sessions | mac-app main + backend | L-INT-TELEGRAM | **built + merged** (1d4248d96): one session per Telegram account, chats total, `MessageRecord.sourceAccountId`; backend 24/24 ×5, Mac 351/351 ×5 on the Linux harness; real Mac + live login pending |
 
 ## rose_user_ui, Apps, Rose-in-Rose
 
@@ -244,3 +244,13 @@ Per the 2026-10-20 goal ("make intelligent guesses; keep critical ones for revie
   - README moved to `assets/user-ui/seed/README.md`: HSL tokens, "See your work", performance budgets, examples.
   - `.c8rc.json` excludes the browser-side seed examples.
 - Mac device identity (merged 071b4acb9): phones, local code devices and iMessage share `macDeviceId()` (salted IOPlatformUUID hash); unreleased, so nothing to migrate.
+- Integrations batch (all merged on feat):
+  - I1 iMessage: Zod `imessageDeviceAccountSchema`.
+  - I8 Telegram: migration `20261020210000_message_record_source_account` (`MessageRecord.sourceAccountId`, nullable, metadata-only); Zod `telegramAccountIdSchema`, `telegramConnectSchema`.
+  - I3 Gmail: connect-time sync moves to the job pipeline; the stale `SYNCING` reclaim drops from 1 h to 10 min; Gmail HTTP uses global `fetch`.
+  - I5 Plaid and I6 Cookies: no approval items.
+  - I1, I6, I8 need a Mac app release (`MAC-APP-RELEASE`) and a real-Mac run of their suites.
+- Display HTML on usercontent (merged 47c77a5e6): new public route `GET /usercontent/display/<agentId>/<sha256>.html` (inline-view CSP, content-addressed, owner-scoped); `file_pointer.usercontent_url` on text/html display items.
+- Test infra (merged ff09676a2): blackbox and coverage runners use `victoria_<workspace>` on system Postgres, never the shared `victoria`. Instruction-file edit to approve:
+  - `CLAUDE.md` Cloud/Linux Database bullet: "`scripts/run.sh` falls back to it. The backend blackbox and coverage runners use their own `victoria_<workspace>` database on that server (created on demand), never the shared `victoria`."
+- Backend asks from the UI thread (merged): `USER_UI_ACTIVE_CHANGED` broadcast; `githubConnected` on Projects (63566611b); `a2a.text` (ea93d584b). No Zod changes.
