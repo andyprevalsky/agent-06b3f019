@@ -6,7 +6,8 @@
  * STATE MACHINE (this file renders the AGENT OVERLAY STATE owned by
  * BrowserStatusBarFullscreen; it holds no state of its own — props select which
  * chip renders):
- * [ACTIVE_DESKTOP]      -> TakeControlChip over the browser
+ * [ACTIVE_DESKTOP]      -> TakeControlChip over the browser ("Agent in progress";
+ *                          the Root browser passes idleLabel: no agent animation)
  * [USER_CONTROL_DESKTOP] -> Hand-back control chip over the interactive browser
  * [WAITING_DESKTOP]     -> WaitingForAssistanceChip over the browser
  * [DISCONNECTED_DESKTOP] -> DisconnectedOverlay over the browser
@@ -23,16 +24,20 @@ export function TakeControlChip({
   onResume,
   isResuming,
   isUserControlling,
+  idleLabel,
 }: {
   onResume: () => void;
   isResuming: boolean;
   isUserControlling: boolean;
+  /** Label while nobody but the viewer is driving (Root browser); omitted = an agent is working. */
+  idleLabel?: string;
 }) {
+  const agentWorking = !isUserControlling && idleLabel === undefined;
   return (
     <div className="absolute bottom-10 left-1/2 -translate-x-1/2 z-10 max-w-[calc(100vw-24px)]">
       <div className="flex items-center gap-3 pl-4 pr-2 py-2 rounded-full bg-navi-black shadow-2xl">
         <div className="flex items-center gap-2">
-          {!isUserControlling && (
+          {agentWorking && (
             <ThinkingAnimation
               dataUrl="/thinking_animations.txt"
               autoplay
@@ -42,7 +47,7 @@ export function TakeControlChip({
             />
           )}
           <span className="whitespace-nowrap text-sm font-medium text-navi-white">
-            {isUserControlling ? 'You have control' : 'Agent in progress'}
+            {isUserControlling ? 'You have control' : (idleLabel ?? 'Agent in progress')}
           </span>
         </div>
         <button

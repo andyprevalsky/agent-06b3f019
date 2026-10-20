@@ -425,8 +425,9 @@ describe('Browser drawer', () => {
     const chrome = within(drawer).getByTestId('browser-chrome');
     const labels = within(chrome)
       .getAllByRole('button')
-      .map((b) => b.getAttribute('aria-label'));
-    expect(labels).toEqual(['Back', 'Forward', 'Reload']);
+      .map((b) => b.getAttribute('aria-label') ?? b.textContent);
+    // Sites: the Root sites list (rose-apps-root-browser.blackbox.tsx).
+    expect(labels).toEqual(['Back', 'Forward', 'Reload', 'Sites']);
     expect(within(chrome).getByRole('button', { name: 'Back' })).toBeDisabled();
     expect(within(chrome).getByRole('button', { name: 'Forward' })).toBeDisabled();
     const address = within(chrome).getByTestId('browser-address-bar');

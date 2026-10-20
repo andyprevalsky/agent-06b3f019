@@ -36,6 +36,12 @@ export const handlers = [
       agentPaused: false,
     });
   }),
+  // Browser world (A6): Root browser closed, no Root sites, no agent forks by default.
+  http.get(`${API_BASE}/browser-world/root`, () => HttpResponse.json({ root: null, sites: [] })),
+  http.get(`${API_BASE}/browser-world/sites`, () => HttpResponse.json({ sites: [] })),
+  http.get(`${API_BASE}/browser-world/agents/:agentId`, ({ params }) =>
+    HttpResponse.json({ agent_id: params.agentId, tasks: [] }),
+  ),
   // Auth endpoints
   http.post(`${API_BASE}/auth/anonymous`, () => {
     return HttpResponse.json({

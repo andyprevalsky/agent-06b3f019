@@ -183,7 +183,12 @@ function presentedBrowserUrl(
   return binding.isBound ? interactiveBrowserUrl(binding.browserUrl) : handoffUrl;
 }
 
-function useBrowserSessionControl(
+/**
+ * Live-view binding + take over / hand back for one browser task. The agent
+ * status bar uses it through useBrowserStatusBarUi; the Browser drawer's Root
+ * tab uses it directly (agentId null: there is no agent to resume).
+ */
+export function useBrowserSessionControl(
   taskId: string,
   agentId: string | null,
   transcriptBrowserUrl: string,
