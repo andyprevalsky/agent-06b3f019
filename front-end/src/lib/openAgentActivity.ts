@@ -30,6 +30,21 @@ export function notifyOpenAgentActivity(activity: OpenAgentActivity): void {
   listeners.forEach((listener) => listener(activity));
 }
 
+/**
+ * USER_UI_ACTIVE_CHANGED on the open agent's channel: a code agent in its tree
+ * activated `versionId`; the user-ui live refresh skips it when already applied.
+ */
+export function notifyUserUiActiveChanged(agentId: string, versionId: string): void {
+  notifyOpenAgentActivity({ agentId, kind: 'user-ui-active-changed', versionId });
+}
+
+/** Channel handler for that event, gated on the subscription still being current. */
+export function userUiActiveChangedHandler(isActive: () => boolean, agentId: string) {
+  return (data: { versionId: string }) => {
+    if (isActive()) notifyUserUiActiveChanged(agentId, data.versionId);
+  };
+}
+
 export function onOpenAgentActivity(listener: Listener): () => void {
   listeners.add(listener);
   return () => {

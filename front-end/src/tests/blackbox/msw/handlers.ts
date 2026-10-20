@@ -16,6 +16,10 @@ export const handlers = [
   // Rose Desktop Integrations icon reads integration health; nothing connected by default.
   http.get(`${API_BASE}/integrations`, () => HttpResponse.json({ integrations: [] })),
   http.get(`${API_BASE}/integrations/plaid/items`, () => HttpResponse.json({ items: [] })),
+  // L-INTEG-CORE cheap progress poll: nothing changed unless a test overrides.
+  http.get(`${API_BASE}/integrations/progress`, () =>
+    HttpResponse.json({ cursor: '2026-10-20T00:00:00.000Z', changed: false }),
+  ),
   // No persisted binding by default: live views fall back to the transcript URL.
   http.get(`${API_BASE}/browser-session/task/:taskId/live-view`, () =>
     HttpResponse.json({ error: 'Session not found' }, { status: 404 }),

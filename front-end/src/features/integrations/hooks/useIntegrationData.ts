@@ -2,9 +2,9 @@ import { useState, useEffect, useCallback } from 'react';
 
 import type { BrowserType } from '@/features/integration-handlers-context';
 
-import { fetchIntegrationsApi } from '../api';
+import { fetchIntegrationsListApi } from '../accountsApi';
 import { VALID_BROWSER_TYPES } from '../config';
-import type { ConnectedIntegration, EmailCredentialState } from '../types';
+import type { AccountsByProvider, ConnectedIntegration, EmailCredentialState } from '../types';
 
 interface IntegrationSyncState {
   connectedIntegrations: ConnectedIntegration[];
@@ -114,11 +114,14 @@ export function useIntegrationData() {
     telegramConnected: false,
     linkedinStatus: null,
   });
+  // Rose Desktop reads per-provider accounts (incl. progress-only providers) from here.
+  const [accountsByProvider, setAccountsByProvider] = useState<AccountsByProvider | null>(null);
 
   const fetchIntegrations = useCallback(async () => {
     try {
-      const integrations = await fetchIntegrationsApi();
-      setSyncState(deriveStateFromIntegrations(integrations));
+      const list = await fetchIntegrationsListApi();
+      setSyncState(deriveStateFromIntegrations(list.integrations));
+      setAccountsByProvider(list.accountsByProvider);
     } catch (err) {
       console.error('Failed to fetch integrations:', err);
     } finally {
@@ -130,5 +133,5 @@ export function useIntegrationData() {
     void fetchIntegrations();
   }, [fetchIntegrations]);
 
-  return { loadingIntegrations, ...syncState, fetchIntegrations } as const;
+  return { loadingIntegrations, ...syncState, accountsByProvider, fetchIntegrations } as const;
 }

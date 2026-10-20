@@ -30,6 +30,10 @@ export interface SyncProgressWire {
   /** Plural noun for the items being synced, e.g. "messages", "transactions". */
   unit?: string | null;
   eta_sec?: number | null;
+  /** What the sync is doing right now, e.g. "Decrypting cookies". */
+  phase?: string | null;
+  startedAt?: string | null;
+  updatedAt?: string | null;
 }
 
 /**
@@ -42,20 +46,38 @@ export interface SyncProgress {
   total: number | null;
   unit: string;
   etaSec: number | null;
+  phase: string | null;
 }
 
+/** Backend SyncState (L-INTEG-CORE); other strings are tolerated as legacy states. */
+export type SyncState = 'idle' | 'syncing' | 'synced' | 'failed' | 'needs_reconnect';
+
 /**
- * One connected account of an integration, as GET /api/integrations reports it
- * per provider row. A browser-cookie account is one browser profile; connecting
- * again creates another account; removal is per account.
+ * One account of an integration (backend IntegrationAccount): per row in
+ * `integrations[].accounts` and per provider in `accountsByProvider`. A
+ * browser-cookie account is one browser profile; removal is per account.
+ * `accountId` 'default' is the legacy single-account row.
  */
 export interface IntegrationAccountWire {
+  provider?: string;
   accountId: string;
-  label: string;
-  /** Server health/sync state, e.g. `synced`, `syncing`, `needs_reconnect`, `error`. */
+  label: string | null;
+  /** SyncState; needs_reconnect already wins over progress server-side. */
   state: string;
   progress?: SyncProgressWire | null;
   lastSyncAt?: string | null;
+  lastError?: string | null;
+}
+
+/** `accountsByProvider` (also lists providers that have only reported progress). */
+export type AccountsByProvider = Record<string, IntegrationAccountWire[]>;
+
+/** GET /api/integrations/progress?since=<cursor> */
+export interface IntegrationsProgressDelta {
+  cursor: string;
+  changed: boolean;
+  /** Present only when `changed`. */
+  accountsByProvider?: AccountsByProvider;
 }
 
 /** Chip tone for one account (ConnectedAccountChip). */
@@ -70,6 +92,10 @@ export interface IntegrationAccount {
   state: string;
   progress: SyncProgress | null;
   lastSyncAt: string | null;
+  /** Why the last sync failed / needs reconnect (null otherwise). */
+  lastError: string | null;
+  /** True when the server sent no label (legacy 'default' row or progress-only). */
+  unlabeled: boolean;
 }
 
 export interface ConnectedIntegration {

@@ -49,10 +49,7 @@ import {
 import { AgentToAgentRow } from './AgentToAgentRow';
 import { CodeAgentAttribution } from './CodeAgentAttribution';
 import { DisplayMediaGroup } from './inline-media/DisplayMediaGroup';
-import {
-  EMPTY_DISPLAY_MEDIA_GROUPING,
-  groupDisplayMedia,
-} from './inline-media/displayMediaGroups';
+import { EMPTY_DISPLAY_MEDIA_GROUPING, groupDisplayMedia } from './inline-media/displayMediaGroups';
 import { EMPTY_WEB_SEARCH_GROUPING, type WebSearchTurnGrouping } from './webSearchTurnGroups';
 
 interface MessageListItemsProps {
@@ -203,9 +200,7 @@ function StockMessageListItem({
   const inlineView = parseInlineViewMetadata(message.metadata?.inlineView);
   const requester = roseDesktop ? messageRequester(message.metadata) : null;
   const attribution =
-    requester?.kind === 'code_agent' && isSendMessageToUserRow(message.metadata)
-      ? requester
-      : null;
+    requester?.kind === 'code_agent' && isSendMessageToUserRow(message.metadata) ? requester : null;
 
   return (
     <div

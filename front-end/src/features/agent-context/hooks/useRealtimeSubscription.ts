@@ -12,7 +12,7 @@ import {
 } from '@/lib/realtime';
 import type { AgentDetail, Message } from '@/lib/api';
 import { publishBrowserSessionBinding } from '@/lib/browserSessionBindings';
-import { notifyOpenAgentActivity } from '@/lib/openAgentActivity';
+import { notifyOpenAgentActivity, userUiActiveChangedHandler } from '@/lib/openAgentActivity';
 
 import type { StreamingBubble, StreamingPlan, StreamingAttention, StreamingTool } from '../types';
 import { createReconnectScheduler } from './agentReconnectScheduler';
@@ -137,16 +137,7 @@ function createRealtimeHandlers(
     onAgentModeStarted: (data) => {
       if (active() && data.agentId === scope.agentId) setIsChatMode(false);
     },
-    // A code agent in this tree activated a Rose UI version: the user-ui live
-    // refresh refetches /active unless that version is already applied.
-    onUserUiActiveChanged: (data) => {
-      if (!active()) return;
-      notifyOpenAgentActivity({
-        agentId: scope.agentId,
-        kind: 'user-ui-active-changed',
-        versionId: data.versionId,
-      });
-    },
+    onUserUiActiveChanged: userUiActiveChangedHandler(active, scope.agentId),
     // Live views follow the backend binding, not the lagging transcript URL.
     onBrowserSession: (binding) => {
       if (active()) publishBrowserSessionBinding(binding);

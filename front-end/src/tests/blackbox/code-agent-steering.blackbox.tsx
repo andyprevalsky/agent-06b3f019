@@ -322,10 +322,7 @@ describe('row 46: scorecards and approvals attributed to the code agent', () => 
     expect(screen.getByTestId('code-agent-attribution')).toHaveTextContent(
       'Codex · via send_message_to_user',
     );
-    expect(screen.getByTestId('user-ui-inline-view')).toHaveAttribute(
-      'data-inline-version',
-      'v3',
-    );
+    expect(screen.getByTestId('user-ui-inline-view')).toHaveAttribute('data-inline-version', 'v3');
   });
 
   it('flag off: no attribution', () => {

@@ -1,18 +1,23 @@
 /**
  * Parser for the multi-account integrations contract (lane L-INTEG-CORE):
  *
- *   GET /api/integrations → integrations[].accounts[] =
- *     { accountId, label, state, progress: { pct, done, total, unit, eta_sec }, lastSyncAt }
+ *   GET /api/integrations → integrations[].accounts[] + accountsByProvider =
+ *     { provider, accountId, label|null, state, lastSyncAt, lastError,
+ *       progress: { pct, done, total, unit, eta_sec, phase, startedAt, updatedAt } }
+ *   GET /api/integrations/progress?since → the same accountsByProvider when changed
  *
  * Pure functions, no state machine. Every field is treated as untrusted:
  *   - `accounts` absent  → null (callers fall back to today's per-row status)
  *   - `total` null       → pct null (indeterminate bar, never a fake pct)
  *   - `eta_sec` null     → etaSec null (ETA text hidden)
  *   - pct >= 100         → the account reads as synced (bar disappears)
+ *   - failed / needs_reconnect → error / warning tone, progress dropped (no bar)
+ *   - label null         → `unlabeled` (callers show their own row label)
  */
 
 import type {
   AccountTone,
+  AccountsByProvider,
   ConnectedIntegration,
   IntegrationAccount,
   SyncProgress,
@@ -36,7 +41,8 @@ export function parseSyncProgress(wire: SyncProgressWire | null | undefined): Sy
   }
   const etaSec = finite(wire.eta_sec) && wire.eta_sec >= 0 ? Math.round(wire.eta_sec) : null;
   const unit = typeof wire.unit === 'string' && wire.unit !== '' ? wire.unit : 'items';
-  return { pct, done, total, unit, etaSec: pct !== null && pct >= 100 ? 0 : etaSec };
+  const phase = typeof wire.phase === 'string' && wire.phase.trim() !== '' ? wire.phase : null;
+  return { pct, done, total, unit, etaSec: pct !== null && pct >= 100 ? 0 : etaSec, phase };
 }
 
 /** True once a determinate sync reached 100%: the chip flips to synced. */
@@ -73,18 +79,56 @@ export function parseIntegrationAccounts(
     const accountId = typeof wire.accountId === 'string' ? wire.accountId : '';
     if (accountId === '') continue;
     const state = typeof wire.state === 'string' ? wire.state : 'synced';
-    const progress = parseSyncProgress(wire.progress as SyncProgressWire | null | undefined);
     const tone = accountToneForState(state);
+    // A damaged account shows no bar: needs_reconnect / failed outrank progress.
+    const progress =
+      tone === 'syncing' || tone === 'synced'
+        ? parseSyncProgress(wire.progress as SyncProgressWire | null | undefined)
+        : null;
+    const labeled = typeof wire.label === 'string' && wire.label !== '';
     accounts.push({
       accountId,
-      label: typeof wire.label === 'string' && wire.label !== '' ? wire.label : accountId,
+      label: labeled ? (wire.label as string) : accountId,
+      unlabeled: !labeled,
       state,
       progress,
       tone: tone === 'syncing' && isProgressComplete(progress) ? 'synced' : tone,
       lastSyncAt: typeof wire.lastSyncAt === 'string' ? wire.lastSyncAt : null,
+      lastError:
+        typeof wire.lastError === 'string' && wire.lastError !== '' ? wire.lastError : null,
     });
   }
   return accounts;
+}
+
+/**
+ * The list the Rose Desktop rows read: each row's `accounts` replaced by the
+ * freshest `accountsByProvider` entry (full list or progress poll), plus a
+ * synthetic row for a provider that has only reported progress so far (its
+ * first sync started before its Integration row exists).
+ */
+export function mergeAccountsByProvider(
+  integrations: ConnectedIntegration[],
+  accountsByProvider: AccountsByProvider | null,
+): ConnectedIntegration[] {
+  if (accountsByProvider === null) return integrations;
+  const merged = integrations.map((row) => {
+    const fresh = accountsByProvider[row.name];
+    return fresh === undefined ? row : { ...row, accounts: fresh };
+  });
+  for (const [provider, accounts] of Object.entries(accountsByProvider)) {
+    if (merged.some((row) => row.name === provider)) continue;
+    if (!Array.isArray(accounts) || accounts.length === 0) continue;
+    const syncing = accounts.some((a) => accountToneForState(String(a.state)) === 'syncing');
+    merged.push({
+      id: `progress:${provider}`,
+      name: provider,
+      status: syncing ? 'SYNCING' : 'CONNECTED',
+      isActive: false,
+      accounts,
+    });
+  }
+  return merged;
 }
 
 /** Find one account's raw-parsed entry across the integrations list. */

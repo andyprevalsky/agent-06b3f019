@@ -123,7 +123,13 @@ export const LIVE_EVENTS = [
 
 /** `requestingAgent` the backend stamps on code-agent rows (agent-tools/service.ts). */
 export function codexRequester(taskId = 'task-1') {
-  return { kind: 'code_agent', agent_id: ROOT_AGENT_ID, label: 'Codex', provider: 'codex', task_id: taskId };
+  return {
+    kind: 'code_agent',
+    agent_id: ROOT_AGENT_ID,
+    label: 'Codex',
+    provider: 'codex',
+    task_id: taskId,
+  };
 }
 
 /** `display` metadata of a pinned question (agent-tools/questionService.ts, L-DISPLAY b10b038c1). */
@@ -218,7 +224,7 @@ export function a2aTimelineMessage(
     : { id: 'task-1', kind: 'code', label: 'Codex' };
   return msg(
     {
-      a2a: { kind: 'message', message_id: messageId, from, to, direction },
+      a2a: { kind: 'message', message_id: messageId, from, to, text, direction },
       idempotencyKey: `a2a:${from.id}:${messageId}:${direction}`,
       title: sent ? 'Codex → Root agent' : 'Root agent → Codex',
       task_id: 'task-1',
@@ -228,7 +234,12 @@ export function a2aTimelineMessage(
       toolCallId: 'call-task-1',
       toolName: 'spawn_claude_code_agent',
     },
-    { text },
+    // Received rows keep the LLM framing in `text`; a2a.text holds the raw words.
+    {
+      text: sent
+        ? text
+        : `[Message from Root agent, agent_id ${ROOT_AGENT_ID}. Reply with send_message_to_agent if a reply is needed]\n\n${text}`,
+    },
   );
 }
 
@@ -250,6 +261,7 @@ export function a2aInboundUserMessage(
         message_id: `client-${kind}`,
         from: CODEX_PARTY,
         to: { id: to.id, kind: 'agent', label: to.label },
+        text,
       },
       idempotencyKey: `a2a:task-1:client-${kind}`,
       title: `Codex → ${to.label}`,

@@ -7,6 +7,8 @@
  *   [ACCOUNTS]  chips (synced | syncing | warning | error), × on each chip removes it,
  *               one progress bar per syncing account, "+ Add account" re-runs connect
  *     chip [SYNCING] --progress reaches 100%--> [SYNCED] (bar disappears)
+ *     chip × --backend 501--> chip kept + the backend's reason on a line under the chips
+ *     chip [ERROR] (state failed) → "sync failed", lastError as its tooltip
  *
  * There is no Manage state and no details panel: everything is on the row.
  * Pure presentation; DesktopIntegrations owns data and actions.
@@ -36,6 +38,8 @@ export interface DesktopAccountView {
   onResync?: () => void;
   resyncLabel?: string;
   resyncing?: boolean;
+  /** Why the backend could not remove this account (DELETE 501); shown under the chips. */
+  removeBlockedReason?: string;
 }
 
 export interface DesktopIntegrationView {
@@ -128,6 +132,19 @@ function AccountsBlock({ view }: { view: DesktopIntegrationView }) {
           <DesktopAccountChip key={`${account.provider}:${account.accountId}`} account={account} />
         ))}
       </div>
+      {view.accounts
+        .filter((account) => account.removeBlockedReason !== undefined)
+        .map((account) => (
+          <p
+            key={`blocked:${account.provider}:${account.accountId}`}
+            role="status"
+            data-testid="account-removal-blocked"
+            className="text-xs text-muted-foreground"
+          >
+            {many ? `${account.label}: ` : ''}
+            {account.removeBlockedReason}
+          </p>
+        ))}
       {syncing.map((account) => (
         <SyncProgressBar
           key={`${account.provider}:${account.accountId}`}

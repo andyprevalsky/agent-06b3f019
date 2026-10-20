@@ -141,13 +141,15 @@ describe('agent-to-agent rows (L-A2A contract, rows 12 + 47b)', () => {
     expect(within(chip.container).queryByTestId('a2a-row')).not.toBeInTheDocument();
   });
 
-  it('adapter: explicit a2a.text wins; unknown parties fall back to stock rendering', () => {
-    const explicit = a2aInboundUserMessage('message', 'framed');
-    explicit.metadata = {
-      ...explicit.metadata,
-      a2a: { ...(explicit.metadata?.a2a as object), text: 'raw sender text' },
-    };
+  it('adapter: a2a.text (raw words) wins over the framed row text; older rows strip the frame', () => {
+    const explicit = a2aInboundUserMessage('message', 'raw sender text');
+    expect(explicit.text).toMatch(/^\[Message from Codex/);
     expect(parseAgentToAgentMessage(explicit)?.text).toBe('raw sender text');
+    const legacy = a2aInboundUserMessage('message', 'pre-ea93d584 row');
+    const { text: _dropped, ...legacyA2a } = legacy.metadata?.a2a as Record<string, unknown>;
+    expect(_dropped).toBe('pre-ea93d584 row');
+    legacy.metadata = { ...legacy.metadata, a2a: legacyA2a };
+    expect(parseAgentToAgentMessage(legacy)?.text).toBe('pre-ea93d584 row');
     const broken = a2aInboundUserMessage('message', 'x');
     broken.metadata = { ...broken.metadata, a2a: { message_id: 'm', from: { id: 'a' } } };
     expect(parseAgentToAgentMessage(broken)).toBeNull();

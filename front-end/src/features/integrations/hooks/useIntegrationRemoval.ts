@@ -4,8 +4,11 @@
  * STATE MACHINE
  *
  *   [IDLE] --chip × (request)--> [CONFIRMING(target)] --cancel--> [IDLE]
- *   [CONFIRMING] --confirm--> [REMOVING(target)] --DELETE ok--> refetch --> [IDLE]
+ *   [CONFIRMING] --confirm--> [REMOVING(target)] --DELETE ok--> refetch full list --> [IDLE]
+ *                                                --DELETE 501--> [IDLE + blocked reason
+ *                                                   shown inline under that chip; chip kept]
  *                                                --DELETE fails--> [IDLE + error]
+ *   The full refetch matters: the cheap progress poll cannot see deletes.
  *
  *   target.accountId set   → DELETE /api/integrations/:name/accounts/:accountId
  *   target.accountId unset → DELETE /api/integrations/:name (one-row providers)
@@ -17,7 +20,7 @@
 
 import { useCallback, useState } from 'react';
 
-import { deleteIntegrationAccountApi } from '../api';
+import { AccountCleanupNotImplementedError, deleteIntegrationAccountApi } from '../accountsApi';
 
 export interface PendingRemoval {
   /** Integration row name, e.g. `chrome`, `chrome_passwords`, `imessage`. */
@@ -37,6 +40,8 @@ export function useIntegrationRemoval(fetchIntegrations: () => Promise<void>) {
   const [pending, setPending] = useState<PendingRemoval | null>(null);
   const [removingKey, setRemovingKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** removalKey → why the backend cannot remove that account yet (DELETE 501). */
+  const [blockedReasons, setBlockedReasons] = useState<Readonly<Record<string, string>>>({});
 
   const request = useCallback((target: PendingRemoval) => {
     setError(null);
@@ -48,17 +53,22 @@ export function useIntegrationRemoval(fetchIntegrations: () => Promise<void>) {
   const confirm = useCallback(async () => {
     if (pending === null) return;
     const { name, accountId } = pending;
+    const key = removalKey(name, accountId);
     setPending(null);
-    setRemovingKey(removalKey(name, accountId));
+    setRemovingKey(key);
     try {
       await deleteIntegrationAccountApi(name, accountId);
       await fetchIntegrations();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to remove account');
+      if (err instanceof AccountCleanupNotImplementedError) {
+        setBlockedReasons((previous) => ({ ...previous, [key]: err.reason }));
+      } else {
+        setError(err instanceof Error ? err.message : 'Failed to remove account');
+      }
     } finally {
       setRemovingKey(null);
     }
   }, [pending, fetchIntegrations]);
 
-  return { pending, removingKey, error, request, cancel, confirm } as const;
+  return { pending, removingKey, error, blockedReasons, request, cancel, confirm } as const;
 }

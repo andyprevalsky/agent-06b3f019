@@ -6,20 +6,29 @@
  *     · Socials · File System
  *   Every integration row is a DesktopIntegrationRow (chips + progress, no Manage
  *   state, no "X of Y connected" summary).
- *   [ANY ACCOUNT SYNCING] --every 5 s--> refetch integrations + Plaid items
- *     (drives useSyncProgress) --nothing syncing--> polling stops
- *   chip × (generic) --> [CONFIRM REMOVE] --confirm--> DELETE --> refetch
+ *   [ANY ACCOUNT SYNCING] --every 5 s--> GET /integrations/progress?since=<cursor>
+ *     (cheap; changed → fresh accountsByProvider overlay + Plaid items refresh)
+ *     --nothing syncing--> polling stops
+ *   chip × (generic) --> [CONFIRM REMOVE] --confirm--> DELETE --> full list refetch
+ *     (the delta poll cannot see deletes) | 501 → reason under the kept chip
  *
  * System context:
- *   Integrations (flag) → DesktopIntegrations → SyncProgressContext
- *     → DesktopIntegrationRow → ConnectedAccountChip(variant=desktop) + SyncProgressBar
+ *   Integrations (flag) → DesktopIntegrations
+ *     → mergeAccountsByProvider(rows, poll overlay ?? list accountsByProvider)
+ *     → SyncProgressContext → DesktopIntegrationRow
+ *     → ConnectedAccountChip(variant=desktop) + SyncProgressBar
  *   Connect / "+ Add account" call the same hooks/actions the stock sections use.
  */
 
-import type { ReactNode } from 'react';
+import { useMemo, type ReactNode } from 'react';
 
+import { mergeAccountsByProvider } from '../hooks/integrationAccounts';
 import { useIntegrationRemoval } from '../hooks/useIntegrationRemoval';
-import { SyncProgressContext, useSyncRefresh } from '../hooks/useSyncProgress';
+import {
+  SyncProgressContext,
+  useAccountsProgressPoll,
+  useSyncRefresh,
+} from '../hooks/useSyncProgress';
 import DesktopComputeRow from './DesktopComputeRow';
 import { type DesktopIntegrationsProps, desktopSectionViews } from './desktopSectionViews';
 import DesktopIntegrationRow, { DesktopSectionHeader } from './DesktopIntegrationRow';
@@ -40,18 +49,23 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 export default function DesktopIntegrations(props: DesktopIntegrationsProps) {
   const { data, plaid, compute } = props;
   const removal = useIntegrationRemoval(data.fetchIntegrations);
-  const sections = desktopSectionViews(props, removal);
+  const progress = useAccountsProgressPoll(data.accountsByProvider, () => void plaid.refresh());
+  const integrations = useMemo(
+    () => mergeAccountsByProvider(data.connectedIntegrations, progress.accountsByProvider),
+    [data.connectedIntegrations, progress.accountsByProvider],
+  );
+  const sections = desktopSectionViews(
+    { ...props, data: { ...data, connectedIntegrations: integrations } },
+    removal,
+  );
   const anySyncing = sections.some(({ rows }) =>
     rows.some((row) => row.accounts.some((account) => account.tone === 'syncing')),
   );
-  useSyncRefresh(anySyncing, DESKTOP_SYNC_REFRESH_MS, () => {
-    void data.fetchIntegrations();
-    void plaid.refresh();
-  });
-  const legacy = (name: string) => data.connectedIntegrations.find((i) => i.name === name);
+  useSyncRefresh(anySyncing, DESKTOP_SYNC_REFRESH_MS, progress.poll);
+  const legacy = (name: string) => integrations.find((i) => i.name === name);
 
   return (
-    <SyncProgressContext.Provider value={{ integrations: data.connectedIntegrations }}>
+    <SyncProgressContext.Provider value={{ integrations }}>
       <div data-testid="rose-desktop-integrations">
         {removal.error !== null && (
           <p role="alert" className="mb-2 text-xs text-destructive">

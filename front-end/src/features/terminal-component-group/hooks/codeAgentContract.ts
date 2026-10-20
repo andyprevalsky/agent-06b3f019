@@ -585,9 +585,10 @@ function parseParty(
 }
 
 /**
- * Inbound USER rows carry the LLM-visible framing written by the backend's
- * `formatInboundAgentMessage`: "[Message|Question from <label>, agent_id <id>. …]\n\n<text>".
- * Prefer an explicit `a2a.text`; otherwise drop exactly that leading frame.
+ * Every A2A row carries `a2a.text` = the sender's raw words (backend ea93d584b);
+ * the row's own text keeps the LLM framing written by `formatInboundAgentMessage`:
+ * "[Message|Question from <label>, agent_id <id>. …]\n\n<text>". Older rows
+ * without `a2a.text` fall back to dropping exactly that leading frame.
  */
 function senderText(a2a: Rec, message: Message): string {
   const explicit = str(a2a.text);
