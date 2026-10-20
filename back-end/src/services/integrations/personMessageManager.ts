@@ -51,6 +51,8 @@ export interface ContactToUpsert {
   title?: string;
   email?: string;
   emailAddresses?: string[];
+  /** `<provider>:<accountId>` recorded on a Person this contact creates (multi-account syncs). */
+  createdBySource?: string;
 
   // Messages (timestamps already normalized to Date)
   messages: Array<{
@@ -60,6 +62,7 @@ export interface ContactToUpsert {
     timestamp: Date;
     message: string;
     externalId?: string; // Platform-native message ID for deduplication
+    sourceAccountId?: string; // Messaging account that synced it (account-scoped deletion)
   }>;
 }
 
@@ -241,6 +244,7 @@ export async function upsertPersonAndMessageRecords(
               message: msg.message,
               externalId: msg.externalId,
               googleAccountEmail: googleAccountEmail?.toLowerCase() ?? null,
+              sourceAccountId: msg.sourceAccountId ?? null,
             })),
             userId,
             googleAccountEmail,
@@ -451,6 +455,7 @@ function buildPersonCreateData(userId: string, contact: ContactToUpsert) {
     ...(isLinkedin && { linkedinUrl: contact.identifier }),
     ...(contact.company && { company: contact.company }),
     ...(contact.title && { title: contact.title }),
+    ...(contact.createdBySource && { createdBySource: contact.createdBySource }),
   };
 }
 

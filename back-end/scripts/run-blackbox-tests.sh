@@ -511,10 +511,20 @@ fi
 
 
 READY=0
+FOREIGN_HEALTH_REPORTED=0
 for _ in $(seq 1 120); do
-  if curl -fsS -m 2 "$TEST_BASE_URL/health" >/dev/null 2>&1; then
+  # Only THIS run's backend counts: port locks are per worktree, so another
+  # worktree's run can hold the same port, and its /health would otherwise be
+  # taken for ours (the domain then runs against the wrong backend). The
+  # isolated backend names its run in /health (BLACKBOX_TEST_RUN_ID).
+  HEALTH_BODY="$(curl -fsS -m 2 "$TEST_BASE_URL/health" 2>/dev/null || true)"
+  if [[ "$HEALTH_BODY" == *"\"instance\":\"$RUN_ID\""* ]]; then
     READY=1
     break
+  fi
+  if [[ -n "$HEALTH_BODY" && "$FOREIGN_HEALTH_REPORTED" == 0 ]]; then
+    FOREIGN_HEALTH_REPORTED=1
+    echo "⚠️  $TEST_BASE_URL/health answers for another run; waiting for run $RUN_ID's backend"
   fi
 
   if ! kill -0 "$BACKEND_PID" >/dev/null 2>&1; then

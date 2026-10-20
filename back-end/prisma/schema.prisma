@@ -629,6 +629,7 @@ model MessageRecord {
   message            String
   externalId         String? // Platform-native message ID (Telegram msg.id, iMessage ROWID, WhatsApp key.id)
   googleAccountEmail String? // Source Gmail account for account-scoped deletion
+  sourceAccountId    String? // Messaging account that synced this row (WhatsApp: linked phone); null = legacy single account
   createdAt          DateTime       @default(now())
   person             Person         @relation(fields: [personId], references: [id], onDelete: Cascade)
 
@@ -689,6 +690,7 @@ model Person {
   skills                     Json?           @default("[]")
   totalOnlineReach           Int?
   messagesExchanged          Int             @default(0)
+  createdBySource            String? // `<provider>:<accountId>` of the multi-account sync that created this contact; null = legacy/other source
   messageRecords             MessageRecord[]
 
   @@unique([userId, phoneNumber])

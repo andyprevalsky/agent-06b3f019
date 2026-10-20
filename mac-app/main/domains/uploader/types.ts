@@ -43,3 +43,14 @@ export type ChromiumBrowser =
   | 'atlas'
   | 'safari'
   | 'firefox';
+
+/**
+ * How the backend judged one per-account progress write: 200 applied (or an
+ * exact replay), 202 coalesced (retry the latest state after `retryAfterMs`),
+ * 409 stale/over the account cap, anything else failed (retry later).
+ */
+export type IntegrationProgressResult =
+  | { kind: 'applied' }
+  | { kind: 'coalesced'; retryAfterMs: number }
+  | { kind: 'stale' }
+  | { kind: 'failed' };

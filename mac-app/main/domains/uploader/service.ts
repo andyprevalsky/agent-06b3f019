@@ -29,6 +29,7 @@ import type {
   IMessageData,
   IMessageUploadContact,
   IMessageUploadPayload,
+  IntegrationProgressResult,
   UploadStrategy,
 } from './types';
 
@@ -251,4 +252,31 @@ export async function dispatchUploadWithTransportRetry(
   }
 
   throw new Error('Browser-cookie upload exhausted without a result');
+}
+
+// ---------------------------------------------------------------------------
+// Per-account progress responses
+// ---------------------------------------------------------------------------
+
+/** Fallback wait when a 202 carries no usable `retryAfterMs`. */
+const DEFAULT_PROGRESS_RETRY_AFTER_MS = 1_000;
+
+/** Map a progress write's HTTP status + JSON body onto the caller's next step. */
+export function toIntegrationProgressResult(
+  status: number,
+  body: unknown
+): IntegrationProgressResult {
+  if (status === 200) return { kind: 'applied' };
+  if (status === 202) {
+    const retryAfterMs = (body as { retryAfterMs?: unknown } | null)?.retryAfterMs;
+    return {
+      kind: 'coalesced',
+      retryAfterMs:
+        typeof retryAfterMs === 'number' && Number.isFinite(retryAfterMs) && retryAfterMs >= 0
+          ? retryAfterMs
+          : DEFAULT_PROGRESS_RETRY_AFTER_MS,
+    };
+  }
+  if (status === 409) return { kind: 'stale' };
+  return { kind: 'failed' };
 }

@@ -14,6 +14,10 @@ ARTIFACT_DIR="$ARTIFACT_ROOT/$RUN_ID"
 TERM_RUN_ID="teardown-term-probe-$$-$RANDOM"
 TERM_ARTIFACT_DIR="$ARTIFACT_ROOT/$TERM_RUN_ID"
 TERM_OUTPUT="$(mktemp)"
+FOREIGN_RUN_ID="teardown-foreign-probe-$$-$RANDOM"
+FOREIGN_ARTIFACT_DIR="$ARTIFACT_ROOT/$FOREIGN_RUN_ID"
+FOREIGN_OUTPUT="$(mktemp)"
+FOREIGN_PID=""
 PORT=""
 TERM_PORT=""
 RUNNER_PID=""
@@ -27,12 +31,15 @@ cleanup() {
   if [[ -n "$RUNNER_PID" ]] && kill -0 "$RUNNER_PID" 2>/dev/null; then
     kill -KILL "$RUNNER_PID" 2>/dev/null || true
   fi
+  if [[ -n "$FOREIGN_PID" ]]; then
+    kill -KILL "$FOREIGN_PID" 2>/dev/null || true
+  fi
   for port in "$PORT" "$TERM_PORT"; do
     if [[ -n "$port" ]]; then
       lsof -ti "tcp:$port" -sTCP:LISTEN 2>/dev/null | xargs kill -KILL 2>/dev/null || true
     fi
   done
-  rm -rf "$ARTIFACT_DIR" "$TERM_ARTIFACT_DIR" "$TERM_OUTPUT"
+  rm -rf "$ARTIFACT_DIR" "$TERM_ARTIFACT_DIR" "$TERM_OUTPUT" "$FOREIGN_ARTIFACT_DIR" "$FOREIGN_OUTPUT"
 }
 trap cleanup EXIT
 
@@ -112,3 +119,54 @@ if grep -Eq "Backend ready at|Backend process exited before becoming ready" "$TE
 fi
 assert_released "$TERM_ARTIFACT_DIR/manifest.json" "SIGTERM" >/dev/null
 echo "PASS: SIGTERM stops the runner with 143 and releases backend and port lock $TERM_PORT"
+
+# Another worktree's run already serves /health on the port this run reserved.
+# Port locks live under each worktree's own artifact root, so two worktrees
+# can pick the same port (2026-10-20: three lanes all reserved 55100); the
+# readiness probe then accepted the foreign backend, ran the domain against it
+# and crashed with ECONNREFUSED once that run exited (or could pass against
+# another checkout's code). Readiness must wait for THIS run's backend, whose
+# /health names its run, and fail loudly when that backend cannot come up.
+FOREIGN_PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+python3 - "$FOREIGN_PORT" <<'PY' &
+import http.server, json, sys
+class Foreign(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({"status": "ok", "instance": "some-other-run"}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        pass
+http.server.HTTPServer(("0.0.0.0", int(sys.argv[1])), Foreign).serve_forever()
+PY
+FOREIGN_PID=$!
+for _ in $(seq 1 100); do
+  curl -fsS -m 1 "http://localhost:$FOREIGN_PORT/health" >/dev/null 2>&1 && break
+  sleep 0.1
+done
+curl -fsS -m 1 "http://localhost:$FOREIGN_PORT/health" >/dev/null 2>&1 || fail "the foreign backend never answered"
+
+set +e
+(
+  cd "$ROOT_DIR/back-end" && \
+    BLACKBOX_TEST_RUN_ID="$FOREIGN_RUN_ID" \
+    BLACKBOX_TEST_BACKEND_PORT="$FOREIGN_PORT" \
+    bash scripts/run-blackbox-tests.sh __teardown_probe__
+) >"$FOREIGN_OUTPUT" 2>&1
+FOREIGN_STATUS=$?
+set -e
+
+[[ "$FOREIGN_STATUS" -ne 0 ]] || fail "the runner succeeded against a foreign backend"
+if grep -Eq "Backend ready at|Unknown domain\(s\)" "$FOREIGN_OUTPUT"; then
+  cat "$FOREIGN_OUTPUT" >&2
+  fail "the runner accepted another run's backend on port $FOREIGN_PORT as its own"
+fi
+grep -Eq "Backend process exited before becoming ready|Timed out waiting for backend health" "$FOREIGN_OUTPUT" || {
+  cat "$FOREIGN_OUTPUT" >&2
+  fail "the runner did not report that its own backend never came up"
+}
+[[ ! -d "$ARTIFACT_ROOT/.port-locks/$FOREIGN_PORT" ]] || fail "port lock $FOREIGN_PORT outlived the run"
+echo "PASS: a foreign backend on port $FOREIGN_PORT is never accepted as this run's backend"

@@ -314,8 +314,18 @@ if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1') {
 }
 
 // Health check endpoint (no auth required)
+// An isolated black-box backend also names its run, so the runner's readiness
+// probe can tell its own backend from another worktree's on the same port.
+const BLACKBOX_INSTANCE = process.env.BLACKBOX_TEST_RUN_ID;
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    ...(BLACKBOX_INSTANCE !== undefined &&
+      BLACKBOX_INSTANCE !== '' && {
+        instance: BLACKBOX_INSTANCE,
+      }),
+  });
 });
 
 // Deep health check — actually touches the DB so an EXTERNAL uptime monitor

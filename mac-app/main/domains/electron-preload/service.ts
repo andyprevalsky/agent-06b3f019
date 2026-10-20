@@ -118,13 +118,23 @@ function buildWhatsAppBridge(ipcRenderer: IpcRenderer): IPC['whatsapp'] {
     hasCredentials: () => ipcRenderer.invoke('whatsapp:hasCredentials') as Promise<boolean>,
     getLinkedPhoneNumber: () =>
       ipcRenderer.invoke('whatsapp:getLinkedPhoneNumber') as Promise<string | null>,
-    isConnected: () => ipcRenderer.invoke('whatsapp:isConnected') as Promise<boolean>,
+    isConnected: (accountId?: string) =>
+      ipcRenderer.invoke('whatsapp:isConnected', accountId) as Promise<boolean>,
+    listAccounts: () =>
+      ipcRenderer.invoke('whatsapp:listAccounts') as Promise<
+        Array<{ accountId: string; connected: boolean }>
+      >,
     connect: () =>
       ipcRenderer.invoke('whatsapp:connect') as Promise<{ success: boolean; error?: string }>,
+    addAccount: () =>
+      ipcRenderer.invoke('whatsapp:addAccount') as Promise<{ success: boolean; error?: string }>,
     disconnect: () =>
       ipcRenderer.invoke('whatsapp:disconnect') as Promise<{ success: boolean; error?: string }>,
-    logout: () =>
-      ipcRenderer.invoke('whatsapp:logout') as Promise<{ success: boolean; error?: string }>,
+    logout: (accountId?: string) =>
+      ipcRenderer.invoke('whatsapp:logout', accountId) as Promise<{
+        success: boolean;
+        error?: string;
+      }>,
   };
 }
 

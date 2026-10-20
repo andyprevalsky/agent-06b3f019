@@ -13,6 +13,7 @@ import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { UPLOAD_LIMITS } from './config';
 import * as service from './service';
+import { InvalidAccountKeyError, toStorageAccountId } from './syncAccountsContract';
 
 const log = createLogger('Integrations');
 const router = Router({ mergeParams: true });
@@ -228,7 +229,31 @@ router.post(
   })
 );
 
-/** POST /api/integrations/whatsapp/upload */
+/**
+ * Optional WhatsApp `accountId` (the linked phone, plan row I2) as its storage
+ * key: absent/'default' = the legacy single-account row. Throws on a bad id.
+ */
+function whatsappAccountId(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  if (typeof value !== 'string') throw new InvalidAccountKeyError('accountId must be a string');
+  return toStorageAccountId(value);
+}
+
+/** Parse the account fields of a WhatsApp body, answering 400 on a bad one. */
+function whatsappAccountOr400(
+  body: { accountId?: unknown } | undefined,
+  res: Response
+): string | null {
+  try {
+    return whatsappAccountId(body?.accountId);
+  } catch (error: unknown) {
+    if (!(error instanceof InvalidAccountKeyError)) throw error;
+    res.status(400).json({ error: error.message });
+    return null;
+  }
+}
+
+/** POST /api/integrations/whatsapp/upload  { contacts, accessedAt?, accountId? } */
 router.post(
   '/whatsapp/upload',
   authenticateMachineUpload,
@@ -239,8 +264,10 @@ router.post(
     if (!Array.isArray(contacts) || contacts.length === 0) {
       return res.status(400).json({ error: 'contacts array is required' });
     }
+    const accountId = whatsappAccountOr400(req.body, res);
+    if (accountId === null) return undefined;
 
-    const result = await service.processWhatsAppUpload(userId, contacts, accessedAt);
+    const result = await service.processWhatsAppUpload(userId, contacts, accessedAt, accountId);
     res.json({
       message: 'WhatsApp payload received, processing in background',
       integration: result.integration,
@@ -249,13 +276,20 @@ router.post(
   })
 );
 
-/** POST /api/integrations/whatsapp/connect */
+/** POST /api/integrations/whatsapp/connect  { accountId?, label? } (body optional) */
 router.post(
   '/whatsapp/connect',
   authenticateMachineUpload,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;
-    const integration = await service.processWhatsAppConnect(userId);
+    const body = req.body as { accountId?: unknown; label?: unknown } | undefined;
+    const accountId = whatsappAccountOr400(body, res);
+    if (accountId === null) return undefined;
+    const label = typeof body?.label === 'string' && body.label.trim() !== '' ? body.label : null;
+    const integration = await service.processWhatsAppConnect(
+      userId,
+      accountId === '' ? undefined : { accountId, label }
+    );
     res.json({ message: 'WhatsApp connected successfully', integration });
   })
 );

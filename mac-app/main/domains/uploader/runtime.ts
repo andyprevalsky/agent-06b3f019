@@ -23,9 +23,13 @@ import {
   IMPERSONATED_MACHINE_DATA_MESSAGE,
 } from '../../base/impersonation';
 import { getErrorMessageOrFallback } from '../../../shared/utils/error';
-import { postWhatsAppConnect } from './repo';
-import { dispatchUploadWithTransportRetry, resolveStrategy } from './service';
-import type { UploadResult } from './types';
+import { postIntegrationProgress, postWhatsAppConnect, postWhatsAppContacts } from './repo';
+import {
+  dispatchUploadWithTransportRetry,
+  resolveStrategy,
+  toIntegrationProgressResult,
+} from './service';
+import type { IntegrationProgressResult, UploadResult } from './types';
 
 /** Emit an `upload:progress` event on the supplied renderer window, if any. */
 function emitProgress(
@@ -44,9 +48,12 @@ export class Uploader {
    * and the integration row is otherwise only created by an upload — so the
    * first sync after pairing deadlocks without this call.
    */
-  static async registerWhatsAppConnected(accessToken: string): Promise<UploadResult> {
+  static async registerWhatsAppConnected(
+    accessToken: string,
+    account: { accountId: string; label: string } | null = null
+  ): Promise<UploadResult> {
     try {
-      const result = await postWhatsAppConnect(accessToken);
+      const result = await postWhatsAppConnect(accessToken, account);
       if (!result.ok) {
         throw new Error(`WhatsApp connect failed: ${result.statusText}`);
       }
@@ -56,6 +63,46 @@ export class Uploader {
         success: false,
         message: getErrorMessageOrFallback(error, 'WhatsApp connect failed'),
       };
+    }
+  }
+
+  /**
+   * Upload one WhatsApp account's contacts batch. `accountId` (the linked
+   * phone) attributes the messages; null keeps the legacy single-account row.
+   */
+  static async uploadWhatsAppContacts(
+    contacts: unknown,
+    accessToken: string,
+    accountId: string | null
+  ): Promise<UploadResult> {
+    if (accessTokenIsImpersonated(accessToken)) {
+      return { success: false, message: IMPERSONATED_MACHINE_DATA_MESSAGE };
+    }
+    try {
+      const result = await postWhatsAppContacts(contacts, accessToken, accountId);
+      if (!result.ok) throw new Error(`Upload failed: ${result.statusText}`);
+      return { success: true };
+    } catch (error) {
+      return { success: false, message: getErrorMessageOrFallback(error) };
+    }
+  }
+
+  /**
+   * Report one account's sync progress (POST .../accounts/:accountId/progress).
+   * Never throws: transport errors read as `failed` so the caller backs off.
+   */
+  static async reportIntegrationProgress(
+    provider: string,
+    accountId: string,
+    body: unknown,
+    accessToken: string
+  ): Promise<IntegrationProgressResult> {
+    if (accessTokenIsImpersonated(accessToken)) return { kind: 'stale' };
+    try {
+      const response = await postIntegrationProgress(provider, accountId, body, accessToken);
+      return toIntegrationProgressResult(response.status, response.body);
+    } catch {
+      return { kind: 'failed' };
     }
   }
 

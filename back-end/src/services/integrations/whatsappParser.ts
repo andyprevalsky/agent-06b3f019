@@ -5,6 +5,13 @@ import { upsertPersonAndMessageRecords, ContactToUpsert } from './personMessageM
 
 const log = createLogger('WhatsAppParser');
 
+/** `Person.createdBySource` prefix: the contact was created by a WhatsApp account's sync. */
+export const WHATSAPP_CONTACT_SOURCE_PREFIX = 'whatsapp:';
+
+export function whatsappContactSource(accountId: string): string {
+  return `${WHATSAPP_CONTACT_SOURCE_PREFIX}${accountId}`;
+}
+
 export interface WhatsAppContactWithMessages {
   contact_id: string;
   contact_name: string | null;
@@ -39,11 +46,17 @@ const normalizeHandle = (handle?: string | null): string => {
 };
 
 /**
- * Transform WhatsApp contact data to the shared ContactToUpsert format
+ * Transform WhatsApp contact data to the shared ContactToUpsert format.
+ * `accountId` (the linked phone; '' = legacy single account) attributes the
+ * messages and any contact this upload creates to that WhatsApp account.
  */
-function transformToContactToUpsert(contact: WhatsAppContactWithMessages): ContactToUpsert {
+function transformToContactToUpsert(
+  contact: WhatsAppContactWithMessages,
+  accountId: string
+): ContactToUpsert {
   const contactId = contact.contact_id;
   const isEmail = contactId.includes('@');
+  const attributed = accountId !== '';
 
   return {
     identifier: contactId,
@@ -54,6 +67,7 @@ function transformToContactToUpsert(contact: WhatsAppContactWithMessages): Conta
     title: contact.title,
     email: contact.email,
     emailAddresses: contact.emailAddresses,
+    ...(attributed && { createdBySource: whatsappContactSource(accountId) }),
     messages: contact.messages.map((msg) => ({
       channel: MessageChannel.WHATSAPP,
       from: msg.is_from_me ? 'me' : msg.contactHandle || contactId,
@@ -61,6 +75,7 @@ function transformToContactToUpsert(contact: WhatsAppContactWithMessages): Conta
       timestamp: new Date(msg.date),
       message: msg.text,
       externalId: msg.id, // WhatsApp message key.id for deduplication
+      ...(attributed && { sourceAccountId: accountId }),
     })),
   };
 }
@@ -68,7 +83,8 @@ function transformToContactToUpsert(contact: WhatsAppContactWithMessages): Conta
 export async function parseWhatsAppData(
   userId: string,
   contacts: WhatsAppContactWithMessages[],
-  jobId: string
+  jobId: string,
+  accountId = ''
 ): Promise<void> {
   let skippedContacts = 0;
   const sanitizedContacts = contacts.reduce<WhatsAppContactWithMessages[]>((acc, contact) => {
@@ -104,7 +120,7 @@ export async function parseWhatsAppData(
   }
 
   const integration = await prisma.integration.findUnique({
-    where: { userId_name_accountId: { userId, name: 'whatsapp', accountId: '' } },
+    where: { userId_name_accountId: { userId, name: 'whatsapp', accountId } },
   });
 
   if (!integration) {
@@ -112,7 +128,7 @@ export async function parseWhatsAppData(
   }
 
   // Transform to shared format and call the manager
-  const contactsToUpsert = sanitizedContacts.map(transformToContactToUpsert);
+  const contactsToUpsert = sanitizedContacts.map((c) => transformToContactToUpsert(c, accountId));
   const result = await upsertPersonAndMessageRecords(userId, contactsToUpsert, jobId);
 
   // Update Integration metadata

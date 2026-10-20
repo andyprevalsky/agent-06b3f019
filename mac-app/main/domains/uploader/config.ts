@@ -43,6 +43,11 @@ export const UPLOAD_ENDPOINTS: Record<UploadStrategy, string> = {
  */
 export const WHATSAPP_CONNECT_ENDPOINT = '/api/integrations/whatsapp/connect';
 
+/** Per-account sync progress endpoint (plan row I0); the account id is URL-encoded. */
+export function integrationProgressPath(provider: string, accountId: string): string {
+  return `/api/integrations/${provider}/accounts/${encodeURIComponent(accountId)}/progress`;
+}
+
 /** IPC channel the renderer window listens on for upload progress. */
 export const UPLOAD_PROGRESS_CHANNEL = 'upload:progress';
 
