@@ -98,6 +98,9 @@ ROOT_DIR="${CLOUDBENCH_FLEET_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && p
 cd "$ROOT_DIR" || exit 1
 # shellcheck source=lib/cloudbench-env.sh
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-env.sh"
+# Every guest refuses bench-app secrets lacking the committed guest namespace,
+# whichever launcher (or older checkout) staged them; a launcher may bind its own.
+CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE="${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-$(cloudbench_expected_guest_temporal_namespace "$APP")}"
 # shellcheck source=lib/cloudbench-github-token.sh
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-github-token.sh"
 CLOUDBENCH_CATALOG_SCRIPT="${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench_catalog.py"
@@ -1779,6 +1782,11 @@ _inject_secrets_locked() {
         echo "   guest Temporal namespace override: $guest_temporal_namespace (guest copies only; from $guest_temporal_override)"
     else
         echo "   guest Temporal namespace: unchanged from agents/.env (no .env.benchmark-temporal override)"
+    fi
+    if ! cloudbench_require_staged_guest_temporal_namespace "$APP" "$guest_temporal_override" \
+            "$agents_src" "$backend_src"; then
+        [ -z "$guest_env_dir" ] || rm -rf "$guest_env_dir"
+        exit 1
     fi
     agents_b64="$(base64 < "$agents_src" | tr -d '\n')"
     backend_b64="$(base64 < "$backend_src" | tr -d '\n')"
