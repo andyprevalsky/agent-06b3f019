@@ -235,6 +235,19 @@ grep -q "\"owner\": \"$deploy_tmp_b\"" "$legacy_registry/$respected_port.json" \
   || fail "a new claim must be mirrored into the legacy registry so earlier-protocol claimants observe it"
 echo "PASS: a live legacy-registry claim reserves its range and new claims are mirrored to it"
 
+# The same legacy registry named twice (directly and via a symlink) is locked
+# once, and a configured but absent legacy registry is created and mirrored.
+ln -s "$legacy_registry" "$TMP_ROOT/legacy-alias"
+absent_registry="$TMP_ROOT/absent-legacy"
+deploy_tmp_c="$TMP_ROOT/descend-I99-tmp-c"
+git -C "$controller" worktree add -q -b deploy-tmp-c "$deploy_tmp_c"
+alias_port="$(timeout 30 python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" claim --registry "$fresh_registry" \
+  --owner "$deploy_tmp_c" --respect-registry "$legacy_registry" --respect-registry "$TMP_ROOT/legacy-alias" \
+  --respect-registry "$absent_registry")" || fail "an aliased legacy registry must not deadlock the claim"
+grep -q "\"owner\": \"$deploy_tmp_c\"" "$absent_registry/$alias_port.json" \
+  || fail "an absent configured legacy registry must be created and receive the mirrored claim"
+echo "PASS: aliased legacy registries lock once and absent ones are created and mirrored"
+
 mkdir -p "$deploy_one/node_modules"
 write_fake_venv "$deploy_one/agents/venv"
 PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \

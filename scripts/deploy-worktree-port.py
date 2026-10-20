@@ -147,15 +147,15 @@ def main() -> int:
 
     if not args.owner.is_dir():
         parser.error(f"owner path is not a directory: {args.owner}")
-    respected = tuple(
-        sorted(
-            {
-                path
-                for path in args.respect_registry
-                if path.is_dir() and path.resolve() != args.registry.resolve()
-            }
-        )
-    )
+    # Create every configured earlier registry and dedupe by resolved path, so
+    # each .lock is held exactly once and a legacy claimant that starts later
+    # still finds this claim mirrored there.
+    own = args.registry.resolve()
+    resolved: set[Path] = set()
+    for path in args.respect_registry:
+        path.mkdir(parents=True, exist_ok=True)
+        resolved.add(path.resolve())
+    respected = tuple(sorted(path for path in resolved if path != own))
     with ExitStack() as stack:
         # Earlier-protocol claimants serialize on their registry's .lock; hold
         # each one (in a fixed order) so neither side claims from a stale view.
