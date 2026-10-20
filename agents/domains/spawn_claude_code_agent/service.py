@@ -2144,6 +2144,7 @@ def _merge_close_code_session_facts(
             "local_commits": merge.get("local_commits", repo.get("localCommits")),
             "pushed": merge.get("pushed", repo.get("pushed")),
             "dirty_files": repo.get("dirtyFiles"),
+            "files": repo.get("files") or [],
             "pr": merge.get("pr"),
             # True only when GitHub confirms the PR merged and the target contains head (C4).
             "merged": merge.get("merged") is True,
@@ -2151,6 +2152,51 @@ def _merge_close_code_session_facts(
         }
     )
     return merged
+
+
+def _iso_utc(epoch_s: Optional[float]) -> Optional[str]:
+    if epoch_s is None:
+        return None
+    return datetime.fromtimestamp(epoch_s, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def build_code_agent_metadata(
+    *,
+    task_id: Optional[str],
+    provider: str,
+    state: str,
+    started_at: Optional[float],
+    ended_at: Optional[float] = None,
+    facts: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """The ``code_agent`` message metadata block the UI thread renders.
+
+    ``state`` is spinning_up | live | completed | failed | paused (paused =
+    idle or user-paused session, resumable; an addition to the UI contract).
+    ``summary.merged_into`` is set only when the merge was confirmed (C4).
+    The target ('cloud' | 'local') and device_name belong to the L-LOCAL lane.
+    """
+    facts = facts or {}
+    block: Dict[str, Any] = {
+        "task_id": task_id,
+        "provider": "codex" if provider == "codex" else "claude",
+        "target": "cloud",
+        "branch": facts.get("branch"),
+        "state": state,
+        "started_at": _iso_utc(started_at),
+    }
+    if ended_at is not None:
+        block["ended_at"] = _iso_utc(ended_at)
+    if facts.get("head"):
+        summary: Dict[str, Any] = {
+            "commit": facts.get("head"),
+            "branch": facts.get("branch"),
+            "files": facts.get("files") or [],
+        }
+        if facts.get("merged") is True and facts.get("merge_target"):
+            summary["merged_into"] = facts.get("merge_target")
+        block["summary"] = summary
+    return block
 
 
 def format_code_session_summary(facts: Optional[Dict[str, Any]]) -> str:
@@ -2457,6 +2503,13 @@ async def spawn_claude_code_activity(
                 github_repo_url=actual_github_repo_url,
                 code_provider=code_provider,
                 code_session=code_session_facts,
+                code_agent=build_code_agent_metadata(
+                    task_id=task_id,
+                    provider=code_provider,
+                    state="live",
+                    started_at=start_time,
+                    facts=code_session_facts,
+                ),
             )
 
             await save_claude_code_message(
@@ -2468,6 +2521,13 @@ async def spawn_claude_code_activity(
                 action_type="task_started",
                 tool_call_id=tool_call_id,
                 code_provider=code_provider,
+                code_agent=build_code_agent_metadata(
+                    task_id=task_id,
+                    provider=code_provider,
+                    state="live",
+                    started_at=start_time,
+                    facts=code_session_facts,
+                ),
             )
             action_summary.append(f"Started task: {goal[:100]}")
 
@@ -2610,6 +2670,14 @@ async def spawn_claude_code_activity(
                 tool_call_id=tool_call_id,
                 code_provider=code_provider,
                 code_session=code_session_facts,
+                code_agent=build_code_agent_metadata(
+                    task_id=task_id,
+                    provider=code_provider,
+                    state="paused",
+                    started_at=start_time,
+                    ended_at=safe_time(),
+                    facts=code_session_facts,
+                ),
             )
             return {
                 "status": CODE_AGENT_PAUSED_STATUS,
@@ -2623,6 +2691,14 @@ async def spawn_claude_code_activity(
                 "output_files": output_files,
                 "code_provider": code_provider,
                 "code_session": code_session_facts,
+                "code_agent": build_code_agent_metadata(
+                    task_id=task_id,
+                    provider=code_provider,
+                    state="paused",
+                    started_at=start_time,
+                    ended_at=safe_time(),
+                    facts=code_session_facts,
+                ),
                 "completed_turns": codex_completed_turn_count(code_events) if code_provider == "codex" else None,
             }
         safe_heartbeat("Verifying Claude Code result")
@@ -2738,6 +2814,14 @@ async def spawn_claude_code_activity(
             "code_provider": code_provider,
             "completed_turns": codex_completed_turn_count(code_events) if code_provider == "codex" else None,
             "code_session": code_session_facts,
+            "code_agent": build_code_agent_metadata(
+                task_id=task_id,
+                provider=code_provider,
+                state="completed",
+                started_at=start_time,
+                ended_at=safe_time(),
+                facts=code_session_facts,
+            ),
         }
         return result
 
@@ -2810,6 +2894,14 @@ async def spawn_claude_code_activity(
                     action_type="task_complete",
                     tool_call_id=tool_call_id,
                     code_provider=code_provider,
+                    code_agent=build_code_agent_metadata(
+                        task_id=task_id,
+                        provider=code_provider,
+                        state="paused",
+                        started_at=start_time,
+                        ended_at=safe_time(),
+                        facts=code_session_facts,
+                    ),
                 )
 
                 await close_e2b_session(task_id=task_id, code_provider=code_provider, reason="cancel")
@@ -2888,6 +2980,14 @@ async def spawn_claude_code_activity(
                     action_type="task_complete",
                     tool_call_id=tool_call_id,
                     code_provider=code_provider,
+                    code_agent=build_code_agent_metadata(
+                        task_id=task_id,
+                        provider=code_provider,
+                        state="failed",
+                        started_at=start_time,
+                        ended_at=safe_time(),
+                        facts=code_session_facts,
+                    ),
                 )
 
                 await close_e2b_session(task_id=task_id, code_provider=code_provider, reason="failure")

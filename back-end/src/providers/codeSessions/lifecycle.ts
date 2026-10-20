@@ -50,6 +50,8 @@ export interface RepoFacts {
   dirtyFiles: number;
   /** origin/HEAD's branch when the checkpoint saw it. */
   defaultBranch?: string | null;
+  /** Lines added/removed per file vs the merge target's merge base. */
+  files?: Array<{ path: string; added: number; removed: number }>;
 }
 
 export interface CheckpointResult {
@@ -91,6 +93,7 @@ export function primaryRepoFacts(manifest: Pick<CheckpointManifest, 'repos'>): R
     remoteUrl: repo.remoteUrl,
     dirtyFiles: repo.dirtyFiles.length,
     defaultBranch: repo.defaultBranch ?? null,
+    files: repo.files ?? [],
   };
 }
 
@@ -115,6 +118,7 @@ export async function checkpointCodeSession(params: {
       seq,
       reason,
       codeProvider: session.codeProvider,
+      diffBase: session.mergeTarget,
     });
     const repo = primaryRepoFacts(manifest);
     await commitCheckpoint(session.id, seq, {

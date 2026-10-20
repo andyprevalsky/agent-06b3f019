@@ -289,7 +289,18 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 title="Starting Claude Code sandbox",
                 message="",
                 status=MessageStatus.IN_PROGRESS,
-                metadata={"toolName": "spawn_claude_code_agent"},
+                metadata={
+                    "toolName": "spawn_claude_code_agent",
+                    "code_agent": {
+                        "task_id": None,
+                        "provider": None,
+                        "target": "cloud",
+                        "branch": None,
+                        "state": "spinning_up",
+                        # workflow.now() keeps the timestamp deterministic on replay.
+                        "started_at": workflow.now().isoformat(),
+                    },
+                },
             )
 
         code_provider = "unknown"
@@ -562,6 +573,8 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             }
             if isinstance(result.get("code_session"), dict):
                 completed_metadata["code_session"] = result["code_session"]
+            if isinstance(result.get("code_agent"), dict):
+                completed_metadata["code_agent"] = result["code_agent"]
             if paused:
                 completed_metadata["session_paused"] = True
             yield ToolEvent(

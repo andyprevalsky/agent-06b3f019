@@ -2948,6 +2948,12 @@ class _FakeCCWorkflow:
     async def wait_condition(self, predicate):
         return None
 
+    @staticmethod
+    def now():
+        from datetime import datetime, timezone
+
+        return datetime(2026, 10, 20, tzinfo=timezone.utc)
+
     async def execute_activity(self, fn, args=None, **kwargs):
         assert fn.__name__ == "resolve_code_agent_provider_activity"
         return args[0]

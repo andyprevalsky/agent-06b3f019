@@ -47,6 +47,7 @@ async def save_claude_code_message(
     agent_type: Optional[str] = None,
     steps_taken: Optional[int] = None,
     code_session: Optional[dict[str, Any]] = None,
+    code_agent: Optional[dict[str, Any]] = None,
 ) -> None:
     """Save Claude Code sub-action message directly to DB via back-end API.
 
@@ -94,6 +95,10 @@ async def save_claude_code_message(
 
     if code_session:
         metadata["code_session"] = code_session
+    # UI contract (rose-user-ui): {task_id, provider, target, branch, state,
+    # started_at, ended_at?, summary?{commit, branch, merged_into?, files}}.
+    if code_agent:
+        metadata["code_agent"] = code_agent
     # Intermediate chip rows (progress, task_started, system) are child-scoped
     # UI and must stay out of the parent LLM context via subAgentId.
     # Parent-facing task_complete terminals reuse the spawn toolCallId — if they

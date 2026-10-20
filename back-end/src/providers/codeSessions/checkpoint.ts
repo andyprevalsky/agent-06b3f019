@@ -59,6 +59,8 @@ export interface CheckpointRepo {
   refs?: Record<string, string>;
   /** origin/HEAD's branch (the repo default) when known. */
   defaultBranch?: string | null;
+  /** Lines added/removed per file vs the merge base with the merge target (incl. uncommitted). */
+  files?: Array<{ path: string; added: number; removed: number }>;
 }
 
 export interface CheckpointManifest {
@@ -152,11 +154,26 @@ export function cliSessionIdFromLog(
   return match?.[1] ?? null;
 }
 
+const MAX_DIFF_FILES = 200;
+
+function parseNumstat(stdout: string): Array<{ path: string; added: number; removed: number }> {
+  const files: Array<{ path: string; added: number; removed: number }> = [];
+  for (const line of stdout.split('\n')) {
+    const match = /^(NUMSTAT|UNTRACKED)=(\d+|-)\t(?:(\d+|-)\t)?(.+)$/.exec(line);
+    if (match === null || files.length >= MAX_DIFF_FILES) continue;
+    const added = match[2] === '-' ? 0 : Number(match[2]);
+    const removed = match[1] === 'UNTRACKED' || match[3] === '-' ? 0 : Number(match[3] ?? 0);
+    files.push({ path: match[4], added, removed });
+  }
+  return files;
+}
+
 async function inspectRepo(
   fs: CodeSessionFs,
   tmp: string,
   repoPath: string,
-  index: number
+  index: number,
+  diffBase: string | null
 ): Promise<{ repo: CheckpointRepo; bundleFile: string | null }> {
   const dir = repoPath === '' ? fs.home : `${fs.home}/${repoPath}`;
   const bundleFile = `${tmp}/repo-${index}.bundle`;
@@ -177,6 +194,12 @@ async function inspectRepo(
       `  git bundle create ${shellQuote(bundleFile)} --all --not --remotes >/dev/null 2>&1 && echo BUNDLE=1`,
       '  echo "DEFAULT=$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)"',
       `  git for-each-ref --count=500 --format='REF=%(refname) %(objectname)' refs/heads refs/tags refs/stash 2>/dev/null`,
+      // Per-file +/- against the merge base with the merge target (UI summary).
+      `  B=${shellQuote(diffBase ?? '')}`,
+      '  if [ -n "$B" ] && git rev-parse -q --verify "refs/remotes/origin/$B" >/dev/null 2>&1; then BASE="origin/$B"; else BASE=$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null); fi',
+      '  MB=""; [ -n "$BASE" ] && MB=$(git merge-base HEAD "$BASE" 2>/dev/null)',
+      `  [ -n "$MB" ] && git diff --numstat "$MB" 2>/dev/null | head -${MAX_DIFF_FILES} | sed 's/^/NUMSTAT=/'`,
+      `  git ls-files --others --exclude-standard 2>/dev/null | head -50 | while IFS= read -r f; do [ -f "$f" ] && printf 'UNTRACKED=%s\\t%s\\n' "$(wc -l < "$f" | tr -d ' ')" "$f"; done`,
       'fi',
       `git status --porcelain=v1 -uall 2>/dev/null | head -500 > ${shellQuote(`${tmp}/dirty-${index}.txt`)}`,
       'exit 0',
@@ -214,6 +237,7 @@ async function inspectRepo(
       dirtyFiles,
       refs,
       defaultBranch: defaultRef.startsWith('origin/') ? defaultRef.slice('origin/'.length) : null,
+      files: parseNumstat(result.stdout),
     },
     bundleFile: hasBundle ? bundleFile : null,
   };
@@ -226,6 +250,8 @@ export interface CreateCheckpointParams {
   seq: number;
   reason: string;
   codeProvider: string;
+  /** Merge target the per-file diff stats are measured against (null = default branch). */
+  diffBase?: string | null;
 }
 
 /** Capture HOME into a new checkpoint and upload it. Returns the manifest. */
@@ -291,7 +317,13 @@ export async function createCheckpoint(
 
     const repos: CheckpointRepo[] = [];
     for (const [index, repoPath] of [...new Set(repoPaths)].entries()) {
-      const { repo, bundleFile } = await inspectRepo(fs, tmp, repoPath, index);
+      const { repo, bundleFile } = await inspectRepo(
+        fs,
+        tmp,
+        repoPath,
+        index,
+        params.diffBase ?? null
+      );
       if (bundleFile !== null && repo.bundle !== null) {
         artifacts.set(repo.bundle, await fs.readFile(bundleFile));
       }
