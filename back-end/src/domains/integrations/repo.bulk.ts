@@ -132,40 +132,6 @@ export async function deleteCookieBundlesForBrowserSnapshot(params: {
   });
 }
 
-/**
- * Remove exactly one browser profile's cookies (the account-scoped delete for a
- * cookie provider). Single indexed `deleteMany` scoped to
- * (userId, browserSource, browserProfile) — never touches another profile.
- */
-export async function deleteCookiesForProfile(params: {
-  userId: string;
-  browserSource: string;
-  browserProfile: string;
-}) {
-  return prisma.cookie.deleteMany({
-    where: {
-      userId: params.userId,
-      browserSource: params.browserSource,
-      browserProfile: params.browserProfile,
-    },
-  });
-}
-
-/** Remove that same profile's cookie bundles (the SSO-replay grouping rows). */
-export async function deleteCookieBundlesForProfile(params: {
-  userId: string;
-  browserSource: string;
-  browserProfile: string;
-}) {
-  return prisma.cookieBundle.deleteMany({
-    where: {
-      userId: params.userId,
-      browserSource: params.browserSource,
-      browserProfile: params.browserProfile,
-    },
-  });
-}
-
 export async function deleteCookieBundlesWithoutCookiesForProfile(params: {
   userId: string;
   browserSource: string;
@@ -249,10 +215,12 @@ export async function bulkUpsertPasswords(
     `
     INSERT INTO "BrowserPassword" (id, "userId", origin, username, "encryptedPassword", "dateLastUsed", "dateCreated", "browserSource", "browserProfile", "syncedAt", "disabledAt", "disabledReason")
     VALUES ${valuesClause}
-    ON CONFLICT ("userId", origin, username, "browserSource", "browserProfile") DO UPDATE SET
+    ON CONFLICT ("userId", origin, username) DO UPDATE SET
       "encryptedPassword" = EXCLUDED."encryptedPassword",
       "dateLastUsed" = EXCLUDED."dateLastUsed",
       "dateCreated" = EXCLUDED."dateCreated",
+      "browserSource" = EXCLUDED."browserSource",
+      "browserProfile" = EXCLUDED."browserProfile",
       "syncedAt" = NOW(),
       "disabledAt" = NULL,
       "disabledReason" = NULL
