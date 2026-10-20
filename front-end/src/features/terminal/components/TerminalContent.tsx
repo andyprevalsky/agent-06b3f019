@@ -20,8 +20,9 @@
  *   none / safe mode → stock layout; published shell → UserUiShell replaces chrome
  *   background image/slot → layer BEHIND the app; app bg + grid/canvas fade to
  *     fadeAfterFirstMessage once the selected agent has a USER message
- * RIGHT APP BAR (RoseAppsProvider): Browser + Voice drawers; the main column
- *   re-centers via --rose-apps-inset.
+ * ROSE DESKTOP APPS (RoseAppsProvider, flag on only): bare top-right icons
+ *   (Browser, Phone, Integrations, Dark mode) + the right-panel slot; panels
+ *   overlay the content (no right bar, no content inset). Flag off: no icons.
  */
 
 import { useState, useMemo, lazy } from 'react';
@@ -30,7 +31,7 @@ import {
   AppSidebar,
   AttentionRequestsProvider,
   NetworkView,
-  RoseAppBar,
+  RoseAppIcons,
   RoseAppsProvider,
   SIDEBAR_WIDTH_COLLAPSED,
   unansweredAgentIds,
@@ -125,9 +126,10 @@ function TerminalLayout(props: TerminalLayoutProps) {
         selectedAgentId={props.agents.selectedAgentId}
         onSelectAgent={props.agents.handleSelectAgent}
         publishLayout={roseDesktop}
+        onLogout={() => void props.agents.handleLogout()}
       >
         <InteractiveTerminalLayout {...props} />
-        {roseDesktop && <RoseAppBar />}
+        {roseDesktop && <RoseAppIcons />}
       </RoseAppsProvider>
     </RoseDesktopContext.Provider>
   );

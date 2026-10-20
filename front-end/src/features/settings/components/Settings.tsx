@@ -32,6 +32,10 @@
  * - subscriptionTier: number | null
  * - apiKeys: array of user's API keys
  * - error: string | null (shown as banner)
+ *
+ * Props: embedded (Rose Desktop account panel beside the left bar: no page
+ * padding) and billingExtra (rendered under Current Plan in the Billing tab).
+ * The stock page passes neither, so it renders unchanged.
  */
 
 import { useState, useCallback } from 'react';
@@ -50,7 +54,14 @@ import {
 import SettingsTabContent from './SettingsTabContent';
 import SubscriptionModal from './SubscriptionModal';
 
-export default function Settings() {
+interface SettingsProps {
+  /** Rendered inside a panel (Rose Desktop account settings): no page padding. */
+  embedded?: boolean;
+  /** Extra Billing content below the Current Plan block (Rose Desktop payments). */
+  billingExtra?: React.ReactNode;
+}
+
+export default function Settings({ embedded = false, billingExtra }: SettingsProps = {}) {
   const [activeTab, setActiveTab] = useState('customization');
   const data = useSettingsData();
   const personalInfo = useSavePersonalInfo(data.userData, data.setError);
@@ -75,8 +86,8 @@ export default function Settings() {
   }
 
   return (
-    <div className="h-full overflow-y-auto pt-20">
-      <div className="container max-w-3xl mx-auto py-12 px-4 space-y-6">
+    <div className={embedded ? 'h-full' : 'h-full overflow-y-auto pt-20'}>
+      <div className={embedded ? 'space-y-6' : 'container max-w-3xl mx-auto py-12 px-4 space-y-6'}>
         <div className="mb-8 backdrop-blur-md bg-background/80 p-6 rounded-xl border border-border/50 dark:border-navi-light-light-black/50">
           <h1 className="text-4xl font-bold mb-2">Settings</h1>
           <p className="text-muted-foreground">Manage your account settings and preferences</p>
@@ -111,6 +122,7 @@ export default function Settings() {
             billing={billing}
             apiKeysHook={apiKeysHook}
             handleFieldChange={handleFieldChange}
+            billingExtra={billingExtra}
           />
         </Tabs>
 

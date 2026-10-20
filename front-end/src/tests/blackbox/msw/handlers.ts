@@ -11,6 +11,8 @@ export const handlers = [
   // Per-user UI: stock UI (nothing published) unless a test overrides it.
   http.get(`${API_BASE}/user-ui/active`, () => HttpResponse.json({ versionId: null })),
   http.get(`${API_BASE}/user-ui/versions`, () => HttpResponse.json({ versions: [] })),
+  // Rose Desktop left bar groups agents by project; none unless a test overrides.
+  http.get(`${API_BASE}/projects`, () => HttpResponse.json([])),
   // No persisted binding by default: live views fall back to the transcript URL.
   http.get(`${API_BASE}/browser-session/task/:taskId/live-view`, () =>
     HttpResponse.json({ error: 'Session not found' }, { status: 404 }),

@@ -98,7 +98,7 @@ export function BrowserAppDrawer() {
     apps.selectedAgentId !== null &&
     activeAgentId !== apps.selectedAgentId;
   return (
-    <AppDrawerShell open={open} label="Browser drawer" testId="browser-app-drawer">
+    <AppDrawerShell open={open} label="Browser drawer" testId="browser-app-drawer" variant="full">
       <div className="flex items-center gap-2.5 border-b border-gray-200/90 px-3.5 py-3 text-[13px]">
         <Globe className="h-[18px] w-[18px] flex-none" strokeWidth={1.7} />
         <b className="font-semibold">Browser</b>

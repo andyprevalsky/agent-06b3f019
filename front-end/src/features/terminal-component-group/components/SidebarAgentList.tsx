@@ -65,7 +65,7 @@ const RUN_STATE_RANK: Record<AgentRunState, number> = {
  * (which depends on client-only attention data) and keeps the list correct
  * between an optimistic pin toggle and the next refetch.
  */
-function sortAgents(
+export function sortAgents(
   agents: Agent[],
   attentionAgentIds: ReadonlySet<string>,
   isArchived: boolean,
@@ -92,7 +92,7 @@ const NO_CONTENT_MATCHES: ReadonlySet<string> = new Set<string>();
  * lossy summary, so searching for a word the user actually typed in their goal
  * must still find the run even when the title dropped that word.
  */
-function matchesQuery(
+export function matchesQuery(
   agent: Agent,
   needle: string,
   contentMatchAgentIds: ReadonlySet<string>,
