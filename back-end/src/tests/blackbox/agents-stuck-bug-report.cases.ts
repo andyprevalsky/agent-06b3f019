@@ -236,7 +236,7 @@ test('stuck-agent reports skip agents that already have a manual Report Bug', as
   }
 });
 
-test('stuck-agent reports retry a failed launch with backoff and the same idempotency key', async () => {
+test('stuck-agent reports retry a failed launch with the identical frozen request', async () => {
   const now = caseClock(9);
   const person = await createRealPerson('retry');
   const agentId = await seedAgent(person, 'retry', {
@@ -248,6 +248,13 @@ test('stuck-agent reports retry a failed launch with backoff and the same idempo
     const first = await runStuckAgentBugReports({ now, ...scope }, failing);
     assert(first.failed === 1, `first launch fails, got ${JSON.stringify(first)}`);
     assert((await claimOf(agentId))?.status === 'FAILED', 'failed launch is recorded');
+
+    // The agent changes between attempts; the retry must still send the first
+    // request, because boxes.dev rejects a reused key with a different body.
+    await prisma.agent.update({
+      where: { id: agentId },
+      data: { status: 'FAILED', title: 'A different title' },
+    });
 
     const early = fakeLauncher();
     await runStuckAgentBugReports(
@@ -263,8 +270,12 @@ test('stuck-agent reports retry a failed launch with backoff and the same idempo
     );
     assert(retry.calls.length === 1, 'retried after the backoff');
     assert(
-      retry.calls[0].idempotencyKey === failing.calls[0].idempotencyKey,
-      'retry reuses the idempotency key so boxes.dev returns the original run'
+      JSON.stringify(retry.calls[0]) === JSON.stringify(failing.calls[0]),
+      `retry must resend the identical keyed request, got ${JSON.stringify(retry.calls[0])}`
+    );
+    assert(
+      retry.calls[0].promptText.includes('(status: ACTIVE)'),
+      'the frozen prompt keeps the status observed at the first attempt'
     );
     assert((await claimOf(agentId))?.status === 'SUCCEEDED', 'retry is recorded');
   } finally {
@@ -272,27 +283,134 @@ test('stuck-agent reports retry a failed launch with backoff and the same idempo
   }
 });
 
-test('stuck-agent reports give up after the last failed attempt', async () => {
-  const start = caseClock(12);
-  const person = await createRealPerson('give-up');
-  const agentId = await seedAgent(person, 'give-up', {
-    createdAt: new Date(start.getTime() - 30 * HOUR_MS),
-  });
+test('stuck-agent reports keep retrying at most daily and never give up inside the lookback', async () => {
+  const start = caseClock(30);
+  const person = await createRealPerson('no-give-up');
+  const createdAt = new Date(start.getTime() - 30 * HOUR_MS);
+  const agentId = await seedAgent(person, 'no-give-up', { createdAt });
   const scope = { candidateAgentIds: [agentId], firstCreatedAt: EPOCH };
   try {
     const failing = fakeLauncher({ failTimes: 100 });
     let clock = start;
-    for (let attempt = 0; attempt < 10; attempt += 1) {
+    for (let tick = 0; tick < 8; tick += 1) {
       await runStuckAgentBugReports({ now: clock, ...scope }, failing);
       clock = new Date(clock.getTime() + 25 * HOUR_MS);
     }
-    assert(failing.calls.length === 6, `six attempts then stop, got ${failing.calls.length}`);
+    assert(failing.calls.length === 8, `one attempt per day, got ${failing.calls.length}`);
     const claim = await claimOf(agentId);
-    assert(claim?.status === 'FAILED', 'gave-up claim stays FAILED');
+    assert(claim?.status === 'FAILED', 'failing claim stays FAILED');
     assert(
-      (claim.request as { nextAttemptAt?: unknown }).nextAttemptAt === null,
-      'gave-up claim has no next attempt'
+      typeof (claim.request as { nextAttemptAt?: unknown }).nextAttemptAt === 'string',
+      'a failing claim always has a next attempt'
     );
+
+    const pastLookback = fakeLauncher();
+    await runStuckAgentBugReports(
+      { now: new Date(createdAt.getTime() + 15 * 24 * HOUR_MS), ...scope },
+      pastLookback
+    );
+    assert(pastLookback.calls.length === 0, 'runs older than the lookback are no longer picked');
+  } finally {
+    await dropClaims([agentId]);
+  }
+});
+
+test('stuck-agent reports stop the tick at the first launch failure', async () => {
+  const now = caseClock(33);
+  const person = await createRealPerson('breaker');
+  const agentIds: string[] = [];
+  for (let i = 0; i < 3; i += 1) {
+    agentIds.push(
+      await seedAgent(person, `breaker-${i}`, {
+        createdAt: new Date(now.getTime() - (30 + i) * HOUR_MS),
+      })
+    );
+  }
+  try {
+    const failing = fakeLauncher({ failTimes: 100 });
+    const summary = await runStuckAgentBugReports(
+      { now, candidateAgentIds: agentIds, firstCreatedAt: EPOCH },
+      failing
+    );
+    assert(
+      failing.calls.length === 1,
+      `one failed launch ends the tick, got ${failing.calls.length}`
+    );
+    assert(summary.failed === 1 && summary.deferred === 2, `summary ${JSON.stringify(summary)}`);
+    const untouched = await Promise.all(agentIds.slice(1).map(claimOf));
+    assert(
+      untouched.every((claim) => claim === null),
+      'deferred agents keep their attempts'
+    );
+  } finally {
+    await dropClaims(agentIds);
+  }
+});
+
+test('stuck-agent reports reclaim a crashed launch only after the stale window', async () => {
+  const now = caseClock(36);
+  const person = await createRealPerson('reclaim');
+  const createdAt = new Date(now.getTime() - 30 * HOUR_MS);
+  const crashed = await seedAgent(person, 'crashed', { createdAt });
+  const inFlight = await seedAgent(person, 'in-flight', { createdAt });
+  const frozen = { name: '--ai-- Not completed after 24h: frozen', promptText: 'frozen prompt' };
+  try {
+    for (const [agentId, ageMinutes] of [
+      [crashed, 11],
+      [inFlight, 5],
+    ] as const) {
+      await prisma.toolSideEffect.create({
+        data: {
+          operationKey: agentBugReportKey(agentId),
+          operationType: AGENT_BUG_REPORT_OPERATION_TYPE,
+          status: 'STARTED',
+          externalId: `dead-owner-${agentId}`,
+          request: { agentId, source: 'stuck_24h', attempts: 1, ...frozen },
+        },
+      });
+      const touchedAt = new Date(now.getTime() - ageMinutes * 60 * 1000);
+      await prisma.$executeRaw`UPDATE "ToolSideEffect" SET "updatedAt" = ${touchedAt} WHERE "operationKey" = ${agentBugReportKey(agentId)}`;
+    }
+    const fake = fakeLauncher();
+    await runStuckAgentBugReports(
+      { now, candidateAgentIds: [crashed, inFlight], firstCreatedAt: EPOCH },
+      fake
+    );
+    assert(fake.calls.length === 1, `only the stale claim is reclaimed, got ${fake.calls.length}`);
+    assert(
+      fake.calls[0].promptText === frozen.promptText && fake.calls[0].name === frozen.name,
+      'a reclaimed launch resends the crashed owner request'
+    );
+    assert((await claimOf(crashed))?.status === 'SUCCEEDED', 'reclaimed launch is recorded');
+    assert((await claimOf(inFlight))?.status === 'STARTED', 'an in-flight claim is left alone');
+  } finally {
+    await dropClaims([crashed, inFlight]);
+  }
+});
+
+test('stuck-agent reports skip an agent whose failed automated report was replaced by a manual one', async () => {
+  const now = caseClock(39);
+  const person = await createRealPerson('manual-over-failed');
+  const agentId = await seedAgent(person, 'manual-over-failed', {
+    createdAt: new Date(now.getTime() - 30 * HOUR_MS),
+  });
+  const scope = { candidateAgentIds: [agentId], firstCreatedAt: EPOCH };
+  try {
+    await runStuckAgentBugReports({ now, ...scope }, fakeLauncher({ failTimes: 1 }));
+    assert((await claimOf(agentId))?.status === 'FAILED', 'automated launch failed first');
+
+    await reportAgentBug(ANDY_ADMIN_USER_ID, agentId, 'Checkout never finished', {
+      launch: async () => ({ run_id: 'run-manual-2', name: 'n', url: 'https://boxes.dev/x' }),
+    });
+    const claim = await claimOf(agentId);
+    assert(
+      claim?.status === 'SUCCEEDED' && claim.externalId === 'run-manual-2',
+      `manual report replaces the failed claim, got ${claim?.status}/${claim?.externalId}`
+    );
+
+    const later = fakeLauncher();
+    await runStuckAgentBugReports({ now: new Date(now.getTime() + 2 * HOUR_MS), ...scope }, later);
+    assert(later.calls.length === 0, 'no automated retry after a manual report');
   } finally {
     await dropClaims([agentId]);
   }
@@ -322,14 +440,17 @@ test('stuck-agent reports launch once when two ticks race', async () => {
   }
 });
 
-test('stuck-agent reports stop at the daily cap', async () => {
+test('stuck-agent reports stop at the daily cap and report the newest runs first', async () => {
   const now = caseClock(18);
   const person = await createRealPerson('cap');
   const priorIds = Array.from({ length: MAX_STUCK_AGENT_REPORTS_PER_DAY - 2 }, () => randomUUID());
   const agentIds: string[] = [];
   for (let i = 0; i < 4; i += 1) {
+    // cap-0 is the newest run, cap-3 the oldest.
     agentIds.push(
-      await seedAgent(person, `cap-${i}`, { createdAt: new Date(now.getTime() - 30 * HOUR_MS) })
+      await seedAgent(person, `cap-${i}`, {
+        createdAt: new Date(now.getTime() - (30 + 10 * i) * HOUR_MS),
+      })
     );
   }
   try {
@@ -353,23 +474,36 @@ test('stuck-agent reports stop at the daily cap', async () => {
       `only the remaining daily budget launches, got ${fake.calls.length}`
     );
     assert(summary.capRemaining === 0, `cap exhausted, got ${summary.capRemaining}`);
+    const launched = fake.calls.map((call) => agentIdInPrompt(call.promptText));
+    assert(
+      launched.join() === agentIds.slice(0, 2).join(),
+      'the newest runs are reported first, while their worker logs are still retained'
+    );
   } finally {
     await dropClaims([...priorIds, ...agentIds]);
   }
 });
 
 test('stuck-agent reports never backfill runs created before the start line', async () => {
-  const now = new Date(STUCK_AGENT_REPORTS_FIRST_CREATED_AT.getTime() + 6 * HOUR_MS);
+  // 48h after the start line both runs are old enough; only the start line differs.
+  const now = new Date(STUCK_AGENT_REPORTS_FIRST_CREATED_AT.getTime() + 48 * HOUR_MS);
   const person = await createRealPerson('start-line');
   const before = await seedAgent(person, 'before-start', {
     createdAt: new Date(STUCK_AGENT_REPORTS_FIRST_CREATED_AT.getTime() - HOUR_MS),
   });
+  const after = await seedAgent(person, 'after-start', {
+    createdAt: new Date(STUCK_AGENT_REPORTS_FIRST_CREATED_AT.getTime() + HOUR_MS),
+  });
   try {
     const fake = fakeLauncher();
-    await runStuckAgentBugReports({ now, candidateAgentIds: [before] }, fake);
-    assert(fake.calls.length === 0, 'runs created before the start line are not reported');
+    await runStuckAgentBugReports({ now, candidateAgentIds: [before, after] }, fake);
+    const launched = fake.calls.map((call) => agentIdInPrompt(call.promptText));
+    assert(
+      launched.join() === after,
+      `only the run created after the start line is reported, got ${launched.join()}`
+    );
   } finally {
-    await dropClaims([before]);
+    await dropClaims([before, after]);
   }
 });
 

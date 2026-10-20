@@ -4,7 +4,9 @@
  *   operationKey  agent-bug-report:<agentId>   (unique → at most one claim per agent)
  *   status        STARTED   launch in flight (externalId = claim owner)
  *                 SUCCEEDED a report exists   (externalId = boxes.dev run id)
- *                 FAILED    launch failed     (request.nextAttemptAt = retry time, null = gave up)
+ *                 FAILED    launch failed     (request.nextAttemptAt = retry time)
+ *   request       the launch name + prompt frozen at the first claim, so every retry
+ *                 sends boxes.dev the identical request under the same idempotency key
  *
  * The manual Report Bug button and the 24h stuck-agent job both write it, so an
  * agent that already has either report is never reported again. A STARTED claim
@@ -79,47 +81,61 @@ export async function findStuckAgentCandidates(
         WHERE report."operationKey" = ${agentBugReportKey('')} || agent.id
           AND NOT ${reclaimableSql('report', input.now, input.staleBefore)})
       ${scope}
-    ORDER BY agent."createdAt" ASC
+    ORDER BY agent."createdAt" DESC
     LIMIT ${input.limit}
   `);
 }
 
-/** Atomically claim the agent's report slot; true only for the winning owner. */
+export interface StuckAgentLaunchRequest {
+  name: string;
+  promptText: string;
+}
+
+export interface StuckAgentBugReportClaim extends StuckAgentLaunchRequest {
+  attempts: number;
+}
+
+/**
+ * Atomically claim the agent's report slot. Returns the frozen launch request
+ * (the first claim's name + prompt) for the winning owner, or null.
+ */
 export async function claimStuckAgentBugReport(
   agentId: string,
   ownerId: string,
+  launch: StuckAgentLaunchRequest,
+  claimedAt: Date,
   now: Date,
   staleBefore: Date
-): Promise<boolean> {
-  const request = { agentId, source: 'stuck_24h', attempts: 1 };
-  const rows = await prisma.$queryRaw<Array<{ externalId: string | null }>>(Prisma.sql`
+): Promise<StuckAgentBugReportClaim | null> {
+  const request = { agentId, source: 'stuck_24h', attempts: 1, ...launch };
+  const rows = await prisma.$queryRaw<Array<{ externalId: string | null; request: unknown }>>(
+    Prisma.sql`
     INSERT INTO "ToolSideEffect"
       (id, "operationKey", "operationType", status, "externalId", request, "createdAt", "updatedAt")
     VALUES
       (${randomUUID()}, ${agentBugReportKey(agentId)}, ${AGENT_BUG_REPORT_OPERATION_TYPE},
-       'STARTED', ${ownerId}, ${JSON.stringify(request)}::jsonb, ${now}, ${now})
+       'STARTED', ${ownerId}, ${JSON.stringify(request)}::jsonb, ${claimedAt}, ${claimedAt})
     ON CONFLICT ("operationKey") DO UPDATE SET
       status = 'STARTED',
       "externalId" = EXCLUDED."externalId",
-      request = COALESCE("ToolSideEffect".request, '{}'::jsonb) || jsonb_build_object(
-        'attempts', COALESCE(("ToolSideEffect".request->>'attempts')::int, 0) + 1,
-        'nextAttemptAt', NULL),
+      request = EXCLUDED.request || COALESCE("ToolSideEffect".request, '{}'::jsonb)
+        || jsonb_build_object(
+          'attempts', COALESCE(("ToolSideEffect".request->>'attempts')::int, 0) + 1,
+          'nextAttemptAt', NULL),
       error = NULL,
       "updatedAt" = EXCLUDED."updatedAt"
     WHERE ${reclaimableSql('ToolSideEffect', now, staleBefore)}
-    RETURNING "externalId"
-  `);
-  return rows[0]?.externalId === ownerId;
-}
-
-/** Attempts recorded on the claim, including the current one. */
-export async function readAgentBugReportAttempts(agentId: string): Promise<number> {
-  const row = await prisma.toolSideEffect.findUnique({
-    where: { operationKey: agentBugReportKey(agentId) },
-    select: { request: true },
-  });
-  const attempts = (row?.request as { attempts?: unknown } | null)?.attempts;
-  return typeof attempts === 'number' ? attempts : 0;
+    RETURNING "externalId", request
+  `
+  );
+  const row = rows[0];
+  if (row?.externalId !== ownerId) return null;
+  const stored = (row.request ?? {}) as Partial<StuckAgentBugReportClaim>;
+  return {
+    name: typeof stored.name === 'string' ? stored.name : launch.name,
+    promptText: typeof stored.promptText === 'string' ? stored.promptText : launch.promptText,
+    attempts: typeof stored.attempts === 'number' ? stored.attempts : 1,
+  };
 }
 
 export async function markStuckAgentBugReportLaunched(
@@ -139,19 +155,19 @@ export async function markStuckAgentBugReportLaunched(
   return result.count === 1;
 }
 
-/** Record a failed launch; `nextAttemptAt` null means no further retries. */
+/** Record a failed launch and when it may be retried. */
 export async function markStuckAgentBugReportFailed(
   agentId: string,
   ownerId: string,
   error: string,
-  nextAttemptAt: Date | null
+  nextAttemptAt: Date
 ): Promise<void> {
   await prisma.$executeRaw(Prisma.sql`
     UPDATE "ToolSideEffect" SET
       status = 'FAILED',
       error = ${error.slice(0, 2000)},
       request = COALESCE(request, '{}'::jsonb)
-        || jsonb_build_object('nextAttemptAt', ${nextAttemptAt?.toISOString() ?? null}::text),
+        || jsonb_build_object('nextAttemptAt', ${nextAttemptAt.toISOString()}::text),
       "updatedAt" = now()
     WHERE "operationKey" = ${agentBugReportKey(agentId)}
       AND status = 'STARTED' AND "externalId" = ${ownerId}

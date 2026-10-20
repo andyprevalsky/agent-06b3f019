@@ -12,7 +12,7 @@
  *     → launchBugReportAutomation  boxes.dev Bug Report automation, same /rca prompt
  *                                  syntax as the Report Bug button, per-agent
  *                                  idempotency key
- *     → SUCCEEDED (run id) | FAILED (retry with backoff, then give up)
+ *     → SUCCEEDED (run id) | FAILED (retry with backoff ≤24h; the first failure ends the tick)
  *
  * The DB is the only state: a missed tick, restart, or deploy catches up on the
  * next tick. No Slack. Work per tick is one indexed window query plus at most
@@ -36,7 +36,6 @@ import {
   findStuckAgentCandidates,
   markStuckAgentBugReportFailed,
   markStuckAgentBugReportLaunched,
-  readAgentBugReportAttempts,
   type StuckAgentCandidate,
 } from './repoAgentBugReports';
 
@@ -52,7 +51,6 @@ const MAX_LAUNCHES_PER_TICK = 10;
 export const MAX_STUCK_AGENT_REPORTS_PER_DAY = 20;
 /** A STARTED claim older than this belongs to a crashed launch and is reclaimable. */
 const STALE_CLAIM_MS = 10 * 60 * 1000;
-const MAX_LAUNCH_ATTEMPTS = 6;
 
 export function buildStuckAgentBugDescription(status: string): string {
   return [
@@ -77,9 +75,12 @@ export function stuckAgentBugReportIdempotencyKey(agentId: string): string {
   return `rose-stuck-agent-24h-${agentId}`;
 }
 
-/** Exponential backoff from 1h, capped at 24h; null after the last attempt. */
-function nextAttemptAt(now: Date, attempts: number): Date | null {
-  if (attempts >= MAX_LAUNCH_ATTEMPTS) return null;
+/**
+ * Exponential backoff from 1h, capped at 24h. There is no give-up: a failing run
+ * keeps retrying at most daily until it ages out of the lookback window, so a
+ * provider outage or rotated secret cannot permanently drop stuck agents.
+ */
+function nextAttemptAt(now: Date, attempts: number): Date {
   const delay = Math.min(HOUR_MS * 2 ** Math.max(0, attempts - 1), 24 * HOUR_MS);
   return new Date(now.getTime() + delay);
 }
@@ -103,6 +104,8 @@ export interface StuckAgentBugReportSummary {
   launched: number;
   failed: number;
   claimLost: number;
+  /** Candidates left for the next tick after a launch failure stopped this one. */
+  deferred: number;
   capRemaining: number;
 }
 
@@ -114,43 +117,68 @@ async function reportStuckAgent(
   launch: (args: ReportBugLaunchArgs) => Promise<ReportBugLaunch>
 ): Promise<LaunchOutcome> {
   const ownerId = randomUUID();
-  const staleBefore = new Date(now.getTime() - STALE_CLAIM_MS);
-  if (!(await claimStuckAgentBugReport(agent.id, ownerId, now, staleBefore))) {
-    return 'claim_lost';
-  }
-
-  try {
-    const launched = await launch({
+  const claim = await claimStuckAgentBugReport(
+    agent.id,
+    ownerId,
+    {
       name: buildStuckAgentBugTitle(agent.title),
       promptText: buildBugReportPrompt(agent.id, buildStuckAgentBugDescription(agent.status)),
+    },
+    new Date(),
+    now,
+    new Date(now.getTime() - STALE_CLAIM_MS)
+  );
+  if (claim === null) return 'claim_lost';
+
+  let runId: string;
+  try {
+    const launched = await launch({
+      name: claim.name,
+      promptText: claim.promptText,
       idempotencyKey: stuckAgentBugReportIdempotencyKey(agent.id),
     });
-    const recorded = await markStuckAgentBugReportLaunched(
-      agent.id,
-      ownerId,
-      launched.run_id,
-      new Date()
-    );
-    log.info('Launched stuck-agent bug report', {
-      rose_agent_id: agent.id,
-      agent_status: agent.status,
-      run_id: launched.run_id,
-      recorded,
-    });
-    return 'launched';
+    runId = launched.run_id;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const attempts = await readAgentBugReportAttempts(agent.id);
-    const retryAt = nextAttemptAt(now, attempts);
-    await markStuckAgentBugReportFailed(agent.id, ownerId, message, retryAt);
+    const retryAt = nextAttemptAt(now, claim.attempts);
+    try {
+      await markStuckAgentBugReportFailed(agent.id, ownerId, message, retryAt);
+    } catch (recordError) {
+      // The claim stays STARTED and becomes reclaimable after STALE_CLAIM_MS.
+      log.error('Failed to record stuck-agent bug report launch failure', {
+        rose_agent_id: agent.id,
+        error: recordError instanceof Error ? recordError.message : String(recordError),
+      });
+    }
     log.error('Stuck-agent bug report launch failed', {
       rose_agent_id: agent.id,
-      attempts,
-      next_attempt_at: retryAt?.toISOString() ?? 'none (gave up)',
+      attempts: claim.attempts,
+      next_attempt_at: retryAt.toISOString(),
       error: message,
     });
     return 'failed';
   }
+
+  // The run exists now. If recording it fails, the STARTED claim is reclaimed
+  // after STALE_CLAIM_MS and the identical keyed request returns this same run.
+  let recorded = false;
+  try {
+    recorded = await markStuckAgentBugReportLaunched(agent.id, ownerId, runId, new Date());
+  } catch (error) {
+    log.error('Launched stuck-agent bug report but could not record it', {
+      rose_agent_id: agent.id,
+      run_id: runId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  log.info('Launched stuck-agent bug report', {
+    rose_agent_id: agent.id,
+    agent_status: agent.status,
+    run_id: runId,
+    attempts: claim.attempts,
+    recorded,
+  });
+  return 'launched';
 }
 
 export async function runStuckAgentBugReports(
@@ -164,6 +192,7 @@ export async function runStuckAgentBugReports(
     launched: 0,
     failed: 0,
     claimLost: 0,
+    deferred: 0,
     capRemaining: 0,
   };
   if (!summary.configured) return summary;
@@ -189,11 +218,17 @@ export async function runStuckAgentBugReports(
   summary.candidates = candidates.length;
 
   const launch = deps.launch ?? launchBugReportAutomation;
-  for (const agent of candidates) {
+  for (const [index, agent] of candidates.entries()) {
     const outcome = await reportStuckAgent(agent, now, launch);
     if (outcome === 'launched') summary.launched += 1;
-    else if (outcome === 'failed') summary.failed += 1;
-    else summary.claimLost += 1;
+    else if (outcome === 'claim_lost') summary.claimLost += 1;
+    else {
+      // A failing launch is usually systemic (boxes.dev down, rotated secret), so
+      // stop here instead of spending every remaining candidate's attempt on it.
+      summary.failed += 1;
+      summary.deferred = candidates.length - index - 1;
+      break;
+    }
   }
   summary.capRemaining -= summary.launched;
   return summary;
