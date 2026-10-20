@@ -45,7 +45,7 @@ export async function findIntegrationAccount(userId: string, name: string, accou
   });
 }
 
-async function lockIntegrationName(tx: Tx, userId: string, name: string): Promise<void> {
+export async function lockIntegrationName(tx: Tx, userId: string, name: string): Promise<void> {
   // Same key as repo.upsertIntegrationRaw so every multi-account writer of a
   // provider is serialized with the compute credential writers.
   await tx.$queryRaw`

@@ -72,7 +72,6 @@ export { handleOAuthCallback } from './oauthService.callback';
 
 export {
   processGenericUpload,
-  processLinkedInUpload,
   processContactsUpload,
   processEmailZipUpload,
   processIMessageUpload,

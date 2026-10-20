@@ -20,6 +20,7 @@ import { findPlaidItemForUser, PlaidItemStatus } from './repo.plaid';
 import { disconnectGmailAccount, GmailAccountNotFoundError } from './service';
 import { disconnectPlaidItem } from './service.plaid';
 import { deleteLanternIntegration, LanternCredentialError } from './service.lantern';
+import { deleteLinkedInAccountData } from './service.linkedinImport';
 import { KNOWN_SOURCES as DOCUMENT_SOURCES } from './uploadService.documents';
 
 /** Lanes that own a provider's account-scoped cleanup (plan rows I1–I8). */
@@ -89,6 +90,16 @@ async function deletePlaidAccount(ctx: AccountCleanupContext): Promise<boolean> 
   return true;
 }
 
+/**
+ * LinkedIn account = one member: its messages (ids prefixed with the account;
+ * the default account owns every unprefixed legacy id) and its row, which holds
+ * the imported profile, positions and sync history. Contacts are shared Person
+ * records, deduplicated across every source, so they are kept.
+ */
+async function deleteLinkedInAccount(ctx: AccountCleanupContext): Promise<boolean> {
+  return deleteLinkedInAccountData(ctx.userId, ctx.accountId);
+}
+
 async function deleteLanternAccount(ctx: AccountCleanupContext): Promise<boolean> {
   if (ctx.accountId !== '') return false;
   try {
@@ -133,10 +144,7 @@ const EXACT: Record<string, IntegrationAccountAdapter> = {
     list: 'row',
     cleanup: todo('L-INT-TELEGRAM', 'messages and sessions are not keyed by Telegram account'),
   },
-  linkedin: {
-    list: 'row',
-    cleanup: todo('L-INT-LINKEDIN', 'imported connections are not keyed by LinkedIn account'),
-  },
+  linkedin: { list: 'row', cleanup: hook(deleteLinkedInAccount) },
   browser_fingerprint: {
     list: 'row',
     cleanup: todo('L-INT-COOKIES', 'fingerprint rows are not keyed by browser profile'),

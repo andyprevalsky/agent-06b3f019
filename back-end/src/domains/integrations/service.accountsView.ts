@@ -14,13 +14,11 @@
 import type { EmailCredentialSource, PlaidItemSource } from './repo.accounts';
 import type { ProgressRow } from './repo.progress';
 import { resolveAccountAdapter } from './service.accountRegistry';
+import { asSyncState, iso, progressOf, snapshotOf } from './service.progressSnapshot';
 import {
-  SYNC_STATES,
   toWireAccountId,
   type AccountsByProvider,
   type IntegrationAccount,
-  type IntegrationAccountProgress,
-  type ProgressSnapshot,
   type SyncState,
 } from './syncAccountsContract';
 
@@ -54,13 +52,6 @@ const ROW_STATUS_HEALTH: Record<string, SyncState> = {
   EXPIRED: 'needs_reconnect',
   NOT_CONNECTED: 'idle',
 };
-
-const iso = (value: Date | null): string | null => (value === null ? null : value.toISOString());
-const num = (value: bigint | null): number | null => (value === null ? null : Number(value));
-
-function asSyncState(value: string): SyncState {
-  return (SYNC_STATES as readonly string[]).includes(value) ? (value as SyncState) : 'idle';
-}
 
 function rowAccount(row: AccountViewRow): KnownAccount {
   const health = ROW_STATUS_HEALTH[row.status] ?? 'idle';
@@ -120,45 +111,6 @@ function knownAccountsOf(row: AccountViewRow, plaidItems: PlaidItemSource[]): Kn
   if (kind === 'email_credentials') return credentialAccounts(row);
   if (kind === 'plaid_items') return plaidAccounts(row, plaidItems);
   return [rowAccount(row)];
-}
-
-export function progressOf(row: ProgressRow | null, state: SyncState): IntegrationAccountProgress {
-  if (row === null) {
-    return {
-      pct: state === 'synced' ? 100 : null,
-      done: null,
-      total: null,
-      unit: null,
-      eta_sec: null,
-      phase: null,
-      startedAt: null,
-      updatedAt: null,
-    };
-  }
-  return {
-    pct: state === 'synced' ? 100 : row.pct,
-    done: num(row.done),
-    total: num(row.total),
-    unit: row.unit,
-    eta_sec: row.etaSec,
-    phase: row.phase,
-    startedAt: iso(row.startedAt),
-    updatedAt: iso(row.updatedAt),
-  };
-}
-
-export function snapshotOf(row: ProgressRow): ProgressSnapshot {
-  const state = asSyncState(row.state);
-  return {
-    provider: row.provider,
-    accountId: toWireAccountId(row.accountId),
-    runId: row.runId,
-    seq: row.seq,
-    state,
-    progress: progressOf(row, state),
-    lastSyncAt: iso(row.lastSyncedAt),
-    lastError: row.lastError,
-  };
 }
 
 function toAccount(known: KnownAccount, progress: ProgressRow | null): IntegrationAccount {
