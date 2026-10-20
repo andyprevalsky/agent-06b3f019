@@ -5253,8 +5253,8 @@ async def test_cc_manager_usage_limit_row_is_paused_with_user_text():
     user_text = "Paused: Claude usage limit reached (resets 4:50 PM UTC). Work is saved."
     instruction = (
         "Code agent stopped: the Claude Code usage limit was reached (resets 2026-10-20T16:50:00.000Z). "
-        "Its work is saved on branch rose/a-1. Retry now with spawn_agent(type='code', code_session_id='cs-1', "
-        "goal=<the same goal>): ..."
+        "Its work is saved on branch rose/a-1.\nRespawn with spawn_agent(type='code', code_session_id='cs-1', "
+        "goal=<the same goal>) to continue: ..."
     )
     usage_limit = {"provider": "claude", "resets_at": "2026-10-20T16:50:00.000Z", "limit_type": "five_hour"}
     retry = {"tool": "spawn_agent", "type": "code", "code_session_id": "cs-1"}

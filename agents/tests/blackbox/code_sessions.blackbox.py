@@ -199,6 +199,8 @@ class _Backend:
         self.availability: list[dict] = []
         self.availability_own_only: list[bool] = []
         self.local = False
+        # What the usage-limit answer says a respawn leases (the backend's stored view).
+        self.next_lease = dict(_SHARED_CLAUDE_LEASE)
 
     async def create_session(self, **kwargs):
         self.created.append(kwargs)
@@ -274,7 +276,7 @@ class _Backend:
             "marked": f"{code_provider}_pool:tok-1",
             "resets_at": "2026-10-03T00:50:00.000Z",
             "accounts": [dict(account) for account in _ACCOUNTS],
-            "next_lease": dict(_NEXT_LEASE),
+            "next_lease": dict(self.next_lease),
         }
 
     async def credential_availability(self, user_id, own_only=False):
@@ -326,9 +328,11 @@ class _Backend:
 _ACCOUNTS = [
     {"provider": "claude", "label": "me@example.com", "status": "limited",
      "limited_until": "2026-10-03T00:50:00.000Z", "this_run": True},
-    {"provider": "codex", "label": "codex@example.com", "status": "available", "limited_until": None, "this_run": False},
+    {"provider": "codex", "label": "codex@example.com", "status": "available",
+     "limited_until": None, "this_run": False},
 ]
-_NEXT_LEASE = {"provider": "codex", "label": "codex@example.com", "available_now": True, "available_at": None}
+_SHARED_CLAUDE_LEASE = {"provider": "claude", "label": None, "available_now": True, "available_at": None}
+_CODEX_LEASE = {"provider": "codex", "label": "codex@example.com", "available_now": True, "available_at": None}
 _ACCOUNT_LINES = (
     "Connected accounts:\n"
     "- Claude Code me@example.com: limited until 2026-10-03T00:50:00.000Z (this run)\n"
@@ -458,6 +462,8 @@ async def _usage_limit_then_retry(availability_on_retry: dict) -> tuple[dict, di
     session_home = _SessionHome(extra_env={"STUB_MODE": "rate_limit"})
     backend = _Backend(session_home)
     backend.availability = [{"claude": True, "codex": True}, availability_on_retry]
+    if not availability_on_retry.get("claude"):
+        backend.next_lease = dict(_CODEX_LEASE)
     with backend.patched():
         first = await asyncio.wait_for(
             ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args()), timeout=30
@@ -491,13 +497,15 @@ async def test_usage_limit_saves_session_and_retry_leases_next_credential():
         assert first["message"] == (
             "Code agent stopped: the Claude Code usage limit was reached on me@example.com "
             "(resets 2026-10-03T00:50:00.000Z). Its work is saved on branch rose/write-answer-0a1b2c3d "
-            "(checkpoint 1).\n" + _ACCOUNT_LINES + f"Respawn with spawn_agent(type='code', code_session_id='{session_id}', "
+            "(checkpoint 1).\n"
+            + _ACCOUNT_LINES
+            + f"Respawn with spawn_agent(type='code', code_session_id='{session_id}', "
             "goal=<the same goal>) to continue: the respawn leases an account that is not rate-limited "
-            "(now Codex codex@example.com) and resumes from the latest checkpoint."
+            "(now a shared Claude Code account) and resumes from the latest checkpoint."
         ), first["message"]
         assert first["usage_limit"]["resets_at"] == "2026-10-03T00:50:00.000Z", first["usage_limit"]
         assert first["usage_limit"]["accounts"] == _ACCOUNTS, first["usage_limit"]
-        assert first["usage_limit"]["next_lease"] == _NEXT_LEASE, first["usage_limit"]
+        assert first["usage_limit"]["next_lease"] == _SHARED_CLAUDE_LEASE, first["usage_limit"]
         assert backend.usage_reports == [("task-1", "claude", 1790988600)], backend.usage_reports
         assert [call.get("reason") for call in backend.closed][0] == "usage_limit", backend.closed
         # The UI reads a resumable pause with plain user text; the parent keeps the retry.
@@ -582,6 +590,7 @@ async def test_local_usage_limit_retries_on_the_mac_with_the_other_login():
     session_home = _SessionHome(extra_env={"STUB_MODE": "rate_limit"})
     backend = _Backend(session_home)
     backend.availability = [{"claude": True, "codex": True}, {"claude": False, "codex": True}]
+    backend.next_lease = dict(_CODEX_LEASE)
     try:
         with backend.patched():
             first = await asyncio.wait_for(

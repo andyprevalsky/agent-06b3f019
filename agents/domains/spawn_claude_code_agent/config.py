@@ -67,8 +67,10 @@ CODE_AGENT_ERROR_RETRY_LIMIT: Final[int] = 5
 CODE_AGENT_PAUSED_STATUS: Final[str] = "paused"
 
 # C15: the CLI stopped on a provider usage limit (structured signal). The
-# session is saved; the parent retries with the same code_session_id and the
-# retry leases another token, or the other provider when none is left.
+# session is saved and paused; the parent gets the error with the user's
+# connected accounts and decides. A respawn with the same code_session_id
+# leases an account that is not rate-limited (the other provider when the
+# session's has none) and resumes from the latest checkpoint.
 CODE_AGENT_USAGE_LIMIT_STATUS: Final[str] = "usage_limit"
 
 # Structured transcript rows (utils/code_transcript.py) are persisted in batches at most
