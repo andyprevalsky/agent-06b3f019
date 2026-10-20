@@ -27,7 +27,11 @@ async function callSlack(method: string, body: Record<string, unknown>): Promise
     // Slack reports logical errors with HTTP 200 and `ok: false`.
     const data = (await response.json().catch(() => ({}))) as { ok?: boolean; error?: string };
     if (data.ok !== true) {
-      log.warn('Slack auto-RCA call not ok', { method, status: response.status, error: data.error });
+      log.warn('Slack auto-RCA call not ok', {
+        method,
+        status: response.status,
+        error: data.error,
+      });
       return false;
     }
     return true;

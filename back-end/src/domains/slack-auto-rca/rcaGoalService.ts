@@ -45,7 +45,7 @@ export function buildRcaGoal(alert: SlackAutoRcaErrorAlert, repoUrl: string): st
     '',
     "Method: follow the repository's RCA methodology exactly. In the code session, first read `.claude/commands/rca.md` and `docs/root-cause-analysis.md` in full, then follow them: gather runtime evidence before theorizing, search `docs/rca/cases/`, trace the critical path to the first-bad boundary, build a local reproduction that fails on the bug, fix the root cause so the same reproduction passes, and register the regression test in its owning suite.",
     '',
-    'This is the automated production-alert mode: nobody will answer approval questions in chat. If the right fix touches an approval-gated surface (prompt or other LLM-visible text, Zod schemas, benchmark definitions or timeouts, production env vars), open the pull request as a draft and list the approval it needs. Otherwise open a pull request against main with the fix, the regression test and the RCA case file. Never merge or deploy.',
+    'Work autonomously and do not stop to wait for approval. If the right fix touches an approval-gated surface (prompt or other LLM-visible text, Zod schemas, benchmark definitions or timeouts, production env vars), open the pull request as a draft and list the approval it needs. Otherwise open a pull request against main with the fix, the regression test and the RCA case file. Never merge or deploy.',
     '',
     'If you cannot reproduce the failure, say so, report it as an open observability gap and do not open a speculative fix.',
     '',

@@ -2,7 +2,7 @@
  * Slack Events API boundary for auto-RCA: signature verification and event
  * parsing. Incident handling lives in incidentService.ts.
  *
- *   #errors top-level card from a configured alert bot ──► error_alert
+ *   #errors top-level card posted by this Slack app     ──► error_alert
  *   human reply inside an alert thread                  ──► feedback
  *   url_verification                                     ──► challenge
  *   anything else (edits, bot replies, other channels)  ──► ignored
@@ -16,6 +16,7 @@ const MAX_FEEDBACK_LENGTH = 8000;
 const SLACK_TS = /^[0-9]{10,}\.[0-9]{6}$/;
 const SLACK_USER_ID = /^[UW][A-Z0-9]{8,32}$/;
 const SLACK_BOT_ID = /^B[A-Z0-9]{8,32}$/;
+const SLACK_APP_ID = /^A[A-Z0-9]{8,32}$/;
 const SLACK_EVENT_ID = /^Ev[A-Za-z0-9]{8,64}$/;
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 const MAX_MENTIONED_AGENTS = 10;
@@ -110,11 +111,17 @@ export function mentionedAgentIds(report: string): string[] {
   return [...ids];
 }
 
+/**
+ * Only cards our own Slack app posted are error alerts: `api_app_id` is the app
+ * the signed delivery belongs to and `app_id` is the app that posted the
+ * message. The backend and the worker post alerts with that app's bot token, so
+ * another integration's bot in the channel can never start an RCA.
+ */
 function parseErrorAlert(
   payload: Record<string, unknown>,
   event: Record<string, unknown>
 ): ParsedSlackAutoRcaEvent {
-  const { channel, ts, bot_id: botId, text } = event;
+  const { channel, ts, bot_id: botId, app_id: appId, text } = event;
   const eventId = payload.event_id;
   if (
     channel !== SLACK_ERROR_CHANNEL_ID ||
@@ -122,6 +129,9 @@ function parseErrorAlert(
     !SLACK_TS.test(ts) ||
     typeof botId !== 'string' ||
     !SLACK_BOT_ID.test(botId) ||
+    typeof appId !== 'string' ||
+    !SLACK_APP_ID.test(appId) ||
+    appId !== payload.api_app_id ||
     typeof eventId !== 'string' ||
     !SLACK_EVENT_ID.test(eventId) ||
     typeof text !== 'string' ||

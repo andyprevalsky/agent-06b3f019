@@ -95,7 +95,8 @@ function slackCodeBlock(value: string, limit: number): string {
   return value.replace(/```/g, "''' ").slice(0, limit);
 }
 
-function buildSlackPayload(input: AlertErrorInput): Record<string, unknown> {
+/** The #errors card. Exported so the auto-RCA blackbox replays this exact shape. */
+export function buildSlackPayload(input: AlertErrorInput): Record<string, unknown> {
   const feLink = input.agentId ? `${FE_BASE}/?agent-id=${input.agentId}` : null;
   const diag = input.agentId
     ? `cd agents && python benchmarks/agent_logs.py ${input.agentId} --url ${PROD_BACKEND} --tree --diagnostics`

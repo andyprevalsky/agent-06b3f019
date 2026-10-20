@@ -22,8 +22,6 @@ export interface SlackAutoRcaConfig {
   ownerUserId: string;
   /** GitHub repository the RCA code agent clones. */
   repoUrl: string;
-  /** Slack bot ids whose top-level #errors posts are error alerts. */
-  alertBotIds: ReadonlySet<string>;
   /** Slack users allowed to steer a running RCA from its thread. */
   feedbackUserIds: ReadonlySet<string>;
   /** One RCA agent per error signature per window. */
@@ -37,7 +35,6 @@ export function getSlackAutoRcaConfig(env: NodeJS.ProcessEnv = process.env): Sla
     enabled: env.AUTO_RCA_ENABLED === '1',
     ownerUserId: (env.SLACK_AUTO_RCA_OWNER_USER_ID ?? '').trim(),
     repoUrl: (env.SLACK_AUTO_RCA_REPO_URL ?? 'https://github.com/Rose-Ai-Labs/rose').trim(),
-    alertBotIds: csv(env.SLACK_AUTO_RCA_ALERT_BOT_IDS),
     feedbackUserIds: csv(env.SLACK_AUTO_RCA_FEEDBACK_USER_IDS),
     signatureWindowMs:
       Number.isFinite(windowMinutes) && windowMinutes >= 1

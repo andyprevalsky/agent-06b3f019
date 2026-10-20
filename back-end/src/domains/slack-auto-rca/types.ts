@@ -7,7 +7,7 @@ export interface SlackAutoRcaFeedback {
   text: string;
 }
 
-/** A top-level alert card posted to the error channel by a configured bot. */
+/** A top-level alert card our own Slack app posted to the error channel. */
 export interface SlackAutoRcaErrorAlert {
   channel: string;
   messageTs: string;

@@ -150,7 +150,10 @@ async function run(): Promise<void> {
       2,
       'each affected agent keeps its own Slack card'
     );
-    assert.ok(calls.every((c) => !c.url.includes('api.github.com')), 'no GitHub dispatch');
+    assert.ok(
+      calls.every((c) => !c.url.includes('api.github.com')),
+      'no GitHub dispatch'
+    );
     delete process.env.AUTO_RCA_ENABLED;
     delete process.env.GITHUB_DISPATCH_TOKEN;
 
@@ -201,7 +204,10 @@ async function run(): Promise<void> {
     assert.strictEqual(card.channel, 'C_INPUT', 'card goes to the configured error channel');
     assert.strictEqual(card.thread_ts, undefined, 'the alert card is top-level, not a reply');
     assert.ok(card.text.includes('bot token path'), 'card fallback text carries the error');
-    assert.ok(calls.every((c) => !c.url.includes('api.github.com')), 'no GitHub dispatch');
+    assert.ok(
+      calls.every((c) => !c.url.includes('api.github.com')),
+      'no GitHub dispatch'
+    );
 
     // --- 11. Within the throttle window the same agent+signature posts nothing. ---
     alertError({ source: 'agent_workflow', message: 'bot token path', agentId: 'agent-bot' });

@@ -11,7 +11,11 @@ export function isUniqueViolation(error: unknown): boolean {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
 }
 
-/** Insert the incident for this signature window, or return the existing one. */
+/**
+ * Insert the incident for this signature window, or return the existing one.
+ * `skipDuplicates` is ON CONFLICT DO NOTHING, so concurrent cards with one
+ * signature converge on a single row without a unique-violation round trip.
+ */
 export async function claimIncident(data: {
   signature: string;
   windowStart: Date;
@@ -20,18 +24,17 @@ export async function claimIncident(data: {
   slackChannel: string;
   slackThreadTs: string;
 }): Promise<{ incident: SlackAutoRcaIncidentRow; created: boolean }> {
-  try {
-    return { incident: await prisma.slackAutoRcaIncident.create({ data }), created: true };
-  } catch (error) {
-    if (!isUniqueViolation(error)) throw error;
-  }
-  const existing = await prisma.slackAutoRcaIncident.findUnique({
+  const inserted = await prisma.slackAutoRcaIncident.createMany({
+    data: [data],
+    skipDuplicates: true,
+  });
+  const incident = await prisma.slackAutoRcaIncident.findUnique({
     where: {
       signature_windowStart: { signature: data.signature, windowStart: data.windowStart },
     },
   });
-  if (existing === null) throw new Error('Slack auto-RCA incident vanished after a unique conflict');
-  return { incident: existing, created: false };
+  if (incident === null) throw new Error('Slack auto-RCA incident missing after its insert');
+  return { incident, created: inserted.count > 0 };
 }
 
 /** Record a Slack delivery. Returns false when Slack already delivered it. */
@@ -42,13 +45,11 @@ export async function claimEvent(data: {
   slackChannel: string;
   slackTs: string;
 }): Promise<boolean> {
-  try {
-    await prisma.slackAutoRcaEvent.create({ data });
-    return true;
-  } catch (error) {
-    if (isUniqueViolation(error)) return false;
-    throw error;
-  }
+  const inserted = await prisma.slackAutoRcaEvent.createMany({
+    data: [data],
+    skipDuplicates: true,
+  });
+  return inserted.count > 0;
 }
 
 /** Undo a claim whose side effect failed so Slack's redelivery can retry it. */
@@ -138,6 +139,14 @@ export async function claimStartNotification(incidentId: string): Promise<boolea
   return claimed.count > 0;
 }
 
+/** Give back the start reply claim after Slack refused the post. */
+export async function releaseStartNotification(incidentId: string): Promise<void> {
+  await prisma.slackAutoRcaIncident.updateMany({
+    where: { id: incidentId },
+    data: { startNotifiedAt: null },
+  });
+}
+
 /** Let the agent's owner clone the configured repository in code sessions. */
 export async function ensureGithubRepoAccess(userId: string, repoUrl: string): Promise<void> {
   await prisma.githubRepoAccess.upsert({
@@ -165,7 +174,11 @@ export async function rotateIncidentAgent(
 /** A created row whose workflow never started must not look like a live run. */
 export async function markAgentStartFailed(agentId: string, message: string): Promise<void> {
   await prisma.agent.updateMany({
-    where: { id: agentId, status: { in: ['STARTING_UP', 'ACTIVE'] }, temporalFirstExecutionRunId: null },
+    where: {
+      id: agentId,
+      status: { in: ['STARTING_UP', 'ACTIVE'] },
+      temporalFirstExecutionRunId: null,
+    },
     data: { status: 'FAILED', statusMessage: message.slice(0, 500) },
   });
 }

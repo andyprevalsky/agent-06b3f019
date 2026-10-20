@@ -122,11 +122,13 @@ async function ensureRcaAgent(
 
 async function notifyStarted(incident: SlackAutoRcaIncidentRow, cfg: SlackAutoRcaConfig) {
   if (!(await repo.claimStartNotification(incident.id))) return;
-  await postThreadReply(
+  const posted = await postThreadReply(
     incident.slackChannel,
     incident.slackThreadTs,
     `:mag: Rose is root-causing this error on ${cfg.repoUrl}. <${agentLink(cfg, incident.agentId)}|Open the RCA agent>`
   );
+  // Leave the reply to the next delivery of this incident instead of losing it.
+  if (!posted) await repo.releaseStartNotification(incident.id);
 }
 
 async function appendOccurrence(
@@ -167,23 +169,28 @@ async function deliverToAgent(
     incident.ownerUserId
   );
   if ('error' in result) {
-    throw new SlackAutoRcaError(`RCA agent ${incident.agentId} rejected a message: ${result.error}`);
+    throw new SlackAutoRcaError(
+      `RCA agent ${incident.agentId} rejected a message: ${result.error}`
+    );
   }
 }
 
 /** Handle a top-level error card in the Slack error channel. */
-export async function handleErrorAlert(alert: SlackAutoRcaErrorAlert): Promise<SlackAutoRcaOutcome> {
+export async function handleErrorAlert(
+  alert: SlackAutoRcaErrorAlert
+): Promise<SlackAutoRcaOutcome> {
   const cfg = getSlackAutoRcaConfig();
-  if (!cfg.enabled) return { action: 'ignored', reason: 'auto_rca_disabled' };
-  if (!cfg.alertBotIds.has(alert.botId)) {
-    log.warn('Ignoring #errors card from a bot not in SLACK_AUTO_RCA_ALERT_BOT_IDS', {
-      bot_id: alert.botId,
+  if (!cfg.enabled) {
+    log.info('AUTO_RCA_ENABLED is not 1; not starting an RCA for this error card', {
+      slack_ts: alert.messageTs,
     });
-    return { action: 'ignored', reason: 'bot_not_allowed' };
+    return { action: 'ignored', reason: 'auto_rca_disabled' };
   }
   const owner = requireOwner(cfg);
   if (await repo.anyAgentOwnedByRcaIncident(mentionedAgentIds(alert.report))) {
-    log.error('An auto-RCA agent failed; not starting an RCA of the RCA', { slack_ts: alert.messageTs });
+    log.error('An auto-RCA agent failed; not starting an RCA of the RCA', {
+      slack_ts: alert.messageTs,
+    });
     return { action: 'ignored', reason: 'rca_agent_failure' };
   }
   const { incident } = await repo.claimIncident({
