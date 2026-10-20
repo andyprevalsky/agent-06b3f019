@@ -6,6 +6,7 @@ import { type NextFunction, type Response, Router } from 'express';
 import { type AuthRequest, authenticate } from '../../providers/auth';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
+import { InvalidFoundryCooldownRequest } from '../../providers/foundryDeploymentCooldown';
 import { computeTokenAuthority } from './config';
 import * as service from './service';
 
@@ -200,6 +201,51 @@ router.get(
   })
 );
 
+/** Shared Azure Foundry cooldowns for `keys=<region host>:<deployment>,...`.
+ *  Agents read every deployment their route plan may try in one request. */
+router.get(
+  '/compute-code/foundry-deployment/cooldown',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    if (req.isInternal !== true) return res.status(403).json({ error: 'Internal only' });
+    const keys = String(req.query.keys ?? '')
+      .split(',')
+      .map((key) => key.trim())
+      .filter((key) => key !== '');
+    try {
+      return res.json({ cooldowns: await service.getFoundryDeploymentCooldowns(keys) });
+    } catch (error) {
+      if (error instanceof InvalidFoundryCooldownRequest) {
+        return res.status(400).json({ error: error.message });
+      }
+      throw error;
+    }
+  })
+);
+
+/** A served Foundry request resets that deployment's escalation. */
+router.post(
+  '/compute-code/foundry-deployment/served',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    if (req.isInternal !== true) return res.status(403).json({ error: 'Internal only' });
+    const body = (req.body as Record<string, unknown> | undefined) ?? {};
+    try {
+      return res.json(
+        await service.markFoundryDeploymentServed(
+          typeof body.region === 'string' ? body.region : '',
+          typeof body.deployment === 'string' ? body.deployment : ''
+        )
+      );
+    } catch (error) {
+      if (error instanceof InvalidFoundryCooldownRequest) {
+        return res.status(400).json({ error: error.message });
+      }
+      throw error;
+    }
+  })
+);
+
 /** Shared GPT_API_KEY status for agents, which cannot read the backend DB. */
 router.get(
   '/compute-code/gpt-key/cooldown',
@@ -231,6 +277,10 @@ router.post(
           failureReason: body.failureReason as string | undefined,
           credentialId: body.credentialId as string | undefined,
           model: body.model as string | undefined,
+          region: body.region as string | undefined,
+          deployment: body.deployment as string | undefined,
+          retryAfterSeconds:
+            typeof body.retryAfterSeconds === 'number' ? body.retryAfterSeconds : undefined,
         }
       );
       return res.json(result);

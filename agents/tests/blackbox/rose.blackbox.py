@@ -611,9 +611,32 @@ async def test_cerebras_strict_native_response_retains_parser_retry():
     async def on_chunk(*args):
         pass
 
-    with patch.dict(os.environ, {"CEREBRAS_API_KEY": "offline-test-placeholder", "ROSE_FAST_CACHE_MODE": "off"}):
-        try:
-            await call_llm_structured_streaming(
+    try:
+        with patch.dict(os.environ, {"CEREBRAS_API_KEY": "offline-test-placeholder", "ROSE_FAST_CACHE_MODE": "off"}):
+            try:
+                await call_llm_structured_streaming(
+                    messages=[{"role": "user", "content": "offline replay"}],
+                    model="rose-labs/rose-1-flash",
+                    temperature=1,
+                    max_tokens=128,
+                    response_model=model,
+                    on_chunk=on_chunk,
+                    call_site="test",
+                    skip_cache_write=True,
+                )
+            except Exception as exc:
+                assert type(exc).__name__ == "LLMStructuredOutputError"
+                assert "valid list" in str(exc)
+            else:
+                raise AssertionError("Malformed native arrays were silently coerced")
+            assert len(requests) == 3
+            assert [body["model"] for body in requests] == ["qwen-3.8-27b", "qwen-3.8-27b", "google/gemini-3.8-flash"]
+            assert all(
+                any(row.get("role") == "tool" and "valid list" in str(row.get("content")) for row in body["messages"])
+                for body in requests[1:]
+            )
+            corrected = True
+            response, _, _ = await call_llm_structured_streaming(
                 messages=[{"role": "user", "content": "offline replay"}],
                 model="rose-labs/rose-1-flash",
                 temperature=1,
@@ -623,31 +646,12 @@ async def test_cerebras_strict_native_response_retains_parser_retry():
                 call_site="test",
                 skip_cache_write=True,
             )
-        except Exception as exc:
-            assert type(exc).__name__ == "LLMStructuredOutputError"
-            assert "valid list" in str(exc)
-        else:
-            raise AssertionError("Malformed native arrays were silently coerced")
-        assert len(requests) == 3
-        assert [body["model"] for body in requests] == ["qwen-3.8-27b", "qwen-3.8-27b", "google/gemini-3.8-flash"]
-        assert all(
-            any(row.get("role") == "tool" and "valid list" in str(row.get("content")) for row in body["messages"])
-            for body in requests[1:]
-        )
-        corrected = True
-        response, _, _ = await call_llm_structured_streaming(
-            messages=[{"role": "user", "content": "offline replay"}],
-            model="rose-labs/rose-1-flash",
-            temperature=1,
-            max_tokens=128,
-            response_model=model,
-            on_chunk=on_chunk,
-            call_site="test",
-            skip_cache_write=True,
-        )
-        assert len(requests) == 4
-        assert response.tool_calls[0].labels == ["Software Engineer"]
-        assert response.tool_calls[0].count == 5
+            assert len(requests) == 4
+            assert response.tool_calls[0].labels == ["Software Engineer"]
+            assert response.tool_calls[0].count == 5
+    finally:
+        # A leaked global handler would answer every later test's capture-wrapped request.
+        teardown_mock()
 
 
 def test_build_cerebras_body_strips_cache_control():
@@ -9362,6 +9366,175 @@ async def test_funded_openai_preserves_requested_output_budget():
     assert seen_foundry == [foundry_reference]
 
 
+async def test_foundry_rate_limit_cooldown_hint_ladder_and_shared_store():
+    """RCA 2026-10-20-foundry-deployment-cooldown-per-process.
+
+    Length: provider advice (Retry-After, else an in-stream "try again in N s",
+    codex responses_error.rs:90-125), otherwise 30/60/300 s per deployment
+    (openclaw usage-failure-state.ts:18-27), reset by a served request. With a
+    backend key, every mark is published and a shared cooldown read from the
+    backend skips that deployment without sending it a request.
+    """
+    import time
+    import types
+    from datetime import datetime, timedelta, timezone
+
+    from providers.rose import foundry
+    from providers.rose.pools import foundry_model, get_pool
+
+    hint = foundry._retry_hint_seconds
+    assert hint(httpx.Headers({"retry-after-ms": "1500"}), "try again in 9s") == 1.5
+    assert hint(httpx.Headers({"retry-after": "12"}), "try again in 9s") == 12.0
+    assert hint(httpx.Headers({}), "Rate limit reached. Please try again in 7s.") == 7.0
+    assert hint(httpx.Headers({}), "Please try again in 20 seconds") == 20.0
+    assert hint(httpx.Headers({}), "try again in 250ms") == 0.25
+    assert hint(httpx.Headers({}), "Requests have exceeded token rate limit.") is None
+
+    model = foundry_model(get_pool("rose-1-ultra"))
+    deployments = [f"{model}-a", f"{model}-b"]
+    completed = (
+        "event: response.output_text.delta\n"
+        'data: {"type":"response.output_text.delta","delta":"ok"}\n\n'
+        "event: response.completed\n"
+        'data: {"type":"response.completed","response":'
+        '{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+    )
+
+    def limited(message: str) -> str:
+        return (
+            "event: response.failed\n"
+            'data: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded","message":"'
+            + message
+            + '"}}}\n\n'
+        )
+
+    async def run(env: dict, handler) -> list[str]:
+        hits: list[str] = []
+        real = httpx.AsyncClient
+
+        async def routed(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "foundry.example.test":
+                hits.append(json.loads(request.content)["model"])
+            return await handler(request)
+
+        module_httpx = types.SimpleNamespace(
+            AsyncClient=lambda **kw: real(**kw, transport=httpx.MockTransport(routed), trust_env=False),
+            Timeout=httpx.Timeout,
+            Headers=httpx.Headers,
+            TransportError=httpx.TransportError,
+        )
+        with (
+            patch.object(foundry, "httpx", module_httpx),
+            patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))),
+        ):
+            await _drain(
+                foundry.foundry_complete(
+                    pool_spec=get_pool("rose-1-ultra"),
+                    messages=[{"role": "user", "content": "hi"}],
+                    response_format=None,
+                    tools=None,
+                    context_tools=None,
+                    tool_choice=None,
+                    temperature=None,
+                    effort=None,
+                    provider_fast_mode=True,
+                    request_id="foundry-cooldown",
+                    route_key="foundry-cooldown-route",
+                    agent_id=None,
+                    call_site="test",
+                    cache_namespace="foundry-cooldown",
+                    ttft_timeout_s=30,
+                    idle_timeout_s=30,
+                )
+            )
+        return hits
+
+    env = {
+        "AZURE_FOUNDRY_ENDPOINT": "https://foundry.example.test",
+        "AZURE_FOUNDRY_API_KEY": "offline",
+        "AZURE_FOUNDRY_DEPLOYMENTS": ",".join(deployments),
+    }
+    with patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))):
+        first = foundry._route_plan(foundry.foundry_regions(), (model,), "foundry-cooldown-route")[0]
+    key = (first[0].endpoint, first[1])
+
+    def provider(reject_message):
+        async def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.host == "foundry.example.test", f"no backend configured, got {request.url}"
+            body = json.loads(request.content)
+            text = limited(reject_message) if reject_message and body["model"] == first[1] else completed
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=text.encode())
+
+        return handler
+
+    def remaining() -> float:
+        return foundry._cooldown_until[key] - time.monotonic()
+
+    # Local-only (no backend key): ladder 30 -> 60 -> 300 -> 300, then serve resets it.
+    foundry._reset_foundry_cooldown_cache()
+    try:
+        observed = []
+        for _ in range(4):
+            foundry._cooldown_until.pop(key, None)
+            assert (await run(env, provider("exceeded token rate limit")))[0] == first[1]
+            observed.append(round(remaining()))
+        assert observed == [30, 60, 300, 300], observed
+        hits = await run(env, provider(None))
+        assert first[1] not in hits, "a cooling deployment must not receive a request"
+        foundry._cooldown_until.pop(key, None)
+        await run(env, provider(None))
+        assert foundry._strikes.get(key, 0) == 0, "a served request ends the escalation"
+        foundry._cooldown_until.pop(key, None)
+        await run(env, provider("exceeded token rate limit"))
+        assert round(remaining()) == 30
+        foundry._cooldown_until.pop(key, None)
+        await run(env, provider("Rate limit reached. Please try again in 7s."))
+        assert round(remaining()) == 7, "the in-stream retry hint sets the cooldown"
+
+        # Shared store: the mark is published; another process's mark is honored.
+        foundry._reset_foundry_cooldown_cache()
+        shared_env = {**env, "BACKEND_API_URL": "https://backend.example.test", "BACKEND_API_KEY": "internal"}
+        marks: list[dict] = []
+        shared: dict[str, dict] = {}
+        shared_key = f"foundry.example.test:{first[1]}"
+
+        async def backend(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "foundry.example.test":
+                return await provider("exceeded token rate limit" if not shared else None)(request)
+            assert request.headers["x-api-key"] == "internal"
+            if request.url.path.endswith("/foundry-deployment/cooldown"):
+                keys = request.url.params["keys"].split(",")
+                return httpx.Response(200, json={"cooldowns": {k: shared[k] for k in keys if k in shared}})
+            if request.url.path.endswith("/token/rate-limited"):
+                marks.append(json.loads(request.content))
+                until = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
+                shared[shared_key] = {"rateLimitedUntil": until, "strikes": 2}
+                return httpx.Response(200, json={"ok": True, "rateLimitedUntil": until, "strikes": 2})
+            raise AssertionError(f"unexpected backend call {request.url}")
+
+        await run(shared_env, backend)
+        assert marks == [
+            {"type": "foundry", "source": "pool", "region": "foundry.example.test", "deployment": first[1]}
+        ], marks
+        assert round(remaining()) == 60, "the shared store owns the escalated length"
+        # A fresh process (empty cache) reads the shared mark and never hits the deployment.
+        foundry._reset_foundry_cooldown_cache()
+        hits = await run(shared_env, backend)
+        assert first[1] not in hits, f"shared cooldown ignored: {hits}"
+        # An unavailable store never disables a usable route.
+        foundry._reset_foundry_cooldown_cache()
+
+        async def store_down(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "foundry.example.test":
+                return await provider(None)(request)
+            return httpx.Response(503)
+
+        hits = await run(shared_env, store_down)
+        assert hits == [first[1]], hits
+    finally:
+        foundry._reset_foundry_cooldown_cache()
+
+
 async def test_wmh_response_schema_binds_exact_candidate_call_ids():
     import json
     import types
@@ -9693,6 +9866,10 @@ async def run_all_tests():
         "cerebras_strict_native_parser_retry", test_cerebras_strict_native_response_retains_parser_retry
     )
     r.record("cerebras_body_strips_cache_control", test_build_cerebras_body_strips_cache_control)
+    await r.record_async(
+        "foundry_rate_limit_cooldown_hint_ladder_shared",
+        test_foundry_rate_limit_cooldown_hint_ladder_and_shared_store,
+    )
     r.record("all_pool_names_matches", test_all_pool_names_matches_registry)
     r.record("get_pool_unknown_raises", test_get_pool_unknown_raises)
     r.record(

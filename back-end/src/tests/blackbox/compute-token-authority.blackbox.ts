@@ -15,8 +15,14 @@
  *   - authority (one shared state, as production has one DB)
  *   - guest A and guest B, configured with COMPUTE_TOKEN_AUTHORITY_URL
  * and asserts, through the guests only, that
- *   1. lineage capacity is enforced across both guests together, and
- *   2. a rate-limit mark reported through guest A stops guest B from serving.
+ *   1. lineage capacity is enforced across both guests together,
+ *   2. a rate-limit mark reported through guest A stops guest B from serving,
+ *   3. two real agent worker processes, one per guest, share one Azure Foundry
+ *      deployment cooldown: after worker A sees an in-stream rate limit, worker B
+ *      never sends a request to that deployment while it cools
+ *      (RCA 2026-10-20-foundry-deployment-cooldown-per-process), and
+ *   4. the shared cooldown length follows the provider hint, else 30/60/300 s,
+ *      without escalating on rejections inside an active window.
  */
 import assert from 'assert';
 import { type ChildProcess, execFileSync, spawn } from 'child_process';
@@ -31,6 +37,11 @@ import { GPT_LINEAGE_CAPACITY } from '../../providers/computeCredentials';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const backendDir = path.resolve(__dirname, '../../..');
 const serverScript = path.join(__dirname, 'compute-token-authority.server.ts');
+const agentsDir = path.resolve(backendDir, '../agents');
+const foundryWorkerFixture = path.join(
+  agentsDir,
+  'tests/blackbox/foundry_shared_cooldown_fixture.py'
+);
 
 const USER_ID = `cta-user-${crypto.randomUUID()}`;
 const GUEST_KEY = `guest-key-${crypto.randomUUID()}`;
@@ -146,6 +157,52 @@ async function post(baseUrl: string, route: string, body: Record<string, unknown
   });
   const text = await response.text();
   assert.strictEqual(response.status, 200, `${route} returned ${response.status}: ${text}`);
+}
+
+interface FoundryWorkerResult {
+  first: string;
+  hits: string[];
+  served: string | null;
+}
+
+/** One real agent worker process whose backend is `baseUrl` (its guest). */
+function runFoundryWorker(baseUrl: string, phase: 'reject' | 'observe'): FoundryWorkerResult {
+  const stdout = execFileSync(
+    path.join(agentsDir, 'venv/bin/python'),
+    [foundryWorkerFixture, phase],
+    {
+      cwd: agentsDir,
+      env: {
+        ...process.env,
+        PYTHONPATH: agentsDir,
+        BACKEND_API_URL: baseUrl,
+        BACKEND_API_KEY: GUEST_KEY,
+      },
+      encoding: 'utf8',
+      timeout: 60_000,
+    }
+  );
+  const line = stdout
+    .split('\n')
+    .reverse()
+    .find((candidate) => candidate.startsWith('{"first"'));
+  assert(line, `Foundry worker (${phase}) printed no result: ${stdout}`);
+  return JSON.parse(line) as FoundryWorkerResult;
+}
+
+async function foundryCall(
+  baseUrl: string,
+  route: string,
+  body: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  const response = await fetch(`${baseUrl}/api/integrations/compute-code/${route}`, {
+    method: 'POST',
+    headers: { 'X-API-Key': GUEST_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  assert.strictEqual(response.status, 200, `${route} returned ${response.status}: ${text}`);
+  return JSON.parse(text) as Record<string, unknown>;
 }
 
 async function main() {
@@ -273,6 +330,74 @@ async function main() {
     console.log(
       'PASS a rate-limit mark through one guest stops every guest from serving the token'
     );
+
+    // 3. Two worker processes on two guests share one Foundry deployment cooldown.
+    const workerA = runFoundryWorker(guestA.baseUrl, 'reject');
+    assert.strictEqual(workerA.hits[0], workerA.first, `worker A hits: ${workerA.hits.join(',')}`);
+    assert(
+      workerA.served !== null && workerA.served !== workerA.first,
+      `worker A must fall through to the other deployment: ${JSON.stringify(workerA)}`
+    );
+    const workerB = runFoundryWorker(guestB.baseUrl, 'observe');
+    const sharedRows = await authorityDb.integration.findMany({
+      where: { name: 'foundry_deployment_cooldown' },
+      select: { accountId: true, rateLimitedUntil: true },
+    });
+    assert(
+      !workerB.hits.includes(workerA.first),
+      `worker B (guest B) sent ${workerB.hits.filter((hit) => hit === workerA.first).length} ` +
+        `request(s) to ${workerA.first}, which worker A (guest A) saw rate limited; ` +
+        `worker B hits=${workerB.hits.join(',')}; authority cooldown rows=${sharedRows.length}`
+    );
+    assert.strictEqual(workerB.served, workerB.hits[0], `worker B: ${JSON.stringify(workerB)}`);
+    console.log(
+      'PASS a Foundry rate limit seen by one worker process stops another from hitting that deployment'
+    );
+
+    // 4. Cooldown length: provider hint, else 30 s, 60 s, 300 s; no in-window escalation.
+    const target = { region: 'ladder.example.test', deployment: `ladder-${suffix}` };
+    const accountId = `${target.region}:${target.deployment}`;
+    const expire = () =>
+      authorityDb.integration.updateMany({
+        where: { name: 'foundry_deployment_cooldown', accountId },
+        data: { rateLimitedUntil: new Date(Date.now() - 1_000) },
+      });
+    const mark = (extra: Record<string, unknown> = {}) =>
+      foundryCall(guestA.baseUrl, 'token/rate-limited', {
+        type: 'foundry',
+        source: 'pool',
+        ...target,
+        ...extra,
+      });
+    const seconds: number[] = [];
+    const first = await mark();
+    seconds.push(Number(first.cooldownSeconds));
+    const inWindow = await mark();
+    assert.strictEqual(inWindow.strikes, 1, 'a rejection inside the window must not escalate');
+    assert.strictEqual(inWindow.rateLimitedUntil, first.rateLimitedUntil);
+    for (let i = 0; i < 3; i++) {
+      await expire();
+      seconds.push(Number((await mark()).cooldownSeconds));
+    }
+    assert.deepStrictEqual(seconds, [30, 60, 300, 300], `ladder ${seconds.join(',')}`);
+    await expire();
+    assert.strictEqual(Number((await mark({ retryAfterSeconds: 7 })).cooldownSeconds), 7);
+    await expire();
+    assert.strictEqual(
+      (await foundryCall(guestB.baseUrl, 'foundry-deployment/served', target)).reset,
+      true
+    );
+    assert.strictEqual(Number((await mark()).cooldownSeconds), 30, 'served must reset the ladder');
+    const read = await fetch(
+      `${guestB.baseUrl}/api/integrations/compute-code/foundry-deployment/cooldown?keys=${encodeURIComponent(accountId)}`,
+      { headers: { 'X-API-Key': GUEST_KEY } }
+    );
+    const readBody = (await read.json()) as {
+      cooldowns: Record<string, { rateLimitedUntil: string | null; strikes: number }>;
+    };
+    assert.strictEqual(readBody.cooldowns[accountId]?.strikes, 1);
+    assert(readBody.cooldowns[accountId]?.rateLimitedUntil !== null, 'guest B reads the cooldown');
+    console.log('PASS Foundry cooldown uses the provider hint, else 30/60/300 s, reset on serve');
   } finally {
     for (const child of children) child.kill('SIGTERM');
     await Promise.all(

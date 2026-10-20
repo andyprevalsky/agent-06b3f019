@@ -16783,6 +16783,45 @@ def test_isolated_postgres_default_keeps_macos_stacks_separate():
 
 
 # This fixture models setup/readiness; native ownership is exercised by the real owner fixture.
+def test_local_isolated_stack_compute_token_authority_default():
+    """A1 (approved 2026-10-20): isolated stacks share production's compute-token state.
+
+    Default URL is the production backend with the stack's own BACKEND_API_KEY;
+    BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off is the diagnostics opt-out; explicit
+    values win; a missing key fails the stack before it starts (fail closed).
+    """
+    import tempfile
+
+    import benchmarks.local as local_bench
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "back-end").mkdir()
+        (root / "back-end" / ".env").write_text('BACKEND_API_KEY="dotenv-key"\n')
+        with patch.object(local_bench, "REPO_ROOT", root):
+            env: dict[str, str] = {"BACKEND_API_KEY": "shell-key"}
+            local_bench.apply_compute_token_authority_env(env)
+            assert env["COMPUTE_TOKEN_AUTHORITY_URL"] == "https://navi-j9a9.onrender.com"
+            assert env["COMPUTE_TOKEN_AUTHORITY_API_KEY"] == "dotenv-key"
+
+            env = {"COMPUTE_TOKEN_AUTHORITY_URL": "https://authority.example", "COMPUTE_TOKEN_AUTHORITY_API_KEY": "k"}
+            local_bench.apply_compute_token_authority_env(env)
+            assert env["COMPUTE_TOKEN_AUTHORITY_URL"] == "https://authority.example"
+            assert env["COMPUTE_TOKEN_AUTHORITY_API_KEY"] == "k"
+
+            env = {"BENCHMARK_COMPUTE_TOKEN_AUTHORITY": "off", "COMPUTE_TOKEN_AUTHORITY_URL": "https://x"}
+            local_bench.apply_compute_token_authority_env(env)
+            assert "COMPUTE_TOKEN_AUTHORITY_URL" not in env and "COMPUTE_TOKEN_AUTHORITY_API_KEY" not in env
+
+            (root / "back-end" / ".env").write_text("")
+            try:
+                local_bench.apply_compute_token_authority_env({})
+            except RuntimeError as error:
+                assert "BACKEND_API_KEY" in str(error) and "BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off" in str(error)
+            else:
+                raise AssertionError("an isolated stack without an authority key must not start")
+
+
 @patch("benchmarks.local._record_stack_cleanup_owner", new=lambda *_args: None)
 def test_local_isolated_stack_opts_into_fast_seed_dump():
     """An isolated stack must use its own tunnel and restore a cached seed."""
@@ -16827,8 +16866,12 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
                 workspace_name="blackbox-bench-isolated-run",
                 base_port=55120,
             )
-            local_bench.start_services(stack, clean_first=False)
+            with patch.dict(os.environ, {"COMPUTE_TOKEN_AUTHORITY_API_KEY": "isolated-authority-key"}):
+                local_bench.start_services(stack, clean_first=False)
 
+            # A1: the isolated stack delegates compute-token state to the shared authority.
+            assert captured["env"]["COMPUTE_TOKEN_AUTHORITY_URL"] == "https://navi-j9a9.onrender.com"
+            assert captured["env"]["COMPUTE_TOKEN_AUTHORITY_API_KEY"] == "isolated-authority-key"
             seed_dump = Path(captured["env"]["BENCHMARK_SEED_DUMP"])
             assert seed_dump.parent == local_bench.BENCHMARK_CONTEXT_ROOT / "seed-cache"
             assert seed_dump.name.endswith(".dump")
@@ -24361,6 +24404,7 @@ async def run_all_tests():
     )
     r.record("isolated_postgres_default", test_isolated_postgres_default_keeps_macos_stacks_separate)
     r.record("local_isolated_fast_seed_dump", test_local_isolated_stack_opts_into_fast_seed_dump)
+    r.record("local_isolated_compute_token_authority", test_local_isolated_stack_compute_token_authority_default)
     r.record(
         "dotenv_fast_mode_cache_falls_back_to_database_url",
         test_dotenv_fast_mode_cache_falls_back_to_database_url,
