@@ -134,6 +134,8 @@ export async function createSession(params: CreateSessionParams) {
     uploaded_files: session.uploadedFiles,
     github_repo_url: normalizedRepoUrl ?? null,
     ...fields,
+    // Live dev-server preview URL (Rose dev accounts, A1); null otherwise.
+    preview_url: session.previewUrl ?? null,
   };
 }
 

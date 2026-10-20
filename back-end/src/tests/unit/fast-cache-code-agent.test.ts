@@ -188,7 +188,10 @@ test('Codex Code sandbox uses Fast Mode localhost proxy plumbing', () => {
     'wrapper must not cache provider paths itself'
   );
   assert.ok(
-    /const REPO_WORKDIR = ["']\/home\/user\/workspace["']/.test(wsServer),
+    // E2B HOME is /home/user; a local (Mac) session keeps the same HOME-relative path.
+    /const REPO_WORKDIR = (["']\/home\/user\/workspace["']|join\(home, ["']workspace["']\))/.test(
+      wsServer
+    ),
     'Codex wrapper must clone generated repos into the stable cache replay workdir'
   );
   assert.ok(

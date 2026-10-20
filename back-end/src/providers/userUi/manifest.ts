@@ -9,6 +9,7 @@
  *     rose-ui.json ──────────────────►  manifest schema + every referenced
  *     root/theme.json                   path exists + theme schema + caps
  *     inline/<view>/…                         │
+ *     apps/<slug>/…   (standalone apps, A2)   │
  *                                             ▼ ok → UserUiVersion + storage
  */
 import { z } from 'zod';
@@ -35,6 +36,10 @@ export const USER_UI_CAPABILITIES = [
 ] as const;
 
 export const USER_UI_VIEW_NAME_RE = /^[a-z0-9-]+$/;
+/** Id of the built-in Rose app (listed first for dev accounts); not a user app slug. */
+export const USER_UI_BUILTIN_APP_ID = 'rose';
+/** Folder every file of app <slug> lives in, so one app never serves another's files. */
+export const userUiAppDir = (slug: string) => `apps/${slug}/`;
 const TOOL_NAME_RE = /^[a-z0-9_]+$/;
 const CSS_CUSTOM_PROPERTY_RE = /^--[A-Za-z0-9_-]{1,64}$/;
 
@@ -82,6 +87,25 @@ export const userUiManifestSchema = z
       .record(
         z.string().max(64).regex(TOOL_NAME_RE, 'tool names must match [a-z0-9_]+'),
         z.object({ manifest: relativePath }).strict()
+      )
+      .optional(),
+    /** Standalone apps (A2): apps/<slug>/ opened full screen from the Apps section. */
+    apps: z
+      .record(
+        z
+          .string()
+          .max(64)
+          .regex(USER_UI_VIEW_NAME_RE, 'app names must match [a-z0-9-]+')
+          .refine((slug) => slug !== USER_UI_BUILTIN_APP_ID, {
+            message: `"${USER_UI_BUILTIN_APP_ID}" is the built-in Rose app`,
+          }),
+        z
+          .object({
+            title: z.string().trim().min(1).max(80),
+            entry: relativePath,
+            icon: relativePath.optional(),
+          })
+          .strict()
       )
       .optional(),
     capabilities: z.array(z.enum(USER_UI_CAPABILITIES)).optional(),
@@ -155,6 +179,10 @@ export function referencedUserUiPaths(manifest: UserUiManifest): string[] {
     if (view.poster) refs.push(view.poster);
   }
   for (const tool of Object.values(manifest.tools ?? {})) refs.push(tool.manifest);
+  for (const app of Object.values(manifest.apps ?? {})) {
+    refs.push(app.entry);
+    if (app.icon) refs.push(app.icon);
+  }
   return refs;
 }
 
@@ -201,6 +229,18 @@ export function validateUserUiBundle(files: UserUiBundleFile[]): UserUiBundleVal
 
   for (const ref of referencedUserUiPaths(manifest)) {
     if (!byPath.has(ref)) errors.push(`${USER_UI_MANIFEST_PATH} references missing file ${ref}`);
+  }
+  for (const [slug, app] of Object.entries(manifest.apps ?? {})) {
+    for (const [field, ref] of [
+      ['entry', app.entry],
+      ['icon', app.icon],
+    ] as const) {
+      if (ref !== undefined && !ref.startsWith(userUiAppDir(slug))) {
+        errors.push(
+          `${USER_UI_MANIFEST_PATH}: apps.${slug}.${field} must be inside ${userUiAppDir(slug)}`
+        );
+      }
+    }
   }
 
   if (manifest.theme && byPath.has(manifest.theme)) {
