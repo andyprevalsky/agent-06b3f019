@@ -1,55 +1,65 @@
 /**
- * Remove-on-chip for single-row integrations (Rose Desktop).
+ * Remove-on-chip for accounts without a dedicated removal flow (Rose Desktop).
  *
  * STATE MACHINE
  *
- *   [IDLE] --chip × (request)--> [CONFIRMING(name)] --cancel--> [IDLE]
- *   [CONFIRMING] --confirm--> [REMOVING(name)] --DELETE ok--> refetch --> [IDLE]
- *                                              --DELETE fails--> [IDLE + error]
+ *   [IDLE] --chip × (request)--> [CONFIRMING(target)] --cancel--> [IDLE]
+ *   [CONFIRMING] --confirm--> [REMOVING(target)] --DELETE ok--> refetch --> [IDLE]
+ *                                                --DELETE fails--> [IDLE + error]
  *
- * Gmail, Plaid and compute accounts keep their own removal flows (no confirm,
- * as today). This hook covers the providers that only have the generic
- * DELETE /api/integrations/:name, whose removal is new in the UI and hard to
- * undo (e.g. WhatsApp needs a fresh QR pairing), so it confirms first.
+ *   target.accountId set   → DELETE /api/integrations/:name/accounts/:accountId
+ *   target.accountId unset → DELETE /api/integrations/:name (one-row providers)
+ *
+ * Gmail, Plaid and compute accounts keep their own existing removal flows. This
+ * hook covers everything else, whose removal is new in the UI and hard to undo
+ * (e.g. WhatsApp needs a fresh QR pairing), so it confirms first.
  */
 
 import { useCallback, useState } from 'react';
 
-import { deleteIntegrationApi } from '../api';
+import { deleteIntegrationAccountApi, deleteIntegrationApi } from '../api';
 
 export interface PendingRemoval {
   /** Integration row name, e.g. `chrome`, `chrome_passwords`, `imessage`. */
   name: string;
-  /** What the user sees in the confirm dialog, e.g. "Chrome cookies". */
+  /** Account within the row (multi-account backend); unset removes the whole row. */
+  accountId?: string;
+  /** What the user sees in the confirm dialog, e.g. "Chrome · Work". */
   label: string;
+}
+
+/** Stable identity of one removal target, used to show the chip's spinner. */
+export function removalKey(name: string, accountId?: string): string {
+  return accountId === undefined ? name : `${name}/${accountId}`;
 }
 
 export function useIntegrationRemoval(fetchIntegrations: () => Promise<void>) {
   const [pending, setPending] = useState<PendingRemoval | null>(null);
-  const [removingName, setRemovingName] = useState<string | null>(null);
+  const [removingKey, setRemovingKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const request = useCallback((name: string, label: string) => {
+  const request = useCallback((target: PendingRemoval) => {
     setError(null);
-    setPending({ name, label });
+    setPending(target);
   }, []);
 
   const cancel = useCallback(() => setPending(null), []);
 
   const confirm = useCallback(async () => {
     if (pending === null) return;
-    const { name } = pending;
+    const { name, accountId } = pending;
     setPending(null);
-    setRemovingName(name);
+    setRemovingKey(removalKey(name, accountId));
     try {
-      await deleteIntegrationApi(name);
+      if (accountId === undefined) await deleteIntegrationApi(name);
+      else await deleteIntegrationAccountApi(name, accountId);
       await fetchIntegrations();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to remove account');
     } finally {
-      setRemovingName(null);
+      setRemovingKey(null);
     }
   }, [pending, fetchIntegrations]);
 
-  return { pending, removingName, error, request, cancel, confirm } as const;
+  return { pending, removingKey, error, request, cancel, confirm } as const;
 }

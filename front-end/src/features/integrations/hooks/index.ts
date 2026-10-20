@@ -10,12 +10,13 @@ export { useGmailConnect } from './useGmailConnect';
 export { useOAuthRedirect } from './useOAuthRedirect';
 export { useIntegrationActions } from './useIntegrationActions';
 export { useIntegrationRemoval } from './useIntegrationRemoval';
+export { SyncProgressContext, useSyncProgress, useSyncRefresh } from './useSyncProgress';
 export {
-  SyncProgressContext,
-  useSyncProgress,
-  useSyncProgressSource,
-  useSyncRefresh,
-} from './useSyncProgress';
+  accountToneForState,
+  isProgressComplete,
+  parseIntegrationAccounts,
+  parseSyncProgress,
+} from './integrationAccounts';
 export { usePlaidIntegration } from './usePlaidIntegration';
 export { usePlaidConnect } from './usePlaidConnect';
 export { usePlaidItems } from './usePlaidItems';

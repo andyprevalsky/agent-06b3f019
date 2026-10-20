@@ -31,7 +31,7 @@ interface BrowserCookiesSectionProps {
   onBrowserSync: (browserType: BrowserType) => void;
 }
 
-function BrowserCookiesIcon() {
+export function BrowserCookiesIcon() {
   return (
     <svg className="w-5 h-5" viewBox="0 0 24 24">
       <defs>

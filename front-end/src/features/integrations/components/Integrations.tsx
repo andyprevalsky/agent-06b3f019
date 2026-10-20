@@ -18,11 +18,18 @@
  * File System is a FE-only section: website is Download for Mac; Mac app
  * plus click stays [IDLE/READY] (no hook).
  *
+ * Rose Desktop flag (useRoseDesktop):
+ *   off → IntegrationSections (stock accordion cards, unchanged)
+ *   on  → DesktopIntegrations (flat sections, account chips, sync progress bars)
+ *   Both receive the SAME hook state; only presentation differs.
+ *
  * This component is a thin orchestrator: it calls hooks, renders sections,
  * and wires up modals. All business logic lives in ../hooks/.
  */
 
 import { Loader2 } from 'lucide-react';
+
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 
 import {
   useAccordion,
@@ -40,11 +47,13 @@ import {
 } from '../hooks';
 import { usePlaidIntegration } from '../hooks/usePlaidIntegration';
 
+import DesktopIntegrations from './DesktopIntegrations';
 import IntegrationModals from './IntegrationModals';
 import IntegrationSections from './IntegrationSections';
 import FileInputs from './FileInputs';
 
 export default function Integrations() {
+  const roseDesktop = useRoseDesktop();
   const handlers = useIntegrationHandlers();
   const { isFullySignedIn } = useAuth();
 
@@ -102,7 +111,8 @@ export default function Integrations() {
               <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
             </div>
           ) : (
-            <IntegrationSections
+            <IntegrationSectionsSwitch
+              roseDesktop={roseDesktop}
               isBrowserCookiesAvailable={!!handlers.browserCookies?.isAvailable}
               isPasskeysAvailable={!!handlers.passkeys?.isAvailable}
               isIMessageAvailable={!!handlers.iMessage?.isAvailable}
@@ -128,4 +138,14 @@ export default function Integrations() {
       <IntegrationModals browser={browser} passwords={passwords} actions={actions} />
     </div>
   );
+}
+
+/** Stock cards with the flag off; the Rose Desktop list with it on. */
+function IntegrationSectionsSwitch({
+  roseDesktop,
+  accordion,
+  ...props
+}: React.ComponentProps<typeof IntegrationSections> & { roseDesktop: boolean }) {
+  if (roseDesktop) return <DesktopIntegrations {...props} />;
+  return <IntegrationSections accordion={accordion} {...props} />;
 }
