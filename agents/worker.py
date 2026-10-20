@@ -84,6 +84,7 @@ from domains.spawn_claude_code_agent.service import (
     resolve_code_agent_provider_activity,
     spawn_claude_code_activity,
 )
+from domains.spawn_claude_code_agent.service_target import resolve_code_agent_target_activity
 from domains.spawn_sub_agents.service import (
     spawn_sub_agent_activity,
     spawn_sub_agents_batch_activity,
@@ -1570,6 +1571,7 @@ async def main():
         mint_purchase_card_activity,
         spawn_browser_agent_activity_v3,
         resolve_code_agent_provider_activity,
+        resolve_code_agent_target_activity,
         spawn_claude_code_activity,
         close_detached_code_session_activity,
         web_search_activity,
