@@ -127,6 +127,17 @@ export const codePublishSchema = z
   })
   .strict();
 
+/** POST /api/preview-handoff/redeem — the one-time code from the preview URL fragment. */
+export const previewHandoffRedeemSchema = z
+  .object({
+    code: z
+      .string()
+      .min(16)
+      .max(256)
+      .regex(/^[A-Za-z0-9_-]+$/),
+  })
+  .strict();
+
 /** GET /credential-availability — can a Claude / Codex credential be leased now. */
 export const credentialAvailabilityQuerySchema = z.object({
   user_id: z.string().min(1).max(200),

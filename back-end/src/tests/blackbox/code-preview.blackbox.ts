@@ -5,6 +5,8 @@
  *
  *   GET  /api/claude-code-session/:taskId/preview   dev accounts only (403), owner-scoped (404)
  *   POST /api/claude-code-session/:taskId/publish   push the branch + open a PR, never merge
+ *   POST /api/claude-code-session/:taskId/preview/handoff + POST /api/preview-handoff/redeem
+ *        one-time preview sign-in (code-preview-handoff.cases.ts)
  *
  *   real Rose front-end copy in a session HOME ──rose-preview start──► real vite (HMR)
  *     └─ backend reports its preview_url ──► headless Chromium ──agent write──► DOM ≤ 3 s
@@ -44,6 +46,7 @@ import {
 import { CodePublishError, publishOwnedTask } from '../../providers/codePreview/service';
 import { prepareCodeSessionWorkspace } from '../../providers/codeSessionWorkspace';
 import { ROSE_DEV_USER_IDS, isRoseDevUser } from '../../utils/roseDevAccess';
+import { previewHandoffCases } from './code-preview-handoff.cases';
 import {
   HMR_EDIT_FILE,
   HMR_EDIT_ROUTE,
@@ -152,6 +155,7 @@ before(async () => {
 });
 
 after(async () => {
+  await prisma.previewHandoffCode.deleteMany({ where: { taskId: { in: createdTasks } } });
   await prisma.claudeCodeSession.deleteMany({ where: { id: { in: createdTasks } } });
   await prisma.codeSession.deleteMany({ where: { id: { in: createdSessions } } });
   await prisma.agent.deleteMany({ where: { id: { in: createdAgents } } });
@@ -272,6 +276,16 @@ test('code-agent prompt: Rose-in-Rose preview + publish lines only for dev Rose 
   assert.doesNotMatch(devOtherRepo, /is Rose itself/);
   const project = buildCodeAgentSystemPrompt({ roseDev: true, roseRepo: true });
   assert.match(project, /is Rose itself/, 'a Rose project session (no github url) gets the lines');
+});
+
+previewHandoffCases({
+  baseUrl,
+  apiKey,
+  devUser: DEV_USER,
+  otherUser: OTHER_USER,
+  agentFor,
+  codeSessionRow,
+  taskRow,
 });
 
 /** Wait until the page shows `marker`; returns the page wall-clock time it appeared. */

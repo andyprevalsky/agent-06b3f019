@@ -39,6 +39,7 @@ import claudeCodeRouter from './domains/claude-code/routes';
 import codeAgentDirectChatRouter, {
   sessionScopedRouter as codeSessionDirectChatRouter,
 } from './domains/claude-code/routesDirectChat';
+import previewHandoffRouter from './domains/claude-code/routes.previewHandoff';
 import codexCodeRouter from './domains/codex-code/routes';
 import billingRouter from './domains/billing/routes';
 import apiKeysRouter from './domains/api-keys/routes';
@@ -173,6 +174,12 @@ app.use(
 // before CORS because sandboxed iframes request them with Origin: null. In prod
 // USERCONTENT_BASE_URL must route these to a separate origin.
 app.use('/usercontent', usercontentRouter);
+
+// One-time preview sign-in redeem (Rose-in-Rose, L-APPS2): called from code-agent
+// preview origins (E2B port hosts, loopback). Mounted before the global CORS so
+// its own CORS answers those origins; the global middleware would answer their
+// preflight with no allow header.
+app.use('/api/preview-handoff', previewHandoffRouter);
 
 // Production must explicitly authorize both public web origins. A missing or
 // partial value aborts startup so Render cannot promote a login-breaking release.

@@ -3,6 +3,7 @@ export {
   createUserUiVersion,
   findAgentOwnerId,
   findActiveUserUiVersion,
+  findTaskCodeSessionId,
   listUserUiVersions,
   readUserUiFile,
   userExists,

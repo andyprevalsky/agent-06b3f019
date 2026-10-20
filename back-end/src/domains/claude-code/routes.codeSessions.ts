@@ -7,6 +7,7 @@
  * POST   /:taskId/keepalive  - extend an attached task's sandbox idle window + lease
  * POST   /:taskId/usage-limit - the CLI stopped on a usage limit: rate-limit its credential (C15)
  * GET    /:taskId/preview   - live dev-server preview of the task's session (dev accounts, A1)
+ * POST   /:taskId/preview/handoff - one-time code that signs that preview in (routes.previewHandoff.ts)
  * POST   /:taskId/publish   - push its branch + open a PR, never merge (dev accounts, A1)
  * GET    /credential-availability?user_id[&own_only=true] - can a Claude / Codex credential be leased now
  *
@@ -36,6 +37,7 @@ import {
   codeTaskUsageLimitSchema,
   credentialAvailabilityQuerySchema,
 } from './types';
+import { registerPreviewHandoffMintRoute } from './routes.previewHandoff';
 import {
   codeCredentialAvailability,
   markCodeTaskUsageLimited,
@@ -158,6 +160,8 @@ function devCaller(req: HybridAuthRequest, res: Response): string | null {
  *                           merges or deploys (dev accounts only)
  */
 export function registerCodePreviewRoutes(router: Router): void {
+  registerPreviewHandoffMintRoute(router);
+
   router.get(
     '/:taskId/preview',
     auth,

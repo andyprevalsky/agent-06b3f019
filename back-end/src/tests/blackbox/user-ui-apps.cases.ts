@@ -8,9 +8,13 @@
  *   invalid apps (missing entry, outside apps/<slug>/, reserved "rose") ──► 400
  *   Rose built-in app: first, dev accounts only, with the newest Rose-repo
  *                      session's live preview URL
+ *   a code agent's publish token (agt + tsk) ──► version publisher ids ──►
+ *                      user app rows carry task_id + code_session_id (null otherwise)
  */
 import { randomUUID } from 'crypto';
 import { prisma } from '../../providers/database';
+import { prepareCodeSessionWorkspace } from '../../providers/codeSessionWorkspace';
+import { verifyUserUiPublishToken } from '../../providers/userUi/publishToken';
 import { ROSE_DEV_USER_IDS } from '../../utils/roseDevAccess';
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -40,6 +44,7 @@ interface AppRow {
   version_id?: string;
   preview_url?: string | null;
   task_id?: string | null;
+  code_session_id?: string | null;
   publish: string;
 }
 
@@ -182,6 +187,91 @@ export function userUiAppsCases(ctx: UserUiAppsCaseContext) {
           const details = JSON.stringify(res.data.details ?? res.data);
           assert(res.status === 400, `${label}: expected 400, got ${res.status} ${details}`);
           assert(pattern.test(details), `${label}: ${details}`);
+        }
+      },
+    },
+    {
+      name: 'apps: a code agent’s publish records its agent + task; user rows carry task_id and code_session_id',
+      fn: async () => {
+        const user = await ctx.anonymous();
+        await apps(user.token); // the first authenticated call creates the user row
+        const agent = await prisma.agent.create({
+          data: { userId: user.userId, goal: 'apps publisher blackbox' },
+        });
+        const session = await prisma.codeSession.create({
+          data: {
+            userId: user.userId,
+            rootAgentId: agent.id,
+            ownerAgentId: agent.id,
+            repoKey: '',
+            sandboxKind: 'e2b',
+          },
+        });
+        const taskId = randomUUID();
+        await prisma.claudeCodeSession.create({
+          data: {
+            id: taskId,
+            agentId: agent.id,
+            sandboxId: `sbx${taskId.slice(0, 8)}`,
+            goal: 'apps publisher blackbox',
+            codeSessionId: session.id,
+          },
+        });
+        try {
+          // The session's publish token, exactly as a code-agent sandbox receives it.
+          const workspace = await prepareCodeSessionWorkspace(
+            user.userId,
+            agent.id,
+            taskId,
+            'claude'
+          );
+          const token = workspace?.envs.ROSE_UI_PUBLISH_TOKEN ?? '';
+          const claims = verifyUserUiPublishToken(token);
+          assert(
+            claims.ok && claims.agentId === agent.id && claims.taskId === taskId,
+            `publish token names agent + task: ${JSON.stringify(claims)}`
+          );
+
+          const byAgent = await publish(
+            token,
+            appFiles({ tips: { title: 'Tip calc', entry: 'apps/tips/index.html' } })
+          );
+          assert(byAgent.status === 201, `agent publish: ${byAgent.status}`);
+          const row = await prisma.userUiVersion.findUnique({
+            where: { id: String(byAgent.data.versionId) },
+          });
+          assert(
+            row?.publishedByAgentId === agent.id && row.publishedByTaskId === taskId,
+            `version records its publisher: ${JSON.stringify(row)}`
+          );
+          const [tips] = (await apps(user.token)).apps;
+          assert(
+            tips?.task_id === taskId && tips.code_session_id === session.id,
+            `app row links its code agent: ${JSON.stringify(tips)}`
+          );
+
+          // A user (or legacy) publish names no code agent.
+          const byUser = await publish(
+            user.token,
+            appFiles({ tips: { title: 'Tip calc', entry: 'apps/tips/index.html' } })
+          );
+          assert(byUser.status === 201, `user publish: ${byUser.status}`);
+          const userRow = await prisma.userUiVersion.findUnique({
+            where: { id: String(byUser.data.versionId) },
+          });
+          assert(
+            userRow?.publishedByAgentId === null && userRow.publishedByTaskId === null,
+            'user publish has no publisher'
+          );
+          const [plain] = (await apps(user.token)).apps;
+          assert(
+            plain?.task_id === null && plain.code_session_id === null,
+            `user-published app row: ${JSON.stringify(plain)}`
+          );
+        } finally {
+          await prisma.claudeCodeSession.deleteMany({ where: { id: taskId } });
+          await prisma.codeSession.deleteMany({ where: { id: session.id } });
+          await prisma.agent.deleteMany({ where: { id: agent.id } });
         }
       },
     },
