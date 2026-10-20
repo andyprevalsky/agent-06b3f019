@@ -1,6 +1,6 @@
 ---
 name: apps-preview
-description: Use to build an app the user opens from the Apps section, or to show a live, hot-reloading preview of a web front-end.
+description: Use for a live, hot-reloading preview of a web front-end, for apps in the Apps section, or when the checkout is Rose itself.
 ---
 
 # Apps and live preview
@@ -10,6 +10,7 @@ description: Use to build an app the user opens from the Apps section, or to sho
 - "Make me an app" or "+ new app": a standalone page the user opens full
   screen from the Apps section of the left bar.
 - A web front-end (vite) the user should watch change while you work.
+- The checkout is Rose itself (see "Rose itself" below).
 
 ## When not to use
 
