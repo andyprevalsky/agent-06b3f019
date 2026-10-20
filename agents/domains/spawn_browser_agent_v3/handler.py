@@ -11665,7 +11665,20 @@ Based on this feedback, I need to continue working on the task and address the i
         })
 
     except asyncio.CancelledError as cancellation:
-        logger.info("\U0001f534 Browser agent activity cancelled (paused)")
+        cancellation_details = activity.cancellation_details()
+        # Only a cancel the workflow asked for (user pause, DAG cancel) is a
+        # pause. On a StartToClose/heartbeat timeout, worker shutdown or reset,
+        # the workflow receives the ActivityError and the manager posts this
+        # tool call's result itself, so a second "paused by user" result here
+        # would replace it after the planner has already moved on.
+        workflow_requested_cancel = cancellation_details is None or cancellation_details.cancel_requested
+        logger.info(
+            "\U0001f534 Browser agent activity cancelled",
+            agent_id=agent_id,
+            task_id=task_id,
+            workflow_requested=workflow_requested_cancel,
+            cancellation=repr(cancellation_details),
+        )
 
         if isinstance(cancellation, _BrowserSessionPreparationCancelled):
             prepared = cancellation.session_data
@@ -11701,6 +11714,9 @@ Based on this feedback, I need to continue working on the task and address the i
 
         if session_id and cleanup_failure is None:
             await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
+
+        if not workflow_requested_cancel:
+            raise
 
         if task_id:
             with _suppress_browser_cleanup_errors():

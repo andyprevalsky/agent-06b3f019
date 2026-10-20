@@ -23480,6 +23480,218 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
     assert llm_usage and llm_usage[0]["input_tokens"] == 900, result.get("usage_items")
 
 
+async def _run_browser_activity_cancelled_mid_step(cancellation_details):
+    """Run the real browser activity and cancel it mid-step with ``cancellation_details``.
+
+    Returns (outcome, terminal_writes, close_mock). ``terminal_writes`` are the
+    save_browser_action_message calls that close the parent's spawn toolCallId.
+    """
+    from contextlib import ExitStack
+
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+    from tools.base import MessageStatus
+
+    env = ActivityEnvironment()
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    session_data = {
+        "task_id": "task-1",
+        "session_id": "session-1",
+        "debug_url": "https://steel.example/debug",
+        "ws_url": "ws://live",
+        "fingerprint_injection": None,
+        "passwords": [],
+        "auth_options": {"realm": "example.com"},
+        "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
+        "user_settings": {},
+    }
+    llm_step = AsyncMock(
+        return_value={
+            "action": {"action": "scroll", "thinking": "Looking for recipes", "params": {"direction": "down"}},
+            "usage": {"prompt_tokens": 900, "completion_tokens": 60, "actual_model": "rose-1-browser-use"},
+            "mode": "waterfall",
+        }
+    )
+
+    async def execute_step_until_cancelled(*args, **kwargs):
+        env.cancel(cancellation_details=cancellation_details)
+        await asyncio.sleep(30)
+        raise AssertionError("the cancelled step must not complete")
+
+    save_action = AsyncMock()
+    close_mock = AsyncMock()
+    native_start = await native_browser_start_source(
+        "1970-01-01T00:00:00+00:00", tool_call_id="call_e97ab0c5c14041d49e4744b74fa8e8fc"
+    )
+    patch_targets = [
+        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", AsyncMock(return_value=[native_start])),
+        patch("domains.spawn_browser_agent_v3.handler.init_browser_session", AsyncMock(return_value=session_data)),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_recent_otps", AsyncMock(return_value=[])),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
+            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler._call_browser_use_with_rotation", llm_step),
+        patch("domains.spawn_browser_agent_v3.handler.execute_action", side_effect=execute_step_until_cancelled),
+        patch("domains.spawn_browser_agent_v3.handler.build_browser_verifier_context", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.extract_session_files", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", close_mock),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", save_action),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_assistant_message", AsyncMock()),
+        patch("browser_tools.dom_service.DOMService", _FakeDomService),
+        patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+        patch(
+            "playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser))
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.live_tab_looks_challenged", AsyncMock(return_value=False)),
+    ]
+
+    outcome = None
+    with ExitStack() as stack:
+        for patch_target in patch_targets:
+            stack.enter_context(patch_target)
+        try:
+            outcome = await asyncio.wait_for(
+                env.run(
+                    spawn_browser_agent_activity_v3,
+                    user_id="user-1",
+                    agent_id="agent-1",
+                    goal="Find three gluten-free Christmas starters on Sainsbury's",
+                    tool_call_id="call_e97ab0c5c14041d49e4744b74fa8e8fc",
+                    task_id="task-1",
+                    output_schema={"fields": [{"name": "result", "type": "string"}]},
+                    use_claude_mode=False,
+                    start_url="https://www.sainsburys.co.uk",
+                ),
+                timeout=20,
+            )
+        except asyncio.CancelledError:
+            outcome = "raised CancelledError"
+
+    terminal_writes = [
+        call.kwargs
+        for call in save_action.await_args_list
+        if call.kwargs.get("tool_call_id") == "call_e97ab0c5c14041d49e4744b74fa8e8fc"
+        and call.kwargs.get("status") in (MessageStatus.FINISHED, MessageStatus.ERROR)
+        and (call.kwargs.get("is_completion_message") or call.kwargs.get("action_type") == "task_complete")
+        # FE-only teardown rows never reach the model (drop_rows_never_sent_to_model).
+        and not (call.kwargs.get("extra_metadata") or {}).get("excludeFromModel")
+    ]
+    return outcome, terminal_writes, close_mock
+
+
+async def test_timed_out_browser_activity_leaves_the_tool_result_to_the_workflow():
+    """A StartToClose timeout must not post a second, "paused by user" result.
+
+    Polar batch 1 (2026-10-20, source 0a2470cc6), 10 roots incl. e2176bec: the
+    browser activity hit its 30-minute StartToClose timeout. The workflow got
+    the ActivityError and posted "Browser automation failed: activity
+    StartToClose timeout" (ERROR) on the spawn toolCallId; the planner then
+    took its next turn. Seconds later the worker's local timeout cancelled the
+    zombie attempt, and its CancelledError branch posted a model-visible
+    FINISHED "Browser Session Cancelled: Agent paused by user" on the SAME
+    toolCallId. Latest-terminal-wins dedup let that row replace the timeout
+    error, which sorted after the next ASSISTANT turn -> the benchmark aborted
+    with "[role_alternation] Consecutive assistant messages at OAI indices 3
+    and 4", and the model was told the user paused a task that actually timed
+    out. Only a cancel the workflow asked for is a pause; on any other cancel
+    the manager boundary owns the tool result (spawn_claude_code_agent already
+    makes this distinction).
+    """
+    from temporalio.activity import ActivityCancellationDetails
+
+    from benchmarks.context_validator import validate_context
+    from tools.base import MessageStatus as _MessageStatus
+
+    spawn_call = "call_e97ab0c5c14041d49e4744b74fa8e8fc"
+    next_calls = [
+        "call_f8eaf40c17274eff8fd25155ab4742b3",
+        "call_059f427ccc57451d98ac1dd7e9452ca1",
+    ]
+    outcome, terminal_writes, close_mock = await _run_browser_activity_cancelled_mid_step(
+        ActivityCancellationDetails(timed_out=True)
+    )
+
+    # Real root rows from agent e2176bec-206d-41d5-879c-5a219991f6d8 up to the
+    # benchmark's abort, followed by whatever the timed-out attempt persisted.
+    messages = [
+        _make_validator_msg("USER", "Christmas get-together plan", "2026-10-20T04:44:07.160Z"),
+        _make_validator_msg("TOOL", "Agent initialization complete.", "2026-10-20T04:44:17.234Z", {
+            "toolCallId": "tc-agent-init", "toolName": "agent_init", "toolStatus": "FINISHED",
+        }),
+        _make_validator_msg("ASSISTANT", "**Planning multi-site browsing**", "2026-10-20T04:44:27.795Z", {
+            "tool_calls": [{"tool": "spawn_agent", "tool_call_id": spawn_call, "goal": "Sainsbury's starters"}],
+        }),
+        _make_validator_msg("TOOL", "", "2026-10-20T04:44:27.879Z", {
+            "toolCallId": spawn_call, "toolName": "spawn_browser_agent", "toolStatus": "IN_PROGRESS",
+        }),
+        _make_validator_msg("TOOL", "activity StartToClose timeout", "2026-10-20T05:14:27.991Z", {
+            "toolCallId": spawn_call, "toolName": "spawn_browser_agent", "toolStatus": "ERROR",
+            "title": "Browser automation failed", "action_type": "task_complete",
+        }),
+        _make_validator_msg("ASSISTANT", "**Preparing separate site searches**", "2026-10-20T05:14:36.023Z", {
+            "tool_calls": [{"tool": "spawn_agent", "tool_call_id": call_id, "goal": "site"} for call_id in next_calls],
+        }),
+    ]
+    for offset, write in enumerate(terminal_writes):
+        messages.append(_make_validator_msg(
+            "TOOL",
+            write.get("message") or "",
+            f"2026-10-20T05:14:38.{785 + offset:03d}Z",
+            {
+                "toolCallId": write["tool_call_id"],
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED" if write["status"] == _MessageStatus.FINISHED else "ERROR",
+                "title": write.get("title"),
+                "action_type": write.get("action_type"),
+            },
+        ))
+
+    role_errors = [
+        v.message for v in validate_context(messages) if v.rule == "role_alternation" and v.severity == "error"
+    ]
+    assert not terminal_writes, (
+        "a timed-out browser attempt must leave the spawn tool result to the workflow's "
+        f"timeout error, got late terminal writes {[(w.get('title'), w.get('message')) for w in terminal_writes]}; "
+        f"validator: {role_errors}"
+    )
+    assert not role_errors, role_errors
+    assert outcome != {"status": "cancelled"} and not (
+        isinstance(outcome, dict) and outcome.get("message") == "Browser agent cancelled by user"
+    ), f"a timed-out attempt must not report a user cancellation: {outcome}"
+    close_mock.assert_awaited()
+
+
+async def test_requested_browser_cancel_still_posts_the_pause_result():
+    """A workflow-requested cancel (user pause) still closes the spawn toolCallId.
+
+    On pause the workflow abandons the activity (TRY_CANCEL) without posting a
+    result, so the activity's "Browser Session Cancelled" row is the only
+    terminal result for the call and must stay.
+    """
+    from temporalio.activity import ActivityCancellationDetails
+
+    outcome, terminal_writes, close_mock = await _run_browser_activity_cancelled_mid_step(
+        ActivityCancellationDetails(cancel_requested=True)
+    )
+    assert [(w.get("title"), w.get("message")) for w in terminal_writes] == [
+        ("Browser Session Cancelled", "Agent paused by user")
+    ], terminal_writes
+    assert isinstance(outcome, dict) and outcome.get("status") == "cancelled", outcome
+    close_mock.assert_awaited()
+
+
+def _make_validator_msg(role, text, ts, metadata=None):
+    return {"role": role, "text": text, "timestamp": ts, "metadata": metadata or {}}
+
+
 async def test_private_browser_pause_urls_use_protected_continuity():
     """Activity results expose redacted URLs while exact continuation stays private."""
     from contextlib import ExitStack
@@ -31074,6 +31286,14 @@ async def run_all_tests():
     await r.record_async(
         "activity_checkpoints_at_step_boundary_on_worker_shutdown",
         test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown,
+    )
+    await r.record_async(
+        "timed_out_browser_activity_leaves_the_tool_result_to_the_workflow",
+        test_timed_out_browser_activity_leaves_the_tool_result_to_the_workflow,
+    )
+    await r.record_async(
+        "requested_browser_cancel_still_posts_the_pause_result",
+        test_requested_browser_cancel_still_posts_the_pause_result,
     )
     await r.record_async(
         "private_browser_pause_urls_use_protected_continuity",
