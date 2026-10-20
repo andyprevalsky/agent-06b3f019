@@ -8,6 +8,7 @@ import {
   writeFileSync,
 } from "fs";
 import { spawn, execFileSync } from "child_process";
+import { timingSafeEqual } from "crypto";
 import { createServer } from "http";
 import { homedir } from "os";
 import { join } from "path";
@@ -57,6 +58,24 @@ let stdoutLineBuffer = "";
 // surfaces mid-run — a null-credential fallback in the backend cannot catch it.
 let oauthFallbackReason = null;
 const clients = new Set();
+
+// ---------------------------------------------------------------------------
+// Inbound user turns (agent-graph messages, direct chat)
+// ---------------------------------------------------------------------------
+//
+//   backend / agents helper ──user_turn{id,token,text,sender}──► this server
+//          ◄──user_turn_ack{id,status}── dedupe by id (delivered once)
+//
+// `codex exec` reads one prompt, so a delivered turn is queued and runs as the
+// next turn of the same thread (`codex exec … resume <thread_id> <text>`)
+// right after the current run exits cleanly. Same protocol and token as the
+// Claude Code ws-server (codeSessionTurns.ts / code_session_turns.py).
+// Turn state lives here (the renderer and run loop use it); the token-checked
+// handler is defined after shutdown().
+const queuedTurns = [];
+let turnsClosed = false;
+let codexThreadId = null;
+
 // After Codex exits the server keeps serving its final buffer until the
 // session is closed, so a detached or retried activity can always reattach.
 // There is no linger deadline: an unattended sandbox pauses on its E2B idle
@@ -136,6 +155,9 @@ function renderCodexJsonLine(line) {
   }
 
   if (event.type === "thread.started") {
+    if (typeof event.thread_id === "string" && event.thread_id) {
+      codexThreadId = event.thread_id;
+    }
     appendEvent({
       type: "session",
       raw_type: event.type,
@@ -265,6 +287,44 @@ async function shutdown(code = 0) {
   setTimeout(() => process.exit(code), 5000);
 }
 
+// Token-checked user_turn handler (see "Inbound user turns" above).
+const TURN_TOKEN = process.env.CODE_SESSION_TURN_TOKEN || "";
+const MAX_TURN_TEXT_CHARS = 100_000;
+const MAX_TURN_ID_CHARS = 128;
+const deliveredTurnIds = new Set();
+
+function tokenMatches(candidate) {
+  if (!TURN_TOKEN || typeof candidate !== "string") return false;
+  const expected = Buffer.from(TURN_TOKEN, "utf8");
+  const actual = Buffer.from(candidate, "utf8");
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+function turnAck(id, status, reason) {
+  return { type: "user_turn_ack", id, status, ...(reason ? { reason } : {}) };
+}
+
+function handleUserTurn(msg) {
+  const id = typeof msg.id === "string" ? msg.id : "";
+  if (!tokenMatches(msg.token)) return turnAck(id, "rejected", "unauthorized");
+  if (!id || id.length > MAX_TURN_ID_CHARS) {
+    return turnAck(id, "rejected", "invalid_id");
+  }
+  if (deliveredTurnIds.has(id)) return turnAck(id, "duplicate");
+  const text = typeof msg.text === "string" ? msg.text.replace(/\0/g, "") : "";
+  if (!text.trim() || text.length > MAX_TURN_TEXT_CHARS) {
+    return turnAck(id, "rejected", "invalid_text");
+  }
+  if (turnsClosed) return turnAck(id, "rejected", "session_ended");
+  const sender = msg.sender === "agent" ? "agent" : "user";
+  deliveredTurnIds.add(id);
+  queuedTurns.push({ id, sender, text });
+  appendEvent({ type: "user_turn", turn_id: id, sender, text });
+  appendOutput("stdout", `[${sender === "user" ? "You" : "Agent"}] ${text}\n`);
+  log("info", "Queued user turn", { id, sender, chars: text.length });
+  return turnAck(id, "delivered");
+}
+
 wss.on("connection", (ws) => {
   log("info", "Client connected", { total: clients.size + 1 });
   clients.add(ws);
@@ -286,6 +346,8 @@ wss.on("connection", (ws) => {
             error: "Codex exec is non-interactive",
           }),
         );
+      } else if (msg.type === "user_turn") {
+        ws.send(JSON.stringify(handleUserTurn(msg)));
       }
     } catch (err) {
       log("error", "Failed to parse message", { error: err.message });
@@ -646,7 +708,7 @@ const sanitizedGoal = [
 // The ChatGPT fast-mode proxy only makes sense for the OAuth token — it forwards
 // to the ChatGPT codex backend, which won't authenticate an OpenAI API key. So
 // the API-key path (initial or fallback) runs against the default OpenAI endpoint.
-function buildCodexArgs({ useFastModeProxy }) {
+function buildCodexArgs({ useFastModeProxy, resume = null }) {
   const args = [
     "exec",
     "--ignore-user-config",
@@ -657,9 +719,13 @@ function buildCodexArgs({ useFastModeProxy }) {
     workDir,
     "-m",
     CODEX_MODEL,
-    // Persistent code sessions continue the previous Codex conversation.
-    ...(CODEX_RESUME_SESSION_ID ? ["resume", CODEX_RESUME_SESSION_ID] : []),
-    sanitizedGoal,
+    // A queued inbound turn continues the current thread; otherwise a
+    // persistent code session continues its previous Codex conversation.
+    ...(resume
+      ? ["resume", resume.threadId, resume.text]
+      : CODEX_RESUME_SESSION_ID
+        ? ["resume", CODEX_RESUME_SESSION_ID, sanitizedGoal]
+        : [sanitizedGoal]),
   ];
   if (useFastModeProxy && codexFastModeProxy) {
     args.splice(
@@ -748,6 +814,28 @@ if (code !== 0 && !usingApiKey && OPENAI_API_KEY && oauthFallbackReason) {
       buildCodexArgs({ useFastModeProxy: false }),
     ));
   }
+}
+
+// Delivered user turns run, in order, as resumed turns of the same thread.
+while (code === 0 && codexThreadId && queuedTurns.length > 0) {
+  const turn = queuedTurns.shift();
+  log("info", "Starting queued user turn", {
+    id: turn.id,
+    sender: turn.sender,
+  });
+  ({ code, signal } = await runCodex(
+    buildCodexArgs({
+      useFastModeProxy: !usingApiKey,
+      resume: { threadId: codexThreadId, text: turn.text },
+    }),
+  ));
+}
+turnsClosed = true;
+if (queuedTurns.length > 0) {
+  appendEvent({
+    type: "user_turn_undelivered",
+    turn_ids: queuedTurns.map((turn) => turn.id),
+  });
 }
 
 exitCode = code ?? 1;

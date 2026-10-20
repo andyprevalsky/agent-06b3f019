@@ -190,12 +190,19 @@ async function recordCodeSessionShare(
   await shareCodeSession({ userId, agentId, sharedWithAgentId: body.share_code_session_with });
 }
 
+/** Server-side create options that are not part of the public request body. */
+export interface CreateAgentOptions {
+  /** Root repository for code sessions, persisted in the create transaction. */
+  githubRepoUrl?: string;
+}
+
 export async function createAgent(
   body: CreateAgentBody,
   userId: string,
   isInternal: boolean,
   clientIP: string | null,
-  isBenchmark = false
+  isBenchmark = false,
+  options: CreateAgentOptions = {}
 ) {
   if (isInternal) body.goal = resolvePromptSecrets(body.goal);
   const verifier = { type: 'FLOAT_LLM_JUDGE' as const };
@@ -249,6 +256,7 @@ export async function createAgent(
     workflowContextGates: body.context_gates,
     workflowStartPhase: body.start_phase,
     workflowTaskQueue: body.task_queue,
+    ...(options.githubRepoUrl !== undefined ? { githubRepoUrl: options.githubRepoUrl } : {}),
   });
   const archiveStartFixture = !isSubAgent ? await prepareAgentStartArchive(agent.agent.id) : null;
   await recordCodeSessionShare(body, userId, agent.agent.id);

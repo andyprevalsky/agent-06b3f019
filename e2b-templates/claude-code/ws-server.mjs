@@ -6,6 +6,7 @@
 
 import { WebSocketServer } from "ws";
 import { execFileSync, execSync, spawn } from "child_process";
+import { timingSafeEqual } from "crypto";
 import {
   appendFileSync,
   copyFileSync,
@@ -129,12 +130,18 @@ wss.on("connection", (ws) => {
           return;
         }
 
+        // Raw stdin stays closed to callers: only authenticated, idempotent
+        // `user_turn` messages reach the CLI (see handleUserTurn).
         ws.send(
           JSON.stringify({
             type: "stdin_error",
-            error: "Claude Code CLI print session is non-interactive",
+            error: "Raw stdin is disabled; send an authenticated user_turn",
           }),
         );
+      } else if (msg.type === "user_turn") {
+        ws.send(JSON.stringify(handleUserTurn(msg)));
+      } else if (msg.type === "hand_back") {
+        ws.send(JSON.stringify(handleHandBack(msg)));
       }
     } catch (e) {
       log("error", "Failed to parse message", { error: e.message });
@@ -667,9 +674,147 @@ function resolveResumeSessionId() {
   return id;
 }
 
+// ---------------------------------------------------------------------------
+// Direct chat: user turns delivered to the running CLI
+// ---------------------------------------------------------------------------
+//
+//   backend route / agents helper ──user_turn{id,token,text}──► this server
+//       │                                   │ dedupe by id (delivered once)
+//       │                                   ▼
+//       │                     CLI stdin (stream-json user message)
+//       ◄──user_turn_ack{id,status}──       │ events broadcast to every client
+//                                           ▼ (FE live terminal + activity)
+//
+// The CLI reads stream-json input and keeps running while stdin is open. An
+// autonomous run ends stdin on its first `result`, exactly like the old
+// one-shot prompt. The first user turn puts the session on a "direct hold": stdin stays
+// open between turns until the user hands back (or the hold idles out), so
+// the user can keep talking to the same CLI conversation.
+//
+// Agent-graph messages (sender "agent", e.g. the root answering a code
+// agent's question) are ordinary queued turns: they never take the direct
+// hold, and stdin stays open until every written turn has its `result`, so a
+// message that arrives mid-run is answered before the CLI exits.
+const TURN_TOKEN = process.env.CODE_SESSION_TURN_TOKEN || "";
+const DIRECT_HOLD_IDLE_MS = (() => {
+  const raw = Number.parseInt(
+    process.env.CODE_SESSION_DIRECT_HOLD_IDLE_MS || "",
+    10,
+  );
+  return Number.isInteger(raw) && raw > 0 ? raw : 10 * 60 * 1000;
+})();
+const MAX_TURN_TEXT_CHARS = 100_000;
+const MAX_TURN_ID_CHARS = 128;
+
+let cliChild = null;
+let cliStdinOpen = false;
+// Turns written to stdin (the task prompt + delivered user turns) that have
+// not produced their `result` yet.
+let pendingTurns = 0;
+let directHold = false;
+let directHoldTimer = null;
+const deliveredTurnIds = new Set();
+
+function userMessageLine(text) {
+  return (
+    JSON.stringify({
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text }] },
+    }) + "\n"
+  );
+}
+
+function tokenMatches(candidate) {
+  if (!TURN_TOKEN || typeof candidate !== "string") return false;
+  const expected = Buffer.from(TURN_TOKEN, "utf8");
+  const actual = Buffer.from(candidate, "utf8");
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+function endCliStdin(reason) {
+  if (!cliStdinOpen || !cliChild) return;
+  cliStdinOpen = false;
+  if (directHoldTimer) {
+    clearTimeout(directHoldTimer);
+    directHoldTimer = null;
+  }
+  log("info", "Closing CLI stdin", { reason });
+  cliChild.stdin.end();
+}
+
+function releaseDirectHold(reason) {
+  if (!directHold) return;
+  directHold = false;
+  appendEvent({ type: "direct_chat", status: "released", reason });
+  if (pendingTurns === 0) endCliStdin(`direct hold released: ${reason}`);
+}
+
+function onCliTurnResult() {
+  pendingTurns = Math.max(0, pendingTurns - 1);
+  if (pendingTurns > 0) return;
+  if (!directHold) {
+    endCliStdin("autonomous turn finished");
+    return;
+  }
+  if (directHoldTimer) clearTimeout(directHoldTimer);
+  directHoldTimer = setTimeout(
+    () => releaseDirectHold("idle"),
+    DIRECT_HOLD_IDLE_MS,
+  );
+}
+
+function turnAck(id, status, reason) {
+  return { type: "user_turn_ack", id, status, ...(reason ? { reason } : {}) };
+}
+
+function handleUserTurn(msg) {
+  const id = typeof msg.id === "string" ? msg.id : "";
+  if (!tokenMatches(msg.token)) return turnAck(id, "rejected", "unauthorized");
+  if (!id || id.length > MAX_TURN_ID_CHARS) {
+    return turnAck(id, "rejected", "invalid_id");
+  }
+  if (deliveredTurnIds.has(id)) return turnAck(id, "duplicate");
+  const text = typeof msg.text === "string" ? msg.text.replace(/\0/g, "") : "";
+  if (!text.trim() || text.length > MAX_TURN_TEXT_CHARS) {
+    return turnAck(id, "rejected", "invalid_text");
+  }
+  if (exitAnnounced || !cliStdinOpen || !cliChild) {
+    return turnAck(id, "rejected", "session_ended");
+  }
+  const sender = msg.sender === "agent" ? "agent" : "user";
+  deliveredTurnIds.add(id);
+  if (directHoldTimer) {
+    clearTimeout(directHoldTimer);
+    directHoldTimer = null;
+  }
+  if (!directHold && sender === "user") {
+    directHold = true;
+    appendEvent({ type: "direct_chat", status: "held", sender });
+  }
+  appendEvent({ type: "user_turn", turn_id: id, sender, text });
+  appendOutput("stdout", `[${sender === "user" ? "You" : "Agent"}] ${text}\n`);
+  pendingTurns += 1;
+  cliChild.stdin.write(userMessageLine(text));
+  log("info", "Delivered user turn", { id, sender, chars: text.length });
+  return turnAck(id, "delivered");
+}
+
+function handleHandBack(msg) {
+  if (!tokenMatches(msg.token)) {
+    return {
+      type: "hand_back_ack",
+      status: "rejected",
+      reason: "unauthorized",
+    };
+  }
+  const wasHeld = directHold;
+  releaseDirectHold("handed_back");
+  return { type: "hand_back_ack", status: wasHeld ? "released" : "not_held" };
+}
+
 async function runClaudeCli() {
   const sanitizedGoal = GOAL.replace(/\0/g, "");
-  const prompt = `Task:\n${sanitizedGoal}`;
+  const prompt = userMessageLine(`Task:\n${sanitizedGoal}`);
 
   appendEvent({
     type: "session",
@@ -686,6 +831,8 @@ async function runClaudeCli() {
   const args = [
     "--print",
     "--verbose",
+    "--input-format",
+    "stream-json",
     "--output-format",
     "stream-json",
     "--model",
@@ -706,7 +853,9 @@ async function runClaudeCli() {
     args.push("--resume", resumeSessionId);
   }
 
-  // The prompt is delivered on stdin, NOT as a positional argument.
+  // The prompt is delivered on stdin, NOT as a positional argument. With
+  // `--input-format stream-json` it is one JSON user message; stdin stays open
+  // so direct-chat user turns can follow (closed by endCliStdin).
   // Claude Code CLI (>=2.x) ignores a positional prompt when
   // `--output-format stream-json` is set and reads the prompt from stdin
   // instead; passing it positionally makes the CLI exit 1 immediately with
@@ -741,8 +890,10 @@ async function runClaudeCli() {
       code: err?.code,
     });
   });
+  cliChild = child;
+  cliStdinOpen = true;
+  pendingTurns = 1;
   child.stdin.write(prompt);
-  child.stdin.end();
 
   let stdoutRemainder = "";
   let sawResult = false;
@@ -760,6 +911,7 @@ async function runClaudeCli() {
           sawResult = true;
         }
         emitClaudeMessage(message);
+        if (message?.type === "result") onCliTurnResult();
       } catch (err) {
         appendOutput("stdout", line + "\n");
         appendEvent({ type: "stdout", text: line });
@@ -802,6 +954,8 @@ async function runClaudeCli() {
       }
     }
     processExited = true;
+    cliStdinOpen = false;
+    if (directHoldTimer) clearTimeout(directHoldTimer);
     const exitCode = Number.isInteger(code) ? code : 1;
     log("info", "Claude Code CLI exited", { exitCode, sawResult });
     finishRun(exitCode);

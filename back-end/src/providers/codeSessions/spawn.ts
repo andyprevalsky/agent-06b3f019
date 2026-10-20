@@ -210,16 +210,49 @@ export async function keepAliveCodeTask(
   taskId: string,
   setTimeoutFn: (sandboxId: string, timeoutMs: number) => Promise<void> = (sandboxId, timeoutMs) =>
     Sandbox.setTimeout(sandboxId, timeoutMs, { apiKey: process.env.E2B_API_KEY })
-): Promise<{ alive: boolean; code_session_id: string | null }> {
+): Promise<{
+  alive: boolean;
+  code_session_id: string | null;
+  awaiting_parent: AwaitingParentQuestion | null;
+}> {
   const task = await prisma.claudeCodeSession.findUnique({ where: { id: taskId } });
   if (task === null || task.status === 'CLOSED') {
-    return { alive: false, code_session_id: task?.codeSessionId ?? null };
+    return { alive: false, code_session_id: task?.codeSessionId ?? null, awaiting_parent: null };
   }
   if (!isLocalClaudeCodeSandboxId(task.sandboxId)) {
     await setTimeoutFn(task.sandboxId, CODE_SANDBOX_IDLE_TIMEOUT_MS);
   }
   if (task.codeSessionId !== null) await extendLease(task.codeSessionId);
-  return { alive: true, code_session_id: task.codeSessionId };
+  return {
+    alive: true,
+    code_session_id: task.codeSessionId,
+    awaiting_parent: (task.awaitingParent ?? null) as AwaitingParentQuestion | null,
+  };
+}
+
+/** A question a code agent asked the Rose agent whose spawn it is running in. */
+export interface AwaitingParentQuestion {
+  message_id: string;
+  question: string;
+  at: string;
+}
+
+/**
+ * The code agent asked its spawning (non-root) Rose agent a question. That
+ * agent is blocked inside this very spawn, so the attached activity sees the
+ * mark on its next keepalive, pauses the session (resumable, never failed) and
+ * returns the question; the answer resumes the session as a new task.
+ */
+export async function markAwaitingParent(
+  taskId: string,
+  question: { message_id: string; question: string }
+): Promise<void> {
+  await prisma.claudeCodeSession.updateMany({
+    where: { id: taskId, status: { not: 'CLOSED' } },
+    data: {
+      awaitingParent: { ...question, at: new Date().toISOString() },
+    },
+  });
 }
 
 /**

@@ -327,8 +327,12 @@ async def close_e2b_session(
         return {}
 
 
-async def keepalive_e2b_session(task_id: str, code_provider: str = "claude") -> bool:
-    """Extend an attached session's sandbox idle window and lease. Best-effort."""
+async def keepalive_e2b_session(task_id: str, code_provider: str = "claude") -> Optional[dict[str, Any]]:
+    """Extend an attached session's sandbox idle window and lease. Best-effort.
+
+    Returns the backend's answer (``alive``, ``awaiting_parent``) or None when
+    the call failed; a failed keepalive never ends the session.
+    """
     config = load_config()
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -337,12 +341,15 @@ async def keepalive_e2b_session(task_id: str, code_provider: str = "claude") -> 
                 headers={"x-api-key": config.backend.api_key or ""},
                 json={},
             )
-            return response.status_code == 200
+            if response.status_code != 200:
+                return None
+            body = response.json()
+            return body if isinstance(body, dict) else None
     except WorkflowGenerationSealed:
         raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.warning("[ClaudeCode] Keepalive failed", task_id=task_id, error=extract_error_message(e))
-        return False
+        return None
 
 
 async def check_sandbox_health(

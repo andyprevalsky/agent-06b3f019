@@ -85,3 +85,15 @@ export interface CloseSessionParams {
   additional_paths?: string[];
   reason?: string;
 }
+
+/** POST /api/claude-code-session/:taskId/turns — a user turn typed to the CLI. */
+export const directTurnSchema = z.object({
+  client_message_id: z
+    .string()
+    .min(8)
+    .max(128)
+    .regex(/^[A-Za-z0-9_-]+$/),
+  text: z.string().trim().min(1).max(100_000),
+  tool_call_id: z.string().min(1).max(256).optional(),
+  user_id: z.string().uuid().optional(), // internal callers only (API key)
+});

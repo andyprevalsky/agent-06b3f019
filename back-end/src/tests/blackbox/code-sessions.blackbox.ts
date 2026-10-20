@@ -45,6 +45,7 @@ import {
   CodeSessionBusyError,
   CodeSessionNotFoundError,
   keepAliveCodeTask,
+  markAwaitingParent,
   resolveSpawnCodeSession,
   retireOwnedCodeSession,
 } from '../../providers/codeSessions/spawn';
@@ -542,7 +543,12 @@ test('keepalive extends an attached sandbox and its lease; retire deletes checkp
   const alive = await keepAliveCodeTask(task.id, async (sandboxId, timeoutMs) => {
     extended.push([sandboxId, timeoutMs]);
   });
-  assert.deepEqual(alive, { alive: true, code_session_id: session.id });
+  assert.deepEqual(alive, { alive: true, code_session_id: session.id, awaiting_parent: null });
+  // A question to the (blocked) spawning agent rides on the next keepalive.
+  await markAwaitingParent(task.id, { message_id: 'q-1', question: 'Which database?' });
+  const asked = await keepAliveCodeTask(task.id, async () => undefined);
+  assert.equal(asked.awaiting_parent?.question, 'Which database?');
+  assert.equal(asked.awaiting_parent?.message_id, 'q-1');
   assert.deepEqual(extended, [['sb-keepalive', 30 * 60 * 1000]]);
   const leased = await prisma.codeSession.findUniqueOrThrow({ where: { id: session.id } });
   assert.ok(

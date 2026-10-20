@@ -394,6 +394,53 @@ def test_general_purpose_faulty_tool_retry_warns_recursion():
     assert "circumvent faulty tools" not in MAIN_SYSTEM_PROMPT
 
 
+def test_code_agent_advertises_rose_user_ui_and_inline_views():
+    """Root and planner learn that coding and Rose-app changes belong to a code agent.
+
+    The code sandbox holds the user's rose_user_ui and its `rose-ui publish`
+    CLI. Without saying so, the root explored and drove a browser against
+    roselabs.ai to change the user's Rose background, and a game was returned
+    only as a file. Execute-phase tools see the `type` description; the planner
+    also sees the spawn_agent prompt. Both must advertise the capability, and
+    the inline_view argument must say it shows code-agent work.
+    """
+    from domains.set_plan.service import get_planner_tools_description
+    from tools.prompts.spawn_agent import PROMPT
+    from utils.tool_schemas import (
+        INLINE_VIEW_DESCRIPTION,
+        SendMessageToUserExecutePhaseTool,
+        SpawnAgentTool,
+    )
+
+    type_desc = " ".join((SpawnAgentTool.model_fields["type"].description or "").split())
+    for phrase in (
+        "Delegate all code writing to it",
+        "user's Rose app UI (rose_user_ui)",
+        "how Rose looks or behaves for the user",
+        "as an inline view",
+        "send_message_to_user's inline_view",
+    ):
+        assert phrase in type_desc, f"spawn_agent type description lost {phrase!r}"
+
+    code_line = next(line for line in PROMPT.splitlines() if line.startswith("- code:"))
+    for phrase in (
+        "give it all code writing",
+        "user's Rose app UI",
+        "publish that as an inline view and return the view name",
+        "add a send_message_to_user_execute_phase task that shows the view via inline_view",
+    ):
+        assert phrase in code_line, f"spawn_agent prompt code line lost {phrase!r}"
+    assert "Anthropic's Claude Code" not in code_line, "code agents also run Codex CLI"
+
+    planner_tools = get_planner_tools_description()
+    assert code_line in planner_tools, "planner must render the spawn_agent code line"
+    assert "user's Rose app UI (rose_user_ui)" in " ".join(planner_tools.split())
+
+    assert "a code agent published" in INLINE_VIEW_DESCRIPTION
+    inline_field = SendMessageToUserExecutePhaseTool.model_fields["inline_view"]
+    assert inline_field.description == INLINE_VIEW_DESCRIPTION
+
+
 def test_planner_spawn_aliases_documented_in_prompt():
     """Spawn planner aliases are documented by the planner prompt, not prompt files."""
     from utils.prompts import PLANNER_SPAWN_AGENT_ALIAS_TABLE
@@ -2210,6 +2257,12 @@ async def run_all_tests():
     r.record(
         "parent_prompts_route_browser_approval_through_commit_click",
         test_parent_prompts_route_browser_approval_through_commit_click,
+    )
+
+    # 22. Code agents advertise rose_user_ui + inline views to root and planner
+    r.record(
+        "code_agent_advertises_rose_user_ui_and_inline_views",
+        test_code_agent_advertises_rose_user_ui_and_inline_views,
     )
     teardown_mock()
     return r.all_passed

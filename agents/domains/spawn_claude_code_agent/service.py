@@ -294,6 +294,14 @@ def format_code_events_transcript(
                 lines.append(f"[{provider} result] {text.strip()[:800]}")
             continue
 
+        if event_type == "user_turn":
+            # Direct chat: the user (or another agent) typed to this CLI.
+            text = event.get("text")
+            who = "Agent" if event.get("sender") == "agent" else "User"
+            if isinstance(text, str) and text.strip():
+                lines.append(f"[{who} → {provider}] {text.strip()}")
+            continue
+
     summary_lines = [str(item).strip() for item in (action_summary or []) if str(item).strip()]
     if summary_lines:
         if lines:
@@ -856,6 +864,17 @@ async def _run_agentic_loop(
     # monitor if the CLI never exits after declaring completion.
     sdk_result_at: float | None = None
     logged_events = int((code_session or {}).get("logged_events") or 0)
+    # Direct chat: while the user holds the session (ws-server `direct_chat`
+    # held → released), the user's turns drive the CLI. The monitor must not
+    # end the session on post-result grace / SDK idle, and never writes to
+    # stdin, so no parent instruction competes with the user.
+    direct_chat_active = False
+    # Every delivered user turn (direct chat or an agent-graph message) adds
+    # one more SDK `result` before the CLI is done: a message that arrives
+    # mid-run makes the first result an intermediate one, so the post-result
+    # exit grace arms only once results catch up with turns.
+    user_turns_seen = 0
+    sdk_results_seen = 0
 
     def _mark_terminal_output_persisted() -> None:
         if terminal_output_persisted is not None:
@@ -901,7 +920,11 @@ async def _run_agentic_loop(
         # The ws-server resends its whole history on every (re)connect, so it
         # replaces everything seen so far instead of appending to it.
         nonlocal completed_codex_turns, in_flight_tool_count
+        nonlocal direct_chat_active, user_turns_seen, sdk_results_seen
         code_events.clear()
+        direct_chat_active = False
+        user_turns_seen = 0
+        sdk_results_seen = 0
         completed_codex_turn_keys.clear()
         completed_codex_turns = 0
         in_flight_tool_count = 0
@@ -914,8 +937,19 @@ async def _run_agentic_loop(
     async def on_event(event: dict[str, Any]) -> None:
         nonlocal completed_codex_turns, last_output_time
         nonlocal in_flight_tool_count, sdk_result_at, logged_events
+        nonlocal direct_chat_active, user_turns_seen, sdk_results_seen
         last_output_time = safe_time()
         code_events.append(event)
+        if event.get("type") == "direct_chat":
+            direct_chat_active = event.get("status") == "held"
+            if not direct_chat_active and sdk_result_at is not None:
+                # Released after a finished turn: the CLI is told to exit now,
+                # so restart the post-result grace from the hand back.
+                sdk_result_at = safe_time()
+        elif event.get("type") == "user_turn":
+            # A new turn: the next SDK result belongs to it.
+            user_turns_seen += 1
+            sdk_result_at = None
         if is_codex_completed_turn_event(event):
             key = codex_completed_turn_event_key(event, len(code_events) - 1)
             if key not in completed_codex_turn_keys:
@@ -930,15 +964,19 @@ async def _run_agentic_loop(
         elif event_type == "tool_result":
             if in_flight_tool_count > 0:
                 in_flight_tool_count -= 1
-        elif event_type == "result" and sdk_result_at is None:
-            sdk_result_at = safe_time()
-            logger.info(
-                "[ClaudeCode] SDK result observed; arming post-result exit grace",
-                agent_id=agent_id,
-                task_id=task_id,
-                grace_s=SDK_POST_RESULT_EXIT_GRACE_S,
-                status=event.get("status"),
-            )
+        elif event_type == "result":
+            # The result of the latest delivered turn arms the exit-grace
+            # backstop (r31 a2/a3); an earlier turn's result does not.
+            sdk_results_seen += 1
+            if sdk_result_at is None and sdk_results_seen > user_turns_seen:
+                sdk_result_at = safe_time()
+                logger.info(
+                    "[ClaudeCode] SDK result observed; arming post-result exit grace",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    grace_s=SDK_POST_RESULT_EXIT_GRACE_S,
+                    status=event.get("status"),
+                )
         # code_events mirrors the sandbox's append-only event history, so an
         # event's index identifies it across reconnect replays and reattaches.
         if len(code_events) <= logged_events:
@@ -1003,7 +1041,21 @@ async def _run_agentic_loop(
             # window open; once keepalives stop it pauses on its own.
             if safe_time() - last_keepalive >= CODE_SESSION_KEEPALIVE_INTERVAL_S:
                 last_keepalive = safe_time()
-                await keepalive_e2b_session(task_id, code_provider)
+                keepalive = await keepalive_e2b_session(task_id, code_provider)
+                awaiting = keepalive.get("awaiting_parent") if isinstance(keepalive, dict) else None
+                if isinstance(awaiting, dict) and awaiting.get("question") and not direct_chat_active:
+                    # The spawning agent is blocked inside this spawn: pause the
+                    # session and hand it the question instead of both waiting.
+                    logger.info(
+                        "[ClaudeCode] Code agent asked its spawner a question; pausing the session",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        message_id=awaiting.get("message_id"),
+                    )
+                    action_summary.append("Code agent asked its parent a question; session paused for the answer")
+                    if loop_outcome is not None:
+                        loop_outcome["awaiting_parent"] = awaiting
+                    break
 
             # After the first SDK result, healthy CLIs exit in <1s. If the
             # process is still alive past the grace window (stdout may keep
@@ -1012,6 +1064,7 @@ async def _run_agentic_loop(
             if (
                 sdk_result_at is not None
                 and exit_code is None
+                and not direct_chat_active
                 and (safe_time() - sdk_result_at) >= SDK_POST_RESULT_EXIT_GRACE_S
             ):
                 grace_elapsed = safe_time() - sdk_result_at
@@ -1041,6 +1094,7 @@ async def _run_agentic_loop(
                 and not pending_output
                 and ws_connected
                 and exit_code is None
+                and not direct_chat_active
             ):
                 logger.info(
                     "[ClaudeCode] Code session idle; pausing it (resumable)",
@@ -1058,6 +1112,8 @@ async def _run_agentic_loop(
                 break
 
             if silence_duration >= SILENCE_TIMEOUT_S and pending_output and ws_connected:
+                # (The parent-LLM relay below is unreachable: every branch
+                # `continue`s before it. Direct chat also never reaches it.)
                 filtered_output = terminal.get_display()
                 pending_output = False
 
@@ -2168,13 +2224,15 @@ def build_code_agent_metadata(
     started_at: Optional[float],
     ended_at: Optional[float] = None,
     facts: Optional[Dict[str, Any]] = None,
+    failure_message: Optional[str] = None,
 ) -> Dict[str, Any]:
     """The ``code_agent`` message metadata block the UI thread renders.
 
     ``state`` is spinning_up | live | completed | failed | paused (paused =
     idle or user-paused session, resumable; an addition to the UI contract).
     ``summary.merged_into`` is set only when the merge was confirmed (C4).
-    The target ('cloud' | 'local') and device_name belong to the L-LOCAL lane.
+    ``failure_message`` is the human-readable reason when state is failed.
+    The target ('cloud' | 'local'), device_name and folder belong to L-LOCAL.
     """
     facts = facts or {}
     block: Dict[str, Any] = {
@@ -2187,6 +2245,8 @@ def build_code_agent_metadata(
     }
     if ended_at is not None:
         block["ended_at"] = _iso_utc(ended_at)
+    if state == "failed" and failure_message:
+        block["failure_message"] = failure_message
     if facts.get("head"):
         summary: Dict[str, Any] = {
             "commit": facts.get("head"),
@@ -2636,14 +2696,15 @@ async def spawn_claude_code_activity(
         # 5. Close session and extract output files before verifier so the
         # verifier sees the SDK event JSON plus the actual extracted artifacts.
         # A persistent session is checkpointed and paused, never killed.
-        idle_paused = loop_outcome.get("idle_paused") is True
+        awaiting_parent = loop_outcome.get("awaiting_parent")
+        idle_paused = loop_outcome.get("idle_paused") is True or isinstance(awaiting_parent, dict)
         close_data = await close_e2b_session(
             task_id=task_id,
             user_id=user_id,
             agent_id=agent_id,
             additional_paths=[],
             code_provider=code_provider,
-            reason="idle" if idle_paused else "close",
+            reason="awaiting_parent" if isinstance(awaiting_parent, dict) else "idle" if idle_paused else "close",
         )
         output_files = close_data.get("output_files", [])
         claude_code_usage = close_data.get("usage")
@@ -2654,11 +2715,18 @@ async def spawn_claude_code_activity(
             # Idle is not failure (C11): report the paused, resumable session.
             if log_collector:
                 await log_collector.stop()
-            message = (
-                f"Code session paused after {loop_outcome.get('idle_s', 0)}s with no activity "
-                "(not failed). Its files, commits and conversation are kept; spawn the code "
-                "agent again to resume it."
-            )
+            if isinstance(awaiting_parent, dict):
+                message = (
+                    f"The code agent asked you: {awaiting_parent.get('question')}\n"
+                    "It is paused (not failed) and waiting for your answer. Spawn the code agent "
+                    "again with this code_session_id and your answer as the goal to resume it."
+                )
+            else:
+                message = (
+                    f"Code session paused after {loop_outcome.get('idle_s', 0)}s with no activity "
+                    "(not failed). Its files, commits and conversation are kept; spawn the code "
+                    "agent again to resume it."
+                )
             summary = format_code_session_summary(code_session_facts)
             await save_claude_code_message(
                 agent_id=agent_id,
@@ -2987,6 +3055,7 @@ async def spawn_claude_code_activity(
                         started_at=start_time,
                         ended_at=safe_time(),
                         facts=code_session_facts,
+                        failure_message=extract_error_message(e),
                     ),
                 )
 

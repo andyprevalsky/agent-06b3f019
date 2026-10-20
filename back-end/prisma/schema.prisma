@@ -597,6 +597,9 @@ model ClaudeCodeSession {
   claudeTokenIntegrationId String?
   /// Persistent code session this spawn attached to (null for legacy rows).
   codeSessionId            String?
+  /// Question this code agent asked its spawning Rose agent ({message_id, question, at}).
+  /// The spawn blocked on this task pauses the session and returns the question.
+  awaitingParent           Json?
 
   @@index([agentId])
   @@index([sandboxId])
@@ -1786,4 +1789,40 @@ model UserUiVersion {
   user       User     @relation(fields: [userId], references: [userId], onDelete: Cascade)
 
   @@index([userId, createdAt])
+}
+
+/// Slack #errors incident owned by one Rose RCA root agent. One row per error
+/// signature per fixed window, so an error storm creates one agent. `agentId`
+/// is minted with the row and the agent is created with that id, which makes
+/// Slack webhook retries idempotent. Backend-only (service role).
+model SlackAutoRcaIncident {
+  id              String    @id @default(uuid())
+  signature       String
+  windowStart     DateTime
+  agentId         String    @unique
+  ownerUserId     String
+  slackChannel    String
+  slackThreadTs   String
+  occurrenceCount Int       @default(1)
+  appendedCount   Int       @default(0)
+  startNotifiedAt DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([signature, windowStart])
+}
+
+/// Slack Events API delivery processed by the auto-RCA webhook. The primary
+/// key dedupes Slack retries; (slackChannel, slackTs) maps an alert thread back
+/// to its incident for reviewer feedback.
+model SlackAutoRcaEvent {
+  eventId      String   @id
+  incidentId   String
+  kind         String
+  slackChannel String
+  slackTs      String
+  createdAt    DateTime @default(now())
+
+  @@index([slackChannel, slackTs])
+  @@index([incidentId])
 }

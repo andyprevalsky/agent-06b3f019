@@ -41,7 +41,9 @@ _CLI_SESSION_ID = "0f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"
 _STUB_CLI = r"""
 import json, os, pathlib, subprocess, sys, time
 
-sys.stdin.read()
+# stream-json input: the task prompt is the first JSON line; the ws-server
+# keeps stdin open until every written turn has its result.
+sys.stdin.readline()
 gate = pathlib.Path(os.environ["STUB_GATE"])
 home = pathlib.Path(os.environ["HOME"])
 argv = sys.argv[1:]
@@ -80,6 +82,8 @@ if resume is None and os.environ.get("STUB_MODE") != "finish":
 found = notes.read_text().strip() if notes.exists() else "missing"
 emit({"type": "assistant", "message": {"content": [{"type": "text", "text": f"notes: {found}"}]}})
 emit({"type": "result", "subtype": "success", "result": f"answer is 42 ({found})", "usage": {}})
+while sys.stdin.readline():  # later turns are acknowledged; exit on EOF
+    emit({"type": "result", "subtype": "success", "result": "turn answered", "usage": {}})
 """
 
 
@@ -169,7 +173,9 @@ class _SessionHome:
 class _Backend:
     """Records the session API; create/resume start ws-servers in one persistent HOME."""
 
-    def __init__(self, session_home: _SessionHome, *, fail_first_persist: bool = False) -> None:
+    def __init__(
+        self, session_home: _SessionHome, *, fail_first_persist: bool = False, question_after: int | None = None
+    ) -> None:
         self.session_home = session_home
         self.created: list[dict] = []
         self.closed: list[dict] = []
@@ -178,6 +184,9 @@ class _Backend:
         self.verified_events: list[list[dict]] = []
         self.fail_first_persist = fail_first_persist
         self._persists = 0
+        # Keepalive number after which the backend reports a question the code
+        # agent asked its (blocked) spawning agent.
+        self.question_after = question_after
 
     async def create_session(self, **kwargs):
         self.created.append(kwargs)
@@ -225,7 +234,10 @@ class _Backend:
 
     async def keepalive(self, *args, **kwargs):
         self.keepalives += 1
-        return True
+        awaiting = None
+        if self.question_after is not None and self.keepalives >= self.question_after:
+            awaiting = {"message_id": "q-1", "question": "Which database should I use?", "at": "2026-10-20T00:00:00Z"}
+        return {"alive": True, "code_session_id": "6c1d6f1e-0000-4000-8000-00000000c0de", "awaiting_parent": awaiting}
 
     async def verifier(self, **kwargs):
         self.verified_events.append([dict(event) for event in kwargs["code_events"]])
@@ -348,6 +360,34 @@ async def test_idle_past_every_old_limit_is_paused_not_failed_then_resumes():
         session_home.cleanup()
 
 
+async def test_question_to_blocked_spawner_pauses_session_and_returns_it():
+    """L-A2A deadlock: a code agent asks its spawning agent, which is blocked in this spawn.
+
+    The question arrives through the keepalive while a tool is still in flight
+    (so idle never fires). The session is paused, not failed, and the tool
+    result carries the question so the spawner can answer by resuming it.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    session_home = _SessionHome()
+    backend = _Backend(session_home, question_after=3)
+    try:
+        with backend.patched(clock=_virtual_clock(2000.0)):
+            outcome = await asyncio.wait_for(
+                ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args()), timeout=30
+            )
+        assert outcome["status"] == "paused" and outcome["success"] is False, outcome
+        assert "Which database should I use?" in outcome["message"], outcome["message"]
+        assert "code_session_id" in outcome["message"], outcome["message"]
+        assert [call.get("reason") for call in backend.closed] == ["awaiting_parent"], backend.closed
+        assert outcome["code_agent"]["state"] == "paused", outcome["code_agent"]
+        assert backend.keepalives >= 3, backend.keepalives
+    finally:
+        session_home.cleanup()
+
+
 async def test_failed_attempt_retry_keeps_state_and_code_session_id():
     """C2: an attempt fails after writing an uncommitted file; the Temporal retry resumes it.
 
@@ -429,6 +469,12 @@ async def test_tool_result_reports_branch_and_merged_only_when_confirmed():
     meta = service.build_code_agent_metadata(task_id="t", provider="claude", state="completed", started_at=0, facts=facts)
     assert meta["summary"]["merged_into"] == "rose/a", meta
     assert meta["state"] == "completed" and meta["target"] == "cloud" and meta["started_at"].endswith("Z"), meta
+    assert "failure_message" not in meta, meta
+    failed = service.build_code_agent_metadata(
+        task_id="t", provider="codex", state="failed", started_at=0, ended_at=5, failure_message="sandbox lost"
+    )
+    assert failed["failure_message"] == "sandbox lost" and failed["provider"] == "codex", failed
+    assert failed["ended_at"].endswith("Z") and "summary" not in failed, failed
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -517,6 +563,10 @@ async def _run_all_tests():
     await r.record_async(
         "idle_past_every_old_limit_paused_then_resumes",
         test_idle_past_every_old_limit_is_paused_not_failed_then_resumes,
+    )
+    await r.record_async(
+        "question_to_blocked_spawner_pauses_session",
+        test_question_to_blocked_spawner_pauses_session_and_returns_it,
     )
     await r.record_async("failed_attempt_retry_keeps_state", test_failed_attempt_retry_keeps_state_and_code_session_id)
     await r.record_async("tool_result_reports_branch_and_merge", test_tool_result_reports_branch_and_merged_only_when_confirmed)

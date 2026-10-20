@@ -90,6 +90,14 @@ async function stopStaleWsServer(sandbox: Sandbox): Promise<void> {
   }
 }
 
+/** Remember which E2B sandbox now holds the session (resume connects to it). */
+export async function recordE2bCodeSessionSandbox(
+  codeSession: CodeSessionRow | null,
+  sandboxId: string
+): Promise<void> {
+  if (codeSession !== null) await recordSandbox(codeSession.id, { sandboxKind: 'e2b', sandboxId });
+}
+
 /** A persistent session's sandbox is paused (never killed) on a failed start. */
 export async function releaseSandboxAfterFailedStart(
   sandbox: Sandbox,

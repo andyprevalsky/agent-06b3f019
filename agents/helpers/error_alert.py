@@ -3,15 +3,14 @@
 DESIGN — mirrors back-end/src/providers/errorAlert.ts. This path deliberately
 does NOT call our own backend: the failures we most want to hear about are the
 ones where the backend/DB is unhealthy, so alerting through it would go silent
-exactly when it matters. `report_failure_activity` posts straight to a Slack
-incoming webhook, and — only when AUTO_RCA_ENABLED=1 — fires a GitHub
-repository_dispatch straight to GitHub's API.
+exactly when it matters. `report_failure_activity` posts straight to Slack
+(bot token or incoming webhook).
 
-When Auto RCA is enabled, GitHub owns the one-PR/one-Slack-card lifecycle. The
-worker dispatches only the stable agent ID; it does not first create a Slack
-side effect that can be duplicated when Temporal retries after a lost activity
-completion. Duplicate dispatches are expected and reconciled downstream by the
-deterministic agent lifecycle key. The in-memory throttle remains best-effort
+Auto RCA runs on Rose: Slack delivers the bot's top-level card to the backend's
+`/api/webhooks/slack/auto-rca`, which creates one Rose RCA root agent per error
+signature window. A Temporal retry after a lost activity completion can post a
+duplicate card; the webhook folds it into the same incident (same signature),
+so it never starts a second RCA. The in-memory throttle remains best-effort
 noise control, never a correctness boundary. The activity NEVER raises.
 """
 
@@ -118,7 +117,7 @@ async def _post_slack_bot(token: str, channel: str, payload: Dict[str, Any]) -> 
     """Post the initial card via chat.postMessage and return {ts, channel}.
 
     A bot-token post (unlike an incoming webhook) yields an editable message
-    handle so the RCA workflow can evolve one card through its lifecycle.
+    handle; its thread later receives the RCA agent link and outcome.
     Returns None if the post didn't land. Never raises.
     """
     async with httpx.AsyncClient() as client:
@@ -139,39 +138,6 @@ async def _post_slack_bot(token: str, channel: str, payload: Dict[str, Any]) -> 
     return {"ts": data.get("ts", ""), "channel": data.get("channel", channel)}
 
 
-async def _dispatch_rca(
-    agent_id: str,
-    slack_channel: str = "",
-) -> bool:
-    token = os.environ.get("GITHUB_DISPATCH_TOKEN")
-    repo = os.environ.get("GITHUB_DISPATCH_REPO", "Rose-Ai-Labs/rose")
-    if not token:
-        activity.logger.warning("AUTO_RCA_ENABLED but GITHUB_DISPATCH_TOKEN unset — RCA not dispatched")
-        return False
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"https://api.github.com/repos/{repo}/dispatches",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github+json",
-                "User-Agent": "rose-error-alert",
-            },
-            json={
-                "event_type": "agent-failure",
-                "client_payload": {
-                    "agent_id": agent_id,
-                    "slack_channel": slack_channel,
-                },
-            },
-            timeout=_OUTBOUND_TIMEOUT_S,
-        )
-        if resp.status_code >= 300:
-            activity.logger.warning(f"RCA dispatch non-2xx: {resp.status_code} {resp.text[:200]}")
-            return False
-        activity.logger.info(f"RCA agent dispatched: agent_id={agent_id}")
-        return True
-
-
 @activity.defn
 async def report_failure_activity(
     agent_id: Optional[str],
@@ -179,17 +145,15 @@ async def report_failure_activity(
     message: str,
     context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Emit an agent failure to #errors (and, when AUTO_RCA_ENABLED=1, launch RCA).
+    """Emit an agent failure to #errors (the auto-RCA webhook reads the card).
 
     Best-effort — always returns, never raises. Deduped by the in-memory throttle.
     """
-    # Keep ordinary alerts agent-scoped, but cap auto-RCA dispatches by incident
-    # signature so one provider outage cannot launch one workflow per agent.
+    # Alerts are agent-scoped; the auto-RCA webhook collapses one incident
+    # signature into one RCA agent.
     signature = _fingerprint(source, message)
     key = f"alert:{agent_id or '-'}:{signature}"
     acquired = False
-    rca_key = f"rca:{signature}"
-    rca_acquired = False
     delivered = False
     try:
         acquired = _acquire_alert_slot(key, time.time())
@@ -200,24 +164,10 @@ async def report_failure_activity(
         channel_id = os.environ.get("SLACK_ERROR_CHANNEL_ID")
         webhook = os.environ.get("SLACK_ERROR_WEBHOOK_URL")
 
-        # Auto RCA owns the visible Slack card. Dispatch first and avoid a
-        # worker-created card entirely so a side-effect-then-lost-completion
-        # retry cannot duplicate the user's lifecycle. If dispatch is down, we
-        # still fall back to the ordinary direct alert below.
-        if os.environ.get("AUTO_RCA_ENABLED") == "1" and agent_id:
-            rca_acquired = _acquire_alert_slot(rca_key, time.time())
-            if rca_acquired:
-                dispatched = await _dispatch_rca(agent_id, channel_id or "")
-                _finish_alert_slot(rca_key, dispatched, time.time())
-                rca_acquired = False
-                if dispatched:
-                    delivered = True
-                    return {"alerted": True, "rca_dispatched": True}
-
         payload = _slack_payload(source, message, agent_id, context)
 
-        # Prefer the bot token: it yields an editable handle for the lifecycle card.
-        # Fall back to an incoming webhook (post-only, no lifecycle edits).
+        # Prefer the bot token: its top-level card is what the auto-RCA webhook
+        # turns into a Rose RCA agent. Fall back to an incoming webhook.
         alerted = False
         if bot_token and channel_id:
             posted = await _post_slack_bot(bot_token, channel_id, payload)
@@ -242,9 +192,6 @@ async def report_failure_activity(
         activity.logger.warning(f"report_failure_activity non-fatal: {e}")
         return {"alerted": False, "error": str(e)}
     finally:
-        if rca_acquired:
-            # Exceptions during dispatch must not suppress the incident retry.
-            _finish_alert_slot(rca_key, False, time.time())
         if acquired:
             # Failed transports remain eligible for the next occurrence to retry.
             _finish_alert_slot(key, delivered, time.time())
