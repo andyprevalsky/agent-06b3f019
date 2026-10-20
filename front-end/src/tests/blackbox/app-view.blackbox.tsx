@@ -1,17 +1,16 @@
 /**
  * Blackbox: the full-screen app view through the real Terminal (Rose Desktop
- * flag on, UI ledger rows 10/39).
+ * flag on, UI ledger rows 10/39), opened from a code-agent chip's live preview.
  *
- *   left-bar app row → the chat column is replaced by the app in a frame:
- *     Rose  → GET /claude-code-session/:taskId/preview (open app only) →
- *             POST …/preview/handoff → <iframe src=preview_url#rose_preview_handoff=code>
- *     user  → <iframe sandbox="allow-scripts" src=usercontent url>
- *   thin header (title · Preview · History · Publish), the normal query box over
- *   the app with Popular Goals hidden; Escape or an agent row returns.
- *   The box steers the app's code session (POST …/turns) or, with no session,
- *   starts a normal agent (POST /api/agents). Quiet text replaces a broken frame.
+ *   card click → the chat column is replaced by that code session's preview:
+ *     GET /claude-code-session/:taskId/preview (open view only) →
+ *     POST …/preview/handoff → <iframe src=preview_url#rose_preview_handoff=code>
+ *   thin header (title · Publish; no tabs), the normal query box over the app
+ *   (Popular Goals hidden) steering the session (POST …/turns); Escape, an agent
+ *   row or the mobile close icon returns. Quiet text replaces a broken frame.
+ *   No left-bar Apps section exists and no Apps list is ever read.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
@@ -22,22 +21,32 @@ import { clearCaptures } from './msw/capture';
 import { server } from './msw/server';
 import {
   API_BASE,
-  ROSE_APP,
-  ROSE_PREVIEW,
-  appsBody,
-  expandRoseBar,
-  openAppFromBar,
+  PREVIEW_URL,
+  TASK_ID,
+  openAppView,
   pressEscape,
-  renderTerminal,
   requests,
-  serveApps,
+  serveAgentWithChip,
   serveHandoff,
   servePreview,
   serveTerminalBasics,
   serveTurns,
   signInRoseDesktop,
-  userApp,
-} from './user-apps.fixtures';
+} from './app-view.fixtures';
+
+vi.mock('@xterm/xterm', () => ({
+  Terminal: class {
+    loadAddon() {}
+    open() {}
+    write() {}
+    dispose() {}
+  },
+}));
+vi.mock('@xterm/addon-fit', () => ({
+  FitAddon: class {
+    fit() {}
+  },
+}));
 
 beforeEach(() => {
   localStorage.clear();
@@ -46,224 +55,163 @@ beforeEach(() => {
   signInRoseDesktop();
   serveTerminalBasics();
   serveTurns();
+  serveAgentWithChip();
 });
 
 afterEach(() => localStorage.clear());
 
-async function openRose() {
-  renderTerminal();
-  await screen.findByTestId('rose-sidebar');
-  expandRoseBar();
-  return await openAppFromBar('rose');
-}
-
-describe('Rose app full screen', () => {
-  it('replaces the chat with the live preview (sign-in handoff fragment) and hides Popular Goals', async () => {
-    serveApps(appsBody([ROSE_APP, userApp()]));
+describe('app view', () => {
+  it('replaces the chat with the live preview (sign-in handoff fragment); no tabs, Publish on the right', async () => {
     servePreview('running');
     const handoff = serveHandoff();
-    renderTerminal();
-    expect(await screen.findByText('Popular Goals')).toBeInTheDocument();
-    expandRoseBar();
-    const view = await openAppFromBar('rose');
+    const view = await openAppView();
 
-    const frame = await within(view).findByTestId('user-app-frame');
-    expect(frame).toHaveAttribute('src', `${ROSE_PREVIEW}#rose_preview_handoff=hc-1`);
+    const frame = await within(view).findByTestId('app-view-frame');
+    expect(frame).toHaveAttribute('src', `${PREVIEW_URL}#rose_preview_handoff=hc-1`);
     expect(frame.getAttribute('sandbox')).toContain('allow-same-origin');
     expect(handoff.calls()).toBe(1);
-    // Preview status is read for the open app only (one task, one read).
-    expect(requests('GET', '/claude-code-session/t-rose/preview')).toHaveLength(1);
+    // Preview status is read for the open view only (one task, one read).
+    expect(requests('GET', `/claude-code-session/${TASK_ID}/preview`)).toHaveLength(1);
 
-    expect(within(view).getByRole('heading', { name: 'Rose' })).toBeInTheDocument();
-    expect(within(view).getByRole('tab', { name: 'Preview' })).toHaveAttribute(
-      'aria-selected',
-      'true',
-    );
-    expect(within(view).getByRole('tab', { name: 'History' })).toBeInTheDocument();
-    expect(within(view).queryByRole('tab', { name: 'Code' })).not.toBeInTheDocument();
+    expect(within(view).getByRole('heading', { name: 'Snake game' })).toBeInTheDocument();
+    expect(within(view).queryByRole('tab')).not.toBeInTheDocument();
+    expect(within(view).queryByText('History')).not.toBeInTheDocument();
     expect(within(view).getByRole('button', { name: 'Publish' })).toBeInTheDocument();
-    // The normal query box floats over the app; Popular Goals and the chat composer are gone.
+    // The normal query box floats over the app; the chat (and its composer) is gone.
     expect(within(view).getByTestId('query-input-surface')).toBeInTheDocument();
-    expect(within(view).getByPlaceholderText('Message Rose directly…')).toBeInTheDocument();
+    expect(within(view).getByPlaceholderText('Message Claude Code directly…')).toBeInTheDocument();
     expect(screen.queryByText('Popular Goals')).not.toBeInTheDocument();
-    expect(screen.queryByPlaceholderText('Enter any goal')).not.toBeInTheDocument();
-    // The open app is marked by color/weight in the left bar.
-    expect(screen.getByTestId('rose-app-row-rose')).toHaveAttribute('data-selected', 'true');
-    expect(screen.getByTestId('rose-app-row-rose').className).toContain('font-semibold');
+    expect(screen.queryByTestId('code-agent-chip')).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText('Type your message...')).not.toBeInTheDocument();
   });
 
   it('loads preview_url without a fragment when the handoff call fails', async () => {
-    serveApps(appsBody([ROSE_APP]));
     servePreview('running');
     serveHandoff('fail');
-    const view = await openRose();
-    const frame = await within(view).findByTestId('user-app-frame');
-    expect(frame).toHaveAttribute('src', ROSE_PREVIEW);
+    const view = await openAppView();
+    expect(await within(view).findByTestId('app-view-frame')).toHaveAttribute('src', PREVIEW_URL);
   });
 
-  it('a message sent over Rose goes to its code session (steer route), never a new agent', async () => {
-    serveApps(appsBody([ROSE_APP]));
+  it("a message sent over the app goes to that code session's steer route, never a new agent", async () => {
     servePreview('running');
     serveHandoff();
     const user = userEvent.setup({ delay: null });
-    const view = await openRose();
-    const box = within(view).getByPlaceholderText('Message Rose directly…');
+    const view = await openAppView();
+    const box = within(view).getByPlaceholderText('Message Claude Code directly…');
     await user.click(box);
-    await user.type(box, 'Make the header sticky{Enter}');
+    await user.type(box, 'Make the snake faster{Enter}');
 
     await waitFor(() =>
-      expect(requests('POST', '/claude-code-session/t-rose/turns')).toHaveLength(1),
+      expect(requests('POST', `/claude-code-session/${TASK_ID}/turns`)).toHaveLength(1),
     );
-    const [turn] = requests('POST', '/claude-code-session/t-rose/turns');
-    expect(turn.body).toEqual(
+    expect(requests('POST', `/claude-code-session/${TASK_ID}/turns`)[0].body).toEqual(
       expect.objectContaining({
-        text: 'Make the header sticky',
+        text: 'Make the snake faster',
         client_message_id: expect.stringMatching(/^turn-/),
       }),
     );
     expect(requests('POST', '/agents')).toHaveLength(0);
+    expect(requests('POST', '/agents/agent-001/messages')).toHaveLength(0);
     // The latest exchange sits just above the query box; the box is cleared.
-    expect(await within(view).findByTestId('user-app-exchange')).toHaveTextContent(
-      'You: Make the header sticky',
+    expect(await within(view).findByTestId('app-view-exchange')).toHaveTextContent(
+      'You: Make the snake faster',
     );
     await waitFor(() => expect(box).toHaveValue(''));
   });
 
-  it('Escape returns to the normal view; an agent row and the mobile close icon do too', async () => {
-    serveApps(appsBody([ROSE_APP]));
+  it('a failed steer keeps the text and shows one line', async () => {
     servePreview('running');
     serveHandoff();
-    await openRose();
-    pressEscape();
-    await waitFor(() => expect(screen.queryByTestId('user-app-screen')).not.toBeInTheDocument());
-    expect(await screen.findByPlaceholderText('Enter any goal')).toBeInTheDocument();
-    expect(screen.getByTestId('rose-app-row-rose')).toHaveAttribute('data-selected', 'false');
+    server.use(
+      http.post(`${API_BASE}/claude-code-session/:taskId/turns`, () =>
+        HttpResponse.json({ error: 'Session is not running' }, { status: 409 }),
+      ),
+    );
+    const user = userEvent.setup({ delay: null });
+    const view = await openAppView();
+    const box = within(view).getByPlaceholderText('Message Claude Code directly…');
+    await user.click(box);
+    await user.type(box, 'Add a score{Enter}');
+    expect(await within(view).findByRole('alert')).toHaveTextContent(
+      "Couldn't reach Claude Code: Session is not running",
+    );
+    expect(box).toHaveValue('Add a score');
+  });
 
-    expandRoseBar();
-    await openAppFromBar('rose');
-    fireEvent.click(await screen.findByTestId('rose-agent-row-agent-001'));
-    await waitFor(() => expect(screen.queryByTestId('user-app-screen')).not.toBeInTheDocument());
+  it('Escape returns to the chat; an agent row and the mobile close icon do too', async () => {
+    servePreview('running');
+    serveHandoff();
+    await openAppView();
+    pressEscape();
+    await waitFor(() => expect(screen.queryByTestId('app-view-screen')).not.toBeInTheDocument());
+    const chip = await screen.findByTestId('code-agent-chip');
+
+    fireEvent.click(within(chip).getByRole('button', { name: 'Open Snake game preview' }));
+    await screen.findByTestId('app-view-screen');
+    fireEvent.click(screen.getByTestId('rose-agent-row-agent-001'));
+    await waitFor(() => expect(screen.queryByTestId('app-view-screen')).not.toBeInTheDocument());
 
     // Below md (no left bar, no keyboard) the header's bare close icon returns too.
-    expandRoseBar();
-    const view = await openAppFromBar('rose');
-    const close = within(view).getByRole('button', { name: 'Close Rose' });
+    fireEvent.click(
+      within(await screen.findByTestId('code-agent-chip')).getByRole('button', {
+        name: 'Open Snake game preview',
+      }),
+    );
+    const view = await screen.findByTestId('app-view-screen');
+    const close = within(view).getByRole('button', { name: 'Close Snake game' });
     expect(close.className).toContain('md:hidden');
     fireEvent.click(close);
-    await waitFor(() => expect(screen.queryByTestId('user-app-screen')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByTestId('app-view-screen')).not.toBeInTheDocument());
   });
 
   it.each([
-    ['paused', ROSE_PREVIEW, 'Paused'],
-    ['not_running', ROSE_PREVIEW, 'Preview is starting…'],
+    ['paused', PREVIEW_URL, 'Paused'],
+    ['not_running', PREVIEW_URL, 'Preview is starting…'],
     ['unknown', null, 'Preview is starting…'],
   ])('preview status %s shows quiet text instead of a frame', async (status, url, text) => {
-    serveApps(appsBody([ROSE_APP]));
     servePreview(status, { previewUrl: url });
     const handoff = serveHandoff();
-    const view = await openRose();
-    expect(await within(view).findByTestId('user-app-quiet')).toHaveTextContent(text);
-    expect(within(view).queryByTestId('user-app-frame')).not.toBeInTheDocument();
+    const view = await openAppView();
+    expect(await within(view).findByTestId('app-view-quiet')).toHaveTextContent(text);
+    expect(within(view).queryByTestId('app-view-frame')).not.toBeInTheDocument();
     expect(handoff.calls()).toBe(0);
   });
 
   it('403 ROSE_DEV_ONLY on the preview renders nothing (no frame, no error text)', async () => {
-    serveApps(appsBody([ROSE_APP]));
     server.use(
-      http.get(`${API_BASE}/claude-code-session/t-rose/preview`, () =>
+      http.get(`${API_BASE}/claude-code-session/${TASK_ID}/preview`, () =>
         HttpResponse.json({ error: 'dev only', code: 'ROSE_DEV_ONLY' }, { status: 403 }),
       ),
     );
-    const view = await openRose();
+    const view = await openAppView();
     await waitFor(() =>
-      expect(requests('GET', '/claude-code-session/t-rose/preview')).toHaveLength(1),
+      expect(requests('GET', `/claude-code-session/${TASK_ID}/preview`)).toHaveLength(1),
     );
     await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(within(view).queryByTestId('user-app-frame')).not.toBeInTheDocument();
-    expect(within(view).queryByTestId('user-app-quiet')).not.toBeInTheDocument();
+    expect(within(view).queryByTestId('app-view-frame')).not.toBeInTheDocument();
+    expect(within(view).queryByTestId('app-view-quiet')).not.toBeInTheDocument();
     expect(screen.queryByText(/dev only|ROSE_DEV_ONLY/)).not.toBeInTheDocument();
   });
 
-  it('Rose without a code session: quiet text, Publish disabled, the box starts a normal agent', async () => {
-    serveApps(appsBody([{ ...ROSE_APP, preview_url: null, task_id: null, code_session_id: null }]));
-    const view = await openRose();
-    expect(within(view).getByTestId('user-app-quiet')).toHaveTextContent('No code session yet');
-    expect(within(view).getByRole('button', { name: 'Publish' })).toBeDisabled();
-    expect(within(view).getByPlaceholderText('Enter any goal')).toBeInTheDocument();
-    expect(requests('GET', '/claude-code-session/t-rose/preview')).toHaveLength(0);
-  });
-});
-
-describe('User apps full screen', () => {
-  it('frames the published URL with sandbox "allow-scripts" only; no preview reads', async () => {
-    serveApps(appsBody([ROSE_APP, userApp()]));
-    const handoff = serveHandoff();
-    renderTerminal();
-    await screen.findByTestId('rose-sidebar');
-    expandRoseBar();
-    const view = await openAppFromBar('game');
-    const frame = within(view).getByTestId('user-app-frame');
-    expect(frame).toHaveAttribute(
-      'src',
-      'https://uc.rose.test/usercontent/v2/apps/game/index.html',
+  it('a failed preview read shows "Preview unavailable"', async () => {
+    server.use(
+      http.get(`${API_BASE}/claude-code-session/${TASK_ID}/preview`, () =>
+        HttpResponse.json({ error: 'boom' }, { status: 500 }),
+      ),
     );
-    expect(frame).toHaveAttribute('sandbox', 'allow-scripts');
-    expect(within(view).getByRole('heading', { name: 'Game' })).toBeInTheDocument();
-    expect(handoff.calls()).toBe(0);
-    expect(requests('GET', '/claude-code-session/t-rose/preview')).toHaveLength(0);
-  });
-
-  it('no code session (older version): sending starts a normal new agent and the app stays open', async () => {
-    serveApps(appsBody([userApp()]));
-    const user = userEvent.setup({ delay: null });
-    renderTerminal();
-    await screen.findByTestId('rose-sidebar');
-    expandRoseBar();
-    const view = await openAppFromBar('game');
-    const box = within(view).getByPlaceholderText('Enter any goal');
-    await user.click(box);
-    await user.type(box, 'Add a high score table{Enter}');
-
-    await waitFor(() => expect(requests('POST', '/agents')).toHaveLength(1));
-    expect(requests('POST', '/agents')[0].body).toEqual(
-      expect.objectContaining({ goal: 'Add a high score table' }),
+    const view = await openAppView();
+    expect(await within(view).findByTestId('app-view-quiet')).toHaveTextContent(
+      'Preview unavailable',
     );
-    expect(requests('POST', '/claude-code-session/t-rose/turns')).toHaveLength(0);
-    const exchange = await within(view).findByTestId('user-app-exchange');
-    expect(exchange).toHaveTextContent('You: Add a high score table');
-    expect(exchange).toHaveTextContent('Started a new agent');
-    expect(screen.getByTestId('user-app-screen')).toBeInTheDocument();
-
-    fireEvent.click(within(exchange).getByRole('button', { name: 'Open' }));
-    await waitFor(() => expect(screen.queryByTestId('user-app-screen')).not.toBeInTheDocument());
   });
 
-  it('L-APPS2 task_id on the row: sending steers the code session that last published it', async () => {
-    serveApps(appsBody([userApp({ task_id: 't-game', code_session_id: 'cs-game' })]));
-    const user = userEvent.setup({ delay: null });
-    renderTerminal();
-    await screen.findByTestId('rose-sidebar');
-    expandRoseBar();
-    const view = await openAppFromBar('game');
-    const box = within(view).getByPlaceholderText('Message Game directly…');
-    await user.click(box);
-    await user.type(box, 'Bigger buttons{Enter}');
-    await waitFor(() =>
-      expect(requests('POST', '/claude-code-session/t-game/turns')).toHaveLength(1),
-    );
-    expect(requests('POST', '/agents')).toHaveLength(0);
-    // Still the usercontent frame: published apps never take a preview sign-in code.
-    expect(within(view).getByTestId('user-app-frame')).toHaveAttribute('sandbox', 'allow-scripts');
-  });
-
-  it('+ New app opens a new Super Agent with "Make me an app" in the composer, not sent', async () => {
-    serveApps(appsBody([ROSE_APP]));
-    renderTerminal();
-    await screen.findByTestId('rose-sidebar');
-    expandRoseBar();
-    fireEvent.click(await screen.findByRole('button', { name: '+ New app' }));
-    expect(await screen.findByPlaceholderText('Enter any goal')).toHaveValue('Make me an app');
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(requests('POST', '/agents')).toHaveLength(0);
+  it('the left bar has no Apps section and no Apps list is ever read', async () => {
+    servePreview('running');
+    serveHandoff();
+    await openAppView();
+    expect(screen.queryByText('Apps')).not.toBeInTheDocument();
+    expect(screen.queryByText('+ New app')).not.toBeInTheDocument();
+    expect(screen.queryByTestId(/^rose-app-row-/)).not.toBeInTheDocument();
+    expect(requests('GET', '/user-ui/apps')).toHaveLength(0);
   });
 });

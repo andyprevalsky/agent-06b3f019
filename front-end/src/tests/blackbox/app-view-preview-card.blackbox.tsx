@@ -5,31 +5,28 @@
  *   metadata.code_agent.preview_url (dev cloud session) → the code-agent chip
  *   shows a small scaled live frame, only while the chip is on screen (each
  *   frame load takes a fresh POST …/preview/handoff code); clicking it opens
- *   the full-screen app view for that task (Rose when it is Rose's session).
- *   Off screen: no frame, no reads. Flag off: the stock chip, no card.
+ *   the full-screen app view for that code session.
+ *   Off screen: no frame, no reads. No preview_url: no card. Flag off: stock chip.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
-import { http, HttpResponse } from 'msw';
+import { fireEvent, screen, within } from '@testing-library/react';
 
 import { resetCodeAgentLocalState } from '@/features/terminal-component-group/hooks/codeAgentLocalState';
 
 import { chipMessage, renderChip } from './code-agent-steering.fixtures';
 import { clearCaptures } from './msw/capture';
-import { server } from './msw/server';
 import {
-  API_BASE,
-  ROSE_APP,
-  ROSE_PREVIEW,
-  appsBody,
-  renderTerminal,
+  PREVIEW_URL,
+  TASK_ID,
+  VisibleIntersectionObserver,
+  openAgentWithChip,
   requests,
-  serveApps,
+  serveAgentWithChip,
   serveHandoff,
   servePreview,
   serveTerminalBasics,
   signInRoseDesktop,
-} from './user-apps.fixtures';
+} from './app-view.fixtures';
 
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
@@ -45,72 +42,11 @@ vi.mock('@xterm/addon-fit', () => ({
   },
 }));
 
-const CARD_PREVIEW = 'https://5173-sbx-card.e2b.test/';
-
-/** IntersectionObserver that reports every observed element as on screen. */
-class VisibleIntersectionObserver {
-  constructor(private readonly callback: IntersectionObserverCallback) {}
-  observe(target: Element) {
-    this.callback(
-      [{ isIntersecting: true, target } as IntersectionObserverEntry],
-      this as unknown as IntersectionObserver,
-    );
-  }
-  unobserve() {}
-  disconnect() {}
-}
-
 const originalObserver = window.IntersectionObserver;
 
-function serveAgentWithChip(codeAgent: Record<string, unknown>) {
-  const message = chipMessage({
-    task_id: 't-card',
-    provider: 'claude',
-    target: 'cloud',
-    state: 'live',
-    title: 'Snake game',
-    preview_url: CARD_PREVIEW,
-    ...codeAgent,
-  });
-  server.use(
-    http.get(`${API_BASE}/agents/:agentId`, ({ params }) =>
-      HttpResponse.json({
-        agent: {
-          agent_id: params.agentId,
-          goal: 'Make me a game',
-          model: 'rose-1-flash',
-          source: 'WEB',
-          reasoning_effort: 'medium',
-          progress: 50,
-          status: 'ACTIVE',
-          status_message: null,
-          temporal_workflow_id: 'wf-001',
-          token_count: 0,
-          tokens_in: 0,
-          tokens_out: 0,
-          context_size: 0,
-          message_count: 1,
-          price_limit_cents: 100,
-          tree_cost_cents: 0,
-          created_at: '2026-10-20T12:00:00.000Z',
-          updated_at: '2026-10-20T12:00:00.000Z',
-          write_lock_enabled: false,
-          parent_agent_id: null,
-          parent_goal: null,
-          verifier: null,
-          tools: [],
-        },
-        messages: [message],
-        pagination: { has_more: false, oldest_timestamp: null },
-      }),
-    ),
-  );
-}
-
-async function openAgentWithChip() {
-  renderTerminal();
-  fireEvent.click(await screen.findByTestId('rose-agent-row-agent-001'));
-  return await screen.findByTestId('code-agent-chip');
+function onScreenEverywhere() {
+  window.IntersectionObserver =
+    VisibleIntersectionObserver as unknown as typeof IntersectionObserver;
 }
 
 beforeEach(() => {
@@ -127,56 +63,47 @@ afterEach(() => {
 });
 
 describe('trajectory live preview card', () => {
-  it('on screen: a scaled live frame with a fresh sign-in code; clicking opens the app view for that task', async () => {
-    window.IntersectionObserver =
-      VisibleIntersectionObserver as unknown as typeof IntersectionObserver;
-    serveApps(appsBody([ROSE_APP]));
-    serveAgentWithChip({});
+  it('on screen: a scaled live frame with a fresh sign-in code; clicking opens the app view', async () => {
+    onScreenEverywhere();
+    serveAgentWithChip();
     const handoff = serveHandoff();
-    servePreview('running', { taskId: 't-card', previewUrl: CARD_PREVIEW });
+    servePreview('running');
     const chip = await openAgentWithChip();
 
     const frame = await within(chip).findByTestId('code-agent-preview-frame');
-    expect(frame).toHaveAttribute('src', `${CARD_PREVIEW}#rose_preview_handoff=hc-1`);
+    expect(frame).toHaveAttribute('src', `${PREVIEW_URL}#rose_preview_handoff=hc-1`);
     expect(frame).toHaveAttribute('loading', 'lazy');
+    expect(frame).toHaveAttribute('tabindex', '-1');
     expect(frame.getAttribute('style')).toContain('scale(0.1875)');
+    expect(frame.getAttribute('sandbox')).toContain('allow-same-origin');
     expect(handoff.calls()).toBe(1);
-    // The card reads nothing else: no preview status until an app is opened.
-    expect(requests('GET', '/claude-code-session/t-card/preview')).toHaveLength(0);
+    // The card reads nothing else: no preview status until the view is opened.
+    expect(requests('GET', `/claude-code-session/${TASK_ID}/preview`)).toHaveLength(0);
 
     fireEvent.click(within(chip).getByRole('button', { name: 'Open Snake game preview' }));
-    const view = await screen.findByTestId('user-app-screen');
-    expect(view).toHaveAttribute('data-app-kind', 'session');
+    const view = await screen.findByTestId('app-view-screen');
     expect(within(view).getByRole('heading', { name: 'Snake game' })).toBeInTheDocument();
-    expect(await within(view).findByTestId('user-app-frame')).toHaveAttribute(
+    // The full-screen frame takes its own fresh code.
+    expect(await within(view).findByTestId('app-view-frame')).toHaveAttribute(
       'src',
-      `${CARD_PREVIEW}#rose_preview_handoff=hc-2`,
+      `${PREVIEW_URL}#rose_preview_handoff=hc-2`,
     );
-    // A bare session has no published versions: Preview only, and the box steers it.
-    expect(within(view).queryByRole('tab', { name: 'History' })).not.toBeInTheDocument();
-    expect(within(view).getByPlaceholderText('Message Snake game directly…')).toBeInTheDocument();
+    expect(requests('GET', `/claude-code-session/${TASK_ID}/preview`)).toHaveLength(1);
   });
 
-  it("a card for Rose's own session opens the Rose app view", async () => {
-    window.IntersectionObserver =
-      VisibleIntersectionObserver as unknown as typeof IntersectionObserver;
-    serveApps(appsBody([ROSE_APP]));
-    serveAgentWithChip({ task_id: 't-rose', preview_url: ROSE_PREVIEW, title: 'Sticky header' });
+  it('a Codex session opens with its own steer label and the "Preview" title fallback', async () => {
+    serveAgentWithChip({ provider: 'codex', title: undefined });
     serveHandoff();
     servePreview('running');
     const chip = await openAgentWithChip();
-    fireEvent.click(
-      await within(chip).findByRole('button', { name: 'Open Sticky header preview' }),
-    );
-    const view = await screen.findByTestId('user-app-screen');
-    expect(view).toHaveAttribute('data-app-kind', 'builtin');
-    expect(within(view).getByRole('heading', { name: 'Rose' })).toBeInTheDocument();
-    expect(screen.getByTestId('rose-app-row-rose')).toHaveAttribute('data-selected', 'true');
+    fireEvent.click(await within(chip).findByRole('button', { name: 'Open app preview' }));
+    const view = await screen.findByTestId('app-view-screen');
+    expect(within(view).getByRole('heading', { name: 'Preview' })).toBeInTheDocument();
+    expect(within(view).getByPlaceholderText('Message Codex directly…')).toBeInTheDocument();
   });
 
   it('off screen: the card holds no frame and makes no handoff call', async () => {
-    serveApps(appsBody([ROSE_APP]));
-    serveAgentWithChip({});
+    serveAgentWithChip();
     const handoff = serveHandoff();
     const chip = await openAgentWithChip();
     expect(await within(chip).findByTestId('code-agent-preview-card')).toBeInTheDocument();
@@ -186,15 +113,24 @@ describe('trajectory live preview card', () => {
   });
 
   it('no preview_url: no card', async () => {
-    serveApps(appsBody([ROSE_APP]));
     serveAgentWithChip({ preview_url: undefined });
     const chip = await openAgentWithChip();
     expect(within(chip).queryByTestId('code-agent-preview-card')).not.toBeInTheDocument();
   });
 
+  it('a preview_url on the app origin is never framed', async () => {
+    onScreenEverywhere();
+    serveAgentWithChip({ preview_url: `${window.location.origin}/` });
+    const handoff = serveHandoff();
+    const chip = await openAgentWithChip();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(within(chip).queryByTestId('code-agent-preview-card')).not.toBeInTheDocument();
+    expect(handoff.calls()).toBe(0);
+  });
+
   it('flag off: the stock chip renders and no preview card exists', () => {
     renderChip(
-      [chipMessage({ task_id: 'task-1', preview_url: CARD_PREVIEW, target: 'cloud' })],
+      [chipMessage({ task_id: 'task-1', preview_url: PREVIEW_URL, target: 'cloud' })],
       false,
     );
     expect(screen.queryByTestId('code-agent-chip')).not.toBeInTheDocument();

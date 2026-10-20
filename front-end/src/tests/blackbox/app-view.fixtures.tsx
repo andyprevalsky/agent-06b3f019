@@ -1,76 +1,33 @@
 /**
- * Fixtures for the Rose Desktop Apps suites (left-bar Apps section, full-screen
- * app view, trajectory preview card). Wire shapes follow the A1/A2 backend
- * (feat/rose-user-ui @ 7826a2a6b) plus the pending L-APPS2 additions:
+ * Fixtures for the Rose Desktop app view suites (a code-agent chip's live
+ * preview card → the full-screen app view). Wire shapes follow the A1 backend
+ * (feat/rose-user-ui @ 7826a2a6b) plus the pending L-APPS2 handoff:
  *
- *   GET  /api/user-ui/apps -> { activeVersionId, apps } (Rose first, dev accounts only)
- *   GET  /api/user-ui/versions -> { activeVersionId, versions: [{ versionId, manifest… }] }
- *   POST /api/user-ui/versions/:id/activate
+ *   metadata.code_agent { task_id, provider, preview_url, title, … } on the spawn row
  *   GET  /api/claude-code-session/:taskId/preview -> { preview_url, status, … }
  *   POST /api/claude-code-session/:taskId/preview/handoff -> { code, expires_at } (L-APPS2)
  *   POST /api/claude-code-session/:taskId/publish -> { pr: { number, url }, created, … }
  *   POST /api/claude-code-session/:taskId/turns (the existing steer route)
  */
-import { act, fireEvent, screen } from '@testing-library/react';
+import { act, fireEvent, screen, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 
 import { Toaster } from '@/components/ui/toaster';
 import { ROSE_DESKTOP_USER_IDS } from '@/lib/roseDesktop';
 import Terminal from '@/pages/Terminal';
 
+import { chipMessage } from './code-agent-steering.fixtures';
 import { capturedRequests } from './msw/capture';
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
 
 export const API_BASE = 'http://localhost:3001/api';
-export const ROSE_PREVIEW = 'https://5173-sbx-rose.e2b.test/';
-export const USERCONTENT = 'https://uc.rose.test/usercontent';
-
-export const ROSE_APP = {
-  id: 'rose',
-  kind: 'builtin',
-  title: 'Rose',
-  url: null,
-  preview_url: ROSE_PREVIEW,
-  task_id: 't-rose',
-  code_session_id: 'cs-rose',
-  publish: 'pull_request',
-};
-
-/** A published user app as the 7826a2a6b backend lists it (no task fields yet). */
-export function userApp(overrides: Record<string, unknown> = {}) {
-  return {
-    id: 'game',
-    kind: 'user',
-    title: 'Game',
-    url: `${USERCONTENT}/v2/apps/game/index.html`,
-    icon_url: `${USERCONTENT}/v2/apps/game/icon.png`,
-    version_id: 'v2',
-    publish: 'usercontent',
-    ...overrides,
-  };
-}
-
-export function appsBody(apps: unknown[], activeVersionId: string | null = 'v2') {
-  return { activeVersionId, apps };
-}
-
-/** GET /apps answers with each body in turn (the last one repeats). */
-export function serveApps(...bodies: unknown[]) {
-  let calls = 0;
-  server.use(
-    http.get(`${API_BASE}/user-ui/apps`, () => {
-      const body = bodies[Math.min(calls, bodies.length - 1)];
-      calls += 1;
-      return HttpResponse.json(body);
-    }),
-  );
-  return { calls: () => calls };
-}
+export const TASK_ID = 't-game';
+export const PREVIEW_URL = 'https://5173-sbx-game.e2b.test/';
 
 export function servePreview(
   status: string,
-  { taskId = 't-rose', previewUrl = ROSE_PREVIEW as string | null } = {},
+  { taskId = TASK_ID, previewUrl = PREVIEW_URL as string | null } = {},
 ) {
   server.use(
     http.get(`${API_BASE}/claude-code-session/${taskId}/preview`, () =>
@@ -108,19 +65,6 @@ export function serveTurns() {
   );
 }
 
-export function version(versionId: string, apps: Record<string, unknown>, active = false) {
-  return {
-    versionId,
-    manifest: { version: 1, apps },
-    fileCount: 3,
-    totalBytes: 2048,
-    createdAt: `2026-10-${versionId === 'v2' ? '20' : '19'}T20:00:00.000Z`,
-    active,
-  };
-}
-
-export const GAME_MANIFEST_APP = { game: { title: 'Game', entry: 'apps/game/index.html' } };
-
 /** Requests captured by MSW for one method + /api path. */
 export function requests(method: string, path: string) {
   return capturedRequests.filter(
@@ -149,11 +93,6 @@ export function signInRoseDesktop() {
   signInAs(ROSE_DESKTOP_USER_IDS[0]);
 }
 
-/** A signed-in account without the Rose Desktop flag (stock UI). */
-export function signInStock() {
-  signInAs('stock-user-1');
-}
-
 export function serveTerminalBasics() {
   server.use(
     http.get(`${API_BASE}/user/profile`, () => HttpResponse.json({ name: 'Test User' })),
@@ -167,6 +106,65 @@ export function serveTerminalBasics() {
   );
 }
 
+/** agent-001's trajectory holds one code-agent chip (spawn row with code_agent). */
+export function serveAgentWithChip(codeAgent: Record<string, unknown> = {}) {
+  const message = chipMessage({
+    task_id: TASK_ID,
+    provider: 'claude',
+    target: 'cloud',
+    state: 'live',
+    title: 'Snake game',
+    preview_url: PREVIEW_URL,
+    ...codeAgent,
+  });
+  server.use(
+    http.get(`${API_BASE}/agents/:agentId`, ({ params }) =>
+      HttpResponse.json({
+        agent: {
+          agent_id: params.agentId,
+          goal: 'Make me a game',
+          model: 'rose-1-flash',
+          source: 'WEB',
+          reasoning_effort: 'medium',
+          progress: 50,
+          status: 'ACTIVE',
+          status_message: null,
+          temporal_workflow_id: 'wf-001',
+          token_count: 0,
+          tokens_in: 0,
+          tokens_out: 0,
+          context_size: 0,
+          message_count: 1,
+          price_limit_cents: 100,
+          tree_cost_cents: 0,
+          created_at: '2026-10-20T12:00:00.000Z',
+          updated_at: '2026-10-20T12:00:00.000Z',
+          write_lock_enabled: false,
+          parent_agent_id: null,
+          parent_goal: null,
+          verifier: null,
+          tools: [],
+        },
+        messages: [message],
+        pagination: { has_more: false, oldest_timestamp: null },
+      }),
+    ),
+  );
+}
+
+/** IntersectionObserver that reports every observed element as on screen. */
+export class VisibleIntersectionObserver {
+  constructor(private readonly callback: IntersectionObserverCallback) {}
+  observe(target: Element) {
+    this.callback(
+      [{ isIntersecting: true, target } as IntersectionObserverEntry],
+      this as unknown as IntersectionObserver,
+    );
+  }
+  unobserve() {}
+  disconnect() {}
+}
+
 export function renderTerminal() {
   return renderWithProviders(
     <>
@@ -176,17 +174,18 @@ export function renderTerminal() {
   );
 }
 
-export function expandRoseBar() {
-  act(() => {
-    fireEvent.mouseEnter(screen.getByTestId('rose-sidebar'));
-  });
+/** Open agent-001 in the real Terminal and return its code-agent chip. */
+export async function openAgentWithChip(): Promise<HTMLElement> {
+  renderTerminal();
+  fireEvent.click(await screen.findByTestId('rose-agent-row-agent-001'));
+  return await screen.findByTestId('code-agent-chip');
 }
 
-/** Open an app from the left bar and return the full-screen app view. */
-export async function openAppFromBar(appId: string): Promise<HTMLElement> {
-  const row = await screen.findByTestId(`rose-app-row-${appId}`);
-  fireEvent.click(row);
-  return await screen.findByTestId('user-app-screen');
+/** Chip → its live preview card → the full-screen app view. */
+export async function openAppView(title = 'Snake game'): Promise<HTMLElement> {
+  const chip = await openAgentWithChip();
+  fireEvent.click(await within(chip).findByRole('button', { name: `Open ${title} preview` }));
+  return await screen.findByTestId('app-view-screen');
 }
 
 export function pressEscape() {
