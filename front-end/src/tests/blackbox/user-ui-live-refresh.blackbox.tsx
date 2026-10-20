@@ -167,7 +167,7 @@ function servePublishedUi(state: PublishedState) {
 }
 
 /** The open agent plus the active version the provider applied (stock = none). */
-function OpenAgentProbe() {
+export function OpenAgentProbe() {
   const { agent } = useAgentContext();
   const { active } = useUserUi();
   return (
