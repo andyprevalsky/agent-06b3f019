@@ -23,7 +23,7 @@ tags:
   - scorecard
 sources:
   - benchmark run original600-1792470090920184153 (controllers 843292f2d97368 / 08001dea711098), host death ~2026-10-20T04:58Z
-repro: scripts/tests/cloudbench-shard-coordinator.test.py (HostDeathAdoption), scripts/tests/cloudbench-original600-supervisor.test.py (Shard.test_shard_supervisor_enforces_the_group_threshold_without_a_host)
+repro: scripts/tests/cloudbench-shard-coordinator.test.py (HostDeathAdoption), scripts/tests/cloudbench-original600-supervisor.test.py (Shard.test_shard_supervisor_enforces_the_group_threshold_without_a_host), scripts/tests/cloudbench-resume-controller-export.test.py (test_dead_owner_accepts_the_shards_bound_e2e_deadline_only), scripts/tests/original600-status.test.py (test_shard_totals_come_from_bound_config_not_fixed_600)
 status: fixed
 ---
 
@@ -93,33 +93,56 @@ frozen at 0 PASS.
 ## Solution
 
 - **Host-independent stop:** `group_infra_threshold(shard)` returns an explicit
-  `infra_threshold`, or else `ceil(group_total/20)`. It is used by the
-  supervisor (`validate_shard`/`validate_snapshot`), the runner `shard_shape`, and
-  `original600-status.py`. One shard reaching the group threshold implies the
-  group reached it, so the stop is never earlier than the global rule. 600
-  scheduled jobs still gives 30.
+  `infra_threshold`, or else `ceil(group_total/20)`. The supervisor
+  (`validate_shard`/`validate_snapshot`) and the runner `shard_shape` use it.
+  One shard reaching the group threshold implies the group reached it, so the
+  stop is never earlier than the global rule. 600 scheduled jobs still gives 30.
+  `original600-status.py` reports the threshold that the run's own pinned guest
+  supervisor enforces: 30 for 0a2470cc6 guests, 3 for this supervisor.
 - **Re-adoptable observation and stop authority:**
   - `cloudbench-original600-runner.py --adopt-live <out>` refuses unless the
-    recorded runner and gate PID/birth are gone. It also refuses when no
-    `terminal.json` exists, or when another adopter holds `adoption.lock`.
+    recorded runner and gate PID/birth are gone. It also refuses when a
+    `terminal.json` exists, or when another adopter holds the controller lock
+    (`~/.cache/original600-adopt/<machine>.lock`) or the output's
+    `adoption.lock`.
   - It writes `adoption-NN.json`, then resumes PROBE, `shard-status.json` (so the
     scorecard resumes live counts), and barrier delivery.
-  - It sends one never-replayed supervisor TERM, reusing `supervisor-term.intent.json`.
-  - It exits when the supervisor reports JOINED. It never runs cleanup, which
+  - It sends one never-replayed supervisor TERM, reusing
+    `supervisor-term.intent.json`. It does so only for the coordinator's durable
+    `owner-stop.json` (threshold or explicit operator stop) or the original
+    deadline.
+  - A signal to the adopter (host or service restart) only detaches. It exits 75
+    and writes `adoption-NN.detached.json`, with no supervisor TERM.
+  - It exits 0 when the supervisor reports JOINED. It never runs cleanup, which
     stays with the dead-owner route.
-- **Coordinator adoption:** `coordinate(adopt=journal)` continues the original
-  journal, release ID, decision and clocks. It records `adoptions[]` with the
-  previous PIDs and keeps the fixed scheduled total and policy. It refuses a
-  finished journal, and also refuses a live recorded coordinator.
-  `run-original600-controller.py --adopt-live <admission> [--check]` binds all
-  shards before spawning any. Fresh journals now record `coordinator`
-  pid/birth for future adoption checks.
+- **Coordinator adoption:** `adopt_coordinate()` continues the original
+  journal, release ID, decision and clocks. It holds `coordination.adopt.lock`
+  and records `adoptions[]` with the previous PIDs. It keeps the fixed scheduled
+  total and policy. A threshold or `--stop REASON` becomes a durable
+  `owner-stop.json`. A signal to the coordinator, an adopter that dies
+  (`ADOPTER_LOST` alert), or an internal error only detaches: no barrier abort,
+  no supervisor TERM, and no `finished_at`, so the run can be adopted again. A
+  journal's earlier signal-derived stop (`operator SIGTERM`) is not replayed
+  (`ADOPTION_UNREPLAYED_STOP`). `finished_at` is written only after every
+  adopter exited 0 with its supervisor settled. It refuses a finished or
+  undecided (pre-release) journal and a live original coordinator.
+  `run-original600-controller.py --adopt-live <admission> [--check] [--stop REASON]`
+  binds all shards before spawning any. Fresh journals record `coordinator`
+  pid/birth and `terminate_cause`.
+- **Dead-owner cleanup for bound timeouts:** `cloudbench-resume-controller-export.py`
+  required `deadline == epoch + 5400`. Runs from 0a2470cc6 record
+  `epoch + e2e_timeout` (9300 here), so every shard of this run was refused. The
+  expected offset now comes from the run's own shard config through its pinned
+  runner's `shard_timeouts()`, with exact equality kept. Live `--dead-owner --check`
+  on both shards moved from `normal authority/caller differs` (origin/main) to
+  the documented next prerequisite (`export/launch.json` from `--fetch-launch`)
+  and wrote nothing.
 - The `--check` run against the live admission bound both dead owners,
   machines 843292f2d97368/08001dea711098, and wrote nothing.
 
 10k-agent behavior: one adopter per controller, the same 5 s exec PROBE as the
-original runner. It does no per-job or per-agent work and holds no shared lock
-beyond the per-output adoption lock.
+original runner. It does no per-job or per-agent work and holds only per-run and
+per-controller adoption locks.
 
 Golden reference: `claude-code-src/src/bridge/bridgeApi.ts:170-177` re-registers
 with the prior durable `environment_id` so the backend reattaches instead of
@@ -134,6 +157,16 @@ session-surviving process manager. Live Hub group publication still runs only
 at start and finish.
 
 ## Human feedback
+
+An independent review of 736e5aa8e found it adoptable with conditions, and the
+parent did not run `--adopt-live` on the live batch. The conditions were:
+- Dead-owner cleanup must accept the bound e2e deadline.
+- An adopter startup failure must not write `finished_at`.
+- An internal coordinator error must not TERM healthy shards.
+- There must be a controller-level adoption lock.
+- A host or service restart TERM must not become a replayed campaign stop.
+- Status must not report 3 for guests that stop at 30.
+- The `terminal.json` refusal had been written inverted in this case file.
 
 The parent asked that any re-adopt fix bring `scripts/run-bench scorecard` back
 to live counts (it froze at "COMPLETED 0/60" while `original600-status.py`

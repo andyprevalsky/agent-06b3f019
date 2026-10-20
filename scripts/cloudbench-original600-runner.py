@@ -809,18 +809,38 @@ def next_probe_index(out):
  numbers=[int(p.name.rsplit('-',1)[1][:6])for p in out.glob('supervisor-*-[0-9][0-9][0-9][0-9][0-9][0-9].json')]
  return max(numbers,default=-1)+1
 
-def adopt_live(out,*,api,probe_interval=5.0):
+def owner_stop(out):
+ """The coordinator's durable stop decision (threshold or explicit operator stop), or None."""
+ try:value=json.loads(read(out/'owner-stop.json'))
+ except (OSError,ValueError):return None
+ return value if isinstance(value,dict) and isinstance(value.get('reason'),str) and value['reason'] else None
+
+def controller_lock(mid,lock_dir=None):
+ """One adopter per controller on this host, whatever output path names it."""
+ import fcntl
+ base=Path(lock_dir) if lock_dir else Path.home()/'.cache/original600-adopt'
+ base.mkdir(mode=0o700,parents=True,exist_ok=True);info=base.lstat()
+ need(stat.S_ISDIR(info.st_mode) and info.st_uid==os.geteuid() and not info.st_mode&0o077,'private adoption lock directory required')
+ fd=os.open(base/(mid+'.lock'),os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
+ try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+ except BlockingIOError:os.close(fd);raise ValueError('another adopter owns this controller')
+ return fd
+
+def adopt_live(out,*,api,probe_interval=5.0,lock_dir=None):
  """Re-adopt observation and stop authority for a live shard whose host runner died.
 
  Same exact-owner controls as run(): PROBE, shard-status.json for the coordinator and
- scorecard, coordinator barrier delivery, and one never-replayed supervisor TERM on an
- owner stop or the original deadline. Never signals a gate, VM or process group and never
- runs cleanup; it returns once the supervisor has joined (then use the dead-owner route)."""
+ scorecard, coordinator barrier delivery, and one never-replayed supervisor TERM. Only a
+ durable owner-stop.json from the coordinator (threshold or explicit operator stop) or the
+ original deadline stops the supervisor. A signal to this process (a host or service restart)
+ only detaches: exit 75 without any supervisor TERM, so the run stays adoptable. Never signals
+ a gate, VM or process group and never runs cleanup; returns 0 once the supervisor joined."""
  import fcntl
  bound=adoption_binding(out);out,caller,mid,base=bound['out'],bound['caller'],bound['machine'],bound['base']
+ controller=controller_lock(mid,lock_dir)
  lock=os.open(out/'adoption.lock',os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
  try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
- except BlockingIOError:os.close(lock);raise ValueError('another adopter owns this output')
+ except BlockingIOError:os.close(lock);os.close(controller);raise ValueError('another adopter owns this output')
  number=1
  while(out/('adoption-%02d.json'%number)).exists():number+=1
  receipt=out/('adoption-%02d.json'%number)
@@ -828,36 +848,41 @@ def adopt_live(out,*,api,probe_interval=5.0):
                    original_owner_pid=caller['pid'],original_owner_birth=caller['birth'],original_gate_pid=caller['gate_pid'],
                    original_gate_birth=caller['gate_birth'],identity_path=base['identity_path'],original_deadline=caller['deadline'],
                    adopted_at=time.time(),cleanup_owner=False))
- stop=[False];old={s:signal.getsignal(s)for s in(signal.SIGTERM,signal.SIGINT)}
- def cancel(*unused):stop[0]=True # never forwarded to a gate, VM or process group
- for s in old:signal.signal(s,cancel)
+ detach=[None];old={s:signal.getsignal(s)for s in(signal.SIGTERM,signal.SIGINT,signal.SIGHUP)}
+ def detached(number,frame):detach[0]=detach[0] or signal.Signals(number).name # never a campaign stop
+ for s in old:signal.signal(s,detached)
  attempt=next_probe_index(out);probe={};delivery={};next_probe=0
  try:
   print(json.dumps(dict(status='ADOPTED_LIVE_SHARD',machine=mid,receipt=str(receipt))),flush=True)
   while True:
-   late=time.time()>=caller['deadline']
+   if detach[0]:
+    save(receipt.with_name(receipt.stem+'.detached.json'),dict(signal=detach[0],supervisor_state=probe.get('state'),observed_at=time.time(),
+         supervisor_term_requested=(out/'supervisor-term.intent.json').exists(),benchmark_success_inferred=False))
+    print(json.dumps(dict(status='ADOPTER_DETACHED',machine=mid,signal=detach[0])),flush=True)
+    return 75
+   late=time.time()>=caller['deadline'];stopping=late or owner_stop(out) is not None
    if time.monotonic()>=next_probe:
     payload=dict(base,action='PROBE')
     try:
      probe=machine_control(api,mid,payload);save(out/('supervisor-probe-%06d.json'%attempt),probe);attempt+=1
-     if(stop[0]or late)and probe['state']=='LIVE':request_term(api,mid,payload,probe,out)
+     if stopping and probe['state']=='LIVE' and not detach[0]:request_term(api,mid,payload,probe,out)
      shard_status(out,probe,mid)
     except (Exception,Deadline) as e:
      save(out/('supervisor-read-pending-%06d.json'%attempt),dict(error=type(e).__name__,no_gate_signal=True,adopter=receipt.name));attempt+=1
     next_probe=time.monotonic()+probe_interval
    state=probe.get('state')
-   if state in('JOINED','ABSENT_UNCONFIRMED')or(state=='NOT_PUBLISHED'and(stop[0]or late)):
-    save(receipt.with_name(receipt.stem+'.terminal.json'),dict(supervisor_state=state,stop_requested=stop[0],deadline_passed=late,
+   if state in('JOINED','ABSENT_UNCONFIRMED')or(state=='NOT_PUBLISHED'and stopping):
+    save(receipt.with_name(receipt.stem+'.terminal.json'),dict(supervisor_state=state,owner_stop=owner_stop(out),deadline_passed=late,
          observed_at=time.time(),next_step='dead-owner export and release (docs/original600-operator-cli.md)',benchmark_success_inferred=False))
     print(json.dumps(dict(status='ADOPTED_SUPERVISOR_SETTLED',machine=mid,supervisor_state=state,
                           next_step='cloudbench-resume-controller-export.py --dead-owner')),flush=True)
     return 0
-   try:deliver_global(api,mid,base,out,probe,delivery,stop[0]or late)
+   try:deliver_global(api,mid,base,out,probe,delivery,stopping)
    except (Exception,Deadline):pass # retried next loop; never a cleanup or signal decision
    time.sleep(.25)
  finally:
   for s,h in old.items():signal.signal(s,h)
-  os.close(lock)
+  os.close(lock);os.close(controller)
 
 def adopt_cli(out,workspace):
  capture=Path(__file__).absolute().with_name('cloudbench-original-volume-capture.py')

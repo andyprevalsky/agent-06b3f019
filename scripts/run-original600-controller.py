@@ -2354,6 +2354,7 @@ def adopt_live_sharded(argv):
     parser.add_argument('--adopt-live', type=Path, required=True, help='sharded admission directory holding coordination.json')
     parser.add_argument('--workspace', type=Path, help="checkout whose env files resolve the Fly credential (default: the shards' original source root)")
     parser.add_argument('--check', action='store_true', help='local binding checks only; no credential read or provider request')
+    parser.add_argument('--stop', metavar='REASON', help='explicit operator stop: every adopter TERMs its exact supervisor once (durable)')
     args = parser.parse_args(argv)
     os.umask(0o077)
     root = Path(__file__).resolve().parents[1]
@@ -2367,7 +2368,7 @@ def adopt_live_sharded(argv):
     shards = [dict(index=int(i), out=Path(v['out'])) for i, v in sorted((record.get('shards') or {}).items(), key=lambda kv: int(kv[0]))]
     if not shards or any(directory not in s['out'].parents for s in shards):
         raise ValueError('every adopted shard output must belong to this admission')
-    coordinator['adoptable'](record, shards, record.get('scheduled_total'), record.get('infra_early_stop'))
+    coordinator['adoptable'](record, shards)
     bindings = [runner['adoption_binding'](s['out']) for s in shards]  # refuse all before spawning any
     workspace = args.workspace
     if workspace is None:
@@ -2391,13 +2392,16 @@ def adopt_live_sharded(argv):
             return subprocess.Popen([sys.executable, str(runner_path), '--adopt-live', str(shard['out']), '--workspace', str(workspace)],
                                     cwd=root, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
 
-    result = coordinator['coordinate'](shards, spawn, journal, scheduled_total=record['scheduled_total'],
-                                       infra_early_stop=record['infra_early_stop'], adopt=record)
-    print(json.dumps(dict(status='ADOPTED_SHARDS_JOINED', directory=str(directory), exit_codes=result['exit_codes'],
-                          terminate_reason=result.get('terminate_reason'), infra_true=result.get('infra_true'),
-                          next_step='per shard: cloudbench-resume-controller-export.py --dead-owner (docs/original600-operator-cli.md)')),
-          flush=True)
-    return 0 if all(code == 0 for code in result['exit_codes'].values()) else 1
+    result = coordinator['adopt_coordinate'](shards, spawn, journal, stop_reason=args.stop)
+    adoption = result['adoptions'][-1]
+    settled = result.get('finished_at') is not None
+    print(json.dumps(dict(status='ADOPTED_SHARDS_JOINED' if settled else 'ADOPTION_DETACHED_RUN_STILL_ADOPTABLE',
+                          directory=str(directory), exit_codes=adoption.get('exit_codes'), lost=adoption.get('lost'),
+                          detached=adoption.get('detached'), terminate_reason=result.get('terminate_reason'),
+                          infra_true=result.get('infra_true'),
+                          next_step=('per shard: cloudbench-resume-controller-export.py --dead-owner (docs/original600-operator-cli.md)'
+                                     if settled else 'rerun --adopt-live; the campaign was not stopped'))), flush=True)
+    return 0 if settled else 1
 
 
 def main():

@@ -314,6 +314,18 @@ def obj(path):return json.loads(read(path))
 def digest(data):return hashlib.sha256(data).hexdigest()
 
 
+def enforced_shard_threshold(root,cfg,shard):
+    """The stop count the run's own pinned guest supervisor enforces for this shard.
+
+    An explicit bound threshold is used as is; otherwise older supervisors default to 30,
+    group-threshold supervisors to 5% of the group's scheduled total."""
+    if 'infra_threshold' in shard:return shard['infra_threshold']
+    path=root/'scripts/cloudbench-original600-supervisor.py';raw=path.read_bytes()
+    need(digest(raw)==cfg.get('source_files',{}).get('cloudbench-original600-supervisor.py'),'pinned supervisor source changed')
+    scope={'__name__':'original600_status_pinned_supervisor','__file__':str(path)};exec(compile(raw,str(path),'exec'),scope)
+    return scope['group_infra_threshold'](shard) if 'group_infra_threshold' in scope else 30
+
+
 def bound_source(root,ref,name,expected):
     path=root/'scripts'/name
     raw=subprocess.check_output(['git','--no-replace-objects','-C',str(root),'show',ref+':scripts/'+name])
@@ -390,7 +402,7 @@ def binding(run,config=None,agents_env=None):
     if cfg.get('shard') is not None:
         # Totals come from the bound shard config; absent shard keeps the original 600/30 payload.
         shard=cfg['shard']
-        payload.update(total_jobs=RUNNER['shard_shape'](shard),campaign_total_jobs=shard['group_total'],infra_stop_threshold=RUNNER['group_infra_threshold'](shard),
+        payload.update(total_jobs=RUNNER['shard_shape'](shard),campaign_total_jobs=shard['group_total'],infra_stop_threshold=enforced_shard_threshold(root,cfg,shard),
                        task_indexes=shard['task_indexes'],runs=shard['runs'])
     return dict(mode='REMOTE',app=auth['app'],machine=mid,source_ref=ref,root=root,
                 agents_env=credential,credential_sha256=auth['env_files']['agents']['sha256'],source_files=cfg['source_files'],

@@ -591,14 +591,39 @@ python3 scripts/run-original600-controller.py --adopt-live "$ADMISSION_DIR"
 
 Run it from a checkout that includes this mode. `--workspace` selects the
 checkout whose env files resolve the Fly credential. The default is the shards'
-original source root. Every shard refuses unless the PID and birth of its
-recorded runner and gate are gone, no `terminal.json` exists, and no other
-adopter holds `adoption.lock`. The adopter writes `adoption-NN.json`, sends at
-most one never-replayed supervisor TERM on an owner stop, the threshold, or the
-original deadline, and exits once the supervisor reports JOINED. It never
-signals a gate, VM, or process group, and never runs cleanup. Launch it under a
-process manager that survives the session; `setsid nohup` did not survive the
-2026-10-20 boxes.dev service restart.
+original source root.
+
+Refusals and locks:
+- Every shard refuses unless the PID and birth of its recorded runner and gate
+  are gone, and no `terminal.json` exists.
+- Only one adopter may hold each controller lock and each output's
+  `adoption.lock`. Only one coordinator may hold `coordination.adopt.lock`.
+- An undecided (pre-release) barrier is refused. Abort it through the
+  runner's barrier ABORT instead.
+
+Stops:
+- Each adopter sends at most one never-replayed supervisor TERM.
+- It does so only for a durable `owner-stop.json` (the cross-shard threshold,
+  or `--stop REASON`) or the original deadline.
+
+Detaching:
+- A signal to the adopting operator or an adopter, such as a host or service
+  restart, only detaches. It sends no barrier abort and no supervisor TERM.
+- An adopter that dies is reported as `ADOPTER_LOST`. An internal error also
+  only detaches.
+- In each of these cases the journal stays unfinished. Run `--adopt-live`
+  again.
+- An earlier journal stop caused by a signal (`operator SIGTERM`) is reported
+  as `ADOPTION_UNREPLAYED_STOP` and is not replayed.
+
+The adopter exits once the supervisor reports JOINED. It never signals a gate,
+VM, or process group, and never runs cleanup. Launch it under a process manager
+that survives the session; `setsid nohup` did not survive the 2026-10-20
+boxes.dev service restart.
+
+Dead-owner export recovery binds the shard's own deadline. That is the epoch
+plus the shard's bound e2e timeout, for example 9300 s for `--timeout 7200`, or
+5400 s when unbound.
 
 Nothing remains to verify the export or run controller cleanup: the run's
 pinned disposable helper refuses every action for a dead cleanup owner. Without
