@@ -64,20 +64,31 @@ export async function findRootRevisions(userId: string, sites: string[]) {
 
 /**
  * The current URL of the newest ACTIVE browser task in one root agent's tree
- * (the root and every agent on its bus), or null. One statement over indexed
- * columns: Agent pkey + Agent(busId), BrowserSession(agentId); owner-scoped by
- * the Agent's userId, so another user's root id finds nothing.
+ * (the root and every agent on its bus), or null: its last recorded URL, else
+ * the URL it opened at. One statement, owner-scoped by the Agent's userId so
+ * another user's root id finds nothing. The materialized tree (Agent pkey +
+ * Agent(busId)) drives one BrowserSession(agentId) probe per tree agent, so
+ * the cost follows the tree's size, never the number of active sessions.
  */
 export async function findTreeBrowserUrl(userId: string, rootAgentId: string) {
   const rows = await prisma.$queryRaw<Array<{ url: string }>>`
-    SELECT COALESCE(NULLIF(bs."currentUrl", ''), bs."startUrl") AS url
-    FROM "BrowserSession" bs
-    JOIN "Agent" a ON a.id = bs."agentId"
-    WHERE a."userId" = ${userId}
-      AND (a.id = ${rootAgentId} OR a."busId" = ${rootAgentId})
-      AND bs.status = 'ACTIVE'
-      AND COALESCE(NULLIF(bs."currentUrl", ''), bs."startUrl") ~* '^https?://'
-    ORDER BY bs."createdAt" DESC
+    WITH tree AS MATERIALIZED (
+      SELECT a.id FROM "Agent" a WHERE a.id = ${rootAgentId} AND a."userId" = ${userId}
+      UNION
+      SELECT a.id FROM "Agent" a WHERE a."busId" = ${rootAgentId} AND a."userId" = ${userId}
+    )
+    SELECT newest.url
+    FROM tree
+    CROSS JOIN LATERAL (
+      SELECT COALESCE(NULLIF(bs."currentUrl", ''), bs."startUrl") AS url, bs."createdAt"
+      FROM "BrowserSession" bs
+      WHERE bs."agentId" = tree.id
+        AND bs.status = 'ACTIVE'
+        AND COALESCE(NULLIF(bs."currentUrl", ''), bs."startUrl") ~* '^https?://'
+      ORDER BY bs."createdAt" DESC
+      LIMIT 1
+    ) newest
+    ORDER BY newest."createdAt" DESC
     LIMIT 1`;
   return rows[0]?.url ?? null;
 }

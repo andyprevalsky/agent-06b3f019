@@ -8,7 +8,6 @@
  * The open then forks every site of the jar on the account it injected, so
  * only what the user changes afterwards is a new login.
  */
-import type { Cookie } from '@prisma/client';
 import type { Browser } from 'playwright';
 import { isAuthCredentialCookieName } from '../../providers/authCookies';
 import { authRealmFromCookieDomain } from '../../providers/authRealm';
@@ -26,6 +25,8 @@ import {
 import * as repo from './repo';
 
 const log = createLogger('BrowserWorld');
+
+type Cookie = Awaited<ReturnType<typeof repo.listRootCookies>>[number];
 
 interface AccountGroup {
   account: string;
