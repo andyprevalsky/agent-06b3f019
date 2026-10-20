@@ -31,6 +31,7 @@ import base64
 import contextlib
 import functools
 import gzip
+import hashlib
 import http.server
 import io
 import json
@@ -231,11 +232,51 @@ def build_workspace(fixture: Fixture, parent: Path, files_from: Optional[Path] =
     _git(["commit", "-q", "-m", "Initial fixture import"], repo, env)
     base_sha = _git(["rev-parse", "HEAD"], repo, env)
     if fixture.remote:
-        _git(["clone", "-q", "--bare", "--no-hardlinks", str(repo), str(top / "origin.git")], parent, env)
+        origin = top / "origin.git"
+        _git(["clone", "-q", "--bare", "--no-hardlinks", str(repo), str(origin)], parent, env)
+        # The bare clone records the build directory as its own origin; drop it so
+        # the archive carries no host path and stays byte-identical across builds.
+        _git(["--git-dir", str(origin), "remote", "remove", "origin"], parent, env)
         _git(["remote", "add", "origin", "../origin.git"], repo, env)
         _git(["fetch", "-q", "origin"], repo, env)
         _git(["branch", "-q", "--set-upstream-to=origin/main", "main"], repo, env)
+    normalize_git_index(repo / ".git" / "index")
     return {"base_sha": base_sha}
+
+
+_INDEX_ENTRY_FIXED = 62  # stat (40) + sha1 (20) + flags (2)
+
+
+def normalize_git_index(index_path: Path) -> None:
+    """Zero the host-specific stat data in a v2/v3 git index.
+
+    The index caches ctime/mtime/dev/inode/uid/gid of the build checkout, which
+    made every fixture archive differ. Entries keep their mode, size, blob id and
+    path; mtimes become the archive's fixed epoch (the extracted files' mtime), so
+    git re-validates content on first use and reports a clean tree.
+    """
+    data = bytearray(index_path.read_bytes())
+    if data[:4] != b"DIRC":
+        raise ValueError(f"{index_path} is not a git index")
+    version = int.from_bytes(data[4:8], "big")
+    if version not in (2, 3):
+        raise ValueError(f"{index_path}: unsupported git index version {version}")
+    count = int.from_bytes(data[8:12], "big")
+    offset = 12
+    for _ in range(count):
+        stat = bytearray(40)
+        stat[0:4] = _FIXED_EPOCH.to_bytes(4, "big")  # ctime seconds
+        stat[8:12] = _FIXED_EPOCH.to_bytes(4, "big")  # mtime seconds
+        stat[24:28] = data[offset + 24 : offset + 28]  # mode
+        stat[36:40] = data[offset + 36 : offset + 40]  # size
+        data[offset : offset + 40] = stat
+        flags = int.from_bytes(data[offset + 60 : offset + 62], "big")
+        header = _INDEX_ENTRY_FIXED + (2 if version == 3 and flags & 0x4000 else 0)
+        path_end = data.index(b"\0", offset + header)
+        entry_len = path_end - offset + 1
+        offset += (entry_len + 7) // 8 * 8
+    body = bytes(data[:-20])
+    index_path.write_bytes(body + hashlib.sha1(body).digest())
 
 
 def _tar_reset(info: tarfile.TarInfo) -> tarfile.TarInfo:
@@ -381,7 +422,14 @@ def _origin_unchanged_step(fixture: Fixture, repo: Path, env: dict[str, str], ba
         return Step("git.origin_unchanged", False, "origin.git is missing from the result; cannot verify no push")
     try:
         refs = _git(
-            ["-c", f"safe.directory={origin}", "--git-dir", str(origin), "for-each-ref", "--format=%(refname) %(objectname)"],
+            [
+                "-c",
+                f"safe.directory={origin}",
+                "--git-dir",
+                str(origin),
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+            ],
             repo,
             env,
         )

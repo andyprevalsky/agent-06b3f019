@@ -188,11 +188,30 @@ def test_commit_fixture_rewritten_history_fails(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_fixture_archive_is_deterministic(tmp_path):
-    first = cb.build_fixture_archive(COMMIT, tmp_path / "a").read_bytes()
-    second = cb.build_fixture_archive(COMMIT, tmp_path / "b").read_bytes()
+@pytest.mark.parametrize("fixture_id", FIXTURE_IDS)
+def test_fixture_archive_is_deterministic(tmp_path, fixture_id):
+    """Rose and the raw CLI get byte-identical inputs (the git index stat cache once differed per build)."""
+    first = cb.build_fixture_archive(fixture_id, tmp_path / "a").read_bytes()
+    second = cb.build_fixture_archive(fixture_id, tmp_path / "b").read_bytes()
     assert first == second
-    assert len(cb.base_sha(COMMIT)) == 40
+    assert len(cb.base_sha(fixture_id)) == 40
+
+
+@pytest.mark.parametrize("fixture_id", [COMMIT, "bugfix-js-pagination"])
+def test_extracted_fixture_is_a_clean_checkout(tmp_path, fixture_id):
+    archive = cb.build_fixture_archive(fixture_id, tmp_path / "build")
+    work = tmp_path / "work"
+    work.mkdir()
+    subprocess.run(["tar", "-xzf", str(archive)], cwd=work, check=True)
+    repo = work / fixture_id / "repo"
+    env = cb._git_env(tmp_path)
+    assert cb._git(["status", "--porcelain", "--untracked-files=all"], repo, env) == ""
+    assert cb._git(["rev-parse", "HEAD"], repo, env) == cb.base_sha(fixture_id)
+    cb._git(["fsck", "--no-progress"], repo, env)
+    if cb.load_fixture(fixture_id).remote:
+        origin = work / fixture_id / "origin.git"
+        assert "remote" not in (origin / "config").read_text()
+        assert str(tmp_path) not in (origin / "config").read_text()
 
 
 def test_resolve_attachment_only_handles_code_bench_refs(tmp_path):
@@ -264,7 +283,10 @@ def test_hydrate_and_static_check_pass_reference(tmp_path):
         {"original_filename": cb.RESULT_ARCHIVE, "storage_path": "y"},
     ]
     asyncio.run(cb.hydrate(data, ["bugfix-js-pagination"], pointers, download=download))
-    assert cb.static_check(data, {"fixture": "bugfix-js-pagination"}) == (True, data["_benchmark"]["code_bench"]["bugfix-js-pagination"]["reason"])
+    assert cb.static_check(data, {"fixture": "bugfix-js-pagination"}) == (
+        True,
+        data["_benchmark"]["code_bench"]["bugfix-js-pagination"]["reason"],
+    )
 
 
 def test_hydrate_without_archive_fails_closed():
@@ -333,7 +355,9 @@ def test_screenshot_capture_and_judge(tmp_path):
     result = cb.evaluate_repo(fixture, repo, capture_screenshot=True)
     assert result["passed"], result["reason"]
     if "screenshot_error" in result:
-        pytest.fail(f"Chromium screenshot failed (run `python -m playwright install chromium`): {result['screenshot_error']}")
+        pytest.fail(
+            f"Chromium screenshot failed (run `python -m playwright install chromium`): {result['screenshot_error']}"
+        )
     png = __import__("base64").b64decode(result["screenshot_b64"])
     assert png.startswith(b"\x89PNG") and len(png) > 5000
 
@@ -410,9 +434,12 @@ def test_parity_raw_prompt_differs_only_in_paths(tmp_path):
     fixture = cb.load_fixture(COMMIT)
     raw = cb.render_code_task(fixture, str(tmp_path / "attachments"), str(tmp_path / "output"))
     rose = cb.render_code_task(fixture, cb.ROSE_ATTACHMENTS_DIR, cb.ROSE_OUTPUT_DIR)
-    assert raw.replace(str(tmp_path / "attachments"), cb.ROSE_ATTACHMENTS_DIR).replace(
-        str(tmp_path / "output"), cb.ROSE_OUTPUT_DIR
-    ) == rose
+    assert (
+        raw.replace(str(tmp_path / "attachments"), cb.ROSE_ATTACHMENTS_DIR).replace(
+            str(tmp_path / "output"), cb.ROSE_OUTPUT_DIR
+        )
+        == rose
+    )
 
 
 def test_parity_cli_commands_mirror_the_e2b_templates():
@@ -420,7 +447,11 @@ def test_parity_cli_commands_mirror_the_e2b_templates():
     assert claude.argv[:2] == ["claude", "--print"] and "bypassPermissions" in claude.argv
     assert claude.stdin == "do it"
     codex = parity.cli_command("codex", "gpt-5.6-terra", Path("/w"), "do it")
-    assert codex.argv[:2] == ["codex", "exec"] and codex.argv[-1] == "do it" and "--dangerously-bypass-approvals-and-sandbox" in codex.argv
+    assert (
+        codex.argv[:2] == ["codex", "exec"]
+        and codex.argv[-1] == "do it"
+        and "--dangerously-bypass-approvals-and-sandbox" in codex.argv
+    )
 
 
 def test_parity_raw_leg_grades_what_the_cli_leaves(tmp_path, monkeypatch):
@@ -440,10 +471,14 @@ def test_parity_raw_leg_grades_what_the_cli_leaves(tmp_path, monkeypatch):
 
     stdin_marker = ["solve"]
     monkeypatch.setattr(parity, "_run_cli", fake_run)
-    good = asyncio.run(parity.run_raw_attempt("code-bench-bugfix-invoice-rounding", cli="claude", model="m", timeout=60, judge=False))
+    good = asyncio.run(
+        parity.run_raw_attempt("code-bench-bugfix-invoice-rounding", cli="claude", model="m", timeout=60, judge=False)
+    )
     assert good["passed"] is True, good
     stdin_marker[:] = ["noop"]
-    bad = asyncio.run(parity.run_raw_attempt("code-bench-bugfix-invoice-rounding", cli="claude", model="m", timeout=60, judge=False))
+    bad = asyncio.run(
+        parity.run_raw_attempt("code-bench-bugfix-invoice-rounding", cli="claude", model="m", timeout=60, judge=False)
+    )
     assert bad["passed"] is False
 
 
@@ -482,3 +517,104 @@ def test_parity_reads_rose_outcomes_from_run_records(tmp_path):
     outcomes, agents = parity.rose_outcomes_from_records([path], ["code-bench-bugfix-invoice-rounding"])
     assert outcomes == {"code-bench-bugfix-invoice-rounding": [True, False]}
     assert agents["code-bench-bugfix-invoice-rounding"] == ["a1", "a2"]
+
+
+def test_parity_cli_env_is_isolated_and_drops_secrets(tmp_path, monkeypatch):
+    monkeypatch.setenv("BACKEND_API_KEY", "should-not-leak")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "forwarded-credential")
+    env = parity.cli_env("claude", tmp_path)
+    assert "BACKEND_API_KEY" not in env
+    assert env["ANTHROPIC_API_KEY"] == "forwarded-credential"
+    assert Path(env["CLAUDE_CONFIG_DIR"]).parent == tmp_path and Path(env["CLAUDE_CONFIG_DIR"]).is_dir()
+    monkeypatch.setenv("CODEX_AUTH_JSON", '{"OPENAI_API_KEY": null}')
+    codex_env = parity.cli_env("codex", tmp_path)
+    auth = Path(codex_env["CODEX_HOME"]) / "auth.json"
+    assert auth.read_text() == '{"OPENAI_API_KEY": null}' and oct(auth.stat().st_mode & 0o777) == "0o600"
+    assert "ANTHROPIC_API_KEY" not in codex_env
+
+
+def test_parity_raw_sandbox_refuses_to_run_inside_the_repo(monkeypatch):
+    inside = parity.REPO_ROOT / ".context"
+    inside.mkdir(exist_ok=True)
+    monkeypatch.setattr(parity.tempfile, "tempdir", str(inside))
+    with pytest.raises(RuntimeError, match="TMPDIR"):
+        asyncio.run(parity.run_raw_attempt("code-bench-bugfix-invoice-rounding", cli="claude", model="m", judge=False))
+    assert not list(inside.glob("code-bench-raw-*"))
+
+
+def test_parity_cli_end_to_end_raw_only(tmp_path, monkeypatch, capsys):
+    """`scripts/run-bench code-parity --skip-rose` drives the raw leg and writes the report."""
+
+    def fake_run(argv, *, cwd, stdin, timeout, env):
+        sandbox = Path(cwd)
+        archive = next((sandbox / "attachments").iterdir())
+        fixture = cb.load_fixture(archive.name[: -len(cb.ARCHIVE_SUFFIX)])
+        assert stdin == cb.render_code_task(fixture, str(sandbox / "attachments"), str(sandbox / "output"))
+        assert argv[argv.index("--model") + 1] == "claude-sonnet-5"
+        subprocess.run(["tar", "-xzf", str(archive)], cwd=sandbox, check=True)
+        cb.apply_reference(fixture, sandbox / fixture.id / "repo")
+        out = sandbox / "output" / cb.RESULT_ARCHIVE
+        subprocess.run(["tar", "-czf", str(out), fixture.id], cwd=sandbox, check=True)
+        return 0, '{"type":"result","subtype":"success"}'
+
+    monkeypatch.delenv("CLAUDE_CODE_MODEL", raising=False)
+    monkeypatch.setattr(parity, "_run_cli", fake_run)
+    task = "code-bench-bugfix-invoice-rounding"
+    code = parity.main(["--tasks", task, "-k", "2", "--skip-rose", "--out-dir", str(tmp_path)])
+    assert code == 0
+    report = json.loads((tmp_path / "parity.json").read_text())
+    assert report["raw"]["task_passes"] == {task: "2/2"} and report["rose_skipped"] is True
+    first, second = report["raw_attempts"][task]
+    assert first["passed"] and first["exit_code"] == 0
+    assert first["input_archive_sha256"] == second["input_archive_sha256"]
+    assert (tmp_path / "raw" / task / "run-1" / "cli-transcript.log").is_file()
+    assert "parity_ok" in capsys.readouterr().out
+
+
+def test_parity_nonzero_cli_exit_fails_even_with_a_correct_archive(monkeypatch):
+    def fake_run(argv, *, cwd, stdin, timeout, env):
+        sandbox = Path(cwd)
+        archive = next((sandbox / "attachments").iterdir())
+        fixture = cb.load_fixture(archive.name[: -len(cb.ARCHIVE_SUFFIX)])
+        subprocess.run(["tar", "-xzf", str(archive)], cwd=sandbox, check=True)
+        cb.apply_reference(fixture, sandbox / fixture.id / "repo")
+        out = sandbox / "output" / cb.RESULT_ARCHIVE
+        subprocess.run(["tar", "-czf", str(out), fixture.id], cwd=sandbox, check=True)
+        return 1, "Invalid API key"
+
+    monkeypatch.setattr(parity, "_run_cli", fake_run)
+    result = asyncio.run(
+        parity.run_raw_attempt("code-bench-bugfix-invoice-rounding", cli="claude", model="m", judge=False)
+    )
+    assert result["hidden_tests_passed"] is True and result["passed"] is False
+    assert "CLI exited 1" in result["reason"]
+
+
+def test_parity_compares_rose_records_with_raw_results(tmp_path):
+    task = "code-bench-bugfix-invoice-rounding"
+    records = []
+    for index, passed in enumerate([True, True, False]):
+        path = tmp_path / f"rose-{index}.json"
+        path.write_text(json.dumps({"tasks": [{"name": task, "passed": passed, "agent_id": f"agent-{index}"}]}))
+        records.append(str(path))
+    raw = tmp_path / "raw.json"
+    raw.write_text(json.dumps({"raw_attempts": {task: [{"passed": True}, {"passed": True}, {"passed": True}]}}))
+    out = tmp_path / "out"
+    code = parity.main(["--tasks", task, "--rose-records", *records, "--raw-results", str(raw), "--out-dir", str(out)])
+    report = json.loads((out / "parity.json").read_text())
+    assert report["rose"]["per_run_passes"] == [1, 1, 0] and report["raw"]["per_run_passes"] == [1, 1, 1]
+    assert report["parity_ok"] is True  # mean 0.667 >= 1 - 1
+    assert report["rose_agent_links"][task][0] == "https://roselabs.ai/?agent-id=agent-0"
+    assert code == 0 and report["c8_ok"] is True
+
+
+def test_parity_is_reachable_through_run_bench():
+    result = subprocess.run(
+        ["bash", str(parity.REPO_ROOT / "scripts" / "run-bench"), "code-parity", "--help"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--run-rose" in result.stdout and "--rose-records" in result.stdout
