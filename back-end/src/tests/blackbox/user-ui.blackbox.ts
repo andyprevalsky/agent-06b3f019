@@ -37,11 +37,12 @@ import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
 import { retryWithBackoff } from '../../providers/retry';
 import { mintUserUiPublishToken } from '../../providers/userUi/publishToken';
-import { USER_UI_CLI_SCRIPT, userUiSeedFiles } from '../../providers/userUi/seed';
+import { userUiCliScript, userUiSeedFiles } from '../../providers/userUi/seed';
 import {
   materializeUserUiInLocalHome,
   prepareUserUiWorkspace,
 } from '../../providers/userUi/workspace';
+import { userUiExampleCases } from './user-ui-examples.cases';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -50,7 +51,7 @@ const execFileAsync = promisify(execFile);
 const EXPECTED_CSP =
   "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; " +
   "style-src 'self' 'unsafe-inline'; img-src * data: blob:; media-src * data: blob:; " +
-  "connect-src 'self'; frame-ancestors *";
+  "connect-src 'self'; worker-src blob:; frame-ancestors *";
 
 interface Session {
   token: string;
@@ -501,7 +502,7 @@ const tests: { name: string; fn: () => Promise<void> }[] = [
         writeFileSync(join(home, 'rose_user_ui', 'node_modules', 'x', 'big.js'), 'skipped');
         writeFileSync(join(home, 'rose_user_ui', '.secret'), 'skipped');
         const cli = join(home, 'rose-ui');
-        writeFileSync(cli, USER_UI_CLI_SCRIPT, { mode: 0o755 });
+        writeFileSync(cli, userUiCliScript(), { mode: 0o755 });
         const minted = await call('/api/user-ui/publish-token', {
           method: 'POST',
           auth: userA.token,
@@ -616,6 +617,16 @@ const tests: { name: string; fn: () => Promise<void> }[] = [
       );
     },
   },
+  ...userUiExampleCases({
+    baseUrl: BASE_URL,
+    token: () => userA.token,
+    userId: () => userA.userId,
+    mintPublishToken: async (auth) => {
+      const minted = await call('/api/user-ui/publish-token', { method: 'POST', auth });
+      expectStatus(minted, 201, 'mint');
+      return String(minted.data.token);
+    },
+  }),
 ];
 
 async function main(): Promise<void> {

@@ -1,0 +1,104 @@
+<!doctype html>
+<!--
+  Example: Rust → WebAssembly visualization (Gray-Scott reaction-diffusion).
+
+  src/lib.rs is the source of viz.wasm (28 KB, no dependencies, no wasm-bindgen);
+  rebuild with `bash build.sh`. Rust runs the simulation and colours pixels into its
+  own linear memory; JavaScript wraps that memory in an ImageData and draws it.
+  Move the pointer over it to seed new growth.
+
+  Use it as a slot or inline view, e.g.
+    "slots": { "home.dashboard": { "entry": "root/slots/growth/index.html" } }
+
+  Loading WASM inside the sandbox: the frame has an opaque origin, so fetch() is a
+  CORS request (usercontent serves Access-Control-Allow-Origin: *) and the CSP
+  allows 'wasm-unsafe-eval'. instantiateStreaming needs application/wasm, which
+  usercontent sets for .wasm files.
+
+  Performance: a fixed-size grid (~40k cells) upscaled by the GPU, a fixed step
+  budget per frame (4 steps, a few ms of WASM), one ImageData view reused per frame;
+  no long blocking pre-computation at load. The loop
+  stops when hidden/offscreen; under prefers-reduced-motion it settles once and
+  shows a still image.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wasm-viz</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0d0d18; color: #f4f1ff; overflow: hidden; font: 13px/1.4 -apple-system, system-ui, sans-serif; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  .label { position: fixed; left: 14px; bottom: 12px; padding: 4px 8px; border-radius: 8px; background: rgb(0 0 0 / 0.35); backdrop-filter: blur(8px); }
+</style>
+</head>
+<body>
+<canvas id="c" aria-label="Reaction-diffusion simulation computed in WebAssembly"></canvas>
+<div class="label" id="label">loading viz.wasm…</div>
+<script type="module">
+  const canvas = document.getElementById('c');
+  const label = document.getElementById('label');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+  const CELLS = 40_000;
+  const STEPS_PER_FRAME = 4;
+  const FEED = 0.037;
+  const KILL = 0.06;
+
+  async function load() {
+    try {
+      return (await WebAssembly.instantiateStreaming(fetch('viz.wasm'), {})).instance;
+    } catch {
+      const bytes = await (await fetch('viz.wasm')).arrayBuffer();
+      return (await WebAssembly.instantiate(bytes, {})).instance;
+    }
+  }
+
+  const { memory, sim_new, sim_step, sim_render, sim_poke } = (await load()).exports;
+  const aspect = Math.max(0.25, Math.min(4, innerWidth / Math.max(1, innerHeight)));
+  const w = Math.round(Math.sqrt(CELLS * aspect));
+  const h = Math.round(CELLS / w);
+  canvas.width = w;
+  canvas.height = h;
+  const sim = sim_new(w, h, 1234567);
+  sim_step(sim, 12, FEED, KILL); // soften the seed spots; growth happens live
+  let image = null;
+  function paint(hue) {
+    const ptr = sim_render(sim, hue);
+    if (!image || image.data.buffer !== memory.buffer) {
+      image = new ImageData(new Uint8ClampedArray(memory.buffer, ptr, w * h * 4), w, h);
+    }
+    ctx.putImageData(image, 0, 0);
+  }
+  label.textContent = `Rust → WASM · ${w}×${h} cells`;
+  document.documentElement.dataset.cells = String(w * h);
+
+  let raf = 0;
+  let onscreen = true;
+  let hue = 0;
+  const running = () => !document.hidden && onscreen && !reduceMotion.matches;
+  function frame() {
+    raf = 0;
+    sim_step(sim, STEPS_PER_FRAME, FEED, KILL);
+    hue += 0.0004;
+    paint(hue);
+    if (running()) raf = requestAnimationFrame(frame);
+  }
+  function update() {
+    if (running() && !raf) raf = requestAnimationFrame(frame);
+    else if (!running() && raf) { cancelAnimationFrame(raf); raf = 0; }
+  }
+  canvas.addEventListener('pointermove', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    sim_poke(sim, Math.floor(((e.clientX - rect.left) / rect.width) * w), Math.floor(((e.clientY - rect.top) / rect.height) * h), 3);
+    if (!running()) { sim_step(sim, 60, FEED, KILL); paint(hue); }
+  });
+  new IntersectionObserver(([entry]) => { onscreen = entry.isIntersecting; update(); }).observe(canvas);
+  document.addEventListener('visibilitychange', update);
+  reduceMotion.addEventListener('change', update);
+  paint(hue);
+  update();
+  parent.postMessage({ type: 'rose:ready' }, '*');
+</script>
+</body>
+</html>

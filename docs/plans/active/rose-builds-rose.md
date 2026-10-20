@@ -80,7 +80,7 @@ Andy: "sub agent for each". There is one lane per integration that syncs today, 
 | A1 | M | Rose-in-Rose: a code session on the Rose repo runs vite HMR. Andy sees the edited Rose on screen about 1 s after a write. Publish opens a PR; ships only via `/deploy`; dev accounts only | e2e: agent write → preview DOM change ≤ 3 s; non-dev account 403 | L-APPS | blocked on W5 |
 | A2 | N | Lovable-style Apps: "Make me an app", "+ new app", Apps section on the left bar (Rose first). Full-screen app with the floating query box and Popular Goals hidden; live-preview card in the trajectory; History restore; per-user publish URL | FE blackbox + e2e (UI ledger) | L-APPS | blocked on W5 |
 | A3 | N | `rose_user_ui` per user: `root/` changes the whole app, `inline/` renders in the trajectory (version pinned), `tools/` adds root-agent tools whose results render inline; safe mode | W1/W2/W4 suites (passing) + recordings | merged | code merged; recordings pending |
-| A4 | N | Code agents get UI instructions, current screenshots and `rose-ui screenshot/record/perf/check` | E2B template test | L-APPS | open |
+| A4 | N | Code agents get UI instructions, current screenshots and `rose-ui screenshot/record/perf/check` | E2B template test | L-APPS | **built** (43de031b5): rose-ui dev/screenshot/record/perf/check, screenshots/current/, six examples; unit + smoke + blackbox 5× green; live E2B check after template rebuild |
 | A5 | M | `display(paths\|urls, caption?)` tool for root, sub-agents and code agents; media posts inline in that agent's trajectory; idempotent per content hash | agents blackbox | L-DISPLAY | **done** (b10b038c1; display 14 cases ×5) — approval at deploy |
 | A6 | N | Root browser with world state split by website: agents fork Root's state; logins merge back; you can take over any tab | agents/browser blackbox | L-BROWSER | open |
 
@@ -151,8 +151,8 @@ Status: **done** = merged into `feat/rose-user-ui` with tests; **running** = a l
 | 2 | Commit locally when done, merge when sharing state; "merged" only if real | C3–C4 | W5 | running |
 | 3 | Grep over code agents' work | C5 | W5 | running |
 | 4 | `rose_user_ui` folder in every workspace, per user, publish | A3 | W1 | done (7cdddf5bf) |
-| 5 | Instructions + **screenshots of the current UI / a way for the code agent to view them** (`rose-ui screenshot/record/perf/check`) | A4 | L-UIKIT | **gap → launching L-UIKIT** |
-| 6 | **Hyper-expressive, high-res, smooth, performant examples** (plan lists 6; only 2 seeded) | A4 | L-UIKIT | **gap → L-UIKIT** |
+| 5 | Instructions + **screenshots of the current UI / a way for the code agent to view them** (`rose-ui screenshot/record/perf/check`) | A4 | L-UIKIT | **done** (L-UIKIT 43de031b5); live E2B pending template rebuild |
+| 6 | **Hyper-expressive, high-res, smooth, performant examples** (plan lists 6; only 2 seeded) | A4 | L-UIKIT | **done** (L-UIKIT 43de031b5); live E2B pending template rebuild |
 | 7 | `root/` alters the whole app (colors, gifs, dashboards, "a whole OS") | A3 | W2 runtime | done (87d1f3532); recordings pending |
 | 8 | `inline/` views in the trajectory | A3 | W1/W2 | done; game flow failing → #24 |
 | 9 | Write a tool for root and render its result any way | A3 | W4 | done (read-only v1). **Gap:** production executor (`USER_TOOLS_EXECUTOR=code_session`) and side-effect tools (needs an idempotency store) → queued L-TOOLS2 |
@@ -237,4 +237,10 @@ Per the 2026-10-20 goal ("make intelligent guesses; keep critical ones for revie
   - A Mac app release (`MAC-APP-RELEASE`), plus a real-Mac run of the phone-mirroring suites, which were only run under a Linux electron stub.
 - Harness (verifier RCA, merged 94732110c): `_call_llm_verifier` parses below-1.0 verdicts without the required-key constraint (prompt, schema and strict flag unchanged; RCA case `2026-10-20-verifier-parse-required-every-output-key-on-partial-verdicts`). The game recording flow still needs an outcome rerun.
 - User UI realtime (merged 6621f1c20): publish tokens carry `agt` (session agent id); a publish that activates broadcasts `USER_UI_ACTIVE_CHANGED` on `agent:<code agent>` and `agent:<root>`. No Zod change.
-
+- L-UIKIT (A4, merged 43de031b5):
+  - E2B template rebuild for both templates (playwright-core 1.64.0 + chromium, ffmpeg, Noto fonts).
+  - Code-agent prompt line on `screenshots/current/` + `rose-ui check` before publish (instructions version `code-agent-rose-ui-kit.v5`).
+  - Usercontent CSP adds `worker-src blob:`.
+  - README moved to `assets/user-ui/seed/README.md`: HSL tokens, "See your work", performance budgets, examples.
+  - `.c8rc.json` excludes the browser-side seed examples.
+- Mac device identity (merged 071b4acb9): phones, local code devices and iMessage share `macDeviceId()` (salted IOPlatformUUID hash); unreleased, so nothing to migrate.

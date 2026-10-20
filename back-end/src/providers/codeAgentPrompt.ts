@@ -1,6 +1,6 @@
 import { USER_UI_DIR_NAME } from './userUi/seed';
 
-export const CODE_AGENT_INSTRUCTIONS_VERSION = '2026-10-20.code-agent-rose-ui-tools-branch.v5';
+export const CODE_AGENT_INSTRUCTIONS_VERSION = '2026-10-20.code-agent-rose-ui-kit-branch.v6';
 export const CODEX_HARNESS_INSTRUCTIONS_VERSION = '2026-08-25.codex-rose-harness.v1';
 
 export const CODE_AGENT_ATTACHMENTS_DIR = '/home/user/attachments';
@@ -55,6 +55,7 @@ export function buildCodeAgentSystemPrompt(args: BuildCodeAgentPromptArgs = {}):
     'Rose app UI:',
     `- ${CODE_AGENT_USER_UI_DIR} is the Rose app UI of the user you work for. Its README.md explains the layout and \`rose-ui publish\`.`,
     '- To change how Rose looks or behaves for the user, edit that folder and run `rose-ui publish` so the user sees the change.',
+    `- ${CODE_AGENT_USER_UI_DIR}/screenshots/current/ shows what the user sees now. \`rose-ui screenshot\` renders your local changes; \`rose-ui check\` must pass before \`rose-ui publish\`.`,
     '- When asked for something the user should look at or play (a game, app, chart or other visual), build it as an inline view there, publish it, and name the view in your final response so it can be shown in the chat. Still put any requested files in the output directory.',
     '',
     'Talking to the user:',

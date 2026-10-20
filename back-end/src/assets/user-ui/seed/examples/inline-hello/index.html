@@ -1,0 +1,53 @@
+<!doctype html>
+<!--
+  Example: the smallest inline view. Receives props over the bridge, reports its
+  height, and animates only transform. Wire it up as
+    "inline": { "hello": { "entry": "inline/hello/index.html", "summary": "Hello counter" } }
+  and show it with send_message_to_user(message, inline_view={ view: "hello", props: { name: "Ada", start: 3 } }).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>inline-hello</title>
+<style>
+  :root { color-scheme: light dark; font: 15px/1.5 system-ui, sans-serif; }
+  body { margin: 0; padding: 16px; }
+  .card { border-radius: 14px; padding: 16px; background: color-mix(in srgb, CanvasText 6%, Canvas); }
+  .count { font-size: 32px; font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div>Hello, <span id="name">there</span>!</div>
+  <div class="count" id="count">0</div>
+  <button id="bump" type="button">+1</button>
+</div>
+<script>
+  // Host → view: { type: 'rose:props', props }. View → host: rose:ready, rose:resize.
+  const nameEl = document.getElementById('name');
+  const countEl = document.getElementById('count');
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+  let count = 0;
+  function reportHeight() {
+    window.parent.postMessage({ type: 'rose:resize', height: Math.ceil(document.documentElement.scrollHeight) }, '*');
+  }
+  window.addEventListener('message', (event) => {
+    const msg = event.data;
+    if (!msg || msg.type !== 'rose:props') return;
+    const props = msg.props || {};
+    if (typeof props.name === 'string') nameEl.textContent = props.name;
+    if (typeof props.start === 'number') { count = props.start; countEl.textContent = String(count); }
+    reportHeight();
+  });
+  document.getElementById('bump').addEventListener('click', () => {
+    count += 1;
+    countEl.textContent = String(count);
+    if (!reduceMotion.matches) countEl.animate([{ transform: 'scale(1.2)' }, { transform: 'scale(1)' }], { duration: 160 });
+  });
+  new ResizeObserver(reportHeight).observe(document.body);
+  window.parent.postMessage({ type: 'rose:ready' }, '*');
+  reportHeight();
+</script>
+</body>
+</html>
