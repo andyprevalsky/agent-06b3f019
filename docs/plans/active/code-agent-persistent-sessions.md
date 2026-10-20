@@ -51,6 +51,17 @@ Approved by product owner 2026-10-20.
   root's latest session for the same repo (or the repo-less session).
 - Temporal retries of a failed spawn reuse the same `code_session_id`.
 
+### 1b. Branch model (confirmed by Andy, 2026-10-20)
+
+| How the agent starts | Worktree | Branch | Merges into |
+|---|---|---|---|
+| **New agent** (New Agent, or **+** on a project) | own, isolated | new branch cut from the project's default branch (`main`) | `main` (when shared) |
+| **Sub-agent** (spawned by another agent) | own, isolated | new branch cut from its **parent's** branch, e.g. `rose-ui/polish` → `rose-ui/polish/speed` | the parent's branch, not `main` |
+| **Right-click "New agent in this branch"** | **shares** the parent's worktree and code session | the parent's branch | — |
+
+Every tool result and trajectory entry for a code agent reports its branch,
+and the merge target for sub-agents is the parent's branch.
+
 ### 2. Pause instead of kill
 
 - Create sandboxes with `autoPause: true`; `closeClaudeCodeSession` calls
@@ -75,8 +86,9 @@ only accepted after its manifest hashes verify.
 
 Replace the template's "commit and push to main" with:
 - Commit locally whenever a unit of work is complete — it is your checkpoint.
-- Merge to main when other agents or the user need your changes (shared state,
-  shipped deliverable). Otherwise keep work on your branch.
+- Merge into your merge target (the parent's branch for sub-agents, `main` for
+  new agents; see 1b) when other agents or the user need your changes.
+  Otherwise keep work on your branch.
 - You decide when, based on the task.
 
 The tool result reports facts: local commits, branch, pushed?, PR, and
