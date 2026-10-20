@@ -108,11 +108,11 @@ function ownerChat(rows: Message[]): Message[] {
   return [msg({}, { role: 'USER', text: 'Polish the speed button' }), ...rows];
 }
 
-const LIVE_ROWS = () => [chipMessage(), eventsMessage(LIVE_EVENTS)];
+const liveRows = () => [chipMessage(), eventsMessage(LIVE_EVENTS)];
 
 /** Serves the list, the batched code agents and each agent's detail; captures direct turns. */
 function serveBackend({
-  ownerMessages = ownerChat(LIVE_ROWS()),
+  ownerMessages = ownerChat(liveRows()),
   turns = () => HttpResponse.json({ status: 'delivered', message_id: 'turn-msg-1' }),
 }: {
   ownerMessages?: Message[];

@@ -168,11 +168,15 @@ describe('Rose left bar (flag on)', () => {
     expect(screen.getByRole('button', { name: '+ New project' })).toBeInTheDocument();
   });
 
-  it('Home returns to the root project and New Super Agent starts one (same handler as stock)', async () => {
+  it('Home (label just "Home") returns home and New Super Agent starts one (same handler as stock)', async () => {
     const user = userEvent.setup();
     const onCreateAgent = vi.fn();
     renderBar({ onCreateAgent });
-    await user.click(within(roseBar()).getByRole('button', { name: 'Home' }));
+    expandBar();
+    const home = within(roseBar()).getByRole('button', { name: 'Home' });
+    expect(home.textContent).toBe('Home');
+    expect(roseBar()).not.toHaveTextContent(/root project/i);
+    await user.click(home);
     expect(onCreateAgent).toHaveBeenCalledTimes(1);
     await user.click(within(roseBar()).getByRole('button', { name: 'New Super Agent' }));
     expect(onCreateAgent).toHaveBeenCalledTimes(2);
