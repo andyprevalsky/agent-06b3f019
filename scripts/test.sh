@@ -88,7 +88,7 @@ if $LIST; then
   echo "Available repos and domains:"
   echo ""
   echo "  agents"
-  (cd agents && python scripts/run_blackbox_tests.py --list 2>/dev/null) | sed 's/^/    /'
+  (cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py --list 2>/dev/null) | sed 's/^/    /'
   echo ""
   echo "  back-end"
   (cd back-end && bash scripts/run-blackbox-tests.sh --list 2>/dev/null) | sed 's/^/    /'
