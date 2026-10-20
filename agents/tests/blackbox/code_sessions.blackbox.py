@@ -270,7 +270,12 @@ class _Backend:
 
     async def report_usage(self, task_id, code_provider, resets_at):
         self.usage_reports.append((task_id, code_provider, resets_at))
-        return {"marked": f"{code_provider}_pool:tok-1", "resets_at": "2026-10-03T00:50:00.000Z"}
+        return {
+            "marked": f"{code_provider}_pool:tok-1",
+            "resets_at": "2026-10-03T00:50:00.000Z",
+            "accounts": [dict(account) for account in _ACCOUNTS],
+            "next_lease": dict(_NEXT_LEASE),
+        }
 
     async def credential_availability(self, user_id, own_only=False):
         self.availability_own_only.append(own_only)
@@ -316,6 +321,19 @@ class _Backend:
             yield
         reset_live_queue_cache()
 
+
+# The backend's stored view of the user's accounts on a usage limit (no provider calls).
+_ACCOUNTS = [
+    {"provider": "claude", "label": "me@example.com", "status": "limited",
+     "limited_until": "2026-10-03T00:50:00.000Z", "this_run": True},
+    {"provider": "codex", "label": "codex@example.com", "status": "available", "limited_until": None, "this_run": False},
+]
+_NEXT_LEASE = {"provider": "codex", "label": "codex@example.com", "available_now": True, "available_at": None}
+_ACCOUNT_LINES = (
+    "Connected accounts:\n"
+    "- Claude Code me@example.com: limited until 2026-10-03T00:50:00.000Z (this run)\n"
+    "- Codex codex@example.com: available\n"
+)
 
 _MAC = "Andy's MacBook"
 _MAC_FOLDER = "~/Developer/rose"
@@ -469,10 +487,17 @@ async def test_usage_limit_saves_session_and_retry_leases_next_credential():
         assert first["failure_kind"] == "usage_limit" and first["retryable"] is True, first
         session_id = "6c1d6f1e-0000-4000-8000-00000000c0de"
         assert first["retry"] == {"tool": "spawn_agent", "type": "code", "code_session_id": session_id}, first
-        assert f"code_session_id='{session_id}'" in first["message"], first["message"]
-        assert "Claude Code usage limit was reached" in first["message"], first["message"]
-        assert "Its work is saved on branch rose/write-answer-0a1b2c3d" in first["message"], first["message"]
+        # The parent's tool error: what stopped, every connected account, what a respawn takes.
+        assert first["message"] == (
+            "Code agent stopped: the Claude Code usage limit was reached on me@example.com "
+            "(resets 2026-10-03T00:50:00.000Z). Its work is saved on branch rose/write-answer-0a1b2c3d "
+            "(checkpoint 1).\n" + _ACCOUNT_LINES + f"Respawn with spawn_agent(type='code', code_session_id='{session_id}', "
+            "goal=<the same goal>) to continue: the respawn leases an account that is not rate-limited "
+            "(now Codex codex@example.com) and resumes from the latest checkpoint."
+        ), first["message"]
         assert first["usage_limit"]["resets_at"] == "2026-10-03T00:50:00.000Z", first["usage_limit"]
+        assert first["usage_limit"]["accounts"] == _ACCOUNTS, first["usage_limit"]
+        assert first["usage_limit"]["next_lease"] == _NEXT_LEASE, first["usage_limit"]
         assert backend.usage_reports == [("task-1", "claude", 1790988600)], backend.usage_reports
         assert [call.get("reason") for call in backend.closed][0] == "usage_limit", backend.closed
         # The UI reads a resumable pause with plain user text; the parent keeps the retry.
@@ -570,9 +595,14 @@ async def test_local_usage_limit_retries_on_the_mac_with_the_other_login():
             )
         assert first["status"] == "usage_limit" and first["retryable"] is True, first
         assert first["retry"] == {"tool": "spawn_agent", "type": "code", "target": "local"}, first
-        assert "your own Claude Code login" in first["message"], first["message"]
-        assert f"stay in {_MAC_FOLDER} on {_MAC}" in first["message"], first["message"]
-        assert "target='local'" in first["message"], first["message"]
+        assert first["message"] == (
+            "Code agent stopped: the usage limit of your own Claude Code login me@example.com was reached "
+            f"(resets 2026-10-03T00:50:00.000Z). Its files and commits stay in {_MAC_FOLDER} on {_MAC}.\n"
+            + _ACCOUNT_LINES
+            + "Respawn with spawn_agent(type='code', target='local', goal=<the same goal>) to continue there: "
+            "the respawn uses one of your own logins that is not rate-limited (now Codex codex@example.com) "
+            "and continues from the files in that folder."
+        ), first["message"]
         assert backend.usage_reports == [("task-1", "claude", 1790988600)], backend.usage_reports
         assert first["code_agent"]["target"] == "local" and first["code_agent"]["state"] == "paused", first
         assert first["code_agent"]["failure_message"] == (
@@ -625,6 +655,44 @@ def test_usage_limit_user_message_names_the_reset_in_utc():
         code_provider="claude", resets_at_iso=None, local_place=f"{_MAC_FOLDER} on {_MAC}", now=now
     )
     assert unknown == f"Paused: Claude usage limit reached. Work stays in {_MAC_FOLDER} on {_MAC}.", unknown
+
+
+def test_usage_limit_parent_message_without_a_free_account_names_the_earliest_reset():
+    """No account free: the error names the earliest reset; an unknown outlook claims nothing."""
+    from domains.spawn_claude_code_agent.service import format_usage_limit_message
+
+    facts = {"code_session_id": "cs-1", "branch": "rose/a-1"}
+    blocked = format_usage_limit_message(
+        code_provider="codex",
+        resets_at_iso="2026-10-20T18:00:00.000Z",
+        facts=facts,
+        accounts=[{"provider": "codex", "label": "Codex account 1", "status": "limited",
+                   "limited_until": "2026-10-20T18:00:00.000Z", "this_run": False},
+                  {"provider": "claude", "label": "me@example.com", "status": "reconnect",
+                   "limited_until": None, "this_run": False}],
+        next_lease={"provider": "codex", "label": "Codex account 1", "available_now": False,
+                    "available_at": "2026-10-20T18:00:00.000Z"},
+    )
+    assert blocked == (
+        "Code agent stopped: the Codex usage limit was reached (resets 2026-10-20T18:00:00.000Z). "
+        "Its work is saved on branch rose/a-1.\nConnected accounts:\n"
+        "- Codex Codex account 1: limited until 2026-10-20T18:00:00.000Z\n"
+        "- Claude Code me@example.com: disconnected (the user must reconnect it)\n"
+        "Respawn with spawn_agent(type='code', code_session_id='cs-1', goal=<the same goal>) to continue: "
+        "no account is free until 2026-10-20T18:00:00.000Z (the earliest reset: Codex Codex account 1); "
+        "a respawn after that leases it and resumes from the latest checkpoint."
+    ), blocked
+    unknown = format_usage_limit_message(code_provider="claude", resets_at_iso=None, facts=facts)
+    assert unknown == (
+        "Code agent stopped: the Claude Code usage limit was reached. Its work is saved on branch rose/a-1.\n"
+        "Respawn with spawn_agent(type='code', code_session_id='cs-1', goal=<the same goal>) to continue: "
+        "the respawn leases an account that is not rate-limited and resumes from the latest checkpoint."
+    ), unknown
+    shared = format_usage_limit_message(
+        code_provider="claude", resets_at_iso=None, facts=facts, accounts=[],
+        next_lease={"provider": "claude", "label": None, "available_now": True, "available_at": None},
+    )
+    assert "\nConnected accounts: none.\n" in shared and "(now a shared Claude Code account)" in shared, shared
 
 
 async def test_failed_attempt_retry_keeps_state_and_code_session_id():
@@ -858,6 +926,10 @@ async def _run_all_tests():
     )
     r.record("usage_limit_detection_structured_only", test_usage_limit_detection_reads_structured_events_only)
     r.record("usage_limit_user_message_names_reset_utc", test_usage_limit_user_message_names_the_reset_in_utc)
+    r.record(
+        "usage_limit_parent_message_names_earliest_reset",
+        test_usage_limit_parent_message_without_a_free_account_names_the_earliest_reset,
+    )
     await r.record_async("local_session_idle_pauses_in_mac_folder", test_local_session_idle_pauses_in_the_mac_folder)
     await r.record_async(
         "local_usage_limit_retries_on_the_mac",

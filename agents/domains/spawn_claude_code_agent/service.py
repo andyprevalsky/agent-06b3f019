@@ -2418,27 +2418,73 @@ def local_workspace_place(target_meta: Optional[Dict[str, Any]]) -> Optional[str
     return f"{folder} on {target_meta.get('device_name') or 'the Mac'}"
 
 
+def _account_line(account: Dict[str, Any]) -> str:
+    """``- Claude Code me@example.com: limited until <reset> (this run)``."""
+    if account.get("status") == "limited":
+        state = f"limited until {account.get('limited_until')}"
+    elif account.get("status") == "reconnect":
+        state = "disconnected (the user must reconnect it)"
+    else:
+        state = "available"
+    this_run = " (this run)" if account.get("this_run") else ""
+    return f"- {_provider_label(str(account.get('provider')))} {account.get('label')}: {state}{this_run}"
+
+
+def _usage_accounts_block(accounts: Optional[List[Dict[str, Any]]]) -> str:
+    """The user's connected accounts as stored (the backend's usage-limit answer)."""
+    if accounts is None:
+        return ""
+    if not accounts:
+        return "\nConnected accounts: none."
+    return "\nConnected accounts:\n" + "\n".join(_account_line(account) for account in accounts)
+
+
+def _respawn_clause(next_lease: Optional[Dict[str, Any]], *, local: bool) -> str:
+    """What a respawn leases: an account that is not rate-limited, else the earliest reset."""
+    then = "continues from the files in that folder" if local else "resumes from the latest checkpoint"
+    free = "one of your own logins" if local else "an account"
+    verb = "uses" if local else "leases"
+    if not isinstance(next_lease, dict) or not next_lease.get("provider"):
+        return f"the respawn {verb} {free} that is not rate-limited and {then}."
+    provider = _provider_label(str(next_lease["provider"]))
+    label = next_lease.get("label")
+    if next_lease.get("available_now"):
+        now = f"now {provider} {label}" if label else f"now a shared {provider} account"
+        return f"the respawn {verb} {free} that is not rate-limited ({now}) and {then}."
+    return (
+        f"no {'login' if local else 'account'} is free until {next_lease.get('available_at')} "
+        f"(the earliest reset: {provider} {label}); a respawn after that {verb} it and {then}."
+    )
+
+
 def format_usage_limit_message(
     *,
     code_provider: str,
     resets_at_iso: Optional[str],
     facts: Optional[Dict[str, Any]],
     local_place: Optional[str] = None,
+    accounts: Optional[List[Dict[str, Any]]] = None,
+    next_lease: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Short, factual retry instructions for the parent (C15).
+    """The parent's tool error for a usage limit (C15): what stopped, every account, the respawn.
 
+    The activity never fails over on its own: the parent decides. ``accounts``
+    and ``next_lease`` are the backend's stored view (no provider calls), so a
+    respawn leases an account that is not rate-limited, else the earliest reset.
     ``local_place`` (a Mac run): the work stays in that folder and the run used
-    the user's own CLI login, so the retry targets the Mac again.
+    the user's own CLI login, so the respawn targets the Mac again.
     """
     facts = facts or {}
-    other = "claude" if code_provider == "codex" else "codex"
     resets = f" (resets {resets_at_iso})" if resets_at_iso else ""
+    limited = next((a for a in accounts or [] if a.get("this_run")), None)
+    on_account = f" {limited.get('label')}" if limited else ""
+    block = _usage_accounts_block(accounts)
     if local_place:
         return (
-            f"Code agent stopped: the usage limit of your own {_provider_label(code_provider)} login was "
-            f"reached{resets}. Its files and commits stay in {local_place}. Retry with "
-            "spawn_agent(type='code', target='local', goal=<the same goal>): it continues there on your "
-            f"{_provider_label(other)} login when one is connected, otherwise after the reset."
+            f"Code agent stopped: the usage limit of your own {_provider_label(code_provider)} login"
+            f"{on_account} was reached{resets}. Its files and commits stay in {local_place}.{block}\n"
+            "Respawn with spawn_agent(type='code', target='local', goal=<the same goal>) to continue there: "
+            + _respawn_clause(next_lease, local=True)
         )
     saved = "Its work is saved"
     if facts.get("branch"):
@@ -2446,10 +2492,10 @@ def format_usage_limit_message(
     if facts.get("checkpoint_seq"):
         saved += f" (checkpoint {facts['checkpoint_seq']})"
     return (
-        f"Code agent stopped: the {_provider_label(code_provider)} usage limit was reached{resets}. "
-        f"{saved}. Retry now with spawn_agent(type='code', code_session_id='{facts.get('code_session_id')}', "
-        "goal=<the same goal>): the retry leases another token of the same provider, or continues on "
-        f"{_provider_label(other)} when none is available, from the saved session."
+        f"Code agent stopped: the {_provider_label(code_provider)} usage limit was reached"
+        f"{' on' + on_account if on_account else ''}{resets}. {saved}.{block}\n"
+        f"Respawn with spawn_agent(type='code', code_session_id='{facts.get('code_session_id')}', "
+        "goal=<the same goal>) to continue: " + _respawn_clause(next_lease, local=False)
     )
 
 
@@ -2986,11 +3032,18 @@ async def spawn_claude_code_activity(
             resets_at_iso = (marked or {}).get("resets_at")
             local_place = local_workspace_place(code_agent_meta)
             # The parent reads the exact retry; the user reads a resumable pause.
+            # The user's connected accounts and what a respawn leases (stored state).
+            accounts = (marked or {}).get("accounts")
+            accounts = accounts if isinstance(accounts, list) else None
+            next_lease = (marked or {}).get("next_lease")
+            next_lease = next_lease if isinstance(next_lease, dict) else None
             message = format_usage_limit_message(
                 code_provider=code_provider,
                 resets_at_iso=resets_at_iso,
                 facts=code_session_facts,
                 local_place=local_place,
+                accounts=accounts,
+                next_lease=next_lease,
             )
             user_message = format_usage_limit_user_message(
                 code_provider=code_provider,
@@ -3030,6 +3083,8 @@ async def spawn_claude_code_activity(
                     "resets_at": resets_at_iso,
                     "limit_type": usage_limit.get("limit_type"),
                     "credential_marked": (marked or {}).get("marked"),
+                    "accounts": accounts,
+                    "next_lease": next_lease,
                 },
                 # A Mac run has no code session: its retry targets the same Mac folder.
                 "retry": (
