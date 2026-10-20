@@ -622,7 +622,7 @@ that survives the session; `setsid nohup` did not survive the 2026-10-20
 boxes.dev service restart.
 
 Dead-owner export recovery binds the shard's own deadline. That is the epoch
-plus the shard's bound e2e timeout, for example 9300 s for `--timeout 7200`, or
+plus the shard's bound e2e timeout, for example 10020 s for `--timeout 7200`, or
 5400 s when unbound.
 
 Nothing remains to verify the export or run controller cleanup: the run's

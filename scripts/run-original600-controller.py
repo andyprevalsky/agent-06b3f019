@@ -1079,7 +1079,7 @@ def prepare(args, root, pins, runner, directory, cap, started_at=None, host_oper
                   remote_files=files, remote_env=dict(CLOUDBENCH_CLONE_MAX_ATTEMPTS='5', PYTHONDONTWRITEBYTECODE='1', **reuse_env, **(runtime_env or {}),
                                   **guest_namespace_env),
                   gate_env=dict(CLOUDBENCH_APP=facts['app'], CLOUDBENCH_REGION='iad', WARM_IMAGE_REF=facts['image_ref'],
-                                CLOUDBENCH_GATE_TIMEOUT_S=str(max(7200, bound_timeouts(args, runner)[1] + 1800)), PYTHONDONTWRITEBYTECODE='1'))
+                                CLOUDBENCH_GATE_TIMEOUT_S=str(runner['gate_watchdog_seconds'](bound_timeouts(args, runner)[1])), PYTHONDONTWRITEBYTECODE='1'))
     if host_operator_provenance is not None:
         config['host_operator_provenance']=host_operator_provenance
     if guest_env['override']:
@@ -1115,10 +1115,8 @@ def bound_timeouts(args, runner):
     """The run's (--task-timeout, --e2e-timeout), within the runner's operator deadline."""
     task_timeout = getattr(args, 'task_timeout', runner['DEFAULT_TASK_TIMEOUT'])
     e2e_timeout = getattr(args, 'e2e_timeout', None)
-    if e2e_timeout is None:  # default: the operator deadline, widened to cover a longer task window
-        e2e_timeout = runner['RUN_DEADLINE']
-        if type(task_timeout) is int:
-            e2e_timeout = max(e2e_timeout, task_timeout + runner['STARTUP_ALLOWANCE'])
+    if e2e_timeout is None:  # default: the operator deadline, widened so a full window is graded and released
+        e2e_timeout = runner['default_e2e_timeout'](task_timeout)
     return runner['campaign_timeouts'](task_timeout, e2e_timeout)
 
 
@@ -2442,7 +2440,7 @@ def main():
     parser.add_argument('--repetitions', type=int, default=3, help='copies per task (default 3)')
     parser.add_argument('--task-timeout', type=int, default=1200, help='per-task execution window, seconds (default 1200, at most 7200)')
     parser.add_argument('--e2e-timeout', type=int, default=None,
-                        help='whole-campaign budget from the admission clock, seconds (default 5400, or the task timeout plus startup when longer)')
+                        help='whole-campaign budget from the admission clock, seconds (default 5400, or the task timeout plus startup, grading and release allowances when longer)')
     parser.add_argument('--worker-headroom', type=int, default=0, help='extra native Machine slots to require for autoscaled workers')
     parser.add_argument('--hub-python', type=Path, help='interpreter with the agents dependencies (httpx) for Hub group publication')
     parser.add_argument('--goal', help='experiments-ledger goal for numbering and experiments/day (default original600)')

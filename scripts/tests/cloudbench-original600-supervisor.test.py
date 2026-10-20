@@ -358,14 +358,14 @@ class BoundManifest(unittest.TestCase):
              group_run_id='original600-fixture',group_total=70,group_started_at=1792287011.18,manifest_sha256=self.sha,task_timeout=480)
   value.update(changes);return value
  def test_shard_validates_against_its_bound_manifest_and_timeouts(self):
-  self.assertEqual(S['validate_shard'](self.shard(),self.tasks),24);self.assertEqual(S['shard_timeouts'](self.shard()),(480,5400));self.assertEqual(S['shard_timeouts'](self.shard(task_timeout=7200,e2e_timeout=9300)),(7200,9300))
+  self.assertEqual(S['validate_shard'](self.shard(),self.tasks),24);self.assertEqual(S['shard_timeouts'](self.shard()),(480,5400));self.assertEqual(S['shard_timeouts'](self.shard(task_timeout=7200,e2e_timeout=10020)),(7200,10020))
   original=json.loads((Path(__file__).parent/'fixtures/original600-tasks.json').read_bytes())
   self.assertEqual(S['validate_shard'](shard_fixture(original),original),9);self.assertEqual(S['shard_timeouts'](shard_fixture(original)),(1200,5400))
   unbound={k:v for k,v in self.shard().items() if k!='manifest_sha256'}
   for manifest,value,message in [(self.tasks,unbound,'original 200 tasks required'),(list(reversed(self.tasks)),self.shard(),'bound ordered tasks changed'),
                                  (self.tasks+[self.tasks[0]],self.shard(),'distinct ordered tasks'),(original,self.shard(manifest_sha256=S['ORIGINAL_TASK_NAMES_SHA256']),'invalid bound manifest hash'),
                                  (self.tasks,self.shard(task_timeout=1200),'encoded by absence'),(self.tasks,self.shard(task_timeout=30),'task timeout'),
-                                 (self.tasks,self.shard(e2e_timeout=2000),'e2e timeout'),(self.tasks,self.shard(e2e_timeout=9301),'e2e timeout'),(self.tasks,self.shard(task_timeout=7201,e2e_timeout=9300),'task timeout'),(self.tasks,self.shard(group_total=71),'group total')]:
+                                 (self.tasks,self.shard(e2e_timeout=2000),'e2e timeout'),(self.tasks,self.shard(e2e_timeout=10021),'e2e timeout'),(self.tasks,self.shard(task_timeout=7200,e2e_timeout=9300),'e2e timeout'),(self.tasks,self.shard(e2e_timeout=3299),'e2e timeout'),(self.tasks,self.shard(task_timeout=7201,e2e_timeout=9300),'task timeout'),(self.tasks,self.shard(group_total=71),'group total')]:
    with self.subTest(message=message),self.assertRaisesRegex(ValueError,message):S['validate_shard'](value,manifest)
  def test_main_runs_the_bound_manifest_with_its_timeouts_and_refuses_original_options(self):
   with tempfile.TemporaryDirectory()as name:

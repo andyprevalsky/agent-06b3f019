@@ -917,9 +917,10 @@ class ExportResume(unittest.TestCase):
     def test_dead_owner_accepts_the_shards_bound_e2e_deadline_only(self):
         # 2026-10-20 Polar batch 1 (0a2470cc6): --timeout 7200 binds e2e_timeout 9300, so the
         # runner recorded caller deadline = epoch + 9300; recovery required epoch + 5400 and
-        # refused the dead-owner cleanup route for every shard of the run.
-        bound = dict(task_timeout=7200, e2e_timeout=9300)
-        for seconds, accepted in ((9300, True), (5400, False), (9301, False)):
+        # refused the dead-owner cleanup route for every shard of the run. That run's own
+        # pinned runner validates its 9300; this source binds the widened 10020 default.
+        bound = dict(task_timeout=7200, e2e_timeout=10020)
+        for seconds, accepted in ((10020, True), (5400, False), (10021, False)):
             with self.subTest(caller_deadline=seconds):
                 self.setUp()
                 f = self.runner_fixture(owner_pid=self.dead_pid(), owner_birth="proc-start:fixture:1", with_pending=False,
@@ -930,7 +931,7 @@ class ExportResume(unittest.TestCase):
                     if accepted:
                         value = M["check"](*args, cleanup_window=self.dead_window(f), dead_owner=True)
                         self.assertEqual(value["binding"]["capture_kind"], "dead-runner-owner")
-                        self.assertEqual(value["state"]["deadline"], f.epoch + 9300)
+                        self.assertEqual(value["state"]["deadline"], f.epoch + 10020)
                         M["unchanged"](value)
                     else:
                         with self.assertRaisesRegex(ValueError, "normal authority/caller differs"):
