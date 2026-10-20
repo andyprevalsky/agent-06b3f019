@@ -82,6 +82,8 @@ export interface GraphCodeSessionRow {
   goal: string;
   streamUrl: string | null;
   createdAt: Date;
+  /** 'claude' | 'codex'; null for legacy rows created before persistent sessions. */
+  codeProvider: string | null;
 }
 
 const codeSessionSelect = {
@@ -91,7 +93,36 @@ const codeSessionSelect = {
   goal: true,
   streamUrl: true,
   createdAt: true,
+  codeProvider: true,
 } as const;
+
+/** Most root ids one code-agents list request may name. */
+export const CODE_AGENT_LIST_MAX_ROOTS = 50;
+const CODE_AGENT_LIST_MAX_ROWS = 500;
+
+export interface RootCodeAgentRow extends GraphCodeSessionRow {
+  rootAgentId: string;
+}
+
+/**
+ * Code agents of the caller's trees, one indexed join for every requested
+ * root (Agent.busId = the root for every agent in a tree, the root included).
+ */
+export async function listCodeAgentsForRoots(
+  userId: string,
+  rootIds: string[]
+): Promise<RootCodeAgentRow[]> {
+  if (rootIds.length === 0) return [];
+  return prisma.$queryRaw<RootCodeAgentRow[]>`
+    SELECT c.id, c."agentId", c.status::text AS status, c.goal, c."streamUrl", c."createdAt",
+           c."codeProvider", a."busId" AS "rootAgentId"
+    FROM "ClaudeCodeSession" c
+    JOIN "Agent" a ON a.id = c."agentId"
+    WHERE a."userId" = ${userId} AND a."busId" = ANY(${rootIds}::text[])
+    ORDER BY c."createdAt" ASC
+    LIMIT ${CODE_AGENT_LIST_MAX_ROWS}
+  `;
+}
 
 export async function listGraphCodeSessions(agentIds: string[]): Promise<GraphCodeSessionRow[]> {
   if (agentIds.length === 0) return [];

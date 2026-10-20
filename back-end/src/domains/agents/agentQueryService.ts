@@ -4,6 +4,7 @@
 
 import * as repo from './repo';
 import { listGraphCodeSessions } from './repoGraph';
+import { codeAgentProvider } from './agentCodeAgentsService';
 import {
   findAgentAcrossRuns,
   findAncestorsAcrossRuns,
@@ -88,6 +89,7 @@ export async function getAgentTree(busId: string, allowBenchmarkArchive = false)
     code_agents: codeSessions.map((session) => ({
       code_agent_id: session.id,
       owner_agent_id: session.agentId,
+      provider: codeAgentProvider(session),
       goal: session.goal,
       status: session.status,
       created_at: session.createdAt,

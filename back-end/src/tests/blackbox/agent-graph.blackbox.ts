@@ -45,6 +45,7 @@ import { prisma } from '../../providers/database';
 import { mintAgentGraphToken } from '../../providers/agentGraph/token';
 import { codeSessionTurnToken } from '../../providers/codeSessionTurns';
 import { deterministicMessageId } from '../../providers/messageIdempotency';
+import { testCodeAgentProviderInTreeAndBatchedList } from './agent-graph-code-agents.cases';
 
 config();
 
@@ -614,6 +615,17 @@ const cases: Array<[string, () => Promise<void>]> = [
   ['question routing by spawner', testQuestionRoutingBySpawner],
   ['grep is pinned to the tree', testGrepIsPinnedToTheTree],
   ['root messages a running code agent once', testRootMessagesRunningCodeAgentOnce],
+  [
+    'code agents report their provider in the tree and the batched list',
+    () =>
+      testCodeAgentProviderInTreeAndBatchedList({
+        baseUrl: BASE_URL,
+        apiKey: API_KEY,
+        userA,
+        userB,
+        ids,
+      }),
+  ],
 ];
 
 async function main(): Promise<void> {

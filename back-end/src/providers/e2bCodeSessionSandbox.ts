@@ -121,6 +121,14 @@ async function stopStaleWsServer(sandbox: Sandbox): Promise<void> {
   }
 }
 
+/** Task-row fields tying a spawn to its persistent session and CLI provider. */
+export function codeSessionTaskFields(
+  codeSession: CodeSessionRow | null,
+  codeProvider: 'claude' | 'codex'
+): { codeSessionId: string | null; codeProvider: string } {
+  return { codeSessionId: codeSession?.id ?? null, codeProvider };
+}
+
 /** Remember which E2B sandbox now holds the session (resume connects to it). */
 export async function recordE2bCodeSessionSandbox(
   codeSession: CodeSessionRow | null,

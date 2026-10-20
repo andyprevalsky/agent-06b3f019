@@ -3,6 +3,7 @@ DROP INDEX "ClaudeCodeSession_sandboxId_key";
 
 -- AlterTable
 ALTER TABLE "ClaudeCodeSession" ADD COLUMN     "awaitingParent" JSONB,
+ADD COLUMN     "codeProvider" TEXT,
 ADD COLUMN     "codeSessionId" TEXT;
 
 -- CreateTable

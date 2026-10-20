@@ -32,6 +32,7 @@ import {
 import {
   acquireCodeSandbox,
   codeSessionBranchEnvs,
+  codeSessionTaskFields,
   type CodeAgentSessionResult,
   createLocalCodeSessionFallback,
   recordE2bCodeSessionSandbox,
@@ -436,7 +437,7 @@ async function createClaudeCodeSessionUnlocked(
       claudeTokenSource,
       claudeTokenIntegrationId:
         credentialMeta?.source === 'pool' ? (credentialMeta.poolTokenId ?? null) : null,
-      codeSessionId: codeSession?.id ?? null,
+      ...codeSessionTaskFields(codeSession, 'claude'),
       projectId: projectWorkspace?.project.id ?? null,
     },
   });
@@ -663,7 +664,7 @@ export async function createCodexCodeSession(
       claudeTokenSource: credentialMeta?.source ?? null,
       claudeTokenIntegrationId:
         credentialMeta?.integrationId ?? credentialMeta?.poolTokenId ?? null,
-      codeSessionId: codeSession?.id ?? null,
+      ...codeSessionTaskFields(codeSession, 'codex'),
     },
   });
   await recordE2bCodeSessionSandbox(codeSession, sandbox.sandboxId);

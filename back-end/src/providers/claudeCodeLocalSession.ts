@@ -563,6 +563,8 @@ export async function createLocalClaudeCodeSession(params: {
         claudeTokenSource: params.claudeTokenSource ?? 'local_fallback',
         claudeTokenIntegrationId: params.claudeTokenIntegrationId,
         projectId: params.projectWorkspace?.project.id ?? null,
+        // The local fallback runs the Claude Code ws-server only.
+        codeProvider: 'claude',
       },
     });
   } catch (persistErr) {

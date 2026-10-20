@@ -603,6 +603,9 @@ model ClaudeCodeSession {
   claudeTokenIntegrationId String?
   /// Persistent code session this spawn attached to (null for legacy rows).
   codeSessionId            String?
+  /// CLI this task ran ('claude' | 'codex'); null for legacy rows. Per task, so a
+  /// usage-limit provider switch (C15) keeps each task's own provider.
+  codeProvider             String?
   /// Question this code agent asked its spawning Rose agent ({message_id, question, at}).
   /// The spawn blocked on this task pauses the session and returns the question.
   awaitingParent           Json?
