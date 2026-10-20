@@ -208,7 +208,7 @@ describe('top-right app icons', () => {
     expect(screen.getByTestId('browser-app-drawer')).toHaveAttribute('data-state', 'closed');
   });
 
-  it('Phone shows only the floating device + Take control, 24px off the right edge', async () => {
+  it('Phone shows only the floating Coming soon device, 24px off the right edge', async () => {
     const user = userEvent.setup();
     renderWithProviders(<RoseAppIcons />);
     expect(screen.queryByTestId('rose-phone')).toBeNull();
@@ -218,16 +218,15 @@ describe('top-right app icons', () => {
     expect(phone.style.top).toBe('50%');
     expect(phone.style.transform).toBe('translateY(-50%)');
     expect(phone.className).not.toMatch(WRAPPER_CLASS);
-    // No background anywhere: not around the iPhone, not between it and its
-    // Take control button — only the device and the button over the page.
+    // No background anywhere: only the device over the page.
     expect(phone.className).not.toMatch(/\bbg-|backdrop/);
     expect(phone.style.background).toBe('');
     expect(phone.style.backgroundColor).toBe('');
     const device = within(phone).getByTestId('rose-phone-device');
-    const takeControl = within(phone).getByRole('button', { name: 'Take control' });
-    expect([...phone.children]).toEqual([device, takeControl]);
+    expect([...phone.children]).toEqual([device]);
     expect(device.style.boxShadow).toContain('rgba(0,0,0,.35)');
-    expect(within(phone).getByRole('button', { name: 'Take control' })).toBeInTheDocument();
+    expect(device).toHaveTextContent('Coming soon');
+    expect(within(phone).queryAllByRole('button')).toHaveLength(0);
     expect(screen.getByTestId('rose-app-panel')).toHaveAttribute('data-state', 'closed');
     // One app at a time: opening Integrations hides the phone.
     await user.click(screen.getByTestId('rose-app-integrations'));
