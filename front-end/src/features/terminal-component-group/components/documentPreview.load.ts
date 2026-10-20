@@ -54,7 +54,7 @@ export async function blobToArrayBuffer(blob: Blob): Promise<ArrayBuffer> {
 
 export async function loadDocumentPreview(
   file: FilePointer,
-  options?: { activeSheet?: string; signal?: AbortSignal },
+  options?: { activeSheet?: string; signal?: AbortSignal; allowInlineScripts?: boolean },
 ): Promise<{ payload: DocumentPreviewPayload; objectUrls: string[] }> {
   const kind = documentPreviewKind(file);
   const objectUrls: string[] = [];
@@ -70,7 +70,9 @@ export async function loadDocumentPreview(
 
   try {
     if (kind === 'html') {
-      const html = hardenHtmlPreview(await downloadAttachmentAsText(downloadUrl, { signal }));
+      const html = hardenHtmlPreview(await downloadAttachmentAsText(downloadUrl, { signal }), {
+        allowInlineScripts: options?.allowInlineScripts === true,
+      });
       return { payload: { kind, downloadUrl, html }, objectUrls };
     }
 

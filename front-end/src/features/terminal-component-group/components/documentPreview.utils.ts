@@ -142,10 +142,17 @@ function isPptx(mime: string, name: string): boolean {
 /**
  * Harden untrusted HTML for iframe srcDoc previews.
  * Blocks network/subresource loads via CSP while allowing inline styles + data: images.
+ * `allowInlineScripts` (Rose Desktop only) also lets the document's own inline
+ * scripts run so generated games/apps work; every network and subresource load
+ * stays blocked, and the iframe stays sandbox="allow-scripts" (opaque origin, no
+ * access to the Rose session).
  */
-export function hardenHtmlPreview(html: string): string {
-  const csp =
-    "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none';\">";
+export function hardenHtmlPreview(
+  html: string,
+  options: { allowInlineScripts?: boolean } = {},
+): string {
+  const scriptSrc = options.allowInlineScripts === true ? " script-src 'unsafe-inline';" : '';
+  const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:;${scriptSrc} base-uri 'none'; form-action 'none'; frame-ancestors 'none';">`;
   if (/<head[\s>]/i.test(html)) {
     return html.replace(/<head([^>]*)>/i, `<head$1>${csp}`);
   }
