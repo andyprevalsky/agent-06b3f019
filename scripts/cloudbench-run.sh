@@ -1188,6 +1188,25 @@ fi
 if [ "${#STACK_CACHE_ENV[@]}" -gt 0 ]; then
     STACK_ENV+=("${STACK_CACHE_ENV[@]}")
 fi
+# Compute-token authority (A1): lease, cooldown and Foundry rate-limit state go
+# to one shared backend, authenticated with this guest's own BACKEND_API_KEY.
+# An unreachable authority fails those calls closed; it never falls back here.
+CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL="$(cloudbench_compute_token_authority_url)"
+if [ -n "$CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL" ]; then
+    authority_key="$(cloudbench_env_value "$REPO_DIR/back-end/.env" BACKEND_API_KEY)"
+    if [ -z "$authority_key" ]; then
+        log "FATAL: compute-token authority $CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL needs BACKEND_API_KEY in back-end/.env"
+        finish 1
+    fi
+    STACK_ENV+=("BENCHMARK_COMPUTE_TOKEN_AUTHORITY=on"
+                "COMPUTE_TOKEN_AUTHORITY_URL=$CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL"
+                "COMPUTE_TOKEN_AUTHORITY_API_KEY=$authority_key")
+    log "compute-token authority: $CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL"
+    unset authority_key
+else
+    STACK_ENV+=("BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off"
+                "COMPUTE_TOKEN_AUTHORITY_URL=" "COMPUTE_TOKEN_AUTHORITY_API_KEY=")
+fi
 if [ "${#TASK_WORKER_ENV[@]}" -gt 0 ]; then
     STACK_ENV+=("${TASK_WORKER_ENV[@]}")
 fi

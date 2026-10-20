@@ -1290,6 +1290,43 @@ def _dotenv_values(path: Path) -> dict[str, str]:
     return values
 
 
+COMPUTE_TOKEN_AUTHORITY_DEFAULT_URL = "https://navi-j9a9.onrender.com"
+
+
+def apply_compute_token_authority_env(env: dict[str, str]) -> None:
+    """Point an isolated stack's compute-token state at one shared authority.
+
+    A1 (approved 2026-10-20): every isolated stack restores its own database
+    with copies of the same real compute tokens, so its lease semaphore,
+    rate-limit marks and Foundry deployment cooldowns diverge from production's
+    and from every other stack's (RCA
+    2026-10-20-bench-guests-ran-independent-compute-token-semaphores). The
+    stack's backend delegates those internal calls to the production backend,
+    authenticated with ``BACKEND_API_KEY`` from ``back-end/.env``; an
+    unreachable authority fails them closed. ``BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off``
+    keeps the copied local state for diagnostics; an explicit
+    ``COMPUTE_TOKEN_AUTHORITY_URL`` / ``_API_KEY`` in the environment wins.
+    """
+    if env.get("BENCHMARK_COMPUTE_TOKEN_AUTHORITY", "").strip().lower() in {"off", "0", "false", "no"}:
+        # Empty exports also mask saved dotenv values in the child services.
+        env["COMPUTE_TOKEN_AUTHORITY_URL"] = ""
+        env["COMPUTE_TOKEN_AUTHORITY_API_KEY"] = ""
+        return
+    url = (env.get("COMPUTE_TOKEN_AUTHORITY_URL") or "").strip() or COMPUTE_TOKEN_AUTHORITY_DEFAULT_URL
+    api_key = (env.get("COMPUTE_TOKEN_AUTHORITY_API_KEY") or "").strip()
+    if not api_key:
+        api_key = _dotenv_values(REPO_ROOT / "back-end" / ".env").get("BACKEND_API_KEY", "").strip()
+    if not api_key:
+        api_key = (env.get("BACKEND_API_KEY") or "").strip()
+    if not api_key:
+        raise RuntimeError(
+            f"compute-token authority {url} needs BACKEND_API_KEY in back-end/.env "
+            "(or BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off to keep the stack's copied token state for diagnostics)"
+        )
+    env["COMPUTE_TOKEN_AUTHORITY_URL"] = url
+    env["COMPUTE_TOKEN_AUTHORITY_API_KEY"] = api_key
+
+
 def validate_agentcard_org_credentials(
     tasks: Sequence[str],
     *,
@@ -1825,6 +1862,7 @@ def start_services(
         env["CONDUCTOR_WORKSPACE_NAME"] = stack.workspace_name
         env["CONDUCTOR_PORT"] = str(stack.base_port)
         env["ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME"] = "1"
+        apply_compute_token_authority_env(env)
         # Default isolated stacks keep Fast Mode cache on the local Postgres so
         # Tokyo / other smokes cannot write through Andy into the shared pooler.
         # fast_cache:on tasks read the shared July cache. Ordinary agent

@@ -175,3 +175,18 @@ export const PLAID_SKIP_WEBHOOK_VERIFICATION = process.env.PLAID_SKIP_WEBHOOK_VE
 export function isEmailProviderSlug(name: string): name is EmailProviderSlug {
   return Object.prototype.hasOwnProperty.call(EMAIL_PROVIDER_CONFIG, name);
 }
+
+/**
+ * Optional shared compute-token authority (see routes.compute.ts). Read per
+ * request so each process uses exactly the environment it started with; null
+ * when unset, which is the production configuration.
+ */
+export function computeTokenAuthority(): { url: string; apiKey: string } | null {
+  const url = (process.env.COMPUTE_TOKEN_AUTHORITY_URL ?? '').trim();
+  if (url === '') return null;
+  const apiKey = (process.env.COMPUTE_TOKEN_AUTHORITY_API_KEY ?? '').trim();
+  if (apiKey === '') {
+    throw new Error('COMPUTE_TOKEN_AUTHORITY_URL requires COMPUTE_TOKEN_AUTHORITY_API_KEY');
+  }
+  return { url: url.replace(/\/+$/, ''), apiKey };
+}
