@@ -63,14 +63,14 @@ Andy: "sub agent for each". There is one lane per integration that syncs today, 
 
 | ID | Criterion | Eval (minimum) | Lane | Status |
 |----|-----------|----------------|------|--------|
-| I0 | **Shared core.** A per-account progress model `(userId, provider, accountId) → { pct, done, total, unit, eta_sec, state, startedAt, updatedAt }`, writable by Mac-app uploads and backend jobs while a sync runs. Exposed on `GET /api/integrations`, one entry per account. Generic per-account delete (`DELETE /api/integrations/:provider/accounts/:accountId`) that removes that account's data. Connecting again creates a new account. Indeterminate progress (no total) is reported as `total: null`, not faked. 10k rule: one row per account and O(1) writes per batch | backend blackbox (progress round trip, two accounts per provider, delete one keeps the other, owner scoping) | L-INTEG-CORE | running |
-| I1 | iMessage: total from `chat.db` count; per-batch progress; one account per Mac (device id) | mac-app main tests (mac CI) + backend blackbox | L-INT-IMESSAGE | queued (after I0) |
-| I2 | WhatsApp: Baileys `progress` surfaced; multi-account (one auth dir and socket per account) | mac-app main + backend | L-INT-WHATSAPP | queued |
-| I3 | Gmail: per-address progress using `messagesTotal`; `SYNCING` per address, not per row; incremental save during a full sync | backend blackbox | L-INT-GMAIL | queued |
+| I0 | **Shared core.** A per-account progress model `(userId, provider, accountId) → { pct, done, total, unit, eta_sec, state, startedAt, updatedAt }`, writable by Mac-app uploads and backend jobs while a sync runs. Exposed on `GET /api/integrations`, one entry per account. Generic per-account delete (`DELETE /api/integrations/:provider/accounts/:accountId`) that removes that account's data. Connecting again creates a new account. Indeterminate progress (no total) is reported as `total: null`, not faked. 10k rule: one row per account and O(1) writes per batch | backend blackbox (progress round trip, two accounts per provider, delete one keeps the other, owner scoping) | L-INTEG-CORE | **done** (639e3baf5; integration-accounts 19/19 ×5) |
+| I1 | iMessage: total from `chat.db` count; per-batch progress; one account per Mac (device id) | mac-app main tests (mac CI) + backend blackbox | L-INT-IMESSAGE | running |
+| I2 | WhatsApp: Baileys `progress` surfaced; multi-account (one auth dir and socket per account) | mac-app main + backend | L-INT-WHATSAPP | running |
+| I3 | Gmail: per-address progress using `messagesTotal`; `SYNCING` per address, not per row; incremental save during a full sync | backend blackbox | L-INT-GMAIL | running |
 | I4 | LinkedIn: honest phases (export requested → waiting → uploading → parsing with counts); multi-account | backend blackbox | L-INT-LINKEDIN | queued |
-| I5 | Plaid: per-item progress (indeterminate total → counts + state); multi-item already exists | backend blackbox | L-INT-PLAID | queued |
+| I5 | Plaid: per-item progress (indeterminate total → counts + state); multi-item already exists | backend blackbox | L-INT-PLAID | running |
 | I6 | Browser cookies: account = browser profile (profile detection beyond Chrome); progress from known counts; delete removes the cookie rows | mac-app main + backend | L-INT-COOKIES | queued |
-| I7 | Passwords and passkeys: fix `BrowserPassword` unique key (add source + profile; migration); per-source account; delete | backend blackbox + migration | L-INT-PASSWORDS | queued |
+| I7 | Passwords and passkeys: fix `BrowserPassword` unique key (add source + profile; migration); per-source account; delete | backend blackbox + migration | L-INT-PASSWORDS | running |
 | I8 | Telegram: progress from chat-list total; multi-account sessions | mac-app main + backend | L-INT-TELEGRAM | queued |
 
 ## rose_user_ui, Apps, Rose-in-Rose
@@ -219,3 +219,20 @@ Per the 2026-10-20 goal ("make intelligent guesses; keep critical ones for revie
 - Env and prod (C10, Render): `SLACK_AUTO_RCA_OWNER_USER_ID` (Andy's user id) must be set at deploy, because `AUTO_RCA_ENABLED=1` is already set and error cards then answer 503 until it is; `SLACK_AUTO_RCA_FEEDBACK_USER_IDS` (Slack user ids allowed to steer an RCA); optional `SLACK_AUTO_RCA_REPO_URL` (default `https://github.com/Rose-Ai-Labs/rose`) and `SLACK_AUTO_RCA_SIGNATURE_WINDOW_MINUTES` (default 60). `GITHUB_DISPATCH_TOKEN` is no longer read for auto-RCA. Fly worker cards must post with the same Slack app's bot token (`SLACK_BOT_TOKEN` + `SLACK_ERROR_CHANNEL_ID`); new tables ship in migration `20261020170000_slack_auto_rca_incidents`.
 - Projects (L-SYNC): Zod schemas in `domains/projects/types.ts`, `project_id` on agent create and code-session create; ws-server project mode and the startup note at the top of the CLI prompt (prompt text); code-agent transcript `project_startup` line; migration `20261020130000_projects`. No new env vars (reuses `CLAUDE_CREDENTIAL_DECRYPTION_KEY`, `GITHUB_TOKEN`).
 - Benchmarks (C8): seven new `code-bench-*` task definitions in `tasks.json` (prompts, hidden-test `static_check`s, 900/1200 s timeouts); the `code_bench_screenshot_judge` method and its judge prompt (`SCREENSHOT_JUDGE_SYSTEM` in `agents/benchmarks/code_bench.py`); the test-only Zod enum value `code_bench_screenshot_judge` in `back-end/src/tests/blackbox/benchmarks.blackbox.ts`. No agent-harness or product prompt changes.
+
+- L-DISPLAY (C12, merged b10b038c1):
+  - Prompt text: the `CODE_AGENT_INSTRUCTIONS_VERSION` v4 "Talking to the user" block; the template `CLAUDE.md` "Talking to the user" section (needs an E2B template rebuild); new `agents/tools/prompts/display.py`; MCP tool descriptions in `rose.mjs`.
+  - Harness: `display` in `EXECUTE_PHASE_TOOLS`/`TOOL_MODELS`/`TOOL_EXECUTORS`; Claude ws-server `--mcp-config` + `mcp__rose`; Codex `mcp_servers.rose` with `tool_timeout_sec=31536000`.
+  - Zod (`domains/agent-tools/types.ts`): display/option/request/message/approval/answer/wait schemas.
+  - Env (optional): `AGENT_TOOLS_TOKEN_SECRET`.
+- L-INTEG-CORE (I0, merged 639e3baf5):
+  - Prisma model `IntegrationSyncProgress` + migration `20261020180000_integration_sync_progress` (RLS policy); Zod `progressWriteSchema`.
+  - Three new endpoints, plus additive `accounts`/`accountsByProvider` on `GET /api/integrations`.
+  - Legacy, Gmail and Plaid deletes now also remove progress rows.
+- L-PHONE (phase 1, merged ffd4d1333):
+  - Prisma model `PhoneDevice` + migration `20261020190000_phone_devices` (RLS); Zod `registerPhoneSchema`, `agentPhoneLeaseSchema`, `phoneIdSchema`, `frameQuerySchema`, `streamDemandQuerySchema`.
+  - The agent-visible 409 messages (`PHONE_CONTROL_TAKEN` …).
+  - A Mac app release (`MAC-APP-RELEASE`), plus a real-Mac run of the phone-mirroring suites, which were only run under a Linux electron stub.
+- Harness (verifier RCA, merged 94732110c): `_call_llm_verifier` parses below-1.0 verdicts without the required-key constraint (prompt, schema and strict flag unchanged; RCA case `2026-10-20-verifier-parse-required-every-output-key-on-partial-verdicts`). The game recording flow still needs an outcome rerun.
+- User UI realtime (merged 6621f1c20): publish tokens carry `agt` (session agent id); a publish that activates broadcasts `USER_UI_ACTIVE_CHANGED` on `agent:<code agent>` and `agent:<root>`. No Zod change.
+
