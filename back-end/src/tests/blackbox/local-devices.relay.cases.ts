@@ -119,8 +119,8 @@ interface Harness {
 }
 
 async function startHarness(): Promise<Harness> {
-  const deviceA = randomUUID();
-  const deviceB = randomUUID();
+  const deviceA: string = randomUUID();
+  const deviceB: string = randomUUID();
   const devices = new Map([
     [
       deviceA,
@@ -337,7 +337,6 @@ export async function sectionA(): Promise<TestResult[]> {
             folder: null,
             envs: {},
             relay_path: relayDevicePath(taskId),
-            home_files: [],
             home_files: [],
           },
         });
