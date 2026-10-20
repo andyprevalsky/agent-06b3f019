@@ -56,6 +56,22 @@ ledger" in `rose-user-ui.md`). This file is the cross-cutting checklist, and
 | PJ3 | M | A code session for a project checks out the default branch, writes the managed env files (0600), then runs the startup script with the timeout. A timeout or failure is reported to the agent and the user and doesn't hang the session; it runs on create and on resume after boot | local-sandbox blackbox: fixture project → env files present, script ran, timeout enforced | L-SYNC | open |
 | PJ4 | M | The Rose project is seeded with its real setup: startup script `agents/benchmarks/fixtures/projects/rose-startup.sh`; env files `agents/.env`, `back-end/.env`, `agents/.env.benchmark-temporal`, `front-end/.env`, `mac-app/.env`, `research/.env`, imported by codebase sync (C9) from Andy's checkout. A Rose code session reaches a healthy `scripts/run.sh` | live smoke on the Rose project | L-SYNC | open |
 
+## Integrations: real sync progress and multiple accounts (UI ledger row 78)
+
+Andy: "sub agent for each". There is one lane per integration that syncs today, after a shared core lane. Messenger and Instagram are skipped because nothing syncs yet ("if they sync"). Survey 2026-10-20: no per-account progress model exists, and every writer except Compute hard-codes `accountId: ''`. Copy the `ComputeAccountConnection` and `EmailIntegrationCredential` patterns. All these rows are M.
+
+| ID | Criterion | Eval (minimum) | Lane | Status |
+|----|-----------|----------------|------|--------|
+| I0 | **Shared core.** A per-account progress model `(userId, provider, accountId) → { pct, done, total, unit, eta_sec, state, startedAt, updatedAt }`, writable by Mac-app uploads and backend jobs while a sync runs. Exposed on `GET /api/integrations`, one entry per account. Generic per-account delete (`DELETE /api/integrations/:provider/accounts/:accountId`) that removes that account's data. Connecting again creates a new account. Indeterminate progress (no total) is reported as `total: null`, not faked. 10k rule: one row per account and O(1) writes per batch | backend blackbox (progress round trip, two accounts per provider, delete one keeps the other, owner scoping) | L-INTEG-CORE | running |
+| I1 | iMessage: total from `chat.db` count; per-batch progress; one account per Mac (device id) | mac-app main tests (mac CI) + backend blackbox | L-INT-IMESSAGE | queued (after I0) |
+| I2 | WhatsApp: Baileys `progress` surfaced; multi-account (one auth dir and socket per account) | mac-app main + backend | L-INT-WHATSAPP | queued |
+| I3 | Gmail: per-address progress using `messagesTotal`; `SYNCING` per address, not per row; incremental save during a full sync | backend blackbox | L-INT-GMAIL | queued |
+| I4 | LinkedIn: honest phases (export requested → waiting → uploading → parsing with counts); multi-account | backend blackbox | L-INT-LINKEDIN | queued |
+| I5 | Plaid: per-item progress (indeterminate total → counts + state); multi-item already exists | backend blackbox | L-INT-PLAID | queued |
+| I6 | Browser cookies: account = browser profile (profile detection beyond Chrome); progress from known counts; delete removes the cookie rows | mac-app main + backend | L-INT-COOKIES | queued |
+| I7 | Passwords and passkeys: fix `BrowserPassword` unique key (add source + profile; migration); per-source account; delete | backend blackbox + migration | L-INT-PASSWORDS | queued |
+| I8 | Telegram: progress from chat-list total; multi-account sessions | mac-app main + backend | L-INT-TELEGRAM | queued |
+
 ## rose_user_ui, Apps, Rose-in-Rose
 
 | ID | Tier | Criterion | Eval (minimum) | Lane | Status |
@@ -169,6 +185,8 @@ Status: **done** = merged into `feat/rose-user-ui` with tests; **running** = a l
 | 38 | iPhone web app hella performant, validated (phone harness → WebKit iPhone 15 emulation) | P1–P6 | L-PERF | queued (runs on the merged branch) |
 | 39 | Each criterion analysed by its own sub-agent with an eval/judge suite; iterate until met | all rows | lane owners + Auditor | lanes running; **Auditor queued** (re-checks every row against evidence before any deploy) |
 | 40 | Recording blockers: decode hang, account pill overlaps | — | parent | done (ac42c75f4, ab8f1bcf8, a151a214c) |
+| 41 | One sub-agent per integration: real sync progress + multiple accounts (iMessage, WhatsApp, Gmail, LinkedIn, Plaid, cookies, passwords/passkeys, Telegram; Messenger/Instagram only if they sync) | I0–I8 | L-INTEG-CORE then one lane each | core running; per-integration queued |
+| 42 | Sub-agents keep going after interruptions | — | parent | done: all 8 lanes resumed after the 2026-10-20 usage-limit stop |
 
 Open follow-ups with owners: **flag the backend side of Rose Desktop** — `rose_user_ui` workspace materialization (W1 `workspace.ts`), the code-agent `rose_user_ui` instructions (`codeAgentPrompt.ts`) and the `code`/`spawn_agent` tool descriptions should apply only to Rose Desktop accounts, because a non-flag account can't see published UI (queued: L-FLAG-BE); code agents need a headless browser in the sandbox to actually play-test games (A4 template, L-UIKIT); bench-only `SpawnAgentToolNoGP` description unchanged; C10 crash-between-create-and-start stuck agent (L-TOOLS2 queue); retire `.github/workflows/auto-rca*.yml`; W1: live E2B check that `rose-ui` is on PATH (needs a real E2B sandbox; no deploy); W2 bridge `rose.*` capability calls + write confirmations (UI thread, plus a backend if one is needed).
 
