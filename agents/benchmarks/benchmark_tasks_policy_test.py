@@ -364,14 +364,30 @@ def test_wait_for_trigger_ignores_phone_call_write_lock_without_completing():
 def test_raise_5m_brex_long_horizon_runs_simulated_on_tamy_account_snapshot():
     """Long-horizon fundraise bench: sim ON, Tamy account snapshot, current cap, Brex $5M judge.
 
-    The prompt is the user's verbatim ask; hold the benchmark at the user-approved 10-minute block.
+    The prompt is the user-approved guided fundraise ask with the pre-seed materials
+    attached; hold the benchmark at the user-approved 10-minute block.
     """
+    from pathlib import Path
+
     from benchmarks.live_fixtures import TAMY_IDENTITY_USER_ID
     from benchmarks.local import resolve_simulate_mode
     from benchmarks.run_benchmark import EXCLUSIVE_SHARED_DB_TASK_NAMES, _live_fixture_run_user_id
 
     task = get_task_by_name("raise-5m-rose-labs-brex")
-    assert task.prompt == "Raise me 5m dollars for my company Rose Labs\nNo questions asked"
+    assert task.prompt.startswith("Raise $5M for my company Rose Labs. No questions asked")
+    assert "rose_labs_primary_usd" in task.prompt
+    materials = [
+        "rose-labs-preseed/pitch-deck.md",
+        "rose-labs-preseed/one-pager.md",
+        "rose-labs-preseed/metrics-fact-sheet.md",
+        "rose-labs-preseed/data-room-index.md",
+        "rose-labs-preseed/safe-terms.md",
+    ]
+    # The catalog lists the materials under "attachment"; the runner uploads
+    # them through attachments (a list joined as one path failed on the cloud).
+    assert task.attachments == materials and task.attachment is None
+    test_assets = Path(__file__).resolve().parents[2] / "front-end/public/test-assets"
+    assert all((test_assets / name).is_file() for name in materials)
     assert task.tags == ["DEMO", "long-horizon"]
     assert task.timeout_seconds == 600
     assert task.world_model_mode == "simulate"

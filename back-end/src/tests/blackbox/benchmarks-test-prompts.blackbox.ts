@@ -187,6 +187,22 @@ async function testPrompts_attachmentUrlsUseTestAssets() {
   }
 }
 
+async function testPrompts_listAttachmentKeepsEveryFile() {
+  // The fundraiser lists its five pre-seed materials under `attachment`.
+  const res = await request(`${BASE_URL}/api/benchmarks/test-prompts`);
+  if (res.status !== 200) throw new Error(`test-prompts status ${res.status}`);
+  const body = res.data as { prompts: TestPrompt[] };
+  const fundraiser = body.prompts.find(
+    (p) => p.title === 'Raise $5M for Rose Labs (Brex balance, simulated)'
+  );
+  if (!fundraiser) throw new Error('Fundraiser prompt missing from test-prompts');
+  if (fundraiser.attachmentUrls.length !== 5) {
+    throw new Error(
+      `Fundraiser attachments: expected 5, got ${JSON.stringify(fundraiser.attachmentUrls)}`
+    );
+  }
+}
+
 async function testPrompts_frontendUrlTokenRewritten() {
   const res = await request(`${BASE_URL}/api/benchmarks/test-prompts`);
   if (res.status !== 200) return;
@@ -338,6 +354,7 @@ async function runAll() {
     { name: 'tags match catalog entries', fn: testPrompts_tagsMatchCatalog },
     { name: 'excludes external vitest smokes', fn: testPrompts_excludeExternalRunners },
     { name: 'attachment urls under /test-assets/', fn: testPrompts_attachmentUrlsUseTestAssets },
+    { name: 'list attachment keeps every file', fn: testPrompts_listAttachmentKeepsEveryFile },
     { name: '{frontend_url} token rewritten', fn: testPrompts_frontendUrlTokenRewritten },
     { name: 'dev default prompt present', fn: testPrompts_devDefaultPresent },
     { name: 'lastFivePassed is boolean on every prompt', fn: testPrompts_lastFivePassedIsBoolean },

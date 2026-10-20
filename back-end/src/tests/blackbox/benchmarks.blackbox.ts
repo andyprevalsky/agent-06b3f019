@@ -62,7 +62,8 @@ const BenchmarkTaskSchema = z.object({
   price_limit_cents: z.number().int().positive(),
   requires_browser_agent: z.boolean(),
   requires_claude_code: z.boolean(),
-  attachment: z.string().nullable(),
+  // One file name, or a list (raise-5m attaches its whole pre-seed materials set).
+  attachment: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]).nullable(),
   approval_handling: z.string().nullable(),
   start_phase: z.string().nullable(),
   // Unified eval-catalog contract (additive, optional — validated by agents/benchmarks/long_horizon.py)

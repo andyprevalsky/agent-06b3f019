@@ -52,7 +52,7 @@ if args[:2]==['machine','status']:
  print(json.dumps(dict(mounts=[dict(volume='vol_owned')])));raise SystemExit()
 assert args[:2] in (['volumes','show'],['volumes','update']),args
 assert '--json' in args,args
-v=dict(id='vol_owned',state='created',auto_backup_enabled=not (p/'disabled').exists(),snapshot_retention=5,size_gb=40,name='fork',attached_machine_id='abcd1234')
+v=dict(id='vol_owned',state='created',auto_backup_enabled=not (p/'disabled').exists(),snapshot_retention=5,size_gb=40,name='fork',attached_machine_id=json.loads(os.environ.get('CLI_ATTACHED','"abcd1234"')))
 if args[:2]==['volumes','update']:
  assert args==['volumes','update','vol_owned','-a','fixture','--scheduled-snapshots=false','--json'],args
  (p/'disabled').touch();v['auto_backup_enabled']=False
@@ -69,9 +69,9 @@ print(json.dumps(v))
         self.shell = libraries+functions+'\nexport -f '+' '.join(exported)+'\nexec "$@"\n'
         self.env = dict(os.environ, PATH=str(bin_path)+':'+os.environ['PATH'], CASE=str(self.directory), CLI_READ_FAILURE='0', CLI_UPDATE_REJECTIONS='0', PRIVATE_SOURCE_ID='', CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION='1', ROOT_DIR=str(SCRIPTS.parent))
 
-    def invoke(self):
+    def invoke(self, *extra):
         f = self.fixture
-        argv = ['python3', str(self.scripts/'cloudbench-disposable-volume.py'), '--registry', str(f.reg), '--owner', f.owner, '--app', 'fixture', '--name', 'cloudbench-fixture', '--machine', 'abcd1234', '--volume', 'vol_owned', '--audit', str(f.audit), '--run', 'run']
+        argv = ['python3', str(self.scripts/'cloudbench-disposable-volume.py'), '--registry', str(f.reg), '--owner', f.owner, '--app', 'fixture', '--name', 'cloudbench-fixture', '--machine', 'abcd1234', '--volume', 'vol_owned', '--audit', str(f.audit), '--run', 'run', *extra]
         return subprocess.run(['bash', '-c', self.shell, 'entry', *argv], env=self.env, capture_output=True, timeout=30)
 
     def calls(self):
@@ -87,6 +87,26 @@ print(json.dumps(v))
         self.assertFalse(evidence['auto_backup_enabled'])
         self.assertEqual(evidence['machine'], 'abcd1234')
         self.assertEqual(evidence['volume'], 'vol_owned')
+
+    def test_snapshot_restored_volume_without_reported_attachment_verifies_by_exact_mount(self):
+        # Observed 2026-10-19: once a 40GB volume finishes restoring from the WMH
+        # donor snapshot, Fly reports attached_machine_id=null while the owned
+        # Machine runs with exactly that mount. The exact mount proves ownership.
+        self.env['CLI_ATTACHED'] = 'null'
+        refused = self.invoke()
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertFalse((self.fixture.audit/'volume-backups/vol_owned/verified.json').exists())
+        result = self.invoke('--snapshot-restored')
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        evidence = json.loads((self.fixture.audit/'volume-backups/vol_owned/verified.json').read_bytes())
+        self.assertFalse(evidence['auto_backup_enabled'])
+
+    def test_volume_attached_to_another_machine_is_refused(self):
+        self.env['CLI_ATTACHED'] = '"other123"'
+        result = self.invoke('--snapshot-restored')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'Volume attached to a different Machine', result.stderr)
+        self.assertFalse((self.fixture.audit/'volume-backups/vol_owned/verified.json').exists())
 
     def test_observed_transient_volume_not_found_update_is_replayed_after_exact_read(self):
         self.env['CLI_UPDATE_REJECTIONS'] = '1'

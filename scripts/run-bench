@@ -280,6 +280,9 @@ Wide runs (sharded controllers):
   --e2e-timeout S. Every routed launch runs --check first.
   --check             Dry run: local checks plus read-only provider preflight,
                       reporting the warm snapshot reuse/refresh decision.
+  Wide runs admit every task the ordinary fleet runs, SIM/DEMO included.
+  RUN_BENCH_CATALOG_ELIGIBILITY=live keeps a LIVE acceptance run's live-query
+  rule (refuses zero-live-spend and DEMO-replay tasks).
 
 Startup reuse:
   Completed dependency snapshots are reused automatically, including from a
@@ -640,6 +643,10 @@ with open(sys.argv[1],"x") as f: json.dump(sys.argv[2:],f)' "$SHARDED_MANIFEST" 
         --agents-env "$(realpath "$ROOT_DIR/agents/.env")" --backend-env "$(realpath "$ROOT_DIR/back-end/.env")"
         --hub-python "$SHARDED_HUB_PY" --repetitions "$RUNS"
         --goal "${RUN_BENCH_GOAL:-$SHARDED_LABEL}" --label "$SHARDED_LABEL"
+        # A user-requested wide run admits the tasks the ordinary fleet runs
+        # (SIM/DEMO included); LIVE acceptance selects the operator's
+        # LIVE-only eligibility, which is also its default when invoked directly.
+        --catalog-eligibility "${RUN_BENCH_CATALOG_ELIGIBILITY:-ordinary}"
     )
     [ -z "$SHARDED_TIMEOUT" ] || SHARDED_ARGS+=(--task-timeout "$SHARDED_TIMEOUT")
     [ -z "$SHARDED_E2E" ] || SHARDED_ARGS+=(--e2e-timeout "$SHARDED_E2E")

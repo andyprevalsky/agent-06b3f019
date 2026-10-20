@@ -79,6 +79,24 @@ def shard_task_ref(shard):
  if shard is None or 'task_ref' not in shard:return TASK_REF
  ref=shard['task_ref'];need(isinstance(ref,str) and re.fullmatch('[0-9a-f]{40}',ref) and ref!=TASK_REF,'invalid bound task ref (the historical pin is encoded by absence)')
  return ref
+# Fresh-only placement moves every fresh REAL Volume to the target region. The
+# fleet refuses it for any snapshot-backed task: a catalog simulate (native WMH)
+# task always boots from the warm donor snapshot in WARM_REGION.
+FRESH_ONLY_PLACEMENT=dict(CLOUDBENCH_FRESH_TARGET_REGION='iad',CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE='false')
+def shard_simulate_tasks(root,shard):
+ """The shard's catalog simulate tasks at its bound task ref, as the fleet reads its catalog modes."""
+ if shard is None:return []
+ ref=shard_task_ref(shard)
+ with tempfile.TemporaryDirectory(prefix='shard-modes-') as scratch:
+  for name in ('tasks.json','polar_tasks.json'):
+   Path(scratch,name).write_bytes(subprocess.check_output(['git','--no-replace-objects','-C',str(root),'show',ref+':agents/benchmarks/'+name]))
+  sys.path.insert(0,str(Path(root)/'scripts'))
+  try:from cloudbench_catalog import get_task_metadata;rows=get_task_metadata(Path(scratch,'tasks.json'),shard['tasks'])
+  finally:sys.path.remove(str(Path(root)/'scripts'))
+ return [row['name'] for row in rows if str(row.get('world_model_mode') or '').lower()=='simulate']
+def shard_placement_env(root,shard):
+ """Fresh-only placement unless the shard has a snapshot-backed simulate task (ordinary fleet placement)."""
+ return {} if shard_simulate_tasks(root,shard) else dict(FRESH_ONLY_PLACEMENT)
 def campaign_timeouts(task_timeout=DEFAULT_TASK_TIMEOUT,e2e_timeout=RUN_DEADLINE):
  """The bound per-task execution window and whole-campaign budget, in seconds."""
  need(type(task_timeout)is int and 60<=task_timeout<=RUN_DEADLINE-STARTUP_ALLOWANCE,'--task-timeout must be 60..%d seconds'%(RUN_DEADLINE-STARTUP_ALLOWANCE))
@@ -633,11 +651,12 @@ def run(config_path,config_sha,out,*,github_token=None):
  out=Path(out).absolute();out.mkdir(mode=0o700);need(out.resolve()==out,'physical new output')
  if v.get('host_operator_provenance'):save(out/'host-operator-provenance.json',v['host_operator_provenance'])
  auth=dict(authority_template,cleanup_owner_pid=os.getpid(),cleanup_owner_birth=birth(os.getpid()),output_directory=str(out/'export'));authority=out/'authority.private.json';save(authority,auth)
- fixed_env=dict(CLOUDBENCH_WARM_MACHINE_NAME=WARM_MACHINE_NAME,CLOUDBENCH_WARM_VOLUME_NAME=WARM_VOLUME_NAME,CLOUDBENCH_REGION='ord',CLOUDBENCH_FRESH_TARGET_REGION='iad',CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE='false',CLOUDBENCH_WARM_DEPS_AUTOREFRESH='0',CLOUDBENCH_SKIP_LOCAL_PATCH='1',CLOUDBENCH_BOOT_TRANSPORT='config',CLOUDBENCH_BOOT_LAUNCH='1')
+ fixed_env=dict(CLOUDBENCH_WARM_MACHINE_NAME=WARM_MACHINE_NAME,CLOUDBENCH_WARM_VOLUME_NAME=WARM_VOLUME_NAME,CLOUDBENCH_REGION='ord',**shard_placement_env(root,shard),CLOUDBENCH_WARM_DEPS_AUTOREFRESH='0',CLOUDBENCH_SKIP_LOCAL_PATCH='1',CLOUDBENCH_BOOT_TRANSPORT='config',CLOUDBENCH_BOOT_LAUNCH='1')
  remote_env=dict(v.get('remote_env',{}))
  need(remote_env.get('CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP',policy)==policy,'infrastructure early-stop policy differs')
  remote_env['CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP']=policy
  for key,value in fixed_env.items():need(remote_env.get(key,value)==value,'original warm/launch option changed: '+key);remote_env[key]=value
+ for key in set(FRESH_ONLY_PLACEMENT)-set(fixed_env):need(key not in remote_env,'fresh-only placement refused for a simulate shard: '+key)
  files=[];staged={}
  for item in v['remote_files']:
   need(re.fullmatch(r'\.git/cloudbench-[A-Za-z0-9_.-]+',item['relative_path']),'only bound benchmark Git metadata may be staged')

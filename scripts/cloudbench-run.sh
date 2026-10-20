@@ -38,7 +38,10 @@
 #
 # Inputs (all from env, exported by run-bench-cloud's on-box invocation):
 #   REF                 branch/sha to sync + run (required; defaults to HEAD if empty)
-#   WMH_MODEL_NAME      cached WMH model artifact name (default rose-r2-archive-anthropic)
+#   WMH_ENGINE          experiential (default, native) | legacy
+#   WMH_MODEL_NAME      cached WMH model artifact name (default rose-archive;
+#                       legacy engine: rose-r2-archive-anthropic)
+#   WMH_ROSE_POOL / WMH_EXECUTION_POLICY / WMH_CONTEXT_TOKENS  native serving config
 #   BENCH_TASKS         comma- OR space-separated task list (required)
 #   BENCH_MAX_CONCURRENCY  max concurrent tasks when >1 task (default 5)
 #   BENCH_SIMULATE      "1" simulate (default) | "0" real mode (no WMH)
@@ -81,7 +84,33 @@ EXECUTION_PROVENANCE_SCRIPT="${CLOUDBENCH_EXECUTION_PROVENANCE_SCRIPT:-$CONTROL_
 
 # ── Inputs (env) ────────────────────────────────────────────────────────────
 REF="${REF:-}"
-WMH_MODEL_NAME="${WMH_MODEL_NAME:-rose-r2-archive-anthropic}"
+# Begin WMH selection.
+# World-model selection: the controller (run-bench-cloud) always passes these;
+# the defaults mirror its native experiential defaults for direct invocations.
+WMH_ENGINE="${WMH_ENGINE:-experiential}"
+if [ "$WMH_ENGINE" = experiential ]; then
+    WMH_MODEL_NAME="${WMH_MODEL_NAME:-rose-archive}"
+    WMH_ROSE_POOL="${WMH_ROSE_POOL:-rose-wmh-gpt61}"
+    WMH_EXECUTION_POLICY="${WMH_EXECUTION_POLICY:-rose-outcome-distribution-v4}"
+else
+    WMH_MODEL_NAME="${WMH_MODEL_NAME:-rose-r2-archive-anthropic}"
+    WMH_ROSE_POOL="${WMH_ROSE_POOL:-rose-1-ultra}"
+    WMH_EXECUTION_POLICY="${WMH_EXECUTION_POLICY:-upstream}"
+fi
+WMH_CONTEXT_TOKENS="${WMH_CONTEXT_TOKENS:-}"
+case "$WMH_ENGINE" in legacy|experiential) ;; *) echo "Invalid WMH_ENGINE: $WMH_ENGINE" >&2; exit 2 ;; esac
+for _wmh_value in "$WMH_MODEL_NAME" "$WMH_ROSE_POOL" "$WMH_EXECUTION_POLICY"; do
+    [[ "$_wmh_value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "Invalid WMH setting: $_wmh_value" >&2; exit 2; }
+done
+# Each engine serves its own donor directory: the native model is restored to
+# world-model-native so it never replaces the legacy model other workspaces serve.
+if [ -z "${CLOUDBENCH_WMH_DIR:-}" ] && [ "$WMH_ENGINE" = experiential ]; then
+    WMH_DIR="$DATA_DIR/world-model-native"
+fi
+# The native venv (and its uv-managed Python under /data/uv-python) is created on
+# the donor volume by `run-bench-cloud --refresh-wmh`; guests never install it.
+WMH_NATIVE_VENV="${CLOUDBENCH_WMH_NATIVE_VENV:-$REPO_DIR/.context/experiential-venv}"
+# End WMH selection.
 BENCH_TASKS="${BENCH_TASKS:-}"
 # The controller passes the task list base64-encoded (BENCH_TASKS_B64) so commas
 # survive the base64/exec layers verbatim; fall back to a raw BENCH_TASKS.
@@ -974,10 +1003,38 @@ fi
 log "system Postgres ready (victoria on :5432)"
 
 # ── 6. Guard the cached WMH model (simulate serves it verbatim — no R2 read) ─
-if [ "$BENCH_SIMULATE" = "1" ]; then
+# Begin cached WMH guard.
+# Prints the reason and returns 1 when the volume cannot serve WMH_ENGINE's
+# model without building or installing anything at run time.
+cloudbench_cached_wmh_problem() {
     if [ ! -f "$WMH_DIR/build.manifest.json" ] || [ ! -d "$WMH_DIR/models/$WMH_MODEL_NAME" ]; then
-        log "FATAL: no cached WMH model at $WMH_DIR/models/$WMH_MODEL_NAME"
-        log "       (expected a PRE-BUILT volume model — never build from R2 at run time)"
+        echo "no cached WMH model at $WMH_DIR/models/$WMH_MODEL_NAME"
+        return 1
+    fi
+    [ "$WMH_ENGINE" = experiential ] || return 0
+    if [ ! -f "$WMH_DIR/models/$WMH_MODEL_NAME/experiential.json" ]; then
+        echo "cached WMH model $WMH_MODEL_NAME has no native pointer models/$WMH_MODEL_NAME/experiential.json"
+        return 1
+    fi
+    if [ ! -x "$WMH_NATIVE_VENV/bin/python" ]; then
+        echo "native WMH venv is absent at $WMH_NATIVE_VENV"
+        return 1
+    fi
+    local wanted recorded
+    wanted="$(sha256sum "$REPO_DIR/agents/requirements-world-model.txt" 2>/dev/null | cut -d ' ' -f 1)"
+    recorded="$(cat "$WMH_NATIVE_VENV/requirements.sha256" 2>/dev/null || true)"
+    if [ -z "$wanted" ] || [ "$wanted" != "$recorded" ]; then
+        echo "native WMH venv at $WMH_NATIVE_VENV does not match agents/requirements-world-model.txt at this ref"
+        return 1
+    fi
+    return 0
+}
+# End cached WMH guard.
+if [ "$BENCH_SIMULATE" = "1" ]; then
+    if ! WMH_GUARD_PROBLEM="$(cloudbench_cached_wmh_problem)"; then
+        log "FATAL: $WMH_GUARD_PROBLEM (engine=$WMH_ENGINE)"
+        log "       (expected a PRE-BUILT volume model + native venv — never build or install at run time;"
+        log "        publish them with: bash scripts/run-bench-cloud --refresh-wmh)"
         finish 1
     fi
 fi
@@ -1080,6 +1137,10 @@ STACK_ENV=(
     "WMH_MODEL_NAME=$WMH_MODEL_NAME"
     "WMH_BUILD_DIR=$WMH_DIR"
     "BENCHMARK_SKIP_WMH_DELTA=1"
+    # serve_world_model selects its engine/pool/policy from these.
+    "WMH_ENGINE=$WMH_ENGINE"
+    "WMH_ROSE_POOL=$WMH_ROSE_POOL"
+    "WMH_EXECUTION_POLICY=$WMH_EXECUTION_POLICY"
     # One isolated guest runs one benchmark. A single worker still supports many
     # workflow/activity slots; eight workers per guest at fleet width exhaust
     # the shared Temporal namespace poll budget and delay stack health by minutes.
@@ -1090,6 +1151,22 @@ STACK_ENV=(
     # the Anthropic family.
     "ROSE_EXCLUDE_ANTHROPIC_FAMILY=${ROSE_EXCLUDE_ANTHROPIC_FAMILY:-}"
 )
+if [ -n "$WMH_CONTEXT_TOKENS" ]; then
+    STACK_ENV+=("WMH_CONTEXT_TOKENS=$WMH_CONTEXT_TOKENS")
+fi
+if [ "$WMH_ENGINE" = experiential ]; then
+    # Pin the guarded, pre-created interpreter: setup-world-model.sh then only
+    # validates it and never runs uv on the guest.
+    STACK_ENV+=("WMH_NATIVE_PYTHON=$WMH_NATIVE_VENV/bin/python")
+    # Native inference settings validated by the local instantiate-whm runs
+    # (.claude/skills/instantiate-whm/scripts/run-trajectory.sh).
+    STACK_ENV+=(
+        "WMH_INFERENCE_POOL=${WMH_INFERENCE_POOL:-rose-1-flash}"
+        "WMH_AZURE_FIRST=${WMH_AZURE_FIRST:-1}"
+        "WMH_EXCLUDE_FAILED_TOOL_EXAMPLES=${WMH_EXCLUDE_FAILED_TOOL_EXAMPLES:-1}"
+        "WMH_JSON_MODE=${WMH_JSON_MODE:-1}"
+    )
+fi
 if [ -n "$BENCHMARK_FAST_MODE_CACHE" ]; then
     STACK_ENV+=("BENCHMARK_FAST_MODE_CACHE=$BENCHMARK_FAST_MODE_CACHE")
 fi
@@ -1501,6 +1578,9 @@ export BENCHMARK_SEED_DUMP='$STACK_SEED_DUMP'
 # deterministic in cloud runs instead of failing closed (or using live search).
 export BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE='$CONTEXT_DIR/sms-web-search-fixture.json'
 export BENCHMARK_REQUIRE_SEED_DUMP=1
+# The runner records which engine owns each seeded WMH session.
+export WMH_ENGINE='$WMH_ENGINE'
+export WMH_MODEL_NAME='$WMH_MODEL_NAME'
 if [ -n '$BENCHMARK_FAST_MODE_CACHE' ]; then
   export BENCHMARK_FAST_MODE_CACHE='$BENCHMARK_FAST_MODE_CACHE'
 fi
