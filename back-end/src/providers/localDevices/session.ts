@@ -142,7 +142,8 @@ export async function buildLocalSessionEnvs(params: {
   };
   if (credential.credentials !== undefined) envs.CLAUDE_CODE_CREDENTIALS = credential.credentials;
   if (credential.accessToken !== undefined) envs.CLAUDE_CODE_OAUTH_TOKEN = credential.accessToken;
-  return { envs, claudeTokenSource: 'user', integrationId: null };
+  // The own login it runs on, so a usage limit marks exactly that account.
+  return { envs, claudeTokenSource: 'user', integrationId: credential.integrationId ?? null };
 }
 
 function startErrorToTarget(error: LocalSessionStartError, deviceName: string): Error {

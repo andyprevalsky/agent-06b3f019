@@ -38,8 +38,8 @@ import {
 } from './types';
 import {
   codeCredentialAvailability,
-  markCodeTaskUsageLimited,
   parseResetsAt,
+  reportCodeTaskUsageLimit,
 } from '../../providers/codeSessions/usageLimit';
 
 const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
@@ -244,9 +244,9 @@ export function registerCodeSessionTaskRoutes(router: Router): void {
         return;
       }
       const { resets_at } = codeTaskUsageLimitSchema.parse(req.body ?? {});
-      const resetsAt = parseResetsAt(resets_at);
-      const result = await markCodeTaskUsageLimited(req.params.taskId, 'claude', resetsAt);
-      res.json({ ...result, resets_at: resetsAt?.toISOString() ?? null });
+      res.json(
+        await reportCodeTaskUsageLimit(req.params.taskId, 'claude', parseResetsAt(resets_at))
+      );
     })
   );
 }

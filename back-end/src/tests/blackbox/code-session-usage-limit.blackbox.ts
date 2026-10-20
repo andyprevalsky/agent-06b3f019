@@ -37,9 +37,12 @@ import { createWithCodeSession, keepAliveCodeTask } from '../../providers/codeSe
 import { markPaused } from '../../providers/codeSessions/store';
 import {
   codeCredentialAvailability,
+  codeUsageOutlook,
   markCodeTaskUsageLimited,
   parseResetsAt,
 } from '../../providers/codeSessions/usageLimit';
+import { fetchClaudeCodeCredentialsWithMeta } from '../../providers/claudeCredentials';
+import { claudeTaskIntegrationId } from '../../providers/claudeCodeSandboxAuth';
 import { localDeviceSandboxId } from '../../providers/localDevices/hub';
 import { buildLocalSessionEnvs } from '../../providers/localDevices/session';
 
@@ -142,6 +145,12 @@ test('a usage limit rate-limits exactly the task’s token until the reset; avai
   });
   assert.equal(marked.status, 200, JSON.stringify(marked.data));
   assert.equal(marked.data.marked, `claude_pool:${first}`);
+  assert.deepEqual(marked.data.accounts, [], 'this user has no connected accounts of its own');
+  assert.deepEqual(
+    marked.data.next_lease,
+    { provider: 'claude', label: null, available_now: true, available_at: null },
+    'the respawn leases a shared Claude credential that is not limited'
+  );
   const firstRow = await prisma.integration.findUniqueOrThrow({ where: { id: first } });
   assert.equal(
     Math.floor((firstRow.rateLimitedUntil?.getTime() ?? 0) / 1000),
@@ -394,6 +403,130 @@ test('a Mac session’s usage limit marks only the user’s own login; own_only 
   });
   assert.equal(kept.alive, true);
   assert.equal(e2bCalls, 0, 'a Mac session has no E2B idle window to extend');
+});
+
+test('a limit on one own account marks only it; the answer lists every account and the next lease', async () => {
+  const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY = Buffer.from(
+    privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
+  ).toString('base64');
+  const pem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+  const owner = `code-usage-owner-${randomUUID()}`;
+  const ownerAgent = randomUUID();
+  await prisma.user.create({ data: { userId: owner, name: 'Two Claude Accounts' } });
+  await prisma.agent.create({ data: { id: ownerAgent, userId: owner, goal: 'Ship it' } });
+  const own = async (name: 'claude_code' | 'gpt_code', email: string, secret: object) => {
+    const row = await prisma.integration.create({
+      data: {
+        userId: owner,
+        type: 'TOOL_SETUP',
+        name,
+        accountId: email,
+        accountEmail: email,
+        status: 'CONNECTED',
+        isActive: true,
+        config: { encryptedCredentials: sealEnvelope(JSON.stringify(secret), pem) },
+      },
+    });
+    createdIntegrations.push(row.id);
+    return row;
+  };
+  const oauth = (token: string) => ({
+    claudeAiOauth: {
+      accessToken: `sk-ant-oat01-${token}`,
+      refreshToken: `refresh-${token}`,
+      expiresAt: Date.now() + 60 * 60 * 1000,
+    },
+  });
+  const personal = await own('claude_code', 'me@example.com', oauth('personal'));
+  const work = await own('claude_code', 'work@example.com', oauth('work'));
+  const codex = await own('gpt_code', 'codex@example.com', {
+    auth_mode: 'chatgpt',
+    tokens: { access_token: 'codex-access', refresh_token: 'codex-refresh', account_id: 'c1' },
+  });
+  try {
+    const leased = await fetchClaudeCodeCredentialsWithMeta(owner);
+    assert.equal(leased?.source, 'user');
+    const used = claudeTaskIntegrationId(leased);
+    assert.ok(used === personal.id || used === work.id, 'the task records its own account');
+    const spare = used === personal.id ? work : personal;
+    const usedEmail = used === personal.id ? personal.accountEmail : work.accountEmail;
+    const limitedTask = await prisma.claudeCodeSession.create({
+      data: {
+        agentId: ownerAgent,
+        sandboxId: `sb-${randomUUID()}`,
+        goal: 'g',
+        claudeTokenSource: 'user',
+        claudeTokenIntegrationId: used,
+      },
+    });
+    const resetsAt = new Date(Date.now() + 4 * 60 * 60 * 1000);
+    const report = await http('POST', `/api/claude-code-session/${limitedTask.id}/usage-limit`, {
+      resets_at: resetsAt.toISOString(),
+    });
+    assert.equal(report.status, 200, JSON.stringify(report.data));
+    assert.deepEqual(report.data.accounts, [
+      {
+        provider: 'claude',
+        label: 'me@example.com',
+        ...(used === personal.id
+          ? { status: 'limited', limited_until: resetsAt.toISOString(), this_run: true }
+          : { status: 'available', limited_until: null, this_run: false }),
+      },
+      {
+        provider: 'claude',
+        label: 'work@example.com',
+        ...(used === work.id
+          ? { status: 'limited', limited_until: resetsAt.toISOString(), this_run: true }
+          : { status: 'available', limited_until: null, this_run: false }),
+      },
+      {
+        provider: 'codex',
+        label: 'codex@example.com',
+        status: 'available',
+        limited_until: null,
+        this_run: false,
+      },
+    ]);
+    assert.deepEqual(
+      report.data.next_lease,
+      {
+        provider: 'claude',
+        label: spare.accountEmail,
+        available_now: true,
+        available_at: null,
+      },
+      `the respawn stays on Claude with the account that is not limited (${usedEmail} is)`
+    );
+    const spareRow = await prisma.integration.findUniqueOrThrow({ where: { id: spare.id } });
+    assert.equal(spareRow.rateLimitedUntil, null, 'only the account the run used is limited');
+    const respawn = await fetchClaudeCodeCredentialsWithMeta(owner);
+    assert.equal(
+      claudeTaskIntegrationId(respawn),
+      spare.id,
+      'the respawn leases the spare account'
+    );
+
+    // Every own login limited: the outlook names the earliest reset (own logins only).
+    const later = new Date(Date.now() + 6 * 60 * 60 * 1000);
+    const soonest = new Date(Date.now() + 2 * 60 * 60 * 1000);
+    await prisma.integration.update({ where: { id: spare.id }, data: { rateLimitedUntil: later } });
+    await prisma.integration.update({
+      where: { id: codex.id },
+      data: { rateLimitedUntil: soonest },
+    });
+    const blocked = await codeUsageOutlook(owner, { prefer: 'claude', ownOnly: true });
+    assert.deepEqual(blocked.next_lease, {
+      provider: 'codex',
+      label: 'codex@example.com',
+      available_now: false,
+      available_at: soonest.toISOString(),
+    });
+  } finally {
+    await prisma.claudeCodeSession.deleteMany({ where: { agentId: ownerAgent } });
+    await prisma.agent.deleteMany({ where: { id: ownerAgent } });
+    await prisma.user.deleteMany({ where: { userId: owner } });
+  }
 });
 
 async function http(method: string, path: string, body?: unknown) {
