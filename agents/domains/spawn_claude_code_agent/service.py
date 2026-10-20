@@ -294,6 +294,14 @@ def format_code_events_transcript(
                 lines.append(f"[{provider} result] {text.strip()[:800]}")
             continue
 
+        if event_type == "user_turn":
+            # Direct chat: the user (or another agent) typed to this CLI.
+            text = event.get("text")
+            who = "Agent" if event.get("sender") == "agent" else "User"
+            if isinstance(text, str) and text.strip():
+                lines.append(f"[{who} → {provider}] {text.strip()}")
+            continue
+
     summary_lines = [str(item).strip() for item in (action_summary or []) if str(item).strip()]
     if summary_lines:
         if lines:
@@ -849,6 +857,17 @@ async def _run_agentic_loop(
     # grace backstop ends the monitor if the CLI never exits.
     sdk_result_at: float | None = None
     logged_events = int((code_session or {}).get("logged_events") or 0)
+    # Direct chat: while the user holds the session (ws-server `direct_chat`
+    # held → released), the user's turns drive the CLI. The monitor must not
+    # end the session on post-result grace / SDK idle, and never writes to
+    # stdin, so no parent instruction competes with the user.
+    direct_chat_active = False
+    # Every delivered user turn (direct chat or an agent-graph message) adds
+    # one more SDK `result` before the CLI is done: a message that arrives
+    # mid-run makes the first result an intermediate one, so the post-result
+    # exit grace arms only once results catch up with turns.
+    user_turns_seen = 0
+    sdk_results_seen = 0
 
     def _mark_terminal_output_persisted() -> None:
         if terminal_output_persisted is not None:
@@ -894,7 +913,11 @@ async def _run_agentic_loop(
         # The ws-server resends its whole history on every (re)connect, so it
         # replaces everything seen so far instead of appending to it.
         nonlocal completed_codex_turns, effective_idle_timeout_s, wait_tool_armed, in_flight_tool_count
+        nonlocal direct_chat_active, user_turns_seen, sdk_results_seen
         code_events.clear()
+        direct_chat_active = False
+        user_turns_seen = 0
+        sdk_results_seen = 0
         completed_codex_turn_keys.clear()
         completed_codex_turns = 0
         in_flight_tool_count = 0
@@ -909,8 +932,19 @@ async def _run_agentic_loop(
     async def on_event(event: dict[str, Any]) -> None:
         nonlocal completed_codex_turns, last_output_time, effective_idle_timeout_s
         nonlocal wait_tool_armed, in_flight_tool_count, sdk_result_at, logged_events
+        nonlocal direct_chat_active, user_turns_seen, sdk_results_seen
         last_output_time = safe_time()
         code_events.append(event)
+        if event.get("type") == "direct_chat":
+            direct_chat_active = event.get("status") == "held"
+            if not direct_chat_active and sdk_result_at is not None:
+                # Released after a finished turn: the CLI is told to exit now,
+                # so restart the post-result grace from the hand back.
+                sdk_result_at = safe_time()
+        elif event.get("type") == "user_turn":
+            # A new turn: the next SDK result belongs to it.
+            user_turns_seen += 1
+            sdk_result_at = None
         if is_codex_completed_turn_event(event):
             key = codex_completed_turn_event_key(event, len(code_events) - 1)
             if key not in completed_codex_turn_keys:
@@ -991,7 +1025,8 @@ async def _run_agentic_loop(
             # result is reaped on the short idle window, not 900s. Record the
             # first result time for the exit-grace backstop (r31 a2/a3).
             wait_tool_armed = False
-            if sdk_result_at is None:
+            sdk_results_seen += 1
+            if sdk_result_at is None and sdk_results_seen > user_turns_seen:
                 sdk_result_at = safe_time()
                 logger.info(
                     "[ClaudeCode] SDK result observed; arming post-result exit grace",
@@ -1072,6 +1107,7 @@ async def _run_agentic_loop(
             if (
                 sdk_result_at is not None
                 and exit_code is None
+                and not direct_chat_active
                 and (safe_time() - sdk_result_at) >= SDK_POST_RESULT_EXIT_GRACE_S
             ):
                 grace_elapsed = safe_time() - sdk_result_at
@@ -1102,6 +1138,7 @@ async def _run_agentic_loop(
                 and not pending_output
                 and ws_connected
                 and exit_code is None
+                and not direct_chat_active
             ):
                 logger.warning(
                     "[ClaudeCode] SDK idle timeout waiting for exit",
@@ -1116,6 +1153,8 @@ async def _run_agentic_loop(
                 break
 
             if silence_duration >= SILENCE_TIMEOUT_S and pending_output and ws_connected:
+                # (The parent-LLM relay below is unreachable: every branch
+                # `continue`s before it. Direct chat also never reaches it.)
                 filtered_output = terminal.get_display()
                 pending_output = False
 

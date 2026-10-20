@@ -3913,6 +3913,10 @@ async def _run_all_tests():
         test_claude_code_retry_after_worker_crash_reattaches_from_heartbeat,
     )
     await r.record_async(
+        "cc_agent_message_delivered_once_and_answered",
+        test_agent_message_to_running_code_agent_is_delivered_once_and_answered,
+    )
+    await r.record_async(
         "cc_unreachable_session_closed_before_fresh_start",
         test_claude_code_unreachable_session_is_closed_before_a_fresh_start,
     )
@@ -4117,12 +4121,23 @@ import os
 import sys
 import time
 
-sys.stdin.read()
+# stream-json input: one JSON user message per line. The ws-server keeps
+# stdin open until every written turn has its result, then closes it.
 gate = os.environ["STUB_CLAUDE_GATE"]
 
 
 def emit(message):
     print(json.dumps(message), flush=True)
+
+
+def record(line):
+    text = "".join(part.get("text", "") for part in json.loads(line)["message"]["content"])
+    with open(os.path.join(gate, "turns.jsonl"), "a") as turns:
+        turns.write(json.dumps({"text": text}) + "\n")
+    return text
+
+
+record(sys.stdin.readline())
 
 
 def wait_for(name):
@@ -4137,6 +4152,15 @@ wait_for("continue")
 emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "step 2: finished answer.txt"}]}})
 wait_for("exit")
 emit({"type": "result", "subtype": "success", "result": "answer is 42", "usage": {}})
+# Later turns (direct chat / agent-graph messages): answer each, exit on EOF.
+while True:
+    line = sys.stdin.readline()
+    if not line:
+        break
+    text = record(line)
+    time.sleep(float(os.environ.get("STUB_CLAUDE_TURN_DELAY_S", "0")))
+    emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "ack: " + text[-60:]}]}})
+    emit({"type": "result", "subtype": "success", "result": "turn answered", "usage": {}})
 """
 
 _CC_STEP_TEXTS = ["step 1: drafted half of answer.txt", "step 2: finished answer.txt"]
@@ -4157,7 +4181,8 @@ class _LocalCodeSandbox:
     The CLI blocks on gate files so the test decides when it continues/exits.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, extra_env: dict[str, str] | None = None) -> None:
+        self._extra_env = dict(extra_env or {})
         self._tmp = Path(tempfile.mkdtemp(prefix="cc-sandbox-"))
         self.port = _free_port()
         self.ws_url = f"ws://127.0.0.1:{self.port}"
@@ -4183,6 +4208,7 @@ class _LocalCodeSandbox:
             "CLAUDE_CODE_GOAL": "Write answer.txt with the answer",
             "ANTHROPIC_API_KEY": "stub-key",
             "STUB_CLAUDE_GATE": str(self._tmp),
+            **self._extra_env,
         }
         with self._log_path.open("w") as log:
             self._process = subprocess.Popen(
@@ -4212,6 +4238,13 @@ class _LocalCodeSandbox:
                 return
             await asyncio.sleep(0.05)
         raise AssertionError(f"ws-server never logged {needle!r}:\n{self.log()}")
+
+    def turns(self) -> list[str]:
+        """Every user turn the scripted CLI read from stdin, in order."""
+        path = self._tmp / "turns.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line)["text"] for line in path.read_text().splitlines() if line.strip()]
 
     @property
     def cli_script(self) -> Path:
@@ -4443,6 +4476,70 @@ async def test_claude_code_detaches_on_worker_drain_and_reattaches_same_sandbox(
         assert recorder.titles.count("Claude Code Started") == 1, recorder.titles
         assert [call["task_id"] for call in recorder.closed] == ["cc-task-1"], recorder.closed
         assert recorder.persisted and all(text in recorder.persisted[-1] for text in _CC_STEP_TEXTS), recorder.persisted
+    finally:
+        sandbox.stop()
+
+
+async def test_agent_message_to_running_code_agent_is_delivered_once_and_answered():
+    """Root → running code agent (C6): one CLI user turn across a retried send.
+
+    The message arrives mid-run, before the task's first `result`. The
+    ws-server must hold stdin open until that turn is answered, the retried
+    delivery (same turn id, as a Temporal retry of the sending activity) must
+    not write a second turn, and the monitor must not take the task's result
+    as the end of the session: with a short post-result grace, ending on the
+    first result would drop the agent turn's answer.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+    from helpers.agent_graph import a2a_message_id
+    from helpers.code_session_turns import code_session_turn_token, deliver_user_turn_to_code_session
+
+    secret = "a2a-blackbox-secret"
+    token = code_session_turn_token("cc-task-1", secret=secret)
+    sandbox = _LocalCodeSandbox({"CODE_SESSION_TURN_TOKEN": token, "STUB_CLAUDE_TURN_DELAY_S": "1.0"})
+    await sandbox.start()
+    recorder = _CCBoundaryRecorder(sandbox.ws_url)
+    try:
+        with recorder.patched(), patch.object(service, "SDK_POST_RESULT_EXIT_GRACE_S", 0.3):
+            beats: list = []
+            env = ActivityEnvironment()
+            env.on_heartbeat = lambda *details: beats.append(details)
+            run = asyncio.create_task(env.run(service.spawn_claude_code_activity, *_cc_activity_args()))
+            await _wait_for_heartbeat(beats, lambda b: b[0] == "Processing Claude Code output", "a sandbox message")
+
+            turn_id = a2a_message_id("wf-root", "tc-send-1")
+            text = "[Message from Root agent, agent_id root-1.] Use port 4242."
+            first = await deliver_user_turn_to_code_session(
+                sandbox.ws_url, task_id="cc-task-1", text=text, turn_id=turn_id, sender="agent", token=token
+            )
+            retried = await deliver_user_turn_to_code_session(
+                sandbox.ws_url, task_id="cc-task-1", text=text, turn_id=turn_id, sender="agent", token=token
+            )
+            assert first.status == "delivered", first
+            assert retried.status == "duplicate", retried
+
+            sandbox.release("continue")
+            sandbox.release("exit")
+            outcome = await asyncio.wait_for(run, timeout=30)
+
+        assert outcome["status"] == "completed" and outcome["success"] is True, outcome
+        turns = sandbox.turns()
+        assert turns[0].startswith("Task:\n"), turns
+        assert turns[1:] == [text], f"the CLI must read the agent turn exactly once, read {turns}"
+        events = recorder.verified_events[0]
+        user_turns = [event for event in events if event.get("type") == "user_turn"]
+        assert [(event.get("turn_id"), event.get("sender")) for event in user_turns] == [(turn_id, "agent")], user_turns
+        results = [event.get("text") for event in events if event.get("type") == "result"]
+        assert results == ["answer is 42", "turn answered"], f"the monitor ended before the agent turn: {results}"
+        finals = [event for event in events if event.get("type") == "final"]
+        assert len(finals) == 1 and finals[0].get("exit_code") == 0, finals
+        assert not any(
+            event.get("type") == "direct_chat" for event in events
+        ), "an agent message must not take the user's direct-chat hold"
+        transcript = service.format_code_events_transcript(events)
+        assert f"[Agent → Claude] {text}" in transcript, transcript
     finally:
         sandbox.stop()
 
