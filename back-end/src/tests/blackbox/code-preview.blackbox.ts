@@ -257,22 +257,22 @@ test('code-agent prompt: Rose-in-Rose shipping rule + apps-preview skill only fo
     roseDesktop: true,
   });
   assert.match(rose, /^- apps-preview: Use /m, 'the table of contents lists apps-preview');
-  assert.match(rose, /is Rose itself/);
+  assert.match(rose, /^- The checkout in ~\/workspace is Rose itself\./m);
   assert.match(rose, /pull request \(`gh pr create`\)/i);
   assert.match(rose, /never merge/i);
   assert.match(rose, /\/deploy/);
   const plain = buildCodeAgentSystemPrompt({
     githubRepoUrl: 'https://github.com/Rose-Ai-Labs/rose',
   });
-  assert.doesNotMatch(plain, /rose-preview|apps-preview|is Rose itself/, 'non-dev accounts');
+  assert.doesNotMatch(plain, /rose-preview|apps-preview|Rose itself/, 'non-dev accounts');
   const devOtherRepo = buildCodeAgentSystemPrompt({
     githubRepoUrl: 'https://github.com/someone/app',
     roseDesktop: true,
   });
   assert.match(devOtherRepo, /^- apps-preview: Use /m);
-  assert.doesNotMatch(devOtherRepo, /is Rose itself/);
+  assert.doesNotMatch(devOtherRepo, /^Rose itself:$/m);
   const project = buildCodeAgentSystemPrompt({ roseDesktop: true, roseRepo: true });
-  assert.match(project, /is Rose itself/, 'a Rose project session (no github url) gets the rule');
+  assert.match(project, /^Rose itself:$/m, 'a Rose project session (no github url) gets the rule');
 
   // How to preview and publish is the apps-preview skill (C17), installed for dev accounts only.
   const skill = installedRoseSkills(true).find((entry) => entry.name === 'apps-preview');

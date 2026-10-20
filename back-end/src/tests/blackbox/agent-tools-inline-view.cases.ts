@@ -64,7 +64,11 @@ export const inlineViewPublishCases: BlackboxTest[] = [
           [join(home, '.rose/bin/rose-ui'), 'pull', uiDir],
           { env }
         );
-        assert(/pulled published version /.test(pulled.stdout), `rose-ui pull: ${pulled.stdout}`);
+        // userB's bundle: its published version, or the starting bundle before any publish.
+        assert(
+          /pulled published version |wrote the starting bundle/.test(pulled.stdout),
+          `rose-ui pull: ${pulled.stdout}`
+        );
         const manifestPath = join(uiDir, 'rose-ui.json');
         const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
           inline?: Record<string, unknown>;
