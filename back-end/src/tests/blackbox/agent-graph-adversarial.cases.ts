@@ -38,8 +38,6 @@ import {
   a2aRowsFrom,
   a2aRowCount,
   awaitingParent,
-  seedAdversarial,
-  cleanupAdversarial,
   cliHome,
   cliEnv,
   runCli,
