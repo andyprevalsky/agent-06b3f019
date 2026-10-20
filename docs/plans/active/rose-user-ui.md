@@ -105,7 +105,7 @@ Status: `done` (merged + verified in a recording), `building`, `queued`,
 | 63 | Account row (bottom-left): signed-in = the **first letter of the user's name as a cursive capital** (Pinyon Script, self-hosted OFL font; ~27px, current text color, no circle/wrapper); signed-out/anon = the existing member (user) icon | spec'd, live in nav.js |
 | 64 | Agent rows use **only the supported run-state glyphs** (existing AgentStatusIndicator / CompactRow): running = bare Bot glyph (expanded: the existing ROSE dot-matrix), needs your input/question = amber alert, done = muted check, failed = muted red ✕. No custom colored dots | spec'd, live in nav.js |
 | 65 | Dark mode covers **every** surface: right panels, Settings, project settings, context menus, tooltips, code-agent chips, scorecards, the pinned question card, bars and query box (panel bg #262624, raised #2f2f2c, text #ecece8, muted #a3a39d, borders rgba(255,255,255,.09), dark icons lightened). Implement with Tailwind `dark:` tokens on each component (mock uses panels/_darkify.js only as a stand-in) | spec'd, live in mock |
-| 66 | **No right bar.** In the app (flag on), the 4 app icons — Browser, Phone, Integrations, Dark mode toggle — sit bare along the **top-right** (no bar/background, 34px hit targets, tooltips on hover). Research / Careers / Download are removed in the app. The signed-out **website** keeps Research / Careers / Download and shows no app icons. Feedback (all users) and Benchmarks (admin) move to the bottom of the left bar above Archived. Right panels and Settings open flush against the window's right edge starting below the icon row (top 56px, top-left radius 12px); Browser is full screen from the left bar to the right edge below the icons; Phone floats 24px from the right edge, vertically centered | spec'd, live in nav.js (supersedes right-bar rows 20/33/56/58/59 placement) |
+| 66 | **No right bar.** In the app (flag on), the 4 app icons — Browser, Phone, Integrations, Dark mode toggle — sit bare along the **top-right** (no bar/background, 34px hit targets, tooltips on hover). Research / Careers / Download are removed in the app. The signed-out **website** keeps Research / Careers / Download and shows no app icons. Feedback (all users) and Benchmarks (admin) move to the bottom of the left bar above Archived. Right panels and Settings open flush against the window's right edge starting below the icon row (top 56px, top-left radius 12px); Browser is full screen from the left bar to the right edge below the icons; Phone floats 24px from the right edge, vertically centered, and nothing behind it: no background between or around the iPhone and its Take control button | spec'd, live in nav.js (supersedes right-bar rows 20/33/56/58/59 placement) |
 | 67 | Top-right app icons open **full-height** drawers (top 0, flush right edge); the icon row floats over the drawer's top-right; clicking the active icon closes it (panels have no own ✕). Settings behaves the same | spec'd, live in nav.js |
 | 68 | Integrations icon shows a small **red dot** when any integration needs reconnection (tooltip names it) | spec'd, live in nav.js |
 | 69 | Admin item is **Biz health** (existing features/admin-health page in the right drawer), not Benchmarks | spec'd, live in nav.js + panels/bizhealth.js |
@@ -127,6 +127,21 @@ Status: `done` (merged + verified in a recording), `building`, `queued`,
 | 41 | Anything coding-based is routed to a code agent (root delegates; it doesn't code itself) | spec'd → coding thread (harness; approval at /deploy) |
 | 42 | **All of this ships behind one feature flag, on only for Andy's account** (user 1f85ff25-6e29-4c1b-8739-f917bd101a30, root devbox); everyone else sees today's UI | spec'd → coding thread |
 | 36 | Every right-bar tab opens a working panel flush to the bar (mock reference: `.context/rose-app-builder-mock/panels/*.js`) | mocks done (11 panels) |
+
+### UI ledger owners (audit 2026-10-20)
+
+Every ask from Andy in the UI-agent and coding threads, mapped to an owner. FE-n = UI-agent front-end workers (merged by the UI agent into one SHA for the coding thread); L-* / C* = coding-thread lanes (rose-builds-rose.md).
+
+| Owner | Rows | State |
+|---|---|---|
+| FE-1 goals / media / chrome | 11-12, 13 (renderer), 14, 15, 24, 55, 66 (Download removal) | rows 11-55 done at 43609f27a (suite green); 24 + Download in progress |
+| FE-2 query box | 23, 31, 32, 40, 43, 53 (dark-only glass send) | in progress |
+| FE-3 nav / drawers / settings | 17-22, 29, 30, 37, 57-61, 63-71, 73, 74, phone float | in progress |
+| FE-4 theme / background | 25, 34 (fade 80%, FE half), 52, 62, 71 (dark check is FE-3), 72 | in progress |
+| FE-5 code-agent steering UI | 44, 45, 46 (render), 47 (picker), 51 (target label + error texts) | in progress, proposed contract until backend lands |
+| Coding thread | 3/A6 root browser world state, 10 + 39 Apps / Rose-in-Rose / local preview URLs (L-APPS), 12 A2A (C6), 13 display tool (A5), 34 backend default, 37 backend new-agent-in-branch, 41 + C12 routing prompts, 46-47b in-sandbox tools + routing by spawner, 48 no timeouts (C11), 50 branch model (C13), 51 local target (C14), 54 HTML+JS (done a151a214c), Phone backend, Projects REST + Agent.projectId | lanes running / queued |
+| UI agent | real recordings (rerun after C12/row-41 merge), integration merge of FE-1..5, live mock | ongoing |
+| Dropped by Andy | Voice, Terminal app, Network app, Files app, right bar, pinned Import pill, liquid-black send (light), two-triangle dark bg | — |
 
 ### Per-user scoping (hard invariant)
 
