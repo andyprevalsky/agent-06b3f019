@@ -37,6 +37,15 @@ import {
   syncAgentIdOf,
 } from './service.linkedinRun';
 import { toWireAccountId, type AccountsByProvider } from './syncAccountsContract';
+import {
+  LinkedInPhaseError,
+  LinkedInRunRequiredError,
+  LinkedInSyncAgentNotFoundError,
+  LinkedInSyncAlreadyRunningError,
+  LinkedInSyncNotFoundError,
+} from './linkedinSyncErrors';
+
+export * from './linkedinSyncErrors';
 
 export const LINKEDIN_INTEGRATION_NAME = LINKEDIN_PROVIDER;
 
@@ -62,40 +71,6 @@ function canStillUpload(agent: AgentLifecycle | null, now: number): boolean {
     agent.temporalWorkflowId !== null ||
     now - agent.createdAt.getTime() < LINKEDIN_SYNC_START_GRACE_MS
   );
-}
-
-export class LinkedInSyncAlreadyRunningError extends Error {
-  constructor(public readonly agentId: string) {
-    super(`LinkedIn sync already running with agent ${agentId}`);
-    this.name = 'LinkedInSyncAlreadyRunningError';
-  }
-}
-
-export class LinkedInSyncAgentNotFoundError extends Error {
-  constructor(agentId: string) {
-    super(`Agent ${agentId} not found`);
-    this.name = 'LinkedInSyncAgentNotFoundError';
-  }
-}
-
-/** No LinkedIn run of this user belongs to the reporting agent. */
-export class LinkedInSyncNotFoundError extends Error {
-  constructor(agentId: string) {
-    super(`No LinkedIn sync is recorded for agent ${agentId}`);
-    this.name = 'LinkedInSyncNotFoundError';
-  }
-}
-
-export type LinkedInPhaseErrorCode = 'PHASE_OUT_OF_ORDER' | 'SYNC_FINISHED' | 'UPLOAD_IN_PROGRESS';
-
-export class LinkedInPhaseError extends Error {
-  constructor(
-    public readonly code: LinkedInPhaseErrorCode,
-    public readonly current: LinkedInPhase
-  ) {
-    super(`LinkedIn sync is at ${current}; that report is not accepted (${code})`);
-    this.name = 'LinkedInPhaseError';
-  }
 }
 
 /** True while another live export agent owns the row's run. */
@@ -220,15 +195,43 @@ async function moveRun(
   return { row, state: moved };
 }
 
+/**
+ * The run a report is about: the reporting agent's run when it sends its id;
+ * otherwise the user's one live export run (or the live run on the named
+ * account), since an agent does not always know its own id.
+ */
+function findReportedRun(rows: repo.LinkedInRow[], report: LinkedInPhaseReport) {
+  if (report.agent_id !== undefined) {
+    const runId = agentRunId(report.agent_id);
+    const row = rows.find((r) => runStateOf(r.config)?.runId === runId);
+    if (row === undefined) throw new LinkedInSyncNotFoundError(report.agent_id);
+    return row;
+  }
+  const live = rows.filter((r) => {
+    const state = runStateOf(r.config);
+    return (
+      r.status === IntegrationStatus.SYNCING &&
+      state !== null &&
+      state.agentId !== null &&
+      isAgentPhase(state.phase)
+    );
+  });
+  const named =
+    report.account_id === undefined ? null : normalizeLinkedInAccountId(report.account_id);
+  const onAccount = live.find((r) => r.accountId === named);
+  if (onAccount !== undefined) return onAccount;
+  if (live.length === 1) return live[0];
+  if (live.length === 0) throw new LinkedInSyncNotFoundError(null);
+  throw new LinkedInRunRequiredError(live.map((r) => toWireAccountId(r.accountId)));
+}
+
 /** Apply one export-agent report (export_requested, waiting_for_export or failed). */
 export async function reportLinkedInAgentPhase(userId: string, report: LinkedInPhaseReport) {
   const now = new Date();
-  const runId = agentRunId(report.agent_id);
   const result = await repo.withLinkedInLock(userId, async (tx) => {
-    const rows = await repo.listAccountRows(tx, userId);
-    let row = rows.find((r) => runStateOf(r.config)?.runId === runId);
-    let current = row === undefined ? null : runStateOf(row.config);
-    if (row === undefined || current === null) throw new LinkedInSyncNotFoundError(report.agent_id);
+    let row = findReportedRun(await repo.listAccountRows(tx, userId), report);
+    let current = runStateOf(row.config);
+    if (current === null) throw new LinkedInSyncNotFoundError(report.agent_id ?? null);
     if (judgeReport(current, report) === 'replay') return { row, state: current };
     if (report.account_id !== undefined) {
       const target = normalizeLinkedInAccountId(report.account_id);
@@ -262,7 +265,7 @@ export async function reportLinkedInAgentPhase(userId: string, report: LinkedInP
   const outcome = await mirrorAgentPhase(userId, result.row.accountId, result.state, now);
   return {
     account_id: toWireAccountId(result.row.accountId),
-    run_id: runId,
+    run_id: result.state.runId,
     phase: result.state.phase,
     progress: outcome.snapshot.progress,
   };

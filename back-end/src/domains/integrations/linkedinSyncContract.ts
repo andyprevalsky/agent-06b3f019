@@ -84,7 +84,8 @@ export const AGENT_REPORTED_PHASES = ['export_requested', 'waiting_for_export', 
 /** Body of POST /api/integrations/linkedin/sync/phase (sent by the export agent). */
 export const linkedinPhaseReportSchema = z
   .object({
-    agent_id: z.string().trim().min(1).max(128),
+    /** The reporting export agent; omitted = the user's one live export run. */
+    agent_id: z.string().trim().min(1).max(128).optional(),
     phase: z.enum(AGENT_REPORTED_PHASES),
     /** The LinkedIn account the browser is signed into (member URN, profile id or /in/ URL). */
     account_id: z.string().trim().min(1).max(MAX_ACCOUNT_ID_LENGTH).optional(),

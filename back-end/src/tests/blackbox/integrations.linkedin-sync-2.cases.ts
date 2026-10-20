@@ -166,11 +166,10 @@ export async function testLinkedinPhases_expiredExportEndsFailed() {
   const agentId = await createAgent(userId);
   try {
     assertStatus((await startSync(token, agentId)).status, 200, null);
-    assertStatus(
-      (await reportPhase(token, { agent_id: agentId, phase: 'export_requested' })).status,
-      200,
-      null
-    );
+    // An agent that does not know its own id reports against the one live run.
+    const requested = await reportPhase(token, { phase: 'export_requested' });
+    assertStatus(requested.status, 200, requested.data);
+    assert((requested.data as { run_id?: string }).run_id === `li-agent-${agentId}`, 'its run');
     const noError = await reportPhase(token, { agent_id: agentId, phase: 'failed' });
     assertStatus(noError.status, 400, noError.data);
     const reason = 'The LinkedIn archive download link expired';
@@ -293,7 +292,13 @@ export async function testLinkedinAccounts_twoAccountsSyncIndependentlyAndDelete
     assertStatus((await startSync(token, agentA, a)).status, 200, null);
     const second = await startSync(token, agentB, 'https://www.linkedin.com/in/Jane-Doe-2002');
     assertStatus(second.status, 200, second.data);
-    await reportPhase(token, { agent_id: agentA, phase: 'export_requested' });
+    const ambiguous = await reportPhase(token, { phase: 'export_requested' });
+    assertStatus(ambiguous.status, 400, ambiguous.data);
+    const runs = ambiguous.data as { error?: string; accounts?: string[] };
+    assert(runs.error === 'RUN_REQUIRED', `two live runs need a key, got ${runs.error}`);
+    assert(runs.accounts?.sort().join() === [a, b].sort().join(), 'both runs named');
+    const byAccount = await reportPhase(token, { phase: 'export_requested', account_id: a });
+    assertStatus(byAccount.status, 200, byAccount.data);
     let accounts = (await listed(token)).accounts;
     assert(accounts.length === 2, `two accounts listed, got ${accounts.length}`);
     const phaseOf = (id: string) => accounts.find((x) => x.accountId === id)?.progress.phase;

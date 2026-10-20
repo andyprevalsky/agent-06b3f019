@@ -34,6 +34,10 @@ function sendKnownError(error: unknown, res: Response): boolean {
     res.status(400).json({ error: error.errors[0]?.message ?? 'Invalid LinkedIn report' });
   } else if (error instanceof InvalidAccountKeyError) {
     res.status(400).json({ error: error.message });
+  } else if (error instanceof service.LinkedInRunRequiredError) {
+    res
+      .status(400)
+      .json({ error: 'RUN_REQUIRED', message: error.message, accounts: error.accounts });
   } else if (error instanceof importer.LinkedInUploadAccountRequiredError) {
     res
       .status(400)
