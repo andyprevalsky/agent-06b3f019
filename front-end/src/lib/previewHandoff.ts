@@ -45,7 +45,11 @@ export function takePreviewHandoffCode(): string | null {
   fragment.delete(PREVIEW_HANDOFF_FRAGMENT);
   const rest = fragment.toString();
   const { pathname, search } = window.location;
-  window.history.replaceState(window.history.state, '', `${pathname}${search}${rest ? `#${rest}` : ''}`);
+  window.history.replaceState(
+    window.history.state,
+    '',
+    `${pathname}${search}${rest ? `#${rest}` : ''}`,
+  );
   return code === '' ? null : code;
 }
 
