@@ -1,0 +1,157 @@
+/**
+ * DOM contract: Steel live view is clipped to the 1280x800 content viewport.
+ * Fails when the iframe is 16:9, framed as the 1288x891 chrome window, or
+ * when a thumbnail is framed as 1440x900.
+ */
+import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { screen } from '@testing-library/react';
+import { renderWithProviders as renderWithFlaggedProviders } from './test-wrapper';
+
+const mobileState = vi.hoisted(() => ({ value: false }));
+vi.mock('@/hooks/use-mobile', () => ({
+  useIsMobile: () => mobileState.value,
+}));
+vi.mock('@/features/terminal-component-group/components/MessageList', () => ({
+  MessageList: () => <div data-testid="message-list" />,
+}));
+vi.mock('@/features/terminal-component-group/components/BrowserBorderGlow', () => ({
+  default: () => null,
+}));
+vi.mock('@/features/terminal-component-group/components/BrowserCursorOverlay', () => ({
+  default: () => null,
+}));
+
+import { BrowserStatusBarFullscreen } from '@/features/terminal-component-group/components/browser-status-bar/legacy/BrowserStatusBarFullscreen';
+import { BrowserStatusBarExpanded } from '@/features/terminal-component-group/components/browser-status-bar/BrowserStatusBarExpanded';
+import { LiveViewFrame } from '@/features/terminal-component-group/components/browser-status-bar/BrowserLiveViewFrame';
+import {
+  LIVE_VIEW_CONTENT_VIEWPORT,
+  STEEL_LIVE_VIEW_WINDOW,
+  steelLiveViewIframeCropStyle,
+} from '@/features/terminal-component-group/components/browser-status-bar/liveViewDisplay';
+
+/** Stock UI (Rose Desktop flag off): accounts without the flag keep the pre–Rose Desktop browser and toolbar. */
+const renderWithProviders: typeof renderWithFlaggedProviders = (ui, options) =>
+  renderWithFlaggedProviders(ui, { ...options, roseDesktop: false });
+
+const STEEL_PLAYER =
+  'https://connect.steel.dev/v1/sessions/ef622b64-21ae-49c3-862b-b615e4ba9e52/player?interactive=false';
+const BROWSER_USE_PLAYER = 'https://live.browser-use.com/session/browser-use-test';
+
+function fullscreenProps() {
+  return {
+    agentId: 'agent-1',
+    taskId: 't1',
+    browserUrl: STEEL_PLAYER,
+    messages: [],
+    outputSchema: undefined,
+    browserSessionMetadata: null,
+    stepProgress: null,
+    isDisconnected: false,
+    isWaitingForAuthAssistance: false,
+    isResuming: false,
+    isUserControlling: false,
+    pendingWriteLockApproval: null,
+    onClose: vi.fn(),
+    onResume: vi.fn(),
+  };
+}
+
+function expectSteelContentClip(stream: HTMLElement, iframe: HTMLElement) {
+  const crop = steelLiveViewIframeCropStyle();
+  expect(stream).toHaveClass('overflow-hidden');
+  expect(stream).toHaveStyle({
+    aspectRatio: `${LIVE_VIEW_CONTENT_VIEWPORT.width} / ${LIVE_VIEW_CONTENT_VIEWPORT.height}`,
+  });
+  expect(stream).not.toHaveStyle({
+    aspectRatio: `${STEEL_LIVE_VIEW_WINDOW.width} / ${STEEL_LIVE_VIEW_WINDOW.height}`,
+  });
+  expect(iframe).toHaveStyle({
+    width: crop.width,
+    height: crop.height,
+    left: crop.left,
+    top: crop.top,
+    transformOrigin: crop.transformOrigin,
+    transform: crop.transform,
+  });
+}
+
+describe('live-view iframe containment', () => {
+  beforeEach(() => {
+    mobileState.value = false;
+  });
+
+  it('crops desktop fullscreen Steel chrome and does not resize the remote viewport', () => {
+    renderWithProviders(<BrowserStatusBarFullscreen {...fullscreenProps()} />);
+
+    const iframe = screen.getByTitle('Browser');
+    const pane = screen.getByTestId('live-view-pane');
+    const stream = screen.getByTestId('live-view-stream');
+    expect(pane).toHaveClass('overflow-hidden');
+    expectSteelContentClip(stream, iframe);
+  });
+
+  it('enables the fullscreen Browser Use viewer only during user control', () => {
+    const props = { ...fullscreenProps(), browserUrl: BROWSER_USE_PLAYER };
+    const { rerender } = renderWithProviders(<BrowserStatusBarFullscreen {...props} />);
+    expect(screen.getByTitle('Browser')).toHaveAttribute('inert');
+
+    rerender(<BrowserStatusBarFullscreen {...props} isUserControlling />);
+    expect(screen.getByTitle('Browser')).not.toHaveAttribute('inert');
+  });
+
+  it('frames the expanded thumbnail to the cropped Steel content box, not 1440x900', () => {
+    renderWithProviders(
+      <BrowserStatusBarExpanded
+        taskId="t1"
+        browserUrl={STEEL_PLAYER}
+        isDisconnected={false}
+        isWaitingForAuthAssistance={false}
+        outputSchema={undefined}
+        browserSessionMetadata={null}
+        stepProgress={null}
+        onThumbnailClick={vi.fn()}
+        onFullscreenToggle={vi.fn()}
+        onCollapse={vi.fn()}
+      />,
+    );
+
+    const iframe = screen.getByTitle('Preview');
+    expect(iframe).toHaveAttribute('inert');
+    expect(iframe).toHaveAttribute('tabindex', '-1');
+    expect(iframe).not.toHaveStyle({ width: '1440px', height: '900px' });
+    expect(iframe).toHaveStyle({
+      width: `${STEEL_LIVE_VIEW_WINDOW.width}px`,
+      height: `${STEEL_LIVE_VIEW_WINDOW.height}px`,
+    });
+    const transform = iframe.style.transform;
+    expect(transform).toMatch(/scale\(/);
+    expect(transform).toMatch(/translate\(/);
+    const translateMatch = transform.match(/translate\(([-0-9.]+)px,\s*([-0-9.]+)px\)/);
+    expect(translateMatch).not.toBeNull();
+    expect(Number(translateMatch![2])).toBeLessThan(0);
+  });
+
+  it('does not recreate the Steel clip ResizeObserver when the same url rerenders', () => {
+    let constructed = 0;
+    const observe = vi.fn();
+    const disconnect = vi.fn();
+    const originalResizeObserver = window.ResizeObserver;
+    window.ResizeObserver = class {
+      observe = observe;
+      disconnect = disconnect;
+      constructor() {
+        constructed += 1;
+      }
+    } as unknown as typeof ResizeObserver;
+
+    const { rerender } = renderWithProviders(<LiveViewFrame url={STEEL_PLAYER} title="Browser" />);
+    expect(constructed).toBe(1);
+
+    rerender(<LiveViewFrame url={STEEL_PLAYER} title="Browser" iframeKey="rerender" />);
+    expect(constructed).toBe(1);
+    expect(disconnect).not.toHaveBeenCalled();
+
+    window.ResizeObserver = originalResizeObserver;
+  });
+});
