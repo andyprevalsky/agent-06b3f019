@@ -99,6 +99,15 @@ The frame's origin is opaque ("null"), which means:
 - WebAssembly is allowed ('wasm-unsafe-eval'; .wasm is served as
   application/wasm), see examples/wasm-viz.
 
+## Something for the user to see or play
+
+Build a game, app, chart or other visual the user asked to see as an inline
+view: write inline/<view-name>/index.html (scripts and data in the bundle; the
+CSP blocks external scripts and fetches), add it under "inline" in rose-ui.json
+with a one-line summary, run `rose-ui publish`, then name the view in your
+final response. If you cannot call send_message_to_user yourself, the agent
+that spawned you shows it.
+
 ## Tools for the user's agent
 
 tools/<tool_name>/tool.json:

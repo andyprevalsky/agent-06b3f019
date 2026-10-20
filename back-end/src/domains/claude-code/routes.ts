@@ -17,6 +17,7 @@ import { createSessionSchema, closeSessionSchema } from './types';
 import type { FilePointer } from '../../providers/storage';
 import * as service from './service';
 import { AgentOwnerMismatchError, MissingUserIdError, GitHubAccessDeniedError } from './service';
+import { ProjectNotFoundForSessionError } from '../../providers/projects/session';
 
 const log = createLogger('ClaudeCodeRoutes');
 const router = Router();
@@ -32,9 +33,8 @@ router.post(
   authenticate,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
-      const { agent_id, goal, attachments, github_repo_url, user_id } = createSessionSchema.parse(
-        req.body
-      );
+      const { agent_id, goal, attachments, github_repo_url, user_id, project_id } =
+        createSessionSchema.parse(req.body);
 
       const result = await service.createSession({
         agent_id,
@@ -42,6 +42,7 @@ router.post(
         attachments: attachments as FilePointer[] | undefined,
         github_repo_url,
         user_id,
+        project_id,
       });
 
       res.json({
@@ -61,6 +62,10 @@ router.post(
           error: error.detail,
           code: 'GITHUB_ACCESS_DENIED',
         });
+        return;
+      }
+      if (error instanceof ProjectNotFoundForSessionError) {
+        res.status(404).json({ error: error.message, code: 'PROJECT_NOT_FOUND' });
         return;
       }
       if (error instanceof AgentOwnerMismatchError) {

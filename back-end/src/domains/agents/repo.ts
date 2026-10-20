@@ -225,6 +225,7 @@ export async function findExecutionModeFlagsByIds(agentIds: string[], userId?: s
       worldModelMode: true,
       memoryEnabled: true,
       isBenchmark: true,
+      projectId: true,
     },
   });
 }

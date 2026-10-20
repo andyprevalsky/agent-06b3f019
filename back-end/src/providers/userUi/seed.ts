@@ -20,7 +20,7 @@ import type { UserUiBundleFile } from './manifest';
 export const USER_UI_DIR_NAME = 'rose_user_ui';
 export const USER_UI_CLI_NAME = 'rose-ui';
 /** Bumped whenever the README or CLI contract changes. */
-export const USER_UI_CLI_VERSION = '2';
+export const USER_UI_CLI_VERSION = '3';
 export const USER_UI_CLI_BIN_DIR = '.rose/bin';
 export const USER_UI_PREVIEW_HOST_PATH = '.rose/lib/rose-ui/preview-host.html';
 

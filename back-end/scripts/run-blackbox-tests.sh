@@ -78,6 +78,9 @@ export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$ROOT_DIR/.context}"
 # user-ui blackbox reads back published bytes); prod uses Supabase Storage.
 export USER_UI_STORAGE_BACKEND=local
 export USER_UI_STORAGE_LOCAL_DIR="${USER_UI_STORAGE_LOCAL_DIR:-$ARTIFACT_DIR/user-ui-storage}"
+# display-tool media (domains/display) uses the same hermetic local store.
+export DISPLAY_STORAGE_BACKEND=local
+export DISPLAY_STORAGE_LOCAL_DIR="${DISPLAY_STORAGE_LOCAL_DIR:-$ARTIFACT_DIR/display-storage}"
 export BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES="${BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES:-weekly}"
 export BLACKBOX_TEST_CAPTURE_OUTBOUND="${BLACKBOX_TEST_CAPTURE_OUTBOUND:-1}"
 
@@ -403,6 +406,7 @@ BACKEND_PID=""
 # npm/tsx can leave the server below a launcher process. Snapshot and drain
 # the owned descendants before terminating that launcher, then join its PID.
 source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
+source "$ROOT_DIR/scripts/lib/port-probe.sh"
 cleanup() {
   local result=$? cleaned=1
   trap - EXIT INT TERM
@@ -435,7 +439,7 @@ reserve_port() {
   while true; do
     local lock_dir="$PORT_LOCK_ROOT/$candidate"
     if mkdir "$lock_dir" 2>/dev/null; then
-      if lsof -ti :"$candidate" >/dev/null 2>&1; then
+      if local_port_in_use "$candidate"; then
         rmdir "$lock_dir" >/dev/null 2>&1 || true
       else
         PORT_LOCK_DIR="$lock_dir"

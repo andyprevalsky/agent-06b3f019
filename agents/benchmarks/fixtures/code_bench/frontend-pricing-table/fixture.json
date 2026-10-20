@@ -1,0 +1,18 @@
+{
+  "id": "frontend-pricing-table",
+  "kind": "front-end component build",
+  "language": "javascript",
+  "task": "Build the pricing table component for this static page (no frameworks, no npm dependencies). Implement renderPricingTable(plans, options) in src/pricingTable.js. It returns an HTML string: a <section class=\"pricing\"> containing one <article class=\"plan\" data-plan=\"<plan id>\"> per plan, in input order. Each card has an <h3> with the plan name, a <p class=\"price\"> showing the monthly price (priceCents 0 shows \"Free\", whole dollars show like \"$12/mo\", other amounts show two decimals like \"$49.50/mo\") and a <ul> with one <li> per feature. When options.highlight equals a plan id, that card's class is \"plan featured\" and it contains <span class=\"badge\">Most popular</span>; no other card is featured. Escape all plan text for HTML (&, <, >, quotes) and do not mutate the input. Then style it in styles.css so the cards sit side by side in a row (a .pricing rule using flex or grid), look like clean cards, and the featured card is clearly emphasised. index.html already renders the plans from src/plans.js with highlight \"team\". Keep the existing tests passing.",
+  "hidden_tests": {
+    "dir": "hidden",
+    "commands": [
+      ["node", "--test", "test/module.test.js"],
+      ["node", "--test", "_hidden_tests/pricing.hidden.test.js"]
+    ]
+  },
+  "screenshot": {
+    "page": "index.html",
+    "viewport": {"width": 1200, "height": 720},
+    "wait_selector": "section.pricing"
+  }
+}

@@ -11,6 +11,7 @@ import { asyncHandler } from '../../utils/asyncHandler';
 import * as service from './service';
 import { GmailSendIdempotencyConflictError, sendEmailOnce } from './service.emailSendOnce';
 import * as resyncService from './service.emailResync';
+import { clearAccountProgress } from './service.progress';
 
 const log = createLogger('Integrations');
 const router = Router({ mergeParams: true });
@@ -254,6 +255,7 @@ router.delete(
 
     try {
       const result = await service.disconnectGmailAccount(req.user!.id, email);
+      await clearAccountProgress(req.user!.id, 'gmail', email);
       return res.json({
         message: 'Gmail account disconnected successfully',
         ...result,

@@ -11,7 +11,7 @@ import { prisma } from '../../providers/database';
 export async function findAgentGithubInfo(agentId: string) {
   return prisma.agent.findUnique({
     where: { id: agentId },
-    select: { githubRepoUrl: true, userId: true, busId: true },
+    select: { githubRepoUrl: true, userId: true, busId: true, projectId: true },
   });
 }
 
@@ -21,7 +21,7 @@ export async function findAgentGithubInfo(agentId: string) {
 export async function findRootAgentGithubInfo(busId: string) {
   return prisma.agent.findUnique({
     where: { id: busId },
-    select: { githubRepoUrl: true, userId: true },
+    select: { githubRepoUrl: true, userId: true, projectId: true },
   });
 }
 
@@ -85,4 +85,36 @@ export async function findAgentFastModeCache(agentId: string): Promise<boolean> 
     select: { fastModeCacheEnabled: true },
   });
   return agent?.fastModeCacheEnabled ?? false;
+}
+
+/**
+ * The code session's spawn chip (its first row): the tool call that renders it
+ * and the CLI provider. One indexed per-agent lookup.
+ */
+export async function findCodeSessionChip(
+  agentId: string,
+  taskId: string
+): Promise<{ toolCallId: string | null; provider: 'claude' | 'codex' }> {
+  const row = await prisma.message.findFirst({
+    where: { agentId, metadata: { path: ['task_id'], equals: taskId } },
+    orderBy: { timestamp: 'asc' },
+    select: { metadata: true },
+  });
+  const fields =
+    row?.metadata !== null && typeof row?.metadata === 'object' && !Array.isArray(row.metadata)
+      ? (row.metadata as Record<string, unknown>)
+      : {};
+  return {
+    toolCallId:
+      typeof fields.toolCallId === 'string' && fields.toolCallId !== '' ? fields.toolCallId : null,
+    provider: fields.code_provider === 'codex' ? 'codex' : 'claude',
+  };
+}
+
+/** Session fields needed to address a live code session for direct chat. */
+export async function findSessionForDirectChat(taskId: string) {
+  return prisma.claudeCodeSession.findUnique({
+    where: { id: taskId },
+    select: { id: true, agentId: true, status: true, streamUrl: true },
+  });
 }

@@ -25,6 +25,8 @@ export const createSessionSchema = z.object({
   attachments: z.array(filePointerSchema).optional(),
   github_repo_url: z.string().optional(),
   user_id: z.string().uuid().optional(), // Required for GitHub repo access check
+  /** Project to restore; defaults to the agent's own (or its root's) project. */
+  project_id: z.string().uuid().optional(),
 });
 
 export const closeSessionSchema = z.object({
@@ -36,4 +38,16 @@ export const closeSessionSchema = z.object({
     .nullable()
     .optional()
     .transform((v) => v ?? undefined), // Additional file paths to extract (e.g., from verifier)
+});
+
+/** POST /api/agents/:id/code-agent/:taskId/messages — a user turn typed to the CLI. */
+export const directTurnSchema = z.object({
+  client_message_id: z
+    .string()
+    .min(8)
+    .max(128)
+    .regex(/^[A-Za-z0-9_-]+$/),
+  text: z.string().trim().min(1).max(100_000),
+  tool_call_id: z.string().min(1).max(256).optional(),
+  user_id: z.string().uuid().optional(), // internal callers only (API key)
 });

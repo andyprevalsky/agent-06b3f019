@@ -6,7 +6,14 @@
 
 import { WebSocketServer } from "ws";
 import { execSync, spawn } from "child_process";
-import { appendFileSync, writeFileSync, mkdirSync } from "fs";
+import { timingSafeEqual } from "crypto";
+import {
+  appendFileSync,
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+} from "fs";
 import { homedir } from "os";
 import { join } from "path";
 
@@ -45,6 +52,14 @@ const CLAUDE_CODE_MODEL = process.env.CLAUDE_CODE_MODEL || "claude-sonnet-5";
 const CODE_AGENT_SYSTEM_PROMPT = process.env.CODE_AGENT_SYSTEM_PROMPT || "";
 const GITHUB_REPO_URL = process.env.GITHUB_REPO_URL;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+// Project sessions (backend restoreWorkspace): the checkout is already in
+// ~/workspace with its env files; run the project's startup script before the
+// CLI on every boot (create and resume) and tell the CLI how it went.
+const PROJECT_WORKDIR = process.env.ROSE_PROJECT_WORKDIR || "";
+const PROJECT_STARTUP = process.env.ROSE_PROJECT_STARTUP || "";
+const PROJECT_STARTUP_CONFIG = process.env.ROSE_PROJECT_STARTUP_CONFIG || "";
+const PROJECT_NAME = process.env.ROSE_PROJECT_NAME || "";
+const PROJECT_STARTUP_REPORT_PREFIX = "ROSE_PROJECT_STARTUP_REPORT ";
 
 // Validate required env vars
 if (
@@ -85,12 +100,28 @@ wss.on("listening", () => {
   });
 });
 
-wss.on("connection", (ws) => {
+// A control connection that only sends a turn (`?replay=0`) skips the history
+// replay: a long session's buffer is megabytes, and the turn ack would queue
+// behind it on every typed message.
+function wantsReplay(req) {
+  try {
+    return (
+      new URL(req?.url || "/", "http://localhost").searchParams.get(
+        "replay",
+      ) !== "0"
+    );
+  } catch {
+    return true;
+  }
+}
+
+wss.on("connection", (ws, req) => {
   // Send full buffer to new client
-  if (outputBuffer.length > 0) {
+  const replay = wantsReplay(req);
+  if (replay && outputBuffer.length > 0) {
     ws.send(JSON.stringify({ type: "buffer", data: outputBuffer }));
   }
-  if (eventBuffer.length > 0) {
+  if (replay && eventBuffer.length > 0) {
     ws.send(JSON.stringify({ type: "code_agent_events", data: eventBuffer }));
   }
   if (exitAnnounced) {
@@ -121,12 +152,18 @@ wss.on("connection", (ws) => {
           return;
         }
 
+        // Raw stdin stays closed to callers: only authenticated, idempotent
+        // `user_turn` messages reach the CLI (see handleUserTurn).
         ws.send(
           JSON.stringify({
             type: "stdin_error",
-            error: "Claude Code CLI print session is non-interactive",
+            error: "Raw stdin is disabled; send an authenticated user_turn",
           }),
         );
+      } else if (msg.type === "user_turn") {
+        ws.send(JSON.stringify(handleUserTurn(msg)));
+      } else if (msg.type === "hand_back") {
+        ws.send(JSON.stringify(handleHandBack(msg)));
       }
     } catch (e) {
       log("error", "Failed to parse message", { error: e.message });
@@ -298,8 +335,22 @@ log("info", "Configuration written");
 // Clone GitHub repo if specified
 let workDir = home;
 const REPO_WORKDIR = join(home, "workspace");
+const projectMode = Boolean(PROJECT_WORKDIR) && existsSync(PROJECT_WORKDIR);
 
-if (GITHUB_REPO_URL) {
+if (projectMode) {
+  workDir = PROJECT_WORKDIR;
+  projects[workDir] = { allowedTools: ["*"], hasTrustDialogAccepted: true };
+  writeFileSync(
+    join(home, ".claude", "projects.json"),
+    JSON.stringify(projects),
+  );
+  settings.allowedDirectories.push(workDir);
+  writeFileSync(settingsPath, JSON.stringify(settings));
+  log("info", "Using restored project workspace", {
+    workDir,
+    project: PROJECT_NAME,
+  });
+} else if (GITHUB_REPO_URL) {
   console.log(`[Setup] Cloning GitHub repo: ${GITHUB_REPO_URL}`);
 
   const repoMatch = GITHUB_REPO_URL.match(/github\.com\/([^\/]+)\/([^\/]+)/);
@@ -346,7 +397,9 @@ if (GITHUB_REPO_URL) {
   }
 }
 
-if (!GITHUB_REPO_URL && CODE_AGENT_SYSTEM_PROMPT) {
+// A project's own CLAUDE.md is never overwritten; the code-agent prompt is
+// already passed with --append-system-prompt.
+if (!GITHUB_REPO_URL && !projectMode && CODE_AGENT_SYSTEM_PROMPT) {
   writeFileSync(join(workDir, "CLAUDE.md"), CODE_AGENT_SYSTEM_PROMPT);
 }
 
@@ -401,6 +454,42 @@ function detailFromToolInput(input, paths) {
   return "";
 }
 
+// `--include-partial-messages` streams the model's output token by token. The
+// deltas are broadcast live (first-token latency for direct chat and the
+// Transcript tab) but never buffered: the complete `assistant` message that
+// follows is the durable record, and replaying every delta on reconnect would
+// multiply the history size.
+function emitStreamDelta(event) {
+  if (!event || typeof event !== "object") return;
+  const delta = { version: 1, provider: "claude" };
+  if (event.type === "message_start") {
+    delta.kind = "message_start";
+  } else if (event.type === "content_block_start") {
+    delta.kind = "block_start";
+    delta.index = event.index ?? null;
+    delta.block_type = event.content_block?.type || null;
+    if (event.content_block?.type === "tool_use") {
+      delta.tool = event.content_block.name || null;
+      delta.tool_use_id = event.content_block.id || null;
+    }
+  } else if (event.type === "content_block_delta") {
+    const d = event.delta || {};
+    if (d.type === "text_delta" && typeof d.text === "string") {
+      delta.kind = "text";
+      delta.text = d.text;
+    } else if (d.type === "thinking_delta" && typeof d.thinking === "string") {
+      delta.kind = "thinking";
+      delta.text = d.thinking;
+    } else {
+      return; // tool input JSON / signatures: the full message carries them
+    }
+    delta.index = event.index ?? null;
+  } else {
+    return;
+  }
+  broadcast("code_agent_delta", delta);
+}
+
 function emitClaudeMessage(message) {
   if (message.type === "system" && message.subtype === "init") {
     appendEvent({
@@ -417,7 +506,25 @@ function emitClaudeMessage(message) {
     return;
   }
 
+  if (message.type === "stream_event") {
+    emitStreamDelta(message.event);
+    return;
+  }
+
   if (message.type === "assistant") {
+    for (const part of message.message?.content || []) {
+      if (part?.type === "thinking" || part?.type === "redacted_thinking") {
+        // Claude Code may omit the thinking text (empty string); the block
+        // still marks where the model thought, for the transcript.
+        const thinking = typeof part.thinking === "string" ? part.thinking : "";
+        appendEvent({
+          type: "thinking",
+          raw_type: `assistant.${part.type}`,
+          text: thinking,
+          redacted: part.type === "redacted_thinking" || !thinking,
+        });
+      }
+    }
     const text = textFromContent(message.message?.content);
     if (text) {
       appendEvent({
@@ -450,10 +557,20 @@ function emitClaudeMessage(message) {
   }
 
   if (message.type === "user" && message.tool_use_result !== undefined) {
+    const resultPart = (
+      Array.isArray(message.message?.content) ? message.message.content : []
+    ).find((part) => part?.type === "tool_result");
     appendEvent({
       type: "tool_result",
       raw_type: "user.tool_result",
       tool_use_result: message.tool_use_result,
+      // Pair the result with its tool_use (transcript rows) and keep the
+      // CLI's error flag: a failed Bash reports `is_error` + "Exit code N".
+      tool_use_id:
+        typeof resultPart?.tool_use_id === "string"
+          ? resultPart.tool_use_id
+          : null,
+      is_error: resultPart?.is_error === true,
     });
     return;
   }
@@ -468,6 +585,8 @@ function emitClaudeMessage(message) {
       usage: message.usage || null,
       model_usage: message.modelUsage || null,
       structured_output: message.structured_output,
+      // Turns still owed a result after this one (0 = the CLI is caught up).
+      pending_turns: pendingTurns,
     });
     if (isSuccess && message.result) {
       appendOutput("stdout", `[Claude result] ${message.result}\n`);
@@ -487,9 +606,278 @@ function emitClaudeMessage(message) {
   });
 }
 
-async function runClaudeCli() {
+// ---------------------------------------------------------------------------
+// Direct chat: turns delivered to the running CLI
+// ---------------------------------------------------------------------------
+//
+//   backend route / agents helper ──user_turn{id,token,text,sender}──► here
+//       │                                   │ dedupe by id (delivered once)
+//       │                                   ▼
+//       │                     CLI stdin (stream-json user message)
+//       ◄──user_turn_ack{id,status,reason?}─│ events broadcast to every client
+//                                           ▼ (FE live terminal + activity)
+//
+// The CLI reads stream-json input and keeps running while stdin is open. An
+// autonomous run ends stdin on its first `result`, exactly like the old
+// one-shot prompt. A turn written while a turn runs is merged into that
+// turn by the CLI (one `result` covers both; measured with Claude Code
+// 2.1.284), and every `result` reports the CLI's own `queued_turn_count`,
+// so pending turns follow that count, not one result per written turn.
+//
+// The first *user* turn puts the session on a direct hold: stdin stays open
+// between turns until the user hands back (or the hold idles out), so the
+// user keeps talking to the same CLI conversation. While the user holds the
+// session, `sender: "agent"` turns (Rose agents relaying instructions or
+// agent-graph messages) are rejected with `relay_paused` so nothing
+// competes with the user; the caller retries after the hand back. Agent
+// turns never take the hold: they are ordinary queued turns, answered
+// before stdin closes.
+const TURN_TOKEN = process.env.CODE_SESSION_TURN_TOKEN || "";
+const DIRECT_HOLD_IDLE_MS = (() => {
+  const raw = Number.parseInt(
+    process.env.CODE_SESSION_DIRECT_HOLD_IDLE_MS || "",
+    10,
+  );
+  return Number.isInteger(raw) && raw > 0 ? raw : 10 * 60 * 1000;
+})();
+const MAX_TURN_TEXT_CHARS = 100_000;
+const MAX_TURN_ID_CHARS = 128;
+
+let cliChild = null;
+let cliStdinOpen = false;
+// Turns written to stdin (the task prompt + delivered user turns) that have
+// not produced their `result` yet.
+let pendingTurns = 0;
+let directHold = false;
+let directHoldTimer = null;
+const deliveredTurnIds = new Set();
+
+function userMessageLine(text) {
+  return (
+    JSON.stringify({
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text }] },
+    }) + "\n"
+  );
+}
+
+function tokenMatches(candidate) {
+  if (!TURN_TOKEN || typeof candidate !== "string") return false;
+  const expected = Buffer.from(TURN_TOKEN, "utf8");
+  const actual = Buffer.from(candidate, "utf8");
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+function clearDirectHoldTimer() {
+  if (directHoldTimer) {
+    clearTimeout(directHoldTimer);
+    directHoldTimer = null;
+  }
+}
+
+function endCliStdin(reason) {
+  if (!cliStdinOpen || !cliChild) return;
+  cliStdinOpen = false;
+  clearDirectHoldTimer();
+  log("info", "Closing CLI stdin", { reason });
+  cliChild.stdin.end();
+}
+
+function releaseDirectHold(reason) {
+  if (!directHold) return;
+  directHold = false;
+  clearDirectHoldTimer();
+  appendEvent({ type: "direct_chat", status: "released", reason });
+  if (pendingTurns === 0) endCliStdin(`direct hold released: ${reason}`);
+}
+
+function onCliTurnResult(message) {
+  // A turn written mid-turn is merged into the running turn, so one `result`
+  // can answer several writes; the CLI says how many are still queued.
+  // (CLIs without the field: one result per written turn.)
+  const queued = message?.queued_turn_count;
+  pendingTurns =
+    Number.isInteger(queued) && queued >= 0
+      ? queued
+      : Math.max(0, pendingTurns - 1);
+  if (pendingTurns > 0) return;
+  if (!directHold) {
+    endCliStdin("autonomous turn finished");
+    return;
+  }
+  clearDirectHoldTimer();
+  directHoldTimer = setTimeout(
+    () => releaseDirectHold("idle"),
+    DIRECT_HOLD_IDLE_MS,
+  );
+}
+
+function turnAck(id, status, reason) {
+  return { type: "user_turn_ack", id, status, ...(reason ? { reason } : {}) };
+}
+
+function handleUserTurn(msg) {
+  const id = typeof msg.id === "string" ? msg.id : "";
+  if (!tokenMatches(msg.token)) return turnAck(id, "rejected", "unauthorized");
+  if (!id || id.length > MAX_TURN_ID_CHARS) {
+    return turnAck(id, "rejected", "invalid_id");
+  }
+  if (deliveredTurnIds.has(id)) return turnAck(id, "duplicate");
+  const text = typeof msg.text === "string" ? msg.text.replace(/\0/g, "") : "";
+  if (!text.trim() || text.length > MAX_TURN_TEXT_CHARS) {
+    return turnAck(id, "rejected", "invalid_text");
+  }
+  if (exitAnnounced || !cliStdinOpen || !cliChild) {
+    return turnAck(id, "rejected", "session_ended");
+  }
+  const sender = msg.sender === "agent" ? "agent" : "user";
+  if (sender === "agent" && directHold) {
+    return turnAck(id, "rejected", "relay_paused");
+  }
+  deliveredTurnIds.add(id);
+  if (sender === "user") {
+    clearDirectHoldTimer();
+    if (!directHold) {
+      directHold = true;
+      appendEvent({ type: "direct_chat", status: "held", sender });
+    }
+  }
+  appendEvent({ type: "user_turn", turn_id: id, sender, text });
+  appendOutput("stdout", `[${sender === "user" ? "You" : "Agent"}] ${text}\n`);
+  pendingTurns += 1;
+  cliChild.stdin.write(userMessageLine(text));
+  log("info", "Delivered user turn", { id, sender, chars: text.length });
+  return turnAck(id, "delivered");
+}
+
+function handleHandBack(msg) {
+  if (!tokenMatches(msg.token)) {
+    return {
+      type: "hand_back_ack",
+      status: "rejected",
+      reason: "unauthorized",
+    };
+  }
+  const wasHeld = directHold;
+  releaseDirectHold("handed_back");
+  return { type: "hand_back_ack", status: wasHeld ? "released" : "not_held" };
+}
+
+function startupBudgetMs() {
+  try {
+    const cfg = JSON.parse(readFileSync(PROJECT_STARTUP_CONFIG, "utf8"));
+    const timeoutS = Number(cfg.timeoutS);
+    return ((Number.isFinite(timeoutS) ? timeoutS : 120) + 30) * 1000;
+  } catch {
+    return 150 * 1000;
+  }
+}
+
+/** Run the project's startup script (bounded); resolves its report or null. */
+function runProjectStartup() {
+  if (!projectMode || !PROJECT_STARTUP || !existsSync(PROJECT_STARTUP)) {
+    return Promise.resolve(null);
+  }
+  appendEvent({
+    type: "project_startup",
+    status: "running",
+    project: PROJECT_NAME,
+  });
+  appendOutput(
+    "stdout",
+    `[Project] Running startup script for ${PROJECT_NAME}\n`,
+  );
+  return new Promise((resolve) => {
+    let stdout = "";
+    let settled = false;
+    let guard = null;
+    const done = (report) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(guard);
+      appendEvent({
+        type: "project_startup",
+        project: PROJECT_NAME,
+        ...report,
+      });
+      log("info", "Project startup finished", {
+        status: report.status,
+        exitCode: report.exitCode,
+        durationMs: report.durationMs,
+      });
+      resolve(report);
+    };
+    const fallback = (status, detail) => ({
+      status,
+      exitCode: null,
+      durationMs: 0,
+      timeoutS: null,
+      outputTail: detail,
+      logPath: null,
+    });
+    const child = spawn(
+      process.execPath,
+      [PROJECT_STARTUP, PROJECT_STARTUP_CONFIG].filter(Boolean),
+      {
+        cwd: workDir,
+        env: { ...process.env, HOME: home },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    child.stdout.on("data", (chunk) => {
+      const text = chunk.toString("utf8");
+      stdout = (stdout + text).slice(-64 * 1024);
+      appendOutput("stdout", text);
+    });
+    child.stderr.on("data", (chunk) =>
+      appendOutput("stderr", chunk.toString("utf8")),
+    );
+    guard = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // already exited
+      }
+      done(fallback("timeout", "startup runner did not finish"));
+    }, startupBudgetMs());
+    child.on("error", (err) => done(fallback("failed", err.message)));
+    child.on("exit", () => {
+      const line = stdout
+        .split("\n")
+        .reverse()
+        .find((l) => l.startsWith(PROJECT_STARTUP_REPORT_PREFIX));
+      try {
+        done(JSON.parse(line.slice(PROJECT_STARTUP_REPORT_PREFIX.length)));
+      } catch {
+        done(fallback("failed", "startup runner produced no report"));
+      }
+    });
+  });
+}
+
+/** One factual paragraph for the CLI about the project startup outcome. */
+function projectStartupNote(report) {
+  if (!report || report.status === "skipped") return "";
+  const name = PROJECT_NAME ? ` for project ${PROJECT_NAME}` : "";
+  const secs = ((report.durationMs || 0) / 1000).toFixed(1);
+  const logRef = report.logPath ? ` Log: ${report.logPath}.` : "";
+  if (report.status === "ok") {
+    return `Project startup${name} finished OK in ${secs}s.${logRef}\n\n`;
+  }
+  const tail = String(report.outputTail || "").slice(-1500);
+  const what =
+    report.status === "timeout"
+      ? `TIMED OUT after ${report.timeoutS ?? "?"}s and was stopped; services it starts may not be running.`
+      : `FAILED (exit ${report.exitCode ?? "?"}) after ${secs}s.`;
+  return `Project startup${name} ${what}${logRef}\nLast output:\n${tail}\n\n`;
+}
+
+async function runClaudeCli(startupReport = null) {
   const sanitizedGoal = GOAL.replace(/\0/g, "");
-  const prompt = `Task:\n${sanitizedGoal}`;
+  // Direct-chat stream-json user message; the project startup note leads the task.
+  const prompt = userMessageLine(
+    `${projectStartupNote(startupReport)}Task:\n${sanitizedGoal}`,
+  );
 
   appendEvent({
     type: "session",
@@ -506,8 +894,11 @@ async function runClaudeCli() {
   const args = [
     "--print",
     "--verbose",
+    "--input-format",
+    "stream-json",
     "--output-format",
     "stream-json",
+    "--include-partial-messages",
     "--model",
     CLAUDE_CODE_MODEL,
     "--permission-mode",
@@ -521,8 +912,18 @@ async function runClaudeCli() {
   if (CODE_AGENT_SYSTEM_PROMPT) {
     args.push("--append-system-prompt", CODE_AGENT_SYSTEM_PROMPT);
   }
+  // Rose agent tools (display / send_message_to_user / request_user_approval)
+  // as an MCP server. The backend writes ~/.rose/mcp.json at session create;
+  // MCP calls have no Bash 2-minute limit, so blocking approvals can wait.
+  const roseMcpConfig = join(home, ".rose", "mcp.json");
+  if (existsSync(roseMcpConfig)) {
+    args.push("--mcp-config", roseMcpConfig);
+    args[args.indexOf("--allowedTools") + 1] += ",mcp__rose";
+  }
 
-  // The prompt is delivered on stdin, NOT as a positional argument.
+  // The prompt is delivered on stdin, NOT as a positional argument. With
+  // `--input-format stream-json` it is one JSON user message; stdin stays open
+  // so direct-chat user turns can follow (closed by endCliStdin).
   // Claude Code CLI (>=2.x) ignores a positional prompt when
   // `--output-format stream-json` is set and reads the prompt from stdin
   // instead; passing it positionally makes the CLI exit 1 immediately with
@@ -557,8 +958,10 @@ async function runClaudeCli() {
       code: err?.code,
     });
   });
+  cliChild = child;
+  cliStdinOpen = true;
+  pendingTurns = 1;
   child.stdin.write(prompt);
-  child.stdin.end();
 
   let stdoutRemainder = "";
   let sawResult = false;
@@ -575,6 +978,9 @@ async function runClaudeCli() {
         if (message?.type === "result") {
           sawResult = true;
         }
+        // Settle turn accounting first so the result event can say whether
+        // more turns are still pending (the monitor's exit grace keys on it).
+        if (message?.type === "result") onCliTurnResult(message);
         emitClaudeMessage(message);
       } catch (err) {
         appendOutput("stdout", line + "\n");
@@ -618,10 +1024,12 @@ async function runClaudeCli() {
       }
     }
     processExited = true;
+    cliStdinOpen = false;
+    if (directHoldTimer) clearTimeout(directHoldTimer);
     const exitCode = Number.isInteger(code) ? code : 1;
     log("info", "Claude Code CLI exited", { exitCode, sawResult });
     finishRun(exitCode);
   });
 }
 
-runClaudeCli();
+runProjectStartup().then((report) => runClaudeCli(report));

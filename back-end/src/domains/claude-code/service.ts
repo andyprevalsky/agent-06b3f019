@@ -10,6 +10,8 @@ import {
 } from '../../providers/e2b';
 import type { FilePointer } from '../../providers/storage';
 import { checkGithubRepoAccess } from '../../providers/github';
+import { resolveSessionProject } from '../../providers/projects/session';
+import type { ProjectRestoreReport } from '../../providers/projects/types';
 import { createLogger } from '../../providers/logger';
 import {
   markPoolTokenRateLimited,
@@ -65,6 +67,8 @@ export interface CreateSessionParams {
   attachments?: FilePointer[];
   github_repo_url?: string;
   user_id?: string;
+  /** Explicit Project; defaults to the agent's (or its root's) project. */
+  project_id?: string;
 }
 
 export interface CreateSessionResult {
@@ -73,17 +77,24 @@ export interface CreateSessionResult {
   ws_url: string;
   uploaded_files: string[];
   github_repo_url: string | null;
+  /** Restore summary when the session materialized a Project (PJ3). */
+  project: ProjectRestoreReport | null;
 }
 
 /** Resolve the owning user and optional GitHub repo from the agent tree. */
 export async function resolveAgentContext(
   agentId: string,
   userId: string | undefined
-): Promise<{ repoUrl: string | undefined; userId: string | undefined }> {
+): Promise<{
+  repoUrl: string | undefined;
+  userId: string | undefined;
+  projectId?: string | undefined;
+}> {
   try {
     const agent = await repo.findAgentGithubInfo(agentId);
     let storedOwnerId = agent?.userId ?? undefined;
     let repoUrl = agent?.githubRepoUrl ?? undefined;
+    let projectId = agent?.projectId ?? undefined;
 
     if (
       repoUrl === undefined &&
@@ -95,6 +106,7 @@ export async function resolveAgentContext(
       const rootAgent = await repo.findRootAgentGithubInfo(agent.busId);
       repoUrl = rootAgent?.githubRepoUrl ?? undefined;
       storedOwnerId ??= rootAgent?.userId;
+      projectId ??= rootAgent?.projectId ?? undefined;
     }
 
     const callerUserId = userId !== undefined && userId !== '' ? userId : undefined;
@@ -107,13 +119,7 @@ export async function resolveAgentContext(
     }
     const resolvedUserId = storedOwnerId ?? callerUserId;
 
-    if (agent?.githubRepoUrl !== undefined && agent.githubRepoUrl !== null) {
-      return {
-        repoUrl,
-        userId: resolvedUserId,
-      };
-    }
-    return { repoUrl, userId: resolvedUserId };
+    return { repoUrl, userId: resolvedUserId, projectId };
   } catch (err) {
     log.error('Failed to look up agent owner and GitHub repo', {
       error: err instanceof Error ? err.message : String(err),
@@ -133,6 +139,15 @@ export async function createSession(params: CreateSessionParams): Promise<Create
   // repo-less agents can still consume their user's stored OAuth credential.
   const resolved = await resolveAgentContext(agent_id, effectiveUserId);
   effectiveUserId = resolved.userId;
+  const projectWorkspace = await resolveSessionProject(
+    effectiveUserId,
+    params.project_id ?? resolved.projectId
+  );
+  if (projectWorkspace !== null) {
+    // The project restore owns the checkout; never also clone github_repo_url.
+    effectiveGithubRepoUrl = undefined;
+    resolved.repoUrl = undefined;
+  }
 
   // Auto-inject GitHub repo URL from the agent tree if not explicitly provided.
   if (effectiveGithubRepoUrl === undefined || effectiveGithubRepoUrl === '') {
@@ -175,7 +190,8 @@ export async function createSession(params: CreateSessionParams): Promise<Create
     attachments,
     normalizedRepoUrl,
     effectiveUserId,
-    fastModeCacheEnabled
+    fastModeCacheEnabled,
+    { projectWorkspace }
   );
 
   return {
@@ -184,6 +200,7 @@ export async function createSession(params: CreateSessionParams): Promise<Create
     ws_url: session.wsUrl,
     uploaded_files: session.uploadedFiles,
     github_repo_url: normalizedRepoUrl ?? null,
+    project: session.projectRestore ?? null,
   };
 }
 

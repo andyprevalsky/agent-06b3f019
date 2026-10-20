@@ -41,6 +41,8 @@ export interface UserUiWorkspace {
   files: UserUiBundleFile[];
   /** Env injected into the session for `rose-ui publish` and published-UI screenshots. */
   envs: Record<string, string>;
+  /** Overrides for a same-host (local fallback) session, e.g. loopback URLs. */
+  localEnvs?: Record<string, string>;
   source: { kind: 'active'; versionId: string } | { kind: 'seed' };
 }
 
@@ -125,7 +127,14 @@ export async function writeUserUiWorkspaceToDir(homeDir: string, workspace: User
     await mkdir(dirname(full), { recursive: true });
     await writeFile(full, file.content);
   }
-  await chmod(join(root, USER_UI_CLI_BIN_DIR, USER_UI_CLI_NAME), 0o755);
+  for (const bin of cliBinPaths(workspace)) await chmod(join(root, bin), 0o755);
+}
+
+/** Every file installed under ~/.rose/bin (rose-ui, rose-agents, ...). */
+function cliBinPaths(workspace: UserUiWorkspace): string[] {
+  return workspace.files
+    .map((file) => file.path)
+    .filter((path) => path.startsWith(`${USER_UI_CLI_BIN_DIR}/`));
 }
 
 interface SandboxFiles {
@@ -152,9 +161,9 @@ export async function writeUserUiWorkspaceToSandbox(
       data: toArrayBuffer(file.content),
     }))
   );
-  await sandbox.commands.run(`chmod 755 ${home}/${USER_UI_CLI_BIN_DIR}/${USER_UI_CLI_NAME}`, {
-    timeoutMs: 10_000,
-  });
+  const bins = cliBinPaths(workspace).map((bin) => `${home}/${bin}`);
+  if (bins.length === 0) return;
+  await sandbox.commands.run(`chmod 755 ${bins.join(' ')}`, { timeoutMs: 10_000 });
   if (workspace.source.kind === 'active') {
     await sandbox.commands.run(currentScreenshotsCommand(home), { timeoutMs: 10_000 });
   }
@@ -217,6 +226,7 @@ export async function materializeUserUiInLocalHome(
     const loopback = `http://127.0.0.1:${process.env.PORT || 3001}`;
     const envs: Record<string, string> = {
       ROSE_UI_PUBLISH_URL: `${loopback}/api/user-ui/versions`,
+      ...workspace.localEnvs,
     };
     if (workspace.source.kind === 'active') {
       envs.ROSE_UI_PUBLISHED_BASE_URL = userUiPublishedBaseUrl(

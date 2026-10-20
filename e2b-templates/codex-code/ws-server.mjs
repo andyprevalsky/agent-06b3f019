@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 import { WebSocketServer } from "ws";
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  rmSync,
+  writeFileSync,
+} from "fs";
 import { spawn, execFileSync } from "child_process";
+import { timingSafeEqual } from "crypto";
 import { createServer } from "http";
 import { homedir } from "os";
 import { join } from "path";
@@ -18,7 +25,9 @@ function log(level, message, data = {}) {
   }
 }
 
-const PORT = 3000;
+// E2B serves the template on 3000; a local run (tests, a local target) picks
+// its own port.
+const PORT = Number.parseInt(process.env.PORT || "3000", 10);
 const GOAL = process.env.CODEX_GOAL;
 const CODEX_AUTH_JSON = process.env.CODEX_AUTH_JSON;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -51,6 +60,24 @@ let stdoutLineBuffer = "";
 // surfaces mid-run — a null-credential fallback in the backend cannot catch it.
 let oauthFallbackReason = null;
 const clients = new Set();
+
+// ---------------------------------------------------------------------------
+// Inbound user turns (agent-graph messages, direct chat)
+// ---------------------------------------------------------------------------
+//
+//   backend / agents helper ──user_turn{id,token,text,sender}──► this server
+//          ◄──user_turn_ack{id,status}── dedupe by id (delivered once)
+//
+// `codex exec` reads one prompt, so a delivered turn is queued and runs as the
+// next turn of the same thread (`codex exec … resume <thread_id> <text>`)
+// right after the current run exits cleanly. Same protocol and token as the
+// Claude Code ws-server (codeSessionTurns.ts / code_session_turns.py).
+// Turn state lives here (the renderer and run loop use it); the token-checked
+// handler is defined after shutdown().
+const queuedTurns = [];
+let turnsClosed = false;
+let codexThreadId = null;
+
 // After Codex exits the server keeps serving its final buffer so an agent
 // activity that detached for a deploy (or crashed and is retried after its 5m
 // heartbeat timeout) can reattach and read the result. Closing the session
@@ -131,6 +158,9 @@ function renderCodexJsonLine(line) {
   }
 
   if (event.type === "thread.started") {
+    if (typeof event.thread_id === "string" && event.thread_id) {
+      codexThreadId = event.thread_id;
+    }
     appendEvent({
       type: "session",
       raw_type: event.type,
@@ -182,13 +212,28 @@ function renderCodexJsonLine(line) {
   const item = event.item;
   if (!item) return "";
 
+  // `item_id` pairs an item's started/completed events (transcript rows).
+  const itemId = typeof item.id === "string" ? item.id : null;
+
   if (item.type === "agent_message" && item.text) {
     appendEvent({
       type: "agent_message",
       raw_type: event.type,
       text: item.text,
+      item_id: itemId,
     });
     return `[Codex] ${item.text}\n`;
+  }
+
+  if (item.type === "reasoning" && event.type === "item.completed") {
+    appendEvent({
+      type: "thinking",
+      raw_type: event.type,
+      text: typeof item.text === "string" ? item.text : "",
+      redacted: !item.text,
+      item_id: itemId,
+    });
+    return "";
   }
 
   if (item.type === "file_change" && event.type === "item.completed") {
@@ -201,6 +246,7 @@ function renderCodexJsonLine(line) {
       status: item.status || "completed",
       changes: item.changes || [],
       paths,
+      item_id: itemId,
     });
     return `[Codex file_change ${item.status || "completed"}] ${describeFileChanges(item.changes)}\n`;
   }
@@ -212,6 +258,7 @@ function renderCodexJsonLine(line) {
         raw_type: event.type,
         status: "started",
         command: item.command,
+        item_id: itemId,
       });
       return `[Codex command started] ${item.command}\n`;
     }
@@ -223,6 +270,7 @@ function renderCodexJsonLine(line) {
       command: item.command,
       output: item.aggregated_output || "",
       exit_code: item.exit_code ?? null,
+      item_id: itemId,
     });
     const output = item.aggregated_output
       ? `\n${item.aggregated_output.replace(/\n?$/, "\n")}`
@@ -260,13 +308,61 @@ async function shutdown(code = 0) {
   setTimeout(() => process.exit(code), 5000);
 }
 
-wss.on("connection", (ws) => {
+// Token-checked user_turn handler (see "Inbound user turns" above).
+const TURN_TOKEN = process.env.CODE_SESSION_TURN_TOKEN || "";
+const MAX_TURN_TEXT_CHARS = 100_000;
+const MAX_TURN_ID_CHARS = 128;
+const deliveredTurnIds = new Set();
+
+function tokenMatches(candidate) {
+  if (!TURN_TOKEN || typeof candidate !== "string") return false;
+  const expected = Buffer.from(TURN_TOKEN, "utf8");
+  const actual = Buffer.from(candidate, "utf8");
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+function turnAck(id, status, reason) {
+  return { type: "user_turn_ack", id, status, ...(reason ? { reason } : {}) };
+}
+
+function handleUserTurn(msg) {
+  const id = typeof msg.id === "string" ? msg.id : "";
+  if (!tokenMatches(msg.token)) return turnAck(id, "rejected", "unauthorized");
+  if (!id || id.length > MAX_TURN_ID_CHARS) {
+    return turnAck(id, "rejected", "invalid_id");
+  }
+  if (deliveredTurnIds.has(id)) return turnAck(id, "duplicate");
+  const text = typeof msg.text === "string" ? msg.text.replace(/\0/g, "") : "";
+  if (!text.trim() || text.length > MAX_TURN_TEXT_CHARS) {
+    return turnAck(id, "rejected", "invalid_text");
+  }
+  if (turnsClosed) return turnAck(id, "rejected", "session_ended");
+  const sender = msg.sender === "agent" ? "agent" : "user";
+  deliveredTurnIds.add(id);
+  queuedTurns.push({ id, sender, text });
+  appendEvent({ type: "user_turn", turn_id: id, sender, text });
+  appendOutput("stdout", `[${sender === "user" ? "You" : "Agent"}] ${text}\n`);
+  log("info", "Queued user turn", { id, sender, chars: text.length });
+  return turnAck(id, "delivered");
+}
+
+wss.on("connection", (ws, req) => {
   log("info", "Client connected", { total: clients.size + 1 });
   clients.add(ws);
 
-  if (outputBuffer.length > 0)
+  // `?replay=0`: a control connection (direct-chat turn) skips the history.
+  let replay = true;
+  try {
+    replay =
+      new URL(req?.url || "/", "http://localhost").searchParams.get(
+        "replay",
+      ) !== "0";
+  } catch {
+    replay = true;
+  }
+  if (replay && outputBuffer.length > 0)
     ws.send(JSON.stringify({ type: "buffer", data: outputBuffer }));
-  if (eventBuffer.length > 0)
+  if (replay && eventBuffer.length > 0)
     ws.send(JSON.stringify({ type: "code_agent_events", data: eventBuffer }));
   if (processExited)
     ws.send(JSON.stringify({ type: "exit", code: exitCode ?? 0 }));
@@ -281,6 +377,11 @@ wss.on("connection", (ws) => {
             error: "Codex exec is non-interactive",
           }),
         );
+      } else if (msg.type === "user_turn") {
+        ws.send(JSON.stringify(handleUserTurn(msg)));
+      } else if (msg.type === "hand_back") {
+        // Codex has no direct-chat hold: queued turns always run in order.
+        ws.send(JSON.stringify({ type: "hand_back_ack", status: "not_held" }));
       }
     } catch (err) {
       log("error", "Failed to parse message", { error: err.message });
@@ -421,8 +522,8 @@ let codexFastModeProxy = await startCodexFastModeProxy();
 const home = homedir();
 const codexHome = join(home, ".codex");
 mkdirSync(codexHome, { recursive: true });
-mkdirSync("/home/user/attachments", { recursive: true });
-mkdirSync("/home/user/output", { recursive: true });
+mkdirSync(join(home, "attachments"), { recursive: true });
+mkdirSync(join(home, "output"), { recursive: true });
 
 async function loginWithApiKey() {
   const login = spawn("codex", ["login", "--with-api-key"], {
@@ -458,8 +559,9 @@ if (CODEX_AUTH_JSON) {
   usingApiKey = true;
 }
 
-let workDir = "/home/user";
-const REPO_WORKDIR = "/home/user/workspace";
+// home is /home/user in the E2B template.
+let workDir = home;
+const REPO_WORKDIR = join(home, "workspace");
 if (GITHUB_REPO_URL) {
   try {
     const parsed = new URL(GITHUB_REPO_URL);
@@ -518,7 +620,7 @@ const sanitizedGoal = [
 // The ChatGPT fast-mode proxy only makes sense for the OAuth token — it forwards
 // to the ChatGPT codex backend, which won't authenticate an OpenAI API key. So
 // the API-key path (initial or fallback) runs against the default OpenAI endpoint.
-function buildCodexArgs({ useFastModeProxy }) {
+function buildCodexArgs({ useFastModeProxy, resume = null }) {
   const args = [
     "exec",
     "--ignore-user-config",
@@ -529,8 +631,25 @@ function buildCodexArgs({ useFastModeProxy }) {
     workDir,
     "-m",
     CODEX_MODEL,
-    sanitizedGoal,
+    ...(resume ? ["resume", resume.threadId, resume.text] : [sanitizedGoal]),
   ];
+  // Rose agent tools as an MCP server (the backend writes ~/.rose/bin/rose at
+  // session create). --ignore-user-config skips config.toml, so register it
+  // with -c. Approvals and pinned questions block until answered; the tool
+  // call deadline is set past any real wait (C11: no code-agent timeouts).
+  const roseCli = join(home, ".rose", "bin", "rose");
+  if (existsSync(roseCli)) {
+    args.splice(
+      1,
+      0,
+      "-c",
+      'mcp_servers.rose.command="node"',
+      "-c",
+      `mcp_servers.rose.args=[${JSON.stringify(roseCli)},"mcp"]`,
+      "-c",
+      "mcp_servers.rose.tool_timeout_sec=31536000",
+    );
+  }
   if (useFastModeProxy && codexFastModeProxy) {
     args.splice(
       1,
@@ -618,6 +737,28 @@ if (code !== 0 && !usingApiKey && OPENAI_API_KEY && oauthFallbackReason) {
       buildCodexArgs({ useFastModeProxy: false }),
     ));
   }
+}
+
+// Delivered user turns run, in order, as resumed turns of the same thread.
+while (code === 0 && codexThreadId && queuedTurns.length > 0) {
+  const turn = queuedTurns.shift();
+  log("info", "Starting queued user turn", {
+    id: turn.id,
+    sender: turn.sender,
+  });
+  ({ code, signal } = await runCodex(
+    buildCodexArgs({
+      useFastModeProxy: !usingApiKey,
+      resume: { threadId: codexThreadId, text: turn.text },
+    }),
+  ));
+}
+turnsClosed = true;
+if (queuedTurns.length > 0) {
+  appendEvent({
+    type: "user_turn_undelivered",
+    turn_ids: queuedTurns.map((turn) => turn.id),
+  });
 }
 
 exitCode = code ?? 1;

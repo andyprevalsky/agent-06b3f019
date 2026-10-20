@@ -89,6 +89,7 @@ from domains.spawn_sub_agents.service import (
     spawn_sub_agents_batch_activity,
 )
 from domains.user_tools.repo import resolve_user_tools_activity, run_user_tool_activity
+from domains.display.repo import display_media_activity
 from domains.wait_for.service import evaluate_condition_activity
 from domains.web_fetch.handler import web_fetch_activity, web_fetch_download_activity
 from health_server import (
@@ -126,6 +127,7 @@ from helpers import (
     summarize_tool_result,
     update_agent_status,
 )
+from helpers.agent_graph import ask_code_agent_question_activity, send_agent_graph_message_activity
 from helpers.attachments import fetch_parent_attachments_activity, resolve_attachments_activity
 from helpers.error_alert import report_failure_activity
 from helpers.generation_handoff import parse_shutdown_grace_seconds
@@ -1576,6 +1578,8 @@ async def main():
         web_fetch_download_activity,
         resolve_user_tools_activity,
         run_user_tool_activity,
+        send_agent_graph_message_activity,
+        ask_code_agent_question_activity,
         save_tool_usage,
         read_message_history_activity,
         generate_message_activity,
@@ -1638,6 +1642,7 @@ async def main():
         send_direct_sms_activity,
         notify_sms_event_activity,
         resolve_user_ui_inline_view_activity,
+        display_media_activity,
         populate_tool_params_activity,
         execute_reasoning_activity,
         query_parent_state_activity,

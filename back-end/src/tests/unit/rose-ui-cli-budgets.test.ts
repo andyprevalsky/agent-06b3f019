@@ -292,10 +292,11 @@ test('preview CSP is the production usercontent CSP', () => {
 test('code agents are pointed at the README, current screenshots and check', () => {
   const prompt = buildCodeAgentSystemPrompt();
   for (const term of [
-    '~/rose_user_ui/README.md',
-    'screenshots/current/',
+    '~/rose_user_ui is the Rose app UI',
+    'README.md',
+    '~/rose_user_ui/screenshots/current/',
     'rose-ui screenshot',
-    'rose-ui check',
+    'rose-ui check` must pass before `rose-ui publish',
   ]) {
     assert.ok(prompt.includes(term), `code-agent prompt mentions ${term}`);
   }

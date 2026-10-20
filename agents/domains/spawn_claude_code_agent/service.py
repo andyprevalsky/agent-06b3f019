@@ -35,6 +35,7 @@ from domains.spawn_claude_code_agent.config import (
     SDK_WAIT_TOOL_IDLE_TIMEOUT_S,
     SDK_WAIT_TOOL_NAMES,
     SILENCE_TIMEOUT_S,
+    TRANSCRIPT_FLUSH_INTERVAL_S,
     code_agent_verifier_disabled,
 )
 from domains.spawn_claude_code_agent.repo import (
@@ -43,6 +44,7 @@ from domains.spawn_claude_code_agent.repo import (
     create_e2b_session,
     persist_terminal_output,
     save_claude_code_message,
+    save_code_transcript_batch,
 )
 from domains.spawn_claude_code_agent.types import ClaudeCodeParentResponse
 from helpers.activity_generation_drain import activity_drain_reason
@@ -52,6 +54,12 @@ from helpers.e2b_log_collector import SandboxLogCollector
 from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
 from helpers.tracing import traced
 from tools.base import MessageStatus
+from utils.code_transcript import (
+    CodeTranscriptBuilder,
+    TranscriptRecord,
+    render_transcript_text,
+    to_ui_record,
+)
 from utils.error_utils import extract_error_message
 from utils.llm_timeouts import VERIFIER_ACTIVITY_TIMEOUT_SECONDS
 from utils.response_schema_constraints import explicitly_allows_empty_value, value_satisfies_output_field_constraints
@@ -219,6 +227,23 @@ def _tool_detail_from_event(event: dict[str, Any]) -> str:
     return ""
 
 
+def _project_startup_line(event: Dict[str, Any]) -> str | None:
+    """One line for a finished project startup (ws-server ``project_startup`` event)."""
+    status = str(event.get("status") or "").strip().lower()
+    if status in {"", "running", "skipped"}:
+        return None
+    project = str(event.get("project") or "").strip()
+    label = f"Project startup ({project})" if project else "Project startup"
+    duration_ms = event.get("durationMs")
+    has_duration = isinstance(duration_ms, (int, float)) and duration_ms > 0
+    seconds = f" in {duration_ms / 1000:.1f}s" if has_duration else ""
+    if status == "ok":
+        return f"{label}: ok{seconds}"
+    if status == "timeout":
+        return f"{label}: timed out after {event.get('timeoutS') or '?'}s"
+    return f"{label}: failed (exit {event.get('exitCode')}){seconds}"
+
+
 def format_code_events_transcript(
     code_events: list[Dict[str, Any]] | None = None,
     action_summary: list[str] | None = None,
@@ -241,6 +266,12 @@ def format_code_events_transcript(
             cwd = event.get("cwd") or event.get("working_directory")
             detail = f"Session started in {cwd}" if cwd else "Session started"
             lines.append(f"[{provider}] {detail}")
+            continue
+
+        if event_type == "project_startup":
+            line = _project_startup_line(event)
+            if line:
+                lines.append(f"[{provider}] {line}")
             continue
 
         if event_type in {"agent_message", "assistant"}:
@@ -292,6 +323,14 @@ def format_code_events_transcript(
             text = event.get("text") or event.get("error") or event.get("message")
             if isinstance(text, str) and text.strip():
                 lines.append(f"[{provider} result] {text.strip()[:800]}")
+            continue
+
+        if event_type == "user_turn":
+            # Direct chat: the user (or another agent) typed to this CLI.
+            text = event.get("text")
+            who = "Agent" if event.get("sender") == "agent" else "User"
+            if isinstance(text, str) and text.strip():
+                lines.append(f"[{who} → {provider}] {text.strip()}")
             continue
 
     summary_lines = [str(item).strip() for item in (action_summary or []) if str(item).strip()]
@@ -724,6 +763,8 @@ _CODE_SESSION_FIELDS = (
     # Sandbox events already logged by an earlier attachment; the reattached
     # attempt logs only the ones that arrived while nobody was attached.
     "logged_events",
+    # Sandbox events whose transcript records are already persisted.
+    "transcript_events",
 )
 
 
@@ -849,6 +890,24 @@ async def _run_agentic_loop(
     # grace backstop ends the monitor if the CLI never exits.
     sdk_result_at: float | None = None
     logged_events = int((code_session or {}).get("logged_events") or 0)
+    # Direct chat: while the user holds the session (ws-server `direct_chat`
+    # held → released), the user's turns drive the CLI. The monitor must not
+    # end the session on post-result grace / SDK idle, and never writes to
+    # stdin, so no parent instruction competes with the user.
+    direct_chat_active = False
+    # Structured transcript (utils/code_transcript.py): records derive from the sandbox's
+    # append-only event history, so `transcript_events` (events already
+    # persisted) survives reattaches the same way `logged_events` does.
+    transcript = CodeTranscriptBuilder(code_provider, goal=goal)
+    transcript_flushed = int((code_session or {}).get("transcript_events") or 0)
+    transcript_pending: dict[str, TranscriptRecord] = {}
+    last_transcript_flush = 0.0
+    # Every delivered user turn (direct chat or an agent-graph message) adds
+    # one more SDK `result` before the CLI is done: a message that arrives
+    # mid-run makes the first result an intermediate one, so the post-result
+    # exit grace arms only once results catch up with turns.
+    user_turns_seen = 0
+    sdk_results_seen = 0
 
     def _mark_terminal_output_persisted() -> None:
         if terminal_output_persisted is not None:
@@ -894,7 +953,13 @@ async def _run_agentic_loop(
         # The ws-server resends its whole history on every (re)connect, so it
         # replaces everything seen so far instead of appending to it.
         nonlocal completed_codex_turns, effective_idle_timeout_s, wait_tool_armed, in_flight_tool_count
+        nonlocal direct_chat_active, transcript, user_turns_seen, sdk_results_seen
         code_events.clear()
+        direct_chat_active = False
+        user_turns_seen = 0
+        sdk_results_seen = 0
+        transcript = CodeTranscriptBuilder(code_provider, goal=goal)
+        transcript_pending.clear()
         completed_codex_turn_keys.clear()
         completed_codex_turns = 0
         in_flight_tool_count = 0
@@ -909,8 +974,23 @@ async def _run_agentic_loop(
     async def on_event(event: dict[str, Any]) -> None:
         nonlocal completed_codex_turns, last_output_time, effective_idle_timeout_s
         nonlocal wait_tool_armed, in_flight_tool_count, sdk_result_at, logged_events
+        nonlocal direct_chat_active, user_turns_seen, sdk_results_seen
         last_output_time = safe_time()
         code_events.append(event)
+        event_index = len(code_events) - 1
+        for record in transcript.feed(event, event_index):
+            if event_index >= transcript_flushed:
+                transcript_pending[record["id"]] = record
+        if event.get("type") == "direct_chat":
+            direct_chat_active = event.get("status") == "held"
+            if not direct_chat_active and sdk_result_at is not None:
+                # Released after a finished turn: the CLI is told to exit now,
+                # so restart the post-result grace from the hand back.
+                sdk_result_at = safe_time()
+        elif event.get("type") == "user_turn":
+            # A new turn: the next SDK result belongs to it.
+            user_turns_seen += 1
+            sdk_result_at = None
         if is_codex_completed_turn_event(event):
             key = codex_completed_turn_event_key(event, len(code_events) - 1)
             if key not in completed_codex_turn_keys:
@@ -991,7 +1071,15 @@ async def _run_agentic_loop(
             # result is reaped on the short idle window, not 900s. Record the
             # first result time for the exit-grace backstop (r31 a2/a3).
             wait_tool_armed = False
-            if sdk_result_at is None:
+            sdk_results_seen += 1
+            # The ws-server knows when the CLI has caught up: Claude Code merges
+            # a turn written mid-turn into the running one (one result for two
+            # writes) and reports its queue. Older sandboxes: count results.
+            pending_turns = event.get("pending_turns")
+            caught_up = (
+                pending_turns == 0 if isinstance(pending_turns, int) else sdk_results_seen > user_turns_seen
+            )
+            if sdk_result_at is None and caught_up:
                 sdk_result_at = safe_time()
                 logger.info(
                     "[ClaudeCode] SDK result observed; arming post-result exit grace",
@@ -1016,6 +1104,39 @@ async def _run_agentic_loop(
             event_type=event_type,
             provider=event.get("provider"),
         )
+
+    async def flush_transcript(force: bool = False) -> None:
+        nonlocal transcript_flushed, last_transcript_flush
+        if not transcript_pending:
+            return
+        if not force and safe_time() - last_transcript_flush < TRANSCRIPT_FLUSH_INTERVAL_S:
+            return
+        batch = dict(transcript_pending)
+        events_to = len(code_events)
+        records = sorted(batch.values(), key=lambda record: (record["seq"], record["rev"]))
+        last_transcript_flush = safe_time()
+        saved = await save_code_transcript_batch(
+            agent_id=agent_id,
+            task_id=task_id,
+            tool_call_id=tool_call_id,
+            code_provider=code_provider,
+            records=[to_ui_record(record) for record in records],
+            events_from=transcript_flushed,
+            events_to=events_to,
+            text=render_transcript_text(records),
+        )
+        if not saved:
+            return  # keep the batch; the next flush retries it
+        for record_id, record in batch.items():
+            # A newer revision that arrived during the save stays pending.
+            if transcript_pending.get(record_id) is record:
+                del transcript_pending[record_id]
+        transcript_flushed = events_to
+        if code_session is not None:
+            code_session["transcript_events"] = events_to
+            # Carry the new mark in a heartbeat so a retry after a drain or a
+            # crash does not re-persist this range.
+            safe_heartbeat("Code transcript persisted")
 
     ws_client = ClaudeCodeWsClient(
         ws_url=ws_url,
@@ -1072,6 +1193,7 @@ async def _run_agentic_loop(
             if (
                 sdk_result_at is not None
                 and exit_code is None
+                and not direct_chat_active
                 and (safe_time() - sdk_result_at) >= SDK_POST_RESULT_EXIT_GRACE_S
             ):
                 grace_elapsed = safe_time() - sdk_result_at
@@ -1102,6 +1224,7 @@ async def _run_agentic_loop(
                 and not pending_output
                 and ws_connected
                 and exit_code is None
+                and not direct_chat_active
             ):
                 logger.warning(
                     "[ClaudeCode] SDK idle timeout waiting for exit",
@@ -1116,6 +1239,8 @@ async def _run_agentic_loop(
                 break
 
             if silence_duration >= SILENCE_TIMEOUT_S and pending_output and ws_connected:
+                # (The parent-LLM relay below is unreachable: every branch
+                # `continue`s before it. Direct chat also never reaches it.)
                 filtered_output = terminal.get_display()
                 pending_output = False
 
@@ -1270,6 +1395,8 @@ async def _run_agentic_loop(
                             code_provider=code_provider,
                         )
 
+            await flush_transcript()
+
             if safe_time() - last_status_update >= 30:
                 elapsed_int = int(elapsed)
                 await save_claude_code_message(
@@ -1296,6 +1423,15 @@ async def _run_agentic_loop(
         # and would otherwise keep buffering broadcasts for a dead reader.
         with contextlib.suppress(Exception):
             await ws_client.disconnect()
+        try:
+            await flush_transcript(force=True)
+        except Exception as flush_err:  # never mask the loop's own outcome
+            logger.warning(
+                "[ClaudeCode] Final transcript flush failed",
+                agent_id=agent_id,
+                task_id=task_id,
+                error=str(flush_err)[:200],
+            )
 
     logger.info(
         "[ClaudeCode] Agentic loop finished",
@@ -2364,6 +2500,7 @@ async def spawn_claude_code_activity(
             "started_at": start_time,
             "loop_started_at": loop_started_at,
             "logged_events": int((attached or {}).get("logged_events") or 0),
+            "transcript_events": int((attached or {}).get("transcript_events") or 0),
         }
         # An attempt's first heartbeat goes out at once and later ones only every
         # throttle interval, so nothing may heartbeat before the session rides

@@ -56,6 +56,7 @@ EXECUTE_PHASE_TOOLS = [
     "spawn_agent",  # Unified: type=browser|code|general_purpose|explore
     "wait_for",
     "send_message_to_user_execute_phase",
+    "display",
     "call_phone_number",
     "message_person",
     "attempt_completion",
@@ -746,7 +747,10 @@ class InlineViewArg(BaseModel):
     props: Optional[Dict[str, Any]] = Field(default=None, description="Small JSON props passed to the view.")
 
 
-INLINE_VIEW_DESCRIPTION = "Optional inline view from the user's published Rose UI to render with this message."
+INLINE_VIEW_DESCRIPTION = (
+    "Optional inline view from the user's published Rose UI to render with this message, such as a game, "
+    "app or visual a code agent published. Use it to show the user that work in the chat."
+)
 
 
 class SendMessageToUserTool(BaseModel):
@@ -775,6 +779,39 @@ class SendMessageToUserExecutePhaseTool(BaseModel):
         )
     )
     inline_view: Optional[InlineViewArg] = Field(default=None, description=INLINE_VIEW_DESCRIPTION)
+
+
+class DisplayOptionArg(BaseModel):
+    """One numbered answer for a pinned question."""
+
+    label: str = Field(description="Short answer label.")
+    description: Optional[str] = Field(default=None, description="One line explaining the option.")
+    recommended: Optional[bool] = Field(default=None, description="True for the option you recommend.")
+
+
+class DisplayTool(BaseModel):
+    """Show images, videos or HTML to the user inline, or pin a question with numbered options."""
+
+    tool: Literal["display"]
+    paths: Optional[List[str]] = Field(
+        default=None,
+        description="Files already in this agent's tree (attachments or outputs), by file name.",
+    )
+    urls: Optional[List[str]] = Field(default=None, description="Public http(s) URLs of images, videos or HTML pages.")
+    caption: Optional[str] = Field(
+        default=None,
+        description=user_facing_text_description('Caption shown with the media; for placement "pinned", the question.'),
+    )
+    placement: Optional[Literal["inline", "pinned"]] = Field(
+        default="inline",
+        description='"inline" posts in the trajectory; "pinned" asks a question (see the tool notes for who answers).',
+    )
+    options: Optional[List[DisplayOptionArg]] = Field(
+        default=None, description='Answers for placement "pinned", shown numbered (max 9).'
+    )
+    allow_other: Optional[bool] = Field(
+        default=None, description='For placement "pinned": offer a free-text "Other…" answer (default true).'
+    )
 
 
 class MessagePersonTool(BaseModel):
@@ -916,7 +953,11 @@ class SpawnAgentTool(BaseModel):
         description=(
             "Select by capability: 'browser' starts a browser session for stateful or authenticated web work; "
             "'code' starts a coding agent using Claude Code or Codex CLI in an ephemeral sandbox, selected by "
-            "available credentials and configuration; 'general_purpose' starts a full autonomous agent for "
+            "available credentials and configuration. Delegate all code writing to it. Its sandbox holds the "
+            "user's Rose app UI (rose_user_ui): it edits and publishes changes to how Rose looks or behaves for "
+            "the user, and it can publish a game, app or visual it builds as an inline view, which you show "
+            "with send_message_to_user's inline_view; "
+            "'general_purpose' starts a full autonomous agent for "
             "cross-domain multi-step work - DO NOT use it or assign it a goal unless that goal is sufficiently distinct from the goal you are tasked with, and the sub-agent's task complexity is strictly less than half of your issued task complexity (otherwise do the work yourself); Be wary of infinite recursion: general_purpose sub-agents can also spawn sub-agents. When using one as an intelligent retry for a faulty tool, instruct it not to spawn more general_purpose sub-agents; otherwise it will likely spawn another general_purpose to retry the same faulty tool after the first error. 'explore' performs read-only research for web or user-data facts; "
             "'for_each' starts one general-purpose agent per item for repeated fan-out. "
             "A 'browser' agent is given an auth inventory at session start, separately from the goal: the user's "
@@ -1294,6 +1335,7 @@ TOOL_MODELS: ToolRegistry = {
     "google_workspace_run": GoogleOAuthDemoTool,
     "send_message_to_user": SendMessageToUserTool,
     "send_message_to_user_execute_phase": SendMessageToUserExecutePhaseTool,
+    "display": DisplayTool,
     "spawn_agent": SpawnAgentTool,
     "message_person": MessagePersonTool,
     # Plan phase tools

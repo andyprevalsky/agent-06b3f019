@@ -4,6 +4,7 @@ import express from 'express';
 import cors from 'cors';
 import { authenticate } from './providers/auth';
 import agentsRouter from './domains/agents/routes';
+import agentGraphRouter from './domains/agents/routes.graph';
 import agentQueuePointerRouter from './domains/agent-queue-pointer/routes';
 import workerProcessRuntimeRouter from './domains/worker-process-runtime/routes';
 import formatRouter from './domains/format/routes';
@@ -31,6 +32,9 @@ import authAssistanceRouter from './domains/auth-assistance/routes';
 import agentPhoneRouter from './domains/agent-phone/routes';
 import x402Router from './domains/x402/routes';
 import claudeCodeRouter from './domains/claude-code/routes';
+import codeAgentDirectChatRouter, {
+  sessionScopedRouter as codeSessionDirectChatRouter,
+} from './domains/claude-code/routesDirectChat';
 import codexCodeRouter from './domains/codex-code/routes';
 import billingRouter from './domains/billing/routes';
 import apiKeysRouter from './domains/api-keys/routes';
@@ -61,6 +65,8 @@ import fastCacheRouter from './domains/fast-cache/routes';
 import archiveRouter from './domains/archive/routes';
 import plannerMemoryRouter from './domains/planner-memory/routes';
 import userUiRouter, { usercontentRouter } from './domains/user-ui/routes';
+import agentToolsRouter, { agentQuestionsRouter } from './domains/agent-tools/routes';
+import projectsRouter from './domains/projects/routes';
 import worldModelsRouter from './domains/world-models/routes';
 import slackAutoRcaRouter from './domains/slack-auto-rca/routes';
 import downloadTelemetryRouter from './domains/download-telemetry/routes';
@@ -512,7 +518,11 @@ if (x402ReceivingWallet) {
 
 // Routes with authentication
 // Note: Each router handles its own auth per-route (hybridAuth for agents)
+app.use('/api/agents', agentQuestionsRouter); // pinned-question answers (agent-tools domain)
+// Direct chat with a code agent: /api/agents/:id/code-agent/:taskId/* (per-route hybridAuth).
+app.use('/api/agents', codeAgentDirectChatRouter);
 app.use('/api/agents', agentsRouter);
+app.use('/api/agent-graph', agentGraphRouter);
 app.use('/api/agent-queue-pointer', agentQueuePointerRouter);
 app.use('/api/worker-process-runtime', workerProcessRuntimeRouter);
 app.use('/api/auth-options', authOptionsRouter);
@@ -529,6 +539,7 @@ app.use('/api/imessage', imessageRouter);
 app.use('/api/vapi', vapiRouter);
 app.use('/api/voices', voicesRouter); // public — exposes ElevenLabs preview MP3 URLs
 app.use('/api/browser-session', browserSessionRouter);
+app.use('/api/claude-code-session', codeSessionDirectChatRouter);
 app.use('/api/claude-code-session', claudeCodeRouter);
 app.use('/api/codex-code-session', codexCodeRouter);
 app.use('/api/people', peopleRouter);
@@ -552,6 +563,8 @@ app.use('/api/fast-cache', fastCacheRouter); // Fast Mode aggressive cache get/s
 app.use('/api/archive', archiveRouter); // Encrypted trace archive + scoped DB fixtures
 app.use('/api/planner-memory', plannerMemoryRouter); // Planner memory history table (planner RAG)
 app.use('/api/user-ui', userUiRouter); // Per-user rose_user_ui versions (publish/activate/active)
+app.use('/api/agent-tools', agentToolsRouter); // display / messages / approvals for agents + code-agent sandboxes
+app.use('/api/projects', projectsRouter); // Owner-scoped Projects: settings, env files, codebase sync
 app.use('/api/world-models', worldModelsRouter); // WMH-compatible simulation runtime shim
 // Anthropic tee-proxy for the code agent. Mounted OUTSIDE /api so the injected
 // ANTHROPIC_BASE_URL = <backend>/anthropic-proxy/<goalHash> resolves to /v1/messages.

@@ -1,0 +1,16 @@
+{
+  "id": "feature-textstats-top-words",
+  "kind": "small feature with tests",
+  "language": "python",
+  "task": "Add a feature to the textstats package: top_words(text, n=3, stopwords=None) in textstats/core.py, also exported from the package (textstats.top_words and listed in textstats.__all__). It returns a list of (word, count) tuples for the n most frequent words, using the existing tokenize() rules. Sort by count descending, then alphabetically for ties. stopwords is an optional collection of words to ignore, compared case-insensitively. Return fewer than n items when there are fewer distinct words. Raise ValueError when n is not positive. Write unit tests for top_words in the tests/ directory and keep every existing test passing.",
+  "hidden_tests": {
+    "dir": "hidden",
+    "commands": [
+      ["python3", "-m", "unittest", "discover", "-s", "tests", "-t", "."],
+      ["python3", "-m", "unittest", "discover", "-s", "_hidden_tests", "-t", "."]
+    ]
+  },
+  "required_patterns": [
+    {"glob": "tests/*.py", "pattern": "top_words", "min_files": 1, "description": "the agent added tests for top_words under tests/"}
+  ]
+}

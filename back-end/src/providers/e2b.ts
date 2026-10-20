@@ -18,6 +18,7 @@ import {
   type GptCodeCredentialEnvelopeResult,
 } from './gptCredentials';
 import { buildCodeAgentSystemPrompt, buildCodexHarnessSystemPrompt } from './codeAgentPrompt';
+import { withAgentGraphInstructions } from './agentGraph/cli';
 import { uploadAttachmentsToSandbox } from './e2bAttachments';
 import { overlayCodexRoseBridge } from './e2bCodexHarness';
 import { workDirForGithubRepo } from './e2bWorkDir';
@@ -29,13 +30,17 @@ import {
   overlayClaudeCodeWsServer,
   overlayCodexCodeWsServer,
 } from './e2bWsServerOverlay';
-import { createLocalClaudeCodeSessionIfBillingBlocked } from './claudeCodeLocalSession';
-import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
 import {
-  applyUserUiSandboxEnvs,
-  prepareUserUiWorkspaceSafe,
-  writeUserUiWorkspaceToSandboxSafe,
-} from './userUi/workspace';
+  createLocalClaudeCodeSessionIfBillingBlocked,
+  resolveLocalSessionWorkDir,
+} from './claudeCodeLocalSession';
+import type { ProjectRestoreReport, ProjectWorkspace } from './projects/types';
+import { restoreSandboxProject } from './projects/workspace';
+import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
+import { codeSessionTurnToken } from './codeSessionTurns';
+import { applyUserUiSandboxEnvs, writeUserUiWorkspaceToSandboxSafe } from './userUi/workspace';
+import { agentToolsForLocalHome } from './agentTools/workspace';
+import { prepareCodeSessionWorkspace } from './codeSessionWorkspace';
 import {
   isRefreshOnlyOauthEnvelope,
   resolveClaudeCodeAuthEnvs,
@@ -103,18 +108,25 @@ const DEFAULT_CODEX_CODE_TEMPLATE_ID = 'codex-code';
  * @param githubRepoUrl - Optional GitHub repo URL to clone before starting Claude
  * @returns Session info including WebSocket URL for terminal streaming
  */
+export interface ClaudeCodeSessionOptions {
+  /** Project restored into `~/workspace` before the CLI starts (PJ3 / C9). */
+  projectWorkspace?: ProjectWorkspace | null;
+}
+
 export async function createClaudeCodeSession(
   agentId: string,
   goal: string,
   attachments?: FilePointer[],
   githubRepoUrl?: string,
   userId?: string,
-  fastModeCacheEnabled?: boolean
+  fastModeCacheEnabled?: boolean,
+  options: ClaudeCodeSessionOptions = {}
 ): Promise<{
   wsUrl: string;
   taskId: string;
   sandboxId: string;
   uploadedFiles: string[];
+  projectRestore?: ProjectRestoreReport | null;
 }> {
   // Serialize creates — concurrent reserve-script calls stampede E2B redis.
   return withClaudeCodeCreateSlot(() =>
@@ -124,7 +136,8 @@ export async function createClaudeCodeSession(
       attachments,
       githubRepoUrl,
       userId,
-      fastModeCacheEnabled
+      fastModeCacheEnabled,
+      options
     )
   );
 }
@@ -135,13 +148,16 @@ async function createClaudeCodeSessionUnlocked(
   attachments?: FilePointer[],
   githubRepoUrl?: string,
   userId?: string,
-  fastModeCacheEnabled?: boolean
+  fastModeCacheEnabled?: boolean,
+  options: ClaudeCodeSessionOptions = {}
 ): Promise<{
   wsUrl: string;
   taskId: string;
   sandboxId: string;
   uploadedFiles: string[];
+  projectRestore?: ProjectRestoreReport | null;
 }> {
+  const projectWorkspace = options.projectWorkspace ?? null;
   log.info(`Creating Claude Code session for agent ${agentId}`);
 
   if (!process.env.E2B_API_KEY || !process.env.E2B_CLAUDE_CODE_TEMPLATE_ID) {
@@ -170,16 +186,23 @@ async function createClaudeCodeSessionUnlocked(
     `wrapper:${fileHash(findLocalClaudeCodeWsServer())}`,
     `env:${process.env.FAST_MODE_CODE_AGENT_ENV_FINGERPRINT ?? 'default'}`,
   ].join('|');
-  const systemPrompt = buildCodeAgentSystemPrompt({
-    githubRepoUrl,
-    workDir,
-  });
+  const systemPrompt = withAgentGraphInstructions(
+    buildCodeAgentSystemPrompt({
+      githubRepoUrl,
+      workDir,
+    })
+  );
 
   // Build environment variables for sandbox
   const envs: Record<string, string> = {
     CLAUDE_CODE_GOAL: goal,
     CLAUDE_CODE_MODEL: model,
     CODE_AGENT_SYSTEM_PROMPT: systemPrompt,
+    // Write capability for direct-chat user turns (codeSessionTurns.ts). The
+    // ws URL the browser reads stays read-only without it.
+    ...(process.env.BACKEND_API_KEY
+      ? { CODE_SESSION_TURN_TOKEN: codeSessionTurnToken(taskId) }
+      : {}),
   };
 
   // Try user's own credentials first, then rotate through the pool. The agent's
@@ -334,7 +357,7 @@ async function createClaudeCodeSessionUnlocked(
     log.info(`GitHub repo configured: ${githubRepoUrl}`);
   }
 
-  const userUiWorkspace = await prepareUserUiWorkspaceSafe(userId);
+  const userUiWorkspace = await prepareCodeSessionWorkspace(userId, agentId, taskId, 'claude');
   applyUserUiSandboxEnvs(envs, userUiWorkspace);
 
   // Create sandbox first (before DB record) to avoid placeholder conflicts.
@@ -358,7 +381,9 @@ async function createClaudeCodeSessionUnlocked(
       goal,
       envs,
       attachments,
-      userUiWorkspace,
+      // Same-host session: loopback tools URL, MCP path under the local HOME.
+      userUiWorkspace: agentToolsForLocalHome(userUiWorkspace, resolveLocalSessionWorkDir(taskId)),
+      projectWorkspace,
       claudeTokenSource,
       claudeTokenIntegrationId:
         credentialMeta?.source === 'pool' ? (credentialMeta.poolTokenId ?? null) : null,
@@ -370,6 +395,7 @@ async function createClaudeCodeSessionUnlocked(
   log.info(`Created sandbox: ${sandbox.sandboxId}`);
   await overlayClaudeCodeWsServer(sandbox);
   await writeUserUiWorkspaceToSandboxSafe(sandbox, userUiWorkspace, agentId);
+  const project = await restoreSandboxProject(taskId, sandbox, projectWorkspace);
 
   const uploadedFiles = await uploadAttachmentsToSandbox(sandbox, attachments, 'Claude Code');
 
@@ -383,6 +409,7 @@ async function createClaudeCodeSessionUnlocked(
     .run('node /home/user/ws-server.mjs', {
       background: true,
       timeoutMs: 0,
+      ...(project.envs ? { envs: project.envs } : {}),
     })
     .catch((err) =>
       log.error('Failed to start WS server', {
@@ -433,6 +460,7 @@ async function createClaudeCodeSessionUnlocked(
       claudeTokenSource,
       claudeTokenIntegrationId:
         credentialMeta?.source === 'pool' ? (credentialMeta.poolTokenId ?? null) : null,
+      projectId: projectWorkspace?.project.id ?? null,
     },
   });
 
@@ -443,6 +471,7 @@ async function createClaudeCodeSessionUnlocked(
     taskId,
     sandboxId: sandbox.sandboxId,
     uploadedFiles,
+    projectRestore: project.report,
   };
 }
 
@@ -486,10 +515,12 @@ export async function createCodexCodeSession(
           roseUserId: userId,
           anchorAgentId: agentId,
         })
-      : buildCodeAgentSystemPrompt({
-          githubRepoUrl,
-          workDir,
-        });
+      : withAgentGraphInstructions(
+          buildCodeAgentSystemPrompt({
+            githubRepoUrl,
+            workDir,
+          })
+        );
 
   const credentialMeta: GptCodeCredentialEnvelopeResult | null =
     await fetchGptCodeCredentialsWithMeta(userId);
@@ -512,6 +543,11 @@ export async function createCodexCodeSession(
     CODEX_MODEL: model,
     CODE_AGENT_SYSTEM_PROMPT: systemPrompt,
     CODE_AGENT_HARNESS_MODE: harnessMode,
+    // Write capability for inbound turns (agent-graph messages, direct chat);
+    // same per-task token as the Claude Code session.
+    ...(process.env.BACKEND_API_KEY
+      ? { CODE_SESSION_TURN_TOKEN: codeSessionTurnToken(taskId) }
+      : {}),
   };
   if (harnessMode === 'rose' && roseApiBaseUrl) {
     const apiKey = process.env.BACKEND_API_KEY ?? '';
@@ -584,7 +620,7 @@ export async function createCodexCodeSession(
     log.info(`GitHub repo configured for Codex: ${githubRepoUrl}`);
   }
 
-  const userUiWorkspace = await prepareUserUiWorkspaceSafe(userId);
+  const userUiWorkspace = await prepareCodeSessionWorkspace(userId, agentId, taskId, 'codex');
   applyUserUiSandboxEnvs(envs, userUiWorkspace);
 
   const sandbox = await createSandboxWithRetry(
