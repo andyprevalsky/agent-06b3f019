@@ -4426,6 +4426,7 @@ class _CCBoundaryRecorder:
         self.persisted: list[str] = []
         self.verified_events: list[list[dict]] = []
         self.logged: list[dict] = []
+        self.transcripts: list[dict] = []
         self.collector = AsyncMock()
 
     async def create_session(self, **kwargs):
@@ -4438,6 +4439,10 @@ class _CCBoundaryRecorder:
 
     async def save_message(self, **kwargs):
         self.titles.append(kwargs.get("title"))
+
+    async def save_transcript(self, **kwargs):
+        self.transcripts.append(kwargs)
+        return True
 
     async def persist_output(self, task_id, output, *args, **kwargs):
         self.persisted.append(output)
@@ -4459,6 +4464,7 @@ class _CCBoundaryRecorder:
             patch.object(service, "create_e2b_session", side_effect=self.create_session),
             patch.object(service, "close_e2b_session", side_effect=self.close_session),
             patch.object(service, "save_claude_code_message", side_effect=self.save_message),
+            patch.object(service, "save_code_transcript_batch", side_effect=self.save_transcript),
             patch.object(service, "persist_terminal_output", side_effect=self.persist_output),
             patch.object(service, "_run_verifier", side_effect=self.verifier),
             patch.object(service, "_log_code_agent_event", side_effect=lambda event, **kw: self.logged.append(event)),

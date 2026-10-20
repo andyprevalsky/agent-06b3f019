@@ -12,6 +12,7 @@ from tools.prompts.attempt_completion_with_result import (
     PROMPT as attempt_completion_with_result_prompt,
 )
 from tools.prompts.call_phone_number import PROMPT as call_phone_number_prompt
+from tools.prompts.display import PROMPT as display_prompt
 from tools.prompts.grep import PROMPT as grep_prompt
 from tools.prompts.google_workspace_run import PROMPT as google_workspace_run_prompt
 from tools.prompts.message_person import PROMPT as message_person_prompt
@@ -34,6 +35,7 @@ TOOL_PROMPTS: dict[str, str] = {
     # Communication
     "send_message_to_user": send_message_to_user_prompt,
     "send_message_to_user_execute_phase": send_message_to_user_execute_phase_prompt,
+    "display": display_prompt,
     "message_person": message_person_prompt,
     "call_phone_number": call_phone_number_prompt,
     # Research

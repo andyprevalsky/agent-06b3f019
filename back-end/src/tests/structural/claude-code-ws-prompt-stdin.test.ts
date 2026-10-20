@@ -41,9 +41,17 @@ assert.ok(
     'Deliver the prompt on stdin instead.'
 );
 
-// 2. The child's stdin must be a pipe (not "ignore") so the prompt can be written.
+// 2. The claude child's stdin must be a pipe (not "ignore") so the prompt can
+// be written. Scoped to the `spawn("claude", ...)` call: other children (the
+// project startup script) may legitimately ignore stdin.
+const claudeSpawnAt = src.indexOf('spawn("claude"');
 assert.ok(
-  !/stdio:\s*\[\s*["']ignore["']/.test(src),
+  claudeSpawnAt >= 0,
+  'claude-code ws-server no longer spawns "claude"; revisit this invariant'
+);
+const claudeSpawn = src.slice(claudeSpawnAt, src.indexOf('});', claudeSpawnAt));
+assert.ok(
+  /stdio:\s*\[/.test(claudeSpawn) && !/stdio:\s*\[\s*["']ignore["']/.test(claudeSpawn),
   'REGRESSION: claude-code ws-server spawns claude with stdin "ignore"; the prompt cannot be delivered ' +
     'on stdin. Use stdio: ["pipe", "pipe", "pipe"].'
 );
