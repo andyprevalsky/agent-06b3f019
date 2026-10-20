@@ -143,7 +143,7 @@ def _render_explore_tool_result(tool_name: str, value: Any) -> str:
                 details["url"] = value["url"]
             detail_text = json.dumps(details, ensure_ascii=False, default=str) if details else ""
             return "\n\n".join(part for part in (source_text, body.strip(), detail_text) if part)
-    if isinstance(value, str) and tool_name in {"web_search", "web_fetch"}:
+    if isinstance(value, str) and tool_name in {"web_search", "web_fetch", "inspect_code"}:
         return value
     return json.dumps(value, ensure_ascii=tool_name not in {"web_search", "web_fetch"}, default=str)
 
