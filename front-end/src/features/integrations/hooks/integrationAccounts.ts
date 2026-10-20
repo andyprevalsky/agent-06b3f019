@@ -8,7 +8,9 @@
  *
  * Pure functions, no state machine. Every field is treated as untrusted:
  *   - `accounts` absent  → null (callers fall back to today's per-row status)
- *   - `total` null       → pct null (indeterminate bar, never a fake pct)
+ *   - `total` null       → pct null (indeterminate bar, never a fake pct), except
+ *                          WhatsApp, whose pct is Baileys' measured percent
+ *                          (determinate only when pct is a number)
  *   - `eta_sec` null     → etaSec null (ETA text hidden)
  *   - pct >= 100         → the account reads as synced (bar disappears)
  *   - failed / needs_reconnect → error / warning tone, progress dropped (no bar)
@@ -28,15 +30,26 @@ function finite(n: unknown): n is number {
   return typeof n === 'number' && Number.isFinite(n);
 }
 
+/**
+ * Providers whose `pct` is measured by the sync itself even though `total` is
+ * always null: WhatsApp reports Baileys' own history-sync percent (plan row I2).
+ * Everyone else's pct without a total would be a guess, so it is dropped.
+ */
+export const PERCENT_ONLY_PROVIDERS: readonly string[] = ['whatsapp'];
+
 /** Normalize one wire progress report; null when it carries nothing usable. */
-export function parseSyncProgress(wire: SyncProgressWire | null | undefined): SyncProgress | null {
+export function parseSyncProgress(
+  wire: SyncProgressWire | null | undefined,
+  options: { measuredPct?: boolean } = {},
+): SyncProgress | null {
   if (wire === null || wire === undefined || typeof wire !== 'object') return null;
   const total = finite(wire.total) && wire.total > 0 ? Math.round(wire.total) : null;
   const rawDone = finite(wire.done) ? Math.max(Math.round(wire.done), 0) : null;
   const done = rawDone !== null && total !== null ? Math.min(rawDone, total) : rawDone;
   let pct: number | null = null;
-  if (total !== null) {
-    const raw = finite(wire.pct) ? wire.pct : done !== null ? (done / total) * 100 : null;
+  if (total !== null || options.measuredPct === true) {
+    const counted = done !== null && total !== null ? (done / total) * 100 : null;
+    const raw = finite(wire.pct) ? wire.pct : counted;
     pct = raw === null ? null : Math.min(Math.max(raw, 0), 100);
   }
   const etaSec = finite(wire.eta_sec) && wire.eta_sec >= 0 ? Math.round(wire.eta_sec) : null;
@@ -83,7 +96,9 @@ export function parseIntegrationAccounts(
     // A damaged account shows no bar: needs_reconnect / failed outrank progress.
     const progress =
       tone === 'syncing' || tone === 'synced'
-        ? parseSyncProgress(wire.progress as SyncProgressWire | null | undefined)
+        ? parseSyncProgress(wire.progress as SyncProgressWire | null | undefined, {
+            measuredPct: row !== undefined && PERCENT_ONLY_PROVIDERS.includes(row.name),
+          })
         : null;
     const labeled = typeof wire.label === 'string' && wire.label !== '';
     accounts.push({

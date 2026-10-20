@@ -20,18 +20,30 @@ import type { useIntegrationData } from '../hooks/useIntegrationData';
 import type { useMessagesSync } from '../hooks/useMessagesSync';
 import type { usePasswordSync } from '../hooks/usePasswordSync';
 import type { usePlaidIntegration } from '../hooks/usePlaidIntegration';
+import { NEW_LINKEDIN_ACCOUNT } from '../hooks/useLinkedInAccountSync';
 import BrowserIcon from './BrowserIcon';
 import { BrowserCookiesIcon } from './BrowserCookiesSection';
 import type { DesktopAccountView, DesktopIntegrationView } from './DesktopIntegrationRow';
+import type { ConnectedIntegration } from '../types';
+import {
+  AGENT_PASSKEYS_PROVIDER,
+  AGENT_PASSKEYS_REMOVAL_WARNING,
+  credentialSourceName,
+  extraPasswordRows,
+  passkeyAccountLabel,
+  passkeyProviderRows,
+  passwordAccountLabel,
+  passwordSource,
+} from './credentialAccountLabels';
 import {
   countDetail,
   gmailAccountViews,
-  passkeyRows,
   plaidAccountViews,
   rowAccounts,
   stringConfig,
   type RemovalPort,
 } from './desktopAccounts';
+import { linkedinAccountViews } from './desktopLinkedIn';
 import DropdownIconFrame, {
   BrowserDropdownIconPreset,
   dropdownIconImageClassName,
@@ -70,6 +82,21 @@ export interface DesktopIntegrationsProps {
 export interface DesktopSectionView {
   title: string;
   rows: DesktopIntegrationView[];
+}
+
+/** Multi-account actions DesktopIntegrations owns (hooks with state), passed to the builders. */
+export interface DesktopPorts {
+  /** hooks/useLinkedInAccountSync */
+  linkedin: {
+    start: (accountId?: string, defaultAccountExporting?: boolean) => Promise<void>;
+    startingAccountId: string | null;
+  };
+  /** hooks/useWhatsAppAccounts */
+  whatsapp: {
+    addAccount: () => Promise<void>;
+    adding: boolean;
+    logoutFor: (accountId: string) => (() => Promise<void>) | undefined;
+  };
 }
 
 type Preset = { iconScale?: number; iconFit?: 'contain' | 'cover' | 'fill' };
@@ -139,34 +166,67 @@ function browserCookieRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
   });
 }
 
+/** Chips of one `<source>_passwords` provider: one per browser profile, "Chrome · Profile 1". */
+function passwordAccounts(
+  row: ConnectedIntegration | undefined,
+  removal: RemovalPort,
+  localSyncing = false,
+) {
+  if (row === undefined) return [];
+  const source = passwordSource(row.name) ?? row.name;
+  return rowAccounts(
+    row,
+    {
+      displayName: `${credentialSourceName(source)} passwords`,
+      label: source === 'apple' ? 'Apple Passwords' : 'Default profile',
+      localSyncing,
+      labelFor: (account) => passwordAccountLabel(row.name, account),
+    },
+    removal,
+  );
+}
+
+/** Chips of one `<source>_passkeys` store; agent-enrolled ones warn before removal. */
+function passkeyAccounts(row: ConnectedIntegration, removal: RemovalPort) {
+  const label = passkeyAccountLabel(row.name);
+  return rowAccounts(
+    row,
+    {
+      displayName: 'Passkeys',
+      label,
+      labelFor: () => label,
+      removalWarning:
+        row.name === AGENT_PASSKEYS_PROVIDER ? AGENT_PASSKEYS_REMOVAL_WARNING : undefined,
+    },
+    removal,
+  );
+}
+
+/** A row for passwords of a browser without a fixed row (e.g. Brave); no connect action. */
+function extraPasswordRow(row: ConnectedIntegration, removal: RemovalPort): DesktopIntegrationView {
+  const source = passwordSource(row.name) ?? row.name;
+  return {
+    key: `passwords-${source}`,
+    name: credentialSourceName(source),
+    icon: framed(
+      BrowserDropdownIconPreset(source),
+      <BrowserIcon type={source as never} className={dropdownIconImageClassName} />,
+    ),
+    accounts: passwordAccounts(row, removal),
+    availability: 'ready',
+  };
+}
+
 function passwordRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
   const rows = p.data.connectedIntegrations;
   const find = (name: string) => rows.find((i) => i.name === name);
   const loading = p.passwords.passwordSyncLoading;
-  const chrome = rowAccounts(
-    find('chrome_passwords'),
-    {
-      displayName: 'Chrome passwords',
-      label: 'Default profile',
-      localSyncing: loading === 'chrome',
-    },
-    removal,
-  );
+  const chrome = passwordAccounts(find('chrome_passwords'), removal, loading === 'chrome');
   const apple = [
-    ...rowAccounts(
-      find('apple_passwords'),
-      { displayName: 'Apple', label: 'Apple Passwords' },
-      removal,
-    ),
-    ...passkeyRows(rows).flatMap((row) =>
-      rowAccounts(row, { displayName: 'Passkeys', label: 'Passkeys' }, removal),
-    ),
+    ...passwordAccounts(find('apple_passwords'), removal),
+    ...passkeyProviderRows(rows).flatMap((row) => passkeyAccounts(row, removal)),
   ];
-  const atlas = rowAccounts(
-    find('atlas_passwords'),
-    { displayName: 'ChatGPT Atlas', label: 'Default profile', localSyncing: loading === 'atlas' },
-    removal,
-  );
+  const atlas = passwordAccounts(find('atlas_passwords'), removal, loading === 'atlas');
   const views: DesktopIntegrationView[] = [
     {
       key: 'chrome-passwords',
@@ -201,11 +261,12 @@ function passwordRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
         : undefined,
       connecting: loading === 'atlas',
     },
+    ...extraPasswordRows(rows).map((row) => extraPasswordRow(row, removal)),
   ];
   return views;
 }
 
-function messageRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
+function messageRows(p: DesktopIntegrationsProps, removal: RemovalPort, ports: DesktopPorts) {
   const rows = p.data.connectedIntegrations;
   const find = (name: string) => rows.find((i) => i.name === name);
   const loading = p.messages.messageSyncLoading;
@@ -227,15 +288,22 @@ function messageRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
     onResync: (email) => void p.actions.onGmailResync(email),
   });
   const whatsappRow = find('whatsapp');
+  // One chip per linked phone (accountId = label = E.164); × logs it out on this Mac first.
   const whatsapp = rowAccounts(
     whatsappRow,
     {
       displayName: 'WhatsApp',
       label: stringConfig(whatsappRow, 'phone') ?? 'Linked device',
-      localSyncing: loading === 'whatsapp',
+      localSyncing: loading === 'whatsapp' || ports.whatsapp.adding,
+      prepareRemoval: ports.whatsapp.logoutFor,
     },
     removal,
   );
+  // No phone yet: the existing connect (resume or first pairing); then each + pairs one more.
+  const connectWhatsApp =
+    whatsapp.length === 0
+      ? () => void p.actions.onWhatsAppConnect()
+      : () => void ports.whatsapp.addAccount();
   const views: DesktopIntegrationView[] = [
     {
       key: 'imessage',
@@ -261,8 +329,8 @@ function messageRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
       icon: framed(DropdownIconPreset.whatsapp, <WhatsAppIcon />),
       accounts: whatsapp,
       availability: availability(p.isWhatsAppAvailable, whatsapp),
-      onConnect: p.isWhatsAppAvailable ? () => void p.actions.onWhatsAppConnect() : undefined,
-      connecting: loading === 'whatsapp',
+      onConnect: p.isWhatsAppAvailable ? connectWhatsApp : undefined,
+      connecting: loading === 'whatsapp' || ports.whatsapp.adding,
     },
     comingSoon('telegram', 'Telegram', framed(DropdownIconPreset.telegram, <TelegramIcon />)),
     comingSoon('messenger', 'Messenger', framed(DropdownIconPreset.messenger, <MessengerIcon />)),
@@ -287,12 +355,15 @@ function plaidRow(p: DesktopIntegrationsProps): DesktopIntegrationView {
   };
 }
 
-function socialRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
-  const row = p.data.connectedIntegrations.find((i) => i.name === 'linkedin');
-  const accounts = rowAccounts(
-    row,
-    { displayName: 'LinkedIn', label: stringConfig(row, 'name') ?? 'LinkedIn account' },
-    removal,
+function socialRows(p: DesktopIntegrationsProps, removal: RemovalPort, ports: DesktopPorts) {
+  const { linkedin } = ports;
+  const accounts = linkedinAccountViews(p.data.connectedIntegrations, removal, {
+    onRetry: (accountId) => void linkedin.start(accountId),
+    startingAccountId: linkedin.startingAccountId,
+  });
+  // A new export without an account lands on `default` until the agent names its account.
+  const defaultExporting = accounts.some(
+    (account) => account.accountId === 'default' && account.tone === 'syncing',
   );
   const views: DesktopIntegrationView[] = [
     comingSoon('x', 'X', framed(DropdownIconPreset.x, <XIcon />)),
@@ -302,8 +373,10 @@ function socialRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
       icon: framed(DropdownIconPreset.linkedin, <LinkedInIcon />),
       accounts,
       availability: availability(p.isBrowserCookiesAvailable, accounts),
-      onConnect: p.isBrowserCookiesAvailable ? () => void p.actions.onLinkedInSync() : undefined,
-      connecting: p.messages.linkedinSyncLoading,
+      onConnect: p.isBrowserCookiesAvailable
+        ? () => void linkedin.start(undefined, defaultExporting)
+        : undefined,
+      connecting: linkedin.startingAccountId === NEW_LINKEDIN_ACCOUNT,
     },
     comingSoon('instagram', 'Instagram', framed(DropdownIconPreset.instagram, <InstagramIcon />)),
   ];
@@ -326,11 +399,12 @@ function fileSystemRow(p: DesktopIntegrationsProps): DesktopIntegrationView {
 export function desktopSectionViews(
   p: DesktopIntegrationsProps,
   removal: RemovalPort,
+  ports: DesktopPorts,
 ): DesktopSectionView[] {
   const sections: DesktopSectionView[] = [
     { title: 'Browser Cookies', rows: browserCookieRows(p, removal) },
     { title: 'Passwords', rows: passwordRows(p, removal) },
-    { title: 'Messages', rows: messageRows(p, removal) },
+    { title: 'Messages', rows: messageRows(p, removal, ports) },
   ];
   if (p.isFullySignedIn) {
     sections.push({
@@ -345,7 +419,7 @@ export function desktopSectionViews(
     });
     sections.push({ title: 'Banks & Financial Accounts', rows: [plaidRow(p)] });
   }
-  sections.push({ title: 'Socials', rows: socialRows(p, removal) });
+  sections.push({ title: 'Socials', rows: socialRows(p, removal, ports) });
   sections.push({ title: 'File System', rows: [fileSystemRow(p)] });
   return sections;
 }

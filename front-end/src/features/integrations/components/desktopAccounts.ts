@@ -11,12 +11,17 @@
  *   contract absent   → one chip for a connected row; × = row DELETE (confirmed)
  *   Gmail / Plaid     → existing per-address / per-item flows, unchanged; the
  *                       contract only contributes sync tone and progress ids
+ *   Gmail address     → idle = queued (quiet), phase `history` = light "checking
+ *                       for new mail" (no bar), scanning / saving = the bar
+ *   labelFor          → a source-qualified chip label (passwords / passkeys, see
+ *                       credentialAccountLabels) used unprefixed in the dialog
+ *   removalWarning    → the confirm dialog states why removal cannot be undone
  */
 
 import { parseIntegrationAccounts } from '../hooks/integrationAccounts';
 import { gmailAccounts } from '../hooks/useIntegrationData';
 import { removalKey, type PendingRemoval } from '../hooks/useIntegrationRemoval';
-import type { AccountTone, ConnectedIntegration, PlaidItem } from '../types';
+import type { AccountTone, ConnectedIntegration, IntegrationAccount, PlaidItem } from '../types';
 import type { DesktopAccountView } from './DesktopIntegrationRow';
 import {
   chipToneForState,
@@ -40,7 +45,7 @@ export function rowStatusTone(row: ConnectedIntegration, localSyncing = false): 
   return 'synced';
 }
 
-function toneDetail(tone: AccountTone): string | undefined {
+export function toneDetail(tone: AccountTone): string | undefined {
   if (tone === 'warning') return 'needs reconnect';
   if (tone === 'error') return 'sync failed';
   return undefined;
@@ -54,6 +59,15 @@ export interface RowFallback {
   detail?: string;
   /** A local connect/sync for this row is running right now. */
   localSyncing?: boolean;
+  /**
+   * Chip label per contract account, already naming its source (e.g.
+   * "Chrome · Profile 1"): the confirm dialog and × use it unprefixed.
+   */
+  labelFor?: (account: IntegrationAccount) => string;
+  /** Removal cannot be undone: the confirm dialog says why. */
+  removalWarning?: string;
+  /** Work to run before one account's DELETE (WhatsApp: log it out on this Mac). */
+  prepareRemoval?: (accountId: string) => (() => Promise<void>) | undefined;
 }
 
 /** Chips for a provider that is one integration row (browsers, passwords, iMessage, ...). */
@@ -68,7 +82,8 @@ export function rowAccounts(
     return contract
       .filter((account) => !(account.state === 'idle' && row.status === 'NOT_CONNECTED'))
       .map((account) => {
-        const label = account.unlabeled ? fallback.label : account.label;
+        const qualified = fallback.labelFor?.(account);
+        const label = qualified ?? (account.unlabeled ? fallback.label : account.label);
         const key = removalKey(row.name, account.accountId);
         return {
           provider: row.name,
@@ -81,9 +96,14 @@ export function rowAccounts(
             removal.request({
               name: row.name,
               accountId: account.accountId,
-              label: `${fallback.displayName} · ${label}`,
+              label: qualified ?? `${fallback.displayName} · ${label}`,
+              warning: fallback.removalWarning,
+              prepare: fallback.prepareRemoval?.(account.accountId),
             }),
-          removeLabel: `Remove ${fallback.displayName} account ${label}`,
+          removeLabel:
+            qualified !== undefined
+              ? `Remove ${qualified}`
+              : `Remove ${fallback.displayName} account ${label}`,
           removing: removal.removingKey === key,
           removeBlockedReason: removal.blockedReasons?.[key],
         };
@@ -113,6 +133,24 @@ export interface GmailPort {
   onResync: (email: string) => void;
 }
 
+/** Gmail's incremental sync (`history`): a light state, never the full bar. */
+const GMAIL_LIGHT_PHASE = 'history';
+
+type GmailSyncView = Pick<DesktopAccountView, 'tone' | 'detail' | 'title' | 'hideProgress'>;
+
+/** Tone, detail and bar choice of one healthy Gmail address from its contract entry. */
+function gmailSyncView(match: IntegrationAccount | undefined): GmailSyncView {
+  if (match === undefined) return { tone: 'synced' };
+  // The shared row is SYNCING (a job lease) and this address has not started yet.
+  if (match.state === 'idle') {
+    return { tone: 'queued', detail: 'queued', title: 'Waiting for its turn to sync' };
+  }
+  if (match.tone === 'syncing' && match.progress?.phase === GMAIL_LIGHT_PHASE) {
+    return { tone: 'syncing', detail: 'checking for new mail', hideProgress: true };
+  }
+  return { tone: match.tone, detail: toneDetail(match.tone), title: match.lastError ?? undefined };
+}
+
 /** One chip per Gmail address, keeping the existing disconnect / reconnect flows. */
 export function gmailAccountViews(
   integrations: ConnectedIntegration[],
@@ -123,15 +161,18 @@ export function gmailAccountViews(
   return gmailAccounts(row).map((account) => {
     const damaged = account.state !== 'connected';
     const match = contract.find((c) => c.accountId === account.email || c.label === account.email);
+    const health: GmailSyncView = damaged
+      ? {
+          tone: 'warning',
+          detail: 'Needs Reconnection',
+          title: account.lastErrorReason ?? 'This account needs to be reconnected.',
+        }
+      : gmailSyncView(match);
     return {
       provider: 'gmail',
       accountId: match?.accountId ?? account.email,
       label: account.email,
-      tone: damaged ? 'warning' : (match?.tone ?? 'synced'),
-      detail: damaged ? 'Needs Reconnection' : undefined,
-      title: damaged
-        ? (account.lastErrorReason ?? 'This account needs to be reconnected.')
-        : undefined,
+      ...health,
       onRemove: () => gmail.onDisconnect(account.email),
       removeLabel: `Disconnect ${account.email}`,
       removing: gmail.disconnectingEmail === account.email,
@@ -177,11 +218,6 @@ export function plaidAccountViews(
       resyncing: needsUpdate && busy,
     };
   });
-}
-
-/** Rows whose name ends with `_passkeys` are passkey stores (one per relying party). */
-export function passkeyRows(integrations: ConnectedIntegration[]): ConnectedIntegration[] {
-  return integrations.filter((i) => i.name.endsWith('_passkeys'));
 }
 
 export function countDetail(value: unknown, unit: string): string | undefined {

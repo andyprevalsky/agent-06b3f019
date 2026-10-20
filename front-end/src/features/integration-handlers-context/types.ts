@@ -73,6 +73,13 @@ export interface PasskeysHandler {
 export interface WhatsAppHandler {
   isAvailable: boolean;
   connect: () => Promise<{ success: boolean; error?: string }>;
+  /**
+   * Pair one more phone (multi-account, plan row I2); the shell shows the QR.
+   * Absent on older shells: the UI then calls the bridge's `addAccount` itself.
+   */
+  addAccount?: () => Promise<{ success: boolean; error?: string }>;
+  /** Log one linked phone out on this Mac (before its backend account is deleted). */
+  logout?: (accountId: string) => Promise<{ success: boolean; error?: string }>;
 }
 
 export interface IntegrationHandlers {

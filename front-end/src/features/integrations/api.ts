@@ -153,11 +153,28 @@ export async function uploadApplePasswordsApi(file: File): Promise<{ passwordCou
 }
 
 /**
+ * POST /integrations/linkedin/sync answered 409: that LinkedIn account already
+ * has a live export agent (`runningAgentId`). The agent this call just spawned
+ * (`spawnedAgentId`) duplicates it.
+ */
+export class LinkedInExportRunningError extends Error {
+  constructor(
+    message: string,
+    readonly runningAgentId: string | null,
+    readonly spawnedAgentId: string,
+  ) {
+    super(message);
+  }
+}
+
+/**
  * Spawn the LinkedIn export directly as a cloud agent (no chat routing: the
  * task is fully specified), then record it as the user's LinkedIn sync so
- * every client shows "Connecting" until that agent ends.
+ * every client shows "Connecting" until that agent ends. `accountId` names
+ * the LinkedIn account to export (retry); omitted = the default account,
+ * which the agent moves to the account it finds itself signed into.
  */
-export async function createLinkedInSyncAgentApi(): Promise<string> {
+export async function createLinkedInSyncAgentApi(accountId?: string): Promise<string> {
   const session = getStoredSession();
   const backendUrl = API_BASE_URL;
   const goal = `Download my LinkedIn data export and upload it to the platform.
@@ -177,14 +194,25 @@ Steps:
 
   const agent = await createAgent({ goal, source: getClientSource(), start_phase: 'execute' });
 
+  const record =
+    accountId === undefined
+      ? { agent_id: agent.agent_id }
+      : { agent_id: agent.agent_id, account_id: accountId };
   const response = await fetch(`${API_BASE_WITH_PATH}/integrations/linkedin/sync`, {
     method: 'POST',
     headers: getAuthHeaders(),
-    body: JSON.stringify({ agent_id: agent.agent_id }),
+    body: JSON.stringify(record),
   });
   if (!response.ok) {
-    const error = (await response.json().catch(() => ({}))) as { error?: string };
-    throw new Error(error.error ?? `Failed to record LinkedIn sync (HTTP ${response.status})`);
+    const error = (await response.json().catch(() => ({}))) as {
+      error?: string;
+      agent_id?: string;
+    };
+    const message = error.error ?? `Failed to record LinkedIn sync (HTTP ${response.status})`;
+    if (response.status === 409) {
+      throw new LinkedInExportRunningError(message, error.agent_id ?? null, agent.agent_id);
+    }
+    throw new Error(message);
   }
   return agent.agent_id;
 }

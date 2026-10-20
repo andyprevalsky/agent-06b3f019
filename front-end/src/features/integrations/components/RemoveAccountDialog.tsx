@@ -3,6 +3,8 @@
  *
  *   [CLOSED] (pending null) --chip ×--> [OPEN(label)] --Cancel / Esc--> [CLOSED]
  *   [OPEN] --Remove--> onConfirm → parent DELETE → [CLOSED]
+ *   [OPEN + warning] (removal cannot be undone, e.g. agent-enrolled passkeys):
+ *     the warning replaces "connect it again later"; same Cancel / Remove
  *
  * Pure presentation over hooks/useIntegrationRemoval.
  */
@@ -33,10 +35,16 @@ export default function RemoveAccountDialog({
       <DialogContent className="max-w-sm">
         <DialogHeader>
           <DialogTitle>Remove account?</DialogTitle>
-          <DialogDescription>
-            {pending?.label} will be disconnected and Rose will stop syncing it. You can connect it
-            again later.
-          </DialogDescription>
+          {pending?.warning !== undefined ? (
+            <DialogDescription data-testid="remove-account-warning">
+              {pending.warning}
+            </DialogDescription>
+          ) : (
+            <DialogDescription>
+              {pending?.label} will be disconnected and Rose will stop syncing it. You can connect
+              it again later.
+            </DialogDescription>
+          )}
         </DialogHeader>
         <DialogFooter>
           <Button variant="outline" size="sm" onClick={onCancel}>

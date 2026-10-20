@@ -101,6 +101,12 @@ export interface IntegrationAccount {
 export interface ConnectedIntegration {
   id: string;
   name: string;
+  /**
+   * Storage account key of this row (`''` = the legacy/default account, which
+   * the account list calls `default`). Multi-row providers (LinkedIn,
+   * passwords) have one row per account.
+   */
+  accountId?: string;
   status: 'NOT_CONNECTED' | 'CONNECTED' | 'SYNCING' | 'SYNC_FAILED' | 'EXPIRED';
   isActive: boolean;
   config?: {

@@ -9,6 +9,10 @@
  *     chip [SYNCING] --progress reaches 100%--> [SYNCED] (bar disappears)
  *     chip × --backend 501--> chip kept + the backend's reason on a line under the chips
  *     chip [ERROR] (state failed) → "sync failed", lastError as its tooltip
+ *       (LinkedIn also prints lastError on a line under the chips + a retry control)
+ *     chip [QUEUED] (Gmail address waiting its turn) → quiet neutral chip, "queued", no bar
+ *     chip [SYNCING + light] (Gmail incremental `history`) → "checking for new mail", no bar
+ *     bar text: provider phase as words, bytes as sizes, LinkedIn timeline when live is blank
  *
  * There is no Manage state and no details panel: everything is on the row.
  * Pure presentation; DesktopIntegrations owns data and actions.
@@ -19,7 +23,7 @@ import { Loader2 } from 'lucide-react';
 
 import { isProgressComplete } from '../hooks/integrationAccounts';
 import { useSyncProgress } from '../hooks/useSyncProgress';
-import type { AccountTone } from '../types';
+import type { AccountTone, SyncProgress } from '../types';
 import ConnectedAccountChip from './ConnectedAccountChip';
 import SyncProgressBar from './SyncProgressBar';
 
@@ -29,7 +33,8 @@ export interface DesktopAccountView {
   accountId: string;
   label: string;
   detail?: string;
-  tone: AccountTone;
+  /** `queued`: connected and waiting its turn to sync (quiet, never an error). */
+  tone: AccountTone | 'queued';
   title?: string;
   onRemove?: () => void;
   removeLabel?: string;
@@ -40,6 +45,12 @@ export interface DesktopAccountView {
   resyncing?: boolean;
   /** Why the backend could not remove this account (DELETE 501); shown under the chips. */
   removeBlockedReason?: string;
+  /** A light sync state: the chip says what is happening and no bar is drawn. */
+  hideProgress?: boolean;
+  /** Bar text while the live progress report is blank. */
+  progressFallback?: SyncProgress | null;
+  /** Why the last sync failed, printed under the chips (not only as a tooltip). */
+  errorText?: string;
 }
 
 export interface DesktopIntegrationView {
@@ -68,10 +79,16 @@ export function DesktopSectionHeader({ children }: { children: ReactNode }) {
   );
 }
 
+function defaultTitle(tone: DesktopAccountView['tone']): string {
+  if (tone === 'warning') return 'Needs reconnect';
+  if (tone === 'queued') return 'Waiting for its turn to sync';
+  return tone;
+}
+
 /** One chip; flips a syncing account to synced the moment its progress hits 100%. */
 function DesktopAccountChip({ account }: { account: DesktopAccountView }) {
   const progress = useSyncProgress(account.provider, account.accountId);
-  const tone: AccountTone =
+  const tone =
     account.tone === 'syncing' && isProgressComplete(progress) ? 'synced' : account.tone;
   const pctDetail =
     tone === 'syncing' && progress !== null && progress.pct !== null
@@ -82,8 +99,8 @@ function DesktopAccountChip({ account }: { account: DesktopAccountView }) {
       variant="desktop"
       label={account.label}
       detail={account.detail ?? pctDetail}
-      tone={tone}
-      title={account.title ?? (tone === 'warning' ? 'Needs reconnect' : tone)}
+      tone={tone === 'queued' ? 'neutral' : tone}
+      title={account.title ?? defaultTitle(tone)}
       onRemove={account.onRemove}
       removeLabel={account.removeLabel ?? `Remove ${account.label}`}
       removing={account.removing}
@@ -123,7 +140,7 @@ function RowAction({ view }: { view: DesktopIntegrationView }) {
 }
 
 function AccountsBlock({ view }: { view: DesktopIntegrationView }) {
-  const syncing = view.accounts.filter((a) => a.tone === 'syncing');
+  const syncing = view.accounts.filter((a) => a.tone === 'syncing' && a.hideProgress !== true);
   const many = view.accounts.length > 1;
   return (
     <div className="ml-[46px] mt-2 flex flex-col gap-2">
@@ -145,12 +162,25 @@ function AccountsBlock({ view }: { view: DesktopIntegrationView }) {
             {account.removeBlockedReason}
           </p>
         ))}
+      {view.accounts
+        .filter((account) => account.errorText !== undefined)
+        .map((account) => (
+          <p
+            key={`error:${account.provider}:${account.accountId}`}
+            data-testid="account-sync-error"
+            className="text-xs text-destructive dark:text-red-300"
+          >
+            {many ? `${account.label}: ` : ''}
+            {account.errorText}
+          </p>
+        ))}
       {syncing.map((account) => (
         <SyncProgressBar
           key={`${account.provider}:${account.accountId}`}
           provider={account.provider}
           accountId={account.accountId}
           prefix={many ? account.label : undefined}
+          fallback={account.progressFallback}
         />
       ))}
       {view.availability === 'ready' && view.onConnect !== undefined && (

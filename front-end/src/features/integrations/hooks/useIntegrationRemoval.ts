@@ -4,7 +4,9 @@
  * STATE MACHINE
  *
  *   [IDLE] --chip × (request)--> [CONFIRMING(target)] --cancel--> [IDLE]
- *   [CONFIRMING] --confirm--> [REMOVING(target)] --DELETE ok--> refetch full list --> [IDLE]
+ *   [CONFIRMING] --confirm--> [REMOVING(target)] --target.prepare (WhatsApp: Mac logout)
+ *                                                  fails--> [IDLE + error], no DELETE
+ *                                                --DELETE ok--> refetch full list --> [IDLE]
  *                                                --DELETE 501--> [IDLE + blocked reason
  *                                                   shown inline under that chip; chip kept]
  *                                                --DELETE fails--> [IDLE + error]
@@ -29,6 +31,17 @@ export interface PendingRemoval {
   accountId?: string;
   /** What the user sees in the confirm dialog, e.g. "Chrome · Work". */
   label: string;
+  /**
+   * Shown instead of the usual "connect it again later" line when removal
+   * cannot be undone (agent-enrolled passkeys: Rose holds the only copy).
+   */
+  warning?: string;
+  /**
+   * Runs before the DELETE (WhatsApp: log the phone out on this Mac first, so
+   * the Mac does not keep syncing an account the backend no longer has). A
+   * failure aborts the removal and is shown as the error.
+   */
+  prepare?: () => Promise<void>;
 }
 
 /** Stable identity of one removal target, used to show the chip's spinner. */
@@ -52,11 +65,12 @@ export function useIntegrationRemoval(fetchIntegrations: () => Promise<void>) {
 
   const confirm = useCallback(async () => {
     if (pending === null) return;
-    const { name, accountId } = pending;
+    const { name, accountId, prepare } = pending;
     const key = removalKey(name, accountId);
     setPending(null);
     setRemovingKey(key);
     try {
+      await prepare?.();
       await deleteIntegrationAccountApi(name, accountId);
       await fetchIntegrations();
     } catch (err) {

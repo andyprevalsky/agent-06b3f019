@@ -6,11 +6,17 @@
  *     · Socials · File System
  *   Every integration row is a DesktopIntegrationRow (chips + progress, no Manage
  *   state, no "X of Y connected" summary).
- *   [ANY ACCOUNT SYNCING] --every 5 s--> GET /integrations/progress?since=<cursor>
+ *   [ANY ACCOUNT SYNCING OR QUEUED] --every 5 s--> GET /integrations/progress?since=<cursor>
  *     (cheap; changed → fresh accountsByProvider overlay + Plaid items refresh)
- *     --nothing syncing--> polling stops
+ *     --nothing syncing or queued--> polling stops (a queued Gmail address keeps
+ *     it alive so its start is seen)
  *   chip × (generic) --> [CONFIRM REMOVE] --confirm--> DELETE --> full list refetch
  *     (the delta poll cannot see deletes) | 501 → reason under the kept chip
+ *     (agent-enrolled passkeys: the dialog warns Rose holds their only copy)
+ *   LinkedIn Connect / + Add account / retry --> useLinkedInAccountSync
+ *     (another account's export; 409 → toast, duplicate agent deleted) | error → alert
+ *   WhatsApp + Add account --> useWhatsAppAccounts.addAccount (pair one more phone);
+ *     chip × --> Mac logout(phone) first (skipped on the web) --> DELETE | error → alert
  *
  * System context:
  *   Integrations (flag) → DesktopIntegrations
@@ -24,6 +30,8 @@ import { useMemo, type ReactNode } from 'react';
 
 import { mergeAccountsByProvider } from '../hooks/integrationAccounts';
 import { useIntegrationRemoval } from '../hooks/useIntegrationRemoval';
+import { useLinkedInAccountSync } from '../hooks/useLinkedInAccountSync';
+import { useWhatsAppAccounts } from '../hooks/useWhatsAppAccounts';
 import {
   SyncProgressContext,
   useAccountsProgressPoll,
@@ -49,6 +57,8 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 export default function DesktopIntegrations(props: DesktopIntegrationsProps) {
   const { data, plaid, compute } = props;
   const removal = useIntegrationRemoval(data.fetchIntegrations);
+  const linkedin = useLinkedInAccountSync(data.fetchIntegrations);
+  const whatsapp = useWhatsAppAccounts(data.fetchIntegrations);
   const progress = useAccountsProgressPoll(data.accountsByProvider, () => void plaid.refresh());
   const integrations = useMemo(
     () => mergeAccountsByProvider(data.connectedIntegrations, progress.accountsByProvider),
@@ -57,19 +67,23 @@ export default function DesktopIntegrations(props: DesktopIntegrationsProps) {
   const sections = desktopSectionViews(
     { ...props, data: { ...data, connectedIntegrations: integrations } },
     removal,
+    { linkedin, whatsapp },
   );
   const anySyncing = sections.some(({ rows }) =>
-    rows.some((row) => row.accounts.some((account) => account.tone === 'syncing')),
+    rows.some((row) =>
+      row.accounts.some((account) => account.tone === 'syncing' || account.tone === 'queued'),
+    ),
   );
   useSyncRefresh(anySyncing, DESKTOP_SYNC_REFRESH_MS, progress.poll);
   const legacy = (name: string) => integrations.find((i) => i.name === name);
+  const alert = removal.error ?? linkedin.error ?? whatsapp.error;
 
   return (
     <SyncProgressContext.Provider value={{ integrations }}>
       <div data-testid="rose-desktop-integrations">
-        {removal.error !== null && (
+        {alert !== null && (
           <p role="alert" className="mb-2 text-xs text-destructive">
-            {removal.error}
+            {alert}
           </p>
         )}
         {sections.map(({ title, rows }) => (
