@@ -144,6 +144,7 @@ Status: `done` (merged + verified in a recording), `building`, `queued`,
 | 89 | **Removed (Andy, 2026-10-20):** whole-app user settings — user theme/tokens, background image + fade (rows 1, 25, 34), and slots (sidebar header/menu, home dashboard, agent panel, background). Apps, versions/rollback, inline views and the Rose dark-mode toggle stay | removing → FE-18 + backend |
 | 90 | Display is a full inline renderer (page/bundle/model/image/video/pdf via usercontent_url; frame sandbox "allow-scripts allow-pointer-lock allow-popups", never same-origin; models get a viewer page) | backend L-DISPLAY3; FE after contract |
 | 91 | Integrations: multi-account support that already existed stays; only the new per-phone/per-profile/LinkedIn-multi additions are removed; every account gets the sync loader | supersedes the multi-account part of 78/85 → FE-17 |
+| 92 | Code-agent conversations (Claude Code + Codex) reuse the **main-chat renderer**; the existing query box targets the native session (attachments, per-session model/effort/speed with effective-state ack, drafts kept until delivery ack); send always steers (idle → next turn, no default queue); questions/approvals sit above the composer, which stays; display output appears in the code agent's own AND parent conversation (canonical id, no duplicates); real streaming with stable rows and duplicate-free reconnect; no file/diff/plan views | agreed by Andy (Codex thread thr_4aa53d39…); FE-16 + backend thread |
 
 ### UI ledger owners (audit 2026-10-20)
 
