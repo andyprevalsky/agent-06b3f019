@@ -10,9 +10,8 @@ first_bad_boundary: Both Rose OAuth transports advertised Claude CLI 2.1.81 whil
 symptoms:
   - "rose.transport.anthropic.error status=400"
   - "rose.claude_auth.invalid_request"
-  - "Claude Code 2.1.81"
-  - "Claude Code 2.1.251 does not support this model; version 2.1.280 or newer is required"
-  - "claude_code_version_too_old"
+  - "Claude Code version 2.1.81"
+  - "2.1.251"
 tags:
   - anthropic
   - claude-oauth
@@ -22,9 +21,8 @@ sources:
   - PR #1299
   - agent 278b1938-5ec6-491e-84fb-33f5f5488fa0
   - commit 50284e1ec3ced062b0a1ad42cdc3bb07f0b6ea26
-  - commit 8f3c22f31 (2026-09-27 ultra retarget to claude-opus-5-5; recurrence 2026-10-20)
 repro: agents/tests/blackbox/rose.blackbox.py::test_anthropic_transport_accepts_captured_client_version_requirement
-status: fixed
+status: open
 ---
 
 ## Problem
@@ -140,38 +138,6 @@ Independent adversarial review passed with no blocking objections and reran
 Python red/green plus TypeScript green. Status remains open pending full deploy
 coverage and production verification. Tracked changes were held until the root
 agent confirmed all affected local stacks and the cloud proof were stopped.
-
-### Recurrence 2026-10-20 (claude-opus-5-5 requires 2.1.280)
-
-After the user reconnected a healthy Claude token in prod, a production-transport
-health check (`post_anthropic_stream` + `build_anthropic_body` for
-`rose-1-ultra`, no rotation/marking side effects) returned HTTP 400
-`Claude Code 2.1.251 does not support this model; version 2.1.280 or newer is
-required` (`details.error_code=claude_code_version_too_old`). The same token at
-2.1.251 served `claude-sonnet-5` and `claude-haiku-4-5` with HTTP 200, so only
-the ultra pool's model was affected. Controlled replay, with only the CLI version
-substring changed and the same token and body: 2.1.251 → 400, 2.1.284 → 200
-(`model: claude-opus-5-5` in `message_start`), 2.1.251 → 400.
-
-Why the earlier guardrail failed to hold: the regression encoded one captured
-minimum (2.1.251) for one hard-coded model (`claude-fable-5-1`). Commit
-8f3c22f31 (2026-09-27) retargeted `rose-1-ultra` to `claude-opus-5-5`, whose
-floor is higher, and nothing tied pool models to a client-version contract. The
-400 is classified `RoseInvalidRequest` (correctly not rotated) and falls through
-to the next leg with only a warning, so every ultra Claude call since 09-27 was
-silently served by GPT once any Claude token existed. It was masked in prod
-because no Claude token was live then (see
-`2026-10-20-compute-lease-served-claude-envelope-past-own-expiry`).
-
-Fix: both transports advertise `claude-cli/2.1.284` (the installed, released
-Claude Code version; ≥ the captured 2.1.280 floor). Both owning regressions
-(`agents/tests/blackbox/rose.blackbox.py::test_anthropic_transport_accepts_captured_client_version_requirement`
-and `back-end/src/tests/blackbox/rose-transport.blackbox.ts`) now iterate
-**every pool's claude_auth_model** against a recorded per-model floor table and
-fail when a pool model has no recorded floor. A future pool retarget
-therefore has to capture the new model's contract. Pre-fix both suites were red
-on exactly `claude-opus-5-5: 400`; post-fix green (Python rose 244/244,
-TypeScript rose-transport PASS).
 
 ## Human feedback
 

@@ -58,8 +58,14 @@ Sonnet or Fable model: 775 between 2026-08-01 and 09-12, and **zero from
 10-07). In that window 1,851 `gpt-6-sol*` items were served in the slot whose
 Claude lease maps to Opus. ClickHouse (7-day retention): 54 Anthropic attempts
 from 2026-10-12, all errors — 52 funded API-key out-of-credits 400s and two OAuth
-401s from the resurrected expired envelope. There is no alerting: every failure
-is a `warning` log followed by fallthrough.
+401s from the resurrected expired envelope. No live OAuth token reached Opus in
+that window, so the separate `claude_code_version_too_old` 400 (claude-opus-5-5
+needs CLI ≥2.1.280 and the transport sends 2.1.251; owned in
+`2026-09-10-claude-oauth-client-version-below-model-minimum`) never appeared in
+retained logs. It would have masked Opus even with a healthy token from
+2026-09-27 onward. The reconnected token returns that 400 for Opus and 200 for
+sonnet-5 and haiku-4-5. There is no alerting: every failure is a `warning` log
+followed by fallthrough.
 
 ## Diagnosis
 

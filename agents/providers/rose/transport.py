@@ -49,7 +49,7 @@ ANTHROPIC_API_KEY_BETA_HEADER = ",".join(
 ANTHROPIC_FAST_MODE_BETA = "fast-mode-2026-02-01"
 ANTHROPIC_VERSION = "2023-06-01"
 ANTHROPIC_X_APP = "cli"
-ANTHROPIC_USER_AGENT = "claude-cli/2.1.284 (external, sdk-ts, agent-sdk/0.2.75)"
+ANTHROPIC_USER_AGENT = "claude-cli/2.1.251 (external, sdk-ts, agent-sdk/0.2.75)"
 
 # Caller specifies the per-attempt connect/header deadline. 60s matches
 # WATERFALL_TIMEOUT_MS in research config; claude_auth.py uses the same
