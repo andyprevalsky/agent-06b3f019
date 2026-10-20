@@ -771,6 +771,45 @@ async def test_ws_server_checks_out_the_code_session_branch():
         shutil.rmtree(root, ignore_errors=True)
 
 
+async def test_preview_url_rides_every_code_agent_block():
+    """A1: the create response's preview_url is on every chip message and the result's code_agent."""
+    from domains.spawn_claude_code_agent import service
+
+    async def run(create_response):
+        saved = []
+
+        async def fake_save(**kwargs):
+            saved.append(kwargs)
+
+        collector = AsyncMock()
+        with (
+            patch.object(service, "SandboxLogCollector", lambda *a, **kw: collector),
+            patch.object(service, "create_e2b_session", AsyncMock(return_value=create_response)),
+            patch.object(service, "save_claude_code_message", side_effect=fake_save),
+            patch.object(service, "_run_agentic_loop", AsyncMock(return_value=(0, False, [], 0, 0, []))),
+            patch.object(service, "_run_verifier", AsyncMock(return_value=(1.0, "ok", {"answer": "x"}, 0, 0))),
+            patch.object(service, "persist_terminal_output", AsyncMock()),
+            patch.object(service, "close_e2b_session", AsyncMock(return_value={"output_files": []})),
+            patch.object(service, "_resolve_claude_token_for_activity", AsyncMock(return_value=None)),
+            patch("helpers.model_pricing.get_model_pricing_with_fallback", AsyncMock(return_value={})),
+            patch("temporalio.activity.heartbeat"),
+        ):
+            result = await service.spawn_claude_code_activity(
+                user_id="u", agent_id="a", goal="edit the header", tool_call_id="tc", output_schema=_SCHEMA
+            )
+        return saved, result
+
+    base = {"task_id": "t-1", "sandbox_id": "sbx1", "ws_url": "wss://3000-sbx1.e2b.app", "uploaded_files": []}
+    url = "https://5173-sbx1.e2b.app/"
+    saved, result = await run({**base, "preview_url": url})
+    blocks = [s["code_agent"] for s in saved if s.get("code_agent")]
+    assert blocks and all(block.get("preview_url") == url for block in blocks), blocks
+    assert result["code_agent"]["preview_url"] == url, result["code_agent"]
+    saved, result = await run({**base, "preview_url": None})
+    assert all("preview_url" not in (s.get("code_agent") or {}) for s in saved), saved
+    assert "preview_url" not in result["code_agent"], result["code_agent"]
+
+
 async def _run_all_tests():
     print("code-sessions blackbox tests:")
     r = BlackboxResult()
@@ -800,6 +839,7 @@ async def _run_all_tests():
     )
     await r.record_async("tool_result_reports_branch_and_merge", test_tool_result_reports_branch_and_merged_only_when_confirmed)
     await r.record_async("ws_server_checks_out_session_branch", test_ws_server_checks_out_the_code_session_branch)
+    await r.record_async("preview_url_rides_every_code_agent_block", test_preview_url_rides_every_code_agent_block)
     teardown_mock()
     return r.all_passed
 

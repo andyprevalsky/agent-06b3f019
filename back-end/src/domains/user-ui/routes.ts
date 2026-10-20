@@ -1,5 +1,6 @@
 /**
- * /api/user-ui — publish/activate/list a user's rose_user_ui versions.
+ * /api/user-ui — publish/activate/list a user's rose_user_ui versions, and
+ * GET /apps for the left-bar Apps section (Rose first for dev accounts, A2).
  * /usercontent — serve published files (see config.ts for the origin rule).
  *
  * Auth: normal user JWT or hybrid API key (internal X-User-Id / Rose API key)
@@ -118,6 +119,16 @@ router.get(
     const userId = requireUserId(req, res);
     if (userId === null) return;
     res.json(await service.getActive(userId, requestOrigin(req)));
+  })
+);
+
+router.get(
+  '/apps',
+  withHybridAuth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    const userId = requireUserId(req, res);
+    if (userId === null) return;
+    res.json(await service.listApps(userId, requestOrigin(req)));
   })
 );
 

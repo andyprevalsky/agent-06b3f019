@@ -45,12 +45,18 @@ published, and neither is screenshots/. Limits: 10 MB per file, 50 MB total,
                          "poster": "inline/<view-name>/poster.png" }
       },
       "tools": { "<tool_name>": { "manifest": "tools/<tool_name>/tool.json" } },
+      "apps": {
+        "<app-name>": { "title": "Tip calculator",
+                        "entry": "apps/<app-name>/index.html",
+                        "icon": "apps/<app-name>/icon.svg" }
+      },
       "capabilities": ["read", "subscribe", "navigate", "create_agent", "send_message"]
     }
 
 Every key except "version" is optional. Paths are relative to this folder (no
 "/" prefix, no ".."). Every referenced path must exist or publishing fails.
-View names match [a-z0-9-]+; tool names match [a-z0-9_]+.
+View and app names match [a-z0-9-]+; tool names match [a-z0-9_]+. An app's
+entry and icon live inside apps/<app-name>/, and "rose" is reserved.
 
 theme.json:
 
@@ -107,6 +113,20 @@ CSP blocks external scripts and fetches), add it under "inline" in rose-ui.json
 with a one-line summary, run `rose-ui publish`, then name the view in your
 final response. If you cannot call send_message_to_user yourself, the agent
 that spawned you shows it.
+
+## Apps
+
+An app is a standalone page the user opens full screen from the Apps section
+of the left bar ("make me an app", "+ new app"). Put it in apps/<app-name>/
+with an index.html entry (scripts, styles and data in the bundle; the CSP
+blocks external scripts and fetches), and add it under "apps" in rose-ui.json
+with a short title and an optional icon. `rose-ui dev` previews it at
+/file/apps/<app-name>/index.html; `rose-ui check` measures it like a view.
+`rose-ui publish` gives it the user's app URL on usercontent and adds it to
+the Apps section; every publish is a version the user can restore from
+History. A built app (for example a vite project's `npm run build` output)
+goes in the same folder: copy the build into apps/<app-name>/ with relative
+asset paths.
 
 ## Tools for the user's agent
 

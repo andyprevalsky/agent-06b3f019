@@ -23,7 +23,7 @@ const zlib = require('zlib');
 const crypto = require('crypto');
 const { execFileSync, spawnSync } = require('child_process');
 
-const CLI_VERSION = '3';
+const CLI_VERSION = '4';
 const KB = 1024;
 const MB = 1024 * KB;
 const MAX_FILE = 10 * MB;
@@ -197,6 +197,7 @@ function manifestEntries(manifest) {
   if (manifest.shell && manifest.shell.entry) out.push({ kind: 'shell', name: 'shell', entry: manifest.shell.entry });
   for (const [name, slot] of Object.entries(manifest.slots || {})) if (slot && slot.entry) out.push({ kind: 'slot', name, entry: slot.entry });
   for (const [name, view] of Object.entries(manifest.inline || {})) if (view && view.entry) out.push({ kind: 'inline', name, entry: view.entry });
+  for (const [name, app] of Object.entries(manifest.apps || {})) if (app && app.entry) out.push({ kind: 'app', name, entry: app.entry });
   return out;
 }
 
