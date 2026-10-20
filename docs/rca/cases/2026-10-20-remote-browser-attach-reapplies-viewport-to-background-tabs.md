@@ -82,14 +82,14 @@ feedback were read before selecting the candidate.
 
 ## Solution
 
-Set headless=False and no_viewport=True on DOMService's remote
+Candidate only: set headless=False and no_viewport=True on DOMService's remote
 BrowserProfile, preserving the existing Steel/Kernel window and viewport rather
 than deriving emulation from the worker's display. These flags configure the
 client's attachment profile; they do not relaunch the remote browser. No timeout
 increase, retry or synthetic model instruction is proposed. Per-agent connection
 work shrinks by one metrics command per tab; no new polling or shared state at
 10k agents. Production wire nonresponse capture and exact live task outcome
-remain open. The reviewed viewport fix is implemented in an isolated deploy worktree; production rollout is pending.
+remain open; no production source change or deployment is claimed.
 
 Golden references read: OpenClaw
 `openclaw/extensions/browser/src/browser/pw-session-cdp-transport.ts:260` attaches
@@ -104,7 +104,8 @@ do not imply all four implement the same browser mechanism.
 
 ## Human feedback
 
-The user asked why the browser died from a parent timeout. The user authorized implementing and deploying the independently reviewed viewport-only fix through ordinary code-behavior gates. Preserve the original live agent and browser; do not replay booking. Keep the production wire nonresponse and broader CDP failure injection open.
+The user asked why the browser died from a parent timeout. No implementation
+approval or instruction to terminate the live booking agent was recorded.
 
 ## Reusable lesson
 
