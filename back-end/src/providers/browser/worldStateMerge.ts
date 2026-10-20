@@ -446,19 +446,23 @@ export async function mergeHarvestedSites(params: {
     cookies: params.cookies,
   };
   const forkBySite = new Map(session.siteForks.map((fork) => [fork.site, fork]));
-  const sites = [
-    ...new Set([
-      ...forkBySite.keys(),
-      ...params.cookies.map((cookie) => authRealmFromCookieDomain(cookie.domain)),
-    ]),
-  ]
-    .filter((site) => site !== '')
-    .sort()
-    .slice(0, MAX_HARVEST_SITES);
   const evidence = new Set([
     ...(await signedInRealmsForBrowserSession({ browserSessionId: session.id, userId })),
     ...(params.signedInSites ?? []).map((site) => canonicalAuthRealm(site)).filter((s) => s !== ''),
   ]);
+  const jarSites = new Set(
+    params.cookies.map((cookie) => authRealmFromCookieDomain(cookie.domain))
+  );
+  // Forked and signed-in sites first, so a huge jar never crowds them out.
+  const sites = [
+    ...new Set([
+      ...[...forkBySite.keys()].sort(),
+      ...[...evidence].filter((site) => jarSites.has(site)).sort(),
+      ...[...jarSites].sort(),
+    ]),
+  ]
+    .filter((site) => site !== '')
+    .slice(0, MAX_HARVEST_SITES);
   const heads: HeadRow[] =
     sites.length === 0
       ? []
