@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import fcntl
 import json
 import os
@@ -43,9 +44,8 @@ def _range_is_bindable(base_port: int) -> bool:
 def _foreign_claims(registries: tuple[Path, ...], owner: Path) -> set[int]:
     """Live base ports another owner holds in a registry this one must respect.
 
-    Read-only: a foreign (for example legacy TMPDIR-scoped) registry is never
-    pruned or written here. Its live claims still reserve their ranges, because
-    their stacks may not be listening when this claim runs.
+    Live claims in earlier (TMPDIR-scoped) registries reserve their ranges,
+    because their stacks may not be listening when this claim runs.
     """
     ports: set[int] = set()
     for registry in registries:
@@ -61,6 +61,20 @@ def _foreign_claims(registries: tuple[Path, ...], owner: Path) -> set[int]:
             except (KeyError, TypeError, ValueError):
                 continue
     return ports
+
+
+def _write_claim(root: Path, payload: dict[str, object]) -> None:
+    fd, temp_name = tempfile.mkstemp(prefix=".claim-", suffix=".tmp", dir=root)
+    temp = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, root / f"{payload['base_port']}.json")
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 class Registry:
@@ -107,19 +121,12 @@ class Registry:
                 "owner": str(owner),
                 "base_port": base_port,
             }
-            fd, temp_name = tempfile.mkstemp(
-                prefix=".claim-", suffix=".tmp", dir=self.root
-            )
-            temp = Path(temp_name)
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                    json.dump(payload, handle, sort_keys=True)
-                    handle.write("\n")
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(temp, self.root / f"{base_port}.json")
-            finally:
-                temp.unlink(missing_ok=True)
+            _write_claim(self.root, payload)
+            # Mirror the claim into each existing earlier registry so a claimant
+            # still running the TMPDIR-scoped protocol observes this range too.
+            for legacy in respected:
+                if legacy.is_dir():
+                    _write_claim(legacy, payload)
             return base_port
         raise RuntimeError("no free ten-port deploy-worktree range is available")
 
@@ -140,13 +147,23 @@ def main() -> int:
 
     if not args.owner.is_dir():
         parser.error(f"owner path is not a directory: {args.owner}")
-    with Registry(args.registry) as registry:
-        respected = tuple(
-            path
-            for path in args.respect_registry
-            if path.resolve() != args.registry.resolve()
+    respected = tuple(
+        sorted(
+            {
+                path
+                for path in args.respect_registry
+                if path.is_dir() and path.resolve() != args.registry.resolve()
+            }
         )
-        print(registry.claim(args.owner, respected))
+    )
+    with ExitStack() as stack:
+        # Earlier-protocol claimants serialize on their registry's .lock; hold
+        # each one (in a fixed order) so neither side claims from a stale view.
+        for legacy in respected:
+            handle = stack.enter_context((legacy / ".lock").open("a+", encoding="utf-8"))
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        with Registry(args.registry) as registry:
+            print(registry.claim(args.owner, respected))
     return 0
 
 

@@ -14,7 +14,8 @@
 # destroys it on scale-down / teardown.
 #
 # Injected env (by the controller wrapper): REF, LOCAL_PATCH_FILE, WORKSPACE_NAME,
-# PRIMARY_HOST, BACKEND_PORT, WMH_PORT, WMH_MODEL_NAME, BENCH_SIMULATE, HEALTH_PORT, SDK_PORT.
+# PRIMARY_HOST, BACKEND_PORT, WMH_PORT, WMH_MODEL_NAME, WMH_EXECUTION_POLICY, BENCH_SIMULATE,
+# HEALTH_PORT, SDK_PORT.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
@@ -182,5 +183,6 @@ exec gosu "$APP_USER" env \
     BENCHMARK_WORLD_MODEL_MODE="${BENCHMARK_WORLD_MODEL_MODE}" \
     ${WMH_BASE_URL:+WMH_BASE_URL="$WMH_BASE_URL"} \
     ${WMH_BASE_URL:+${WMH_MODEL_NAME:+WMH_MODEL_NAME="$WMH_MODEL_NAME"}} \
+    ${WMH_BASE_URL:+${WMH_EXECUTION_POLICY:+WMH_EXECUTION_POLICY="$WMH_EXECUTION_POLICY"}} \
     ENABLE_BENCHMARK_MEMORY_BASELINE=1 \
     bash ./scripts/run_local_worker.sh

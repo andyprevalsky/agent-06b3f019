@@ -40,3 +40,20 @@ export function readCatalogTasks(): unknown[] {
   }
   return parsed;
 }
+
+/**
+ * File names a catalog task attaches. `attachments` wins over `attachment`; either
+ * may be one name or a list. Only non-empty string names count, so a malformed
+ * member never becomes an asset URL such as `/test-assets/[object Object]`.
+ */
+export function catalogAttachmentNames(task: {
+  attachment?: unknown;
+  attachments?: unknown;
+}): string[] {
+  const listed: unknown[] = Array.isArray(task.attachments)
+    ? (task.attachments as unknown[])
+    : Array.isArray(task.attachment)
+      ? (task.attachment as unknown[])
+      : [task.attachment];
+  return listed.filter((file): file is string => typeof file === 'string' && file.trim() !== '');
+}

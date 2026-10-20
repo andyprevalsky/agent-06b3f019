@@ -2600,7 +2600,7 @@ assert services['status'] == 'stopped' and type(count) is int and 1 <= count <= 
 cleanup_name = 'cloudbench-stack-cleanup-' + owner['run_token'] + '.status'
 expected = {'services.json', 'run.json', 'stack.log', cleanup_name, 'logs/backend.log',
             'logs/worker.log', *(f'logs/worker.{i}.log' for i in range(1, count))}
-assert set(manifest['files']) == expected
+assert set(manifest['files']) - {'wmh-serve-log.txt'} == expected
 assert {p.name for p in (root / 'logs').glob('worker*.log')} == {Path(p).name for p in expected if p.startswith('logs/worker')}
 cleanup = dict(line.split('=', 1) for line in read(root / cleanup_name).decode().splitlines())
 assert cleanup['state'] == 'clean' and cleanup['token'] == owner['run_token']
@@ -11956,7 +11956,10 @@ if registry_raw:
     assert not contract['validate_task_matrix_binding'](provenance, matrix)
     values = provenance['config']['values']
     shapes = set()
-    for prefix in ('primary', 'bundled_frontend'):
+    # SIM primaries claim their own measured shape; provenance from before the
+    # SIM keys existed records only the primary and bundled-frontend shapes.
+    for prefix in ('primary', 'bundled_frontend', 'sim'):
+        if prefix == 'sim' and 'sim_vm_size' not in values: continue
         size, memory = values[prefix + '_vm_size'], values[prefix + '_vm_memory_mb']
         match = re.fullmatch('(shared-cpu|performance)-([1-9][0-9]*)x', size)
         assert match and memory.isdigit()
@@ -16772,6 +16775,8 @@ PROVENANCE_CONFIG_ARGS=(
     --config-value "primary_vm_memory_mb=$FLEET_PRIMARY_VM_MEMORY"
     --config-value "bundled_frontend_vm_size=$FLEET_BUNDLED_FRONTEND_VM_SIZE"
     --config-value "bundled_frontend_vm_memory_mb=$FLEET_BUNDLED_FRONTEND_VM_MEMORY"
+    --config-value "sim_vm_size=$FLEET_SIM_VM_SIZE"
+    --config-value "sim_vm_memory_mb=$FLEET_SIM_VM_MEMORY"
     --config-value "worker_vm_size=$FLEET_WORKER_VM_SIZE"
     --config-value "worker_vm_memory_mb=$FLEET_WORKER_VM_MEMORY"
     --config-value "worker_health_port=$FLEET_WORKER_HEALTH_PORT"
@@ -17891,6 +17896,8 @@ PY
         echo "export WMH_PORT=$(printf '%q' "$BOX_WMH_PORT")"
         # Simulated tool boundaries on autoscaled workers name the served model.
         echo "export WMH_MODEL_NAME=$(printf '%q' "$WMH_MODEL_NAME")"
+        # ...and its execution policy, which partitions the fast cache like the primary's.
+        echo "export WMH_EXECUTION_POLICY=$(printf '%q' "$WMH_EXECUTION_POLICY")"
         echo "export HEALTH_PORT=$(printf '%q' "$FLEET_WORKER_HEALTH_PORT")"
         echo "export BENCH_SIMULATE=$(printf '%q' "$sim")"
         if [ "${BENCHMARK_DEMO_CACHE_READ_ONLY:-}" = 1 ]; then

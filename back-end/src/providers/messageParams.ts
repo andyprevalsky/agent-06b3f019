@@ -34,17 +34,25 @@ export function withoutNulText(value: string): string {
   return value.includes(NUL) ? value.replaceAll(NUL, '') : value;
 }
 
-/** Recursively drop U+0000 from JSON strings and object keys; other values are unchanged. */
+/**
+ * Recursively drop U+0000 from JSON strings and object keys; other values are unchanged.
+ * A key that already had no U+0000 keeps its value: a sanitized key that collides with
+ * it (`toolCallId` beside `toolCallId\u0000`) is dropped instead of overwriting it.
+ */
 export function withoutNulJson<T>(value: T): T {
   if (typeof value === 'string') return withoutNulText(value) as T;
   if (Array.isArray(value)) return value.map((item: unknown) => withoutNulJson(item)) as T;
   if (value !== null && typeof value === 'object' && !(value instanceof Date)) {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).map(([key, item]) => [
-        withoutNulText(key),
-        withoutNulJson(item),
-      ])
-    ) as T;
+    const entries = Object.entries(value as Record<string, unknown>);
+    const result: Record<string, unknown> = {};
+    for (const [key, item] of entries) {
+      if (!key.includes(NUL)) result[key] = withoutNulJson(item);
+    }
+    for (const [key, item] of entries) {
+      const clean = withoutNulText(key);
+      if (key.includes(NUL) && !Object.hasOwn(result, clean)) result[clean] = withoutNulJson(item);
+    }
+    return result as T;
   }
   return value;
 }

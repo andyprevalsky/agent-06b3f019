@@ -2,13 +2,23 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Every repository question below names its worktree explicitly. An inherited
+# GIT_DIR/GIT_COMMON_DIR (e.g. from a hook or another repo's tool shell) would
+# answer for a different repository and select its port registry instead.
+unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_PREFIX
 # shellcheck source=lib/local-pg-image.sh
 . "$SCRIPT_DIR/lib/local-pg-image.sh"
 # One registry per repository, independent of TMPDIR: concurrent deploys that
 # ran with different TMPDIR values (/tmp vs the documented Linux /var/tmp) used
 # to claim from separate registries and received the same base port.
 # Earlier TMPDIR-scoped registries keep reserving the ranges their live owners hold.
-LEGACY_REGISTRIES=("${TMPDIR:-/tmp}/rose-deploy-worktree-ports-${UID}" "/tmp/rose-deploy-worktree-ports-${UID}" "/var/tmp/rose-deploy-worktree-ports-${UID}")
+# ROSE_DEPLOY_LEGACY_PORT_REGISTRIES (colon-separated) replaces that set, e.g. in tests.
+if [ -n "${ROSE_DEPLOY_LEGACY_PORT_REGISTRIES+x}" ]; then
+  IFS=: read -r -a LEGACY_REGISTRIES <<<"$ROSE_DEPLOY_LEGACY_PORT_REGISTRIES"
+else
+  LEGACY_REGISTRIES=("${TMPDIR:-/tmp}/rose-deploy-worktree-ports-${UID}" "/tmp/rose-deploy-worktree-ports-${UID}" "/var/tmp/rose-deploy-worktree-ports-${UID}")
+fi
 ORIGINAL_ARGS=("$@")
 WORKTREE=""
 SOURCE_WORKSPACE=""
@@ -476,7 +486,7 @@ if [ -n "${ROSE_DEPLOY_PREFLIGHT_TEST_PAUSE_AFTER_LOCK:-}" ]; then
 fi
 RESPECT_ARGS=()
 if [ "$PORT_REGISTRY" = "$DEFAULT_REGISTRY" ]; then
-  for legacy in "${LEGACY_REGISTRIES[@]}"; do
+  for legacy in ${LEGACY_REGISTRIES[@]+"${LEGACY_REGISTRIES[@]}"}; do
     RESPECT_ARGS+=(--respect-registry "$legacy")
   done
 fi

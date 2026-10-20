@@ -73,6 +73,8 @@ _CONFIG_SCALAR_KEYS = {
     "primary_vm_memory_mb",
     "bundled_frontend_vm_size",
     "bundled_frontend_vm_memory_mb",
+    "sim_vm_size",
+    "sim_vm_memory_mb",
     "worker_vm_size",
     "worker_vm_memory_mb",
     "worker_health_port",

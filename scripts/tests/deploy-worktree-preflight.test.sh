@@ -198,6 +198,9 @@ deploy_tmp_b="$TMP_ROOT/descend-I99-tmp-b"
 git -C "$controller" worktree add -q -b deploy-tmp-a "$deploy_tmp_a"
 git -C "$controller" worktree add -q -b deploy-tmp-b "$deploy_tmp_b"
 mkdir -p "$TMP_ROOT/tmpdir-a" "$TMP_ROOT/tmpdir-b"
+# Earlier-protocol registries are fixtures here; never mirror into the host's.
+mkdir -p "$TMP_ROOT/tmpdir-a/legacy" "$TMP_ROOT/tmpdir-b/legacy"
+export ROSE_DEPLOY_LEGACY_PORT_REGISTRIES="$TMP_ROOT/tmpdir-a/legacy:$TMP_ROOT/tmpdir-b/legacy"
 TMPDIR="$TMP_ROOT/tmpdir-a" bash "$PREFLIGHT" --worktree "$deploy_tmp_a" --source "$controller" \
   --skip-dependencies --skip-database >/dev/null
 TMPDIR="$TMP_ROOT/tmpdir-b" bash "$PREFLIGHT" --worktree "$deploy_tmp_b" --source "$controller" \
@@ -210,6 +213,15 @@ tmp_b_port="$(sed -nE 's/^export CONDUCTOR_PORT=([0-9]+)$/\1/p' "$deploy_tmp_b/.
   || fail "the default port registry must live in the repository's git common directory"
 echo "PASS: deploys prepared under different TMPDIR values receive distinct ports"
 
+foreign_repo="$TMP_ROOT/foreign-repo"
+git init -q "$foreign_repo"
+GIT_DIR="$foreign_repo/.git" GIT_COMMON_DIR="$foreign_repo/.git" bash "$PREFLIGHT" \
+  --worktree "$deploy_tmp_b" --source "$controller" --skip-dependencies --skip-database >/dev/null
+expect_eq "$(sed -nE 's/^export CONDUCTOR_PORT=([0-9]+)$/\1/p' "$deploy_tmp_b/.context/deploy-worktree.env")" "$tmp_b_port" \
+  "inherited GIT_DIR/GIT_COMMON_DIR cannot redirect the port registry"
+[ ! -e "$foreign_repo/.git/rose-deploy-worktree-ports" ] \
+  || fail "an inherited foreign GIT_DIR must not receive this repository's port claims"
+
 legacy_registry="$TMP_ROOT/legacy-ports"
 fresh_registry="$TMP_ROOT/fresh-ports"
 mkdir -p "$legacy_registry"
@@ -217,8 +229,11 @@ printf '{"base_port": 56000, "owner": "%s", "schema_version": 1}\n' "$deploy_tmp
 respected_port="$(python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" claim --registry "$fresh_registry" \
   --owner "$deploy_tmp_b" --respect-registry "$legacy_registry")"
 [ "$respected_port" != 56000 ] || fail "a live claim in a respected legacy registry must reserve its range"
-[ -f "$legacy_registry/56000.json" ] || fail "a respected legacy registry must not be modified"
-echo "PASS: a live legacy-registry claim reserves its range without being rewritten"
+grep -q "\"owner\": \"$deploy_tmp_a\"" "$legacy_registry/56000.json" \
+  || fail "a respected legacy claim must stay with its owner"
+grep -q "\"owner\": \"$deploy_tmp_b\"" "$legacy_registry/$respected_port.json" \
+  || fail "a new claim must be mirrored into the legacy registry so earlier-protocol claimants observe it"
+echo "PASS: a live legacy-registry claim reserves its range and new claims are mirrored to it"
 
 mkdir -p "$deploy_one/node_modules"
 write_fake_venv "$deploy_one/agents/venv"
