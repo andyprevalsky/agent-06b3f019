@@ -1079,7 +1079,7 @@ def prepare(args, root, pins, runner, directory, cap, started_at=None, host_oper
                   remote_files=files, remote_env=dict(CLOUDBENCH_CLONE_MAX_ATTEMPTS='5', PYTHONDONTWRITEBYTECODE='1', **reuse_env, **(runtime_env or {}),
                                   **guest_namespace_env),
                   gate_env=dict(CLOUDBENCH_APP=facts['app'], CLOUDBENCH_REGION='iad', WARM_IMAGE_REF=facts['image_ref'],
-                                CLOUDBENCH_GATE_TIMEOUT_S='7200', PYTHONDONTWRITEBYTECODE='1'))
+                                CLOUDBENCH_GATE_TIMEOUT_S=str(max(7200, bound_timeouts(args, runner)[1] + 1800)), PYTHONDONTWRITEBYTECODE='1'))
     if host_operator_provenance is not None:
         config['host_operator_provenance']=host_operator_provenance
     if guest_env['override']:
@@ -1113,8 +1113,13 @@ def simultaneous_copies(args, runner):
 
 def bound_timeouts(args, runner):
     """The run's (--task-timeout, --e2e-timeout), within the runner's operator deadline."""
-    return runner['campaign_timeouts'](getattr(args, 'task_timeout', runner['DEFAULT_TASK_TIMEOUT']),
-                                       getattr(args, 'e2e_timeout', runner['RUN_DEADLINE']))
+    task_timeout = getattr(args, 'task_timeout', runner['DEFAULT_TASK_TIMEOUT'])
+    e2e_timeout = getattr(args, 'e2e_timeout', None)
+    if e2e_timeout is None:  # default: the operator deadline, widened to cover a longer task window
+        e2e_timeout = runner['RUN_DEADLINE']
+        if type(task_timeout) is int:
+            e2e_timeout = max(e2e_timeout, task_timeout + runner['STARTUP_ALLOWANCE'])
+    return runner['campaign_timeouts'](task_timeout, e2e_timeout)
 
 
 def original_manifest(manifest, runner):
@@ -2372,9 +2377,9 @@ def main():
     parser.add_argument('--tasks-per-controller', type=int, help='explicit tasks per controller (all repetitions of a task share one controller)')
     parser.add_argument('--task-count', type=int, help='run only the first N manifest tasks (diagnostic ladder)')
     parser.add_argument('--repetitions', type=int, default=3, help='copies per task (default 3)')
-    parser.add_argument('--task-timeout', type=int, default=1200, help='per-task execution window, seconds (default 1200)')
-    parser.add_argument('--e2e-timeout', type=int, default=5400,
-                        help='whole-campaign budget from the admission clock, seconds (default 5400, the operator deadline)')
+    parser.add_argument('--task-timeout', type=int, default=1200, help='per-task execution window, seconds (default 1200, at most 7200)')
+    parser.add_argument('--e2e-timeout', type=int, default=None,
+                        help='whole-campaign budget from the admission clock, seconds (default 5400, or the task timeout plus startup when longer)')
     parser.add_argument('--worker-headroom', type=int, default=0, help='extra native Machine slots to require for autoscaled workers')
     parser.add_argument('--hub-python', type=Path, help='interpreter with the agents dependencies (httpx) for Hub group publication')
     parser.add_argument('--goal', help='experiments-ledger goal for numbering and experiments/day (default original600)')

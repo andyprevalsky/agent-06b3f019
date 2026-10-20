@@ -54,12 +54,18 @@ SHARD_FIELDS={'index','count','tasks','tasks_sha256','task_indexes','runs','grou
 # original-manifest shard with default timeouts keeps its exact historical bytes.
 SHARD_OPTIONAL={'infra_threshold','manifest_sha256','task_timeout','e2e_timeout','task_ref'}
 DEFAULT_TASK_TIMEOUT=1200
-# Every operator receipt, transfer and TERM fence is bound to epoch+RUN_DEADLINE;
-# a campaign --e2e-timeout must fit inside it.
+# Default operator deadline. A shard's host TERM fence is epoch plus its bound
+# --e2e-timeout (RUN_DEADLINE when absent); setup transfers keep this bound.
 RUN_DEADLINE=5400
 # Controller boot, canary/preflight release, fleet readiness and final evidence/release
 # (Eval Suite stage targets 720+900+480) outside the per-task execution window.
 STARTUP_ALLOWANCE=2100
+# Longest per-task execution window the sharded operator accepts (2 hours). A
+# bound --e2e-timeout may extend the operator deadline up to this plus startup.
+MAX_TASK_TIMEOUT=7200
+MAX_RUN_DEADLINE=MAX_TASK_TIMEOUT+STARTUP_ALLOWANCE
+TASK_TIMEOUT_REFUSAL=('--task-timeout must be 60..%d seconds (%d hours; run-bench --timeout): ask the user to choose a lower execution timeout '
+ 'or to change the CLI setting MAX_TASK_TIMEOUT in scripts/cloudbench-original600-runner.py')%(MAX_TASK_TIMEOUT,MAX_TASK_TIMEOUT//3600)
 def manifest_sha(tasks):return sha(('\n'.join(tasks)+'\n').encode())
 def warm_deps_proof(raw):
  """The producer's one-line dependency proof: node/python fingerprints, epoch and snapshot."""
@@ -81,8 +87,8 @@ def shard_task_ref(shard):
  return ref
 def campaign_timeouts(task_timeout=DEFAULT_TASK_TIMEOUT,e2e_timeout=RUN_DEADLINE):
  """The bound per-task execution window and whole-campaign budget, in seconds."""
- need(type(task_timeout)is int and 60<=task_timeout<=RUN_DEADLINE-STARTUP_ALLOWANCE,'--task-timeout must be 60..%d seconds'%(RUN_DEADLINE-STARTUP_ALLOWANCE))
- need(type(e2e_timeout)is int and task_timeout+STARTUP_ALLOWANCE<=e2e_timeout<=RUN_DEADLINE,'--e2e-timeout must cover the task timeout plus %ds startup/release and fit the %ds operator deadline'%(STARTUP_ALLOWANCE,RUN_DEADLINE))
+ need(type(task_timeout)is int and 60<=task_timeout<=MAX_TASK_TIMEOUT,TASK_TIMEOUT_REFUSAL)
+ need(type(e2e_timeout)is int and task_timeout+STARTUP_ALLOWANCE<=e2e_timeout<=MAX_RUN_DEADLINE,'--e2e-timeout must cover the task timeout plus %ds startup/release and fit the %ds operator deadline'%(STARTUP_ALLOWANCE,MAX_RUN_DEADLINE))
  return task_timeout,e2e_timeout
 def shard_timeouts(shard):
  # One canonical encoding: a bound field is present only when it differs from the original value.
@@ -627,8 +633,8 @@ def run(config_path,config_sha,out,*,github_token=None):
  root=Path(v['source_root']).resolve(strict=True);ref=v['source_ref'];need(re.fullmatch('[0-9a-f]{40}',ref or''),'UNBOUND final source')
  need(subprocess.check_output(['git','--no-replace-objects','-C',str(root),'rev-parse','HEAD'],text=True).strip()==ref,'source HEAD mismatch')
  validate_source_members(root,ref,v['source_files'])
- tasks=json.loads(read(v['tasks_path']));epoch=v['started_at_epoch'];need(type(epoch)in(int,float)and epoch>0 and time.time()<epoch+5400,'original new attempt clock expired')
- shard=v.get('shard');argv=campaign_argv(tasks,epoch,shard);shard_env(dict(v.get('remote_env',{})),shard,'original600-supervisor.'+'0'*24+'.json') # refuse before any output
+ tasks=json.loads(read(v['tasks_path']));epoch=v['started_at_epoch'];need(type(epoch)in(int,float)and epoch>0 and time.time()<epoch+MAX_RUN_DEADLINE,'original new attempt clock expired')
+ shard=v.get('shard');argv=campaign_argv(tasks,epoch,shard);deadline_s=RUN_DEADLINE if shard is None else shard_timeouts(shard)[1];shard_env(dict(v.get('remote_env',{})),shard,'original600-supervisor.'+'0'*24+'.json') # refuse before any output
  authority_template=json.loads(read(v['authority_template']));need(authority_template['allowed']is True and authority_template['source_ref']==ref,'root authority must match final source')
  out=Path(out).absolute();out.mkdir(mode=0o700);need(out.resolve()==out,'physical new output')
  if v.get('host_operator_provenance'):save(out/'host-operator-provenance.json',v['host_operator_provenance'])
@@ -666,7 +672,7 @@ def run(config_path,config_sha,out,*,github_token=None):
  env['CLOUDBENCH_GATE_NO_EFFECT_RECEIPT']=str(out/'gate.preallocation-failure.json')
  env.update(CLOUDBENCH_GATE_ROOT_DIR=str(root),CLOUDBENCH_GATE_PAYLOAD_FILE=str(payload),CLOUDBENCH_GATE_PAYLOAD_SHA256=payload_sha)
  env.update(CLOUDBENCH_GATE_REF=ref,CLOUDBENCH_GATE_EXPORT_DIR=str(export),CLOUDBENCH_GATE_RETAIN_HOST='1',CLOUDBENCH_GATE_EXPORT_HOST='1',CLOUDBENCH_GATE_VM_SIZE='performance-8x',CLOUDBENCH_GATE_VM_MEMORY='32768',CLOUDBENCH_GATE_WORKSPACE_VOLUME_SIZE_GB='256')
- need(int(env.get('CLOUDBENCH_GATE_TIMEOUT_S','0'))>5400,'explicit host watchdog must outlive benchmark cleanup')
+ need(int(env.get('CLOUDBENCH_GATE_TIMEOUT_S','0'))>deadline_s,'explicit host watchdog must outlive benchmark cleanup')
  capture=root/'scripts/cloudbench-original-volume-capture.py';scope={'__file__':str(capture),'__name__':'bound_external_controller'};exec(compile(capture.read_bytes(),str(capture),'exec'),scope)
  token=scope['resolve_token']({'workspace':str(root)});api=scope['Fly'](APP,token)
  stop=[False];old_handlers={s:signal.getsignal(s)for s in(signal.SIGTERM,signal.SIGINT)}
@@ -680,14 +686,14 @@ def run(config_path,config_sha,out,*,github_token=None):
   raise
  mid=None;probe={};probed_after_join=False;attempt=0;cleanup=None;cleanup_action=None;last_error=None;next_probe=0;delivery={}
  try:
-  save(out/'caller.json',dict(pid=os.getpid(),birth=birth(os.getpid()),gate_pid=gate.pid,gate_birth=birth(gate.pid),source_ref=ref,task_ref=shard_task_ref(shard),epoch=epoch,deadline=epoch+5400,identity_path='/tmp/gate/repo/.context/'+identity_name,authority_sha256=sha(authority.read_bytes())))
+  save(out/'caller.json',dict(pid=os.getpid(),birth=birth(os.getpid()),gate_pid=gate.pid,gate_birth=birth(gate.pid),source_ref=ref,task_ref=shard_task_ref(shard),epoch=epoch,deadline=epoch+deadline_s,identity_path='/tmp/gate/repo/.context/'+identity_name,authority_sha256=sha(authority.read_bytes())))
   while True:
    joined=gate.poll()is not None
    if joined:
     gate.wait();stream.close()
     early=preallocation_terminal(True,gate.returncode,gate.pid,ref,export,out/'gate.preallocation-failure.json')
     if early is not None:
-     save(out/'terminal.json',dict(early,started_at_epoch=epoch,original_deadline=epoch+5400))
+     save(out/'terminal.json',dict(early,started_at_epoch=epoch,original_deadline=epoch+deadline_s))
      return gate.returncode
    ownership=export/'disposable-controller.ownership.json'
    if mid is None and ownership.exists():
@@ -697,22 +703,22 @@ def run(config_path,config_sha,out,*,github_token=None):
      import runpy
      bulk_path=Path(__file__).with_name('cloudbench-controller-bulk-transfer.py')
      need(sha(bulk_path.read_bytes())==v['source_files'][bulk_path.name],'bulk helper source changed')
-     runpy.run_path(str(bulk_path))['transfer'](api,mid,record['machine'],out,payload_sha,epoch+5400,lambda:stop[0],runtime=globals(),source_sha256=v['source_files'][bulk_path.name])
+     runpy.run_path(str(bulk_path))['transfer'](api,mid,record['machine'],out,payload_sha,epoch+deadline_s,lambda:stop[0],runtime=globals(),source_sha256=v['source_files'][bulk_path.name])
     else:
      need(v.get('host_operator_provenance') and v['source_files']['cloudbench-original600-runner.py']!=sha(Path(__file__).read_bytes()),'fragment transfer requires explicit historical workload compatibility')
-     transfer_sidecars(api,mid,record['machine'],out,payload_sha,epoch+5400,lambda:stop[0])
+     transfer_sidecars(api,mid,record['machine'],out,payload_sha,epoch+deadline_s,lambda:stop[0])
    if cleanup is None and mid and time.monotonic()>=next_probe:
     payload=dict(machine=mid,source_ref=ref,epoch=epoch,identity_path='/tmp/gate/repo/.context/'+identity_name,action='PROBE')
     try:
      probe=machine_control(api,mid,payload);probed_after_join=joined;save(out/('supervisor-probe-%06d.json'%attempt),probe);attempt+=1
-     if(stop[0]or time.time()>=epoch+5400)and probe['state']=='LIVE':request_term(api,mid,payload,probe,out)
+     if(stop[0]or time.time()>=epoch+deadline_s)and probe['state']=='LIVE':request_term(api,mid,payload,probe,out)
      if shard is not None:shard_status(out,probe,mid)
     except BaseException as e:
      last_error=type(e).__name__
      save(out/('supervisor-read-pending-%06d.json'%attempt),dict(error=last_error,no_gate_signal=True));attempt+=1
     next_probe=time.monotonic()+5
    if shard is not None and cleanup is None and mid:
-    try:deliver_global(api,mid,dict(machine=mid,source_ref=ref,epoch=epoch,identity_path='/tmp/gate/repo/.context/'+identity_name),out,probe,delivery,stop[0]or time.time()>=epoch+5400)
+    try:deliver_global(api,mid,dict(machine=mid,source_ref=ref,epoch=epoch,identity_path='/tmp/gate/repo/.context/'+identity_name),out,probe,delivery,stop[0]or time.time()>=epoch+deadline_s)
     except (Exception,Deadline) as e:last_error=type(e).__name__ # retried next loop; never a cleanup or signal decision
    verified=export/'disposable-export.verified.json'
    mode=cleanup_mode(joined,ownership.exists(),(export/'workspace-volume.ownership.json').exists(),probe,verified.exists(),probed_after_join)
@@ -727,7 +733,7 @@ def run(config_path,config_sha,out,*,github_token=None):
     if release.exists():
      r=reconciled_release(out,export,authority,mid,cleanup_action,joined,probe,probed_after_join)
      status='FAILED_STARTUP_WORKSPACE_RELEASED'if cleanup_action!='cleanup'else'CONTROLLER_RELEASE_VERIFIED'if probe.get('state')=='JOINED'else'FAILED_BEFORE_SUPERVISOR_RELEASED'
-     result=dict(status=status,supervisor_state=probe.get('state'),gate_exit_code=gate.returncode,controller_cleanup_exit_code=code,externally_reconciled_after_helper_failure=code!=0,machine=mid,source_ref=ref,started_at_epoch=epoch,original_deadline=epoch+5400,release=r,benchmark_success_inferred=False)
+     result=dict(status=status,supervisor_state=probe.get('state'),gate_exit_code=gate.returncode,controller_cleanup_exit_code=code,externally_reconciled_after_helper_failure=code!=0,machine=mid,source_ref=ref,started_at_epoch=epoch,original_deadline=epoch+deadline_s,release=r,benchmark_success_inferred=False)
      save(out/'terminal.json',result);return gate.returncode
     if not(out/'cleanup.pending.json').exists():save(out/'cleanup.pending.json',dict(status='PENDING_EXTERNAL_OWNER_LIVE',helper_exit_code=code,no_cleanup_retry=True))
    if joined and not cleanup_ready(True,probe,verified.exists(),probed_after_join)and not(out/'gate.pending.json').exists():
@@ -744,7 +750,7 @@ def run(config_path,config_sha,out,*,github_token=None):
    if gate.poll() is not None:
     early=preallocation_terminal(True,gate.returncode,gate.pid,ref,export,out/'gate.preallocation-failure.json')
     if early is not None:
-     save(out/'terminal.json',dict(early,started_at_epoch=epoch,original_deadline=epoch+5400))
+     save(out/'terminal.json',dict(early,started_at_epoch=epoch,original_deadline=epoch+deadline_s))
      return gate.wait()
    if mid is None:
     try:
@@ -752,7 +758,7 @@ def run(config_path,config_sha,out,*,github_token=None):
      if candidate.exists():
       record=json.loads(read(candidate));need(record['authority_sha256']==sha(authority.read_bytes()),'wrong late controller ownership');newmid=record['machine']['id'];need(newmid not in auth['protected_machines'],'protected controller ID');mid=newmid
     except BaseException:pass
-   if cleanup is None and mid and (stop[0] or time.time()>=epoch+5400):
+   if cleanup is None and mid and (stop[0] or time.time()>=epoch+deadline_s):
     try:
      payload=dict(machine=mid,source_ref=ref,epoch=epoch,identity_path='/tmp/gate/repo/.context/'+identity_name,action='PROBE')
      current=machine_control(api,mid,payload)
@@ -869,11 +875,11 @@ def self_test():
                                   (tasks+[tasks[0]],dict(shard,manifest_sha256=manifest_sha(tasks+[tasks[0]])),'bound ordered task manifest required'),
                                   (self.manifest(),dict(shard,manifest_sha256=TASK_NAMES_SHA),'invalid bound manifest hash'),(tasks,dict(shard,manifest_sha256='A'*64),'invalid bound manifest hash'),
                                   (tasks,dict(shard,task_timeout=1200),'encoded by absence'),(tasks,dict(shard,e2e_timeout=5400),'encoded by absence'),
-                                  (tasks,dict(shard,task_timeout=59),'task-timeout'),(tasks,dict(shard,task_timeout=3301),'task-timeout'),(tasks,dict(shard,task_timeout=480.0),'task-timeout'),
-                                  (tasks,dict(shard,task_timeout=True),'task-timeout'),(tasks,dict(shard,e2e_timeout=2579),'e2e-timeout'),(tasks,dict(shard,e2e_timeout=5401),'e2e-timeout'),
+                                  (tasks,dict(shard,task_timeout=59),'task-timeout'),(tasks,dict(shard,task_timeout=7201),'task-timeout'),(tasks,dict(shard,task_timeout=480.0),'task-timeout'),
+                                  (tasks,dict(shard,task_timeout=True),'task-timeout'),(tasks,dict(shard,e2e_timeout=2579),'e2e-timeout'),(tasks,dict(shard,e2e_timeout=9301),'e2e-timeout'),(tasks,dict(shard,task_timeout=7201,e2e_timeout=9300),'ask the user'),
                                   (tasks,dict(shard,group_total=71),'group total exceeds the bound manifest'),(tasks,dict(shard,task_indexes=list(range(2,70,3))),'ordered subset of the bound manifest')]:
     with self.subTest(message=message,value={k:value[k] for k in SHARD_OPTIONAL&set(value)}),self.assertRaisesRegex(ValueError,message):campaign_argv(manifest,epoch,value)
-   self.assertEqual(campaign_timeouts(),(1200,5400));self.assertEqual(campaign_timeouts(3300,5400),(3300,5400))
+   self.assertEqual(campaign_timeouts(),(1200,5400));self.assertEqual(campaign_timeouts(3300,5400),(3300,5400));self.assertEqual(campaign_timeouts(7200,9300),(7200,9300))
    # The original-manifest shard encodes neither field: its bytes and argv are the historical ones.
    original=self.shard(self.manifest());self.assertFalse(SHARD_OPTIONAL&set(original))
    self.assertEqual(campaign_argv(self.manifest(),epoch,original)[9:13],['--timeout','1200','--e2e-timeout','5400'])
