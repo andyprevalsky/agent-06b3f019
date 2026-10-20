@@ -94,7 +94,6 @@ vi.mock('../../main/services/messaging/platforms/whatsapp/WhatsAppClient', async
       this.connected = false;
     });
     isConnected = (): boolean => this.connected;
-    getSelfJid = (): string | null => null;
   }
   return { WhatsAppClient: FakeClient };
 });
@@ -369,14 +368,11 @@ describe('messaging-whatsapp > WhatsAppSync (coordinator + fetch boundary)', () 
     const { WhatsAppSync } =
       await import('../../main/services/messaging/platforms/whatsapp/WhatsAppSync');
     await WhatsAppSync.connect();
-    // With no linked account, connect() pairs one session; dig its FakeClient out of the
-    // private per-account session map via a typed cast. Tests drive it via emit('sync', ...)
-    // exactly as the real Baileys-backed client does.
-    const sessions = (
-      WhatsAppSync as unknown as { sessions: Map<string, { client: EventEmitter | null }> }
-    ).sessions;
-    const client = [...sessions.values()][0]?.client;
-    if (!client) throw new Error('WhatsAppSync session client not set after connect()');
+    // The coordinator instantiates one FakeClient per connect(); dig it out by poking the
+    // private static field via a typed cast. Tests drive it via emit('sync', ...) exactly as
+    // the real Baileys-backed client does.
+    const client = (WhatsAppSync as unknown as { client: EventEmitter | null }).client;
+    if (!client) throw new Error('WhatsAppSync.client not set after connect()');
     return { WhatsAppSync, client };
   }
 

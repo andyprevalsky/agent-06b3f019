@@ -4,72 +4,78 @@
  * Filesystem-backed persistence for Baileys' multi-file auth state, plus helpers
  * that parse the credentials file for the linked phone number. No business logic;
  * just typed data access against `fs` and `path`.
- *
- * One WhatsApp account = one auth dir (plan row I2):
- *
- *   userData/whatsapp-auth/             legacy single-account dir (never moved)
- *   userData/whatsapp-accounts/<slot>/  every account paired since
- *
- * A slot is named when pairing starts, before the phone number is known; the
- * account id is always read back from that dir's `creds.json` (`me.id`).
  */
-import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import {
-  WHATSAPP_ACCOUNT_SLOT_PREFIX,
-  WHATSAPP_CREDS_BACKUP_FILE,
-  WHATSAPP_CREDS_FILE,
-  getWhatsAppAccountsRoot,
-  getWhatsAppAuthDir,
-} from './config';
+import { WHATSAPP_CREDS_BACKUP_FILE, WHATSAPP_CREDS_FILE, getWhatsAppAuthDir } from './config';
 import { jidToPhone } from './normalize';
 import type { WhatsAppCredsFile } from './types';
 
-/** Baileys multi-file auth state of ONE account, with backup/restore capability. */
-export class WhatsAppAuthStore {
-  constructor(readonly dir: string) {}
-
-  private get credsPath(): string {
-    return path.join(this.dir, WHATSAPP_CREDS_FILE);
+/**
+ * WhatsApp authentication state management.
+ * Uses Baileys' multi-file auth state with backup/restore capability.
+ */
+export class WhatsAppAuth {
+  /**
+   * Get the auth directory path.
+   */
+  static getAuthDir(): string {
+    return getWhatsAppAuthDir();
   }
 
-  private get backupPath(): string {
-    return path.join(this.dir, WHATSAPP_CREDS_BACKUP_FILE);
+  /**
+   * Ensure auth directory exists. Idempotent.
+   */
+  static ensureAuthDir(): void {
+    const dir = getWhatsAppAuthDir();
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
   }
 
-  /** Ensure the auth directory exists. Idempotent. */
-  ensureAuthDir(): void {
-    if (!fs.existsSync(this.dir)) fs.mkdirSync(this.dir, { recursive: true });
-  }
-
-  /** Credentials exist and are valid JSON with non-trivial content. */
-  hasCredentials(): boolean {
+  /**
+   * Check if credentials exist and are valid JSON with non-trivial content.
+   */
+  static hasCredentials(): boolean {
+    const credsPath = path.join(getWhatsAppAuthDir(), WHATSAPP_CREDS_FILE);
     try {
-      if (!fs.existsSync(this.credsPath)) return false;
-      const stats = fs.statSync(this.credsPath);
+      if (!fs.existsSync(credsPath)) return false;
+      const stats = fs.statSync(credsPath);
       if (!stats.isFile() || stats.size <= 1) return false;
-      JSON.parse(fs.readFileSync(this.credsPath, 'utf-8'));
+      const raw = fs.readFileSync(credsPath, 'utf-8');
+      JSON.parse(raw); // Validate JSON
       return true;
     } catch {
       return false;
     }
   }
 
-  /** Restore credentials from backup when the main creds are corrupted. True only on restore. */
-  maybeRestoreFromBackup(): boolean {
+  /**
+   * Attempt to restore credentials from backup if main creds are corrupted.
+   * Returns true only when an actual restore happened.
+   */
+  static maybeRestoreFromBackup(): boolean {
+    const dir = getWhatsAppAuthDir();
+    const credsPath = path.join(dir, WHATSAPP_CREDS_FILE);
+    const backupPath = path.join(dir, WHATSAPP_CREDS_BACKUP_FILE);
+
     try {
-      if (fs.existsSync(this.credsPath)) {
-        JSON.parse(fs.readFileSync(this.credsPath, 'utf-8'));
+      // Check if main creds are valid
+      if (fs.existsSync(credsPath)) {
+        const raw = fs.readFileSync(credsPath, 'utf-8');
+        JSON.parse(raw);
         return false; // Creds are valid, no restore needed
       }
     } catch {
       // Main creds are corrupted or missing — fall through to restore
     }
+
+    // Try to restore from backup
     try {
-      if (!fs.existsSync(this.backupPath)) return false;
-      JSON.parse(fs.readFileSync(this.backupPath, 'utf-8'));
-      fs.copyFileSync(this.backupPath, this.credsPath);
+      if (!fs.existsSync(backupPath)) return false;
+      const backupRaw = fs.readFileSync(backupPath, 'utf-8');
+      JSON.parse(backupRaw); // Validate backup
+      fs.copyFileSync(backupPath, credsPath);
       console.log('[WhatsAppAuth] Restored credentials from backup');
       return true;
     } catch {
@@ -77,97 +83,51 @@ export class WhatsAppAuthStore {
     }
   }
 
-  /** Back up the current credentials. No-op on missing/invalid creds. */
-  backupCredentials(): void {
+  /**
+   * Create a backup of current credentials. No-op on missing/invalid creds.
+   */
+  static backupCredentials(): void {
+    const dir = getWhatsAppAuthDir();
+    const credsPath = path.join(dir, WHATSAPP_CREDS_FILE);
+    const backupPath = path.join(dir, WHATSAPP_CREDS_BACKUP_FILE);
+
     try {
-      if (!fs.existsSync(this.credsPath)) return;
-      JSON.parse(fs.readFileSync(this.credsPath, 'utf-8')); // Only backup valid JSON
-      fs.copyFileSync(this.credsPath, this.backupPath);
+      if (!fs.existsSync(credsPath)) return;
+      const raw = fs.readFileSync(credsPath, 'utf-8');
+      JSON.parse(raw); // Only backup valid JSON
+      fs.copyFileSync(credsPath, backupPath);
     } catch {
       // Ignore backup failures
     }
   }
 
-  /** Remove this account's auth dir (logout). Idempotent. */
-  clearCredentials(): void {
+  /**
+   * Clear all WhatsApp credentials (logout). Idempotent.
+   */
+  static clearCredentials(): void {
+    const dir = getWhatsAppAuthDir();
     try {
-      if (fs.existsSync(this.dir)) fs.rmSync(this.dir, { recursive: true, force: true });
+      if (fs.existsSync(dir)) {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
       console.log('[WhatsAppAuth] Credentials cleared');
     } catch (error) {
       console.error('[WhatsAppAuth] Failed to clear credentials:', error);
     }
   }
 
-  /** The linked phone number (E.164) from this dir's credentials, if any. */
-  getLinkedPhoneNumber(): string | null {
+  /**
+   * Get the linked phone number (E.164) from stored credentials, if any.
+   */
+  static getLinkedPhoneNumber(): string | null {
+    const credsPath = path.join(getWhatsAppAuthDir(), WHATSAPP_CREDS_FILE);
     try {
-      if (!fs.existsSync(this.credsPath)) return null;
-      const creds = JSON.parse(fs.readFileSync(this.credsPath, 'utf-8')) as WhatsAppCredsFile;
+      if (!fs.existsSync(credsPath)) return null;
+      const raw = fs.readFileSync(credsPath, 'utf-8');
+      const creds = JSON.parse(raw) as WhatsAppCredsFile;
       return jidToPhone(creds.me?.id);
     } catch {
       return null;
     }
-  }
-}
-
-/** The legacy single-account store (`userData/whatsapp-auth`). */
-export function legacyWhatsAppAuthStore(): WhatsAppAuthStore {
-  return new WhatsAppAuthStore(getWhatsAppAuthDir());
-}
-
-/** Every store holding credentials: the legacy dir first, then slots in pairing order. */
-export function listWhatsAppAuthStores(): WhatsAppAuthStore[] {
-  const stores = [legacyWhatsAppAuthStore()];
-  const root = getWhatsAppAccountsRoot();
-  try {
-    const slots = fs
-      .readdirSync(root, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => entry.name)
-      .sort();
-    for (const slot of slots) stores.push(new WhatsAppAuthStore(path.join(root, slot)));
-  } catch {
-    // No multi-account root yet.
-  }
-  return stores.filter((store) => store.hasCredentials());
-}
-
-/** A fresh, empty slot for pairing one more account. */
-export function createWhatsAppAuthStore(): WhatsAppAuthStore {
-  const slot = `${WHATSAPP_ACCOUNT_SLOT_PREFIX}${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
-  return new WhatsAppAuthStore(path.join(getWhatsAppAccountsRoot(), slot));
-}
-
-/**
- * Static facade over the legacy single-account store, kept for callers and
- * tests written before multi-account.
- */
-export class WhatsAppAuth {
-  static getAuthDir(): string {
-    return getWhatsAppAuthDir();
-  }
-
-  static ensureAuthDir(): void {
-    legacyWhatsAppAuthStore().ensureAuthDir();
-  }
-
-  static hasCredentials(): boolean {
-    return legacyWhatsAppAuthStore().hasCredentials();
-  }
-
-  static maybeRestoreFromBackup(): boolean {
-    return legacyWhatsAppAuthStore().maybeRestoreFromBackup();
-  }
-
-  static backupCredentials(): void {
-    legacyWhatsAppAuthStore().backupCredentials();
-  }
-
-  static clearCredentials(): void {
-    legacyWhatsAppAuthStore().clearCredentials();
-  }
-
-  static getLinkedPhoneNumber(): string | null {
-    return legacyWhatsAppAuthStore().getLinkedPhoneNumber();
   }
 }

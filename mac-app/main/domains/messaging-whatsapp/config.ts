@@ -29,18 +29,6 @@ export function resetWhatsAppAuthDirCache(): void {
   cachedAuthDir = null;
 }
 
-/**
- * Root holding one Baileys auth dir per WhatsApp account paired since
- * multi-account (`<root>/<slot>/creds.json`). The legacy single-account dir
- * above stays where it is and is listed as one more account.
- */
-export function getWhatsAppAccountsRoot(): string {
-  return path.join(app.getPath('userData'), 'whatsapp-accounts');
-}
-
-/** Prefix of a newly created account slot dir (`acct-<epoch ms>-<random>`). */
-export const WHATSAPP_ACCOUNT_SLOT_PREFIX = 'acct-';
-
 /** Filename of the primary Baileys credentials file. */
 export const WHATSAPP_CREDS_FILE = 'creds.json';
 
@@ -68,33 +56,6 @@ export const WHATSAPP_BROWSER: readonly [string, string, string] = [
   'Chrome',
   '126.0.6478.183',
 ];
-
-/** A history sync with no batch for this long has delivered everything it will. */
-export const WHATSAPP_HISTORY_IDLE_MS = 60_000;
-
-/** Baileys `HistorySyncType` → the progress `phase` reported for it. */
-export const WHATSAPP_HISTORY_PHASES: Readonly<Record<number, string>> = {
-  0: 'initial_bootstrap',
-  1: 'initial_status',
-  2: 'full',
-  3: 'recent',
-  4: 'push_name',
-  5: 'non_blocking_data',
-  6: 'on_demand',
-};
-
-/** Baileys `HistorySyncType.FULL`: the last stage of a full-history sync. */
-export const WHATSAPP_HISTORY_FULL = 2;
-
-/** Progress unit: `done` counts messages saved to the backend in this run. */
-export const WHATSAPP_PROGRESS_UNIT = 'messages';
-
-/** Mirror of the server's coalescing window: one syncing write per second. */
-export const WHATSAPP_PROGRESS_MIN_INTERVAL_MS = 1_000;
-
-/** Backoff after a failed progress write (doubles per failure, capped). */
-export const WHATSAPP_PROGRESS_RETRY_MS = 5_000;
-export const WHATSAPP_PROGRESS_MAX_RETRY_MS = 60_000;
 
 /** Integration name used in Uploader + IntegrationCache lookups. */
 export const WHATSAPP_INTEGRATION_NAME = 'whatsapp';

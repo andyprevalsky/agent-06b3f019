@@ -26,8 +26,6 @@ const ROOT = path.resolve(__dirname, '../..');
 interface WhatsAppStub {
   hasCredentials: ReturnType<typeof vi.fn>;
   connect: ReturnType<typeof vi.fn>;
-  addAccount: ReturnType<typeof vi.fn>;
-  logout: ReturnType<typeof vi.fn>;
 }
 
 function installApi(
@@ -221,73 +219,6 @@ describe('useWhatsAppConnect', () => {
   });
 });
 
-describe('useWhatsAppConnect multi-account (plan row I2)', () => {
-  beforeEach(() => {
-    delete (window as unknown as { api?: unknown }).api;
-  });
-
-  it('addAccount always pairs a new phone behind the QR modal, even with stored credentials', async () => {
-    let pushQR: ((qr: string) => void) | undefined;
-    let resolveAdd: ((r: { success: boolean }) => void) | undefined;
-    const connect = vi.fn(async () => ({ success: true }));
-    const addAccount = vi.fn(
-      () =>
-        new Promise<{ success: boolean }>((resolve) => {
-          resolveAdd = resolve;
-        })
-    );
-    installApi({ hasCredentials: vi.fn(async () => true), connect, addAccount }, (cb) => {
-      pushQR = cb;
-      return vi.fn();
-    });
-
-    const { result } = renderHook(() => useWhatsAppConnect());
-    let pending: Promise<{ success: boolean; error?: string }> | undefined;
-    act(() => {
-      pending = result.current.addAccount();
-    });
-    await waitFor(() => expect(result.current.isModalOpen).toBe(true));
-    act(() => pushQR?.('qr-second-phone'));
-    expect(result.current.qrCode).toBe('qr-second-phone');
-    expect(connect).not.toHaveBeenCalled();
-
-    await act(async () => {
-      resolveAdd?.({ success: true });
-      expect(await pending).toEqual({ success: true });
-    });
-    expect(addAccount).toHaveBeenCalledTimes(1);
-    expect(result.current.isModalOpen).toBe(false);
-    expect(result.current.qrCode).toBeNull();
-  });
-
-  it('addAccount reports unavailable on a shell without multi-account support', async () => {
-    installApi({ hasCredentials: vi.fn(), connect: vi.fn() });
-    const { result } = renderHook(() => useWhatsAppConnect());
-    let outcome: { success: boolean; error?: string } | undefined;
-    await act(async () => {
-      outcome = await result.current.addAccount();
-    });
-    expect(outcome?.success).toBe(false);
-    expect(result.current.isModalOpen).toBe(false);
-  });
-
-  it('logout signs out exactly the given phone and resolves bridge errors', async () => {
-    const logout = vi
-      .fn()
-      .mockResolvedValueOnce({ success: true })
-      .mockRejectedValueOnce(new Error('bridge down'));
-    installApi({ hasCredentials: vi.fn(), connect: vi.fn(), logout });
-    const { result } = renderHook(() => useWhatsAppConnect());
-    await act(async () => {
-      expect(await result.current.logout('+15550001111')).toEqual({ success: true });
-    });
-    expect(logout).toHaveBeenCalledWith('+15550001111');
-    await act(async () => {
-      expect((await result.current.logout('+15550002222')).success).toBe(false);
-    });
-  });
-});
-
 describe('shared integration handler wiring', () => {
   const CONTRACT = path.join(
     ROOT,
@@ -306,12 +237,6 @@ describe('shared integration handler wiring', () => {
   it('exposes WhatsApp as a handler the shared Integrations panel can use', () => {
     expect(contractKeys()).toContain('whatsApp');
     expect(fs.readFileSync(MAIN, 'utf8')).toMatch(/whatsApp:\s*\{/);
-  });
-
-  it('passes multi-account pairing (with its QR modal) and per-phone logout to the shared UI', () => {
-    const main = fs.readFileSync(MAIN, 'utf8');
-    expect(main).toMatch(/addAccount:\s*whatsApp\.addAccount/);
-    expect(main).toMatch(/logout:\s*whatsApp\.logout/);
   });
 
   it('supplies every capability the shared UI can gate on', () => {
