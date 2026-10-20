@@ -16,10 +16,10 @@
  *   open-agent deep link           → force 'agents' even from browse/settings
  *   agents + inspectionContext     → compact read-only pill in global control rail
  *
- * PER-USER UI (features/user-ui; signed-in non-archive users):
+ * PER-USER UI (features/user-ui; Rose Desktop, signed-in non-archive users):
  *   none / safe mode → stock layout; published shell → UserUiShell replaces chrome
- *   background image/slot → layer BEHIND the app; app bg + grid/canvas fade to
- *     fadeAfterFirstMessage once the selected agent has a USER message
+ *   whole-app theme, background + fade and slots are removed (UI ledger row 89):
+ *     the stock background, sidebar and query box always render
  * ROSE DESKTOP APPS (RoseAppsProvider, flag on only): bare top-right icons
  *   (Browser, Phone, Integrations, Dark mode) + the right-panel slot; panels
  *   overlay the content (no right bar, no content inset). Flag off: no icons.
@@ -53,12 +53,7 @@ import { RoseDesktopContext } from '@/hooks/roseDesktopContext';
 import { RoseThemeProvider } from '@/features/rose-theme';
 import { isBenchmarkSharedView } from '@/lib/benchmarkShare';
 import { isBenchmarkArchiveMode } from '@/lib/benchmarkArchive';
-import {
-  UserUiProvider,
-  UserUiShell,
-  UserUiSlot,
-  useUserUiOpaqueSurfaces,
-} from '@/features/user-ui';
+import { UserUiProvider, UserUiShell } from '@/features/user-ui';
 
 import { useTerminalAgents } from '../hooks/useTerminalAgents';
 import { useTerminalDerivedState, type TerminalLayoutProps } from './terminalLayoutState';
@@ -69,9 +64,9 @@ import { resolveInitialTerminalView } from '../hooks/resolveInitialTerminalView'
 import type { TerminalView } from '../types';
 import { BROWSER_REVIEW_TEST_PHONE } from '../config';
 
+import { BackgroundPattern } from './BackgroundPattern';
 import { InspectionAccountBadge } from './InspectionAccountBadge';
 import { TerminalHeader } from './TerminalHeader';
-import { TerminalBackdrop } from './TerminalBackdrop';
 import { MainContent } from './TerminalMainContent';
 import { TerminalModals } from './TerminalModals';
 
@@ -174,8 +169,7 @@ function InteractiveTerminalChrome(props: TerminalLayoutProps) {
         className="h-screen w-screen flex flex-col bg-background dark:bg-navi-black relative overflow-hidden"
         style={{ height: '100dvh' }}
       >
-        <TerminalBackdrop
-          hasUserMessage={derived.hasUserMessage}
+        <BackgroundPattern
           patternOffset={props.patternOffset}
           tileColors={props.tileColors}
           colorPalette={props.colorPalette}
@@ -302,14 +296,8 @@ function SidebarSection({
   showBenchmarks: boolean;
   showAdminHealth: boolean;
 }) {
-  const opaqueSurface = useUserUiOpaqueSurfaces();
   return (
     <AppSidebar
-      userUi={{
-        opaqueSurface,
-        headerSlot: <UserUiSlot name="sidebar.header" autoHeight className="px-3 pb-2" />,
-        menuSlot: <UserUiSlot name="menu" autoHeight className="px-3 py-2" />,
-      }}
       currentView={currentView}
       onViewChange={setCurrentView}
       showBrowse={showBrowse}

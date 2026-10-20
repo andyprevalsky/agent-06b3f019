@@ -163,8 +163,6 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
   ],
   'features/terminal/components/AgentChatArea.tsx': [
     'Cross-domain import: "@/features/terminal-component-group"',
-    // Per-user UI runtime: home.dashboard slot + opaque query box over a user background.
-    'Cross-domain import: "@/features/user-ui"',
   ],
   // Rose Desktop app view: the normal query box over AppViewScreen (AgentChatArea host).
   'features/terminal/components/AppScreenHost.tsx': [
@@ -181,21 +179,15 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
   'features/terminal/components/TerminalContent.tsx': [
     'Cross-domain import: "@/features/terminal-component-group"',
     'Cross-domain import: "@/features/terminal-component-group/',
-    // Per-user UI runtime: provider, shell and sidebar slots mount in the
-    // terminal layout (the one place the session user is known).
+    // Per-user UI runtime: provider and shell mount in the terminal layout
+    // (the one place the session user is known).
     'Cross-domain import: "@/features/user-ui"',
     // Rose dark mode: RoseThemeProvider mounts where the session user is known.
     'Cross-domain import: "@/features/rose-theme"',
   ],
-  // Per-user UI runtime: user background layer + fading app backdrop.
-  'features/terminal/components/TerminalBackdrop.tsx': [
-    'Cross-domain import: "@/features/user-ui"',
-  ],
   'features/terminal/components/TerminalMainContent.tsx': [
     // View router: the team-gated Benchmarks tab renders the benchmarks feature.
     'Cross-domain import: "@/features/benchmarks"',
-    // Per-user UI runtime: agent.panel slot beside the chat column.
-    'Cross-domain import: "@/features/user-ui"',
   ],
   // Rose dark mode: the Popular Goals pills switch to the mock's dark controls.
   'features/terminal/components/PopularGoalsCarousel.tsx': [

@@ -24,12 +24,6 @@
  * Every desktop surface reserves 3rem above New Agent. The shared sidebar owns
  * that spacing so the web and Electron renderers cannot silently diverge.
  *
- * PER-USER UI (props from the terminal layout; the sidebar stays props-driven):
- * userUi.opaqueSurface → solid white rail (a user background image is showing
- *                   through the app, so the translucent rail would be illegible)
- * userUi.headerSlot    → rendered above New Agent while EXPANDED (hidden COLLAPSED)
- * userUi.menuSlot      → rendered above the footer nav while EXPANDED
- *
  * All other state (agents, selection, credits, feedback popover, subscription
  * modal) is owned either by the parent (agents/view) or by extracted
  * sub-components (SidebarAgentList, SidebarCreditIndicator,
@@ -37,7 +31,7 @@
  * live in useAgentRowActions.
  */
 
-import { useCallback, useMemo, useState, type CSSProperties, type ReactNode } from 'react';
+import { useCallback, useMemo, useState, type CSSProperties } from 'react';
 import type { User } from '@supabase/supabase-js';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { cn } from '@/lib/utils';
@@ -88,19 +82,8 @@ export interface AppSidebarProps {
   backgroundColors?: number;
   borderColor?: number;
   shadowIntensity?: number;
-  /** Per-user UI hooks into the rail (see PER-USER UI above). */
-  userUi?: SidebarUserUi;
   /** Rose Desktop only: agent/project actions whose backends are not wired yet. */
   roseActions?: RoseSidebarActions;
-}
-
-interface SidebarUserUi {
-  /** Render a solid rail (a per-user background image shows behind the app). */
-  opaqueSurface?: boolean;
-  /** Per-user `sidebar.header` slot, shown only while expanded. */
-  headerSlot?: ReactNode;
-  /** Per-user `menu` slot, shown only while expanded. */
-  menuSlot?: ReactNode;
 }
 
 function buildSidebarStyle({
@@ -109,14 +92,12 @@ function buildSidebarStyle({
   backgroundColors,
   borderColor,
   dripStyles,
-  opaqueSurface = false,
 }: {
   width: number;
   blur: number;
   backgroundColors: number;
   borderColor: number;
   dripStyles?: SidebarDripStyles;
-  opaqueSurface?: boolean;
 }): CSSProperties {
   const backdrop =
     blur > 0 && dripStyles
@@ -128,9 +109,8 @@ function buildSidebarStyle({
     paddingTop: '3rem',
     backdropFilter: backdrop,
     WebkitBackdropFilter: backdrop,
-    backgroundColor: opaqueSurface
-      ? '#ffffff'
-      : backgroundColors > 0 && dripStyles
+    backgroundColor:
+      backgroundColors > 0 && dripStyles
         ? `rgba(255, 255, 255, ${dripStyles.bgOpacity * 0.95})`
         : undefined,
     borderColor: borderColor > 0 && dripStyles ? dripStyles.borderRgb : undefined,
@@ -144,22 +124,19 @@ function useSidebarStyle(params: {
   backgroundColors: number;
   borderColor: number;
   dripStyles?: SidebarDripStyles;
-  opaqueSurface: boolean;
 }): CSSProperties {
-  const { width, blur, backgroundColors, borderColor, dripStyles, opaqueSurface } = params;
+  const { width, blur, backgroundColors, borderColor, dripStyles } = params;
   return useMemo(
-    () =>
-      buildSidebarStyle({ width, blur, backgroundColors, borderColor, dripStyles, opaqueSurface }),
-    [width, blur, backgroundColors, borderColor, dripStyles, opaqueSurface],
+    () => buildSidebarStyle({ width, blur, backgroundColors, borderColor, dripStyles }),
+    [width, blur, backgroundColors, borderColor, dripStyles],
   );
 }
 
-function sidebarSurfaceProps(opaqueSurface: boolean, isDragging: boolean) {
+function sidebarSurfaceProps(isDragging: boolean) {
   return {
-    'data-surface': opaqueSurface ? 'opaque' : 'translucent',
     className: cn(
       'group/sidebar fixed top-0 left-0 z-[50] hidden h-full flex-col border-r border-gray-200/60 md:flex',
-      opaqueSurface ? 'bg-white' : 'bg-white/95',
+      'bg-white/95',
       'ease-out shadow-xl',
       // Animating width while dragging fights the pointer and feels laggy.
       isDragging ? '' : 'transition-all duration-300',
@@ -295,7 +272,6 @@ function StockAppSidebar({
   blur = 0,
   backgroundColors = 0,
   borderColor = 0,
-  userUi,
 }: AppSidebarProps) {
   const { width, isCollapsed, isDragging, startDrag, setWidth } = useSidebarWidth();
   const { isArchiveOpen, setIsArchiveOpen, searchQuery, setSearchQuery, search } =
@@ -316,15 +292,7 @@ function StockAppSidebar({
     showBenchmarks,
     showAdminHealth,
   });
-  const opaqueSurface = userUi?.opaqueSurface === true;
-  const style = useSidebarStyle({
-    width,
-    blur,
-    backgroundColors,
-    borderColor,
-    dripStyles,
-    opaqueSurface,
-  });
+  const style = useSidebarStyle({ width, blur, backgroundColors, borderColor, dripStyles });
   const listProps = {
     ...searchListProps(search, searchQuery),
     isLoadingAgents,
@@ -338,13 +306,11 @@ function StockAppSidebar({
   const archiveProps = { onSelectAgent, handlers, refreshToken: archiveRefreshToken };
 
   return (
-    <aside {...sidebarSurfaceProps(opaqueSurface, isDragging)} style={style}>
+    <aside {...sidebarSurfaceProps(isDragging)} style={style}>
       <SidebarResizeHandle isDragging={isDragging} onPointerDown={startDrag} />
-      {!isCollapsed && userUi?.headerSlot}
       <SidebarCreateAgentButton isCollapsed={isCollapsed} onCreateAgent={onCreateAgent} />
       <SidebarSearch isCollapsed={isCollapsed} value={searchQuery} onChange={setSearchQuery} />
       <SidebarAgentList {...listProps} />
-      {!isCollapsed && userUi?.menuSlot}
       <SidebarFooter {...footerProps} onOpenArchive={() => setIsArchiveOpen(true)} />
       {renameDialog}
       <ArchivedAgentsDialog
