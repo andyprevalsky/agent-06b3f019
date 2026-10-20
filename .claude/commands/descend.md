@@ -809,6 +809,31 @@ per-run observed mechanism, not the count, grants membership.
   trajectories, with no agent rerun, and report how many verdicts change.
 - Rank clusters by priority, then by affected-run count, as "X of N", and
   state which clusters overlap.
+- **Name the real error, not a condition.** A cluster's cause must be a
+  concrete defect at a named code site: what it does, what it should do,
+  and the observed consequence. Examples: "a compaction trigger that never
+  fires because its threshold exceeds the model window", or "the action
+  result omits the page state its contract promises". A growing value, a
+  slow step or a high count ("context grows", "31% of turns observe",
+  "CPU at 22%") is a measurement. Keep digging until you find the defect, or
+  label it a design gap or an open observability gap.
+- **Be exact about limits.** Say which limit fired, who enforces it and
+  where it is set. For example: "Temporal StartToClose of 30 minutes kills
+  the activity; the loop itself has no time check".
+- **Be exact about providers.** Name every provider error and the model
+  served: provider, deployment/region, HTTP status, error text, counts and
+  timestamps, and the configured pool versus `actual_model`. Never write
+  "rate limited by X" without that receipt.
+- **Ground every proposed harness change in golden references.** Before
+  recommending any change to harness behaviour (caps, history pruning,
+  screenshot retention, timeouts, observation format, recovery), open the
+  reference harnesses: claude-code-src, openclaw, hermes-agent, codex,
+  prime-agent, and browser-use or Skyvern when present. Cite the real
+  `path:line` and the concrete value each one uses, for example "hermes caps
+  X at N (path:line); Skyvern times out Y after Z s (path:line)", and make
+  that the stated reasoning for the proposed value. Write "no analog found"
+  only after searching. A change with no reference precedent must say why
+  every reference approach does not fit. Never cite from memory.
 
 Give every cluster a stable row ID, a kebab-case name for its boundary and
 mechanism, its member tasks, and one **exemplar**: the member with `observed`
