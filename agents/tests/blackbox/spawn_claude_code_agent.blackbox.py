@@ -2931,6 +2931,9 @@ async def test_spawn_activity_cancelled_cleanup():
         )
     assert result["status"] == "cancelled"
     assert result["task_id"] == "t"
+    # The workflow's chip row reuses this block: a user pause is resumable.
+    assert (result["code_agent"]["task_id"], result["code_agent"]["state"]) == ("t", "paused"), result
+    assert result["code_agent"]["ended_at"], result["code_agent"]
     close_session.assert_awaited_once()
     fake_collector.stop.assert_awaited()
 
@@ -5032,7 +5035,7 @@ async def test_cc_manager_reattaches_after_worker_drain_on_same_queue():
     titles = _cc_titles(events)
     assert titles.count("Starting Claude Code sandbox") == 1, titles
     assert titles.count("\u2713 Task Completed") == 1, titles
-    assert "Claude Code Session Cancelled" not in titles, titles
+    assert "Code session paused" not in titles, titles
 
 
 async def test_cc_manager_parks_code_session_for_generation_handoff():

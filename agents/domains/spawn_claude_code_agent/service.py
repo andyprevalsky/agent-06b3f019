@@ -2330,7 +2330,8 @@ def _merge_close_code_session_facts(
     return merged
 
 
-def _iso_utc(epoch_s: Optional[float]) -> Optional[str]:
+def iso_utc(epoch_s: Optional[float]) -> Optional[str]:
+    """``2026-10-20T16:50:00Z`` for an epoch (the ``code_agent`` timestamp format)."""
     if epoch_s is None:
         return None
     return datetime.fromtimestamp(epoch_s, tz=timezone.utc).isoformat().replace("+00:00", "Z")
@@ -2350,9 +2351,10 @@ def build_code_agent_metadata(
     """The ``code_agent`` message metadata block the UI thread renders.
 
     ``state`` is spinning_up | live | completed | failed | paused (paused =
-    idle or user-paused session, resumable; an addition to the UI contract).
-    ``summary.merged_into`` is set only when the merge was confirmed (C4).
-    ``failure_message`` is the human-readable reason when state is failed.
+    idle, user-paused, waiting on its parent or stopped by a usage limit;
+    resumable, never failed). ``summary.merged_into`` is set only when the
+    merge was confirmed (C4). ``failure_message`` is the human-readable reason
+    for the user when state is failed or paused (e.g. the usage-limit reset).
     ``target_meta`` carries the run target ('cloud' | 'local'), device_name and
     folder (owned by the local-target lane); cloud when omitted. It also carries
     ``preview_url``: the session's live dev-server preview (Rose dev accounts, A1).
@@ -2368,11 +2370,11 @@ def build_code_agent_metadata(
         # the project/repo default branch for new agents (C13).
         "base_branch": facts.get("merge_target") or facts.get("base_branch"),
         "state": state,
-        "started_at": _iso_utc(started_at),
+        "started_at": iso_utc(started_at),
     }
     if ended_at is not None:
-        block["ended_at"] = _iso_utc(ended_at)
-    if state == "failed" and failure_message:
+        block["ended_at"] = iso_utc(ended_at)
+    if state in ("failed", "paused") and failure_message:
         block["failure_message"] = failure_message
     if facts.get("head"):
         summary: Dict[str, Any] = {
@@ -2449,6 +2451,41 @@ def format_usage_limit_message(
         "goal=<the same goal>): the retry leases another token of the same provider, or continues on "
         f"{_provider_label(other)} when none is available, from the saved session."
     )
+
+
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _reset_label(resets_at_iso: Optional[str], now: float) -> Optional[str]:
+    """``4:50 PM UTC`` within 24 h of ``now``, otherwise ``Oct 3, 12:50 AM UTC``."""
+    if not resets_at_iso:
+        return None
+    try:
+        reset = datetime.fromisoformat(resets_at_iso.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
+    clock = f"{reset.hour % 12 or 12}:{reset.minute:02d} {'AM' if reset.hour < 12 else 'PM'} UTC"
+    if 0 <= reset.timestamp() - now < 24 * 3600:
+        return clock
+    return f"{_MONTHS[reset.month - 1]} {reset.day}, {clock}"
+
+
+def format_usage_limit_user_message(
+    *,
+    code_provider: str,
+    resets_at_iso: Optional[str],
+    local_place: Optional[str] = None,
+    now: Optional[float] = None,
+) -> str:
+    """The user's one line for a usage-limit pause (``code_agent.failure_message``).
+
+    The parent gets ``format_usage_limit_message`` (the exact retry) instead.
+    """
+    reset = _reset_label(resets_at_iso, safe_time() if now is None else now)
+    provider = "Codex" if code_provider == "codex" else "Claude"
+    resets = f" (resets {reset})" if reset else ""
+    saved = f"Work stays in {local_place}." if local_place else "Work is saved."
+    return f"Paused: {provider} usage limit reached{resets}. {saved}"
 
 
 def format_code_session_summary(facts: Optional[Dict[str, Any]]) -> str:
@@ -2948,27 +2985,33 @@ async def spawn_claude_code_activity(
                 await log_collector.stop()
             resets_at_iso = (marked or {}).get("resets_at")
             local_place = local_workspace_place(code_agent_meta)
+            # The parent reads the exact retry; the user reads a resumable pause.
             message = format_usage_limit_message(
                 code_provider=code_provider,
                 resets_at_iso=resets_at_iso,
                 facts=code_session_facts,
                 local_place=local_place,
             )
+            user_message = format_usage_limit_user_message(
+                code_provider=code_provider,
+                resets_at_iso=resets_at_iso,
+                local_place=local_place,
+            )
             code_agent = build_code_agent_metadata(
                 target_meta=code_agent_meta,
                 task_id=task_id,
                 provider=code_provider,
-                state="failed",
+                state="paused",
                 started_at=start_time,
                 ended_at=safe_time(),
                 facts=code_session_facts,
-                failure_message=message,
+                failure_message=user_message,
             )
             await save_claude_code_message(
                 agent_id=agent_id,
                 title="Code agent hit a usage limit",
                 task_id=task_id,
-                message=message,
+                message=user_message,
                 status=MessageStatus.FINISHED,
                 action_type="usage_limit",
                 tool_call_id=tool_call_id,
@@ -3282,6 +3325,16 @@ async def spawn_claude_code_activity(
                     )
             raise
 
+        # A user pause is resumable: the chip ends paused, never failed.
+        paused_code_agent = build_code_agent_metadata(
+            target_meta=code_agent_meta,
+            task_id=task_id,
+            provider=code_provider,
+            state="paused",
+            started_at=start_time,
+            ended_at=safe_time(),
+            facts=code_session_facts,
+        )
         if task_id:
             try:
                 # Persist terminal output before closing (skip if already written)
@@ -3317,15 +3370,7 @@ async def spawn_claude_code_activity(
                     action_type="task_complete",
                     tool_call_id=tool_call_id,
                     code_provider=code_provider,
-                    code_agent=build_code_agent_metadata(
-                        target_meta=code_agent_meta,
-                        task_id=task_id,
-                        provider=code_provider,
-                        state="paused",
-                        started_at=start_time,
-                        ended_at=safe_time(),
-                        facts=code_session_facts,
-                    ),
+                    code_agent=paused_code_agent,
                 )
 
                 await close_e2b_session(task_id=task_id, code_provider=code_provider, reason="cancel")
@@ -3343,6 +3388,7 @@ async def spawn_claude_code_activity(
             "message": "Claude Code agent cancelled by user",
             "code_provider": code_provider,
             "code_session": code_session_facts,
+            "code_agent": paused_code_agent,
         }
 
     except Exception as e:
