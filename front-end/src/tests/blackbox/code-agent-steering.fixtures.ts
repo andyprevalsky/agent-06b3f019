@@ -2,7 +2,13 @@
  * Fixtures for code-agent steering blackbox tests (Rose Desktop rows 44-47, 51).
  * Wire shapes follow features/terminal-component-group/hooks/codeAgentContract.ts.
  */
+import { createElement, type ReactNode } from 'react';
+import { AgentContext } from '@/features/agent-context';
+import ClaudeCodeChip from '@/features/terminal-component-group/components/ClaudeCodeChip';
+import { MessageListItems } from '@/features/terminal-component-group/components/MessageListItems';
 import type { Message } from '@/lib/api';
+import { makeAgentCtx } from './message-bubble.fixtures';
+import { renderWithProviders } from './test-wrapper';
 
 export const ROOT_AGENT_ID = 'root-agent-1';
 export const API_BASE = 'http://localhost:3001/api';
@@ -140,4 +146,123 @@ export function signIn() {
     user: { id: 'test-user', is_anonymous: false },
   };
   localStorage.setItem('rose-session', JSON.stringify(session));
+}
+
+// ── Agent-to-agent rows (backend agentGraphSendService, L-A2A) ──────────────
+
+const CODEX_PARTY = {
+  id: 'task-1',
+  kind: 'code',
+  provider: 'codex',
+  owner_agent_id: 'root-agent-1',
+  label: 'Codex',
+};
+const ROOT_PARTY = { id: ROOT_AGENT_ID, kind: 'agent', label: 'Root agent' };
+
+/** Code-agent timeline row (TOOL, action_type 'agent_message') on the session owner. */
+export function a2aTimelineMessage(
+  direction: 'sent' | 'received',
+  text: string,
+  messageId: string,
+) {
+  const sent = direction === 'sent';
+  const from = sent ? CODEX_PARTY : { id: ROOT_AGENT_ID, kind: 'agent', label: 'Root agent' };
+  const to = sent
+    ? { id: ROOT_AGENT_ID, kind: 'agent', label: 'Root agent' }
+    : { id: 'task-1', kind: 'code', label: 'Codex' };
+  return msg(
+    {
+      a2a: { kind: 'message', message_id: messageId, from, to, direction },
+      idempotencyKey: `a2a:${from.id}:${messageId}:${direction}`,
+      title: sent ? 'Codex → Root agent' : 'Root agent → Codex',
+      task_id: 'task-1',
+      subAgentId: 'task-1',
+      action_type: 'agent_message',
+      code_provider: 'codex',
+      toolCallId: 'call-task-1',
+      toolName: 'spawn_claude_code_agent',
+    },
+    { text },
+  );
+}
+
+/** USER row delivered to a Rose agent by a code agent (text carries the LLM framing). */
+export function a2aInboundUserMessage(
+  kind: 'message' | 'question',
+  text: string,
+  to: { id: string; label: string } = { id: ROOT_PARTY.id, label: ROOT_PARTY.label },
+) {
+  const what = kind === 'question' ? 'Question' : 'Message';
+  const reply =
+    kind === 'question'
+      ? 'Answer with send_message_to_agent; if you cannot, ask your parent the same way (agent_id "parent")'
+      : 'Reply with send_message_to_agent if a reply is needed';
+  return msg(
+    {
+      a2a: {
+        kind,
+        message_id: `client-${kind}`,
+        from: CODEX_PARTY,
+        to: { id: to.id, kind: 'agent', label: to.label },
+      },
+      idempotencyKey: `a2a:task-1:client-${kind}`,
+      title: `Codex → ${to.label}`,
+    },
+    { role: 'USER', text: `[${what} from Codex, agent_id task-1. ${reply}]\n\n${text}` },
+  );
+}
+
+// ── Render helpers (no JSX: this file is shared by several blackbox files) ──
+
+export function WithAgent({
+  messages,
+  children,
+  selectedAgentId = ROOT_AGENT_ID,
+}: {
+  messages: Message[];
+  children?: ReactNode;
+  selectedAgentId?: string;
+}) {
+  return createElement(
+    AgentContext.Provider,
+    { value: makeAgentCtx({ messages, selectedAgentId }) },
+    children,
+  );
+}
+
+export function renderChip(messages: Message[], roseDesktop = true) {
+  return renderWithProviders(
+    createElement(WithAgent, { messages }, createElement(ClaudeCodeChip, { taskId: 'task-1' })),
+    { roseDesktop },
+  );
+}
+
+export interface RenderItemsOptions {
+  roseDesktop?: boolean;
+  currentAnimatingId?: string | null;
+  onAnimationComplete?: () => void;
+  selectedAgentId?: string;
+  /** Rendered after the list inside the same agent context (e.g. PinnedQuestionMount). */
+  after?: ReactNode;
+}
+
+export function renderItems(messages: Message[], options: RenderItemsOptions = {}) {
+  const selectedAgentId = options.selectedAgentId ?? ROOT_AGENT_ID;
+  return renderWithProviders(
+    createElement(
+      WithAgent,
+      { messages, selectedAgentId },
+      createElement(MessageListItems, {
+        filteredMessages: messages,
+        streamingMetricsBySubAgentId: new Map(),
+        currentAnimatingId: options.currentAnimatingId ?? null,
+        onAnimationComplete: options.onAnimationComplete ?? (() => {}),
+        selectedAgentId,
+        exploreStepMap: new Map(),
+        waitForCheckMap: new Map(),
+      }),
+      options.after,
+    ),
+    { roseDesktop: options.roseDesktop ?? true },
+  );
 }

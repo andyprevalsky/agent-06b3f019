@@ -5,6 +5,7 @@
  *   [EMPTY] → "Waiting for <agent>…"
  *   [EVENTS] → thinking (collapsed ⇄ expanded) · assistant messages · compact tool rows
  *              · "You → <agent>" rows (session echoes + local echoes not yet echoed back)
+ *              · agent-to-agent rows ("Codex → Rose" / "Rose → Codex"; questions as "<agent> asks")
  *   new rows → scroll to bottom
  *
  * STEER INPUT:
@@ -24,6 +25,7 @@ import {
   type CodeAgentTranscriptEvent,
 } from '../hooks/codeAgentContract';
 import { addLocalEcho, type LocalEcho } from '../hooks/codeAgentLocalState';
+import { AgentToAgentRow } from './AgentToAgentRow';
 
 const MUTED = 'text-muted-foreground dark:text-[#a3a39d]';
 
@@ -140,6 +142,9 @@ export function CodeAgentTranscript({
           return <ThinkingRow key={key} text={event.text ?? ''} seconds={row.thinkingSeconds} />;
         }
         if (event.type === 'tool' && event.tool) return <ToolRow key={key} tool={event.tool} />;
+        if (event.type === 'agent_message' && event.a2a) {
+          return <AgentToAgentRow key={key} a2a={event.a2a} compact />;
+        }
         if (event.role === 'user')
           return <YouRow key={key} text={event.text ?? ''} label={label} />;
         return (

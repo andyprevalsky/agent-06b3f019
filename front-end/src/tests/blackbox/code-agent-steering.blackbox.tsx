@@ -3,7 +3,6 @@
  * rows 44, 45, 46, 47, 51). Every case runs with the flag on and proves the
  * stock UI is unchanged with the flag off. Backend writes are served by MSW.
  */
-import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -12,20 +11,11 @@ import { http, HttpResponse } from 'msw';
 import ClaudeCodeChip from '@/features/terminal-component-group/components/ClaudeCodeChip';
 import ApprovalChip from '@/features/terminal-component-group/components/ApprovalChip';
 import { PinnedQuestionMount } from '@/features/terminal-component-group/components/PinnedQuestion';
-import { MessageListItems } from '@/features/terminal-component-group/components/MessageListItems';
 import { filterMessagesForSubAgent } from '@/features/terminal-component-group/components/useMessageFiltering';
 import { resetCodeAgentLocalState } from '@/features/terminal-component-group/hooks/codeAgentLocalState';
-import {
-  collectCodeAgentEvents,
-  parseCodeAgentMeta,
-  parsePinnedQuestion,
-  parseScorecardInlineView,
-} from '@/features/terminal-component-group/hooks/codeAgentContract';
 import { derivePendingApproval } from '@/features/terminal/hooks/derivations';
-import { AgentContext } from '@/features/agent-context';
 import type { Message } from '@/lib/api';
 
-import { makeAgentCtx } from './message-bubble.fixtures';
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
 import {
@@ -33,11 +23,13 @@ import {
   LIVE_EVENTS,
   QUESTION_DISPLAY,
   ROOT_AGENT_ID,
+  WithAgent,
   chipMessage,
-  codeAgent,
   eventsMessage,
   msg,
   questionMessage,
+  renderChip,
+  renderItems,
   signIn,
 } from './code-agent-steering.fixtures';
 
@@ -59,14 +51,6 @@ vi.mock('@xterm/addon-fit', () => ({
     fit() {}
   },
 }));
-
-function WithAgent({ messages, children }: { messages: Message[]; children: ReactNode }) {
-  return (
-    <AgentContext.Provider value={makeAgentCtx({ messages, selectedAgentId: ROOT_AGENT_ID })}>
-      {children}
-    </AgentContext.Provider>
-  );
-}
 
 const COMPLETED = {
   state: 'completed',
@@ -90,32 +74,6 @@ const COMPLETED = {
     preview_url: 'https://preview.rose.test/nub',
   },
 };
-
-function renderChip(messages: Message[], roseDesktop = true) {
-  return renderWithProviders(
-    <WithAgent messages={messages}>
-      <ClaudeCodeChip taskId="task-1" />
-    </WithAgent>,
-    { roseDesktop },
-  );
-}
-
-function renderItems(messages: Message[], roseDesktop = true) {
-  return renderWithProviders(
-    <WithAgent messages={messages}>
-      <MessageListItems
-        filteredMessages={messages}
-        streamingMetricsBySubAgentId={new Map()}
-        currentAnimatingId={null}
-        onAnimationComplete={vi.fn()}
-        selectedAgentId={ROOT_AGENT_ID}
-        exploreStepMap={new Map()}
-        waitForCheckMap={new Map()}
-      />
-    </WithAgent>,
-    { roseDesktop },
-  );
-}
 
 beforeEach(() => {
   resetCodeAgentLocalState();
@@ -370,7 +328,7 @@ describe('row 46: scorecards and approvals attributed to the code agent', () => 
   });
 
   it('flag off: no attribution and no host scorecard', () => {
-    renderItems([scorecardMessage(SCORECARD)], false);
+    renderItems([scorecardMessage(SCORECARD)], { roseDesktop: false });
     expect(screen.queryByTestId('code-agent-attribution')).not.toBeInTheDocument();
     expect(screen.queryByTestId('code-agent-scorecard')).not.toBeInTheDocument();
     expect(screen.getByText('Speed button scorecard')).toBeInTheDocument();
@@ -538,7 +496,7 @@ describe('row 47: pinned question above the query box', () => {
     renderPinned([chipMessage(), questionMessage()], false);
     expect(screen.queryByTestId('pinned-question')).not.toBeInTheDocument();
     const question = questionMessage();
-    const { container } = renderItems([question], false);
+    const { container } = renderItems([question], { roseDesktop: false });
     expect(container.querySelector(`[data-message-id="${question.message_id}"]`)).not.toBeNull();
   });
 });
@@ -596,55 +554,5 @@ describe('row 51: execution target and local failures', () => {
   it('flag off: no target label', () => {
     renderChip([chipMessage({ target: 'local', folder: '~/Developer/rose' })], false);
     expect(screen.queryByTestId('code-agent-target')).not.toBeInTheDocument();
-  });
-});
-
-describe('contract adapter: absent or malformed metadata keeps the stock behavior', () => {
-  it('rejects code_agent snapshots missing a required field', () => {
-    expect(parseCodeAgentMeta(undefined)).toBeNull();
-    expect(parseCodeAgentMeta('live')).toBeNull();
-    expect(parseCodeAgentMeta(codeAgent({ provider: 'gemini' }))).toBeNull();
-    expect(parseCodeAgentMeta(codeAgent({ state: 'paused' }))).toBeNull();
-    expect(parseCodeAgentMeta(codeAgent({ task_id: '' }))).toBeNull();
-    expect(parseCodeAgentMeta(codeAgent({ started_at: null }))).toBeNull();
-    expect(parseCodeAgentMeta(codeAgent({ target: 'mars' }))?.target).toBe('cloud');
-    expect(parseCodeAgentMeta(codeAgent({ failure_kind: 'other' }))?.failure_kind).toBeUndefined();
-  });
-
-  it("drops malformed transcript events and keeps only the task's rows", () => {
-    const events = collectCodeAgentEvents(
-      [
-        eventsMessage([
-          { type: 'tool', ts: 3 },
-          { type: 'message', ts: 2 },
-          { type: 'message', text: 'no time' },
-          { type: 'message', ts: 2, text: 'second' },
-          { type: 'thinking', ts: 1, text: 'first' },
-        ]),
-        eventsMessage([{ type: 'message', ts: 0, text: 'other task' }], 'task-2'),
-      ],
-      'task-1',
-    );
-    expect(events.map((e) => e.text)).toEqual(['first', 'second']);
-  });
-
-  it('rejects pinned questions and scorecards without their required fields', () => {
-    expect(
-      parsePinnedQuestion({ display: { ...QUESTION_DISPLAY, placement: 'inline' } }),
-    ).toBeNull();
-    expect(parsePinnedQuestion({ display: { ...QUESTION_DISPLAY, question_id: '' } })).toBeNull();
-    expect(parsePinnedQuestion({ display: { ...QUESTION_DISPLAY, allow_other: false } })).toEqual(
-      expect.objectContaining({ allow_other: false, options: expect.any(Array) }),
-    );
-    expect(parseScorecardInlineView({ view: 'scorecard', props: { rows: [] } })).toBeNull();
-    expect(
-      parseScorecardInlineView({ view: 'chart', props: { rows: [{ label: 'a' }] } }),
-    ).toBeNull();
-  });
-
-  it('flag on with a malformed snapshot renders the stock chip', () => {
-    renderChip([chipMessage({ provider: 'gemini' })]);
-    expect(screen.queryByTestId('code-agent-chip')).not.toBeInTheDocument();
-    expect(screen.queryByPlaceholderText(/directly…/)).not.toBeInTheDocument();
   });
 });

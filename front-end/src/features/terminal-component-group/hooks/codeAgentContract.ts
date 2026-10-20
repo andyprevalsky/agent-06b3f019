@@ -12,7 +12,12 @@
  *     ├─ metadata.from_code_agent       → sender attribution (send_message_to_user / approvals / questions)
  *     ├─ metadata.inlineView (no versionId, view 'scorecard') → host scorecard view
  *     ├─ metadata.display (placement 'pinned', kind 'question') → pinned question
- *     └─ metadata.question_answer       → question answered (unpins everywhere)
+ *     ├─ metadata.question_answer       → question answered (unpins everywhere)
+ *     └─ metadata.a2a                   → agent-to-agent message (backend agentGraphSendService):
+ *          TOOL row, action_type 'agent_message', a2a.direction, task_id/subAgentId = code session
+ *            → code agent's own timeline ("Codex → Rose" / "Rose → Codex")
+ *          USER row on the recipient Rose agent → never a user bubble
+ *          a2a.kind 'question' → inline question (routed to a parent agent, row 47b)
  *   POST /api/agents/:id/code-agent/:taskId/messages {text}     → steer the CLI session
  *   POST /api/agents/:id/questions/:questionId/answer {answer}  → answer a pinned question
  *
@@ -80,15 +85,19 @@ export interface CodeAgentToolCall {
   ok?: boolean;
 }
 
-/** One entry of `message.metadata.code_agent_events[]`. */
+/**
+ * One entry of `message.metadata.code_agent_events[]`, or (type 'agent_message')
+ * an agent-to-agent timeline row of the same code session.
+ */
 export interface CodeAgentTranscriptEvent {
-  type: 'thinking' | 'message' | 'tool';
+  type: 'thinking' | 'message' | 'tool' | 'agent_message';
   /** ISO-8601 or epoch ms. */
   ts: string | number;
   text?: string;
   tool?: CodeAgentToolCall;
   /** 'user' = a steering message echoed back by the session (default 'assistant'). */
   role?: 'assistant' | 'user';
+  a2a?: AgentToAgentMessage;
 }
 
 /** `message.metadata.from_code_agent` — which code agent produced this row. */
@@ -125,6 +134,29 @@ export interface ScorecardRow {
 export interface ScorecardInlineView {
   title?: string;
   rows: ScorecardRow[];
+}
+
+export type AgentToAgentKind = 'message' | 'question';
+
+export interface AgentToAgentParty {
+  id: string;
+  kind: 'agent' | 'code';
+  /** Code agents only (sender metadata, or the timeline row's `code_provider`). */
+  provider?: CodeAgentProvider;
+  /** Display name: "Codex" / "Claude Code" / "Rose" / a Rose sub-agent's title. */
+  label: string;
+}
+
+/** `message.metadata.a2a`, normalized for display. */
+export interface AgentToAgentMessage {
+  kind: AgentToAgentKind;
+  /** Present on code-agent timeline rows only. */
+  direction?: 'sent' | 'received';
+  message_id: string;
+  from: AgentToAgentParty;
+  to: AgentToAgentParty;
+  /** The sender's own text (inbound LLM framing removed). */
+  text: string;
 }
 
 // ── Display helpers ─────────────────────────────────────────────────────────
@@ -292,6 +324,13 @@ export function collectCodeAgentEvents(
   for (const message of messages) {
     const metadata = message.metadata;
     if (!metadata || metadata.task_id !== taskId) continue;
+    // 'agent_message' is not in the shared ClaudeCodeActionType union yet; read it untyped here.
+    const actionType: unknown = metadata.action_type;
+    if (actionType === 'agent_message') {
+      const a2a = parseAgentToAgentMessage(message);
+      if (a2a) events.push({ type: 'agent_message', ts: message.timestamp, a2a });
+      continue;
+    }
     const raw = metadata.code_agent_events;
     if (!Array.isArray(raw)) continue;
     for (const entry of raw) {
@@ -366,6 +405,76 @@ export function parseScorecardInlineView(value: unknown): ScorecardInlineView | 
   });
   if (rows.length === 0) return null;
   return { title: str(props.title), rows };
+}
+
+/**
+ * The backend labels Rose agents "Root agent" / "Agent" when untitled; the
+ * desktop UI calls every Rose agent "Rose" unless it carries its own title.
+ */
+const GENERIC_ROSE_LABELS = new Set(['Root agent', 'Agent']);
+
+function parseParty(
+  value: unknown,
+  fallbackProvider: CodeAgentProvider | null,
+): AgentToAgentParty | null {
+  const r = rec(value);
+  const id = str(r?.id);
+  if (!r || !id || (r.kind !== 'agent' && r.kind !== 'code')) return null;
+  const rawLabel = str(r.label)?.trim();
+  if (r.kind === 'code') {
+    const prov = provider(r.provider) ?? fallbackProvider;
+    return {
+      id,
+      kind: 'code',
+      provider: prov ?? undefined,
+      label: prov ? codeAgentLabel(prov) : (rawLabel ?? 'Code agent'),
+    };
+  }
+  return {
+    id,
+    kind: 'agent',
+    label: !rawLabel || GENERIC_ROSE_LABELS.has(rawLabel) ? 'Rose' : rawLabel,
+  };
+}
+
+/**
+ * Inbound USER rows carry the LLM-visible framing written by the backend's
+ * `formatInboundAgentMessage`: "[Message|Question from <label>, agent_id <id>. …]\n\n<text>".
+ * Prefer an explicit `a2a.text`; otherwise drop exactly that leading frame.
+ */
+function senderText(a2a: Rec, message: Message): string {
+  const explicit = str(a2a.text);
+  if (explicit) return explicit;
+  const text = message.text ?? '';
+  const frame = /^\[(?:Message|Question) from [^\n]*\]\n\n/.exec(text);
+  return frame ? text.slice(frame[0].length) : text;
+}
+
+/** Agent-to-agent message carried by this row, or null (stock rendering). */
+export function parseAgentToAgentMessage(message: Message): AgentToAgentMessage | null {
+  const metadata = message.metadata;
+  const a2a = rec(metadata?.a2a);
+  if (!a2a) return null;
+  const messageId = str(a2a.message_id);
+  const codeProvider = provider(metadata?.code_provider);
+  const from = parseParty(a2a.from, codeProvider);
+  const to = parseParty(a2a.to, codeProvider);
+  if (!messageId || !from || !to) return null;
+  const direction =
+    a2a.direction === 'sent' || a2a.direction === 'received' ? a2a.direction : undefined;
+  return {
+    kind: a2a.kind === 'question' ? 'question' : 'message',
+    direction,
+    message_id: messageId,
+    from,
+    to,
+    text: senderText(a2a, message),
+  };
+}
+
+/** The code agent on either side of an exchange (for its icon), if any. */
+export function agentToAgentCodeProvider(a2a: AgentToAgentMessage): CodeAgentProvider | null {
+  return a2a.from.provider ?? a2a.to.provider ?? null;
 }
 
 // ── Writes ──────────────────────────────────────────────────────────────────
