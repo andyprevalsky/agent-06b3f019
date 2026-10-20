@@ -6873,6 +6873,11 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
         return
     snapshots = {}
     preparation_warnings = {}
+    # An operator/watchdog interrupt (asyncio.run's SIGINT cancellation) may
+    # land in any wait below. The evaluated outcomes are already final, and the
+    # archive is diagnostic, so stop archiving but still carry every owned root
+    # through exact pause/release before re-raising the interruption.
+    interrupted: asyncio.CancelledError | None = None
     for aid in sorted(owned):
         try:
             # Task-scoped fixture identities have already been restored. Bind
@@ -6886,8 +6891,12 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                     raise RuntimeError("pause was not acknowledged")
             finally:
                 _owned_cleanup_user_id.reset(identity)
-        except Exception as error:
-            detail = str(error) or type(error).__name__
+        except (Exception, asyncio.CancelledError) as error:
+            if isinstance(error, asyncio.CancelledError):
+                interrupted = interrupted or error
+                detail = "interrupted"
+            else:
+                detail = str(error) or type(error).__name__
             if aid in snapshots:
                 # A lost pause acknowledgment can be recovered by the exact
                 # sealed-tree/provider/payment proof below.
@@ -6916,6 +6925,8 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                 if before is None:
                     raise RuntimeError("exact provider ownership was not established")
                 evidence["before"] = before
+                if interrupted is not None:
+                    raise RuntimeError("benchmark interrupted before archive refresh")
                 # Pausing a root starts browser recording finalization in the
                 # worker. Each owned Kernel session can take a separate replay
                 # stop/read cycle; deleting the root after the old fixed 60s
@@ -6961,8 +6972,12 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                     result.world_model_fidelity = world_model_fidelity
                 if not archive_ref:
                     raise RuntimeError("owned cloud root final archive was not confirmed")
-            except Exception as error:
-                detail = str(error) or type(error).__name__
+            except (Exception, asyncio.CancelledError) as error:
+                if isinstance(error, asyncio.CancelledError):
+                    interrupted = interrupted or error
+                    detail = "interrupted during archive refresh"
+                else:
+                    detail = str(error) or type(error).__name__
                 # Archive/publication is diagnostic. Preserve the evaluator's
                 # terminal outcome while still requiring exact resource release.
                 evidence["warnings"].append(f"archive: {detail}")
@@ -7049,8 +7064,55 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
         finally:
             if identity is not None:
                 _owned_cleanup_user_id.reset(identity)
+    if interrupted is not None:
+        # Exact release completed for every owned root iff nothing failed. The
+        # caller publishes that verdict; the interruption itself still wins.
+        interrupted.owned_batch_cleanup_verified = not failures
+        interrupted.owned_batch_cleanup_failures = list(failures)
+        raise interrupted
     if failures:
         raise RuntimeError("owned cloud evidence finalization failed: " + "; ".join(failures))
+
+
+async def _finalize_owned_batch_and_save_run(
+    base_url: str,
+    run: Any,
+    live_ids: dict[str, list[str]],
+    *,
+    owned_batch_cleanup: bool,
+    retrieval_audit: Callable[[], Any],
+    never_admitted_results: tuple = (),
+) -> None:
+    """Finalize owned cloud roots, then persist the run record exactly once."""
+    # All selected execution has finished. Keep workers and backend available
+    # while recordings finalize, then freeze terminal evidence once.
+    batch_cleanup_error: BaseException | None = None
+    if owned_batch_cleanup:
+        try:
+            await _finalize_owned_cloud_batch(base_url, run.task_results, live_ids,
+                                              never_admitted_results=never_admitted_results)
+            _complete_interrupt_cleanup()
+        except BaseException as error:
+            # An interrupt here arrives after every outcome was evaluated. Save
+            # the record before propagating it, or the run reads as UNKNOWN.
+            if getattr(error, "owned_batch_cleanup_verified", False) is True:
+                _complete_interrupt_cleanup()
+            batch_cleanup_error = error
+
+    # Always save results — even partial results from interrupted runs are valuable
+    if run.task_results:
+        run.world_model_retrieval_audit = retrieval_audit()
+        path = run.save()
+        print(f"\n  Results saved: {path}")
+        try:
+            context_dir = Path(os.environ.get("BENCHMARK_CONTEXT_DIR", ".context"))
+            context_dir.mkdir(parents=True, exist_ok=True)
+            (context_dir / "run.json").write_text(Path(path).read_text(), encoding="utf-8")
+        except Exception as exc:
+            print(f"  ⚠ run.json archive write failed (non-fatal): {exc}")
+
+    if batch_cleanup_error is not None:
+        raise batch_cleanup_error
 
 
 async def _capture_task_failure_evidence(
@@ -16920,30 +16982,14 @@ async def main_async(args):
             else:
                 print(f"  ⚠ Worker memory sampling unavailable after smoke: {memory_after.get('reason')}")
 
-        # All selected execution has finished. Keep workers and backend available
-        # while recordings finalize, then freeze terminal evidence once.
-        batch_cleanup_error = None
-        if owned_batch_cleanup:
-            try:
-                await _finalize_owned_cloud_batch(base_url, run.task_results, _live_task_agent_ids, never_admitted_results=_never_admitted_results)
-                _complete_interrupt_cleanup()
-            except Exception as error:
-                batch_cleanup_error = error
-
-        # Always save results — even partial results from interrupted runs are valuable
-        if run.task_results:
-            run.world_model_retrieval_audit = _wmh_evidence.finalize()
-            path = run.save()
-            print(f"\n  Results saved: {path}")
-            try:
-                context_dir = Path(os.environ.get("BENCHMARK_CONTEXT_DIR", ".context"))
-                context_dir.mkdir(parents=True, exist_ok=True)
-                (context_dir / "run.json").write_text(Path(path).read_text(), encoding="utf-8")
-            except Exception as exc:
-                print(f"  ⚠ run.json archive write failed (non-fatal): {exc}")
-
-        if batch_cleanup_error is not None:
-            raise batch_cleanup_error
+        await _finalize_owned_batch_and_save_run(
+            base_url,
+            run,
+            _live_task_agent_ids,
+            owned_batch_cleanup=owned_batch_cleanup,
+            retrieval_audit=_wmh_evidence.finalize,
+            never_admitted_results=tuple(_never_admitted_results),
+        )
 
     # Print summary
     s = run.summary

@@ -246,16 +246,15 @@ def _window(card) -> float | None:
 
 
 CARD_PATTERN = re.compile(r"(^|/)\.?context/fleet/runs/([^/]+)/_batch/report-card\.json$")
-OWNED_PATTERN = re.compile(r"(^|/)\.?context/fleet/runs/[^/]+/(teardown-ownership/owned-clones\.(names|ids)|[^/]+/worker-clones\.ids)$")
 MACHINE_ID = re.compile(r"^[0-9a-f]{14}$")
 RELEASED_TERMINALS = {"CONTROLLER_RELEASE_VERIFIED", "DEAD_OWNER_CONTROLLER_RELEASE_VERIFIED", "FAILED_BEFORE_SUPERVISOR_RELEASED"}
 SUMMARY_PATTERN = re.compile(r"(^|/)\.?context/benchmarks/campaigns/[^/]+/summary\.json$")
 
 
 def export_records(export: Path) -> dict:
-    """One pass over a verified controller export: campaign summary, fleet report cards
-    and the owned guest clone names/IDs recorded by each fleet's teardown ownership."""
-    records = {"summary": None, "cards": {}, "owned_names": set(), "owned_ids": set()}
+    """One pass over a verified controller export: campaign summary and fleet report cards.
+    Owned guest identities belong to scripts/cloudbench-native-release-audit.py."""
+    records = {"summary": None, "cards": {}}
     archive = Path(export) / "originals.tar.gz"
     if not (Path(export) / "disposable-export.verified.json").exists() or not archive.exists():
         return records
@@ -269,9 +268,6 @@ def export_records(export: Path) -> dict:
                 card = json.loads(stream.extractfile(member).read())
                 if isinstance(card, dict) and isinstance(card.get("run_id"), str):
                     records["cards"][card["run_id"]] = card
-            elif OWNED_PATTERN.search(member.name):
-                for line in stream.extractfile(member).read().decode(errors="replace").split():
-                    records["owned_ids" if MACHINE_ID.match(line) else "owned_names"].add(line)
     return records
 
 
@@ -466,20 +462,29 @@ def _job_lifecycle(exp, audit=None, finished_after=None):
     released = sum(r.get("released") is True for r in terminal)
     checked = (audit or {}).get("checked") or {}
     usable = (isinstance(audit, dict) and audit.get("schema") == "cloudbench-native-release-audit-v1"
-              and isinstance(audit.get("present"), list) and checked.get("guest_names")
+              and isinstance(audit.get("present"), list)
+              # Registry/owner metadata can precede any recorded guest name; it still counts.
+              and (checked.get("guest_names") or checked.get("guest_ids") or checked.get("guest_volumes")
+                   or checked.get("owner_tokens") or checked.get("controller_ids") or audit.get("retained_owners"))
               and (not finished_after or (audit.get("observed_at") or 0) >= finished_after))
-    if usable and not audit["present"] and audit.get("released") is False:
+    lingering = (audit["present"] + (audit.get("present_volumes") or [])) if usable else []
+    retained = (audit.get("retained_owners") or []) if usable else []
+    if usable and (lingering or retained):
+        detail = []
+        if lingering:
+            detail.append(f"still present: {', '.join(str(m.get('name') or m.get('id')) for m in lingering[:4])}")
+        if retained:
+            detail.append(f"retained owners: {', '.join(token[:12] for token in retained[:4])}")
+        lifecycle_item(exp, "fail", "Guests released (native audit)", " · ".join(detail))
+    elif usable and audit.get("released") is False:
         # Nothing listed, but the audit did not check every shard's export.
         lifecycle_item(exp, "warn", "Guests released (native audit incomplete)",
                        f"{checked.get('verified_exports')}/{checked.get('expected_shards')} verified shard exports checked")
-    elif usable and not audit["present"]:
+    elif usable:
         exp["_audit_released"] = True
         lifecycle_item(exp, "ok", "Guests released (native audit)",
                        f"{pacific(audit['observed_at'])}: none present of {len(checked['guest_names'])} owned guests "
                        f"+ {len(checked.get('controller_ids') or [])} controllers")
-    elif usable:
-        lifecycle_item(exp, "fail", "Guests released (native audit)",
-                       f"still present: {', '.join(str(m.get('name') or m.get('id')) for m in audit['present'][:4])}")
     else:
         lifecycle_item(exp, "ok" if released == len(terminal) else "warn", "Guests released",
                        f"{released}/{len(terminal)} terminal jobs" + ("" if released == len(terminal) else " · no native audit"))
@@ -634,8 +639,10 @@ def load_sharded(run_dir: Path, deep: bool = True) -> dict:
     elif isinstance(result, dict):
         lifecycle_item(exp, "ok", "Results recorded", "result.json")
         published = result.get("hub_group_final_published")
+        reason = result.get("hub_group_final_error")
         lifecycle_item(exp, "ok" if published else "warn", "Hub group publication",
-                       "final group published" if published else "final group NOT published")
+                       "final group published" if published else "final group NOT published"
+                       + (f": {str(reason)[:160]}" if reason else ""))
     else:
         lifecycle_item(exp, "pending", "Results recorded", "result.json pending")
     finished = coordination.get("finished_at")
@@ -690,6 +697,14 @@ def load(run_dir: Path, deep: bool = True) -> dict:
         return load_campaign(run_dir)
     if (run_dir / "_batch/report-card.json").exists() or (run_dir / "report-card.json").exists():
         return load_fleet(run_dir)
+    abort = read_json(run_dir / "preallocation-abort.json")
+    if isinstance(abort, dict) and abort.get("allocated") is False:  # sharded launch refused before any Machine
+        exp = empty_experiment("sharded", run_dir)
+        exp["triggered_at"] = (read_json(run_dir / "admission-intent.private.json") or {}).get("started_at_epoch")
+        exp["state"], exp["state_reason"] = "ABORTED", str(abort.get("reason") or "aborted before allocation")[:160]
+        exp["ended_at"], exp["end_evidence"] = abort.get("ended_at"), "preallocation-abort.json"
+        lifecycle_item(exp, "ok", "No Machine allocated", "launch aborted before capacity admission")
+        return finish_experiment(exp)
     exp = empty_experiment("unknown", run_dir)
     exp["state"], exp["state_reason"] = "UNRECORDED", "no recorded benchmark artifacts in this directory"
     lifecycle_item(exp, "warn", "Recorded artifacts", "none found")

@@ -2136,7 +2136,7 @@ print(state.strip().lower())
 reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone's forked volume
     local vol="$1" diagnostic_log="${2:-}" i lifecycle_rc state
     local destroy_capture destroy_rc destroy_bytes destroy_excerpt destroy_suffix
-    local destroy_accepted=0 destroy_ambiguous=0 lifecycle_ambiguous=0 once_status=0
+    local destroy_accepted=0 destroy_ambiguous=0 lifecycle_ambiguous=0 once_status=0 delete_sent
     [ -n "$vol" ] || return 0
     if [ "${POOL_REUSE_ONLY:-0}" = 1 ]; then
         echo "❌ reuse-only retains Volume identity; refusing destroy of $vol" >&2
@@ -2172,8 +2172,10 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
             echo "  ❌ could not reset response capture for volume $vol; retaining exact ownership" >&2
             return 1
         }
+        delete_sent=1
         if [ "${DISPOSABLE_REAP:-0}" = 1 ] && { [ "$i" -gt 1 ] || [ "$once_status" = 2 ]; }; then
             destroy_rc=1 # keep reconciling exact GET; never repeat DELETE
+            delete_sent=0
         elif FLY volumes destroy "$vol" -a "$APP" --yes >"$destroy_capture" 2>&1; then
             destroy_rc=0
             destroy_accepted=1
@@ -2186,7 +2188,9 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
         destroy_suffix=""
         [ "$destroy_bytes" -le 200 ] || destroy_suffix=" [truncated; ${destroy_bytes} bytes total]"
         [ -n "$destroy_excerpt" ] || destroy_excerpt="<empty>"
-        if [ -n "$diagnostic_log" ]; then
+        if [ "$delete_sent" = 0 ]; then
+            : # reported below with the exact state; no DELETE response exists
+        elif [ -n "$diagnostic_log" ]; then
             if ! printf '[%s] volume destroy attempt %s/6 id=%s rc=%s response=%s%s\n' \
                 "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" \
                 "$i" "$vol" "$destroy_rc" "$destroy_excerpt" "$destroy_suffix" \
@@ -2221,6 +2225,22 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
             esac
         else
             lifecycle_ambiguous=1
+        fi
+        if [ "$delete_sent" = 0 ]; then
+            # A reconcile-only pass sent no DELETE; never print its placeholder
+            # status as a provider rejection (it read as "rc=1 response=<empty>").
+            if [ -n "$diagnostic_log" ]; then
+                printf '[%s] volume destroy reconcile %s/6 id=%s state=%s (DELETE not resent)\n' \
+                    "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" \
+                    "$i" "$vol" "${state:-unreadable}" >> "$diagnostic_log" || {
+                    rm -f "$destroy_capture"
+                    echo "  ❌ could not persist reconcile state for volume $vol; retaining exact ownership" >&2
+                    return 1
+                }
+            else
+                printf '  ⏳ volume destroy reconcile %s/6 id=%s state=%s (DELETE not resent)\n' \
+                    "$i" "$vol" "${state:-unreadable}" >&2
+            fi
         fi
         sleep 3
     done
