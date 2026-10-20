@@ -24,6 +24,10 @@
  *   failed / paused: read-only transcript when events exist
  *   not running + code_session: "<branch> → <merge_target> · pushed · PR #n · merged"
  *
+ * PREVIEW CARD (code_agent.preview_url, dev cloud sessions; rows 10/39): a small
+ *   live preview under the header, framed only while on screen; clicking it opens
+ *   the full-screen app view for this task (CodeAgentPreviewCard).
+ *
  * Maximize opens the existing FullscreenView (owned by ClaudeCodeChip).
  */
 
@@ -50,6 +54,7 @@ import {
   CodeAgentTranscript,
   type ChipTab,
 } from './codeAgentChip.steer';
+import { CodeAgentPreviewCard } from './app-view/CodeAgentPreviewCard';
 
 const MUTED = 'text-muted-foreground dark:text-[#a3a39d]';
 const CODE = 'font-mono text-[12.5px] text-[#e8507f]';
@@ -258,6 +263,15 @@ export function DesktopCodeAgentChip({ meta, vm, events, toolCallId }: DesktopCo
             <ChevronDown className={`h-4 w-4 flex-shrink-0 ${MUTED}`} />
           ))}
       </div>
+
+      {meta.preview_url && (
+        <CodeAgentPreviewCard
+          taskId={meta.task_id}
+          previewUrl={meta.preview_url}
+          title={meta.title ?? null}
+          provider={meta.provider}
+        />
+      )}
 
       {state === 'failed' && <FailureBox meta={meta} fallback={vm.failureMessage} />}
 

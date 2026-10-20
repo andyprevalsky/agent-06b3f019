@@ -23,6 +23,9 @@
  * ROSE DESKTOP APPS (RoseAppsProvider, flag on only): bare top-right icons
  *   (Browser, Phone, Integrations, Dark mode) + the right-panel slot; panels
  *   overlay the content (no right bar, no content inset). Flag off: no icons.
+ * APP VIEW (AppViewProvider): a code-agent chip's live preview card opens the
+ *   code session's preview full screen in place of the chat column (Rose
+ *   Desktop only; AgentChatArea). It holds no list and reads nothing itself.
  * THEME (RoseThemeProvider, Rose Desktop accounts only): light (default) <->
  *   dark via useRoseTheme().toggle() — the top-right Dark mode icon calls it,
  *   so RoseAppIcons renders inside the provider. Dark adds html.dark and the
@@ -38,6 +41,7 @@ import {
   RoseAppIcons,
   RoseAppsProvider,
   SIDEBAR_WIDTH_COLLAPSED,
+  AppViewProvider,
   unansweredAgentIds,
   useAttentionRequests,
 } from '@/features/terminal-component-group';
@@ -134,7 +138,9 @@ function TerminalLayout(props: TerminalLayoutProps) {
           publishLayout={roseDesktop}
           onLogout={() => void props.agents.handleLogout()}
         >
-          <InteractiveTerminalLayout {...props} />
+          <AppViewProvider userId={props.agents.user?.id ?? null}>
+            <InteractiveTerminalLayout {...props} />
+          </AppViewProvider>
           {roseDesktop && <RoseAppIcons />}
         </RoseAppsProvider>
       </RoseThemeProvider>

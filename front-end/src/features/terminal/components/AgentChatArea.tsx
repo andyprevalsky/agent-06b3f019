@@ -27,6 +27,12 @@
  *   Rose Desktop  → no footer (UI ledger #14); the links live behind the
  *                   info item of the query box's rose nub.
  *
+ * APP VIEW (Rose Desktop only, UI ledger rows 10/39; AppViewProvider):
+ *   a code-agent chip's live preview card opens that code session's preview,
+ *   which replaces the whole chat column (AppScreenHost): the app full screen,
+ *   the normal query box floating over it (Popular Goals hidden) steering that
+ *   session. Escape / an agent row / Home / New Super Agent close it.
+ *
  * MOBILE BOTTOM (Rose Desktop only, UI ledger #11):
  *   the input area pads by --mobile-querybox-gap only and carries
  *   `rose-mobile-query-area`; below md the query box inside it hugs the display
@@ -38,8 +44,12 @@ import { useRef, Suspense, type ComponentType, type ReactNode } from 'react';
 import * as analytics from '@/lib/analytics';
 import { isBenchmarkSharedView } from '@/lib/benchmarkShare';
 
-import { ApprovalChip, PinnedQuestionMount } from '@/features/terminal-component-group';
-import { QueryInput } from '@/features/terminal-component-group';
+import {
+  ApprovalChip,
+  PinnedQuestionMount,
+  QueryInput,
+  useAppView,
+} from '@/features/terminal-component-group';
 import { UserUiSlot, useUserUiOpaqueSurfaces } from '@/features/user-ui';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { cn } from '@/lib/utils';
@@ -58,6 +68,7 @@ import type {
   Model,
 } from '../types';
 
+import { AppScreenHost } from './AppScreenHost';
 import { ChatScrollArea } from './ChatScrollArea';
 import { SubAgentBreadcrumb } from './SubAgentBreadcrumb';
 import { SystemMessagesPanel } from './SystemMessagesPanel';
@@ -78,7 +89,23 @@ interface AgentChatAreaProps {
   BrowserStatusBarCarousel: ComponentType<{ browsers: BrowserPanelData[] }>;
 }
 
-export function AgentChatArea({
+/** Rose Desktop: an open app view (AppViewProvider) replaces the whole chat column. */
+export function AgentChatArea(props: AgentChatAreaProps) {
+  const roseDesktop = useRoseDesktop();
+  const appView = useAppView();
+  const target = roseDesktop && !isBenchmarkSharedView() ? (appView?.target ?? null) : null;
+  if (target === null || appView === null) return <ChatColumn {...props} />;
+  return (
+    <AppScreenHost
+      target={target}
+      onClose={appView.closeApp}
+      agents={props.agents}
+      drip={props.drip}
+    />
+  );
+}
+
+function ChatColumn({
   agents: a,
   drip,
   models,

@@ -25,6 +25,9 @@
  *
  * PANELS: project settings beside the bar (useRoseSidebarProjects); archive dialog;
  * rename dialog (useAgentRowActions); delete-project confirm dialog.
+ *
+ * APP VIEW (AppViewProvider; opened from a code-agent chip's preview card): an
+ * agent or code-agent row, Home and New Super Agent close it first.
  */
 
 import { Activity, Archive, Globe, Megaphone } from 'lucide-react';
@@ -39,6 +42,7 @@ import type { AppSidebarProps } from '../AppSidebar';
 import ArchivedAgentsDialog from '../ArchivedAgentsDialog';
 import { matchesQuery, sortAgents } from '../agentListOrdering';
 import { useRoseApps } from '../rose-apps/roseAppsState';
+import { useAppView } from '../app-view/appViewState';
 import { useAgentRowActions } from '../useAgentRowActions';
 import { useSidebarSearch } from '../useSidebarSearch';
 import { DeleteProjectDialog } from './DeleteProjectDialog';
@@ -105,8 +109,27 @@ export default function RoseSidebar(props: AppSidebarProps) {
   return isMobile ? null : <RoseSidebarBar {...props} />;
 }
 
+/** Agent selection and new-agent entry points leave the full-screen app view first. */
+function useAppViewExits(props: AppSidebarProps) {
+  const appView = useAppView();
+  const close = () => appView?.closeApp();
+  return {
+    close,
+    onSelectAgent: (agentId: string | null) => {
+      close();
+      props.onSelectAgent(agentId);
+    },
+    onCreateAgent: () => {
+      close();
+      props.onCreateAgent();
+    },
+  };
+}
+
 function RoseSidebarBar(props: AppSidebarProps) {
-  const { onSelectAgent, onViewChange, currentView } = props;
+  const { onViewChange, currentView } = props;
+  const exits = useAppViewExits(props);
+  const { onSelectAgent } = exits;
   const apps = useRoseApps();
   const notYet = useNotYet();
   const expansion = useExpansion();
@@ -125,7 +148,7 @@ function RoseSidebarBar(props: AppSidebarProps) {
     },
     onRefreshAttention: props.onRefreshAttention,
     selectedAgentId: props.selectedAgentId,
-    onSelectAgent,
+    onSelectAgent: props.onSelectAgent,
   });
   const actionsFor = useRoseAgentMenuActions(handlers, roseActions);
   const codeAgentsNeedingInput = useCodeAgentAttention();
@@ -133,9 +156,13 @@ function RoseSidebarBar(props: AppSidebarProps) {
     [...grouped.home, ...grouped.projects.flatMap((g) => g.agents)],
     props.selectedAgentId,
   );
-  const onOpenCodeAgent =
-    roseActions.onOpenCodeAgent ??
-    ((codeAgent: CodeAgentListItem) => onSelectAgent(codeAgent.owner_agent_id));
+  const onOpenCodeAgent = (codeAgent: CodeAgentListItem) => {
+    if (roseActions.onOpenCodeAgent === undefined) onSelectAgent(codeAgent.owner_agent_id);
+    else {
+      exits.close();
+      roseActions.onOpenCodeAgent(codeAgent);
+    }
+  };
   const goToView = (view: Parameters<typeof onViewChange>[0]) => {
     onViewChange(view);
     onSelectAgent(null);
@@ -164,8 +191,8 @@ function RoseSidebarBar(props: AppSidebarProps) {
           transition: `width ${ROSE_BAR_DURATION_MS}ms ${ROSE_BAR_EASE}`,
         }}
       >
-        <RoseHomeRow isExpanded={isExpanded} onClick={props.onCreateAgent} />
-        <RoseNewAgentButton isExpanded={isExpanded} onClick={props.onCreateAgent} />
+        <RoseHomeRow isExpanded={isExpanded} onClick={exits.onCreateAgent} />
+        <RoseNewAgentButton isExpanded={isExpanded} onClick={exits.onCreateAgent} />
         <RoseSearchRow isExpanded={isExpanded} value={query} onChange={setQuery} />
         {isExpanded && props.userUi?.headerSlot}
         <ScrollArea className="min-h-0 flex-1">

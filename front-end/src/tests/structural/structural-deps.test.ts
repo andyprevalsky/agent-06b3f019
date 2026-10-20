@@ -166,6 +166,10 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
     // Per-user UI runtime: home.dashboard slot + opaque query box over a user background.
     'Cross-domain import: "@/features/user-ui"',
   ],
+  // Rose Desktop app view: the normal query box over AppViewScreen (AgentChatArea host).
+  'features/terminal/components/AppScreenHost.tsx': [
+    'Cross-domain import: "@/features/terminal-component-group"',
+  ],
   'features/terminal/components/ChatScrollArea.tsx': [
     'Cross-domain import: "@/features/terminal-component-group"',
   ],
