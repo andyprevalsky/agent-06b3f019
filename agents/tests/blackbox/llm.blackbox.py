@@ -4540,7 +4540,7 @@ async def test_check_progress_below_threshold_returns_partial_structured_respons
 
 
 def test_filter_context_for_execute_verifier_uses_execute_boundary():
-    """Execute verifier context excludes plan/research rows before the execute boundary."""
+    """Execute verifier context keeps the goal but excludes plan/research rows before the execute boundary."""
     from helpers.llm import _filter_context_for_execute_verifier
 
     context = [
@@ -4579,7 +4579,7 @@ def test_filter_context_for_execute_verifier_uses_execute_boundary():
 
     filtered = _filter_context_for_execute_verifier(context)
     text = "\n".join(m.get("text", "") for m in filtered)
-    assert "original research goal" not in text
+    assert "original research goal" in text
     assert "Tokyo plan-phase explore result" not in text
     assert "plan created" not in text
     assert "Beginning execute" not in text
@@ -4630,9 +4630,69 @@ async def test_check_progress_execute_filters_plan_context_before_llm():
     assert result["score"] == 0.5
     rendered = json.dumps(captured_messages)
     assert "execute result" in rendered
-    assert "original goal" not in rendered
+    assert "original goal" in rendered
     assert "plan explore result" not in rendered
     assert "set_plan" not in rendered
+
+
+async def test_check_progress_execute_verifier_keeps_original_goal():
+    """The execute verifier extracts the final output against the user's goal.
+
+    Regression for explore-agent-mid-run-message (4cf417f1, 1469eaed): a
+    start_phase=execute root's goal row has no phase while every execute row is
+    tagged EXECUTE, so the execute filter dropped the goal. The extraction then
+    saw only the follow-up ("also say who led the round") and wrote two-sentence
+    summaries although the goal asked for a one-sentence summary.
+    """
+    from helpers.llm import check_progress
+
+    captured_messages = []
+
+    async def fake_call_llm_verifier(messages, *_args, **_kwargs):
+        captured_messages.extend(messages)
+        return {"score": 1.0, "reasoning": "complete"}, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    goal = "Compile 8 funding rounds. For each round give a one-sentence summary and a source URL."
+    context = [
+        {"role": "USER", "text": goal, "timestamp": "2026-10-20T01:16:11Z"},
+        {
+            "role": "USER",
+            "text": "<environment>\nYou are /root, the root agent.\n</environment>",
+            "timestamp": "2026-10-20T01:16:16Z",
+        },
+        {
+            "role": "TOOL",
+            "text": "Started explore agent in background. Address: /root/funding_research.",
+            "timestamp": "2026-10-20T01:16:23Z",
+            "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED", "phase": "EXECUTE"},
+        },
+        {
+            "role": "USER",
+            "text": 'One more thing: in each round\'s summary, also say who led the round, as "Led by <investor>".',
+            "timestamp": "2026-10-20T01:16:27Z",
+        },
+        {
+            "role": "TOOL",
+            "text": "Message Type: FINAL_ANSWER\nPayload:\n1) Cognition raised $2B. Led by a16z.",
+            "timestamp": "2026-10-20T01:17:09Z",
+            "metadata": {"toolName": "agent_notification", "phase": "EXECUTE"},
+        },
+    ]
+
+    with patch("temporalio.activity.heartbeat"), patch("helpers.llm._call_llm_verifier", fake_call_llm_verifier):
+        await check_progress(
+            context=context,
+            verifier_system_prompt="VERIFY",
+            model="rose",
+            call_site="verifier_execute",
+            response_schema={"fields": [{"name": "rounds", "type": "list[object]", "required": True}]},
+        )
+
+    rendered = json.dumps(captured_messages)
+    assert goal in rendered, "execute verifier must see the original user goal"
+    assert "Led by <investor>" in rendered
+    assert "FINAL_ANSWER" in rendered
+    assert rendered.index("one-sentence summary") < rendered.index("Led by <investor>")
 
 
 def _soft_complete_bench_goal() -> str:
@@ -10006,6 +10066,10 @@ async def run_all_tests():
     await r.record_async(
         "check_progress_execute_filters_plan_context",
         test_check_progress_execute_filters_plan_context_before_llm,
+    )
+    await r.record_async(
+        "check_progress_execute_verifier_keeps_original_goal",
+        test_check_progress_execute_verifier_keeps_original_goal,
     )
     await r.record_async("call_llm_rose_path", test_call_llm_rose_path)
     await r.record_async(

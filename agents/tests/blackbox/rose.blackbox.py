@@ -650,6 +650,97 @@ async def test_cerebras_strict_native_response_retains_parser_retry():
         assert response.tool_calls[0].count == 5
 
 
+async def test_cerebras_tool_call_at_output_limit_is_escalated_not_accepted():
+    """A Cerebras reply that spent its whole output limit is a cut-off, whatever finish it reports.
+
+    Regression for explore-agent-mid-run-message b2726cac: the explore's final
+    qwen-3.8-27b call used completion_tokens == max_completion_tokens (8192),
+    mostly on reasoning, yet Cerebras reported finish_reason="tool_calls" with a
+    strict-grammar-closed attempt_completion_with_result whose table stopped
+    mid-sentence. The cut-off result became the explore's FINAL_ANSWER.
+    """
+    from typing import Literal
+
+    from helpers.llm import call_llm_structured_streaming
+    from pydantic import BaseModel
+    from utils.tool_schemas import create_agent_action_model
+
+    class FinishTool(BaseModel):
+        tool: Literal["attempt_completion_with_result"]
+        result: str
+
+    model = create_agent_action_model(
+        ["attempt_completion_with_result"], tool_registry={"attempt_completion_with_result": FinishTool}
+    )
+    requests = []
+    truncated = "| 7 | Prime Intellect | Series A | 2026-07-08 | announced a"
+    complete = (
+        truncated + " $130M Series A led by Founders Fund. |\n| 8 | Seltz | Seed | 2026-06-24 | led by B Capital. |"
+    )
+
+    def handler(request):
+        if request.url.host not in {"api.cerebras.ai", "openrouter.ai"}:
+            return httpx.Response(200, json={})
+        body = json.loads(request.content)
+        requests.append(body)
+        limit = body.get("max_completion_tokens") or body.get("max_tokens")
+        first = len(requests) == 1
+        payloads = [
+            {"choices": [{"delta": {"reasoning": "checking every lead investor"}, "finish_reason": None}]},
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": f"captured-{len(requests)}",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "attempt_completion_with_result",
+                                        "arguments": json.dumps({"result": truncated if first else complete}),
+                                    },
+                                }
+                            ]
+                        },
+                        # Exact observed provider label at the limit.
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+            {
+                "usage": {
+                    "prompt_tokens": 14330,
+                    "completion_tokens": limit if first else 9000,
+                    "total_tokens": 14330 + (limit if first else 9000),
+                }
+            },
+        ]
+        return httpx.Response(200, text="\n".join(_openai_sse(payloads)), headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+
+    async def on_chunk(*args):
+        pass
+
+    with patch.dict(os.environ, {"CEREBRAS_API_KEY": "offline-test-placeholder", "ROSE_FAST_CACHE_MODE": "off"}):
+        response, usage, _ = await call_llm_structured_streaming(
+            messages=[{"role": "user", "content": "offline replay"}],
+            model="rose-labs/rose-1-flash",
+            temperature=1,
+            max_tokens=8192,
+            response_model=model,
+            on_chunk=on_chunk,
+            call_site="explore_agent",
+            skip_cache_write=True,
+        )
+
+    assert requests[0]["max_completion_tokens"] == 8192
+    assert len(requests) == 2, "a reply that used the whole output limit must be retried with room to finish"
+    assert requests[1]["max_completion_tokens"] > 8192
+    assert response.tool_calls[0].result == complete
+
+
 def test_build_cerebras_body_strips_cache_control():
     """Cerebras 400s Anthropic/OpenRouter cache_control on system parts.
 
@@ -10120,6 +10211,10 @@ async def run_all_tests():
     await r.record_async("cerebras_mixed_toolset_contract", test_cerebras_mixed_toolset_uses_valid_request_contract)
     await r.record_async(
         "cerebras_strict_native_parser_retry", test_cerebras_strict_native_response_retains_parser_retry
+    )
+    await r.record_async(
+        "cerebras_tool_call_at_output_limit_escalated",
+        test_cerebras_tool_call_at_output_limit_is_escalated_not_accepted,
     )
     r.record("cerebras_body_strips_cache_control", test_build_cerebras_body_strips_cache_control)
     r.record("all_pool_names_matches", test_all_pool_names_matches_registry)

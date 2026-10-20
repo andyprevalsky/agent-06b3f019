@@ -1481,15 +1481,20 @@ def _is_execute_boundary_message(msg: Dict[str, Any]) -> bool:
 
 
 def _filter_context_for_execute_verifier(context: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Return only execute-phase context for final-task verification.
+    """Return the user's goal plus execute-phase context for final-task verification.
 
     The main workflow can have an earlier PLAN/RESEARCH phase with explore
     calls, set_plan, and planning verifier feedback. Execute verifiers must
     judge only evidence produced after the execute boundary. If no boundary or
     phase metadata is present, keep the context unchanged; execute-only agents
     and local browser/code verifier contexts have no planning phase to remove.
+
+    The original goal (the first USER row) is not planning evidence: the
+    verifier scores and extracts the output against it, so it is always kept
+    even when it precedes the execute boundary.
     """
     sorted_context = sorted(context, key=lambda m: m.get("timestamp", "1970-01-01"))
+    goal_idx = next((idx for idx, msg in enumerate(sorted_context) if msg.get("role") == "USER"), None)
 
     first_execute_idx: Optional[int] = None
     for idx, msg in enumerate(sorted_context):
@@ -1507,6 +1512,8 @@ def _filter_context_for_execute_verifier(context: List[Dict[str, Any]]) -> List[
         first_execute_idx = boundary_idx + 1
 
     execute_context: List[Dict[str, Any]] = []
+    if goal_idx is not None and goal_idx < first_execute_idx:
+        execute_context.append(sorted_context[goal_idx])
     for msg in sorted_context[first_execute_idx:]:
         if _message_phase(msg) in ("PLAN", "RESEARCH"):
             continue
