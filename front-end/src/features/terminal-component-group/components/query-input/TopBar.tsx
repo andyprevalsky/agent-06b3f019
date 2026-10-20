@@ -12,6 +12,9 @@
  *     |
  *     +--> [SIMULATOR_VISIBLE] when parent says the account is simulator-allow-listed
  *
+ * REVEAL: the whole bar sits in ToolbarRevealRegion — [COLLAPSED] until the
+ * rose nub (ToolbarNub) is hovered, focused or tapped, then [EXPANDED].
+ *
  * TopBar owns layout only; account and viewport gating stay in QueryInputBody.
  */
 
@@ -25,8 +28,12 @@ import { CostIndicator } from './CostIndicator';
 import { ContextMeter } from './ContextMeter';
 import type { AgentDetail } from '../../hooks';
 import type { UsePriceLimitResult } from './usePriceLimit';
+import { ToolbarRevealRegion } from './ToolbarNub';
+import type { ToolbarReveal } from './useToolbarReveal';
 
 interface TopBarProps {
+  /** Nub-driven reveal state; the bar stays collapsed until opened. */
+  reveal?: ToolbarReveal;
   agentDetail?: AgentDetail | null;
   onAgentUpdate?: () => void;
   onAgentDelete?: () => void;
@@ -47,6 +54,7 @@ interface TopBarProps {
 }
 
 export function TopBar({
+  reveal,
   agentDetail,
   onAgentUpdate,
   onAgentDelete,
@@ -66,46 +74,51 @@ export function TopBar({
   restartThreshold,
 }: TopBarProps) {
   return (
-    <div className="flex items-center justify-between gap-2 px-3 pb-2">
-      <div className="flex items-center gap-2">
-        <div className="hidden md:block">
-          <WriteLockToggle
-            agentId={agentDetail?.agent_id}
-            writeLockEnabled={agentDetail?.write_lock_enabled ?? true}
+    <ToolbarRevealRegion reveal={reveal}>
+      <div className="flex items-center justify-between gap-2 px-3 pb-2">
+        <div className="flex items-center gap-2">
+          <div className="hidden md:block">
+            <WriteLockToggle
+              agentId={agentDetail?.agent_id}
+              writeLockEnabled={agentDetail?.write_lock_enabled ?? true}
+              onUpdate={onAgentUpdate}
+            />
+          </div>
+          {showTestPrompts && (
+            <TestPromptsSelector
+              onSelectPrompt={onSelectPrompt}
+              shouldAutoLoadDefaultPrompt={shouldAutoLoadDefaultPrompt}
+            />
+          )}
+          <RoseToolSetChip />
+          {showFastMode && (
+            <FastModeToggle enabled={fastMode} onChange={onFastModeChange ?? (() => {})} />
+          )}
+          {showSimulator && (
+            <SimulatorToggle
+              enabled={simulatorMode}
+              onChange={onSimulatorModeChange ?? (() => {})}
+            />
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <CostIndicator
+            agentDetail={agentDetail}
+            pendingPriceLimitCents={pendingPriceLimitCents}
+            priceLimit={priceLimit}
+          />
+          <ContextMeter
+            contextPercentage={contextPercentage}
+            contextSize={contextSize}
+            restartThreshold={restartThreshold}
+          />
+          <AgentSettingsDialog
+            agent={agentDetail}
             onUpdate={onAgentUpdate}
+            onDelete={onAgentDelete}
           />
         </div>
-        {showTestPrompts && (
-          <TestPromptsSelector
-            onSelectPrompt={onSelectPrompt}
-            shouldAutoLoadDefaultPrompt={shouldAutoLoadDefaultPrompt}
-          />
-        )}
-        <RoseToolSetChip />
-        {showFastMode && (
-          <FastModeToggle enabled={fastMode} onChange={onFastModeChange ?? (() => {})} />
-        )}
-        {showSimulator && (
-          <SimulatorToggle enabled={simulatorMode} onChange={onSimulatorModeChange ?? (() => {})} />
-        )}
       </div>
-      <div className="flex items-center gap-2">
-        <CostIndicator
-          agentDetail={agentDetail}
-          pendingPriceLimitCents={pendingPriceLimitCents}
-          priceLimit={priceLimit}
-        />
-        <ContextMeter
-          contextPercentage={contextPercentage}
-          contextSize={contextSize}
-          restartThreshold={restartThreshold}
-        />
-        <AgentSettingsDialog
-          agent={agentDetail}
-          onUpdate={onAgentUpdate}
-          onDelete={onAgentDelete}
-        />
-      </div>
-    </div>
+    </ToolbarRevealRegion>
   );
 }

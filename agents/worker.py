@@ -88,6 +88,7 @@ from domains.spawn_sub_agents.service import (
     spawn_sub_agent_activity,
     spawn_sub_agents_batch_activity,
 )
+from domains.user_tools.repo import resolve_user_tools_activity, run_user_tool_activity
 from domains.wait_for.service import evaluate_condition_activity
 from domains.web_fetch.handler import web_fetch_activity, web_fetch_download_activity
 from health_server import (
@@ -1573,6 +1574,8 @@ async def main():
         people_search_activity,
         web_fetch_activity,
         web_fetch_download_activity,
+        resolve_user_tools_activity,
+        run_user_tool_activity,
         save_tool_usage,
         read_message_history_activity,
         generate_message_activity,

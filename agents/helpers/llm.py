@@ -92,7 +92,9 @@ from utils.response_schema_constraints import (
 from utils.tool_schemas import (
     ResponseSchemaBound,
     create_agent_action_model,
+    get_tool_models,
 )
+from utils.user_tool_models import build_user_tool_registry, llm_declarations
 
 logger = structlog.get_logger()
 
@@ -6200,6 +6202,7 @@ async def call_llm_activity(
     cache_sequence_id: Optional[str] = None,
     exclude_anthropic_family: bool = False,
     pending_context_token: Optional[str] = None,
+    user_tools: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Activity wrapper for LLM calls with structured output and streaming.
@@ -6235,6 +6238,8 @@ async def call_llm_activity(
         pending_context_token: Identity of the workflow's pending-context write for
             this call. A same-agent slot with a different token is stale (left by a
             workflow that migrated off this worker) and is treated as a miss.
+        user_tools: Pinned user-tool declarations (name, description, input_schema)
+            for a root agent. Appended last so older replayed histories default to None.
         cache_before_extra_user_message: Mark the latest stable conversation
             block before appending extra_user_message. This lets productive
             param calls create/read one shared prefix without caching the unique
@@ -6336,7 +6341,15 @@ async def call_llm_activity(
             messages.append({"role": "user", "content": extra_user_message})
 
         # Create dynamic action model
-        AgentActionModel = create_agent_action_model(tool_names)
+        # Pinned user tools (root agent) are declared after the built-ins, sorted.
+        user_tool_decls = llm_declarations(user_tools)
+        if user_tool_decls:
+            AgentActionModel = create_agent_action_model(
+                [*tool_names, *(decl["name"] for decl in user_tool_decls)],
+                tool_registry={**get_tool_models(), **build_user_tool_registry(user_tool_decls)},
+            )
+        else:
+            AgentActionModel = create_agent_action_model(tool_names)
 
         # Direct-token mode is detected from actual_model in stream response, not from input token presence.
         _is_claude = [False]  # Mutable list so closures can update it

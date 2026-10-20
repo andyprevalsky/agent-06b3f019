@@ -93,6 +93,28 @@ send_message_to_user(message, inline_view={ view: "<view-name>", props: {...} })
 The message pins the published version, so later publishes never change old
 messages. Keep props small JSON.
 
+## Tools for the user's agent
+
+tools/<tool_name>/tool.json:
+
+    {
+      "name": "<tool_name>",
+      "description": "one sentence the agent reads to decide when to call it",
+      "input_schema": { "type": "object", "properties": { ... } },
+      "output_schema": { ... },              optional; results are validated
+      "render": { "view": "<view-name>" },   optional; result becomes that inline view's props
+      "side_effects": false,                 v1 supports read-only tools only
+      "timeout_s": 60,                       default 60, max 300
+      "runtime": "node",                     or "python"
+      "entry": "tools/<tool_name>/handler.js",
+      "files": ["lib.js"]                    optional extra files, relative to tools/<tool_name>/
+    }
+
+The handler reads one JSON object (the input) on stdin and writes one JSON
+object on stdout. A non-zero exit is reported to the agent as a tool error.
+It runs with no secrets in its environment and a 256 KB output cap. After
+publishing, the user's next root-agent run can call it as user__<tool_name>.
+
 ## Performance rules (enforced in review)
 
 - Target 60 fps, 120 fps on ProMotion displays; no main-thread task > 50 ms.

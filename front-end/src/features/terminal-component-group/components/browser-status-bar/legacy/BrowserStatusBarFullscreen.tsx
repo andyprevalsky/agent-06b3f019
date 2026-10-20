@@ -31,26 +31,26 @@ import type { MouseEvent, ReactNode } from 'react';
 import { X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useIsMobile } from '@/hooks/use-mobile';
-import BrowserBorderGlow from '../BrowserBorderGlow';
-import { resolveBrowserBorderGlowTone } from '../browserBorderGlow/resolveTone';
-import BrowserCursorOverlay from '../BrowserCursorOverlay';
-import { resolveBrowserControlState, type BrowserControlState } from '../browserControlState';
-import type { Message } from '../../hooks';
+import BrowserBorderGlow from '../../BrowserBorderGlow';
+import { resolveBrowserBorderGlowTone } from '../../browserBorderGlow/resolveTone';
+import BrowserCursorOverlay from '../../BrowserCursorOverlay';
+import { resolveBrowserControlState, type BrowserControlState } from '../../browserControlState';
+import type { Message } from '../../../hooks';
 import {
   DisconnectedOverlay,
   MobileBrowserControlFooter,
   TakeControlChip,
   WaitingForAssistanceChip,
-} from './BrowserFullscreenOverlays';
+} from '../BrowserFullscreenOverlays';
 import { TaskProgressSidebar } from './BrowserTaskProgressPanel';
-import { BrowserProxyLocationChip } from './BrowserProxyLocationChip';
-import { LiveViewFrame } from './BrowserLiveViewFrame';
+import { BrowserProxyLocationChip } from '../BrowserProxyLocationChip';
+import { LiveViewFrame } from '../BrowserLiveViewFrame';
 import type {
   BrowserSessionMetadata,
   OutputSchemaRef,
   PendingWriteLockApproval,
   StepProgress,
-} from './types';
+} from '../types';
 
 interface FullscreenProps {
   readOnly?: boolean;

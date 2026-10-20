@@ -7,6 +7,11 @@
  *
  * PER-USER UI: agents view + selected agent + published agent.panel slot →
  * a sandboxed panel to the right of the chat column (lg+ viewports only).
+ * RIGHT INSET: on md+ the column pads right by --rose-apps-inset (app bar +
+ * any open app drawer) and, while a drawer is open, left by
+ * --rose-apps-inset-left (the collapsed rail), so content re-centers in the
+ * remaining width with the drawer's 520ms ease (paused while resizing). The
+ * top-right nav links hide while a drawer is open (--rose-apps-nav-visibility).
  */
 
 import { useNavigate } from 'react-router-dom';
@@ -61,8 +66,14 @@ export function MainContent(props: MainContentProps) {
       className={cn(
         'flex-1 flex justify-center h-screen overflow-hidden',
         fullWidthView && 'md:pl-[var(--browse-sidebar-offset)]',
+        'md:pr-[var(--rose-apps-inset,0px)]',
+        !fullWidthView && 'md:pl-[var(--rose-apps-inset-left,0px)]',
       )}
-      style={{ height: '100dvh', ...browseOffsetStyle }}
+      style={{
+        height: '100dvh',
+        transition: 'var(--rose-apps-inset-transition, none)',
+        ...browseOffsetStyle,
+      }}
     >
       <div
         className={cn(
@@ -146,7 +157,12 @@ function TerminalViewContent(props: MainContentProps) {
 function DesktopNavLinks() {
   const navigate = useNavigate();
   return (
-    <div className="hidden md:flex items-center gap-2 absolute top-5 right-2 z-50">
+    <div
+      className="hidden md:flex items-center gap-2 absolute top-5 right-2 z-50"
+      style={{
+        visibility: 'var(--rose-apps-nav-visibility, visible)' as React.CSSProperties['visibility'],
+      }}
+    >
       <button
         onClick={() => navigate('/research')}
         className="px-3 py-1.5 bg-navi-white text-navi-black text-xs font-medium rounded-full border border-border hover:bg-navi-white/80 transition-colors shadow-sm"
