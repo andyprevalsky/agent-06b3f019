@@ -138,7 +138,7 @@ Andy: "sub agent for each". There is one lane per integration that syncs today, 
 - **L-NAV:** Home, boxes functions, right-bar moves, hover-expand.
 - **L-DEFAULTS:** speed and model defaults, popular goals.
 - **L-DARK:** dark mode app.
-- **L-PHONE:** phone app backend + Mac side (phase 1 done, ffd4d1333; phase 2 agent tap/type tools planned).
+- **L-PHONE:** removed (f40117d0f). The phone is built in the separate phone-harness devbox; here the UI thread shows a fake iPhone plus a "feature coming" screen.
 - **L-PERF:** mobile performance validation (P1–P6), run last over the merged branch.
 - **L-INT-* (I1–I8):** one lane per integration (running); **L-RCA-RETIRE:** remove the GitHub Actions auto-RCA (running).
 - **Auditor:** an independent judge that re-checks every row against its evidence before `/deploy`.
@@ -254,7 +254,7 @@ Per the 2026-10-20 goal ("make intelligent guesses; keep critical ones for revie
   - Prisma model `IntegrationSyncProgress` + migration `20261020180000_integration_sync_progress` (RLS policy); Zod `progressWriteSchema`.
   - Three new endpoints, plus additive `accounts`/`accountsByProvider` on `GET /api/integrations`.
   - Legacy, Gmail and Plaid deletes now also remove progress rows.
-- L-PHONE (phase 1, merged ffd4d1333):
+- ~~L-PHONE (phase 1, merged ffd4d1333)~~ **withdrawn: phone code removed in f40117d0f (no PhoneDevice migration, no phone Mac release item).** Original items, for history:
   - Prisma model `PhoneDevice` + migration `20261020190000_phone_devices` (RLS); Zod `registerPhoneSchema`, `agentPhoneLeaseSchema`, `phoneIdSchema`, `frameQuerySchema`, `streamDemandQuerySchema`.
   - The agent-visible 409 messages (`PHONE_CONTROL_TAKEN` …).
   - A Mac app release (`MAC-APP-RELEASE`), plus a real-Mac run of the phone-mirroring suites, which were only run under a Linux electron stub.
