@@ -14197,17 +14197,30 @@ normalize_current_pool_shape() {
             inventory="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 1
         fi
     fi
+    # An explicit admission already forbids normalization of a Machine. Read
+    # every pool row's admission proof in one process (one spawn per row cost
+    # ~10s at 447 rows), with the same key-presence test as before.
+    local -A explicit_ids=()
+    local explicit_id
+    while IFS= read -r explicit_id; do
+        [ -n "$explicit_id" ] && explicit_ids["$explicit_id"]=1
+    done < <(python3 - "$POOL_IDS_FILE" "$GIT_COMMON_DIR/cloudbench-pool-reuse" <<'PY' 2>/dev/null
+import json, sys
+from pathlib import Path
+proofs = Path(sys.argv[2])
+for raw in Path(sys.argv[1]).read_text().splitlines():
+    if not raw:
+        continue
+    try:
+        if 'explicit_idle' in json.load(open(proofs / (raw + '.json'))):
+            print(raw)
+    except Exception:
+        pass
+PY
+)
     while read -r id; do
         [ -n "$id" ] || continue
-        # An explicit admission already forbids normalization of this Machine.
-        # Check the same exclusion before parsing the full app inventory.
-        if python3 - "$GIT_COMMON_DIR/cloudbench-pool-reuse/$id.json" <<'PY' 2>/dev/null
-import json,sys
-assert 'explicit_idle' in json.load(open(sys.argv[1]))
-PY
-        then
-            continue
-        fi
+        [ -z "${explicit_ids[$id]+x}" ] || continue
         shape="$(printf '%s' "$inventory" | pool_machine_shape_from_json "$id")" || continue
         read -r state kind cpus memory <<< "$shape"
         [ "$state" = "stopped" ] || continue
