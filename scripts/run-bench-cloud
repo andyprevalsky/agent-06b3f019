@@ -3358,7 +3358,8 @@ mv '$REMOTE_WMH_NATIVE.incoming' '$REMOTE_WMH_NATIVE'
 rm -rf '$REMOTE_WMH_NATIVE.previous'
 # The donor is stopped and snapshotted right after this; flush every restored
 # byte first (2026-10-20 an unflushed blob tail was snapshotted truncated).
-sync -f '$REMOTE_WMH_NATIVE' && sync
+sync -f '$REMOTE_WMH_NATIVE'
+sync
 echo '::WMH-REFRESH-DONE::'
 ls -la '$REMOTE_WMH/models' '$REMOTE_WMH_NATIVE/models' 2>/dev/null || true
 df -h /data 2>/dev/null || true"

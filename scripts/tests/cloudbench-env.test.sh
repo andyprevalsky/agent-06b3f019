@@ -193,7 +193,9 @@ class WorldModelLaunch(unittest.TestCase):
         # for its snapshot (2026-10-20 an unflushed blob tail was snapshotted
         # truncated and every SIM guest failed the native artifact digest).
         swap = fragment.index("mv '$REMOTE_WMH_NATIVE.incoming' '$REMOTE_WMH_NATIVE'")
-        flush = fragment.index("sync -f '$REMOTE_WMH_NATIVE' && sync")
+        # Separate commands: under set -e a failed `sync -f` in `a && b` would not
+        # stop the refresh before the DONE marker (CodeRabbit, PR #1560).
+        flush = fragment.index("sync -f '$REMOTE_WMH_NATIVE'\nsync\n")
         self.assertLess(swap, flush)
         self.assertLess(flush, fragment.index("echo '::WMH-REFRESH-DONE::'"))
         # Fleets rehydrate the donor proof from Machine metadata (observed
@@ -308,7 +310,9 @@ class WorldModelLaunch(unittest.TestCase):
             "(root/'build.manifest.json').write_text('native-manifest')\n"
         )
         gib = 1 << 30
-        for case, freed, ok in (("room-after-drop", 30 * gib, True), ("no-room-even-after-drop", 10 * gib, False)):
+        for case, freed, ok, sync_fails in (("room-after-drop", 30 * gib, True, ""),
+                                            ("no-room-even-after-drop", 10 * gib, False, ""),
+                                            ("flush-fails", 30 * gib, False, "1")):
             with self.subTest(case=case), tempfile.TemporaryDirectory(prefix="wmh-native-replace-") as temporary:
                 scratch = Path(temporary)
                 repo = scratch / "repo"
@@ -328,7 +332,8 @@ class WorldModelLaunch(unittest.TestCase):
                 (native / "models/rose-archive/experiential.json").write_text("corrupt-previous")
                 calls = scratch / "calls.jsonl"
                 result = run(
-                    "gosu() { shift; \"$@\"; }; chown() { :; }; rsync() { return 1; }; sync() { :; };\n"
+                    "gosu() { shift; \"$@\"; }; chown() { :; }; rsync() { return 1; };\n"
+                    "sync() { [ -z \"$SYNC_FAILS\" ] || [ \"${1:-}\" != -f ]; };\n"
                     # The previous tree occupies exactly what dropping it frees.
                     "du() { printf '%s\\t%s\\n' \"$((DF_AVAIL_FREED - DF_AVAIL))\" \"${@: -1}\"; };\n" + DF_FAKE + fragment
                     + '\neval "$NATIVE_REFRESH_CMD"',
@@ -337,15 +342,16 @@ class WorldModelLaunch(unittest.TestCase):
                      "WMH_LEGACY_CACHE_NAME": "rose-r2-archive-legacy",
                      "WMH_LEGACY_MODEL_NAME": "rose-r2-archive-anthropic",
                      "REMOTE_UV_PYTHON": str(scratch / "uv-python"), "CALLS": str(calls),
-                     "DF_AVAIL": str(7 * gib), "DF_AVAIL_FREED": str(freed)},
+                     "DF_AVAIL": str(7 * gib), "DF_AVAIL_FREED": str(freed), "SYNC_FAILS": sync_fails},
                 )
                 self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
                 self.assertEqual("::WMH-REFRESH-DONE::" in result.stdout, ok)
                 pulls = [json.loads(line) for line in calls.read_text().splitlines() if '"pull"' in line]
-                self.assertEqual(len(pulls), 1 if ok else 0)
+                pulled = ok or bool(sync_fails)
+                self.assertEqual(len(pulls), 1 if pulled else 0)
                 self.assertEqual((native / "models/rose-archive/experiential.json").read_text(),
-                                 "fresh" if ok else "corrupt-previous")
-                self.assertEqual("dropping the previous native WMH tree" in result.stdout, ok)
+                                 "fresh" if pulled else "corrupt-previous")
+                self.assertEqual("dropping the previous native WMH tree" in result.stdout, pulled)
                 self.assertEqual((world / "models/rose-r2-archive-anthropic/model.json").read_text(), "donor-legacy")
 
     def test_native_refresh_restores_a_lost_legacy_model_beside_the_native_one(self):
