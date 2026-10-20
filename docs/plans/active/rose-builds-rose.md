@@ -215,7 +215,7 @@ Per the 2026-10-20 goal ("make intelligent guesses; keep critical ones for revie
 - Schemas: `rose-ui.json` and `tool.json` validation; any new Zod schemas.
 - Env and prod: `USERCONTENT_BASE_URL` (separate origin), `USER_UI_TOKEN_SECRET`, E2B template rebuild; C10 `SLACK_AUTO_RCA_OWNER_USER_ID` (required — with `AUTO_RCA_ENABLED=1` already on Render every error card 503s until set), `SLACK_AUTO_RCA_FEEDBACK_USER_IDS`, optional `SLACK_AUTO_RCA_REPO_URL`/`SLACK_AUTO_RCA_SIGNATURE_WINDOW_MINUTES`; migration `20261020170000_slack_auto_rca_incidents`.
 - Prompt text: C10 RCA goal/occurrence/feedback text `back-end/src/domains/slack-auto-rca/rcaGoalService.ts` (78 lines).
-- C10 follow-ups: retire `.github/workflows/auto-rca*.yml` (dead `agent-rca-feedback` trigger); update `.claude/commands/rca.md` automated-alert section (prompt approval); stuck agent if the backend crashes between agent-row create and workflow start.
+- C10 follow-ups: ~~retire `.github/workflows/auto-rca*.yml`~~ **done (cfa7e12d4: 5 workflows, prompt file, `scripts/auto-rca-tool`, alert-context route and their tests removed; 60/60 structural gates)**; update `.claude/commands/rca.md` automated-alert section (prompt approval); stuck agent if the backend crashes between agent-row create and workflow start.
 - Prompt text (C10): the auto-RCA root goal, occurrence and reviewer-feedback messages, and the RCA response schema in `back-end/src/domains/slack-auto-rca/rcaGoalService.ts`.
 - Env and prod (C10, Render): `SLACK_AUTO_RCA_OWNER_USER_ID` (Andy's user id) must be set at deploy, because `AUTO_RCA_ENABLED=1` is already set and error cards then answer 503 until it is; `SLACK_AUTO_RCA_FEEDBACK_USER_IDS` (Slack user ids allowed to steer an RCA); optional `SLACK_AUTO_RCA_REPO_URL` (default `https://github.com/Rose-Ai-Labs/rose`) and `SLACK_AUTO_RCA_SIGNATURE_WINDOW_MINUTES` (default 60). `GITHUB_DISPATCH_TOKEN` is no longer read for auto-RCA. Fly worker cards must post with the same Slack app's bot token (`SLACK_BOT_TOKEN` + `SLACK_ERROR_CHANNEL_ID`); new tables ship in migration `20261020170000_slack_auto_rca_incidents`.
 - Projects (L-SYNC): Zod schemas in `domains/projects/types.ts`, `project_id` on agent create and code-session create; ws-server project mode and the startup note at the top of the CLI prompt (prompt text); code-agent transcript `project_startup` line; migration `20261020130000_projects`. No new env vars (reuses `CLAUDE_CREDENTIAL_DECRYPTION_KEY`, `GITHUB_TOKEN`).
@@ -278,3 +278,21 @@ Per the 2026-10-20 goal ("make intelligent guesses; keep critical ones for revie
   - Canonical seed re-publication under the new schema cache key (PG15, normal procedure).
   - Mac app release.
   - No Zod or prompt changes.
+- L-RCA-RETIRE (merged cfa7e12d4):
+  - CI deletion: `auto-rca*.yml` ×5 and `.github/auto-rca-prompt.txt`.
+  - Prompt files:
+    - `.claude/commands/rca.md`: the "Automated production-alert mode" section is rewritten for the Slack → Rose RCA agent path.
+    - `.claude/commands/deploy.md`: the auto-RCA gate is dropped from the registry text.
+  - Deleted tests: `agent-alert-context.blackbox.ts`, `auto-rca-lifecycle.blackbox.test.sh`, `auto-rca-workflow.test.sh`.
+  - `scripts/test.sh` loses `--auto-rca-changed-from`.
+
+## Operational follow-ups at deploy (for Andy)
+
+- Redeploy Render and Fly right after the merge. Prod `main` still dispatches `agent-failure` to GitHub; between the merge and both redeploys, failures get no card and no RCA.
+- Close or adopt the 77 open draft `auto-rca/*` PRs (#1232–#1561) and delete their branches.
+- Remove the GitHub secret `RCA_CLAUDE_CODE_OAUTH_TOKEN` (and revoke the token), and the env var `GITHUB_DISPATCH_REPO` on Render and Fly. Keep `GITHUB_DISPATCH_TOKEN`.
+- Set `SLACK_AUTO_RCA_OWNER_USER_ID` on Render (C10; error cards 503 until it is set).
+- E2B template rebuild (L-DISPLAY, L-UIKIT and W5b template changes).
+- Mac app release (L-PHONE, L-LOCAL, I1, I2, I6, I8) plus a real-Mac run of their suites, which have only run on the Linux electron-stub harness so far.
+- Canonical seed re-publication for the new schema cache key (PG15).
+- Set `USERCONTENT_BASE_URL` to a separate origin before any user UI goes live.
