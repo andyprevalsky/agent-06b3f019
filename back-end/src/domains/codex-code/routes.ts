@@ -3,8 +3,10 @@ import { type AuthRequest, authenticate } from '../../providers/auth';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import type { FilePointer } from '../../providers/storage';
-import { createSessionSchema, closeSessionSchema } from './types';
+import { createSessionSchema, closeSessionSchema, codeTaskUsageLimitSchema } from './types';
 import * as service from './service';
+import { codeSessionHttpError, keepAliveCodeTask } from '../../providers/codeSessions/spawn';
+import { markCodeTaskUsageLimited, parseResetsAt } from '../../providers/codeSessions/usageLimit';
 import { GitHubAccessDeniedError, MissingUserIdError } from './service';
 import {
   LocalTargetUnavailableError,
@@ -17,6 +19,51 @@ import {
 
 const log = createLogger('CodexCodeRoutes');
 const router = Router();
+
+const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+
+/**
+ * POST /api/codex-code-session/:taskId/keepalive - the attached activity extends
+ * the sandbox idle window and the code-session lease (internal only).
+ */
+router.post(
+  '/:taskId/keepalive',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    if (req.isInternal !== true) {
+      res.status(403).json({ error: 'Internal callers only' });
+      return;
+    }
+    if (!UUID.test(req.params.taskId)) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
+    res.json(await keepAliveCodeTask(req.params.taskId));
+  })
+);
+
+/**
+ * POST /api/codex-code-session/:taskId/usage-limit - Codex stopped on a usage
+ * limit (structured codex_error_info): rate-limit its credential (C15).
+ */
+router.post(
+  '/:taskId/usage-limit',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    if (req.isInternal !== true) {
+      res.status(403).json({ error: 'Internal callers only' });
+      return;
+    }
+    if (!UUID.test(req.params.taskId)) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
+    const { resets_at } = codeTaskUsageLimitSchema.parse(req.body ?? {});
+    const resetsAt = parseResetsAt(resets_at);
+    const result = await markCodeTaskUsageLimited(req.params.taskId, 'codex', resetsAt);
+    res.json({ ...result, resets_at: resetsAt?.toISOString() ?? null });
+  })
+);
 
 router.post(
   '/create',
@@ -33,10 +80,14 @@ router.post(
         memory_enabled,
         harness_mode,
         rose_api_base_url,
+        code_session_id,
+        lease_owner,
+        base_branch,
         target,
       } = createSessionSchema.parse(req.body);
 
-      // C14: a local session runs on the agent tree's Mac with the user's own login.
+      // C14: a local session runs on the agent tree's Mac with the user's own
+      // login (no persistent code session: the work stays in the granted folder).
       const result =
         target === 'local'
           ? await createLocalCodeSessionResponse({
@@ -55,6 +106,9 @@ router.post(
               memory_enabled,
               harness_mode,
               rose_api_base_url,
+              code_session_id,
+              lease_owner,
+              base_branch,
             });
 
       res.json({ success: true, ...result });
@@ -75,6 +129,11 @@ router.post(
         res.status(403).json({ error: error.detail, code: 'GITHUB_ACCESS_DENIED' });
         return;
       }
+      const sessionError = codeSessionHttpError(error);
+      if (sessionError !== null) {
+        res.status(sessionError.status).json(sessionError.body);
+        return;
+      }
       log.error('Failed to create Codex Code session', {
         error: error instanceof Error ? error.message : String(error),
       });
@@ -90,8 +149,16 @@ router.post(
   authenticate,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
-      const { task_id, user_id, agent_id, additional_paths } = closeSessionSchema.parse(req.body);
-      const result = await service.closeSession({ task_id, user_id, agent_id, additional_paths });
+      const { task_id, user_id, agent_id, additional_paths, reason } = closeSessionSchema.parse(
+        req.body
+      );
+      const result = await service.closeSession({
+        task_id,
+        user_id,
+        agent_id,
+        additional_paths,
+        reason,
+      });
       res.json({ success: true, ...result });
     } catch (error) {
       log.error('Failed to close Codex Code session', {

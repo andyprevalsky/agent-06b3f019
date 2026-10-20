@@ -19,7 +19,10 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 from domains.spawn_claude_code_agent.config import (
     CODE_ACTIVITY_HEARTBEAT_TIMEOUT_S,
+    CODE_AGENT_ACTIVITY_NO_DEADLINE,
     CODE_AGENT_DRAIN_YIELD_STATUS,
+    CODE_AGENT_PAUSED_STATUS,
+    CODE_AGENT_USAGE_LIMIT_STATUS,
     CODE_SESSION_HEARTBEAT_KEY,
     CODE_TARGET_LOCAL,
     LOCAL_TARGET_UNAVAILABLE_CODE,
@@ -220,6 +223,11 @@ def _local_target_unavailable(error: BaseException) -> Optional[ApplicationError
     return None
 
 
+def _failed_code_agent(target_info: Optional[Dict[str, Any]], message: str) -> Dict[str, Any]:
+    """``metadata.code_agent`` for a run that failed before or outside the activity result."""
+    return {**code_agent_metadata(target_info), "state": "failed", "failure_message": message}
+
+
 def _resumed_target(code_session: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Target recorded on a parked/drained session, so a reattach keeps its Mac."""
     if not code_session or code_session.get("target") != CODE_TARGET_LOCAL:
@@ -284,6 +292,14 @@ class SpawnClaudeCodeAgentManager(ToolManager):
         output_schema = tool_call.get("output_schema")
         requested_attachments = tool_call.get("attachments")
         github_repo_url = tool_call.get("github_repo_link")
+        # Resume a specific persistent code session; omitted, the backend resumes
+        # this agent's latest session for the repo (or starts its own branch).
+        requested_code_session_id = tool_call.get("code_session_id")
+        code_session_request = (
+            {"code_session_id": requested_code_session_id}
+            if isinstance(requested_code_session_id, str) and requested_code_session_id
+            else None
+        )
         requested_target = normalize_code_target(tool_call.get("target"))
         user_id = workflow_instance.user_id
         agent_id = workflow_instance.agent_id
@@ -330,14 +346,15 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     agent_id=agent_id,
                     error=extract_error_message(lookup_error),
                 )
+                lookup_message = extract_error_message(lookup_error)
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
                     title="Code session failed",
-                    message=extract_error_message(lookup_error),
+                    message=lookup_message,
                     status=MessageStatus.ERROR,
                     metadata={
                         "toolName": "spawn_claude_code_agent",
-                        "code_agent": {"target": CODE_TARGET_LOCAL},
+                        "code_agent": _failed_code_agent({"target": CODE_TARGET_LOCAL}, lookup_message),
                     },
                 )
                 return
@@ -356,7 +373,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     metadata={
                         "toolName": "spawn_claude_code_agent",
                         "error_code": LOCAL_TARGET_UNAVAILABLE_CODE,
-                        "code_agent": code_agent_metadata(target_info),
+                        "code_agent": _failed_code_agent(target_info, target_info.get("error") or ""),
                     },
                 )
                 return
@@ -374,7 +391,16 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 status=MessageStatus.IN_PROGRESS,
                 metadata={
                     "toolName": "spawn_claude_code_agent",
-                    "code_agent": code_agent_metadata(target_info),
+                    "code_agent": {
+                        "task_id": None,
+                        "provider": None,
+                        "branch": None,
+                        "state": "spinning_up",
+                        # workflow.now() keeps the timestamp deterministic on replay.
+                        "started_at": workflow.now().isoformat(),
+                        # target / device_name / folder (cloud unless a Mac was resolved).
+                        **code_agent_metadata(target_info),
+                    },
                 },
             )
 
@@ -451,6 +477,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                             gpt_token_pool_id,
                             fast_mode_cache_enabled,
                             code_session,
+                            code_session_request,
                             # A cloud run schedules exactly the pre-C14 arguments.
                             *(
                                 [CODE_TARGET_LOCAL, target_info.get("device_id"), target_info.get("device_name")]
@@ -458,7 +485,9 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                                 else []
                             ),
                         ],
-                        start_to_close_timeout=timedelta(minutes=50),
+                        # No runtime limit (C11): Temporal needs a value, so this is
+                        # effectively infinite; liveness is heartbeat_timeout only.
+                        start_to_close_timeout=CODE_AGENT_ACTIVITY_NO_DEADLINE,
                         heartbeat_timeout=timedelta(seconds=CODE_ACTIVITY_HEARTBEAT_TIMEOUT_S),
                         # WAIT so pause cancel receives the activity's cancelled
                         # result (includes task_id). TRY_CANCEL races the workflow
@@ -466,14 +495,13 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                         # leaving ClaudeCodeChip stuck on "Spinning up..." on the
                         # durable hub FE (agent 094f1085 / task 1d92a4db).
                         cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
-                        # Capacity flakes (redis pool / 503 no healthy upstream) often
-                        # clear within a minute. Prefer in-activity Temporal retries
-                        # over soft-failing the tool early — soft-fail lets the DAG
-                        # advance into attempt_completion with incomplete CC work
-                        # (cuda-kernel k=3 r10 agent1: soft-fail @~30m → verifier
-                        # 50% → redo CC → 4200s task timeout). Keep soft-fail as the
-                        # post-exhaustion path for no_tool_failures.
-                        retry_policy=RetryPolicy(maximum_attempts=5),
+                        # Unlimited attempts: a worker crash or deploy never ends a code
+                        # session (each retry reattaches/resumes it). Errors the
+                        # activity raises itself become non-retryable after
+                        # CODE_AGENT_ERROR_RETRY_LIMIT attempts, so capacity flakes
+                        # still get in-activity retries before the soft-fail path
+                        # (cuda-kernel k=3 r10 agent1) and nothing loops forever.
+                        retry_policy=RetryPolicy(maximum_attempts=0),
                     )
 
                     # Wait for activity completion or pause signal
@@ -642,24 +670,44 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             code_provider = result.get("code_provider") or code_provider
             success = result.get("success") is True
             output_files = result.get("output_files", [])
+            paused = result.get("status") == CODE_AGENT_PAUSED_STATUS
+            completed_metadata: Dict[str, Any] = {
+                "toolName": "spawn_claude_code_agent",
+                "task_id": result.get("task_id"),
+                "action_type": "task_complete",
+                "success": success,
+                "structured_response": result.get("structured_response"),
+                "code_provider": code_provider,
+                "completed_turns": result.get("completed_turns"),
+            }
+            if isinstance(result.get("code_session"), dict):
+                completed_metadata["code_session"] = result["code_session"]
+            completed_metadata["code_agent"] = {
+                **code_agent_metadata(target_info),
+                **(result.get("code_agent") if isinstance(result.get("code_agent"), dict) else {}),
+            }
+            if paused:
+                completed_metadata["session_paused"] = True
+            usage_limited = result.get("status") == CODE_AGENT_USAGE_LIMIT_STATUS
+            if usage_limited:
+                # C15: structured, retryable error; the message has the exact retry.
+                completed_metadata["failure_kind"] = "usage_limit"
+                completed_metadata["retryable"] = True
+                completed_metadata["usage_limit"] = result.get("usage_limit")
+                completed_metadata["retry"] = result.get("retry")
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title="✓ Task Completed" if success else "Task Incomplete",
+                # An idle session is paused and resumable, never a failure (C11).
+                title=(
+                    "Code agent hit a usage limit"
+                    if usage_limited
+                    else "Code session paused"
+                    if paused
+                    else ("✓ Task Completed" if success else "Task Incomplete")
+                ),
                 message=result.get("message", ""),
                 status=MessageStatus.FINISHED,
-                metadata={
-                    "toolName": "spawn_claude_code_agent",
-                    "task_id": result.get("task_id"),
-                    "action_type": "task_complete",
-                    "success": success,
-                    "structured_response": result.get("structured_response"),
-                    "code_provider": code_provider,
-                    "completed_turns": result.get("completed_turns"),
-                    "code_agent": {
-                        **code_agent_metadata(target_info),
-                        **(result.get("code_agent") if isinstance(result.get("code_agent"), dict) else {}),
-                    },
-                },
+                metadata=completed_metadata,
                 data={"usage": tool_usage},
             )
 
@@ -697,8 +745,9 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                         "toolName": "spawn_claude_code_agent",
                         "code_provider": code_provider,
                         "error_code": LOCAL_TARGET_UNAVAILABLE_CODE,
-                        "code_agent": code_agent_metadata(
-                            {**target_info, "device_name": device_name or target_info.get("device_name")}
+                        "code_agent": _failed_code_agent(
+                            {**target_info, "device_name": device_name or target_info.get("device_name")},
+                            local_unavailable.message,
                         ),
                     },
                 )
@@ -737,15 +786,16 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 error_type=type(e).__name__,
             )
 
+            failure_message = extract_error_message(e)
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="Code session failed",
-                message=extract_error_message(e),
+                message=failure_message,
                 status=MessageStatus.ERROR,
                 metadata={
                     "toolName": "spawn_claude_code_agent",
                     "code_provider": code_provider,
-                    "code_agent": code_agent_metadata(target_info),
+                    "code_agent": _failed_code_agent(target_info, failure_message),
                 },
             )
 

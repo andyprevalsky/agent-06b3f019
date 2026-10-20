@@ -14,6 +14,7 @@ Observable surface:
 import asyncio
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -72,6 +73,11 @@ class _Workflow:
 
     async def wait_condition(self, predicate):
         return None
+
+    @staticmethod
+    def now():
+        # The handler stamps the spinning-up chip with workflow.now() (deterministic).
+        return datetime(2026, 10, 20, tzinfo=timezone.utc)
 
     async def execute_activity(self, fn, args=None, **kwargs):
         self.executed.append((fn.__name__, list(args or []), kwargs))
@@ -159,6 +165,11 @@ def test_spawn_agent_schemas_declare_target_default_cloud():
         assert model.model_validate({"tool": "spawn_agent", "type": "code", "goal": "g", "output_schema": SCHEMA}).target == "cloud"
 
 
+def _target_keys(code_agent):
+    """The keys this lane owns in ``metadata.code_agent`` (others own branch/state/summary)."""
+    return {k: code_agent[k] for k in ("target", "device_name", "folder") if k in code_agent}
+
+
 async def test_spawn_agent_forwards_target_to_code_manager():
     """spawn_agent(type='code', target='local') hands target to the code-agent manager."""
     from domains.spawn_agent import handler as spawn_handler
@@ -197,19 +208,21 @@ async def test_cloud_default_is_unchanged():
     assert len(fake.started) == 1
     name, args, _ = fake.started[0]
     assert name == "spawn_claude_code_activity"
-    assert len(args) == 16 and args[15] is None, args
+    # 17 = the pre-C14 arguments (code_session_request last, None without code_session_id).
+    assert len(args) == 17 and args[15] is None and args[16] is None, args
     starting = events[0]
     assert starting.title == "Starting Claude Code sandbox"
-    assert starting.metadata["code_agent"] == {"target": "cloud"}
+    assert _target_keys(starting.metadata["code_agent"]) == {"target": "cloud"}
+    assert starting.metadata["code_agent"]["state"] == "spinning_up"
     finished = [e for e in events if getattr(e, "status", None) == MessageStatus.FINISHED][0]
-    assert finished.metadata["code_agent"] == {"target": "cloud"}
+    assert _target_keys(finished.metadata["code_agent"]) == {"target": "cloud"}
 
 
 async def test_explicit_cloud_target_matches_default():
     fake = _Workflow(_Handle(result=_ok_result()))
     await _run({"goal": "fix", "output_schema": SCHEMA, "target": "cloud"}, fake)
     assert [name for name, _, _ in fake.executed] == ["resolve_code_agent_provider_activity"]
-    assert len(fake.started[0][1]) == 16
+    assert len(fake.started[0][1]) == 17
 
 
 async def test_local_routes_to_the_mac():
@@ -226,11 +239,11 @@ async def test_local_routes_to_the_mac():
     assert target_kwargs["retry_policy"].maximum_attempts == 2
     name, args, _ = fake.started[0]
     assert name == "spawn_claude_code_activity"
-    assert args[16:] == ["local", "dev-1", DEVICE], args
+    assert args[17:] == ["local", "dev-1", DEVICE], args
     assert events[0].title == f"Starting code agent on {DEVICE}"
-    assert events[0].metadata["code_agent"] == {"target": "local", "device_name": DEVICE}
+    assert _target_keys(events[0].metadata["code_agent"]) == {"target": "local", "device_name": DEVICE}
     finished = [e for e in events if getattr(e, "status", None) == MessageStatus.FINISHED][0]
-    assert finished.metadata["code_agent"] == folder_meta
+    assert _target_keys(finished.metadata["code_agent"]) == folder_meta
 
 
 async def test_disconnected_mac_fails_immediately_with_exact_error():
@@ -246,7 +259,7 @@ async def test_disconnected_mac_fails_immediately_with_exact_error():
     event = events[0]
     assert event.status == MessageStatus.ERROR
     assert event.message == DISCONNECTED
-    assert event.metadata["code_agent"] == {"target": "local", "device_name": DEVICE}
+    assert _target_keys(event.metadata["code_agent"]) == {"target": "local", "device_name": DEVICE}
     assert event.metadata["error_code"] == "LOCAL_TARGET_UNAVAILABLE"
 
 
@@ -260,7 +273,7 @@ async def test_web_started_agent_asking_local_gets_exact_error():
     assert len(events) == 1
     assert events[0].status == MessageStatus.ERROR
     assert events[0].message == WEB_ORIGIN
-    assert events[0].metadata["code_agent"] == {"target": "local"}
+    assert _target_keys(events[0].metadata["code_agent"]) == {"target": "local"}
 
 
 async def test_mac_lost_between_check_and_create_maps_to_exact_error():
@@ -289,7 +302,7 @@ async def test_mac_lost_between_check_and_create_maps_to_exact_error():
     terminal = events[-1]
     assert terminal.status == MessageStatus.ERROR
     assert terminal.message == DISCONNECTED
-    assert terminal.metadata["code_agent"] == {"target": "local", "device_name": DEVICE}
+    assert _target_keys(terminal.metadata["code_agent"]) == {"target": "local", "device_name": DEVICE}
     assert len(fake.started) == 1
 
 
@@ -312,7 +325,7 @@ async def test_reattach_keeps_the_mac_without_a_new_lookup():
     assert [name for name, _, _ in fake.executed] == []
     args = fake.started[0][1]
     assert args[15] == session
-    assert args[16:] == ["local", "dev-1", DEVICE]
+    assert args[17:] == ["local", "dev-1", DEVICE]
 
 
 # ── target activity + backend mapping ───────────────────────────────────
@@ -438,8 +451,8 @@ async def test_activity_records_local_target_on_session_and_messages():
     assert result["status"] == "completed"
     assert seen_create["target"] == "local" and seen_create["local_device_id"] == "dev-1"
     expected_meta = {"target": "local", "device_name": DEVICE, "folder": "~/Developer/rose"}
-    assert saved and all(s["code_agent"] == expected_meta for s in saved), saved
-    assert result["code_agent"] == expected_meta
+    assert saved and all(_target_keys(s["code_agent"]) == expected_meta for s in saved), saved
+    assert _target_keys(result["code_agent"]) == expected_meta
 
 
 async def test_save_message_merges_code_agent_metadata():

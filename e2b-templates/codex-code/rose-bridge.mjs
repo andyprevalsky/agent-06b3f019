@@ -84,9 +84,14 @@ async function agentsGet(agentId, json) {
   else console.log(JSON.stringify(data));
 }
 
+// Polls until the agent is terminal. No default deadline: Rose agents have no
+// runtime limit (code-agent C11). --timeout-seconds N bounds it explicitly.
 async function agentsPoll(agentId, args) {
-  const timeoutSeconds = Number(args["timeout-seconds"] || 900);
-  const deadline = Date.now() + timeoutSeconds * 1000;
+  const timeoutSeconds = args["timeout-seconds"]
+    ? Number(args["timeout-seconds"])
+    : null;
+  const deadline =
+    timeoutSeconds !== null ? Date.now() + timeoutSeconds * 1000 : Infinity;
   let last = null;
   while (Date.now() < deadline) {
     last = await roseRequest(`/api/agents/${agentId}`);

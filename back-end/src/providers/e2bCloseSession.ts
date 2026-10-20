@@ -1,5 +1,6 @@
 import { unregisterWorkspaceExecutor } from './projects/workspaceExecutor';
 import { Sandbox } from 'e2b';
+import { Prisma } from '@prisma/client';
 import mime from 'mime-types';
 import { CODE_AGENT_OUTPUT_DIR } from './codeAgentPrompt';
 import { randomUUID } from './crypto';
@@ -7,6 +8,10 @@ import { prisma } from './database';
 import { createLogger } from './logger';
 import { type FilePointer, uploadToStorage } from './storage';
 import { closeLocalClaudeCodeSession, isLocalClaudeCodeSandboxId } from './claudeCodeLocalSession';
+import { checkpointCodeSession, type RepoFacts } from './codeSessions/lifecycle';
+import { e2bSandboxFs, localSandboxFs } from './codeSessions/sandboxFs';
+import { markPaused, type CodeSessionRow } from './codeSessions/store';
+import { resolveMergeFacts, type CodeSessionMergeFacts } from './codeSessions/mergeFacts';
 import { isLocalDeviceSandboxId } from './localDevices/hub';
 import { closeLocalDeviceCodeSession } from './localDevices/session';
 
@@ -69,12 +74,83 @@ export function parseClaudeCodeUsage(jsonlContent: string): ClaudeCodeUsage {
   return usage;
 }
 
+/** Facts the code-agent tool result reports about the persistent session. */
+export interface CodeSessionCloseFacts {
+  code_session_id: string;
+  state: string;
+  checkpoint_seq: number | null;
+  cli_session_id: string | null;
+  /** Branch this session works on and where it merges (plan §1b). */
+  branch: string | null;
+  merge_target: string | null;
+  repo: RepoFacts | null;
+  /** merged=true only when GitHub confirms the PR merged and the target contains head. */
+  merge: CodeSessionMergeFacts;
+}
+
+async function closeFacts(
+  row: CodeSessionRow,
+  checkpoint: { seq: number; cliSessionId: string | null; repo: RepoFacts | null } | null,
+  state: string
+): Promise<CodeSessionCloseFacts> {
+  const stored = (row.lastRepoFacts ?? null) as
+    (RepoFacts & { merge?: CodeSessionMergeFacts }) | null;
+  const repo = checkpoint?.repo ?? stored ?? null;
+  const merge = await resolveMergeFacts({
+    repoUrl: row.repoUrl,
+    repo,
+    mergeTarget: row.mergeTarget,
+    previous: stored?.merge ?? null,
+  });
+  if (merge.source === 'github' && repo !== null) {
+    await prisma.codeSession
+      .update({
+        where: { id: row.id },
+        data: { lastRepoFacts: { ...repo, merge } as unknown as Prisma.InputJsonValue },
+      })
+      .catch(() => undefined);
+  }
+  return {
+    code_session_id: row.id,
+    state,
+    checkpoint_seq:
+      checkpoint?.seq ?? (row.latestCheckpointSeq > 0 ? row.latestCheckpointSeq : null),
+    cli_session_id: checkpoint?.cliSessionId ?? row.cliSessionId,
+    branch: row.branch ?? repo?.branch ?? null,
+    merge_target: merge.merge_target ?? row.mergeTarget,
+    repo,
+    merge,
+  };
+}
+
+/**
+ * Whether this task still owns its code session's sandbox. A later spawn may
+ * already have resumed the same sandbox; closing the older task must not
+ * checkpoint over it or pause it underneath the newer one.
+ */
+async function ownsCodeSessionSandbox(
+  session: { id: string; sandboxId: string; createdAt: Date; codeSessionId: string | null },
+  codeSession: CodeSessionRow
+): Promise<boolean> {
+  if (codeSession.sandboxId !== session.sandboxId) return false;
+  const newer = await prisma.claudeCodeSession.findFirst({
+    where: { codeSessionId: codeSession.id, createdAt: { gt: session.createdAt } },
+    select: { id: true },
+  });
+  return newer === null;
+}
+
 export async function closeClaudeCodeSession(
   taskId: string,
   userId?: string,
   agentId?: string,
-  additionalPaths?: string[]
-): Promise<{ outputFiles: FilePointer[]; usage?: ClaudeCodeUsage }> {
+  additionalPaths?: string[],
+  options?: { reason?: string }
+): Promise<{
+  outputFiles: FilePointer[];
+  usage?: ClaudeCodeUsage;
+  codeSession?: CodeSessionCloseFacts;
+}> {
   log.info(`Closing Claude Code session ${taskId}`);
 
   const session = await prisma.claudeCodeSession.findUnique({
@@ -85,9 +161,45 @@ export async function closeClaudeCodeSession(
     throw new Error(`Claude Code session not found: ${taskId}`);
   }
 
+  const reason = options?.reason ?? 'close';
+  const codeSession =
+    session.codeSessionId !== null
+      ? await prisma.codeSession.findUnique({ where: { id: session.codeSessionId } })
+      : null;
+  const ownsSandbox =
+    codeSession !== null &&
+    codeSession.state !== 'RETIRED' &&
+    (await ownsCodeSessionSandbox(session, codeSession));
+
+  if (codeSession !== null && session.status === 'CLOSED') {
+    // Retried close: the session was already checkpointed and paused.
+    return { outputFiles: [], codeSession: await closeFacts(codeSession, null, codeSession.state) };
+  }
+
   if (isLocalClaudeCodeSandboxId(session.sandboxId)) {
+    let checkpoint = null;
+    if (codeSession !== null && ownsSandbox && codeSession.homeDir !== null) {
+      checkpoint = await checkpointCodeSession({
+        session: codeSession,
+        fs: localSandboxFs(codeSession.homeDir),
+        reason,
+        agentId: session.agentId,
+      });
+    }
     const local = await closeLocalClaudeCodeSession(taskId, userId, additionalPaths);
-    return { outputFiles: local.outputFiles };
+    if (codeSession !== null && ownsSandbox) await markPaused(codeSession.id);
+    return {
+      outputFiles: local.outputFiles,
+      ...(codeSession !== null
+        ? {
+            codeSession: await closeFacts(
+              codeSession,
+              checkpoint,
+              ownsSandbox ? 'PAUSED' : codeSession.state
+            ),
+          }
+        : {}),
+    };
   }
 
   if (isLocalDeviceSandboxId(session.sandboxId)) {
@@ -97,6 +209,7 @@ export async function closeClaudeCodeSession(
 
   const outputFiles: FilePointer[] = [];
   let usage: ClaudeCodeUsage | undefined;
+  let codeSessionFacts: CodeSessionCloseFacts | undefined;
 
   try {
     // Connect to sandbox
@@ -267,12 +380,31 @@ export async function closeClaudeCodeSession(
       }
     }
 
-    // Kill the sandbox
+    // The project workspace executor belongs to this task either way.
     unregisterWorkspaceExecutor(taskId);
-    await sandbox.kill();
-    log.info(`Killed sandbox: ${session.sandboxId}`);
+    if (codeSession !== null && ownsSandbox) {
+      // Persistent session: checkpoint, then pause (fs + memory survive).
+      const checkpoint = await checkpointCodeSession({
+        session: codeSession,
+        fs: e2bSandboxFs(sandbox),
+        reason,
+        agentId: session.agentId,
+      });
+      await sandbox.pause();
+      await markPaused(codeSession.id);
+      codeSessionFacts = await closeFacts(codeSession, checkpoint, 'PAUSED');
+      log.info(`Paused sandbox: ${session.sandboxId} (code session ${codeSession.id})`);
+    } else if (codeSession !== null) {
+      // A newer spawn resumed this sandbox; leave it running for that spawn.
+      codeSessionFacts = await closeFacts(codeSession, null, codeSession.state);
+    } else {
+      await sandbox.kill();
+      log.info(`Killed sandbox: ${session.sandboxId}`);
+    }
   } catch (error) {
-    log.error('Failed to kill sandbox', {
+    if (codeSession !== null && ownsSandbox)
+      await markPaused(codeSession.id).catch(() => undefined);
+    log.error('Failed to pause/kill sandbox', {
       error: error instanceof Error ? error.message : String(error),
     });
     // Continue to update DB even if kill fails
@@ -289,7 +421,14 @@ export async function closeClaudeCodeSession(
 
   log.info(`Session closed: ${taskId}`);
 
-  return { outputFiles, usage };
+  if (codeSessionFacts === undefined && codeSession !== null) {
+    codeSessionFacts = await closeFacts(codeSession, null, codeSession.state);
+  }
+  return {
+    outputFiles,
+    usage,
+    ...(codeSessionFacts !== undefined ? { codeSession: codeSessionFacts } : {}),
+  };
 }
 
 /**
@@ -305,8 +444,10 @@ export async function getClaudeCodeSession(taskId: string) {
  * Get session by sandbox ID.
  */
 export async function getClaudeCodeSessionBySandboxId(sandboxId: string) {
-  return await prisma.claudeCodeSession.findUnique({
+  // A persistent code session reuses one sandbox across spawns: newest wins.
+  return await prisma.claudeCodeSession.findFirst({
     where: { sandboxId },
+    orderBy: { createdAt: 'desc' },
   });
 }
 
