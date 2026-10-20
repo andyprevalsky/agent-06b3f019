@@ -3,9 +3,7 @@
  *
  * OPEN APP:
  *   [CLOSED] --click Browser icon | openAgentBrowser(agent, task)--> [BROWSER]
- *   [CLOSED] --click Voice icon------------------------------------> [VOICE]
- *   [BROWSER|VOICE] --click the other icon--> [VOICE|BROWSER]
- *   [BROWSER|VOICE] --click its own icon | close button | Escape---> [CLOSED]
+ *   [BROWSER] --click its icon | close button | Escape--> [CLOSED]
  *
  * BROWSER TAB (only meaningful while [BROWSER]):
  *   [ROOT] --click agent tab | openAgentBrowser--> [AGENT(id)]
