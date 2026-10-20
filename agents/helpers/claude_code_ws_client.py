@@ -280,6 +280,12 @@ class ClaudeCodeWsClient:
                 if self.on_stdin_error:
                     await self.on_stdin_error(error_msg)
 
+            elif msg_type == "code_agent_delta":
+                # Live token stream for UI viewers; the complete assistant
+                # message follows as a code_agent_event, so the monitor
+                # (which never reads partial output) ignores it.
+                pass
+
             else:
                 logger.warning("[ClaudeCodeWs] Unknown message type", msg_type=msg_type)
 
