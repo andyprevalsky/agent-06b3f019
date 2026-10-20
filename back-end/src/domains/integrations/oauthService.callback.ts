@@ -12,7 +12,7 @@ import {
   type TokenExchangeResult,
 } from './types';
 import { createLogger } from '../../providers/logger';
-import { fetchGmailEmails, parseGmailOAuthEmails } from '../../services/integrations/gmailParser';
+import { syncGmailIntegrationNow } from '../../services/integrations/gmailSync';
 import { startGoogleWorkspaceSync } from '../../services/integrations/googleWorkspaceSync';
 import { EMAIL_PROVIDER_CONFIG } from './config';
 import { storedOAuthGrant } from './googleOAuthCredential';
@@ -21,45 +21,6 @@ import { exchangeProviderCode, buildRedirectUri, sendOAuthResult } from './oauth
 import { resolveSourceConnectGate } from './sourceConnectGate';
 
 const log = createLogger('Integrations');
-
-/** Process the background Gmail email sync after OAuth. */
-async function syncGmailEmails(
-  accessToken: string,
-  userEmail: string,
-  userId: string,
-  integrationId: string,
-  credentialId: string
-): Promise<void> {
-  const jobId = `gmail-oauth-${userId}-${Date.now()}`;
-  log.info('Starting Gmail email sync', { jobId, userId });
-
-  const emails = await fetchGmailEmails(accessToken, userEmail);
-  const result = await parseGmailOAuthEmails(userId, userEmail, emails, jobId, credentialId);
-
-  const existingIntegration = await repo.findIntegrationById(integrationId);
-  const existingConfig = (existingIntegration?.config as Record<string, unknown> | null) ?? {};
-  const existingContacts =
-    typeof existingConfig.contacts === 'number' ? existingConfig.contacts : 0;
-  const existingMessages =
-    typeof existingConfig.messages === 'number' ? existingConfig.messages : 0;
-
-  await repo.updateIntegration(integrationId, {
-    config: {
-      ...existingConfig,
-      contacts: existingContacts + result.contacts,
-      messages: existingMessages + result.messages,
-      lastSyncedAt: new Date().toISOString(),
-    },
-  });
-
-  log.info('Gmail sync complete', {
-    jobId,
-    newContacts: result.contacts,
-    newMessages: result.messages,
-    totalContacts: existingContacts + result.contacts,
-    totalMessages: existingMessages + result.messages,
-  });
-}
 
 function maybeSyncGmailAfterOAuth(params: {
   providerKey: EmailProviderSlug;
@@ -78,17 +39,13 @@ function maybeSyncGmailAfterOAuth(params: {
   ) {
     return;
   }
-  void syncGmailEmails(
-    params.accessToken,
-    params.userEmail,
-    params.userId,
-    params.integrationId,
-    params.credentialId
-  ).catch(() => {
-    log.error('Error syncing Gmail emails', { integrationId: params.integrationId });
-    void repo.updateIntegrationStatus(params.integrationId, IntegrationStatus.SYNC_FAILED, {
-      lastFailedSyncAt: new Date(),
-      failureReason: 'Gmail sync failed',
+  // The cron job's own claimed, per-address sync: progress per address, batches
+  // saved as they arrive, a resume cursor and the history cursor. A row the
+  // cron already claimed is left to that run.
+  void syncGmailIntegrationNow(params.integrationId).catch((error: unknown) => {
+    log.error('Error syncing Gmail emails', {
+      integrationId: params.integrationId,
+      error: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200),
     });
   });
 }
