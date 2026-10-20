@@ -4454,6 +4454,118 @@ async def test_check_progress_below_threshold_returns_partial_structured_respons
     assert result["structured_response"] == {"summary": "x"}
 
 
+async def test_call_llm_verifier_required_output_keys_bind_only_completion_verdicts():
+    """Required output keys gate a completion verdict, not a partial one.
+
+    The verifier rubric defines 0.5 and 0.0 as verdicts in which a required
+    field is not grounded, and forbids inventing it. When an optional field
+    turns OpenAI strict mode off, the provider no longer forces every key, so
+    such a verdict omits the field (agent 9698df4f, 2026-10-20). That verdict
+    is valid. A 1.0 verdict that omits a required key is not, and present
+    values keep their declared types at every score.
+    """
+    from pydantic import ValidationError
+
+    from config import load_config
+    from helpers.llm import _call_llm_verifier
+    from providers.rose.schema import build_openai_response_format
+    from providers.rose.types import StreamChunk
+
+    schema = {
+        "fields": [
+            {"name": "game_file", "type": "str", "required": True},
+            {"name": "view_name", "type": "str", "required": False},
+            {"name": "description", "type": "str", "required": True},
+            {
+                "name": "selected",
+                "type": "object",
+                "required": False,
+                "properties": [
+                    {"name": "title", "type": "str"},
+                    {"name": "price_usd", "type": "float"},
+                ],
+            },
+        ]
+    }
+    replies: list[dict] = []
+    request_formats: list[dict] = []
+
+    class OneVerdictRose:
+        async def complete(self, **kwargs):
+            request_formats.append(build_openai_response_format(kwargs["response_model"])["json_schema"])
+            yield StreamChunk(kind="metadata", data={"actual_model": "gpt-6-sol-gpt", "pool_name": "gpt-token"})
+            yield StreamChunk(kind="content", data={"text": json.dumps(replies[-1])})
+            yield StreamChunk(kind="usage", data={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2})
+            yield StreamChunk(kind="done", data={})
+
+    async def judge(verdict: dict) -> dict:
+        replies.append(verdict)
+        with patch("temporalio.activity.heartbeat"), patch("helpers.llm.RoseClient", OneVerdictRose):
+            parsed, _usage = await _call_llm_verifier(
+                messages=[{"role": "user", "content": "Goal: make a game"}],
+                model="rose-labs/rose-1-ultra",
+                config=load_config(),
+                response_schema=schema,
+            )
+        return parsed
+
+    partial = await judge(
+        {
+            "output": {"game_file": "/home/user/output/game.html", "view_name": "game"},
+            "reasoning": "The description of the controls is not grounded in any tool result.",
+            "score": 0.5,
+        }
+    )
+    assert partial["score"] == 0.5
+    assert partial["output"] == {"game_file": "/home/user/output/game.html", "view_name": "game"}
+    assert partial["reasoning"].startswith("The description of the controls")
+
+    nested_partial = await judge(
+        {
+            "output": {"game_file": "/home/user/output/game.html", "selected": {"title": "Neon"}},
+            "reasoning": "The price is not shown.",
+            "score": 0.5,
+        }
+    )
+    assert nested_partial["output"]["selected"] == {"title": "Neon"}
+    assert "description" not in nested_partial["output"]
+
+    rejected = (
+        # A completion verdict must contain every required key at every level.
+        {"output": {"game_file": "/home/user/output/game.html"}, "reasoning": "done", "score": 1.0},
+        {
+            "output": {
+                "game_file": "/home/user/output/game.html",
+                "description": "Dodge and collect.",
+                "selected": {"title": "Neon"},
+            },
+            "reasoning": "done",
+            "score": 1.0,
+        },
+        # Partial verdicts still type-check the values they do report.
+        {"output": {"game_file": "/home/user/output/game.html", "description": None}, "reasoning": "r", "score": 0.5},
+        {"output": {"game_file": 7}, "reasoning": "r", "score": 0.0},
+    )
+    for verdict in rejected:
+        try:
+            await judge(verdict)
+        except ValidationError:
+            continue
+        raise AssertionError(f"verdict should be rejected: {verdict}")
+
+    complete = await judge(
+        {
+            "output": {"game_file": "/home/user/output/game.html", "description": "Dodge and collect."},
+            "reasoning": "done",
+            "score": 1.0,
+        }
+    )
+    assert complete["output"] == {"game_file": "/home/user/output/game.html", "description": "Dodge and collect."}
+    # Every request carried the same provider-facing contract.
+    assert all(fmt == request_formats[0] for fmt in request_formats)
+    assert request_formats[0]["schema"]["properties"]["output"]["required"] == ["game_file", "description"]
+
+
 def test_filter_context_for_execute_verifier_uses_execute_boundary():
     """Execute verifier context excludes plan/research rows before the execute boundary."""
     from helpers.llm import _filter_context_for_execute_verifier
@@ -9797,6 +9909,10 @@ async def run_all_tests():
     await r.record_async(
         "check_progress_below_threshold_returns_partial_structured_response",
         test_check_progress_below_threshold_returns_partial_structured_response,
+    )
+    await r.record_async(
+        "call_llm_verifier_required_output_keys_bind_only_completion_verdicts",
+        test_call_llm_verifier_required_output_keys_bind_only_completion_verdicts,
     )
     await r.record_async(
         "check_progress_accepts_completed_code_task_structured_response",

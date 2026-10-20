@@ -402,6 +402,7 @@ model User {
   activeUiVersionId           String?
   uiVersions                  UserUiVersion[]
   localDevices                LocalDevice[]
+  phoneDevices                PhoneDevice[]
   projects                    Project[]
 
   @@index([userId])
@@ -1799,6 +1800,41 @@ model LocalDevice {
   user       User     @relation(fields: [userId], references: [userId], onDelete: Cascade)
 
   @@index([userId])
+}
+
+/// A phone attached to one of the user's Macs (Phase 1: an iPhone shown
+/// through macOS iPhone Mirroring and operated by the Rose Mac app). One row
+/// per (user, Mac); the Mac app upserts it as its presence heartbeat.
+///
+/// Exclusive control: at most one holder at a time (an agent or the user),
+/// recorded on this row and changed only by compare-and-set updates on
+/// `leaseId`. Holders keep the lease alive by heartbeat (no wall-clock run
+/// limit); a lapsed lease reads as free, so a dead holder never strands it.
+model PhoneDevice {
+  id             String    @id @default(uuid())
+  userId         String
+  /// Per-install hash of the Mac's hardware id (never the raw UUID).
+  macDeviceId    String
+  name           String
+  model          String?
+  /// 'iphone_mirroring' (the only Phase 1 kind).
+  kind           String    @default("iphone_mirroring")
+  /// Mac-reported: iPhone Mirroring is connected and showing the phone.
+  online         Boolean   @default(false)
+  lastSeenAt     DateTime
+  /// 'agent' | 'user' | null (free).
+  holderKind     String?
+  holderAgentId  String?
+  /// New on every change of holder; operations under a stale lease fail.
+  leaseId        String?
+  leaseExpiresAt DateTime?
+  /// Agent whose control the user took; it may reacquire after release.
+  resumeAgentId  String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  user           User      @relation(fields: [userId], references: [userId], onDelete: Cascade)
+
+  @@unique([userId, macDeviceId])
 }
 
 /// Slack #errors incident owned by one Rose RCA root agent. One row per error
