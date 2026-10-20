@@ -125,7 +125,7 @@ test('Contacts sync is a required version-three startup setting', () => {
 
 test('Gmail installed and correct Google account is required by version-four startup', () => {
   const state = fixture();
-  assert.equal(verificationDto(state, context).requirementsVersion, 4);
+  assert.equal(verificationDto(state, context).requirementsVersion, SETUP_REQUIREMENTS_VERSION);
   delete (state.checks as Record<string, unknown>).gmail;
   assert.equal(verificationDto(state, context).configurationReady, false);
 });
@@ -136,4 +136,15 @@ test('configuration cannot be ready without server-configured Google identity ev
       .configurationReady,
     false
   );
+});
+
+test('device passcode is required before Gmail and absence cannot satisfy boot configuration', () => {
+  assert.ok(CONFIG_TARGETS.includes('device_passcode' as (typeof CONFIG_TARGETS)[number]));
+  assert.ok(
+    CONFIG_TARGETS.indexOf('device_passcode' as (typeof CONFIG_TARGETS)[number]) <
+      CONFIG_TARGETS.indexOf('gmail')
+  );
+  const state = fixture();
+  delete (state.checks as Record<string, unknown>).device_passcode;
+  assert.equal(verificationDto(state, context).configurationReady, false);
 });

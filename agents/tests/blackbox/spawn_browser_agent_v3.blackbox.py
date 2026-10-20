@@ -30163,6 +30163,7 @@ async def run_all_tests():
     await r.record_async("phone_setup_failclosed_and_safe_errors", test_phone_setup_failclosed_and_safe_errors)
     await r.record_async("phone_setup_pending_receipt_and_ready_private_ref", test_phone_setup_pending_receipt_and_ready_private_ref)
     await r.record_async("phone_saved_credential_wire_and_unknown_receipt", test_phone_saved_credential_wire_and_unknown_receipt)
+    await r.record_async("phone_device_passcode_wire_and_unknown_receipt", test_phone_device_passcode_wire_and_unknown_receipt)
     await r.record_async("phone_saved_credential_rejects_model_secret_routing_args", test_phone_saved_credential_rejects_model_secret_routing_args)
     await r.record_async("phone_durable_http_contract", test_phone_durable_http_contract)
     await r.record_async("phone_denied_before_dom_and_private_binding", test_phone_denied_before_dom_and_private_binding)
@@ -31020,6 +31021,57 @@ async def test_phone_saved_credential_wire_and_unknown_receipt():
         assert not any("auth-assistance" in path for _, path, _ in calls)
 
 
+async def test_phone_device_passcode_wire_and_unknown_receipt():
+    """Real Python HTTP boundary, synthetic broker only; never a saved secret."""
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import execute_phone
+    calls, posts = [], []
+    lease = {"id": "saved-lease", "status": "ACTIVE", "browserTaskId": "saved-task"}
+    setup = {"attemptId": "saved-attempt", "revision": 4, "state": "in_progress"}
+    snapshot = {"enabled": True, "interaction": {"lease": lease, "cursor": 8, "setup": setup}}
+    outcome = "created"
+    receipt = None
+    def backend(request):
+        nonlocal receipt
+        body = json.loads(request.content) if request.content else {}
+        calls.append((request.method, request.url.path, body))
+        if request.url.path.endswith("/capability"):
+            return httpx.Response(200, json={"enabled": True})
+        if "/interactions/" in request.url.path:
+            return httpx.Response(200, json={"lease": lease, "cursor": 99, "setup": {**setup, "revision": 99}})
+        if request.url.path.endswith("/operations"):
+            posts.append(body)
+            assert body["operation"] == "credentials.fill_device_passcode" and body["args"] == {}
+            assert body["expectedCursor"] == 8 and body["setupAttemptId"] == "saved-attempt" and body["setupRevision"] == 4
+            receipt = {"operation": {"id": body["operationId"], "operation": "credentials.fill_device_passcode", "status": "UNKNOWN" if outcome == "unknown" else "FAILED" if outcome == "unavailable" else "RUNNING" if outcome == "pending" else "SUCCEEDED", "errorCode": "phone_passcode_binding_required" if outcome == "unavailable" else None, "result": {"success": outcome in ("created", "acknowledged", "confirmed"), "private": True, "passcodeStatus": outcome} if outcome in ("created", "acknowledged", "confirmed", "pending", "unknown", "unavailable") else None}}
+            if outcome == "unknown":
+                raise httpx.ReadTimeout("SYNTHETIC-PRIVATE-ERROR-CANARY", request=request)
+            return httpx.Response(200, json=receipt)
+        if request.method == "GET" and "/operations/" in request.url.path:
+            assert request.url.path.endswith(receipt["operation"]["id"])
+            return httpx.Response(200, json=receipt)
+        if request.url.path.endswith("/heartbeat"):
+            return httpx.Response(200, json={})
+        raise AssertionError(request.url.path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        kwargs = dict(config=_fake_config(), user_id="synthetic-user", agent_id="agent", task_id="saved-task", decision_id="stable-fill", snapshot=snapshot, client=client)
+        for outcome in ("created", "created", "acknowledged", "confirmed", "pending", "unavailable", "unknown"):
+            kwargs["decision_id"] = "stable-" + outcome
+            before = len(posts)
+            result = await execute_phone({"mode": "operation", "operation": "credentials.fill_device_passcode", "args": {}}, **kwargs)
+            assert len(posts) == before + 1
+            assert "SYNTHETIC-PRIVATE-ERROR-CANARY" not in json.dumps(result)
+            if outcome == "unknown":
+                assert not result["success"] and result["operation"]["status"] == "UNKNOWN"
+            elif outcome == "unavailable":
+                assert not result["success"] and result["operation"]["errorCode"] == "phone_passcode_binding_required"
+            else:
+                assert result["operation"]["result"]["passcodeStatus"] == outcome
+        assert posts[0] == posts[1], "Same logical intent changed its submitted command identity"
+        assert len({body["operationId"] for body in posts}) == 6
+        assert not any("auth-assistance" in path for _, path, _ in calls)
+
+
 async def test_phone_saved_credential_rejects_model_secret_routing_args():
     import httpx
     from domains.spawn_browser_agent_v3.phone import execute_phone
@@ -31032,8 +31084,10 @@ async def test_phone_saved_credential_rejects_model_secret_routing_args():
         mutations.append(request.url.path)
         return httpx.Response(200, json={"operation": {"status": "SUCCEEDED"}})
     async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
-        for name in ("password", "credentialId", "credentialRef", "realm", "account", "x"):
-            result = await execute_phone({"mode": "operation", "operation": "credentials.fill_saved", "args": {name: "SYNTHETIC-CANARY"}}, config=_fake_config(), user_id="u", agent_id="a", task_id="t", decision_id="d", snapshot={"enabled": True, "interaction": {"cursor": 0}}, client=client)
+        for name in ("password", "passcode", "code", "credentialId", "credentialRef", "realm", "account", "x"):
+            for operation in ("credentials.fill_saved", "credentials.fill_device_passcode"):
+                result = await execute_phone({"mode": "operation", "operation": operation, "args": {name: "SYNTHETIC-CANARY"}}, config=_fake_config(), user_id="u", agent_id="a", task_id="t", decision_id="d", snapshot={"enabled": True, "interaction": {"cursor": 0}}, client=client)
+                assert not result["success"], "Model supplied secret arguments reached execution"
             assert not result["success"], "Model supplied credential/routing arguments reached execution"
             assert "SYNTHETIC-CANARY" not in json.dumps(result)
         assert mutations == [], "Invalid saved-credential arguments reached physical command submission"
@@ -31042,9 +31096,9 @@ async def test_phone_saved_credential_rejects_model_secret_routing_args():
 async def test_phone_setup_settings_targets_transport_recovery_and_billing():
     import httpx
     from domains.spawn_browser_agent_v3 import phone
-    targets = ("apple_account", "icloud_messages", "icloud_keychain", "icloud_contacts", "imessage", "receive_address", "portrait_lock", "gmail", "runtime")
+    targets = ("apple_account", "icloud_messages", "icloud_keychain", "icloud_contacts", "imessage", "receive_address", "portrait_lock", "device_passcode", "gmail", "runtime")
     lease = {"id": "settings-lease", "status": "ACTIVE", "browserTaskId": "settings-task"}
-    verification = {"requirementsVersion": 4, "checks": {"gmail": {"status": "unknown", "current": True}, "icloud_messages": {"status": "confirmed", "current": False}, "imessage": {"status": "disabled", "current": True}, "portrait_lock": {"status": "unknown", "current": True}}, "configurationReady": False, "operationalStatus": "degraded", "expectedReceiveAddress": "+15550000000"}
+    verification = {"requirementsVersion": 5, "checks": {"gmail": {"status": "unknown", "current": True}, "icloud_messages": {"status": "confirmed", "current": False}, "imessage": {"status": "disabled", "current": True}, "portrait_lock": {"status": "unknown", "current": True}}, "configurationReady": False, "operationalStatus": "degraded", "expectedReceiveAddress": "+15550000000"}
     setup = {"attemptId": "settings-attempt", "revision": 5, "identityVerified": True, "state": "in_progress", "verification": verification}
     view = {"lease": lease, "cursor": 11, "setup": setup}
     snapshot = {"enabled": True, "interaction": copy.deepcopy(view)}
@@ -31088,9 +31142,9 @@ async def test_phone_setup_settings_targets_transport_recovery_and_billing():
             assert result["usage"] == usage and "usage_items" not in result
             assert "SYNTHETIC-PRIVATE-ERROR" not in json.dumps(result)
         result = await phone.execute_phone({"mode": "setup", "action": "verify", "verificationTarget": "icloud_messages", "evidenceOperationIds": ["owned-read"]}, **common, decision_id="verify-icloud_messages")
-        assert result["success"] and len(paid) == 9, "Exact intent retry rebilled"
+        assert result["success"] and len(paid) == 10, "Exact intent retry rebilled"
         conflict = await phone.execute_phone({"mode": "setup", "action": "verify", "verificationTarget": "imessage", "evidenceOperationIds": ["owned-read"]}, **common, decision_id="verify-icloud_messages")
-        assert not conflict["success"] and conflict["_httpStatus"] == 409 and len(paid) == 9
+        assert not conflict["success"] and conflict["_httpStatus"] == 409 and len(paid) == 10
         assert posts[-1]["requestKey"] == posts[-2]["requestKey"], "Target entered the public decision ID instead of backend HMAC payload"
         legacy = await phone.execute_phone({"mode": "setup", "action": "verify", "evidenceOperationIds": ["owned-read"]}, **common, decision_id="legacy")
         assert legacy["success"] and "verificationTarget" not in posts[-1]

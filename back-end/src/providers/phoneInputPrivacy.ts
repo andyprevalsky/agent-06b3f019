@@ -90,6 +90,25 @@ function redactResult(
   value: unknown,
   privacy: PhonePrivacy
 ): unknown {
+  if (command.operation === 'credentials.fill_device_passcode') {
+    const stage =
+      value !== null && typeof value === 'object'
+        ? (value as { passcodeStatus?: unknown }).passcodeStatus
+        : undefined;
+    return {
+      success: command.state === 'SUCCEEDED',
+      private: true,
+      passcodeStatus:
+        command.state === 'SUCCEEDED' &&
+        (stage === 'created' || stage === 'confirmed' || stage === 'acknowledged')
+          ? stage
+          : command.state === 'UNKNOWN'
+            ? 'unknown'
+            : ['CONNECTING', 'RUNNING'].includes(command.state)
+              ? 'pending'
+              : 'unavailable',
+    };
+  }
   if (command.operation === 'credentials.fill_saved')
     return {
       success: command.state === 'SUCCEEDED',

@@ -12,7 +12,7 @@ import { LEASE_TIMEOUT_MS } from './config';
 import { IPhoneError, type Transaction } from './types';
 import type { CommandClaim, PhoneActor, PhoneCommand } from './types.operations';
 
-const READ_OPERATIONS = new Set([
+export const READ_OPERATIONS = new Set([
   'messages.verify_sent',
   'screen.frame',
   'screen.text',

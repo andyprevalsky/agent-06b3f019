@@ -1,5 +1,5 @@
 /** Bounded last-observed configuration facts; never perpetual device attestation. */
-export const SETUP_REQUIREMENTS_VERSION = 4;
+export const SETUP_REQUIREMENTS_VERSION = 5;
 export const SETUP_TARGETS = [
   'apple_account',
   'icloud_messages',
@@ -8,6 +8,7 @@ export const SETUP_TARGETS = [
   'imessage',
   'receive_address',
   'portrait_lock',
+  'device_passcode',
   'gmail',
   'runtime',
 ] as const;

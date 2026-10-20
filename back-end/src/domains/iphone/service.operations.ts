@@ -1,3 +1,4 @@
+import { runDevicePasscode } from './service.passcode';
 import { runMessage } from './service.message';
 import type { MessageVerifier } from '../../providers/phoneMessageVerifier';
 import { runSavedCredential } from './service.savedCredential';
@@ -89,7 +90,7 @@ export async function performPhoneCommand(
   messageVerifier?: MessageVerifier
 ) {
   if (
-    input.operation === 'credentials.fill_saved' &&
+    ['credentials.fill_saved', 'credentials.fill_device_passcode'].includes(input.operation) &&
     (actor !== 'agent' ||
       Object.keys(input.args).length !== 0 ||
       input.expectedCursor === undefined ||
@@ -126,9 +127,11 @@ export async function performPhoneCommand(
     command =
       (await (message
         ? runMessage(claim, input.args.queueId as string, client, messageVerifier)
-        : input.operation === 'credentials.fill_saved'
-          ? runSavedCredential(claim, client, credentialVerifier, beforeSavedExecute)
-          : runClaim(claim, input, client))) ??
+        : input.operation === 'credentials.fill_device_passcode'
+          ? runDevicePasscode(claim, client, credentialVerifier, beforeSavedExecute)
+          : input.operation === 'credentials.fill_saved'
+            ? runSavedCredential(claim, client, credentialVerifier, beforeSavedExecute)
+            : runClaim(claim, input, client))) ??
       (await commands.ownedCommand(userId, leaseId, input.operationId)) ??
       command;
   }

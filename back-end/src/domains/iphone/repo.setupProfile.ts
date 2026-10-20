@@ -61,6 +61,7 @@ export async function configureSetup(
         ? { verified: { ...state.verified, profileRevision: state.profileRevision + 1 } }
         : {}),
       ...(state.verification ? { verification: state.verification } : {}),
+      ...(state.passcodeCreation ? { passcodeCreation: state.passcodeCreation } : {}),
     };
     await tx.iPhoneDevice.update({
       where: { id: device.id },

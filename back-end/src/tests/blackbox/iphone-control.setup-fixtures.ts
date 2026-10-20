@@ -70,7 +70,8 @@ export async function proveSettings(
   includeIdentity = true,
   includePortrait = true,
   includeContacts = true,
-  includeGmail = true
+  includeGmail = true,
+  includePasscode = true
 ) {
   const prior = h.setupVerifier;
   h.setupVerifier = async () => ({
@@ -86,6 +87,7 @@ export async function proveSettings(
       'imessage',
       'receive_address',
       ...(includePortrait ? ['portrait_lock'] : []),
+      ...(includePasscode ? ['device_passcode'] : []),
       ...(includeGmail ? ['gmail'] : []),
       ...(includeIdentity ? ['apple_account'] : []),
     ]) {

@@ -9,7 +9,8 @@ import type { CommandClaim } from './types.operations';
 import { selectedPassword } from '../../providers/phoneSavedPassword';
 export async function savedBinding(
   claim: CommandClaim,
-  bounds: { x: number; y: number; w: number; h: number }
+  bounds: { x: number; y: number; w: number; h: number },
+  preserveConfiguredIdentities = true
 ) {
   return leases.transaction(async (tx) => {
     const { device } = await leases.lockedDevice(tx, claim.lease.userId);
@@ -68,7 +69,7 @@ export async function savedBinding(
             read,
             openPhoneValue(read.resultEncrypted),
             device.privateInputEncrypted,
-            state
+            preserveConfiguredIdentities ? state : {}
           ),
         },
       ],

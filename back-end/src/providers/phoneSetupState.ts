@@ -29,6 +29,18 @@ export interface SetupState {
   attempt?: SetupAttempt;
   verified?: { at: string; profileRevision: number };
   verification?: SetupChecks;
+  passcodeCreation?: {
+    operationId: string;
+    cursor: number;
+    attemptId: string;
+    revision: number;
+    profileRevision: number;
+    workflowId: string;
+    providerEpoch: number;
+    leaseId: string;
+    confirmed: boolean;
+    acknowledged?: boolean;
+  };
   expectedPhone?: string | null;
 }
 export function setupState(encrypted: string | null): SetupState {
@@ -44,6 +56,19 @@ export function setupState(encrypted: string | null): SetupState {
       value.profileRevision < 0 ||
       !Number.isSafeInteger(value.claimRevision) ||
       value.claimRevision < 0 ||
+      (value.passcodeCreation !== undefined &&
+        (!value.passcodeCreation ||
+          typeof value.passcodeCreation.operationId !== 'string' ||
+          !Number.isSafeInteger(value.passcodeCreation.cursor) ||
+          typeof value.passcodeCreation.attemptId !== 'string' ||
+          !Number.isSafeInteger(value.passcodeCreation.revision) ||
+          !Number.isSafeInteger(value.passcodeCreation.profileRevision) ||
+          !Number.isSafeInteger(value.passcodeCreation.providerEpoch) ||
+          typeof value.passcodeCreation.workflowId !== 'string' ||
+          typeof value.passcodeCreation.leaseId !== 'string' ||
+          typeof value.passcodeCreation.confirmed !== 'boolean' ||
+          (value.passcodeCreation.acknowledged !== undefined &&
+            typeof value.passcodeCreation.acknowledged !== 'boolean'))) ||
       (value.expectedGoogleIdentity !== undefined &&
         (typeof value.expectedGoogleIdentity !== 'string' ||
           value.expectedGoogleIdentity.trim() === '' ||

@@ -91,7 +91,7 @@ required, request the protected step rather than retrying the rejected credentia
 or bypassing biometric/device authentication.
 A filled masked field alone is not sign-in proof: observe and verify the result.
 If a password still blocks after saved-credential unavailability/rejection, or a
-user-only verification code, device passcode, or user-presence authentication
+user-only verification code, existing/owner-only device passcode, or user-presence authentication
 (biometrics/trusted-device approval) blocks progress, call
 request_user_assistance_for_authentication with targetKind="iphone" and the
 matching criticalReason. The browser auth waterfall applies only to browser
@@ -127,7 +127,7 @@ After fresh observations, use mode=setup, action=verify with evidenceOperationId
 containing 1..8 successful current broker observation IDs and verificationTarget:
 apple_account (the default when omitted), icloud_messages, icloud_keychain,
 icloud_contacts,
-imessage, receive_address, portrait_lock, gmail, or runtime. Verify iCloud Messages sync and iCloud
+imessage, receive_address, portrait_lock, device_passcode, gmail, or runtime. Verify iCloud Messages sync and iCloud
 Keychain sync separately. iMessage activation/sign-in is separate from iCloud
 Messages sync; neither one proves the other. For icloud_contacts, configure
 iCloud Contacts sync and verify explicit enabled control state; populated
@@ -138,6 +138,28 @@ receiving, not merely listed. For portrait_lock, use the observed Control Center
 UI to enable the OS Portrait Orientation Lock and verify explicit enabled control
 state or OS confirmation. A portrait frame alone, portrait dimensions, or a lock
 label without its enabled state is not proof. Keep ambiguous evidence unknown.
+Before Gmail setup, inspect the owned setup checks for the required device passcode.
+If absent, navigate the observed OS new-passcode creation flow; select Passcode Options
+and 4-Digit Numeric Code before calling credentials.fill_device_passcode with
+empty args and the actual seen setup context.
+The backend supplies its configured boot passcode privately; never type, reveal,
+infer, or include its value, a credential ref, account, or coordinates in model arguments.
+After this task's successful creation, use the same empty-args operation on the
+standard weak-code warning or confirmation form. The backend chooses only the
+owned standard warning acknowledgment or private confirmation input; never tap
+the warning separately. An acknowledged receipt permits only confirmation next,
+not arbitrary intervening mutations. This covers only the standard weak-code warning,
+never enterprise or provider policy. The backend requires its owned stage receipt.
+Do not change an existing passcode; never guess, reset, or bypass an existing
+unlock, change-code, OS policy, or user-presence requirement. Existing unknown
+passcodes use native device_passcode assistance when genuinely blocking.
+If provider management disallows changes or passcode modification is restricted,
+report setup action=block with reasonCode=configuration_unavailable, not authentication attention.
+Do not remove or weaken provider/MDM profiles or alter device management to proceed.
+The safe passcodeStatus receipt may be created, acknowledged, confirmed, pending, unknown, or
+unavailable; pending/UNKNOWN must not be replayed. A private acknowledgment alone is not enabled-state proof.
+Use verificationTarget=device_passcode with fresh broker evidence of the enabled
+OS setting; do not claim configurationReady or a known code from typing alone.
 After Apple Account sign-in, configure and verify the required iCloud Messages,
 iMessage, and receive-address settings before starting Gmail sign-in that may need SMS.
 Do not wait for historical message downloads; a configured setting alone is not proof of current SMS receipt.
@@ -299,7 +321,7 @@ async def execute_phone(
         params = validate_browser_tool_args("phone", params)
     except ValueError:
         return {"success": False, "error": "Invalid phone arguments"}
-    if params["mode"] == "operation" and params.get("operation") == "credentials.fill_saved" and params.get("args", {}) != {}:
+    if params["mode"] == "operation" and params.get("operation") in {"credentials.fill_saved", "credentials.fill_device_passcode"} and params.get("args", {}) != {}:
         return {"success": False, "error": "Saved credential fill accepts no model arguments"}
     if params["mode"] == "operation" and params.get("operation") in {"messages.send_approved", "messages.verify_sent"}:
         command_args = params.get("args", {})

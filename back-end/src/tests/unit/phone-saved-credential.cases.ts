@@ -7,7 +7,13 @@ test('saved phone credential binding uses fixed actual-evidence Rose purpose and
   const mock = t.mock;
   let captured: CompletionOptions | undefined;
   let actual = 'saved-binding-model';
-  let response: { allowed: boolean; x: number; y: number; credentialRealm?: string } = {
+  let response: {
+    allowed: boolean;
+    x: number;
+    y: number;
+    credentialRealm?: string;
+    passcodeStage?: string;
+  } = {
     allowed: true,
     x: 50,
     y: 70,
@@ -85,6 +91,40 @@ test('saved phone credential binding uses fixed actual-evidence Rose purpose and
       assert.equal(replay.y, undefined);
     }
   }
+  response = { allowed: true, x: 50, y: 70, passcodeStage: 'create' };
+  const passcodeInput = {
+    ...input,
+    purpose: 'device_passcode' as const,
+    permittedPasscodeStage: 'create' as const,
+  };
+  const passcode = await verifyPhoneCredential(passcodeInput);
+  assert.equal(passcode.allowed, true);
+  assert.equal(passcode.passcodeStage, 'create');
+  assert.equal(passcode.credentialRealm, undefined);
+  assert.ok(String(captured?.messages[0].content).includes('MDM restrictions'));
+  assert.ok(!JSON.stringify(captured?.messages).includes('1234'));
+  assert.equal(
+    JSON.parse(captured!.messages[1].content as string).expectedAppleIdentity,
+    undefined
+  );
+  response = { allowed: true, x: 50, y: 70, passcodeStage: 'acknowledge' };
+  assert.equal(
+    (
+      await verifyPhoneCredential({
+        ...passcodeInput,
+        permittedPasscodeStage: 'confirm_or_acknowledge',
+      })
+    ).allowed,
+    true
+  );
+  assert.equal(
+    (await verifyPhoneCredential({ ...passcodeInput, permittedPasscodeStage: 'confirm' })).allowed,
+    false
+  );
+  response = { allowed: true, x: 50, y: 70, passcodeStage: 'confirm' };
+  assert.equal((await verifyPhoneCredential(passcodeInput)).allowed, false);
+  response = { allowed: false, x: 0, y: 0, passcodeStage: 'unknown' };
+  assert.equal((await verifyPhoneCredential(passcodeInput)).allowed, false);
   response = { allowed: true, x: 50, y: 70, credentialRealm: 'google' };
   const google = await verifyPhoneCredential({
     ...input,

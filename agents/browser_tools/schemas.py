@@ -447,7 +447,7 @@ class PhoneBrowserTool(BaseModel):
     action: Optional[Literal["defer", "block", "verify"]] = None
     reasonCode: Optional[Literal["user_constraint", "unsupported", "configuration_unavailable", "observed_signed_out"]] = None
     evidenceOperationIds: Optional[List[str]] = None
-    verificationTarget: Optional[Literal["apple_account", "icloud_messages", "icloud_keychain", "icloud_contacts", "imessage", "receive_address", "portrait_lock", "gmail", "runtime"]] = None
+    verificationTarget: Optional[Literal["apple_account", "icloud_messages", "icloud_keychain", "icloud_contacts", "imessage", "receive_address", "portrait_lock", "device_passcode", "gmail", "runtime"]] = None
 
     @model_validator(mode="after")
     def validate_mode(self):

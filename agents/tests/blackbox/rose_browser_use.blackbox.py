@@ -3034,7 +3034,7 @@ async def test_native_autofill_real_model_synthetic_controls():
 def test_phone_setup_verification_targets_schema_and_isolation():
     import pytest
     from browser_tools.schemas import validate_browser_tool_args
-    targets = ["apple_account", "icloud_messages", "icloud_keychain", "icloud_contacts", "imessage", "receive_address", "portrait_lock", "gmail", "runtime"]
+    targets = ["apple_account", "icloud_messages", "icloud_keychain", "icloud_contacts", "imessage", "receive_address", "portrait_lock", "device_passcode", "gmail", "runtime"]
     before = json.dumps(BROWSER_USE_TOOLS, sort_keys=True)
     for target in targets:
         params = {"mode": "setup", "action": "verify", "evidenceOperationIds": ["owned-read"], "verificationTarget": target}
@@ -3063,7 +3063,7 @@ async def test_phone_setup_settings_actual_handler_observation():
     from types import SimpleNamespace
     from domains.spawn_browser_agent_v3 import handler as h
     from domains.spawn_browser_agent_v3.types import ClaudeTokenState
-    verification = {"requirementsVersion": 4, "checks": {"gmail": {"status": "unknown", "current": True}, "icloud_messages": {"status": "confirmed", "observedAt": "2026-10-19T00:00:00Z", "current": False}, "imessage": {"status": "unknown", "current": True}, "portrait_lock": {"status": "unknown", "current": True}}, "configurationReady": False, "operationalStatus": "degraded", "expectedReceiveAddress": "+15550000000"}
+    verification = {"requirementsVersion": 5, "checks": {"gmail": {"status": "unknown", "current": True}, "icloud_messages": {"status": "confirmed", "observedAt": "2026-10-19T00:00:00Z", "current": False}, "imessage": {"status": "unknown", "current": True}, "portrait_lock": {"status": "unknown", "current": True}}, "configurationReady": False, "operationalStatus": "degraded", "expectedReceiveAddress": "+15550000000"}
     setup = {"identityVerified": True, "state": "in_progress", "attemptId": "owned-attempt", "revision": 7, "expectedGoogleAccountIdentifier": "synthetic-google@example.test", "verification": verification}
     captured = []
     def provider(request):
@@ -3084,6 +3084,16 @@ async def test_phone_setup_settings_actual_handler_observation():
         assert "expectedGoogleAccountIdentifier" in wire and "synthetic-google@example.test" in wire
         assert "App Store" in wire and "install Gmail" in wire
         assert "verificationTarget=gmail" in wire
+        assert "credentials.fill_device_passcode" in wire and "verificationTarget=device_passcode" in wire
+        assert "Passcode Options" in wire and "4-Digit Numeric Code" in wire
+        assert "acknowledged" in wire and "standard weak-code warning" in wire
+        assert "never enterprise or provider policy" in wire
+        assert "Do not change an existing passcode" in wire
+        assert "Do not remove or weaken provider/MDM profiles" in wire
+        assert "configuration_unavailable" in wire and "passcode modification is restricted" in wire
+        assert "never guess, reset, or bypass" in wire
+        assert "private acknowledgment alone is not enabled-state proof" in wire
+        assert "1234" not in wire
         assert "Supported bindings are Apple Account and Google sign-in" in wire
         assert "actual Google form" in wire and "separately configured Google identity" in wire
         assert "supports Apple Account binding only" not in wire
