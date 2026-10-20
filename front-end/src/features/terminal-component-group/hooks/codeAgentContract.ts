@@ -747,16 +747,20 @@ export function agentToAgentCodeProvider(a2a: AgentToAgentMessage): CodeAgentPro
 
 // ── Writes ──────────────────────────────────────────────────────────────────
 
-async function postJson(path: string, body: Record<string, string | undefined>): Promise<void> {
+/** POST a JSON body; a non-2xx response throws `toError(status, backend error text)`. */
+async function postJson(
+  path: string,
+  body: object,
+  toError: (status: number, message: string) => Error = (_status, message) => new Error(message),
+): Promise<void> {
   const res = await fetch(`${API_BASE_WITH_PATH}${path}`, {
     method: 'POST',
     headers: getAuthHeaders(),
     body: JSON.stringify(body),
   });
-  if (!res.ok) {
-    const error = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(error.error || `Request failed (${res.status})`);
-  }
+  if (res.ok) return;
+  const error = (await res.json().catch(() => ({}))) as { error?: string };
+  throw toError(res.status, error.error || `Request failed (${res.status})`);
 }
 
 /** A fresh idempotency key for one direct turn (reuse it when retrying the same text). */
@@ -816,12 +820,5 @@ export async function answerPinnedQuestion(
   reply: PinnedQuestionReply,
 ): Promise<void> {
   const path = `/agents/${encodeURIComponent(agentId)}/questions/${encodeURIComponent(questionId)}/answer`;
-  const res = await fetch(`${API_BASE_WITH_PATH}${path}`, {
-    method: 'POST',
-    headers: getAuthHeaders(),
-    body: JSON.stringify(reply),
-  });
-  if (res.ok) return;
-  const error = (await res.json().catch(() => ({}))) as { error?: string };
-  throw new PinnedQuestionAnswerError(res.status, error.error || `Request failed (${res.status})`);
+  return postJson(path, reply, (status, message) => new PinnedQuestionAnswerError(status, message));
 }

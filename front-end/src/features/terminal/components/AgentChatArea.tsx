@@ -49,11 +49,8 @@ import {
   ApprovalChip,
   PinnedQuestionMount,
   QueryInput,
-  UserAppScreen,
   resolveAppView,
   useUserApps,
-  type AppQueryBoxBinding,
-  type OpenAppView,
 } from '@/features/terminal-component-group';
 import { UserUiSlot, useUserUiOpaqueSurfaces } from '@/features/user-ui';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
@@ -66,7 +63,6 @@ import { getContextPercentage, getModelContextWindow } from '../hooks/derivation
 import type {
   AgentSlice,
   DripSlice,
-  FilePointer,
   PendingApproval,
   PendingGate,
   BrowserPanelData,
@@ -74,11 +70,13 @@ import type {
   Model,
 } from '../types';
 
+import { AppScreenHost } from './AppScreenHost';
 import { ChatScrollArea } from './ChatScrollArea';
 import { SubAgentBreadcrumb } from './SubAgentBreadcrumb';
 import { SystemMessagesPanel } from './SystemMessagesPanel';
 import { PopularGoalsCarousel } from './PopularGoalsCarousel';
 import { composerCanSubmit } from './composerCanSubmit';
+import { queryBoxModels } from './queryBoxModels';
 import { TerminalLegalFooter } from './TerminalLegalFooter';
 
 interface AgentChatAreaProps {
@@ -94,7 +92,28 @@ interface AgentChatAreaProps {
   BrowserStatusBarCarousel: ComponentType<{ browsers: BrowserPanelData[] }>;
 }
 
-export function AgentChatArea({
+/** Rose Desktop: an open app (UserAppsProvider) replaces the whole chat column. */
+export function AgentChatArea(props: AgentChatAreaProps) {
+  const roseDesktop = useRoseDesktop();
+  const userApps = useUserApps();
+  const appView =
+    roseDesktop && userApps !== null && !isBenchmarkSharedView()
+      ? resolveAppView(userApps.target, userApps.apps)
+      : null;
+  if (appView === null || userApps === null) return <ChatColumn {...props} />;
+  return (
+    <AppScreenHost
+      view={appView}
+      onClose={userApps.closeApp}
+      agents={props.agents}
+      drip={props.drip}
+      models={props.models}
+      modelsLoading={props.modelsLoading}
+    />
+  );
+}
+
+function ChatColumn({
   agents: a,
   drip,
   models,
@@ -111,9 +130,6 @@ export function AgentChatArea({
   const { tickerOffset, tickerRef } = useTickerCarousel(a.selectedAgentId);
   const sharedView = isBenchmarkSharedView();
   const roseDesktop = useRoseDesktop();
-  const userApps = useUserApps();
-  const appView =
-    roseDesktop && userApps !== null ? resolveAppView(userApps.target, userApps.apps) : null;
   const readOnlyMessage = sharedView
     ? 'Read-only benchmark recording'
     : a.inspectionContext
@@ -129,19 +145,6 @@ export function AgentChatArea({
     status: a.agentDetail?.status,
     isChatMode: a.isChatMode,
   });
-
-  if (appView !== null && userApps !== null && !sharedView) {
-    return (
-      <AppScreenHost
-        view={appView}
-        onClose={userApps.closeApp}
-        agents={a}
-        drip={drip}
-        models={models}
-        modelsLoading={modelsLoading}
-      />
-    );
-  }
 
   return (
     <>
@@ -357,68 +360,5 @@ function ChatQueryInputBox({
         onPendingPriceLimitChange={a.setPendingPriceLimitCents}
       />
     </div>
-  );
-}
-
-/** Models offered by the query box. */
-function queryBoxModels(models: Model[]): Model[] {
-  return models.filter(
-    (m) =>
-      m.id === 'rose-labs/rose-1-flash' ||
-      m.id === 'rose-labs/rose-fast' ||
-      m.id === 'rose-labs/rose-1-lite' ||
-      m.id === 'rose-labs/rose-1-ultra',
-  );
-}
-
-interface AppScreenHostProps {
-  view: OpenAppView;
-  onClose: () => void;
-  agents: AgentSlice;
-  drip: DripSlice;
-  models: Model[];
-  modelsLoading: boolean;
-}
-
-/** The full-screen app view with the normal query box (Popular Goals hidden). */
-function AppScreenHost({ view, onClose, agents: a, drip, models, modelsLoading }: AppScreenHostProps) {
-  const startAgent = async (goal: string, attachments?: FilePointer[]) => {
-    if (a.handleCreateAgent === undefined) throw new Error('agent creation is unavailable');
-    await a.handleCreateAgent({
-      goal,
-      model: a.selectedModel,
-      price_limit_cents: a.pendingPriceLimitCents,
-      ...(attachments && attachments.length > 0 ? { attachments } : {}),
-    });
-  };
-  const renderQueryBox = (binding: AppQueryBoxBinding) => (
-    <QueryInput
-      opaqueSurface
-      value={binding.value}
-      onChange={binding.onChange}
-      onSubmit={binding.onSubmit}
-      disabled={binding.disabled}
-      placeholder={binding.placeholder}
-      selectedModel={a.selectedModel}
-      onModelChange={a.setSelectedModel}
-      fastMode={a.fastMode}
-      onFastModeChange={a.setFastMode}
-      availableModels={queryBoxModels(models)}
-      modelsLoading={modelsLoading}
-      showModelSelector={!binding.steers}
-      dripStyles={drip.dripStyles}
-      drippiness={drip.blur}
-      pendingPriceLimitCents={a.pendingPriceLimitCents}
-      onPendingPriceLimitChange={a.setPendingPriceLimitCents}
-    />
-  );
-  return (
-    <UserAppScreen
-      key={view.key}
-      view={view}
-      onClose={onClose}
-      onStartAgent={startAgent}
-      renderQueryBox={renderQueryBox}
-    />
   );
 }

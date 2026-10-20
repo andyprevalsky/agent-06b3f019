@@ -106,10 +106,7 @@ export function resolveAppView(
 }
 
 /** Left-bar row of the open view (a task view highlights the app it resolved to). */
-export function openAppId(
-  target: AppTarget | null,
-  apps: readonly UserAppEntry[],
-): string | null {
+export function openAppId(target: AppTarget | null, apps: readonly UserAppEntry[]): string | null {
   const view = resolveAppView(target, apps);
   return view !== null && view.key.startsWith('app:') ? view.key.slice('app:'.length) : null;
 }

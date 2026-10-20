@@ -17,11 +17,7 @@
  */
 import type { ReactNode } from 'react';
 
-import {
-  isCrossOriginHttpUrl,
-  PREVIEW_FRAME_SANDBOX,
-  USER_APP_FRAME_SANDBOX,
-} from './appFrame';
+import { isCrossOriginHttpUrl, PREVIEW_FRAME_SANDBOX, USER_APP_FRAME_SANDBOX } from './appFrame';
 import type { OpenAppView } from './userAppsState';
 import { useCodePreviewStatus, usePreviewFrameSrc } from './useAppPreview';
 

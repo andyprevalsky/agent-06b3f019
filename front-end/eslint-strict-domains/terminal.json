@@ -25,5 +25,7 @@
   "src/features/terminal/components/StreamingMarkdown.tsx",
   "src/features/terminal/components/index.ts",
   "src/features/terminal/index.ts",
-  "src/pages/Terminal.tsx"
+  "src/pages/Terminal.tsx",
+  "src/features/terminal/components/AppScreenHost.tsx",
+  "src/features/terminal/components/queryBoxModels.ts"
 ]

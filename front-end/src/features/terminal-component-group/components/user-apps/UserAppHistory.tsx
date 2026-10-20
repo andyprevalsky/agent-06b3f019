@@ -25,9 +25,7 @@ import { ROSE_ACTIVE_COLOR } from '../rose-sidebar/roseSidebarLayout';
 import type { AppHistoryScope } from './userAppsState';
 
 type HistoryState =
-  | { kind: 'loading' }
-  | { kind: 'list'; versions: UserUiVersionWithApps[] }
-  | { kind: 'error' };
+  { kind: 'loading' } | { kind: 'list'; versions: UserUiVersionWithApps[] } | { kind: 'error' };
 
 const MUTED = 'text-[hsl(240_6%_58%)] dark:text-[#a3a39d]';
 
