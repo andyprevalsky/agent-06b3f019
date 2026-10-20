@@ -27,6 +27,8 @@ export const INLINE_VIEW_ROOT_MARGIN = '400px 0px';
 export const DEFAULT_BACKGROUND_FADE = 0.8;
 export const BACKGROUND_FADE_TRANSITION_MS = 600;
 export const LIVE_RELOAD_POLL_MS = 5_000;
+/** Any number of live-refresh requests inside this window collapse into one GET. */
+export const USER_UI_REFRESH_WINDOW_MS = 750;
 export const SAFE_MODE_STORAGE_KEY = 'rose_safe_mode';
 export const SAFE_MODE_QUERY_PARAM = 'rose_safe';
 export const LIVE_RELOAD_QUERY_PARAM = 'rose_ui_live';
