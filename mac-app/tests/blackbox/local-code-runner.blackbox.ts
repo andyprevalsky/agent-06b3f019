@@ -10,7 +10,11 @@
  *   - session manager: start → session_started{folder label}; no grant →
  *     session_failed(no_folder_granted) without spawning; stop/exit/redelivery
  *   - tunnel mux: one local socket per relay channel, frames both ways
+ *   - device identity (services/deviceIdentity, this runner's device id): a
+ *     salted hash of IOPlatformUUID, never the UUID; stable; falls back to the
+ *     Mac's name, then its hostname
  */
+import { createHash } from 'crypto';
 import { EventEmitter } from 'events';
 import fs from 'fs';
 import os from 'os';
@@ -43,6 +47,7 @@ import {
   type SessionDeps,
 } from '../../main/domains/local-code-runner/serviceSession';
 import { TunnelMux } from '../../main/domains/local-code-runner/serviceTunnel';
+import type * as DeviceIdentity from '../../main/services/deviceIdentity';
 import type {
   ChildLike,
   ControlFromDevice,
@@ -566,5 +571,73 @@ describe('tunnel mux', () => {
     expect(JSON.parse(tunnel.sent.at(-1) ?? '')).toEqual({ op: 'close', ch: 2 });
     tunnel.emit('close');
     expect(mux.channelCount).toBe(0);
+  });
+});
+
+describe('device identity', () => {
+  const probe = {
+    hardwareUuid: 'ABCDEF01-2345-6789-ABCD-EF0123456789' as string | null,
+    computerName: "Andy's MacBook Pro" as string | null,
+    calls: [] as string[],
+  };
+  const saltedHash = (basis: string) =>
+    createHash('sha256').update(`rose-mac-device-v1\0${basis}`).digest('hex').slice(0, 32);
+
+  async function loadIdentity(): Promise<typeof DeviceIdentity> {
+    vi.resetModules();
+    vi.doMock('child_process', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('child_process')>();
+      const execFileSync = (command: string, args: readonly string[] = []) => {
+        probe.calls.push([command, ...args].join(' '));
+        if (command === 'ioreg') {
+          if (probe.hardwareUuid === null) throw new Error('ioreg unavailable');
+          return `+-o J316sAP  <class IOPlatformExpertDevice>\n  "IOPlatformUUID" = "${probe.hardwareUuid}"\n`;
+        }
+        if (command === 'scutil') {
+          if (probe.computerName === null) throw new Error('scutil unavailable');
+          return `${probe.computerName}\n`;
+        }
+        throw new Error(`unexpected command ${command}`);
+      };
+      const mocked = { ...actual, execFileSync };
+      return { ...mocked, default: mocked };
+    });
+    return import('../../main/services/deviceIdentity');
+  }
+
+  beforeEach(() => {
+    probe.hardwareUuid = 'ABCDEF01-2345-6789-ABCD-EF0123456789';
+    probe.computerName = "Andy's MacBook Pro";
+    probe.calls = [];
+  });
+
+  afterEach(() => {
+    vi.doUnmock('child_process');
+    vi.resetModules();
+  });
+
+  it('is a salted hash of IOPlatformUUID, never the UUID itself, and is stable', async () => {
+    const identity = await loadIdentity();
+    const id = identity.macDeviceId();
+    expect(id).toBe(saltedHash('ABCDEF01-2345-6789-ABCD-EF0123456789'));
+    expect(id).not.toContain('ABCDEF01');
+    probe.hardwareUuid = 'FFFFFFFF-0000-0000-0000-000000000000';
+    expect(identity.macDeviceId()).toBe(id);
+    expect(probe.calls.filter((c) => c.startsWith('ioreg'))).toHaveLength(1);
+    identity.resetDeviceIdentityForTests();
+    expect(identity.macDeviceId()).toBe(saltedHash('FFFFFFFF-0000-0000-0000-000000000000'));
+  });
+
+  it('falls back to the Mac name when ioreg is unavailable', async () => {
+    probe.hardwareUuid = null;
+    const identity = await loadIdentity();
+    expect(identity.macDeviceName()).toBe("Andy's MacBook Pro");
+    expect(identity.macDeviceId()).toBe(saltedHash("host:Andy's MacBook Pro"));
+  });
+
+  it('names the Mac by its hostname when scutil is unavailable', async () => {
+    probe.computerName = null;
+    const identity = await loadIdentity();
+    expect(identity.macDeviceName()).toBe(os.hostname().replace(/\.local$/, ''));
   });
 });

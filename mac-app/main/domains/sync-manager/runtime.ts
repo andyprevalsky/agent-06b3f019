@@ -11,7 +11,6 @@
 
 import { logConsole, logConsoleError } from '../../base/logger';
 import { IMessageQueueService } from '../../services/IMessageQueueService';
-import { PhoneMirroring } from '../../services/phoneMirroring';
 import { PLATFORM_CONFIG } from './config';
 import {
   runStartupSyncs,
@@ -66,9 +65,6 @@ export class SyncManager {
       return;
     }
     IMessageQueueService.start();
-    // The attached iPhone (iPhone Mirroring) follows the same identity
-    // boundary: started only for this Mac's own, non-impersonated session.
-    PhoneMirroring.start();
 
     logConsole('SyncManager', 'All syncs started');
   }
@@ -86,7 +82,6 @@ export class SyncManager {
 
     await stopRealTimeWatchers();
     IMessageQueueService.stop();
-    PhoneMirroring.stop();
 
     logConsole('SyncManager', 'All syncs stopped');
   }
