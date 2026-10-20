@@ -7,6 +7,7 @@
  *   POST /api/user-ui/versions/:id/activate  move the user's active pointer
  *   GET  /api/user-ui/active                 { versionId, manifest, baseUrl } | { versionId: null }
  *   GET  /api/user-ui/versions               list the caller's versions
+ *   GET  /api/user-ui/apps                   Apps section: Rose (dev only) + published apps
  *   POST /api/user-ui/publish-token          short-lived sandbox publish token
  *   GET  /usercontent/:versionId/*           published bytes, immutable + strict CSP
  *
@@ -43,6 +44,7 @@ import {
   prepareUserUiWorkspace,
 } from '../../providers/userUi/workspace';
 import { userUiExampleCases } from './user-ui-examples.cases';
+import { userUiAppsCases } from './user-ui-apps.cases';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -568,6 +570,9 @@ const tests: { name: string; fn: () => Promise<void> }[] = [
         '## Something for the user to see or play',
         'add it under "inline" in rose-ui.json',
         'then name the view in your\nfinal response',
+        // A2: apps are standalone pages listed in the Apps section.
+        '## Apps',
+        'add it under "apps" in rose-ui.json',
       ]) {
         assert(readme.includes(term), `README documents ${term}`);
       }
@@ -617,6 +622,7 @@ const tests: { name: string; fn: () => Promise<void> }[] = [
       );
     },
   },
+  ...userUiAppsCases({ baseUrl: BASE_URL, anonymous: anonymousSession, call, bundle }),
   ...userUiExampleCases({
     baseUrl: BASE_URL,
     token: () => userA.token,

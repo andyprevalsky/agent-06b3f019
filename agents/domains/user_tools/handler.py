@@ -31,6 +31,7 @@ from .service import (
     resolve_user_tools_activity,
     run_activity_timeout_seconds,
     run_user_tool_activity,
+    user_tool_call_key,
 )
 
 logger = structlog.get_logger()
@@ -125,18 +126,23 @@ async def run_user_tool(
         tool_call_id,
         tool_name,
     )
+    activity_args: List[Any] = [
+        workflow_instance.agent_id,
+        workflow_instance.user_id,
+        version_id,
+        source_name,
+        params,
+        pinned.get("base_url"),
+        spec,
+    ]
+    if spec.get("side_effects") is True:
+        # Stable across activity retries, workflow replay and continue_as_new
+        # (same workflow id, same tool call id), so a retry finds the stored result.
+        activity_args.append(user_tool_call_key(wf_api.info().workflow_id, tool_call_id))
     try:
         outcome = await wf_api.execute_activity(
             run_user_tool_activity,
-            args=[
-                workflow_instance.agent_id,
-                workflow_instance.user_id,
-                version_id,
-                source_name,
-                params,
-                pinned.get("base_url"),
-                spec,
-            ],
+            args=activity_args,
             start_to_close_timeout=timedelta(seconds=run_activity_timeout_seconds(spec.get("timeout_s"))),
             retry_policy=RetryPolicy(maximum_attempts=RUN_ACTIVITY_MAX_ATTEMPTS),
         )

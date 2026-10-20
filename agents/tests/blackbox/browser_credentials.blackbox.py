@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -11,7 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from _test_utils import BlackboxResult, assert_captured_call, setup_mock
+from _test_utils import BlackboxResult, assert_captured_call, get_captured_requests, setup_mock, teardown_mock
 from browser_tools.dom_service import ActionHistory
 
 
@@ -757,6 +758,62 @@ async def test_prepare_browser_auth_uses_unified_realm_endpoint() -> None:
         header_present="x-user-id",
     )
     assert call["requestHeaders"]["x-user-id"] == "user-1"
+
+
+def test_password_use_is_sign_in_evidence_for_world_state_merge() -> None:
+    """Only a typed saved/minted password marks a site as signed in (plan A6)."""
+    from domains.spawn_browser_agent_v3.service_crypto import signed_in_realm_for_secret_refs
+
+    assert signed_in_realm_for_secret_refs({"pwd:me@github"}, "https://github.com/login") == "github.com"
+    assert signed_in_realm_for_secret_refs({"pwd:new"}, "https://www.example.org/signup") == "example.org"
+    assert signed_in_realm_for_secret_refs({"card_number", "card_cvv"}, "https://shop.example/pay") == ""
+    assert signed_in_realm_for_secret_refs(set(), "https://github.com/login") == ""
+    assert signed_in_realm_for_secret_refs({"pwd:me@github"}, "") == ""
+    assert signed_in_realm_for_secret_refs(None, "https://github.com/login") == ""
+
+
+async def test_browser_close_sends_sign_in_evidence_and_returns_world_state_receipt() -> None:
+    """Close carries the task's sign-in evidence and returns the merge receipt."""
+    from domains.spawn_browser_agent_v3.repo import close_browser_session
+
+    receipt = {
+        "task_id": "task-1",
+        "kind": "agent",
+        "sites": [
+            {
+                "site": "github.com",
+                "outcome": "merged",
+                "base_revision": 0,
+                "head_revision": 1,
+                "merged_revision": 1,
+            }
+        ],
+    }
+    config = SimpleNamespace(backend=SimpleNamespace(api_url="https://backend.example.com", api_key="internal-key"))
+    try:
+        setup_mock(
+            {"/api/browser-session/close": {"status": 200, "json": {"success": True, "world_state": receipt}}}
+        )
+        returned = await close_browser_session(
+            config, "session-1", current_url="https://github.com/", signed_in_sites=["github.com", "github.com"]
+        )
+        assert returned == receipt, returned
+        body = json.loads(get_captured_requests()[-1]["requestBody"])
+        assert body == {
+            "session_id": "session-1",
+            "pause": False,
+            "current_url": "https://github.com/",
+            "signed_in_sites": ["github.com"],
+        }, body
+
+        # No evidence: the field is omitted, so older backends see the old payload.
+        teardown_mock()
+        setup_mock({"/api/browser-session/close": {"status": 200, "json": {"success": True, "world_state": None}}})
+        assert await close_browser_session(config, "session-2") is None
+        body = json.loads(get_captured_requests()[-1]["requestBody"])
+        assert body == {"session_id": "session-2", "pause": False}, body
+    finally:
+        teardown_mock()
 
 
 async def test_failed_restoration_preserves_target_credential_inventory() -> None:
@@ -1617,6 +1674,14 @@ async def run_all_tests():
     await runner.record_async(
         "prepare_browser_auth_uses_unified_realm_endpoint",
         test_prepare_browser_auth_uses_unified_realm_endpoint,
+    )
+    runner.record(
+        "password_use_is_sign_in_evidence_for_world_state_merge",
+        test_password_use_is_sign_in_evidence_for_world_state_merge,
+    )
+    await runner.record_async(
+        "browser_close_sends_sign_in_evidence_and_returns_world_state_receipt",
+        test_browser_close_sends_sign_in_evidence_and_returns_world_state_receipt,
     )
     await runner.record_async(
         "passkey_injection_reenables_virtual_environment_at_use_boundary",

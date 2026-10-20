@@ -1,5 +1,8 @@
 /**
- * /api/user-ui — publish/activate/list a user's rose_user_ui versions.
+ * /api/user-ui — publish/activate/list a user's rose_user_ui versions,
+ * GET /apps for the left-bar Apps section (Rose first for dev accounts, A2),
+ * plus the internal user-tool routes (routes.tools.ts: side-effect records +
+ * the code-session executor).
  * /usercontent — serve published files (see config.ts for the origin rule).
  *
  * Auth: normal user JWT or hybrid API key (internal X-User-Id / Rose API key)
@@ -15,6 +18,7 @@ import {
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { USERCONTENT_CACHE_CONTROL, USERCONTENT_CSP } from './config';
+import { registerUserToolRoutes } from './routes.tools';
 import * as service from './service';
 import { publishUserUiVersionSchema, userUiVersionIdSchema } from './types';
 
@@ -122,6 +126,16 @@ router.get(
 );
 
 router.get(
+  '/apps',
+  withHybridAuth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    const userId = requireUserId(req, res);
+    if (userId === null) return;
+    res.json(await service.listApps(userId, requestOrigin(req)));
+  })
+);
+
+router.get(
   '/versions',
   withHybridAuth,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
@@ -140,6 +154,9 @@ router.post(
     res.status(201).json(service.mintPublishToken(userId));
   })
 );
+
+// Internal: side-effect records + the code-session executor for user tools.
+registerUserToolRoutes(router);
 
 export default router;
 

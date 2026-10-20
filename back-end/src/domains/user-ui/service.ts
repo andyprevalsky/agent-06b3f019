@@ -11,11 +11,14 @@
  * in-process cache, so there is no per-agent fan-in.
  */
 import {
+  USER_UI_BUILTIN_APP_ID,
   isSafeUserUiPath,
   userUiContentType,
   validateUserUiBundle,
   type UserUiBundleFile,
 } from '../../providers/userUi/manifest';
+import { findLatestRosePreview } from '../../providers/codePreview/service';
+import { isRoseDevUser } from '../../utils/roseDevAccess';
 import { getDisplayObject } from '../../providers/agentTools/media';
 import { broadcastUserUiActiveChanged } from '../../providers/chat/supabaseBroadcast';
 import { createLogger } from '../../providers/logger';
@@ -120,6 +123,71 @@ export async function listVersions(userId: string) {
       active: v.id === activeVersionId,
     })),
   };
+}
+
+/** One row of the left-bar Apps section (A2). */
+export type UserAppEntry =
+  | {
+      id: typeof USER_UI_BUILTIN_APP_ID;
+      kind: 'builtin';
+      title: 'Rose';
+      /** Rose ships through /deploy; there is no published Rose URL. */
+      url: null;
+      /** Live HMR preview of the newest Rose-repo code session, when one exists. */
+      preview_url: string | null;
+      task_id: string | null;
+      code_session_id: string | null;
+      /** Publish opens a pull request (POST /api/claude-code-session/:taskId/publish). */
+      publish: 'pull_request';
+    }
+  | {
+      id: string;
+      kind: 'user';
+      title: string;
+      /** Published entry on usercontent: this version's per-user URL. */
+      url: string;
+      icon_url: string | null;
+      version_id: string;
+      /** Publish is `rose-ui publish` (a new version); restore = activate an older one. */
+      publish: 'usercontent';
+    };
+
+/**
+ * GET /api/user-ui/apps: Rose first (dev accounts only), then the apps in the
+ * active version's rose-ui.json. History/restore reuse GET /versions (each
+ * version's manifest lists its apps) and POST /versions/:id/activate.
+ */
+export async function listApps(userId: string, requestOrigin: string) {
+  const apps: UserAppEntry[] = [];
+  if (isRoseDevUser(userId)) {
+    const preview = await findLatestRosePreview(userId);
+    apps.push({
+      id: USER_UI_BUILTIN_APP_ID,
+      kind: 'builtin',
+      title: 'Rose',
+      url: null,
+      preview_url: preview?.preview_url ?? null,
+      task_id: preview?.task_id ?? null,
+      code_session_id: preview?.code_session_id ?? null,
+      publish: 'pull_request',
+    });
+  }
+  const active = await repo.findActiveUserUiVersion(userId);
+  if (active) {
+    const base = usercontentBaseUrl(requestOrigin, active.id);
+    for (const [slug, app] of Object.entries(active.manifest.apps ?? {})) {
+      apps.push({
+        id: slug,
+        kind: 'user',
+        title: app.title,
+        url: `${base}${app.entry}`,
+        icon_url: app.icon !== undefined && app.icon !== '' ? `${base}${app.icon}` : null,
+        version_id: active.id,
+        publish: 'usercontent',
+      });
+    }
+  }
+  return { activeVersionId: active?.id ?? null, apps };
 }
 
 export function mintPublishToken(userId: string) {

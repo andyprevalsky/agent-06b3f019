@@ -202,6 +202,7 @@ export async function createSession(params: CreateSessionParams): Promise<Create
     github_repo_url: normalizedRepoUrl ?? null,
     ...fields,
     project: session.projectRestore ?? null,
+    preview_url: session.previewUrl ?? null,
   };
 }
 

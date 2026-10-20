@@ -81,6 +81,9 @@ export USER_UI_STORAGE_LOCAL_DIR="${USER_UI_STORAGE_LOCAL_DIR:-$ARTIFACT_DIR/use
 # display-tool media (domains/display) uses the same hermetic local store.
 export DISPLAY_STORAGE_BACKEND=local
 export DISPLAY_STORAGE_LOCAL_DIR="${DISPLAY_STORAGE_LOCAL_DIR:-$ARTIFACT_DIR/display-storage}"
+# User-tool handlers (POST /api/user-ui/tools/run) run in a local code-session
+# HOME instead of E2B; the backend refuses this mode in production.
+export USER_TOOLS_SESSION_SANDBOX=local
 export BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES="${BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES:-weekly}"
 export BLACKBOX_TEST_CAPTURE_OUTBOUND="${BLACKBOX_TEST_CAPTURE_OUTBOUND:-1}"
 

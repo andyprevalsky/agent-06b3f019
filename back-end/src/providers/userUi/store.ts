@@ -257,6 +257,22 @@ export async function readUserUiFile(versionId: string, path: string): Promise<B
   return getObject(objectKey(owner, versionId, path));
 }
 
+/** True when `versionId` is one of `userId`'s published versions (owner cached). */
+export async function userOwnsUserUiVersion(userId: string, versionId: string): Promise<boolean> {
+  return (await versionOwner(versionId)) === userId;
+}
+
+/** One file of a version owned by `userId`; null when absent or not theirs. */
+export async function readOwnedUserUiFile(
+  userId: string,
+  versionId: string,
+  path: string
+): Promise<Buffer | null> {
+  const owner = await versionOwner(versionId);
+  if (owner === null || owner !== userId) return null;
+  return getObject(objectKey(userId, versionId, path));
+}
+
 /** All files of a version (for restoring it into a code-agent workspace). */
 export async function readUserUiVersionFiles(
   userId: string,

@@ -8,8 +8,9 @@
       "input_schema": {...},            # JSON Schema object (no $ref)
       "output_schema": {...},           # optional JSON Schema for the handler result
       "render": {"view": "<inline key>"},   # optional inline view for the result
-      "side_effects": false,
-      "idempotency_key_field": "...",   # required when side_effects (v1 rejects side effects)
+      "side_effects": false,            # true: the handler runs at most once per tool call
+      "idempotency_key_field": "...",   # optional, side_effects only: input field Rose fills
+                                        # with the call's idempotency key
       "timeout_s": 60,                  # default 60, max 300
       "runtime": "node" | "python",
       "entry": "tools/<name>/handler.js",
@@ -18,8 +19,20 @@
 
 The pinned spec stored in workflow state is small (schemas + metadata, never
 handler bytes).
+
+Side-effecting tools (``side_effects: true``, CLAUDE.md rule 20): a call's
+idempotency key is ``user_tool_call_key(root workflow id, tool call id)``. The
+handler gets it as ``ROSE_IDEMPOTENCY_KEY`` (and in its input under
+``idempotency_key_field`` when declared) to pass to downstream APIs. The run
+activity claims the key in the backend's ToolSideEffect record before the
+handler starts and stores the handler's run record before returning, so a
+Temporal retry or a concurrent duplicate replays that record instead of running
+the handler again. ``shape_handler_run`` turns a run record into the tool
+outcome identically for a fresh run and a replay.
 """
 
+import base64
+import hashlib
 import json
 import posixpath
 import re
@@ -33,6 +46,8 @@ from utils.user_tool_models import USER_TOOL_PREFIX
 TOOL_NAME_RE = re.compile(r"^[a-z0-9_]{1,48}$")
 VIEW_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 VERSION_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+IDEMPOTENCY_KEY_RE = re.compile(r"^[0-9a-f]{64}$")
+INPUT_FIELD_RE = re.compile(r"^[a-z_][a-z0-9_]{0,63}$")
 RUNTIMES = ("node", "python")
 
 USER_TOOL_DEFAULT_TIMEOUT_S = 60
@@ -52,10 +67,8 @@ MAX_HANDLER_FILE_BYTES = 5 * 1024 * 1024
 MAX_HANDLER_TOTAL_BYTES = 20 * 1024 * 1024
 MAX_INPUT_BYTES = 256 * 1024
 
-SIDE_EFFECTS_UNSUPPORTED = (
-    "side_effects tools are not supported in v1: no backend idempotency record exists for "
-    "(agent, tool, key) results, so a Temporal retry could repeat the side effect"
-)
+# Environment variable carrying a side-effecting call's idempotency key.
+IDEMPOTENCY_KEY_ENV = "ROSE_IDEMPOTENCY_KEY"
 
 
 class UserToolSpecError(ValueError):
@@ -128,6 +141,52 @@ def safe_relative_path(path: Any, *, prefix: str) -> str:
     return normalized
 
 
+def _side_effect_fields(raw: Dict[str, Any], input_schema: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+    side_effects = raw.get("side_effects")
+    if not isinstance(side_effects, bool):
+        raise UserToolSpecError("side_effects must be a boolean")
+    field = raw.get("idempotency_key_field")
+    if field is None:
+        return side_effects, None
+    if not side_effects:
+        raise UserToolSpecError("idempotency_key_field is only valid with side_effects: true")
+    if not isinstance(field, str) or not INPUT_FIELD_RE.match(field):
+        raise UserToolSpecError("idempotency_key_field must match [a-z_][a-z0-9_]* (max 64 chars)")
+    if field in (input_schema.get("properties") or {}) or field == "tool":
+        raise UserToolSpecError(
+            "idempotency_key_field must not be an input_schema property: Rose fills it, never the agent"
+        )
+    return side_effects, field
+
+
+def _timeout_seconds(raw: Dict[str, Any]) -> int:
+    timeout_raw = raw.get("timeout_s", USER_TOOL_DEFAULT_TIMEOUT_S)
+    if isinstance(timeout_raw, bool) or not isinstance(timeout_raw, (int, float)):
+        raise UserToolSpecError("timeout_s must be a number")
+    if timeout_raw <= 0 or timeout_raw > USER_TOOL_MAX_TIMEOUT_S:
+        raise UserToolSpecError(f"timeout_s must be in (0, {USER_TOOL_MAX_TIMEOUT_S}]")
+    return max(1, int(timeout_raw))
+
+
+def _handler_files(
+    raw: Dict[str, Any], source_name: str, manifest_files: Optional[Iterable[str]]
+) -> Tuple[str, List[str]]:
+    prefix = f"tools/{source_name}/"
+    entry = safe_relative_path(raw.get("entry"), prefix=prefix)
+    files = {entry}
+    extra = raw.get("files") or []
+    if not isinstance(extra, list):
+        raise UserToolSpecError("files must be a list of paths relative to the tool directory")
+    for rel in extra:
+        files.add(safe_relative_path(posixpath.join(prefix, str(rel)), prefix=prefix))
+    for path in manifest_files or []:
+        if isinstance(path, str) and path.startswith(prefix):
+            files.add(safe_relative_path(path, prefix=prefix))
+    if len(files) > MAX_HANDLER_FILES:
+        raise UserToolSpecError(f"a tool may ship at most {MAX_HANDLER_FILES} files")
+    return entry, sorted(files)
+
+
 def normalize_tool_spec(
     raw: Any,
     *,
@@ -136,7 +195,7 @@ def normalize_tool_spec(
 ) -> UserToolSpec:
     """Validate a parsed tool.json and return the pinned spec.
 
-    Raises UserToolSpecError for any contract violation (including side effects in v1).
+    Raises UserToolSpecError for any contract violation.
     """
     if not TOOL_NAME_RE.match(source_name or ""):
         raise UserToolSpecError(f"tool name {source_name!r} must match [a-z0-9_]+")
@@ -160,39 +219,12 @@ def normalize_tool_spec(
     if output_schema is not None:
         output_schema = _check_schema(output_schema, "output_schema", require_object=False)
 
-    side_effects = raw.get("side_effects")
-    if not isinstance(side_effects, bool):
-        raise UserToolSpecError("side_effects must be a boolean")
-    idempotency_key_field = raw.get("idempotency_key_field")
-    if side_effects:
-        if not isinstance(idempotency_key_field, str) or not idempotency_key_field:
-            raise UserToolSpecError("side_effects tools must declare idempotency_key_field")
-        raise UserToolSpecError(SIDE_EFFECTS_UNSUPPORTED)
-
-    timeout_raw = raw.get("timeout_s", USER_TOOL_DEFAULT_TIMEOUT_S)
-    if isinstance(timeout_raw, bool) or not isinstance(timeout_raw, (int, float)):
-        raise UserToolSpecError("timeout_s must be a number")
-    if timeout_raw <= 0 or timeout_raw > USER_TOOL_MAX_TIMEOUT_S:
-        raise UserToolSpecError(f"timeout_s must be in (0, {USER_TOOL_MAX_TIMEOUT_S}]")
-    timeout_s = max(1, int(timeout_raw))
-
+    side_effects, idempotency_key_field = _side_effect_fields(raw, input_schema)
+    timeout_s = _timeout_seconds(raw)
     runtime = raw.get("runtime")
     if runtime not in RUNTIMES:
         raise UserToolSpecError(f"runtime must be one of {list(RUNTIMES)}")
-
-    prefix = f"tools/{source_name}/"
-    entry = safe_relative_path(raw.get("entry"), prefix=prefix)
-    files = {entry}
-    extra = raw.get("files") or []
-    if not isinstance(extra, list):
-        raise UserToolSpecError("files must be a list of paths relative to the tool directory")
-    for rel in extra:
-        files.add(safe_relative_path(posixpath.join(prefix, str(rel)), prefix=prefix))
-    for path in manifest_files or []:
-        if isinstance(path, str) and path.startswith(prefix):
-            files.add(safe_relative_path(path, prefix=prefix))
-    if len(files) > MAX_HANDLER_FILES:
-        raise UserToolSpecError(f"a tool may ship at most {MAX_HANDLER_FILES} files")
+    entry, files = _handler_files(raw, source_name, manifest_files)
 
     render = raw.get("render")
     render_view: Optional[str] = None
@@ -208,12 +240,12 @@ def normalize_tool_spec(
         "input_schema": input_schema,
         "output_schema": output_schema,
         "render_view": render_view,
-        "side_effects": False,
-        "idempotency_key_field": None,
+        "side_effects": side_effects,
+        "idempotency_key_field": idempotency_key_field,
         "timeout_s": timeout_s,
         "runtime": runtime,
         "entry": entry,
-        "files": sorted(files),
+        "files": files,
     }
     return spec
 
@@ -230,14 +262,29 @@ def _first_schema_error(schema: Dict[str, Any], value: Any) -> Optional[str]:
     return f"{where}: {error.message}"
 
 
-def validate_tool_input(spec: UserToolSpec, tool_input: Any) -> Tuple[Optional[bytes], Optional[str]]:
-    """Return ``(stdin_bytes, error)`` for the handler's JSON input."""
+def user_tool_call_key(root_workflow_id: str, tool_call_id: str) -> str:
+    """Idempotency key of one user-tool call; stable across Temporal retries and replays."""
+    return hashlib.sha256(f"user_tool\0{root_workflow_id}\0{tool_call_id}".encode("utf-8")).hexdigest()
+
+
+def validate_tool_input(
+    spec: UserToolSpec, tool_input: Any, idempotency_key: Optional[str] = None
+) -> Tuple[Optional[bytes], Optional[str]]:
+    """Return ``(stdin_bytes, error)`` for the handler's JSON input.
+
+    The idempotency key is added under ``idempotency_key_field`` after
+    validation: the agent never supplies it, so it is not in input_schema.
+    """
     if not isinstance(tool_input, dict):
         return None, "tool input must be a JSON object"
     error = _first_schema_error(spec.get("input_schema") or {}, tool_input)
     if error:
         return None, f"input does not match input_schema: {error}"
-    encoded = json.dumps(tool_input, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    payload = dict(tool_input)
+    field = spec.get("idempotency_key_field")
+    if field and idempotency_key:
+        payload[field] = idempotency_key
+    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     if len(encoded) > MAX_INPUT_BYTES:
         return None, f"tool input exceeds {MAX_INPUT_BYTES} bytes"
     return encoded, None
@@ -276,3 +323,75 @@ def build_inline_view(
 
 def tail_text(data: bytes, limit: int) -> str:
     return data[-limit:].decode("utf-8", errors="replace").strip()
+
+
+# ── Handler run records: one shape for every executor, stored for side effects ──
+
+
+class HandlerRun(TypedDict, total=False):
+    """What one handler process did. JSON-safe; the stored side-effect record."""
+
+    returncode: Optional[int]
+    stdout_b64: str  # empty on overflow (the bytes are dropped)
+    stderr_tail: str
+    timed_out: bool
+    overflow: bool
+    executor: str
+    code_session_id: Optional[str]
+
+
+def handler_run_record(
+    *,
+    returncode: Optional[int],
+    stdout: bytes,
+    stderr_tail: str,
+    timed_out: bool,
+    overflow: bool,
+    executor: str,
+    code_session_id: Optional[str] = None,
+) -> HandlerRun:
+    overflow = bool(overflow) or len(stdout) > MAX_STDOUT_BYTES
+    return {
+        "returncode": returncode,
+        "stdout_b64": "" if overflow else base64.b64encode(stdout).decode("ascii"),
+        "stderr_tail": stderr_tail[-STDERR_TAIL_BYTES:],
+        "timed_out": bool(timed_out),
+        "overflow": overflow,
+        "executor": executor,
+        "code_session_id": code_session_id,
+    }
+
+
+def outcome_error(kind: str, message: str, **extra: Any) -> Dict[str, Any]:
+    return {"ok": False, "error_kind": kind, "error": message, **extra}
+
+
+def shape_handler_run(spec: UserToolSpec, version_id: Optional[str], run: Any) -> Dict[str, Any]:
+    """The tool outcome for a run record (pure: a replayed record gives the same outcome)."""
+    if not isinstance(run, dict):
+        return outcome_error("executor", "handler run record is malformed")
+    timeout_s = int(spec.get("timeout_s") or USER_TOOL_DEFAULT_TIMEOUT_S)
+    stderr_tail = str(run.get("stderr_tail") or "")[-STDERR_TAIL_BYTES:]
+    if run.get("timed_out"):
+        return outcome_error("timeout", f"handler timed out after {timeout_s}s", stderr_tail=stderr_tail)
+    if run.get("overflow"):
+        return outcome_error("output_too_large", f"handler output exceeds {MAX_STDOUT_BYTES} bytes")
+    returncode = run.get("returncode")
+    if returncode != 0:
+        message = f"handler exited with code {returncode}"
+        if stderr_tail:
+            message += f": {stderr_tail}"
+        return outcome_error("exit", message, stderr_tail=stderr_tail)
+    try:
+        stdout = base64.b64decode(str(run.get("stdout_b64") or ""), validate=True)
+    except ValueError:
+        return outcome_error("executor", "handler run record has an invalid stdout encoding")
+    result, output_error = parse_handler_output(spec, stdout)
+    if output_error or result is None:
+        return outcome_error("output", output_error or "invalid output")
+    return {
+        "ok": True,
+        "result": result,
+        "inline_view": build_inline_view(spec, version_id, result),
+        "output_bytes": len(stdout),
+    }

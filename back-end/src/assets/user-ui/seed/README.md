@@ -45,12 +45,18 @@ published, and neither is screenshots/. Limits: 10 MB per file, 50 MB total,
                          "poster": "inline/<view-name>/poster.png" }
       },
       "tools": { "<tool_name>": { "manifest": "tools/<tool_name>/tool.json" } },
+      "apps": {
+        "<app-name>": { "title": "Tip calculator",
+                        "entry": "apps/<app-name>/index.html",
+                        "icon": "apps/<app-name>/icon.svg" }
+      },
       "capabilities": ["read", "subscribe", "navigate", "create_agent", "send_message"]
     }
 
 Every key except "version" is optional. Paths are relative to this folder (no
 "/" prefix, no ".."). Every referenced path must exist or publishing fails.
-View names match [a-z0-9-]+; tool names match [a-z0-9_]+.
+View and app names match [a-z0-9-]+; tool names match [a-z0-9_]+. An app's
+entry and icon live inside apps/<app-name>/, and "rose" is reserved.
 
 theme.json:
 
@@ -108,6 +114,20 @@ with a one-line summary, run `rose-ui publish`, then name the view in your
 final response. If you cannot call send_message_to_user yourself, the agent
 that spawned you shows it.
 
+## Apps
+
+An app is a standalone page the user opens full screen from the Apps section
+of the left bar ("make me an app", "+ new app"). Put it in apps/<app-name>/
+with an index.html entry (scripts, styles and data in the bundle; the CSP
+blocks external scripts and fetches), and add it under "apps" in rose-ui.json
+with a short title and an optional icon. `rose-ui dev` previews it at
+/file/apps/<app-name>/index.html; `rose-ui check` measures it like a view.
+`rose-ui publish` gives it the user's app URL on usercontent and adds it to
+the Apps section; every publish is a version the user can restore from
+History. A built app (for example a vite project's `npm run build` output)
+goes in the same folder: copy the build into apps/<app-name>/ with relative
+asset paths.
+
 ## Tools for the user's agent
 
 tools/<tool_name>/tool.json:
@@ -118,7 +138,8 @@ tools/<tool_name>/tool.json:
       "input_schema": { "type": "object", "properties": { ... } },
       "output_schema": { ... },              optional; results are validated
       "render": { "view": "<view-name>" },   optional; result becomes that inline view's props
-      "side_effects": false,                 v1 supports read-only tools only
+      "side_effects": false,                 true if a call changes anything outside the tool
+      "idempotency_key_field": "request_id", optional, side_effects only (see below)
       "timeout_s": 60,                       default 60, max 300
       "runtime": "node",                     or "python"
       "entry": "tools/<tool_name>/handler.js",
@@ -127,8 +148,16 @@ tools/<tool_name>/tool.json:
 
 The handler reads one JSON object (the input) on stdin and writes one JSON
 object on stdout. A non-zero exit is reported to the agent as a tool error.
-It runs with no secrets in its environment and a 256 KB output cap. After
-publishing, the user's next root-agent run can call it as user__<tool_name>.
+It runs in this user's own code session (a fresh working directory each
+call), with no secrets in its environment, the timeout_s limit and a 256 KB
+output cap. After publishing, the user's next root-agent run can call it as
+user__<tool_name>.
+
+A side_effects tool runs at most once per agent tool call: a retried call
+gets the recorded result back without running the handler again. Its
+handler receives the call's idempotency key as ROSE_IDEMPOTENCY_KEY (and in
+its input under idempotency_key_field, which must not be an input_schema
+property); pass it to downstream APIs that accept one.
 
 ## See your work
 
