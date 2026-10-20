@@ -20514,7 +20514,9 @@ def test_refresh_deps_mode_contract() -> None:
     # donor is stopped by signal, then snapshotted. Dirty page cache is lost on
     # that stop (truncated WMH blobs, wmh-donor-snapshot-unflushed-blobs), so
     # the remote command must flush before it reports DONE.
-    assert mode.index("sync -f '$REMOTE_REPO' && sync") < mode.index("echo '::DEPS-REFRESH-DONE::'")
+    # Separate commands: under set -e a failed `sync -f` in `a && b` would not
+    # stop the command before DONE (CodeRabbit on the WMH refresh, PR #1560).
+    assert mode.index("sync -f '$REMOTE_REPO'\nsync\n") < mode.index("echo '::DEPS-REFRESH-DONE::'")
     # stop precedes the snapshot cut
     assert mode.index('stop_machine_strict "$mid"') < mode.index('create_volume_snapshot_exact "$VOL_ID"')
     # bounded wait for a COMPLETE fresh snapshot: a measured donor snapshot ran
