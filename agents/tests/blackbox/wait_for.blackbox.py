@@ -2141,6 +2141,14 @@ async def test_wait_for_agents_any_and_user_message():
         gates["draft_a"].set()
         await wf._background_handles["toolu_a"]
 
+        # Nothing running: "any" returns at once (tree-feedback-routing a1f51afd waited
+        # 6 minutes after every drafter had finished and its answer was delivered).
+        assert wf._pending_background_ids() == []
+        status, result = await asyncio.wait_for(wait_for(wf, {"description": "any", "agents": "any"}, "tc-any3"), 2)
+        assert result.startswith("None of your agents is running, so there is nothing to wait for."), result
+        assert "- /root/draft_a: completed" in result and "- /root/draft_b: completed" in result, result
+        assert rows.for_call("tc-any3")[-1]["metadata"]["wokenBy"] == "none_running"
+
 
 async def test_wait_for_agents_mode_timeout_reports_status_and_reads_tree_for_others():
     from domains.wait_for.handler import wait_for

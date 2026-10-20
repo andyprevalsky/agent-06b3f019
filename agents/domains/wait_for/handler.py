@@ -847,11 +847,16 @@ class WaitForManager(ToolManager):
 
         already = [t for t in targets if _is_finished_status(t.get("status"))]
         wake: Optional[dict[str, Any]] = None
-        if not already:
 
-            def _matches(event: dict[str, Any]) -> bool:
-                return _agent_event_matches(event, None if any_agent else targets)
+        def _matches(event: dict[str, Any]) -> bool:
+            return _agent_event_matches(event, None if any_agent else targets)
 
+        # "any" with nothing running has nothing to wait for (tree-feedback-routing
+        # a1f51afd: the lead waited 6 minutes after all of its drafters had finished).
+        none_running = any_agent and not _running_own_agents(workflow_instance)
+        if none_running:
+            wake = first_wake(workflow_instance, mark, (), _matches)
+        elif not already:
             remaining = (deadline - _utc_now()).total_seconds()
             try:
                 woken = await sleep_until_woken_or_generation_handoff(
@@ -882,6 +887,9 @@ class WaitForManager(ToolManager):
         if already:
             headline = f"{', '.join(t['address'] for t in already)} already finished."
             woken_by = "already_finished"
+        elif wake is None and none_running:
+            headline = "None of your agents is running, so there is nothing to wait for."
+            woken_by = "none_running"
         elif wake is not None and _woke_before_start(wake, started):
             label = describe_wake(wake, await _wake_source_task_path(workflow_instance, wake, targets))
             headline = f"Woken by {label} received before the wait started."
@@ -908,6 +916,11 @@ class WaitForManager(ToolManager):
             metadata={**base_meta, "wokenBy": woken_by},
             data={"wait_result": text},
         )
+
+
+def _running_own_agents(workflow_instance: Any) -> list[str]:
+    pending = getattr(workflow_instance, "_pending_background_ids", None)
+    return list(pending()) if callable(pending) else []
 
 
 def _wait_for_error(message: str) -> ToolEvent:
