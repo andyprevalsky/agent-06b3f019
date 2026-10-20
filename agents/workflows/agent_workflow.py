@@ -6,7 +6,6 @@ Uses run_agent for the core loop. Workflow handles:
 - continue_as_new for context overflow
 """
 
-from helpers.wmh_activity_policy import wmh_activity_timeout_options
 import asyncio
 import contextlib
 import hashlib
@@ -22,6 +21,8 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
+from helpers.wmh_activity_policy import wmh_activity_timeout_options
+
 # Import pass-through for workflow context:
 # - Our own modules are safe (config.py has no import-time side effects)
 # - Third-party libraries (httpx, instructor) may have import-time issues
@@ -33,6 +34,7 @@ with workflow.unsafe.imports_passed_through():
         spawn_agent,
     )
     from domains.spawn_agent.oai_demo_report_files import materialize_oai_demo_report_files_activity
+    from domains.user_tools.handler import declared_user_tools, pin_user_tools, run_user_tool
     from domains.wait_for.service import pending_timestamp_wait_to_resume
     from helpers import (
         check_user_usage,
@@ -133,6 +135,7 @@ with workflow.unsafe.imports_passed_through():
         build_verifier_prompt,
     )
     from utils.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS
+    from utils.user_tool_models import is_user_tool_name
 
 logger = structlog.get_logger()
 
@@ -755,6 +758,10 @@ class AgentWorkflow:
         self.root_goal: Optional[str] = None
         self.fast_mode_cache_enabled: bool = False
         self.memory_enabled: bool = False
+        # User-authored tools pinned once per run (domains/user_tools); carried
+        # across continue_as_new so a mid-run publish never changes the toolset.
+        self.user_tools: Dict[str, Any] = {}
+        self.user_tools_pinned: bool = False
         # Fast Mode button — LLM provider speed only (Anthropic speed / OpenAI priority).
         # Independent of DEMO cache replay (self.fast_mode_cache_enabled).
         self.provider_fast_mode: bool = True
@@ -1008,6 +1015,9 @@ class AgentWorkflow:
             }
         if isinstance(state.get("memory_enabled"), bool):
             self.memory_enabled = state["memory_enabled"]
+        if isinstance(state.get("user_tools"), dict):
+            self.user_tools = dict(state["user_tools"])
+            self.user_tools_pinned = True
         self._cost_limit_reached = self._resume_prior_status == "COST_LIMIT_REACHED"
         if self._resume_prior_status == "OUT_OF_CREDITS":
             self._has_credits = False
@@ -1292,6 +1302,7 @@ class AgentWorkflow:
             "max_iterations": self.max_iterations,
             "context_gates": dict(self.context_gates),
             "memory_enabled": bool(getattr(self, "memory_enabled", False)),
+            **({"user_tools": dict(self.user_tools)} if getattr(self, "user_tools_pinned", False) else {}),
             "runtime_state": {
                 "last_message_check": self._serialized_datetime(self.last_message_check),
                 "paused_by_parent": self._paused_by_parent,
@@ -2217,6 +2228,11 @@ class AgentWorkflow:
         # startup generation establishes the initial contract; later genuine user
         # feedback refreshes the accepted native schema asynchronously.
         is_sub_agent = bool(parent_workflow_id or parent_agent_id or fetched_parent_agent_id)
+        # Pin the user's published tools once (root, real world only; restored on continue_as_new).
+        await pin_user_tools(
+            self,
+            is_root=not is_sub_agent and self.depth == 0 and self.world_model_mode == "real",
+        )
         startup_execute_context: Optional[List[Dict[str, Any]]] = None
         # Chat re-escalation after a terminal run starts a new workflow with
         # plan|execute and no resume_state. continue_as_new / deploy resume
@@ -3305,6 +3321,7 @@ class AgentWorkflow:
                     "context": list(self.context),
                 }
             run_agent_kwargs["get_requirement_revision"] = lambda: self._response_schema_revision
+            run_agent_kwargs.setdefault("user_tools", declared_user_tools(self))
             return await run_agent(**run_agent_kwargs)
         finally:
             self._tool_parking_enabled = False
@@ -3852,6 +3869,10 @@ class AgentWorkflow:
             # Leftover-safe: Fast Mode waits for explore like live, so this
             # is a no-op unless something still tracked a handle.
             await self._drain_fast_mode_explores()
+        if is_user_tool_name(tool_name):
+            # Pinned user-authored tool: runs its own activity and posts its own
+            # FINISHED/ERROR TOOL message (never raises).
+            return await run_user_tool(self, tool_name, tool_args, tool_call_id)
         if tool_name not in TOOL_EXECUTORS:
             error_msg = f"Unknown tool: {tool_name}"
             await self._handle_tool_event(

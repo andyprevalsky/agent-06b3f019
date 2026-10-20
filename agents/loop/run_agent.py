@@ -62,7 +62,8 @@ from utils.llm_timeouts import (
     STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS,
     VERIFIER_ACTIVITY_TIMEOUT_SECONDS,
 )
-from utils.tool_schemas import PLAN_TOOL_MODELS, create_agent_action_model
+from utils.tool_schemas import PLAN_TOOL_MODELS, create_agent_action_model, get_tool_models
+from utils.user_tool_models import build_user_tool_registry, llm_declarations
 
 logger = structlog.get_logger()
 
@@ -254,6 +255,9 @@ async def run_agent(
     # namespace (exact-match). Both flow from the workflow; default off = no-op.
     fast_mode_cache_enabled: bool = False,
     goal_text: Optional[str] = None,
+    # Pinned user-authored tools (root agent only; see domains/user_tools). Declared
+    # after the built-in tools, sorted by name, so the cached tool prefix is stable.
+    user_tools: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Run the unified agent loop.
@@ -367,11 +371,19 @@ async def run_agent(
     # wins (e.g., browser agent). During PLAN we narrow spawn_agent to the
     # explore-only variant via PLAN_TOOL_MODELS so the LLM can't pick an
     # invalid `type` — runtime validation was burning 4 retries per error.
-    AgentAction = (
-        response_model
-        if response_model
-        else create_agent_action_model(tools, tool_registry=PLAN_TOOL_MODELS if is_plan_loop else None)
-    )
+    user_tool_decls = llm_declarations(user_tools) if not response_model else []
+    if user_tool_decls:
+        base_registry = dict(PLAN_TOOL_MODELS) if is_plan_loop else get_tool_models()
+        AgentAction = create_agent_action_model(
+            [*tools, *(decl["name"] for decl in user_tool_decls)],
+            tool_registry={**base_registry, **build_user_tool_registry(user_tool_decls)},
+        )
+    else:
+        AgentAction = (
+            response_model
+            if response_model
+            else create_agent_action_model(tools, tool_registry=PLAN_TOOL_MODELS if is_plan_loop else None)
+        )
 
     def _remember_successful_compute_token(token: Optional[Dict[str, Any]]) -> None:
         nonlocal remembered_claude_token
@@ -1472,6 +1484,7 @@ async def run_agent(
                         # an older replayed history falls back to the default.
                         exclude_anthropic_family_on_llm_retry,
                         pending_context_token,
+                        user_tool_decls or None,
                     ],
                     start_to_close_timeout=timedelta(seconds=STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS),
                     retry_policy=RetryPolicy(maximum_attempts=3),
