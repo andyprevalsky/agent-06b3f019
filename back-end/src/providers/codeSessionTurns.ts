@@ -8,7 +8,10 @@
  *          ◄──────            {type:"user_turn_ack", id, status, reason?}
  *
  * The ws-server dedupes by `id` for the life of the session, so retries never
- * write a second turn. `token` is an HMAC of the task id under
+ * write a second turn. `rejected` reasons: `relay_paused` (an agent turn while
+ * the user holds the session), `session_ended`, `provider_unsupported`
+ * (Codex), `unauthorized`, `invalid_text`, `invalid_id`. The control socket
+ * connects with `?replay=0` so the ack never queues behind the history replay. `token` is an HMAC of the task id under
  * BACKEND_API_KEY, injected into the sandbox as CODE_SESSION_TURN_TOKEN at
  * creation: the stream URL the browser reads stays read-only.
  */
@@ -36,6 +39,13 @@ export function codeSessionTurnToken(taskId: string, secret = process.env.BACKEN
   return createHmac('sha256', secret).update(`${TURN_TOKEN_CONTEXT}${taskId}`).digest('hex');
 }
 
+/** The session URL with the ws-server's history replay disabled. */
+export function controlWsUrl(wsUrl: string): string {
+  const url = new URL(wsUrl);
+  url.searchParams.set('replay', '0');
+  return url.toString();
+}
+
 interface AckMessage {
   type?: string;
   id?: string;
@@ -50,7 +60,7 @@ function sendAndAwaitAck(
   timeoutMs: number
 ): Promise<AckMessage> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(wsUrl);
+    const ws = new WebSocket(controlWsUrl(wsUrl));
     let settled = false;
     const finish = (fn: () => void) => {
       if (settled) return;

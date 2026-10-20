@@ -87,6 +87,30 @@ export async function findAgentFastModeCache(agentId: string): Promise<boolean> 
   return agent?.fastModeCacheEnabled ?? false;
 }
 
+/**
+ * The code session's spawn chip (its first row): the tool call that renders it
+ * and the CLI provider. One indexed per-agent lookup.
+ */
+export async function findCodeSessionChip(
+  agentId: string,
+  taskId: string
+): Promise<{ toolCallId: string | null; provider: 'claude' | 'codex' }> {
+  const row = await prisma.message.findFirst({
+    where: { agentId, metadata: { path: ['task_id'], equals: taskId } },
+    orderBy: { timestamp: 'asc' },
+    select: { metadata: true },
+  });
+  const fields =
+    row?.metadata !== null && typeof row?.metadata === 'object' && !Array.isArray(row.metadata)
+      ? (row.metadata as Record<string, unknown>)
+      : {};
+  return {
+    toolCallId:
+      typeof fields.toolCallId === 'string' && fields.toolCallId !== '' ? fields.toolCallId : null,
+    provider: fields.code_provider === 'codex' ? 'codex' : 'claude',
+  };
+}
+
 /** Session fields needed to address a live code session for direct chat. */
 export async function findSessionForDirectChat(taskId: string) {
   return prisma.claudeCodeSession.findUnique({
