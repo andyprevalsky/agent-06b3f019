@@ -53,6 +53,7 @@ import {
   deleteLanternIntegration,
   LanternCredentialError,
 } from './service.lantern';
+import { settleLinkedInSync } from './service.linkedinSync';
 export { LanternCredentialError } from './service.lantern';
 
 const log = createLogger('Integrations');
@@ -180,9 +181,12 @@ export async function getIntegrations(userId: string) {
 
   log.info('Fetching integrations', { userId, domainsCached: hasCachedDomains });
 
-  const integrations = withDerivedConnectedEmails(await repo.findIntegrationsByUser(userId)).map(
-    redactLanternIntegration
-  );
+  const integrations = (
+    await settleLinkedInSync(
+      userId,
+      withDerivedConnectedEmails(await repo.findIntegrationsByUser(userId))
+    )
+  ).map(redactLanternIntegration);
   log.info('Integrations query done', { durationMs: Date.now() - queryStart });
 
   const authenticatedDomains = await repo.getAuthenticatedDomains(userId);

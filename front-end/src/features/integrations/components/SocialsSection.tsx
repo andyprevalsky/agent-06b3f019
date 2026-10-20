@@ -4,9 +4,13 @@
  * [COLLAPSED] --toggle--> [EXPANDED] --toggle--> [COLLAPSED]
  *
  * Sub-items:
- *   LinkedIn: [IDLE] --click--> [SYNCING] --spawned--> [STARTED] (Desktop only,
- *     spawns one export agent; once started the row icon lights with the rose
- *     glow and re-export is blocked)
+ *   LinkedIn (Desktop only; state is the server's `linkedin` integration row):
+ *     [IDLE | SYNC_FAILED] --click--> [SPAWNING] --agent recorded--> [SYNCING]
+ *     [SPAWNING] --spawn fails--> [IDLE] (retryable)
+ *     [SYNCING] --export agent uploads--> [CONNECTED]
+ *     [SYNCING] --export agent ends without uploading--> [SYNC_FAILED]
+ *     SYNCING shows "Connecting your data…" across refreshes; SYNCING and
+ *     CONNECTED light the rose glow and block re-export.
  *   X, Instagram: [COMING_SOON] (static)
  */
 
@@ -22,6 +26,7 @@ interface SocialsSectionProps {
   isBrowserCookiesAvailable: boolean;
   linkedinSyncLoading: boolean;
   linkedinSyncStarted: boolean;
+  linkedinConnected: boolean;
   onLinkedInSync: () => void;
 }
 
@@ -108,11 +113,13 @@ function LinkedInRow({
   isAvailable,
   loading,
   started,
+  connected,
   onSync,
 }: {
   isAvailable: boolean;
   loading: boolean;
   started: boolean;
+  connected: boolean;
   onSync: () => void;
 }) {
   if (!isAvailable) {
@@ -138,7 +145,7 @@ function LinkedInRow({
   return (
     <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
       <div className="flex items-center gap-3">
-        <DropdownIconFrame {...DropdownIconPreset.linkedin} isSynced={started}>
+        <DropdownIconFrame {...DropdownIconPreset.linkedin} isSynced={started || connected}>
           <LinkedInIcon />
         </DropdownIconFrame>
         <div className="flex min-w-0 flex-col">
@@ -152,7 +159,7 @@ function LinkedInRow({
       </div>
       <button
         onClick={onSync}
-        disabled={loading || started}
+        disabled={loading || started || connected}
         aria-label="Connect LinkedIn"
         className="h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground disabled:opacity-60 disabled:hover:bg-muted disabled:hover:text-muted-foreground"
       >
@@ -172,13 +179,15 @@ export default function SocialsSection({
   isBrowserCookiesAvailable,
   linkedinSyncLoading,
   linkedinSyncStarted,
+  linkedinConnected,
   onLinkedInSync,
 }: SocialsSectionProps) {
+  const linkedinActive = linkedinSyncStarted || linkedinConnected;
   return (
     <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
       <div className="p-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <DropdownIconFrame {...DropdownIconPreset.socialsMain} isSynced={linkedinSyncStarted}>
+          <DropdownIconFrame {...DropdownIconPreset.socialsMain} isSynced={linkedinActive}>
             <SocialsIcon />
           </DropdownIconFrame>
           <div className="flex flex-col">
@@ -187,7 +196,7 @@ export default function SocialsSection({
           </div>
         </div>
         <SectionToggleButton
-          isConnected={linkedinSyncStarted}
+          isConnected={linkedinActive}
           onClick={onToggle}
           sectionLabel="Socials"
         />
@@ -207,6 +216,7 @@ export default function SocialsSection({
             isAvailable={isBrowserCookiesAvailable}
             loading={linkedinSyncLoading}
             started={linkedinSyncStarted}
+            connected={linkedinConnected}
             onSync={onLinkedInSync}
           />
           <div className="px-4 py-2 flex items-center justify-between">

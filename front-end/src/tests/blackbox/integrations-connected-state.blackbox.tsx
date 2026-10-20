@@ -289,7 +289,7 @@ describe('Integrations connected-state treatment', () => {
         whatsApp: { isAvailable: true, connect: whatsAppConnect },
       } as unknown as Parameters<typeof useMessagesSync>[0];
 
-      const { result } = renderHook(() => useMessagesSync(handlers, async () => {}));
+      const { result } = renderHook(() => useMessagesSync(handlers, async () => {}, null));
 
       let iMessagePending: Promise<void> | undefined;
       act(() => {
