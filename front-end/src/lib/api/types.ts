@@ -172,6 +172,7 @@ export interface CreateAgentPayload {
   attachments?: FilePointer[]; // Optional file attachments for the initial goal message
   price_limit_cents?: number; // Defaults to $10.00
   depth?: number; // Depth >= 1 auto-responds to questions (used for agentic integrations)
+  start_phase?: 'plan' | 'execute'; // Skip chat routing: start the cloud agent workflow directly
   fast_mode_cache_enabled?: boolean; // Fast Mode button → LLM provider speed (DEMO cache is prompt-matched)
   world_model_mode?: 'real' | 'simulate' | 'shadow'; // Per-agent provider/environment execution mode
 }

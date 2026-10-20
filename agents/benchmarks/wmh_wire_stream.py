@@ -34,7 +34,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
-from benchmarks.wmh_outcomes import apply_state_patch
+from benchmarks.wmh_outcomes import apply_state_patch, apply_state_patch_in_place
 
 STREAM_GUIDE = (
     "\n\nWORLD EVIDENCE STREAM: this step's evidence object arrives as the following user messages, oldest "
@@ -165,6 +165,12 @@ def streamable(evidence: Any) -> bool:
 def fold_stream(units: list[str], final: str) -> dict:
     """Rebuild the exact evidence object a stream rendering encodes."""
     task = state = None
+    # Every unit is freshly decoded, so nothing here aliases the caller's data.
+    # Change units apply in place to one private copy of the baseline. The
+    # result equals applying apply_state_patch per unit; re-encoding the whole
+    # state after every unit made each fold quadratic in the world's history,
+    # and the provider folds every request on its one event loop (SIM run 7).
+    owned = False
     history: list = []
     contexts: dict = {}
     examples: dict = {}
@@ -176,9 +182,12 @@ def fold_stream(units: list[str], final: str) -> dict:
         if tag == "task":
             task = value
         elif tag == "environment_state_baseline":
-            state = deepcopy(value)
+            state, owned = value, False
         elif tag == "environment_state_changes":
-            state = apply_state_patch(state, value)
+            if not owned:
+                state, owned = apply_state_patch(state, value), True
+            elif not apply_state_patch_in_place(state, value):
+                json.dumps(state, allow_nan=False)
         elif tag == "visible_conversation":
             history.extend(value)
         elif tag == "reference_material":

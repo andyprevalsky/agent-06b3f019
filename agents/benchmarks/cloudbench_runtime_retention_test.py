@@ -254,11 +254,22 @@ fleet_recovery_confirm_forensic_retirement {shlex.quote(str(registry))}
         "borrowed-sibling",
         "absent-seal",
         "absent-listed-file",
+        "wmh-serve-log",
+        "unknown-listed-file",
     ],
 )
 def test_primary_retention_rechecks_complete_capture(tmp_path: Path, corrupt: str) -> None:
     out = tmp_path / "task"
     root = primary_fixture(out)
+    if corrupt in ("wmh-serve-log", "unknown-listed-file"):
+        # A SIM guest seals its optional WMH serve log beside the stack files; the
+        # controller collects it, so the fleet's final validator must accept it.
+        name = "wmh-serve-log.txt" if corrupt == "wmh-serve-log" else "unexpected.txt"
+        payload = b"wmh_step_committed prediction_ms=10\n"
+        (root / name).write_bytes(payload)
+        manifest = json.loads((root / "manifest.json").read_text())
+        manifest["files"][name] = {"bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
+        (root / "manifest.json").write_text(json.dumps(manifest))
     if corrupt == "absent-seal":
         # A guest stopped before collection never produced remote-logs at all.
         shutil.rmtree(out / "remote-logs")
@@ -290,7 +301,7 @@ def test_primary_retention_rechecks_complete_capture(tmp_path: Path, corrupt: st
         timeout=10,
         check=False,
     )
-    assert (result.returncode == 0) == (corrupt == "none"), result.stderr
+    assert (result.returncode == 0) == (corrupt in ("none", "wmh-serve-log")), result.stderr
     if corrupt.startswith("absent-"):
         # The absence is reported as such, never as a raw resolver traceback.
         assert "Traceback" not in result.stderr and "FileNotFoundError" not in result.stderr, result.stderr
@@ -702,6 +713,7 @@ def test_boot_admission_archives_only_verified_completed_standalone_runs(tmp_pat
 @pytest.mark.parametrize(
     "case",
     [
+        "wmh-serve-log",
         "seal-transition",
         "manifest-url",
         "manifest-timeout",

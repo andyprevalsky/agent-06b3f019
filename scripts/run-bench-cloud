@@ -12,7 +12,8 @@
 #
 # The per-run path is HANDS-OFF + WARM:
 #     one-time  : --setup  → volume + machine + git clone
-#     rare      : --refresh-wmh → (re)build the cached WMH model on the volume
+#     rare      : --build-wmh → build the native WMH on an owned big machine + publish
+#                 --refresh-wmh → restore the published serving cache onto the volume
 #     per run   : <task...> [--simulate] → start warm machine → detach the on-box
 #                  driver (cloudbench-run.sh) → serve-cached-WMH → run_benchmark →
 #                  proxy the live dashboard to the Mac → retrieve report card +
@@ -53,7 +54,18 @@
 #   --builder native|depot  image-build only; native default, Depot app scope/zstd 3
 #   --no-cache         explicitly bypass image build layers (build/setup only)
 #   --build-context D  build the unchanged source in another checkout
-#   --refresh-wmh      explicit-only: (re)build the cached WMH model on /data/world-model
+#   --refresh-wmh      explicit-only: refresh the cached WMH models on the donor
+#                      (native default: restore WMH_CACHE_NAME into /data/world-model-native
+#                      + pre-create the native venv, and restore WMH_LEGACY_CACHE_NAME
+#                      (default rose-r2-archive-legacy) into /data/world-model only when
+#                      the legacy model is missing; fails before a pull without room;
+#                      WMH_ENGINE=legacy rebuilds on-box)
+#   --build-wmh        explicit-only: build the native WMH on an OWNED ephemeral
+#                      Machine+Volume forked from the donor snapshot (WMH_BUILD_VM_SIZE
+#                      performance-8x, WMH_BUILD_VM_MEMORY_MB 65536, WMH_BUILD_VOLUME_GB
+#                      80), push WMH_CACHE_NAME (serving-only) + WMH_FULL_CACHE_NAME
+#                      (full; default rose-archive-native), then destroy both. Optional
+#                      WMH_EXPORT_CACHE_NAME runs only the native step on that export.
 #   --refresh-secrets  refresh + verify the app environment, then exit (maintenance
 #                      op — the ONLY path that stages/activates app secrets)
 #   --verify-secrets   READ-ONLY check that the app environment exists, then exit.
@@ -68,7 +80,8 @@
 #   --no-dashboard     do NOT proxy/open the live dashboard (implied under CI)
 #   --dash-port <n>    local port for the proxied dashboard (default CONDUCTOR_PORT+5764
 #                      → 8765 on the standard 3001 workspace)
-#   --model <name>     WMH model artifact name (default rose-r2-archive-anthropic)
+#   --model <name>     WMH model artifact name (default rose-archive; legacy engine:
+#                      rose-r2-archive-anthropic)
 #   --vm-size <size>   machine size at --setup (default shared-cpu-4x)
 #   --vm-memory <mb>   machine memory at --setup (default 8192)
 #   --volume-size <gb> volume size at --setup (default 20)
@@ -150,6 +163,11 @@ source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-app-env-
 # On-box paths (mirror scripts/cloudbench-run.sh).
 REMOTE_REPO="/data/repo"
 REMOTE_WMH="/data/world-model"
+# uv-managed Python for the native WMH venv; must live on the volume so clones keep it.
+REMOTE_UV_PYTHON="/data/uv-python"
+# The native experiential model lives beside, never inside, the legacy model
+# directory: every engine's guests fork the same donor snapshot.
+REMOTE_WMH_NATIVE="/data/world-model-native"
 REMOTE_LOG="/data/bench.log"      # detached on-box driver logs here; we poll it.
 REMOTE_TMP_SCRIPT="/tmp/rb.sh"    # the base64'd on-box invocation lands here.
 REMOTE_DASH_PORT="8009"           # on-box static dashboard http.server port.
@@ -164,7 +182,7 @@ REMOTE_BACKEND_PORT="3001"        # scripts/run.sh backend port for CONDUCTOR_PO
 CLOUDBENCH_RUNNER_USER_ID="1f85ff25-6e29-4c1b-8739-f917bd101a30"
 
 # ── Defaults ───────────────────────────────────────────────────────────────
-MODE="run"              # run | setup | refresh-wmh | refresh-secrets | destroy
+MODE="run"              # run | setup | build-wmh | refresh-wmh | refresh-secrets | destroy
 IMAGE_BUILD_NO_CACHE=0
 IMAGE_BUILD_CONTEXT="$ROOT_DIR"
 IMAGE_BUILD_BUILDER=native
@@ -175,14 +193,45 @@ BENCH_SIMULATE="1"
 BENCH_PARALLEL="0"
 BENCH_MAX_CONCURRENCY="5"
 BENCH_REF=""
-WMH_MODEL_NAME="rose-r2-archive-anthropic"
 # World-model launch configuration uses portable values, never controller paths.
-WMH_ENGINE="${WMH_ENGINE:-legacy}"
+# Cloud SIM serves the same native experiential WMH as local runs by default
+# (see .claude/skills/instantiate-whm). WMH_ENGINE=legacy explicitly selects the
+# previous model and its legacy defaults; every value stays operator-overridable.
+WMH_ENGINE="${WMH_ENGINE:-experiential}"
 case "$WMH_ENGINE" in
     legacy|experiential) ;;
     *) echo "Invalid WMH_ENGINE: expected legacy or experiential" >&2; exit 2 ;;
 esac
-WMH_ROSE_POOL="${WMH_ROSE_POOL:-rose-1-ultra}"
+if [ "$WMH_ENGINE" = experiential ]; then
+    WMH_MODEL_NAME="${WMH_MODEL_NAME:-rose-archive}"
+    WMH_ROSE_POOL="${WMH_ROSE_POOL:-rose-wmh-gpt61}"
+    WMH_EXECUTION_POLICY="${WMH_EXECUTION_POLICY:-rose-outcome-distribution-v4}"
+else
+    WMH_MODEL_NAME="${WMH_MODEL_NAME:-rose-r2-archive-anthropic}"
+    WMH_ROSE_POOL="${WMH_ROSE_POOL:-rose-1-ultra}"
+    WMH_EXECUTION_POLICY="${WMH_EXECUTION_POLICY:-upstream}"
+fi
+if ! [[ "$WMH_MODEL_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "Invalid WMH_MODEL_NAME" >&2
+    exit 2
+fi
+# R2 cache name of the serving-only native build that --refresh-wmh restores.
+WMH_CACHE_NAME="${WMH_CACHE_NAME:-rose-archive-serving}"
+if ! [[ "$WMH_CACHE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "Invalid WMH_CACHE_NAME" >&2
+    exit 2
+fi
+# Both engines serve from one donor snapshot: the legacy model (main's default)
+# under /data/world-model and the native one beside it. When the donor lost the
+# legacy model, the native --refresh-wmh restores it from this R2 cache.
+WMH_LEGACY_CACHE_NAME="${WMH_LEGACY_CACHE_NAME:-rose-r2-archive-legacy}"
+WMH_LEGACY_MODEL_NAME="${WMH_LEGACY_MODEL_NAME:-rose-r2-archive-anthropic}"
+for _wmh_name_key in WMH_LEGACY_CACHE_NAME WMH_LEGACY_MODEL_NAME; do
+    if ! [[ "${!_wmh_name_key}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+        echo "Invalid $_wmh_name_key" >&2
+        exit 2
+    fi
+done
 if ! [[ "$WMH_ROSE_POOL" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
     echo "Invalid WMH_ROSE_POOL" >&2
     exit 2
@@ -233,7 +282,6 @@ if [ -n "$WMH_CONTEXT_TOKENS" ] && ! [[ "$WMH_CONTEXT_TOKENS" =~ ^[1-9][0-9]*$ ]
     echo "Invalid WMH_CONTEXT_TOKENS: expected a positive integer or unset" >&2
     exit 2
 fi
-WMH_EXECUTION_POLICY="${WMH_EXECUTION_POLICY:-upstream}"
 case "$WMH_EXECUTION_POLICY" in
     upstream|rose-virtual-public-affordances-v1|rose-virtual-public-affordances-v2|rose-outcome-distribution-v1|rose-outcome-distribution-v2|rose-outcome-distribution-v3|rose-outcome-distribution-v4) ;;
     *) echo "Invalid WMH_EXECUTION_POLICY: expected an immutable registered policy" >&2; exit 2 ;;
@@ -284,6 +332,7 @@ while [ $# -gt 0 ]; do
             ;;
         --build-context)  IMAGE_BUILD_CONTEXT="${2:-}"; shift 2 ;;
         --refresh-wmh)    MODE="refresh-wmh"; shift ;;
+        --build-wmh)      MODE="build-wmh"; shift ;;
         --refresh-deps)   MODE="refresh-deps"; shift ;;
         --refresh-secrets) MODE="refresh-secrets"; shift ;;
         --verify-secrets) MODE="verify-secrets"; shift ;;   # read-only preflight (concurrency-safe)
@@ -306,7 +355,7 @@ while [ $# -gt 0 ]; do
         --volume-size)    VOLUME_SIZE="${2:-}"; shift 2 ;;
         --timeout)        RUN_TIMEOUT="${2:-}"; shift 2 ;;
         -h|--help)
-            sed -n '2,76p' "$0"; exit 0 ;;
+            sed -n '2,91p' "$0"; exit 0 ;;
         --*)              echo "❌ Unknown flag: $1" >&2; exit 2 ;;
         *)                BENCH_TASKS+=("$1"); shift ;;
     esac
@@ -484,6 +533,11 @@ if [ -z "$BENCH_REF" ]; then
     BENCH_REF="$(git rev-parse HEAD 2>/dev/null || echo '')"
 fi
 validate_wmh_rose_pool_at_ref "$BENCH_REF" "$WMH_ROSE_POOL" || exit 2
+# --model may replace the configured name after the launch block validated it.
+if ! [[ "$WMH_MODEL_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "Invalid WMH_MODEL_NAME" >&2
+    exit 2
+fi
 
 # ── Fly auth token ───────────────────────────────────────────────────────────
 # Operating the bench app requires a USER/org-scoped token. Prefer, in order:
@@ -3166,6 +3220,7 @@ if [ "$MODE" = "refresh-wmh" ]; then
         fi
     fi
     echo "═══ run-bench-cloud --refresh-wmh ═══"
+    echo "engine=$WMH_ENGINE cache=$WMH_CACHE_NAME pool=$WMH_ROSE_POOL policy=$WMH_EXECUTION_POLICY"
     echo "model=$WMH_MODEL_NAME target=$REMOTE_WMH max_bundles=$WMH_REFRESH_MAX_BUNDLES max_steps=$WMH_REFRESH_MAX_STEPS max_steps_per_bundle=$WMH_REFRESH_MAX_STEPS_PER_BUNDLE"
     [ -n "$WMH_REFRESH_ROOT_AGENT_IDS" ] \
         && echo "explicit_roots=${#_wmh_refresh_roots[@]} (strict corpus selection)"
@@ -3179,13 +3234,44 @@ if [ "$MODE" = "refresh-wmh" ]; then
     trap 'cleanup_refresh_wmh; exit 130' INT
     trap 'cleanup_refresh_wmh; exit 143' TERM
     CLOUDBENCH_HOLD_APP_ENV_LOCK=1
-    inject_secrets      # refresh secrets so R2 creds for the corpus read are current.
+    # Exclusive donor maintenance, but never restage the shared app secrets:
+    # restaging from this checkout's env reverted every concurrent guest to the
+    # prod Temporal namespace (2026-10-19). The donor already carries the app's
+    # R2 credentials; rotate them only with an explicit --refresh-secrets.
+    acquire_app_environment_lock || exit 1
+    verify_app_environment || exit 1
 
     mid="$(resolve_machine_id)"
     [ -z "$mid" ] && { echo "❌ No persistent machine — run 'run-bench-cloud --setup' first."; exit 1; }
     write_state "$mid"
 
+    # The snapshot this refresh cuts carries the donor's CURRENT dependency
+    # trees, so it may only be republished under the fingerprints of the newest
+    # donor proof — never this checkout's local receipt, which a peer devbox's
+    # dependency refresh can have superseded (the lock is per clone, not global).
+    # Resolve it before touching the donor; it is re-checked before publication.
+    # Begin WMH donor dependency proof.
+    wmh_refresh_donor_proof() {  # → "node python epoch snapshot volume"
+        local inventory volume proof
+        inventory="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 1
+        volume="$(printf '%s' "$inventory" | ID="$maintenance_mid" python3 -c '
+import json, os, sys
+for m in json.load(sys.stdin) or []:
+    if m.get("id") == os.environ["ID"]:
+        mounts = (m.get("config") or {}).get("mounts") or []
+        print(mounts[0].get("volume", "") if len(mounts) == 1 else "")
+')" || return 1
+        [ -n "$volume" ] || return 1
+        proof="$(printf '%s' "$inventory" | cloudbench_warm_deps_latest_proof "$APP" "$maintenance_mid" "$volume")" || return 1
+        printf '%s %s\n' "$proof" "$volume"
+    }
+    # End WMH donor dependency proof.
     maintenance_mid="$mid"
+    if ! WMH_DONOR_PROOF="$(wmh_refresh_donor_proof)"; then
+        echo "❌ the donor publishes no dependency proof for its volume; run --refresh-deps first" >&2
+        exit 1
+    fi
+    read -r RECORDED_NODE_FP RECORDED_PY_FP _ _ VOL_ID <<< "$WMH_DONOR_PROOF"
     prepare_warm_source "$mid" || exit 1
     require_machine_ready "$mid" || exit 1
 
@@ -3198,10 +3284,69 @@ if [ "$MODE" = "refresh-wmh" ]; then
     fi
     warm_source_fetch_ref "$mid" "$EXPECTED_WMH_REF" || exit 1
     echo ""
-    echo "🌍 Building the WMH model on the box → $REMOTE_WMH (WMH_GEPA_BUDGET=0 index-only) ..."
-    # Decode secrets into the checkout .env, mirror deps if needed, then run the
-    # WMH build. This is the ONLY place update_world_model_for_simulation() runs
-    # cloud-side. Runs as rose from the agents dir with the cached-model build root.
+    # Native (default): the small donor never builds. The model is built on a big
+    # owned machine and published with `wmh_build_cache push --serving-only`; here
+    # the donor restores that serving-only cache, and pre-creates the native venv
+    # (and its uv-managed Python) on the volume so guests never install at run time.
+    # The cache is restored and verified beside the live tree, then swapped into
+    # its own directory: the legacy model under $REMOTE_WMH, which other
+    # workspaces' guests still serve, is never replaced (2026-10-19 a --force
+    # restore into $REMOTE_WMH deleted rose-r2-archive-anthropic from the donor).
+    NATIVE_REFRESH_CMD="set -e
+[ -n \"\${AGENTS_ENV_B64:-}\" ] && echo \"\$AGENTS_ENV_B64\" | base64 -d > '$REMOTE_REPO/agents/.env'
+[ -n \"\${BACKEND_ENV_B64:-}\" ] && echo \"\$BACKEND_ENV_B64\" | base64 -d > '$REMOTE_REPO/back-end/.env'
+chown rose:rose '$REMOTE_REPO/agents/.env' '$REMOTE_REPO/back-end/.env' 2>/dev/null || true
+[ -x '$REMOTE_REPO/agents/venv/bin/python' ] || rsync -a /app/agents/venv/ '$REMOTE_REPO/agents/venv/'
+mkdir -p '$REMOTE_REPO/.context' '$REMOTE_UV_PYTHON'
+chown -R rose:rose '$REMOTE_REPO/agents/venv' '$REMOTE_REPO/.context' '$REMOTE_UV_PYTHON' 2>/dev/null || true
+cd '$REMOTE_REPO'
+[ -x agents/venv/bin/uv ] || gosu rose env HOME=/home/rose agents/venv/bin/python -m pip install --quiet uv
+gosu rose env HOME=/home/rose UV_PYTHON_INSTALL_DIR='$REMOTE_UV_PYTHON' UV_CACHE_DIR=/tmp/rose-uv-cache UV_LINK_MODE=copy bash scripts/setup-world-model.sh
+cd agents
+# A streaming pull stages beside its target and needs the cache's full size free
+# there (the previous tree stays until the swap): fail before pulling otherwise.
+wmh_require_room() {
+    local need avail
+    need=\$(PYTHONDONTWRITEBYTECODE=1 venv/bin/python -u -m benchmarks.wmh_build_cache status --name \"\$1\" | venv/bin/python -c 'import json, sys; print(int(json.load(sys.stdin)[\"plaintext_bytes\"]))') || { echo \"cannot read the published size of WMH cache \$1\" >&2; return 1; }
+    avail=\$(df -PB1 \"\$(dirname \"\$2\")\" | awk 'NR == 2 { print \$4 }')
+    if ! [ \"\$avail\" -ge \$((need + 1073741824)) ] 2>/dev/null; then
+        echo \"insufficient donor disk for WMH cache \$1: needs \$need bytes + 1 GiB margin beside \$2, \${avail:-unknown} bytes free\" >&2
+        return 1
+    fi
+    echo \"disk headroom ok for \$1: \$need bytes needed, \$avail free\"
+}
+# The legacy model (main's default engine) must survive beside the native one.
+# Restore it atomically only when it is missing or was replaced by another model.
+if [ -f '$REMOTE_WMH/build.manifest.json' ] && [ -d '$REMOTE_WMH/models/$WMH_LEGACY_MODEL_NAME' ] && [ ! -e '$REMOTE_WMH/models/$WMH_LEGACY_MODEL_NAME/experiential.json' ]; then
+    echo 'legacy WMH model $WMH_LEGACY_MODEL_NAME intact at $REMOTE_WMH; leaving it'
+else
+    echo 'legacy WMH model $WMH_LEGACY_MODEL_NAME missing at $REMOTE_WMH; restoring cache $WMH_LEGACY_CACHE_NAME'
+    rm -rf '$REMOTE_WMH.incoming' '$REMOTE_WMH.incoming'.replaced-* '$REMOTE_WMH.previous'
+    wmh_require_room '$WMH_LEGACY_CACHE_NAME' '$REMOTE_WMH.incoming'
+    PYTHONDONTWRITEBYTECODE=1 venv/bin/python -u -m benchmarks.wmh_build_cache pull --build-dir '$REMOTE_WMH.incoming' --name '$WMH_LEGACY_CACHE_NAME' --force
+    [ -f '$REMOTE_WMH.incoming/build.manifest.json' ] && [ -d '$REMOTE_WMH.incoming/models/$WMH_LEGACY_MODEL_NAME' ] || { rm -rf '$REMOTE_WMH.incoming'; echo 'restored cache $WMH_LEGACY_CACHE_NAME lacks build.manifest.json or models/$WMH_LEGACY_MODEL_NAME' >&2; exit 1; }
+    chown -R rose:rose '$REMOTE_WMH.incoming'
+    if [ -e '$REMOTE_WMH' ]; then mv '$REMOTE_WMH' '$REMOTE_WMH.previous'; fi
+    mv '$REMOTE_WMH.incoming' '$REMOTE_WMH'
+    rm -rf '$REMOTE_WMH.previous'
+    echo 'restored legacy WMH model $WMH_LEGACY_MODEL_NAME at $REMOTE_WMH'
+fi
+rm -rf '$REMOTE_WMH_NATIVE.incoming' '$REMOTE_WMH_NATIVE.incoming'.replaced-* '$REMOTE_WMH_NATIVE.previous'
+wmh_require_room '$WMH_CACHE_NAME' '$REMOTE_WMH_NATIVE.incoming'
+PYTHONDONTWRITEBYTECODE=1 venv/bin/python -u -m benchmarks.wmh_build_cache pull --build-dir '$REMOTE_WMH_NATIVE.incoming' --name '$WMH_CACHE_NAME' --force
+[ -f '$REMOTE_WMH_NATIVE.incoming/models/$WMH_MODEL_NAME/experiential.json' ] || { rm -rf '$REMOTE_WMH_NATIVE.incoming'; echo 'restored cache $WMH_CACHE_NAME lacks models/$WMH_MODEL_NAME/experiential.json' >&2; exit 1; }
+[ -f '$REMOTE_WMH_NATIVE.incoming/build.manifest.json' ] || { rm -rf '$REMOTE_WMH_NATIVE.incoming'; echo 'restored cache $WMH_CACHE_NAME lacks build.manifest.json' >&2; exit 1; }
+chown -R rose:rose '$REMOTE_WMH_NATIVE.incoming'
+if [ -e '$REMOTE_WMH_NATIVE' ]; then mv '$REMOTE_WMH_NATIVE' '$REMOTE_WMH_NATIVE.previous'; fi
+mv '$REMOTE_WMH_NATIVE.incoming' '$REMOTE_WMH_NATIVE'
+rm -rf '$REMOTE_WMH_NATIVE.previous'
+echo '::WMH-REFRESH-DONE::'
+ls -la '$REMOTE_WMH/models' '$REMOTE_WMH_NATIVE/models' 2>/dev/null || true
+df -h /data 2>/dev/null || true"
+    # Legacy (explicit WMH_ENGINE=legacy): decode secrets into the checkout .env,
+    # mirror deps if needed, then run the WMH build. This is the ONLY place
+    # update_world_model_for_simulation() runs cloud-side. Runs as rose from the
+    # agents dir with the cached-model build root.
     BUILD_CMD="set -e
 # decode env for R2 creds the corpus read needs
 [ -n \"\${AGENTS_ENV_B64:-}\" ] && echo \"\$AGENTS_ENV_B64\" | base64 -d > '$REMOTE_REPO/agents/.env'
@@ -3216,11 +3361,17 @@ gosu rose env HOME=/home/rose WMH_BUILD_DIR='$REMOTE_WMH' WMH_MODEL_NAME='$WMH_M
   venv/bin/python -u -c \"from benchmarks.world_model_harness import update_world_model_for_simulation as u; import json, os; ids=[value for value in os.environ.get('WMH_ROOT_AGENT_IDS', '').split(',') if value]; print(json.dumps(u(root_agent_ids=ids or None, progress=lambda e: print('[WMH]', e.get('title'), e.get('status'), flush=True))))\"
 echo '::WMH-REFRESH-DONE::'
 ls -la '$REMOTE_WMH/models' 2>/dev/null || true"
+    if [ "$WMH_ENGINE" = experiential ]; then
+        echo "🌍 Restoring native WMH cache $WMH_CACHE_NAME → $REMOTE_WMH_NATIVE (model $WMH_MODEL_NAME; no on-box build) ..."
+        BUILD_CMD="$NATIVE_REFRESH_CMD"
+    else
+        echo "🌍 Building the legacy WMH model on the box → $REMOTE_WMH (WMH_GEPA_BUDGET=0 index-only) ..."
+    fi
     REFRESH_LOG="$(mktemp)"
     ssh_exec "$mid" "$BUILD_CMD" 2>&1 | grep -av '^Connecting to' | tee "$REFRESH_LOG" | sed 's/^/   /'
     if grep -q '::WMH-REFRESH-DONE::' "$REFRESH_LOG" 2>/dev/null; then
         echo ""
-        echo "✅ WMH model refreshed + cached at $REMOTE_WMH (served-not-rebuilt on every future run)."
+        echo "✅ WMH model ($WMH_ENGINE) refreshed + cached at $REMOTE_WMH (served-not-rebuilt on every future run)."
         rm -f "$REFRESH_LOG"
     else
         echo ""
@@ -3232,31 +3383,442 @@ ls -la '$REMOTE_WMH/models' 2>/dev/null || true"
     # Fleet clones fork a snapshot, not the mutable warm volume. Publish the exact rebuilt
     # volume only after the model reported ready and the source is proven quiescent; otherwise
     # successful maintenance silently leaves every benchmark on the previous WMH corpus.
-    read -r RECORDED_NODE_FP RECORDED_PY_FP _ _ \
-        < "$WARM_DEPS_STATE_FILE" 2>/dev/null || true
-    if [ -z "${RECORDED_NODE_FP:-}" ] || [ -z "${RECORDED_PY_FP:-}" ]; then
-        echo "❌ cannot publish WMH snapshot without the existing dependency proof" >&2
-        exit 1
-    fi
     stop_machine_strict "$mid" || exit 1
     mid=""
-    VOL_ID="$(FLY machines list -a "$APP" --json 2>/dev/null | MN="$MACHINE_NAME" python3 -c '
-import json, os, sys
-for m in json.load(sys.stdin) or []:
-    if m.get("name") == os.environ["MN"]:
-        mounts = m.get("config", {}).get("mounts") or []
-        if mounts: print(mounts[0].get("volume", ""))
-        break
-')"
-    [ -n "$VOL_ID" ] || { echo "❌ could not resolve the rebuilt WMH volume id"; exit 1; }
+    # A peer dependency refresh during this window replaced the volume's trees:
+    # never publish this snapshot under the fingerprints read at the start.
+    if ! WMH_DONOR_PROOF_AFTER="$(wmh_refresh_donor_proof)" \
+        || [ "$WMH_DONOR_PROOF_AFTER" != "$WMH_DONOR_PROOF" ]; then
+        echo "❌ the donor dependency proof changed during the WMH refresh; not cutting or publishing a snapshot" >&2
+        exit 1
+    fi
     SNAP_START_EPOCH="$(date +%s)"
     create_volume_snapshot_exact "$VOL_ID" || exit 1
     NEW_SNAP="$CREATED_SNAPSHOT_ID"
     printf '%s %s %s %s\n' "$RECORDED_NODE_FP" "$RECORDED_PY_FP" "$SNAP_START_EPOCH" \
         "$NEW_SNAP" > "$WARM_DEPS_STATE_FILE"
+    printf '%s %s\n' "$EXPECTED_WMH_REF" "$NEW_SNAP" > "$WARM_DEPS_STATE_FILE.ref.$$" \
+        && mv -f "$WARM_DEPS_STATE_FILE.ref.$$" "$WARM_DEPS_STATE_FILE.ref"
+    # Fleets rehydrate the donor proof from its Machine metadata, not this
+    # checkout's file: without publishing, every SIM clone keeps forking the
+    # previous snapshot (and its previous WMH model).
+    if ! cloudbench_publish_warm_deps_state "$APP" "$maintenance_mid" "$VOL_ID" \
+        "$RECORDED_NODE_FP" "$RECORDED_PY_FP" "$SNAP_START_EPOCH" "$NEW_SNAP"; then
+        echo "❌ WMH snapshot $NEW_SNAP was cut but its donor proof was not published; fleets would keep the previous model" >&2
+        exit 1
+    fi
     echo "✅ WMH model snapshot published for fleet clones: $NEW_SNAP"
 
     # EXIT trap parks the already-stopped source machine.
+    exit 0
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# MODE: --build-wmh — build the native WMH model on an OWNED, ephemeral big
+# Machine + Volume forked from the donor's proven snapshot, publish the
+# serving-only cache (what --refresh-wmh restores) and the full cache (the base
+# of the next incremental build), then destroy both resources. The donor itself
+# is never started, synced or modified here.
+# ═════════════════════════════════════════════════════════════════════════════
+# Begin WMH build lifecycle.
+WMH_BUILD_VM_SIZE="${WMH_BUILD_VM_SIZE:-performance-8x}"
+WMH_BUILD_VM_MEMORY_MB="${WMH_BUILD_VM_MEMORY_MB:-65536}"
+WMH_BUILD_VOLUME_GB="${WMH_BUILD_VOLUME_GB:-80}"
+WMH_BUILD_TIMEOUT_SECONDS="${WMH_BUILD_TIMEOUT_SECONDS:-14400}"
+WMH_BUILD_POLL_SECONDS="${WMH_BUILD_POLL_SECONDS:-60}"
+WMH_BUILD_RELEASE_ATTEMPTS="${WMH_BUILD_RELEASE_ATTEMPTS:-90}"
+WMH_BUILD_RELEASE_SLEEP_SECONDS="${WMH_BUILD_RELEASE_SLEEP_SECONDS:-2}"
+WMH_FULL_CACHE_NAME="${WMH_FULL_CACHE_NAME:-rose-archive-native}"
+WMH_EXPORT_CACHE_NAME="${WMH_EXPORT_CACHE_NAME:-}"
+# A rose-owned parent: wmh_build_cache pull stages its temp dir beside the build dir.
+WMH_BUILD_REMOTE_ROOT="${WMH_BUILD_REMOTE_ROOT:-/data/wmhb}"
+WMH_BUILD_REMOTE_DIR="$WMH_BUILD_REMOTE_ROOT/native"
+WMH_BUILD_REMOTE_SCRIPT="/data/wmh-build.sh"
+WMH_BUILD_REMOTE_LOG="/data/wmh-build.log"
+WMH_BUILD_REMOTE_PID="/data/wmh-build.pid"
+WMH_BUILD_LEDGER=""
+WMH_BUILD_DONOR_MID=""
+WMH_BUILD_DONOR_VOLUME=""
+WMH_BUILD_TORN_DOWN=0
+
+wmh_build_validate() {
+    local key
+    for key in WMH_BUILD_VM_MEMORY_MB WMH_BUILD_VOLUME_GB WMH_BUILD_TIMEOUT_SECONDS \
+        WMH_BUILD_RELEASE_ATTEMPTS; do
+        [[ "${!key}" =~ ^[1-9][0-9]*$ ]] || { echo "❌ $key must be a positive integer" >&2; return 2; }
+    done
+    for key in WMH_BUILD_POLL_SECONDS WMH_BUILD_RELEASE_SLEEP_SECONDS; do
+        [[ "${!key}" =~ ^[0-9]+$ ]] || { echo "❌ $key must be a non-negative integer" >&2; return 2; }
+    done
+    # The full archive export plus the forked repo/deps tree outgrew smaller volumes.
+    [ "$WMH_BUILD_VOLUME_GB" -ge 80 ] || { echo "❌ WMH_BUILD_VOLUME_GB must be at least 80" >&2; return 2; }
+    [[ "$WMH_BUILD_VM_SIZE" =~ ^[a-z0-9-]+$ ]] || { echo "❌ invalid WMH_BUILD_VM_SIZE" >&2; return 2; }
+    for key in WMH_FULL_CACHE_NAME WMH_EXPORT_CACHE_NAME; do
+        [ -z "${!key}" ] && [ "$key" = WMH_EXPORT_CACHE_NAME ] && continue
+        [[ "${!key}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "❌ invalid $key" >&2; return 2; }
+    done
+    [ "$WMH_ENGINE" = experiential ] || { echo "❌ --build-wmh builds the native experiential model only" >&2; return 2; }
+}
+
+# Durable ownership ledger: every intent and exact ID is fsynced BEFORE use, so
+# teardown (or a human after a controller crash) can release exactly this run's
+# resources and nothing else.
+wmh_build_record() {  # wmh_build_record <key> <value>
+    printf '%s=%s\n' "$1" "$2" >> "$WMH_BUILD_LEDGER" || return 1
+    python3 -c 'import os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+os.fsync(fd); os.close(fd)' "$WMH_BUILD_LEDGER"
+}
+
+wmh_build_ledger_value() {  # wmh_build_ledger_value <key>
+    [ -f "$WMH_BUILD_LEDGER" ] || return 0
+    sed -n "s/^$1=//p" "$WMH_BUILD_LEDGER" | tail -1
+}
+
+wmh_build_not_donor() {  # wmh_build_not_donor <machine-or-volume-id>
+    [ -n "$1" ] || return 1
+    if [ "$1" = "$WMH_BUILD_DONOR_MID" ] || [ "$1" = "$WMH_BUILD_DONOR_VOLUME" ]; then
+        echo "❌ refusing to operate on the shared donor resource $1" >&2
+        return 1
+    fi
+}
+
+# Print "<field> of the exact-name/ID match" from a provider listing; exit 3 when
+# the listing itself is unreadable (never confuse that with "absent").
+wmh_build_lookup() {  # wmh_build_lookup machines|volumes id|name <value> <field>
+    local listing
+    listing="$(FLY "$1" list -a "$APP" --json 2>/dev/null)" || return 3
+    printf '%s' "$listing" | KEY="$2" VALUE="$3" FIELD="$4" python3 -c '
+import json, os, sys
+try:
+    rows = json.load(sys.stdin) or []
+except Exception:
+    raise SystemExit(3)
+matches = [r for r in rows if isinstance(r, dict) and r.get(os.environ["KEY"]) == os.environ["VALUE"]]
+if len(matches) > 1:
+    raise SystemExit(4)
+if matches:
+    print(matches[0].get(os.environ["FIELD"]) or "")
+'
+}
+
+wmh_build_create_resources() {  # → sets WMH_BUILD_MID / WMH_BUILD_VOLUME
+    local run_id="$1" snapshot="$2" image="$3" volume_name machine_name output
+    volume_name="wmhb_$run_id"
+    machine_name="wmhb-${run_id//_/-}"
+    WMH_BUILD_MID=""
+    WMH_BUILD_VOLUME=""
+    wmh_build_record volume_name "$volume_name" || return 1
+    echo "💽 Forking volume $volume_name (${WMH_BUILD_VOLUME_GB}GB) from donor snapshot $snapshot ..."
+    output="$(FLY volumes create "$volume_name" -a "$APP" --region "$REGION" \
+        --size "$WMH_BUILD_VOLUME_GB" --snapshot-id "$snapshot" --yes --json 2>&1)" || {
+        printf '%s\n' "$output" | sed 's/^/   /' >&2
+        echo "❌ volume fork failed" >&2
+        return 1
+    }
+    WMH_BUILD_VOLUME="$(printf '%s' "$output" | python3 -c '
+import json, sys
+text = sys.stdin.read()
+try:
+    print(json.loads(text[text.index("{"):]).get("id") or "")
+except Exception:
+    print("")
+')"
+    [[ "$WMH_BUILD_VOLUME" =~ ^vol_[A-Za-z0-9]+$ ]] || {
+        echo "❌ volume fork returned no exact ID" >&2
+        WMH_BUILD_VOLUME=""
+        return 1
+    }
+    wmh_build_not_donor "$WMH_BUILD_VOLUME" || return 1
+    wmh_build_record volume_id "$WMH_BUILD_VOLUME" || return 1
+    echo "   volume: $WMH_BUILD_VOLUME"
+    wmh_build_record machine_name "$machine_name" || return 1
+    echo "🖥️  Creating build machine $machine_name ($WMH_BUILD_VM_SIZE / ${WMH_BUILD_VM_MEMORY_MB}MB, process: sleep infinity) ..."
+    # The process must outlive any build: a finite sleep exits and stops the box.
+    output="$(FLY machine run "$image" -a "$APP" --name "$machine_name" --region "$REGION" \
+        --vm-size "$WMH_BUILD_VM_SIZE" --vm-memory "$WMH_BUILD_VM_MEMORY_MB" \
+        --volume "$WMH_BUILD_VOLUME:/data" --restart no \
+        --metadata "wmh_build_run=$run_id" --detach sleep infinity 2>&1)" || {
+        printf '%s\n' "$output" | sed 's/^/   /' >&2
+        echo "❌ build machine creation failed" >&2
+        return 1
+    }
+    WMH_BUILD_MID="$(printf '%s\n' "$output" | grep -oiE 'Machine ID: [0-9a-f]+' | tail -1 | awk '{print $3}')"
+    [ -n "$WMH_BUILD_MID" ] || WMH_BUILD_MID="$(wmh_build_lookup machines name "$machine_name" id)" || WMH_BUILD_MID=""
+    [[ "$WMH_BUILD_MID" =~ ^[0-9a-f]{8,32}$ ]] || {
+        echo "❌ build machine creation returned no exact ID" >&2
+        WMH_BUILD_MID=""
+        return 1
+    }
+    wmh_build_not_donor "$WMH_BUILD_MID" || { WMH_BUILD_MID=""; return 1; }
+    wmh_build_record machine_id "$WMH_BUILD_MID" || return 1
+    echo "   machine: $WMH_BUILD_MID"
+}
+
+# Destroy exactly the ledger's resources and prove release. Idempotent; returns
+# non-zero (with the ledger path) when either release is unproven.
+wmh_build_teardown() {
+    [ "$WMH_BUILD_TORN_DOWN" = 1 ] && return 0
+    WMH_BUILD_TORN_DOWN=1
+    [ -n "$WMH_BUILD_LEDGER" ] && [ -f "$WMH_BUILD_LEDGER" ] || return 0
+    local mid vid name state attempt status=0
+    mid="$(wmh_build_ledger_value machine_id)"
+    vid="$(wmh_build_ledger_value volume_id)"
+    # An ambiguous create recorded only its unique name; resolve that exact name.
+    name="$(wmh_build_ledger_value machine_name)"
+    if [ -z "$mid" ] && [ -n "$name" ]; then
+        mid="$(wmh_build_lookup machines name "$name" id)" || { echo "❌ cannot resolve machine $name" >&2; status=1; mid=""; }
+        [ -n "$mid" ] && wmh_build_not_donor "$mid" && wmh_build_record machine_id "$mid"
+    fi
+    name="$(wmh_build_ledger_value volume_name)"
+    if [ -z "$vid" ] && [ -n "$name" ]; then
+        vid="$(wmh_build_lookup volumes name "$name" id)" || { echo "❌ cannot resolve volume $name" >&2; status=1; vid=""; }
+        [ -n "$vid" ] && wmh_build_not_donor "$vid" && wmh_build_record volume_id "$vid"
+    fi
+    if [ -n "$mid" ] && wmh_build_not_donor "$mid"; then
+        echo "🧹 Destroying build machine $mid ..."
+        FLY machine destroy --force "$mid" -a "$APP" 2>&1 | sed 's/^/   /' || true
+        state="unknown"
+        for attempt in $(seq 1 "$WMH_BUILD_RELEASE_ATTEMPTS"); do
+            state="$(wmh_build_lookup machines id "$mid" state)" || state="unknown"
+            case "$state" in ''|destroyed) state=released; break ;; esac
+            [ "$attempt" = 15 ] && FLY machine destroy --force "$mid" -a "$APP" >/dev/null 2>&1
+            sleep "$WMH_BUILD_RELEASE_SLEEP_SECONDS"
+        done
+        if [ "$state" = released ]; then
+            wmh_build_record machine_released destroyed
+        else
+            echo "❌ build machine $mid release unproven (state=$state)" >&2
+            status=1
+        fi
+    elif [ -n "$mid" ]; then
+        status=1
+    fi
+    if [ -n "$vid" ] && wmh_build_not_donor "$vid"; then
+        echo "🧹 Destroying build volume $vid ..."
+        state="unknown"
+        for attempt in $(seq 1 "$WMH_BUILD_RELEASE_ATTEMPTS"); do
+            state="$(wmh_build_lookup volumes id "$vid" state)" || state="unknown"
+            case "$state" in ''|pending_destroy|destroyed) state="released:${state:-absent}"; break ;; esac
+            # Fly rejects deletion until the destroyed machine detaches; retry.
+            FLY volumes destroy "$vid" -a "$APP" --yes >/dev/null 2>&1 || true
+            sleep "$WMH_BUILD_RELEASE_SLEEP_SECONDS"
+        done
+        if [ "${state%%:*}" = released ]; then
+            wmh_build_record volume_released "${state#released:}"
+        else
+            echo "❌ build volume $vid release unproven (state=$state)" >&2
+            status=1
+        fi
+    elif [ -n "$vid" ]; then
+        status=1
+    fi
+    if [ "$status" -eq 0 ]; then
+        echo "✅ Build machine + volume released (ledger: $WMH_BUILD_LEDGER)"
+    else
+        echo "❌ WMH build resources NOT proven released — reconcile exactly the IDs in $WMH_BUILD_LEDGER" >&2
+    fi
+    return "$status"
+}
+
+# The detached on-box job. Values are passed as a quoted header; the body is
+# literal so it needs no escaping. Runs as root; every build step runs as rose.
+wmh_build_remote_script() {
+    printf 'B_REPO=%q\nB_UV_PYTHON=%q\nB_ROOT=%q\nB_DIR=%q\nB_PID=%q\n' \
+        "$REMOTE_REPO" "$REMOTE_UV_PYTHON" "$WMH_BUILD_REMOTE_ROOT" "$WMH_BUILD_REMOTE_DIR" "$WMH_BUILD_REMOTE_PID"
+    printf 'B_MODEL=%q\nB_POOL=%q\nB_POLICY=%q\nB_CONTEXT=%q\n' \
+        "$WMH_MODEL_NAME" "$WMH_ROSE_POOL" "$WMH_EXECUTION_POLICY" "$WMH_CONTEXT_TOKENS"
+    printf 'B_SERVING=%q\nB_FULL=%q\nB_EXPORT=%q\n' \
+        "$WMH_CACHE_NAME" "$WMH_FULL_CACHE_NAME" "$WMH_EXPORT_CACHE_NAME"
+    cat <<'WMH_BUILD_BODY'
+set -euo pipefail
+mkdir -p "$B_ROOT"
+# A re-launch after an unconfirmed launch must never start a second build.
+mkdir "$B_ROOT/.running" 2>/dev/null || { echo "[wmh-build] already running"; exit 0; }
+echo $$ > "$B_PID"
+trap 'rc=$?; [ "$rc" -eq 0 ] || echo "::WMH-BUILD-FAILED:: rc=$rc"' EXIT
+step() { echo "[wmh-build] $(date -u +%H:%M:%SZ) $*"; }
+as_rose() {
+    gosu rose env HOME=/home/rose UV_PYTHON_INSTALL_DIR="$B_UV_PYTHON" UV_CACHE_DIR="$B_ROOT/uv-cache" \
+        UV_LINK_MODE=copy PYTHONDONTWRITEBYTECODE=1 "$@"
+}
+cd "$B_REPO"
+[ -s agents/.env ] || { echo "agents/.env is missing (R2 credentials)" >&2; exit 1; }
+[ -x agents/venv/bin/python ] || rsync -a /app/agents/venv/ agents/venv/
+mkdir -p "$B_UV_PYTHON" "$B_ROOT/uv-cache" .context
+chown -R rose:rose "$B_ROOT" "$B_UV_PYTHON" .context agents/venv
+step "native venv (uv-managed Python under $B_UV_PYTHON)"
+[ -x agents/venv/bin/uv ] || as_rose agents/venv/bin/python -m pip install --quiet uv
+as_rose bash scripts/setup-world-model.sh
+cd agents
+cache() { as_rose venv/bin/python -u -m benchmarks.wmh_build_cache "$@"; }
+if [ -n "$B_EXPORT" ]; then
+    step "pull export cache $B_EXPORT"
+    cache pull --build-dir "$B_DIR" --name "$B_EXPORT" --force
+    step "native build only (model $B_MODEL, pool $B_POOL)"
+    as_rose env WMH_ENGINE=experiential WMH_ROSE_POOL="$B_POOL" WMH_EXECUTION_POLICY="$B_POLICY" \
+        venv/bin/python -u -c 'import sys; from benchmarks.experiential_bridge import build_native; build_native(sys.argv[1], sys.argv[1], sys.argv[2], sys.argv[3])' \
+        "$B_DIR" "$B_MODEL" "$B_POOL"
+else
+    status="$(cache status --name "$B_FULL" 2>&1)" && published=1 || published=0
+    if [ "$published" = 1 ]; then
+        step "pull full cache $B_FULL (only new bundles export)"
+        cache pull --build-dir "$B_DIR" --name "$B_FULL" --force
+    elif printf '%s' "$status" | grep -q "no cache published for"; then
+        step "no full cache $B_FULL published: full build"
+    else
+        printf '%s\n' "$status" >&2
+        echo "cannot read full cache $B_FULL" >&2
+        exit 1
+    fi
+    step "update_world_model_for_simulation (model $B_MODEL)"
+    as_rose env WMH_BUILD_DIR="$B_DIR" WMH_MODEL_NAME="$B_MODEL" WMH_ENGINE=experiential WMH_ROSE_POOL="$B_POOL" \
+        WMH_CONTEXT_TOKENS="$B_CONTEXT" WMH_EXECUTION_POLICY="$B_POLICY" WMH_GEPA_BUDGET=0 WMH_MAX_BUNDLES=0 \
+        WMH_CONFORMANCE_EXAMPLES=100 WMH_REQUIRE_CONFORMANCE=1 \
+        venv/bin/python -u -c "from benchmarks.world_model_harness import update_world_model_for_simulation as u; import json; print(json.dumps(u(progress=lambda e: print('[WMH]', e.get('title'), e.get('status'), flush=True)), default=str))"
+fi
+[ -f "$B_DIR/models/$B_MODEL/experiential.json" ] || { echo "build lacks models/$B_MODEL/experiential.json" >&2; exit 1; }
+[ -f "$B_DIR/build.manifest.json" ] || { echo "build lacks build.manifest.json" >&2; exit 1; }
+step "push serving-only cache $B_SERVING"
+cache push --serving-only --build-dir "$B_DIR" --name "$B_SERVING"
+step "push full cache $B_FULL"
+cache push --build-dir "$B_DIR" --name "$B_FULL"
+echo "::WMH-BUILD-DONE::"
+WMH_BUILD_BODY
+}
+
+# Poll the detached job's log with short reads; print new lines as progress.
+wmh_build_poll() {  # wmh_build_poll <machine-id>
+    local mid="$1" lines=0 deadline=$((SECONDS + WMH_BUILD_TIMEOUT_SECONDS))
+    local out body total alive misses=0 dead=0
+    while :; do
+        out="$(ssh_read "$mid" "f='$WMH_BUILD_REMOTE_LOG'; t=\$(wc -l < \"\$f\" 2>/dev/null || echo 0); sed -n '$((lines + 1)),$((lines + 2000))p' \"\$f\" 2>/dev/null; p=\$(cat '$WMH_BUILD_REMOTE_PID' 2>/dev/null); if [ -n \"\$p\" ] && kill -0 \"\$p\" 2>/dev/null; then a=alive; else a=dead; fi; echo \"::WMH-LOG-END:: \$t \$a\"")" || out=""
+        if printf '%s\n' "$out" | grep -q '^::WMH-LOG-END:: '; then
+            misses=0
+            body="$(printf '%s\n' "$out" | sed '/^::WMH-LOG-END:: /,$d')"
+            read -r _ total alive <<< "$(printf '%s\n' "$out" | grep '^::WMH-LOG-END:: ' | tail -1)"
+            [ -n "$body" ] && printf '%s\n' "$body" | sed 's/^/   /'
+            [[ "$total" =~ ^[0-9]+$ ]] || total="$lines"
+            lines=$(( total < lines + 2000 ? total : lines + 2000 ))
+            if printf '%s\n' "$body" | grep -q '^::WMH-BUILD-DONE::'; then
+                return 0
+            fi
+            if printf '%s\n' "$body" | grep -q '^::WMH-BUILD-FAILED::'; then
+                echo "❌ on-box WMH build failed (log: $WMH_BUILD_REMOTE_LOG on $mid)" >&2
+                return 1
+            fi
+            if [ "$alive" = dead ] && [ "$lines" -ge "$total" ]; then
+                dead=$((dead + 1))
+                [ "$dead" -ge 2 ] && {
+                    echo "❌ on-box WMH build exited without a completion marker" >&2
+                    return 1
+                }
+            else
+                dead=0
+            fi
+        else
+            misses=$((misses + 1))
+            echo "   ⚠️ log read failed ($misses); machine state: $(machine_state "$mid")" >&2
+            [ "$misses" -ge 10 ] && { echo "❌ build log unreadable 10 times in a row" >&2; return 1; }
+        fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "❌ WMH build timed out after ${WMH_BUILD_TIMEOUT_SECONDS}s (WMH_BUILD_TIMEOUT_SECONDS)" >&2
+            return 1
+        fi
+        sleep "$WMH_BUILD_POLL_SECONDS"
+    done
+}
+# End WMH build lifecycle.
+
+if [ "$MODE" = "build-wmh" ]; then
+    wmh_build_validate || exit 2
+    if ! WMH_BUILD_REF="$(git -C "$ROOT_DIR" rev-parse --verify "${BENCH_REF}^{commit}" 2>/dev/null)"; then
+        echo "❌ invalid benchmark ref: $BENCH_REF is not a local commit" >&2
+        exit 1
+    fi
+    validate_wmh_rose_pool_at_ref "$WMH_BUILD_REF" "$WMH_ROSE_POOL" || exit 2
+    read -r _ _ _ WMH_BUILD_SNAPSHOT < "$WARM_DEPS_STATE_FILE" 2>/dev/null || true
+    [ -n "${WMH_BUILD_SNAPSHOT:-}" ] || {
+        echo "❌ no proven donor snapshot in $WARM_DEPS_STATE_FILE (run --refresh-deps first)" >&2
+        exit 1
+    }
+    echo "═══ run-bench-cloud --build-wmh ═══"
+    echo "ref=$WMH_BUILD_REF snapshot=$WMH_BUILD_SNAPSHOT vm=$WMH_BUILD_VM_SIZE/${WMH_BUILD_VM_MEMORY_MB}MB volume=${WMH_BUILD_VOLUME_GB}GB"
+    echo "model=$WMH_MODEL_NAME pool=$WMH_ROSE_POOL policy=$WMH_EXECUTION_POLICY serving=$WMH_CACHE_NAME full=$WMH_FULL_CACHE_NAME export=${WMH_EXPORT_CACHE_NAME:-<none>}"
+    ensure_app
+    # Read-only: the build machine inherits the shared app secrets; never mutate them here.
+    verify_app_environment || exit 1
+    WMH_BUILD_DONOR_MID="$(resolve_machine_id)"
+    [ -n "$WMH_BUILD_DONOR_MID" ] || { echo "❌ no donor machine $MACHINE_NAME to take the image from" >&2; exit 1; }
+    read -r WMH_BUILD_IMAGE WMH_BUILD_DONOR_VOLUME <<< "$(_machines_json | ID="$WMH_BUILD_DONOR_MID" python3 -c '
+import json, os, sys
+for m in json.load(sys.stdin) or []:
+    if m.get("id") == os.environ["ID"]:
+        config = m.get("config") or {}
+        mounts = config.get("mounts") or [{}]
+        print(config.get("image") or "", mounts[0].get("volume") or "")
+')"
+    [ -n "${WMH_BUILD_IMAGE:-}" ] || { echo "❌ could not read the donor image" >&2; exit 1; }
+    WMH_BUILD_RUN_ID="$(date -u +%Y%m%d%H%M%S)_$(printf '%04x' "$((RANDOM % 65536))")"
+    mkdir -p "$ROOT_DIR/.context/wmh-build/$WMH_BUILD_RUN_ID" || exit 1
+    WMH_BUILD_LEDGER="$ROOT_DIR/.context/wmh-build/$WMH_BUILD_RUN_ID/owned-resources.env"
+    wmh_build_record app "$APP" || exit 1
+    wmh_build_record source_snapshot "$WMH_BUILD_SNAPSHOT" || exit 1
+    wmh_build_record donor_machine_id "$WMH_BUILD_DONOR_MID" || exit 1
+    echo "ownership ledger: $WMH_BUILD_LEDGER"
+    wmh_build_exit() {
+        local rc=$?
+        trap - EXIT INT TERM HUP
+        wmh_build_teardown || rc=1
+        exit "$rc"
+    }
+    trap wmh_build_exit EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+
+    wmh_build_create_resources "$WMH_BUILD_RUN_ID" "$WMH_BUILD_SNAPSHOT" "$WMH_BUILD_IMAGE" || exit 1
+    require_machine_ready "$WMH_BUILD_MID" || exit 1
+    echo "🔄 checking out $WMH_BUILD_REF on the build machine ..."
+    warm_source_fetch_ref "$WMH_BUILD_MID" "$WMH_BUILD_REF" || exit 1
+    set +e   # warm_source_fetch_ref leaves errexit on; this mode handles failures explicitly.
+    ssh_exec "$WMH_BUILD_MID" "set -e
+[ -n \"\${AGENTS_ENV_B64:-}\" ] && echo \"\$AGENTS_ENV_B64\" | base64 -d > '$REMOTE_REPO/agents/.env'
+[ -n \"\${BACKEND_ENV_B64:-}\" ] && echo \"\$BACKEND_ENV_B64\" | base64 -d > '$REMOTE_REPO/back-end/.env'
+chown rose:rose '$REMOTE_REPO/agents/.env' '$REMOTE_REPO/back-end/.env'
+rm -f '$WMH_BUILD_REMOTE_SCRIPT' '$WMH_BUILD_REMOTE_PID'
+echo ::WMH-ENV-READY::" 300 2>&1 | grep -a '::WMH-ENV-READY::' >/dev/null || {
+        echo "❌ could not stage the app env files on the build machine" >&2
+        exit 1
+    }
+    WMH_BUILD_LOCAL_SCRIPT="$(mktemp)"
+    wmh_build_remote_script > "$WMH_BUILD_LOCAL_SCRIPT"
+    cloudbench_retry_command 5 3 FLY ssh sftp put -a "$APP" --machine "$WMH_BUILD_MID" -q -m 0700 \
+        "$WMH_BUILD_LOCAL_SCRIPT" "$WMH_BUILD_REMOTE_SCRIPT" || {
+        rm -f "$WMH_BUILD_LOCAL_SCRIPT"
+        echo "❌ could not upload the build job" >&2
+        exit 1
+    }
+    rm -f "$WMH_BUILD_LOCAL_SCRIPT"
+    # Fly's exec API 408s on long commands and `ssh -C` mishandles background jobs: detach the
+    # job on the box and poll its log with short reads instead.
+    WMH_BUILD_LAUNCHED=0
+    for _attempt in 1 2 3 4; do
+        FLY ssh console -a "$APP" --machine "$WMH_BUILD_MID" \
+            -C "bash -lc \"setsid nohup bash '$WMH_BUILD_REMOTE_SCRIPT' >> '$WMH_BUILD_REMOTE_LOG' 2>&1 < /dev/null &\"" >/dev/null 2>&1 || true
+        sleep 5
+        if ssh_read "$WMH_BUILD_MID" "p=\$(cat '$WMH_BUILD_REMOTE_PID' 2>/dev/null); [ -n \"\$p\" ] && kill -0 \"\$p\" && echo RUNNING; grep -q '^::WMH-BUILD-' '$WMH_BUILD_REMOTE_LOG' 2>/dev/null && echo RUNNING" \
+            2>/dev/null | grep -q RUNNING; then
+            WMH_BUILD_LAUNCHED=1
+            break
+        fi
+        echo "   ⚠️ build job not confirmed (attempt $_attempt/4); re-launching"
+    done
+    [ "$WMH_BUILD_LAUNCHED" = 1 ] || { echo "❌ build job never started on $WMH_BUILD_MID" >&2; exit 1; }
+    echo "🏗️  Build running on $WMH_BUILD_MID (log $WMH_BUILD_REMOTE_LOG; timeout ${WMH_BUILD_TIMEOUT_SECONDS}s)"
+    wmh_build_poll "$WMH_BUILD_MID" || exit 1
+    echo "✅ Native WMH built; published serving-only cache $WMH_CACHE_NAME and full cache $WMH_FULL_CACHE_NAME."
+    echo "   Next: bash scripts/run-bench-cloud --refresh-wmh   (restores $WMH_CACHE_NAME onto the donor)"
     exit 0
 fi
 
@@ -3351,7 +3913,7 @@ print(round(mult * 0.00288 * perf + mem_gb * 0.00732, 5))
 
 echo "═══ run-bench-cloud (warm run) ═══"
 echo "tasks=[$TASKS_DISPLAY] simulate=$BENCH_SIMULATE parallel=$BENCH_PARALLEL max_concurrency=$BENCH_MAX_CONCURRENCY"
-echo "ref=${BENCH_REF:-<HEAD>} model=$WMH_MODEL_NAME app=$APP dashboard=$DASHBOARD workspace=$RUN_WORKSPACE_NAME"
+echo "ref=${BENCH_REF:-<HEAD>} model=$WMH_MODEL_NAME engine=$WMH_ENGINE app=$APP dashboard=$DASHBOARD workspace=$RUN_WORKSPACE_NAME"
 echo ""
 
 # READ-ONLY env preflight (concurrent-workstream safe): the run path only
@@ -4114,10 +4676,12 @@ if owner.exists() or owner.is_symlink():
     cleanup_name = f"cloudbench-stack-cleanup-{token}.status"
     expected = {"services.json", "run.json", "stack.log", cleanup_name, "logs/backend.log",
                 "logs/worker.log", *(f"logs/worker.{i}.log" for i in range(1, count))}
-    assert set(manifest["files"]) == expected
+    # The served WMH log is optional evidence, present only for simulated runs.
+    optional = set(manifest["files"]) & {"wmh-serve-log.txt"}
+    assert set(manifest["files"]) - optional == expected
     entries = list(capture.rglob("*"))
     assert all(not path.is_symlink() for path in entries)
-    assert {str(path.relative_to(capture)) for path in entries} == expected | {"manifest.json", "logs"}
+    assert {str(path.relative_to(capture)) for path in entries} == expected | optional | {"manifest.json", "logs"}
     cleanup = dict(line.split("=", 1) for line in read(capture / cleanup_name).decode().splitlines())
     assert cleanup["state"] == "clean" and cleanup["token"] == token
     total = 0
@@ -4266,10 +4830,12 @@ while True:
 assert expected["version"] == 1 and expected["run_token"] == run_token and expected["machine_id"] == machine
 files = expected["files"]
 required = {"services.json", "run.json", "stack.log", "logs/backend.log", f"cloudbench-stack-cleanup-{run_token}.status"}
+# Present only when the stack served a world model (its per-step server timing).
+OPTIONAL = "wmh-serve-log.txt"
 assert isinstance(files, dict) and required <= files.keys() and len(files) <= 1030
 total = 0
 for name, metadata in files.items():
-    assert name in required or re.fullmatch(r"logs/worker(?:\.[1-9][0-9]*)?\.log", name)
+    assert name in required or name == OPTIONAL or re.fullmatch(r"logs/worker(?:\.[1-9][0-9]*)?\.log", name)
     assert set(metadata) == {"bytes", "sha256"}
     assert type(metadata["bytes"]) is int and metadata["bytes"] >= 0
     assert re.fullmatch(r"[0-9a-f]{64}", metadata["sha256"])
@@ -4298,7 +4864,7 @@ for name, metadata in files.items():
 services = json.loads((pending / "services.json").read_text())
 count = services["env"]["worker_processes"]
 assert services["status"] == "stopped" and type(count) is int and 1 <= count <= 1024
-assert set(files) == required | {"logs/worker.log", *(f"logs/worker.{i}.log" for i in range(1, count))}
+assert set(files) - {OPTIONAL} == required | {"logs/worker.log", *(f"logs/worker.{i}.log" for i in range(1, count))}
 assert manifest() == expected, "runtime evidence changed across collection"
 with (pending / "manifest.json").open("x") as output:
     json.dump(expected, output, sort_keys=True)
@@ -6247,7 +6813,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ] && ! cloudbench_skip_held_driver_tea
     fi
 fi
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" != "1" ]; then
-    for remote_log_name in stack.log services.json logs/backend.log logs/worker.log logs/research.log; do
+    for remote_log_name in stack.log services.json logs/backend.log logs/worker.log logs/research.log wmh-serve-log.txt; do
         local_log_name="$(printf '%s' "$remote_log_name" | tr '/' '-')"
         ssh_read "$mid" "cat '$REMOTE_REPO/.context/cloudbench/$remote_log_name' 2>/dev/null" \
             > "$OUT_DIR/remote-logs/$local_log_name" 2>/dev/null || true

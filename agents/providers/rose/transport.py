@@ -15,6 +15,7 @@ No retry, no rotation, no waterfall — those live in `claude_auth.py` and
 from __future__ import annotations
 
 import contextlib
+import json
 from typing import Any, AsyncIterator, Dict, Optional
 
 import httpx
@@ -49,7 +50,29 @@ ANTHROPIC_API_KEY_BETA_HEADER = ",".join(
 ANTHROPIC_FAST_MODE_BETA = "fast-mode-2026-02-01"
 ANTHROPIC_VERSION = "2023-06-01"
 ANTHROPIC_X_APP = "cli"
-ANTHROPIC_USER_AGENT = "claude-cli/2.1.251 (external, sdk-ts, agent-sdk/0.2.75)"
+# Anthropic rejects OAuth requests from clients older than each model's
+# minimum (`claude_code_version_too_old`). Recorded live requirements live in
+# shared/claude-oauth-client/contract.json; the rose blackbox fails when this
+# value, the TS mirror, or any configured claude_auth_model disagrees with it.
+ANTHROPIC_USER_AGENT = "claude-cli/2.1.304 (external, sdk-ts, agent-sdk/0.2.75)"
+CLIENT_VERSION_TOO_OLD = "claude_code_version_too_old"
+
+
+def anthropic_error_fields(error_body: str) -> Dict[str, Optional[str]]:
+    """Provider error type/code from an Anthropic error body (enum fields only)."""
+    try:
+        parsed = json.loads(error_body)
+    except ValueError:
+        return {"error_type": None, "error_code": None}
+    error = parsed.get("error") if isinstance(parsed, dict) else None
+    if not isinstance(error, dict):
+        return {"error_type": None, "error_code": None}
+    details = error.get("details")
+    code = details.get("error_code") if isinstance(details, dict) else None
+    return {
+        "error_type": error.get("type") if isinstance(error.get("type"), str) else None,
+        "error_code": code if isinstance(code, str) else None,
+    }
 
 # Caller specifies the per-attempt connect/header deadline. 60s matches
 # WATERFALL_TIMEOUT_MS in research config; claude_auth.py uses the same
@@ -188,6 +211,7 @@ async def post_anthropic_stream(
             # Read body for error context. It's small for error responses;
             # caller turns this into a typed RoseError.
             error_body = (await response.aread()).decode("utf-8", errors="replace")
+            error_fields = anthropic_error_fields(error_body)
             logger.warning(
                 "rose.transport.anthropic.error",
                 request_id=request_id,
@@ -199,7 +223,20 @@ async def post_anthropic_stream(
                 # body length; the full body is still attached below for
                 # the caller's error classifier.
                 error_body_len=len(error_body),
+                **error_fields,
             )
+            if error_fields["error_code"] == CLIENT_VERSION_TOO_OLD:
+                # Every call to this model is rejected until the advertised
+                # client version is raised; never let it pass as an opaque 400.
+                logger.error(
+                    "rose.transport.anthropic.client_version_too_old",
+                    request_id=request_id,
+                    agent_id=agent_id,
+                    call_site=call_site,
+                    model=body.get("model"),
+                    user_agent=headers.get("User-Agent"),
+                    provider_message=json.loads(error_body)["error"].get("message"),
+                )
             # Attach body to response for the caller's error classifier.
             setattr(response, "_rose_error_body", error_body)
         yield response

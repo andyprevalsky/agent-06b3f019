@@ -1913,7 +1913,7 @@ class Portable(unittest.TestCase):
             self.assertEqual((check['status'], check['controllers'], check['copies'], check['copies_per_controller_bound'], check['provider_calls']),
                              ('CHECKED_NOT_LAUNCHED', 3, 70, 32, 2))
             self.assertEqual(check['manifest'], dict(sha256=RUNNER['manifest_sha'](names), tasks=70, original=False, task_timeout=480,
-                                                     e2e_timeout=5400, catalog_eligible=70))
+                                                     e2e_timeout=5400, catalog_eligible=70, catalog_eligibility='live'))
             self.assertEqual(check['shard_bindings'], dict(manifest_sha256=RUNNER['manifest_sha'](names), task_timeout=480))
             self.assertEqual(check['shard_campaign_options'], ['--strict-barrier', '--concurrency', '24', '-k', '1', '--retry-infra', '1',
                                                                '--timeout', '480', '--e2e-timeout', '5400'])
@@ -1926,6 +1926,7 @@ class Portable(unittest.TestCase):
                                                ('not-ready', names[:3] + not_ready, [], 'non-ready tasks'),
                                                ('duplicate', names[:3] + names[:1], [], 'distinct task names'),
                                                ('rootless', names[:3] + rootless, [], 'cloud-root'),
+                                               ('rootless-ordinary', names[:3] + rootless, ['--catalog-eligibility', 'ordinary'], 'cloud-root'),
                                                ('timeout', names, ['--task-timeout', '30'], 'task-timeout must be 60'),
                                                ('e2e', names, ['--task-timeout', '480', '--e2e-timeout', '2000'], 'e2e-timeout must cover'),
                                                ('continuation', names, ['--resume-admission', str(fx.state)], 'original 200-task manifest')]:
@@ -3028,6 +3029,84 @@ class TaskRefBinding(unittest.TestCase):
             self.assertEqual(supervisor['shard_task_ref'](None), RUNNER['TASK_REF'])
 
 
+class WideRunCatalogModes(unittest.TestCase):
+    """An ordinary user-requested wide run admits and places SIM/DEMO catalog tasks as the ordinary fleet
+    does; LIVE acceptance (the operator default) keeps refusing zero-spend and DEMO-replay tasks."""
+    # A main commit whose catalog has the native-WMH simulate task tagged DEMO.
+    SIM_REF = '851937ca339765ce0aaf28a05a1b45fcdc870d2e'
+    SIM_TASK = 'raise-5m-rose-labs-brex'
+
+    def names(self):
+        rows = json.loads(subprocess.check_output(['git', '--no-replace-objects', '-C', str(ROOT), 'show',
+                                                   self.SIM_REF + ':agents/benchmarks/polar_tasks.json']))
+        return [self.SIM_TASK] + [row['name'] for row in rows if row.get('status', 'ready') == 'ready'][:7]
+
+    def args(self, directory, **overrides):
+        values = dict(source_ref=self.SIM_REF, task_ref=self.SIM_REF, tasks=private(directory/'tasks', self.names()),
+                      backend_env=private(directory/'backend.env', 'COMPLETE=fixture\n'), task_count=None,
+                      repetitions=5, controllers='auto', tasks_per_controller=None, task_timeout=1200, e2e_timeout=5400)
+        values.update(overrides)
+        return argparse.Namespace(**values)
+
+    def test_live_acceptance_refuses_demo_replay_and_ordinary_runs_admit_it(self):
+        with tempfile.TemporaryDirectory() as name, \
+                patch.object(CLI, 'capacity_snapshot', side_effect=AssertionError('no provider read')):
+            directory = Path(name)
+            for live in (self.args(directory), self.args(directory, catalog_eligibility='live')):
+                with self.assertRaisesRegex(ValueError, r"DEMO-replay tasks: \['raise-5m-rose-labs-brex'\]"):
+                    CLI.task_manifest(live, ROOT, RUNNER)
+            bound = CLI.task_manifest(self.args(directory, catalog_eligibility='ordinary'), ROOT, RUNNER)
+            self.assertEqual((bound['catalog_eligibility'], bound['catalog_eligible'], bound['original']), ('ordinary', 8, False))
+            # Ordinary eligibility keeps the cloud-runnable rule: a non-ready name still refuses.
+            bad = self.args(directory, tasks=private(directory/'bad', self.names() + ['no-such-benchmark-task']),
+                            catalog_eligibility='ordinary')
+            with self.assertRaisesRegex(ValueError, 'non-ready tasks'):
+                CLI.task_manifest(bad, ROOT, RUNNER)
+
+    def fleet_admission(self, env, modes):
+        """The ordinary fleet's actual fresh-placement admission for one shard's env and catalog modes."""
+        source = (ROOT/'scripts/run-bench-fleet').read_text()
+        def fn(name):
+            start = source.index(name + '() {')
+            return source[start:source.index('\n}\n', start) + 3]
+        script = ('set -u\nREGION=ord\nFRESH_TARGET_REGION=\nFRESH_VOLUMES=1\nPRIVATE_SOURCE_FILE=\nPROVISION_POOL=\nSIM_ON_CSV=\n'
+                  'POOL_IDS_FILE=\nRECOVER_STALE_ONLY=0\nCLOUDBENCH_BOOT_LAUNCH=1\n'
+                  + 'BENCHES=(' + ' '.join('b%d' % i for i in range(len(modes))) + ')\nCATALOG_MODES=(' + ' '.join(modes) + ')\n'
+                  + ''.join('export %s=%s\n' % (k, shlex.quote(v)) for k, v in env.items())
+                  + '\n'.join(fn(n) for n in ('is_sim_on', 'primary_clone_storage_mode', 'fresh_target_region_admission',
+                                               'fresh_volume_placement_admission'))
+                  + '\nfresh_target_region_admission && fresh_volume_placement_admission\n')
+        return subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=10)
+
+    def test_every_shard_placement_passes_the_ordinary_fleet_admission(self):
+        with tempfile.TemporaryDirectory() as name:
+            args = self.args(Path(name), catalog_eligibility='ordinary')
+            plan = CLI.shard_selection(args, RUNNER)
+            self.assertEqual((plan['controllers'], plan['copies']), (2, 40))
+            catalog = runpy.run_path(str(ROOT/'scripts/cloudbench_catalog.py'))
+            sim_shards = 0
+            for item in plan['shards']:
+                shard = CLI.bound_shard(item, args, RUNNER, 'g', plan['copies'], 1.0)
+                simulate = RUNNER['shard_simulate_tasks'](ROOT, shard)
+                self.assertEqual(simulate, [t for t in shard['tasks'] if t == self.SIM_TASK])
+                env = RUNNER['shard_placement_env'](ROOT, shard)
+                modes = ['simulate' if t in simulate else 'real' for t in shard['tasks']]
+                result = self.fleet_admission(env, modes)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                if simulate:
+                    sim_shards += 1
+                    self.assertEqual(env, {})  # snapshot-backed WMH guests keep the ordinary donor-region placement
+                    # The former fixed fresh-only placement is exactly what the fleet refuses for this shard.
+                    refused = self.fleet_admission(RUNNER['FRESH_ONLY_PLACEMENT'], modes)
+                    self.assertNotEqual(refused.returncode, 0)
+                    self.assertIn('cannot route snapshot or simulated tasks', refused.stderr)
+                else:
+                    self.assertEqual(env, RUNNER['FRESH_ONLY_PLACEMENT'])  # REAL-only shards keep the iad fresh-only placement
+            self.assertEqual(sim_shards, 1)
+        # The original600 legacy controller (no shard) is unchanged.
+        self.assertEqual(RUNNER['shard_placement_env'](ROOT, None), RUNNER['FRESH_ONLY_PLACEMENT'])
+
+
 class RunBenchShardedRouting(unittest.TestCase):
     """scripts/run-bench routes wide cloud runs to the sharded operator with the pushed HEAD."""
     @contextmanager
@@ -3065,7 +3144,8 @@ class RunBenchShardedRouting(unittest.TestCase):
             env = dict(os.environ, RUN_BENCH_SHARDED_OPERATOR_UNDER_TEST=str(operator), OPERATOR_CALLS=str(calls),
                        RUN_BENCH_FLEET_BIN_UNDER_TEST=str(fake_fleet), FLEET_CALLS=str(fleet),
                        GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
-            for key in ('RUN_BENCH_SHARDED_ROUTE', 'RUN_BENCH_SHARDED_STATE_DIR', 'RUN_BENCH_GOAL', 'RUN_BENCH_CATALOG_UNDER_TEST'):
+            for key in ('RUN_BENCH_SHARDED_ROUTE', 'RUN_BENCH_SHARDED_STATE_DIR', 'RUN_BENCH_GOAL', 'RUN_BENCH_CATALOG_UNDER_TEST',
+                        'RUN_BENCH_CATALOG_ELIGIBILITY'):
                 env.pop(key, None)
             def run(*argv):
                 result = subprocess.run(['bash', str(root/'scripts/run-bench'), *argv], cwd=root, env=env,
@@ -3119,6 +3199,18 @@ class RunBenchShardedRouting(unittest.TestCase):
             self.assertEqual((result.returncode, len(ops)), (2, 1))  # a refused check never launches
             self.assertIn('nothing was launched', result.stderr)
             fx.env.pop('OPERATOR_EXIT')
+
+    def test_wide_runs_select_ordinary_catalog_eligibility_and_live_acceptance_opts_in(self):
+        names = ['raise-5m-rose-labs-brex'] + polar_names(7)
+        with self.checkout() as fx:
+            result, ops, fleets = fx.run(*names, '-k', '5', '--concurrency', '40', '--check')
+            self.assertEqual((result.returncode, len(ops), fleets), (0, 1, []), result.stderr)
+            self.assertEqual(self.option(ops[0], '--catalog-eligibility'), 'ordinary')
+            fx.env['RUN_BENCH_CATALOG_ELIGIBILITY'] = 'live'
+            result, ops, fleets = fx.run(*names, '-k', '5', '--concurrency', '40', '--check')
+            self.assertEqual((result.returncode, len(ops)), (0, 1), result.stderr)
+            self.assertEqual(self.option(ops[0], '--catalog-eligibility'), 'live')
+            fx.env.pop('RUN_BENCH_CATALOG_ELIGIBILITY')
 
     def test_narrow_runs_keep_the_fleet_path_and_refuse_a_sharded_dry_run(self):
         names = polar_names(10)

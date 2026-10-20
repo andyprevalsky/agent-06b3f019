@@ -199,6 +199,12 @@ def _adds_new_records(state_patch, state):
     return True
 
 
+# Bound for one retirement attempt to join its cancelled operations. A slow
+# drain fails that attempt with 500 while the session stays fenced; the owner
+# retries retirement (run 7, 2026-10-20).
+NATIVE_SESSION_JOIN_SECONDS = 10
+
+
 @dataclass
 class NativeSession:
     id: str
@@ -874,7 +880,7 @@ class ParallelWorldModel:
                     if isinstance(result, NativeDurabilityError):
                         raise result
             else:
-                _, pending = await asyncio.wait(tasks, timeout=10)
+                _, pending = await asyncio.wait(tasks, timeout=NATIVE_SESSION_JOIN_SECONDS)
                 if pending:
                     raise RuntimeError("Native session operations did not join during retirement")
                 await asyncio.gather(*tasks, return_exceptions=True)

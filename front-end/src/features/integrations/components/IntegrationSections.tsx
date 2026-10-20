@@ -203,6 +203,7 @@ export default function IntegrationSections({
         isBrowserCookiesAvailable={isBrowserCookiesAvailable}
         linkedinSyncLoading={messages.linkedinSyncLoading}
         linkedinSyncStarted={messages.linkedinSyncStarted}
+        linkedinConnected={messages.linkedinConnected}
         onLinkedInSync={() => void actions.onLinkedInSync()}
       />
 

@@ -126,6 +126,14 @@ class BenchmarkTask:
     deploy_category: Optional[str] = None
     deploy_canary: bool = False
 
+    def __post_init__(self) -> None:
+        # The catalog may list several files under "attachment"; keep the
+        # single-file field a path and carry the list as attachments, which
+        # every consumer already supports.
+        if isinstance(self.attachment, list):
+            self.attachments = [*self.attachments, *self.attachment]
+            self.attachment = None
+
     def effective_price_limit_cents(self) -> int:
         """Return the route-aware cap without weakening the default eval."""
         exclude_anthropic = os.getenv("ROSE_EXCLUDE_ANTHROPIC_FAMILY", "").strip().lower()
