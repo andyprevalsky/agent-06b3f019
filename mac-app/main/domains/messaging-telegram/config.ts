@@ -53,3 +53,18 @@ export const CONNECTION_RETRIES = 5;
  * Integration key used by the backend and IntegrationCache for Telegram.
  */
 export const INTEGRATION_KEY = 'telegram';
+
+/** Per-account sessions live in TELEGRAM_AUTH_DIR/accounts/<telegram user id>/. */
+export const ACCOUNTS_DIR: string = path.join(TELEGRAM_AUTH_DIR, 'accounts');
+
+/** Per-account profile (label, legacy-claim flag) beside the session file. */
+export const PROFILE_FILE = 'account.json';
+
+/** A Telegram account id is the numeric Telegram user id (also guards path joins). */
+export const ACCOUNT_ID_PATTERN = /^\d{1,20}$/;
+
+/** Chats whose history is uploaded together; one progress write follows each batch. */
+export const DIALOGS_PER_BATCH = 10;
+
+/** Progress unit reported for Telegram history sync. */
+export const PROGRESS_UNIT = 'chats';

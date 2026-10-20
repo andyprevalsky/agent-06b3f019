@@ -25,6 +25,8 @@
  *   - validation 400s, per-user account cap, internal API-key writer path, auth 401
  *   - Plaid per-item sync progress (I5): indeterminate total while syncing, final counts,
  *     1 s coalescing, independent items, ITEM_LOGIN_REQUIRED, webhook re-sync reuses the row
+ *   - Telegram (I8): two accounts listed separately, per-account attribution, delete one
+ *     account's messages only, legacy claim and default-account delete
  *
  * Usage: bash scripts/run-blackbox-tests.sh integration-accounts
  */
@@ -35,6 +37,7 @@ import { reportIntegrationProgress } from '../../domains/integrations/service.pr
 import { MAX_PROGRESS_ACCOUNTS_PER_USER } from '../../domains/integrations/syncAccountsContract';
 import { cases as advancedCases } from './integration-accounts.cases';
 import { cases as plaidProgressCases } from './integration-accounts.plaid.cases';
+import { telegramCases } from './integration-accounts.telegram.cases';
 import {
   accountsOf,
   anonymousSession,
@@ -369,6 +372,7 @@ async function main(): Promise<void> {
     ...coreCases,
     ...advancedCases(() => ({ a: A(), b: B() })),
     ...plaidProgressCases(),
+    ...telegramCases(),
   ];
   let failed = 0;
   try {

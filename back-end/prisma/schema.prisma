@@ -633,6 +633,11 @@ model MessageRecord {
   message            String
   externalId         String? // Platform-native message ID (Telegram msg.id, iMessage ROWID, WhatsApp key.id)
   googleAccountEmail String? // Source Gmail account for account-scoped deletion
+  /// Provider-side account that synced this message (a Telegram user id), for
+  /// account-scoped deletion. Null = the legacy/default account. Rows that carry
+  /// it namespace `externalId` as "<sourceAccountId>:<native id>" so two accounts'
+  /// per-account message counters cannot collide on the dedup key.
+  sourceAccountId    String?
   createdAt          DateTime       @default(now())
   person             Person         @relation(fields: [personId], references: [id], onDelete: Cascade)
 

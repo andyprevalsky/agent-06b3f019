@@ -13,6 +13,12 @@ import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { UPLOAD_LIMITS } from './config';
 import * as service from './service';
+import {
+  connectTelegramAccount,
+  telegramAccountIdSchema,
+  telegramConnectSchema,
+  uploadTelegramAccountBatch,
+} from './uploadService.telegram';
 
 const log = createLogger('Integrations');
 const router = Router({ mergeParams: true });
@@ -260,27 +266,55 @@ router.post(
   })
 );
 
-/** POST /api/integrations/telegram/connect */
+/**
+ * POST /api/integrations/telegram/connect
+ * Body `{ accountId, label?, claimLegacy? }` connects ONE Telegram account
+ * (accountId = Telegram user id); an empty body is the legacy single account.
+ */
 router.post(
   '/telegram/connect',
   authenticateMachineUpload,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;
-    const integration = await service.processTelegramConnect(userId);
+    const parsed = telegramConnectSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.errors[0]?.message ?? 'Invalid body' });
+    }
+    const { accountId } = parsed.data;
+    const integration =
+      accountId === undefined
+        ? await service.processTelegramConnect(userId)
+        : await connectTelegramAccount(userId, { ...parsed.data, accountId });
     res.json({ message: 'Telegram connected successfully', integration });
   })
 );
 
-/** POST /api/integrations/telegram/upload */
+/**
+ * POST /api/integrations/telegram/upload
+ * With `accountId` the batch belongs to that connected account (404 when it
+ * is not connected); without it, the legacy single account.
+ */
 router.post(
   '/telegram/upload',
   authenticateMachineUpload,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;
-    const { contacts, accessedAt } = req.body;
+    const { contacts, accessedAt, accountId } = req.body;
 
     if (!Array.isArray(contacts) || contacts.length === 0) {
       return res.status(400).json({ error: 'contacts array is required' });
+    }
+
+    if (accountId !== undefined) {
+      const parsedAccount = telegramAccountIdSchema.safeParse(accountId);
+      if (!parsedAccount.success) return res.status(400).json({ error: 'Invalid accountId' });
+      const at = typeof accessedAt === 'string' ? accessedAt : undefined;
+      const scoped = await uploadTelegramAccountBatch(userId, parsedAccount.data, contacts, at);
+      if (scoped === null) return res.status(404).json({ error: 'TELEGRAM_ACCOUNT_NOT_CONNECTED' });
+      return res.json({
+        message: 'Telegram payload received, processing in background',
+        ...scoped,
+      });
     }
 
     const result = await service.processTelegramUpload(userId, contacts, accessedAt);
