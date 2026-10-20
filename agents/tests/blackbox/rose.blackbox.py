@@ -2035,19 +2035,52 @@ async def _drain(gen):
     return out
 
 
-async def test_anthropic_transport_accepts_captured_client_version_requirement():
-    """The captured provider rejection must not recur on any direct OAuth request."""
-    from providers.rose.transport import post_anthropic_stream
+# Provider-observed Claude OAuth client-version floors, keyed by the model the
+# OAuth transport sends. Each value is the minimum CLI version demanded by a
+# captured `claude_code_version_too_old` rejection, or the version at which a
+# live OAuth call to that model was observed to succeed. Every
+# `claude_auth_model` in the pool registry must appear here: retargeting a pool
+# to a new Claude model without recording its client-version contract is how
+# rose-1-ultra silently lost Claude from 2026-09-27 (claude-opus-5-5 requires
+# 2.1.280 while the transport still advertised 2.1.251).
+CLAUDE_OAUTH_CLIENT_VERSION_FLOORS = {
+    # 2026-09-10 captured rejection (req_011CevmJfH4uoGCZB6RutpU1).
+    "claude-fable-5-1": (2, 1, 251),
+    # 2026-10-20 captured rejection with a healthy reconnected token.
+    "claude-opus-5-5": (2, 1, 280),
+    # 2026-10-20 live OAuth calls returned HTTP 200 at 2.1.251.
+    "claude-sonnet-5": (2, 1, 251),
+    "claude-haiku-4-5": (2, 1, 251),
+}
 
-    captured_rejection = {
+
+def _captured_version_rejection(advertised: str, required: tuple) -> dict:
+    return {
         "type": "error",
         "error": {
             "type": "invalid_request_error",
-            "message": "Claude Code 2.1.81 does not support this model; version 2.1.251 or newer is required. Run 'claude update', or update the Claude desktop app, then try again.",
+            "message": (
+                f"Claude Code {advertised} does not support this model; version "
+                f"{'.'.join(map(str, required))} or newer is required. Run 'claude update', "
+                "or update the Claude desktop app, then try again."
+            ),
             "details": {"error_code": "claude_code_version_too_old"},
         },
-        "request_id": "req_011CevmJfH4uoGCZB6RutpU1",
+        "request_id": "req_011CgCi6e8D8f5PgT8x86DGd",
     }
+
+
+async def test_anthropic_transport_accepts_captured_client_version_requirement():
+    """Every pool's Claude OAuth model accepts the transport's advertised client version."""
+    from providers.rose.pools import all_pool_names, get_pool
+    from providers.rose.transport import post_anthropic_stream
+
+    models = sorted({get_pool(name).claude_auth_model for name in all_pool_names()})
+    missing = [model for model in models if model not in CLAUDE_OAUTH_CLIENT_VERSION_FLOORS]
+    assert not missing, (
+        f"pool claude_auth_model(s) {missing} have no recorded OAuth client-version floor; "
+        "capture a live OAuth call for the model before routing a pool to it"
+    )
     seen_headers: list[dict[str, str]] = []
 
     def handler(req):
@@ -2057,26 +2090,30 @@ async def test_anthropic_transport_accepts_captured_client_version_requirement()
         seen_headers.append(dict(req.headers))
         advertised = req.headers["user-agent"].split("/", 1)[1].split(" ", 1)[0]
         version = tuple(int(part) for part in advertised.split("."))
-        if version < (2, 1, 251):
-            return httpx.Response(400, json=captured_rejection)
+        required = CLAUDE_OAUTH_CLIENT_VERSION_FLOORS[json.loads(req.content)["model"]]
+        if version < required:
+            return httpx.Response(400, json=_captured_version_rejection(advertised, required))
         return httpx.Response(200, text='event: message_stop\ndata: {"type":"message_stop"}\n\n')
 
     set_mock_handler(handler)
-    async with post_anthropic_stream(
-        body={
-            "model": "claude-fable-5-1",
-            "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 16,
-            "stream": True,
-        },
-        claude_token="version-test-token",
-        request_id="r-client-version",
-    ) as response:
-        assert response.status_code == 200, (
-            "OAuth transport advertised a client version rejected by the captured provider contract"
-        )
-        assert await response.aread()
-    assert len(seen_headers) == 1
+    rejected = []
+    for model in models:
+        async with post_anthropic_stream(
+            body={
+                "model": model,
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 16,
+                "stream": True,
+            },
+            claude_token="version-test-token",
+            request_id=f"r-client-version-{model}",
+        ) as response:
+            if response.status_code == 200:
+                assert await response.aread()
+            else:
+                rejected.append((model, response.status_code))
+    assert not rejected, f"OAuth transport advertised a client version the provider rejects for {rejected}"
+    assert len(seen_headers) == len(models)
 
 
 async def test_provider_transports_preserve_error_body_for_classification():

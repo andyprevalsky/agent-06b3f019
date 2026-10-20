@@ -48,7 +48,7 @@ export const ANTHROPIC_BETA_HEADER_API_KEY = [
 
 const ANTHROPIC_VERSION = '2023-06-01';
 const ANTHROPIC_X_APP = 'cli';
-const ANTHROPIC_USER_AGENT = 'claude-cli/2.1.251 (external, sdk-ts, agent-sdk/0.2.75)';
+const ANTHROPIC_USER_AGENT = 'claude-cli/2.1.284 (external, sdk-ts, agent-sdk/0.2.75)';
 
 export const DEFAULT_CONNECT_TIMEOUT_MS = 60_000;
 
