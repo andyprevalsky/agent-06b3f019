@@ -10,6 +10,10 @@ import { handleChatMessage, broadcastAgentModeStarted } from '../../providers/ch
 import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailure';
 import { deleteAgentRecursive as killAgentRecursive } from '../../providers/agentKill';
 import { createGithubRepo } from '../../providers/github';
+import {
+  CodeSessionShareTargetNotFoundError,
+  shareCodeSession,
+} from '../../providers/codeSessions/branch';
 import { createLogger } from '../../providers/logger';
 import { resolvePriceLimitCents } from '../../providers/priceLimitDefaults';
 import type { CreateAgentBody } from './types';
@@ -184,6 +188,12 @@ export async function createAgent(
   applyMemoryDefault(body, benchmarkFlag);
   disableFastModeForWorldModel(body);
   assertWorldModelModeAccess(body, userId);
+  if (
+    body.share_code_session_with !== undefined &&
+    (await repo.findAgent(body.share_code_session_with, userId)) === null
+  ) {
+    throw new CodeSessionShareTargetNotFoundError(body.share_code_session_with);
+  }
   const existingSubAgent = await resumeExistingSubAgent(body, userId, verifier);
   if (existingSubAgent !== null) return existingSubAgent;
   const { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo } =
@@ -228,6 +238,14 @@ export async function createAgent(
     workflowTaskQueue: body.task_queue,
   });
   const archiveStartFixture = !isSubAgent ? await prepareAgentStartArchive(agent.agent.id) : null;
+  if (body.share_code_session_with !== undefined) {
+    // Recorded before the workflow starts so its first code spawn already shares.
+    await shareCodeSession({
+      userId,
+      agentId: agent.agent.id,
+      sharedWithAgentId: body.share_code_session_with,
+    });
+  }
 
   const workflowId = await launchAgentWorkflow(body, agent, userId, isSubAgent, agentId, verifier);
 

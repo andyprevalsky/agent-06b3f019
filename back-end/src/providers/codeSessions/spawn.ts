@@ -6,15 +6,18 @@ import { Sandbox } from 'e2b';
 import { prisma } from '../database';
 import { createLogger } from '../logger';
 import { isLocalClaudeCodeSandboxId } from '../claudeCodeLocalSession';
+import { effectiveOwnerAgentId, planCodeSessionBranch } from './branch';
 import { checkpointCodeSession, retireCodeSession, sweepExpiredCodeSessions } from './lifecycle';
 import { e2bSandboxFs, localSandboxFs } from './sandboxFs';
 import {
   CodeSessionNotFoundError,
+  extendLease,
   findOwnedCodeSession,
   markPaused,
   resolveCodeSession,
   type CodeSessionRow,
 } from './store';
+import { CODE_SANDBOX_IDLE_TIMEOUT_MS } from '../e2bCodeSessionSandbox';
 
 const log = createLogger('CodeSessionSpawn');
 
@@ -27,6 +30,8 @@ export interface ResolveSpawnParams {
   codeProvider: 'claude' | 'codex';
   codeSessionId?: string;
   leaseOwner?: string;
+  /** Project default branch; null/undefined = the repo's own default branch. */
+  baseBranch?: string | null;
 }
 
 /** Resolve (and lease) the code session a spawn attaches to. */
@@ -34,6 +39,7 @@ export async function resolveSpawnCodeSession(
   params: ResolveSpawnParams
 ): Promise<CodeSessionRow | null> {
   if (params.userId === undefined || params.userId === '') return null;
+  const userId = params.userId;
   const agent = await prisma.agent.findUnique({
     where: { id: params.agentId },
     select: { busId: true },
@@ -42,18 +48,34 @@ export async function resolveSpawnCodeSession(
     agent?.busId !== undefined && agent.busId !== null && agent.busId !== ''
       ? agent.busId
       : params.agentId;
-  sweepExpiredCodeSessions(params.userId);
+  sweepExpiredCodeSessions(userId);
+  // "New agent in this branch" works in the shared agent's session; every
+  // other agent owns its own worktree and branch (plan §1b).
+  const ownerAgentId = await effectiveOwnerAgentId(userId, params.agentId);
   const { session, created } = await resolveCodeSession({
-    userId: params.userId,
+    userId,
     rootAgentId,
+    ownerAgentId,
     repoUrl: params.repoUrl,
     codeProvider: params.codeProvider,
     codeSessionId: params.codeSessionId,
     leaseOwner: params.leaseOwner ?? `agent:${params.agentId}`,
+    shared: ownerAgentId !== params.agentId,
+    planBranch: (parallelOf) =>
+      planCodeSessionBranch({
+        userId,
+        ownerAgentId,
+        repoUrl: params.repoUrl,
+        defaultBranch: params.baseBranch ?? null,
+        parallelOf,
+      }),
   });
   log.info(created ? 'Created code session' : 'Resuming code session', {
     codeSessionId: session.id,
     rootAgentId,
+    ownerAgentId,
+    branch: session.branch ?? undefined,
+    mergeTarget: session.mergeTarget ?? undefined,
     state: session.state,
     checkpointSeq: String(session.latestCheckpointSeq),
   });
@@ -69,10 +91,7 @@ export async function createWithCodeSession<
 >(
   params: ResolveSpawnParams,
   create: (codeSession: CodeSessionRow | null) => Promise<T>
-): Promise<{
-  session: T;
-  fields: { code_session_id: string | null; resumed_from: string; cli_session_id: string | null };
-}> {
+): Promise<{ session: T; fields: CodeSessionSpawnFields }> {
   const codeSession = await resolveSpawnCodeSession(params);
   let session: T;
   try {
@@ -87,18 +106,41 @@ export async function createWithCodeSession<
       code_session_id: codeSession?.id ?? null,
       resumed_from: session.resumedFrom ?? 'new',
       cli_session_id: session.cliSessionId ?? null,
+      branch: codeSession?.branch ?? null,
+      base_branch: codeSession?.baseBranch ?? null,
+      merge_target: codeSession?.mergeTarget ?? null,
+      parent_code_session_id: codeSession?.parentCodeSessionId ?? null,
     },
   };
+}
+
+/** Session facts every create response (and so the tool's first trajectory entry) carries. */
+export interface CodeSessionSpawnFields {
+  code_session_id: string | null;
+  resumed_from: string;
+  cli_session_id: string | null;
+  /** Branch the agent works on (null for repo-less sessions). */
+  branch: string | null;
+  /** Ref the branch was cut from; null = the repo's default branch. */
+  base_branch: string | null;
+  /** Where the branch merges; null = the repo's default branch. */
+  merge_target: string | null;
+  parent_code_session_id: string | null;
 }
 
 export interface CodeSessionView {
   code_session_id: string;
   root_agent_id: string;
+  owner_agent_id: string;
   repo_url: string | null;
   code_provider: string;
   state: string;
   checkpoint_seq: number;
   cli_session_id: string | null;
+  branch: string | null;
+  base_branch: string | null;
+  merge_target: string | null;
+  parent_code_session_id: string | null;
   repo: unknown;
   last_active_at: Date;
 }
@@ -107,11 +149,16 @@ function view(row: CodeSessionRow): CodeSessionView {
   return {
     code_session_id: row.id,
     root_agent_id: row.rootAgentId,
+    owner_agent_id: row.ownerAgentId,
     repo_url: row.repoUrl,
     code_provider: row.codeProvider,
     state: row.state,
     checkpoint_seq: row.latestCheckpointSeq,
     cli_session_id: row.cliSessionId,
+    branch: row.branch,
+    base_branch: row.baseBranch,
+    merge_target: row.mergeTarget,
+    parent_code_session_id: row.parentCodeSessionId,
     repo: row.lastRepoFacts,
     last_active_at: row.lastActiveAt,
   };
@@ -135,6 +182,27 @@ export async function retireOwnedCodeSession(
   if (row === null) throw new CodeSessionNotFoundError(codeSessionId);
   if (row.state !== 'RETIRED') await retireCodeSession(row);
   return view((await findOwnedCodeSession(userId, codeSessionId)) ?? row);
+}
+
+/**
+ * Keepalive from the attached code-agent activity (liveness is heartbeat-only;
+ * there is no runtime limit): extend the E2B sandbox's idle window and the
+ * session lease. Once keepalives stop, the sandbox pauses after the window.
+ */
+export async function keepAliveCodeTask(
+  taskId: string,
+  setTimeoutFn: (sandboxId: string, timeoutMs: number) => Promise<void> = (sandboxId, timeoutMs) =>
+    Sandbox.setTimeout(sandboxId, timeoutMs, { apiKey: process.env.E2B_API_KEY })
+): Promise<{ alive: boolean; code_session_id: string | null }> {
+  const task = await prisma.claudeCodeSession.findUnique({ where: { id: taskId } });
+  if (task === null || task.status === 'CLOSED') {
+    return { alive: false, code_session_id: task?.codeSessionId ?? null };
+  }
+  if (!isLocalClaudeCodeSandboxId(task.sandboxId)) {
+    await setTimeoutFn(task.sandboxId, CODE_SANDBOX_IDLE_TIMEOUT_MS);
+  }
+  if (task.codeSessionId !== null) await extendLease(task.codeSessionId);
+  return { alive: true, code_session_id: task.codeSessionId };
 }
 
 /**

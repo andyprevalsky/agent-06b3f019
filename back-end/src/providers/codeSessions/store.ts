@@ -1,16 +1,18 @@
 /**
  * CodeSession persistence: identity, leasing, pause and retirement.
  *
- *   resolveCodeSession(user, root, repo, id?, leaseOwner)
+ *   resolveCodeSession(user, owner agent, repo, id?, leaseOwner)
  *     ├─ id given ──► must belong to user (else CodeSessionNotFoundError → 404)
- *     ├─ no id ─────► latest live session for (user, root, repoKey)
- *     │                (expired by TTL → retired, then a new one)
+ *     ├─ no id ─────► the owner's primary live session for (user, owner, repoKey)
+ *     │                (expired by TTL → retired, then a new one on a planned branch)
  *     └─ lease ─────► conditional update; a lease held by another spawn means
- *                     a parallel spawn: explicit id → CodeSessionBusyError,
- *                     default → a fresh session for that spawn
+ *                     a parallel spawn: explicit id / shared → CodeSessionBusyError,
+ *                     default → an idle parallel session, else a new one whose
+ *                     branch is cut from the busy one
  *
- * 10k agents: every query is keyed by (userId, rootAgentId, repoKey) or the
- * session id; no shared row or global counter is touched.
+ * 10k agents: every query is keyed by (userId, ownerAgentId, repoKey) or the
+ * session id (bounded scan of OWNER_SESSION_SCAN rows); no shared row or
+ * global counter is touched.
  */
 import { Prisma } from '@prisma/client';
 import { prisma } from '../database';
@@ -51,14 +53,31 @@ export function repoKeyFor(repoUrl: string | null | undefined): string {
   return repoUrl !== undefined && repoUrl !== null ? repoUrl.trim() : '';
 }
 
+/** Branch a new session works on (see branch.ts). Null fields for repo-less sessions. */
+export interface CodeSessionBranchPlan {
+  branch: string | null;
+  baseBranch: string | null;
+  mergeTarget: string | null;
+  parentCodeSessionId: string | null;
+}
+
 export interface ResolveCodeSessionParams {
   userId: string;
   rootAgentId: string;
+  /** Agent whose worktree this is (the spawning agent, or the agent it shares with). */
+  ownerAgentId: string;
   repoUrl: string | null;
   codeProvider: string;
   codeSessionId?: string | null;
   /** Stable for one tool call so Temporal retries keep their lease. */
   leaseOwner: string;
+  /**
+   * Branch for a session this call has to create. `parallelOf` is the owner's
+   * session that another spawn holds; the new session branches from it.
+   */
+  planBranch: (parallelOf: CodeSessionRow | null) => Promise<CodeSessionBranchPlan>;
+  /** Shared session ("New agent in this branch"): a busy session is an error, never a fork. */
+  shared?: boolean;
   now?: Date;
 }
 
@@ -66,6 +85,9 @@ export interface ResolvedCodeSession {
   session: CodeSessionRow;
   created: boolean;
 }
+
+/** Owner sessions inspected per resolve: the primary plus a few parallel ones. */
+const OWNER_SESSION_SCAN = 10;
 
 function isExpired(session: { lastActiveAt: Date }, now: Date): boolean {
   return now.getTime() - session.lastActiveAt.getTime() > codeSessionTtlMs();
@@ -88,11 +110,16 @@ async function tryLease(id: string, leaseOwner: string, now: Date): Promise<bool
   return result.count === 1;
 }
 
-async function createSession(params: ResolveCodeSessionParams, now: Date): Promise<CodeSessionRow> {
+async function createSession(
+  params: ResolveCodeSessionParams,
+  plan: CodeSessionBranchPlan,
+  now: Date
+): Promise<CodeSessionRow> {
   return prisma.codeSession.create({
     data: {
       userId: params.userId,
       rootAgentId: params.rootAgentId,
+      ownerAgentId: params.ownerAgentId,
       repoUrl: params.repoUrl,
       repoKey: repoKeyFor(params.repoUrl),
       codeProvider: params.codeProvider,
@@ -100,7 +127,29 @@ async function createSession(params: ResolveCodeSessionParams, now: Date): Promi
       leaseOwner: params.leaseOwner,
       leaseExpiresAt: new Date(now.getTime() + LEASE_MS),
       lastActiveAt: now,
+      branch: plan.branch,
+      baseBranch: plan.baseBranch,
+      mergeTarget: plan.mergeTarget,
+      parentCodeSessionId: plan.parentCodeSessionId,
     },
+  });
+}
+
+/** Live sessions of one owner for one repo, primary (oldest) first. */
+export async function ownerCodeSessions(
+  userId: string,
+  ownerAgentId: string,
+  repoUrl: string | null
+): Promise<CodeSessionRow[]> {
+  return prisma.codeSession.findMany({
+    where: {
+      userId,
+      ownerAgentId,
+      repoKey: repoKeyFor(repoUrl),
+      state: { not: CODE_SESSION_STATES.RETIRED },
+    },
+    orderBy: { createdAt: 'asc' },
+    take: OWNER_SESSION_SCAN,
   });
 }
 
@@ -130,27 +179,34 @@ export async function resolveCodeSession(
     return { session: leased, created: false };
   }
 
-  const latest = await prisma.codeSession.findFirst({
-    where: {
-      userId: params.userId,
-      rootAgentId: params.rootAgentId,
-      repoKey: repoKeyFor(params.repoUrl),
-      state: { not: CODE_SESSION_STATES.RETIRED },
-    },
-    orderBy: { lastActiveAt: 'desc' },
-  });
-  if (latest !== null && isExpired(latest, now)) {
-    await markRetired(latest.id, now);
-  } else if (latest !== null && (await tryLease(latest.id, params.leaseOwner, now))) {
-    const leased = await prisma.codeSession.findUniqueOrThrow({ where: { id: latest.id } });
-    return { session: leased, created: false };
-  } else if (latest !== null) {
-    log.info('Latest code session is leased by another spawn; starting a parallel session', {
-      codeSessionId: latest.id,
-      rootAgentId: params.rootAgentId,
+  // The owner's primary session first; when another spawn holds it, an idle
+  // parallel session of the same owner, else a new parallel one branched from
+  // the primary so two CLIs never share one worktree.
+  const live: CodeSessionRow[] = [];
+  for (const candidate of await ownerCodeSessions(
+    params.userId,
+    params.ownerAgentId,
+    params.repoUrl
+  )) {
+    if (isExpired(candidate, now)) await markRetired(candidate.id, now);
+    else live.push(candidate);
+  }
+  for (const candidate of live) {
+    if (await tryLease(candidate.id, params.leaseOwner, now)) {
+      const leased = await prisma.codeSession.findUniqueOrThrow({ where: { id: candidate.id } });
+      return { session: leased, created: false };
+    }
+    if (params.shared === true) throw new CodeSessionBusyError(candidate.id);
+  }
+  const parallelOf = live[0] ?? null;
+  if (parallelOf !== null) {
+    log.info('Code session is leased by another spawn; starting a parallel session', {
+      codeSessionId: parallelOf.id,
+      ownerAgentId: params.ownerAgentId,
     });
   }
-  return { session: await createSession(params, now), created: true };
+  const plan = await params.planBranch(parallelOf);
+  return { session: await createSession(params, plan, now), created: true };
 }
 
 export async function recordSandbox(
@@ -192,6 +248,21 @@ export async function commitCheckpoint(
       lastRepoFacts: facts.repoFacts as Prisma.InputJsonValue,
       lastActiveAt: new Date(),
     },
+  });
+}
+
+/**
+ * Keepalive from an attached spawn: push the lease out so a long-running
+ * session is never taken by a parallel spawn, and record activity for the TTL.
+ */
+export async function extendLease(codeSessionId: string, now = new Date()): Promise<void> {
+  await prisma.codeSession.updateMany({
+    where: {
+      id: codeSessionId,
+      state: CODE_SESSION_STATES.ACTIVE,
+      leaseOwner: { not: null },
+    },
+    data: { leaseExpiresAt: new Date(now.getTime() + LEASE_MS), lastActiveAt: now },
   });
 }
 

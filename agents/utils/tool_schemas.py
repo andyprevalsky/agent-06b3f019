@@ -973,6 +973,14 @@ class SpawnAgentTool(BaseModel):
             "the GitHub repo defaults to a repo automatically created for this agent tree."
         ),
     )
+    code_session_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional when type='code'. Ignored for every other type. The code_session_id a "
+            "previous code-agent result reported, to resume that exact session (files, commits, "
+            "branch and conversation). Omit it to resume your own latest session for the repo."
+        ),
+    )
     start_phase: Optional[Literal["PLAN", "EXECUTE"]] = Field(
         default=None,
         description=(
@@ -1116,6 +1124,14 @@ class SpawnAgentToolNoGP(BaseModel):
         default=None,
         description=(
             "Optional when type='code'. GitHub repository URL to clone and sync to. Ignored for every other type."
+        ),
+    )
+    code_session_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional when type='code'. Ignored for every other type. The code_session_id a "
+            "previous code-agent result reported, to resume that exact session (files, commits, "
+            "branch and conversation). Omit it to resume your own latest session for the repo."
         ),
     )
     context_gates: Optional[Dict[str, bool]] = Field(

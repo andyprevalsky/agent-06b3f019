@@ -164,6 +164,7 @@ export async function createSession(params: CreateSessionParams): Promise<Create
       codeProvider: 'claude',
       codeSessionId: params.code_session_id,
       leaseOwner: params.lease_owner,
+      baseBranch: params.base_branch ?? null,
     },
     (codeSession) =>
       createClaudeCodeSession(

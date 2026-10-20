@@ -108,6 +108,7 @@ export async function createSession(params: CreateSessionParams) {
       codeProvider: 'codex',
       codeSessionId: params.code_session_id,
       leaseOwner: params.lease_owner,
+      baseBranch: params.base_branch ?? null,
     },
     (codeSession) =>
       createCodexCodeSession(

@@ -48,6 +48,8 @@ export interface RepoFacts {
   pushed: boolean;
   remoteUrl: string | null;
   dirtyFiles: number;
+  /** origin/HEAD's branch when the checkpoint saw it. */
+  defaultBranch?: string | null;
 }
 
 export interface CheckpointResult {
@@ -58,7 +60,9 @@ export interface CheckpointResult {
 }
 
 export function localCodeSessionRoot(): string {
-  return resolve(process.env.CLAUDE_CODE_LOCAL_SESSIONS_DIR || '/tmp/claude-code-local/code-sessions');
+  return resolve(
+    process.env.CLAUDE_CODE_LOCAL_SESSIONS_DIR || '/tmp/claude-code-local/code-sessions'
+  );
 }
 
 export function localCodeSessionHome(codeSessionId: string): string {
@@ -86,6 +90,7 @@ export function primaryRepoFacts(manifest: Pick<CheckpointManifest, 'repos'>): R
     pushed: repo.pushed,
     remoteUrl: repo.remoteUrl,
     dirtyFiles: repo.dirtyFiles.length,
+    defaultBranch: repo.defaultBranch ?? null,
   };
 }
 
@@ -152,6 +157,15 @@ export async function checkpointCodeSession(params: {
   }
 }
 
+/** github.com remotes fetch with the platform token, as the ws-server clone does. */
+export function githubAuthRemoteUrl(remoteUrl: string): string {
+  const token = process.env.GITHUB_TOKEN;
+  if (token === undefined || token === '' || !remoteUrl.startsWith('https://github.com/')) {
+    return remoteUrl;
+  }
+  return remoteUrl.replace('https://github.com/', `https://x-access-token:${token}@github.com/`);
+}
+
 /**
  * Restore the newest checkpoint that verifies. A corrupted checkpoint is
  * rejected (never applied) and the next older one is tried.
@@ -176,7 +190,9 @@ export async function restoreLatestCheckpoint(
       }
       throw error;
     }
-    const { cliSessionId } = await applyCheckpoint(fs, verified);
+    const { cliSessionId } = await applyCheckpoint(fs, verified, {
+      authRemoteUrl: githubAuthRemoteUrl,
+    });
     return { seq, cliSessionId };
   }
   return null;

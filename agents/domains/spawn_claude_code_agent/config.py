@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import timedelta
 from typing import Final
 
 # Temporary kill-switch for the post-run code-agent completion verifier
@@ -21,54 +22,46 @@ def code_agent_verifier_disabled() -> bool:
 # Silence timeout — if no output for this long, Claude Code is "done talking"
 SILENCE_TIMEOUT_S: Final[float] = 1.0
 
-# After the autonomous CC path observes silence and begins waiting for the SDK
-# exit, require a fresh WebSocket event within this window. Without it, a hung
-# CLI (no exit_code, no further events) spins until MAX_RUNTIME_S — seen on
-# cuda-kernel k=3 r12 agent 4e1a84b7 (ScheduleWakeup/Bash then 10m+ of only
-# progress chips). Progress chips do not refresh last_output_time.
-SDK_IDLE_TIMEOUT_S: Final[float] = 180.0  # 3 minutes of no WS events
-
-# Claude Code's Monitor / ScheduleWakeup tools legitimately go quiet on the
-# WebSocket while background work continues (cuda k=3 r21 agent ce189356:
-# Monitor + ScheduleWakeup then 180s silence → idle kill, 0 artifacts, score
-# 0.5). Keep the short default for ordinary hangs, but stretch the idle window
-# after those wait tools so productive sessions are not aborted mid-wait.
-# Still well below MAX_RUNTIME_S so a truly stuck Monitor cannot burn the full
-# budget.
+# ── No timeouts (rose-builds-rose C11) ──
+# A code agent has no runtime limit. Liveness is heartbeat-only: the activity
+# heartbeats Temporal and keeps the sandbox alive while it is attached, and a
+# dead worker is detected by CODE_ACTIVITY_HEARTBEAT_TIMEOUT_S and retried.
 #
-# The same stretched window applies while ANY tool is in-flight (tool_use with
-# no matching tool_result yet). Long Bash / Write / network calls emit no WS
-# events until they finish — cuda k=3 r22 CC#4 was idle-killed mid-Bash at
-# 180s despite active work. tool_result restores the short window unless a
-# wait tool has armed the post-wait stretch.
-SDK_WAIT_TOOL_IDLE_TIMEOUT_S: Final[float] = 900.0  # 15 minutes after wait tools / in-flight
-SDK_WAIT_TOOL_NAMES: Final[frozenset[str]] = frozenset({"Monitor", "ScheduleWakeup"})
-# Bash (and Task/TaskOutput for backgrounded work) often emit tool_result while
-# work continues off-WebSocket. Treat them like wait tools for idle-arming so
-# tool_result does not snap idle back to 180s and kill productive sessions
-# (cuda k=3 r24 a2 CC: Bash stretch → tool_result → 180s idle kill, 0 artifacts).
-SDK_POST_RESULT_STRETCH_TOOL_NAMES: Final[frozenset[str]] = frozenset(
-    {"Bash", "Task", "TaskOutput"}
-)
+# When the CLI sends no event for this window with no tool in flight and no
+# SDK result, the session is PAUSED (checkpoint + E2B pause) and the tool
+# returns status "paused" with its code_session_id: resumable on the next
+# spawn, never a failure. Paused processes keep their memory, so a Monitor /
+# ScheduleWakeup wait continues when the session resumes. A tool in flight
+# (long Bash, Write, network call) keeps the session attached indefinitely:
+# silence there is work, not a hang (cuda k=3 r21/r22/r24 were productive
+# sessions the old 180s/900s idle kills aborted).
+CODE_SESSION_IDLE_PAUSE_S: Final[float] = 900.0
 
-# After the SDK emits type=result (CLI declared completion), do not let
-# Bash/Task/ScheduleWakeup re-arm the 900s stretch. Healthy sessions exit
-# within ~1s of result (cuda k=3 r31 a1); zombie sessions that keep tooling
-# after result (r31 a2: result → ScheduleWakeup/Bash → Max runtime, 0
-# artifacts) must fall back to the short idle window so the parent can retry
-# inside the bench budget instead of burning 2×1800s.
-#
-# Absolute backstop if stdout keeps refreshing last_output_time after result
-# (prevents idle from ever firing): end the monitor this many seconds after
-# the *first* SDK result regardless of stretch/idle.
+# After the SDK emits type=result the CLI has declared completion; healthy
+# sessions exit within ~1s (cuda k=3 r31 a1). A zombie that keeps tooling
+# after result (r31 a2) must not hold the session: once this grace passes the
+# monitor ends and the run is verified on its result. Not a failure and not a
+# kill: closing the session checkpoints and pauses the sandbox.
 SDK_POST_RESULT_EXIT_GRACE_S: Final[float] = 180.0
 
-# Maximum runtime before timeout.
-# Keep this well below long rose-bench task budgets (e.g. cuda-kernel 4200s).
-# A 60m cap let hung Claude Code sessions burn the whole bench with no parent
-# recovery (k=3 2026-09-02: 3009s/3721s CC waits → all timeouts). Successful
-# code-agent path finishes CC in ~15m; 30m fails hung sessions with headroom.
-MAX_RUNTIME_S: Final[int] = 1800  # 30 minutes (matches E2B SANDBOX_TIMEOUT_MS)
+# The attached activity extends the sandbox's E2B idle window this often
+# (POST /:taskId/keepalive). Well inside the backend's 30-minute window, so an
+# attached session never auto-pauses; once keepalives stop it pauses on its own.
+CODE_SESSION_KEEPALIVE_INTERVAL_S: Final[float] = 240.0
+
+# Temporal requires a start_to_close or schedule_to_close timeout on every
+# activity. The code-agent activity passes this effectively-infinite value so
+# its only liveness check is heartbeat_timeout (structural test:
+# test_code_agent_activity_has_no_deadline_and_no_attempt_cap).
+CODE_AGENT_ACTIVITY_NO_DEADLINE: Final[timedelta] = timedelta(days=36500)
+
+# Temporal retries are unlimited so worker crashes and deploys never end a
+# session. Errors the activity itself raises (not worker death) stop retrying
+# after this many attempts so a deterministic failure cannot loop forever.
+CODE_AGENT_ERROR_RETRY_LIMIT: Final[int] = 5
+
+# Tool result status for an idle session that was paused (resumable).
+CODE_AGENT_PAUSED_STATUS: Final[str] = "paused"
 
 # ── Deploy drain / reattach ──
 # Same value as BROWSER_DRAIN_YIELD_STATUS: the activity detached from a sandbox
@@ -79,7 +72,7 @@ CODE_AGENT_DRAIN_YIELD_STATUS: Final[str] = "yielded_for_deploy_drain"
 CODE_SESSION_HEARTBEAT_KEY: Final[str] = "code_session"
 DRAIN_CHECK_INTERVAL_S: Final[float] = 1.0
 # The retry after a dead worker starts once this passes without a heartbeat, so
-# the sandbox ws-servers' REATTACH_LINGER_MS must outlast it.
+# the sandbox ws-servers serve their final buffer until the session is closed.
 CODE_ACTIVITY_HEARTBEAT_TIMEOUT_S: Final[int] = 300
 # A reattaching attempt closes the previous sandbox and starts over only after
 # this many failed handshakes, so one network blip does not discard a live run.

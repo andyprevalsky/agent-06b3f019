@@ -167,6 +167,10 @@ const createAgentBaseSchema = z.object({
   // Provider/environment execution mode. Defaults to real at the DB and
   // workflow boundaries; sub-agents inherit their parent's persisted mode.
   world_model_mode: z.enum(['real', 'simulate', 'shadow']).optional(),
+  // "New agent in this branch": this agent's code-agent spawns work in the
+  // named agent's code session (same worktree, branch and CLI conversation)
+  // instead of getting their own branch. Must be an agent the caller owns.
+  share_code_session_with: z.string().uuid().optional(),
 });
 
 function validateParentWorkflowPair(

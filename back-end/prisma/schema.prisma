@@ -604,14 +604,19 @@ model ClaudeCodeSession {
   @@index([codeSessionId])
 }
 
-/// Persistent code-agent workspace scoped to (userId, rootAgentId, repoKey).
-/// Every spawn_code_agent call in a root tree resumes its latest session for
-/// the same repo: a paused sandbox when it survived, otherwise the latest
-/// verified checkpoint stored under user/<userId>/code-sessions/<id>/<seq>/.
+/// Persistent code-agent workspace owned by one agent for one repo
+/// (userId, ownerAgentId, repoKey). Every code-agent spawn by that agent
+/// resumes its latest session: a paused sandbox when it survived, otherwise
+/// the latest verified checkpoint under user/<userId>/code-sessions/<id>/<seq>/.
+/// Branch model (docs/plans/active/code-agent-persistent-sessions.md §1b): a
+/// root agent's branch is cut from the repo default branch; a sub-agent's is
+/// cut from its parent's branch and merges back into it.
 model CodeSession {
   id                  String    @id @default(uuid())
   userId              String
   rootAgentId         String
+  /// Agent whose code-agent spawns work in this session's worktree.
+  ownerAgentId        String
   repoUrl             String?
   /// repoUrl ?? '' so the scope lookup is one indexed equality.
   repoKey             String    @default("")
@@ -630,13 +635,32 @@ model CodeSession {
   latestCheckpointSeq Int       @default(0)
   nextCheckpointSeq   Int       @default(0)
   lastRepoFacts       Json?
+  /// Branch this session works on (repo sessions only).
+  branch              String?
+  /// Ref the branch was cut from; null = the repo's default branch.
+  baseBranch          String?
+  /// Branch this one merges into; null = the repo's default branch.
+  mergeTarget         String?
+  /// The parent agent's session this branch was cut from (sub-agents).
+  parentCodeSessionId String?
   lastActiveAt        DateTime  @default(now())
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
   retiredAt           DateTime?
 
-  @@index([userId, rootAgentId, repoKey, lastActiveAt(sort: Desc)])
+  @@index([userId, ownerAgentId, repoKey, lastActiveAt(sort: Desc)])
   @@index([userId, state, lastActiveAt])
+}
+
+/// "New agent in this branch": agentId works in the code session (worktree,
+/// branch, CLI conversation) of sharedWithAgentId instead of its own.
+model CodeSessionShare {
+  agentId           String   @id
+  userId            String
+  sharedWithAgentId String
+  createdAt         DateTime @default(now())
+
+  @@index([sharedWithAgentId])
 }
 
 model GithubRepoAccess {

@@ -3,7 +3,8 @@
  * working state whether or not the agent committed anything:
  *
  *   HOME ──tar (minus caches/large/.git/credentials)──► worktree.tar.gz
- *   each git repo under HOME ──git bundle --all──────► repo-<n>.bundle
+ *   each git repo under HOME ──git bundle --all --not --remotes──► repo-<n>.bundle
+ *                               (local-only commits; refs listed in the manifest)
  *   newest Claude/Codex session log ─────────────────► cli-log.jsonl
  *   manifest.json: seq, sha256 + size of every artifact, HEAD/branch/dirty
  *                  files per repo, cli session id
@@ -54,6 +55,10 @@ export interface CheckpointRepo {
   localCommits: number;
   pushed: boolean;
   dirtyFiles: string[];
+  /** Local refs (branches, tags, stash) and their shas, restored onto a fresh clone. */
+  refs?: Record<string, string>;
+  /** origin/HEAD's branch (the repo default) when known. */
+  defaultBranch?: string | null;
 }
 
 export interface CheckpointManifest {
@@ -165,7 +170,13 @@ async function inspectRepo(
       'if [ -n "$HEAD_SHA" ]; then',
       '  echo "LOCAL=$(git rev-list --count HEAD --not --remotes 2>/dev/null)"',
       '  echo "REMOTE_REFS=$(git for-each-ref --count=1 --format=x refs/remotes 2>/dev/null)"',
-      `  git bundle create ${shellQuote(bundleFile)} --all >/dev/null 2>&1 && echo BUNDLE=1`,
+      // Only history a remote does not already hold: a full `--all` bundle of a
+      // large repo (Rose: 1.4 GB) per checkpoint is not storable. Restore
+      // fetches the remote first, so these prerequisites are present there.
+      // No local-only commits -> git refuses an empty bundle -> refs alone.
+      `  git bundle create ${shellQuote(bundleFile)} --all --not --remotes >/dev/null 2>&1 && echo BUNDLE=1`,
+      '  echo "DEFAULT=$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)"',
+      `  git for-each-ref --count=500 --format='REF=%(refname) %(objectname)' refs/heads refs/tags refs/stash 2>/dev/null`,
       'fi',
       `git status --porcelain=v1 -uall 2>/dev/null | head -500 > ${shellQuote(`${tmp}/dirty-${index}.txt`)}`,
       'exit 0',
@@ -185,6 +196,12 @@ async function inspectRepo(
     dirtyFiles = [];
   }
   const hasBundle = values.get('BUNDLE') === '1';
+  const refs: Record<string, string> = {};
+  for (const line of result.stdout.split('\n')) {
+    const match = /^REF=(refs\/\S+) ([0-9a-f]{40,64})$/.exec(line.trim());
+    if (match !== null) refs[match[1]] = match[2];
+  }
+  const defaultRef = values.get('DEFAULT') ?? '';
   return {
     repo: {
       path: repoPath,
@@ -195,6 +212,8 @@ async function inspectRepo(
       localCommits,
       pushed: head !== null && hasRemoteRefs && localCommits === 0,
       dirtyFiles,
+      refs,
+      defaultBranch: defaultRef.startsWith('origin/') ? defaultRef.slice('origin/'.length) : null,
     },
     bundleFile: hasBundle ? bundleFile : null,
   };
@@ -210,7 +229,9 @@ export interface CreateCheckpointParams {
 }
 
 /** Capture HOME into a new checkpoint and upload it. Returns the manifest. */
-export async function createCheckpoint(params: CreateCheckpointParams): Promise<CheckpointManifest> {
+export async function createCheckpoint(
+  params: CreateCheckpointParams
+): Promise<CheckpointManifest> {
   const { fs, userId, codeSessionId, seq, reason, codeProvider } = params;
   const tmp = tmpDirFor(codeSessionId, seq, 'ckpt');
   const home = fs.home;
@@ -375,18 +396,26 @@ export async function loadVerifiedCheckpoint(
 }
 
 function safeRelativePath(path: string): boolean {
-  return (
-    path === '' || (!path.startsWith('/') && !path.split('/').some((part) => part === '..'))
-  );
+  return path === '' || (!path.startsWith('/') && !path.split('/').some((part) => part === '..'));
 }
 
 /**
  * Restore a verified checkpoint into fs.home: untar the worktree, rebuild every
- * repo from its bundle (refs, HEAD, index) and put the CLI log back in place.
+ * repo (fetch its remote, then the incremental bundle of local-only commits,
+ * then every recorded ref, HEAD and index) and put the CLI log back in place.
  */
+export interface ApplyCheckpointOptions {
+  /** Credentialed fetch URL for a repo's (sanitized) remote. */
+  authRemoteUrl?: (remoteUrl: string) => string;
+}
+
+/** refs/heads/*, refs/tags/* and refs/stash: no option-looking or traversal names. */
+const SAFE_REF = /^refs\/(?:heads\/|tags\/)?(?!-)(?!.*\.\.)[A-Za-z0-9._\/-]+$/;
+
 export async function applyCheckpoint(
   fs: CodeSessionFs,
-  checkpoint: VerifiedCheckpoint
+  checkpoint: VerifiedCheckpoint,
+  options: ApplyCheckpointOptions = {}
 ): Promise<{ cliSessionId: string | null }> {
   const { manifest, artifacts } = checkpoint;
   const tmp = tmpDirFor(manifest.codeSessionId, manifest.seq, 'restore');
@@ -404,10 +433,15 @@ export async function applyCheckpoint(
       throw new Error(`Checkpoint untar failed: ${untar.stderr.slice(0, 500)}`);
     }
     for (const repo of manifest.repos ?? []) {
-      if (repo.bundle === null || !artifacts.has(repo.bundle) || !safeRelativePath(repo.path)) {
-        continue;
-      }
+      if (!safeRelativePath(repo.path)) continue;
+      const bundle = repo.bundle !== null && artifacts.has(repo.bundle) ? repo.bundle : null;
+      const refs = Object.entries(repo.refs ?? {}).filter(
+        ([ref, sha]) => SAFE_REF.test(ref) && /^[0-9a-f]{40,64}$/.test(sha)
+      );
+      if (bundle === null && repo.remoteUrl === null && refs.length === 0) continue;
       const dir = repo.path === '' ? home : `${home}/${repo.path}`;
+      const remote =
+        repo.remoteUrl !== null ? (options.authRemoteUrl?.(repo.remoteUrl) ?? repo.remoteUrl) : null;
       const setHead =
         repo.branch !== null
           ? `git symbolic-ref HEAD ${shellQuote(`refs/heads/${repo.branch}`)}`
@@ -419,17 +453,27 @@ export async function applyCheckpoint(
           'set -e',
           `mkdir -p ${shellQuote(dir)} && cd ${shellQuote(dir)}`,
           '[ -d .git ] || git init -q',
-          `git fetch -q --update-head-ok ${shellQuote(`${tmp}/${repo.bundle}`)} '+refs/*:refs/*'`,
+          ...(remote !== null
+            ? [
+                `git remote set-url origin ${shellQuote(remote)} 2>/dev/null || git remote add origin ${shellQuote(remote)}`,
+                // The incremental bundle's prerequisites live on the remote.
+                "git fetch -q origin '+refs/heads/*:refs/remotes/origin/*'",
+                'git remote set-head origin -a >/dev/null 2>&1 || true',
+              ]
+            : []),
+          ...(bundle !== null
+            ? [`git fetch -q ${shellQuote(`${tmp}/${bundle}`)} '+refs/*:refs/rose-restore/*'`]
+            : []),
+          ...refs.map(([ref, sha]) => `git update-ref ${shellQuote(ref)} ${shellQuote(sha)}`),
+          "git for-each-ref --format='%(refname)' refs/rose-restore | while read -r r; do git update-ref -d \"$r\"; done",
           setHead,
           // Mixed reset: index matches HEAD, the restored working files stay.
           'git reset -q',
-          repo.remoteUrl !== null
-            ? `git remote get-url origin >/dev/null 2>&1 || git remote add origin ${shellQuote(repo.remoteUrl)}`
-            : 'true',
           'git config user.name >/dev/null || git config user.name "Rose Agent"',
           'git config user.email >/dev/null || git config user.email "agent@roselabs.ai"',
         ].join('\n'),
-        { timeoutMs: 300_000 }
+        // A fresh sandbox re-downloads the remote: a control-plane bound, not a session limit.
+        { timeoutMs: 20 * 60_000 }
       );
       if (result.exitCode !== 0) {
         throw new Error(
@@ -438,7 +482,11 @@ export async function applyCheckpoint(
       }
     }
     const cliLog = artifacts.get(CLI_LOG_ARTIFACT);
-    if (cliLog !== undefined && manifest.cliLogPath !== null && safeRelativePath(manifest.cliLogPath)) {
+    if (
+      cliLog !== undefined &&
+      manifest.cliLogPath !== null &&
+      safeRelativePath(manifest.cliLogPath)
+    ) {
       await fs.writeFile(`${home}/${manifest.cliLogPath}`, cliLog);
     }
     log.info('Checkpoint restored', {

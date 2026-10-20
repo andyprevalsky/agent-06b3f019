@@ -74,11 +74,12 @@ let eventBuffer = [];
 // Track connected clients
 const clients = new Set();
 
-// After the CLI exits the server keeps serving its final buffer so an agent
-// activity that detached for a deploy (or crashed and is retried after its 5m
-// heartbeat timeout) can reattach and read the result. Closing the session
-// (SIGTERM / sandbox kill) still exits immediately.
-const REATTACH_LINGER_MS = 15 * 60 * 1000;
+// After the CLI exits the server keeps serving its final buffer until the
+// session is closed, so an agent activity that detached for a deploy (or
+// crashed and is retried after its heartbeat timeout) can always reattach and
+// read the result. There is no linger deadline: an unattended sandbox pauses
+// on its E2B idle window and the result is still here when it resumes.
+// Closing the session (SIGTERM / sandbox pause or kill) exits immediately.
 
 // Create WebSocket server
 const wss = new WebSocketServer({ port: PORT });
@@ -183,7 +184,7 @@ let processExited = false;
 let shuttingDown = false;
 let exitAnnounced = false;
 let finalExitCode = 0;
-let lingerTimer = null;
+let servingFinalBuffer = false;
 
 function exitMessage(exitCode) {
   // Sent directly, not wrapped in data
@@ -211,18 +212,14 @@ function announceExit(exitCode) {
 
 function finishRun(exitCode) {
   announceExit(exitCode);
-  if (lingerTimer || shuttingDown) return;
-  log("info", "Serving final buffer for reattach", {
-    exitCode,
-    lingerMs: REATTACH_LINGER_MS,
-  });
-  lingerTimer = setTimeout(() => shutdown(exitCode), REATTACH_LINGER_MS);
+  if (servingFinalBuffer || shuttingDown) return;
+  servingFinalBuffer = true;
+  log("info", "Serving final buffer for reattach until closed", { exitCode });
 }
 
 async function shutdown(exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
-  if (lingerTimer) clearTimeout(lingerTimer);
   log("info", "Starting graceful shutdown", { exitCode });
 
   announceExit(exitCode);
@@ -391,6 +388,105 @@ if (RESUMING_REPO) {
 
 if (!GITHUB_REPO_URL && CODE_AGENT_SYSTEM_PROMPT) {
   writeFileSync(join(workDir, "CLAUDE.md"), CODE_AGENT_SYSTEM_PROMPT);
+}
+
+// Persistent code sessions work on their own branch (code-agent-persistent-
+// sessions.md §1b). A resumed worktree is already on it; otherwise resume the
+// pushed branch, else cut it from CODE_AGENT_BASE_BRANCH (the parent agent's
+// branch for sub-agents) or, when that is empty, the repo's default branch.
+// A base that is not on the remote is reported, never silently replaced.
+function gitRun(args, cwd) {
+  try {
+    const stdout = execFileSync("git", args, {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    });
+    return { ok: true, out: String(stdout).trim() };
+  } catch (err) {
+    return { ok: false, out: String(err?.stderr || err?.message || "").trim() };
+  }
+}
+
+function prepareCodeSessionBranch(repoDir) {
+  const branch = (process.env.CODE_AGENT_BRANCH || "").trim();
+  if (!branch || !existsSync(join(repoDir, ".git"))) return null;
+  const base = (process.env.CODE_AGENT_BASE_BRANCH || "").trim();
+  if (!gitRun(["check-ref-format", "--branch", branch], repoDir).ok) {
+    log("warn", "Ignoring invalid code-session branch name", { branch });
+    return null;
+  }
+  const result = { branch, base: base || null, source: null, error: null };
+  if (gitRun(["rev-parse", "--verify", "-q", `refs/heads/${branch}`], repoDir).ok) {
+    const current = gitRun(["symbolic-ref", "-q", "--short", "HEAD"], repoDir);
+    if (current.out !== branch) {
+      const switched = gitRun(["checkout", branch], repoDir);
+      if (!switched.ok) result.error = switched.out.slice(0, 300);
+    }
+    result.source = "local";
+  } else if (
+    gitRun(
+      ["fetch", "-q", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`],
+      repoDir,
+    ).ok
+  ) {
+    const created = gitRun(["checkout", "-B", branch, `origin/${branch}`], repoDir);
+    if (!created.ok) result.error = created.out.slice(0, 300);
+    result.source = "remote";
+  } else {
+    let start = null;
+    if (base) {
+      const fetched = gitRun(
+        ["fetch", "-q", "origin", `+refs/heads/${base}:refs/remotes/origin/${base}`],
+        repoDir,
+      );
+      if (fetched.ok) {
+        start = `origin/${base}`;
+        result.source = "base";
+      } else {
+        result.error = `base branch ${base} is not on the remote`;
+      }
+    } else {
+      gitRun(["remote", "set-head", "origin", "-a"], repoDir);
+      const defaultRef = gitRun(
+        ["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
+        repoDir,
+      );
+      start = defaultRef.ok && defaultRef.out ? defaultRef.out : "HEAD";
+      result.source = "default";
+    }
+    if (start) {
+      const created = gitRun(["checkout", "-B", branch, start], repoDir);
+      if (!created.ok) result.error = created.out.slice(0, 300);
+    }
+  }
+  result.current = gitRun(["symbolic-ref", "-q", "--short", "HEAD"], repoDir).out || null;
+  result.head = gitRun(["rev-parse", "-q", "--verify", "HEAD"], repoDir).out || null;
+  log(result.error ? "warn" : "info", "Code session branch prepared", result);
+  try {
+    mkdirSync(join(home, ".rose"), { recursive: true });
+    writeFileSync(join(home, ".rose", "code-session-branch.json"), JSON.stringify(result));
+  } catch {
+    // diagnostics only
+  }
+  return result;
+}
+
+const codeSessionBranch =
+  GITHUB_REPO_URL && workDir === REPO_WORKDIR
+    ? prepareCodeSessionBranch(REPO_WORKDIR)
+    : null;
+if (codeSessionBranch) {
+  appendEvent({
+    type: "code_session_branch",
+    branch: codeSessionBranch.current || codeSessionBranch.branch,
+    base_branch: codeSessionBranch.base,
+    merge_target: (process.env.CODE_AGENT_MERGE_TARGET || "").trim() || null,
+    source: codeSessionBranch.source,
+    head: codeSessionBranch.head,
+    error: codeSessionBranch.error,
+  });
 }
 
 function promptVersion() {

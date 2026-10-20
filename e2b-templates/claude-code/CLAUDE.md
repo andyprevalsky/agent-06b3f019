@@ -14,13 +14,11 @@ This is an isolated E2B sandbox environment for completing coding tasks.
 - **Node.js**: Available via `node` (npm via `npm`)
 - **Git**: Available for version control
 
-This is an ephemeral sandbox - changes won't persist after the session ends.
+This sandbox is persistent: your files, local commits and conversation are kept between sessions (the sandbox pauses instead of being deleted).
 
 ## Git Workflow (when working with repositories)
 
-If you are working in a cloned GitHub repository, always push your changes before completing your task:
-1. Stage all changes: `git add -A`
-2. Commit with a descriptive message: `git commit -m "feat: [description]"`
-3. Push to main: `git push origin main`
-
-Unpushed changes will be lost when the sandbox closes!
+- You work on your own branch (named in your instructions). Sub-agents branch from their parent's branch and merge back into it.
+- Commit locally whenever a unit of work is complete. Commits are your checkpoints.
+- Merge into your merge target (your parent's branch, or the default branch for a new agent) when other agents or the user need your changes. Otherwise keep the work on your branch.
+- You decide when to commit, push and merge, based on the task.

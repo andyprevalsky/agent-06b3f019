@@ -31,6 +31,8 @@ import {
 } from './e2bWsServerOverlay';
 import {
   acquireCodeSessionSandbox,
+  CODE_SANDBOX_IDLE_TIMEOUT_MS,
+  codeSessionBranchEnvs,
   type CodeAgentSessionResult,
   codeSessionCreateOptions,
   createLocalCodeSessionFallback,
@@ -96,7 +98,10 @@ if (!process.env.E2B_CLAUDE_CODE_TEMPLATE_ID) {
 }
 
 const WS_PORT = 3000;
-const SANDBOX_TIMEOUT_MS = 1800000; // 30 minutes (matches agents MAX_RUNTIME_S)
+// Not a runtime cap: the attached code-agent activity extends it with every
+// keepalive, so it only bounds how long an unattended sandbox stays up before
+// it pauses (persistent code sessions) or is killed (legacy sessions).
+const SANDBOX_TIMEOUT_MS = CODE_SANDBOX_IDLE_TIMEOUT_MS;
 const WS_READY_TIMEOUT_MS = 10000;
 const CODEX_WS_READY_TIMEOUT_MS = 30000;
 const WS_READY_POLL_INTERVAL_MS = 100;
@@ -174,6 +179,8 @@ async function createClaudeCodeSessionUnlocked(
   const systemPrompt = buildCodeAgentSystemPrompt({
     githubRepoUrl,
     workDir,
+    branch: codeSession?.branch,
+    mergeTarget: codeSession?.mergeTarget,
   });
 
   // Build environment variables for sandbox
@@ -181,6 +188,7 @@ async function createClaudeCodeSessionUnlocked(
     CLAUDE_CODE_GOAL: goal,
     CLAUDE_CODE_MODEL: model,
     CODE_AGENT_SYSTEM_PROMPT: systemPrompt,
+    ...codeSessionBranchEnvs(codeSession),
   };
 
   // Try user's own credentials first, then rotate through the pool. The agent's
@@ -506,6 +514,8 @@ export async function createCodexCodeSession(
       : buildCodeAgentSystemPrompt({
           githubRepoUrl,
           workDir,
+          branch: codeSession?.branch,
+          mergeTarget: codeSession?.mergeTarget,
         });
 
   const credentialMeta: GptCodeCredentialEnvelopeResult | null =
@@ -529,6 +539,7 @@ export async function createCodexCodeSession(
     CODEX_MODEL: model,
     CODE_AGENT_SYSTEM_PROMPT: systemPrompt,
     CODE_AGENT_HARNESS_MODE: harnessMode,
+    ...codeSessionBranchEnvs(codeSession),
   };
   if (harnessMode === 'rose' && roseApiBaseUrl) {
     const apiKey = process.env.BACKEND_API_KEY ?? '';
@@ -604,19 +615,17 @@ export async function createCodexCodeSession(
   const userUiWorkspace = await prepareUserUiWorkspaceSafe(userId);
   applyUserUiSandboxEnvs(envs, userUiWorkspace);
 
-  const { sandbox, resumedFrom, cliSessionId } = await acquireCodeSessionSandbox(
-    codeSession,
-    () =>
-      createSandboxWithRetry(
-        templateId,
-        {
-          apiKey: process.env.E2B_API_KEY,
-          timeoutMs: SANDBOX_TIMEOUT_MS,
-          envs,
-          ...codeSessionCreateOptions(codeSession),
-        },
-        'Codex Code'
-      )
+  const { sandbox, resumedFrom, cliSessionId } = await acquireCodeSessionSandbox(codeSession, () =>
+    createSandboxWithRetry(
+      templateId,
+      {
+        apiKey: process.env.E2B_API_KEY,
+        timeoutMs: SANDBOX_TIMEOUT_MS,
+        envs,
+        ...codeSessionCreateOptions(codeSession),
+      },
+      'Codex Code'
+    )
   );
   if (cliSessionId !== null) envs.CODEX_RESUME_SESSION_ID = cliSessionId;
 

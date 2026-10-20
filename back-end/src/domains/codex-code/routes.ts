@@ -5,11 +5,16 @@ import { asyncHandler } from '../../utils/asyncHandler';
 import type { FilePointer } from '../../providers/storage';
 import { createSessionSchema, closeSessionSchema } from './types';
 import * as service from './service';
-import { sendCodeSessionError } from '../claude-code/codeSessionRoutes';
+import {
+  registerCodeSessionTaskRoutes,
+  sendCodeSessionError,
+} from '../claude-code/codeSessionRoutes';
 import { GitHubAccessDeniedError, MissingUserIdError } from './service';
 
 const log = createLogger('CodexCodeRoutes');
 const router = Router();
+
+registerCodeSessionTaskRoutes(router);
 
 router.post(
   '/create',
@@ -28,6 +33,7 @@ router.post(
         rose_api_base_url,
         code_session_id,
         lease_owner,
+        base_branch,
       } = createSessionSchema.parse(req.body);
 
       const result = await service.createSession({
@@ -42,6 +48,7 @@ router.post(
         rose_api_base_url,
         code_session_id,
         lease_owner,
+        base_branch,
       });
 
       res.json({ success: true, ...result });

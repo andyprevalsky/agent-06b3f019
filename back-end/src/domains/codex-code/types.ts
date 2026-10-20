@@ -13,6 +13,7 @@ export const createSessionSchema = z.object({
   rose_api_base_url: z.string().url().optional(),
   code_session_id: z.string().uuid().optional(),
   lease_owner: z.string().min(1).max(200).optional(),
+  base_branch: z.string().min(1).max(255).optional(),
 });
 
 export const closeSessionSchema = z.object({
@@ -35,6 +36,7 @@ export interface CreateSessionParams {
   rose_api_base_url?: string;
   code_session_id?: string;
   lease_owner?: string;
+  base_branch?: string;
 }
 
 export interface CloseSessionParams {

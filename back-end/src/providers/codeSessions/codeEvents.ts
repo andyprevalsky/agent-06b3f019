@@ -250,9 +250,11 @@ export function codeEventSearchText(event: CodeEvent): string {
       `output: ${excerpt(event.output ?? '')}`,
     ].join('\n');
   }
-  return [`[code_event] edited: ${event.editedFile ?? ''}`, `diff:`, excerpt(event.diff ?? '')].join(
-    '\n'
-  );
+  return [
+    `[code_event] edited: ${event.editedFile ?? ''}`,
+    `diff:`,
+    excerpt(event.diff ?? ''),
+  ].join('\n');
 }
 
 export interface IndexCodeEventsParams {

@@ -67,4 +67,3 @@ export async function waitForChildReadiness(
     child.once('exit', onFailure);
   });
 }
-

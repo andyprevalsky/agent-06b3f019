@@ -30,6 +30,8 @@ export const createSessionSchema = z.object({
   code_session_id: z.string().uuid().optional(),
   // Stable per tool call so Temporal retries of one spawn keep their lease.
   lease_owner: z.string().min(1).max(200).optional(),
+  // Project default branch a new root session's branch is cut from (default: the repo's).
+  base_branch: z.string().min(1).max(255).optional(),
 });
 
 export const closeSessionSchema = z.object({
@@ -58,6 +60,7 @@ export interface CreateSessionParams {
   user_id?: string;
   code_session_id?: string;
   lease_owner?: string;
+  base_branch?: string;
 }
 
 export interface CreateSessionResult {
@@ -69,6 +72,10 @@ export interface CreateSessionResult {
   code_session_id: string | null;
   resumed_from: string;
   cli_session_id: string | null;
+  branch: string | null;
+  base_branch: string | null;
+  merge_target: string | null;
+  parent_code_session_id: string | null;
 }
 
 export interface CloseSessionParams {

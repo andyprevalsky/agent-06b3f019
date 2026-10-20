@@ -20,20 +20,19 @@ from temporalio.exceptions import ApplicationError
 
 from domains.spawn_claude_code_agent.config import (
     CODE_AGENT_DRAIN_YIELD_STATUS,
+    CODE_AGENT_ERROR_RETRY_LIMIT,
+    CODE_AGENT_PAUSED_STATUS,
     CODE_SESSION_HEARTBEAT_KEY,
+    CODE_SESSION_IDLE_PAUSE_S,
+    CODE_SESSION_KEEPALIVE_INTERVAL_S,
     DRAIN_CHECK_INTERVAL_S,
     E2B_COST_CENTS_PER_SECOND,
     ECHO_SUPPRESS_S,
     FATAL_ERROR_PATTERNS,
-    MAX_RUNTIME_S,
     MAX_UNCHANGED_OUTPUTS,
     REATTACH_PROBE_ATTEMPTS,
     REATTACH_PROBE_BACKOFF_S,
-    SDK_IDLE_TIMEOUT_S,
     SDK_POST_RESULT_EXIT_GRACE_S,
-    SDK_POST_RESULT_STRETCH_TOOL_NAMES,
-    SDK_WAIT_TOOL_IDLE_TIMEOUT_S,
-    SDK_WAIT_TOOL_NAMES,
     SILENCE_TIMEOUT_S,
     code_agent_verifier_disabled,
 )
@@ -41,6 +40,7 @@ from domains.spawn_claude_code_agent.repo import (
     check_sandbox_health,
     close_e2b_session,
     create_e2b_session,
+    keepalive_e2b_session,
     persist_terminal_output,
     save_claude_code_message,
 )
@@ -724,6 +724,11 @@ _CODE_SESSION_FIELDS = (
     # Sandbox events already logged by an earlier attachment; the reattached
     # attempt logs only the ones that arrived while nobody was attached.
     "logged_events",
+    # Persistent code session (C1/C2): a retry after a failed attempt resumes
+    # the same session even when the sandbox itself has been paused.
+    "code_session_id",
+    "branch",
+    "merge_target",
 )
 
 
@@ -809,6 +814,7 @@ async def _run_agentic_loop(
     loop_started_at: Optional[float] = None,
     generation_yield: bool = True,
     code_session: Optional[Dict[str, Any]] = None,
+    loop_outcome: Optional[Dict[str, Any]] = None,
 ) -> tuple[int, bool, list[Dict[str, str]], int, int, list[Dict[str, Any]]]:
     """Run the WebSocket-based agentic loop monitoring Claude Code output.
 
@@ -821,9 +827,12 @@ async def _run_agentic_loop(
 
     Raises ``CodeSessionDrained`` when the worker drains (or, with
     ``generation_yield``, its generation is superseded) before Claude Code
-    exits. ``loop_started_at`` keeps MAX_RUNTIME_S cumulative across reattaches.
-    ``code_session["logged_events"]`` is kept current so each sandbox event is
-    logged once across every attachment to the session.
+    exits. There is no runtime limit (C11): liveness is the activity heartbeat.
+    A CLI that sends nothing for ``CODE_SESSION_IDLE_PAUSE_S`` with no tool in
+    flight and no SDK result ends the loop with ``loop_outcome["idle_paused"]``
+    set, and the caller pauses (never fails) the session. A tool in flight keeps
+    the loop attached indefinitely. ``code_session["logged_events"]`` is kept
+    current so each sandbox event is logged once across every attachment.
     """
     last_output_time = safe_time()
     exit_code: Optional[int] = None
@@ -840,13 +849,11 @@ async def _run_agentic_loop(
     code_events = code_events if code_events is not None else []
     completed_codex_turn_keys: set[str] = set()
     completed_codex_turns = 0
-    # Default short idle; stretched after Monitor/ScheduleWakeup tool_use and
-    # while any tool is in-flight (tool_use awaiting tool_result).
-    effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
-    wait_tool_armed = False
+    # Tools awaiting their tool_result: while any is in flight the session is
+    # working and never idle-paused, however long the tool runs.
     in_flight_tool_count = 0
-    # Wall-clock of first SDK type=result. Stretch must not re-arm after this;
-    # grace backstop ends the monitor if the CLI never exits.
+    # Wall-clock of first SDK type=result; the exit-grace backstop ends the
+    # monitor if the CLI never exits after declaring completion.
     sdk_result_at: float | None = None
     logged_events = int((code_session or {}).get("logged_events") or 0)
 
@@ -893,13 +900,11 @@ async def _run_agentic_loop(
     async def on_events_replay(events: list[dict[str, Any]]) -> None:
         # The ws-server resends its whole history on every (re)connect, so it
         # replaces everything seen so far instead of appending to it.
-        nonlocal completed_codex_turns, effective_idle_timeout_s, wait_tool_armed, in_flight_tool_count
+        nonlocal completed_codex_turns, in_flight_tool_count
         code_events.clear()
         completed_codex_turn_keys.clear()
         completed_codex_turns = 0
         in_flight_tool_count = 0
-        wait_tool_armed = False
-        effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
         for event in events:
             await on_event(event)
         logger.info(
@@ -907,8 +912,8 @@ async def _run_agentic_loop(
         )
 
     async def on_event(event: dict[str, Any]) -> None:
-        nonlocal completed_codex_turns, last_output_time, effective_idle_timeout_s
-        nonlocal wait_tool_armed, in_flight_tool_count, sdk_result_at, logged_events
+        nonlocal completed_codex_turns, last_output_time
+        nonlocal in_flight_tool_count, sdk_result_at, logged_events
         last_output_time = safe_time()
         code_events.append(event)
         if is_codex_completed_turn_event(event):
@@ -917,90 +922,23 @@ async def _run_agentic_loop(
                 completed_codex_turn_keys.add(key)
                 completed_codex_turns += 1
         event_type = event.get("type")
-        tool_name = event.get("name") or event.get("tool_name") or event.get("tool")
         # Count every tool_use toward in-flight, even when name is missing /
         # non-string — tool_result always decrements, and a name-gated
         # increment made those paths asymmetric (CodeRabbit #1260).
         if event_type == "tool_use":
             in_flight_tool_count += 1
-            if not isinstance(tool_name, str):
-                # Nameless tool_use: still stretch the in-flight idle window.
-                if sdk_result_at is not None:
-                    effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
-                elif effective_idle_timeout_s != SDK_WAIT_TOOL_IDLE_TIMEOUT_S:
-                    logger.info(
-                        "[ClaudeCode] Extending SDK idle timeout for in-flight tool",
-                        agent_id=agent_id,
-                        task_id=task_id,
-                        tool_name=str(tool_name),
-                        idle_limit_s=SDK_WAIT_TOOL_IDLE_TIMEOUT_S,
-                    )
-                    effective_idle_timeout_s = SDK_WAIT_TOOL_IDLE_TIMEOUT_S
-            elif sdk_result_at is not None:
-                # SDK already declared completion — do not re-arm the 900s
-                # stretch (r31 a2: result → Bash/ScheduleWakeup re-armed stretch
-                # → Max runtime, 0 artifacts). Keep the short idle window.
-                effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
-            elif tool_name in SDK_WAIT_TOOL_NAMES or tool_name in SDK_POST_RESULT_STRETCH_TOOL_NAMES:
-                # Wait tools AND Bash/Task/TaskOutput: arm post-result stretch.
-                # Bash often returns tool_result while background work continues
-                # with no further WS events; without arming, tool_result snaps
-                # idle back to 180s and kills the session (cuda k=3 r24).
-                wait_tool_armed = True
-                if effective_idle_timeout_s != SDK_WAIT_TOOL_IDLE_TIMEOUT_S:
-                    reason = (
-                        "wait tool"
-                        if tool_name in SDK_WAIT_TOOL_NAMES
-                        else "post-result stretch tool"
-                    )
-                    logger.info(
-                        f"[ClaudeCode] Extending SDK idle timeout for {reason}",
-                        agent_id=agent_id,
-                        task_id=task_id,
-                        tool_name=tool_name,
-                        idle_limit_s=SDK_WAIT_TOOL_IDLE_TIMEOUT_S,
-                    )
-                effective_idle_timeout_s = SDK_WAIT_TOOL_IDLE_TIMEOUT_S
-            else:
-                # Non-wait tool (e.g. Write) — stretch while in-flight so
-                # silence during execution is not mistaken for a hung CLI.
-                # Do NOT clear wait_tool_armed: Monitor/ScheduleWakeup/Bash often
-                # precede follow-on tools, and the post-result stretch must
-                # survive those (otherwise tool_result restores the short
-                # 180s window and kills the wait/background work).
-                if effective_idle_timeout_s != SDK_WAIT_TOOL_IDLE_TIMEOUT_S:
-                    logger.info(
-                        "[ClaudeCode] Extending SDK idle timeout for in-flight tool",
-                        agent_id=agent_id,
-                        task_id=task_id,
-                        tool_name=tool_name,
-                        idle_limit_s=SDK_WAIT_TOOL_IDLE_TIMEOUT_S,
-                    )
-                effective_idle_timeout_s = SDK_WAIT_TOOL_IDLE_TIMEOUT_S
         elif event_type == "tool_result":
             if in_flight_tool_count > 0:
                 in_flight_tool_count -= 1
-            if sdk_result_at is not None:
-                effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
-            elif in_flight_tool_count == 0 and not wait_tool_armed:
-                # All tools finished and no post-wait stretch armed — restore
-                # the short hung-CLI window.
-                effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
-        elif event_type == "result":
-            # SDK declared completion — drop wait arm so a hung process after
-            # result is reaped on the short idle window, not 900s. Record the
-            # first result time for the exit-grace backstop (r31 a2/a3).
-            wait_tool_armed = False
-            if sdk_result_at is None:
-                sdk_result_at = safe_time()
-                logger.info(
-                    "[ClaudeCode] SDK result observed; arming post-result exit grace",
-                    agent_id=agent_id,
-                    task_id=task_id,
-                    grace_s=SDK_POST_RESULT_EXIT_GRACE_S,
-                    status=event.get("status"),
-                )
-            effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
+        elif event_type == "result" and sdk_result_at is None:
+            sdk_result_at = safe_time()
+            logger.info(
+                "[ClaudeCode] SDK result observed; arming post-result exit grace",
+                agent_id=agent_id,
+                task_id=task_id,
+                grace_s=SDK_POST_RESULT_EXIT_GRACE_S,
+                status=event.get("status"),
+            )
         # code_events mirrors the sandbox's append-only event history, so an
         # event's index identifies it across reconnect replays and reattaches.
         if len(code_events) <= logged_events:
@@ -1037,6 +975,7 @@ async def _run_agentic_loop(
     loop_start = loop_started_at if loop_started_at is not None else safe_time()
     last_status_update = safe_time()
     last_drain_check = 0.0
+    last_keepalive = safe_time()
 
     async def on_chunk(text: str, tokens: int) -> None:
         pass  # Parent LLM streaming not needed
@@ -1060,15 +999,16 @@ async def _run_agentic_loop(
                     )
                     raise CodeSessionDrained(drain_reason)
 
-            if elapsed > MAX_RUNTIME_S:
-                logger.warning("[ClaudeCode] Max runtime exceeded", agent_id=agent_id, task_id=task_id, elapsed=elapsed)
-                action_summary.append(f"Max runtime exceeded ({int(elapsed)}s)")
-                break
+            # No runtime limit (C11). While attached, keep the sandbox's idle
+            # window open; once keepalives stop it pauses on its own.
+            if safe_time() - last_keepalive >= CODE_SESSION_KEEPALIVE_INTERVAL_S:
+                last_keepalive = safe_time()
+                await keepalive_e2b_session(task_id, code_provider)
 
             # After the first SDK result, healthy CLIs exit in <1s. If the
             # process is still alive past the grace window (stdout may keep
-            # refreshing last_output_time so short idle never fires), end the
-            # session so the parent can retry inside the bench budget.
+            # refreshing last_output_time), end the monitor: the run is
+            # verified on its result and closing pauses (not kills) the sandbox.
             if (
                 sdk_result_at is not None
                 and exit_code is None
@@ -1092,27 +1032,29 @@ async def _run_agentic_loop(
 
             silence_duration = safe_time() - last_output_time
 
-            # Autonomous CC waits for SDK exit after the first silence observation
-            # (parent-LLM nudge is intentionally skipped). If the CLI then goes
-            # quiet without exit_code, break instead of spinning to MAX_RUNTIME_S.
-            # effective_idle_timeout_s stretches after Monitor/ScheduleWakeup
-            # and while any tool is in-flight (awaiting tool_result).
+            # Idle → pause, never fail (C11). A tool in flight is work, so only a
+            # CLI with nothing in flight and no SDK result is idle.
             if (
-                silence_duration >= effective_idle_timeout_s
+                silence_duration >= CODE_SESSION_IDLE_PAUSE_S
+                and in_flight_tool_count == 0
+                and sdk_result_at is None
                 and not pending_output
                 and ws_connected
                 and exit_code is None
             ):
-                logger.warning(
-                    "[ClaudeCode] SDK idle timeout waiting for exit",
+                logger.info(
+                    "[ClaudeCode] Code session idle; pausing it (resumable)",
                     agent_id=agent_id,
                     task_id=task_id,
                     silence_s=silence_duration,
-                    idle_limit_s=effective_idle_timeout_s,
+                    idle_pause_s=CODE_SESSION_IDLE_PAUSE_S,
                 )
                 action_summary.append(
-                    f"SDK idle timeout ({int(silence_duration)}s with no WebSocket events)"
+                    f"Session idle for {int(silence_duration)}s with no tool in flight; pausing it (resumable)"
                 )
+                if loop_outcome is not None:
+                    loop_outcome["idle_paused"] = True
+                    loop_outcome["idle_s"] = int(silence_duration)
                 break
 
             if silence_duration >= SILENCE_TIMEOUT_S and pending_output and ws_connected:
@@ -2163,6 +2105,97 @@ def build_usage_items(
 
 
 # ---------------------------------------------------------------------------
+# Persistent code-session facts (C1-C5, C13)
+# ---------------------------------------------------------------------------
+
+
+def _spawn_code_session_facts(session_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Facts from the create response: session id, branch, merge target, resume source."""
+    if not session_data.get("code_session_id"):
+        return None
+    return {
+        "code_session_id": session_data.get("code_session_id"),
+        "branch": session_data.get("branch"),
+        "base_branch": session_data.get("base_branch"),
+        "merge_target": session_data.get("merge_target"),
+        "parent_code_session_id": session_data.get("parent_code_session_id"),
+        "resumed_from": session_data.get("resumed_from"),
+    }
+
+
+def _merge_close_code_session_facts(
+    facts: Optional[Dict[str, Any]], close_data: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Add the close response's checkpoint and merge facts to the spawn facts."""
+    closed = close_data.get("code_session")
+    if not isinstance(closed, dict):
+        return facts
+    merged = dict(facts or {})
+    merge = closed.get("merge") if isinstance(closed.get("merge"), dict) else {}
+    repo = closed.get("repo") if isinstance(closed.get("repo"), dict) else {}
+    merged.update(
+        {
+            "code_session_id": closed.get("code_session_id") or merged.get("code_session_id"),
+            "state": closed.get("state"),
+            "checkpoint_seq": closed.get("checkpoint_seq"),
+            "branch": closed.get("branch") or merged.get("branch"),
+            "merge_target": closed.get("merge_target") or merged.get("merge_target"),
+            "head": merge.get("head") or repo.get("head"),
+            "local_commits": merge.get("local_commits", repo.get("localCommits")),
+            "pushed": merge.get("pushed", repo.get("pushed")),
+            "dirty_files": repo.get("dirtyFiles"),
+            "pr": merge.get("pr"),
+            # True only when GitHub confirms the PR merged and the target contains head (C4).
+            "merged": merge.get("merged") is True,
+            "merge_target_contains_head": merge.get("merge_target_contains_head"),
+        }
+    )
+    return merged
+
+
+def format_code_session_summary(facts: Optional[Dict[str, Any]]) -> str:
+    """One factual block for the tool result: session, branch, commits, PR, merged."""
+    if not facts or not facts.get("code_session_id"):
+        return ""
+    lines = [f"Code session: {facts['code_session_id']} ({facts.get('state') or 'active'})"]
+    if facts.get("branch"):
+        target = facts.get("merge_target") or "the default branch"
+        lines.append(f"Branch: {facts['branch']} (merges into {target})")
+    if facts.get("head"):
+        pushed = "yes" if facts.get("pushed") else "no"
+        lines.append(
+            f"HEAD: {str(facts['head'])[:12]} | local commits not on the remote: "
+            f"{facts.get('local_commits') or 0} | pushed: {pushed} | uncommitted files: "
+            f"{facts.get('dirty_files') or 0}"
+        )
+    pr = facts.get("pr")
+    if isinstance(pr, dict) and pr.get("number"):
+        lines.append(f"PR: #{pr['number']} {pr.get('state') or ''} {pr.get('url') or ''}".rstrip())
+    if facts.get("branch"):
+        lines.append(f"Merged: {'yes' if facts.get('merged') else 'no'} (confirmed with GitHub)")
+    return "\n".join(lines)
+
+
+def _raise_bounded_activity_error(error: BaseException) -> None:
+    """Re-raise an activity error; stop Temporal retrying it after the error limit.
+
+    Retries are otherwise unlimited (worker crashes and deploys never end a code
+    session), so a deterministic failure must not loop forever.
+    """
+    if (
+        activity.in_activity()
+        and activity.info().attempt >= CODE_AGENT_ERROR_RETRY_LIMIT
+        and not (isinstance(error, ApplicationError) and error.non_retryable)
+    ):
+        raise ApplicationError(
+            extract_error_message(error),
+            type=type(error).__name__,
+            non_retryable=True,
+        ) from error
+    raise error
+
+
+# ---------------------------------------------------------------------------
 # Temporal activity
 # ---------------------------------------------------------------------------
 
@@ -2210,6 +2243,7 @@ async def spawn_claude_code_activity(
     gpt_token_pool_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     resume_session: Optional[Dict[str, Any]] = None,
+    code_session_request: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Claude Code agent activity using E2B Desktop Sandbox.
 
@@ -2237,6 +2271,12 @@ async def spawn_claude_code_activity(
         resume_session: Session returned by a drained attempt; its sandbox is reattached
             when still reachable. ``generation_yield=False`` keeps the run on this worker
             when its generation is superseded (no parked handoff is available).
+        code_session_request: ``{"code_session_id": ...}`` to resume a specific
+            persistent code session; omitted, the backend resumes the spawning
+            agent's latest session for the repo (or creates one on a new branch).
+
+    No runtime limit (C11): the activity runs while the CLI works and heartbeats.
+    An idle CLI is paused (status ``paused``, resumable), never failed.
     """
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
 
@@ -2253,6 +2293,15 @@ async def spawn_claude_code_activity(
     # A retry's heartbeat session is newer than the scheduled resume_session: the
     # earlier attempt may have replaced an unreachable sandbox with a fresh one.
     attached = _code_session_from_heartbeat() or code_session_record(resume_session)
+    # The persistent session survives a paused/unreachable sandbox: a retry
+    # resumes it by id even when its attached record must be discarded (C2).
+    requested_code_session_id = (code_session_request or {}).get("code_session_id")
+    code_session_id: Optional[str] = (attached or {}).get("code_session_id") or (
+        requested_code_session_id if isinstance(requested_code_session_id, str) else None
+    )
+    lease_owner = f"tool:{agent_id}:{tool_call_id}"
+    code_session_facts: Optional[Dict[str, Any]] = None
+    loop_outcome: Dict[str, Any] = {}
 
     total_input_tokens = 0
     total_output_tokens = 0
@@ -2337,7 +2386,11 @@ async def spawn_claude_code_activity(
                 github_repo_url=github_repo_url,
                 code_provider=code_provider,
                 fast_mode_cache_enabled=fast_mode_cache_enabled,
+                code_session_id=code_session_id,
+                lease_owner=lease_owner,
             )
+            code_session_id = session_data.get("code_session_id") or code_session_id
+            code_session_facts = _spawn_code_session_facts(session_data)
             task_id = session_data["task_id"]
             sandbox_id = session_data["sandbox_id"]
             ws_url = session_data["ws_url"]
@@ -2364,7 +2417,17 @@ async def spawn_claude_code_activity(
             "started_at": start_time,
             "loop_started_at": loop_started_at,
             "logged_events": int((attached or {}).get("logged_events") or 0),
+            "code_session_id": code_session_id,
+            "branch": (code_session_facts or {}).get("branch") or (attached or {}).get("branch"),
+            "merge_target": (code_session_facts or {}).get("merge_target")
+            or (attached or {}).get("merge_target"),
         }
+        if code_session_facts is None and code_session_id:
+            code_session_facts = {
+                "code_session_id": code_session_id,
+                "branch": session_record["branch"],
+                "merge_target": session_record["merge_target"],
+            }
         # An attempt's first heartbeat goes out at once and later ones only every
         # throttle interval, so nothing may heartbeat before the session rides
         # along, and the session must ride along before anything else can fail:
@@ -2393,6 +2456,7 @@ async def spawn_claude_code_activity(
                 output_schema=output_schema,
                 github_repo_url=actual_github_repo_url,
                 code_provider=code_provider,
+                code_session=code_session_facts,
             )
 
             await save_claude_code_message(
@@ -2445,6 +2509,7 @@ async def spawn_claude_code_activity(
                 loop_started_at=loop_started_at,
                 generation_yield=generation_yield,
                 code_session=session_record,
+                loop_outcome=loop_outcome,
             )
         except CodeSessionDrained as drained:
             # Cleared before awaiting so a cancel landing in stop() reaches the
@@ -2510,16 +2575,56 @@ async def spawn_claude_code_activity(
 
         # 5. Close session and extract output files before verifier so the
         # verifier sees the SDK event JSON plus the actual extracted artifacts.
+        # A persistent session is checkpointed and paused, never killed.
+        idle_paused = loop_outcome.get("idle_paused") is True
         close_data = await close_e2b_session(
             task_id=task_id,
             user_id=user_id,
             agent_id=agent_id,
             additional_paths=[],
             code_provider=code_provider,
+            reason="idle" if idle_paused else "close",
         )
         output_files = close_data.get("output_files", [])
         claude_code_usage = close_data.get("usage")
+        code_session_facts = _merge_close_code_session_facts(code_session_facts, close_data)
         session_heartbeats.close()
+
+        if idle_paused:
+            # Idle is not failure (C11): report the paused, resumable session.
+            if log_collector:
+                await log_collector.stop()
+            message = (
+                f"Code session paused after {loop_outcome.get('idle_s', 0)}s with no activity "
+                "(not failed). Its files, commits and conversation are kept; spawn the code "
+                "agent again to resume it."
+            )
+            summary = format_code_session_summary(code_session_facts)
+            await save_claude_code_message(
+                agent_id=agent_id,
+                title="Code session paused",
+                task_id=task_id,
+                message=message,
+                status=MessageStatus.FINISHED,
+                action_type="session_paused",
+                tool_call_id=tool_call_id,
+                code_provider=code_provider,
+                code_session=code_session_facts,
+            )
+            return {
+                "status": CODE_AGENT_PAUSED_STATUS,
+                "success": False,
+                "message": f"{message}\n{summary}" if summary else message,
+                "task_id": task_id,
+                "ws_url": ws_url,
+                "execution_time_ms": (safe_time() - start_time) * 1000,
+                "usage_items": [],
+                "structured_response": None,
+                "output_files": output_files,
+                "code_provider": code_provider,
+                "code_session": code_session_facts,
+                "completed_turns": codex_completed_turn_count(code_events) if code_provider == "codex" else None,
+            }
         safe_heartbeat("Verifying Claude Code result")
 
         logger.info(
@@ -2593,6 +2698,9 @@ async def spawn_claude_code_activity(
             close_reasoning=v_reasoning,
             action_summary=action_summary,
         )
+        code_session_summary = format_code_session_summary(code_session_facts)
+        if code_session_summary:
+            context_message = f"{context_message}\n\n{code_session_summary}"
 
         # Log Claude Code LLM usage (not charged)
         if claude_code_usage:
@@ -2629,6 +2737,7 @@ async def spawn_claude_code_activity(
             "output_files": output_files,
             "code_provider": code_provider,
             "completed_turns": codex_completed_turn_count(code_events) if code_provider == "codex" else None,
+            "code_session": code_session_facts,
         }
         return result
 
@@ -2703,7 +2812,7 @@ async def spawn_claude_code_activity(
                     code_provider=code_provider,
                 )
 
-                await close_e2b_session(task_id=task_id, code_provider=code_provider)
+                await close_e2b_session(task_id=task_id, code_provider=code_provider, reason="cancel")
             except Exception as cleanup_error:
                 logger.warning(
                     "[ClaudeCode] Cleanup failed on cancel",
@@ -2717,6 +2826,7 @@ async def spawn_claude_code_activity(
             "task_id": task_id,
             "message": "Claude Code agent cancelled by user",
             "code_provider": code_provider,
+            "code_session": code_session_facts,
         }
 
     except Exception as e:
@@ -2780,7 +2890,7 @@ async def spawn_claude_code_activity(
                     code_provider=code_provider,
                 )
 
-                await close_e2b_session(task_id=task_id, code_provider=code_provider)
+                await close_e2b_session(task_id=task_id, code_provider=code_provider, reason="failure")
             except Exception as cleanup_error:
                 logger.warning(
                     "[ClaudeCode] Cleanup failed on error",
@@ -2789,7 +2899,7 @@ async def spawn_claude_code_activity(
                     error=str(cleanup_error),
                 )
 
-        raise
+        _raise_bounded_activity_error(e)
 
     finally:
         session_heartbeats.close()

@@ -4,6 +4,7 @@
  * GET    /code-sessions/:id  - the caller's code session (404 for unknown/foreign)
  * DELETE /code-sessions/:id  - retire it: kill sandbox, delete checkpoints
  * POST   /checkpoint         - checkpoint a running task (worker drain) without pausing
+ * POST   /:taskId/keepalive  - extend an attached task's sandbox idle window + lease
  *
  * Every read/write is scoped to the authenticated user; a foreign id is
  * indistinguishable from an unknown one.
@@ -16,6 +17,7 @@ import {
   CodeSessionBusyError,
   CodeSessionNotFoundError,
   getOwnedCodeSessionView,
+  keepAliveCodeTask,
   retireOwnedCodeSession,
 } from '../../providers/codeSessions/spawn';
 import { asyncHandler } from '../../utils/asyncHandler';
@@ -97,6 +99,32 @@ export function registerCodeSessionRoutes(router: Router): void {
       }
       const { task_id, reason } = codeSessionCheckpointSchema.parse(req.body);
       res.json(await checkpointRunningTask(task_id, reason ?? 'drain'));
+    })
+  );
+
+  registerCodeSessionTaskRoutes(router);
+}
+
+/**
+ * Task-scoped routes shared by the Claude Code and Codex routers.
+ *
+ * POST /:taskId/keepalive - the attached activity extends the sandbox idle
+ *                           window and the session lease (internal only).
+ */
+export function registerCodeSessionTaskRoutes(router: Router): void {
+  router.post(
+    '/:taskId/keepalive',
+    authenticate,
+    asyncHandler(async (req: AuthRequest, res: Response) => {
+      if (req.isInternal !== true) {
+        res.status(403).json({ error: 'Internal callers only' });
+        return;
+      }
+      if (!UUID.test(req.params.taskId)) {
+        res.status(404).json({ error: 'Session not found' });
+        return;
+      }
+      res.json(await keepAliveCodeTask(req.params.taskId));
     })
   );
 }

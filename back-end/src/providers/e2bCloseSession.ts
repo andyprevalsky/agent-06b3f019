@@ -1,4 +1,5 @@
 import { Sandbox } from 'e2b';
+import { Prisma } from '@prisma/client';
 import mime from 'mime-types';
 import { CODE_AGENT_OUTPUT_DIR } from './codeAgentPrompt';
 import { randomUUID } from './crypto';
@@ -9,6 +10,7 @@ import { closeLocalClaudeCodeSession, isLocalClaudeCodeSandboxId } from './claud
 import { checkpointCodeSession, type RepoFacts } from './codeSessions/lifecycle';
 import { e2bSandboxFs, localSandboxFs } from './codeSessions/sandboxFs';
 import { markPaused, type CodeSessionRow } from './codeSessions/store';
+import { resolveMergeFacts, type CodeSessionMergeFacts } from './codeSessions/mergeFacts';
 
 const log = createLogger('E2B');
 const OUTPUT_DIR = CODE_AGENT_OUTPUT_DIR;
@@ -75,20 +77,45 @@ export interface CodeSessionCloseFacts {
   state: string;
   checkpoint_seq: number | null;
   cli_session_id: string | null;
+  /** Branch this session works on and where it merges (plan §1b). */
+  branch: string | null;
+  merge_target: string | null;
   repo: RepoFacts | null;
+  /** merged=true only when GitHub confirms the PR merged and the target contains head. */
+  merge: CodeSessionMergeFacts;
 }
 
-function closeFacts(
+async function closeFacts(
   row: CodeSessionRow,
   checkpoint: { seq: number; cliSessionId: string | null; repo: RepoFacts | null } | null,
   state: string
-): CodeSessionCloseFacts {
+): Promise<CodeSessionCloseFacts> {
+  const stored = (row.lastRepoFacts ?? null) as (RepoFacts & { merge?: CodeSessionMergeFacts }) | null;
+  const repo = checkpoint?.repo ?? stored ?? null;
+  const merge = await resolveMergeFacts({
+    repoUrl: row.repoUrl,
+    repo,
+    mergeTarget: row.mergeTarget,
+    previous: stored?.merge ?? null,
+  });
+  if (merge.source === 'github' && repo !== null) {
+    await prisma.codeSession
+      .update({
+        where: { id: row.id },
+        data: { lastRepoFacts: { ...repo, merge } as unknown as Prisma.InputJsonValue },
+      })
+      .catch(() => undefined);
+  }
   return {
     code_session_id: row.id,
     state,
-    checkpoint_seq: checkpoint?.seq ?? (row.latestCheckpointSeq > 0 ? row.latestCheckpointSeq : null),
+    checkpoint_seq:
+      checkpoint?.seq ?? (row.latestCheckpointSeq > 0 ? row.latestCheckpointSeq : null),
     cli_session_id: checkpoint?.cliSessionId ?? row.cliSessionId,
-    repo: checkpoint?.repo ?? (row.lastRepoFacts as RepoFacts | null) ?? null,
+    branch: row.branch ?? repo?.branch ?? null,
+    merge_target: merge.merge_target ?? row.mergeTarget,
+    repo,
+    merge,
   };
 }
 
@@ -142,7 +169,7 @@ export async function closeClaudeCodeSession(
 
   if (codeSession !== null && session.status === 'CLOSED') {
     // Retried close: the session was already checkpointed and paused.
-    return { outputFiles: [], codeSession: closeFacts(codeSession, null, codeSession.state) };
+    return { outputFiles: [], codeSession: await closeFacts(codeSession, null, codeSession.state) };
   }
 
   if (isLocalClaudeCodeSandboxId(session.sandboxId)) {
@@ -160,7 +187,13 @@ export async function closeClaudeCodeSession(
     return {
       outputFiles: local.outputFiles,
       ...(codeSession !== null
-        ? { codeSession: closeFacts(codeSession, checkpoint, ownsSandbox ? 'PAUSED' : codeSession.state) }
+        ? {
+            codeSession: await closeFacts(
+              codeSession,
+              checkpoint,
+              ownsSandbox ? 'PAUSED' : codeSession.state
+            ),
+          }
         : {}),
     };
   }
@@ -348,17 +381,18 @@ export async function closeClaudeCodeSession(
       });
       await sandbox.pause();
       await markPaused(codeSession.id);
-      codeSessionFacts = closeFacts(codeSession, checkpoint, 'PAUSED');
+      codeSessionFacts = await closeFacts(codeSession, checkpoint, 'PAUSED');
       log.info(`Paused sandbox: ${session.sandboxId} (code session ${codeSession.id})`);
     } else if (codeSession !== null) {
       // A newer spawn resumed this sandbox; leave it running for that spawn.
-      codeSessionFacts = closeFacts(codeSession, null, codeSession.state);
+      codeSessionFacts = await closeFacts(codeSession, null, codeSession.state);
     } else {
       await sandbox.kill();
       log.info(`Killed sandbox: ${session.sandboxId}`);
     }
   } catch (error) {
-    if (codeSession !== null && ownsSandbox) await markPaused(codeSession.id).catch(() => undefined);
+    if (codeSession !== null && ownsSandbox)
+      await markPaused(codeSession.id).catch(() => undefined);
     log.error('Failed to pause/kill sandbox', {
       error: error instanceof Error ? error.message : String(error),
     });
@@ -377,7 +411,7 @@ export async function closeClaudeCodeSession(
   log.info(`Session closed: ${taskId}`);
 
   if (codeSessionFacts === undefined && codeSession !== null) {
-    codeSessionFacts = closeFacts(codeSession, null, codeSession.state);
+    codeSessionFacts = await closeFacts(codeSession, null, codeSession.state);
   }
   return {
     outputFiles,

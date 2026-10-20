@@ -39,8 +39,16 @@ router.post(
   authenticate,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
-      const { agent_id, goal, attachments, github_repo_url, user_id, code_session_id, lease_owner } =
-        createSessionSchema.parse(req.body);
+      const {
+        agent_id,
+        goal,
+        attachments,
+        github_repo_url,
+        user_id,
+        code_session_id,
+        lease_owner,
+        base_branch,
+      } = createSessionSchema.parse(req.body);
 
       const result = await service.createSession({
         agent_id,
@@ -50,6 +58,7 @@ router.post(
         user_id,
         code_session_id,
         lease_owner,
+        base_branch,
       });
 
       res.json({

@@ -12,6 +12,7 @@ import { createLogger } from '../../providers/logger';
 import { BenchmarkHubUnavailableError } from '../../providers/benchmarkHubErrors';
 import { StaleParentWorkflowGenerationError } from '../../providers/workflowGeneration';
 import { WorldModelModeAccessError } from './agentExecutionMode';
+import { CodeSessionShareTargetNotFoundError } from '../../providers/codeSessions/branch';
 
 const log = createLogger('Agents');
 
@@ -33,6 +34,10 @@ export function handleRouteError(
   }
   if (error instanceof StaleParentWorkflowGenerationError) {
     res.status(409).json({ error: error.message });
+    return;
+  }
+  if (error instanceof CodeSessionShareTargetNotFoundError) {
+    res.status(404).json({ error: error.message, code: 'CODE_SESSION_SHARE_TARGET_NOT_FOUND' });
     return;
   }
   if (error instanceof WorldModelModeAccessError) {

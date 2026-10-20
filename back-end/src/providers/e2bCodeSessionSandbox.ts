@@ -26,7 +26,14 @@ import {
 
 const log = createLogger('E2B');
 const WS_PORT = 3000;
-const SANDBOX_TIMEOUT_MS = 1800000; // keep in sync with e2b.ts
+/**
+ * How long a sandbox nobody is attached to stays up. The attached activity
+ * keeps extending it (POST /:taskId/keepalive), so this is an idle window,
+ * not a runtime limit: on expiry a persistent session's sandbox pauses
+ * (lifecycle onTimeout=pause) and resumes on the next spawn.
+ */
+export const CODE_SANDBOX_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+const SANDBOX_TIMEOUT_MS = CODE_SANDBOX_IDLE_TIMEOUT_MS;
 
 export interface CodeAgentSessionResult {
   wsUrl: string;
@@ -103,10 +110,23 @@ export async function releaseSandboxAfterFailedStart(
   await markPaused(codeSession.id);
 }
 
+/**
+ * Branch the sandbox ws-server checks out before the CLI starts (plan §1b).
+ * CODE_AGENT_BASE_BRANCH empty = cut from the repository's default branch.
+ */
+export function codeSessionBranchEnvs(codeSession: CodeSessionRow | null): Record<string, string> {
+  if (codeSession?.branch === null || codeSession?.branch === undefined) return {};
+  return {
+    CODE_AGENT_BRANCH: codeSession.branch,
+    CODE_AGENT_BASE_BRANCH: codeSession.baseBranch ?? '',
+    CODE_AGENT_MERGE_TARGET: codeSession.mergeTarget ?? '',
+  };
+}
+
 /** Persistent code sessions pause (keeping fs + memory) on timeout. */
-export function codeSessionCreateOptions(
-  codeSession: CodeSessionRow | null
-): { lifecycle?: { onTimeout: 'pause' } } {
+export function codeSessionCreateOptions(codeSession: CodeSessionRow | null): {
+  lifecycle?: { onTimeout: 'pause' };
+} {
   return codeSession !== null ? { lifecycle: { onTimeout: 'pause' } } : {};
 }
 
@@ -133,7 +153,8 @@ export async function createLocalCodeSessionFallback(
   const resumeId = localHome?.cliSessionId ?? null;
   const local = await createLocalClaudeCodeSessionIfBillingBlocked(err, {
     ...params,
-    envs: resumeId !== null ? { ...params.envs, CLAUDE_CODE_RESUME_SESSION_ID: resumeId } : params.envs,
+    envs:
+      resumeId !== null ? { ...params.envs, CLAUDE_CODE_RESUME_SESSION_ID: resumeId } : params.envs,
     ...(localHome !== null ? { homeDir: localHome.home } : {}),
   });
   if (local === null) return null;
