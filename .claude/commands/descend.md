@@ -785,7 +785,22 @@ per-run observed mechanism, not the count, grants membership.
   from the sample one RCA inspected.
 - A wall-clock timeout is a symptom: decompose the lost time (upstream kills
   and redone work, per-step latency buckets, idle gaps) before assigning it a
-  cluster.
+  cluster. Decompose it as per-decision cost × decision count, and compare
+  the first third of an activity's steps with the last third. A cost that
+  grows inside an activity, such as context growth or CPU burst exhaustion,
+  is invisible in fleet-wide percentiles.
+- Identify killed activities by span duration ≥ StartToClose − 10 s, and
+  check the count against the Hub. Matching kills by timestamp proximity
+  mislabels short activities.
+- Read event-loop lag (`loop.lag`) together with process CPU. Lag with low
+  CPU means starvation (quota, steal or blocking I/O); lag at 100% CPU means
+  saturation. They need different fixes.
+- For a killed or stalled span, decode its last `llm.context.dumped` payload
+  to recover the exact final decision and the action history. It contains a
+  leased token, so never paste the raw dump.
+- Check that a suspected cause separates failures from passes before ranking
+  it. In Polar batch 1, the Foundry failover share did not separate them,
+  while prompt growth and activity kills did.
 - Before attributing a FAIL to the agent, check the evaluator contract. Did
   the judge see what the product shows the user (for example a final answer
   stored in message metadata)? Does any gate inherit a repository default
