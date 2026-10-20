@@ -147,7 +147,7 @@ export function CollapsedChip(props: CollapsedChipProps) {
         </div>
       )}
       {props.isExpanded && (
-        <div className="mt-2 overflow-hidden rounded-xl border border-black/10 shadow-sm dark:border-white/10">
+        <div className="mt-2 overflow-hidden rounded-xl border border-black/10 shadow-sm dark:border-white/[0.09]">
           {props.state === 'completed' || props.state === 'failed' ? (
             <CompletedTranscriptSurface
               output={props.terminalTranscript}

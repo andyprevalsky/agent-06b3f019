@@ -4,7 +4,7 @@
  * Isolated so `QueryInput.tsx` stays light on inline style ternaries.
  *
  * THEME: `roseDark` (Rose Desktop dark mode, useRoseTheme().isDark) swaps the
- * translucent white drip for the mock's solid dark surface (#2f2f2c, 12% white
+ * translucent white drip for the mock's solid dark surface (#2f2f2c, 9% white
  * border, deep shadow) and drops the white marble layer. Light mode (and every
  * stock account, which never goes dark) takes the original branch unchanged.
  */
@@ -15,7 +15,7 @@ import type { DripStyles } from './types';
 /** Rose dark query box (mock panels/dark.js: div.rounded-xl:has(textarea)). */
 export const ROSE_DARK_QUERY_SURFACE = {
   backgroundColor: '#2f2f2c',
-  borderColor: 'rgba(255, 255, 255, 0.12)',
+  borderColor: 'rgba(255, 255, 255, 0.09)',
   boxShadow: '0 10px 40px rgba(0, 0, 0, 0.35)',
 } as const;
 

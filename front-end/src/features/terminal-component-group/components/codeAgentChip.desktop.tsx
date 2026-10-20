@@ -64,7 +64,7 @@ function Summary({ summary }: { summary: CodeAgentSummary }) {
   return (
     <div
       data-testid="code-agent-summary"
-      className="border-t border-border pb-3 pl-11 pr-3.5 pt-2.5 text-[13px] text-foreground/80 dark:border-white/[.09] dark:text-[#ecece8]"
+      className="border-t border-border pb-3 pl-11 pr-3.5 pt-2.5 text-[13px] text-foreground/80 dark:border-white/[0.07] dark:text-[#ecece8]"
     >
       <div>
         Committed <code className={CODE}>{summary.commit.slice(0, 7)}</code> on{' '}
@@ -114,7 +114,7 @@ function SessionLine({ session, meta }: { session: CodeSessionFacts; meta: CodeA
   return (
     <div
       data-testid="code-agent-session"
-      className="border-t border-border pb-2.5 pl-11 pr-3.5 pt-2.5 text-[13px] text-foreground/80 dark:border-white/[.09] dark:text-[#ecece8]"
+      className="border-t border-border pb-2.5 pl-11 pr-3.5 pt-2.5 text-[13px] text-foreground/80 dark:border-white/[0.07] dark:text-[#ecece8]"
     >
       <code className={CODE}>{branch}</code>
       {target && (
@@ -286,7 +286,7 @@ export function DesktopCodeAgentChip({ meta, vm, events, toolCallId }: DesktopCo
       {!isLive && open && showSummary && meta.summary && <Summary summary={meta.summary} />}
 
       {!isLive && open && !showSummary && hasTranscript && (
-        <div className="border-t border-border pb-2 dark:border-white/[.09]">
+        <div className="border-t border-border pb-2 dark:border-white/[0.07]">
           <CodeAgentTranscript events={events} echoes={echoes} provider={meta.provider} />
         </div>
       )}

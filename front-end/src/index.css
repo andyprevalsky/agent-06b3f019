@@ -177,8 +177,10 @@
     --muted-foreground: 60 3.2% 62.7%; /* #a3a39d */
     --accent: 60 2.8% 21.4%; /* #383835 hover */
     --accent-foreground: 60 10.3% 94.3%;
-    --border: 60 1.6% 25.1%; /* rgba(255,255,255,.12) over #272725 */
-    --input: 60 1.6% 25.1%;
+    /* Subtle dividers (Andy: no bright hairlines): separators ~ white .07,
+       field outlines ~ white .09 over the #272725 page. */
+    --border: 60 1.9% 20.8%; /* #363634 = rgba(255,255,255,.07) over #272725 */
+    --input: 60 1.8% 22.4%; /* #3a3a38 = rgba(255,255,255,.09) over #272725 */
     --ring: 60 3.2% 62.7%;
   }
 

@@ -14,7 +14,7 @@ html.dark .rose-settings [role='tablist'] {
   padding: 0;
   border-radius: 0;
   background: transparent;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
 }
 
 html.dark .rose-settings [role='tab'] {
@@ -57,7 +57,7 @@ html.dark .rose-settings .bg-card h3 {
 html.dark .rose-settings textarea,
 html.dark .rose-settings select,
 html.dark .rose-settings input:not([type='checkbox']):not([type='radio']):not([type='file']) {
-  border-color: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.09);
   background-color: #2f2f2c;
   color: #f2f2ef;
 }

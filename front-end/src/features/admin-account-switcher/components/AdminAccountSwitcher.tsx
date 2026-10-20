@@ -57,7 +57,7 @@ const PILL_CONTAINER_CLASS = 'relative flex max-w-full min-w-0 flex-col items-en
 const INLINE_CONTAINER_CLASS = 'relative my-4 flex max-w-full min-w-0 flex-col items-start';
 const PILL_OWN_CLASS = 'border-border/60 bg-background/90 text-foreground';
 const INLINE_OWN_CLASS =
-  'border-gray-200 bg-white text-[hsl(240_15%_8%)] dark:border-white/[0.12] dark:bg-[#2f2f2c] dark:text-[#e4e4df]';
+  'border-gray-200 bg-white text-[hsl(240_15%_8%)] dark:border-white/[0.09] dark:bg-[#2f2f2c] dark:text-[#e4e4df]';
 const AWAY_CLASS = 'border-purple-400/60 bg-purple-600/95 text-white';
 
 export function AdminAccountSwitcher({
@@ -152,7 +152,7 @@ const PILL_PANEL_CLASS =
   'absolute right-0 top-full mt-2 w-[22rem] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-border/60 bg-background/98 shadow-2xl backdrop-blur-md';
 /** In flow below the Settings row (the drawer scrolls; nothing is clipped). */
 const INLINE_PANEL_CLASS =
-  'mt-2 w-full max-w-[22rem] overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-white/[0.12] dark:bg-[#2f2f2c]';
+  'mt-2 w-full max-w-[22rem] overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-white/[0.09] dark:bg-[#2f2f2c]';
 
 function SwitcherPanel({
   switcher,

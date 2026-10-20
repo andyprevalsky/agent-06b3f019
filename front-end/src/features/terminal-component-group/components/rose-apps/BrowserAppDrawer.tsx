@@ -181,7 +181,7 @@ export function BrowserAppDrawer() {
       <div
         role="tablist"
         aria-label="Browser tabs"
-        className="flex flex-none gap-5 overflow-x-auto border-b border-gray-200/90 px-[18px] dark:border-white/[0.09]"
+        className="flex flex-none gap-5 overflow-x-auto border-b border-gray-200/90 px-[18px] dark:border-white/[0.07]"
       >
         <DrawerTab
           testId="browser-tab-root"

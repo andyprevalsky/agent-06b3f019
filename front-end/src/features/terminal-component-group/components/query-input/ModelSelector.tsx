@@ -22,7 +22,7 @@
  * dropdown; other models keep provider/name.
  *
  * roseDark (Rose Desktop dark mode): the chip is the mock's dark control —
- * #2f2f2c fill, 12% white border, #e4e4df text (same shape), and the open
+ * #2f2f2c fill, 9% white border, #e4e4df text (same shape), and the open
  * dropdown list sits on the same #2f2f2c surface (#e4e4df names, #a3a39d
  * descriptions; hover/selected rows use the dark accent token). Light and the
  * stock UI keep the exact stock chip and list classes.
@@ -50,9 +50,9 @@ interface ModelSelectorProps {
 
 /** Rose dark chip (mock panels/dark.js: button[class*="border"]); hover only lifts slightly. */
 const ROSE_DARK_MODEL_CHIP_CLASS =
-  'dark:border-white/[0.12] dark:bg-[#2f2f2c] dark:text-[#e4e4df] dark:hover:bg-[#383835]';
+  'dark:border-white/[0.09] dark:bg-[#2f2f2c] dark:text-[#e4e4df] dark:hover:bg-[#383835]';
 /** Rose dark dropdown: the list matches the chip's surface. */
-const ROSE_DARK_MENU_CLASS = 'dark:border-white/[0.12] dark:bg-[#2f2f2c]';
+const ROSE_DARK_MENU_CLASS = 'dark:border-white/[0.09] dark:bg-[#2f2f2c]';
 const ROSE_DARK_LIST_CLASS = 'dark:bg-[#2f2f2c] dark:text-[#e4e4df]';
 const ROSE_DARK_DESCRIPTION_CLASS = 'dark:text-[#a3a39d]';
 

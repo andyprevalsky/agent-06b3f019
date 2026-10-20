@@ -361,13 +361,14 @@ describe('dark query box (mock panels/dark.js; FE-13 visual pass)', () => {
   const surface = () => screen.getByTestId('query-input-surface');
   const modelChip = () => screen.getByText('rose-flash').closest('button')!;
 
-  it('is the solid #2f2f2c surface with a 12% white border, deep shadow and no white marble', () => {
+  it('is the solid #2f2f2c surface with a 9% white border, deep shadow and no white marble', () => {
     storeDark(ROSE_THEME_USER);
     renderWithProviders(themed(queryBoxElement()));
     expect(htmlIsDark()).toBe(true);
     const box = surface();
     expect(box.style.backgroundColor).toBe('rgb(47, 47, 44)');
-    expect(box.style.borderColor).toBe('rgba(255, 255, 255, 0.12)');
+    // Outer borders stay subtle in dark (<= white .10).
+    expect(box.style.borderColor).toBe('rgba(255, 255, 255, 0.09)');
     expect(box.style.boxShadow).toBe('0 10px 40px rgba(0, 0, 0, 0.35)');
     expect(box.getAttribute('style')).not.toContain('backdrop-filter');
     // No translucent white drip or marble layer: the content wrapper is the only child.
@@ -388,7 +389,7 @@ describe('dark query box (mock panels/dark.js; FE-13 visual pass)', () => {
     );
   });
 
-  it('model chip is #2f2f2c with a 12% white border and #e4e4df text, same shape; light unchanged', () => {
+  it('model chip is #2f2f2c with a 9% white border and #e4e4df text, same shape; light unchanged', () => {
     renderWithProviders(themed(queryBoxElement()));
     const light = modelChip().className;
     expect(light).toContain('dark:bg-gray-800');
@@ -397,7 +398,7 @@ describe('dark query box (mock panels/dark.js; FE-13 visual pass)', () => {
     const dark = modelChip();
     expect(dark).toHaveClass(
       'dark:bg-[#2f2f2c]',
-      'dark:border-white/[0.12]',
+      'dark:border-white/[0.09]',
       'dark:text-[#e4e4df]',
       // Same shape and light colors as the stock chip.
       'rounded-lg',
@@ -447,7 +448,7 @@ describe('dark Popular Goals pills (mock button[class*="border"])', () => {
     expect(`${row().outerHTML}\n`).toBe(readLightMarkup('popularGoalsDesktop'));
   });
 
-  it('dark: #2f2f2c fill, 12% white border, #e4e4df text, same pill shape; label #a3a39d', () => {
+  it('dark: #2f2f2c fill, 9% white border, #e4e4df text, same pill shape; label #a3a39d', () => {
     storeDark(ROSE_THEME_USER);
     renderWithProviders(themed(popularGoalsElement()));
     expect(htmlIsDark()).toBe(true);
@@ -463,7 +464,7 @@ describe('dark Popular Goals pills (mock button[class*="border"])', () => {
         'border',
       );
       // The inline drip border (whitish) is replaced, not layered under a class.
-      expect(pill.style.borderColor).toBe('rgba(255, 255, 255, 0.12)');
+      expect(pill.style.borderColor).toBe('rgba(255, 255, 255, 0.09)');
     }
     expect(within(row()).getByText('Popular Goals')).toHaveClass('dark:text-[#a3a39d]');
   });

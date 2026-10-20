@@ -214,7 +214,7 @@ describe('Rose Settings drawer dark stylesheet (mock .acp: flat rows, text tabs)
       background: 'transparent',
       padding: '0',
       'border-radius': '0',
-      'border-bottom': '1px solid rgba(255, 255, 255, 0.08)',
+      'border-bottom': '1px solid rgba(255, 255, 255, 0.07)',
     });
     expect(decls("html.dark .rose-settings [role='tab']")).toMatchObject({
       background: 'transparent',
@@ -236,7 +236,7 @@ describe('Rose Settings drawer dark stylesheet (mock .acp: flat rows, text tabs)
     });
     expect(decls('html.dark .rose-settings textarea')).toMatchObject({
       'background-color': '#2f2f2c',
-      'border-color': 'rgba(255, 255, 255, 0.12)',
+      'border-color': 'rgba(255, 255, 255, 0.09)',
       color: '#f2f2ef',
     });
   });
@@ -253,7 +253,7 @@ describe('Rose Desktop dark surfaces carry no navy utilities (sweep vs panels/da
     'features/terminal-component-group/components/query-input/AttachmentList.tsx':
       'bg-gray-100 border-gray-200 text-gray-700',
     'features/terminal-component-group/components/SubAgentToolBubble.tsx':
-      'border-gray-200 dark:border-white/[0.12] bg-gray-50',
+      'border-gray-200 dark:border-white/[0.09] bg-gray-50',
     'features/terminal/components/SubAgentBreadcrumb.tsx': 'border-gray-200/50',
     'features/terminal-component-group/components/AgentSettingsDialog.tsx': 'border-gray-300',
     'features/terminal-component-group/components/CostLimitModal.tsx': 'border-gray-300',
@@ -275,4 +275,91 @@ describe('Rose Desktop dark surfaces carry no navy utilities (sweep vs panels/da
       expect(source).toContain(light);
     },
   );
+});
+
+describe('subtle dark dividers (Andy: separators white .07, outer borders <= .10)', () => {
+  const SRC = path.resolve(__dirname, '../..');
+  const DIRS = [
+    'features/terminal-component-group/components/rose-sidebar',
+    'features/terminal-component-group/components/rose-apps',
+    'features/terminal-component-group/components/query-input',
+  ];
+  const FILES = [
+    'features/terminal-component-group/components/codeAgentChip.desktop.tsx',
+    'features/terminal-component-group/components/codeAgentChip.steer.tsx',
+    'features/terminal-component-group/components/claudeCodeChip.shared.tsx',
+    'features/terminal-component-group/components/claudeCodeChip.renderers.tsx',
+    'features/terminal-component-group/components/PinnedQuestion.tsx',
+    'features/terminal-component-group/components/SubAgentToolBubble.tsx',
+    'features/terminal-component-group/components/AgentSettingsDialog.tsx',
+    'features/terminal-component-group/components/CostLimitModal.tsx',
+    'features/terminal/components/PopularGoalsCarousel.tsx',
+    'features/terminal/components/SubAgentBreadcrumb.tsx',
+    'features/admin-account-switcher/components/AdminAccountSwitcher.tsx',
+    'features/settings/components/roseSettings.css',
+  ];
+  const sources = [
+    ...DIRS.flatMap((dir) =>
+      fs
+        .readdirSync(path.join(SRC, dir))
+        .filter((name) => /\.(tsx?|css)$/.test(name))
+        .map((name) => `${dir}/${name}`),
+    ),
+    ...FILES,
+  ].map((file) => ({ file, text: fs.readFileSync(path.join(SRC, file), 'utf-8') }));
+
+  /** Every white hairline: dark border/divide utilities and CSS/inline white border colors. */
+  function whiteBorderAlphas(text: string): number[] {
+    const alphas: number[] = [];
+    const utility =
+      /dark:(?:hover:)?(?:border|divide)(?:-[tblrxy])?-white\/(?:\[([0-9.]+)\]|(\d+))/g;
+    for (const m of text.matchAll(utility)) {
+      alphas.push(m[1] !== undefined ? parseFloat(m[1]) : parseInt(m[2]!, 10) / 100);
+    }
+    const css = /border[a-z-]*:\s*[^;\n]*rgba\(255, ?255, ?255, ?([0-9.]+)\)/g;
+    for (const m of text.matchAll(css)) alphas.push(parseFloat(m[1]!));
+    const inline = /border(?:Color|_BORDER)[^\n]*rgba\(255, ?255, ?255, ?([0-9.]+)\)/g;
+    for (const m of text.matchAll(inline)) alphas.push(parseFloat(m[1]!));
+    return alphas;
+  }
+
+  it('no Rose dark hairline is brighter than white .10', () => {
+    const offenders = sources.flatMap(({ file, text }) =>
+      whiteBorderAlphas(text)
+        .filter((alpha) => alpha > 0.1)
+        .map((alpha) => `${file}: ${alpha}`),
+    );
+    expect(offenders).toEqual([]);
+    expect(sources.flatMap(({ text }) => whiteBorderAlphas(text)).length).toBeGreaterThan(20);
+  });
+
+  it('row separators are white .07 (bar group pills, menu separators, panel rows)', () => {
+    const text = (file: string) => sources.find((s) => s.file.endsWith(file))!.text;
+    expect(text('rose-sidebar/RoseAgentGroups.tsx')).toContain('dark:bg-white/[0.07]');
+    expect(text('rose-sidebar/RoseAgentRowMenu.tsx')).toContain(
+      'my-1 bg-gray-200/95 dark:bg-white/[0.07]',
+    );
+    expect(text('rose-sidebar/RoseProjectRow.tsx')).toContain(
+      'my-1 bg-gray-200/95 dark:bg-white/[0.07]',
+    );
+    expect(text('rose-sidebar/RoseProjectSettingsPanel.tsx')).toContain(
+      'border-b border-[#f0f1f4] dark:border-white/[0.07]',
+    );
+    expect(text('rose-apps/RoseAppPanels.tsx')).toContain('dark:border-white/[0.07]');
+    expect(text('rose-apps/BrowserAppDrawer.tsx')).toContain(
+      'border-b border-gray-200/90 px-[18px] dark:border-white/[0.07]',
+    );
+  });
+
+  it('the theme tokens behind border-border / border-input are the subtle greys', () => {
+    const tokens: Record<string, string> = {};
+    postcss.parse(fs.readFileSync(path.join(SRC, 'index.css'), 'utf-8')).walkRules((rule) => {
+      if (!rule.selectors.includes('html.dark')) return;
+      rule.walkDecls((d) => {
+        tokens[d.prop] = d.value;
+      });
+    });
+    expect(tokens['--border']).toBe('60 1.9% 20.8%'); // white .07 over #272725
+    expect(tokens['--input']).toBe('60 1.8% 22.4%'); // white .09 over #272725
+  });
 });

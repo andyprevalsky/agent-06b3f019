@@ -450,7 +450,7 @@ describe('Rose Desktop model selector: short pool names (#77)', () => {
     try {
       const { list, menu, description } = await openModelMenu(true);
       expect(document.documentElement).toHaveClass('dark');
-      expect(menu).toHaveClass('dark:bg-[#2f2f2c]', 'dark:border-white/[0.12]');
+      expect(menu).toHaveClass('dark:bg-[#2f2f2c]', 'dark:border-white/[0.09]');
       expect(list).toHaveClass('bg-white', 'dark:bg-[#2f2f2c]', 'dark:text-[#e4e4df]');
       expect(description).toHaveClass('text-gray-500', 'dark:text-[#a3a39d]');
     } finally {
@@ -461,7 +461,7 @@ describe('Rose Desktop model selector: short pool names (#77)', () => {
   it('light control: the dropdown keeps the stock white list classes', async () => {
     const { list, menu, description } = await openModelMenu(false);
     expect(document.documentElement).not.toHaveClass('dark');
-    expect(menu.className).not.toMatch(/#2f2f2c|white\/\[0\.12\]/);
+    expect(menu.className).not.toMatch(/#2f2f2c|white\/\[0\.09\]/);
     expect(list.className).toMatch(/(^|\s)bg-white(\s|$)/);
     expect(list.className).not.toMatch(/#2f2f2c|#e4e4df/);
     expect(description.className).toBe('text-xs text-gray-500');

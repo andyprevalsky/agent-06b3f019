@@ -123,7 +123,7 @@ function ProjectRowMenu(props: RoseProjectRowProps) {
         <SettingsIcon className={icon} strokeWidth={1.7} />
         Project settings
       </ContextMenuItem>
-      <ContextMenuSeparator className="mx-1.5 my-1 bg-gray-200/95 dark:bg-white/[0.09]" />
+      <ContextMenuSeparator className="mx-1.5 my-1 bg-gray-200/95 dark:bg-white/[0.07]" />
       <ContextMenuItem
         onSelect={props.onRequestDelete}
         className={cn(MENU_ROW, 'text-[#e5484d] focus:text-[#e5484d]')}

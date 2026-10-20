@@ -193,7 +193,8 @@ describe('Rose left bar (flag on)', () => {
     const pill = screen.getAllByTestId('rose-group-divider')[0].querySelector('i')!;
     expect(pill.className).toContain('h-[3px]');
     expect(pill.className).toContain('w-[18px]');
-    expect(pill.className).toContain('dark:bg-white/[0.14]');
+    // Subtle dark divider (separators: white .07).
+    expect(pill.className).toContain('dark:bg-white/[0.07]');
 
     expandBar();
     expect(bar.style.width).toBe('236px');

@@ -28,7 +28,7 @@ import { useProjectSettingsForm, type ProjectDraft } from './useProjectSettingsF
 const MUTED = 'text-[hsl(240_8%_45%)] dark:text-[#a3a39d]';
 const MONO = 'font-mono text-[12px]';
 const FIELD_ROW =
-  'flex items-center justify-between gap-4 border-b border-[#f0f1f4] dark:border-white/[0.09] py-2.5';
+  'flex items-center justify-between gap-4 border-b border-[#f0f1f4] dark:border-white/[0.07] py-2.5';
 const H3 = 'mb-2 mt-[22px] text-[13px] font-semibold';
 
 type SetField = <K extends keyof ProjectDraft>(key: K, value: ProjectDraft[K]) => void;

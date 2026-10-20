@@ -15,7 +15,7 @@
  *
  * THEME (useRoseTheme, Rose Desktop dark mode only): the pills are the mock's
  *   dark controls (panels/dark.js button[class*="border"]): #2f2f2c fill,
- *   rgba(255,255,255,.12) border (replaces the inline drip border), #e4e4df
+ *   rgba(255,255,255,.09) border (replaces the inline drip border), #e4e4df
  *   text, same shape; the label reads #a3a39d. Light renders the stock markup.
  *
  * LAYOUT: [label (md+)] [ticker viewport (overflow hidden) > track (translated)]
@@ -43,7 +43,7 @@ const GOAL_PILL_CLASS =
   'px-3 py-1 text-xs bg-secondary hover:bg-secondary/80 rounded-full whitespace-nowrap flex-shrink-0 border';
 /** Rose dark pill colors (mock); same shape as the stock pill. */
 const ROSE_DARK_GOAL_PILL_CLASS = 'dark:bg-[#2f2f2c] dark:hover:bg-[#383835] dark:text-[#e4e4df]';
-const ROSE_DARK_GOAL_PILL_BORDER = 'rgba(255, 255, 255, 0.12)';
+const ROSE_DARK_GOAL_PILL_BORDER = 'rgba(255, 255, 255, 0.09)';
 const LABEL_CLASS = 'hidden md:block text-sm text-muted-foreground whitespace-nowrap flex-shrink-0';
 
 interface PopularGoalsCarouselProps {

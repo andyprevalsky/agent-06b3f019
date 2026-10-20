@@ -171,7 +171,7 @@ export function PinnedQuestionCard({
                   onKeyDown={onOtherKeyDown}
                   placeholder="Other…"
                   aria-label="Other answer"
-                  className="min-w-0 flex-1 border-0 border-b border-border bg-transparent py-[3px] outline-none focus:border-[#e8507f] dark:border-white/[.12] dark:placeholder:text-[#a3a39d]"
+                  className="min-w-0 flex-1 border-0 border-b border-border bg-transparent py-[3px] outline-none focus:border-[#e8507f] dark:border-white/[0.09] dark:placeholder:text-[#a3a39d]"
                 />
               </li>
             )}

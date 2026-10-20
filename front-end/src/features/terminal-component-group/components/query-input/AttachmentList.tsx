@@ -66,9 +66,9 @@ const STATUS_CLASSNAMES: Record<PendingAttachment['status'], string> = {
     'bg-red-50 border-red-200 text-red-700 dark:bg-red-900/20 dark:border-red-800 dark:text-red-400',
   done: 'bg-green-50 border-green-200 text-green-700 dark:bg-green-900/20 dark:border-green-800 dark:text-green-400',
   uploading:
-    'bg-gray-100 border-gray-200 text-gray-700 dark:bg-[#2f2f2c] dark:border-white/[0.12] dark:text-[#e4e4df]',
+    'bg-gray-100 border-gray-200 text-gray-700 dark:bg-[#2f2f2c] dark:border-white/[0.09] dark:text-[#e4e4df]',
   pending:
-    'bg-gray-100 border-gray-200 text-gray-700 dark:bg-[#2f2f2c] dark:border-white/[0.12] dark:text-[#e4e4df]',
+    'bg-gray-100 border-gray-200 text-gray-700 dark:bg-[#2f2f2c] dark:border-white/[0.09] dark:text-[#e4e4df]',
 };
 
 function AttachmentIcon({ attachment }: { attachment: PendingAttachment }) {

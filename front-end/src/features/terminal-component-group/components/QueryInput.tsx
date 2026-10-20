@@ -45,7 +45,7 @@
  *                      otherwise the translucent drip surface
  *   Rose dark (useRoseTheme().isDark, Rose Desktop accounts only):
  *                      [LIGHT drip | opaque] --html.dark--> [DARK solid #2f2f2c,
- *                      12% white border, deep shadow, no white marble; textarea
+ *                      9% white border, deep shadow, no white marble; textarea
  *                      #f2f2ef / placeholder #8c8c86; model chip #2f2f2c]
  *                      Light keeps the exact stock styles (dripStyles.ts).
  */

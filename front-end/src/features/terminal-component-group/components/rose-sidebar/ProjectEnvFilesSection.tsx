@@ -57,7 +57,7 @@ function EnvFileRow({
   return (
     <div
       data-testid="project-env-file"
-      className="border-b border-gray-100 dark:border-white/[0.09] py-[9px]"
+      className="border-b border-gray-100 dark:border-white/[0.07] py-[9px]"
     >
       <div className="flex items-center gap-2.5">
         <button
