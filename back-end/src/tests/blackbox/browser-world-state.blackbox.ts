@@ -262,7 +262,9 @@ async function cdpBrowser(): Promise<{ endpoint: string }> {
 
 async function homeBrowserOpensFromTheTemplateAndMergesOnClose(): Promise<void> {
   const userId = await createUser('root');
-  await seedTemplate(userId, 'example.com', 'root-com', 2, { creationUtc: 13_400_000_100_000_000n });
+  await seedTemplate(userId, 'example.com', 'root-com', 2, {
+    creationUtc: 13_400_000_100_000_000n,
+  });
   // A second, older account on the same site: the home browser holds ONE login per site.
   await seedTemplate(userId, 'example.com', 'other-account', 1, { account: 'chrome:Profile 2' });
   await prisma.cookie.create({
@@ -398,13 +400,15 @@ async function rootRoutesValidateBeforeTouchingAProvider(): Promise<void> {
 
 async function main(): Promise<void> {
   process.stdout.write('Browser World State Black-box Tests\n');
+  // /prepare-auth runs in this process and would mint a real inbox and phone
+  // number for each fixture user that has no saved login. Mock the provider
+  // boundary by leaving both providers unconfigured, as auth-options does.
+  delete process.env.PRIMITIVE_API_KEY;
+  delete process.env.AGENTPHONE_API_KEY;
   const cases: Array<[string, () => Promise<void>]> = [
     ['fork is scoped to the prepared site', forkIsScopedToThePreparedSite],
     ['a new login merges and seeds the next fork', newLoginMergesAndSeedsTheNextFork],
-    [
-      'unchanged and logged-out sites keep the template',
-      unchangedAndLoggedOutSitesKeepTheTemplate,
-    ],
+    ['unchanged and logged-out sites keep the template', unchangedAndLoggedOutSitesKeepTheTemplate],
     ['every read and write is owner scoped', everyReadAndWriteIsOwnerScoped],
     ['a retried merge is idempotent', retriedMergeIsIdempotent],
     ['home routes validate before touching a provider', rootRoutesValidateBeforeTouchingAProvider],

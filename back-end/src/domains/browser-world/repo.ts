@@ -1,11 +1,13 @@
 /**
- * Browser world repo: owner-scoped reads of Root's per-site heads, the Root
- * browser session and each agent's per-site forks. Every query is keyed by one
- * user (and one agent), never by a whole user's agent tree.
+ * Browser world repo: owner-scoped reads of the template's per-(site, account)
+ * heads, the home browser session and each agent's per-site forks. Every query
+ * is keyed by one user (and one agent or one agent tree), never a user's whole
+ * agent list.
  */
 import { domainVariants } from '../../providers/browserCookies';
 import { prisma, runTransactionWithRetry } from '../../providers/database';
-import { ROOT_BROWSER_PROFILE, ROOT_BROWSER_SOURCE } from '../../providers/browser/worldState';
+import { ROOT_BROWSER_SOURCE } from '../../providers/browser/worldState';
+import { nextSuperseded } from '../../providers/browser/worldStateKeepBest';
 import {
   MAX_AGENT_BROWSER_TASKS,
   MAX_ROOT_COOKIES_PER_OPEN,
@@ -30,14 +32,15 @@ export async function findRootSessionByTaskId(taskId: string) {
 export async function listRootSites(userId: string) {
   return prisma.browserSiteState.findMany({
     where: { userId, cookieCount: { gt: 0 } },
-    orderBy: { site: 'asc' },
+    orderBy: [{ site: 'asc' }, { account: 'asc' }],
     take: MAX_ROOT_SITES_LISTED,
   });
 }
 
+/** Every template account's cookies (the home browser picks one account per site). */
 export async function listRootCookies(userId: string) {
   return prisma.cookie.findMany({
-    where: { userId, browserSource: ROOT_BROWSER_SOURCE, browserProfile: ROOT_BROWSER_PROFILE },
+    where: { userId, browserSource: ROOT_BROWSER_SOURCE },
     take: MAX_ROOT_COOKIES_PER_OPEN,
   });
 }
@@ -55,47 +58,70 @@ export async function findRootRevisions(userId: string, sites: string[]) {
   if (sites.length === 0) return [];
   return prisma.browserSiteState.findMany({
     where: { userId, site: { in: sites } },
-    select: { site: true, revision: true },
+    select: { site: true, account: true, revision: true },
   });
 }
 
 /**
- * Forget one site in Root: drop its Root cookies and bundle, and advance its
- * head as an empty write. Keeping the head (instead of deleting it) keeps the
- * revision monotonic, so a task that forked before the forget stays stale.
+ * The current URL of the newest ACTIVE browser task in one root agent's tree
+ * (the root and every agent on its bus), or null. One statement over indexed
+ * columns: Agent pkey + Agent(busId), BrowserSession(agentId); owner-scoped by
+ * the Agent's userId, so another user's root id finds nothing.
+ */
+export async function findTreeBrowserUrl(userId: string, rootAgentId: string) {
+  const rows = await prisma.$queryRaw<Array<{ url: string }>>`
+    SELECT COALESCE(NULLIF(bs."currentUrl", ''), bs."startUrl") AS url
+    FROM "BrowserSession" bs
+    JOIN "Agent" a ON a.id = bs."agentId"
+    WHERE a."userId" = ${userId}
+      AND (a.id = ${rootAgentId} OR a."busId" = ${rootAgentId})
+      AND bs.status = 'ACTIVE'
+      AND COALESCE(NULLIF(bs."currentUrl", ''), bs."startUrl") ~* '^https?://'
+    ORDER BY bs."createdAt" DESC
+    LIMIT 1`;
+  return rows[0]?.url ?? null;
+}
+
+/**
+ * Forget one site in the template: drop every account's cookies and bundle for
+ * it and advance each head as an empty write that supersedes its login.
+ * Keeping the heads (instead of deleting them) keeps revisions monotonic, and
+ * the superseded login cannot come back from a task that still holds it.
  */
 export async function forgetRootSite(userId: string, site: string): Promise<boolean> {
   return runTransactionWithRetry(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`browser-world:${userId}:${site}`}))`;
-    const head = await tx.browserSiteState.findUnique({ where: { userId_site: { userId, site } } });
-    if (head === null || head.cookieCount === 0) return false;
+    const heads = await tx.browserSiteState.findMany({
+      where: { userId, site, cookieCount: { gt: 0 } },
+    });
+    if (heads.length === 0) return false;
     await tx.cookie.deleteMany({
-      where: {
-        userId,
-        browserSource: ROOT_BROWSER_SOURCE,
-        browserProfile: ROOT_BROWSER_PROFILE,
-        OR: domainVariants(site),
-      },
+      where: { userId, browserSource: ROOT_BROWSER_SOURCE, OR: domainVariants(site) },
     });
     await tx.cookieBundle.deleteMany({
-      where: {
-        userId,
-        authRealm: site,
-        browserSource: ROOT_BROWSER_SOURCE,
-        browserProfile: ROOT_BROWSER_PROFILE,
-      },
+      where: { userId, authRealm: site, browserSource: ROOT_BROWSER_SOURCE },
     });
-    await tx.browserSiteState.update({
-      where: { id: head.id },
-      data: {
-        revision: head.revision + 1,
-        authFingerprint: '',
-        cookieCount: 0,
-        lastWriterKind: 'user_forget',
-        lastWriterTaskId: null,
-        lastWriterAgentId: null,
-      },
-    });
+    for (const head of heads) {
+      await tx.browserSiteState.update({
+        where: { id: head.id },
+        data: {
+          revision: head.revision + 1,
+          supersededFingerprints: nextSuperseded(
+            head.supersededFingerprints,
+            [head.authFingerprint],
+            ''
+          ),
+          authFingerprint: '',
+          authExpiresAt: null,
+          validatedAt: null,
+          observedAt: new Date(),
+          cookieCount: 0,
+          lastWriterKind: 'user_forget',
+          lastWriterTaskId: null,
+          lastWriterAgentId: null,
+        },
+      });
+    }
     return true;
   });
 }

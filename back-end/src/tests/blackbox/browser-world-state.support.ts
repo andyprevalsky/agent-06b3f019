@@ -66,6 +66,8 @@ export async function createAgent(
       status: 'ACTIVE',
       temporalWorkflowId: id,
       parentAgentId: options.parentAgentId ?? null,
+      // A child's parent generation is its parent's workflow (here its id).
+      parentWorkflowId: options.parentAgentId ?? null,
       busId: options.busId ?? id,
       depth: options.parentAgentId === undefined ? 0 : 1,
     },
@@ -159,7 +161,8 @@ export async function seedTemplate(
       authFingerprint: fingerprintOf(site, value),
       authExpiresAt: seed.expires === undefined ? null : new Date(seed.expires * 1000),
       validatedAt: seed.validatedAt ?? null,
-      observedAt: seed.observedAt === undefined ? new Date(Date.now() - 3_600_000) : seed.observedAt,
+      observedAt:
+        seed.observedAt === undefined ? new Date(Date.now() - 3_600_000) : seed.observedAt,
       supersededFingerprints: seed.superseded ?? [],
       cookieCount: 1,
       lastWriterKind: 'agent',

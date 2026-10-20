@@ -78,7 +78,10 @@ export async function anUnforkedSitesNewLoginPercolatesIn(): Promise<void> {
   const recorded = await prisma.browserSiteFork.findUnique({
     where: { browserSessionId_site: { browserSessionId: task.id, site: 'example.net' } },
   });
-  assert(recorded?.mergedRevision === 1, `merge not recorded on the task: ${JSON.stringify(recorded)}`);
+  assert(
+    recorded?.mergedRevision === 1,
+    `merge not recorded on the task: ${JSON.stringify(recorded)}`
+  );
 }
 
 export async function collisionsKeepTheBestLogin(): Promise<void> {
@@ -216,7 +219,10 @@ export async function concurrentClosesConvergeOnTheBestLogin(): Promise<void> {
       .map((receipt) => outcomeOf(receipt, 'example.com'))
       .filter((entry) => entry?.outcome === 'merged');
     assert((await templateCookieValue(userId, 'example.com')) === expected, `best was ${expected}`);
-    assert(head?.revision === merged.length, `revision ${head?.revision} for ${merged.length} writes`);
+    assert(
+      head?.revision === merged.length,
+      `revision ${head?.revision} for ${merged.length} writes`
+    );
     const revisions = new Set(merged.map((entry) => entry?.merged_revision));
     assert(revisions.size === merged.length, 'two closes wrote the same revision');
     const rows = await prisma.cookie.count({
@@ -227,13 +233,20 @@ export async function concurrentClosesConvergeOnTheBestLogin(): Promise<void> {
 
   // Simultaneous closes: the validated login wins whatever the interleaving.
   const racing = await createUser('race');
-  const [ta, tb, tc] = await Promise.all([1, 2, 3].map(() => createAgentTask(racing)));
+  // Tasks are created one by one (fixture rows); only the closes race.
+  const ta = await createAgentTask(racing);
+  const tb = await createAgentTask(racing);
+  const tc = await createAgentTask(racing);
   const raced = await Promise.all([
     close(ta, jars.a),
     close(tb, jars.b),
     close(tc, jars.c, ['example.com']),
   ]);
-  await settled(racing, 'c', raced.filter((receipt) => receipt !== null));
+  await settled(
+    racing,
+    'c',
+    raced.filter((receipt) => receipt !== null)
+  );
 
   // Without evidence the later expiry wins, in either order.
   for (const order of [
@@ -380,7 +393,10 @@ export async function defaultUrlComesFromTheTreesActiveTask(): Promise<void> {
   assert(none.status === 200 && none.body.default_url === null, JSON.stringify(none.body));
   const stranger = await createUser('stranger');
   const foreign = await api(`/api/browser-world/root?agent_id=${rootId}`, stranger);
-  assert(foreign.body.default_url === null, `another user's URL leaked: ${JSON.stringify(foreign)}`);
+  assert(
+    foreign.body.default_url === null,
+    `another user's URL leaked: ${JSON.stringify(foreign)}`
+  );
   const bad = await api('/api/browser-world/root?agent_id=not-a-uuid', userId);
   assert(bad.status === 400, `bad agent_id returned ${bad.status}`);
 }
@@ -451,7 +467,10 @@ export async function openWithoutStartUrlUsesTheDefaultUrl(): Promise<void> {
   assert(opened[1] === 'https://chosen.example/', 'an explicit start_url did not win');
   await deps.close(chosen.session_id);
   await openRootBrowser(userId, { agentId: idleRoot }, deps);
-  assert(opened.length === 3 && opened[2] === undefined, `idle tree opened at ${String(opened[2])}`);
+  assert(
+    opened.length === 3 && opened[2] === undefined,
+    `idle tree opened at ${String(opened[2])}`
+  );
 }
 
 export async function theHomeBrowserIsNotAutoOpened(): Promise<void> {
@@ -467,7 +486,10 @@ export async function theHomeBrowserIsNotAutoOpened(): Promise<void> {
   const receipt = await mergeSessionWorldState(task.sessionId, { browser });
   expectSite(receipt, 'example.com', 'merged');
   const view = await api(`/api/browser-world/root?agent_id=${rootId}`, userId);
-  assert(view.status === 200 && view.body.root === null, `home browser open: ${JSON.stringify(view.body)}`);
+  assert(
+    view.status === 200 && view.body.root === null,
+    `home browser open: ${JSON.stringify(view.body)}`
+  );
   assert(view.body.default_url === 'https://working.example/', JSON.stringify(view.body));
   const sites = (view.body.sites as Array<{ site: string }>).map((entry) => entry.site);
   assert(sites.includes('example.com'), 'percolated credentials are not listed');

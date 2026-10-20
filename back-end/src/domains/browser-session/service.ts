@@ -134,7 +134,7 @@ export async function prepareSessionCredentials(
     }),
     repo.findPasswords(userId),
     repo.reservePasskeysForRealm(userId, authRealm),
-    // Root world-state fork (A6), read before injection selects cookies.
+    // Browser-template fork (A6): recorded once injection has chosen the account.
     prepareWorldStateFork(session, userId, targetUrl),
   ]);
 
