@@ -52,6 +52,8 @@ const DEFAULT_BUDGETS = Object.freeze({
   /** Median per-400ms pixel change under prefers-reduced-motion (continuous motion). */
   reducedMotionChangedMax: 0.001,
 });
+/** Display refresh rates frame intervals are snapped to (see frameStats). */
+const STANDARD_REFRESH_HZ = [24, 30, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 240];
 /** 1-minute load average per CPU above which fps cannot be judged fairly. */
 const HOST_BUSY_LOAD_PER_CORE = 1.25;
 /** Session-start captures: CSS viewport x device scale = PNG pixels. */
@@ -255,19 +257,34 @@ function readTextForAudit(file) {
 
 // ───────────────────────────── budgets ─────────────────────────────
 
-/** Frame-time distribution → fps. times are rAF timestamps in ms. */
+/**
+ * Frame-time distribution → fps. times are rAF timestamps in ms.
+ * Frames land on display refreshes, so each delta is quantized to a whole number of
+ * refresh intervals (the mean of the on-time cluster: deltas within 1.5x of the
+ * fastest 10%) before p50/p5 are read: timestamp jitter (33.3 vs 33.4 ms for one
+ * missed vsync) must not flip a verdict. p5 >= 30 therefore means "at most one
+ * missed refresh at p95" at 60 Hz.
+ */
 function frameStats(times) {
-  if (!times || times.length < 3) return { frames: times ? times.length : 0, p50: null, p5: null, mean: null, worstFrameMs: null };
+  if (!times || times.length < 3) return { frames: times ? times.length : 0, p50: null, p5: null, mean: null, worstFrameMs: null, refreshMs: null };
   const deltas = [];
   for (let i = 1; i < times.length; i++) deltas.push(times[i] - times[i - 1]);
   const sorted = deltas.slice().sort((a, b) => a - b);
-  const pick = (q) => sorted[Math.min(sorted.length - 1, Math.floor(q * (sorted.length - 1)))];
+  const pick = (list, q) => list[Math.min(list.length - 1, Math.floor(q * (list.length - 1)))];
+  const fast = pick(sorted, 0.1);
+  const onTime = sorted.filter((d) => d <= fast * 1.5);
+  const measured = Math.max(4, onTime.reduce((s, d) => s + d, 0) / onTime.length);
+  // Snap to a standard display rate when within 3% (60 Hz measures 16.6-16.8 ms).
+  const hz = STANDARD_REFRESH_HZ.find((r) => Math.abs(1000 / measured - r) / r <= 0.03);
+  const refresh = hz ? 1000 / hz : measured;
+  const quantized = sorted.map((d) => Math.max(1, Math.round(d / refresh)) * refresh);
   return {
     frames: times.length,
-    p50: round(1000 / pick(0.5)),
-    p5: round(1000 / pick(0.95)),
+    p50: round(1000 / pick(quantized, 0.5)),
+    p5: round(1000 / pick(quantized, 0.95)),
     mean: round(((times.length - 1) * 1000) / (times[times.length - 1] - times[0])),
     worstFrameMs: round(sorted[sorted.length - 1]),
+    refreshMs: round(refresh, 2),
   };
 }
 

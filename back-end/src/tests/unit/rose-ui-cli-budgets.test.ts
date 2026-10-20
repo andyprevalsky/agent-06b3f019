@@ -154,6 +154,39 @@ test('frame stats and CLS session windows', () => {
   assert.equal(cli.cumulativeLayoutShift([]), 0);
 });
 
+/** 60 Hz frames where `share` of them miss `missed` vsyncs, with ±0.1 ms timestamp jitter. */
+function vsyncFrames(share: number, missed: number, jitter: number): number[] {
+  const times = [0];
+  for (let i = 1; i < 200; i++) {
+    const late = i % Math.round(1 / share) === 0;
+    times.push(times[i - 1] + (late ? (missed + 1) * 16.667 : 16.667) + (i % 2 ? jitter : -jitter));
+  }
+  return times;
+}
+
+test('frame stats are quantized to the refresh interval (timestamp jitter cannot flip a verdict)', () => {
+  // Regression: one missed vsync at p95 measured as 33.4 ms → "29.9 fps" and failed
+  // fps-p5 (min 30), while the identical cadence at 33.3 ms passed.
+  for (const jitter of [0.1, -0.1, 0.4]) {
+    const oneMissed = cli.frameStats(vsyncFrames(1 / 8, 1, jitter));
+    assert.equal(oneMissed.p5, 30, `one missed vsync at p95 is 30 fps (jitter ${jitter})`);
+    assert.equal(oneMissed.p50, 60);
+    const verdict = cli.evaluateBudgets({
+      ...SMOOTH,
+      normal: { ...SMOOTH.normal, workers: [{ fps: oneMissed }] },
+    });
+    assert.equal(verdict.pass, true, JSON.stringify(verdict.violations));
+  }
+  // Two missed vsyncs at p95 is real jank and still fails.
+  const twoMissed = cli.frameStats(vsyncFrames(1 / 8, 2, 0.1));
+  assert.equal(twoMissed.p5, 20);
+  const verdict = cli.evaluateBudgets({
+    ...SMOOTH,
+    normal: { ...SMOOTH.normal, workers: [{ fps: twoMissed }] },
+  });
+  assert.deepEqual(rules(verdict), ['fps-p5']);
+});
+
 function auditFiles(root: string): AuditFile[] {
   const out: AuditFile[] = [];
   const walk = (dir: string) => {
