@@ -973,7 +973,7 @@ bench_needs_large_primary() {  # bench_needs_large_primary <task>
 }
 
 primary_vm_size_for_bench() {  # primary_vm_size_for_bench <task>
-    if [ "${INFRA_PROBE:-0}" != "1" ] && is_sim_on "$1"; then
+    if [ "${INFRA_PROBE:-0}" != "1" ] && bench_simulates "$1"; then
         printf '%s\n' "$FLEET_SIM_VM_SIZE"
     elif bench_needs_large_primary "$1"; then
         printf '%s\n' "$FLEET_BUNDLED_FRONTEND_VM_SIZE"
@@ -983,7 +983,7 @@ primary_vm_size_for_bench() {  # primary_vm_size_for_bench <task>
 }
 
 primary_vm_memory_for_bench() {  # primary_vm_memory_for_bench <task>
-    if [ "${INFRA_PROBE:-0}" != "1" ] && is_sim_on "$1"; then
+    if [ "${INFRA_PROBE:-0}" != "1" ] && bench_simulates "$1"; then
         printf '%s\n' "$FLEET_SIM_VM_MEMORY"
     elif bench_needs_large_primary "$1"; then
         printf '%s\n' "$FLEET_BUNDLED_FRONTEND_VM_MEMORY"
@@ -1846,6 +1846,14 @@ FLY() {
 }
 
 is_sim_on() { case ",$SIM_ON_CSV," in *",$1,"*) return 0 ;; esac; return 1; }
+bench_simulates() {  # <task>; --sim-on or a catalog simulate task (the guest serves the WMH)
+    is_sim_on "$1" && return 0
+    local index
+    for index in "${!BENCHES[@]}"; do
+        [ "${BENCHES[$index]}" = "$1" ] && [ "${CATALOG_MODES[$index]:-}" = simulate ] && return 0
+    done
+    return 1
+}
 primary_clone_storage_mode() {
     local bench="$1" index
     [ "$FRESH_VOLUMES" = 1 ] || { printf snapshot; return; }

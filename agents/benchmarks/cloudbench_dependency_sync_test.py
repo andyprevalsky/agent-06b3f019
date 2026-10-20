@@ -10758,7 +10758,9 @@ def _terminate_test_owned_central_hubs(hub_context: Path, runs_root: Path) -> No
 
 
 def _fleet_primary_shape_helpers(source: str) -> str:
-    sim_on = next(line for line in source.splitlines() if line.startswith("is_sim_on() {"))
+    sim_on = next(line for line in source.splitlines() if line.startswith("is_sim_on() {")) + "\n" + _extract_fleet_function(
+        source, "bench_simulates() {"
+    )
     return """FLEET_PRIMARY_VM_MEMORY=${FLEET_PRIMARY_VM_MEMORY:-4096}
 FLEET_BUNDLED_FRONTEND_VM_SIZE=${FLEET_BUNDLED_FRONTEND_VM_SIZE:-shared-cpu-4x}
 FLEET_BUNDLED_FRONTEND_VM_MEMORY=${FLEET_BUNDLED_FRONTEND_VM_MEMORY:-8192}
@@ -11706,6 +11708,13 @@ SIM_ON_CSV=raise-5m-rose-labs-brex
 ! bench_uses_default_pool_shape raise-5m-rose-labs-brex
 [ "$(primary_vm_size_for_bench chat-mode)" = shared-cpu-2x ]
 [ "$(primary_vm_memory_for_bench chat-mode)" = 4096 ]
+# A bare run of a catalog simulate task (no --sim-on) serves the WMH too.
+SIM_ON_CSV=
+BENCHES=(raise-5m-rose-labs-brex chat-mode)
+CATALOG_MODES=(simulate real)
+[ "$(primary_vm_size_for_bench raise-5m-rose-labs-brex)" = performance-8x ]
+[ "$(primary_vm_memory_for_bench raise-5m-rose-labs-brex)" = 65536 ]
+[ "$(primary_vm_size_for_bench chat-mode)" = shared-cpu-2x ]
 INFRA_PROBE=1
 [ "$(primary_vm_size_for_bench raise-5m-rose-labs-brex)" = shared-cpu-2x ]
 """
