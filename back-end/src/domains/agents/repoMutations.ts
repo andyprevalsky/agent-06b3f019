@@ -45,6 +45,7 @@ function optionalAgentCreateFields(params: {
   worldModelMode?: 'real' | 'simulate' | 'shadow';
   isBenchmark?: boolean;
   githubRepoUrl?: string;
+  originDeviceId?: string;
 }): Partial<Prisma.AgentUncheckedCreateInput> {
   return {
     ...(params.temporalWorkflowId !== undefined && params.temporalWorkflowId !== null
@@ -73,6 +74,7 @@ function optionalAgentCreateFields(params: {
     ...(params.worldModelMode !== undefined ? { worldModelMode: params.worldModelMode } : {}),
     ...(params.isBenchmark === true ? { isBenchmark: true } : {}),
     ...(params.githubRepoUrl !== undefined ? { githubRepoUrl: params.githubRepoUrl } : {}),
+    ...(params.originDeviceId !== undefined ? { originDeviceId: params.originDeviceId } : {}),
   };
 }
 
@@ -127,6 +129,8 @@ export interface CreateAgentParams {
   workflowTaskQueue?: string;
   /** Repository code sessions in this tree clone (set before the workflow starts). */
   githubRepoUrl?: string;
+  /** Rose Mac app device that started this root agent (C14 local code agents). */
+  originDeviceId?: string;
 }
 
 /** Create an agent with verifier and goal message in a transaction. */

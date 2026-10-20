@@ -17,6 +17,10 @@ import { createSessionSchema, closeSessionSchema } from './types';
 import type { FilePointer } from '../../providers/storage';
 import * as service from './service';
 import { AgentOwnerMismatchError, MissingUserIdError, GitHubAccessDeniedError } from './service';
+import {
+  LocalTargetUnavailableError,
+  localTargetUnavailableBody,
+} from '../../providers/localDevices/messages';
 
 const log = createLogger('ClaudeCodeRoutes');
 const router = Router();
@@ -32,9 +36,8 @@ router.post(
   authenticate,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
-      const { agent_id, goal, attachments, github_repo_url, user_id } = createSessionSchema.parse(
-        req.body
-      );
+      const { agent_id, goal, attachments, github_repo_url, user_id, target } =
+        createSessionSchema.parse(req.body);
 
       const result = await service.createSession({
         agent_id,
@@ -42,6 +45,7 @@ router.post(
         attachments: attachments as FilePointer[] | undefined,
         github_repo_url,
         user_id,
+        target,
       });
 
       res.json({
@@ -49,6 +53,10 @@ router.post(
         ...result,
       });
     } catch (error) {
+      if (error instanceof LocalTargetUnavailableError) {
+        res.status(409).json(localTargetUnavailableBody(error));
+        return;
+      }
       if (error instanceof MissingUserIdError) {
         res.status(400).json({
           error: 'user_id is required when using github_repo_url',

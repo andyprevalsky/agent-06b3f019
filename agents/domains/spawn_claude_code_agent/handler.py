@@ -231,6 +231,7 @@ def _resumed_target(code_session: Optional[Dict[str, Any]]) -> Optional[Dict[str
         "device_id": code_session.get("device_id"),
         "device_name": code_session.get("device_name"),
         "error": None,
+        "folder": code_session.get("folder"),
     }
 
 
@@ -654,7 +655,10 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     "structured_response": result.get("structured_response"),
                     "code_provider": code_provider,
                     "completed_turns": result.get("completed_turns"),
-                    "code_agent": code_agent_metadata(target_info),
+                    "code_agent": {
+                        **code_agent_metadata(target_info),
+                        **(result.get("code_agent") if isinstance(result.get("code_agent"), dict) else {}),
+                    },
                 },
                 data={"usage": tool_usage},
             )

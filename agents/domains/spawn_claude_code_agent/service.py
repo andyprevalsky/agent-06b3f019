@@ -724,10 +724,11 @@ _CODE_SESSION_FIELDS = (
     # Sandbox events already logged by an earlier attachment; the reattached
     # attempt logs only the ones that arrived while nobody was attached.
     "logged_events",
-    # A local (Mac) run: a reattaching attempt keeps the same target and device.
+    # A local (Mac) run: a reattaching attempt keeps the same target, device and folder.
     "target",
     "device_id",
     "device_name",
+    "folder",
 )
 
 
@@ -2284,6 +2285,8 @@ async def spawn_claude_code_activity(
     code_agent_meta: Dict[str, Any] = {"target": "local" if target == "local" else "cloud"}
     if target == "local" and local_device_name:
         code_agent_meta["device_name"] = local_device_name
+    if isinstance(attached, dict) and attached.get("folder"):
+        code_agent_meta["folder"] = attached["folder"]
 
     logger.info(
         "[ClaudeCode] Using response schema from tool call",
@@ -2366,6 +2369,9 @@ async def spawn_claude_code_activity(
             uploaded_files = session_data.get("uploaded_files", [])
             actual_github_repo_url = session_data.get("github_repo_url")
             loop_started_at = None
+            if target == "local" and session_data.get("folder"):
+                # Display path of the folder the Mac granted (e.g. "~/Developer/rose").
+                code_agent_meta["folder"] = session_data["folder"]
 
             logger.info(
                 "[ClaudeCode] Session created",
@@ -2393,7 +2399,14 @@ async def spawn_claude_code_activity(
         }
         if target == "local":
             # A drained/retried attempt must reattach to the same Mac, never the cloud.
-            session_record.update({"target": "local", "device_id": local_device_id, "device_name": local_device_name})
+            session_record.update(
+                {
+                    "target": "local",
+                    "device_id": local_device_id,
+                    "device_name": local_device_name,
+                    "folder": code_agent_meta.get("folder"),
+                }
+            )
         # An attempt's first heartbeat goes out at once and later ones only every
         # throttle interval, so nothing may heartbeat before the session rides
         # along, and the session must ride along before anything else can fail:
@@ -2660,6 +2673,7 @@ async def spawn_claude_code_activity(
             "output_files": output_files,
             "code_provider": code_provider,
             "completed_turns": codex_completed_turn_count(code_events) if code_provider == "codex" else None,
+            "code_agent": code_agent_meta,
         }
         return result
 

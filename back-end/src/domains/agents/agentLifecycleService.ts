@@ -11,6 +11,7 @@ import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailu
 import { deleteAgentRecursive as killAgentRecursive } from '../../providers/agentKill';
 import { createGithubRepo } from '../../providers/github';
 import { createLogger } from '../../providers/logger';
+import { findOwnedLocalDevice } from '../../providers/localDevices/store';
 import { resolvePriceLimitCents } from '../../providers/priceLimitDefaults';
 import type { CreateAgentBody } from './types';
 import { getPromptSecret } from './config';
@@ -172,6 +173,25 @@ async function resolveSubAgentBenchmarkFlag(
 export interface CreateAgentOptions {
   /** Root repository for code sessions, persisted in the create transaction. */
   githubRepoUrl?: string;
+  /**
+   * `X-Rose-Device-Id` sent by the Rose Mac app's main process (C14). Recorded
+   * only for a MAC_APP root agent and only when the caller owns that device.
+   */
+  originDeviceHeader?: string;
+}
+
+/** The Mac that started this root agent; nothing for web/PWA/SMS roots and sub-agents. */
+export async function originDeviceFields(
+  body: CreateAgentBody,
+  userId: string,
+  isSubAgent: boolean,
+  header: string | undefined
+): Promise<{ originDeviceId?: string }> {
+  if (isSubAgent || body.source !== 'MAC_APP' || header === undefined || header === '') {
+    return {};
+  }
+  const device = await findOwnedLocalDevice(header, userId);
+  return device === null ? {} : { originDeviceId: device.id };
 }
 
 export async function createAgent(
@@ -234,6 +254,7 @@ export async function createAgent(
     workflowStartPhase: body.start_phase,
     workflowTaskQueue: body.task_queue,
     ...(options.githubRepoUrl !== undefined ? { githubRepoUrl: options.githubRepoUrl } : {}),
+    ...(await originDeviceFields(body, userId, isSubAgent, options.originDeviceHeader)),
   });
   const archiveStartFixture = !isSubAgent ? await prepareAgentStartArchive(agent.agent.id) : null;
 

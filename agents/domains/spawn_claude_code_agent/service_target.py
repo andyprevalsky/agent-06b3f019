@@ -53,12 +53,14 @@ def cloud_target() -> CodeAgentTarget:
 
 
 def code_agent_metadata(target: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """The ``metadata.code_agent`` keys this lane owns: ``target`` and ``device_name``."""
+    """The ``metadata.code_agent`` keys this lane owns: ``target``, ``device_name``, ``folder``."""
     if not target:
         return {"target": CODE_TARGET_CLOUD}
     metadata: Dict[str, Any] = {"target": target.get("target") or CODE_TARGET_CLOUD}
     if target.get("device_name"):
         metadata["device_name"] = target["device_name"]
+    if target.get("folder"):
+        metadata["folder"] = target["folder"]
     return metadata
 
 

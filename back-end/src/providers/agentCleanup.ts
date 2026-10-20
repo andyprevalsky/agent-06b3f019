@@ -6,6 +6,8 @@ import { createLogger } from './logger';
 import { cleanupAgentPurchaseCards } from './purchaseCleanup';
 import { closeSession } from './browser';
 import { closeLocalClaudeCodeSession, isLocalClaudeCodeSandboxId } from './claudeCodeLocalSession';
+import { isLocalDeviceSandboxId } from './localDevices/hub';
+import { closeLocalDeviceCodeSession } from './localDevices/session';
 
 const log = createLogger('Cleanup');
 
@@ -84,6 +86,10 @@ function codeSessionReleaseDependencies(): CodeSessionReleaseDependencies {
     killSandbox: async (session) => {
       if (isLocalClaudeCodeSandboxId(session.sandboxId)) {
         await closeLocalClaudeCodeSession(session.id);
+        return;
+      }
+      if (isLocalDeviceSandboxId(session.sandboxId)) {
+        await closeLocalDeviceCodeSession(session.id, session.sandboxId);
         return;
       }
       // false means E2B no longer has the sandbox, which is as released as a kill.

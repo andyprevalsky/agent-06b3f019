@@ -17,6 +17,7 @@ import {
 } from '../../providers/claudeCredentials';
 import { markAnthropicApiKeyOnCooldown } from '../../providers/computeCredentials';
 import { syncConnectionAfterIntegrationAuthFailure } from '../../providers/integrationConnectionSync';
+import { createLocalCodeSessionResponse } from '../../providers/localDevices/session';
 
 export type { HealthCheckResult } from './health';
 export { checkSandboxHealth } from './health';
@@ -65,6 +66,8 @@ export interface CreateSessionParams {
   attachments?: FilePointer[];
   github_repo_url?: string;
   user_id?: string;
+  /** C14: 'local' runs the same ws-server on the agent tree's Mac. */
+  target?: 'cloud' | 'local';
 }
 
 export interface CreateSessionResult {
@@ -73,6 +76,9 @@ export interface CreateSessionResult {
   ws_url: string;
   uploaded_files: string[];
   github_repo_url: string | null;
+  /** Local (Mac) sessions only: the Mac running it and its granted folder. */
+  device_name?: string;
+  folder?: string;
 }
 
 /** Resolve the owning user and optional GitHub repo from the agent tree. */
@@ -133,6 +139,10 @@ export async function createSession(params: CreateSessionParams): Promise<Create
   // repo-less agents can still consume their user's stored OAuth credential.
   const resolved = await resolveAgentContext(agent_id, effectiveUserId);
   effectiveUserId = resolved.userId;
+
+  if (params.target === 'local') {
+    return createLocalCodeSessionResponse({ agentId: agent_id, goal, provider: 'claude' });
+  }
 
   // Auto-inject GitHub repo URL from the agent tree if not explicitly provided.
   if (effectiveGithubRepoUrl === undefined || effectiveGithubRepoUrl === '') {

@@ -9,10 +9,7 @@
 export const LOCAL_TARGET_UNAVAILABLE_CODE = 'LOCAL_TARGET_UNAVAILABLE';
 
 export type LocalTargetReason =
-  | 'not_mac_origin'
-  | 'device_disconnected'
-  | 'no_folder_granted'
-  | 'no_own_credentials';
+  'not_mac_origin' | 'device_disconnected' | 'no_folder_granted' | 'no_own_credentials';
 
 export const LOCAL_TARGET_NOT_MAC_ORIGIN: LocalTargetReason = 'not_mac_origin';
 export const LOCAL_TARGET_DEVICE_DISCONNECTED: LocalTargetReason = 'device_disconnected';
@@ -56,6 +53,21 @@ export function localTargetError(
     case 'device_disconnected':
       return localTargetDisconnectedMessage(deviceName);
   }
+}
+
+/** 409 body the worker maps to a non-retryable tool error with `error` verbatim. */
+export function localTargetUnavailableBody(error: LocalTargetUnavailableError): {
+  code: typeof LOCAL_TARGET_UNAVAILABLE_CODE;
+  reason: LocalTargetReason;
+  device_name: string | null;
+  error: string;
+} {
+  return {
+    code: LOCAL_TARGET_UNAVAILABLE_CODE,
+    reason: error.reason,
+    device_name: error.deviceName,
+    error: error.message,
+  };
 }
 
 /**

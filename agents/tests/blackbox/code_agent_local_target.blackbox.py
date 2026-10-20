@@ -216,7 +216,8 @@ async def test_local_routes_to_the_mac():
     """target='local' resolves the Mac once and runs the same activity with its identity."""
     from tools.base import MessageStatus
 
-    fake = _Workflow(_Handle(result=_ok_result()), target_result=_available())
+    folder_meta = {"target": "local", "device_name": DEVICE, "folder": "~/Developer/rose"}
+    fake = _Workflow(_Handle(result=_ok_result(code_agent=folder_meta)), target_result=_available())
     events = await _run({"goal": "fix", "output_schema": SCHEMA, "target": "local"}, fake)
 
     lookups = [args for name, args, _ in fake.executed if name == "resolve_code_agent_target_activity"]
@@ -229,7 +230,7 @@ async def test_local_routes_to_the_mac():
     assert events[0].title == f"Starting code agent on {DEVICE}"
     assert events[0].metadata["code_agent"] == {"target": "local", "device_name": DEVICE}
     finished = [e for e in events if getattr(e, "status", None) == MessageStatus.FINISHED][0]
-    assert finished.metadata["code_agent"] == {"target": "local", "device_name": DEVICE}
+    assert finished.metadata["code_agent"] == folder_meta
 
 
 async def test_disconnected_mac_fails_immediately_with_exact_error():
@@ -400,7 +401,13 @@ async def test_activity_records_local_target_on_session_and_messages():
 
     async def fake_create(**kwargs):
         seen_create.update(kwargs)
-        return {"task_id": "t-1", "sandbox_id": "mac-dev-1-t-1", "ws_url": "wss://relay", "uploaded_files": []}
+        return {
+            "task_id": "t-1",
+            "sandbox_id": "mac-dev-1-t-1",
+            "ws_url": "wss://relay",
+            "uploaded_files": [],
+            "folder": "~/Developer/rose",
+        }
 
     async def fake_save(**kwargs):
         saved.append(kwargs)
@@ -430,7 +437,9 @@ async def test_activity_records_local_target_on_session_and_messages():
         )
     assert result["status"] == "completed"
     assert seen_create["target"] == "local" and seen_create["local_device_id"] == "dev-1"
-    assert saved and all(s["code_agent"] == {"target": "local", "device_name": DEVICE} for s in saved), saved
+    expected_meta = {"target": "local", "device_name": DEVICE, "folder": "~/Developer/rose"}
+    assert saved and all(s["code_agent"] == expected_meta for s in saved), saved
+    assert result["code_agent"] == expected_meta
 
 
 async def test_save_message_merges_code_agent_metadata():

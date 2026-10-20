@@ -21,6 +21,9 @@ import inviteCodesRouter from './domains/invite-codes/routes';
 import sendSmsRouter from './domains/send-sms/routes';
 import vapiRouter from './domains/vapi/routes';
 import { attachHoldStreamServer } from './domains/vapi/holdListenerService';
+import { HOLD_STREAM_PATH } from './domains/vapi/config';
+import localDevicesRouter from './domains/local-devices/routes';
+import { attachLocalDeviceServer } from './domains/local-devices/service';
 import voicesRouter from './domains/voices/routes';
 import browserSessionRouter from './domains/browser-session/routes';
 import peopleRouter from './domains/people/routes';
@@ -530,6 +533,7 @@ app.use('/api/vapi', vapiRouter);
 app.use('/api/voices', voicesRouter); // public — exposes ElevenLabs preview MP3 URLs
 app.use('/api/browser-session', browserSessionRouter);
 app.use('/api/claude-code-session', claudeCodeRouter);
+app.use('/api/local-devices', localDevicesRouter);
 app.use('/api/codex-code-session', codexCodeRouter);
 app.use('/api/people', peopleRouter);
 app.use('/api/integrations', integrationsRouter);
@@ -659,6 +663,8 @@ const server = app.listen(PORT, () => {
 });
 // wait_for_human: Twilio streams parked calls' hold audio to this server.
 attachHoldStreamServer(server);
+// C14: Rose Mac app control channels and per-session local code relays.
+attachLocalDeviceServer(server, [HOLD_STREAM_PATH]);
 
 // Graceful shutdown
 const shutdown = async (signal: string) => {

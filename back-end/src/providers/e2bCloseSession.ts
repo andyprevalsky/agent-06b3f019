@@ -6,6 +6,8 @@ import { prisma } from './database';
 import { createLogger } from './logger';
 import { type FilePointer, uploadToStorage } from './storage';
 import { closeLocalClaudeCodeSession, isLocalClaudeCodeSandboxId } from './claudeCodeLocalSession';
+import { isLocalDeviceSandboxId } from './localDevices/hub';
+import { closeLocalDeviceCodeSession } from './localDevices/session';
 
 const log = createLogger('E2B');
 const OUTPUT_DIR = CODE_AGENT_OUTPUT_DIR;
@@ -85,6 +87,11 @@ export async function closeClaudeCodeSession(
   if (isLocalClaudeCodeSandboxId(session.sandboxId)) {
     const local = await closeLocalClaudeCodeSession(taskId, userId, additionalPaths);
     return { outputFiles: local.outputFiles };
+  }
+
+  if (isLocalDeviceSandboxId(session.sandboxId)) {
+    // The work stays in the user's Mac folder; nothing is uploaded from their disk.
+    return await closeLocalDeviceCodeSession(taskId, session.sandboxId);
   }
 
   const outputFiles: FilePointer[] = [];
