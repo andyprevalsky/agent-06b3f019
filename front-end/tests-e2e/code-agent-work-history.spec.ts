@@ -58,7 +58,6 @@ for (const provider of ['claude', 'codex'] as const) {
     page,
   }) => {
     const rec = attachRecorder(page);
-    page.on('pageerror', (error) => console.log('PAGEERROR', error.message));
     let completed = false;
     await page.addInitScript((id) => {
       const user = { id, is_anonymous: false };
@@ -77,6 +76,10 @@ for (const provider of ['claude', 'codex'] as const) {
     }, ROSE_DESKTOP_USER_IDS[0]);
     await page.route('**/api/**', async (route) => {
       const path = new URL(route.request().url()).pathname;
+      if (!path.startsWith('/api/')) {
+        await route.continue();
+        return;
+      }
       const agent = {
         agent_id: OWNER,
         goal: 'Polish the speed control',
