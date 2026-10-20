@@ -66,7 +66,9 @@ def run(script, values=None):
                           text=True, capture_output=True)
 
 # Donor free space as `df -PB1` reports it; DF_AVAIL sets the available bytes.
-DF_FAKE = "df() { printf 'Filesystem 1-blocks Used Available Capacity Mounted\\nfake 0 0 %s 0%% /data\\n' \"$DF_AVAIL\"; };\n"
+# DF_AVAIL_FREED (optional) is reported once $REMOTE_WMH_NATIVE no longer exists.
+DF_FAKE = ("df() { a=\"$DF_AVAIL\"; if [ -n \"${DF_AVAIL_FREED:-}\" ] && [ ! -e \"$REMOTE_WMH_NATIVE\" ]; then a=\"$DF_AVAIL_FREED\"; fi; "
+           "printf 'Filesystem 1-blocks Used Available Capacity Mounted\\nfake 0 0 %s 0%% /data\\n' \"$a\"; };\n")
 
 class WorldModelLaunch(unittest.TestCase):
     def assert_handoff(self, values, *, engine="experiential", pool="rose-1-mini",
@@ -283,6 +285,64 @@ class WorldModelLaunch(unittest.TestCase):
                 self.assertEqual(setup, [{"tool": "setup", "uv_python": str(scratch / "uv-python"),
                                           "cwd": str(repo)}])
                 self.assertTrue((scratch / "uv-python").is_dir())
+
+    def test_native_refresh_replaces_a_previous_native_tree_that_leaves_too_little_room(self):
+        # 2026-10-20 re-refreshing a donor that already held a ~16 GB native tree
+        # failed its headroom check (7.1 GB free, 20.5 GB needed), so a corrupt
+        # native model could never be replaced. The previous tree is dropped only
+        # when the staged pull would not otherwise fit.
+        fragment = re.search(r'^    NATIVE_REFRESH_CMD="set -e\n.*?^ {4}# Legacy', source, re.M | re.S).group(0)
+        fragment = fragment[:fragment.rfind("    # Legacy")]
+        fake_python = (
+            "#!" + sys.executable + "\nimport json,os,sys\nfrom pathlib import Path\nargv=sys.argv[1:]\n"
+            "if argv[:1]==['-c']:\n    os.execv(sys.executable,[sys.executable]+argv)\n"
+            "open(os.environ['CALLS'],'a').write(json.dumps(argv)+'\\n')\n"
+            "if argv[:4]==['-m','pip','install','--quiet']:\n"
+            "    uv=Path(sys.argv[0]).parent/'uv'; uv.write_text('#!/bin/sh\\n'); uv.chmod(0o755); sys.exit(0)\n"
+            "if 'status' in argv:\n"
+            "    print(json.dumps({'plaintext_bytes':19*10**9})); sys.exit(0)\n"
+            "root=Path(argv[argv.index('--build-dir')+1])\n"
+            "(root/'models/rose-archive').mkdir(parents=True)\n"
+            "(root/'models/rose-archive/experiential.json').write_text('fresh')\n"
+            "(root/'build.manifest.json').write_text('native-manifest')\n"
+        )
+        gib = 1 << 30
+        for case, freed, ok in (("room-after-drop", 30 * gib, True), ("no-room-even-after-drop", 10 * gib, False)):
+            with self.subTest(case=case), tempfile.TemporaryDirectory(prefix="wmh-native-replace-") as temporary:
+                scratch = Path(temporary)
+                repo = scratch / "repo"
+                python = repo / "agents/venv/bin/python"
+                python.parent.mkdir(parents=True)
+                (repo / "back-end").mkdir()
+                (repo / "scripts").mkdir()
+                (repo / "scripts/setup-world-model.sh").write_text(":\n")
+                python.write_text(fake_python)
+                python.chmod(0o755)
+                world = scratch / "world-model"
+                (world / "models/rose-r2-archive-anthropic").mkdir(parents=True)
+                (world / "models/rose-r2-archive-anthropic/model.json").write_text("donor-legacy")
+                (world / "build.manifest.json").write_text("donor-legacy-manifest")
+                native = scratch / "world-model-native"
+                (native / "models/rose-archive").mkdir(parents=True)
+                (native / "models/rose-archive/experiential.json").write_text("corrupt-previous")
+                calls = scratch / "calls.jsonl"
+                result = run(
+                    "gosu() { shift; \"$@\"; }; chown() { :; }; rsync() { return 1; }; sync() { :; };\n" + DF_FAKE + fragment
+                    + '\neval "$NATIVE_REFRESH_CMD"',
+                    {"REMOTE_REPO": str(repo), "REMOTE_WMH": str(world), "REMOTE_WMH_NATIVE": str(native),
+                     "WMH_MODEL_NAME": "rose-archive", "WMH_CACHE_NAME": "rose-archive-serving",
+                     "WMH_LEGACY_CACHE_NAME": "rose-r2-archive-legacy",
+                     "WMH_LEGACY_MODEL_NAME": "rose-r2-archive-anthropic",
+                     "REMOTE_UV_PYTHON": str(scratch / "uv-python"), "CALLS": str(calls),
+                     "DF_AVAIL": str(7 * gib), "DF_AVAIL_FREED": str(freed)},
+                )
+                self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
+                self.assertEqual("::WMH-REFRESH-DONE::" in result.stdout, ok)
+                pulls = [json.loads(line) for line in calls.read_text().splitlines() if '"pull"' in line]
+                self.assertEqual(len(pulls), 1 if ok else 0)
+                if ok:
+                    self.assertEqual((native / "models/rose-archive/experiential.json").read_text(), "fresh")
+                self.assertEqual((world / "models/rose-r2-archive-anthropic/model.json").read_text(), "donor-legacy")
 
     def test_native_refresh_restores_a_lost_legacy_model_beside_the_native_one(self):
         # 2026-10-19 a native restore overwrote /data/world-model, so main's

@@ -3332,7 +3332,16 @@ else
     echo 'restored legacy WMH model $WMH_LEGACY_MODEL_NAME at $REMOTE_WMH'
 fi
 rm -rf '$REMOTE_WMH_NATIVE.incoming' '$REMOTE_WMH_NATIVE.incoming'.replaced-* '$REMOTE_WMH_NATIVE.previous'
-wmh_require_room '$WMH_CACHE_NAME' '$REMOTE_WMH_NATIVE.incoming'
+# A previous native tree (~16 GB) and its staged replacement do not both fit a
+# 40 GB donor volume. This maintenance donor serves nothing and its snapshot is
+# published only on success (fleets keep forking the previous snapshot until
+# then), so drop the previous tree when the staged pull would not fit.
+if ! wmh_require_room '$WMH_CACHE_NAME' '$REMOTE_WMH_NATIVE.incoming'; then
+    [ -e '$REMOTE_WMH_NATIVE' ] || exit 1
+    echo 'dropping the previous native WMH tree at $REMOTE_WMH_NATIVE to make room for its replacement'
+    rm -rf '$REMOTE_WMH_NATIVE'
+    wmh_require_room '$WMH_CACHE_NAME' '$REMOTE_WMH_NATIVE.incoming'
+fi
 PYTHONDONTWRITEBYTECODE=1 venv/bin/python -u -m benchmarks.wmh_build_cache pull --build-dir '$REMOTE_WMH_NATIVE.incoming' --name '$WMH_CACHE_NAME' --force
 [ -f '$REMOTE_WMH_NATIVE.incoming/models/$WMH_MODEL_NAME/experiential.json' ] || { rm -rf '$REMOTE_WMH_NATIVE.incoming'; echo 'restored cache $WMH_CACHE_NAME lacks models/$WMH_MODEL_NAME/experiential.json' >&2; exit 1; }
 [ -f '$REMOTE_WMH_NATIVE.incoming/build.manifest.json' ] || { rm -rf '$REMOTE_WMH_NATIVE.incoming'; echo 'restored cache $WMH_CACHE_NAME lacks build.manifest.json' >&2; exit 1; }
