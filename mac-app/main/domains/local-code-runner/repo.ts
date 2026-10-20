@@ -27,6 +27,7 @@ import type {
   ChildLike,
   ExecSpec,
   FolderGrant,
+  HomeFile,
   LocalCodeProvider,
   LocalDeviceIdentity,
   SocketLike,
@@ -144,9 +145,27 @@ export function wsServerPath(provider: LocalCodeProvider, isPackaged: boolean): 
 }
 
 export async function makeSessionHome(userDataDir: string, taskId: string): Promise<string> {
-  const dir = path.join(userDataDir, SESSIONS_DIR, taskId);
+  const dir = path.join(sessionsRoot(userDataDir), taskId);
   await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
   return dir;
+}
+
+export function sessionsRoot(userDataDir: string): string {
+  return path.join(userDataDir, SESSIONS_DIR);
+}
+
+/** Write backend-provided HOME files (paths already validated relative). */
+export async function writeHomeFiles(sessionHome: string, files: HomeFile[]): Promise<void> {
+  const root = path.resolve(sessionHome);
+  for (const file of files) {
+    const target = path.resolve(root, file.path);
+    if (!target.startsWith(`${root}${path.sep}`))
+      throw new Error(`refusing to write outside HOME: ${file.path}`);
+    await fs.promises.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+    await fs.promises.writeFile(target, Buffer.from(file.content_base64, 'base64'), {
+      mode: file.executable ? 0o755 : 0o600,
+    });
+  }
 }
 
 export function terminalLogPath(sessionHome: string): string {

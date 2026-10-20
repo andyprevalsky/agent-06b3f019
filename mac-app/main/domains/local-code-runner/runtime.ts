@@ -72,6 +72,7 @@ function buildManager(deviceId: string): LocalSessionManager {
     allocatePort: repo.allocatePort,
     newToken: randomUUID,
     makeSessionHome: (taskId) => repo.makeSessionHome(app.getPath('userData'), taskId),
+    writeHomeFiles: repo.writeHomeFiles,
     terminalLogPath: repo.terminalLogPath,
     spawn: repo.spawnProcess,
     waitForReady: repo.waitForReady,
@@ -127,7 +128,12 @@ function onControlOpen(socket: WebSocket, done: () => void): void {
   control = socket;
   connected = true;
   logConsole(LOG_TAG, 'Control channel connected');
-  sendControl({ type: 'hello', sessions: manager?.liveTaskIds() ?? [] });
+  sendControl({
+    type: 'hello',
+    sessions: manager?.liveTaskIds() ?? [],
+    // The backend relocates each session's Rose tools (MCP paths) to <root>/<task_id>.
+    sessions_root: repo.sessionsRoot(app.getPath('userData')),
+  });
   void manager?.reattachTunnels();
   broadcastStatus();
   socket.on('message', (raw) => {

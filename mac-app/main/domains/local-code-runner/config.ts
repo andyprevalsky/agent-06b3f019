@@ -69,6 +69,13 @@ export const SESSION_ENV_ALLOWLIST = [
   'NODE_EXTRA_CA_CERTS',
 ] as const;
 
+/** Rose tool env (ROSE_TOOLS_*, ROSE_AGENTS_*, ROSE_UI_*, ROSE_AGENT_ID) passes through... */
+export const SESSION_ENV_BACKEND_PREFIX = 'ROSE_';
+/** ...except what the Mac itself owns for the session. */
+export const SESSION_ENV_MAC_OWNED_PREFIXES = ['ROSE_PROJECT_', 'ROSE_LOCAL_'];
+/** Where the Rose CLIs land in the session HOME (prepended to PATH). */
+export const SESSION_BIN_DIR = '.rose/bin';
+
 /** Backend-provided env keys a session may receive (never paths/PORT/HOME). */
 export const SESSION_ENV_FROM_BACKEND = new Set([
   'CLAUDE_CODE_GOAL',

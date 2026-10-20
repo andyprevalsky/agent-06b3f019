@@ -37,12 +37,29 @@ export type ControlToDevice =
       envs: Record<string, string>;
       /** Path (on the backend origin) of this session's tunnel leg. */
       relay_path: string;
+      /**
+       * Files for the session HOME (rose_user_ui, `rose` / `rose-agents` CLIs,
+       * MCP + tools config), already relocated to the Mac's session HOME.
+       */
+      home_files: LocalHomeFile[];
     }
   | { type: 'stop_session'; task_id: string };
 
+export interface LocalHomeFile {
+  /** Relative to the session HOME; never absolute or `..`. */
+  path: string;
+  content_base64: string;
+  executable: boolean;
+}
+
 /** Mac app → backend over the control channel. */
 export type ControlFromDevice =
-  | { type: 'hello'; sessions: string[] }
+  | {
+      type: 'hello';
+      sessions: string[];
+      /** Absolute dir holding per-session HOMEs (`<root>/<task_id>`). */
+      sessions_root?: string;
+    }
   | {
       type: 'session_started';
       task_id: string;
@@ -91,7 +108,13 @@ export function parseControlFromDevice(raw: string): ControlFromDevice | null {
   switch (value.type) {
     case 'hello':
       return Array.isArray(value.sessions) && value.sessions.every((s) => typeof s === 'string')
-        ? { type: 'hello', sessions: value.sessions }
+        ? {
+            type: 'hello',
+            sessions: value.sessions,
+            ...(typeof value.sessions_root === 'string' && value.sessions_root.startsWith('/')
+              ? { sessions_root: value.sessions_root }
+              : {}),
+          }
         : null;
     case 'session_started':
       return typeof value.task_id === 'string' && typeof value.folder === 'string'

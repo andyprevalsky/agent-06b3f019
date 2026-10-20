@@ -124,6 +124,8 @@ interface DeviceConnection {
   deviceId: string;
   userId: string;
   socket: WebSocket;
+  /** From the Mac's hello: where its per-session HOMEs live. */
+  sessionsRoot: string | null;
 }
 
 interface PendingStart {
@@ -174,6 +176,12 @@ export class LocalDeviceHub {
   isDeviceConnected(deviceId: string): boolean {
     const connection = this.devices.get(deviceId);
     return connection !== undefined && connection.socket.readyState === connection.socket.OPEN;
+  }
+
+  /** Session HOME for a task on this Mac (from its hello), or null when unknown. */
+  deviceSessionHome(deviceId: string, taskId: string): string | null {
+    const root = this.devices.get(deviceId)?.sessionsRoot ?? null;
+    return root === null ? null : `${root.replace(/\/+$/, '')}/${taskId}`;
   }
 
   isSessionTunnelConnected(taskId: string): boolean {
@@ -381,7 +389,7 @@ export class LocalDeviceHub {
     const deviceId = auth.device.id;
     const previous = this.devices.get(deviceId);
     if (previous !== undefined) previous.socket.close(4001, 'replaced by a newer connection');
-    this.devices.set(deviceId, { deviceId, userId: auth.userId, socket: ws });
+    this.devices.set(deviceId, { deviceId, userId: auth.userId, socket: ws, sessionsRoot: null });
     void this.deps.touchDevice(deviceId).catch(() => undefined);
     log.info('Mac app control channel connected', { device_id: deviceId });
     const stopPing = this.keepAlive(ws);
@@ -410,6 +418,8 @@ export class LocalDeviceHub {
     const message: ControlFromDevice | null = parseControlFromDevice(raw);
     if (message === null) return;
     if (message.type === 'hello') {
+      const connection = this.devices.get(deviceId);
+      if (connection !== undefined) connection.sessionsRoot = message.sessions_root ?? null;
       log.info('Mac app hello', { device_id: deviceId, live_sessions: message.sessions.length });
       return;
     }

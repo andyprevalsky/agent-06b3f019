@@ -14,6 +14,8 @@ import {
   parseLocalDeviceSandboxId,
 } from '../../providers/localDevices/hub';
 import { relayDevicePath } from '../../providers/localDevices/protocol';
+import { localHomeFromWorkspace } from '../../providers/localDevices/homeFiles';
+import type { UserUiWorkspace } from '../../providers/userUi/workspace';
 
 export interface TestResult {
   name: string;
@@ -181,6 +183,7 @@ async function startAsMac(h: Harness, control: OpenedSocket, taskId: string) {
       folder: null,
       envs: { CLAUDE_CODE_GOAL: 'g' },
       relay_path: relayDevicePath(taskId),
+      home_files: [],
     },
   });
   const command = frame(await control.next((m) => frame(m).type === 'start_session'));
@@ -245,6 +248,7 @@ export async function sectionA(): Promise<TestResult[]> {
               folder: null,
               envs: {},
               relay_path: '/x',
+              home_files: [],
             },
           }),
           (error: unknown) =>
@@ -333,6 +337,8 @@ export async function sectionA(): Promise<TestResult[]> {
             folder: null,
             envs: {},
             relay_path: relayDevicePath(taskId),
+            home_files: [],
+            home_files: [],
           },
         });
         await control.next((m) => frame(m).type === 'start_session');
@@ -363,6 +369,62 @@ export async function sectionA(): Promise<TestResult[]> {
           taskId,
         });
         assert.strictEqual(parseLocalDeviceSandboxId(`local-${taskId}`), null);
+      })
+    );
+
+    results.push(
+      await runTest('A6 hello tells the hub where the Mac keeps session HOMEs', async () => {
+        const control = await openSocket(
+          `${h.base}/api/local-devices/control`,
+          deviceHeaders('tok-a', h.deviceA)
+        );
+        assert.strictEqual(h.hub.deviceSessionHome(h.deviceA, 't-1'), null);
+        control.ws.send(
+          JSON.stringify({ type: 'hello', sessions: [], sessions_root: '/Users/a/Rose/sessions/' })
+        );
+        await new Promise((done) => setTimeout(done, 50));
+        assert.strictEqual(h.hub.deviceSessionHome(h.deviceA, 't-1'), '/Users/a/Rose/sessions/t-1');
+        control.ws.close();
+        await control.closed;
+      })
+    );
+
+    results.push(
+      await runTest('A7 local HOME carries the sandbox tools, relocated to the Mac', async () => {
+        const home = '/Users/a/Library/Application Support/Rose/local-code-sessions/t-1';
+        const workspace: UserUiWorkspace = {
+          files: [
+            { path: '.rose/bin/rose', content: Buffer.from('#!/usr/bin/env node\n') },
+            { path: '.rose/bin/rose-agents', content: Buffer.from('#!/usr/bin/env node\n') },
+            { path: '.rose/tools.json', content: Buffer.from('{}') },
+            { path: '.rose/mcp.json', content: Buffer.from('{}') },
+            { path: 'rose_user_ui/README.md', content: Buffer.from('readme') },
+          ],
+          envs: {
+            ROSE_TOOLS_URL: 'https://api.example.com/api/agent-tools/agent-1',
+            ROSE_TOOLS_TOKEN: 'tools-token',
+            ROSE_AGENTS_URL: 'https://api.example.com/api/agents/graph',
+            ROSE_AGENTS_TOKEN: 'graph-token',
+          },
+          source: { kind: 'seed' },
+        } as UserUiWorkspace;
+        const local = localHomeFromWorkspace(workspace, home);
+        const byPath = new Map(local.files.map((file) => [file.path, file]));
+        assert.strictEqual(byPath.get('.rose/bin/rose')?.executable, true);
+        assert.strictEqual(byPath.get('.rose/bin/rose-agents')?.executable, true);
+        assert.strictEqual(byPath.get('rose_user_ui/README.md')?.executable, false);
+        const mcp = JSON.parse(
+          Buffer.from(byPath.get('.rose/mcp.json')?.content_base64 ?? '', 'base64').toString()
+        ) as { mcpServers: { rose: { args: string[] } } };
+        assert.deepStrictEqual(mcp.mcpServers.rose.args, [`${home}/.rose/bin/rose`, 'mcp']);
+        const tools = JSON.parse(
+          Buffer.from(byPath.get('.rose/tools.json')?.content_base64 ?? '', 'base64').toString()
+        ) as Record<string, string>;
+        assert.strictEqual(tools.url, 'https://api.example.com/api/agent-tools/agent-1');
+        assert.strictEqual(tools.token, 'tools-token');
+        assert.strictEqual(local.envs.ROSE_TOOLS_TOKEN, 'tools-token');
+        assert.strictEqual(local.envs.ROSE_AGENTS_URL, 'https://api.example.com/api/agents/graph');
+        assert.deepStrictEqual(localHomeFromWorkspace(null, home), { files: [], envs: {} });
       })
     );
   } finally {

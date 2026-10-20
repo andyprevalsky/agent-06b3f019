@@ -27,6 +27,7 @@ import {
   LocalFolderError,
   addGrant,
   appleScriptString,
+  buildSessionEnv,
   buildTerminalAttachCommand,
   buildWsServerSpawn,
   displayFolder,
@@ -47,6 +48,7 @@ import type {
   ControlFromDevice,
   ExecSpec,
   FolderGrant,
+  HomeFile,
   SocketLike,
   SpawnSpec,
   StartSessionCommand,
@@ -195,7 +197,7 @@ describe('ws-server spawn', () => {
       CLAUDE_CODE_GOAL: 'fix the bug',
       CLAUDE_CODE_OAUTH_TOKEN: 'user-own-token',
       ELECTRON_RUN_AS_NODE: '1',
-      PATH: base.shellPath,
+      PATH: `${base.sessionHome}/.rose/bin:${base.shellPath}`,
       PORT: '51234',
       HOME: base.sessionHome,
       CLAUDE_CONFIG_DIR: `${base.sessionHome}/.claude`,
@@ -259,11 +261,22 @@ describe('control messages and backoff', () => {
       folder: null,
       envs: { CLAUDE_CODE_GOAL: 'g', BAD: 3 },
       relay_path: '/api/local-code-relay/t/device',
+      home_files: [{ path: '.rose/bin/rose', content_base64: 'IyE=', executable: true }],
     };
     expect(parseControlMessage(JSON.stringify(start))).toEqual({
       ...start,
       envs: { CLAUDE_CODE_GOAL: 'g' },
     });
+    for (const bad of ['../outside', '/etc/passwd', 'a/../../b', '']) {
+      expect(
+        parseControlMessage(
+          JSON.stringify({
+            ...start,
+            home_files: [{ path: bad, content_base64: '', executable: false }],
+          })
+        )
+      ).toBeNull();
+    }
     expect(
       parseControlMessage(JSON.stringify({ ...start, relay_path: 'https://evil/x' }))
     ).toBeNull();
@@ -314,6 +327,8 @@ function harness(overrides: Partial<SessionDeps> = {}) {
   const tunnels: FakeSocket[] = [];
   const locals: FakeSocket[] = [];
   const children: FakeChild[] = [];
+  const order: string[] = [];
+  const written: Array<{ sessionHome: string; files: HomeFile[] }> = [];
   let grants = grantProject();
   const deps: SessionDeps = {
     grants: () => grants,
@@ -326,8 +341,13 @@ function harness(overrides: Partial<SessionDeps> = {}) {
     allocatePort: async () => 40001,
     newToken: () => 'tok',
     makeSessionHome: async (taskId) => path.join(tmp, 'sessions', taskId),
+    writeHomeFiles: async (sessionHome, files) => {
+      order.push(`home:${files.length}`);
+      written.push({ sessionHome, files });
+    },
     terminalLogPath: (sessionHome) => path.join(sessionHome, 'terminal.log'),
     spawn: (spec) => {
+      order.push('spawn');
       spawned.push(spec);
       const child = new FakeChild();
       children.push(child);
@@ -360,6 +380,8 @@ function harness(overrides: Partial<SessionDeps> = {}) {
     tunnels,
     locals,
     children,
+    order,
+    written,
     setGrants: (next: FolderGrant[]) => {
       grants = next;
     },
@@ -375,6 +397,7 @@ function startCommand(overrides: Partial<StartSessionCommand> = {}): StartSessio
     folder: null,
     envs: { CLAUDE_CODE_GOAL: 'fix' },
     relay_path: '/api/local-code-relay/task-1/device',
+    home_files: [],
     ...overrides,
   };
 }
@@ -459,6 +482,54 @@ describe('session manager', () => {
     expect(h.tunnels).toHaveLength(2);
     await h.manager.reattachTunnels();
     expect(h.tunnels).toHaveLength(2);
+  });
+});
+
+describe('in-session Rose tools', () => {
+  it('passes the Rose tool env through and keeps Mac-owned session keys', () => {
+    const env = buildSessionEnv(
+      {},
+      {
+        ROSE_TOOLS_URL: 'https://api.example.com/api/agent-tools/a',
+        ROSE_TOOLS_TOKEN: 'tools',
+        ROSE_AGENTS_URL: 'https://api.example.com/api/agents/graph',
+        ROSE_UI_PUBLISH_TOKEN: 'ui',
+        ROSE_PROJECT_STARTUP: '/home/user/startup.sh',
+        ROSE_LOCAL_WS_READINESS_TOKEN: 'forged',
+        GITHUB_TOKEN: 'never',
+      }
+    );
+    expect(env).toEqual({
+      ROSE_TOOLS_URL: 'https://api.example.com/api/agent-tools/a',
+      ROSE_TOOLS_TOKEN: 'tools',
+      ROSE_AGENTS_URL: 'https://api.example.com/api/agents/graph',
+      ROSE_UI_PUBLISH_TOKEN: 'ui',
+    });
+  });
+
+  it('writes the session HOME files before spawning ws-server', async () => {
+    const h = harness();
+    const files: HomeFile[] = [
+      { path: '.rose/bin/rose', content_base64: 'IyE=', executable: true },
+      { path: '.rose/mcp.json', content_base64: 'e30=', executable: false },
+    ];
+    await h.manager.start(startCommand({ home_files: files }));
+    expect(h.order).toEqual(['home:2', 'spawn']);
+    expect(h.written[0]).toEqual({ sessionHome: path.join(tmp, 'sessions', 'task-1'), files });
+    expect(h.spawned[0].env.PATH).toBe(
+      `${path.join(tmp, 'sessions', 'task-1')}/.rose/bin:/usr/bin`
+    );
+  });
+
+  it('a HOME that cannot be prepared fails the start without spawning', async () => {
+    const h = harness({
+      writeHomeFiles: async () => {
+        throw new Error('disk full');
+      },
+    });
+    await h.manager.start(startCommand());
+    expect(h.spawned).toEqual([]);
+    expect(h.control[0]).toEqual(expect.objectContaining({ code: 'spawn_failed' }));
   });
 });
 

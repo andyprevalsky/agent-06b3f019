@@ -34,6 +34,15 @@ export interface StartSessionCommand {
   folder: string | null;
   envs: Record<string, string>;
   relay_path: string;
+  /** Session-HOME files: the same Rose tools (rose / rose-agents / rose-ui + MCP) a sandbox gets. */
+  home_files: HomeFile[];
+}
+
+export interface HomeFile {
+  /** Relative to the session HOME (validated: never absolute or `..`). */
+  path: string;
+  content_base64: string;
+  executable: boolean;
 }
 
 export type ControlToDevice = StartSessionCommand | { type: 'stop_session'; task_id: string };
@@ -41,7 +50,7 @@ export type ControlToDevice = StartSessionCommand | { type: 'stop_session'; task
 export type SessionFailureCode = 'no_folder_granted' | 'folder_not_granted' | 'spawn_failed';
 
 export type ControlFromDevice =
-  | { type: 'hello'; sessions: string[] }
+  | { type: 'hello'; sessions: string[]; sessions_root: string }
   | { type: 'session_started'; task_id: string; folder: string }
   | { type: 'session_failed'; task_id: string; code: SessionFailureCode; error: string }
   | { type: 'session_exited'; task_id: string; code: number | null };

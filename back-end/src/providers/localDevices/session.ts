@@ -30,6 +30,7 @@ import {
 } from './messages';
 import { relayDevicePath, type LocalCodeProvider } from './protocol';
 import { findAgentOrigin, findLocalDevice } from './store';
+import { prepareLocalHome } from './homeFiles';
 
 const log = createLogger('LocalDevices');
 
@@ -198,6 +199,14 @@ export async function createLocalDeviceCodeSession(
     task_id: taskId,
     device_id: target.deviceId,
   });
+  // Same in-session Rose tools as a sandbox (rose / rose-agents / rose-ui + MCP).
+  const home = await prepareLocalHome({
+    userId: target.userId,
+    agentId: params.agentId,
+    taskId,
+    provider: params.provider,
+    homeDir: hub.deviceSessionHome(target.deviceId, taskId),
+  });
   let folder: string;
   try {
     ({ folder } = await hub.startSession({
@@ -209,8 +218,9 @@ export async function createLocalDeviceCodeSession(
         agent_id: params.agentId,
         provider: params.provider,
         folder: params.folder ?? null,
-        envs,
+        envs: { ...home.envs, ...envs },
         relay_path: relayDevicePath(taskId),
+        home_files: home.files,
       },
     }));
   } catch (error) {

@@ -12,13 +12,17 @@ import {
   FORBIDDEN_GRANT_ROOTS,
   RECONNECT_BASE_MS,
   RECONNECT_MAX_MS,
+  SESSION_BIN_DIR,
   SESSION_ENV_ALLOWLIST,
+  SESSION_ENV_BACKEND_PREFIX,
   SESSION_ENV_FROM_BACKEND,
+  SESSION_ENV_MAC_OWNED_PREFIXES,
 } from './config';
 import type {
   ControlToDevice,
   ExecSpec,
   FolderGrant,
+  HomeFile,
   LocalCodeProvider,
   SessionFailureCode,
   SpawnSpec,
@@ -152,9 +156,20 @@ export function buildSessionEnv(
     if (value !== undefined && value !== '') env[key] = value;
   }
   for (const [key, value] of Object.entries(backendEnvs)) {
-    if (SESSION_ENV_FROM_BACKEND.has(key)) env[key] = value;
+    const roseTool =
+      key.startsWith(SESSION_ENV_BACKEND_PREFIX) &&
+      !SESSION_ENV_MAC_OWNED_PREFIXES.some((prefix) => key.startsWith(prefix));
+    if (SESSION_ENV_FROM_BACKEND.has(key) || roseTool) env[key] = value;
   }
   return env;
+}
+
+/** A session-HOME file path that stays inside HOME, or null. */
+export function safeHomeRelativePath(candidate: string): string | null {
+  if (candidate === '' || path.isAbsolute(candidate) || candidate.includes('\0')) return null;
+  const normalized = path.posix.normalize(candidate);
+  if (normalized.startsWith('..') || normalized === '.') return null;
+  return normalized;
 }
 
 /**
@@ -181,7 +196,8 @@ export function buildWsServerSpawn(params: {
     env: {
       ...buildSessionEnv(params.hostEnv, params.backendEnvs),
       ELECTRON_RUN_AS_NODE: '1',
-      PATH: params.shellPath,
+      // The session's Rose CLIs (rose, rose-agents, rose-ui) resolve first.
+      PATH: `${path.join(params.sessionHome, SESSION_BIN_DIR)}:${params.shellPath}`,
       PORT: String(params.port),
       HOME: params.sessionHome,
       ...(params.provider === 'claude'
@@ -275,6 +291,23 @@ export function parseControlMessage(raw: string): ControlToDevice | null {
     for (const [key, item] of Object.entries(value.envs)) {
       if (typeof item === 'string') envs[key] = item;
     }
+    const homeFiles: HomeFile[] = [];
+    for (const file of Array.isArray(value.home_files) ? value.home_files : []) {
+      if (
+        !isRecord(file) ||
+        typeof file.path !== 'string' ||
+        typeof file.content_base64 !== 'string'
+      ) {
+        return null;
+      }
+      const safePath = safeHomeRelativePath(file.path);
+      if (safePath === null) return null;
+      homeFiles.push({
+        path: safePath,
+        content_base64: file.content_base64,
+        executable: file.executable === true,
+      });
+    }
     return {
       type: 'start_session',
       task_id: value.task_id,
@@ -283,6 +316,7 @@ export function parseControlMessage(raw: string): ControlToDevice | null {
       folder: value.folder,
       envs,
       relay_path: value.relay_path,
+      home_files: homeFiles,
     };
   }
   return null;

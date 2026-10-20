@@ -31,6 +31,7 @@ import type {
   ControlFromDevice,
   ExecSpec,
   FolderGrant,
+  HomeFile,
   LocalCodeProvider,
   LocalSessionView,
   SocketLike,
@@ -49,6 +50,7 @@ export interface SessionDeps {
   allocatePort: () => Promise<number>;
   newToken: () => string;
   makeSessionHome: (taskId: string) => Promise<string>;
+  writeHomeFiles: (sessionHome: string, files: HomeFile[]) => Promise<void>;
   terminalLogPath: (sessionHome: string) => string;
   spawn: (spec: SpawnSpec) => ChildLike;
   waitForReady: (
@@ -114,6 +116,16 @@ export class LocalSessionManager {
     const port = await this.deps.allocatePort();
     const token = this.deps.newToken();
     const sessionHome = await this.deps.makeSessionHome(command.task_id);
+    try {
+      await this.deps.writeHomeFiles(sessionHome, command.home_files);
+    } catch (error) {
+      this.fail(
+        command.task_id,
+        'spawn_failed',
+        `session HOME setup failed: ${getErrorMessage(error)}`
+      );
+      return;
+    }
     const spec = buildWsServerSpawn({
       execPath: this.deps.execPath,
       wsServerPath: this.deps.wsServerPath(command.provider),
