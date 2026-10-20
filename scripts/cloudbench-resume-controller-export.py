@@ -58,6 +58,7 @@ def readonly_hubs(scope,source,repo,directory):
  guard=next(n for n in function.body if isinstance(n,ast.Try))
  boundary=next(i for i,n in enumerate(guard.body)if isinstance(n,ast.Assign)and any(isinstance(t,ast.Name)and t.id=='end'for t in n.targets))
  guard.body=guard.body[:boundary]+[ast.parse("return [{'pid':pid,'birth':owner['pid_start'],'owner_sha256':hashlib.sha256(raw).hexdigest()} for pid,fd,owner,raw,path in selected]").body[0]]
+ assert not any(isinstance(n,ast.Call)and isinstance(n.func,ast.Name)and n.func.id=='pidfd_send_signal'for n in ast.walk(function))
  assert not any(isinstance(n,ast.Call)and isinstance(n.func,ast.Attribute)and n.func.attr in ('pidfd_send_signal','kill','killpg','unlink','write_bytes','write_text')for n in ast.walk(function))
  module=ast.fix_missing_locations(ast.Module(body=[function],type_ignores=[]));namespace=dict(scope);exec(compile(module,'<readonly-old-Hub-validator>','exec'),namespace)
  return namespace['readonly_hubs'](repo,directory)or[]

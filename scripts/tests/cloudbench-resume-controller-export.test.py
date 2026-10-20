@@ -1428,6 +1428,7 @@ class ExportResume(unittest.TestCase):
         with mock.patch.object(
             signal,
             "pidfd_send_signal",
+            create=True,
             side_effect=AssertionError("no signal in read-only validator"),
         ):
             self.assertEqual(
@@ -1455,7 +1456,7 @@ class ExportResume(unittest.TestCase):
         owner.chmod(0o400)
         real_close = os.close
         with (
-            mock.patch.object(signal, "pidfd_send_signal", side_effect=AssertionError("no signal")),
+            mock.patch.object(signal, "pidfd_send_signal", create=True, side_effect=AssertionError("no signal")),
             mock.patch.object(os, "close", wraps=real_close) as closed,
         ):
             with self.assertRaisesRegex(ValueError, "command changed"):

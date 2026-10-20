@@ -143,7 +143,7 @@ def execute(v):
   path=journal/('term-'+str(expected['pid'])+'.json')
   if path.exists():results.append(dict(pid=expected['pid'],state='INTENT_EXISTS_UNKNOWN_NO_REPLAY'));continue
   try:
-   fd=os.pidfd_open(expected['pid'])
+   fd=pidfd_open(expected['pid'])
    try:
     current=owner(Path(expected['registry']),repo,common,writers,v['source_ref']);need(current==expected,'owner changed after plan')
     need(not select.select([fd],[],[],0)[0],'owner exited')
@@ -152,7 +152,7 @@ def execute(v):
     try:
      if executor_uid!=expected['uid']:os.seteuid(expected['uid'])
      need(os.geteuid()==expected['uid'],'signal executor UID differs')
-     signal.pidfd_send_signal(fd,signal.SIGTERM)
+     pidfd_send_signal(fd,signal.SIGTERM)
     finally:
      if os.geteuid()!=executor_uid:os.seteuid(executor_uid)
     result=dict(pid=expected['pid'],state='TERM_SENT_NOT_JOINED')
@@ -369,7 +369,7 @@ def agent_execute(v,custody=Path('/tmp/gate/controller-host-custody')):
   save(journal/'plan.json',dict(identity_sha256=identity,launch_sha256=v['launch_sha256'],role='normal-agent',targets=[proof],held=[]))
   return dict(status='PLANNED',targets=1,held=0,plan_sha256=digest(read(journal/'plan.json')))
  expected=plan['targets'][0];need(all(proof.get(k)==value for k,value in expected.items()if k!='capture_sha256'),'normal agent changed since plan')
- fd=os.pidfd_open(proof['pid'])
+ fd=pidfd_open(proof['pid'])
  try:
   current=process(proof['pid'],proof['uid']);need(current['birth']==proof['birth']and current['cwd']=='/tmp/gate/repo'and not select.select([fd],[],[],0)[0],'normal agent process changed')
   save(journal/'pre-signal-capture.private.json',capture);save(journal/'pre-signal-writer-check.private.json',closed)
@@ -380,7 +380,7 @@ def agent_execute(v,custody=Path('/tmp/gate/controller-host-custody')):
   executor=os.geteuid()
   try:
    if executor!=proof['uid']:os.seteuid(proof['uid'])
-   need(os.geteuid()==proof['uid']and time.time()<agent_cleanup_deadline(v),'normal agent signal UID/clock differs');signal.pidfd_send_signal(fd,signal.SIGTERM)
+   need(os.geteuid()==proof['uid']and time.time()<agent_cleanup_deadline(v),'normal agent signal UID/clock differs');pidfd_send_signal(fd,signal.SIGTERM)
   finally:
    if os.geteuid()!=executor:os.seteuid(executor)
   exited=bool(select.select([fd],[],[],2)[0]);result=dict(pid=proof['pid'],birth=proof['birth'],state='EXIT_OBSERVED'if exited else'TERM_SENT_NOT_JOINED',role='normal-agent',no_release_claim=True)
@@ -395,7 +395,14 @@ def execute(v):
   return agent_execute(v)
  return old_execute(v)
 """
-GUEST += AGENT
+_export_tree = ast.parse((HERE / "cloudbench-controller-export.py").read_bytes())
+_pidfd_source = next(
+    ast.literal_eval(node.value)
+    for node in _export_tree.body
+    if isinstance(node, ast.Assign)
+    and any(isinstance(target, ast.Name) and target.id == "PIDFD_SOURCE" for target in node.targets)
+)
+GUEST = _pidfd_source + "\n" + GUEST + AGENT
 
 
 def command(payload):
@@ -510,6 +517,7 @@ def saved_positive_plan(args, export):
         )
     expected_names = {
         "cloudbench-controller-orphan-drain.py",
+        "cloudbench-controller-export.py",
         "cloudbench-resume-controller-export.py",
         "cloudbench-controller-payload-finalization.py",
         "cloudbench-original600-runner.py",
@@ -683,6 +691,7 @@ def normal_agent_state(args):
     )
     names = (
         "cloudbench-controller-orphan-drain.py",
+        "cloudbench-controller-export.py",
         "cloudbench-resume-controller-export.py",
         "cloudbench-controller-payload-finalization.py",
         "cloudbench-original600-runner.py",
@@ -792,6 +801,7 @@ def local_state(args):
     need(time.time() >= state["deadline"], "original clock has not expired")
     names = (
         "cloudbench-controller-orphan-drain.py",
+        "cloudbench-controller-export.py",
         "cloudbench-controller-payload-finalization.py",
         "cloudbench-original600-runner.py",
         "cloudbench-resume-controller-payload.py",
