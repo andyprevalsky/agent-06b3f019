@@ -1,14 +1,25 @@
+/**
+ * Gmail background sync: per-address progress, batched full syncs that resume
+ * from a cursor, and incremental History API syncs.
+ *
+ *   cron (5 min) / OAuth connect
+ *      └─ claim integration row (atomic; lastSyncAt is a lease renewed by heartbeats)
+ *           └─ per connected address (own runId, own progress row, own failure)
+ *                ├─ history cursor stored  ─► incremental (History API)
+ *                └─ none / expired / resume ─► gmailFullSync (scan → save per batch)
+ *
+ * 10k rule: per address per batch O(1) writes (cursor, <=1 progress write at
+ * 1/s, heartbeat at 1/min); steady-state incremental syncs write one progress
+ * row per address per tick.
+ */
+import { IntegrationStatus, EmailProvider, MessageChannel, type Prisma } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import { createLogger } from '../../providers/logger';
-import { IntegrationStatus, EmailProvider, MessageChannel } from '@prisma/client';
+import { fetchFullMessages, fetchGmailHistory, type ParsedEmail } from './gmailParser';
 import {
-  fetchGmailEmails,
-  fetchGmailHistory,
-  fetchMessagesByIds,
-  getGmailProfile,
-  ParsedEmail,
-} from './gmailParser';
-import { upsertPersonAndMessageRecords, ContactToUpsert } from './personMessageManager';
+  isDisconnectedGoogleCredentialError,
+  upsertPersonAndMessageRecords,
+} from './personMessageManager';
 import {
   classifyEmailAuthFailure,
   markCredentialFailure,
@@ -18,11 +29,27 @@ import {
 import { missingGoogleScopes } from '../../domains/integrations/googleScopes';
 import { googleClientId, googleClientSecret } from '../../domains/integrations/config';
 import { encryptGoogleToken, readGoogleToken } from '../../providers/googleCredentials';
+import {
+  clearFullSyncCursor,
+  FULL_SYNC_BATCH_SIZE,
+  readFullSyncCursor,
+  runGmailFullSync,
+} from './gmailFullSync';
+import { toContactsToUpsert } from './gmailSync.contacts';
+import {
+  GmailAddressProgress,
+  resolveGmailSyncDeps,
+  type GmailSyncDeps,
+} from './gmailSync.progress';
 
 const log = createLogger('GmailSync');
 
-// Sync interval: 1 hour
-const SYNC_INTERVAL_MS = 60 * 60 * 1000;
+/**
+ * A SYNCING row whose lease (lastSyncAt) is older than this is treated as a
+ * crashed sync and re-claimed; running syncs renew it every HEARTBEAT_INTERVAL_MS.
+ */
+const LEASE_STALE_MS = 10 * 60 * 1000;
+const HEARTBEAT_INTERVAL_MS = 60 * 1000;
 
 // Google OAuth token endpoint
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -161,466 +188,385 @@ export async function getValidAccessToken(credential: {
   return refreshed.accessToken;
 }
 
-/**
- * Strip HTML tags and decode entities
- */
-function stripHtml(html: string): string {
-  return html
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/\s+/g, ' ')
-    .trim();
+type SyncCredential = {
+  id: string;
+  email: string | null;
+  accessToken: string | null;
+  refreshToken: string | null;
+  expiresAt: Date | null;
+  scopes?: string[];
+  metadata: Prisma.JsonValue | null;
+};
+
+type AddressResult = { success: boolean; contacts: number; messages: number };
+
+const FAILED: AddressResult = { success: false, contacts: 0, messages: 0 };
+
+/** Lease renewal for a long sync: bump the row's lastSyncAt at most once a minute. */
+function leaseHeartbeat(integrationId: string, deps: GmailSyncDeps): () => Promise<void> {
+  let last = deps.now().getTime();
+  return async () => {
+    const now = deps.now();
+    if (now.getTime() - last < HEARTBEAT_INTERVAL_MS) return;
+    last = now.getTime();
+    await prisma.integration.update({ where: { id: integrationId }, data: { lastSyncAt: now } });
+  };
 }
 
 /**
- * Transform emails to contacts format, filtering by contacts user has sent to
+ * Atomic per-key config write for one address: other addresses' cursors and
+ * fields written concurrently (OAuth connect, disconnect) are never clobbered.
  */
-async function transformAndFilterEmails(
-  emails: ParsedEmail[],
-  userEmail: string,
-  userId: string
-): Promise<ContactToUpsert[]> {
-  // Build user email set (same logic as gmailParser.transformEmailsToContacts)
-  const userEmailSet = new Set<string>([userEmail.toLowerCase()]);
-  for (const email of emails) {
-    if (email.isSent) {
-      userEmailSet.add(email.from.toLowerCase());
-    }
-  }
-  // Detect imported accounts: emails where neither from nor to/cc includes a known
-  // user address were imported. The user's imported address dominates the orphan pool.
-  let foundNew = true;
-  while (foundNew) {
-    foundNew = false;
-    const fromCounts = new Map<string, number>();
-    const toCounts = new Map<string, number>();
-    for (const email of emails) {
-      const from = email.from.toLowerCase();
-      const allRecipients = [...email.to, ...email.cc].map((e) => e.toLowerCase());
-      if (userEmailSet.has(from) || allRecipients.some((r) => userEmailSet.has(r))) continue;
-      fromCounts.set(from, (fromCounts.get(from) || 0) + 1);
-      for (const r of allRecipients) {
-        toCounts.set(r, (toCounts.get(r) || 0) + 1);
-      }
-    }
-    const candidates = [...fromCounts.entries()]
-      .filter(([addr]) => (toCounts.get(addr) || 0) >= 5)
-      .sort((a, b) => b[1] - a[1]);
-    if (candidates.length > 0) {
-      const [topAddr, topCount] = candidates[0];
-      const secondCount = candidates.length > 1 ? candidates[1][1] : 0;
-      if (topCount >= 20 && (secondCount === 0 || topCount >= secondCount * 3)) {
-        userEmailSet.add(topAddr);
-        foundNew = true;
-        log.info('Detected imported account', {
-          from: topCount,
-          to: toCounts.get(topAddr) || 0,
-          next: secondCount,
-        });
-      }
-    }
-  }
-  log.info('userEmailSet computed', { count: userEmailSet.size });
-
-  // Group emails by contact
-  const contactMap = new Map<
-    string,
-    {
-      email: string;
-      name: string | null;
-      sentCount: number;
-      receivedCount: number;
-      messages: Array<{
-        from: string;
-        to: string;
-        subject: string;
-        date: Date;
-        body: string | null;
-        isFromMe: boolean;
-      }>;
-    }
-  >();
-
-  for (const email of emails) {
-    const isFromMe = email.isSent || userEmailSet.has(email.from.toLowerCase());
-
-    // Determine contact emails
-    let contactEmails: string[] = [];
-    if (isFromMe) {
-      contactEmails = [...email.to, ...email.cc].filter((e) => !userEmailSet.has(e.toLowerCase()));
-    } else {
-      contactEmails = [email.from];
-    }
-
-    // Get plain text body
-    let bodyContent = email.bodyText;
-    if (!bodyContent && email.bodyHtml) {
-      bodyContent = stripHtml(email.bodyHtml);
-    }
-    if (bodyContent && bodyContent.length > 10000) {
-      bodyContent = bodyContent.substring(0, 10000) + '...';
-    }
-
-    for (const contactEmail of contactEmails) {
-      const contactEmailLower = contactEmail.toLowerCase();
-
-      if (!contactMap.has(contactEmailLower)) {
-        contactMap.set(contactEmailLower, {
-          email: contactEmailLower,
-          name: isFromMe ? null : email.fromName,
-          sentCount: 0,
-          receivedCount: 0,
-          messages: [],
-        });
-      }
-
-      const contact = contactMap.get(contactEmailLower)!;
-
-      if (isFromMe) {
-        contact.sentCount++;
-      } else {
-        contact.receivedCount++;
-        if (email.fromName && !contact.name) {
-          contact.name = email.fromName;
-        }
-      }
-
-      contact.messages.push({
-        from: email.from,
-        to: isFromMe ? contactEmail : userEmail,
-        subject: email.subject,
-        date: email.date,
-        body: bodyContent,
-        isFromMe,
-      });
-    }
-  }
-
-  // Get unique contact emails from this batch
-  const batchContactEmails = Array.from(contactMap.keys());
-
-  if (batchContactEmails.length === 0) {
-    return [];
-  }
-
-  // Query database to find contacts user has ever sent to
-  const sentToContacts = await prisma.messageRecord.findMany({
-    where: {
-      channel: MessageChannel.EMAIL,
-      to: { in: batchContactEmails },
-      person: {
-        userId,
-      },
-    },
-    select: { to: true },
-    distinct: ['to'],
-  });
-
-  const historicallySentTo = new Set(
-    sentToContacts.map((m) => m.to?.toLowerCase()).filter(Boolean)
-  );
-
-  // Also include contacts we sent to in THIS batch
-  for (const [email, contact] of contactMap) {
-    if (contact.sentCount > 0) {
-      historicallySentTo.add(email);
-    }
-  }
-
-  // Filter to only contacts user has sent to
-  const validContacts = Array.from(contactMap.entries())
-    .filter(([email]) => historicallySentTo.has(email))
-    .map(([, contact]) => contact);
-
-  log.info('Filtered contacts (user has sent to them)', { count: validContacts.length });
-
-  // Transform to ContactToUpsert format
-  return validContacts.map((contact) => {
-    let firstName = '';
-    let lastName = '';
-    if (contact.name) {
-      const nameParts = contact.name.split(' ');
-      firstName = nameParts[0] || '';
-      lastName = nameParts.slice(1).join(' ') || '';
-    }
-
-    return {
-      identifier: contact.email,
-      identifierType: 'email' as const,
-      firstName,
-      lastName,
-      email: contact.email,
-      emailAddresses: [contact.email],
-      messages: contact.messages.map((msg) => ({
-        channel: MessageChannel.EMAIL,
-        from: msg.from,
-        to: msg.to,
-        timestamp: msg.date,
-        message: msg.subject + (msg.body ? '\n\n' + msg.body : ''),
-      })),
-    };
-  });
+async function recordAddressSynced(params: {
+  integrationId: string;
+  address: string;
+  historyId: string;
+  isPrimary: boolean;
+  contacts: number;
+  messages: number;
+}): Promise<void> {
+  const { integrationId, address, historyId } = params;
+  await prisma.$executeRaw`
+    UPDATE "Integration" SET
+      "config" = jsonb_set(
+        jsonb_set(
+          jsonb_set(
+            CASE WHEN ${params.isPrimary}
+              THEN jsonb_set(COALESCE("config", '{}'::jsonb), '{historyId}', to_jsonb(${historyId}::text))
+              ELSE COALESCE("config", '{}'::jsonb) END,
+            '{historyIds}',
+            COALESCE("config"->'historyIds', '{}'::jsonb) || jsonb_build_object(${address}::text, ${historyId}::text)
+          ),
+          '{contacts}',
+          to_jsonb(COALESCE(("config"->>'contacts')::int, 0) + ${params.contacts}::int)
+        ),
+        '{messages}',
+        to_jsonb(COALESCE(("config"->>'messages')::int, 0) + ${params.messages}::int)
+      ),
+      "lastSyncAt" = NOW(),
+      "lastSuccessfulSyncAt" = NOW(),
+      "status" = 'CONNECTED'::"IntegrationStatus",
+      "updatedAt" = NOW()
+    WHERE "id" = ${integrationId}`;
 }
 
-/**
- * Sync Gmail for a single user
- */
-async function syncGmailForUser(
-  userId: string,
-  credential: {
-    id: string;
-    email: string | null;
-    accessToken: string | null;
-    refreshToken: string | null;
-    expiresAt: Date | null;
-    metadata: unknown;
-  },
-  integrationId: string
-): Promise<{ success: boolean; contacts: number; messages: number }> {
-  const credentialEmail = credential.email || '';
-  log.info('Starting sync for user', { userId, credentialId: credential.id });
-
-  // Get valid access token
-  const accessToken = await getValidAccessToken(credential);
-  if (!accessToken) {
-    log.error('Failed to get valid access token', { credentialId: credential.id });
-    return { success: false, contacts: 0, messages: 0 };
+/** Incremental sync from a stored historyId; null when Google expired that history. */
+async function runIncrementalSync(params: {
+  userId: string;
+  credential: SyncCredential & { email: string };
+  accessToken: string;
+  userEmail: string;
+  historyId: string;
+  progress: GmailAddressProgress;
+  deps: GmailSyncDeps;
+}): Promise<{ historyId: string; contacts: number; messages: number; added: number } | null> {
+  const { credential, accessToken, deps, progress } = params;
+  const history = await fetchGmailHistory(accessToken, params.historyId, deps.fetcher);
+  if (history.newHistoryId === '') return null;
+  const added = history.addedMessageIds.length;
+  if (added === 0) {
+    log.info('No new messages', { credentialId: credential.id });
+    return { historyId: history.newHistoryId, contacts: 0, messages: 0, added };
   }
+  log.info('New messages found', { credentialId: credential.id, count: added });
+  await progress.report({
+    state: 'syncing',
+    phase: 'history',
+    unit: 'messages',
+    done: 0,
+    total: added,
+  });
+  const emails: ParsedEmail[] = [];
+  for (let i = 0; i < added; i += FULL_SYNC_BATCH_SIZE) {
+    const ids = history.addedMessageIds.slice(i, i + FULL_SYNC_BATCH_SIZE);
+    emails.push(...(await fetchFullMessages(accessToken, ids, deps.fetcher)));
+  }
+  // The whole new set is judged together (import detection, written-to filter).
+  const contactsToUpsert = await toContactsToUpsert({
+    emails,
+    userEmail: params.userEmail,
+    userId: params.userId,
+    accountEmail: credential.email,
+  });
+  let contacts = 0;
+  let messages = 0;
+  if (contactsToUpsert.length > 0) {
+    const result = await upsertPersonAndMessageRecords(
+      params.userId,
+      contactsToUpsert,
+      `gmail-sync-${credential.id}-${progress.runId}`,
+      credential.email,
+      credential.id,
+      undefined,
+      { statsFromStoredChannel: MessageChannel.EMAIL }
+    );
+    contacts = result.contacts;
+    messages = result.messages;
+  }
+  return { historyId: history.newHistoryId, contacts, messages, added };
+}
 
-  // Re-fetch integration from DB to get the latest config.
-  // Without this, sequential credential syncs clobber each other's historyIds
-  // and counts because they all spread from the same stale config snapshot.
+/** Resolve the sender address, the stored history cursor and whether it is primary. */
+async function loadAddressState(integrationId: string, credentialEmail: string) {
   const integration = await prisma.integration.findUnique({
     where: { id: integrationId },
     select: { id: true, config: true },
   });
-  if (!integration) {
-    log.error('Integration not found', { integrationId });
-    return { success: false, contacts: 0, messages: 0 };
-  }
-
+  if (!integration) return null;
   const config = (integration.config || {}) as IntegrationConfig;
-
-  // Per-credential historyId: stored in config.historyIds[credentialEmail]
-  // Falls back to legacy config.historyId for the primary account
-  const historyIds = config.historyIds;
+  // Per-credential historyId: config.historyIds[address]; the legacy config.historyId
+  // belongs to the primary address.
   const historyId =
-    historyIds?.[credentialEmail] ||
+    config.historyIds?.[credentialEmail] ||
     (credentialEmail === config.userEmail ? config.historyId : undefined);
+  return { historyId, isPrimary: credentialEmail === config.userEmail };
+}
 
-  // Use the credential's own email for sender detection
-  let userEmail = credentialEmail;
-  if (!userEmail) {
-    try {
-      const profile = await getGmailProfile(accessToken);
-      userEmail = profile.emailAddress;
-    } catch {
-      log.error('Failed to get user email', { credentialId: credential.id });
-      return { success: false, contacts: 0, messages: 0 };
-    }
+async function syncAddress(
+  userId: string,
+  credential: SyncCredential & { email: string },
+  integrationId: string,
+  progress: GmailAddressProgress,
+  deps: GmailSyncDeps
+): Promise<AddressResult> {
+  log.info('Starting sync for address', { userId, credentialId: credential.id });
+  const accessToken = await getValidAccessToken(credential);
+  if (!accessToken) {
+    log.error('Failed to get valid access token', { credentialId: credential.id });
+    const health = await prisma.emailIntegrationCredential.findUnique({
+      where: { id: credential.id },
+      select: { state: true, lastErrorReason: true },
+    });
+    const reconnect = health?.state === 'needs_reconnect';
+    await progress.report({
+      state: reconnect ? 'needs_reconnect' : 'failed',
+      error: health?.lastErrorReason ?? 'Could not refresh Google access',
+    });
+    return FAILED;
   }
-
-  let emails: ParsedEmail[] = [];
-  let newHistoryId: string;
-
-  if (historyId) {
-    // Incremental sync using History API
-    log.info('Performing incremental sync', { credentialId: credential.id });
-
-    const historyResult = await fetchGmailHistory(accessToken, historyId);
-
-    if (historyResult.newHistoryId === '') {
-      // History expired, need full sync
-      log.info('History expired, falling back to full sync', { credentialId: credential.id });
-      emails = await fetchGmailEmails(accessToken, userEmail);
-      const profile = await getGmailProfile(accessToken);
-      newHistoryId = profile.historyId;
-    } else if (historyResult.addedMessageIds.length === 0) {
-      // No new messages
-      log.info('No new messages', { credentialId: credential.id });
-      newHistoryId = historyResult.newHistoryId;
-    } else {
-      // Fetch the new messages
-      log.info('New messages found', {
-        credentialId: credential.id,
-        count: historyResult.addedMessageIds.length,
-      });
-      emails = await fetchMessagesByIds(accessToken, historyResult.addedMessageIds);
-      newHistoryId = historyResult.newHistoryId;
-    }
+  const state = await loadAddressState(integrationId, credential.email);
+  if (state === null) {
+    log.error('Integration not found', { integrationId });
+    return FAILED;
+  }
+  const resuming = readFullSyncCursor(credential.metadata) !== null;
+  const ctx = { userId, credential, accessToken, userEmail: credential.email, progress, deps };
+  let outcome: { historyId: string; contacts: number; messages: number };
+  let done: number | null = null;
+  let total: number | null = null;
+  let phase: 'history' | 'saving' = 'history';
+  const incremental =
+    state.historyId && !resuming
+      ? await runIncrementalSync({ ...ctx, historyId: state.historyId })
+      : null;
+  if (incremental !== null) {
+    outcome = incremental;
+    done = incremental.added;
+    total = incremental.added;
   } else {
-    // Full sync (first time for this credential)
-    log.info('Performing full sync (no historyId)', { credentialId: credential.id });
-    emails = await fetchGmailEmails(accessToken, userEmail);
-    const profile = await getGmailProfile(accessToken);
-    newHistoryId = profile.historyId;
+    log.info('Performing full sync', { credentialId: credential.id, resuming });
+    const full = await runGmailFullSync({
+      ...ctx,
+      heartbeat: leaseHeartbeat(integrationId, deps),
+    });
+    outcome = full;
+    done = full.listed;
+    total = full.total;
+    phase = 'saving';
   }
 
-  let contactCount = 0;
-  let messageCount = 0;
-
-  if (emails.length > 0) {
-    // Transform and filter emails (import detection is built into transformAndFilterEmails)
-    const contactsToUpsert = await transformAndFilterEmails(emails, userEmail, userId);
-
-    if (contactsToUpsert.length > 0) {
-      // Use shared manager for DB operations
-      const result = await upsertPersonAndMessageRecords(
-        userId,
-        contactsToUpsert,
-        `gmail-sync-${credential.id}-${Date.now()}`,
-        credentialEmail,
-        credential.id
-      );
-      contactCount = result.contacts;
-      messageCount = result.messages;
-    }
-  }
-
-  // Get existing counts and add new counts
-  const existingContacts = config.contacts || 0;
-  const existingMessages = config.messages || 0;
-
-  // Update integration with per-credential historyId
-  const updatedHistoryIds = { ...(historyIds || {}), [credentialEmail]: newHistoryId };
-
-  await prisma.integration.update({
-    where: { id: integration.id },
-    data: {
-      lastSyncAt: new Date(),
-      lastSuccessfulSyncAt: new Date(),
-      status: IntegrationStatus.CONNECTED,
-      config: {
-        ...config,
-        historyIds: updatedHistoryIds,
-        // Keep legacy historyId for backwards compat with primary account
-        ...(credentialEmail === config.userEmail ? { historyId: newHistoryId } : {}),
-        contacts: existingContacts + contactCount,
-        messages: existingMessages + messageCount,
-      },
-    },
+  await recordAddressSynced({
+    integrationId,
+    address: credential.email,
+    historyId: outcome.historyId,
+    isPrimary: state.isPrimary,
+    contacts: outcome.contacts,
+    messages: outcome.messages,
   });
-
+  await clearFullSyncCursor(credential.id);
   // A completed sync clears any prior failure. getValidAccessToken only clears
   // it when it actually refreshed; a credential whose access token was still
   // valid would otherwise stay marked failed from an earlier transient error.
   await markCredentialHealthy(credential.id);
-
+  await progress.report({ state: 'synced', phase, unit: 'messages', done, total });
   log.info('Sync complete', {
     credentialId: credential.id,
-    newContacts: contactCount,
-    newMessages: messageCount,
+    newContacts: outcome.contacts,
+    newMessages: outcome.messages,
   });
-  return { success: true, contacts: contactCount, messages: messageCount };
+  return { success: true, contacts: outcome.contacts, messages: outcome.messages };
+}
+
+/** One address, with its failure contained to its own progress row. */
+async function syncAddressContained(
+  userId: string,
+  credential: SyncCredential,
+  integrationId: string,
+  deps: GmailSyncDeps
+): Promise<AddressResult> {
+  const email = credential.email ?? '';
+  if (email === '') return FAILED;
+  const progress = new GmailAddressProgress(userId, email, deps);
+  try {
+    return await syncAddress(userId, { ...credential, email }, integrationId, progress, deps);
+  } catch (error) {
+    log.error('Error syncing credential', {
+      credentialId: credential.id,
+      errorType: error instanceof Error ? error.name : 'UnknownError',
+      error: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200),
+    });
+    // A disconnected address has no account left to report on; writing would
+    // resurrect its deleted progress row.
+    if (!isDisconnectedGoogleCredentialError(error)) {
+      await progress.report({ state: 'failed', error: 'Gmail sync failed' });
+    }
+    return FAILED;
+  }
+}
+
+/**
+ * Credentials awaiting re-consent are skipped (their refresh token is gone, so a
+ * retry is a guaranteed 400 every tick), and so are address-less ones: an address
+ * is the account, so there is nothing to report progress for.
+ */
+function isSyncable(c: { refreshToken: string | null; state: string; email: string | null }) {
+  return Boolean(c.refreshToken) && c.state !== 'needs_reconnect' && Boolean(c.email);
+}
+
+const syncWhere = (cutoff: Date): Prisma.IntegrationWhereInput => ({
+  name: 'gmail',
+  isActive: true,
+  OR: [
+    { status: { in: [IntegrationStatus.CONNECTED, IntegrationStatus.SYNC_FAILED] } },
+    { status: IntegrationStatus.SYNCING, lastSyncAt: { lt: cutoff } },
+  ],
+});
+
+/**
+ * Claim one integration for this run: an atomic conditional update, so the cron
+ * and an OAuth-triggered sync never run the same row at once. A SYNCING row is
+ * claimable only once its lease (lastSyncAt, renewed by heartbeats) went stale.
+ */
+async function claimIntegration(integrationId: string, deps: GmailSyncDeps): Promise<boolean> {
+  const now = deps.now();
+  const claimed = await prisma.integration.updateMany({
+    where: { id: integrationId, ...syncWhere(new Date(now.getTime() - LEASE_STALE_MS)) },
+    data: { status: IntegrationStatus.SYNCING, lastSyncAt: now },
+  });
+  return claimed.count === 1;
+}
+
+async function syncClaimedIntegration(
+  integration: {
+    id: string;
+    userId: string;
+    emailCredentials: Array<SyncCredential & { state: string }>;
+  },
+  deps: GmailSyncDeps
+): Promise<boolean> {
+  const validCredentials = integration.emailCredentials.filter(isSyncable);
+  let allSucceeded = true;
+  for (const credential of validCredentials) {
+    log.info('Syncing credential', { credentialId: credential.id, integrationId: integration.id });
+    const result = await syncAddressContained(integration.userId, credential, integration.id, deps);
+    if (!result.success) allSucceeded = false;
+  }
+  if (!allSucceeded) {
+    await prisma.integration.update({
+      where: { id: integration.id },
+      data: {
+        lastFailedSyncAt: new Date(),
+        status: IntegrationStatus.SYNC_FAILED,
+        failureReason: 'Gmail sync failed',
+      },
+    });
+  } else if (validCredentials.length === 0) {
+    await prisma.integration.update({
+      where: { id: integration.id },
+      data: { status: IntegrationStatus.CONNECTED },
+    });
+  }
+  return allSucceeded;
+}
+
+const CREDENTIAL_SELECT = {
+  id: true,
+  email: true,
+  accessToken: true,
+  refreshToken: true,
+  expiresAt: true,
+  scopes: true,
+  metadata: true,
+  state: true,
+} as const;
+
+/** Addresses in connect order, so a multi-address row syncs deterministically. */
+const GMAIL_CREDENTIALS = {
+  where: { provider: EmailProvider.GMAIL },
+  select: CREDENTIAL_SELECT,
+  orderBy: [{ createdAt: 'asc' as const }, { id: 'asc' as const }],
+};
+
+export interface GmailSyncJobOptions {
+  deps?: Partial<GmailSyncDeps>;
+  /** Restrict the run to these users (operator scripts and tests). */
+  userIds?: string[];
 }
 
 /**
  * Run the Gmail sync job - finds all integrations due for sync and processes them
  */
-export async function runGmailSyncJob(): Promise<void> {
+export async function runGmailSyncJob(options: GmailSyncJobOptions = {}): Promise<void> {
   log.info('Starting sync job...');
-
-  const syncIntervalCutoff = new Date(Date.now() - SYNC_INTERVAL_MS);
-
-  // Find Gmail integrations that are due for sync.
-  // CONNECTED/SYNC_FAILED: always eligible (sync immediately)
-  // SYNCING: only re-pick if lastSyncAt > 1 hour ago (crash recovery)
+  const deps = resolveGmailSyncDeps(options.deps);
+  const cutoff = new Date(deps.now().getTime() - LEASE_STALE_MS);
   const dueIntegrations = await prisma.integration.findMany({
     where: {
-      name: 'gmail',
-      isActive: true,
-      OR: [
-        { status: { in: [IntegrationStatus.CONNECTED, IntegrationStatus.SYNC_FAILED] } },
-        { status: IntegrationStatus.SYNCING, lastSyncAt: { lt: syncIntervalCutoff } },
-      ],
+      ...syncWhere(cutoff),
+      ...(options.userIds !== undefined && { userId: { in: options.userIds } }),
     },
-    include: {
-      emailCredentials: {
-        where: { provider: EmailProvider.GMAIL },
-      },
+    select: {
+      id: true,
+      userId: true,
+      emailCredentials: GMAIL_CREDENTIALS,
     },
   });
-
   log.info('Integrations due for sync', { count: dueIntegrations.length });
 
   let successCount = 0;
   let failCount = 0;
-
   for (const integration of dueIntegrations) {
-    // Skip credentials the user must re-consent to. Their refresh token is gone,
-    // so retrying is a guaranteed 400 from Google every cron tick -- pure noise
-    // that also kept the whole integration pinned to SYNC_FAILED and starved the
-    // healthy accounts sharing this row of a CONNECTED status.
-    const allCredentials = integration.emailCredentials.filter((c) => c.refreshToken);
-    const validCredentials = allCredentials.filter((c) => c.state !== 'needs_reconnect');
-    const needsReconnectCount = allCredentials.length - validCredentials.length;
-
-    if (needsReconnectCount > 0) {
-      log.info('Skipping credentials awaiting reconnection', {
-        integrationId: integration.id,
-        count: needsReconnectCount,
-      });
-    }
-
-    if (validCredentials.length === 0) {
+    if (!integration.emailCredentials.some(isSyncable)) {
       log.info('Skipping integration - no syncable credentials', { integrationId: integration.id });
       continue;
     }
-
-    // Mark as syncing with timestamp to prevent duplicate pickup.
-    // lastSyncAt acts as a lock — the query won't re-pick this for 30 min (crash recovery).
-    await prisma.integration.update({
-      where: { id: integration.id },
-      data: { status: IntegrationStatus.SYNCING, lastSyncAt: new Date() },
-    });
-
-    // Sync each credential (email account) separately
-    let allSucceeded = true;
-    let lastError: string | null = null;
-
-    for (const credential of validCredentials) {
-      try {
-        log.info('Syncing credential', {
-          credentialId: credential.id,
-          integrationId: integration.id,
-        });
-        const result = await syncGmailForUser(integration.userId, credential, integration.id);
-
-        if (!result.success) {
-          allSucceeded = false;
-          lastError = 'Gmail sync failed';
-        }
-      } catch (error) {
-        log.error('Error syncing credential', {
-          credentialId: credential.id,
-          errorType: error instanceof Error ? error.name : 'UnknownError',
-        });
-        allSucceeded = false;
-        lastError = 'Gmail sync failed';
-      }
-    }
-
-    if (allSucceeded) {
-      successCount++;
-    } else {
-      failCount++;
-      await prisma.integration.update({
-        where: { id: integration.id },
-        data: {
-          lastFailedSyncAt: new Date(),
-          status: IntegrationStatus.SYNC_FAILED,
-          failureReason: lastError || 'Sync failed - check logs',
-        },
-      });
-    }
+    if (!(await claimIntegration(integration.id, deps))) continue;
+    if (await syncClaimedIntegration(integration, deps)) successCount++;
+    else failCount++;
   }
-
   log.info('Sync job complete', { succeeded: successCount, failed: failCount });
+}
+
+/**
+ * Start a sync of one integration now (after an OAuth connect), through the same
+ * claim, per-address progress and batched full sync as the cron job. Resolves
+ * false when the row is already claimed by a running sync.
+ */
+export async function syncGmailIntegrationNow(
+  integrationId: string,
+  options: { deps?: Partial<GmailSyncDeps> } = {}
+): Promise<boolean> {
+  const deps = resolveGmailSyncDeps(options.deps);
+  if (!(await claimIntegration(integrationId, deps))) return false;
+  const integration = await prisma.integration.findUnique({
+    where: { id: integrationId },
+    select: {
+      id: true,
+      userId: true,
+      emailCredentials: GMAIL_CREDENTIALS,
+    },
+  });
+  if (integration === null) return false;
+  await syncClaimedIntegration(integration, deps);
+  return true;
 }

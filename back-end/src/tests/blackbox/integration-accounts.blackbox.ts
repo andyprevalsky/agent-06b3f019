@@ -27,6 +27,9 @@
  *     1 s coalescing, independent items, ITEM_LOGIN_REQUIRED, webhook re-sync reuses the row
  *   - Telegram (I8): two accounts listed separately, per-account attribution, delete one
  *     account's messages only, legacy claim and default-account delete
+ *   - Gmail sync (plan row I3, integration-accounts.gmail-sync.cases.ts): per-address
+ *     progress with total = messagesTotal, per-batch save, resume from cursor without
+ *     duplicates, independent addresses, unknown total stays null
  *
  * Usage: bash scripts/run-blackbox-tests.sh integration-accounts
  */
@@ -38,6 +41,7 @@ import { MAX_PROGRESS_ACCOUNTS_PER_USER } from '../../domains/integrations/syncA
 import { cases as advancedCases } from './integration-accounts.cases';
 import { cases as plaidProgressCases } from './integration-accounts.plaid.cases';
 import { telegramCases } from './integration-accounts.telegram.cases';
+import { gmailSyncCases } from './integration-accounts.gmail-sync.cases';
 import {
   accountsOf,
   anonymousSession,
@@ -373,6 +377,7 @@ async function main(): Promise<void> {
     ...advancedCases(() => ({ a: A(), b: B() })),
     ...plaidProgressCases(),
     ...telegramCases(),
+    ...gmailSyncCases(),
   ];
   let failed = 0;
   try {
