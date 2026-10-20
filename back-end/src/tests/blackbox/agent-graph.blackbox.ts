@@ -31,6 +31,10 @@
  *   - root → running code agent (the production Claude ws-server.mjs with a
  *     scripted CLI): delivered once to the CLI as a user turn across a
  *     retried send, answered before the CLI exits; a finished session → 409
+ *   - adversarial scenarios (agent-graph-adversarial.cases.ts): blocked-spawner
+ *     question handoff, sibling question cycles, deep-chain routing, finished /
+ *     deleted spawners, duplicate message ids, flooding, cross-tree isolation,
+ *     stale tokens and a cancelled parent
  *
  * Usage: bash scripts/run-blackbox-tests.sh agent-graph
  */
@@ -46,6 +50,11 @@ import { mintAgentGraphToken } from '../../providers/agentGraph/token';
 import { codeSessionTurnToken } from '../../providers/codeSessionTurns';
 import { deterministicMessageId } from '../../providers/messageIdempotency';
 import { testCodeAgentProviderInTreeAndBatchedList } from './agent-graph-code-agents.cases';
+import {
+  adversarialCases,
+  cleanupAdversarial,
+  seedAdversarial,
+} from './agent-graph-adversarial.cases';
 
 config();
 
@@ -632,6 +641,7 @@ const cases: Array<[string, () => Promise<void>]> = [
         ids,
       }),
   ],
+  ...adversarialCases({ baseUrl: BASE_URL, apiKey: API_KEY }),
 ];
 
 async function main(): Promise<void> {
@@ -639,6 +649,7 @@ async function main(): Promise<void> {
   let failed = 0;
   try {
     await seed();
+    await seedAdversarial();
     for (const [name, fn] of cases) {
       try {
         await fn();
@@ -650,6 +661,7 @@ async function main(): Promise<void> {
     }
   } finally {
     await cleanup();
+    await cleanupAdversarial();
     await prisma.$disconnect();
   }
   process.stdout.write(`\n${cases.length - failed}/${cases.length} agent-graph cases passed\n`);
