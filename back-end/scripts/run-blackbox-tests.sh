@@ -406,6 +406,7 @@ BACKEND_PID=""
 # npm/tsx can leave the server below a launcher process. Snapshot and drain
 # the owned descendants before terminating that launcher, then join its PID.
 source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
+source "$ROOT_DIR/scripts/lib/port-probe.sh"
 cleanup() {
   local result=$? cleaned=1
   trap - EXIT INT TERM
@@ -438,7 +439,7 @@ reserve_port() {
   while true; do
     local lock_dir="$PORT_LOCK_ROOT/$candidate"
     if mkdir "$lock_dir" 2>/dev/null; then
-      if lsof -ti :"$candidate" >/dev/null 2>&1; then
+      if local_port_in_use "$candidate"; then
         rmdir "$lock_dir" >/dev/null 2>&1 || true
       else
         PORT_LOCK_DIR="$lock_dir"

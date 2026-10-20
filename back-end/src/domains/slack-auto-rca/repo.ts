@@ -95,6 +95,16 @@ export async function anyAgentOwnedByRcaIncident(agentIds: string[]): Promise<bo
   return owned !== null;
 }
 
+/** Start bookkeeping for the abandoned-start check (null when the agent row is missing). */
+export async function findAgentStart(
+  agentId: string
+): Promise<{ status: string; temporalFirstExecutionRunId: string | null; createdAt: Date } | null> {
+  return prisma.agent.findUnique({
+    where: { id: agentId },
+    select: { status: true, temporalFirstExecutionRunId: true, createdAt: true },
+  });
+}
+
 export async function agentExists(agentId: string): Promise<boolean> {
   const agent = await prisma.agent.findUnique({ where: { id: agentId }, select: { id: true } });
   return agent !== null;

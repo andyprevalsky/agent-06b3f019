@@ -45,8 +45,12 @@ function optionalAgentCreateFields(params: {
   worldModelMode?: 'real' | 'simulate' | 'shadow';
   isBenchmark?: boolean;
   githubRepoUrl?: string;
+  projectId?: string | null;
 }): Partial<Prisma.AgentUncheckedCreateInput> {
   return {
+    ...(params.projectId !== undefined && params.projectId !== null
+      ? { projectId: params.projectId }
+      : {}),
     ...(params.temporalWorkflowId !== undefined && params.temporalWorkflowId !== null
       ? { temporalWorkflowId: params.temporalWorkflowId }
       : {}),
@@ -127,6 +131,7 @@ export interface CreateAgentParams {
   workflowTaskQueue?: string;
   /** Repository code sessions in this tree clone (set before the workflow starts). */
   githubRepoUrl?: string;
+  projectId?: string | null;
 }
 
 /** Create an agent with verifier and goal message in a transaction. */

@@ -1,3 +1,4 @@
+import { unregisterWorkspaceExecutor } from './projects/workspaceExecutor';
 import { Sandbox } from 'e2b';
 import mime from 'mime-types';
 import { CODE_AGENT_OUTPUT_DIR } from './codeAgentPrompt';
@@ -260,6 +261,7 @@ export async function closeClaudeCodeSession(
     }
 
     // Kill the sandbox
+    unregisterWorkspaceExecutor(taskId);
     await sandbox.kill();
     log.info(`Killed sandbox: ${session.sandboxId}`);
   } catch (error) {

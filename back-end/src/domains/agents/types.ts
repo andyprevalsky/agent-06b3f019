@@ -164,6 +164,8 @@ const createAgentBaseSchema = z.object({
   // fork a get_memories tool call into the planner context. Own first-class
   // flag (not a context gate). Default off; sub-agents inherit their parent's.
   memory_enabled: z.boolean().optional(),
+  /** Owning Project (left-bar grouping); sub-agents inherit the parent's when omitted. */
+  project_id: z.string().uuid().nullable().optional(),
   // Provider/environment execution mode. Defaults to real at the DB and
   // workflow boundaries; sub-agents inherit their parent's persisted mode.
   world_model_mode: z.enum(['real', 'simulate', 'shadow']).optional(),

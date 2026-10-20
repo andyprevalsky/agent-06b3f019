@@ -12,6 +12,7 @@ import { createLogger } from '../../providers/logger';
 import { BenchmarkHubUnavailableError } from '../../providers/benchmarkHubErrors';
 import { StaleParentWorkflowGenerationError } from '../../providers/workflowGeneration';
 import { WorldModelModeAccessError } from './agentExecutionMode';
+import { AgentProjectNotFoundError } from './agentProject';
 
 const log = createLogger('Agents');
 
@@ -37,6 +38,10 @@ export function handleRouteError(
   }
   if (error instanceof WorldModelModeAccessError) {
     res.status(403).json({ error: error.message });
+    return;
+  }
+  if (error instanceof AgentProjectNotFoundError) {
+    res.status(404).json({ error: error.message });
     return;
   }
   if (error instanceof BenchmarkHubUnavailableError) {
