@@ -26,7 +26,7 @@ sources:
   - agent fb3964fd-8a79-4cc8-ae5b-8449ebc50027
   - task 50a54f59-4d42-51a8-af7d-7810ec6a5047
   - commit 64e5cc2dd83dfc346797b97e7c0f5fd749713250
-  - PR #1552 deploy gate discovery; supplemental payment candidate is not included in that PR
+  - PR #1552 initial deploy gate discovery at64e5cc2dd; payment candidate was excluded pending separate approval
   - benchmark run 6a650338-5a33-41fa-9e7d-32530efe8315
   - agent fb3964fd-8a79-4cc8-ae5b-8449ebc50027 evidence .context/rca-915ab997/browser-payment-failure-triage.txt
   - agent fb3964fd-8a79-4cc8-ae5b-8449ebc50027 timing .context/rca-915ab997/browser-payment-timing-audit.txt
@@ -279,11 +279,11 @@ multi-pending histories and last4-only direct finalizer calls remain separate
 defensive risks. Existing simulator compaction and the long-history verifier
 window are outside this repair. No new event store, synthetic actor message,
 model, schema, prompt instruction or timeout change was introduced. Deployment
-of these runtime context bytes still awaits the exact final approval snapshot.
+of these runtime context bytes required the exact final approval snapshot, subsequently approved as A3 below.
 
 ## Solution
 
-Proposed for deployment; **applied only in the separately authorized local experiment**: preserve the existing validated result payload when
+Approved A3 candidate, now applied in the isolated PR #1552 deploy worktree; production rollout is pending: preserve the existing validated result payload when
 transitioning it to payment_card_ready, with the canonical ready fields taking
 precedence. Apply that same transition to action history, simulated history,
 and both saved tool transcripts, plus the existing alternate pending-completion
@@ -296,12 +296,12 @@ by the model. `/deploy` Step 0p therefore requires fresh snapshot-specific
 approval. The already-authorized viewport patch does not grant that approval.
 The parent owns the approval request. During the initial handoff, neither the candidate nor additional
 runtime source was applied or committed. The later local-only authorization
-is recorded above; production approval is still not granted.
+is recorded above. The subsequent exact A3 deployment approval is recorded under Human feedback.
 
 The follow-up local experiment registered the owning regression and ran the
-unchanged task, as recorded above. Deployment still requires snapshot-specific
-approval and applicable deployment gates. Keep this case OPEN while those
-approval and deployment steps remain pending; candidate browser terminal and
+unchanged task, as recorded above. Snapshot-specific A3 approval has now been
+received; applicable deployment gates and rollout remain pending. Keep this
+case OPEN until those deployment steps complete; candidate browser terminal and
 recording evidence passed as recorded above.
 
 Read-only golden comparison found no native payment-card-approval analogue in
