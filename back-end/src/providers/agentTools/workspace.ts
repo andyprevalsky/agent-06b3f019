@@ -7,6 +7,7 @@
  *          {url, token} ────────────────► ~/.rose/tools.json        (MCP servers may not inherit env)
  *          Claude Code MCP config ──────► ~/.rose/mcp.json          (ws-server passes --mcp-config;
  *                                                                   Codex gets the same server via -c)
+ *          change-environment-size ─────► ~/.rose/skills/change-environment-size/SKILL.md (C16)
  *          token scoped to THIS agent ──► ROSE_TOOLS_URL / ROSE_TOOLS_TOKEN env
  *
  * The files ride the existing rose_user_ui materialization (same HOME layout,
@@ -29,10 +30,22 @@ export const AGENT_TOOLS_CLI_PATH = `${USER_UI_CLI_BIN_DIR}/${AGENT_TOOLS_CLI_NA
 export const AGENT_TOOLS_CONFIG_PATH = '.rose/tools.json';
 export const AGENT_TOOLS_MCP_CONFIG_PATH = '.rose/mcp.json';
 export const AGENT_TOOLS_ENV_URL = 'ROSE_TOOLS_URL';
+/** The `rose env` skill ships with the CLI it documents (C16; the shared skill materializer absorbs it). */
+export const ENV_SIZE_SKILL_PATH = '.rose/skills/change-environment-size/SKILL.md';
 export const AGENT_TOOLS_ENV_TOKEN = 'ROSE_TOOLS_TOKEN';
 
 const SCRIPT_PATH = join(__dirname, '../../assets/rose-tools/rose.mjs');
+const ENV_SIZE_SKILL_SOURCE = join(
+  __dirname,
+  '../../assets/rose-skills/change-environment-size/SKILL.md'
+);
 let cachedScript: Buffer | null = null;
+let cachedEnvSizeSkill: Buffer | null = null;
+
+export function envSizeSkillFile(): Buffer {
+  cachedEnvSizeSkill ??= readFileSync(ENV_SIZE_SKILL_SOURCE);
+  return cachedEnvSizeSkill;
+}
 
 /** The shipped CLI bytes (src/assets in dev, dist/assets after `npm run build`). */
 export function agentToolsCliScript(): Buffer {
@@ -143,6 +156,7 @@ export function withAgentTools(
       AGENT_TOOLS_CLI_PATH,
       AGENT_TOOLS_CONFIG_PATH,
       AGENT_TOOLS_MCP_CONFIG_PATH,
+      ENV_SIZE_SKILL_PATH,
     ]);
     return {
       ...base,
@@ -154,6 +168,7 @@ export function withAgentTools(
           content: Buffer.from(toolsConfig(url, token, base.envs), 'utf8'),
         },
         { path: AGENT_TOOLS_MCP_CONFIG_PATH, content: Buffer.from(mcpConfig(homeDir), 'utf8') },
+        { path: ENV_SIZE_SKILL_PATH, content: envSizeSkillFile() },
       ],
       envs: { ...base.envs, [AGENT_TOOLS_ENV_URL]: url, [AGENT_TOOLS_ENV_TOKEN]: token },
       localEnvs: { ...base.localEnvs, [AGENT_TOOLS_ENV_URL]: localAgentToolsUrl(url) },
