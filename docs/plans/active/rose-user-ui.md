@@ -131,7 +131,19 @@ Status: `done` (merged + verified in a recording), `building`, `queued`,
 | 41 | Anything coding-based is routed to a code agent (root delegates; it doesn't code itself) | spec'd → coding thread (harness; approval at /deploy) |
 | 42 | **All of this ships behind one feature flag, on only for Andy's account** (user 1f85ff25-6e29-4c1b-8739-f917bd101a30, root devbox); everyone else sees today's UI | spec'd → coding thread |
 | 36 | Every right-bar tab opens a working panel flush to the bar (mock reference: `.context/rose-app-builder-mock/panels/*.js`) | mocks done (11 panels) |
-| 79 | Left bar: a **running code agent with no pending user request** (no amber alert) shows a small bubble of the existing `front-end/src/assets/thinking.svg` (~10px) on the **top-left corner of its provider icon** (status glyphs stay top-right); never together with the amber alert, check or x; same in light and dark | spec'd, live in nav.js; FE-11 |
+| 79 | (superseded 2026-10-20 by #81: no thinking bubble or status glyphs on code-agent rows) | superseded |
+| 80 | Clicking a **code-agent row** in the left bar enters that code agent: its own conversation view (provider icon, title, target/branch, state; full transcript) and the normal query box talks to it directly ("Message Codex…"); Escape/parent/Home returns | spec'd, live in nav.js; FE-16 |
+| 81 | Code-agent rows = provider icon + title only (no check, x, alert or thinking bubble); agent (robot) rows keep their status glyphs | spec'd, live in nav.js; FE-16 |
+| 82 | Left bar Home row reads just **Home** (no "· root project") | spec'd, live in nav.js; FE-16 |
+| 83 | **Left-bar Apps section removed** (Andy: "rm the weird apps shit"); the full-screen app view opens only from a code agent's live preview card | spec'd, live in nav.js; FE-15 |
+| 84 | Mobile/iPad header (flag on): hamburger + Rose pill + the four app icons (Browser, Phone, Integrations w/ red dot, Dark) — never just "Rose ≡" | spec'd, live in nav.js; FE-16 |
+| 85 | Integrations = one account per integration (single chip, × disconnects, no "+ Add account") + the gradient sync loader; icons keep their **stock app-icon backgrounds** (iMessage/WhatsApp tiles, DropdownIconFrame) visible in dark; backend loader contract sent to the coding thread | spec'd, live in panels/integrations.js; FE-17 + L-CULL-INTEG |
+| 86 | Phone app = floating iPhone with a calm **Coming soon** screen (phone harness built in its own devbox; no /api/phones) | spec'd, live in panels/phone.js; FE-17 |
+| 87 | Browser app is not auto-opened; opening it with an agent selected starts at that root tree's default_url | spec'd → FE-17 |
+| 88 | Dark mode dividers/hairlines are subtle (row separators ≈ rgba(255,255,255,.07), outer borders ≤ .10), never bright white | spec'd, live in nav.js; FE-13 |
+| 89 | **Removed (Andy, 2026-10-20):** whole-app user settings — user theme/tokens, background image + fade (rows 1, 25, 34), and slots (sidebar header/menu, home dashboard, agent panel, background). Apps, versions/rollback, inline views and the Rose dark-mode toggle stay | removing → FE-18 + backend |
+| 90 | Display is a full inline renderer (page/bundle/model/image/video/pdf via usercontent_url; frame sandbox "allow-scripts allow-pointer-lock allow-popups", never same-origin; models get a viewer page) | backend L-DISPLAY3; FE after contract |
+| 91 | Integrations: multi-account support that already existed stays; only the new per-phone/per-profile/LinkedIn-multi additions are removed; every account gets the sync loader | supersedes the multi-account part of 78/85 → FE-17 |
 
 ### UI ledger owners (audit 2026-10-20)
 
@@ -140,8 +152,11 @@ Every ask from Andy in the UI-agent and coding threads, mapped to an owner. FE-n
 | Owner | Rows | State |
 |---|---|---|
 | FE-1..FE-10 | 11-15, 17-25, 29-34, 37, 40, 43-47, 51-53, 55, 57-78 (UI halves) | merged in ui-integration (gate green at b4870be23; feat merged at 511197ab0) |
-| FE-11 code agents | display HTML via usercontent_url, code_agent paused / usage-limit Retry, batched code-agents list, share_code_session_with, 79 | in progress |
-| FE-12 integrations | Gmail I3, Passwords/Passkeys I7, LinkedIn I4 (export goal text: approval at deploy), WhatsApp I2 | in progress |
+| FE-11 code agents | display HTML via usercontent_url, code_agent paused / usage-limit text (Retry waits on L-CODEAGENT-API), batched code-agents list, share_code_session_with, 79 | merged |
+| FE-12 integrations | Gmail I3, Passwords/Passkeys I7, LinkedIn I4 (export goal text: approval at deploy), WhatsApp I2 | merged |
+| FE-13 dark visual fixes | dark query surface, dark New Super Agent + model chip, speed square radius, admin switcher into Settings | in progress |
+| FE-14 root browser | Browser drawer: Root by default, selected agent's tab, take over, per-site fork/merge text, sites list; server account labels | in progress |
+| FE-15 apps | 10, 39: left-bar Apps (Rose first, dev only), full-screen app view + query box, History restore, Publish → PR, live preview card | in progress (mock: Apps section in nav.js) |
 | Coding thread | 3/A6 root browser world state, 10 + 39 Apps / Rose-in-Rose / local preview URLs (L-APPS), 12 A2A (C6), 13 display tool (A5), 34 backend default, 37 backend new-agent-in-branch, 41 + C12 routing prompts, 46-47b in-sandbox tools + routing by spawner, 48 no timeouts (C11), 50 branch model (C13), 51 local target (C14), 54 HTML+JS (done a151a214c), Phone backend, Projects REST + Agent.projectId | lanes running / queued |
 | UI agent | real recordings (rerun after C12/row-41 merge), integration merge of FE-1..5, live mock | ongoing |
 | Dropped by Andy | Voice, Terminal app, Network app, Files app, right bar, pinned Import pill, liquid-black send (light), two-triangle dark bg | — |

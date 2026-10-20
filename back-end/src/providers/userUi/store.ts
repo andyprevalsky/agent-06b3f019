@@ -41,6 +41,9 @@ export interface UserUiVersionRecord {
   fileCount: number;
   totalBytes: number;
   createdAt: Date;
+  /** Code agent + task whose publish token created this version (null otherwise). */
+  publishedByAgentId: string | null;
+  publishedByTaskId: string | null;
 }
 
 function objectKey(userId: string, versionId: string, path: string): string {
@@ -102,6 +105,8 @@ function toRecord(row: {
   fileCount: number;
   totalBytes: number;
   createdAt: Date;
+  publishedByAgentId: string | null;
+  publishedByTaskId: string | null;
 }): UserUiVersionRecord {
   return { ...row, manifest: row.manifest as unknown as UserUiManifest };
 }
@@ -145,6 +150,8 @@ export async function createUserUiVersion(params: {
   manifest: UserUiManifest;
   totalBytes: number;
   activate: boolean;
+  publishedByAgentId?: string | null;
+  publishedByTaskId?: string | null;
 }): Promise<UserUiVersionRecord> {
   const versionId = crypto.randomUUID();
   const index: UserUiIndexEntry[] = params.files.map((file) => ({
@@ -173,6 +180,8 @@ export async function createUserUiVersion(params: {
       manifest: params.manifest as unknown as Prisma.InputJsonValue,
       fileCount: params.files.length,
       totalBytes: params.totalBytes,
+      publishedByAgentId: params.publishedByAgentId ?? null,
+      publishedByTaskId: params.publishedByTaskId ?? null,
     },
   });
   const [row] = params.activate
@@ -190,8 +199,24 @@ export async function createUserUiVersion(params: {
     fileCount: params.files.length,
     totalBytes: params.totalBytes,
     activated: params.activate,
+    publishedByAgentId: params.publishedByAgentId ?? null,
+    publishedByTaskId: params.publishedByTaskId ?? null,
   });
   return toRecord(row);
+}
+
+/**
+ * The code session of the task that published a version (one primary-key
+ * read); null for user/legacy publishes, a task without a persistent code
+ * session, or a task row that no longer exists.
+ */
+export async function findTaskCodeSessionId(taskId: string | null): Promise<string | null> {
+  if (taskId === null) return null;
+  const task = await prisma.claudeCodeSession.findUnique({
+    where: { id: taskId },
+    select: { codeSessionId: true },
+  });
+  return task?.codeSessionId ?? null;
 }
 
 /** Point the user at one of THEIR versions; false when it is not theirs. */

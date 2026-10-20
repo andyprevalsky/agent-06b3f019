@@ -29,6 +29,7 @@ export interface Progress {
 export interface Account {
   provider: string;
   accountId: string;
+  label: string | null;
   state: string;
   progress: Progress;
   lastSyncAt: string | null;

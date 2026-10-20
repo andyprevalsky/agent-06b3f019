@@ -138,10 +138,6 @@
         "main/domains/permission-reader/repo.ts",
         "main/domains/permission-reader/runtime.ts",
         "main/domains/permission-reader/service.ts",
-        "main/domains/phone-mirroring/config.ts",
-        "main/domains/phone-mirroring/repo.ts",
-        "main/domains/phone-mirroring/runtime.ts",
-        "main/domains/phone-mirroring/service.ts",
         "main/domains/sync-manager/config.ts",
         "main/domains/sync-manager/repo.ts",
         "main/domains/sync-manager/runtime.ts",
@@ -197,7 +193,6 @@
         "main/services/messaging/types.ts",
         "main/services/passkeyEnroll.ts",
         "main/services/permissionReader.ts",
-        "main/services/phoneMirroring.ts",
         "main/services/sync/IntegrationCache.ts",
         "main/services/sync/SyncManager.ts",
         "main/services/uploader.ts",
@@ -206,7 +201,7 @@
         "shared/utils/error.ts"
       ],
       "testFile": "tests/blackbox/ipc-registry.blackbox.ts",
-      "fileCount": 194
+      "fileCount": 189
     },
     {
       "domain": "i-message-queue-service",
@@ -1221,30 +1216,6 @@
       "fileCount": 10
     },
     {
-      "domain": "phone-mirroring",
-      "type": "main-service",
-      "entryFile": "main/services/phoneMirroring.ts",
-      "files": [
-        "main/base/config.ts",
-        "main/base/impersonation.ts",
-        "main/base/logger.ts",
-        "main/domains/auth/config.ts",
-        "main/domains/auth/repo.ts",
-        "main/domains/auth/runtime.ts",
-        "main/domains/auth/service.ts",
-        "main/domains/phone-mirroring/config.ts",
-        "main/domains/phone-mirroring/repo.ts",
-        "main/domains/phone-mirroring/runtime.ts",
-        "main/domains/phone-mirroring/service.ts",
-        "main/services/auth.ts",
-        "main/services/deviceIdentity.ts",
-        "main/services/phoneMirroring.ts",
-        "shared/utils/error.ts"
-      ],
-      "testFile": "tests/blackbox/phone-mirroring.blackbox.ts",
-      "fileCount": 14
-    },
-    {
       "domain": "uploader",
       "type": "main-service",
       "entryFile": "main/services/uploader.ts",
@@ -1931,10 +1902,6 @@
         "main/domains/permission-reader/repo.ts",
         "main/domains/permission-reader/runtime.ts",
         "main/domains/permission-reader/service.ts",
-        "main/domains/phone-mirroring/config.ts",
-        "main/domains/phone-mirroring/repo.ts",
-        "main/domains/phone-mirroring/runtime.ts",
-        "main/domains/phone-mirroring/service.ts",
         "main/domains/sync-manager/config.ts",
         "main/domains/sync-manager/repo.ts",
         "main/domains/sync-manager/runtime.ts",
@@ -1975,7 +1942,6 @@
         "main/services/messaging/platforms/whatsapp/WhatsAppSync.ts",
         "main/services/messaging/types.ts",
         "main/services/permissionReader.ts",
-        "main/services/phoneMirroring.ts",
         "main/services/sync/IntegrationCache.ts",
         "main/services/sync/SyncManager.ts",
         "main/services/sync/index.ts",
@@ -1986,7 +1952,7 @@
         "shared/utils/error.ts"
       ],
       "testFile": "tests/blackbox/sync-manager.blackbox.ts",
-      "fileCount": 169
+      "fileCount": 164
     },
     {
       "domain": "electron-main",
@@ -2141,10 +2107,6 @@
         "main/domains/permission-reader/repo.ts",
         "main/domains/permission-reader/runtime.ts",
         "main/domains/permission-reader/service.ts",
-        "main/domains/phone-mirroring/config.ts",
-        "main/domains/phone-mirroring/repo.ts",
-        "main/domains/phone-mirroring/runtime.ts",
-        "main/domains/phone-mirroring/service.ts",
         "main/domains/sync-manager/config.ts",
         "main/domains/sync-manager/repo.ts",
         "main/domains/sync-manager/runtime.ts",
@@ -2202,7 +2164,6 @@
         "main/services/messaging/types.ts",
         "main/services/passkeyEnroll.ts",
         "main/services/permissionReader.ts",
-        "main/services/phoneMirroring.ts",
         "main/services/sync/IntegrationCache.ts",
         "main/services/sync/SyncManager.ts",
         "main/services/uploader.ts",
@@ -2211,7 +2172,7 @@
         "shared/utils/error.ts"
       ],
       "testFile": "tests/blackbox/electron-main.blackbox.ts",
-      "fileCount": 211
+      "fileCount": 206
     },
     {
       "domain": "electron-preload",
@@ -2729,7 +2690,6 @@
       "main/domains/passkey-permission/runtime.ts",
       "main/domains/passkey-permission/types.ts",
       "main/domains/permission-reader/types.ts",
-      "main/domains/phone-mirroring/types.ts",
       "main/domains/user-data-sync/types.ts",
       "ui/features/apple-passwords-modal/types.ts",
       "ui/features/atlas-password-modal/types.ts",

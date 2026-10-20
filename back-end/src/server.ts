@@ -39,6 +39,7 @@ import claudeCodeRouter from './domains/claude-code/routes';
 import codeAgentDirectChatRouter, {
   sessionScopedRouter as codeSessionDirectChatRouter,
 } from './domains/claude-code/routesDirectChat';
+import previewHandoffRouter from './domains/claude-code/routes.previewHandoff';
 import codexCodeRouter from './domains/codex-code/routes';
 import billingRouter from './domains/billing/routes';
 import apiKeysRouter from './domains/api-keys/routes';
@@ -69,7 +70,6 @@ import fastCacheRouter from './domains/fast-cache/routes';
 import archiveRouter from './domains/archive/routes';
 import plannerMemoryRouter from './domains/planner-memory/routes';
 import userUiRouter, { usercontentRouter } from './domains/user-ui/routes';
-import phonesRouter from './domains/phones/routes';
 import agentToolsRouter, { agentQuestionsRouter } from './domains/agent-tools/routes';
 import projectsRouter from './domains/projects/routes';
 import worldModelsRouter from './domains/world-models/routes';
@@ -174,6 +174,12 @@ app.use(
 // before CORS because sandboxed iframes request them with Origin: null. In prod
 // USERCONTENT_BASE_URL must route these to a separate origin.
 app.use('/usercontent', usercontentRouter);
+
+// One-time preview sign-in redeem (Rose-in-Rose, L-APPS2): called from code-agent
+// preview origins (E2B port hosts, loopback). Mounted before the global CORS so
+// its own CORS answers those origins; the global middleware would answer their
+// preflight with no allow header.
+app.use('/api/preview-handoff', previewHandoffRouter);
 
 // Production must explicitly authorize both public web origins. A missing or
 // partial value aborts startup so Render cannot promote a login-breaking release.
@@ -570,7 +576,6 @@ app.use('/api/fast-cache', fastCacheRouter); // Fast Mode aggressive cache get/s
 app.use('/api/archive', archiveRouter); // Encrypted trace archive + scoped DB fixtures
 app.use('/api/planner-memory', plannerMemoryRouter); // Planner memory history table (planner RAG)
 app.use('/api/user-ui', userUiRouter); // Per-user rose_user_ui versions (publish/activate/active)
-app.use('/api/phones', phonesRouter); // Attached phones (iPhone Mirroring): presence, exclusive control, screen relay
 app.use('/api/agent-tools', agentToolsRouter); // display / messages / approvals for agents + code-agent sandboxes
 app.use('/api/projects', projectsRouter); // Owner-scoped Projects: settings, env files, codebase sync
 app.use('/api/world-models', worldModelsRouter); // WMH-compatible simulation runtime shim
