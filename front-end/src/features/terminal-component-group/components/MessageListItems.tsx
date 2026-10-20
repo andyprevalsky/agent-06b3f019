@@ -16,8 +16,16 @@
  *
  * With a web-search grouping, a turn's searches render as one row at the first
  * search's position (WebSearchGroupItem); the other searches render nothing.
+ *
+ * ROSE DESKTOP (flag on; stock rendering otherwise):
+ *   send_message_to_user from a code agent → "<agent> · via send_message_to_user" above it
+ *   inlineView { view: 'scorecard' } with no versionId → host ScorecardCard beneath it
+ *   pinned question (display.placement 'pinned') → not inline; PinnedQuestionMount shows it
+ *   metadata.a2a (USER or TOOL agent_message row) → AgentToAgentRow, never a user bubble
  */
+import { useEffect } from 'react';
 import { InlineUserView, parseInlineViewMetadata } from '@/features/user-ui';
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 
 import MessageBubble from './MessageBubble';
 import type { Message } from '../hooks';
@@ -27,6 +35,15 @@ import {
   type SubAgentStreamingMetrics,
 } from './useMessageFiltering';
 import { WebSearchGroupItem } from './WebSearchGroupItem';
+import {
+  parseAgentToAgentMessage,
+  parseCodeAgentSender,
+  type AgentToAgentMessage,
+  parsePinnedQuestion,
+  parseScorecardInlineView,
+} from '../hooks/codeAgentContract';
+import { AgentToAgentRow } from './AgentToAgentRow';
+import { CodeAgentAttribution, ScorecardCard } from './CodeAgentScorecard';
 import { EMPTY_WEB_SEARCH_GROUPING, type WebSearchTurnGrouping } from './webSearchTurnGroups';
 
 interface MessageListItemsProps {
@@ -86,7 +103,41 @@ function getMessageRenderKey(message: Message): string {
   return message.message_id;
 }
 
-function MessageListItem({
+function isSendMessageToUser(message: Message): boolean {
+  const toolName = message.metadata?.toolName;
+  return toolName === 'send_message_to_user' || toolName === 'send_message_to_user_execute_phase';
+}
+
+/** Agent-to-agent row in the trajectory; completes the typing chain like other bubbles. */
+function AgentToAgentListItem({
+  message,
+  a2a,
+  shouldType,
+  onTypingComplete,
+}: {
+  message: Message;
+  a2a: AgentToAgentMessage;
+  shouldType: boolean;
+  onTypingComplete: () => void;
+}) {
+  useEffect(() => {
+    if (shouldType) onTypingComplete();
+  }, [shouldType, onTypingComplete]);
+  return (
+    <div
+      data-message-id={message.message_id}
+      data-message-role={message.role}
+      data-message-kind="agent-to-agent"
+      className="min-w-0 max-w-full"
+    >
+      <AgentToAgentRow a2a={a2a} />
+    </div>
+  );
+}
+
+/** Stock message row (plus Rose Desktop attribution + host scorecard). */
+function StockMessageListItem({
+  roseDesktop,
   message,
   currentAnimatingId,
   onAnimationComplete,
@@ -100,7 +151,7 @@ function MessageListItem({
   streamingPlanCharCount,
   streamingPlanStartedAtMs,
   streamingMetricsBySubAgentId,
-}: MessageListItemProps) {
+}: MessageListItemProps & { roseDesktop: boolean }) {
   const planCharCount = resolvePlanCharCount(message, streamingPlanCharCount);
   const thinkingMetrics = resolveMessageThinkingMetrics(message, streamingMetricsBySubAgentId);
   const isFinalAnswer = message.metadata?.isUserAttentionMessage === true;
@@ -117,6 +168,9 @@ function MessageListItem({
       ? rawAgentStartPhase
       : undefined;
   const inlineView = parseInlineViewMetadata(message.metadata?.inlineView);
+  const scorecard = roseDesktop ? parseScorecardInlineView(message.metadata?.inlineView) : null;
+  const sender = roseDesktop ? parseCodeAgentSender(message.metadata) : null;
+  const showAttribution = sender !== null && (scorecard !== null || isSendMessageToUser(message));
 
   return (
     <div
@@ -130,6 +184,7 @@ function MessageListItem({
       data-agent-start-phase={agentStartPhase}
       className="min-w-0 max-w-full"
     >
+      {showAttribution && sender && <CodeAgentAttribution sender={sender} />}
       <MessageBubble
         message={message}
         shouldType={message.message_id === currentAnimatingId}
@@ -148,8 +203,35 @@ function MessageListItem({
         streamingMetricsBySubAgentId={streamingMetricsBySubAgentId}
       />
       {inlineView && <InlineUserView inlineView={inlineView} messageId={message.message_id} />}
+      {scorecard && (
+        <div className="mt-2">
+          <ScorecardCard scorecard={scorecard} />
+        </div>
+      )}
     </div>
   );
+}
+
+/**
+ * Rose Desktop routes a pinned question (shown above the query box instead) and
+ * agent-to-agent rows away from the stock bubble; everything else is stock.
+ */
+function MessageListItem(props: MessageListItemProps) {
+  const roseDesktop = useRoseDesktop();
+  const { message } = props;
+  if (roseDesktop && parsePinnedQuestion(message.metadata)) return null;
+  const a2a = roseDesktop ? parseAgentToAgentMessage(message) : null;
+  if (a2a) {
+    return (
+      <AgentToAgentListItem
+        message={message}
+        a2a={a2a}
+        shouldType={message.message_id === props.currentAnimatingId}
+        onTypingComplete={props.onAnimationComplete}
+      />
+    );
+  }
+  return <StockMessageListItem {...props} roseDesktop={roseDesktop} />;
 }
 
 export function MessageListItems({

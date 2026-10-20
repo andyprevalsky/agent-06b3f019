@@ -139,6 +139,9 @@ export function derivePendingApproval(messages: Message[]): PendingApproval | nu
     question: activeApproval.text || '',
     imageUrl: activeApproval.metadata?.imageUrl || null,
     requestPaymentCard: activeApproval.metadata?.requestUserApproval?.requestPaymentCard,
+    ...(activeApproval.metadata?.from_code_agent !== undefined
+      ? { fromCodeAgent: activeApproval.metadata.from_code_agent }
+      : {}),
   };
 }
 

@@ -74,6 +74,8 @@ export interface PendingApproval {
   question: string;
   imageUrl: string | null;
   requestPaymentCard?: RequestPaymentCardPayload;
+  /** Raw `metadata.from_code_agent` of the requesting code agent (parsed by ApprovalChip). */
+  fromCodeAgent?: unknown;
 }
 
 export interface PendingGate {
