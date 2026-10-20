@@ -18,6 +18,7 @@ import computeRoutes from './routes.compute';
 import plaidRoutes from './routes.plaid';
 import documentRoutes from './routes.documents';
 import lanternRoutes from './routes.lantern';
+import linkedinRoutes from './routes.linkedin';
 
 const router = Router();
 
@@ -31,6 +32,7 @@ router.use(computeRoutes);
 router.use(plaidRoutes);
 router.use(documentRoutes);
 router.use(lanternRoutes);
+router.use(linkedinRoutes);
 
 // ---------------------------------------------------------------------------
 // CRUD routes
