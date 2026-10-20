@@ -807,6 +807,12 @@ per-run observed mechanism, not the count, grants membership.
   after it wait on (the cancelled child settling, a post-timeout classifier)?
   Prefer deadlines that report and move on without waiting for the hung
   child, as codex `exec.rs` and claude-code `withTimeout` do.
+- Check isolation boundaries for shared external limits. A benchmark guest
+  that copies production state (compute tokens, cooldowns, semaphores) into
+  its own database enforces that limit per guest, not across the fleet. Count
+  grants or marks per guest against the real provider capacity before
+  calling a provider error external. In Polar batch 1, 58 guests each
+  granted the same token at 1 of 16 slots, and OpenAI returned 285 429s.
 - Check that a suspected cause separates failures from passes before ranking
   it. In Polar batch 1, the Foundry failover share did not separate them,
   while prompt growth and activity kills did.
