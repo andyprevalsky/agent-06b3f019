@@ -804,7 +804,7 @@ class DisplayTool(BaseModel):
     )
     placement: Optional[Literal["inline", "pinned"]] = Field(
         default="inline",
-        description='"inline" posts in the trajectory; "pinned" asks above the query box and waits for the answer.',
+        description='"inline" posts in the trajectory; "pinned" asks a question (see the tool notes for who answers).',
     )
     options: Optional[List[DisplayOptionArg]] = Field(
         default=None, description='Answers for placement "pinned", shown numbered (max 9).'

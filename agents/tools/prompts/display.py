@@ -4,4 +4,4 @@ PROMPT = """Use this tool to show the user images, videos or HTML pages (screens
 
 Usage:
 - `paths` are files already in this agent's tree; `urls` are public links. Showing the same file again does nothing.
-- placement "pinned" asks a question above the user's input box with numbered `options` and waits for the answer. Use it only when you cannot proceed without the user's choice; the answer is the tool result."""
+- placement "pinned" asks a question with numbered `options`. Use it only when you cannot proceed without the choice. If you are the root agent or the root started you, it is pinned above the user's input box and the answer is the tool result; otherwise the agent that started you gets the question and answers by message."""
