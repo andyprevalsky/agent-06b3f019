@@ -31,14 +31,7 @@ import {
 } from './e2bWsServerOverlay';
 import { createLocalClaudeCodeSessionIfBillingBlocked } from './claudeCodeLocalSession';
 import type { ProjectRestoreReport, ProjectWorkspace } from './projects/types';
-import {
-  e2bWorkspaceExecutor,
-  projectSessionEnv,
-  projectSessionPaths,
-  registerWorkspaceExecutor,
-  restoreWorkspace,
-} from './projects/workspace';
-import type { E2bSandboxLike } from './projects/workspaceExecutor';
+import { restoreSandboxProject } from './projects/workspace';
 import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
 import {
   applyUserUiSandboxEnvs,
@@ -469,19 +462,6 @@ async function createClaudeCodeSessionUnlocked(
     uploadedFiles,
     projectRestore: project.report,
   };
-}
-
-/** Restore a project into an E2B sandbox; ws-server runs its startup on boot. */
-async function restoreSandboxProject(
-  taskId: string,
-  sandbox: E2bSandboxLike,
-  workspace: ProjectWorkspace | null
-): Promise<{ envs: Record<string, string> | null; report: ProjectRestoreReport | null }> {
-  if (!workspace) return { envs: null, report: null };
-  const home = '/home/user';
-  registerWorkspaceExecutor(taskId, e2bWorkspaceExecutor(sandbox, home));
-  const report = await restoreWorkspace(taskId, workspace);
-  return { envs: projectSessionEnv(projectSessionPaths(home), workspace.project.name), report };
 }
 
 export async function createCodexCodeSession(

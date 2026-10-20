@@ -107,7 +107,7 @@ export interface ProjectRestoreReport {
     branch: string | null;
     headSha: string | null;
     cloned: boolean;
-    source: 'remote' | 'bundle' | 'empty';
+    source: 'remote' | 'bundle' | 'empty' | 'existing';
     error?: string;
   };
   localWork: { stash: string | null; branches: string[]; patchPath: string | null };

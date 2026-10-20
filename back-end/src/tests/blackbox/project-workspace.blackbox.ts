@@ -46,7 +46,7 @@ import {
 } from '../../providers/claudeCodeLocalSession';
 import { prisma } from '../../providers/database';
 import { prepareSessionProject } from '../../providers/projects/session';
-import { runProjectStartup } from '../../providers/projects/workspace';
+import { restoreWorkspace, runProjectStartup } from '../../providers/projects/workspace';
 import {
   anonymousSession,
   assert,
@@ -301,6 +301,29 @@ test('sync → restore → startup ok, with incremental re-sync and no secret le
   const untracked = sh(repo, 'git show "stash@{0}:untracked-note.txt"');
   assert(untracked.includes('untracked work'), 'untracked file in the stash');
   assert(existsSync(join(home, '.rose/project/uncommitted-r3.patch')), 'patch file kept');
+
+  // Resume (W5 hook): restoring into an existing workspace keeps the session's
+  // branch and local work, and refreshes env files.
+  sh(repo, 'git checkout -q -b agent-work && echo wip > agent-wip.txt');
+  writeFileSync(join(repo, 'app', '.env.local'), 'LOCALLY_EDITED=1\n');
+  const stashesBefore = sh(repo, 'git stash list').split('\n').filter(Boolean).length;
+  const resumed = await restoreWorkspace(taskId, await prepareSessionProject(s.userId, project.id));
+  assert(
+    resumed.checkout.source === 'existing',
+    `resume keeps the checkout: ${resumed.checkout.source}`
+  );
+  assert(
+    resumed.checkout.branch === 'agent-work',
+    `resume keeps the branch: ${resumed.checkout.branch}`
+  );
+  assert(existsSync(join(repo, 'agent-wip.txt')), 'resume keeps uncommitted session work');
+  const stashesAfter = sh(repo, 'git stash list').split('\n').filter(Boolean).length;
+  assert(stashesAfter === stashesBefore, 'resume does not re-stash synced work');
+  assert(
+    readFileSync(join(repo, 'app', '.env.local'), 'utf8') === 'APP_MODE=staging\n',
+    'resume rewrites env files from the project'
+  );
+  leakTexts.push(['resume report', JSON.stringify(resumed)]);
 
   const rerun = await runProjectStartup(taskId);
   assert(rerun.status === 'ok' && rerun.exitCode === 0, `rerun ok: ${JSON.stringify(rerun)}`);

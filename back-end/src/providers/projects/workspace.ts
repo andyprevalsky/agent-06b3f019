@@ -24,10 +24,13 @@ import { STARTUP_RUNNER_SCRIPT } from './startupRunner';
 import { findSessionProject, prepareProjectWorkspace } from './store';
 import type { ProjectRestoreReport, ProjectStartupReport, ProjectWorkspace } from './types';
 import {
+  e2bWorkspaceExecutor,
   localWorkspaceExecutor,
   registerWorkspaceExecutor,
   shq,
+  unregisterWorkspaceExecutor,
   workspaceExecutorFor,
+  type E2bSandboxLike,
   type WorkspaceExecutor,
 } from './workspaceExecutor';
 
@@ -155,14 +158,30 @@ async function writeBundle(ctx: RestoreContext): Promise<string | null> {
   return writePrivate(ctx, `${PROJECT_DIR}/repo-r${ctx.ws.revision}.bundle`, ctx.ws.gitBundle);
 }
 
-async function restoreCheckout(ctx: RestoreContext, bundlePath: string | null): Promise<void> {
+async function readHead(ctx: RestoreContext): Promise<void> {
+  const head = await git(ctx, 'rev-parse HEAD');
+  const current = await git(ctx, 'symbolic-ref --short -q HEAD');
+  ctx.report.checkout.headSha = head.exitCode === 0 ? head.stdout.trim() : null;
+  ctx.report.checkout.branch = current.exitCode === 0 ? current.stdout.trim() : null;
+}
+
+/**
+ * Fresh workspace: clone (remote, else full bundle, else empty repo) and check
+ * out the default branch. An existing workspace (resume) is left exactly as
+ * the session left it. Returns false for an existing workspace.
+ */
+async function restoreCheckout(ctx: RestoreContext, bundlePath: string | null): Promise<boolean> {
   const { ws, report } = ctx;
   if (await repoExists(ctx)) {
-    report.warnings.push('Workspace already present; kept the existing checkout');
-  } else if (ws.cloneUrl || ws.project.repoUrl) {
+    report.checkout.source = 'existing';
+    report.warnings.push('Workspace already present; kept its branch and local work');
+    await readHead(ctx);
+    return false;
+  }
+  if (ws.cloneUrl || ws.project.repoUrl) {
     await cloneInto(ctx, ws.cloneUrl ?? ws.project.repoUrl!, 'remote');
   }
-  if (!report.checkout.cloned && !(await repoExists(ctx))) {
+  if (!report.checkout.cloned) {
     const fullBundle = bundlePath !== null && ws.manifest?.git?.bundleKind === 'full';
     if (!(fullBundle && (await cloneInto(ctx, bundlePath, 'bundle')))) {
       const init = await ctx.ex.run(
@@ -177,10 +196,8 @@ async function restoreCheckout(ctx: RestoreContext, bundlePath: string | null): 
   if (report.checkout.source !== 'empty' && !(await checkoutBranch(ctx, branch))) {
     report.warnings.push(`Default branch ${branch} not found; kept the cloned HEAD`);
   }
-  const head = await git(ctx, 'rev-parse HEAD');
-  const current = await git(ctx, 'symbolic-ref --short -q HEAD');
-  report.checkout.headSha = head.exitCode === 0 ? head.stdout.trim() : null;
-  report.checkout.branch = current.exitCode === 0 ? current.stdout.trim() : null;
+  await readHead(ctx);
+  return true;
 }
 
 async function restoreLocalCommits(ctx: RestoreContext, bundlePath: string | null): Promise<void> {
@@ -240,25 +257,37 @@ async function writeProjectFiles(ctx: RestoreContext): Promise<string[]> {
       ctx.report.warnings.push(`Skipped unsafe file path ${file.path.slice(0, 200)}`);
       continue;
     }
-    if (file.linkTarget) {
-      const stored = await writePrivate(ctx, `${PROJECT_DIR}/files/${rel}`, file.content);
-      const link = `${ctx.paths.repoDir}/${rel}`;
-      const out = await ctx.ex.run(
-        `mkdir -p "$(dirname ${shq(link)})" && ln -sfn ${shq(stored)} ${shq(link)}`,
-        { timeoutMs: SHORT_TIMEOUT_MS }
+    try {
+      written.push(await writeProjectFile(ctx, rel, file));
+      ctx.report.filesWritten.push(rel);
+    } catch (err) {
+      // One unsafe destination (e.g. a symlinked directory) must not abort the restore.
+      ctx.report.warnings.push(
+        `Skipped ${rel}: ${err instanceof Error ? err.message : String(err)}`.slice(0, 400)
       );
-      if (out.exitCode !== 0) {
-        ctx.report.warnings.push(`Could not link ${rel}: ${out.stderr.slice(-300)}`);
-        continue;
-      }
-      ctx.report.symlinks.push({ path: rel, target: stored });
-      written.push(stored);
-    } else {
-      written.push(await ctx.ex.writeFileInside(ctx.paths.repoDir, rel, file.content, 0o600));
     }
-    ctx.report.filesWritten.push(rel);
   }
   return written;
+}
+
+/** Write one env/config file; external links become a 0600 copy + symlink. */
+async function writeProjectFile(
+  ctx: RestoreContext,
+  rel: string,
+  file: ProjectWorkspace['files'][number]
+): Promise<string> {
+  if (!file.linkTarget) {
+    return ctx.ex.writeFileInside(ctx.paths.repoDir, rel, file.content, 0o600);
+  }
+  const stored = await writePrivate(ctx, `${PROJECT_DIR}/files/${rel}`, file.content);
+  const link = `${ctx.paths.repoDir}/${rel}`;
+  const out = await ctx.ex.run(
+    `mkdir -p "$(dirname ${shq(link)})" && ln -sfn ${shq(stored)} ${shq(link)}`,
+    { timeoutMs: SHORT_TIMEOUT_MS }
+  );
+  if (out.exitCode !== 0) throw new Error(`could not link: ${out.stderr.slice(-300)}`);
+  ctx.report.symlinks.push({ path: rel, target: stored });
+  return stored;
 }
 
 async function restoreInternalLinks(ctx: RestoreContext): Promise<void> {
@@ -355,9 +384,10 @@ export async function restoreWorkspace(
   );
   if (mk.exitCode !== 0) throw new Error(`Could not prepare ${paths.projectDir}`);
   const bundlePath = await writeBundle(ctx);
-  await restoreCheckout(ctx, bundlePath);
-  await restoreLocalCommits(ctx, bundlePath);
-  await restoreUncommitted(ctx);
+  if (await restoreCheckout(ctx, bundlePath)) {
+    await restoreLocalCommits(ctx, bundlePath);
+    await restoreUncommitted(ctx);
+  }
   const written = await writeProjectFiles(ctx);
   await restoreInternalLinks(ctx);
   await toolchainWarnings(ctx);
@@ -443,8 +473,47 @@ export async function restoreLocalProject(
 ): Promise<{ envs: Record<string, string>; report: ProjectRestoreReport | null }> {
   if (!workspace) return { envs: {}, report: null };
   registerWorkspaceExecutor(sessionId, localWorkspaceExecutor(homeDir, baseEnv));
-  const report = await restoreWorkspace(sessionId, workspace);
+  const report = await restoreRegistered(sessionId, workspace);
   return { envs: projectSessionEnv(projectSessionPaths(homeDir), workspace.project.name), report };
+}
+
+/** restoreWorkspace, unregistering the executor when the restore itself throws. */
+export async function restoreRegistered(
+  sessionId: string,
+  workspace: ProjectWorkspace
+): Promise<ProjectRestoreReport> {
+  try {
+    return await restoreWorkspace(sessionId, workspace);
+  } catch (err) {
+    unregisterWorkspaceExecutor(sessionId);
+    throw err;
+  }
+}
+
+const E2B_HOME = '/home/user';
+
+/**
+ * E2B: restore `workspace` into the sandbox HOME and return the ws-server env
+ * (no-op without a project). A restore that throws kills the sandbox: no DB
+ * row exists yet, so nothing else could ever close it.
+ */
+export async function restoreSandboxProject(
+  sessionId: string,
+  sandbox: E2bSandboxLike & { kill(): Promise<unknown> },
+  workspace: ProjectWorkspace | null
+): Promise<{ envs: Record<string, string> | null; report: ProjectRestoreReport | null }> {
+  if (!workspace) return { envs: null, report: null };
+  registerWorkspaceExecutor(sessionId, e2bWorkspaceExecutor(sandbox, E2B_HOME));
+  try {
+    const report = await restoreRegistered(sessionId, workspace);
+    return {
+      envs: projectSessionEnv(projectSessionPaths(E2B_HOME), workspace.project.name),
+      report,
+    };
+  } catch (err) {
+    await sandbox.kill().catch(() => undefined);
+    throw err;
+  }
 }
 
 export { prepareProjectWorkspace };
