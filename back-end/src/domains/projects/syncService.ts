@@ -36,13 +36,7 @@ import {
   MAX_PATCH_ENVELOPE_CHARS,
 } from './config';
 import * as repo from './repo';
-import {
-  ProjectError,
-  requireProject,
-  sanitizeRepoUrl,
-  toProjectDto,
-  variablesOf,
-} from './service';
+import { ProjectError, requireProject, sanitizeRepoUrl, projectDto, variablesOf } from './service';
 import type { SyncFileBody, SyncPushBody } from './types';
 
 function secretsOrThrow<T>(fn: () => T): T {
@@ -285,7 +279,7 @@ export async function applySyncPush(userId: string, projectId: string, body: Syn
   });
   const refreshed = await requireProject(userId, project.id);
   return {
-    project: toProjectDto(refreshed, await repo.countEnvFiles(project.id)),
+    project: await projectDto(userId, refreshed),
     revision,
     written: planned.filter((p) => p.changed).map((p) => p.write.path),
     unchanged: planned.filter((p) => !p.changed).map((p) => p.write.path),
