@@ -1,11 +1,7 @@
 import { MessageChannel, Prisma } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import { createLogger } from '../../providers/logger';
-import {
-  MessageAccountRemovedError,
-  upsertPersonAndMessageRecords,
-  type ContactToUpsert,
-} from './personMessageManager';
+import { upsertPersonAndMessageRecords, ContactToUpsert } from './personMessageManager';
 
 const log = createLogger('TelegramParser');
 
@@ -29,21 +25,6 @@ export interface TelegramMessageData {
   contactHandle?: string;
 }
 
-/**
- * The Telegram account (user id) an upload came from and its Integration row.
- * Absent for legacy single-account uploads.
- */
-export interface TelegramAccountScope {
-  accountId: string;
-  integrationId: string;
-  accessedAt?: string;
-}
-
-/** Account-scoped rows namespace the per-account Telegram message id. */
-export function telegramExternalId(messageId: string, accountId?: string): string {
-  return accountId === undefined ? messageId : `${accountId}:${messageId}`;
-}
-
 const normalizeHandle = (handle?: string | null): string => {
   if (!handle) return '';
   const trimmed = handle.trim();
@@ -56,10 +37,7 @@ const normalizeHandle = (handle?: string | null): string => {
 /**
  * Transform Telegram contact data to the shared ContactToUpsert format
  */
-function transformToContactToUpsert(
-  contact: TelegramContactWithMessages,
-  accountId?: string
-): ContactToUpsert {
+function transformToContactToUpsert(contact: TelegramContactWithMessages): ContactToUpsert {
   const contactId = contact.contact_id;
   // Telegram IDs are typically numeric user IDs
   const isEmail = contactId.includes('@');
@@ -79,43 +57,15 @@ function transformToContactToUpsert(
       to: msg.is_from_me ? msg.contactHandle || contactId : 'me',
       timestamp: new Date(msg.date),
       message: msg.text,
-      // Telegram message ID for deduplication (namespaced per account).
-      externalId: telegramExternalId(msg.id, accountId),
+      externalId: msg.id, // Telegram message ID for deduplication
     })),
   };
-}
-
-async function findTargetIntegration(userId: string, scope?: TelegramAccountScope) {
-  if (scope === undefined) {
-    return prisma.integration.findUnique({
-      where: { userId_name_accountId: { userId, name: 'telegram', accountId: '' } },
-    });
-  }
-  return prisma.integration.findFirst({
-    where: { id: scope.integrationId, userId, name: 'telegram', accountId: scope.accountId },
-  });
-}
-
-function nextConfig(
-  existing: Prisma.JsonObject,
-  totalMessages: number,
-  scope?: TelegramAccountScope
-): Prisma.JsonObject {
-  const config: Prisma.JsonObject = {
-    ...existing,
-    lastUploadedAt: new Date().toISOString(),
-    totalMessagesProcessed: Number(existing.totalMessagesProcessed ?? 0) + totalMessages,
-    batchesReceived: Number(existing.batchesReceived ?? 0) + 1,
-  };
-  if (scope?.accessedAt !== undefined) config.lastFrontendAccessAt = scope.accessedAt;
-  return config;
 }
 
 export async function parseTelegramData(
   userId: string,
   contacts: TelegramContactWithMessages[],
-  jobId: string,
-  scope?: TelegramAccountScope
+  jobId: string
 ): Promise<void> {
   let skippedContacts = 0;
   const sanitizedContacts = contacts.reduce<TelegramContactWithMessages[]>((acc, contact) => {
@@ -150,43 +100,32 @@ export async function parseTelegramData(
     });
   }
 
-  const integration = await findTargetIntegration(userId, scope);
+  const integration = await prisma.integration.findUnique({
+    where: { userId_name_accountId: { userId, name: 'telegram', accountId: '' } },
+  });
+
   if (!integration) {
-    if (scope !== undefined) throw new MessageAccountRemovedError();
     throw new Error('Telegram integration not found');
   }
 
   // Transform to shared format and call the manager
-  const contactsToUpsert = sanitizedContacts.map((contact) =>
-    transformToContactToUpsert(contact, scope?.accountId)
-  );
-  const result = await upsertPersonAndMessageRecords(
-    userId,
-    contactsToUpsert,
-    jobId,
-    undefined,
-    undefined,
-    scope === undefined
-      ? undefined
-      : { sourceAccountId: scope.accountId, integrationId: scope.integrationId }
-  );
+  const contactsToUpsert = sanitizedContacts.map(transformToContactToUpsert);
+  const result = await upsertPersonAndMessageRecords(userId, contactsToUpsert, jobId);
 
-  // Update Integration metadata. `updateMany` keeps this a no-op when the
-  // account was removed after its last batch was stored.
+  // Update Integration metadata
   const existingConfig =
     (integration.config as Prisma.JsonObject | null) || ({} as Prisma.JsonObject);
-  const now = new Date();
-  await prisma.integration.updateMany({
+  const existingTotalMessages = Number(existingConfig.totalMessagesProcessed ?? 0);
+  const existingBatches = Number(existingConfig.batchesReceived ?? 0);
+  await prisma.integration.update({
     where: { id: integration.id },
     data: {
-      config: nextConfig(existingConfig, totalMessages, scope),
-      ...(scope !== undefined && {
-        status: 'CONNECTED',
-        isActive: true,
-        lastSyncAt: now,
-        lastSuccessfulSyncAt: now,
-        failureReason: null,
-      }),
+      config: {
+        ...existingConfig,
+        lastUploadedAt: new Date().toISOString(),
+        totalMessagesProcessed: existingTotalMessages + totalMessages,
+        batchesReceived: existingBatches + 1,
+      },
     },
   });
 
