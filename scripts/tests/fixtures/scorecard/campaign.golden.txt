@@ -1,11 +1,13 @@
 🧪 EXPERIMENT #1 · 🔵 RUNNING
 mixed5 · 5 scheduled · cloud · src UNRECORDED
 Triggered Oct 18, 12:28:52 PM PDT
-experiments/day warming 1h00m · 1 launch (rate after 1 d)
+24.0 experiments/day · 1 launch / 0.04 d · warming 1h00m
 Since last benchmark ended: RUNNING
 QUEUED 1 · IN_PROGRESS 1 · COMPLETED 3/5
-PASS 1/2 50.0% · HARNESS 0 · INFRA 50.0% (2/4 terminal attempts)
-AGENT FAIL 1
+PASS 1 · HARNESS FAILURE 0 · INFRA FAILURE 1
+AGENT FAILURE 1
+Pass rate 50.0% (1/2 scored)
+Infra attempts 2/4
 Stop at 1/5 unique infra-failed jobs (5%)
      1 AGENT FAIL: Expected tool 'spawn_browser_agent' not found in messages
      1 INFRA: reason UNRECORDED

@@ -317,12 +317,28 @@ class Scorecard(unittest.TestCase):
         (admission / "shard-02/run/global-abort.json").unlink()
         self.assertIsNone(render(admission, self.f)["experiment"]["progress"], "undelivered abort is not proof")
 
-    def test_experiments_per_day_warms_until_one_day_of_goal_history(self):
+    def test_headline_progress_precedes_exact_failure_counts(self):
+        data = render(self.f.campaign(), self.f)
+        document = self.valid(data)
+        kpis = document.split('data-section="kpis"', 1)[1].split('</section>', 1)[0]
+        labels = re.findall(r'<div class="k">([^<]+)</div>', kpis)
+        self.assertEqual(labels[:3], ["QUEUED", "IN_PROGRESS", "COMPLETED"])
+        self.assertNotIn("%", kpis)
+        outcomes = document.split('data-section="outcomes"', 1)[1].split('</section>', 1)[0]
+        self.assertLess(outcomes.index("PASS"), outcomes.index("HARNESS FAILURE"))
+        self.assertLess(outcomes.index("HARNESS FAILURE"), outcomes.index("INFRA FAILURE"))
+        self.assertIn("INFRA FAILURE 1", outcomes)
+        self.assertLess(outcomes.index("INFRA FAILURE"), outcomes.index("AGENT FAILURE"))
+        text = CARD["render_text"](data)
+        self.assertIn("PASS 1 · HARNESS FAILURE 0 · INFRA FAILURE 1", text)
+        self.assertEqual(data["experiment"]["progress"], {"queued": 1, "in_progress": 1, "completed": 3, "unobserved": 0})
+
+    def test_experiments_per_day_remains_numeric_while_warming(self):
         admission = self.f.barrier_abort()
         text = CARD["render_text"](render(admission, self.f))
-        self.assertIn("experiments/day warming 1h00m · 1 launch (rate after 1 d)", text)
-        self.assertNotIn("24.0 experiments/day", text)
-        self.assertIn("experiments/day warming 1h00m", self.valid(render(admission, self.f)))
+        self.assertIn("24.0 experiments/day · 1 launch / 0.04 d · warming 1h00m", text)
+        self.assertNotIn("rate after 1 d", text)
+        self.assertIn("24.0 experiments/day", self.valid(render(admission, self.f)))
         later = CARD["build"](admission, ledger=self.f.ledger, now=T0 + 2 * 86400)
         self.assertIn("0.5 experiments/day · 1 launch / 2.00 d", CARD["render_text"](later))
 
@@ -685,6 +701,11 @@ class ExperimentsLedger(unittest.TestCase):
             self.assertEqual(g1[0]["end"]["ended_at"], T0 + 5)
             rate = LEDGER["launch_rate"](g1, T0 + 43200)
             self.assertEqual((rate["launches"], round(rate["days"], 2), round(rate["per_day"], 1)), (2, 0.5, 4.0))
+            early = LEDGER["launch_rate"](g1, T0 + 30)
+            self.assertEqual(early["per_day"], 5760.0, "use the actual 30 seconds, not a synthetic minute")
+            zero = LEDGER["launch_rate"](g1[:1], T0)
+            self.assertIsNone(zero["per_day"], "no rate can be inferred at zero elapsed time")
+            self.assertIn("no elapsed goal time", CARD["_rate_text"]({"rate": zero, "generated_at": T0}))
 
     def test_oversized_entry_drops_optional_fields_and_never_writes_partial_line(self):
         with tempfile.TemporaryDirectory() as name:

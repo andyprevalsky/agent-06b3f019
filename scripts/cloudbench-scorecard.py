@@ -923,16 +923,19 @@ def _infra_text(exp) -> tuple[str, str, str]:
 
 
 def _rate_text(card) -> str:
-    """experiments/day for the goal; ``warming`` until the goal clock spans RATE_MIN_DAYS."""
+    """Observed launch rate remains numeric during the first goal day."""
     rate = card.get("rate")
     if not rate:
         return "experiments/day UNRECORDED (no ledger launch)"
     launches = f'{rate["launches"]} launch{"es" if rate["launches"] != 1 else ""}'
+    if rate.get("per_day") is None:
+        return f'experiments/day UNMEASURED (no elapsed goal time) · {launches}'
+    text = f'{rate["per_day"]:.1f} experiments/day · {launches} / {rate["days"]:.2f} d'
     if rate.get("warming"):
-        age = duration(card["generated_at"] - rate["goal_started_at"])
-        return f'experiments/day warming {age} · {launches} (rate after {ledger_mod.RATE_MIN_DAYS:g} d)'
-    return (f'{rate["per_day"]:.1f} experiments/day · {launches} / {rate["days"]:.2f} d'
-            + (" (lower bound)" if rate.get("backfilled") else ""))
+        text += ' · warming ' + duration(card["generated_at"] - rate["goal_started_at"])
+    if rate.get("backfilled"):
+        text += " (lower bound)"
+    return text
 
 
 def render_html(card: dict) -> str:
@@ -954,8 +957,7 @@ def render_html(card: dict) -> str:
     since_html = (_span("run", "RUNNING") if since.get("state") == "RUNNING" else
                   f'<b>{e(duration(since["age"]))}</b> ago · {e(since["label"])} ended {e(pacific(since["at"]))}'
                   if since.get("state") == "ENDED" else _span("warn", "END UNRECORDED"))
-    rate_html = (_span("warn", _rate_text(card)) if not rate or rate.get("warming") else
-                 f'<b>{rate["per_day"]:.1f}</b> ' + e(_rate_text(card).split(" ", 1)[1]))
+    rate_html = _span("warn" if not rate or rate.get("warming") else "", _rate_text(card))
     goal_elapsed = (f' · goal elapsed {e(duration(card["generated_at"] - rate["goal_started_at"]))}' if rate else "")
     out.append('<section data-section="header"><div class="title">'
                f'<span>🧪 Experiment {e(number)}</span>'
@@ -965,48 +967,38 @@ def render_html(card: dict) -> str:
                f'<div class="sub">Triggered {e(pacific(exp.get("triggered_at")))}{goal_elapsed}</div>'
                f'<div class="sub">{rate_html}</div>'
                f'<div class="sub">Since last benchmark ended: {since_html}</div></section>')
-    # KPI tiles
-    scored = exp.get("scored")
-    pass_value = pct(o["PASS"], scored) if o and scored else "NO SCORED TASKS" if o else "UNMEASURED"
-    pass_rate = o["PASS"] / scored if o and scored else None
-    pass_cls = "na" if pass_rate is None else "ok" if pass_rate >= 0.9 else "warn" if pass_rate >= 0.5 else "bad"
-    pass_sub = f'{o["PASS"]}/{scored} scored' if o and scored else "PASS + AGENT FAIL denominator"
-    infra_value, infra_cls, infra_sub = _infra_text(exp)
+    # Logical job counts lead; outcome counts follow immediately below.
     progress = exp.get("progress")
-    if progress:
-        prog_value = f'{progress["completed"]}/{total}' if total else str(progress["completed"])
-        prog_sub = f'Q {progress["queued"]} · IP {progress["in_progress"]} · C {progress["completed"]}' + (
-            f' · unobserved {progress["unobserved"]}' if progress["unobserved"] else "")
-        prog_cls = "ok" if total and progress["completed"] == total else "run"
-        if exp.get("never_started"):
-            prog_sub, prog_cls = prog_sub + " · never started", "na"
-    else:
-        prog_value, prog_sub, prog_cls = "UNMEASURED", "no job records yet", "warn"
     end_or_now = exp.get("ended_at") or (card["generated_at"] if state == "RUNNING" else None)
     elapsed = duration(end_or_now - exp["triggered_at"]) if end_or_now and exp.get("triggered_at") else "UNMEASURED"
     window = f'exec window {duration(exp["window_s"])}' if exp.get("window_s") else "exec window UNRECORDED"
     threshold = exp.get("infra_threshold")
-    out.append('<section data-section="kpis"><div class="kpis">'
-               f'<div class="tile"><div class="k">✅ Pass</div><div class="v {pass_cls}">{e(pass_value)}</div><div class="s">{e(pass_sub)}</div></div>'
-               f'<div class="tile"><div class="k">🧯 Infra</div><div class="v {infra_cls}">{e(infra_value)}</div>'
-               f'<div class="s">{e(infra_sub)}{" · " if infra_sub else ""}stop at {e(threshold if threshold else "UNRECORDED")}</div></div>'
-               f'<div class="tile"><div class="k">📦 Progress</div><div class="v {prog_cls}">{e(prog_value)}</div><div class="s">{e(prog_sub)}</div></div>'
-               f'<div class="tile"><div class="k">⏱ Elapsed</div><div class="v {"run" if state == "RUNNING" else ""}">{e(elapsed)}</div>'
-               f'<div class="s">{e(window)}</div></div></div></section>')
+    tiles = []
+    for label, key in (("QUEUED", "queued"), ("IN_PROGRESS", "in_progress"), ("COMPLETED", "completed")):
+        count = str(progress[key]) if progress else "UNMEASURED"
+        detail = "logical tasks" if progress else "no job records yet"
+        if label == "COMPLETED" and progress:
+            detail = f'of {total} scheduled' if total else "recorded terminal outcomes"
+        if exp.get("never_started"):
+            detail += " · never started"
+        tiles.append(f'<div class="tile"><div class="k">{label}</div><div class="v {"run" if progress else "warn"}">{e(count)}</div><div class="s">{e(detail)}</div></div>')
+    out.append('<section data-section="kpis"><div class="kpis">' + "".join(tiles) + '</div></section>')
+    threshold = exp.get("infra_threshold")
     # Outcomes
     harness_text, harness_cls = _harness(exp)
     legend = []
-    for category in CATEGORIES:
+    labels = {"HARNESS": "HARNESS FAILURE", "INFRA": "INFRA FAILURE", "AGENT FAIL": "AGENT FAILURE"}
+    for category in ("PASS", "HARNESS", "INFRA", "AGENT FAIL", "UNKNOWN", "CANCELLED", "SKIPPED"):
         count = (o or {}).get(category, 0)
         always = category in ("PASS", "HARNESS", "INFRA")
         if not always and not count:
             continue
         if category == "HARNESS":
-            legend.append(f'<span class="{harness_cls}">■ HARNESS {e(harness_text)}</span>')
+            legend.append(f'<span class="{harness_cls}">■ HARNESS FAILURE {e(harness_text)}</span>')
             continue
         value = f"{count} · {pct(count, total)}" if o and total else "UNMEASURED"
         cls = "warn" if not o else "ok" if category == "INFRA" and not count else CATEGORY_CLASS[category]
-        legend.append(f'<span class="{cls}">■ {category} {e(value)}</span>')
+        legend.append(f'<span class="{cls}">■ {labels.get(category, category)} {e(value)}</span>')
     pending = (progress["queued"] + progress["in_progress"] + progress["unobserved"]) if progress else 0
     if pending:
         legend.append(f'<span class="na">■ never started {pending}</span>' if exp.get("never_started")
@@ -1032,7 +1024,7 @@ def render_html(card: dict) -> str:
         out.append(f'<section data-section="causes"><h2>Failure causes</h2><div class="note">{e(text)}</div></section>')
     # Timing / cost / cache / llm
     wall, execs, cost, cache = exp.get("wall"), exp.get("exec"), exp.get("cost"), exp.get("cache")
-    timing = [("Triggered", e(pacific(exp.get("triggered_at"))))]
+    timing = [("Triggered", e(pacific(exp.get("triggered_at")))), ("Elapsed", e(elapsed)), ("Execution window", e(window))]
     if exp.get("released_at"):
         timing.append(("Released", e(pacific(exp["released_at"]))))
     timing.append(("Ended", _span("run", "RUNNING") if state == "RUNNING" and not exp.get("ended_at")
@@ -1174,16 +1166,17 @@ def render_text(card: dict) -> str:
                  + (" · never started (start barrier aborted before release)" if exp.get("never_started") else "")
                  if prog else "QUEUED / IN_PROGRESS / COMPLETED UNMEASURED")
     harness, _ = _harness(exp)
-    infra_value, _, infra_sub = _infra_text(exp)
     if o:
-        scored = exp.get("scored") or 0
-        lines.append((f'PASS {o["PASS"]}/{scored} {pct(o["PASS"], scored)} · ' if scored else "PASS 0 · NO SCORED TASKS · ")
-                     + f'HARNESS {harness} · INFRA {infra_value}' + (f' ({infra_sub})' if infra_sub else ""))
-        extra = [f"{c} {o[c]}" for c in ("AGENT FAIL", "UNKNOWN", "CANCELLED", "SKIPPED") if o.get(c)]
+        lines.append(f'PASS {o["PASS"]} · HARNESS FAILURE {harness} · INFRA FAILURE {o["INFRA"]}')
+        extra = [f'{"AGENT FAILURE" if c == "AGENT FAIL" else c} {o[c]}' for c in ("AGENT FAIL", "UNKNOWN", "CANCELLED", "SKIPPED") if o.get(c)]
         if extra:
             lines.append(" · ".join(extra))
+        if exp.get("scored"):
+            lines.append(f'Pass rate {pct(o["PASS"], exp["scored"])} ({o["PASS"]}/{exp["scored"]} scored)')
+        if exp.get("terminal_attempts"):
+            lines.append(f'Infra attempts {exp.get("infra_attempts", 0)}/{exp["terminal_attempts"]}')
     else:
-        lines.append(f"PASS UNMEASURED · HARNESS {harness} · INFRA {infra_value}")
+        lines.append(f"PASS UNMEASURED · HARNESS FAILURE {harness} · INFRA FAILURE UNMEASURED")
     if exp.get("infra_threshold"):
         lines.append(f'Stop at {exp["infra_threshold"]}/{total} unique infra-failed jobs (5%)')
     for cat, text, count in exp.get("reasons") or []:

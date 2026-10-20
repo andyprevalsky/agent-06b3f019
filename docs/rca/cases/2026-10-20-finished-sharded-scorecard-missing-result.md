@@ -65,3 +65,17 @@ Parent asked to prioritize launch integration and report card observability gaps
 ## Reusable lesson
 
 Render a producer's terminal clock independently of result-publication completeness, retaining missing outcomes as explicit gaps.
+
+## Render contract follow-up
+
+Parent's real HTML inspection found KPI tiles led with pass/infra percentages,
+not the required logical counts, and numeric launch rate was hidden during
+warming. The existing owning scorecard suite reproduced both failures before
+repair. The renderer now leads with QUEUED / IN_PROGRESS / COMPLETED and
+then PASS / HARNESS FAILURE / INFRA FAILURE; agent failure, cancellation and
+unknown counts remain separate. Numeric rate remains visible while warming.
+The rate uses actual elapsed seconds instead of a synthetic one-minute floor;
+zero elapsed time remains explicitly unmeasured. User instruction and
+.claude/shared/report-display-format.md are the authoritative display contract.
+Golden text fixtures and HTML-order, count, numeric-rate and zero-time tests
+cover the repair. No receipt, outcome or producer timestamp is changed.
