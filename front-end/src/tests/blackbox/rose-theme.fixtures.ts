@@ -10,6 +10,8 @@
  * query-box-desktop.html is the flagged (Rose Desktop) query box surface in
  * light mode, captured at ui-integration 511197ab0 just before the dark query
  * box surface / textarea / model chip (FE-13 visual pass) were added.
+ * popular-goals-desktop.html is the flagged Popular Goals row in light mode,
+ * captured at ui-integration d413b93f5 before its dark pills were added.
  *
  * Plain .ts (createElement, no JSX) so the module exports helpers, not components.
  */
@@ -20,6 +22,7 @@ import { Fragment, createElement, useLayoutEffect, type ReactNode } from 'react'
 import { BackgroundPattern } from '@/features/terminal/components/BackgroundPattern';
 import { TerminalHeader } from '@/features/terminal/components/TerminalHeader';
 import QueryInput from '@/features/terminal-component-group/components/QueryInput';
+import { PopularGoalsCarousel } from '@/features/terminal/components/PopularGoalsCarousel';
 import type { DripStyles } from '@/features/terminal/types';
 import { RoseThemeProvider, useRoseTheme } from '@/features/rose-theme';
 
@@ -32,6 +35,7 @@ export const LIGHT_MARKUP_FIXTURES = {
   backgroundMobile: 'background-mobile.html',
   headerDesktop: 'header-desktop.html',
   queryBoxDesktop: 'query-box-desktop.html',
+  popularGoalsDesktop: 'popular-goals-desktop.html',
 } as const;
 
 export type LightMarkupFixture = keyof typeof LIGHT_MARKUP_FIXTURES;
@@ -120,6 +124,17 @@ export function queryBoxElement() {
     ],
     dripStyles: DRIP_STYLES,
     drippiness: 10,
+  });
+}
+
+/** The flagged Popular Goals row with the drip border on (borderColor > 0). */
+export function popularGoalsElement() {
+  return createElement(PopularGoalsCarousel, {
+    tickerOffset: 0,
+    tickerRef: { current: null },
+    onGoalClick: noop,
+    dripStyles: DRIP_STYLES,
+    borderColor: 10,
   });
 }
 

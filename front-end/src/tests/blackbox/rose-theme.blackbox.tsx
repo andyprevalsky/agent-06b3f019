@@ -23,6 +23,7 @@ import {
   backgroundElement,
   headerElement,
   headerPillMarkup,
+  popularGoalsElement,
   queryBoxElement,
   queryBoxMarkup,
   readLightMarkup,
@@ -434,6 +435,44 @@ describe('dark query box (mock panels/dark.js; FE-13 visual pass)', () => {
     expect(htmlIsDark()).toBe(false);
     expect(surface().style.backgroundColor).toBe('rgba(255, 255, 255, 0.6)');
     expect(surface().outerHTML).not.toMatch(/#2f2f2c|#f2f2ef|#8c8c86|#e4e4df|47, 47, 44/);
+  });
+});
+
+describe('dark Popular Goals pills (mock button[class*="border"])', () => {
+  const row = () => screen.getByTestId('popular-goals-row');
+  const pills = () => within(screen.getByTestId('popular-goals-track')).getAllByRole('button');
+
+  it('light control: the flagged row renders the stock markup byte-for-byte', () => {
+    renderWithProviders(themed(popularGoalsElement()));
+    expect(`${row().outerHTML}\n`).toBe(readLightMarkup('popularGoalsDesktop'));
+  });
+
+  it('dark: #2f2f2c fill, 12% white border, #e4e4df text, same pill shape; label #a3a39d', () => {
+    storeDark(ROSE_THEME_USER);
+    renderWithProviders(themed(popularGoalsElement()));
+    expect(htmlIsDark()).toBe(true);
+    for (const pill of pills()) {
+      expect(pill).toHaveClass(
+        'dark:bg-[#2f2f2c]',
+        'dark:text-[#e4e4df]',
+        'dark:hover:bg-[#383835]',
+        'px-3',
+        'py-1',
+        'text-xs',
+        'rounded-full',
+        'border',
+      );
+      // The inline drip border (whitish) is replaced, not layered under a class.
+      expect(pill.style.borderColor).toBe('rgba(255, 255, 255, 0.12)');
+    }
+    expect(within(row()).getByText('Popular Goals')).toHaveClass('dark:text-[#a3a39d]');
+  });
+
+  it('switches back to the exact stock row in the commit that leaves dark', () => {
+    storeDark(ROSE_THEME_USER);
+    renderWithProviders(themed(popularGoalsElement()));
+    toggleThemeInOneCommit();
+    expect(`${row().outerHTML}\n`).toBe(readLightMarkup('popularGoalsDesktop'));
   });
 });
 
