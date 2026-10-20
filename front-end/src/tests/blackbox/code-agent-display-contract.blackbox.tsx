@@ -10,7 +10,9 @@
  *      the ROOT's query box, sourced from the existing attention-request list.
  *   2. inline media     one ASSISTANT row per item (file_pointer + display
  *      {placement 'inline', kind 'media', sha256, mime_type, caption?}) → one
- *      gallery; text/html in a sandboxed (allow-scripts) cross-origin frame.
+ *      gallery; text/html frames file_pointer.usercontent_url (a22e8a0b4) in a
+ *      sandboxed (allow-scripts) cross-origin frame; older rows without it get
+ *      a plain open/download link to the storage URL, never a frame.
  *   3. approvals        ApprovalChip labelled from requestingAgent.
  *   4. send_message_to_user from a code agent (subAgentId = task) renders in the
  *      root trajectory with its pinned inline view ({view, versionId, props}).
@@ -33,6 +35,7 @@ import {
 import { derivePendingApproval } from '@/features/terminal/hooks/derivations';
 import type { Message } from '@/lib/api';
 
+import { capturedRequests } from './msw/capture';
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
 import {
@@ -330,6 +333,18 @@ function mediaMessage(
   );
 }
 
+const USERCONTENT = 'https://usercontent.rose.test';
+
+/** A text/html display row as displayService writes it since a22e8a0b4 (usercontent_url set). */
+function htmlMessage(index: number, usercontentUrl: string) {
+  const row = mediaMessage(index, 'text/html', 'html');
+  return { ...row, file_pointer: { ...row.file_pointer!, usercontent_url: usercontentUrl } };
+}
+
+function attachmentUrlRequests() {
+  return capturedRequests.filter((r) => /\/attachments\/[^/]+\/url$/.test(new URL(r.url).pathname));
+}
+
 function serveSignedUrls() {
   server.use(
     http.get(`${API_BASE}/agents/:agentId/attachments/:fileId/url`, ({ params }) =>
@@ -368,14 +383,58 @@ describe('L-DISPLAY 2: inline media through the gallery', () => {
     expect(screen.getAllByTestId('inline-media')).toHaveLength(2);
   });
 
-  it('text/html renders in a sandboxed allow-scripts frame on a separate origin', async () => {
+  it('text/html frames file_pointer.usercontent_url in an allow-scripts sandbox, never storage', async () => {
     serveSignedUrls();
-    renderItems([mediaMessage(4, 'text/html', 'html', 'The game')]);
+    renderItems([htmlMessage(4, `${USERCONTENT}/usercontent/display/${ROOT_AGENT_ID}/game.html`)]);
     const frame = await screen.findByTitle('item-4.html');
     expect(frame.tagName).toBe('IFRAME');
+    // Exactly allow-scripts: no allow-same-origin, so the page gets an opaque origin.
     expect(frame).toHaveAttribute('sandbox', 'allow-scripts');
-    expect(frame).toHaveAttribute('src', `${STORAGE}/signed/fp-4`);
+    expect(frame).toHaveAttribute(
+      'src',
+      `${USERCONTENT}/usercontent/display/${ROOT_AGENT_ID}/game.html`,
+    );
+    expect(screen.queryByTestId('display-html-link')).not.toBeInTheDocument();
     expect(screen.queryByTestId('inline-media')).not.toBeInTheDocument();
+    // The frame never asks for the storage URL.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(attachmentUrlRequests()).toHaveLength(0);
+  });
+
+  it('an older row without usercontent_url is a plain open/download link, never framed', async () => {
+    serveSignedUrls();
+    renderItems([mediaMessage(4, 'text/html', 'html', 'The game')]);
+    const link = await screen.findByTestId('display-html-link');
+    expect(link.tagName).toBe('A');
+    expect(link).toHaveAttribute('href', `${STORAGE}/signed/fp-4`);
+    expect(link).toHaveAttribute('download', 'item-4.html');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(link).toHaveTextContent('Open item-4.html');
+    expect(document.querySelector('iframe')).toBeNull();
+  });
+
+  it('a same-origin usercontent_url is never framed (falls back to the link)', async () => {
+    serveSignedUrls();
+    renderItems([htmlMessage(5, `${window.location.origin}/usercontent/display/x/y.html`)]);
+    expect(await screen.findByTestId('display-html-link')).toHaveAttribute(
+      'href',
+      `${STORAGE}/signed/fp-5`,
+    );
+    expect(document.querySelector('iframe')).toBeNull();
+  });
+
+  it('an unsignable older row shows the unavailable notice, no link or frame', async () => {
+    server.use(
+      http.get(`${API_BASE}/agents/:agentId/attachments/:fileId/url`, () =>
+        HttpResponse.json({ error: 'gone' }, { status: 404 }),
+      ),
+    );
+    renderItems([mediaMessage(4, 'text/html', 'html')]);
+    expect(await screen.findByTestId('display-html-unavailable')).toHaveTextContent(
+      'item-4.html — preview unavailable',
+    );
+    expect(screen.queryByTestId('display-html-link')).not.toBeInTheDocument();
+    expect(document.querySelector('iframe')).toBeNull();
   });
 
   it("a code agent's media rows (subAgentId = task) stay in the root trajectory", () => {
@@ -390,11 +449,17 @@ describe('L-DISPLAY 2: inline media through the gallery', () => {
   it('flag off: stock attachment bubble, no gallery grouping or frame', () => {
     serveSignedUrls();
     renderItems(
-      [mediaMessage(1, 'image/png', 'png', 'Caption'), mediaMessage(6, 'text/html', 'html')],
+      [
+        mediaMessage(1, 'image/png', 'png', 'Caption'),
+        mediaMessage(6, 'text/html', 'html'),
+        htmlMessage(7, `${USERCONTENT}/usercontent/display/${ROOT_AGENT_ID}/game.html`),
+      ],
       { roseDesktop: false },
     );
     expect(screen.queryByTestId('inline-media')).not.toBeInTheDocument();
     expect(screen.queryByTitle('item-6.html')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('item-7.html')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('display-html-link')).not.toBeInTheDocument();
     expect(screen.queryByTestId('code-agent-attribution')).not.toBeInTheDocument();
   });
 });

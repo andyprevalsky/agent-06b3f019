@@ -4,21 +4,16 @@
  * bottom rows (Feedback / Biz health / Archived / account), account glyph and
  * Settings drawer. Flag off keeps the stock sidebar (app-sidebar suites).
  * Projects, project settings and the agent right-click menu live in
- * rose-sidebar-projects.blackbox.tsx.
+ * rose-sidebar-projects.blackbox.tsx; code-agent rows in
+ * rose-sidebar-code-agents.blackbox.tsx.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { http, HttpResponse } from 'msw';
 
 import AppSidebar from '@/features/terminal-component-group/components/AppSidebar';
 
-import { MAX_CODE_AGENT_TREES } from '@/features/terminal-component-group/components/rose-sidebar/useRoseCodeAgents';
-import type { CodeAgentNode } from '@/lib/api/tree';
-
 import { defaultProps, makeAgent, mockSession } from './app-sidebar.fixtures';
-import { capturedRequests, clearCaptures } from './msw/capture';
-import { server } from './msw/server';
 import {
   anonymousUser,
   collapseBar,
@@ -345,201 +340,5 @@ describe('Rose left bar (flag on)', () => {
       .getByTestId('rose-agent-row-home-run')
       .querySelector('[data-sidebar-agent-icon]')!;
     expect(bot.getAttribute('class')).toContain('dark:text-[#a3a39d]');
-  });
-});
-
-// ─── Code agents (GET /api/agents/tree → code_agents) ───────────────────────
-
-const API_BASE = 'http://localhost:3001/api';
-
-function codeAgent(overrides: Partial<CodeAgentNode> & { code_agent_id: string }): CodeAgentNode {
-  return {
-    owner_agent_id: 'home-run',
-    goal: 'Write the export retry',
-    status: 'ACTIVE',
-    created_at: '2026-10-20T11:00:00.000Z',
-    ...overrides,
-  };
-}
-
-/** Trees keyed by busId (= root agent id); every other root has no code agents. */
-function mockCodeAgentTrees(trees: Record<string, CodeAgentNode[]>) {
-  server.use(
-    http.get(`${API_BASE}/agents/tree`, ({ request }) => {
-      const busId = new URL(request.url).searchParams.get('busId') ?? '';
-      return HttpResponse.json({ agents: [], code_agents: trees[busId] ?? [] });
-    }),
-  );
-}
-
-function treeRequests(): string[] {
-  return capturedRequests
-    .filter((r) => r.method === 'GET' && new URL(r.url).pathname === '/api/agents/tree')
-    .map((r) => new URL(r.url).searchParams.get('busId') ?? '');
-}
-
-function barRowOrder(): string[] {
-  const groups = screen.getByTestId('rose-agent-groups');
-  return [
-    ...groups.querySelectorAll<HTMLElement>(
-      '[data-testid^="rose-agent-row-"], [data-testid^="rose-code-agent-row-"], [data-testid^="rose-project-row-"]',
-    ),
-  ].map((el) => el.dataset.testid!.replace(/^rose-(agent|code-agent|project)-row-/, '$1:'));
-}
-
-describe('Rose left bar code agents (flag on)', () => {
-  beforeEach(() => {
-    localStorage.clear();
-    mockSession();
-    clearCaptures();
-    mockProjectsApi([makeProject(), makeProject({ id: 'p-habits', name: 'Habits' })]);
-    mockCodeAgentTrees({
-      'home-run': [
-        codeAgent({
-          code_agent_id: 'cc-fix',
-          provider: 'codex',
-          status: 'ERROR',
-          goal: 'Fix flaky test',
-        }),
-        codeAgent({
-          code_agent_id: 'cc-build',
-          provider: 'claude',
-          goal: 'Build the widget',
-          created_at: '2026-10-20T10:00:00.000Z',
-        }),
-      ],
-      // Owned by a sub-agent of rose-run: listed under its root row; no provider → Claude.
-      'rose-run': [
-        codeAgent({
-          code_agent_id: 'cc-sub',
-          owner_agent_id: 'rose-sub',
-          status: 'COMPLETED',
-          goal: 'Refactor nav',
-        }),
-      ],
-    });
-  });
-  afterEach(() => {
-    localStorage.clear();
-    document.documentElement.classList.remove('dark');
-  });
-
-  it("lists each tree's code agents under its agent row, indented one level, oldest first", async () => {
-    renderBar();
-    expandBar();
-    await screen.findByTestId('rose-code-agent-row-cc-sub');
-    await screen.findByTestId('rose-code-agent-row-cc-fix');
-    expect(barRowOrder()).toEqual([
-      'agent:home-run',
-      'code-agent:cc-build',
-      'code-agent:cc-fix',
-      'agent:orphan',
-      'agent:home-done',
-      'project:p-rose',
-      'agent:rose-run',
-      'code-agent:cc-sub',
-      'agent:rose-fail',
-      'project:p-habits',
-      'agent:habits-done',
-    ]);
-    // One level under the parent: Home agent rows sit at 22px, project agent rows at 34px.
-    expect(screen.getByTestId('rose-code-agent-row-cc-build').className).toContain('pl-[34px]');
-    expect(screen.getByTestId('rose-code-agent-row-cc-sub').className).toContain('pl-[46px]');
-    expect(screen.getByTestId('rose-code-agent-row-cc-build')).toHaveTextContent(
-      'Build the widget',
-    );
-  });
-
-  it('uses the Claude / Codex icon instead of the Bot glyph, with only the supported status glyphs', async () => {
-    renderBar({}, { dark: true });
-    const row = (id: string) => screen.getByTestId(`rose-code-agent-row-${id}`);
-    await screen.findByTestId('rose-code-agent-row-cc-sub');
-    await screen.findByTestId('rose-code-agent-row-cc-fix');
-    for (const id of ['cc-build', 'cc-fix', 'cc-sub']) {
-      expect(row(id).querySelector('[data-sidebar-agent-icon], svg.lucide-bot')).toBeNull();
-    }
-    // Running Claude session = bare provider icon.
-    expect(within(row('cc-build')).getByRole('img', { name: 'Claude Code' })).toBeInTheDocument();
-    expect(
-      within(row('cc-build')).queryByRole('img', { name: /Working|Completed|Failed/ }),
-    ).toBeNull();
-    // Failed Codex session = Codex icon + muted red x.
-    expect(within(row('cc-fix')).getByRole('img', { name: 'Codex' })).toBeInTheDocument();
-    const failed = within(row('cc-fix')).getByRole('img', { name: 'Failed' });
-    expect(failed.querySelector('.text-red-400\\/80')).not.toBeNull();
-    // Missing provider defaults to Claude; done = muted check, green only in dark.
-    expect(row('cc-sub')).toHaveAttribute('data-provider', 'claude');
-    const check = within(row('cc-sub'))
-      .getByRole('img', { name: 'Completed' })
-      .querySelector('svg.lucide-check')!;
-    expect(check.getAttribute('class')).toContain('text-gray-400');
-    expect(check.getAttribute('class')).toContain('dark:text-[#22c55e]');
-    expect(row('cc-sub').className).toContain('dark:text-[#a3a39d]');
-  });
-
-  it("collapsed: code agents stay in their parent's group with no divider between them", async () => {
-    renderBar();
-    const build = await screen.findByTestId('rose-code-agent-row-cc-build');
-    const sub = await screen.findByTestId('rose-code-agent-row-cc-sub');
-    expect(roseBar()).toHaveAttribute('data-expanded', 'false');
-    expect(build.className).toContain('px-[22px]');
-    expect(screen.getByTestId('rose-group-home')).toContainElement(build);
-    expect(screen.getByTestId('rose-group-p-rose')).toContainElement(sub);
-    expect(screen.getAllByTestId('rose-group-divider')).toHaveLength(2);
-    expect(
-      screen.getByTestId('rose-group-p-rose').querySelector('[data-testid="rose-group-divider"]'),
-    ).toBeNull();
-  });
-
-  it('clicking a code agent opens its owner conversation; a provided handler replaces that', async () => {
-    const user = userEvent.setup();
-    const onSelectAgent = vi.fn();
-    const { unmount } = renderBar({ onSelectAgent });
-    await user.click(await screen.findByTestId('rose-code-agent-row-cc-sub'));
-    expect(onSelectAgent).toHaveBeenCalledWith('rose-sub');
-    unmount();
-
-    const onOpenCodeAgent = vi.fn();
-    renderBar({ roseActions: { onOpenCodeAgent } });
-    await user.click(await screen.findByTestId('rose-code-agent-row-cc-fix'));
-    expect(onOpenCodeAgent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        code_agent_id: 'cc-fix',
-        owner_agent_id: 'home-run',
-        provider: 'codex',
-      }),
-    );
-  });
-
-  it('reads a bounded number of trees: the selected row plus the first rows', async () => {
-    const many = Array.from({ length: MAX_CODE_AGENT_TREES + 5 }, (_, i) =>
-      makeAgent({
-        agent_id: `bulk-${i}`,
-        goal: `Bulk ${i}`,
-        status: 'COMPLETED',
-        ...createdMinutesAgo(i + 1),
-      }),
-    );
-    const last = `bulk-${MAX_CODE_AGENT_TREES + 4}`;
-    renderWithProviders(
-      <AppSidebar
-        {...defaultProps({ agents: many, user: signedInUser(), selectedAgentId: last })}
-      />,
-    );
-    await waitFor(() => expect(treeRequests()).toHaveLength(MAX_CODE_AGENT_TREES));
-    expect(treeRequests()).toContain(last);
-    expect(treeRequests()).not.toContain(`bulk-${MAX_CODE_AGENT_TREES + 3}`);
-  });
-
-  it('flag off: the stock sidebar reads no trees and shows no code agents', async () => {
-    renderWithProviders(
-      <AppSidebar {...defaultProps({ agents: AGENTS, user: signedInUser() })} />,
-      {
-        roseDesktop: false,
-      },
-    );
-    await waitFor(() => expect(screen.getByLabelText('Resize sidebar')).toBeInTheDocument());
-    expect(screen.queryByTestId('rose-code-agent-row-cc-build')).toBeNull();
-    expect(treeRequests()).toHaveLength(0);
   });
 });

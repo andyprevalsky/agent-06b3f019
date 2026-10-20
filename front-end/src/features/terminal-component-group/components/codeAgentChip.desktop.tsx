@@ -7,6 +7,10 @@
  *   [completed]   → header (check · Completed Successfully · duration · target) + summary
  *   [failed]      → header (✕ · Failed · duration · target) + red failure box (always shown)
  *                   with the backend's failure text verbatim (LOCAL_TARGET_UNAVAILABLE etc.)
+ *   [paused]      → header (muted pause · Paused · duration · target), never red: the
+ *                   session is saved and resumable. A usage-limit stop (C15) reads
+ *                   "Paused - usage limit, resumes on <other CLI>"; no Retry button
+ *                   (the backend has no user-callable retry route yet).
  *
  * TARGET (code_agent.target): 'local' → "This Mac · <folder>" (device_name tooltip),
  *   else "Cloud". Mac app only (window.api.localCode) + local + running →
@@ -17,7 +21,8 @@
  *              + "Message <agent> directly…" steer input
  *   completed: commit · branch · merged into · tests · files ± · Open preview
  *              (no summary → read-only transcript when events exist)
- *   failed:    read-only transcript when events exist
+ *   failed / paused: read-only transcript when events exist
+ *   not running + code_session: "<branch> → <merge_target> · pushed · PR #n · merged"
  *
  * Maximize opens the existing FullscreenView (owned by ClaudeCodeChip).
  */
@@ -29,9 +34,11 @@ import {
   codeAgentLabel,
   codeAgentTargetLabel,
   eventTimeMs,
+  usageLimitPausedText,
   type CodeAgentMeta,
   type CodeAgentSummary,
   type CodeAgentTranscriptEvent,
+  type CodeSessionFacts,
 } from '../hooks/codeAgentContract';
 import { useLocalEchoes } from '../hooks/codeAgentLocalState';
 import { desktopChipState, formatElapsed, useNow } from '../hooks/codeAgentSteering';
@@ -99,6 +106,43 @@ function Summary({ summary }: { summary: CodeAgentSummary }) {
   );
 }
 
+/** The persistent code session's branch and where it merges, with push / PR / merge facts. */
+function SessionLine({ session, meta }: { session: CodeSessionFacts; meta: CodeAgentMeta }) {
+  const branch = session.branch ?? meta.branch;
+  if (!branch) return null;
+  const target = session.merge_target ?? meta.base_branch;
+  return (
+    <div
+      data-testid="code-agent-session"
+      className="border-t border-border pb-2.5 pl-11 pr-3.5 pt-2.5 text-[13px] text-foreground/80 dark:border-white/[.09] dark:text-[#ecece8]"
+    >
+      <code className={CODE}>{branch}</code>
+      {target && (
+        <>
+          {' → '}
+          <code className={CODE}>{target}</code>
+        </>
+      )}
+      {session.pushed && ' · pushed'}
+      {session.pr && (
+        <>
+          {' · '}
+          <a
+            href={session.pr.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(event) => event.stopPropagation()}
+            className="font-semibold text-[#e8507f] no-underline hover:underline"
+          >
+            PR #{session.pr.number}
+          </a>
+        </>
+      )}
+      {session.merged && ' · merged'}
+    </div>
+  );
+}
+
 /**
  * The backend's failure text verbatim (a LOCAL_TARGET_UNAVAILABLE message is
  * already the exact user-facing sentence); never re-worded on the client.
@@ -158,7 +202,10 @@ export function DesktopCodeAgentChip({ meta, vm, events, toolCallId }: DesktopCo
   const hasTranscript = events.length > 0 || echoes.length > 0;
   const isLive = state === 'live' || state === 'verifying';
   const showSummary = state === 'completed' && meta.summary;
-  const expandable = isLive || Boolean(showSummary) || hasTranscript;
+  const session = !running && meta.code_session ? meta.code_session : null;
+  const expandable = isLive || Boolean(showSummary) || hasTranscript || session !== null;
+  const statusText =
+    state === 'paused' && meta.usage_limit ? usageLimitPausedText(meta.usage_limit) : undefined;
 
   return (
     <div
@@ -173,7 +220,7 @@ export function DesktopCodeAgentChip({ meta, vm, events, toolCallId }: DesktopCo
       >
         <ProviderIcon codeProvider={meta.provider} className="h-5 w-5 flex-shrink-0" />
         <div className="flex min-w-0 flex-1 items-center gap-2">
-          <StatusDisplay state={state} codeProvider={meta.provider} />
+          <StatusDisplay state={state} codeProvider={meta.provider} text={statusText} />
           {meta.title && (
             <span className={`truncate text-sm ${MUTED}`} data-testid="code-agent-title">
               · {meta.title}
@@ -233,6 +280,8 @@ export function DesktopCodeAgentChip({ meta, vm, events, toolCallId }: DesktopCo
           />
         </div>
       )}
+
+      {open && session && <SessionLine session={session} meta={meta} />}
 
       {!isLive && open && showSummary && meta.summary && <Summary summary={meta.summary} />}
 

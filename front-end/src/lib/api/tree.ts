@@ -23,29 +23,55 @@ export async function fetchTreeState(busId: string): Promise<AgentTreeNode[]> {
 /** Status of a Claude Code / Codex session (ClaudeCodeSessionStatus). */
 export type CodeAgentStatus = 'ACTIVE' | 'COMPLETED' | 'CLOSED' | 'ERROR';
 
+/** The CLI a code agent ran; null for legacy rows that never recorded it. */
+export type CodeAgentProviderName = 'claude' | 'codex' | null;
+
 /**
  * A code agent (Claude Code / Codex session) in a tree: GET /api/agents/tree
  * lists them in `code_agents`, keyed to the Rose agent that owns the session.
- * `provider` is not in the contract yet; readers default to Claude, as the
- * code-agent chip does.
  */
 export interface CodeAgentNode {
   code_agent_id: string;
   owner_agent_id: string;
+  provider: CodeAgentProviderName;
   goal: string;
   status: CodeAgentStatus;
   created_at: string;
-  provider?: 'claude' | 'codex' | null;
 }
 
-/** The code agents of one tree (root agent id = busId). */
-export async function fetchTreeCodeAgents(busId: string): Promise<CodeAgentNode[]> {
-  const response = await fetch(
-    `${API_BASE_WITH_PATH}/agents/tree?busId=${encodeURIComponent(busId)}`,
-    { headers: getAuthHeaders() },
-  );
-  if (!response.ok) throw new Error(`Failed to fetch tree code agents (${response.status})`);
-  const data = (await response.json()) as { code_agents?: CodeAgentNode[] };
+/** Most root ids one GET /api/agents/code-agents request may name (backend: 400 above). */
+export const CODE_AGENT_LIST_MAX_ROOTS = 50;
+
+/**
+ * One row of GET /api/agents/code-agents: a code agent of one of the requested
+ * trees (root_agent_id = the tree's root, owner_agent_id = the Rose agent that
+ * owns the session). `title` is the first line of its goal.
+ */
+export interface CodeAgentListItem {
+  code_agent_id: string;
+  owner_agent_id: string;
+  root_agent_id: string;
+  provider: CodeAgentProviderName;
+  status: CodeAgentStatus;
+  title: string;
+  created_at: string;
+}
+
+/**
+ * Code agents of up to CODE_AGENT_LIST_MAX_ROOTS trees in one request (the
+ * backend returns at most 500 rows, oldest first). Callers chunk larger sets.
+ */
+export async function fetchCodeAgentsForRoots(rootIds: string[]): Promise<CodeAgentListItem[]> {
+  if (rootIds.length === 0) return [];
+  if (rootIds.length > CODE_AGENT_LIST_MAX_ROOTS) {
+    throw new Error(`At most ${CODE_AGENT_LIST_MAX_ROOTS} roots per code-agents request`);
+  }
+  const query = rootIds.map(encodeURIComponent).join(',');
+  const response = await fetch(`${API_BASE_WITH_PATH}/agents/code-agents?root_ids=${query}`, {
+    headers: getAuthHeaders(),
+  });
+  if (!response.ok) throw new Error(`Failed to fetch code agents (${response.status})`);
+  const data = (await response.json()) as { code_agents?: CodeAgentListItem[] };
   return Array.isArray(data.code_agents) ? data.code_agents : [];
 }
 

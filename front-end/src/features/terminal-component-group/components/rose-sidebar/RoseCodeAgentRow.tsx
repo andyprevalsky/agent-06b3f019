@@ -1,9 +1,11 @@
 /**
  * STATE MACHINE: RoseCodeAgentRow (a Claude Code / Codex session in the Rose
- * left bar, listed under the agent row whose tree spawned it)
+ * left bar, listed under the root row of the tree that spawned it; one row of
+ * GET /api/agents/code-agents, labelled by its `title`)
  *
  * Stateless. Glyph = the provider's icon (Claude or Codex) instead of the Bot
- * glyph, plus only the existing supported status glyphs in its corner:
+ * glyph (provider null = legacy row → Claude), plus only the existing
+ * supported status glyphs in its corner:
  *   ACTIVE             → bare provider icon (running)
  *   COMPLETED / CLOSED → muted check (green only in dark)
  *   ERROR              → muted red x
@@ -14,7 +16,7 @@
  */
 
 import { cn } from '@/lib/utils';
-import type { CodeAgentNode, CodeAgentStatus } from '@/lib/api/tree';
+import type { CodeAgentListItem, CodeAgentStatus } from '@/lib/api/tree';
 
 import AgentStatusIndicator from '../AgentStatusIndicator';
 import type { AgentRunStatus } from '../agentRunState';
@@ -27,7 +29,7 @@ function codeAgentRunStatus(status: CodeAgentStatus): AgentRunStatus {
 }
 
 interface RoseCodeAgentRowProps {
-  codeAgent: CodeAgentNode;
+  codeAgent: CodeAgentListItem;
   isExpanded: boolean;
   /** The parent agent row is itself indented (it sits under a project). */
   parentIndented: boolean;
@@ -42,7 +44,7 @@ export default function RoseCodeAgentRow({
 }: RoseCodeAgentRowProps) {
   const provider = codeAgent.provider ?? 'claude';
   const status = codeAgentRunStatus(codeAgent.status);
-  const name = codeAgent.goal.trim() === '' ? 'Code agent' : codeAgent.goal;
+  const name = codeAgent.title.trim() === '' ? 'Code agent' : codeAgent.title;
   return (
     <button
       type="button"

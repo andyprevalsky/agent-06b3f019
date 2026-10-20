@@ -18,14 +18,15 @@
  *
  * ROSE DESKTOP (flag on AND a `metadata.code_agent` snapshot for this task):
  * [DESKTOP] <-- DesktopCodeAgentChip (target label, timer, Transcript/Terminal
- *               tabs, steer input, commit summary; see codeAgentChip.desktop.tsx)
+ *               tabs, steer input, commit summary, paused state; see
+ *               codeAgentChip.desktop.tsx). Fullscreen shows the same desktop state.
  * Flag off, or no snapshot → the stock branches below, unchanged.
  *
  * All effects, refs, and sub-hooks live in `useClaudeCodeChip`. This file is a
  * presentational router: it picks one renderer branch per state.
  */
 
-import { useDesktopCodeAgent } from '../hooks/codeAgentSteering';
+import { desktopChipState, useDesktopCodeAgent } from '../hooks/codeAgentSteering';
 import { type ClaudeCodeChipProps } from '../types';
 import { useClaudeCodeChip } from './claudeCodeChip.hooks';
 import { DesktopCodeAgentChip } from './codeAgentChip.desktop';
@@ -57,7 +58,7 @@ export default function ClaudeCodeChip({
   if (vm.isFullscreen) {
     return (
       <FullscreenView
-        state={vm.chipState}
+        state={desktopMeta ? desktopChipState(desktopMeta, vm.chipState) : vm.chipState}
         outputSchema={vm.outputSchema}
         githubRepoUrl={vm.githubRepoUrl}
         codeProvider={vm.codeProvider}

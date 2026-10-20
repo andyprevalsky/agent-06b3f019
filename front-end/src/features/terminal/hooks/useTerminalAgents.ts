@@ -199,18 +199,32 @@ function buildAuthModalHandlers(modals: ReturnType<typeof useTerminalModals>) {
   return { handleLoginClick, handleJoinWaitlist };
 }
 
-function buildReturn(a: BuildArgs) {
-  const { handleLoginClick, handleJoinWaitlist } = buildAuthModalHandlers(a.modals);
-  const openNewAgent = (projectId: string | null) => {
+/** New-agent entry points; each makes the next goal create a fresh agent. */
+function buildNewAgentHandlers(a: BuildArgs) {
+  const openNewAgent = (projectId: string | null, shareWith: string | null = null) => {
     a.cleanupAgentState();
     a.resetAnimationState();
     a.setCurrentView('agents');
     a.messaging.setNewAgentProjectId(projectId);
+    a.messaging.setNewAgentShareWith(shareWith);
   };
-  /** New Super Agent: the next goal creates a Home agent. */
-  const handleCreateNewAgent = () => openNewAgent(null);
-  /** A project's "+" (Rose Desktop): the next goal creates the agent in that project. */
-  const handleCreateNewAgentInProject = (project: { id: string }) => openNewAgent(project.id);
+  return {
+    /** New Super Agent: the next goal creates a Home agent. */
+    handleCreateNewAgent: () => openNewAgent(null),
+    /** A project's "+" (Rose Desktop): the next goal creates the agent in that project. */
+    handleCreateNewAgentInProject: (project: { id: string }) => openNewAgent(project.id),
+    /**
+     * Agent menu "New agent in this branch" (Rose Desktop): the next goal creates an
+     * agent in that agent's project that works in its code session (same branch).
+     */
+    handleCreateNewAgentInBranch: (agent: { agent_id: string; project_id?: string | null }) =>
+      openNewAgent(agent.project_id ?? null, agent.agent_id),
+  };
+}
+
+function buildReturn(a: BuildArgs) {
+  const { handleLoginClick, handleJoinWaitlist } = buildAuthModalHandlers(a.modals);
+  const newAgent = buildNewAgentHandlers(a);
   return {
     user: a.auth.isFullySignedIn ? a.auth.user : null,
     authUser: a.auth.user,
@@ -273,8 +287,7 @@ function buildReturn(a: BuildArgs) {
     handleLogout: a.handleLogout,
     handleLoginClick,
     handleJoinWaitlist,
-    handleCreateNewAgent,
-    handleCreateNewAgentInProject,
+    ...newAgent,
     newAgentProjectId: a.messaging.newAgentProjectId,
     handleSubmitFeedback: a.actions.handleSubmitFeedback,
     resetAnimationState: a.resetAnimationState,

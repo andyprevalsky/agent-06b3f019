@@ -163,7 +163,9 @@ describe('contract adapter: absent or malformed metadata keeps the stock behavio
     expect(parseCodeAgentMeta(undefined)).toBeNull();
     expect(parseCodeAgentMeta('live')).toBeNull();
     expect(parseCodeAgentMeta(codeAgent({ provider: 'gemini' }))).toBeNull();
-    expect(parseCodeAgentMeta(codeAgent({ state: 'paused' }))).toBeNull();
+    expect(parseCodeAgentMeta(codeAgent({ state: 'sleeping' }))).toBeNull();
+    // W5b (f78bf8aa8): 'paused' is a contract state (resumable session).
+    expect(parseCodeAgentMeta(codeAgent({ state: 'paused' }))?.state).toBe('paused');
     expect(parseCodeAgentMeta(codeAgent({ task_id: '' }))).toBeNull();
     expect(parseCodeAgentMeta(codeAgent({ started_at: null }))).toBeNull();
     expect(parseCodeAgentMeta(codeAgent({ target: 'mars' }))?.target).toBe('cloud');

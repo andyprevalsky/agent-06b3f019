@@ -146,6 +146,11 @@ export const handlers = [
     return HttpResponse.json({ agents: [] });
   }),
 
+  // Rose left bar: batched code agents of the listed trees (before /agents/:agentId).
+  http.get(`${API_BASE}/agents/code-agents`, () => {
+    return HttpResponse.json({ code_agents: [] });
+  }),
+
   http.get(`${API_BASE}/agents/:agentId`, ({ params }) => {
     return HttpResponse.json({
       agent: {

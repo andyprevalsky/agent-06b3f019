@@ -2,11 +2,18 @@
  * Code-agent steering contract (Rose Desktop, UI ledger rows 44-47 and 51).
  *
  * The ONE adapter between the backend and the code-agent steering UI: every
- * wire shape the UI reads or writes lives here; change this file (and its
- * blackbox fixtures) when the contract moves, and nothing else.
+ * wire shape the UI reads or writes lives here (the W5b code_session /
+ * usage-limit parsers sit in ./codeAgentSession.ts, re-exported here); change
+ * these files (and their blackbox fixtures) when the contract moves.
  *
  *   agent:<rootId> realtime INSERT/UPDATE (existing message path)
- *     ├─ metadata.code_agent            → CodeAgentMeta    (chip lifecycle, target, summary)
+ *     ├─ metadata.code_agent            → CodeAgentMeta    (chip lifecycle, target, summary);
+ *     │    state 'paused' = idle/user pause or waiting on the parent: resumable, never failed
+ *     ├─ metadata.code_session          → CodeSessionFacts (branch → merge_target, pushed/pr/merged)
+ *     ├─ metadata.failure_kind 'usage_limit' + retryable + usage_limit{provider, resets_at}
+ *     │    (C15, final spawn row) → paused: "Paused - usage limit, resumes on <other CLI>".
+ *     │    The retry is a parent spawn_agent(type='code', code_session_id) tool call; the
+ *     │    backend exposes no user-callable retry route, so the chip shows no Retry button.
  *     ├─ metadata.code_agent_events[]   → transcript events (task-scoped rows, hidden from root)
  *     ├─ metadata.requestingAgent       → RequestingAgent  (who sent a display / message /
  *     │                                   approval / question; L-DISPLAY b10b038c1)
@@ -14,7 +21,9 @@
  *     │    options, allow_other, question_id, items, deliver_to 'user', routed_agent_id}:
  *     │    IN_PROGRESS → pinned above the query box; FINISHED (answered) → unpinned
  *     ├─ ASSISTANT + file_pointer + metadata.display {placement 'inline', kind 'media',
- *     │    sha256, mime_type, caption?} → one item of an inline media gallery
+ *     │    sha256, mime_type, caption?} → one item of an inline media gallery;
+ *     │    text/html pointers carry file_pointer.usercontent_url (the sandboxed
+ *     │    usercontent origin, a22e8a0b4): the only URL an HTML item is framed from
  *     ├─ TOOL send_message_to_user + inlineView {view, versionId, props}; code-agent rows
  *     │    carry subAgentId = task yet still show in the root trajectory
  *     └─ metadata.a2a                   → agent-to-agent message (backend agentGraphSendService):
@@ -38,11 +47,27 @@
 import { API_BASE_WITH_PATH, getAuthHeaders } from '@/lib/api/client';
 import type { FilePointer, Message } from '@/lib/api/types';
 
+import {
+  parseCodeSession,
+  parseUsageLimit,
+  type CodeAgentUsageLimit,
+  type CodeSessionFacts,
+} from './codeAgentSession';
+
+export { usageLimitPausedText } from './codeAgentSession';
+
+export type {
+  CodeAgentUsageLimit,
+  CodeSessionFacts,
+  CodeSessionPullRequest,
+} from './codeAgentSession';
+
 // ── Wire types ──────────────────────────────────────────────────────────────
 
 export type CodeAgentProvider = 'claude' | 'codex';
 export type CodeAgentTarget = 'cloud' | 'local';
-export type CodeAgentState = 'spinning_up' | 'live' | 'completed' | 'failed';
+/** 'paused' = idle pause, user pause or waiting on the parent: resumable, never a failure. */
+export type CodeAgentState = 'spinning_up' | 'live' | 'completed' | 'failed' | 'paused';
 
 /**
  * Canonical local-run failures (row 51). When `failure_kind` is set the UI
@@ -85,6 +110,10 @@ export interface CodeAgentMeta {
   /** Short task subtitle shown after the status ("· nub tab behind the query box"). */
   title?: string;
   summary?: CodeAgentSummary;
+  /** From the task rows' `metadata.code_session` (latest wins). */
+  code_session?: CodeSessionFacts;
+  /** Set when the task stopped on a provider usage limit (state is then 'paused'). */
+  usage_limit?: CodeAgentUsageLimit;
 }
 
 export interface CodeAgentToolCall {
@@ -154,6 +183,11 @@ export interface DisplayMediaItem {
   /** Present on the first item of one display call only. */
   caption?: string;
   requester: RequestingAgent | null;
+  /**
+   * text/html only: `file_pointer.usercontent_url`, served from the usercontent
+   * origin. Older rows have none; their storage URL is never framed.
+   */
+  usercontent_url?: string;
 }
 
 export type AgentToAgentKind = 'message' | 'question';
@@ -246,7 +280,7 @@ function provider(value: unknown): CodeAgentProvider | null {
   return value === 'claude' || value === 'codex' ? value : null;
 }
 
-const STATES: readonly CodeAgentState[] = ['spinning_up', 'live', 'completed', 'failed'];
+const STATES: readonly CodeAgentState[] = ['spinning_up', 'live', 'completed', 'failed', 'paused'];
 const FAILURE_KINDS: readonly CodeAgentFailureKind[] = [
   'local_disconnected',
   'local_requires_mac_app',
@@ -319,6 +353,8 @@ interface TaskFold {
   firstTs: string | number | undefined;
   state: CodeAgentState;
   failure?: string;
+  session?: CodeSessionFacts;
+  usageLimit?: CodeAgentUsageLimit;
 }
 
 function foldTaskRow(fold: TaskFold, message: Message): void {
@@ -327,16 +363,28 @@ function foldTaskRow(fold: TaskFold, message: Message): void {
   if (partial) Object.assign(fold.snapshot, partial);
   fold.provider = fold.provider ?? provider(metadata?.code_provider);
   fold.firstTs = fold.firstTs ?? message.timestamp;
+  fold.session = parseCodeSession(metadata?.code_session) ?? fold.session;
+  fold.usageLimit = parseUsageLimit(metadata) ?? fold.usageLimit;
   const action: unknown = metadata?.action_type;
+  const terminal =
+    metadata?.error_code === LOCAL_TARGET_UNAVAILABLE ||
+    metadata?.toolStatus === 'ERROR' ||
+    action === 'task_complete';
   if (metadata?.error_code === LOCAL_TARGET_UNAVAILABLE || metadata?.toolStatus === 'ERROR') {
     fold.state = 'failed';
     // The local-target error text is the exact user-facing message: shown verbatim.
     fold.failure = str(message.text) ?? fold.failure;
   } else if (action === 'task_complete') {
-    fold.state = metadata?.success === false ? 'failed' : 'completed';
+    // The producer's success flag decides; without one the stock chip's reading stands.
+    if (typeof metadata?.success === 'boolean')
+      fold.state = metadata.success ? 'completed' : 'failed';
   } else if (action === 'claude_code_started' && fold.state === 'spinning_up') {
     fold.state = 'live';
   }
+  // A terminal row without its own state retires a stale running snapshot; an
+  // explicit producer state (completed / failed / paused) on any row stands.
+  const running = fold.snapshot.state === 'live' || fold.snapshot.state === 'spinning_up';
+  if (terminal && partial?.state === undefined && running) delete fold.snapshot.state;
 }
 
 /**
@@ -363,14 +411,17 @@ export function latestCodeAgentMeta(
   const s = fold.snapshot;
   if (s.provider !== undefined && !provider(s.provider)) return null;
   if (s.state !== undefined && !STATES.some((state) => state === s.state)) return null;
-  return parseCodeAgentMeta({
+  const meta = parseCodeAgentMeta({
     ...s,
     task_id: str(s.task_id) ?? taskId,
     provider: s.provider ?? fold.provider ?? 'claude',
-    state: s.state ?? fold.state,
+    // A usage-limit stop is saved and resumable: paused, never failed (C15).
+    state: fold.usageLimit ? 'paused' : (s.state ?? fold.state),
     started_at: s.started_at ?? fold.firstTs,
     failure_message: s.failure_message ?? fold.failure,
   });
+  if (!meta) return null;
+  return { ...meta, code_session: fold.session, usage_limit: fold.usageLimit };
 }
 
 function parseEvent(value: unknown): CodeAgentTranscriptEvent | null {
@@ -598,6 +649,7 @@ export function parseDisplayMedia(message: Message): DisplayMediaItem | null {
     sha256: str(display.sha256),
     caption: str(display.caption),
     requester: messageRequester(message.metadata),
+    usercontent_url: str(rec(message.file_pointer)?.usercontent_url),
   };
 }
 
