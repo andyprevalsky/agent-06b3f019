@@ -86,7 +86,7 @@ ledger" in `rose-user-ui.md`). This file is the cross-cutting checklist, and
 | U13 | N | Chrome cleanup: Research/Careers removed; About/Privacy/Terms behind an info icon in the nub toolbar; pinned "Import Code Repo" goal | W6 | in progress |
 | U14 | N | Already merged, awaiting recordings: nub, white Join Waitlist, right app bar with Browser and Voice, Browser drawer replacing fullscreen, background fade, no wrappers | merged | recordings pending |
 | U15 | M | Home **is** the root project: the base workspace every agent and code session forks from (repo checkout, env files, startup script). Home shows the root chat; its gear opens that project's settings | L-NAV | open |
-| U16 | N | Right bar also gets **Files** and **Terminal** apps | L-NAV | open |
+| U16 | N | ~~Right bar also gets Files and Terminal apps~~ — **dropped for now** (UI ledger row 58: right bar = Browser, Phone, Integrations, Dark mode; admin Payments, Benchmarks, Feedback). No Files/Terminal/Network/Voice panel backends. The C14 local Terminal *window* on the Mac is kept | — | dropped |
 | U17 | M | Panels and drawers open flush against their bar, full height, no gap, margin or floating card (fix the W3 Browser drawer's 12 px inset) | L-NAV | open |
 | U18 | N | Popular goal "Make me a website" | L-DEFAULTS | open |
 
@@ -112,14 +112,14 @@ ledger" in `rose-user-ui.md`). This file is the cross-cutting checklist, and
 - **L-BENCH:** code benchmarks and parity.
 - **L-SYNC:** codebase sync integration.
 - **L-RCA:** bug detection on Rose infra.
-- **L-LOCAL:** local laptop target through the Mac app (C14).
+- **L-LOCAL:** local laptop target through the Mac app (C14) (queued).
 - **L-APPS:** Rose-in-Rose and Apps (after W5).
 - **L-DISPLAY:** the display tool.
-- **L-BROWSER:** root browser and world state.
+- **L-BROWSER:** root browser and world state (queued; starts when a running lane finishes).
 - **L-NAV:** Home, boxes functions, right-bar moves, hover-expand.
 - **L-DEFAULTS:** speed and model defaults, popular goals.
 - **L-DARK:** dark mode app.
-- **L-PHONE:** phone app.
+- **L-PHONE:** phone app. Backend part: device state, "another agent is using this", take control and release (queued; starts when a running lane finishes).
 - **L-PERF:** mobile performance validation (P1–P6), run last over the merged branch.
 - **Auditor:** an independent judge that re-checks every row against its evidence before `/deploy`.
 
