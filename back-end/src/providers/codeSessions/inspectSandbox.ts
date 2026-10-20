@@ -171,17 +171,20 @@ export async function installInspectGuards(
   }
   const realGit = real.get('git');
   if (realGit === undefined) throw new Error('Inspection guard setup failed: git not found');
-  await fs.writeFile(`${paths.bin}/git`, Buffer.from(gitWrapper(realGit)));
-  await fs.writeFile(`${paths.bin}/gh`, Buffer.from(GH_WRAPPER));
+  const files = new Map<string, string>([
+    [`${paths.bin}/git`, gitWrapper(realGit)],
+    [`${paths.bin}/gh`, GH_WRAPPER],
+  ]);
   for (const tool of ['npm', 'pnpm', 'yarn']) {
     const target = real.get(tool);
-    if (target !== undefined) {
-      await fs.writeFile(`${paths.bin}/${tool}`, Buffer.from(publishWrapper(tool, target)));
-    }
+    if (target !== undefined) files.set(`${paths.bin}/${tool}`, publishWrapper(tool, target));
   }
-  for (const hook of BLOCKED_GIT_HOOKS) {
-    await fs.writeFile(`${paths.hooks}/${hook}`, Buffer.from(BLOCKING_HOOK));
-  }
+  for (const hook of BLOCKED_GIT_HOOKS) files.set(`${paths.hooks}/${hook}`, BLOCKING_HOOK);
+  // One exec writes every guard file (each sandbox round trip costs latency).
+  const writes = [...files].map(
+    ([path, content]) =>
+      `printf %s ${shellQuote(Buffer.from(content).toString('base64'))} | base64 -d > ${shellQuote(path)} || exit 4`
+  );
   const repoSteps: string[] = [];
   for (const repo of manifest.repos ?? []) {
     const dir = repoDir(fs.home, repo.path);
@@ -199,6 +202,7 @@ export async function installInspectGuards(
   }
   const finish = await fs.exec(
     [
+      ...writes,
       `chmod 755 ${shellQuote(paths.bin)}/* ${shellQuote(paths.hooks)}/* || exit 4`,
       // Template scaffolding that tells a code agent to commit and message the user.
       `rm -f ${shellQuote(`${fs.home}/CLAUDE.md`)} ${shellQuote(`${fs.home}/.git-credentials`)}`,
