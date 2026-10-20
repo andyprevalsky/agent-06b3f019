@@ -7,13 +7,17 @@
  *   DELETE /api/integrations/:name (legacy)          deleteLegacyIntegration
  *
  * 10k rule: one list call adds two indexed per-user reads (progress rows, Plaid
- * items) in parallel with the existing query; the delta poll is four indexed
+ * items) in parallel with the existing query; the delta poll is five indexed
  * existence probes when nothing changed. Nothing fans in across users.
  */
 
 import { createLogger } from '../../providers/logger';
 import { withGoogleScopeHealth } from './integrationScopeHealth';
-import { listAccountRowSources, listActivePlaidItemSources } from './repo.accounts';
+import {
+  findIntegrationAccount,
+  listAccountRowSources,
+  listActivePlaidItemSources,
+} from './repo.accounts';
 import { accountSourcesChangedSince, listProgressForUser } from './repo.progress';
 import * as service from './service';
 import {
@@ -22,6 +26,7 @@ import {
   type IntegrationLane,
 } from './service.accountRegistry';
 import { buildAccountsView, type AccountViewRow } from './service.accountsView';
+import { LINKEDIN_INTEGRATION_NAME, settleLinkedInSync } from './service.linkedinSync';
 import { clearAccountProgress, clearProviderProgress } from './service.progress';
 import {
   assertProviderSlug,
@@ -84,12 +89,16 @@ export async function getAccountsDelta(
   since: Date | null
 ): Promise<ProgressDeltaResponse> {
   const cursor = new Date(Date.now() - 2_000).toISOString();
-  if (since !== null && !(await accountSourcesChangedSince(userId, since))) {
+  const settled = [LINKEDIN_INTEGRATION_NAME];
+  if (since !== null && !(await accountSourcesChangedSince(userId, since, settled))) {
     return { cursor, changed: false };
   }
-  // Same Google scope-health derivation as the full list, so both views agree.
+  // Same Google scope-health and LinkedIn settle derivations as the full list,
+  // so both views agree.
   const [rows, plaidItems, progress] = await Promise.all([
-    listAccountRowSources(userId).then(withGoogleScopeHealth),
+    listAccountRowSources(userId)
+      .then(withGoogleScopeHealth)
+      .then((light) => settleLightLinkedInRow(userId, light)),
     listActivePlaidItemSources(userId),
     listProgressForUser(userId),
   ]);
@@ -98,6 +107,27 @@ export async function getAccountsDelta(
     changed: true,
     accountsByProvider: buildAccountsView({ rows, plaidItems, progress }),
   };
+}
+
+/**
+ * A SYNCING LinkedIn row whose export agent ended reads SYNC_FAILED in the full
+ * list (settleLinkedInSync); apply the same read-time settle to the light rows.
+ * Only that row's config is read, and only while it is SYNCING.
+ */
+async function settleLightLinkedInRow<T extends AccountViewRow>(
+  userId: string,
+  rows: T[]
+): Promise<T[]> {
+  const syncing = rows.find(
+    (row) => row.name === LINKEDIN_INTEGRATION_NAME && row.status === 'SYNCING'
+  );
+  if (syncing === undefined) return rows;
+  const stored = await findIntegrationAccount(userId, syncing.name, syncing.accountId);
+  if (stored === null) return rows;
+  const [settled] = await settleLinkedInSync(userId, [stored]);
+  return rows.map((row) =>
+    row === syncing ? { ...row, status: settled.status, failureReason: settled.failureReason } : row
+  );
 }
 
 export async function deleteIntegrationAccount(

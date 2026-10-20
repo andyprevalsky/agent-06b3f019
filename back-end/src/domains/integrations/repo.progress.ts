@@ -95,11 +95,21 @@ export async function deleteProviderProgress(userId: string, provider: string): 
 
 /**
  * True when anything an account chip is derived from changed after `since`.
- * Four tiny indexed existence probes; no row bodies are read.
+ * Tiny indexed existence probes; no row bodies are read. Rows named in
+ * `settledWhileSyncing` derive their state at read time from other tables
+ * (an export agent's lifecycle), so while one is SYNCING it always counts as changed.
  */
-export async function accountSourcesChangedSince(userId: string, since: Date): Promise<boolean> {
+export async function accountSourcesChangedSince(
+  userId: string,
+  since: Date,
+  settledWhileSyncing: string[]
+): Promise<boolean> {
   const after = { gt: since };
   const probes = await Promise.all([
+    prisma.integration.findFirst({
+      where: { userId, name: { in: settledWhileSyncing }, status: 'SYNCING' },
+      select: { id: true },
+    }),
     prisma.integrationSyncProgress.findFirst({
       where: { userId, updatedAt: after },
       select: { id: true },

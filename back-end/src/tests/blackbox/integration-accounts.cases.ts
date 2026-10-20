@@ -242,6 +242,31 @@ async function deltaPoll(users: Users): Promise<void> {
   assert(mac?.progress.done === 3, 'the delta carries the new progress');
 }
 
+async function linkedinSettleAgrees(users: Users): Promise<void> {
+  const { a } = users();
+  await prisma.integration.create({
+    data: {
+      userId: a.userId,
+      name: 'linkedin',
+      type: 'DATA_SOURCE',
+      status: 'SYNCING',
+      config: { syncAgentId: randomUUID() },
+    },
+  });
+  const listed = (await accountsOf(a.token, 'linkedin')).find((x) => x.accountId === 'default');
+  assert(listed?.state === 'failed', `a dead export agent reads failed, got ${listed?.state}`);
+  const delta = DeltaResponse.parse(
+    (await call('/api/integrations/progress', { auth: a.token })).data
+  );
+  const polled = delta.accountsByProvider?.linkedin?.find((x) => x.accountId === 'default');
+  assert(JSON.stringify(polled) === JSON.stringify(listed), 'the delta settles LinkedIn too');
+  const future = new Date(Date.now() + 60_000).toISOString();
+  const probe = DeltaResponse.parse(
+    (await call(`/api/integrations/progress?since=${future}`, { auth: a.token })).data
+  );
+  assert(probe.changed, 'a SYNCING LinkedIn row can settle at any time, so it is never quiet');
+}
+
 async function internalWriterPath(users: Users): Promise<void> {
   const { a } = users();
   const res = await call('/api/integrations/linkedin/accounts/li-internal/progress', {
@@ -268,6 +293,10 @@ export function cases(users: Users): Array<{ name: string; fn: () => Promise<voi
     { name: 'Plaid items are accounts; delete one', fn: () => plaidItemsAreAccounts(users) },
     { name: 'todo cleanup hooks answer 501 and keep data', fn: () => todoHooksRefuse(users) },
     { name: 'delta poll: changed flag, cursor, identical view', fn: () => deltaPoll(users) },
+    {
+      name: 'LinkedIn read-time settle: list and delta agree',
+      fn: () => linkedinSettleAgrees(users),
+    },
     { name: 'internal API-key writer path', fn: () => internalWriterPath(users) },
   ];
 }
