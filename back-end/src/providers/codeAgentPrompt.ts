@@ -1,4 +1,4 @@
-export const CODE_AGENT_INSTRUCTIONS_VERSION = '2026-07-08.code-agent-output-contract.v2';
+export const CODE_AGENT_INSTRUCTIONS_VERSION = '2026-10-20.code-agent-output-contract.v3';
 export const CODEX_HARNESS_INSTRUCTIONS_VERSION = '2026-08-25.codex-rose-harness.v1';
 
 export const CODE_AGENT_ATTACHMENTS_DIR = '/home/user/attachments';
@@ -41,6 +41,10 @@ export function buildCodeAgentSystemPrompt(args: BuildCodeAgentPromptArgs = {}):
     '- Finish only after the requested artifacts exist and have been checked.',
     '- Surface real configuration or credential failures directly.',
     '- If task text says to use Claude Code or a code agent, treat that as this current Rose Labs code-agent session. Do not launch a separate claude/Claude Code CLI, run claude login, or start any interactive authentication flow.',
+    '',
+    "The user's Rose app UI:",
+    "- If ~/rose_user_ui exists, it is this user's Rose app UI (theme, slots, shell, inline views, tools). Read ~/rose_user_ui/README.md before changing it.",
+    '- ~/rose_user_ui/screenshots/current/ shows what the user sees now. `rose-ui screenshot` renders your local changes; `rose-ui check` must pass before `rose-ui publish`.',
     ...repoLines,
   ].join('\n');
 }

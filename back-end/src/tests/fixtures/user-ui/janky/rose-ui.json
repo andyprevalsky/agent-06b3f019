@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "slots": {
+    "home.dashboard": { "entry": "root/slots/janky/index.html" }
+  }
+}
