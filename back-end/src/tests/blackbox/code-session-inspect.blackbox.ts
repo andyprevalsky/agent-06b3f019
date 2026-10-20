@@ -34,6 +34,7 @@ import { after, before, test } from 'node:test';
 import { Sandbox } from 'e2b';
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
+import { retryWithBackoff } from '../../providers/retry';
 import {
   __resetAnthropicApiKeyCooldown,
   isAnthropicApiKeyOnCooldown,
@@ -135,6 +136,13 @@ if mode == "crash":
     LOG.open("a").write(json.dumps(record) + "\n")
     sys.stderr.write("boom\n")
     sys.exit(2)
+if mode == "slow":
+    import time
+    LOG.open("a").write(json.dumps(record) + "\n")
+    time.sleep(3)
+    record["slow_done_ms"] = int(time.time() * 1000)
+    LOG.open("a").write(json.dumps(record) + "\n")
+    sys.exit(0)
 head_before = run("git rev-parse HEAD")["out"]
 record["attempts"] = {
     "read": run("git log -1 --format=%s"),
@@ -222,6 +230,7 @@ interface FakeSandbox {
   provider: string;
   home: string;
   kills: number;
+  killedAtMs: number | null;
 }
 
 const sandboxes: FakeSandbox[] = [];
@@ -235,13 +244,20 @@ function installFakeFactory(): void {
       ...base,
       exec: (script, opts) => base.exec(`export PATH=${fakeBin}:"$PATH"\n${script}`, opts),
     };
-    const record: FakeSandbox = { id: `sb-inspect-${randomUUID()}`, provider, home, kills: 0 };
+    const record: FakeSandbox = {
+      id: `sb-inspect-${randomUUID()}`,
+      provider,
+      home,
+      kills: 0,
+      killedAtMs: null,
+    };
     sandboxes.push(record);
     return {
       fs,
       sandboxId: record.id,
       kill: async () => {
         record.kills += 1;
+        record.killedAtMs ??= Date.now();
         rmSync(home, { recursive: true, force: true });
       },
     };
@@ -265,6 +281,7 @@ interface CliRun {
   head_before?: string;
   head_after?: string;
   remote?: string;
+  slow_done_ms?: number;
 }
 
 function cliRuns(): CliRun[] {
@@ -563,6 +580,41 @@ test('teardown: the sandbox is killed when the CLI fails and when the restore fa
     [1],
     'a failed restore still kills its sandbox'
   );
+});
+
+test('a caller that gives up (abort) gets its sandbox killed at once, not after the CLI', async () => {
+  const liveHome = join(fixtureDir, 'live-home-abort');
+  seedWorkspace(liveHome);
+  const live = await liveSession(liveHome);
+  setMode('slow');
+  const before = sandboxes.length;
+  const runsBefore = cliRuns().length;
+  const abort = new AbortController();
+  const pending = inspectCodeSession({
+    userId: userA,
+    agentId: agentA,
+    codeSessionId: live.id,
+    question: 'Take your time.',
+    signal: abort.signal,
+  });
+  // Abort once the CLI has started (it writes its first record on start).
+  await retryWithBackoff(async () => cliRuns().length > runsBefore, {
+    maxRetries: 100,
+    fixedDelays: Array<number>(99).fill(50),
+    shouldRetryResult: (started) => !started,
+    component: 'CodeInspectAbortFixture',
+  });
+  assert.ok(cliRuns().length > runsBefore, 'the CLI started before the caller aborted');
+  abort.abort();
+  const result = await pending;
+  assert.equal(result.status, 'failed', JSON.stringify(result));
+  const [sandbox] = sandboxes.slice(before);
+  assert.equal(sandbox.kills, 1, 'killed once, though the run also reached its finally');
+  const doneMs = cliRuns()
+    .slice(runsBefore)
+    .find((run) => run.slow_done_ms !== undefined)?.slow_done_ms;
+  assert.ok(doneMs !== undefined && sandbox.killedAtMs !== null);
+  assert.ok(sandbox.killedAtMs < doneMs, 'the kill happened while the CLI was still running');
 });
 
 test('C15: a Claude usage limit backs that credential off and the inspection answers on Codex', async () => {
