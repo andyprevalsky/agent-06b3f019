@@ -1,8 +1,8 @@
 """Unit tests for the direct-to-Slack failure emitter (helpers/error_alert.py).
 
-Auto RCA dispatch owns its Slack lifecycle, ordinary alerts keep direct Slack
-fallbacks, the throttle never merges distinct agents, and the activity NEVER
-raises.
+Auto RCA never dispatches to GitHub (the Slack card drives the Rose RCA agent),
+alerts keep direct Slack fallbacks, the throttle never merges distinct agents,
+and the activity NEVER raises.
 """
 
 import asyncio
@@ -101,7 +101,7 @@ def test_throttle_map_stays_bounded(monkeypatch):
     assert "key-0" not in error_alert._last_sent
 
 
-def test_auto_rca_dispatch_owns_slack_card(monkeypatch):
+def test_auto_rca_posts_bot_card_and_never_dispatches_to_github(monkeypatch):
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
     monkeypatch.setenv("SLACK_ERROR_CHANNEL_ID", "C_INPUT")
     monkeypatch.setenv("AUTO_RCA_ENABLED", "1")
@@ -109,16 +109,12 @@ def test_auto_rca_dispatch_owns_slack_card(monkeypatch):
 
     result = _run(error_alert.report_failure_activity("agent-1", "agent_workflow", "boom failed"))
 
-    assert result["alerted"] is True
-    assert result["rca_dispatched"] is True
-    assert not any("chat.postMessage" in c["url"] for c in FakeClient.calls)
-    disp = next(c for c in FakeClient.calls if "api.github.com" in c["url"])
-    cp = disp["json"]["client_payload"]
-    assert "slack_ts" not in cp
-    assert cp["slack_channel"] == "C_INPUT"
-    assert cp["agent_id"] == "agent-1"
-    assert "source" not in cp
-    assert "title" not in cp
+    assert result == {"alerted": True}
+    assert not any("api.github.com" in c["url"] for c in FakeClient.calls)
+    card = next(c for c in FakeClient.calls if "chat.postMessage" in c["url"])
+    assert card["json"]["channel"] == "C_INPUT"
+    assert "thread_ts" not in card["json"], "the alert card must be top-level"
+    assert "boom failed" in card["json"]["text"]
 
 
 def test_context_is_included_in_slack_payload(monkeypatch):
@@ -176,7 +172,7 @@ def test_same_incident_text_does_not_throttle_distinct_agents(monkeypatch):
     assert len([c for c in FakeClient.calls if "hooks.slack.test" in c["url"]]) == 2
 
 
-def test_same_incident_dispatches_one_rca_and_falls_back_for_other_agents(monkeypatch):
+def test_same_incident_alerts_every_agent_without_github(monkeypatch):
     monkeypatch.setenv("AUTO_RCA_ENABLED", "1")
     monkeypatch.setenv("GITHUB_DISPATCH_TOKEN", "ghp_test")
     monkeypatch.setenv("SLACK_ERROR_WEBHOOK_URL", "https://hooks.slack.test/xxx")
@@ -184,30 +180,10 @@ def test_same_incident_dispatches_one_rca_and_falls_back_for_other_agents(monkey
     first = _run(error_alert.report_failure_activity("agent-a", "sms", "provider outage 42"))
     second = _run(error_alert.report_failure_activity("agent-b", "sms", "provider outage 99"))
 
-    assert first["rca_dispatched"] is True
+    assert first["alerted"] is True
     assert second["alerted"] is True
-    assert second.get("rca_dispatched") is not True
-    assert len([c for c in FakeClient.calls if "api.github.com" in c["url"]]) == 1
-    assert len([c for c in FakeClient.calls if "hooks.slack.test" in c["url"]]) == 1
-
-
-def test_temporal_replay_dispatches_but_never_duplicates_worker_slack(monkeypatch):
-    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
-    monkeypatch.setenv("SLACK_ERROR_CHANNEL_ID", "C_INPUT")
-    monkeypatch.setenv("AUTO_RCA_ENABLED", "1")
-    monkeypatch.setenv("GITHUB_DISPATCH_TOKEN", "ghp_test")
-
-    first = _run(error_alert.report_failure_activity("agent-replay", "agent_workflow", "boom"))
-    # Simulate a new worker after the external dispatch landed but Temporal lost
-    # the activity completion. In-memory throttle state is gone.
-    error_alert._last_sent.clear()
-    error_alert._in_flight.clear()
-    second = _run(error_alert.report_failure_activity("agent-replay", "agent_workflow", "boom"))
-
-    assert first["rca_dispatched"] is True
-    assert second["rca_dispatched"] is True
-    assert len([c for c in FakeClient.calls if "api.github.com" in c["url"]]) == 2
-    assert not any("chat.postMessage" in c["url"] for c in FakeClient.calls)
+    assert not any("api.github.com" in c["url"] for c in FakeClient.calls)
+    assert len([c for c in FakeClient.calls if "hooks.slack.test" in c["url"]]) == 2
 
 
 def test_never_raises_on_transport_error(monkeypatch):
