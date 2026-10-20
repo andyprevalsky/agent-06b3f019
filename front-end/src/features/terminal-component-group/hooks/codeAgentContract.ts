@@ -11,9 +11,11 @@
  *     │    state 'paused' = idle/user pause or waiting on the parent: resumable, never failed
  *     ├─ metadata.code_session          → CodeSessionFacts (branch → merge_target, pushed/pr/merged)
  *     ├─ metadata.failure_kind 'usage_limit' + retryable + usage_limit{provider, resets_at}
- *     │    (C15, final spawn row) → paused: "Paused - usage limit, resumes on <other CLI>".
- *     │    The retry is a parent spawn_agent(type='code', code_session_id) tool call; the
- *     │    backend exposes no user-callable retry route, so the chip shows no Retry button.
+ *     │    (C15, final spawn row) → paused (an older producer's state 'failed' is corrected),
+ *     │    with the backend's text for the user: code_agent.failure_message when the producer
+ *     │    itself wrote state 'paused' (that text is user-facing), else the usage_limit
+ *     │    details. The retry is a parent spawn_agent(type='code', code_session_id) tool
+ *     │    call; the backend exposes no user-callable retry/resume route: no Retry button.
  *     ├─ metadata.code_agent_events[]   → transcript events (task-scoped rows, hidden from root)
  *     ├─ metadata.requestingAgent       → RequestingAgent  (who sent a display / message /
  *     │                                   approval / question; L-DISPLAY b10b038c1)
@@ -54,7 +56,7 @@ import {
   type CodeSessionFacts,
 } from './codeAgentSession';
 
-export { usageLimitPausedText } from './codeAgentSession';
+export { pausedNote, usageLimitDetails } from './codeAgentSession';
 
 export type {
   CodeAgentUsageLimit,
@@ -114,6 +116,12 @@ export interface CodeAgentMeta {
   code_session?: CodeSessionFacts;
   /** Set when the task stopped on a provider usage limit (state is then 'paused'). */
   usage_limit?: CodeAgentUsageLimit;
+  /**
+   * The backend's user-facing line for a pause: `failure_message` of a snapshot
+   * the producer itself marked 'paused' (a corrected 'failed' row's text is the
+   * parent's retry instruction, never shown).
+   */
+  pause_message?: string;
 }
 
 export interface CodeAgentToolCall {
@@ -421,7 +429,9 @@ export function latestCodeAgentMeta(
     failure_message: s.failure_message ?? fold.failure,
   });
   if (!meta) return null;
-  return { ...meta, code_session: fold.session, usage_limit: fold.usageLimit };
+  // Only a snapshot the producer itself marked paused carries user-facing text.
+  const pause_message = s.state === 'paused' ? str(s.failure_message) : undefined;
+  return { ...meta, code_session: fold.session, usage_limit: fold.usageLimit, pause_message };
 }
 
 function parseEvent(value: unknown): CodeAgentTranscriptEvent | null {
@@ -750,11 +760,6 @@ async function postJson(path: string, body: Record<string, string | undefined>):
     const error = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(error.error || `Request failed (${res.status})`);
   }
-}
-
-/** A fresh idempotency key for one direct turn (reuse it when retrying the same text). */
-export function newDirectTurnId(): string {
-  return `turn-${crypto.randomUUID()}`;
 }
 
 /**

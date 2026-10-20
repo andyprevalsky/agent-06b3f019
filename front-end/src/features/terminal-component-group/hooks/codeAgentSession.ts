@@ -8,13 +8,14 @@
  *   C15 usage-limit stop: the spawn's final row carries failure_kind 'usage_limit' +
  *     retryable + usage_limit{provider, resets_at, …} + retry{tool, type,
  *     code_session_id}; the activity's own row has action_type 'usage_limit'.
+ *     Shown as Paused with the backend's user text (no retry route, no Retry).
  *
  * Parsed defensively: anything missing or malformed yields undefined.
  */
 
 import type { Message } from '@/lib/api/types';
 
-import type { CodeAgentProvider } from './codeAgentContract';
+import type { CodeAgentMeta, CodeAgentProvider } from './codeAgentContract';
 
 /** `metadata.code_session.pr`: the newest PR GitHub reports for the branch. */
 export interface CodeSessionPullRequest {
@@ -35,15 +36,30 @@ export interface CodeSessionFacts {
   merged: boolean;
 }
 
-/** C15 usage-limit stop: the CLI whose limit was hit; the retry continues on the other one. */
+/** C15 usage-limit stop: the CLI whose limit was hit and when it resets. */
 export interface CodeAgentUsageLimit {
   provider: CodeAgentProvider;
   resets_at?: string;
 }
 
-/** "Paused - usage limit, resumes on <the other CLI>" (claude ↔ codex). */
-export function usageLimitPausedText(limit: CodeAgentUsageLimit): string {
-  return `Paused - usage limit, resumes on ${limit.provider === 'codex' ? 'Claude Code' : 'Codex'}`;
+/** "<CLI> usage limit reached[ · resets <local time>]" from the usage_limit block as sent. */
+export function usageLimitDetails(limit: CodeAgentUsageLimit): string {
+  const label = limit.provider === 'codex' ? 'Codex' : 'Claude Code';
+  const resets = limit.resets_at ? Date.parse(limit.resets_at) : Number.NaN;
+  if (!Number.isFinite(resets)) return `${label} usage limit reached`;
+  const at = new Date(resets).toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+  return `${label} usage limit reached · resets ${at}`;
+}
+
+/** The line under a paused session's status: the backend's text, else the usage-limit details. */
+export function pausedNote(meta: CodeAgentMeta): string | undefined {
+  if (meta.state !== 'paused') return undefined;
+  return meta.pause_message ?? (meta.usage_limit ? usageLimitDetails(meta.usage_limit) : undefined);
 }
 
 type Rec = Record<string, unknown>;

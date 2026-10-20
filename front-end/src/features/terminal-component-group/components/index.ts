@@ -26,6 +26,13 @@ export { unansweredCount, useAttentionRequests } from './attention-inbox/useAtte
 export { RoseAppsProvider } from './rose-apps/roseAppsContext';
 export { RoseAppIcons } from './rose-apps/RoseAppIcons';
 export { useRoseApps } from './rose-apps/roseAppsState';
+export { CodeAgentViewProvider } from './code-agent-view/CodeAgentViewProvider';
+export { CodeAgentConversationView } from './code-agent-view/CodeAgentConversationView';
+export {
+  useCodeAgentView,
+  useOpenCodeAgent,
+  type OpenCodeAgent,
+} from './code-agent-view/codeAgentViewState';
 export * from './agentRunState';
 export * from './formatElapsed';
 export { default as AgentStatusIndicator } from './AgentStatusIndicator';

@@ -65,6 +65,11 @@ export interface QueryInputProps {
   agentId?: string;
   pendingPriceLimitCents?: number;
   onPendingPriceLimitChange?: (cents: number) => void;
+  /**
+   * Rose Desktop code-agent view: the box is a text-only direct channel to a
+   * code session — no nub tab, pinned tools, model/speed or attachments.
+   */
+  directChannel?: boolean;
 }
 
 export const DEFAULT_DRIP_STYLES: DripStyles = {

@@ -23,6 +23,10 @@
  *   - usePriceLimit      : edit/save/cancel cost-limit flow
  *   - useTopBarProps     : account/viewport gating shared by TopBar + NubToolbar
  *
+ * DIRECT CHANNEL (directChannel, the Rose Desktop code-agent view): the same
+ *   shell, textarea and send button only — no nub tab, pinned tools, model,
+ *   speed, paperclip, paste or drop (the code session takes text only).
+ *
  * TAB REVEAL (Rose Desktop only): owned by `useToolbarReveal` (ToolbarNub.tsx)
  *   [CLOSED 4px lip] --hover/focus/tap--> [OPEN 18px strip] --leave/tap--> [CLOSED]
  *
@@ -77,10 +81,14 @@ import './query-input/roseQueryBox.css';
 export type { QueryInputProps };
 export type { DripStyles, PendingAttachment } from './query-input/types';
 
+/** Direct channel: no paste target and no drop zone (text only). */
+const NO_TEXTAREA = { current: null };
+const NO_DROP = { onDragOver: () => {}, onDragLeave: () => {}, onDrop: () => {} };
+
 export default function QueryInput(props: QueryInputProps) {
-  const { dripStyles = DEFAULT_DRIP_STYLES, drippiness = 0 } = props;
+  const { dripStyles = DEFAULT_DRIP_STYLES, drippiness = 0, directChannel = false } = props;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const attachments = useAttachments({ textareaRef });
+  const attachments = useAttachments({ textareaRef: directChannel ? NO_TEXTAREA : textareaRef });
   const priceLimit = usePriceLimit({
     agentDetail: props.agentDetail,
     pendingPriceLimitCents: props.pendingPriceLimitCents ?? DEFAULT_PENDING_PRICE_LIMIT_CENTS,
@@ -99,7 +107,7 @@ export default function QueryInput(props: QueryInputProps) {
         data-testid="query-input-host"
         className={cn('max-w-4xl mx-auto', roseDesktop && 'relative mt-[14px]')}
       >
-        {roseDesktop && (
+        {roseDesktop && !directChannel && (
           <NubTab reveal={reveal}>
             <NubToolbar {...topBarProps} />
           </NubTab>
@@ -108,7 +116,7 @@ export default function QueryInput(props: QueryInputProps) {
           dripStyles={dripStyles}
           drippiness={drippiness}
           isDragOver={attachments.isDragOver}
-          dragHandlers={attachments.dragHandlers}
+          dragHandlers={directChannel ? NO_DROP : attachments.dragHandlers}
           opaqueSurface={props.opaqueSurface === true}
           aboveTab={roseDesktop}
           roseDark={roseDark}
@@ -182,16 +190,18 @@ function QueryInputBody(props: QueryInputBodyProps) {
     topBarProps,
     roseDesktop,
     roseDark,
+    directChannel = false,
   } = props;
   const agentCompleted = agentDetail?.status === 'COMPLETED' || agentDetail?.status === 'FAILED';
   const speed =
-    roseDesktop && topBarProps.showFastMode
+    roseDesktop && !directChannel && topBarProps.showFastMode
       ? { fastMode: topBarProps.fastMode ?? false, onFastModeChange: topBarProps.onFastModeChange }
       : undefined;
+  const toolbar = roseDesktop ? <PinnedTools {...topBarProps} /> : <TopBar {...topBarProps} />;
 
   return (
     <>
-      {roseDesktop ? <PinnedTools {...topBarProps} /> : <TopBar {...topBarProps} />}
+      {!directChannel && toolbar}
       <AttachmentList attachments={attachments.attachments} onRemove={attachments.remove} />
       <DragOverlay visible={attachments.isDragOver} />
       <InputContainer
@@ -214,6 +224,7 @@ function QueryInputBody(props: QueryInputBodyProps) {
         roseDesktop={roseDesktop}
         roseDark={roseDark}
         speed={speed}
+        attachable={!directChannel}
       />
     </>
   );

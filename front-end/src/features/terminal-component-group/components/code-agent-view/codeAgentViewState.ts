@@ -42,6 +42,12 @@ export function useCodeAgentView(): CodeAgentViewValue | null {
   return useContext(CodeAgentViewContext);
 }
 
+/** The open code agent when `selectedAgentId` owns it (else null: show that agent's chat). */
+export function useOpenCodeAgent(selectedAgentId: string | null): OpenCodeAgent | null {
+  const open = useContext(CodeAgentViewContext)?.openCodeAgent ?? null;
+  return open !== null && open.ownerAgentId === selectedAgentId ? open : null;
+}
+
 /** A left-bar row (GET /api/agents/code-agents item) as the code agent to open. */
 export function openCodeAgentFromRow(row: CodeAgentListItem): OpenCodeAgent {
   return {

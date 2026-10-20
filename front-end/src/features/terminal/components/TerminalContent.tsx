@@ -23,6 +23,10 @@
  * ROSE DESKTOP APPS (RoseAppsProvider, flag on only): bare top-right icons
  *   (Browser, Phone, Integrations, Dark mode) + the right-panel slot; panels
  *   overlay the content (no right bar, no content inset). Flag off: no icons.
+ * CODE AGENT VIEW (CodeAgentViewProvider, flag on only): a left-bar code-agent
+ *   row (or ?agent-id=<owner>&code-agent=<task id>) opens that Claude Code /
+ *   Codex session as its own conversation in the chat column; the sidebar marks
+ *   its row and AgentChatArea renders it. Flag off: never opens.
  * THEME (RoseThemeProvider, Rose Desktop accounts only): light (default) <->
  *   dark via useRoseTheme().toggle() — the top-right Dark mode icon calls it,
  *   so RoseAppIcons renders inside the provider. Dark adds html.dark and the
@@ -34,6 +38,7 @@ import { useState, useMemo, lazy } from 'react';
 import {
   AppSidebar,
   AttentionRequestsProvider,
+  CodeAgentViewProvider,
   NetworkView,
   RoseAppIcons,
   RoseAppsProvider,
@@ -134,7 +139,13 @@ function TerminalLayout(props: TerminalLayoutProps) {
           publishLayout={roseDesktop}
           onLogout={() => void props.agents.handleLogout()}
         >
-          <InteractiveTerminalLayout {...props} />
+          <CodeAgentViewProvider
+            enabled={roseDesktop}
+            selectedAgentId={props.agents.selectedAgentId}
+            onSelectAgent={props.agents.handleSelectAgent}
+          >
+            <InteractiveTerminalLayout {...props} />
+          </CodeAgentViewProvider>
           {roseDesktop && <RoseAppIcons />}
         </RoseAppsProvider>
       </RoseThemeProvider>

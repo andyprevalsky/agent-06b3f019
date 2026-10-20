@@ -8,9 +8,10 @@
  *   [failed]      → header (✕ · Failed · duration · target) + red failure box (always shown)
  *                   with the backend's failure text verbatim (LOCAL_TARGET_UNAVAILABLE etc.)
  *   [paused]      → header (muted pause · Paused · duration · target), never red: the
- *                   session is saved and resumable. A usage-limit stop (C15) reads
- *                   "Paused - usage limit, resumes on <other CLI>"; no Retry button
- *                   (the backend has no user-callable retry route yet).
+ *                   session is saved and resumable. Under it, one muted line with the
+ *                   backend's text for the user (pausedNote: a usage-limit stop's
+ *                   message, else its usage_limit details); no Retry button (the
+ *                   backend has no user-callable retry/resume route).
  *
  * TARGET (code_agent.target): 'local' → "This Mac · <folder>" (device_name tooltip),
  *   else "Cloud". Mac app only (window.api.localCode) + local + running →
@@ -34,7 +35,7 @@ import {
   codeAgentLabel,
   codeAgentTargetLabel,
   eventTimeMs,
-  usageLimitPausedText,
+  pausedNote,
   type CodeAgentMeta,
   type CodeAgentSummary,
   type CodeAgentTranscriptEvent,
@@ -54,7 +55,7 @@ import {
 const MUTED = 'text-muted-foreground dark:text-[#a3a39d]';
 const CODE = 'font-mono text-[12.5px] text-[#e8507f]';
 
-function Summary({ summary }: { summary: CodeAgentSummary }) {
+export function Summary({ summary }: { summary: CodeAgentSummary }) {
   const tests =
     summary.tests_passed === undefined
       ? null
@@ -107,7 +108,7 @@ function Summary({ summary }: { summary: CodeAgentSummary }) {
 }
 
 /** The persistent code session's branch and where it merges, with push / PR / merge facts. */
-function SessionLine({ session, meta }: { session: CodeSessionFacts; meta: CodeAgentMeta }) {
+export function SessionLine({ session, meta }: { session: CodeSessionFacts; meta: CodeAgentMeta }) {
   const branch = session.branch ?? meta.branch;
   if (!branch) return null;
   const target = session.merge_target ?? meta.base_branch;
@@ -147,7 +148,7 @@ function SessionLine({ session, meta }: { session: CodeSessionFacts; meta: CodeA
  * The backend's failure text verbatim (a LOCAL_TARGET_UNAVAILABLE message is
  * already the exact user-facing sentence); never re-worded on the client.
  */
-function FailureBox({ meta, fallback }: { meta: CodeAgentMeta; fallback: string | null }) {
+export function FailureBox({ meta, fallback }: { meta: CodeAgentMeta; fallback: string | null }) {
   const body: ReactNode = meta.failure_message ?? fallback;
   if (!body) return null;
   return (
@@ -159,6 +160,17 @@ function FailureBox({ meta, fallback }: { meta: CodeAgentMeta; fallback: string 
         {body}
       </p>
     </div>
+  );
+}
+
+/** A paused session's one muted line (never red): the backend's text for the user. */
+export function PausedNote({ meta, className }: { meta: CodeAgentMeta; className: string }) {
+  const note = pausedNote(meta);
+  if (!note) return null;
+  return (
+    <p data-testid="code-agent-paused-note" className={`text-[13px] ${MUTED} ${className}`}>
+      {note}
+    </p>
   );
 }
 
@@ -204,8 +216,6 @@ export function DesktopCodeAgentChip({ meta, vm, events, toolCallId }: DesktopCo
   const showSummary = state === 'completed' && meta.summary;
   const session = !running && meta.code_session ? meta.code_session : null;
   const expandable = isLive || Boolean(showSummary) || hasTranscript || session !== null;
-  const statusText =
-    state === 'paused' && meta.usage_limit ? usageLimitPausedText(meta.usage_limit) : undefined;
 
   return (
     <div
@@ -220,7 +230,7 @@ export function DesktopCodeAgentChip({ meta, vm, events, toolCallId }: DesktopCo
       >
         <ProviderIcon codeProvider={meta.provider} className="h-5 w-5 flex-shrink-0" />
         <div className="flex min-w-0 flex-1 items-center gap-2">
-          <StatusDisplay state={state} codeProvider={meta.provider} text={statusText} />
+          <StatusDisplay state={state} codeProvider={meta.provider} />
           {meta.title && (
             <span className={`truncate text-sm ${MUTED}`} data-testid="code-agent-title">
               · {meta.title}
@@ -260,6 +270,7 @@ export function DesktopCodeAgentChip({ meta, vm, events, toolCallId }: DesktopCo
       </div>
 
       {state === 'failed' && <FailureBox meta={meta} fallback={vm.failureMessage} />}
+      {state === 'paused' && <PausedNote meta={meta} className="-mt-1.5 pb-2.5 pl-11 pr-3.5" />}
 
       {isLive && (
         <div className={open ? '' : 'hidden'}>

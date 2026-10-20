@@ -15,6 +15,8 @@
  * STATE MACHINE (SUBMIT BUTTON): owned by SubmitOrStopButton (SubmitButtons.tsx)
  *   [SEND] <-- canSubmit; [STOP] <-- !canSubmit; [PAUSING] <-- isPausing
  *
+ * TEXT ONLY (attachable=false, the code-agent direct channel): no paperclip.
+ *
  * ROSE DESKTOP (roseDesktop): bare paperclip (no background/border) at the
  * model selector's 26px height, no model info button, short Rose model names
  * (rose-flash / rose-ultra), the 3-state SpeedToggle
@@ -63,6 +65,8 @@ interface InputContainerProps {
   roseDark?: boolean;
   /** Rose Desktop speed toggle wiring; omitted when the account has no Fast Mode. */
   speed?: { fastMode: boolean; onFastModeChange?: (enabled: boolean) => void };
+  /** false = text only (code-agent direct channel): no paperclip. */
+  attachable?: boolean;
 }
 
 export function InputContainer(props: InputContainerProps) {
@@ -86,6 +90,7 @@ export function InputContainer(props: InputContainerProps) {
     roseDesktop = false,
     roseDark = false,
     speed,
+    attachable = true,
   } = props;
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -105,11 +110,13 @@ export function InputContainer(props: InputContainerProps) {
       </div>
       <div className="flex items-center justify-between gap-3 px-3 pt-2 w-full">
         <div className="flex items-center gap-1.5">
-          <PaperclipButton
-            bare={roseDesktop}
-            disabled={disabled || agentCompleted}
-            onClick={() => fileInputRef.current?.click()}
-          />
+          {attachable && (
+            <PaperclipButton
+              bare={roseDesktop}
+              disabled={disabled || agentCompleted}
+              onClick={() => fileInputRef.current?.click()}
+            />
+          )}
           <ModelSelector
             selectedModel={selectedModel}
             onModelChange={onModelChange}
