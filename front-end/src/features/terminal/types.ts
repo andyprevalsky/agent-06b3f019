@@ -163,6 +163,8 @@ export interface AgentSlice {
   ancestors: AncestorNode[];
   handleSelectAgent: (id: string | null) => void;
   handleSendMessage: (attachments?: FilePointer[]) => Promise<void>;
+  /** Create (and select) an agent with this goal; the Rose Desktop app view's new-agent route. */
+  handleCreateAgent?: (data: CreateAgentPayload) => Promise<void>;
   handlePauseAgent: () => Promise<void>;
   handleSubmitFeedback: (f: BlueprintFeedback) => Promise<void>;
   refreshAgentDetail: (id: string) => Promise<void>;

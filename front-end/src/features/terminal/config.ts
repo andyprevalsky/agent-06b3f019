@@ -20,6 +20,9 @@ export const OPENING_MESSAGES: OpeningMessage[] = [
 
 // ── Popular goals carousel ────────────────────────────────────────────────
 
+/** Composer prefill of the left-bar Apps "+ New app" (never auto-sent; ledger row 10). */
+export const NEW_APP_GOAL = 'Make me an app';
+
 /**
  * Goals shown first, in this order, for Rose Desktop accounts only
  * (lib/roseDesktop.ts; UI ledger #15, #24). "Import Code Repo" is a plain goal
@@ -28,7 +31,7 @@ export const OPENING_MESSAGES: OpeningMessage[] = [
  */
 export const ROSE_DESKTOP_POPULAR_GOALS: string[] = [
   'Import Code Repo',
-  'Make me an app',
+  NEW_APP_GOAL,
   'Make me a website',
   'Change my background photo',
   'Make me a game',

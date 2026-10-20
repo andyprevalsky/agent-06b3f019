@@ -69,7 +69,8 @@ export interface RoseAgentGroupsProps {
   observeRoot: (agentId: string) => (element: HTMLElement | null) => void;
 }
 
-function GroupDivider() {
+/** Neutral line pill between collapsed groups (also above the collapsed Apps section). */
+export function GroupDivider() {
   return (
     <div data-testid="rose-group-divider" aria-hidden="true" className="flex justify-center py-2">
       <i className="block h-[3px] w-[18px] rounded-[3px] bg-[hsl(240_6%_86%)] dark:bg-white/[0.14]" />

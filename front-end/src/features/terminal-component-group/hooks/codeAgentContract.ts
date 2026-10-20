@@ -7,7 +7,8 @@
  * these files (and their blackbox fixtures) when the contract moves.
  *
  *   agent:<rootId> realtime INSERT/UPDATE (existing message path)
- *     ├─ metadata.code_agent            → CodeAgentMeta    (chip lifecycle, target, summary);
+ *     ├─ metadata.code_agent            → CodeAgentMeta    (chip lifecycle, target, summary,
+ *     │    preview_url → live preview card that opens the full-screen app view);
  *     │    state 'paused' = idle/user pause or waiting on the parent: resumable, never failed
  *     ├─ metadata.code_session          → CodeSessionFacts (branch → merge_target, pushed/pr/merged)
  *     ├─ metadata.failure_kind 'usage_limit' + retryable + usage_limit{provider, resets_at}
@@ -114,6 +115,11 @@ export interface CodeAgentMeta {
   code_session?: CodeSessionFacts;
   /** Set when the task stopped on a provider usage limit (state is then 'paused'). */
   usage_limit?: CodeAgentUsageLimit;
+  /**
+   * Live dev-server preview of the session (dev cloud sessions, A1:
+   * https://5173-<sandbox>.<domain>/). The chip shows a live preview card.
+   */
+  preview_url?: string;
 }
 
 export interface CodeAgentToolCall {
@@ -334,6 +340,7 @@ export function parseCodeAgentMeta(value: unknown): CodeAgentMeta | null {
     failure_kind: failureKind,
     title: str(r.title),
     summary: parseSummary(r.summary),
+    preview_url: str(r.preview_url),
   };
 }
 

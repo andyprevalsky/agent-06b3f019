@@ -33,6 +33,11 @@ export interface RoseSidebarActions {
    * that owns the session; its chat holds the code agent's chip and transcript.
    */
   onOpenCodeAgent?: (codeAgent: CodeAgentListItem) => void;
+  /**
+   * Apps section "+ New app": start a new Super Agent with the composer
+   * prefilled ("Make me an app"), never auto-sent. Default: New Super Agent.
+   */
+  onNewApp?: () => void;
 }
 
 export function useNotYet() {
