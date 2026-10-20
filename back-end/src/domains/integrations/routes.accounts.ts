@@ -92,7 +92,10 @@ router.post(
       assertProviderSlug(provider);
       const accountId = toStorageAccountId(req.params.accountId);
       // No new accounts: a non-default id must already be one of this provider's rows.
-      if (accountId !== '' && (await findIntegrationAccount(userId, provider, accountId)) === null) {
+      if (
+        accountId !== '' &&
+        (await findIntegrationAccount(userId, provider, accountId)) === null
+      ) {
         throw new accounts.IntegrationAccountNotFoundError(provider, req.params.accountId);
       }
       const outcome = await reportIntegrationProgress({

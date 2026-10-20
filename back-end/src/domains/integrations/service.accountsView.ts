@@ -70,7 +70,8 @@ const keyOf = (provider: string, accountId: string) => `${provider}\u0000${accou
 
 function rowHealth(row: AccountViewRow): { state: AccountState; lastError: string | null } {
   const reconnect = (row.emailCredentials ?? []).find((c) => c.state === 'needs_reconnect');
-  if (reconnect !== undefined) return { state: 'needs_reconnect', lastError: reconnect.lastErrorReason };
+  if (reconnect !== undefined)
+    return { state: 'needs_reconnect', lastError: reconnect.lastErrorReason };
   const state = ROW_STATUS_STATE[row.status] ?? 'idle';
   const failed = state === 'sync_failed' || state === 'EXPIRED';
   return { state, lastError: failed ? row.failureReason : null };

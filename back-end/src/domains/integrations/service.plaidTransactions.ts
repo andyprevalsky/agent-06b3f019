@@ -5,6 +5,8 @@
  *   Plaid Link/exchange -> PlaidItem(access token + cursor)
  *     -> /transactions/sync pages -> normalized PlaidTransaction rows
  *     -> /api/data/grep source=transactions -> explore agents
+ *     -> sync progress of the user's `plaid` row (transactions saved; Plaid
+ *        reports no up-front total, so the bar is indeterminate until synced)
  */
 
 import type { Transaction } from 'plaid';
@@ -22,8 +24,36 @@ import {
   upsertPlaidTransaction,
   type PlaidTransactionUpsertInput,
 } from './repo.plaid';
+import { reportProgressBestEffort } from './service.progress';
+import type { ProgressWriteInput } from './syncAccountsContract';
 
 const log = createLogger('PlaidTransactions');
+
+/**
+ * Best-effort sync progress of the user's one `plaid` Integration row (always
+ * accountId ''): transactions saved per /transactions/sync page, total unknown.
+ */
+function plaidRunProgress(userId: string, itemRowId: string) {
+  const runId = `plaid-sync:${itemRowId}:${Date.now()}`;
+  const report = (input: Omit<ProgressWriteInput, 'runId'>) =>
+    reportProgressBestEffort({
+      userId,
+      provider: 'plaid',
+      accountId: '',
+      input: { runId, ...input },
+    });
+  return {
+    start: () => report({ state: 'syncing', unit: 'transactions', done: 0, total: null }),
+    saved: (done: number) => report({ state: 'syncing', done }),
+    finish: (done: number) => report({ state: 'synced', done }),
+    fail: (err: unknown) => report({ state: 'failed', error: syncErrorMessage(err) }),
+  };
+}
+
+function syncErrorMessage(err: unknown): string {
+  if (isPlaidError(err)) return err.response.data.error_message;
+  return err instanceof Error ? err.message : String(err);
+}
 
 function parsePlaidDate(value: string | null | undefined): Date | null {
   if (typeof value !== 'string' || value.trim() === '') return null;
@@ -109,6 +139,8 @@ export async function syncPlaidItemTransactions(
   }
 
   await markPlaidItemSyncing(item.id);
+  const progress = plaidRunProgress(item.userId, item.id);
+  await progress.start();
 
   let cursor: string | null = item.cursor ?? null;
   let added = 0;
@@ -135,9 +167,11 @@ export async function syncPlaidItemTransactions(
 
       cursor = page.next_cursor || cursor;
       hasMore = page.has_more;
+      if (hasMore) await progress.saved(added + modified + removed);
     }
 
     await markPlaidItemSyncSucceeded(item.id, cursor, options.webhookAt);
+    await progress.finish(added + modified + removed);
     log.info('Plaid transaction sync complete', {
       userId: item.userId,
       plaidItemId: item.plaidItemId,
@@ -147,6 +181,7 @@ export async function syncPlaidItemTransactions(
     });
     return { added, modified, removed, cursor };
   } catch (err) {
+    await progress.fail(err);
     if (isPlaidError(err)) {
       const code = err.response.data.error_code;
       const message = err.response.data.error_message;

@@ -95,8 +95,7 @@ async function settleLightLinkedInRows<T extends AccountViewRow>(
   );
 }
 
-const isLiveRun = (row: ProgressRow) =>
-  !TERMINAL_SYNC_STATES.includes(row.state as SyncState);
+const isLiveRun = (row: ProgressRow) => !TERMINAL_SYNC_STATES.includes(row.state as SyncState);
 
 /**
  * The bar poll. `accountsByProvider` is always the user's full account map (the
@@ -125,7 +124,11 @@ export async function getAccountsDelta(
         row.status === 'SYNCING' ||
         row.emailCredentials.some((credential) => after(credential.updatedAt))
     );
-  return { cursor, changed, accountsByProvider: buildAccountsView({ rows, progress, now: new Date() }) };
+  return {
+    cursor,
+    changed,
+    accountsByProvider: buildAccountsView({ rows, progress, now: new Date() }),
+  };
 }
 
 /**

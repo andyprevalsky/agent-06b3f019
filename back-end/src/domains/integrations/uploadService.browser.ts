@@ -18,6 +18,7 @@ import { createLogger } from '../../providers/logger';
 import { authRealmFromCookieDomain } from '../../providers/authRealm';
 import { VALID_BROWSERS } from './config';
 import * as repo from './repo';
+import { uploadRunProgress } from './service.uploadProgress';
 const log = createLogger('Integrations');
 const COOKIE_SNAPSHOT_SEPARATOR = '\u001f';
 
@@ -291,12 +292,24 @@ export async function processCookiesUpload(
     config: { browser, cookieCount: sanitizedCookies.length, uploadedAt: new Date().toISOString() },
   });
 
-  if (sanitizedCookies.length > 0) {
-    await upsertCookieBatches(userId, browser, sanitizedCookies);
-  } else {
-    await repo.deleteCookiesForBrowserSnapshot({ userId, browserSource: browser });
-    await repo.deleteCookieBundlesForBrowserSnapshot({ userId, browserSource: browser });
-  }
+  // Sync progress of the browser's row: cookies stored of cookies uploaded, at
+  // each existing 100-cookie batch (best-effort; never fails the upload).
+  const progress = uploadRunProgress({
+    userId,
+    run: `cookies-upload:${browser}`,
+    unit: 'cookies',
+    totals: new Map([[browser, sanitizedCookies.length]]),
+  });
+  await progress.start();
+  await progress.step(async () => {
+    if (sanitizedCookies.length > 0) {
+      await upsertCookieBatches(userId, browser, sanitizedCookies, progress.advance);
+    } else {
+      await repo.deleteCookiesForBrowserSnapshot({ userId, browserSource: browser });
+      await repo.deleteCookieBundlesForBrowserSnapshot({ userId, browserSource: browser });
+    }
+  });
+  await progress.finish();
 
   return { cookieCount: sanitizedCookies.length, integration };
 }
@@ -305,7 +318,8 @@ export async function processCookiesUpload(
 async function upsertCookieBatches(
   userId: string,
   browser: string,
-  sanitizedCookies: SanitizedCookie[]
+  sanitizedCookies: SanitizedCookie[],
+  onBatch: (cookiesDone: number) => Promise<unknown>
 ) {
   const BATCH_SIZE = 100;
   let processedCount = 0;
@@ -366,6 +380,7 @@ async function upsertCookieBatches(
     const params = buildCookieParams(userId, browser, deduped);
     await repo.bulkUpsertCookies(values, params);
     processedCount += deduped.length;
+    await onBatch(i + batch.length);
   }
 
   for (const group of profileGroups) {

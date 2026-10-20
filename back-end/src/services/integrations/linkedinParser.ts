@@ -310,7 +310,9 @@ export function transformLinkedInContacts(
 export async function importLinkedInData(
   userId: string,
   zipPath: string,
-  jobId: string
+  jobId: string,
+  /** Called once the archive is parsed, with the contact + message records to import. */
+  onParsed?: (records: number) => Promise<void>
 ): Promise<{ contacts: number; messages: number }> {
   log.info('Parsing LinkedIn ZIP', { jobId, zipPath });
 
@@ -362,6 +364,8 @@ export async function importLinkedInData(
     contacts: contactsToUpsert.length,
     userId,
   });
+
+  await onParsed?.(contactsToUpsert.length + totalMessages);
 
   // Upsert via shared manager
   const result = await upsertPersonAndMessageRecords(userId, contactsToUpsert, jobId);

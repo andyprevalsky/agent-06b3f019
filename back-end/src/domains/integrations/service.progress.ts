@@ -26,6 +26,9 @@ import {
 
 const log = createLogger('IntegrationProgress');
 
+/** progressWriteSchema's `error` bound. */
+const MAX_PROGRESS_ERROR_CHARS = 2_000;
+
 export class ProgressAccountLimitError extends Error {
   constructor() {
     super(`At most ${MAX_PROGRESS_ACCOUNTS_PER_USER} integration accounts may report progress`);
@@ -120,8 +123,14 @@ export async function reportIntegrationProgress(
  * sync's outcome; a failed write is logged and the next boundary supersedes it.
  */
 export async function reportProgressBestEffort(params: ReportProgressParams): Promise<void> {
+  // A long failure message must not invalidate the run's terminal write.
+  const { error } = params.input;
+  const input =
+    typeof error === 'string' && error.length > MAX_PROGRESS_ERROR_CHARS
+      ? { ...params.input, error: error.slice(0, MAX_PROGRESS_ERROR_CHARS) }
+      : params.input;
   try {
-    await reportIntegrationProgress(params);
+    await reportIntegrationProgress({ ...params, input });
   } catch (error: unknown) {
     log.warn('Progress write failed (sync unaffected)', {
       userId: params.userId,
