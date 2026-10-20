@@ -30757,6 +30757,122 @@ async def test_browser_routes_parent_agent_rows_by_recipient_task_only():
     inbox_get.assert_not_awaited()
 
 
+@_in_browser_activity_context
+async def test_browser_agent_message_is_an_assistant_inter_agent_turn_on_every_request_path():
+    """User decision: a task-addressed agent message is ASSISTANT role in the browser history (Codex).
+
+    Delivered once, after the previous step's tool result (never between a tool_use
+    and its tool_result, never merged into a model turn), and, while it is the last
+    message of a request, sent as user role on the real Anthropic and GPT request
+    builders (both strip a trailing assistant as prefill). The marker survives the
+    model-visible projection and a JSON resume round trip.
+    """
+    from domains.spawn_browser_agent_v3 import handler as h
+    from providers.rose.browser_use import build_browser_use_messages
+    from providers.rose.claude_auth import build_anthropic_body
+    from providers.rose.gpt_auth import build_codex_responses_body
+    from providers.rose.inter_agent_context import is_inter_agent_message, settle_trailing_inter_agent_messages
+    from providers.rose.pools import get_pool
+    from providers.rose.transforms import transform_messages_for_anthropic
+
+    with patch("helpers.agent_inbox.fetch_agent_inbox", AsyncMock(return_value=[])):
+        replay = await _run_browser_durable_user_feedback_replay(agent_rows=[_OWN_AGENT_ROW], inbox_address="tool-1")
+    assert replay["result"]["status"] == "completed"
+    body_text = _own_agent_message_turn()
+    turns = replay["model_calls"][1]["turn_messages"]
+    own = [index for index, message in enumerate(turns) if message.get("content") == body_text]
+    assert len(own) == 1, turns
+    own_index = own[0]
+    assert turns[own_index] == {"role": "assistant", "content": body_text}
+    assert is_inter_agent_message(turns[own_index]), "the inter-agent marker was lost"
+    # Placed after the previous step's tool result, which directly follows its tool call.
+    tool_index = max(index for index, message in enumerate(turns) if message.get("role") == "tool")
+    assert tool_index < own_index, turns
+    assert turns[tool_index - 1]["role"] == "assistant" and turns[tool_index - 1]["tool_calls"][0]["id"] == (
+        turns[tool_index]["tool_call_id"]
+    )
+    assert own_index == len(turns) - 1, "it is the newest turn of this request"
+
+    pool_spec = get_pool("rose-1-browser-use")
+
+    def wire(turn_messages, **extra):
+        messages = build_browser_use_messages(
+            task="Read calendar",
+            browser_state={},
+            action_history=[],
+            available_actions=["click", "attempt_completion"],
+            turn_messages=turn_messages,
+            **extra,
+        )
+        settled = settle_trailing_inter_agent_messages(messages)
+        anthropic = build_anthropic_body(
+            pool_spec=pool_spec, messages=settled, tools=None, tool_choice=None, response_format=None, max_tokens=64
+        )
+        gpt = build_codex_responses_body(
+            pool_spec=pool_spec, model_override="gpt-5.6", messages=settled, request_id="r", cache_breakpoints=True
+        )
+        return messages, settled, anthropic["messages"], gpt["input"]
+
+    def texts(message):
+        content = message.get("content")
+        if isinstance(content, str):
+            return [content]
+        return [block.get("text") for block in content if isinstance(block, dict) and block.get("text")]
+
+    # Trailing: unsettled, both transports would drop it; settled, it is the user tail.
+    messages, settled, anthropic, gpt = wire(turns)
+    _s, _d, unsettled_anthropic = transform_messages_for_anthropic(messages)
+    assert body_text not in "\n".join(t for m in unsettled_anthropic for t in texts(m)), "would be dropped"
+    assert settled[-1] == {"role": "user", "content": body_text} and messages[-1]["role"] == "assistant"
+    assert anthropic[-1]["role"] == "user" and anthropic[-1]["content"][-1]["text"] == body_text
+    assert anthropic[-1]["content"][-1].get("cache_control") == {"type": "ephemeral"}
+    assert gpt[-1]["role"] == "user" and gpt[-1]["content"][-1]["text"] == body_text
+
+    # Not trailing (the next step's tool turn follows): it stays its own assistant message.
+    next_turns = list(turns)
+    h._append_browser_turn_messages(
+        next_turns,
+        unified_action={"action": "click", "thinking": "Open it", "params": {"index": 3}},
+        result={"status": "success"},
+        tool_call_id="call-next",
+    )
+    messages, settled, anthropic, gpt = wire(next_turns)
+    assert settled is messages
+    anthropic_roles = [(m["role"], body_text in texts(m)) for m in anthropic]
+    tail = anthropic_roles[-3:]
+    assert tail == [("assistant", True), ("assistant", False), ("user", False)], anthropic_roles
+    assert [b["type"] for b in anthropic[-2]["content"]][-1] == "tool_use"
+    assert anthropic[-4]["role"] == "user", "the tool_result (and user feedback) precede the agent message"
+    gpt_own = [i for i, item in enumerate(gpt) if item.get("role") and body_text in texts(item)]
+    assert len(gpt_own) == 1 and gpt[gpt_own[0]]["role"] == "assistant", gpt
+    assert gpt[gpt_own[0]]["content"][0]["type"] == "output_text"
+    # The next model turn (its thinking text + function_call) stays separate: never merged.
+    assert texts(gpt[gpt_own[0] + 1]) == ["Open it"] and gpt[gpt_own[0] + 2]["type"] == "function_call"
+    assert gpt[gpt_own[0] - 1].get("role") == "user", "tool output/user feedback precede the agent message"
+    # A fork prompt after it (write-lock notification) keeps it assistant too.
+    messages, settled, anthropic, _gpt = wire(turns, extra_user_messages=[{"role": "user", "content": "Fork"}])
+    assert settled is messages and anthropic[-2]["role"] == "assistant" and texts(anthropic[-2]) == [body_text]
+
+    # The model-visible projection keeps the marker even when redaction rebuilds strings.
+    visible = h._model_visible_browser_turn_messages(
+        turns, lambda value: json.loads(json.dumps(value)), secret_values_used=False
+    )
+    assert is_inter_agent_message(visible[own_index])
+    # A JSON resume round trip restores it (otherwise a trailing one would be dropped as prefill).
+    state = h._browser_resume_continuity_state(
+        action_history=SimpleNamespace(get_entries=lambda: []),
+        visited_urls=[],
+        verifier_checkpoints=[],
+        browser_turn_messages=turns,
+    )
+    assert state["inter_agent_turn_indexes"] == [own_index]
+    restored = h._restore_browser_turn_messages(json.loads(json.dumps(state)))
+    assert restored == turns and is_inter_agent_message(restored[own_index])
+    assert [is_inter_agent_message(m) for m in restored] == [is_inter_agent_message(m) for m in turns]
+    resumed = h._drain_resume_state({"status": "drain", **json.loads(json.dumps(state))}, None)
+    assert resumed["inter_agent_turn_indexes"] == [own_index]
+
+
 def test_browser_agent_rows_deliver_once_across_rereads_and_resume():
     """The per-step read re-returns rows since task start: each own message is delivered once, even after resume."""
     from helpers.agent_inbox import AgentInbox
@@ -31460,6 +31576,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_routes_parent_agent_rows_by_recipient_task",
         test_browser_routes_parent_agent_rows_by_recipient_task_only,
+    )
+    await r.record_async(
+        "browser_agent_message_is_assistant_inter_agent_turn_on_every_request_path",
+        test_browser_agent_message_is_an_assistant_inter_agent_turn_on_every_request_path,
     )
     r.record(
         "browser_agent_rows_deliver_once_across_rereads_and_resume",

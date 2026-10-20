@@ -3836,6 +3836,40 @@ async def test_explore_agent_inbox_delivers_each_message_once_and_tolerates_fail
     assert rendered[2]["content"].endswith(
         "Message Type: MESSAGE\nTask name: unknown\nSender: root-1\nPayload:\nAlso check hotels."
     ), rendered[2]
+    # In the explore's real context: after the step's tool result, assistant role,
+    # and settled to user only while it trails the request (providers drop a trailing assistant).
+    from providers.rose.inter_agent_context import is_inter_agent_message, settle_trailing_inter_agent_messages
+
+    step = [
+        {"role": "USER", "text": "research X", "timestamp": "2026-01-01T00:00:00+00:00", "metadata": {}},
+        {
+            "role": "ASSISTANT",
+            "text": "Searching.",
+            "timestamp": "2026-01-01T00:00:01+00:00",
+            "metadata": {"tool_calls": [{"tool": "web_search", "tool_call_id": "call_a", "query": "X"}]},
+        },
+        {
+            "role": "TOOL",
+            "text": "results",
+            "timestamp": "2026-01-01T00:00:02+00:00",
+            "metadata": {"toolCallId": "call_a", "toolName": "web_search", "toolStatus": "FINISHED"},
+        },
+    ]
+    in_context = await build_llm_messages([*step, first], "SYSTEM")
+    assert [m["role"] for m in in_context] == ["system", "user", "assistant", "tool", "assistant"], in_context
+    assert is_inter_agent_message(in_context[-1]) and in_context[-1]["content"] == rendered[1]["content"]
+    assert settle_trailing_inter_agent_messages(in_context)[-1] == {"role": "user", "content": rendered[1]["content"]}
+    later = await build_llm_messages(
+        [
+            *step,
+            first,
+            {"role": "ASSISTANT", "text": "Denver only.", "timestamp": "2099-01-01T00:00:00+00:00", "metadata": {}},
+        ],
+        "SYSTEM",
+    )
+    assert [m["role"] for m in later][-2:] == ["assistant", "assistant"] and is_inter_agent_message(later[-2])
+    assert later[-1]["content"].endswith("Denver only."), "never merged into the model's turn"
+    assert settle_trailing_inter_agent_messages(later) is later
     assert [c.args for c in fetch.await_args_list] == [
         ("parent-1", "bg-tc-1", None),
         ("parent-1", "bg-tc-1", m1["created_at"]),

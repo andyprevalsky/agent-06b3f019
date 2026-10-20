@@ -72,6 +72,7 @@ from providers.fast_cache.context import write_through_enabled_for_user
 from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
 from providers.rose.browser_use import format_browser_state_for_tool
 from providers.rose.errors import BrowserModelOutputValidationError
+from providers.rose.inter_agent_context import InterAgentText, inter_agent_message, is_inter_agent_message
 from providers.rose.types import ComputeTokenSource
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.attention_requests import REJECTION_SENTINEL
@@ -901,6 +902,18 @@ def _browser_turn_messages_for_resume(
     return list(browser_turn_messages or [])
 
 
+def _restore_browser_turn_messages(resume_state: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Resumed transcript with its assistant-role inter-agent messages re-marked."""
+    state = resume_state or {}
+    messages = [message for message in (state.get("browser_turn_messages") or []) if isinstance(message, dict)]
+    for index in state.get("inter_agent_turn_indexes") or []:
+        if isinstance(index, int) and 0 <= index < len(messages):
+            message = messages[index]
+            if message.get("role") == "assistant" and isinstance(message.get("content"), str):
+                messages[index] = inter_agent_message(message["content"])
+    return messages
+
+
 def _complete_pending_payment_card_result(
     browser_turn_messages: List[Dict[str, Any]],
     action_history: Any,
@@ -1133,6 +1146,9 @@ def _model_visible_browser_message(
         safe["content"] = blocks
     elif content is not None:
         safe["content"] = visible_json(content, str(message.get("name") or "")) if role == "tool" else redact(content)
+        if is_inter_agent_message(message) and isinstance(safe["content"], str):
+            # Keep the inter-agent marker: RoseClient settles a trailing one to user role.
+            safe["content"] = InterAgentText(safe["content"])
     calls = message.get("tool_calls")
     if isinstance(calls, list):
         visible_calls = []
@@ -1595,6 +1611,10 @@ def _browser_resume_continuity_state(
         "visited_urls": list(visited_urls),
         "verifier_checkpoints": list(verifier_checkpoints),
         "browser_turn_messages": _browser_turn_messages_for_resume(browser_turn_messages),
+        # JSON drops the inter-agent str marker; these indexes restore it on resume.
+        "inter_agent_turn_indexes": [
+            index for index, message in enumerate(browser_turn_messages or []) if is_inter_agent_message(message)
+        ],
         "reasoning_messages": list(reasoning_messages or []),
         "action_summary": list(action_summary or []),
         "auth_attempts": auth_runtime_state.snapshot() if auth_runtime_state is not None else None,
@@ -6050,6 +6070,7 @@ _BROWSER_RESUME_CONTINUITY_FIELDS = (
     "visited_urls",
     "verifier_checkpoints",
     "browser_turn_messages",
+    "inter_agent_turn_indexes",
     "reasoning_messages",
     "action_summary",
     "auth_attempts",
@@ -7667,11 +7688,7 @@ async def _spawn_browser_agent_activity_v3_real(
     # A process-local thread pump heartbeats every registered activity context.
     _heartbeat_token = start_browser_activity_heartbeat()
     action_entries: List[Dict[str, Any]] = []
-    browser_turn_messages: List[Dict[str, Any]] = [
-        message
-        for message in ((write_lock_resume_state or {}).get("browser_turn_messages") or [])
-        if isinstance(message, dict)
-    ]
+    browser_turn_messages: List[Dict[str, Any]] = _restore_browser_turn_messages(write_lock_resume_state)
     if (write_lock_resume_state or {}).get("approval_type") == "payment":
         _resolve_payment_card_tool_result_for_resume(
             browser_turn_messages,
@@ -9270,8 +9287,10 @@ async def _spawn_browser_agent_activity_v3_real(
             agent_message_rows = instruction_state.pop("_agent_message_rows", None) or []
             if agent_inbox is not None:
                 # Same read as the user instructions: rows addressed to this task only, once each.
+                # Assistant-role inter-agent message (Codex), appended at step start after the
+                # previous step's tool results; RoseClient sends it as user while it trails.
                 for agent_message in agent_inbox.accept_rows(agent_message_rows):
-                    browser_turn_messages.append({"role": "user", "content": format_agent_message(agent_message)})
+                    browser_turn_messages.append(inter_agent_message(format_agent_message(agent_message)))
 
             # Handle pending write lock action
             if pending_write_lock_action:
