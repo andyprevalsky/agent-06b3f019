@@ -1,102 +1,30 @@
-/**
- * i-message-sync — account gate and real-time uploads.
- *
- *   rows (one per Mac + legacy '') ──► decideGate ──► run(connect | sync) | skip
- *     connect trigger ............... run (sync when this Mac's row exists)
- *     this Mac's row ................ run sync (unless NOT_CONNECTED / freshly SYNCING)
- *     removed by the user ........... skip until the user connects again
- *     row seen before, now missing .. run sync: the backend's 410 decides removal
- *     legacy row / another Mac ...... run connect (claims the legacy row / joins)
- *
- * The backend, not a cached list, is the authority on removal: a `sync` upload
- * for a removed Mac answers 410 and recreates nothing.
- */
-
 import { MessageTransformer } from '../../services/messaging/MessageTransformer';
 import { STALE_SYNC_THRESHOLD_MS } from './config';
 import {
   checkIMessageAccess,
-  deviceAccount,
-  getIMessageAccounts,
+  getIntegration,
   getMaxIMessageRowId,
   getSession,
+  isIntegrationConnected,
+  readIMessages,
   readIMessagesSinceRowId,
-  sessionUserId,
   toNormalizedMessages,
-  uploadDeviceBatch,
+  uploadImessagePayload,
 } from './repo';
-import { loadUserState, markAccountRemoved } from './service.state';
-import type {
-  AccountMode,
-  DeviceSyncState,
-  Integration,
-  NormalizedMessage,
-  SyncEvent,
-  SyncTrigger,
-} from './types';
+import type { IntegrationConfig, NormalizedMessage, SyncEvent } from './types';
 
-export type Gate =
-  { kind: 'run'; mode: AccountMode; accountConfirmed: boolean } | { kind: 'skip'; reason: string };
+const INTEGRATION_NAME = 'imessage';
 
-const accountOf = (row: Integration): string => row.accountId ?? '';
-
-/** Null to proceed, or why a scheduled sync must not use this row now. */
-function rowSkipReason(row: Integration): string | null {
-  if (row.status === 'NOT_CONNECTED') return 'integration not connected';
-  if (row.status !== 'SYNCING' || row.lastSyncAt === null || row.lastSyncAt === undefined) {
-    return null;
-  }
-  const lastSyncAge = Date.now() - new Date(row.lastSyncAt).getTime();
-  if (lastSyncAge < STALE_SYNC_THRESHOLD_MS) {
-    return `already syncing (last sync ${Math.round(lastSyncAge / 60000)}m ago)`;
-  }
-  console.log(
-    `[IMessageSync] Re-syncing - SYNCING status stale (last sync ${Math.round(lastSyncAge / 60000)}m ago)`
-  );
-  return null;
-}
-
-export function decideGate(
-  rows: Integration[],
-  accountId: string,
-  state: DeviceSyncState,
-  trigger: SyncTrigger
-): Gate {
-  const own = rows.find((row) => accountOf(row) === accountId);
-  if (trigger === 'connect') {
-    return { kind: 'run', mode: own ? 'sync' : 'connect', accountConfirmed: own !== undefined };
-  }
-  if (own !== undefined) {
-    const reason = rowSkipReason(own);
-    return reason === null
-      ? { kind: 'run', mode: 'sync', accountConfirmed: true }
-      : { kind: 'skip', reason };
-  }
-  if (state.removed) return { kind: 'skip', reason: "this Mac's iMessage account was removed" };
-  if (state.established) return { kind: 'run', mode: 'sync', accountConfirmed: false };
-  const legacy = rows.find((row) => accountOf(row) === '');
-  if (legacy !== undefined) {
-    const reason = rowSkipReason(legacy);
-    return reason === null
-      ? { kind: 'run', mode: 'connect', accountConfirmed: false }
-      : { kind: 'skip', reason };
-  }
-  if (rows.some((row) => row.status !== 'NOT_CONNECTED')) {
-    return { kind: 'run', mode: 'connect', accountConfirmed: false };
-  }
-  return { kind: 'skip', reason: 'integration not found' };
-}
-
-/** This Mac's own iMessage account row is present and connected. */
-export async function isOwnAccountConnected(): Promise<boolean> {
-  const { id } = deviceAccount();
-  const rows = await getIMessageAccounts();
-  return rows.some((row) => accountOf(row) === id && row.status !== 'NOT_CONNECTED');
+/**
+ * True if the iMessage integration is currently marked connected in cache.
+ */
+export async function isConnected(): Promise<boolean> {
+  return isIntegrationConnected(INTEGRATION_NAME);
 }
 
 /**
- * Upload real-time messages to this Mac's account (`sync` mode: never creates
- * it). Returns true on success. Never throws.
+ * Upload normalized messages to the backend. Returns true on success, false if
+ * unauthenticated or the uploader reports failure. Never throws.
  */
 export async function uploadNormalizedMessages(messages: NormalizedMessage[]): Promise<boolean> {
   const session = await getSession();
@@ -104,21 +32,15 @@ export async function uploadNormalizedMessages(messages: NormalizedMessage[]): P
     console.log('[IMessageSync] Skipping upload - not authenticated');
     return false;
   }
-  const account = deviceAccount();
+
   const contacts = MessageTransformer.toContactWithMessages(messages);
   const stats = MessageTransformer.getStats(messages);
+
   console.log(
     `[IMessageSync] Uploading ${stats.total} messages from ${stats.uniqueContacts} contacts`
   );
-  const result = await uploadDeviceBatch(contacts, session.access_token, {
-    ...account,
-    mode: 'sync',
-  });
-  const userId = sessionUserId(session);
-  if (result.accountRemoved && userId !== null) {
-    markAccountRemoved(loadUserState(userId, account.id));
-    console.log("[IMessageSync] This Mac's iMessage account was removed; real-time upload dropped");
-  }
+
+  const result = await uploadImessagePayload(contacts, session.access_token);
   return result.success;
 }
 
@@ -141,14 +63,15 @@ export async function fetchNewMessagesSinceRowId(
 }
 
 /**
- * Handle a single real-time sync event: upload new messages when this Mac's
- * account is connected. Errors (connection, upload) are logged.
+ * Handle a single real-time sync event: upload new messages when the
+ * integration is still connected. Errors (connection, upload) are logged.
  */
 export async function handleSyncEvent(event: SyncEvent): Promise<void> {
   if (event.type === 'error') {
     console.error('[IMessageSync] Real-time watcher error:', event.error);
     return;
   }
+
   if (
     event.type !== 'new_messages' ||
     event.messages === undefined ||
@@ -156,10 +79,13 @@ export async function handleSyncEvent(event: SyncEvent): Promise<void> {
   ) {
     return;
   }
-  if (!(await isOwnAccountConnected())) {
-    console.log("[IMessageSync] Real-time: skipping upload - this Mac's account is not connected");
+
+  const connected = await isConnected();
+  if (!connected) {
+    console.log('[IMessageSync] Real-time: skipping upload - integration not connected');
     return;
   }
+
   console.log(`[IMessageSync] Real-time: ${event.messages.length} new message(s) detected`);
   const success = await uploadNormalizedMessages(event.messages);
   if (success) {
@@ -169,7 +95,10 @@ export async function handleSyncEvent(event: SyncEvent): Promise<void> {
   }
 }
 
-/** Real-time sync needs chat.db access (the caller also checks watcher state). */
+/**
+ * Can a real-time sync start right now? (access gated; caller also inspects the
+ * watcher's active state before actually starting it.)
+ */
 export function canStartRealTimeSync(): boolean {
   if (!checkIMessageAccess()) {
     console.log('[IMessageSync] Cannot start real-time sync - no iMessage access');
@@ -178,9 +107,97 @@ export function canStartRealTimeSync(): boolean {
   return true;
 }
 
-/** Initial ROWID for real-time sync (max currently in DB — avoids re-syncing). */
+/**
+ * Initial ROWID for real-time sync (max currently in DB — avoids re-syncing).
+ */
 export function initialRealTimeRowId(): number {
   const rowId = getMaxIMessageRowId();
   console.log(`[IMessageSync] Initializing real-time sync from ROWID ${rowId}`);
   return rowId;
+}
+
+interface SyncResult {
+  /** True if the reader + uploader ran to completion and upload succeeded. */
+  uploaded: boolean;
+  /** Max ROWID observed among uploaded messages (for bumping the watcher cursor). */
+  newMaxRowId: number | null;
+}
+
+/**
+ * Decide whether a scheduled sync should run now. Returns null to proceed or a
+ * reason string to skip.
+ */
+function shouldSkipScheduledSync(
+  integration: { status: string; lastSyncAt?: string | null } | undefined
+): string | null {
+  if (!integration || integration.status === 'NOT_CONNECTED') {
+    return 'integration not found';
+  }
+  if (integration.status !== 'SYNCING') return null;
+  if (integration.lastSyncAt === null || integration.lastSyncAt === undefined) return null;
+
+  const lastSyncAge = Date.now() - new Date(integration.lastSyncAt).getTime();
+  if (lastSyncAge < STALE_SYNC_THRESHOLD_MS) {
+    return `already syncing (last sync ${Math.round(lastSyncAge / 60000)}m ago)`;
+  }
+  console.log(
+    `[IMessageSync] Re-syncing - SYNCING status stale (last sync ${Math.round(lastSyncAge / 60000)}m ago)`
+  );
+  return null;
+}
+
+/**
+ * Full sync: gated by auth + access + integration state, reads messages
+ * (incrementally when possible), uploads, and returns the outcome. Errors are
+ * caught and logged — this never throws.
+ */
+export async function runFullSync(): Promise<SyncResult> {
+  const session = await getSession();
+  if (!session) {
+    console.log('[IMessageSync] Skipping sync - not authenticated');
+    return { uploaded: false, newMaxRowId: null };
+  }
+
+  if (!checkIMessageAccess()) {
+    console.log('[IMessageSync] Skipping sync - no iMessage access');
+    return { uploaded: false, newMaxRowId: null };
+  }
+
+  try {
+    const integration = await getIntegration(INTEGRATION_NAME);
+    const skipReason = shouldSkipScheduledSync(integration);
+    if (skipReason !== null) {
+      console.log(`[IMessageSync] Skipping sync - ${skipReason}`);
+      return { uploaded: false, newMaxRowId: null };
+    }
+
+    const integrationConfig = integration?.config as IntegrationConfig | undefined;
+    const lastAccessedAt = integrationConfig?.lastFrontendAccessAt;
+    const isIncrementalSync = lastAccessedAt !== undefined && lastAccessedAt !== '';
+
+    console.log(
+      `[IMessageSync] Reading messages${isIncrementalSync ? ` since ${lastAccessedAt}` : ' (full sync)'}`
+    );
+    const messages = await readIMessages(lastAccessedAt, isIncrementalSync);
+
+    if (messages.length === 0) {
+      console.log('[IMessageSync] No new messages to sync');
+      return { uploaded: false, newMaxRowId: null };
+    }
+
+    console.log(`[IMessageSync] Found ${messages.length} new messages, uploading...`);
+    const result = await uploadImessagePayload(messages, session.access_token);
+
+    if (!result.success) {
+      console.error('[IMessageSync] Sync failed:', result.message);
+      return { uploaded: false, newMaxRowId: null };
+    }
+
+    console.log('[IMessageSync] Sync complete');
+    const newMaxRowId = Math.max(...messages.map((m) => m.id));
+    return { uploaded: true, newMaxRowId };
+  } catch (error) {
+    console.error('[IMessageSync] Error during sync:', error);
+    return { uploaded: false, newMaxRowId: null };
+  }
 }

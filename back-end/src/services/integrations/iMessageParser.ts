@@ -49,14 +49,9 @@ function appleTimestampToDate(appleTimestamp: number): Date {
 }
 
 /**
- * Transform iMessage contact data to the shared ContactToUpsert format.
- * Device-account messages (`accountId` set) are keyed `<accountId>:<ROWID>`:
- * ROWIDs are per-Mac, so the same number on two Macs is two messages.
+ * Transform iMessage contact data to the shared ContactToUpsert format
  */
-function transformToContactToUpsert(
-  contact: ContactWithMessages,
-  accountId: string
-): ContactToUpsert {
+function transformToContactToUpsert(contact: ContactWithMessages): ContactToUpsert {
   const contactId = contact.contact_id;
   const isEmail = contactId.includes('@');
 
@@ -75,22 +70,16 @@ function transformToContactToUpsert(
       to: msg.is_from_me ? msg.contactHandle || contactId : 'me',
       timestamp: appleTimestampToDate(msg.date),
       message: msg.text,
-      // iMessage ROWID for deduplication, namespaced by the Mac it came from.
-      externalId: accountId === '' ? String(msg.id) : `${accountId}:${msg.id}`,
+      externalId: String(msg.id), // iMessage ROWID for deduplication
     })),
   };
 }
 
-/**
- * Store one iMessage upload. `accountId` is the Mac device account
- * (`''` = the legacy single account every older Mac app writes).
- */
 export async function parseIMessageData(
   userId: string,
   contacts: ContactWithMessages[],
-  jobId: string,
-  accountId = ''
-): Promise<{ contacts: number; messages: number }> {
+  jobId: string
+): Promise<void> {
   let skippedContacts = 0;
   const sanitizedContacts = contacts.reduce<ContactWithMessages[]>((acc, contact) => {
     const contactId = normalizeHandle(contact.contact_id);
@@ -125,7 +114,7 @@ export async function parseIMessageData(
   }
 
   const integration = await prisma.integration.findUnique({
-    where: { userId_name_accountId: { userId, name: 'imessage', accountId } },
+    where: { userId_name_accountId: { userId, name: 'imessage', accountId: '' } },
   });
 
   if (!integration) {
@@ -133,19 +122,8 @@ export async function parseIMessageData(
   }
 
   // Transform to shared format and call the manager
-  const contactsToUpsert = sanitizedContacts.map((contact) =>
-    transformToContactToUpsert(contact, accountId)
-  );
-  // Device accounts insert under their Integration row (sourceAccountId set, and
-  // stopped by MessageAccountRemovedError once that row is deleted).
-  const result = await upsertPersonAndMessageRecords(
-    userId,
-    contactsToUpsert,
-    jobId,
-    undefined,
-    undefined,
-    accountId === '' ? undefined : { sourceAccountId: accountId, integrationId: integration.id }
-  );
+  const contactsToUpsert = sanitizedContacts.map(transformToContactToUpsert);
+  const result = await upsertPersonAndMessageRecords(userId, contactsToUpsert, jobId);
 
   // Update Integration metadata
   const existingConfig =
@@ -169,5 +147,4 @@ export async function parseIMessageData(
     contacts: result.contacts,
     messages: result.messages,
   });
-  return result;
 }

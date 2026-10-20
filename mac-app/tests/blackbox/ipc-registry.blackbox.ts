@@ -8,16 +8,17 @@
  *   - which channels are registered
  *   - that each channel's handler returns the documented response shape for
  *     happy-path / unauthenticated / error inputs
- *   - that the telegram connect flow registers every connected account before
- *     syncing (the registration HTTP body is asserted in
- *     messaging-telegram-accounts.blackbox.ts)
+ *   - that handlers which hit the backend (telegram:* integration-connect flows)
+ *     send the exact URL + method + auth header + content-type we expect, as
+ *     captured by fetch-capture
  *
  * Internals under test (services, electron-store data, loggers) are mocked so
  * the tests assert only on the channel contract — the same surface renderers
  * see via `window.api.*`.
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { clearFetchCaptures, fetchCaptures, installFetchCapture } from './fetch-capture';
 
 // ---------------------------------------------------------------------------
 // 1. Capture ipcMain.handle registrations into a shared map.
@@ -69,7 +70,7 @@ vi.mock('electron', () => ({
 //    when both come from different `vi.mock` call sites in this file.
 // ---------------------------------------------------------------------------
 vi.mock('electron-store', () => ({
-  default: vi.fn().mockImplementation(function () {
+  default: vi.fn().mockImplementation(() => {
     const storage = new Map<string, unknown>();
     return {
       get: vi.fn((key: string, fallback?: unknown) =>
@@ -130,11 +131,9 @@ vi.mock('../../main/services/iMessageSender', () => ({
 }));
 
 const imsgSyncRun = vi.fn(async () => undefined);
-const imsgSyncConnect = vi.fn(async () => ({ success: true }));
 vi.mock('../../main/services/iMessageSync', () => ({
   IMessageSync: {
     sync: (...a: unknown[]) => imsgSyncRun(...a),
-    connect: (...a: unknown[]) => imsgSyncConnect(...a),
   },
 }));
 
@@ -207,16 +206,12 @@ const waConnected = vi.fn(() => false);
 const waConnect = vi.fn(async () => undefined);
 const waDisconnect = vi.fn(async () => undefined);
 const waLogout = vi.fn(async () => undefined);
-const waList = vi.fn(() => [] as Array<{ accountId: string; connected: boolean }>);
-const waAdd = vi.fn(async () => undefined);
 vi.mock('../../main/services/messaging/platforms/whatsapp/WhatsAppSync', () => ({
   WhatsAppSync: {
     hasCredentials: (...a: unknown[]) => waHas(...a),
     getLinkedPhoneNumber: (...a: unknown[]) => waPhone(...a),
     isConnected: (...a: unknown[]) => waConnected(...a),
-    listAccounts: (...a: unknown[]) => waList(...a),
     connect: (...a: unknown[]) => waConnect(...a),
-    addAccount: (...a: unknown[]) => waAdd(...a),
     disconnect: (...a: unknown[]) => waDisconnect(...a),
     logout: (...a: unknown[]) => waLogout(...a),
   },
@@ -234,8 +229,6 @@ const tgSubmitCode = vi.fn();
 const tgSubmitPassword = vi.fn();
 const tgCancelAuth = vi.fn();
 const tgGetClient = vi.fn(() => null);
-const tgRegisterAccounts = vi.fn(async () => 1);
-const tgListAccounts = vi.fn(() => [] as unknown[]);
 vi.mock('../../main/services/messaging/platforms/telegram/TelegramSync', () => ({
   TelegramSync: {
     hasSession: (...a: unknown[]) => tgHasSession(...a),
@@ -250,8 +243,6 @@ vi.mock('../../main/services/messaging/platforms/telegram/TelegramSync', () => (
     submitPassword: (...a: unknown[]) => tgSubmitPassword(...a),
     cancelAuth: (...a: unknown[]) => tgCancelAuth(...a),
     getClient: (...a: unknown[]) => tgGetClient(...a),
-    registerConnectedAccounts: (...a: unknown[]) => tgRegisterAccounts(...a),
-    listAccounts: (...a: unknown[]) => tgListAccounts(...a),
   },
 }));
 
@@ -369,15 +360,12 @@ describe('ipc-registry: channel registration', () => {
       'whatsapp:hasCredentials',
       'whatsapp:getLinkedPhoneNumber',
       'whatsapp:isConnected',
-      'whatsapp:listAccounts',
       'whatsapp:connect',
-      'whatsapp:addAccount',
       'whatsapp:disconnect',
       'whatsapp:logout',
       'telegram:hasSession',
       'telegram:hasApiCredentials',
       'telegram:isConnected',
-      'telegram:listAccounts',
       'telegram:connectWithExistingSession',
       'telegram:disconnect',
       'telegram:logout',
@@ -507,7 +495,6 @@ describe('ipc-registry: local machine uploads while impersonating', () => {
     authGetSession.mockReset();
     authGetSession.mockResolvedValue(impersonatedSession);
     batchUpload.mockClear();
-    imsgSyncConnect.mockClear();
     imsgCheckAccess.mockReturnValue(true);
     imsgReadMessages.mockResolvedValue([]);
   });
@@ -529,7 +516,6 @@ describe('ipc-registry: local machine uploads while impersonating', () => {
         message: 'Unavailable while viewing another account',
       });
       expect(batchUpload).not.toHaveBeenCalled();
-      expect(imsgSyncConnect).not.toHaveBeenCalled();
     }
   );
 });
@@ -541,7 +527,6 @@ describe('ipc-registry: iMessage channels', () => {
     imsgSenderSend.mockReset();
     authGetSession.mockReset();
     batchUpload.mockReset();
-    imsgSyncConnect.mockClear();
   });
 
   it('imessage:checkAccess returns the reader boolean', async () => {
@@ -564,25 +549,23 @@ describe('ipc-registry: iMessage channels', () => {
     expect(result).toEqual({ success: false, message: 'Not authenticated' });
   });
 
-  it('imessage:startUpload connects this Mac as its own account with live progress', async () => {
+  it('imessage:startUpload happy path forwards messages to the batch uploader', async () => {
     imsgCheckAccess.mockReturnValueOnce(true);
     authGetSession.mockResolvedValueOnce(fakeSession);
-    imsgSyncConnect.mockResolvedValueOnce({ success: true });
+    imsgReadMessages.mockResolvedValueOnce([
+      { id: 1, contact_id: 'a' },
+      { id: 2, contact_id: 'a' },
+      { id: 3, contact_id: 'b' },
+    ]);
+    batchUpload.mockResolvedValueOnce({ success: true });
     const result = await invoke('imessage:startUpload');
-    // The device sync reads chat.db in batches itself; the IPC path no longer
-    // reads every message up front or posts one device-less payload.
-    expect(imsgSyncConnect).toHaveBeenCalledTimes(1);
-    expect(imsgReadMessages).not.toHaveBeenCalled();
-    expect(batchUpload).not.toHaveBeenCalled();
+    expect(batchUpload).toHaveBeenCalledWith(
+      'imessage',
+      expect.any(Array),
+      fakeSession.access_token,
+      null
+    );
     expect(result).toEqual({ success: true });
-  });
-
-  it('imessage:startUpload returns the device sync failure', async () => {
-    imsgCheckAccess.mockReturnValueOnce(true);
-    authGetSession.mockResolvedValueOnce(fakeSession);
-    imsgSyncConnect.mockResolvedValueOnce({ success: false, message: 'Upload failed: 500' });
-    const result = await invoke('imessage:startUpload');
-    expect(result).toEqual({ success: false, message: 'Upload failed: 500' });
   });
 
   it('imessage:sendDirect returns success when sender resolves', async () => {
@@ -986,43 +969,6 @@ describe('ipc-registry: whatsapp channels', () => {
     waConnect.mockReset();
     waDisconnect.mockReset();
     waLogout.mockReset();
-    waList.mockReset();
-    waAdd.mockReset();
-  });
-
-  it('whatsapp:listAccounts returns every linked account', async () => {
-    const accounts = [
-      { accountId: '+15550001111', connected: true },
-      { accountId: '+15550002222', connected: false },
-    ];
-    waList.mockReturnValueOnce(accounts);
-    await expect(invoke('whatsapp:listAccounts')).resolves.toEqual(accounts);
-  });
-
-  it('whatsapp:addAccount pairs one more account, guarded by the machine session', async () => {
-    waAdd.mockResolvedValueOnce(undefined);
-    await expect(invoke('whatsapp:addAccount')).resolves.toEqual({ success: true });
-    expect(waAdd).toHaveBeenCalledWith({ onQRCode: expect.any(Function) });
-
-    authGetSession.mockReset();
-    authGetSession.mockResolvedValue(null);
-    const refused = await invoke<{ success: boolean }>('whatsapp:addAccount');
-    expect(refused.success).toBe(false);
-    expect(waAdd).toHaveBeenCalledTimes(1);
-  });
-
-  it('whatsapp:logout and isConnected scope to one account id; none means all/any', async () => {
-    waLogout.mockResolvedValue(undefined);
-    await invoke('whatsapp:logout', '+15550001111');
-    expect(waLogout).toHaveBeenLastCalledWith('+15550001111');
-    await invoke('whatsapp:logout');
-    expect(waLogout).toHaveBeenLastCalledWith(undefined);
-    await invoke('whatsapp:logout', 42);
-    expect(waLogout).toHaveBeenLastCalledWith(undefined);
-
-    waConnected.mockReturnValue(true);
-    await invoke('whatsapp:isConnected', '+15550002222');
-    expect(waConnected).toHaveBeenLastCalledWith('+15550002222');
   });
 
   it('whatsapp:hasCredentials returns the service boolean', async () => {
@@ -1171,52 +1117,42 @@ describe('ipc-registry: telegram channels (non-backend)', () => {
     await expect(invoke('telegram:disconnect')).resolves.toEqual({ success: true });
     await expect(invoke('telegram:logout')).resolves.toEqual({ success: true });
   });
-
-  it('telegram:logout forwards one account id; without it logs out every account', async () => {
-    tgLogout.mockClear();
-    await invoke('telegram:logout', '1001');
-    await invoke('telegram:logout');
-    expect(tgLogout.mock.calls).toEqual([['1001'], [undefined]]);
-  });
-
-  it('telegram:listAccounts returns the service account list', async () => {
-    const accounts = [{ accountId: '1001', label: '@alice', connected: true }];
-    tgListAccounts.mockReturnValueOnce(accounts);
-    await expect(invoke('telegram:listAccounts')).resolves.toEqual(accounts);
-  });
-
-  it('telegram:syncHistorical forwards an account id', async () => {
-    tgSyncHistorical.mockClear();
-    await invoke('telegram:syncHistorical', 50, '1002');
-    expect(tgSyncHistorical).toHaveBeenCalledWith(50, '1002');
-  });
 });
 
 // ---------------------------------------------------------------------------
-// Registration boundary: after telegram:connectWithExistingSession the handler
-// registers every connected account (TelegramSync.registerConnectedAccounts,
-// whose POST /api/integrations/telegram/connect body is asserted in
-// messaging-telegram-accounts.blackbox.ts) and syncs only when one registered.
+// Backend boundary coverage: telegram:connectWithExistingSession is the only
+// flow in registry.ts that makes a real fetch() call — it POSTs to the backend
+// to register the integration. Capture and assert on URL/method/headers.
 // ---------------------------------------------------------------------------
-describe('ipc-registry: telegram account registration', () => {
+describe('ipc-registry: telegram backend boundary', () => {
+  let restoreFetch: (() => void) | null = null;
+
   beforeEach(() => {
+    clearFetchCaptures();
     tgConnectExisting.mockReset();
     authGetSession.mockReset();
+    integrationCacheInvalidate.mockReset();
     tgSyncHistorical.mockReset();
-    tgRegisterAccounts.mockReset();
   });
 
-  it('telegram:connectWithExistingSession skips registration when service returns false', async () => {
+  afterEach(() => {
+    restoreFetch?.();
+    restoreFetch = null;
+  });
+
+  it('telegram:connectWithExistingSession skips backend when service returns false', async () => {
+    restoreFetch = installFetchCapture({});
     tgConnectExisting.mockResolvedValueOnce(false);
     authGetSession.mockResolvedValueOnce(fakeSession);
 
     const result = await invoke('telegram:connectWithExistingSession');
 
     expect(result).toEqual({ success: false });
-    expect(tgRegisterAccounts).not.toHaveBeenCalled();
+    expect(fetchCaptures).toHaveLength(0);
   });
 
-  it('telegram:connectWithExistingSession skips everything when no session', async () => {
+  it('telegram:connectWithExistingSession skips backend when no session', async () => {
+    restoreFetch = installFetchCapture({});
     tgConnectExisting.mockResolvedValueOnce(true);
     authGetSession.mockResolvedValueOnce(null);
 
@@ -1224,32 +1160,47 @@ describe('ipc-registry: telegram account registration', () => {
 
     expect(result).toEqual({ success: false, error: 'Not authenticated' });
     expect(tgConnectExisting).not.toHaveBeenCalled();
-    expect(tgRegisterAccounts).not.toHaveBeenCalled();
+    expect(fetchCaptures).toHaveLength(0);
   });
 
-  it('telegram:connectWithExistingSession registers accounts, then syncs history', async () => {
+  it('telegram:connectWithExistingSession POSTs to /api/integrations/telegram/connect with bearer auth', async () => {
+    restoreFetch = installFetchCapture({
+      '/api/integrations/telegram/connect': () =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+    });
     tgConnectExisting.mockResolvedValueOnce(true);
     authGetSession.mockResolvedValue(fakeSession);
-    tgRegisterAccounts.mockResolvedValueOnce(2);
     tgSyncHistorical.mockResolvedValueOnce(0);
 
     const result = await invoke('telegram:connectWithExistingSession');
 
     expect(result).toEqual({ success: true });
-    expect(tgRegisterAccounts).toHaveBeenCalledTimes(1);
-    await vi.waitFor(() => expect(tgSyncHistorical).toHaveBeenCalledTimes(1));
+    expect(fetchCaptures).toHaveLength(1);
+    const call = fetchCaptures[0];
+    expect(call.url).toBe('https://backend.test/api/integrations/telegram/connect');
+    expect(call.method).toBe('POST');
+    expect(call.headers.authorization).toBe(`Bearer ${fakeSession.access_token}`);
+    expect(call.headers['content-type']).toBe('application/json');
+    expect(integrationCacheInvalidate).toHaveBeenCalled();
   });
 
-  it('telegram:connectWithExistingSession still returns {success:true} when no account registers', async () => {
+  it('telegram:connectWithExistingSession still returns {success:true} when backend rejects', async () => {
+    restoreFetch = installFetchCapture({
+      '/api/integrations/telegram/connect': () => new Response('server err', { status: 500 }),
+    });
     tgConnectExisting.mockResolvedValueOnce(true);
     authGetSession.mockResolvedValue(fakeSession);
-    tgRegisterAccounts.mockResolvedValueOnce(0);
 
     const result = await invoke('telegram:connectWithExistingSession');
 
     // Observable contract: the IPC reply still shows the session-level success.
     // Backend failure is logged but not surfaced to the renderer.
     expect(result).toEqual({ success: true });
-    expect(tgSyncHistorical).not.toHaveBeenCalled();
+    expect(fetchCaptures).toHaveLength(1);
+    expect(fetchCaptures[0].responseStatus).toBe(500);
+    expect(integrationCacheInvalidate).not.toHaveBeenCalled();
   });
 });
