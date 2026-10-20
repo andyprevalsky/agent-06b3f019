@@ -1010,6 +1010,24 @@ def test_verifier_static_prompt_clears_anthropic_cache_threshold():
     )
 
 
+def test_verifier_credits_completed_sub_agent_results_as_evidence():
+    """A delegating agent's verifier treats a child's reported findings as evidence.
+
+    The execute verifier never receives a sub-agent's own tool rows (they are
+    scoped out of the parent's context), so the child's spawn_agent result /
+    FINAL_ANSWER notification is the only evidence a delegating agent can have.
+    Replay of the explore-agent-mid-run-message b1cff031 verifier call: with
+    the old "do not treat this as evidence for a positive fact" wording it
+    scored 0.0 twice out of three ("only the agent's summary"); with this rule
+    it scored 1.0 three out of three.
+    """
+    from utils.prompts import _VERIFIER_STATIC_PROMPT
+
+    assert "grounded evidence for positive facts" in _VERIFIER_STATIC_PROMPT
+    assert "sub-agent's own tool\n   calls are never shown to you" in _VERIFIER_STATIC_PROMPT
+    assert "Do not treat this as evidence for a positive fact" not in _VERIFIER_STATIC_PROMPT
+
+
 # ============================================================================
 # 9. TS-side static system prompts have no dynamic dates inside their template
 #    literal (cache-killer mirror of the Python invariant in section 1).
@@ -2122,6 +2140,11 @@ async def run_all_tests():
     r.record(
         "verifier_static_prompt_clears_anthropic_cache_threshold",
         test_verifier_static_prompt_clears_anthropic_cache_threshold,
+    )
+
+    r.record(
+        "verifier_credits_completed_sub_agent_results_as_evidence",
+        test_verifier_credits_completed_sub_agent_results_as_evidence,
     )
 
     # 9. TS-side static prompts have no dynamic dates (E1)

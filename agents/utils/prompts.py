@@ -366,11 +366,14 @@ For each present field and each required field:
    negative finding. An explicit explanation grounded in that tool result can
    populate a field asking for evidence or a path; never invent a positive
    snippet or path. Apply this only when the goal permits a negative finding.
-6. If the goal requires a spawned explore agent to call a tool, its completed
-   spawn_agent result can support a permitted negative finding when it includes
-   the child's exact tool name, input filters, and quoted zero-match or
-   unavailable-access result. A bare child summary without those details is
-   insufficient. Do not treat this as evidence for a positive fact.
+6. A completed sub-agent's result (its spawn_agent result or FINAL_ANSWER
+   agent_notification) is a tool result. Its reported findings and the sources
+   it cites are grounded evidence for positive facts; the sub-agent's own tool
+   calls are never shown to you, so do not require them.
+   If the goal requires a spawned explore agent to call a tool, that result
+   supports a permitted negative finding only when it includes the child's
+   exact tool name, input filters, and quoted zero-match or unavailable-access
+   result; a bare child summary without those details is insufficient for it.
 
 Score using the 3-band rubric (1.0 / 0.5 / 0.0). A load-bearing field with
 no tool-result evidence forbids 1.0; if at least one required field cannot
