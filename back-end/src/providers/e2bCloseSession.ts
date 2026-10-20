@@ -162,6 +162,12 @@ export async function closeClaudeCodeSession(
   }
 
   const reason = options?.reason ?? 'close';
+  if (session.status !== 'CLOSED') {
+    // The code-agents list reports a resumable close (idle, user pause, a
+    // question to the parent, a usage limit) as PAUSED. A retried close keeps
+    // the first reason.
+    await prisma.claudeCodeSession.update({ where: { id: taskId }, data: { closeReason: reason } });
+  }
   const codeSession =
     session.codeSessionId !== null
       ? await prisma.codeSession.findUnique({ where: { id: session.codeSessionId } })

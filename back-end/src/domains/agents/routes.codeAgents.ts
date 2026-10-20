@@ -1,7 +1,12 @@
 /**
  * GET /api/agents/code-agents?root_ids=<comma-separated, max 50>
  *   → { code_agents: [{ code_agent_id, owner_agent_id, root_agent_id, provider,
- *                       status, title, created_at }] }
+ *                       status, code_session_id, awaiting_parent, title,
+ *                       created_at }] }
+ *
+ * Newest first, at most 50 per root. status: ACTIVE | COMPLETED | CLOSED |
+ * ERROR | PAUSED (resumable: idle, user pause, waiting on its parent, usage
+ * limit). awaiting_parent: { question, at } | null.
  *
  * Scoped to the caller: other users' roots return nothing.
  */
