@@ -15,6 +15,10 @@
  *      Feedback, Biz health and the account row (Settings) open in the
  *      right-panel slot (RoseAppsProvider); clicking again closes it.
  *
+ * SURFACE: always solid (bg-white / dark #262624), so data-surface="opaque" —
+ * legible over a per-user background image without the stock rail's switch.
+ * MOBILE (< md): not mounted at all; the mobile agent drawer lists agents.
+ *
  * PANELS: project settings beside the bar (useRoseSidebarProjects); archive dialog;
  * rename dialog (useAgentRowActions); delete-project confirm dialog.
  */
@@ -23,6 +27,7 @@ import { Activity, Archive, Globe, Megaphone } from 'lucide-react';
 import { useState, type FocusEvent } from 'react';
 
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { useIsMobile } from '@/hooks/use-mobile';
 import type { CodeAgentNode } from '@/lib/api/tree';
 import { cn } from '@/lib/utils';
 
@@ -88,7 +93,13 @@ function useGroupedAgents(
   };
 }
 
+/** The bar is md+ only; below md nothing mounts (MobileAgentDrawer owns the list). */
 export default function RoseSidebar(props: AppSidebarProps) {
+  const isMobile = useIsMobile();
+  return isMobile ? null : <RoseSidebarBar {...props} />;
+}
+
+function RoseSidebarBar(props: AppSidebarProps) {
   const { onSelectAgent, onViewChange, currentView } = props;
   const apps = useRoseApps();
   const notYet = useNotYet();
@@ -133,6 +144,7 @@ export default function RoseSidebar(props: AppSidebarProps) {
       <aside
         data-testid="rose-sidebar"
         data-expanded={isExpanded}
+        data-surface="opaque"
         aria-label="Agents"
         {...expansion.surface}
         className={cn(

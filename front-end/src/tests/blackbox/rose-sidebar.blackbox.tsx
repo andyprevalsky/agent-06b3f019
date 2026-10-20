@@ -100,6 +100,18 @@ describe('Rose left bar (flag on)', () => {
     document.documentElement.classList.remove('dark');
   });
 
+  it('below md the bar does not mount (the mobile drawer lists agents)', () => {
+    const width = window.innerWidth;
+    window.innerWidth = 390;
+    try {
+      renderBar();
+      expect(screen.queryByTestId('rose-sidebar')).toBeNull();
+      expect(screen.queryByText('Plan Tahoe trip')).toBeNull();
+    } finally {
+      window.innerWidth = width;
+    }
+  });
+
   it('flag off renders the stock sidebar, flag on the Rose bar', () => {
     const { unmount } = renderWithProviders(<AppSidebar {...defaultProps()} />, {
       roseDesktop: false,
@@ -313,6 +325,8 @@ describe('Rose left bar (flag on)', () => {
   it('every bar surface carries dark tokens (light unchanged)', () => {
     renderBar();
     const bar = roseBar();
+    // Always solid, so it reads as opaque over a per-user background image.
+    expect(bar).toHaveAttribute('data-surface', 'opaque');
     expect(bar.className).toContain('bg-white');
     expect(bar.className).toContain('dark:bg-[#262624]');
     expect(bar.className).toContain('dark:border-white/[0.09]');

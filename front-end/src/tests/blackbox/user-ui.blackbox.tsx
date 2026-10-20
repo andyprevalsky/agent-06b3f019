@@ -267,7 +267,9 @@ describe('opaque chrome over a user background', () => {
     // home.dashboard slot mounts above the popular goals on the landing page.
     const dashboard = await screen.findByTestId('user-ui-slot-home.dashboard');
     expect(dashboard.querySelector('iframe')).toHaveAttribute('sandbox', 'allow-scripts');
-    expect(screen.getByTestId('rose-app-bar')).toBeInTheDocument();
+    // Rose Desktop chrome: bare top-right app icons, no right bar (UI ledger row 66).
+    expect(screen.getByTestId('rose-app-icons')).toBeInTheDocument();
+    expect(screen.queryByTestId('rose-app-bar')).toBeNull();
   });
 
   it('keeps the stock UI for accounts without the Rose Desktop flag, even with a published UI', async () => {
