@@ -15,12 +15,17 @@ Invariants covered:
     non-retryable, transient 5xx are retryable
   - activity payload dataclasses decode with real annotations (the workflow
     sandbox resolves no string annotations)
+  - adversarial (L-A2A-ADV): a response lost after the backend delivered is
+    retried with the same id and lands once; a 429 from the per-sender cap is
+    retryable no sooner than its Retry-After; a question to a finished or
+    deleted spawner is final (one request, no retry loop)
 """
 
 import asyncio
 import dataclasses
 import json
 import typing
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any, Dict, List
 from unittest.mock import patch
@@ -154,6 +159,95 @@ async def test_scope_errors_are_final_and_transient_errors_retry():
                 raise AssertionError(f"HTTP {status} must raise")
 
 
+async def test_lost_response_after_delivery_is_retried_once():
+    """A Temporal retry after the backend delivered but the response was lost lands once."""
+    from helpers.agent_graph import AgentGraphSendRequest, a2a_message_id, send_agent_graph_message_activity
+
+    delivered: Dict[str, str] = {}
+    requests: List[Dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content or b"{}")
+        requests.append(body)
+        message_id = body["message_id"]
+        if message_id in delivered:
+            return httpx.Response(200, json={"message_id": message_id, "status": "duplicate", "to": {"id": body["to"]}})
+        delivered[message_id] = body["text"]
+        # The backend committed the delivery; the response never reaches the worker.
+        raise httpx.ReadError("connection reset after commit", request=request)
+
+    setup_mock_fn(handler)
+    message_id = a2a_message_id("wf-parent/run-1", "toolu_answer")
+    request = AgentGraphSendRequest(agent_id="parent-1", to="code-1", text="use Postgres", message_id=message_id)
+    with patch("helpers.agent_graph.load_config", _config):
+        try:
+            await send_agent_graph_message_activity(request)
+        except ApplicationError as err:
+            assert not err.non_retryable, f"a lost response must stay retryable: {err}"
+        except httpx.HTTPError:
+            pass  # a transport error fails the attempt; Temporal retries it
+        else:
+            raise AssertionError("the first attempt must fail when its response is lost")
+        # Temporal's retry: same request payload, same message id.
+        retried = await send_agent_graph_message_activity(request)
+    assert retried["status"] == "duplicate", retried
+    assert list(delivered) == [message_id], delivered
+    assert [body["message_id"] for body in requests] == [message_id, message_id], requests
+
+
+async def test_rate_limited_send_retries_no_sooner_than_retry_after():
+    """The per-sender cap answers 429 + Retry-After; the activity retries after that delay."""
+    from helpers.agent_graph import AgentGraphSendRequest, send_agent_graph_message_activity
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            headers={"Retry-After": "7"},
+            json={"error": "Too many agent messages from this sender; retry in 7s"},
+        )
+
+    setup_mock_fn(handler)
+    request = AgentGraphSendRequest(agent_id="root-1", to="child-1", text="ping", message_id="flood-1")
+    with patch("helpers.agent_graph.load_config", _config):
+        try:
+            await send_agent_graph_message_activity(request)
+        except ApplicationError as err:
+            assert not err.non_retryable, "a rate limit is temporary"
+            assert "429" in str(err), err
+            assert err.next_retry_delay == timedelta(seconds=7), err.next_retry_delay
+        else:
+            raise AssertionError("HTTP 429 must raise")
+
+
+async def test_question_to_finished_or_deleted_spawner_is_final():
+    """No retry loop against a spawner that can never answer."""
+    from helpers.agent_graph import AgentGraphQuestionRequest, ask_code_agent_question_activity
+
+    for status, error in (
+        (409, "The agent that started you has finished; it cannot answer this question"),
+        (404, "Agent not found"),
+    ):
+        seen: List[str] = []
+
+        def handler(request: httpx.Request, status: int = status, error: str = error) -> httpx.Response:
+            seen.append(request.url.path)
+            return httpx.Response(status, json={"error": error})
+
+        setup_mock_fn(handler)
+        request = AgentGraphQuestionRequest(
+            agent_id="finished-1", code_session_id="code-9", question="still there?", message_id=f"q-{status}"
+        )
+        with patch("helpers.agent_graph.load_config", _config):
+            try:
+                await ask_code_agent_question_activity(request)
+            except ApplicationError as err:
+                assert err.non_retryable, f"HTTP {status} is final"
+                assert error[:40] in str(err), err
+            else:
+                raise AssertionError(f"HTTP {status} must raise")
+        assert seen == ["/api/agent-graph/questions"], seen
+
+
 def test_payload_dataclasses_have_real_annotations():
     from helpers import agent_graph
 
@@ -185,6 +279,13 @@ async def run_all_tests():
             "scope_errors_final_transient_retry", test_scope_errors_are_final_and_transient_errors_retry
         )
         r.record("payload_dataclasses_real_annotations", test_payload_dataclasses_have_real_annotations)
+        await r.record_async("lost_response_retried_once", test_lost_response_after_delivery_is_retried_once)
+        await r.record_async(
+            "rate_limited_send_retries_after_retry_after", test_rate_limited_send_retries_no_sooner_than_retry_after
+        )
+        await r.record_async(
+            "question_to_finished_or_deleted_spawner_final", test_question_to_finished_or_deleted_spawner_is_final
+        )
     finally:
         teardown_mock()
     return r.all_passed

@@ -36,6 +36,7 @@ import { keepAliveCodeTask } from '../../providers/codeSessions/spawn';
 import { deterministicMessageId } from '../../providers/messageIdempotency';
 import { getTemporalClient } from '../../providers/temporal';
 import { blackboxTemporalSignals } from '../../providers/temporalBlackboxFake';
+import { askQuestion } from '../../domains/agents/agentGraphQuestionService';
 import { sendGraphMessage } from '../../domains/agents/agentGraphSendService';
 import type { GraphCaller } from '../../domains/agents/agentGraphService';
 
@@ -935,16 +936,34 @@ async function testCancelledParentStaysCancelledWhenItsChildAsks(
 ): Promise<void> {
   const paused = await call(ctx, `/api/agents/${ids.P}/pause`, { userId: userX, body: {} });
   expectStatus(paused, 200, 'user pauses P');
-  const asked = await call(ctx, '/api/agent-graph/questions', {
-    bearer: graphToken(ids.SP, ids.P),
-    body: { question: `continue ${RUN}?`, message_id: `paused-q-${RUN}` },
+  // P's workflow is live in this process's in-memory Temporal client, so a
+  // resume attempt would really succeed (the HTTP backend has no workflow).
+  const temporal = await getTemporalClient();
+  await temporal.workflow.start('agentWorkflow', {
+    workflowId: ids.P,
+    taskQueue: 'a2a-adversarial',
+    args: [],
   });
-  expectStatus(asked, 200, 'the child asks its paused parent');
+  const caller: GraphCaller = {
+    userId: userX,
+    rootAgentId: ids.R,
+    self: { kind: 'code', id: ids.SP, ownerAgentId: ids.P, provider: 'claude' },
+  };
+  const asked = await askQuestion(caller, {
+    question: `continue ${RUN}?`,
+    message_id: `paused-q-${RUN}`,
+  });
+  assert(asked.deliver_to === 'agent' && asked.agent_id === ids.P, 'routed to the paused spawner');
   assert((await a2aRowsFrom(ids.P, ids.SP)).length === 1, 'the question is durable for the resume');
   const parent = await prisma.agent.findUnique({ where: { id: ids.P }, select: { status: true } });
+  const signals = blackboxTemporalSignals(temporal, ids.P).map((signal) => signal.name);
   assert(
-    parent?.status === 'PAUSED',
-    `a child's question must not lift the user's pause (status ${parent?.status})`
+    parent?.status === 'PAUSED' && !signals.includes('resume'),
+    `a child's question must not lift the user's pause (status ${parent?.status}, signals ${JSON.stringify(signals)})`
+  );
+  assert(
+    signals.filter((name) => name === 'receive_user_response').length === 1,
+    `the question reaches the paused workflow once: ${JSON.stringify(signals)}`
   );
 }
 
