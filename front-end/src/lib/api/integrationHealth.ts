@@ -5,9 +5,12 @@
  *   GET /api/integrations             -> { integrations: rows with `status` and per-account `emailCredentials` }
  *   GET /api/integrations/plaid/items -> { items: rows with `status` and `institutionName` }
  *
- * Needs reconnection: an integration whose status is EXPIRED or with any email
- * account in `needs_reconnect` (only re-consent fixes those), or a Plaid item
- * in REQUIRES_REAUTH (the page's "sign in again" state).
+ * Needs reconnection (the red dot): an integration whose status is EXPIRED,
+ * whose account (`accounts[]`, lane L-CULL-INTEG) is `needs_reconnect` or
+ * `EXPIRED`, or with any email account in `needs_reconnect` (only re-consent
+ * fixes those), or a Plaid item in REQUIRES_REAUTH (the page's "sign in again"
+ * state). A failed sync (`sync_failed` / SYNC_FAILED) is not a reconnect: the
+ * Integrations page shows its error instead, and no dot is drawn for it.
  */
 
 import { API_BASE_WITH_PATH, getAuthHeaders } from './client';
@@ -16,6 +19,17 @@ export interface IntegrationHealthRow {
   name: string;
   status: string;
   emailCredentials?: { email: string | null; state: string }[];
+  accounts?: { state?: unknown }[] | null;
+}
+
+const RECONNECT_STATES = new Set(['needs_reconnect', 'expired']);
+
+function accountNeedsReconnect(row: IntegrationHealthRow): boolean {
+  if (!Array.isArray(row.accounts)) return false;
+  return row.accounts.some(
+    (account) =>
+      typeof account?.state === 'string' && RECONNECT_STATES.has(account.state.toLowerCase()),
+  );
 }
 
 export interface PlaidItemHealthRow {
@@ -48,6 +62,7 @@ export function integrationsNeedingReconnect(health: IntegrationHealth): string[
     .filter(
       (row) =>
         row.status === 'EXPIRED' ||
+        accountNeedsReconnect(row) ||
         (row.emailCredentials ?? []).some((c) => c.state === 'needs_reconnect'),
     )
     .map((row) => row.name);

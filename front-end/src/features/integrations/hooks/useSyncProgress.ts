@@ -1,26 +1,29 @@
 /**
- * ONE adapter for "how far along is this account's sync?".
+ * ONE adapter for "how far along is this integration's sync?".
  *
  * STATE MACHINE (per account)
  *
- *   [NO_DATA]        no `accounts[].progress` (or legacy backend) → null;
+ *   [NO_DATA]        no `accounts[0].progress` (or legacy backend) → null;
  *                    a syncing chip shows the indeterminate bar
  *   [INDETERMINATE]  progress without a total → { pct: null, ... }
  *   [RUNNING]        { pct < 100, done, total, unit, etaSec|null }
- *   [DONE]           pct reaches 100 → chip flips to synced, bar disappears
+ *   [DONE]           pct reaches 100 or state synced → chip flips to synced,
+ *                    bar disappears
  *
  * System context:
  *
- *   GET /api/integrations → integrations[].accounts[] + accountsByProvider
+ *   GET /api/integrations → integrations[].accounts[0] + accountsByProvider
  *   GET /api/integrations/progress?since=<cursor> (useAccountsProgressPoll,
- *            │   every 5 s via useSyncRefresh only while anything syncs)
- *            ▼  mergeAccountsByProvider (fresh accounts per row + progress-only rows)
+ *            │   every 5 s via useSyncRefresh only while anything syncs and
+ *            │   the Integrations panel is mounted — it unmounts when closed)
+ *            ▼  mergeAccountsByProvider (fresh account per row + progress-only rows)
  *   SyncProgressContext (Rose Desktop integrations list)
  *            ▼
- *   useSyncProgress(provider, accountId) → { pct, done, total, unit, etaSec } | null
+ *   useSyncProgress(provider, accountId?) → { pct, done, total, unit, etaSec, phase } | null
  *
  * `provider` is the integration row name (`chrome`, `imessage`, `gmail`,
- * `plaid`, ...); `accountId` is the account's id within that row.
+ * `plaid`, ...). A row has one account; `accountId` picks a Gmail address or
+ * Plaid item (multi-account before Rose Desktop).
  */
 
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
@@ -35,8 +38,11 @@ export interface SyncProgressSource {
 
 export const SyncProgressContext = createContext<SyncProgressSource | null>(null);
 
-/** `{ pct, done, total, unit, etaSec }` for one account's sync, or null when unreported. */
-export function useSyncProgress(provider: string, accountId: string): SyncProgress | null {
+/**
+ * `{ pct, done, total, unit, etaSec, phase }` of one sync, or null when unreported:
+ * the row's one account, or (Gmail address / Plaid item) the entry `accountId`.
+ */
+export function useSyncProgress(provider: string, accountId?: string): SyncProgress | null {
   const source = useContext(SyncProgressContext);
   if (source === null) return null;
   return findIntegrationAccount(source.integrations, provider, accountId)?.progress ?? null;

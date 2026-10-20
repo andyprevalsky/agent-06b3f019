@@ -1,18 +1,23 @@
 /**
  * STATE MACHINE: DesktopIntegrationRow (Rose Desktop, flag on)
  *
- *   [NO_ACCOUNTS + ready]        icon · name · "Connect" (runs the existing connect flow)
- *   [NO_ACCOUNTS + desktop-only] icon · name · "Desktop only" · Download for Mac
- *   [NO_ACCOUNTS + coming-soon]  icon · name · "Coming soon"
- *   [ACCOUNTS]  chips (synced | syncing | warning | error), × on each chip removes it,
- *               one progress bar per syncing account, "+ Add account" re-runs connect
- *     chip [SYNCING] --progress reaches 100%--> [SYNCED] (bar disappears)
- *     chip × --backend 501--> chip kept + the backend's reason on a line under the chips
- *     chip [ERROR] (state failed) → "sync failed", lastError as its tooltip
- *       (LinkedIn also prints lastError on a line under the chips + a retry control)
- *     chip [QUEUED] (Gmail address waiting its turn) → quiet neutral chip, "queued", no bar
- *     chip [SYNCING + light] (Gmail incremental `history`) → "checking for new mail", no bar
- *     bar text: provider phase as words, bytes as sizes, LinkedIn timeline when live is blank
+ *   [NOT CONNECTED + ready]        icon · name · "Connect" (runs the existing connect flow)
+ *   [NOT CONNECTED + desktop-only] icon · name · "Desktop only" · Download for Mac
+ *   [NOT CONNECTED + coming-soon]  icon · name · "Coming soon"
+ *   [CONNECTED]  the stock app-icon tile glows rose (amber while an account needs
+ *                reconnecting); the row's ONE account chip (synced | syncing |
+ *                warning | error), × disconnects it; one gradient bar while it syncs
+ *     chip [SYNCING] --progress reaches 100% or state synced--> [SYNCED] (bar disappears)
+ *     chip [WARNING] (needs_reconnect / EXPIRED) → "needs reconnect"
+ *     chip [ERROR] (sync_failed) → "sync failed" + its lastError on a line under the chip
+ *   [CONNECTED, multiAccount] rows that listed several accounts before Rose Desktop
+ *     (Gmail addresses, Plaid institutions, compute subscriptions): one chip per
+ *     account, one bar per syncing account, "+ Add account" re-runs connect
+ *     chip [QUEUED] (Gmail address waiting its turn) → quiet neutral chip, no bar
+ *     chip [SYNCING + light] (Gmail `history`) → "checking for new mail", no bar
+ *     rowSync (the backend reports one account for the whole row) → one row bar,
+ *       no per-chip bars
+ *   bar text: provider phase as words, bytes as sizes, "N of M <unit>", "~ETA left"
  *
  * There is no Manage state and no details panel: everything is on the row.
  * Pure presentation; DesktopIntegrations owns data and actions.
@@ -23,17 +28,19 @@ import { Loader2 } from 'lucide-react';
 
 import { isProgressComplete } from '../hooks/integrationAccounts';
 import { useSyncProgress } from '../hooks/useSyncProgress';
-import type { AccountTone, SyncProgress } from '../types';
+import type { AccountTone } from '../types';
 import ConnectedAccountChip from './ConnectedAccountChip';
+import DropdownIconFrame, { warningGlowGradient } from './DropdownIconFrame';
 import SyncProgressBar from './SyncProgressBar';
 
 export interface DesktopAccountView {
-  /** Integration row name; with `accountId` it keys the sync-progress adapter. */
+  /** Integration row name; keys the sync-progress adapter. */
   provider: string;
-  accountId: string;
+  /** Gmail address / Plaid item / compute account; undefined = the row's one account. */
+  accountId?: string;
   label: string;
   detail?: string;
-  /** `queued`: connected and waiting its turn to sync (quiet, never an error). */
+  /** `queued`: a Gmail address waiting its turn to sync (quiet, never an error). */
   tone: AccountTone | 'queued';
   title?: string;
   onRemove?: () => void;
@@ -43,25 +50,39 @@ export interface DesktopAccountView {
   onResync?: () => void;
   resyncLabel?: string;
   resyncing?: boolean;
-  /** Why the backend could not remove this account (DELETE 501); shown under the chips. */
-  removeBlockedReason?: string;
   /** A light sync state: the chip says what is happening and no bar is drawn. */
   hideProgress?: boolean;
-  /** Bar text while the live progress report is blank. */
-  progressFallback?: SyncProgress | null;
-  /** Why the last sync failed, printed under the chips (not only as a tooltip). */
+  /** Why the last sync failed, printed under the chip (not only as a tooltip). */
   errorText?: string;
+}
+
+/** Sync of a multi-account row whose backend reports one account for the whole row. */
+export interface RowSync {
+  provider: string;
+  syncing: boolean;
+  hideProgress?: boolean;
+  errorText?: string;
+}
+
+/** The stock app-icon tile: DropdownIconFrame preset + the existing glyph/asset. */
+export interface DesktopIcon {
+  preset: { iconScale?: number; iconFit?: 'contain' | 'cover' | 'fill' };
+  glyph: ReactNode;
+  /** Frame class, e.g. pinning a currentColor glyph dark on the light tile. */
+  className?: string;
 }
 
 export interface DesktopIntegrationView {
   key: string;
   name: string;
-  /** Existing icon asset, already framed. */
-  icon: ReactNode;
+  icon: DesktopIcon;
   accounts: DesktopAccountView[];
   availability: 'ready' | 'desktop-only' | 'coming-soon';
   onConnect?: () => void;
   connecting?: boolean;
+  /** Listed several accounts before Rose Desktop: "+ Add account" stays. */
+  multiAccount?: boolean;
+  rowSync?: RowSync;
   /** Row-scoped extras (sign-in modal, inline error). */
   extra?: ReactNode;
 }
@@ -70,6 +91,7 @@ const ACTION_CLASSES =
   'shrink-0 text-[12.5px] font-semibold text-[#e8507f] hover:opacity-80 disabled:opacity-50 dark:text-[#ff7aa2]';
 const BADGE_CLASSES =
   'shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground';
+const ERROR_LINE_CLASSES = 'text-xs text-destructive dark:text-red-300';
 
 export function DesktopSectionHeader({ children }: { children: ReactNode }) {
   return (
@@ -101,13 +123,28 @@ function DesktopAccountChip({ account }: { account: DesktopAccountView }) {
       tone={tone === 'queued' ? 'neutral' : tone}
       title={account.title ?? defaultTitle(tone)}
       onRemove={account.onRemove}
-      removeLabel={account.removeLabel ?? `Remove ${account.label}`}
+      removeLabel={account.removeLabel ?? `Disconnect ${account.label}`}
       removing={account.removing}
       disabled={account.disabled}
       onResync={account.onResync}
       resyncLabel={account.resyncLabel}
       resyncing={account.resyncing}
     />
+  );
+}
+
+function RowIcon({ view }: { view: DesktopIntegrationView }) {
+  const connected = view.accounts.length > 0;
+  const damaged = view.accounts.some((a) => a.tone === 'warning');
+  return (
+    <DropdownIconFrame
+      {...view.icon.preset}
+      className={view.icon.className}
+      isSynced={connected}
+      glowGradient={damaged ? warningGlowGradient : undefined}
+    >
+      {view.icon.glyph}
+    </DropdownIconFrame>
   );
 }
 
@@ -138,51 +175,60 @@ function RowAction({ view }: { view: DesktopIntegrationView }) {
   );
 }
 
-function AccountsBlock({ view }: { view: DesktopIntegrationView }) {
+const accountKey = (account: DesktopAccountView) =>
+  `${account.provider}:${account.accountId ?? ''}`;
+
+function SyncBars({ view }: { view: DesktopIntegrationView }) {
   const syncing = view.accounts.filter((a) => a.tone === 'syncing' && a.hideProgress !== true);
+  if (view.rowSync !== undefined) {
+    const { rowSync } = view;
+    const show = (rowSync.syncing || syncing.length > 0) && rowSync.hideProgress !== true;
+    return show ? <SyncProgressBar provider={rowSync.provider} /> : null;
+  }
   const many = view.accounts.length > 1;
+  return (
+    <>
+      {syncing.map((account) => (
+        <SyncProgressBar
+          key={accountKey(account)}
+          provider={account.provider}
+          accountId={account.accountId}
+          prefix={many ? account.label : undefined}
+        />
+      ))}
+    </>
+  );
+}
+
+function AccountsBlock({ view }: { view: DesktopIntegrationView }) {
+  const many = view.accounts.length > 1;
+  const rowError = view.rowSync?.errorText;
   return (
     <div className="ml-[46px] mt-2 flex flex-col gap-2">
       <div className="flex flex-wrap gap-1.5" data-testid={`accounts-${view.key}`}>
         {view.accounts.map((account) => (
-          <DesktopAccountChip key={`${account.provider}:${account.accountId}`} account={account} />
+          <DesktopAccountChip key={accountKey(account)} account={account} />
         ))}
       </div>
-      {view.accounts
-        .filter((account) => account.removeBlockedReason !== undefined)
-        .map((account) => (
-          <p
-            key={`blocked:${account.provider}:${account.accountId}`}
-            role="status"
-            data-testid="account-removal-blocked"
-            className="text-xs text-muted-foreground"
-          >
-            {many ? `${account.label}: ` : ''}
-            {account.removeBlockedReason}
-          </p>
-        ))}
       {view.accounts
         .filter((account) => account.errorText !== undefined)
         .map((account) => (
           <p
-            key={`error:${account.provider}:${account.accountId}`}
+            key={`error:${accountKey(account)}`}
             data-testid="account-sync-error"
-            className="text-xs text-destructive dark:text-red-300"
+            className={ERROR_LINE_CLASSES}
           >
             {many ? `${account.label}: ` : ''}
             {account.errorText}
           </p>
         ))}
-      {syncing.map((account) => (
-        <SyncProgressBar
-          key={`${account.provider}:${account.accountId}`}
-          provider={account.provider}
-          accountId={account.accountId}
-          prefix={many ? account.label : undefined}
-          fallback={account.progressFallback}
-        />
-      ))}
-      {view.availability === 'ready' && view.onConnect !== undefined && (
+      {rowError !== undefined && (
+        <p data-testid="account-sync-error" className={ERROR_LINE_CLASSES}>
+          {rowError}
+        </p>
+      )}
+      <SyncBars view={view} />
+      {view.multiAccount === true && view.availability === 'ready' && view.onConnect && (
         <button
           type="button"
           onClick={view.onConnect}
@@ -198,17 +244,17 @@ function AccountsBlock({ view }: { view: DesktopIntegrationView }) {
 }
 
 export default function DesktopIntegrationRow({ view }: { view: DesktopIntegrationView }) {
-  const hasAccounts = view.accounts.length > 0;
+  const connected = view.accounts.length > 0;
   return (
     <div className="border-b border-border/60 py-2.5" data-testid={`integration-row-${view.key}`}>
       <div className="flex items-center gap-3">
-        {view.icon}
+        <RowIcon view={view} />
         <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
           {view.name}
         </span>
-        {!hasAccounts && <RowAction view={view} />}
+        {!connected && <RowAction view={view} />}
       </div>
-      {hasAccounts && <AccountsBlock view={view} />}
+      {connected && <AccountsBlock view={view} />}
       {view.extra}
     </div>
   );

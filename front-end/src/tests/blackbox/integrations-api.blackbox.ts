@@ -22,8 +22,8 @@ import {
   startGmailOAuthApi,
   sendPasswordRequestApi,
   uploadApplePasswordsApi,
+  createLinkedInSyncAgentApi,
 } from '@/features/integrations/api';
-import { createLinkedInSyncAgentApi } from '@/features/integrations/api/linkedin';
 
 const API_BASE = 'http://localhost:3001/api';
 

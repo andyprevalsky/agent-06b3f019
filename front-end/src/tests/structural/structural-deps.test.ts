@@ -232,9 +232,6 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
   'features/integrations/hooks/useMessagesSync.ts': [
     'Cross-domain import: "@/features/integration-handlers-context"',
   ],
-  'features/integrations/hooks/useWhatsAppAccounts.ts': [
-    'Cross-domain import: "@/features/integration-handlers-context"',
-  ],
   'features/integrations/components/BrowserIcon.tsx': [
     'Cross-domain import: "@/features/integration-handlers-context"',
   ],

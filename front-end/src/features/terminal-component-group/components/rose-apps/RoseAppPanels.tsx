@@ -2,8 +2,11 @@
  * STATE MACHINE: RoseAppPanelDrawer (the right-panel slot for non-browser apps)
  *
  *   openApp ∈ {integrations, benchmarks, feedback, health, settings} --> [OPEN(app)]
- *   anything else --> [CLOSED] (the shell keeps the last body while it slides out)
- *   [OPEN] --Escape | its trigger again (icon / left-bar row)--> [CLOSED]
+ *   anything else --> [CLOSING] the shell keeps the last body while it slides
+ *                     out, then --after DRAWER_DURATION_MS--> [CLOSED] body
+ *                     unmounted, so a closed panel runs no polls or requests
+ *                     (e.g. the Integrations sync-progress poll)
+ *   [OPEN] --Escape | its trigger again (icon / left-bar row)--> [CLOSING]
  *
  * Header = icon + title; no close X (the triggers toggle, UI ledger row 67).
  * Bodies reuse existing pages (loaded lazily through the pages layer; features
@@ -27,11 +30,12 @@ import {
   Settings as SettingsIcon,
   type LucideIcon,
 } from 'lucide-react';
-import { lazy, Suspense, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
 
 import SidebarCreditIndicator from '../SidebarCreditIndicator';
 import { AppDrawerShell } from './AppDrawerShell';
 import { FeedbackAppPanel } from './FeedbackAppPanel';
+import { DRAWER_DURATION_MS } from './roseAppsLayout';
 import { useRoseApps, type RoseApp } from './roseAppsState';
 
 const IntegrationsPage = lazy(() => import('@/pages/Integrations'));
@@ -100,11 +104,16 @@ function PanelBody({ app }: { app: PanelApp }): ReactNode {
 export function RoseAppPanelDrawer() {
   const apps = useRoseApps();
   const openApp = apps?.openApp ?? null;
-  // Keep the last panel's body while the shell slides out.
+  // Keep the last panel's body while the shell slides out, then unmount it.
   const [shown, setShown] = useState<PanelApp | null>(null);
   if (isPanelApp(openApp) && shown !== openApp) setShown(openApp);
-  if (apps === null) return null;
   const open = isPanelApp(openApp);
+  useEffect(() => {
+    if (open || shown === null) return undefined;
+    const timer = window.setTimeout(() => setShown(null), DRAWER_DURATION_MS);
+    return () => window.clearTimeout(timer);
+  }, [open, shown]);
+  if (apps === null) return null;
   const meta = shown === null ? null : PANELS[shown];
   return (
     <AppDrawerShell open={open} label={`${meta?.title ?? 'App'} panel`} testId="rose-app-panel">

@@ -3,14 +3,12 @@
  *
  *   [INDETERMINATE]  progress null or pct null → full-width flowing gradient,
  *                    text "N <unit>" when a count exists, else "Syncing…"
- *   [DETERMINATE]    pct < 100 → bar width = pct (animated), moving shimmer,
- *                    "N of M <unit>" + "~ETA left" (ETA hidden when unknown);
- *                    a measured pct with no counts (WhatsApp) reads "N%"
+ *   [DETERMINATE]    total known, pct < 100 → bar width = pct (animated), moving
+ *                    shimmer, "N of M <unit>" + "~ETA left" (ETA hidden when unknown)
  *   [DONE]           pct >= 100 → not rendered (the chip has flipped to synced)
  *   any state with progress.phase → "<phase> · " before the count text; Gmail
- *     and LinkedIn machine phases read as text (syncProgressFormat.phaseLabel)
+ *     machine phases read as text (syncProgressFormat.phaseLabel)
  *   unit 'bytes' → sizes ("1.5 MB of 12 MB"), never a raw byte count
- *   no live progress → the caller's fallback (LinkedIn: the run's phase timeline)
  *
  * 4px track, rose→violet gradient (#ffb36b→#ff5f8f→#e43f9a→#9b4dff) with a
  * soft glow. Uses the existing `animate-shimmer` keyframes (tailwind config).
@@ -30,13 +28,7 @@ const GLOW = '0 0 8px rgba(255,95,143,.45)';
 const fmt = (n: number) => n.toLocaleString('en-US');
 
 function ProgressText({ progress }: { progress: SyncProgress | null }) {
-  if (progress === null || progress.done === null) {
-    // A measured percent without counts (WhatsApp) is still real progress.
-    if (progress?.pct != null) {
-      return <b className="font-semibold text-foreground">{Math.round(progress.pct)}%</b>;
-    }
-    return <span>Syncing…</span>;
-  }
+  if (progress === null || progress.done === null) return <span>Syncing…</span>;
   if (progress.unit === 'bytes') {
     return (
       <span>
@@ -122,25 +114,17 @@ export function SyncProgressView({
   );
 }
 
-/** True when a live report carries nothing to show (no phase and no count). */
-function isBlank(progress: SyncProgress | null): boolean {
-  return progress === null || (progress.phase === null && progress.done === null);
-}
-
 /** Progress bar for one syncing account, read through the single adapter. */
 export default function SyncProgressBar({
   provider,
   accountId,
   prefix,
-  fallback = null,
 }: {
   provider: string;
-  accountId: string;
+  /** Gmail address / Plaid item; undefined = the row's one account. */
+  accountId?: string;
   prefix?: string;
-  /** Shown while the live progress report is blank (e.g. a LinkedIn run's timeline). */
-  fallback?: SyncProgress | null;
 }) {
-  const live = useSyncProgress(provider, accountId);
-  const progress = isBlank(live) && fallback !== null ? fallback : live;
+  const progress = useSyncProgress(provider, accountId);
   return <SyncProgressView progress={progress} prefix={prefix} provider={provider} />;
 }

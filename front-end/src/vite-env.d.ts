@@ -17,19 +17,10 @@ interface ElectronLocalCodeBridge {
   openTerminal: (taskId: string) => Promise<{ success: boolean }>;
 }
 
-/** Mac app WhatsApp bridge (mac-app/shared/types/ipc.ts `whatsapp`); the part the web UI calls. */
-interface ElectronWhatsAppBridge {
-  /** Pair one more account; the QR streams over `onWhatsAppQRCode`. */
-  addAccount?: () => Promise<{ success: boolean; error?: string }>;
-  /** Log out one account (E.164 phone); others stay connected. */
-  logout: (accountId?: string) => Promise<{ success: boolean; error?: string }>;
-}
-
 interface ElectronApiBridge {
   isElectron?: boolean;
   auth?: ElectronAuthBridge;
   localCode?: ElectronLocalCodeBridge;
-  whatsapp?: ElectronWhatsAppBridge;
 }
 
 declare interface Window {
