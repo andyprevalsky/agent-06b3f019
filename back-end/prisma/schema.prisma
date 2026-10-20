@@ -374,6 +374,9 @@ model User {
   isAnonymous                 Boolean                     @default(false)
   onboardingCompletedAt       DateTime?
   imessageBridgeLastSeenAt    DateTime?
+  /// Largest code-agent sandbox tier (small | medium | large) this user's code
+  /// agents may resize to; null = the deployment default (C16).
+  codeSandboxMaxTier          String?
   // Per-number WhatsApp deliverability for mirrored lifecycle notifications.
   // null = unknown (try once, learn); true = reachable (received an inbound WA
   // message or a send succeeded); false = not on WhatsApp / undeliverable (skip
@@ -664,6 +667,9 @@ model CodeSession {
   mergeTarget         String?
   /// The parent agent's session this branch was cut from (sub-agents).
   parentCodeSessionId String?
+  /// Size tier (small | medium | large) of the sandbox the session holds; null =
+  /// created before sized sandboxes (the default tier). C16.
+  sandboxTier         String?
   lastActiveAt        DateTime  @default(now())
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
@@ -671,6 +677,29 @@ model CodeSession {
 
   @@index([userId, ownerAgentId, repoKey, lastActiveAt(sort: Desc)])
   @@index([userId, state, lastActiveAt])
+}
+
+/// A code agent's request to move its session to another sandbox size (C16).
+model CodeSessionResize {
+  id            String    @id @default(uuid())
+  codeSessionId String
+  userId        String
+  agentId       String
+  /// Task (ClaudeCodeSession) whose CLI asked for the resize.
+  taskId        String?
+  fromTier      String
+  toTier        String
+  reason        String
+  /// PENDING (recorded) | RUNNING (being applied) | DONE | FAILED
+  status        String    @default("PENDING")
+  /// Task that continues the session after the resize (DONE, or FAILED on the old tier).
+  newTaskId     String?
+  error         String?
+  requestedAt   DateTime  @default(now())
+  startedAt     DateTime?
+  completedAt   DateTime?
+
+  @@index([codeSessionId, requestedAt(sort: Desc)])
 }
 
 /// "New agent in this branch": agentId works in the code session (worktree,
@@ -2013,6 +2042,8 @@ model Project {
   startupScript   String?
   startupTimeoutS Int                  @default(120)
   autoWake        Boolean              @default(false)
+  /// Default sandbox size tier for new code sessions (small | medium | large); null = deployment default.
+  sandboxSize     String?
   /// Per-project salt for content fingerprints (incremental re-sync).
   syncSalt        String
   /// Monotonic snapshot revision; bumped by every accepted sync.
