@@ -111,6 +111,27 @@ export async function userExists(userId: string): Promise<boolean> {
   return user !== null;
 }
 
+/**
+ * The publishing agent and its root, when the agent belongs to `userId`.
+ * Walks parentAgentId (tree depth, not tree size); [] when not the user's.
+ */
+export async function userUiAnnounceAgentIds(userId: string, agentId: string): Promise<string[]> {
+  const chain: string[] = [];
+  let current: string | null = agentId;
+  while (current !== null && !chain.includes(current)) {
+    const agent: { parentAgentId: string | null } | null = await prisma.agent.findFirst({
+      where: { id: current, userId },
+      select: { parentAgentId: true },
+    });
+    if (agent === null) break;
+    chain.push(current);
+    current = agent.parentAgentId;
+  }
+  if (chain.length === 0) return [];
+  const root = chain[chain.length - 1] as string;
+  return root === agentId ? [agentId] : [agentId, root];
+}
+
 /** Store every file + index, then create the row (and optionally activate it). */
 export async function createUserUiVersion(params: {
   userId: string;
