@@ -66,6 +66,8 @@ export interface CodeAgentMeta {
   device_name?: string;
   folder?: string;
   branch: string;
+  /** Branch this agent merges into when done (the spawner's branch; row 50). */
+  base_branch?: string;
   state: CodeAgentState;
   /** ISO-8601 or epoch ms. */
   started_at: string | number;
@@ -274,6 +276,7 @@ export function parseCodeAgentMeta(value: unknown): CodeAgentMeta | null {
     device_name: str(r.device_name),
     folder: str(r.folder),
     branch: str(r.branch) ?? '',
+    base_branch: str(r.base_branch),
     state,
     started_at: startedAt,
     ended_at: time(r.ended_at),

@@ -10,12 +10,15 @@ import { useAgentContext, type Message } from '../hooks';
 import type { ChipState } from '../types';
 import {
   answeredQuestionIds,
+  codeAgentLabel,
   codeAgentToolCallId,
   collectCodeAgentEvents,
   latestCodeAgentMeta,
+  parseCodeAgentMeta,
   parseCodeAgentSender,
   parsePinnedQuestion,
   type CodeAgentMeta,
+  type CodeAgentProvider,
   type CodeAgentSender,
   type CodeAgentTranscriptEvent,
   type PinnedQuestionDisplay,
@@ -106,4 +109,106 @@ export function usePendingQuestion(): { pending: PendingQuestion | null; agentId
     [closed, messages, roseDesktop],
   );
   return { pending, agentId: selectedAgentId ?? agent?.agent_id ?? null };
+}
+
+// ── Root status line under the chips (row 44) ───────────────────────────────
+
+interface TaskRollup {
+  provider: CodeAgentProvider;
+  started: boolean;
+  terminal: boolean;
+  toolCallIds: Set<string>;
+  meta: CodeAgentMeta | null;
+}
+
+const TERMINAL_ACTIONS = new Set(['task_complete', 'session_cancelled']);
+
+/** Code tasks of the spawn tool, folded from their rows (later snapshots win). */
+function rollupCodeTasks(messages: Message[]): Map<string, TaskRollup> {
+  const tasks = new Map<string, TaskRollup>();
+  const bareCancelCallIds = new Set<string>();
+  for (const message of messages) {
+    const metadata = message.metadata;
+    if (metadata?.toolName !== 'spawn_claude_code_agent') continue;
+    const action: unknown = metadata.action_type;
+    const callId = typeof metadata.toolCallId === 'string' ? metadata.toolCallId : null;
+    const taskId = metadata.task_id;
+    if (typeof taskId !== 'string' || taskId === '' || taskId === 'pending') {
+      // Handler cancel can omit task_id; it still ends the task sharing its toolCallId.
+      if (action === 'session_cancelled' && callId) bareCancelCallIds.add(callId);
+      continue;
+    }
+    const task: TaskRollup = tasks.get(taskId) ?? {
+      provider: 'claude',
+      started: false,
+      terminal: false,
+      toolCallIds: new Set<string>(),
+      meta: null,
+    };
+    if (metadata.code_provider === 'codex') task.provider = 'codex';
+    if (action === 'claude_code_started') task.started = true;
+    if (typeof action === 'string' && TERMINAL_ACTIONS.has(action)) task.terminal = true;
+    if (callId) task.toolCallIds.add(callId);
+    const meta = parseCodeAgentMeta(metadata.code_agent);
+    if (meta && meta.task_id === taskId) task.meta = meta;
+    tasks.set(taskId, task);
+  }
+  for (const task of tasks.values()) {
+    if ([...task.toolCallIds].some((id) => bareCancelCallIds.has(id))) task.terminal = true;
+  }
+  return tasks;
+}
+
+function isLive(task: TaskRollup): boolean {
+  if (task.terminal) return false;
+  return task.meta ? task.meta.state === 'live' : task.started;
+}
+
+export type RootWaitStatus =
+  | { kind: 'answer'; agent: string; base?: string }
+  | { kind: 'one'; agent: string; branch?: string; base?: string }
+  | { kind: 'many'; count: number };
+
+/**
+ * What the root agent is waiting on, derived from the trajectory alone:
+ *   an open pinned question → "<agent> is waiting on your answer"
+ *   one live code agent     → "Rose is waiting on <agent>[, then merges <branch> into <base>]"
+ *   several live            → "Rose is waiting on <n> code agents"
+ *   nothing live            → null (line hidden)
+ */
+export function deriveRootWaitStatus(
+  messages: Message[],
+  closedQuestions: ReadonlySet<string>,
+): RootWaitStatus | null {
+  const tasks = rollupCodeTasks(messages);
+  const pending = findPendingQuestion(messages, closedQuestions);
+  if (pending?.sender) {
+    const task = pending.sender.task_id ? tasks.get(pending.sender.task_id) : undefined;
+    return {
+      kind: 'answer',
+      agent: codeAgentLabel(pending.sender.provider),
+      base: task?.meta?.base_branch,
+    };
+  }
+  const live = [...tasks.values()].filter(isLive);
+  if (live.length === 0) return null;
+  if (live.length > 1) return { kind: 'many', count: live.length };
+  const [task] = live;
+  const provider = task.meta?.provider ?? task.provider;
+  return {
+    kind: 'one',
+    agent: codeAgentLabel(provider),
+    branch: task.meta?.branch || undefined,
+    base: task.meta?.base_branch,
+  };
+}
+
+export function useRootWaitStatus(): RootWaitStatus | null {
+  const roseDesktop = useRoseDesktop();
+  const { messages } = useAgentContext();
+  const closed = useClosedQuestions();
+  return useMemo(
+    () => (roseDesktop ? deriveRootWaitStatus(messages, closed) : null),
+    [closed, messages, roseDesktop],
+  );
 }
