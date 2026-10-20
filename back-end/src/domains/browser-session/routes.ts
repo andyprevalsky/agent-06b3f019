@@ -79,9 +79,11 @@ router.post(
   authenticate,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
-      const { session_id, pause, current_url } = closeSessionSchema.parse(req.body);
+      const { session_id, pause, current_url, signed_in_sites } = closeSessionSchema.parse(
+        req.body
+      );
 
-      const result = await closeBrowserSession(session_id, pause, current_url);
+      const result = await closeBrowserSession(session_id, pause, current_url, signed_in_sites);
 
       res.json({ success: true, ...result });
     } catch (error) {
