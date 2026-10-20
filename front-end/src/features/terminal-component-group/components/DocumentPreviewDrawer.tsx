@@ -10,6 +10,8 @@
  *   html         -> iframe srcDoc (sandboxed, opaque origin) — always shows markup body;
  *                   Rose Desktop accounts also run its inline scripts (network still blocked)
  *   image        -> <img>
+ *   video        -> <video controls> streamed from the signed URL (Rose Desktop only;
+ *                   stock accounts keep videos download-only)
  *   markdown     -> MarkdownText
  *   text         -> <pre>
  *   csv          -> SpreadsheetTable
@@ -23,6 +25,8 @@
  * SYSTEM CONTEXT:
  * CompletionSummaryCard / StructuredResponseDisplay -> FilePointerDisplay click
  *   -> DocumentPreviewDrawer (Sheet side=right)
+ * InlineMediaGallery (messages, tool results, file outputs) tap/click
+ *   -> DocumentPreviewDrawer (signedUrl passed through when already resolved)
  */
 
 import { useEffect, useState } from 'react';
@@ -41,16 +45,26 @@ interface DocumentPreviewDrawerProps {
   file: FilePointer | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Already-resolved signed URL; skips client-side signing when provided. */
+  signedUrl?: string;
 }
 
-export function DocumentPreviewDrawer({ file, open, onOpenChange }: DocumentPreviewDrawerProps) {
+export function DocumentPreviewDrawer({
+  file,
+  open,
+  onOpenChange,
+  signedUrl,
+}: DocumentPreviewDrawerProps) {
   // Only set after an explicit tab click. Passing the loader's default sheet back
   // into useDocumentPreview would remount the load and race blackbox assertions.
   const [selectedSheet, setSelectedSheet] = useState<string | undefined>(undefined);
   const fileKey = documentPreviewFileKey(file);
+  const roseDesktop = useRoseDesktop();
   const loadState = useDocumentPreview(file, open, {
     activeSheet: selectedSheet,
-    allowInlineScripts: useRoseDesktop(),
+    allowInlineScripts: roseDesktop,
+    signedUrl,
+    video: roseDesktop,
   });
 
   // Reset on close AND on file change. `fileKey` was already a dependency, but
@@ -61,8 +75,8 @@ export function DocumentPreviewDrawer({ file, open, onOpenChange }: DocumentPrev
     setSelectedSheet(undefined);
   }, [open, fileKey]);
 
-  const kind = file ? documentPreviewKind(file) : 'download';
-  const typeLabel = file ? documentTypeLabel(file) : 'File';
+  const kind = file ? documentPreviewKind(file, { video: roseDesktop }) : 'download';
+  const typeLabel = file ? documentTypeLabel(file, { video: roseDesktop }) : 'File';
   const spreadsheet = loadState.status === 'ready' ? loadState.payload.spreadsheet : undefined;
   const downloadUrl =
     loadState.status === 'ready'
@@ -167,6 +181,16 @@ export function DocumentPreviewDrawer({ file, open, onOpenChange }: DocumentPrev
                 src={loadState.payload.previewUrl}
                 alt={file.original_filename}
                 className="max-h-full max-w-full object-contain"
+              />
+            </div>
+          ) : kind === 'video' && loadState.payload.previewUrl ? (
+            <div className="flex h-full items-center justify-center bg-black p-4">
+              <video
+                src={loadState.payload.previewUrl}
+                controls
+                playsInline
+                data-testid="document-preview-video"
+                className="max-h-full max-w-full"
               />
             </div>
           ) : kind === 'pdf' && loadState.payload.previewUrl ? (

@@ -21,7 +21,15 @@
  *   per-user background showing              → query box renders opaque
  *
  * LEGAL LINKS:
- *   About, Privacy, and Terms remain available while chatting.
+ *   stock         → About, Privacy, and Terms footer remains while chatting.
+ *   Rose Desktop  → no footer (UI ledger #14); the links live behind the
+ *                   info item of the query box's rose nub.
+ *
+ * MOBILE BOTTOM (Rose Desktop only, UI ledger #11):
+ *   the input area pads by --mobile-querybox-gap only and carries
+ *   `rose-mobile-query-area`; below md the query box inside it hugs the display
+ *   curve (index.css: concentric bottom radius + safe-area inner padding).
+ *   stock → input area pads by the safe-area inset (unchanged).
  */
 
 import { useRef, Suspense, type ComponentType, type ReactNode } from 'react';
@@ -31,6 +39,8 @@ import { isBenchmarkSharedView } from '@/lib/benchmarkShare';
 import { ApprovalChip } from '@/features/terminal-component-group';
 import { QueryInput } from '@/features/terminal-component-group';
 import { UserUiSlot, useUserUiOpaqueSurfaces } from '@/features/user-ui';
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
+import { cn } from '@/lib/utils';
 import { GateStack } from './GateStack';
 
 import { useTickerCarousel } from '../hooks/useTickerCarousel';
@@ -82,6 +92,7 @@ export function AgentChatArea({
   const opening = useOpeningAnimation(a.selectedAgentId, a.isLoadingNetwork);
   const { tickerOffset, tickerRef } = useTickerCarousel(a.selectedAgentId);
   const sharedView = isBenchmarkSharedView();
+  const roseDesktop = useRoseDesktop();
   const readOnlyMessage = sharedView
     ? 'Read-only benchmark recording'
     : a.inspectionContext
@@ -143,7 +154,7 @@ export function AgentChatArea({
         />
       )}
 
-      <TerminalLegalFooter />
+      {!roseDesktop && <TerminalLegalFooter />}
     </>
   );
 }
@@ -181,11 +192,17 @@ function InputArea({
   // an `overflow-hidden` column. Without it, a tall child (an approval card
   // with a multi-item receipt) is the one that gets squeezed and clipped
   // instead of the scrollable transcript above it.
+  const roseDesktop = useRoseDesktop();
   return (
     <div
       data-testid="terminal-input-area"
       data-chat-mode={a.isChatMode ? 'true' : 'false'}
-      className="relative shrink-0 pb-[calc(0.25rem+var(--safe-area-inset-bottom))] transition-opacity duration-300 ease-in-out md:pb-6"
+      className={cn(
+        'relative shrink-0 transition-opacity duration-300 ease-in-out md:pb-6',
+        roseDesktop
+          ? 'rose-mobile-query-area pb-[var(--mobile-querybox-gap)]'
+          : 'pb-[calc(0.25rem+var(--safe-area-inset-bottom))]',
+      )}
       style={{
         // A pending gate is actionable (the agent is waiting on the user), so
         // keep it crisp even if the agent row shows FAILED — only dim a truly

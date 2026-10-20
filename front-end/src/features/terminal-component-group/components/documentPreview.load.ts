@@ -52,21 +52,34 @@ export async function blobToArrayBuffer(blob: Blob): Promise<ArrayBuffer> {
   });
 }
 
-export async function loadDocumentPreview(
-  file: FilePointer,
-  options?: { activeSheet?: string; signal?: AbortSignal; allowInlineScripts?: boolean },
-): Promise<{ payload: DocumentPreviewPayload; objectUrls: string[] }> {
-  const kind = documentPreviewKind(file);
-  const objectUrls: string[] = [];
-  const signal = options?.signal;
-
+async function createSignedUrl(file: FilePointer): Promise<string> {
   const { data, error } = await supabase.storage
     .from('attachments')
     .createSignedUrl(file.storage_path, SIGNED_URL_TTL_SECONDS);
   if (error || !data?.signedUrl) {
     throw new DocumentPreviewLoadError(error?.message || 'Could not create signed URL');
   }
-  const downloadUrl = data.signedUrl;
+  return data.signedUrl;
+}
+
+export async function loadDocumentPreview(
+  file: FilePointer,
+  options?: {
+    activeSheet?: string;
+    signal?: AbortSignal;
+    allowInlineScripts?: boolean;
+    signedUrl?: string;
+    /** Rose Desktop only: videos stream in the drawer (stock: download-only). */
+    video?: boolean;
+  },
+): Promise<{ payload: DocumentPreviewPayload; objectUrls: string[] }> {
+  const kind = documentPreviewKind(file, { video: options?.video === true });
+  const objectUrls: string[] = [];
+  const signal = options?.signal;
+
+  // Callers that already hold a signed URL (e.g. agent attachments signed by
+  // the backend for inline media) pass it to skip client-side signing.
+  const downloadUrl = options?.signedUrl ?? (await createSignedUrl(file));
 
   try {
     if (kind === 'html') {
@@ -135,6 +148,11 @@ export async function loadDocumentPreview(
 
     if (kind === 'download') {
       return { payload: { kind, downloadUrl }, objectUrls };
+    }
+
+    // Videos stream from the signed URL; never buffer the whole file as a blob.
+    if (kind === 'video') {
+      return { payload: { kind, downloadUrl, previewUrl: downloadUrl }, objectUrls };
     }
 
     const blob = await downloadAttachmentAsBlob(downloadUrl, { signal });

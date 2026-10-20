@@ -1238,6 +1238,34 @@ html {
   bottom: calc(env(safe-area-inset-bottom, 0px) + 1rem);
 }
 
+/* Mobile web/PWA query box hugs the bottom display curve (UI ledger #11,
+ * Rose Desktop accounts only: AgentChatArea adds .rose-mobile-query-area to the
+ * input area only when the flag is on; the stock UI never matches).
+ * The box sits one gap (= the column's px-2 side inset) above the screen edge,
+ * so its bottom corners are concentric with the display corner: radius =
+ * display corner - gap. On screens without a bottom safe area (no curve) the
+ * min() collapses back to the stock 0.75rem (rounded-xl) radius. Content stays
+ * above the home indicator by padding the box's inside by the rest of the
+ * safe-area inset. [data-surface] is the query box shell (QueryInput). */
+:root {
+  --display-corner: 55px;
+  --mobile-querybox-gap: 0.5rem;
+}
+
+@media (max-width: 767px) {
+  .rose-mobile-query-area [data-surface] {
+    --mobile-querybox-radius: min(
+      calc(var(--display-corner) - var(--mobile-querybox-gap)),
+      calc(0.75rem + var(--safe-area-inset-bottom) * 2)
+    );
+    border-bottom-left-radius: var(--mobile-querybox-radius);
+    border-bottom-right-radius: var(--mobile-querybox-radius);
+    padding-bottom: calc(
+      0.75rem + max(0px, var(--safe-area-inset-bottom) - var(--mobile-querybox-gap))
+    );
+  }
+}
+
 /* Grid background pattern for hero section */
 .grid-background {
   background-image:

@@ -12,6 +12,9 @@
  * --rose-apps-inset-left (the collapsed rail), so content re-centers in the
  * remaining width with the drawer's 520ms ease (paused while resizing). The
  * top-right nav links hide while a drawer is open (--rose-apps-nav-visibility).
+ * Rose Desktop accounts get no top-right nav links at all (UI ledger #14, #66:
+ * no Research, Careers or Download — the app icons sit there instead); the
+ * stock website keeps Research, Careers and Download.
  */
 
 import { useNavigate } from 'react-router-dom';
@@ -20,6 +23,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { BenchmarksView } from '@/features/benchmarks';
 import { UserUiSlot } from '@/features/user-ui';
 import { useAppData } from '@/hooks/appDataContext';
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { cn } from '@/lib/utils';
 import AdminHealth from '@/pages/AdminHealth';
 import Browse from '@/pages/Browse';
@@ -156,6 +160,8 @@ function TerminalViewContent(props: MainContentProps) {
 
 function DesktopNavLinks() {
   const navigate = useNavigate();
+  const roseDesktop = useRoseDesktop();
+  if (roseDesktop) return null;
   return (
     <div
       className="hidden md:flex items-center gap-2 absolute top-5 right-2 z-50"
