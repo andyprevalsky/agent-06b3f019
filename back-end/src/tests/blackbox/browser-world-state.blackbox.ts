@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 /**
- * Root browser world state split by website (plan row A6).
+ * The user's one browser template, split by website and account (plan row A6).
  *
  * The provider boundary is a local Chromium (the same stand-in the
  * auth-persist and steel-injection suites use), so no cloud browser starts.
@@ -8,194 +8,55 @@
  * through the real close-time harvest; reads through the HTTP routes.
  *
  * Invariants:
- *   - fork is scoped to the prepared site (no other Root site is injected)
- *   - a new login merges into Root; Root then seeds the next agent's fork
- *   - unchanged and anonymous sites do not merge; a lost login does not merge
- *   - a stale agent cannot overwrite a newer Root login (guarded LWW)
+ *   - fork is scoped to the prepared site (no other template site is injected)
+ *   - every credential a task holds at close percolates into the template;
+ *     a collision within one account keeps the best login (keep-best rule in
+ *     providers/browser/worldStateKeepBest.ts), different accounts never compete
+ *   - a logged-out, expired, empty or superseded state never replaces a login
  *   - owner scoping on every read and write
- *   - a retried merge (activity retry, rule 20) never bumps the revision twice
- *   - the Root browser opens from Root state, merges only what the user changed
+ *   - a retried close (activity retry, rule 20) never writes twice
+ *   - the home browser opens only on request, from the template, at the URL
+ *     its root agent's tree is working on
  */
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
-import { chromium, type Browser, type BrowserContext } from 'playwright';
+import { chromium } from 'playwright';
 import { prisma } from '../../providers/database';
 import {
   mergeSessionWorldState,
-  ROOT_BROWSER_PROFILE,
   ROOT_BROWSER_SOURCE,
   rootBrowserAgentId,
-  siteAuthSnapshot,
-  type WorldStateMergeReceipt,
 } from '../../providers/browser/worldState';
-import { prepareSessionCredentials } from '../../domains/browser-session/service';
 import {
   closeRootBrowser,
   openRootBrowser,
   type RootBrowserDeps,
 } from '../../domains/browser-world/service';
-
-const BASE_URL = process.env.TEST_BASE_URL ?? 'http://localhost:3001';
-const API_KEY = process.env.BACKEND_API_KEY ?? '';
-
-function assert(condition: unknown, message: string): asserts condition {
-  if (!condition) throw new Error(message);
-}
-
-// ── fixtures ──────────────────────────────────────────────────────────────
-
-const users: string[] = [];
-
-async function createUser(label: string): Promise<string> {
-  const userId = `world-${label}-${randomUUID()}`;
-  await prisma.user.create({ data: { userId, isAnonymous: true } });
-  users.push(userId);
-  return userId;
-}
-
-async function cleanup(userId: string): Promise<void> {
-  await prisma.browserSession.deleteMany({ where: { context: { userId } } });
-  await prisma.browserContext.deleteMany({ where: { userId } });
-  await prisma.browserSiteState.deleteMany({ where: { userId } });
-  await prisma.cookie.deleteMany({ where: { userId } });
-  await prisma.cookieBundle.deleteMany({ where: { userId } });
-  await prisma.agent.deleteMany({ where: { userId } });
-  await prisma.user.deleteMany({ where: { userId } });
-}
-
-async function createAgentTask(userId: string, options: { agentId?: string } = {}) {
-  const agentId = options.agentId ?? randomUUID();
-  if (options.agentId === undefined) {
-    await prisma.agent.create({
-      data: {
-        id: agentId,
-        userId,
-        goal: 'Use the root browser world state',
-        status: 'ACTIVE',
-        temporalWorkflowId: agentId,
-      },
-    });
-  }
-  const context = await prisma.browserContext.upsert({
-    where: { userId },
-    create: { userId },
-    update: {},
-  });
-  return prisma.browserSession.create({
-    data: {
-      contextId: context.id,
-      agentId,
-      sessionId: `world-${randomUUID()}`,
-      // The caller hands the real (local) browser to every call.
-      wsUrl: 'ws://already-connected.invalid',
-      provider: 'kernel',
-      status: 'ACTIVE',
-      startUrl: 'https://example.com/',
-      providerProfileSource: 'user_persistent',
-      providerProfilePersist: true,
-    },
-  });
-}
-
-/** Root state for one site, written the way a merge writes it. */
-async function seedRootSite(userId: string, site: string, value: string, revision: number) {
-  const cookie = { name: 'session', value, domain: `.${site}`, path: '/' };
-  await prisma.cookie.create({
-    data: {
-      userId,
-      ...cookie,
-      isSecure: true,
-      browserSource: ROOT_BROWSER_SOURCE,
-      browserProfile: ROOT_BROWSER_PROFILE,
-      creationUtc: 13_400_000_000_000_000n,
-      hasExpires: false,
-      isPersistent: false,
-    },
-  });
-  await prisma.cookieBundle.create({
-    data: {
-      userId,
-      authRealm: site,
-      browserSource: ROOT_BROWSER_SOURCE,
-      browserProfile: ROOT_BROWSER_PROFILE,
-    },
-  });
-  await prisma.browserSiteState.create({
-    data: {
-      userId,
-      site,
-      revision,
-      authFingerprint: siteAuthSnapshot([cookie], site).fingerprint,
-      cookieCount: 1,
-      lastWriterKind: 'agent',
-    },
-  });
-}
-
-async function setSiteCookie(context: BrowserContext, site: string, name: string, value: string) {
-  await context.addCookies([
-    { name, value, domain: `.${site}`, path: '/', secure: true, httpOnly: true, sameSite: 'Lax' },
-  ]);
-}
-
-async function cookieValue(context: BrowserContext, site: string, name = 'session') {
-  const cookies = await context.cookies();
-  return cookies.find((cookie) => cookie.name === name && cookie.domain === `.${site}`)?.value;
-}
-
-async function headOf(userId: string, site: string) {
-  return prisma.browserSiteState.findUnique({ where: { userId_site: { userId, site } } });
-}
-
-async function rootCookieValue(userId: string, site: string) {
-  const row = await prisma.cookie.findFirst({
-    where: {
-      userId,
-      domain: `.${site}`,
-      name: 'session',
-      browserSource: ROOT_BROWSER_SOURCE,
-      browserProfile: ROOT_BROWSER_PROFILE,
-    },
-  });
-  return row?.value;
-}
-
-function outcomeOf(receipt: WorldStateMergeReceipt | null, site: string) {
-  return receipt?.sites.find((entry) => entry.site === site);
-}
-
-const browsers: Browser[] = [];
-
-async function freshBrowser(): Promise<{ browser: Browser; context: BrowserContext }> {
-  const browser = await chromium.launch({ headless: true });
-  browsers.push(browser);
-  const context = await browser.newContext();
-  return { browser, context };
-}
-
-async function fork(session: { sessionId: string }, userId: string, browser: Browser, url: string) {
-  await prepareSessionCredentials(session.sessionId, userId, url, { browser });
-}
-
-async function api(path: string, userId: string | null, init: RequestInit = {}) {
-  const response = await fetch(`${BASE_URL}${path}`, {
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      'X-API-Key': API_KEY,
-      ...(userId === null ? {} : { 'X-User-Id': userId }),
-      ...(init.headers ?? {}),
-    },
-  });
-  return { status: response.status, body: (await response.json()) as Record<string, unknown> };
-}
-
-// ── cases ─────────────────────────────────────────────────────────────────
+import { keepBestCases } from './browser-world-state.keep-best.cases';
+import {
+  api,
+  assert,
+  BASE_URL,
+  browsers,
+  cleanup,
+  cookieValue,
+  createAgentTask,
+  createUser,
+  fingerprintOf,
+  fork,
+  freshBrowser,
+  headOf,
+  outcomeOf,
+  seedTemplate,
+  setSiteCookie,
+  templateCookieValue,
+  users,
+} from './browser-world-state.support';
 
 async function forkIsScopedToThePreparedSite(): Promise<void> {
   const userId = await createUser('scope');
-  await seedRootSite(userId, 'example.com', 'root-com', 3);
-  await seedRootSite(userId, 'example.org', 'root-org', 1);
+  await seedTemplate(userId, 'example.com', 'root-com', 3);
+  await seedTemplate(userId, 'example.org', 'root-org', 1);
   const task = await createAgentTask(userId);
   const { browser, context } = await freshBrowser();
 
@@ -203,7 +64,7 @@ async function forkIsScopedToThePreparedSite(): Promise<void> {
 
   assert(
     (await cookieValue(context, 'example.com')) === 'root-com',
-    'the prepared site did not receive Root state'
+    'the prepared site did not receive the template login'
   );
   assert(
     (await cookieValue(context, 'example.org')) === undefined,
@@ -212,12 +73,9 @@ async function forkIsScopedToThePreparedSite(): Promise<void> {
   const forks = await prisma.browserSiteFork.findMany({ where: { browserSessionId: task.id } });
   assert(forks.length === 1 && forks[0]?.site === 'example.com', JSON.stringify(forks));
   assert(forks[0].baseRevision === 3, `base revision ${forks[0].baseRevision}, expected 3`);
+  assert(forks[0].account === '', `forked account ${forks[0].account}`);
   assert(
-    forks[0].baseFingerprint ===
-      siteAuthSnapshot(
-        [{ name: 'session', value: 'root-com', domain: '.example.com', path: '/' }],
-        'example.com'
-      ).fingerprint,
+    forks[0].baseFingerprint === fingerprintOf('example.com', 'root-com'),
     'fork base is not the jar the session started from'
   );
 }
@@ -239,7 +97,8 @@ async function newLoginMergesAndSeedsTheNextFork(): Promise<void> {
   const head = await headOf(userId, 'example.net');
   assert(head?.revision === 1 && head.lastWriterTaskId === task.id, JSON.stringify(head));
   assert(head.lastWriterAgentId === task.agentId && head.lastWriterKind === 'agent', 'writer');
-  assert((await rootCookieValue(userId, 'example.net')) === 'agent-login', 'Root cookie missing');
+  assert(head.validatedAt !== null, 'sign-in evidence did not validate the login');
+  assert((await templateCookieValue(userId, 'example.net')) === 'agent-login', 'cookie missing');
 
   const next = await createAgentTask(userId);
   const nextBrowser = await freshBrowser();
@@ -254,17 +113,17 @@ async function newLoginMergesAndSeedsTheNextFork(): Promise<void> {
   assert(nextFork.baseRevision === 1, `next fork base ${nextFork.baseRevision}`);
 }
 
-async function unchangedAnonymousAndSignedOutSitesDoNotMerge(): Promise<void> {
+async function unchangedAndLoggedOutSitesKeepTheTemplate(): Promise<void> {
   const userId = await createUser('nomerge');
-  await seedRootSite(userId, 'example.com', 'root-com', 3);
-  await seedRootSite(userId, 'example.org', 'root-org', 2);
+  await seedTemplate(userId, 'example.com', 'root-com', 3);
+  await seedTemplate(userId, 'example.org', 'root-org', 2);
   const task = await createAgentTask(userId);
   const { browser, context } = await freshBrowser();
   await fork(task, userId, browser, 'https://example.com/');
   await fork(task, userId, browser, 'https://example.org/');
   await fork(task, userId, browser, 'https://example.edu/');
-  // example.edu: an anonymous visit leaves an auth-looking cookie, no sign-in.
-  await setSiteCookie(context, 'example.edu', 'session', 'anonymous-visitor');
+  // example.edu: a first login (here an anonymous visit) needs no sign-in evidence.
+  await setSiteCookie(context, 'example.edu', 'session', 'first-visit');
   // example.org: the site signed the agent out and issued a different cookie.
   await context.clearCookies({ domain: '.example.org' });
   await setSiteCookie(context, 'example.org', 'auth_token', 'guest');
@@ -272,73 +131,20 @@ async function unchangedAnonymousAndSignedOutSitesDoNotMerge(): Promise<void> {
   const receipt = await mergeSessionWorldState(task.sessionId, { browser });
 
   assert(outcomeOf(receipt, 'example.com')?.outcome === 'unchanged', JSON.stringify(receipt));
-  assert(outcomeOf(receipt, 'example.edu')?.outcome === 'no_login_signal', JSON.stringify(receipt));
   assert(outcomeOf(receipt, 'example.org')?.outcome === 'signed_out', JSON.stringify(receipt));
+  assert(outcomeOf(receipt, 'example.edu')?.outcome === 'merged', JSON.stringify(receipt));
   assert((await headOf(userId, 'example.com'))?.revision === 3, 'unchanged site was rewritten');
   assert((await headOf(userId, 'example.org'))?.revision === 2, 'signed-out jar was merged');
-  assert((await headOf(userId, 'example.edu')) === null, 'anonymous cookies became Root state');
-  assert((await rootCookieValue(userId, 'example.org')) === 'root-org', 'Root login was lost');
-}
-
-async function staleAgentCannotOverwriteNewerRootLogin(): Promise<void> {
-  const userId = await createUser('stale');
-  await seedRootSite(userId, 'example.com', 'root-com', 3);
-  const taskA = await createAgentTask(userId);
-  const taskB = await createAgentTask(userId);
-  const a = await freshBrowser();
-  const b = await freshBrowser();
-  await fork(taskA, userId, a.browser, 'https://example.com/');
-  await fork(taskB, userId, b.browser, 'https://example.com/');
-  await setSiteCookie(b.context, 'example.com', 'session', 'b-login');
-  await setSiteCookie(a.context, 'example.com', 'session', 'a-login');
-
-  const merged = await mergeSessionWorldState(taskB.sessionId, { browser: b.browser });
-  const stale = await mergeSessionWorldState(taskA.sessionId, { browser: a.browser });
-
-  assert(outcomeOf(merged, 'example.com')?.outcome === 'merged', JSON.stringify(merged));
-  const staleEntry = outcomeOf(stale, 'example.com');
-  assert(
-    staleEntry?.outcome === 'stale' &&
-      staleEntry.base_revision === 3 &&
-      staleEntry.head_revision === 4,
-    JSON.stringify(stale)
-  );
-  const head = await headOf(userId, 'example.com');
-  assert(head?.revision === 4 && head.lastWriterTaskId === taskB.id, JSON.stringify(head));
-  assert(
-    (await rootCookieValue(userId, 'example.com')) === 'b-login',
-    'stale agent clobbered Root'
-  );
-
-  // The per-agent view shows which sites each task forked and how they ended.
-  const viewA = await api(`/api/browser-world/agents/${taskA.agentId}`, userId);
-  const tasksA = viewA.body.tasks as Array<{ task_id: string; sites: Array<{ state: string }> }>;
-  assert(viewA.status === 200 && tasksA[0]?.sites[0]?.state === 'stale', JSON.stringify(viewA));
-  const viewB = await api(`/api/browser-world/agents/${taskB.agentId}`, userId);
-  const tasksB = viewB.body.tasks as Array<{
-    task_id: string;
-    live_view_path: string;
-    control_path: string;
-    sites: Array<{ site: string; state: string; merged_revision: number; root_revision: number }>;
-  }>;
-  const siteB = tasksB[0]?.sites[0];
-  assert(
-    siteB?.state === 'merged' && siteB.merged_revision === 4 && siteB.root_revision === 4,
-    JSON.stringify(viewB)
-  );
-  assert(
-    tasksB[0]?.live_view_path === `/api/browser-session/task/${taskB.id}/live-view` &&
-      tasksB[0].control_path === `/api/browser-session/task/${taskB.id}/control`,
-    'takeover paths missing from the agent view'
-  );
+  assert((await headOf(userId, 'example.edu'))?.revision === 1, 'first login did not percolate');
+  assert((await templateCookieValue(userId, 'example.org')) === 'root-org', 'login was lost');
 }
 
 async function everyReadAndWriteIsOwnerScoped(): Promise<void> {
   const owner = await createUser('owner');
   const other = await createUser('other');
-  await seedRootSite(owner, 'example.com', 'owner-com', 1);
-  await seedRootSite(other, 'example.com', 'other-com', 5);
-  await seedRootSite(other, 'example.org', 'other-org', 1);
+  await seedTemplate(owner, 'example.com', 'owner-com', 1);
+  await seedTemplate(other, 'example.com', 'other-com', 5);
+  await seedTemplate(other, 'example.org', 'other-org', 1);
   const otherTask = await createAgentTask(other);
   const otherBrowser = await freshBrowser();
   await fork(otherTask, other, otherBrowser.browser, 'https://example.org/');
@@ -351,7 +157,7 @@ async function everyReadAndWriteIsOwnerScoped(): Promise<void> {
   await mergeSessionWorldState(task.sessionId, { browser });
   assert((await headOf(owner, 'example.com'))?.revision === 2, 'owner merge missing');
   assert((await headOf(other, 'example.com'))?.revision === 5, 'merge crossed users');
-  assert((await rootCookieValue(other, 'example.com')) === 'other-com', 'other Root rewritten');
+  assert((await templateCookieValue(other, 'example.com')) === 'other-com', 'other rewritten');
 
   const anonymous = await fetch(`${BASE_URL}/api/browser-world/sites`);
   assert(anonymous.status === 401, `unauthenticated read returned ${anonymous.status}`);
@@ -359,8 +165,10 @@ async function everyReadAndWriteIsOwnerScoped(): Promise<void> {
   assert(keyOnly.status === 401, `API key without a user returned ${keyOnly.status}`);
 
   const sites = await api('/api/browser-world/sites', owner);
-  const listed = (sites.body.sites as Array<{ site: string; revision: number }>).map((s) => s.site);
-  assert(sites.status === 200 && listed.join(',') === 'example.com', JSON.stringify(sites.body));
+  const listed = (sites.body.sites as Array<{ site: string; account: string }>).map(
+    (s) => `${s.site}|${s.account}`
+  );
+  assert(sites.status === 200 && listed.join(',') === 'example.com|', JSON.stringify(sites.body));
 
   const foreignAgent = await api(`/api/browser-world/agents/${otherTask.agentId}`, owner);
   assert(
@@ -377,18 +185,24 @@ async function everyReadAndWriteIsOwnerScoped(): Promise<void> {
   assert(forgetOwn.body.forgotten === true, JSON.stringify(forgetOwn.body));
   const tombstone = await headOf(other, 'example.org');
   assert(tombstone?.revision === 2 && tombstone.cookieCount === 0, JSON.stringify(tombstone));
-  assert((await rootCookieValue(other, 'example.org')) === undefined, 'forgotten cookies remain');
-  // The fork that predates the forget is now stale: it cannot resurrect the login.
-  await setSiteCookie(otherBrowser.context, 'example.org', 'session', 'resurrected');
-  const late = await mergeSessionWorldState(otherTask.sessionId, {
+  assert((await templateCookieValue(other, 'example.org')) === undefined, 'cookies remain');
+  // A task still holding the forgotten login cannot bring it back...
+  const stale = await mergeSessionWorldState(otherTask.sessionId, {
     browser: otherBrowser.browser,
   });
-  assert(outcomeOf(late, 'example.org')?.outcome === 'stale', JSON.stringify(late));
+  assert(outcomeOf(stale, 'example.org')?.outcome === 'superseded', JSON.stringify(stale));
+  assert((await headOf(other, 'example.org'))?.cookieCount === 0, 'forgotten login came back');
+  // ...but a new login after the forget percolates like any other.
+  await setSiteCookie(otherBrowser.context, 'example.org', 'session', 'signed-in-again');
+  const fresh = await mergeSessionWorldState(otherTask.sessionId, {
+    browser: otherBrowser.browser,
+  });
+  assert(outcomeOf(fresh, 'example.org')?.outcome === 'merged', JSON.stringify(fresh));
 }
 
 async function retriedMergeIsIdempotent(): Promise<void> {
   const userId = await createUser('retry');
-  await seedRootSite(userId, 'example.com', 'root-com', 7);
+  await seedTemplate(userId, 'example.com', 'root-com', 7);
   const task = await createAgentTask(userId);
   const { browser, context } = await freshBrowser();
   await fork(task, userId, browser, 'https://example.com/');
@@ -404,6 +218,7 @@ async function retriedMergeIsIdempotent(): Promise<void> {
   const third = await mergeSessionWorldState(task.sessionId);
 
   assert(outcomeOf(first, 'example.com')?.merged_revision === 8, JSON.stringify(first));
+  assert(outcomeOf(first, 'example.com')?.rule === 'newer', JSON.stringify(first));
   assert(
     outcomeOf(unreachable, 'example.com')?.merged_revision === 8,
     `unreachable retry lost the receipt: ${JSON.stringify(unreachable)}`
@@ -416,10 +231,10 @@ async function retriedMergeIsIdempotent(): Promise<void> {
     );
   }
   assert((await headOf(userId, 'example.com'))?.revision === 8, 'retry bumped the revision');
-  const rootRows = await prisma.cookie.count({
+  const rows = await prisma.cookie.count({
     where: { userId, browserSource: ROOT_BROWSER_SOURCE, domain: '.example.com' },
   });
-  assert(rootRows === 1, `retry duplicated Root cookies (${rootRows})`);
+  assert(rows === 1, `retry duplicated template cookies (${rows})`);
 }
 
 async function freePort(): Promise<number> {
@@ -445,20 +260,36 @@ async function cdpBrowser(): Promise<{ endpoint: string }> {
   return { endpoint: `http://127.0.0.1:${port}` };
 }
 
-async function rootBrowserOpensFromRootAndMergesWhatTheUserChanged(): Promise<void> {
+async function homeBrowserOpensFromTheTemplateAndMergesOnClose(): Promise<void> {
   const userId = await createUser('root');
-  await seedRootSite(userId, 'example.com', 'root-com', 2);
+  await seedTemplate(userId, 'example.com', 'root-com', 2, { creationUtc: 13_400_000_100_000_000n });
+  // A second, older account on the same site: the home browser holds ONE login per site.
+  await seedTemplate(userId, 'example.com', 'other-account', 1, { account: 'chrome:Profile 2' });
+  await prisma.cookie.create({
+    data: {
+      userId,
+      name: 'sid2',
+      value: 'other-sid',
+      domain: '.example.com',
+      path: '/',
+      browserSource: ROOT_BROWSER_SOURCE,
+      browserProfile: 'chrome:Profile 2',
+      creationUtc: 13_400_000_000_000_000n,
+      hasExpires: false,
+      isPersistent: false,
+    },
+  });
   const { endpoint } = await cdpBrowser();
   const viewer = await chromium.connectOverCDP(endpoint);
   browsers.push(viewer);
-  const rootContext = viewer.contexts()[0];
-  assert(rootContext !== undefined, 'CDP browser has no default context');
-  // The persistent profile already carries an agent's anonymous visit.
-  await setSiteCookie(rootContext, 'example.edu', 'session', 'profile-anonymous');
+  const homeContext = viewer.contexts()[0];
+  assert(homeContext !== undefined, 'CDP browser has no default context');
+  // The persistent profile already carries an earlier visit.
+  await setSiteCookie(homeContext, 'example.edu', 'session', 'profile-visit');
 
   let created = 0;
   const deps: RootBrowserDeps = {
-    createSession: async (contextId, agentId) => {
+    createSession: async (contextId, agentId, startUrl) => {
       created += 1;
       const row = await prisma.browserSession.create({
         data: {
@@ -469,6 +300,7 @@ async function rootBrowserOpensFromRootAndMergesWhatTheUserChanged(): Promise<vo
           debugUrl: 'https://live.example/root',
           provider: 'kernel',
           status: 'ACTIVE',
+          startUrl: startUrl ?? null,
           providerProfileSource: 'user_persistent',
         },
       });
@@ -495,41 +327,51 @@ async function rootBrowserOpensFromRootAndMergesWhatTheUserChanged(): Promise<vo
 
   const root = await openRootBrowser(userId, {}, deps);
   assert(root.live_view_url === 'https://live.example/root', JSON.stringify(root));
-  assert((await cookieValue(rootContext, 'example.com')) === 'root-com', 'Root state not injected');
+  assert(root.start_url === null, `opened at ${String(root.start_url)}`);
+  assert((await cookieValue(homeContext, 'example.com')) === 'root-com', 'template not injected');
+  assert(
+    (await cookieValue(homeContext, 'example.com', 'sid2')) === undefined,
+    'two accounts were injected into one jar'
+  );
   const again = await openRootBrowser(userId, {}, deps);
-  assert(again.task_id === root.task_id && created === 1, 'a live Root browser was not reused');
+  assert(again.task_id === root.task_id && created === 1, 'a live home browser was not reused');
   const session = await prisma.browserSession.findUniqueOrThrow({ where: { id: root.task_id } });
-  assert(session.agentId === rootBrowserAgentId(userId), 'Root session is not marked as Root');
+  assert(session.agentId === rootBrowserAgentId(userId), 'home session is not marked as home');
 
   const view = await api('/api/browser-world/root', userId);
   const viewRoot = view.body.root as { task_id: string; live_view_path: string } | null;
   assert(view.status === 200 && viewRoot?.task_id === root.task_id, JSON.stringify(view.body));
   assert(
     viewRoot.live_view_path === `/api/browser-session/task/${root.task_id}/live-view`,
-    'Root takeover path missing'
+    'home takeover path missing'
   );
 
-  // While Root is open an agent signs in to example.com; Root's tab never touches it.
+  // While it is open an agent signs in to example.com; the home tab never touches it.
   const task = await createAgentTask(userId);
   const agent = await freshBrowser();
   await fork(task, userId, agent.browser, 'https://example.com/');
   await setSiteCookie(agent.context, 'example.com', 'session', 'agent-com');
   await mergeSessionWorldState(task.sessionId, { browser: agent.browser });
-  // The user signs in to a new site in the Root browser.
-  await setSiteCookie(rootContext, 'example.org', 'session', 'user-org');
+  // The user signs in to a new site in the home browser.
+  await setSiteCookie(homeContext, 'example.org', 'session', 'user-org');
 
   const { world_state: closed } = await closeRootBrowser(userId, deps);
 
   assert(closed?.kind === 'root', JSON.stringify(closed));
   assert(outcomeOf(closed, 'example.org')?.outcome === 'merged', JSON.stringify(closed));
-  assert(outcomeOf(closed, 'example.com')?.outcome === 'unchanged', JSON.stringify(closed));
-  assert(outcomeOf(closed, 'example.edu')?.outcome === 'unchanged', JSON.stringify(closed));
+  // The home tab still holds the login the agent replaced: it is stale, not better.
+  assert(outcomeOf(closed, 'example.com')?.outcome === 'superseded', JSON.stringify(closed));
+  // Every credential percolates, including what the persistent profile held.
+  assert(outcomeOf(closed, 'example.edu')?.outcome === 'merged', JSON.stringify(closed));
   const org = await headOf(userId, 'example.org');
   assert(org?.revision === 1 && org.lastWriterKind === 'root', JSON.stringify(org));
-  assert((await rootCookieValue(userId, 'example.com')) === 'agent-com', 'Root clobbered agent');
-  assert((await headOf(userId, 'example.edu')) === null, 'profile cookies merged as a login');
+  assert((await templateCookieValue(userId, 'example.com')) === 'agent-com', 'home clobbered');
+  assert(
+    (await templateCookieValue(userId, 'example.com', 'chrome:Profile 2')) === 'other-account',
+    'the other account was touched'
+  );
   const afterClose = await api('/api/browser-world/root', userId);
-  assert(afterClose.body.root === null, 'closed Root browser still reported open');
+  assert(afterClose.body.root === null, 'closed home browser still reported open');
 }
 
 async function rootRoutesValidateBeforeTouchingAProvider(): Promise<void> {
@@ -538,14 +380,16 @@ async function rootRoutesValidateBeforeTouchingAProvider(): Promise<void> {
     api(path, userId, { method: 'POST', body: JSON.stringify(body) });
   const badUrl = await post('/api/browser-world/root/open', { start_url: 'not a url' });
   assert(badUrl.status === 400, `bad start_url returned ${badUrl.status}`);
+  const badAgent = await post('/api/browser-world/root/open', { agent_id: 'not-a-uuid' });
+  assert(badAgent.status === 400, `bad agent_id returned ${badAgent.status}`);
   const unknownField = await post('/api/browser-world/root/open', { profile: 'other-user' });
   assert(unknownField.status === 400, `unknown field returned ${unknownField.status}`);
   const notOpen = await post('/api/browser-world/root/close', {});
-  assert(notOpen.status === 404, `closing an unopened Root returned ${notOpen.status}`);
+  assert(notOpen.status === 404, `closing an unopened home browser returned ${notOpen.status}`);
   const none = await api('/api/browser-world/root', userId);
   assert(none.status === 200 && none.body.root === null, JSON.stringify(none.body));
-  const badAgent = await api('/api/browser-world/agents/not-a-uuid', userId);
-  assert(badAgent.status === 400, `bad agent id returned ${badAgent.status}`);
+  const badAgentView = await api('/api/browser-world/agents/not-a-uuid', userId);
+  assert(badAgentView.status === 400, `bad agent id returned ${badAgentView.status}`);
   const badSite = await api('/api/browser-world/sites/bad%20site', userId, { method: 'DELETE' });
   assert(badSite.status === 400, `bad site returned ${badSite.status}`);
   const anonymousOpen = await fetch(`${BASE_URL}/api/browser-world/root/open`, { method: 'POST' });
@@ -558,17 +402,17 @@ async function main(): Promise<void> {
     ['fork is scoped to the prepared site', forkIsScopedToThePreparedSite],
     ['a new login merges and seeds the next fork', newLoginMergesAndSeedsTheNextFork],
     [
-      'unchanged, anonymous and signed-out sites do not merge',
-      unchangedAnonymousAndSignedOutSitesDoNotMerge,
+      'unchanged and logged-out sites keep the template',
+      unchangedAndLoggedOutSitesKeepTheTemplate,
     ],
-    ['a stale agent cannot overwrite a newer Root login', staleAgentCannotOverwriteNewerRootLogin],
     ['every read and write is owner scoped', everyReadAndWriteIsOwnerScoped],
     ['a retried merge is idempotent', retriedMergeIsIdempotent],
-    ['Root routes validate before touching a provider', rootRoutesValidateBeforeTouchingAProvider],
+    ['home routes validate before touching a provider', rootRoutesValidateBeforeTouchingAProvider],
     [
-      'Root browser opens from Root and merges what the user changed',
-      rootBrowserOpensFromRootAndMergesWhatTheUserChanged,
+      'the home browser opens from the template and merges on close',
+      homeBrowserOpensFromTheTemplateAndMergesOnClose,
     ],
+    ...keepBestCases,
   ];
   let failed = 0;
   try {

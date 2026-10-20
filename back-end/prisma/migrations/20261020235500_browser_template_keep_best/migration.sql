@@ -8,7 +8,8 @@
 DROP INDEX "BrowserSiteState_userId_site_key";
 
 -- AlterTable
-ALTER TABLE "BrowserSiteFork" ADD COLUMN     "account" TEXT NOT NULL DEFAULT '';
+ALTER TABLE "BrowserSiteFork" ADD COLUMN     "account" TEXT NOT NULL DEFAULT '',
+ADD COLUMN     "baseObservedAt" TIMESTAMP(3);
 
 -- AlterTable
 ALTER TABLE "BrowserSiteState" ADD COLUMN     "account" TEXT NOT NULL DEFAULT '',

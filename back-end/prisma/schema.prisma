@@ -1574,6 +1574,9 @@ model BrowserSiteFork {
   baseRevision     Int
   baseFingerprint  String
   baseAuthKeys     String[]       @default([])
+  // Age of the injected login the task started from (its freshest cookie);
+  // null when nothing was injected for the site.
+  baseObservedAt   DateTime?
   mergedRevision   Int?
   lastOutcome      String?
   forkedAt         DateTime       @default(now())
