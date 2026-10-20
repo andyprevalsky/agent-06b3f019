@@ -23,7 +23,8 @@ export const INLINE_VIEW_DEFAULT_HEIGHT = 240;
 export const INLINE_VIEW_LIVE_CAP = 4;
 /** How far outside the viewport an inline view may be and still go live. */
 export const INLINE_VIEW_ROOT_MARGIN = '400px 0px';
-export const DEFAULT_BACKGROUND_FADE = 0.2;
+/** Backdrop opacity after the first user message when the theme sets none (ledger row 34). */
+export const DEFAULT_BACKGROUND_FADE = 0.8;
 export const BACKGROUND_FADE_TRANSITION_MS = 600;
 export const LIVE_RELOAD_POLL_MS = 5_000;
 export const SAFE_MODE_STORAGE_KEY = 'rose_safe_mode';

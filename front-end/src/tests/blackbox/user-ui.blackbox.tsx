@@ -202,7 +202,19 @@ describe('background backdrop', () => {
     expect(backdrop.style.opacity).toBe('0.2');
   });
 
-  it('defaults the fade to 0.2 and leaves the stock backdrop untouched without a background', async () => {
+  it('defaults the fade to 0.8 (80%) when the theme sets no fadeAfterFirstMessage', async () => {
+    serveActive(FULL_MANIFEST, { background: { image: 'root/assets/wallpaper.jpg' } });
+    const { rerender } = render(<BackdropHarness hasUserMessage={false} />);
+    await screen.findByTestId('user-ui-background-image');
+    const backdrop = screen.getByTestId('app-background-layer');
+    expect(backdrop.style.opacity).toBe('1');
+
+    rerender(<BackdropHarness hasUserMessage />);
+    expect(backdrop).toHaveAttribute('data-backdrop-state', 'faded');
+    expect(backdrop.style.opacity).toBe('0.8');
+  });
+
+  it('leaves the stock backdrop untouched without a background', async () => {
     serveActive({ version: 1 });
     render(<BackdropHarness hasUserMessage />);
     await new Promise((resolve) => setTimeout(resolve, 20));
