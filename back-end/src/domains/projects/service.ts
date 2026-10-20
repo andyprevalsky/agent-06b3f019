@@ -162,9 +162,7 @@ function settingsData(body: UpdateProjectBody) {
       : {}),
     ...(body.startupTimeoutS !== undefined ? { startupTimeoutS: body.startupTimeoutS } : {}),
     ...(body.lifecycle?.autoWake !== undefined ? { autoWake: body.lifecycle.autoWake } : {}),
-    ...(body.sandboxSize !== undefined
-      ? { sandboxSize: sandboxSizeColumn(body.sandboxSize) }
-      : {}),
+    ...(body.sandboxSize !== undefined ? { sandboxSize: sandboxSizeColumn(body.sandboxSize) } : {}),
   };
 }
 

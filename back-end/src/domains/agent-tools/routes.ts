@@ -14,7 +14,7 @@ import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { displayMedia } from './displayService';
 import { readEnvironment, requestEnvironmentSize } from './environmentService';
-import { sandboxResizeHttpError } from '../../providers/codeSessions/sandboxSize';
+import { sandboxResizeHttpError } from '../../providers/codeSessions/sandboxResize';
 import { sendMessageToUser } from './messageService';
 import { answerQuestion } from './questionService';
 import { createApproval, waitForRequest } from './requestService';

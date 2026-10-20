@@ -18,12 +18,6 @@ import {
 import { markAnthropicApiKeyOnCooldown } from '../../providers/computeCredentials';
 import { syncConnectionAfterIntegrationAuthFailure } from '../../providers/integrationConnectionSync';
 import { createWithCodeSession } from '../../providers/codeSessions/spawn';
-import {
-  closeTaskForResize,
-  performSandboxResize,
-  stopSandboxCli,
-  type PerformResizeResult,
-} from '../../providers/codeSessions/sandboxSize';
 
 export type { HealthCheckResult } from './health';
 export { checkSandboxHealth } from './health';
@@ -210,31 +204,6 @@ export async function createSession(params: CreateSessionParams): Promise<Create
     project: session.projectRestore ?? null,
     preview_url: session.previewUrl ?? null,
   };
-}
-
-// ---------------------------------------------------------------------------
-// Resize (C16): continue the session in a sandbox of another size
-// ---------------------------------------------------------------------------
-
-export async function resizeSession(
-  taskId: string,
-  requestId: string
-): Promise<PerformResizeResult<CreateSessionResult>> {
-  return performSandboxResize({
-    taskId,
-    requestId,
-    stopCli: stopSandboxCli,
-    closeTask: closeTaskForResize,
-    create: (input) =>
-      createSession({
-        agent_id: input.agentId,
-        goal: input.goal,
-        user_id: input.userId,
-        code_session_id: input.codeSessionId,
-        lease_owner: input.leaseOwner,
-        ...(input.projectId !== null ? { project_id: input.projectId } : {}),
-      }),
-  });
 }
 
 // ---------------------------------------------------------------------------

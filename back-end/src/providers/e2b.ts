@@ -39,7 +39,6 @@ import {
   releaseSandboxAfterFailedStart,
 } from './e2bCodeSessionSandbox';
 import { type CodeSessionRow } from './codeSessions/store';
-import { resolveSpawnSandbox } from './codeSessions/sandboxSize';
 import type { ProjectWorkspace } from './projects/types';
 import { restoreSandboxProject } from './projects/workspace';
 import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
@@ -368,17 +367,12 @@ async function createClaudeCodeSessionUnlocked(
   // Create sandbox first (before DB record) to avoid placeholder conflicts.
   // When E2B team billing blocks creates, fall back to a same-host local
   // Claude Code ws-server so code-agent benches can still make progress.
-  // C16: the session's size picks the template (the project default for a new session).
-  const sized = await resolveSpawnSandbox(
-    codeSession,
-    'claude',
-    projectWorkspace?.project.sandboxSize ?? null
-  );
-  const templateIdForCreate = sized.templateId ?? process.env.E2B_CLAUDE_CODE_TEMPLATE_ID;
+  const templateIdForCreate = process.env.E2B_CLAUDE_CODE_TEMPLATE_ID;
   let acquired;
   try {
     acquired = await acquireCodeSandbox(codeSession, templateIdForCreate, envs, 'Claude Code', {
-      size: sized.size,
+      provider: 'claude',
+      projectSize: projectWorkspace?.project.sandboxSize,
       agentId,
     });
   } catch (err) {
@@ -465,7 +459,7 @@ async function createClaudeCodeSessionUnlocked(
       projectId: projectWorkspace?.project.id ?? null,
     },
   });
-  await recordE2bCodeSessionSandbox(codeSession, sandbox.sandboxId, sized.size);
+  await recordE2bCodeSessionSandbox(codeSession, sandbox.sandboxId);
 
   log.info(`Session ready: ${taskId}, WS: ${wsUrl}`);
 
@@ -478,7 +472,7 @@ async function createClaudeCodeSessionUnlocked(
     cliSessionId,
     projectRestore: project.report,
     previewUrl,
-    sandboxSize: sized.size,
+    sandboxSize: acquired.size,
   };
 }
 
@@ -635,15 +629,11 @@ export async function createCodexCodeSession(
   const userUiWorkspace = await prepareCodeSessionWorkspace(userId, agentId, taskId, 'codex');
   applyUserUiSandboxEnvs(envs, userUiWorkspace);
 
-  // C16: the session's size picks the template.
-  const sized = await resolveSpawnSandbox(codeSession, 'codex', null);
-  const { sandbox, resumedFrom, cliSessionId } = await acquireCodeSandbox(
-    codeSession,
-    sized.templateId ?? templateId,
-    envs,
-    'Codex Code',
-    { size: sized.size, agentId }
-  );
+  const acquired = await acquireCodeSandbox(codeSession, templateId, envs, 'Codex Code', {
+    provider: 'codex',
+    agentId,
+  });
+  const { sandbox, resumedFrom, cliSessionId } = acquired;
   if (cliSessionId !== null) envs.CODEX_RESUME_SESSION_ID = cliSessionId;
 
   log.info(`Using Codex sandbox: ${sandbox.sandboxId} (${resumedFrom})`);
@@ -700,7 +690,7 @@ export async function createCodexCodeSession(
       ...codeSessionTaskFields(codeSession, 'codex'),
     },
   });
-  await recordE2bCodeSessionSandbox(codeSession, sandbox.sandboxId, sized.size);
+  await recordE2bCodeSessionSandbox(codeSession, sandbox.sandboxId);
 
   log.info(`Codex session ready: ${taskId}, WS: ${wsUrl}`);
 
@@ -712,6 +702,6 @@ export async function createCodexCodeSession(
     resumedFrom,
     cliSessionId,
     previewUrl,
-    sandboxSize: sized.size,
+    sandboxSize: acquired.size,
   };
 }

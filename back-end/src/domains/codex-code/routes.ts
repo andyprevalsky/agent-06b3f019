@@ -9,8 +9,9 @@ import {
   codeTaskResizeSchema,
   codeTaskUsageLimitSchema,
 } from './types';
-import { sandboxResizeHttpError } from '../../providers/codeSessions/sandboxSize';
+import { sandboxResizeHttpError } from '../../providers/codeSessions/sandboxResize';
 import * as service from './service';
+import { resizeSession } from './resizeService';
 import { codeSessionHttpError, keepAliveCodeTask } from '../../providers/codeSessions/spawn';
 import { markCodeTaskUsageLimited, parseResetsAt } from '../../providers/codeSessions/usageLimit';
 import { GitHubAccessDeniedError, MissingUserIdError } from './service';
@@ -89,7 +90,7 @@ router.post(
       return;
     }
     try {
-      const result = await service.resizeSession(req.params.taskId, parsed.data.request_id);
+      const result = await resizeSession(req.params.taskId, parsed.data.request_id);
       res.json({ ...result.session, resized: result.resized, request: result.request });
     } catch (error) {
       const mapped = sandboxResizeHttpError(error) ?? codeSessionHttpError(error);

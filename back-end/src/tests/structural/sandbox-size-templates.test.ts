@@ -33,7 +33,9 @@ interface PlanEntry {
   dockerfile: string;
 }
 
-const config = JSON.parse(readFileSync(path.join(templatesDir, 'sized-templates.json'), 'utf8')) as {
+const config = JSON.parse(
+  readFileSync(path.join(templatesDir, 'sized-templates.json'), 'utf8')
+) as {
   grid: { cpu: number[]; memoryGb: number[] };
   maxGridPoints: number;
   providers: Record<string, { source: string; dockerfile: string }>;
@@ -88,7 +90,11 @@ check('no per-size template copies are committed', () => {
     const tomls = files.filter((file) => /^e2b.*\.toml$/.test(file));
     const dockerfiles = files.filter((file) => /Dockerfile/.test(file));
     assert.deepStrictEqual(tomls, ['e2b.toml'], `${spec.source}: ${tomls.join(', ')}`);
-    assert.deepStrictEqual(dockerfiles, [spec.dockerfile], `${spec.source}: ${dockerfiles.join(', ')}`);
+    assert.deepStrictEqual(
+      dockerfiles,
+      [spec.dockerfile],
+      `${spec.source}: ${dockerfiles.join(', ')}`
+    );
   }
 });
 

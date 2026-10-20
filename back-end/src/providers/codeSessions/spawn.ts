@@ -21,7 +21,8 @@ import {
 } from './store';
 import { CODE_SANDBOX_IDLE_TIMEOUT_MS } from '../e2bCodeSessionSandbox';
 import { switchCodeSessionProvider } from './usageLimit';
-import { pendingResizeForTask, sizeView, type SandboxSize, type SizeView } from './sandboxSize';
+import { pendingResizeForTask, sizeView, type SizeView } from './sandboxResize';
+import type { SandboxSize } from './sandboxSize';
 
 const log = createLogger('CodeSessionSpawn');
 

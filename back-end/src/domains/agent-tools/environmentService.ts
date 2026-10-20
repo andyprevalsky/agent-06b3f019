@@ -12,7 +12,7 @@ import {
   requestSandboxResize,
   SandboxResizeError,
   type ResizeRequestResult,
-} from '../../providers/codeSessions/sandboxSize';
+} from '../../providers/codeSessions/sandboxResize';
 import type { AgentToolsCaller } from './types';
 
 function codeAgentTask(caller: AgentToolsCaller): { userId: string; taskId: string | null } {

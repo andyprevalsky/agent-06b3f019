@@ -20,7 +20,13 @@ import {
   restoreLatestCheckpoint,
   type ResumedFrom,
 } from './codeSessions/lifecycle';
-import { heldSandboxSize, sameSize, type SandboxSize } from './codeSessions/sandboxSize';
+import {
+  heldSandboxSize,
+  resolveSpawnSandbox,
+  sameSize,
+  type SandboxProvider,
+  type SandboxSize,
+} from './codeSessions/sandboxSize';
 import { e2bSandboxFs } from './codeSessions/sandboxFs';
 import { createSandboxWithRetry } from './e2bSandboxCreate';
 import {
@@ -101,6 +107,7 @@ export async function acquireCodeSessionSandbox(
     const restored = await restoreLatestCheckpoint(session, e2bSandboxFs(sandbox));
     if (restored !== null) {
       if (replaced !== null) await retireReplacedSandbox(session, sandbox, replaced, sizing);
+      else await recordNewSandbox(session, sandbox, sizing);
       return { sandbox, resumedFrom: 'checkpoint', cliSessionId: restored.cliSessionId };
     }
   }
@@ -109,7 +116,22 @@ export async function acquireCodeSessionSandbox(
     await replaced.pause().catch(() => undefined);
     throw new Error('The saved session could not be restored into the new sandbox size');
   }
+  if (session !== null) await recordNewSandbox(session, sandbox, sizing);
   return { sandbox, resumedFrom: 'new', cliSessionId: null };
+}
+
+/** The row names the sandbox the session holds, with its size, as soon as it exists (C16). */
+async function recordNewSandbox(
+  session: CodeSessionRow,
+  sandbox: Sandbox,
+  sizing: SpawnSizing
+): Promise<void> {
+  if (sizing.size === undefined) return;
+  await recordSandbox(session.id, {
+    sandboxKind: 'e2b',
+    sandboxId: sandbox.sandboxId,
+    size: sizing.size,
+  });
 }
 
 /** Checkpoint the held sandbox before moving to another size; the row now names that checkpoint. */
@@ -165,21 +187,32 @@ async function retireReplacedSandbox(
 
 /**
  * Acquire the sandbox for a spawn: resume the session's paused sandbox, else
- * create one from `templateId` (restoring the latest checkpoint). The
- * timeout is the idle window every keepalive extends, not a runtime cap.
+ * create one (restoring the latest checkpoint). With a `provider`, the
+ * session's size (C16: an active resize, the held size, or a new session's
+ * project default) picks the template; `templateId` is the unsized fallback.
+ * The timeout is the idle window every keepalive extends, not a runtime cap.
  */
 export async function acquireCodeSandbox(
   codeSession: CodeSessionRow | null,
   templateId: string,
   envs: Record<string, string>,
   label: string,
-  sizing: SpawnSizing = {}
-): Promise<{ sandbox: Sandbox; resumedFrom: ResumedFrom; cliSessionId: string | null }> {
-  return acquireCodeSessionSandbox(
+  sizing: { provider?: SandboxProvider; projectSize?: unknown; agentId?: string } = {}
+): Promise<{
+  sandbox: Sandbox;
+  resumedFrom: ResumedFrom;
+  cliSessionId: string | null;
+  size?: SandboxSize;
+}> {
+  const sized =
+    sizing.provider !== undefined
+      ? await resolveSpawnSandbox(codeSession, sizing.provider, sizing.projectSize ?? null)
+      : null;
+  const acquired = await acquireCodeSessionSandbox(
     codeSession,
     () =>
       createSandboxWithRetry(
-        templateId,
+        sized?.templateId ?? templateId,
         {
           apiKey: process.env.E2B_API_KEY,
           timeoutMs: SANDBOX_TIMEOUT_MS,
@@ -188,8 +221,9 @@ export async function acquireCodeSandbox(
         },
         label
       ),
-    sizing
+    { ...(sized !== null ? { size: sized.size } : {}), agentId: sizing.agentId }
   );
+  return { ...acquired, ...(sized !== null ? { size: sized.size } : {}) };
 }
 
 /** A resumed sandbox still runs the previous (lingering) ws-server on WS_PORT. */
@@ -214,19 +248,12 @@ export function codeSessionTaskFields(
   return { codeSessionId: codeSession?.id ?? null, codeProvider };
 }
 
-/** Remember which E2B sandbox (and size, C16) now holds the session (resume connects to it). */
+/** Remember which E2B sandbox now holds the session (resume connects to it). */
 export async function recordE2bCodeSessionSandbox(
   codeSession: CodeSessionRow | null,
-  sandboxId: string,
-  size?: SandboxSize
+  sandboxId: string
 ): Promise<void> {
-  if (codeSession !== null) {
-    await recordSandbox(codeSession.id, {
-      sandboxKind: 'e2b',
-      sandboxId,
-      ...(size !== undefined ? { size } : {}),
-    });
-  }
+  if (codeSession !== null) await recordSandbox(codeSession.id, { sandboxKind: 'e2b', sandboxId });
 }
 
 /** A persistent session's sandbox is paused (never killed) on a failed start. */

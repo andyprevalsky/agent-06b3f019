@@ -14,11 +14,6 @@ import {
 
 import { classifyComputeGrantFailure } from '../../providers/computeGrantFailure';
 import { createWithCodeSession } from '../../providers/codeSessions/spawn';
-import {
-  closeTaskForResize,
-  performSandboxResize,
-  stopSandboxCli,
-} from '../../providers/codeSessions/sandboxSize';
 
 export type { HealthCheckResult } from './health';
 export { checkSandboxHealth } from './health';
@@ -142,24 +137,6 @@ export async function createSession(params: CreateSessionParams) {
     // Live dev-server preview URL (Rose dev accounts, A1); null otherwise.
     preview_url: session.previewUrl ?? null,
   };
-}
-
-/** C16: continue the session in a sandbox of another size (see providers/codeSessions/sandboxSize). */
-export async function resizeSession(taskId: string, requestId: string) {
-  return performSandboxResize({
-    taskId,
-    requestId,
-    stopCli: stopSandboxCli,
-    closeTask: closeTaskForResize,
-    create: (input) =>
-      createSession({
-        agent_id: input.agentId,
-        goal: input.goal,
-        user_id: input.userId,
-        code_session_id: input.codeSessionId,
-        lease_owner: input.leaseOwner,
-      }),
-  });
 }
 
 export async function closeSession(params: CloseSessionParams) {

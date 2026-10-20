@@ -29,16 +29,21 @@ import { mintAgentToolsToken } from '../../providers/agentTools/token';
 import { ENV_SIZE_SKILL_PATH, withAgentTools } from '../../providers/agentTools/workspace';
 import {
   closeTaskForResize,
-  DEFAULT_SANDBOX_GRID,
   performSandboxResize,
   requestSandboxResize,
-  resolveSpawnSandbox,
-  sandboxGrid,
   SandboxResizeError,
   stopSandboxCli,
+} from '../../providers/codeSessions/sandboxResize';
+import {
+  DEFAULT_SANDBOX_GRID,
+  resolveSpawnSandbox,
+  sandboxGrid,
 } from '../../providers/codeSessions/sandboxSize';
 import { keepAliveCodeTask } from '../../providers/codeSessions/spawn';
-import { acquireCodeSandbox, recordE2bCodeSessionSandbox } from '../../providers/e2bCodeSessionSandbox';
+import {
+  acquireCodeSandbox,
+  recordE2bCodeSessionSandbox,
+} from '../../providers/e2bCodeSessionSandbox';
 import { writeUserUiWorkspaceToSandbox } from '../../providers/userUi/workspace';
 
 config();
@@ -307,19 +312,25 @@ test('resize round trip: new sandbox from the size template keeps branch, files 
     assert.deepEqual(requested.body.to, { cpu: 2, memory_gb: 16 }, 'cpu unchanged, memory raised');
     const requestId = requested.body.request_id;
     const alive = await keepAliveCodeTask(task.id, async () => undefined);
-    assert.equal(alive.resize_requested?.request_id, requestId, 'keepalive hands it to the activity');
+    assert.equal(
+      alive.resize_requested?.request_id,
+      requestId,
+      'keepalive hands it to the activity'
+    );
 
     const goals: string[] = [];
     const create = async (input: { goal: string; codeSessionId: string; agentId: string }) => {
       goals.push(input.goal);
-      const row = await prisma.codeSession.findUniqueOrThrow({ where: { id: input.codeSessionId } });
-      const sized = await resolveSpawnSandbox(row, 'claude', null);
-      const acquired = await acquireCodeSandbox(row, sized.templateId ?? '', {}, 'test', {
-        size: sized.size,
+      const row = await prisma.codeSession.findUniqueOrThrow({
+        where: { id: input.codeSessionId },
+      });
+      // The same acquire e2b.ts runs: the session's size picks the template.
+      const acquired = await acquireCodeSandbox(row, 'unsized-fallback', {}, 'test', {
+        provider: 'claude',
         agentId: input.agentId,
       });
       clock.acquired = performance.now();
-      await recordE2bCodeSessionSandbox(row, acquired.sandbox.sandboxId, sized.size);
+      await recordE2bCodeSessionSandbox(row, acquired.sandbox.sandboxId);
       const created = await prisma.claudeCodeSession.create({
         data: {
           agentId,
@@ -369,10 +380,15 @@ test('resize round trip: new sandbox from the size template keeps branch, files 
     const workspace = join(homeB, 'workspace');
     assert.equal(git(workspace, 'rev-parse', '--abbrev-ref', 'HEAD'), 'rose/feature-1');
     assert.equal(git(workspace, 'log', '-1', '--format=%s'), 'local commit');
-    assert.equal(readFileSync(join(workspace, 'README.md'), 'utf8'), 'line one\nuncommitted edit\n');
+    assert.equal(
+      readFileSync(join(workspace, 'README.md'), 'utf8'),
+      'line one\nuncommitted edit\n'
+    );
     assert.equal(readFileSync(join(workspace, 'untracked.txt'), 'utf8'), 'untracked file\n');
     assert.ok(
-      existsSync(join(homeB, '.claude', 'projects', '-home-user-workspace', `${cliSessionId}.jsonl`))
+      existsSync(
+        join(homeB, '.claude', 'projects', '-home-user-workspace', `${cliSessionId}.jsonl`)
+      )
     );
 
     const row = await prisma.codeSession.findUniqueOrThrow({ where: { id: session.id } });
@@ -511,9 +527,16 @@ test('HTTP: no reason 400, local target not applicable, status lists the top con
   assert.equal(json.top_memory.length, 5);
   assert.equal(json.top_cpu.length, 5);
   const rss = json.top_memory.map((row) => row.rss_mb);
-  assert.deepEqual(rss, [...rss].sort((a, b) => b - a), 'sorted by memory');
+  assert.deepEqual(
+    rss,
+    [...rss].sort((a, b) => b - a),
+    'sorted by memory'
+  );
   assert.ok(json.top_memory.every((row) => row.pid > 0 && row.command.length > 0));
-  const text = execFileSync(process.execPath, [roseCli, 'env', 'status'], { env, encoding: 'utf8' });
+  const text = execFileSync(process.execPath, [roseCli, 'env', 'status'], {
+    env,
+    encoding: 'utf8',
+  });
   assert.match(text, /Environment: 2 vCPU, 4 GB RAM/);
   assert.match(text, /Top 5 processes by memory \(RSS\):/);
   assert.match(text, /Top 5 processes by CPU/);
@@ -569,7 +592,11 @@ test('the change-environment-size skill is installed in the session HOME', async
   assert.ok(workspace);
   const home = join(fixtureDir, 'home-skill');
   mkdirSync(home, { recursive: true });
-  await writeUserUiWorkspaceToSandbox(fakeSandbox(home, 'sb-skill').sandbox, '/home/user', workspace);
+  await writeUserUiWorkspaceToSandbox(
+    fakeSandbox(home, 'sb-skill').sandbox,
+    '/home/user',
+    workspace
+  );
   const skill = readFileSync(join(home, ENV_SIZE_SKILL_PATH), 'utf8');
   assert.match(skill, /^---\nname: change-environment-size\ndescription: Use .+\n---\n/);
   assert.match(skill, /rose env status/);

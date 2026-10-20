@@ -549,7 +549,8 @@ function formatEnvironment(status) {
 function sizeNumber(value, name) {
   if (value === undefined || value === null || value === '') return undefined;
   const number = Number(value);
-  if (!Number.isInteger(number) || number < 1) throw new ToolError(`${name} must be a whole number`);
+  if (!Number.isInteger(number) || number < 1)
+    throw new ToolError(`${name} must be a whole number`);
   return number;
 }
 

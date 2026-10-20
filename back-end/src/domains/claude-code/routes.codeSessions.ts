@@ -38,8 +38,8 @@ import {
   codeTaskUsageLimitSchema,
   credentialAvailabilityQuerySchema,
 } from './types';
-import { resizeSession } from './service';
-import { sandboxResizeHttpError } from '../../providers/codeSessions/sandboxSize';
+import { resizeSession } from './resizeService';
+import { sandboxResizeHttpError } from '../../providers/codeSessions/sandboxResize';
 import {
   codeCredentialAvailability,
   markCodeTaskUsageLimited,
