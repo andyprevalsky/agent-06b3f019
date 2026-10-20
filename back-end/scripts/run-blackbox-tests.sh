@@ -159,6 +159,7 @@ DB_CONTAINER="victoria-db-${WORKSPACE_HINT}"
 DB_FOUND=false
 STACK_DB_EXPECTED=false
 SELECTED_DB_URL=""
+ENSURE_SYSTEM_DB_NAME=""
 ISOLATED_DB_RESOLVED=false
 
 # Managed callers (for example, run-coverage.sh) may know the exact isolated
@@ -261,9 +262,17 @@ if ! $STACK_DB_EXPECTED && ! $DB_FOUND; then
   SYSTEM_PG_CANDIDATES+=(5432)
   for SYSTEM_PG_PORT in "${SYSTEM_PG_CANDIDATES[@]}"; do
     if pg_isready -h localhost -p "$SYSTEM_PG_PORT" -U postgres -q 2>/dev/null; then
+      # Never the shared `victoria`: this workspace's own database only.
+      if ! SYSTEM_DB_NAME="$(workspace_system_db_name "$WORKSPACE_HINT")"; then
+        echo "❌ Workspace name '$WORKSPACE_HINT' cannot name a test database (letters, digits, - and _ only)." >&2
+        exit 1
+      fi
+      # Created after the Prisma freshness check: stale deps touch no DB.
+      ENSURE_SYSTEM_DB_NAME="$SYSTEM_DB_NAME"
       LOCAL_DB_PORT="$SYSTEM_PG_PORT"
+      SELECTED_DB_URL="postgresql://postgres:postgres@localhost:$SYSTEM_PG_PORT/$SYSTEM_DB_NAME"
       DB_FOUND=true
-      echo "Using local Postgres (system) at localhost:$SYSTEM_PG_PORT"
+      echo "Using local Postgres (system) at localhost:$SYSTEM_PG_PORT, database $SYSTEM_DB_NAME"
       break
     fi
   done
@@ -289,6 +298,11 @@ if $DB_FOUND; then
     echo "Skipping local DB schema sync; existing backend caller prepared the test database."
   else
     node "$SCRIPT_DIR/assert-prisma-client-current.mjs"
+    if [[ -n "${ENSURE_SYSTEM_DB_NAME:-}" ]] &&
+      ! ensure_workspace_system_db "$LOCAL_DB_PORT" "$ENSURE_SYSTEM_DB_NAME"; then
+      echo "❌ Could not create the test database $ENSURE_SYSTEM_DB_NAME on localhost:$LOCAL_DB_PORT." >&2
+      exit 1
+    fi
     if command -v psql >/dev/null 2>&1; then
       psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
 DO $$

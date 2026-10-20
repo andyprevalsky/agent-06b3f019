@@ -61,3 +61,26 @@ system_db_fallback_is_safe() {
   running=$(printf '%s\n' "$running" | grep -vE '^victoria-db-seed(mem|src)-[0-9]+$' || true)
   [[ -z "$running" ]]
 }
+
+# Shared system Postgres hosts every workspace's test database and the dev
+# stack's `victoria`. A test runner must never select `victoria` itself: its
+# schema sync is `prisma db push --accept-data-loss`, so a worktree on an older
+# schema drops other branches' tables. Each workspace gets victoria_<hint>.
+workspace_system_db_name() {
+  local hint="${1:-}"
+  [[ "$hint" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,53}$ ]] || return 1
+  printf 'victoria_%s\n' "$hint"
+}
+
+# Create the workspace database on system Postgres when it is missing.
+# Idempotent and race-safe: a concurrent creator winning is success.
+ensure_workspace_system_db() {
+  local port="$1" name="$2"
+  local admin="postgresql://postgres:postgres@localhost:$port/postgres"
+  local exists="SELECT 1 FROM pg_database WHERE datname = '$name'"
+  [[ "$name" =~ ^victoria_[A-Za-z0-9][A-Za-z0-9_-]{0,53}$ ]] || return 1
+  [[ "$(psql "$admin" -Atc "$exists" </dev/null 2>/dev/null)" == "1" ]] && return 0
+  psql "$admin" -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"$name\"" </dev/null >/dev/null 2>&1 ||
+    [[ "$(psql "$admin" -Atc "$exists" </dev/null 2>/dev/null)" == "1" ]]
+}
+
