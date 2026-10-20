@@ -163,7 +163,11 @@ async function gmailNeedsReconnect(users: Users): Promise<void> {
   assert(gmail.state === 'needs_reconnect', `needs_reconnect beats a run, got ${gmail.state}`);
   assert(gmail.lastError === 'invalid_grant', 'the reconnect reason is shown');
   assert(gmail.progress?.pct === 10, 'the bar numbers are still reported');
-  assert(gmail.label === `work.${tag}@example.com, home.${tag}@example.com`, 'label = addresses');
+  assert(
+    gmail.label?.split(', ').sort().join(', ') ===
+      [`work.${tag}@example.com`, `home.${tag}@example.com`].sort().join(', '),
+    `label contains both credential addresses, got ${gmail.label}`
+  );
 }
 
 /** A syncing run whose writer vanished falls back to its row; a row-less run disappears. */

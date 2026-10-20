@@ -649,6 +649,7 @@ export async function runGmailSyncJob(): Promise<void> {
       runId,
       state: allSucceeded ? 'synced' : 'failed',
       done: saved,
+      total,
       error: allSucceeded ? null : lastError,
     });
 

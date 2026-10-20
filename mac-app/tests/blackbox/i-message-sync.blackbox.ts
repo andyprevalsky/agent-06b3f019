@@ -77,6 +77,9 @@ const uploadResponder: MockResponder = () =>
 
 const uploadCalls = () => fetchCaptures.filter((c) => c.url.includes(UPLOAD_PATH));
 
+const PROGRESS_PATH = '/api/integrations/imessage/accounts/default/progress';
+const progressCalls = () => fetchCaptures.filter((c) => c.url.includes(PROGRESS_PATH));
+
 function makeMessage(overrides: Partial<IMessageData> = {}): IMessageData {
   return {
     id: 1,
@@ -349,7 +352,7 @@ describe('i-message-sync blackbox', () => {
     expect(IMessageReader.getMaxRowId).not.toHaveBeenCalled();
   });
 
-  it('no extraneous outbound calls: sync issues exactly one upload fetch', async () => {
+  it('no extraneous outbound calls: one upload, bracketed by its two progress writes', async () => {
     const { IMessageReader } = await import('../../main/services/iMessageReader');
     const { IMessageSync } = await import('../../main/services/iMessageSync');
     vi.mocked(IMessageReader.readMessages).mockResolvedValue([makeMessage()]);
@@ -357,8 +360,52 @@ describe('i-message-sync blackbox', () => {
     await IMessageSync.sync();
 
     // IntegrationCache is mocked, so no `/api/integrations` fetch occurs in this
-    // isolated run — the upload should be the only outbound call.
+    // isolated run — the upload and its sync-progress writes are the only calls.
     expect(uploadCalls()).toHaveLength(1);
-    expect(fetchCaptures).toHaveLength(1);
+    expect(fetchCaptures.map((c) => new URL(c.url).pathname)).toEqual([
+      PROGRESS_PATH,
+      UPLOAD_PATH,
+      PROGRESS_PATH,
+    ]);
+  });
+
+  it('sync progress: syncing at 0 of the messages read, then synced, on the imessage row', async () => {
+    const { IMessageReader } = await import('../../main/services/iMessageReader');
+    const { IMessageSync } = await import('../../main/services/iMessageSync');
+    vi.mocked(IMessageReader.readMessages).mockResolvedValue([
+      makeMessage({ id: 1 }),
+      makeMessage({ id: 2, contact_id: 'bob@example.com' }),
+      makeMessage({ id: 3 }),
+    ]);
+
+    await IMessageSync.sync();
+
+    const writes = progressCalls();
+    expect(writes).toHaveLength(2);
+    expect(writes[0].url).toBe(`https://backend.test${PROGRESS_PATH}`);
+    expect(writes[0].method).toBe('POST');
+    expect(writes[0].headers['authorization']).toBe('Bearer test-access-token');
+    const [opened, closed] = writes.map((w) => JSON.parse(w.body ?? '{}'));
+    expect(opened).toMatchObject({ seq: 1, state: 'syncing', unit: 'messages', done: 0, total: 3 });
+    expect(closed).toMatchObject({ seq: 2, state: 'synced', done: 3 });
+    expect(typeof opened.runId).toBe('string');
+    expect(closed.runId).toBe(opened.runId);
+  });
+
+  it('sync progress: a failed upload ends the run failed with its error', async () => {
+    if (restoreFetch) restoreFetch();
+    restoreFetch = installFetchCapture({
+      [UPLOAD_PATH]: () => new Response('boom', { status: 500 }),
+    });
+    const { IMessageReader } = await import('../../main/services/iMessageReader');
+    const { IMessageSync } = await import('../../main/services/iMessageSync');
+    vi.mocked(IMessageReader.readMessages).mockResolvedValue([makeMessage()]);
+
+    await expect(IMessageSync.sync()).resolves.toBeUndefined();
+
+    const bodies = progressCalls().map((w) => JSON.parse(w.body ?? '{}'));
+    expect(bodies.map((b) => b.state)).toEqual(['syncing', 'failed']);
+    expect(typeof bodies[1].error).toBe('string');
+    expect(bodies[1].error.length).toBeGreaterThan(0);
   });
 });

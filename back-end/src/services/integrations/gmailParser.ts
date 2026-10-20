@@ -1,4 +1,4 @@
-import fetch, { RequestInit, Response } from 'node-fetch';
+// Use the platform fetch so the shared outbound capture/replay boundary owns Gmail HTTP.
 import { createLogger } from '../../providers/logger';
 import { upsertPersonAndMessageRecords } from './personMessageManager';
 import {
