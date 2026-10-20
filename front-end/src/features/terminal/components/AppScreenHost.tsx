@@ -26,7 +26,6 @@ interface AppScreenHostProps {
 export function AppScreenHost({ target, onClose, agents: a, drip }: AppScreenHostProps) {
   const renderQueryBox = (binding: AppQueryBoxBinding) => (
     <QueryInput
-      opaqueSurface
       value={binding.value}
       onChange={binding.onChange}
       onSubmit={() => binding.onSubmit()}
