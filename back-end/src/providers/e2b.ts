@@ -371,7 +371,11 @@ async function createClaudeCodeSessionUnlocked(
   const templateIdForCreate = process.env.E2B_CLAUDE_CODE_TEMPLATE_ID;
   let acquired;
   try {
-    acquired = await acquireCodeSandbox(codeSession, templateIdForCreate, envs, 'Claude Code');
+    acquired = await acquireCodeSandbox(codeSession, templateIdForCreate, envs, 'Claude Code', {
+      provider: 'claude',
+      projectSize: projectWorkspace?.project.sandboxSize,
+      agentId,
+    });
   } catch (err) {
     const local = await createLocalCodeSessionFallback(err, codeSession, {
       taskId,
@@ -467,6 +471,7 @@ async function createClaudeCodeSessionUnlocked(
     cliSessionId,
     projectRestore: project.report,
     previewUrl,
+    sandboxSize: acquired.size,
   };
 }
 
@@ -623,12 +628,11 @@ export async function createCodexCodeSession(
   const userUiWorkspace = await prepareCodeSessionWorkspace(userId, agentId, taskId, 'codex');
   applyUserUiSandboxEnvs(envs, userUiWorkspace);
 
-  const { sandbox, resumedFrom, cliSessionId } = await acquireCodeSandbox(
-    codeSession,
-    templateId,
-    envs,
-    'Codex Code'
-  );
+  const acquired = await acquireCodeSandbox(codeSession, templateId, envs, 'Codex Code', {
+    provider: 'codex',
+    agentId,
+  });
+  const { sandbox, resumedFrom, cliSessionId } = acquired;
   if (cliSessionId !== null) envs.CODEX_RESUME_SESSION_ID = cliSessionId;
 
   log.info(`Using Codex sandbox: ${sandbox.sandboxId} (${resumedFrom})`);
@@ -697,5 +701,6 @@ export async function createCodexCodeSession(
     resumedFrom,
     cliSessionId,
     previewUrl,
+    sandboxSize: acquired.size,
   };
 }

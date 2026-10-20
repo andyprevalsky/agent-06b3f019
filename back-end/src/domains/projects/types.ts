@@ -23,6 +23,26 @@ const repoUrlSchema = z.string().trim().min(1).max(500).nullable();
 
 const lifecycleSchema = z.object({ autoWake: z.boolean().optional() }).strict();
 
+/** Upper bounds for a project's default code-sandbox size (C16). */
+export const MAX_SANDBOX_CPU = 64;
+export const MAX_SANDBOX_MEMORY_GB = 256;
+
+/**
+ * Default sandbox size of the project's new code sessions: vCPUs and/or memory
+ * (GB); a missing dimension takes the deployment default, null clears it. The
+ * closest built template that satisfies it is used.
+ */
+const sandboxSizeSchema = z
+  .object({
+    cpu: z.number().int().min(1).max(MAX_SANDBOX_CPU).optional(),
+    memoryGb: z.number().int().min(1).max(MAX_SANDBOX_MEMORY_GB).optional(),
+  })
+  .strict()
+  .refine((size) => size.cpu !== undefined || size.memoryGb !== undefined, {
+    message: 'give cpu, memoryGb or both',
+  })
+  .nullable();
+
 const settingsShape = {
   repoUrl: repoUrlSchema.optional(),
   defaultBranch: branchSchema.optional(),
@@ -34,6 +54,7 @@ const settingsShape = {
     .max(MAX_STARTUP_TIMEOUT_S)
     .optional(),
   lifecycle: lifecycleSchema.optional(),
+  sandboxSize: sandboxSizeSchema.optional(),
 };
 
 const projectNameSchema = z.string().trim().min(1).max(100);

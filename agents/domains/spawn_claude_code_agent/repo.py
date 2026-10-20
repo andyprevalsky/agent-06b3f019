@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid as uuid_module
 from typing import Any, Optional
 
@@ -10,7 +11,12 @@ import structlog
 from temporalio.exceptions import ApplicationError
 
 from config import load_config
-from domains.spawn_claude_code_agent.config import LOCAL_TARGET_UNAVAILABLE_CODE
+from domains.spawn_claude_code_agent.config import (
+    CODE_SESSION_RESIZE_ATTEMPTS,
+    CODE_SESSION_RESIZE_RETRY_BACKOFF_S,
+    CODE_SESSION_RESIZE_TIMEOUT_S,
+    LOCAL_TARGET_UNAVAILABLE_CODE,
+)
 from helpers.workflow_generation import (
     WorkflowGenerationSealed,
     raise_if_generation_sealed,
@@ -490,6 +496,53 @@ async def report_code_usage_limit(
     except Exception as e:
         logger.warning("[ClaudeCode] Usage-limit report failed", task_id=task_id, error=extract_error_message(e))
         return None
+
+
+async def resize_e2b_session(task_id: str, request_id: str, code_provider: str = "claude") -> Optional[dict[str, Any]]:
+    """Apply a pending sandbox size change (C16); returns the task that continues the session.
+
+    The backend checkpoints the session, moves it into a sandbox of the new size and
+    resumes the CLI conversation there. Idempotent per ``request_id``: a retry after a
+    lost response returns the same task. A concurrent apply (409 RESIZE_IN_PROGRESS)
+    is waited out; any other failure returns None and the session stays where it is.
+    """
+    config = load_config()
+    url = f"{config.backend.api_url}{_session_base_path(code_provider)}/{task_id}/resize"
+    for attempt in range(1, CODE_SESSION_RESIZE_ATTEMPTS + 1):
+        try:
+            async with httpx.AsyncClient(timeout=CODE_SESSION_RESIZE_TIMEOUT_S) as client:
+                response = await client.post(
+                    url,
+                    headers={"x-api-key": config.backend.api_key or ""},
+                    json={"request_id": request_id},
+                )
+            body = response.json() if response.content else {}
+            if response.status_code == 200 and isinstance(body, dict):
+                return body
+            code = body.get("code") if isinstance(body, dict) else None
+            retryable = response.status_code >= 500 or code == "RESIZE_IN_PROGRESS"
+            logger.warning(
+                "[ClaudeCode] Sandbox resize call failed",
+                task_id=task_id,
+                request_id=request_id,
+                status=response.status_code,
+                code=code,
+                attempt=attempt,
+            )
+            if not retryable:
+                return None
+        except WorkflowGenerationSealed:
+            raise  # a replaced generation must stop, never be swallowed
+        except Exception as e:
+            logger.warning(
+                "[ClaudeCode] Sandbox resize call failed",
+                task_id=task_id,
+                request_id=request_id,
+                error=extract_error_message(e),
+                attempt=attempt,
+            )
+        await asyncio.sleep(CODE_SESSION_RESIZE_RETRY_BACKOFF_S * attempt)
+    return None
 
 
 async def fetch_code_credential_availability(user_id: str, own_only: bool = False) -> Optional[dict[str, bool]]:

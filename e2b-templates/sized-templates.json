@@ -1,0 +1,9 @@
+{
+  "_comment": "C16 code-agent sandbox sizes. ONE source per provider: every size is built from that provider's single Dockerfile by build-sized-templates.mjs; only cpu/memory differ. Keep grid equal to DEFAULT_SANDBOX_GRID in back-end/src/providers/codeSessions/sandboxSize.ts (pinned by src/tests/structural/sandbox-size-templates.test.ts).",
+  "grid": { "cpu": [2, 8], "memoryGb": [4, 16] },
+  "maxGridPoints": 9,
+  "providers": {
+    "claude": { "source": "claude-code", "dockerfile": "e2b.Dockerfile", "namePrefix": "claude-code" },
+    "codex": { "source": "codex-code", "dockerfile": "e2b.Dockerfile", "namePrefix": "codex-code" }
+  }
+}

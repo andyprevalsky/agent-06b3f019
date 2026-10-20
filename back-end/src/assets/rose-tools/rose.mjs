@@ -6,16 +6,20 @@
 //   rose message <text> [--inline-view NAME] [--props JSON]
 //   rose approve <question>
 //   rose wait <request-id>
-//   rose mcp                      (stdio MCP server: display, send_message_to_user, request_user_approval)
+//   rose env status [--json]      (size, memory/swap/load, OOM kills, top processes)
+//   rose env size [--cpu N] [--memory-gb M] --reason TEXT
+//   rose mcp                      (stdio MCP server: display, send_message_to_user, request_user_approval,
+//                                  change_environment_size)
 //
 // Every call goes to $ROSE_TOOLS_URL with $ROSE_TOOLS_TOKEN (or ~/.rose/tools.json),
 // a token scoped to this session's agent. Pinned questions and approvals block
 // until answered: the wait is a loop of bounded long-polls with no overall
 // deadline; each poll is the liveness heartbeat. Re-running the same blocking
 // command after an interruption resumes the same request instead of asking twice.
+import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { cpus, freemem, homedir, loadavg, totalmem } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 
@@ -382,6 +386,204 @@ async function approvalTool(args, onBeat) {
   return describeAnswer(state);
 }
 
+// ── environment size (C16) ──
+
+const GB = 1024 ** 3;
+const CPU_SAMPLE_MS = Number(process.env.ROSE_ENV_CPU_SAMPLE_MS || 1000);
+const round1 = (value) => Math.round(value * 10) / 10;
+
+function readText(path) {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+function memoryInfo() {
+  const text = readText('/proc/meminfo') || '';
+  const bytes = (key) => {
+    const match = text.match(new RegExp(`^${key}:\\s+(\\d+)`, 'm'));
+    return match ? Number(match[1]) * 1024 : null;
+  };
+  const total = bytes('MemTotal') ?? totalmem();
+  const available = bytes('MemAvailable') ?? freemem();
+  const swapTotal = bytes('SwapTotal') ?? 0;
+  const swapFree = bytes('SwapFree') ?? 0;
+  return { total, available, used: total - available, swapTotal, swapUsed: swapTotal - swapFree };
+}
+
+/** OOM kills: this cgroup's memory.events, else the kernel's count since boot. */
+function oomKills() {
+  const cgroup = (readText('/sys/fs/cgroup/memory.events') || '').match(/^oom_kill (\d+)/m);
+  if (cgroup) return { count: Number(cgroup[1]), source: 'cgroup memory.events' };
+  const vmstat = (readText('/proc/vmstat') || '').match(/^oom_kill (\d+)/m);
+  if (vmstat) return { count: Number(vmstat[1]), source: '/proc/vmstat, since boot' };
+  return null;
+}
+
+/** pid → {rssBytes, ticks, command} from /proc; null when /proc is unavailable (macOS). */
+function procSnapshot() {
+  let pids;
+  try {
+    pids = readdirSync('/proc').filter((name) => /^\d+$/.test(name));
+  } catch {
+    return null;
+  }
+  const out = new Map();
+  for (const pid of pids) {
+    const stat = readText(`/proc/${pid}/stat`);
+    const statm = readText(`/proc/${pid}/statm`);
+    if (!stat || !statm) continue;
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    const ticks = Number(fields[11]) + Number(fields[12]);
+    const rssBytes = Number(statm.split(' ')[1]) * 4096;
+    const cmdline = (readText(`/proc/${pid}/cmdline`) || '').split('\0').join(' ').trim();
+    const comm = stat.slice(stat.indexOf('(') + 1, stat.lastIndexOf(')'));
+    out.set(Number(pid), { rssBytes, ticks, command: (cmdline || `[${comm}]`).slice(0, 160) });
+  }
+  return out;
+}
+
+function psTop(sortFlag) {
+  return execFileSync('ps', ['-axo', 'pid=,rss=,pcpu=,command=', sortFlag], {
+    encoding: 'utf8',
+    maxBuffer: 16 * 1024 * 1024,
+  })
+    .split('\n')
+    .filter((line) => line.trim())
+    .slice(0, 5)
+    .map((line) => {
+      const [pid, rss, pcpu, ...command] = line.trim().split(/\s+/);
+      return {
+        pid: Number(pid),
+        rss_mb: Math.round(Number(rss) / 1024),
+        cpu_pct: Number(pcpu),
+        command: command.join(' ').slice(0, 160),
+      };
+    });
+}
+
+/** Top 5 by RSS and by CPU over a short sample (ps off Linux). */
+async function topProcesses() {
+  const first = procSnapshot();
+  if (first === null) return { byMemory: psTop('-m'), byCpu: psTop('-r') };
+  await sleep(CPU_SAMPLE_MS);
+  const second = procSnapshot() || new Map();
+  const ticksPerSecond = 100;
+  const rows = [...second.entries()]
+    .filter(([pid]) => pid !== process.pid)
+    .map(([pid, now]) => {
+      const before = first.get(pid);
+      const delta = before ? Math.max(0, now.ticks - before.ticks) : 0;
+      return {
+        pid,
+        rss_mb: Math.round(now.rssBytes / (1024 * 1024)),
+        cpu_pct: round1((delta / ticksPerSecond / (CPU_SAMPLE_MS / 1000)) * 100),
+        command: now.command,
+      };
+    });
+  return {
+    byMemory: [...rows].sort((a, b) => b.rss_mb - a.rss_mb).slice(0, 5),
+    byCpu: [...rows].sort((a, b) => b.cpu_pct - a.cpu_pct || b.rss_mb - a.rss_mb).slice(0, 5),
+  };
+}
+
+const sizeText = (size) => (size ? `${size.cpu} vCPU, ${size.memory_gb} GB RAM` : 'unknown');
+
+async function environmentStatus() {
+  let rose;
+  try {
+    rose = await call('GET', '/environment');
+  } catch (err) {
+    rose = { applicable: null, error: err.message };
+  }
+  const memory = memoryInfo();
+  const top = await topProcesses();
+  return {
+    rose,
+    visible: { cpus: cpus().length, memory_gb: round1(memory.total / GB) },
+    memory: {
+      used_gb: round1(memory.used / GB),
+      total_gb: round1(memory.total / GB),
+      available_gb: round1(memory.available / GB),
+      used_pct: Math.round((memory.used / memory.total) * 100),
+    },
+    swap: { used_gb: round1(memory.swapUsed / GB), total_gb: round1(memory.swapTotal / GB) },
+    load_average: loadavg().map((value) => Math.round(value * 100) / 100),
+    oom_kills: oomKills(),
+    top_memory: top.byMemory,
+    top_cpu: top.byCpu,
+  };
+}
+
+function formatEnvironment(status) {
+  const lines = [];
+  const rose = status.rose || {};
+  if (rose.applicable === true) {
+    lines.push(`Environment: ${sizeText(rose.size)} (largest allowed: ${sizeText(rose.max)})`);
+    lines.push(`Built sizes: ${(rose.available || []).map(sizeText).join('; ') || 'none'}`);
+    const last = (rose.resizes || [])[0];
+    if (last) {
+      lines.push(
+        `Last resize: ${sizeText(last.from)} -> ${sizeText(last.to)} (${last.status}, ${last.requested_at})`
+      );
+    }
+  } else if (rose.applicable === false) {
+    lines.push(`Environment: ${rose.message}`);
+  } else {
+    lines.push(`Environment: size unknown (${rose.error})`);
+  }
+  lines.push(`Visible here: ${status.visible.cpus} CPUs, ${status.visible.memory_gb} GB memory`);
+  const m = status.memory;
+  lines.push(
+    `Memory: ${m.used_gb} GB used of ${m.total_gb} GB (${m.used_pct}%), ${m.available_gb} GB available`
+  );
+  lines.push(`Swap: ${status.swap.used_gb} GB used of ${status.swap.total_gb} GB`);
+  lines.push(`Load average: ${status.load_average.join(' ')} (1/5/15 min)`);
+  lines.push(
+    status.oom_kills
+      ? `OOM kills: ${status.oom_kills.count} (${status.oom_kills.source})`
+      : 'OOM kills: not readable here'
+  );
+  const table = (title, rows) => {
+    lines.push(title);
+    lines.push('  PID      RSS_MB   CPU%  COMMAND');
+    for (const row of rows) {
+      lines.push(
+        `  ${String(row.pid).padEnd(8)} ${String(row.rss_mb).padStart(6)}  ${String(row.cpu_pct).padStart(5)}  ${row.command}`
+      );
+    }
+  };
+  table('Top 5 processes by memory (RSS):', status.top_memory);
+  table(`Top 5 processes by CPU (last ${CPU_SAMPLE_MS / 1000} s):`, status.top_cpu);
+  return lines.join('\n');
+}
+
+function sizeNumber(value, name) {
+  if (value === undefined || value === null || value === '') return undefined;
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 1)
+    throw new ToolError(`${name} must be a whole number`);
+  return number;
+}
+
+async function environmentSizeTool(args) {
+  const cpu = sizeNumber(args.cpu, 'cpu');
+  const memoryGb = sizeNumber(args.memory_gb, 'memory_gb');
+  const reason = typeof args.reason === 'string' ? args.reason.trim() : '';
+  if (cpu === undefined && memoryGb === undefined) {
+    throw new ToolError('give a cpu count, a memory size in GB, or both');
+  }
+  if (!reason) throw new ToolError('a reason is required (what needs the new size)');
+  const result = await call('POST', '/environment/size', {
+    ...(cpu !== undefined ? { cpu } : {}),
+    ...(memoryGb !== undefined ? { memory_gb: memoryGb } : {}),
+    reason,
+  });
+  return { text: result.message || `resize ${result.status}`, rejected: false };
+}
+
 // ── MCP stdio server ──
 
 const MCP_TOOLS = [
@@ -441,6 +643,23 @@ const MCP_TOOLS = [
     },
   },
   {
+    name: 'change_environment_size',
+    description:
+      'Move this session to a sandbox with more or fewer vCPUs and/or GB of memory. Use it for legitimate demand (repeated OOM kills, heavy swap, minutes of CPU-bound builds or tests), not for a runaway process or leak: kill or fix that instead. Run `rose env status` first. The session is saved and continues automatically in the new sandbox (same branch, files and conversation).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        cpu: { type: 'integer', description: 'vCPUs wanted; omit to keep the current count.' },
+        memory_gb: {
+          type: 'integer',
+          description: 'Memory in GB wanted; omit to keep the current size.',
+        },
+        reason: { type: 'string', description: 'What needs the new size, with evidence.' },
+      },
+      required: ['reason'],
+    },
+  },
+  {
     name: 'request_user_approval',
     description:
       "Ask the user to approve an action through Rose's approval prompt. Blocks until the user answers and returns approved or rejected with their reply.",
@@ -456,6 +675,7 @@ const MCP_HANDLERS = {
   display: displayTool,
   send_message_to_user: messageTool,
   request_user_approval: approvalTool,
+  change_environment_size: environmentSizeTool,
 };
 
 function serveMcp() {
@@ -522,6 +742,8 @@ const USAGE = `usage:
   rose message <text> [--inline-view NAME] [--props JSON]
   rose approve <question>
   rose wait <request-id>
+  rose env status [--json]
+  rose env size [--cpu N] [--memory-gb M] --reason TEXT
   rose mcp`;
 
 function parseFlags(argv, valueFlags) {
@@ -600,6 +822,26 @@ async function main(argv) {
   } else if (command === 'wait') {
     if (!rest[0]) throw new ToolError('rose wait needs a request id');
     result = describeAnswer(await waitFor(rest[0]));
+  } else if (command === 'env') {
+    const [sub, ...envArgs] = rest;
+    const { flags } = parseFlags(envArgs, new Set(['cpu', 'memory-gb', 'reason']));
+    if (sub === 'status') {
+      const status = await environmentStatus();
+      result = {
+        text: flags.json ? JSON.stringify(status, null, 2) : formatEnvironment(status),
+        rejected: false,
+      };
+    } else if (sub === 'size') {
+      result = await environmentSizeTool({
+        cpu: (flags.cpu || [])[0],
+        memory_gb: (flags['memory-gb'] || [])[0],
+        reason: (flags.reason || [])[0],
+      });
+    } else {
+      throw new ToolError(
+        'usage: rose env status [--json] | rose env size [--cpu N] [--memory-gb M] --reason TEXT'
+      );
+    }
   } else {
     throw new ToolError(`unknown command ${command}\n${USAGE}`);
   }

@@ -224,7 +224,13 @@ export async function resolveCodeSession(
 
 export async function recordSandbox(
   codeSessionId: string,
-  data: { sandboxKind: 'e2b' | 'local'; sandboxId: string; homeDir?: string | null }
+  data: {
+    sandboxKind: 'e2b' | 'local';
+    sandboxId: string;
+    homeDir?: string | null;
+    /** Size of an E2B sandbox (C16). */
+    size?: { cpu: number; memoryGb: number };
+  }
 ): Promise<void> {
   await prisma.codeSession.update({
     where: { id: codeSessionId },
@@ -232,6 +238,9 @@ export async function recordSandbox(
       sandboxKind: data.sandboxKind,
       sandboxId: data.sandboxId,
       ...(data.homeDir !== undefined ? { homeDir: data.homeDir } : {}),
+      ...(data.size !== undefined
+        ? { sandboxCpu: data.size.cpu, sandboxMemoryGb: data.size.memoryGb }
+        : {}),
       lastActiveAt: new Date(),
     },
   });

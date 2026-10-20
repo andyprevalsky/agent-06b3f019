@@ -3,8 +3,15 @@ import { type AuthRequest, authenticate } from '../../providers/auth';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import type { FilePointer } from '../../providers/storage';
-import { createSessionSchema, closeSessionSchema, codeTaskUsageLimitSchema } from './types';
+import {
+  createSessionSchema,
+  closeSessionSchema,
+  codeTaskResizeSchema,
+  codeTaskUsageLimitSchema,
+} from './types';
+import { sandboxResizeHttpError } from '../../providers/codeSessions/sandboxResize';
 import * as service from './service';
+import { resizeSession } from './resizeService';
 import { codeSessionHttpError, keepAliveCodeTask } from '../../providers/codeSessions/spawn';
 import { parseResetsAt, reportCodeTaskUsageLimit } from '../../providers/codeSessions/usageLimit';
 import { GitHubAccessDeniedError, MissingUserIdError } from './service';
@@ -60,6 +67,37 @@ router.post(
     }
     const { resets_at } = codeTaskUsageLimitSchema.parse(req.body ?? {});
     res.json(await reportCodeTaskUsageLimit(req.params.taskId, 'codex', parseResetsAt(resets_at)));
+  })
+);
+
+/**
+ * POST /api/codex-code-session/:taskId/resize - apply a pending sandbox size
+ * change and return the task that continues the session (C16, internal only).
+ */
+router.post(
+  '/:taskId/resize',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    if (req.isInternal !== true) {
+      res.status(403).json({ error: 'Internal callers only' });
+      return;
+    }
+    const parsed = codeTaskResizeSchema.safeParse(req.body ?? {});
+    if (!UUID.test(req.params.taskId) || !parsed.success) {
+      res.status(400).json({ error: 'task id and request_id (uuid) are required' });
+      return;
+    }
+    try {
+      const result = await resizeSession(req.params.taskId, parsed.data.request_id);
+      res.json({ ...result.session, resized: result.resized, request: result.request });
+    } catch (error) {
+      const mapped = sandboxResizeHttpError(error) ?? codeSessionHttpError(error);
+      if (mapped !== null) {
+        res.status(mapped.status).json(mapped.body);
+        return;
+      }
+      throw error;
+    }
   })
 );
 

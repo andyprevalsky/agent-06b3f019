@@ -14,6 +14,7 @@
  * PROJECT_LIST_LIMIT / MAX_ENV_FILES); listing uses one query with counts.
  */
 import type { EnvVariableMeta } from '../../providers/projects/envFile';
+import { sandboxSizeColumn } from '../../providers/projects/store';
 import * as repo from './repo';
 import type { CreateProjectBody, UpdateProjectBody } from './types';
 
@@ -37,6 +38,8 @@ export interface ProjectDto {
   startupScript: string | null;
   startupTimeoutS: number;
   lifecycle: { autoWake: boolean };
+  /** Default code-sandbox size of new sessions (C16); null = deployment default. */
+  sandboxSize: { cpu?: number; memoryGb?: number } | null;
   sync: { revision: number; lastSyncedAt: string | null };
   envFileCount: number;
   createdAt: string;
@@ -72,6 +75,7 @@ export function toProjectDto(
     startupScript: project.startupScript,
     startupTimeoutS: project.startupTimeoutS,
     lifecycle: { autoWake: project.autoWake },
+    sandboxSize: sandboxSizeOf(project.sandboxSize),
     sync: {
       revision: project.syncRevision,
       lastSyncedAt: project.lastSyncedAt ? project.lastSyncedAt.toISOString() : null,
@@ -80,6 +84,17 @@ export function toProjectDto(
     createdAt: project.createdAt.toISOString(),
     updatedAt: project.updatedAt.toISOString(),
   };
+}
+
+/** The stored `{cpu?, memoryGb?}`, or null for anything else. */
+export function sandboxSizeOf(value: unknown): { cpu?: number; memoryGb?: number } | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const { cpu, memoryGb } = value as { cpu?: unknown; memoryGb?: unknown };
+  const size = {
+    ...(Number.isInteger(cpu) ? { cpu: cpu as number } : {}),
+    ...(Number.isInteger(memoryGb) ? { memoryGb: memoryGb as number } : {}),
+  };
+  return Object.keys(size).length > 0 ? size : null;
 }
 
 export function variablesOf(file: repo.ProjectEnvFileRecord): EnvVariableMeta[] {
@@ -147,6 +162,7 @@ function settingsData(body: UpdateProjectBody) {
       : {}),
     ...(body.startupTimeoutS !== undefined ? { startupTimeoutS: body.startupTimeoutS } : {}),
     ...(body.lifecycle?.autoWake !== undefined ? { autoWake: body.lifecycle.autoWake } : {}),
+    ...(body.sandboxSize !== undefined ? { sandboxSize: sandboxSizeColumn(body.sandboxSize) } : {}),
   };
 }
 
