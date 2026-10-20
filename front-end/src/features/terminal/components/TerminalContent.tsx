@@ -16,13 +16,12 @@
  *   open-agent deep link           → force 'agents' even from browse/settings
  *   agents + inspectionContext     → compact read-only pill in global control rail
  *
- * PER-USER UI (features/user-ui, signed-in non-archive users only):
- *   no published UI / safe mode    → stock layout (unchanged)
- *   published shell                → UserUiShell replaces the whole chrome
- *   background image / slot        → fixed layer BEHIND the app; the app's own
- *                                    background + grid/canvas layers fade to
- *                                    fadeAfterFirstMessage once the selected
- *                                    agent has a USER message (opaque before)
+ * PER-USER UI (features/user-ui; signed-in non-archive users):
+ *   none / safe mode → stock layout; published shell → UserUiShell replaces chrome
+ *   background image/slot → layer BEHIND the app; app bg + grid/canvas fade to
+ *     fadeAfterFirstMessage once the selected agent has a USER message
+ * RIGHT APP BAR (RoseAppsProvider): Browser + Voice drawers; the main column
+ *   re-centers via --rose-apps-inset.
  */
 
 import { useState, useMemo, lazy } from 'react';
@@ -31,6 +30,8 @@ import {
   AppSidebar,
   AttentionRequestsProvider,
   NetworkView,
+  RoseAppBar,
+  RoseAppsProvider,
   SIDEBAR_WIDTH_COLLAPSED,
   unansweredAgentIds,
   useAttentionRequests,
@@ -48,16 +49,11 @@ import {
 } from '@/features/user-ui';
 
 import { useTerminalAgents } from '../hooks/useTerminalAgents';
+import { useTerminalDerivedState, type TerminalLayoutProps } from './terminalLayoutState';
 import { useDrippiness } from '../hooks/useDrippiness';
 import { useTileAnimation } from '../hooks/useTileAnimation';
 import { usePatternOffset } from '../hooks/usePatternOffset';
 import { resolveInitialTerminalView } from '../hooks/resolveInitialTerminalView';
-import {
-  computeActiveBrowserPanels,
-  derivePendingApproval,
-  derivePendingGates,
-  deriveHasActiveAttentionRequest,
-} from '../hooks/derivations';
 import type { TerminalView } from '../types';
 import { BROWSER_REVIEW_TEST_PHONE } from '../config';
 
@@ -106,56 +102,25 @@ export function TerminalContent() {
   );
 }
 
-function useTerminalDerivedState(agents: ReturnType<typeof useTerminalAgents>) {
-  const activeBrowserPanels = useMemo(
-    () => computeActiveBrowserPanels(agents.messages),
-    [agents.messages],
-  );
-  const pendingApproval = useMemo(() => derivePendingApproval(agents.messages), [agents.messages]);
-  const pendingGates = useMemo(() => derivePendingGates(agents.messages), [agents.messages]);
-  const hasActiveAttention = useMemo(
-    () => deriveHasActiveAttentionRequest(agents.messages),
-    [agents.messages],
-  );
-  const browserStatusProps = useMemo(
-    () => (activeBrowserPanels.length === 0 ? null : { browsers: activeBrowserPanels }),
-    [activeBrowserPanels],
-  );
-  return {
-    pendingApproval,
-    pendingGates,
-    hasActiveAttention,
-    browserStatusProps,
-    systemMessages: agents.messages.filter((message) => message.role === 'SYSTEM'),
-    showAdminHealth: isAdminOperator(agents.user),
-    hasUserMessage:
-      agents.selectedAgentId !== null && agents.messages.some((message) => message.role === 'USER'),
-  };
-}
-
 /** The per-user UI belongs to the signed-in session user only. */
 function resolveUserUiUserId(agents: ReturnType<typeof useTerminalAgents>): string | null {
   if (agents.isAnonymous || isBenchmarkArchiveMode()) return null;
   return agents.user?.id ?? null;
 }
 
-interface TerminalLayoutProps {
-  agents: ReturnType<typeof useTerminalAgents>;
-  drip: ReturnType<typeof useDrippiness>;
-  tileAnimation: ReturnType<typeof useTileAnimation>;
-  patternOffset: ReturnType<typeof usePatternOffset>['patternOffset'];
-  tileColors: ReturnType<typeof usePatternOffset>['tileColors'];
-  colorPalette: ReturnType<typeof usePatternOffset>['colorPalette'];
-  currentView: TerminalView;
-  setCurrentView: (view: TerminalView) => void;
-  models: ReturnType<typeof useAppData>['models'];
-  modelsLoading: boolean;
-  derived: ReturnType<typeof useTerminalDerivedState>;
-}
-
 function TerminalLayout(props: TerminalLayoutProps) {
   if (isBenchmarkSharedView()) return <SharedBenchmarkLayout {...props} />;
-  return <InteractiveTerminalLayout {...props} />;
+  return (
+    <RoseAppsProvider
+      agents={props.agents.agents}
+      selectedAgentId={props.agents.selectedAgentId}
+      onSelectAgent={props.agents.handleSelectAgent}
+      publishLayout
+    >
+      <InteractiveTerminalLayout {...props} />
+      <RoseAppBar />
+    </RoseAppsProvider>
+  );
 }
 
 function InteractiveTerminalLayout(props: TerminalLayoutProps) {

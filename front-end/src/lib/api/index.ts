@@ -12,3 +12,4 @@ export * from './people';
 export * from './signals';
 export * from './tree';
 export * from './blueprints';
+export * from './persona';

@@ -2,13 +2,19 @@
  * STATE MACHINE: QueryInput (top-level orchestrator)
  *
  * Composition:
+ *   ToolbarNub (rose pill at the shell's top-left corner)
  *   TopBar (WriteLock, ToolSet, TestPrompts, CostIndicator, ContextMeter, Settings)
+ *     (TopBar wraps itself in ToolbarRevealRegion: hidden until the nub is
+ *     hovered/focused/tapped)
  *   AttachmentList (chips)
  *   InputContainer (textarea + paperclip + model picker + submit/stop button)
  *
  * Sub-state lives in hooks:
  *   - useAttachments     : attachment lifecycle + paste/drag
  *   - usePriceLimit      : edit/save/cancel cost-limit flow
+ *
+ * TOOLBAR REVEAL:      owned by `useToolbarReveal` (see ToolbarNub.tsx)
+ *   [COLLAPSED] --hover/focus/tap nub--> [EXPANDED] --leave nub+toolbar--> [COLLAPSED]
  *
  * INPUT STATE:
  *   [EMPTY] -> (type) -> [HAS_TEXT] -> (submit/clear) -> [EMPTY]
@@ -46,6 +52,8 @@ import { usePriceLimit, type UsePriceLimitResult } from './query-input/usePriceL
 import { AttachmentList } from './query-input/AttachmentList';
 import { InputContainer } from './query-input/InputContainer';
 import { TopBar } from './query-input/TopBar';
+import { ToolbarNub } from './query-input/ToolbarNub';
+import { useToolbarReveal, type ToolbarReveal } from './query-input/useToolbarReveal';
 import { buildDripContainerStyle, buildMarbleBackgroundStyle } from './query-input/dripStyles';
 
 export type { QueryInputProps };
@@ -66,6 +74,7 @@ export default function QueryInput(props: QueryInputProps) {
     onAgentUpdate: props.onAgentUpdate,
   });
   const handleSubmit = useSubmitHandler(attachments, props.onSubmit);
+  const toolbarReveal = useToolbarReveal();
 
   return (
     <div className="w-full md:px-0">
@@ -76,6 +85,7 @@ export default function QueryInput(props: QueryInputProps) {
           isDragOver={attachments.isDragOver}
           dragHandlers={attachments.dragHandlers}
           opaqueSurface={props.opaqueSurface === true}
+          toolbarReveal={toolbarReveal}
         >
           <QueryInputBody
             {...props}
@@ -84,6 +94,7 @@ export default function QueryInput(props: QueryInputProps) {
             priceLimit={priceLimit}
             textareaRef={textareaRef}
             handleSubmit={handleSubmit}
+            toolbarReveal={toolbarReveal}
           />
         </QueryInputShell>
       </div>
@@ -128,6 +139,7 @@ interface QueryInputBodyProps extends QueryInputProps {
   priceLimit: UsePriceLimitResult;
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
   handleSubmit: () => void;
+  toolbarReveal: ToolbarReveal;
 }
 
 function QueryInputBody(props: QueryInputBodyProps) {
@@ -160,13 +172,13 @@ function QueryInputBody(props: QueryInputBodyProps) {
     handleSubmit,
   } = props;
   const { user: authUser } = useAuth();
-  const isMobile = useIsMobile();
-  const visibility = getQueryInputVisibility(isMobile, authUser);
+  const visibility = getQueryInputVisibility(useIsMobile(), authUser);
   const agentCompleted = agentDetail?.status === 'COMPLETED' || agentDetail?.status === 'FAILED';
 
   return (
     <>
       <TopBar
+        reveal={props.toolbarReveal}
         agentDetail={agentDetail}
         onAgentUpdate={onAgentUpdate}
         onAgentDelete={onAgentDelete}
@@ -231,6 +243,7 @@ interface QueryInputShellProps {
     onDrop: (e: React.DragEvent) => void;
   };
   opaqueSurface: boolean;
+  toolbarReveal: ToolbarReveal;
   children: React.ReactNode;
 }
 
@@ -240,6 +253,7 @@ function QueryInputShell({
   isDragOver,
   dragHandlers,
   opaqueSurface,
+  toolbarReveal,
   children,
 }: QueryInputShellProps) {
   const dripStyle = buildDripContainerStyle(dripStyles, drippiness, isDragOver);
@@ -263,6 +277,7 @@ function QueryInputShell({
           style={buildMarbleBackgroundStyle(dripStyles)}
         />
       )}
+      <ToolbarNub reveal={toolbarReveal} />
       <div className="relative z-10">{children}</div>
     </div>
   );

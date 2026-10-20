@@ -1,11 +1,11 @@
 /**
- * Blackbox tests for the mobile fullscreen browser layout.
+ * Blackbox tests for the Browser drawer's agent pane layout (it replaced the
+ * fullscreen browser view).
  *
- * Desktop keeps the horizontal split (fixed-width task-progress panel beside
- * the iframe). Mobile is one stacked view: fixed header, full-width 8:5 live
- * browser, browser-control footer, then always-visible task progress. The
- * remote viewport remains desktop-sized and scales into the aspect-matched
- * browser pane.
+ * Both form factors stack: status row, full-width 8:5 live browser, then the
+ * always-visible task progress. Desktop overlays agent controls on the live
+ * view; mobile (bottom sheet) moves them to a footer below it. The remote
+ * viewport remains desktop-sized and scales into the aspect-matched pane.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { screen } from '@testing-library/react';
@@ -30,11 +30,9 @@ vi.mock('@/features/terminal-component-group/components/BrowserCursorOverlay', (
   default: () => null,
 }));
 
-import { BrowserStatusBarFullscreen } from '@/features/terminal-component-group/components/browser-status-bar/BrowserStatusBarFullscreen';
+import { BrowserAgentPane } from '@/features/terminal-component-group/components/browser-status-bar/BrowserAgentPane';
 
-const DESKTOP_PANEL_CLASS = 'w-[min(320px,calc(100vw-60px))]';
-
-type Props = React.ComponentProps<typeof BrowserStatusBarFullscreen>;
+type Props = React.ComponentProps<typeof BrowserAgentPane>;
 
 function defaultProps(overrides: Partial<Props> = {}): Props {
   return {
@@ -51,29 +49,37 @@ function defaultProps(overrides: Partial<Props> = {}): Props {
     isResuming: false,
     isUserControlling: false,
     pendingWriteLockApproval: null,
-    onClose: vi.fn(),
     onResume: vi.fn(),
     ...overrides,
   };
 }
 
-describe('BrowserStatusBarFullscreen mobile layout', () => {
+describe('BrowserAgentPane layout', () => {
   beforeEach(() => {
     mobileState.value = false;
   });
 
-  it('renders the fixed-width task-progress panel on desktop', () => {
+  it('stacks the letterboxed live view above full-width task progress on desktop', () => {
     mobileState.value = false;
-    renderWithProviders(<BrowserStatusBarFullscreen {...defaultProps()} />);
+    renderWithProviders(<BrowserAgentPane {...defaultProps()} />);
 
     expect(screen.getByText('Task progress')).toBeInTheDocument();
-    expect(document.body.innerHTML).toContain(DESKTOP_PANEL_CLASS);
+    const panel = screen.getByTestId('task-progress-panel');
+    expect(panel).toHaveClass('w-full');
+    // The old fixed-width fullscreen side column is gone.
+    expect(document.body.innerHTML).not.toContain('w-[min(320px,calc(100vw-60px))]');
+    const livePane = screen.getByTestId('live-view-pane');
+    expect(livePane).toHaveStyle({ aspectRatio: '8 / 5' });
+    expect(livePane.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Desktop overlays the take-control chip on the live view (no footer).
+    expect(livePane).toContainElement(screen.getByRole('button', { name: 'Take control' }));
+    expect(screen.queryByTestId('mobile-browser-control-footer')).not.toBeInTheDocument();
   });
 
   it('prioritizes disconnected controls when desktop auth assistance is also pending', () => {
     mobileState.value = false;
     renderWithProviders(
-      <BrowserStatusBarFullscreen
+      <BrowserAgentPane
         {...defaultProps({
           isDisconnected: true,
           isWaitingForAuthAssistance: true,
@@ -89,10 +95,7 @@ describe('BrowserStatusBarFullscreen mobile layout', () => {
 
   it('stacks a full-width browser above always-visible progress on mobile', () => {
     mobileState.value = true;
-    renderWithProviders(<BrowserStatusBarFullscreen {...defaultProps()} />);
-
-    // The fixed-width desktop column must not render inline on mobile.
-    expect(document.body.innerHTML).not.toContain(DESKTOP_PANEL_CLASS);
+    renderWithProviders(<BrowserAgentPane {...defaultProps()} />);
 
     // The desktop stream fills an aspect-matched, full-width mobile pane.
     const iframe = screen.getByTitle('Browser');
@@ -119,7 +122,7 @@ describe('BrowserStatusBarFullscreen mobile layout', () => {
   it('keeps disconnected controls internally consistent when auth assistance is also pending', () => {
     mobileState.value = true;
     renderWithProviders(
-      <BrowserStatusBarFullscreen
+      <BrowserAgentPane
         {...defaultProps({
           isDisconnected: true,
           isWaitingForAuthAssistance: true,
@@ -140,7 +143,7 @@ describe('BrowserStatusBarFullscreen mobile layout', () => {
     function ControlHarness() {
       const [controlled, setControlled] = useState(false);
       return (
-        <BrowserStatusBarFullscreen
+        <BrowserAgentPane
           {...defaultProps({
             isUserControlling: controlled,
             onResume: () => setControlled((current) => !current),
