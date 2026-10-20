@@ -521,6 +521,12 @@ let codexFastModeProxy = await startCodexFastModeProxy();
 
 const home = homedir();
 const codexHome = join(home, ".codex");
+// Same contract as the Claude Code ws-server: ROSE_PROJECT_WORKDIR names an
+// existing folder to work in (a restored project, or the folder a user granted
+// to the Rose Mac app). That folder is never cloned into or given an AGENTS.md,
+// and the session's scratch dirs stay under HOME.
+const PROJECT_WORKDIR = process.env.ROSE_PROJECT_WORKDIR || "";
+const projectMode = Boolean(PROJECT_WORKDIR) && existsSync(PROJECT_WORKDIR);
 mkdirSync(codexHome, { recursive: true });
 mkdirSync(join(home, "attachments"), { recursive: true });
 mkdirSync(join(home, "output"), { recursive: true });
@@ -560,9 +566,9 @@ if (CODEX_AUTH_JSON) {
 }
 
 // home is /home/user in the E2B template.
-let workDir = home;
+let workDir = projectMode ? PROJECT_WORKDIR : home;
 const REPO_WORKDIR = join(home, "workspace");
-if (GITHUB_REPO_URL) {
+if (GITHUB_REPO_URL && !projectMode) {
   try {
     const parsed = new URL(GITHUB_REPO_URL);
     if (!parsed.pathname.split("/").filter(Boolean).pop()) {
@@ -594,7 +600,9 @@ if (GITHUB_REPO_URL) {
   }
 }
 
-if (!GITHUB_REPO_URL && CODE_AGENT_SYSTEM_PROMPT) {
+// A project's own AGENTS.md is never overwritten; the goal already carries the
+// code-agent instructions.
+if (!GITHUB_REPO_URL && !projectMode && CODE_AGENT_SYSTEM_PROMPT) {
   writeFileSync(join(workDir, "AGENTS.md"), CODE_AGENT_SYSTEM_PROMPT);
 }
 

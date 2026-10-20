@@ -71,6 +71,9 @@ model Agent {
   memoryEnabled                    Boolean                   @default(true)
   isBenchmark                      Boolean                   @default(false)
   githubRepoUrl                    String?
+  /// LocalDevice.id of the Rose Mac app that started this root agent (C14).
+  /// Null for web/PWA/SMS roots and for sub-agents (they resolve it via busId).
+  originDeviceId                   String?
   /// Owning Project (left-bar grouping, code-session workspace). Null = Home.
   /// Set on create (owner-validated) or inherited from the parent agent.
   projectId                        String?
@@ -398,6 +401,7 @@ model User {
   /// Active published rose_user_ui version (UserUiVersion.id); null = stock UI.
   activeUiVersionId           String?
   uiVersions                  UserUiVersion[]
+  localDevices                LocalDevice[]
   phoneDevices                PhoneDevice[]
   projects                    Project[]
 
@@ -1777,6 +1781,25 @@ model UserUiVersion {
   user       User     @relation(fields: [userId], references: [userId], onDelete: Cascade)
 
   @@index([userId, createdAt])
+}
+
+/// A Rose Mac app install that can run local code agents (C14). `id` is minted
+/// and persisted by the Mac app; the first authenticated register binds it to a
+/// user and it can never move to another user. Live connectivity is in-process
+/// (the device's control WebSocket), not stored; `lastSeenAt` is informational.
+/// Backend-only (service role).
+model LocalDevice {
+  id         String   @id
+  userId     String
+  name       String
+  platform   String   @default("darwin")
+  appVersion String?
+  lastSeenAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  user       User     @relation(fields: [userId], references: [userId], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 /// A phone attached to one of the user's Macs (Phase 1: an iPhone shown

@@ -6,6 +6,14 @@ import type { FilePointer } from '../../providers/storage';
 import { createSessionSchema, closeSessionSchema } from './types';
 import * as service from './service';
 import { GitHubAccessDeniedError, MissingUserIdError } from './service';
+import {
+  LocalTargetUnavailableError,
+  localTargetUnavailableBody,
+} from '../../providers/localDevices/messages';
+import {
+  LocalSessionOwnerMismatchError,
+  createLocalCodeSessionResponse,
+} from '../../providers/localDevices/session';
 
 const log = createLogger('CodexCodeRoutes');
 const router = Router();
@@ -25,22 +33,40 @@ router.post(
         memory_enabled,
         harness_mode,
         rose_api_base_url,
+        target,
       } = createSessionSchema.parse(req.body);
 
-      const result = await service.createSession({
-        agent_id,
-        goal,
-        attachments: attachments as FilePointer[] | undefined,
-        github_repo_url,
-        user_id,
-        fast_mode_cache_enabled,
-        memory_enabled,
-        harness_mode,
-        rose_api_base_url,
-      });
+      // C14: a local session runs on the agent tree's Mac with the user's own login.
+      const result =
+        target === 'local'
+          ? await createLocalCodeSessionResponse({
+              agentId: agent_id,
+              goal,
+              provider: 'codex',
+              expectedUserId: user_id,
+            })
+          : await service.createSession({
+              agent_id,
+              goal,
+              attachments: attachments as FilePointer[] | undefined,
+              github_repo_url,
+              user_id,
+              fast_mode_cache_enabled,
+              memory_enabled,
+              harness_mode,
+              rose_api_base_url,
+            });
 
       res.json({ success: true, ...result });
     } catch (error) {
+      if (error instanceof LocalTargetUnavailableError) {
+        res.status(409).json(localTargetUnavailableBody(error));
+        return;
+      }
+      if (error instanceof LocalSessionOwnerMismatchError) {
+        res.status(403).json({ error: error.message, code: 'AGENT_OWNER_MISMATCH' });
+        return;
+      }
       if (error instanceof MissingUserIdError) {
         res.status(400).json({ error: error.message, code: 'MISSING_USER_ID' });
         return;
