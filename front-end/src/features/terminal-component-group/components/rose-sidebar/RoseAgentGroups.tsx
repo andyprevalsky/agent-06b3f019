@@ -15,11 +15,13 @@
  * non-empty groups of agent icons are separated by 18×3px neutral line pills.
  *
  * CODE AGENTS: each agent row is followed by the Claude Code / Codex sessions
- * of its tree (RoseCodeAgentRow), indented one level under it while expanded;
- * collapsed they stay inside the parent's group (no divider between them).
- * Every agent row reports its visibility (observeRoot) so only the trees on
- * screen are read. A running code agent shows the thinking bubble unless it
- * waits on the user (codeAgentsNeedingInput → amber alert instead).
+ * of its tree (RoseCodeAgentRow: provider icon + title, no status glyph),
+ * indented one level under it while expanded; collapsed they stay inside the
+ * parent's group (no divider between them). Every agent row reports its
+ * visibility (observeRoot) so only the trees on screen are read.
+ * SELECTION: [AGENT] the selected agent row is marked (color/weight)
+ *   --code-agent row click--> [CODE AGENT] that row is marked instead; its
+ *   owner agent row (still the selected agent underneath) is not.
  *
  * While a search query is active, project groups with no matching agent drop out.
  */
@@ -63,8 +65,8 @@ export interface RoseAgentGroupsProps {
   /** Code agents listed under an agent row (its tree's sessions). */
   codeAgentsFor: (agentId: string) => readonly CodeAgentListItem[];
   onOpenCodeAgent: (codeAgent: CodeAgentListItem) => void;
-  /** Code agents (task ids) with an unanswered question / approval for the user. */
-  codeAgentsNeedingInput: ReadonlySet<string>;
+  /** The code agent whose conversation is open (its row is marked, not its owner's). */
+  selectedCodeAgentId: string | null;
   /** Ref for each agent row; its visibility decides which code-agent pages are read. */
   observeRoot: (agentId: string) => (element: HTMLElement | null) => void;
 }
@@ -92,7 +94,9 @@ function AgentRows({
         <Fragment key={agent.agent_id}>
           <RoseAgentRow
             agent={agent}
-            isSelected={props.selectedAgentId === agent.agent_id}
+            isSelected={
+              props.selectedCodeAgentId === null && props.selectedAgentId === agent.agent_id
+            }
             isExpanded={props.isExpanded}
             indented={indented}
             hasAttentionRequest={props.attentionAgentIds.has(agent.agent_id)}
@@ -107,7 +111,7 @@ function AgentRows({
               codeAgent={codeAgent}
               isExpanded={props.isExpanded}
               parentIndented={indented}
-              needsInput={props.codeAgentsNeedingInput.has(codeAgent.code_agent_id)}
+              isSelected={props.selectedCodeAgentId === codeAgent.code_agent_id}
               onOpen={() => props.onOpenCodeAgent(codeAgent)}
             />
           ))}

@@ -8,11 +8,10 @@
  *   A right-click menu, the search box or an inline name input keeps it EXPANDED.
  *
  * LAYOUT (top → bottom, rows 17/30/57/59/63):
- *   Home (root project) · New Super Agent (black) · Search
+ *   Home · New Super Agent (black) · Search
  *   agents grouped by project (RoseAgentGroups), each followed by its tree's
  *   code agents (useRoseCodeAgents: one batched read per on-screen page of
- *   ≤50 roots; running ones show a thinking bubble unless an attention request
- *   of theirs is open, useCodeAgentAttention) · + New project
+ *   ≤50 roots; provider icon + title only) · + New project
  *   ── Feedback · [Biz health, admins] · Archived · [Browse] · account row.
  *      Feedback, Biz health and the account row (Settings) open in the
  *      right-panel slot (RoseAppsProvider); clicking again closes it.
@@ -20,6 +19,13 @@
  * SURFACE: always solid (bg-white / dark #262624), so data-surface="opaque" —
  * legible over a per-user background image without the stock rail's switch.
  * MOBILE (< md): not mounted at all; the mobile agent drawer lists agents.
+ *
+ * CODE AGENT VIEW (CodeAgentViewProvider, when mounted):
+ *   [AGENT] --code-agent row--> [CODE AGENT] its conversation replaces the chat
+ *     column (owner selected first when needed); that row is marked, not the owner
+ *   [CODE AGENT] --any agent row (incl. its owner)--> [AGENT] that agent; the
+ *     owner's row only closes the code agent (no reload); Home / views close it too
+ *   No provider (isolated renders): a code-agent row selects its owner agent.
  *
  * PANELS: project settings beside the bar (useRoseSidebarProjects); archive dialog;
  * rename dialog (useAgentRowActions); delete-project confirm dialog.
@@ -36,6 +42,7 @@ import { cn } from '@/lib/utils';
 import type { AppSidebarProps } from '../AppSidebar';
 import ArchivedAgentsDialog from '../ArchivedAgentsDialog';
 import { matchesQuery, sortAgents } from '../agentListOrdering';
+import { openCodeAgentFromRow, useCodeAgentView } from '../code-agent-view/codeAgentViewState';
 import { useRoseApps } from '../rose-apps/roseAppsState';
 import { useAgentRowActions } from '../useAgentRowActions';
 import { useSidebarSearch } from '../useSidebarSearch';
@@ -56,7 +63,6 @@ import {
   ROSE_BAR_EXPANDED_WIDTH,
   ROSE_BAR_WIDTH,
 } from './roseSidebarLayout';
-import { useCodeAgentAttention } from './useCodeAgentAttention';
 import { useNotYet, useRoseAgentMenuActions } from './useRoseAgentMenuActions';
 import { useRoseCodeAgents } from './useRoseCodeAgents';
 import { useRoseSidebarProjects } from './useRoseSidebarProjects';
@@ -96,6 +102,28 @@ function useGroupedAgents(
   };
 }
 
+/** Code-agent rows open their own conversation view; agent rows leave it. */
+function useCodeAgentRows(props: AppSidebarProps) {
+  const { onSelectAgent, selectedAgentId } = props;
+  const view = useCodeAgentView();
+  const openCodeAgent = view?.openCodeAgent ?? null;
+  const onOpenCodeAgent =
+    props.roseActions?.onOpenCodeAgent ??
+    ((row: CodeAgentListItem) => {
+      if (view !== null) view.open(openCodeAgentFromRow(row));
+      else onSelectAgent(row.owner_agent_id);
+    });
+  const selectAgentRow = (agentId: string) => {
+    if (view !== null && openCodeAgent !== null) {
+      view.close();
+      // The owner is already loaded underneath: closing is enough.
+      if (agentId === selectedAgentId) return;
+    }
+    onSelectAgent(agentId);
+  };
+  return { onOpenCodeAgent, selectAgentRow, selectedCodeAgentId: openCodeAgent?.taskId ?? null };
+}
+
 /** The bar is md+ only; below md nothing mounts (MobileAgentDrawer owns the list). */
 export default function RoseSidebar(props: AppSidebarProps) {
   const isMobile = useIsMobile();
@@ -125,14 +153,11 @@ function RoseSidebarBar(props: AppSidebarProps) {
     onSelectAgent,
   });
   const actionsFor = useRoseAgentMenuActions(handlers, roseActions);
-  const codeAgentsNeedingInput = useCodeAgentAttention();
   const { codeAgentsFor, observeRoot } = useRoseCodeAgents(
     [...grouped.home, ...grouped.projects.flatMap((g) => g.agents)],
     props.selectedAgentId,
   );
-  const onOpenCodeAgent =
-    roseActions.onOpenCodeAgent ??
-    ((codeAgent: CodeAgentListItem) => onSelectAgent(codeAgent.owner_agent_id));
+  const codeAgentRows = useCodeAgentRows(props);
   const goToView = (view: Parameters<typeof onViewChange>[0]) => {
     onViewChange(view);
     onSelectAgent(null);
@@ -173,14 +198,14 @@ function RoseSidebarBar(props: AppSidebarProps) {
             attentionAgentIds={attention}
             settingsProjectId={projects.openProject?.id ?? null}
             renamingProjectId={projects.renamingProjectId}
-            onSelectAgent={onSelectAgent}
+            onSelectAgent={codeAgentRows.selectAgentRow}
             actionsFor={actionsFor}
             onMenuOpenChange={expansion.setMenuOpen}
             projectActions={projects.projectActions}
             codeAgentsFor={codeAgentsFor}
-            onOpenCodeAgent={onOpenCodeAgent}
+            onOpenCodeAgent={codeAgentRows.onOpenCodeAgent}
             observeRoot={observeRoot}
-            codeAgentsNeedingInput={codeAgentsNeedingInput}
+            selectedCodeAgentId={codeAgentRows.selectedCodeAgentId}
           />
         </ScrollArea>
         {isExpanded && props.userUi?.menuSlot}
