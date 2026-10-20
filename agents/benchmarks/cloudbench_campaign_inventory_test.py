@@ -2363,6 +2363,22 @@ fi
 
 
 
+def test_campaign_inventory_plans_native_wmh_guests_for_simulate_tasks(tmp_path):
+    """Wide (sharded) runs plan capacity from the fleet's own shape functions. A
+    catalog simulate task boots a performance-8x/64 GB guest for the native WMH;
+    the planner must load the SIM selection and count it, never error or plan
+    it as a 4 GB guest."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('stress_campaign_sim', ROOT / 'scripts/run-bench-campaign.py')
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    rows = [{'name': 'raise-5m-rose-labs-brex', 'requires_browser_agent': False, 'world_model_mode': 'simulate'},
+            {'name': 'plain-fixture', 'requires_browser_agent': False}]
+    result = module.stress_default_requirements(ROOT, rows, peak=2, baseline=None)
+    assert result['planned_performance_cpu_units'] == 8
+    assert result['planned_shared_cpu_units'] == 2
+    assert result['planned_memory_mib'] == 65536 + 4096
+
+
 def test_campaign_inventory_stress_defaults_derive_actual_vm_profiles_and_withhold_unknown_capacity(tmp_path):
     import importlib.util
     spec = importlib.util.spec_from_file_location('stress_campaign_defaults', ROOT / 'scripts/run-bench-campaign.py')
