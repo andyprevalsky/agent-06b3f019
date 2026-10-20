@@ -17,9 +17,9 @@ tags:
   - deadline
   - native-stop
 sources:
-  - deploy run 20261020-013350-3832649 resumed A3
-  - source 5bd3a3d44 merge of approved browser repair and main 33d096476
-  - .context/rca-915ab997/A3-native-stop-diagnosis.txt
+  - benchmark run 20261020-013350-3832649 resumed A3 deploy structural gate
+  - commit 5bd3a3d44 merge of approved browser repair and main 33d096476
+  - agent 915ab997-c174-4297-80ac-15347120342f investigation evidence .context/rca-915ab997/A3-native-stop-diagnosis.txt
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py::test_guest_shutdown_child_confirmation_native_stop_is_bounded_exact_and_verified
 status: open
 ---
