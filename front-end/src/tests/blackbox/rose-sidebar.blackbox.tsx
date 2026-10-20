@@ -10,10 +10,14 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import type { User } from '@supabase/supabase-js';
+import { http, HttpResponse } from 'msw';
 
 import AppSidebar from '@/features/terminal-component-group/components/AppSidebar';
 
 import { defaultProps, makeAgent, mockSession } from './app-sidebar.fixtures';
+import { capturedRequests, clearCaptures } from './msw/capture';
+import { server } from './msw/server';
 import {
   anonymousUser,
   collapseBar,
@@ -281,7 +285,8 @@ describe('Rose left bar (flag on)', () => {
     const user = userEvent.setup();
     renderBar();
     const account = within(roseBar()).getByRole('button', { name: 'Andy Prevalsky' });
-    const initial = within(account).getByTestId('rose-account-initial');
+    // Member icon while the Rose profile loads, then the initial (useAccountProfileName).
+    const initial = await within(account).findByTestId('rose-account-initial');
     expect(initial).toHaveTextContent('A');
     expect(initial.style.fontFamily).toContain('Pinyon Script');
     expect(initial.style.fontSize).toBe('27px');
@@ -395,5 +400,124 @@ describe('Rose left bar (flag on)', () => {
       .getByTestId('rose-agent-row-home-run')
       .querySelector('[data-sidebar-agent-icon]')!;
     expect(bot.getAttribute('class')).toContain('dark:text-[#a3a39d]');
+  });
+});
+
+// ─── Account row name from the Rose profile (ledger row 63) ─────────────────
+
+const PROFILE_URL = 'http://localhost:3001/api/user-settings';
+
+/** A phone-OTP sign-in: Supabase auth metadata carries no name. */
+function phoneOnlyUser(): User {
+  return { ...signedInUser(), user_metadata: {}, phone: '+19729777432' } as User;
+}
+
+function accountRow(name: string | RegExp) {
+  return within(roseBar()).getByRole('button', { name });
+}
+
+function profileRequests(): number {
+  return capturedRequests.filter(
+    (r) => r.method === 'GET' && new URL(r.url).pathname === '/api/user-settings',
+  ).length;
+}
+
+describe('Rose left bar account row: name from the Rose profile (row 63)', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    mockSession();
+    clearCaptures();
+    mockProjectsApi([]);
+  });
+  afterEach(() => localStorage.clear());
+
+  it('profile name + empty auth metadata → "Andy Prevalsky" and the cursive "A"', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      http.get(PROFILE_URL, async () => {
+        await gate;
+        return HttpResponse.json({ name: 'Andy Prevalsky', phone: '+19729777432' });
+      }),
+    );
+    renderWithProviders(<AppSidebar {...defaultProps({ agents: [], user: phoneOnlyUser() })} />);
+    // Loading: the member icon fills the initial's 20px box (no layout shift).
+    const loading = accountRow('+19729777432');
+    const icon = within(loading).getByTestId('rose-account-member-icon');
+    expect(icon).toHaveClass('h-5', 'w-5');
+    expect(within(loading).queryByTestId('rose-account-initial')).toBeNull();
+
+    release();
+    const account = await waitFor(() => accountRow('Andy Prevalsky'));
+    const initial = await within(account).findByTestId('rose-account-initial');
+    expect(initial).toHaveTextContent('A');
+    expect(initial).toHaveClass('h-5', 'w-5');
+    expect(initial.style.fontFamily).toContain('Pinyon Script');
+    expect(within(account).queryByTestId('rose-account-member-icon')).toBeNull();
+    expect(profileRequests()).toBe(1);
+  });
+
+  it('the profile name wins over auth metadata', async () => {
+    server.use(http.get(PROFILE_URL, () => HttpResponse.json({ name: 'Andrew P' })));
+    renderWithProviders(
+      <AppSidebar {...defaultProps({ agents: [], user: signedInUser('Metadata Name') })} />,
+    );
+    const account = await waitFor(() => accountRow('Andrew P'));
+    expect(await within(account).findByTestId('rose-account-initial')).toHaveTextContent('A');
+  });
+
+  it('no profile name → auth metadata, then email local part, then phone', async () => {
+    // Default handler: {} (no name).
+    const { unmount } = renderWithProviders(
+      <AppSidebar {...defaultProps({ agents: [], user: signedInUser('Grace Hopper') })} />,
+    );
+    const meta = await waitFor(() => accountRow('Grace Hopper'));
+    expect(await within(meta).findByTestId('rose-account-initial')).toHaveTextContent('G');
+    unmount();
+
+    const emailUser = { ...phoneOnlyUser(), email: 'ada@example.com' } as User;
+    const second = renderWithProviders(
+      <AppSidebar {...defaultProps({ agents: [], user: emailUser })} />,
+    );
+    const email = await waitFor(() => accountRow('ada'));
+    expect(await within(email).findByTestId('rose-account-initial')).toHaveTextContent('A');
+    second.unmount();
+
+    renderWithProviders(<AppSidebar {...defaultProps({ agents: [], user: phoneOnlyUser() })} />);
+    const phone = accountRow('+19729777432');
+    await waitFor(() => expect(profileRequests()).toBeGreaterThan(0));
+    // "+" is not a letter: the member icon stays.
+    await waitFor(() =>
+      expect(within(phone).getByTestId('rose-account-member-icon')).toBeInTheDocument(),
+    );
+    expect(within(phone).queryByTestId('rose-account-initial')).toBeNull();
+  });
+
+  it('a failed profile request falls back to the auth metadata name', async () => {
+    server.use(http.get(PROFILE_URL, () => HttpResponse.json({}, { status: 500 })));
+    renderWithProviders(
+      <AppSidebar {...defaultProps({ agents: [], user: signedInUser('Andy Prevalsky') })} />,
+    );
+    const account = accountRow('Andy Prevalsky');
+    expect(await within(account).findByTestId('rose-account-initial')).toHaveTextContent('A');
+  });
+
+  it('anonymous: member icon and no profile request', async () => {
+    renderWithProviders(<AppSidebar {...defaultProps({ agents: [], user: anonymousUser() })} />);
+    const guest = accountRow('Guest');
+    expect(within(guest).getByTestId('rose-account-member-icon')).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(profileRequests()).toBe(0);
+  });
+
+  it('flag off: the stock sidebar makes no profile request', async () => {
+    renderWithProviders(<AppSidebar {...defaultProps({ agents: [], user: phoneOnlyUser() })} />, {
+      roseDesktop: false,
+    });
+    expect(screen.queryByTestId('rose-sidebar')).toBeNull();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(profileRequests()).toBe(0);
   });
 });

@@ -1,7 +1,8 @@
 /**
  * Presentational rows for the Rose Desktop left bar (UI ledger rows 17/29/30/63):
- * account row: signed in = cursive initial, anonymous = member icon (both open
- * Settings); no session = member icon labelled "Sign in" (opens login).
+ * account row: signed in = cursive initial + name (Rose profile name first, see
+ * accountDisplayName; member icon while the profile loads), anonymous = member
+ * icon (both open Settings); no session = member icon labelled "Sign in" (opens login).
  * Home (root project), the raw black "New Super Agent" button (row 76; dark mode
  * inverts it: #f2f2ef fill, #1f1f1d label/plus, mock panels/dark.js .nb), the
  * Search row, plain nav rows (Archived, Browse, Health) and the account row. Stateless.
@@ -144,12 +145,17 @@ export function RoseNavRow({
 
 export function RoseAccountRow({
   user,
+  profileName = null,
+  profileLoading = false,
   isExpanded,
   isActive,
   onOpenSettings,
   onLoginClick,
 }: {
   user: User | null;
+  /** The Rose profile name (backend User row); preferred over auth metadata. */
+  profileName?: string | null;
+  profileLoading?: boolean;
   isExpanded: boolean;
   isActive: boolean;
   onOpenSettings: () => void;
@@ -157,10 +163,17 @@ export function RoseAccountRow({
 }) {
   // No session at all: the row signs in. A session (anonymous or not) opens Settings.
   const signedIn = user !== null && user.is_anonymous !== true;
-  const label = user === null ? 'Sign in' : signedIn ? accountDisplayName(user) : 'Guest';
+  const label =
+    user === null ? 'Sign in' : signedIn ? accountDisplayName(user, profileName) : 'Guest';
   return (
     <RoseNavRow
-      icon={<AccountGlyph user={signedIn ? user : null} />}
+      icon={
+        <AccountGlyph
+          user={signedIn ? user : null}
+          profileName={profileName}
+          loading={profileLoading}
+        />
+      }
       label={label}
       isExpanded={isExpanded}
       isActive={isActive}
