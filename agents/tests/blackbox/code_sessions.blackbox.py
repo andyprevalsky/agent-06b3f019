@@ -475,8 +475,13 @@ async def test_usage_limit_saves_session_and_retry_leases_next_credential():
         assert first["usage_limit"]["resets_at"] == "2026-10-03T00:50:00.000Z", first["usage_limit"]
         assert backend.usage_reports == [("task-1", "claude", 1790988600)], backend.usage_reports
         assert [call.get("reason") for call in backend.closed][0] == "usage_limit", backend.closed
-        assert first["code_agent"]["state"] == "failed" and first["code_agent"]["failure_message"], first
-        assert any(m.get("action_type") == "usage_limit" for m in backend.messages), backend.messages
+        # The UI reads a resumable pause with plain user text; the parent keeps the retry.
+        user_text = "Paused: Claude usage limit reached (resets Oct 3, 12:50 AM UTC). Work is saved."
+        assert first["code_agent"]["state"] == "paused", first["code_agent"]
+        assert first["code_agent"]["failure_message"] == user_text, first["code_agent"]
+        progress = [m for m in backend.messages if m.get("action_type") == "usage_limit"]
+        assert [m["message"] for m in progress] == [user_text], progress
+        assert progress[0]["code_agent"]["state"] == "paused", progress[0]["code_agent"]
 
         assert backend.created[1]["code_session_id"] == session_id, backend.created[1]
         assert backend.created[1]["code_provider"] == "claude", backend.created[1]
@@ -569,7 +574,10 @@ async def test_local_usage_limit_retries_on_the_mac_with_the_other_login():
         assert f"stay in {_MAC_FOLDER} on {_MAC}" in first["message"], first["message"]
         assert "target='local'" in first["message"], first["message"]
         assert backend.usage_reports == [("task-1", "claude", 1790988600)], backend.usage_reports
-        assert first["code_agent"]["target"] == "local" and first["code_agent"]["state"] == "failed", first
+        assert first["code_agent"]["target"] == "local" and first["code_agent"]["state"] == "paused", first
+        assert first["code_agent"]["failure_message"] == (
+            f"Paused: Claude usage limit reached (resets Oct 3, 12:50 AM UTC). Work stays in {_MAC_FOLDER} on {_MAC}."
+        ), first["code_agent"]
 
         assert backend.availability_own_only == [True, True], backend.availability_own_only
         assert backend.created[1]["target"] == "local" and backend.created[1]["code_provider"] == "codex"
@@ -600,6 +608,23 @@ def test_usage_limit_detection_reads_structured_events_only():
         {"type": "stdout", "text": "usage_limit_reached"},
     ):
         assert usage_limit_from_event(prose) is None, prose
+
+
+def test_usage_limit_user_message_names_the_reset_in_utc():
+    """The UI's usage-limit text: time only within 24 h of the reset, otherwise date and time (UTC)."""
+    from datetime import datetime, timezone
+
+    from domains.spawn_claude_code_agent.service import format_usage_limit_user_message
+
+    now = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc).timestamp()
+    soon = format_usage_limit_user_message(code_provider="claude", resets_at_iso="2026-10-20T16:50:00.000Z", now=now)
+    assert soon == "Paused: Claude usage limit reached (resets 4:50 PM UTC). Work is saved.", soon
+    later = format_usage_limit_user_message(code_provider="codex", resets_at_iso="2026-10-23T00:50:00Z", now=now)
+    assert later == "Paused: Codex usage limit reached (resets Oct 23, 12:50 AM UTC). Work is saved.", later
+    unknown = format_usage_limit_user_message(
+        code_provider="claude", resets_at_iso=None, local_place=f"{_MAC_FOLDER} on {_MAC}", now=now
+    )
+    assert unknown == f"Paused: Claude usage limit reached. Work stays in {_MAC_FOLDER} on {_MAC}.", unknown
 
 
 async def test_failed_attempt_retry_keeps_state_and_code_session_id():
@@ -832,6 +857,7 @@ async def _run_all_tests():
         test_usage_limit_retry_switches_provider_when_pool_is_exhausted,
     )
     r.record("usage_limit_detection_structured_only", test_usage_limit_detection_reads_structured_events_only)
+    r.record("usage_limit_user_message_names_reset_utc", test_usage_limit_user_message_names_the_reset_in_utc)
     await r.record_async("local_session_idle_pauses_in_mac_folder", test_local_session_idle_pauses_in_the_mac_folder)
     await r.record_async(
         "local_usage_limit_retries_on_the_mac",
