@@ -1,0 +1,168 @@
+<!doctype html>
+<!--
+  Example: "Rose OS", a full-viewport windowed shell with a dock and draggable windows.
+
+  Use it as the shell (replaces the app chrome; the safe-mode control stays on top):
+    "shell": { "entry": "root/shell/rose-os/index.html" }
+
+  How it stays at 60/120 fps:
+  - Windows are positioned with transform: translate3d(); dragging writes one
+    transform per animation frame (pointer events are coalesced into a rAF), never
+    left/top, so a drag is compositor-only with no layout.
+  - Open/minimize/restore and dock magnification animate transform + opacity only.
+  - Glass uses backdrop-filter on a few fixed-size layers; the wallpaper is CSS.
+  - The clock updates once per minute, aligned to the minute, and stops when hidden.
+  - prefers-reduced-motion: no open/minimize/magnify animation, instant state changes.
+  Sandboxed frames have no localStorage or cookies (opaque origin); keep state in
+  memory, or in props once the bridge offers it.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Rose OS</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body {
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif; color: #f6f4ff;
+    background:
+      radial-gradient(1200px 800px at 15% 20%, #6d28d9 0%, transparent 60%),
+      radial-gradient(900px 700px at 85% 30%, #db2777 0%, transparent 55%),
+      radial-gradient(1000px 900px at 50% 100%, #0891b2 0%, transparent 60%),
+      #120f22;
+    user-select: none; -webkit-user-select: none;
+  }
+  .glass { background: rgb(28 24 46 / 0.55); backdrop-filter: blur(24px) saturate(1.6); -webkit-backdrop-filter: blur(24px) saturate(1.6); border: 1px solid rgb(255 255 255 / 0.14); }
+  #menubar { position: fixed; inset: 0 0 auto 0; height: 30px; display: flex; align-items: center; gap: 18px; padding: 0 14px; z-index: 1000; border-width: 0 0 1px; font-weight: 500; }
+  #menubar b { font-weight: 700; }
+  #clock { margin-left: auto; font-variant-numeric: tabular-nums; }
+  .window { position: absolute; top: 0; left: 0; width: 360px; border-radius: 14px; overflow: hidden; box-shadow: 0 30px 60px -20px rgb(0 0 0 / 0.55); will-change: transform; }
+  .window.min { opacity: 0; pointer-events: none; }
+  .titlebar { display: flex; align-items: center; gap: 7px; height: 34px; padding: 0 12px; cursor: grab; touch-action: none; }
+  .titlebar:active { cursor: grabbing; }
+  .titlebar .title { margin-left: 8px; font-weight: 600; }
+  .light { width: 12px; height: 12px; border-radius: 50%; border: 0; padding: 0; cursor: pointer; }
+  .light.close { background: #ff5f57; } .light.min { background: #febc2e; } .light.max { background: #28c840; }
+  .body { padding: 6px 14px 14px; }
+  .row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid rgb(255 255 255 / 0.08); }
+  .row:first-child { border-top: 0; }
+  .pill { margin-left: auto; padding: 1px 8px; border-radius: 99px; font-size: 11px; background: rgb(255 255 255 / 0.12); }
+  textarea { width: 100%; height: 150px; resize: none; border: 0; border-radius: 10px; padding: 10px; background: rgb(0 0 0 / 0.25); color: inherit; font: inherit; }
+  .spark { display: flex; align-items: end; gap: 4px; height: 90px; }
+  .spark i { flex: 1; border-radius: 4px 4px 0 0; background: linear-gradient(#f0abfc, #7c3aed); transform-origin: bottom; }
+  #dock { position: fixed; left: 50%; bottom: 10px; transform: translateX(-50%); display: flex; gap: 10px; padding: 8px 10px; border-radius: 22px; z-index: 1000; }
+  .app { width: 48px; height: 48px; border-radius: 13px; border: 0; cursor: pointer; display: grid; place-items: center; font-size: 22px; color: #fff; transition: transform 160ms cubic-bezier(0.2, 0.8, 0.2, 1); transform-origin: bottom; }
+  .app:hover { transform: scale(1.22) translateY(-4px); }
+  .app.open::after { content: ''; position: absolute; margin-top: 60px; width: 4px; height: 4px; border-radius: 50%; background: #fff; }
+  @media (prefers-reduced-motion: reduce) { .app { transition: none; } .app:hover { transform: none; } }
+  @media (prefers-reduced-transparency: reduce) { .glass { background: rgb(28 24 46 / 0.96); backdrop-filter: none; -webkit-backdrop-filter: none; } }
+</style>
+</head>
+<body>
+<div id="menubar" class="glass"><b>Rose</b><span>File</span><span>View</span><span>Window</span><span id="clock"></span></div>
+<div id="desk"></div>
+<nav id="dock" class="glass" aria-label="Dock"></nav>
+<script>
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+  const desk = document.getElementById('desk');
+  const dock = document.getElementById('dock');
+  const APPS = [
+    { id: 'agents', title: 'Agents', icon: '✦', color: 'linear-gradient(135deg,#8b5cf6,#ec4899)', x: 0.08, y: 0.12, body: () =>
+      ['Plan a weekend in Big Sur|running', 'Reply to the Lisbon thread|waiting', 'Book dinner for Friday|running', 'Renew passport|done']
+        .map((s) => { const [n, st] = s.split('|'); return `<div class="row"><span>${n}</span><span class="pill">${st}</span></div>`; }).join('') },
+    { id: 'notes', title: 'Notes', icon: '✎', color: 'linear-gradient(135deg,#f59e0b,#f97316)', x: 0.42, y: 0.2, body: () => '<textarea aria-label="Notes">Ideas for the offsite…</textarea>' },
+    { id: 'activity', title: 'Activity', icon: '↗', color: 'linear-gradient(135deg,#06b6d4,#3b82f6)', x: 0.62, y: 0.46, body: () =>
+      `<div class="spark">${[0.3, 0.55, 0.4, 0.8, 0.62, 0.9, 0.5, 0.72, 0.45, 0.66].map((h) => `<i style="height:100%;transform:scaleY(${h})"></i>`).join('')}</div>` },
+  ];
+  const wins = new Map();
+  let z = 10;
+
+  function animate(el, frames, ms) {
+    return reduceMotion.matches ? Promise.resolve() : el.animate(frames, { duration: ms, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)' }).finished;
+  }
+
+  function createWindow(app) {
+    const w = document.createElement('section');
+    w.className = 'window glass';
+    w.setAttribute('aria-label', app.title);
+    w.innerHTML = `<div class="titlebar"><button class="light close" aria-label="Close"></button><button class="light min" aria-label="Minimize"></button><button class="light max" aria-label="Zoom"></button><span class="title"></span></div><div class="body">${app.body()}</div>`;
+    w.querySelector('.title').textContent = app.title;
+    const state = { el: w, app, x: Math.round(innerWidth * app.x), y: Math.round(innerHeight * app.y), open: true, minimized: false };
+    const place = () => { w.style.transform = `translate3d(${state.x}px, ${state.y}px, 0)`; };
+    place();
+    w.addEventListener('pointerdown', () => { w.style.zIndex = String(++z); });
+
+    // Drag: pointer events can arrive many times per frame; apply at most once per frame.
+    const bar = w.querySelector('.titlebar');
+    let drag = null;
+    let pending = 0;
+    bar.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('button')) return;
+      drag = { dx: e.clientX - state.x, dy: e.clientY - state.y };
+      bar.setPointerCapture(e.pointerId);
+    });
+    bar.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      state.x = Math.max(-300, Math.min(innerWidth - 60, e.clientX - drag.dx));
+      state.y = Math.max(30, Math.min(innerHeight - 40, e.clientY - drag.dy));
+      if (!pending) pending = requestAnimationFrame(() => { pending = 0; place(); });
+    });
+    const end = () => { drag = null; };
+    bar.addEventListener('pointerup', end);
+    bar.addEventListener('pointercancel', end);
+    w.querySelector('.close').addEventListener('click', () => toggle(app.id, 'close'));
+    w.querySelector('.min').addEventListener('click', () => toggle(app.id, 'min'));
+    desk.append(w);
+    wins.set(app.id, state);
+    return state;
+  }
+
+  async function toggle(id, how) {
+    const s = wins.get(id);
+    const icon = dock.querySelector(`[data-app="${id}"]`);
+    if (!s.open || s.minimized) {
+      s.open = true; s.minimized = false;
+      s.el.classList.remove('min');
+      s.el.style.display = '';
+      s.el.style.zIndex = String(++z);
+      icon.classList.add('open');
+      await animate(s.el, [{ opacity: 0, transform: `translate3d(${s.x}px, ${s.y + 40}px, 0) scale(0.92)` }, { opacity: 1, transform: `translate3d(${s.x}px, ${s.y}px, 0)` }], 260);
+      return;
+    }
+    const r = icon.getBoundingClientRect();
+    await animate(s.el, [{ opacity: 1, transform: `translate3d(${s.x}px, ${s.y}px, 0)` }, { opacity: 0, transform: `translate3d(${r.left}px, ${r.top}px, 0) scale(0.1)` }], 280);
+    if (how === 'close') { s.open = false; s.el.style.display = 'none'; icon.classList.remove('open'); }
+    else { s.minimized = true; s.el.classList.add('min'); }
+  }
+
+  for (const app of APPS) {
+    const b = document.createElement('button');
+    b.className = 'app open';
+    b.dataset.app = app.id;
+    b.title = app.title;
+    b.style.background = app.color;
+    b.textContent = app.icon;
+    b.addEventListener('click', () => toggle(app.id, 'min'));
+    dock.append(b);
+    createWindow(app);
+  }
+
+  // Clock: one update per minute, aligned to the minute; stopped while hidden.
+  const clock = document.getElementById('clock');
+  let clockTimer = 0;
+  function tick() {
+    clock.textContent = new Date().toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+    clockTimer = setTimeout(tick, 60000 - (Date.now() % 60000) + 50);
+  }
+  function syncClock() {
+    clearTimeout(clockTimer);
+    clockTimer = 0;
+    if (!document.hidden) tick();
+  }
+  document.addEventListener('visibilitychange', syncClock);
+  syncClock();
+  parent.postMessage({ type: 'rose:ready' }, '*');
+</script>
+</body>
+</html>

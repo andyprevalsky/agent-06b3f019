@@ -1,0 +1,233 @@
+<!doctype html>
+<!--
+  Example: animated shader background. WebGPU first, WebGL2 fallback, same look.
+
+  Use it: copy this folder to root/slots/background/ and add to rose-ui.json
+    "slots": { "background": { "entry": "root/slots/background/index.html" } }
+  The background shows through the app once the first message is sent
+  (theme.json background.fadeAfterFirstMessage controls how much).
+
+  Performance:
+  - Renders at devicePixelRatio, then caps the backing store at PIXEL_BUDGET pixels.
+    A soft field like this looks identical upscaled and costs a fraction of the GPU.
+  - Quality governor: if frames run slower than ~60 fps (weak or software GPU), the
+    pixel budget shrinks once to fit, so the page never janks to keep resolution.
+  - Resizes on ResizeObserver, never per frame. Uniforms are one 16-byte write.
+  - Stops the loop when hidden or scrolled offscreen; one static frame under
+    prefers-reduced-motion. `document.documentElement.dataset.backend` says which
+    API is drawing (webgpu | webgl2 | none).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>shader-background</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0b1a; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c" aria-hidden="true"></canvas>
+<script type="module">
+  const MAX_PIXELS = 1_000_000;
+  const MIN_PIXELS = 60_000;
+  const TARGET_FRAME_MS = 15;
+  let pixelBudget = MAX_PIXELS;
+  const canvas = document.getElementById('c');
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+  const root = document.documentElement;
+
+  const WGSL = /* wgsl */ `
+    struct U { res: vec2f, time: f32, pad: f32 };
+    @group(0) @binding(0) var<uniform> u: U;
+    @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+      return vec4f(p[i], 0.0, 1.0);
+    }
+    fn hash(p0: vec2f) -> f32 {
+      var p = fract(p0 * vec2f(123.34, 456.21));
+      p += dot(p, p + 45.32);
+      return fract(p.x * p.y);
+    }
+    fn noise(p: vec2f) -> f32 {
+      let i = floor(p);
+      var f = fract(p);
+      f = f * f * (3.0 - 2.0 * f);
+      return mix(mix(hash(i), hash(i + vec2f(1.0, 0.0)), f.x),
+                 mix(hash(i + vec2f(0.0, 1.0)), hash(i + vec2f(1.0, 1.0)), f.x), f.y);
+    }
+    fn fbm(p0: vec2f) -> f32 {
+      var v = 0.0; var a = 0.5; var p = p0;
+      for (var i = 0; i < 3; i++) { v += a * noise(p); p *= 2.03; a *= 0.5; }
+      return v;
+    }
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let frag = vec2f(pos.x, u.res.y - pos.y);
+      let uv = frag / u.res;
+      let p = (frag * 2.0 - u.res) / min(u.res.x, u.res.y);
+      let t = u.time * 0.05;
+      let q = vec2f(fbm(p * 1.5 + t), fbm(p * 1.5 - t + 3.1));
+      let f = fbm(p * 1.2 + 2.0 * q + vec2f(t * 2.0, -t));
+      var col = mix(vec3f(0.04, 0.05, 0.12), vec3f(0.30, 0.18, 0.62), smoothstep(0.2, 0.8, f));
+      col = mix(col, vec3f(0.95, 0.35, 0.55), smoothstep(0.55, 0.95, q.x) * 0.6);
+      col = mix(col, vec3f(0.20, 0.75, 0.85), smoothstep(0.6, 1.0, q.y) * 0.35);
+      return vec4f(col * (0.85 + 0.15 * uv.y), 1.0);
+    }`;
+
+  const GLSL_VS = `#version 300 es
+    in vec2 p; void main() { gl_Position = vec4(p, 0.0, 1.0); }`;
+  const GLSL_FS = `#version 300 es
+    precision highp float;
+    uniform vec2 uRes; uniform float uTime; out vec4 o;
+    float hash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+    float noise(vec2 p) {
+      vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+      return mix(mix(hash(i), hash(i + vec2(1, 0)), f.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), f.x), f.y);
+    }
+    float fbm(vec2 p) { float v = 0.0, a = 0.5; for (int i = 0; i < 3; i++) { v += a * noise(p); p *= 2.03; a *= 0.5; } return v; }
+    void main() {
+      vec2 uv = gl_FragCoord.xy / uRes;
+      vec2 p = (gl_FragCoord.xy * 2.0 - uRes) / min(uRes.x, uRes.y);
+      float t = uTime * 0.05;
+      vec2 q = vec2(fbm(p * 1.5 + t), fbm(p * 1.5 - t + 3.1));
+      float f = fbm(p * 1.2 + 2.0 * q + vec2(t * 2.0, -t));
+      vec3 col = mix(vec3(0.04, 0.05, 0.12), vec3(0.30, 0.18, 0.62), smoothstep(0.2, 0.8, f));
+      col = mix(col, vec3(0.95, 0.35, 0.55), smoothstep(0.55, 0.95, q.x) * 0.6);
+      col = mix(col, vec3(0.20, 0.75, 0.85), smoothstep(0.6, 1.0, q.y) * 0.35);
+      o = vec4(col * (0.85 + 0.15 * uv.y), 1.0);
+    }`;
+
+  /** Backing-store size: CSS size x DPR, scaled down to fit the pixel budget. */
+  function backingSize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    let w = canvas.clientWidth * dpr;
+    let h = canvas.clientHeight * dpr;
+    const scale = Math.min(1, Math.sqrt(pixelBudget / Math.max(1, w * h)));
+    return [Math.max(1, Math.round(w * scale)), Math.max(1, Math.round(h * scale))];
+  }
+
+  async function createWebGpu() {
+    if (!navigator.gpu) return null;
+    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'low-power' });
+    if (!adapter) return null;
+    const device = await adapter.requestDevice();
+    const ctx = canvas.getContext('webgpu');
+    const format = navigator.gpu.getPreferredCanvasFormat();
+    ctx.configure({ device, format, alphaMode: 'opaque' });
+    const module = device.createShaderModule({ code: WGSL });
+    const pipeline = device.createRenderPipeline({
+      layout: 'auto',
+      vertex: { module, entryPoint: 'vs' },
+      fragment: { module, entryPoint: 'fs', targets: [{ format }] },
+      primitive: { topology: 'triangle-list' },
+    });
+    const uniforms = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: uniforms } }] });
+    const data = new Float32Array(4);
+    return {
+      name: 'webgpu',
+      draw(seconds) {
+        data[0] = canvas.width; data[1] = canvas.height; data[2] = seconds;
+        device.queue.writeBuffer(uniforms, 0, data);
+        const encoder = device.createCommandEncoder();
+        const pass = encoder.beginRenderPass({ colorAttachments: [{ view: ctx.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.draw(3);
+        pass.end();
+        device.queue.submit([encoder.finish()]);
+      },
+    };
+  }
+
+  function createWebGl2() {
+    const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, powerPreference: 'low-power' });
+    if (!gl) return null;
+    const compile = (type, src) => {
+      const s = gl.createShader(type);
+      gl.shaderSource(s, src);
+      gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+      return s;
+    };
+    const prog = gl.createProgram();
+    gl.attachShader(prog, compile(gl.VERTEX_SHADER, GLSL_VS));
+    gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, GLSL_FS));
+    gl.linkProgram(prog);
+    gl.useProgram(prog);
+    gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    const loc = gl.getAttribLocation(prog, 'p');
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    const uRes = gl.getUniformLocation(prog, 'uRes');
+    const uTime = gl.getUniformLocation(prog, 'uTime');
+    return {
+      name: 'webgl2',
+      draw(seconds) {
+        gl.viewport(0, 0, canvas.width, canvas.height);
+        gl.uniform2f(uRes, canvas.width, canvas.height);
+        gl.uniform1f(uTime, seconds);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+      },
+    };
+  }
+
+  const forceWebGl = new URLSearchParams(location.search).has('webgl2');
+  const renderer = (forceWebGl ? null : await createWebGpu().catch(() => null)) || createWebGl2();
+  root.dataset.backend = renderer ? renderer.name : 'none';
+
+  if (renderer) {
+    let raf = 0;
+    let onscreen = true;
+    const origin = performance.now();
+    const running = () => !document.hidden && onscreen && !reduceMotion.matches;
+    // Quality governor: skip warm-up frames, then average 8 frame intervals; if they
+    // miss the target, shrink the budget in one proportional step (decrease-only, so
+    // it never oscillates). Pixel cost is roughly linear in pixel count.
+    let last = 0;
+    let samples = [];
+    let warmup = 6;
+    const govern = (now) => {
+      if (last && warmup-- <= 0) samples.push(now - last);
+      last = now;
+      if (samples.length < 8) return;
+      const avg = samples.reduce((s, d) => s + d, 0) / samples.length;
+      samples = [];
+      if (avg > TARGET_FRAME_MS * 1.25 && pixelBudget > MIN_PIXELS) {
+        pixelBudget = Math.max(MIN_PIXELS, pixelBudget * (TARGET_FRAME_MS / avg) * 0.8);
+        [canvas.width, canvas.height] = backingSize();
+        warmup = 4;
+        root.dataset.pixelBudget = String(Math.round(pixelBudget));
+      }
+    };
+    const frame = (now) => {
+      raf = 0;
+      govern(now);
+      renderer.draw((now - origin) / 1000);
+      if (running()) raf = requestAnimationFrame(frame);
+    };
+    const update = () => {
+      if (running() && !raf) {
+        last = 0; // a pause is not a slow frame
+        samples = [];
+        raf = requestAnimationFrame(frame);
+      }
+      else if (!running() && raf) { cancelAnimationFrame(raf); raf = 0; }
+    };
+    new ResizeObserver(() => {
+      [canvas.width, canvas.height] = backingSize();
+      if (!raf) renderer.draw((performance.now() - origin) / 1000);
+    }).observe(canvas);
+    new IntersectionObserver(([entry]) => { onscreen = entry.isIntersecting; update(); }).observe(canvas);
+    document.addEventListener('visibilitychange', update);
+    reduceMotion.addEventListener('change', update);
+    [canvas.width, canvas.height] = backingSize();
+    renderer.draw(0);
+    update();
+  }
+  parent.postMessage({ type: 'rose:ready' }, '*');
+</script>
+</body>
+</html>

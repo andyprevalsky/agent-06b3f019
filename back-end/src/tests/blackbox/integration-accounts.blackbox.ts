@@ -24,6 +24,8 @@
  *   - providers without account-scoped cleanup answer 501 and keep their data
  *   - iMessage: one account per Mac device id; delete removes exactly that Mac's messages
  *   - validation 400s, per-user account cap, internal API-key writer path, auth 401
+ *   - Plaid per-item sync progress (I5): indeterminate total while syncing, final counts,
+ *     1 s coalescing, independent items, ITEM_LOGIN_REQUIRED, webhook re-sync reuses the row
  *
  * Usage: bash scripts/run-blackbox-tests.sh integration-accounts
  */
@@ -34,6 +36,7 @@ import { reportIntegrationProgress } from '../../domains/integrations/service.pr
 import { MAX_PROGRESS_ACCOUNTS_PER_USER } from '../../domains/integrations/syncAccountsContract';
 import { cases as advancedCases } from './integration-accounts.cases';
 import { imessageCases } from './integration-accounts.imessage.cases';
+import { cases as plaidProgressCases } from './integration-accounts.plaid.cases';
 import {
   accountsOf,
   anonymousSession,
@@ -353,6 +356,8 @@ async function cleanup(userIds: string[]): Promise<void> {
   await prisma.messageRecord.deleteMany({ where: { person: where } });
   await prisma.person.deleteMany({ where });
   await prisma.integrationSyncProgress.deleteMany({ where });
+  await prisma.cookie.deleteMany({ where });
+  await prisma.cookieBundle.deleteMany({ where });
   await prisma.plaidTransaction.deleteMany({ where });
   await prisma.plaidAccount.deleteMany({ where });
   await prisma.plaidItem.deleteMany({ where });
@@ -365,7 +370,12 @@ async function main(): Promise<void> {
   sessions.a = await anonymousSession();
   sessions.b = await anonymousSession();
   const users = () => ({ a: A(), b: B() });
-  const tests = [...coreCases, ...advancedCases(users), ...imessageCases(users)];
+  const tests = [
+    ...coreCases,
+    ...advancedCases(users),
+    ...plaidProgressCases(),
+    ...imessageCases(users),
+  ];
   let failed = 0;
   try {
     for (const test of tests) {
