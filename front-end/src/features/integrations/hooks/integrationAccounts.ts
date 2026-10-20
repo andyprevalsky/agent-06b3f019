@@ -66,12 +66,6 @@ export function accountToneForState(state: string): AccountTone {
   return 'synced';
 }
 
-/** True for the states only a reconnect fixes (the Integrations icon's red dot). */
-export function needsReconnectState(state: string): boolean {
-  const s = state.trim().toLowerCase();
-  return s === 'needs_reconnect' || s === 'expired';
-}
-
 function parseEntry(entry: Record<string, unknown>): IntegrationAccount | null {
   const accountId = typeof entry.accountId === 'string' ? entry.accountId : '';
   if (accountId === '') return null;

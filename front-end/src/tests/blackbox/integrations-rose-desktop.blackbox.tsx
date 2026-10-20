@@ -24,12 +24,12 @@ import { http, HttpResponse } from 'msw';
 
 import {
   accountToneForState,
-  needsReconnectState,
   parseIntegrationAccount,
   parseSyncProgress,
 } from '@/features/integrations/hooks/integrationAccounts';
 import { formatEta } from '@/features/integrations/components/syncProgressFormat';
 import type { ConnectedIntegration } from '@/features/integrations/types';
+import { integrationsNeedingReconnect } from '@/lib/api/integrationHealth';
 
 import {
   account,
@@ -541,9 +541,14 @@ describe('integrations account parser', () => {
     expect(accountToneForState('needs_reconnect')).toBe('warning');
     expect(accountToneForState('EXPIRED')).toBe('warning');
     expect(accountToneForState('sync_failed')).toBe('error');
-    expect(needsReconnectState('needs_reconnect')).toBe(true);
-    expect(needsReconnectState('EXPIRED')).toBe(true);
-    expect(needsReconnectState('sync_failed')).toBe(false);
+    const health = (state: string) => ({
+      integrations: [{ name: 'imessage', status: 'CONNECTED', accounts: [{ state }] }],
+      plaidItems: [],
+    });
+    expect(integrationsNeedingReconnect(health('needs_reconnect'))).toEqual(['imessage']);
+    expect(integrationsNeedingReconnect(health('EXPIRED'))).toEqual(['imessage']);
+    expect(integrationsNeedingReconnect(health('sync_failed'))).toEqual([]);
+    expect(integrationsNeedingReconnect(health('syncing'))).toEqual([]);
   });
 
   it("reads a row's one account (its first entry); null without `accounts`", () => {
