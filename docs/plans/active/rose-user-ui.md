@@ -140,8 +140,11 @@ Every ask from Andy in the UI-agent and coding threads, mapped to an owner. FE-n
 | Owner | Rows | State |
 |---|---|---|
 | FE-1..FE-10 | 11-15, 17-25, 29-34, 37, 40, 43-47, 51-53, 55, 57-78 (UI halves) | merged in ui-integration (gate green at b4870be23; feat merged at 511197ab0) |
-| FE-11 code agents | display HTML via usercontent_url, code_agent paused / usage-limit Retry, batched code-agents list, share_code_session_with, 79 | in progress |
-| FE-12 integrations | Gmail I3, Passwords/Passkeys I7, LinkedIn I4 (export goal text: approval at deploy), WhatsApp I2 | in progress |
+| FE-11 code agents | display HTML via usercontent_url, code_agent paused / usage-limit text (Retry waits on L-CODEAGENT-API), batched code-agents list, share_code_session_with, 79 | merged |
+| FE-12 integrations | Gmail I3, Passwords/Passkeys I7, LinkedIn I4 (export goal text: approval at deploy), WhatsApp I2 | merged |
+| FE-13 dark visual fixes | dark query surface, dark New Super Agent + model chip, speed square radius, admin switcher into Settings | in progress |
+| FE-14 root browser | Browser drawer: Root by default, selected agent's tab, take over, per-site fork/merge text, sites list; server account labels | in progress |
+| FE-15 apps | 10, 39: left-bar Apps (Rose first, dev only), full-screen app view + query box, History restore, Publish → PR, live preview card | in progress (mock: Apps section in nav.js) |
 | Coding thread | 3/A6 root browser world state, 10 + 39 Apps / Rose-in-Rose / local preview URLs (L-APPS), 12 A2A (C6), 13 display tool (A5), 34 backend default, 37 backend new-agent-in-branch, 41 + C12 routing prompts, 46-47b in-sandbox tools + routing by spawner, 48 no timeouts (C11), 50 branch model (C13), 51 local target (C14), 54 HTML+JS (done a151a214c), Phone backend, Projects REST + Agent.projectId | lanes running / queued |
 | UI agent | real recordings (rerun after C12/row-41 merge), integration merge of FE-1..5, live mock | ongoing |
 | Dropped by Andy | Voice, Terminal app, Network app, Files app, right bar, pinned Import pill, liquid-black send (light), two-triangle dark bg | — |
