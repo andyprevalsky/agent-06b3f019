@@ -14,6 +14,7 @@ from tools.prompts.attempt_completion_with_result import (
 from tools.prompts.call_phone_number import PROMPT as call_phone_number_prompt
 from tools.prompts.display import PROMPT as display_prompt
 from tools.prompts.grep import PROMPT as grep_prompt
+from tools.prompts.inspect_code import PROMPT as inspect_code_prompt
 from tools.prompts.google_workspace_run import PROMPT as google_workspace_run_prompt
 from tools.prompts.message_person import PROMPT as message_person_prompt
 from tools.prompts.people_search import PROMPT as people_search_prompt
@@ -40,6 +41,7 @@ TOOL_PROMPTS: dict[str, str] = {
     "call_phone_number": call_phone_number_prompt,
     # Research
     "grep": grep_prompt,
+    "inspect_code": inspect_code_prompt,
     "google_workspace_run": google_workspace_run_prompt,
     "web_search": web_search_prompt,
     "people_search": people_search_prompt,

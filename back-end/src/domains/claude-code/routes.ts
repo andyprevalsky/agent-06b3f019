@@ -7,6 +7,8 @@
  * POST /api/claude-code-session/checkpoint - Checkpoint a running task's code session
  * GET  /api/claude-code-session/code-sessions/:id    - Owned code session (404 otherwise)
  * DELETE /api/claude-code-session/code-sessions/:id - Retire it (kill + delete checkpoints)
+ * POST /api/claude-code-session/code-sessions/:id/inspect - Read-only inspection of its latest
+ *                                          checkpoint in a throwaway sandbox (internal)
  * GET  /api/claude-code-session/:taskId  - Get session info
  * GET  /api/claude-code-session/agent/:agentId - Get all sessions for an agent
  * POST /api/claude-code-session/:taskId/output - Persist terminal output
@@ -21,6 +23,7 @@ import { createSessionSchema, closeSessionSchema } from './types';
 import type { FilePointer } from '../../providers/storage';
 import * as service from './service';
 import { registerCodeSessionRoutes, sendCodeSessionError } from './routes.codeSessions';
+import { registerCodeInspectRoutes } from './routes.codeInspect';
 import { AgentOwnerMismatchError, MissingUserIdError, GitHubAccessDeniedError } from './service';
 import {
   LocalTargetUnavailableError,
@@ -36,6 +39,7 @@ const log = createLogger('ClaudeCodeRoutes');
 const router = Router();
 
 registerCodeSessionRoutes(router);
+registerCodeInspectRoutes(router);
 
 /**
  * C14: a local session runs on the agent tree's Mac with the user's own login,

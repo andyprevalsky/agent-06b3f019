@@ -740,6 +740,20 @@ class GrepTool(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class InspectCodeTool(BaseModel):
+    """Ask a read-only code agent about the files in a code agent's workspace.
+
+    It answers from that session's latest checkpoint in a separate sandbox,
+    cites file:line, and cannot change the session.
+    """
+
+    tool: Literal["inspect_code"]
+    code_session_id: str = Field(description="The code_session_id from that code agent's result.")
+    question: str = Field(
+        description="A self-contained question about the code, naming the files, features or behavior to check."
+    )
+
+
 class InlineViewArg(BaseModel):
     """A published rose_user_ui inline view rendered with the message."""
 
@@ -1379,6 +1393,8 @@ TOOL_MODELS: ToolRegistry = {
     "call_phone_number": CallPhoneNumberTool,
     # Local data search
     "grep": GrepTool,
+    # Read-only look inside a code agent's workspace (explore)
+    "inspect_code": InspectCodeTool,
 }
 
 # Phase-specific override registry. PLAN narrows spawn_agent to the explore-only
@@ -1397,6 +1413,7 @@ EXPLORE_AGENT_TOOLS = [
     "web_fetch",
     "grep",
     "api_request",
+    "inspect_code",
     "attempt_completion_with_result",
 ]
 
@@ -1649,6 +1666,7 @@ __all__ = [
     "AttemptCompletionWithResultTool",
     "CallPhoneNumberTool",
     "GrepTool",
+    "InspectCodeTool",
     "TOOL_MODELS",
     "ToolRegistry",
     "create_agent_action_model",

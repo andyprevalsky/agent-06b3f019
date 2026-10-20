@@ -143,7 +143,7 @@ def _render_explore_tool_result(tool_name: str, value: Any) -> str:
                 details["url"] = value["url"]
             detail_text = json.dumps(details, ensure_ascii=False, default=str) if details else ""
             return "\n\n".join(part for part in (source_text, body.strip(), detail_text) if part)
-    if isinstance(value, str) and tool_name in {"web_search", "web_fetch"}:
+    if isinstance(value, str) and tool_name in {"web_search", "web_fetch", "inspect_code"}:
         return value
     return json.dumps(value, ensure_ascii=tool_name not in {"web_search", "web_fetch"}, default=str)
 
@@ -496,6 +496,7 @@ async def spawn_explore_agent_activity(
     from providers.fast_cache.client import resolve_agent_fast_mode
     from tools.api_request import ApiRequestManager
     from tools.grep import GrepManager
+    from tools.inspect_code import InspectCodeManager
     from tools.people_search import PeopleSearchManager
     from tools.web_fetch import WebFetchManager
     from tools.web_search import WebSearchManager
@@ -805,6 +806,16 @@ async def spawn_explore_agent_activity(
                         )
                     ):
                         unavailable_sources_collected.append(normalized)
+        elif tool_name == "inspect_code":
+            result = await InspectCodeManager().execute_tool(
+                execute_activity=tagged_execute_activity,
+                tool_call=tool_call_dict,
+                tool_call_id=tool_call_id,
+                agent_id=agent_id,
+                user_id=user_id,
+            )
+            if result.get("error"):
+                return {"error": True, "message": str(result["error"])}
         elif tool_name == "api_request":
             from utils.kill_switches import api_request_disabled
 
