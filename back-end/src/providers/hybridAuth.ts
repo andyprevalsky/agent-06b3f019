@@ -18,7 +18,11 @@ import { createInitialCredit } from './credits';
 import { PhoneAccountExistsError, syncJwtUser, type JwtUserStore } from './hybridAuthUser';
 import { createLogger } from './logger';
 import { OLDEST_ACCOUNT_FIRST, phoneLookupVariants } from './phoneAccountLookup';
-import { impersonatorFromPayload, verifySupabaseAccessToken } from './supabaseJwt';
+import {
+  impersonatorFromPayload,
+  sessionMethodFromPayload,
+  verifySupabaseAccessToken,
+} from './supabaseJwt';
 
 const log = createLogger('HybridAuth');
 
@@ -71,6 +75,8 @@ export interface HybridAuthRequest extends Request {
     phone?: string;
     /** Operator acting on behalf of `id` (RFC 8693 `act`), else undefined. */
     impersonatedBy?: string;
+    /** First `amr` method of the session (`otp`, `preview_handoff`, ...). */
+    authMethod?: string;
   };
 }
 
@@ -197,6 +203,7 @@ async function handleJwtAuth(
     email: payload.email,
     phone: payload.phone,
     impersonatedBy: impersonatorFromPayload(payload),
+    authMethod: sessionMethodFromPayload(payload),
   };
   req.isInternal = false;
   req.isX402 = false;

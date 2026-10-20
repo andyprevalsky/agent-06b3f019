@@ -1,7 +1,11 @@
 import type { Request, Response, NextFunction } from 'express';
 import type jwt from 'jsonwebtoken';
 import { createLogger } from './logger';
-import { impersonatorFromPayload, verifySupabaseAccessToken } from './supabaseJwt';
+import {
+  impersonatorFromPayload,
+  sessionMethodFromPayload,
+  verifySupabaseAccessToken,
+} from './supabaseJwt';
 
 const log = createLogger('Auth');
 
@@ -26,6 +30,8 @@ export interface AuthRequest extends Request {
      * correctness depends on "is this really the account holder?" must read it.
      */
     impersonatedBy?: string;
+    /** First `amr` method of the session (`otp`, `preview_handoff`, ...). */
+    authMethod?: string;
   };
   isInternal?: boolean;
 }
@@ -72,6 +78,7 @@ async function authenticateRequest(
       email: payload.email,
       phone: payload.phone,
       impersonatedBy: impersonatorFromPayload(payload),
+      authMethod: sessionMethodFromPayload(payload),
     };
     req.isInternal = false;
 
