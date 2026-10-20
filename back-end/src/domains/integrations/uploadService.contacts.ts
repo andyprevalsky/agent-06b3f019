@@ -10,6 +10,7 @@ import { createLogger } from '../../providers/logger';
 import * as repo from './repo';
 import { parseVcfContent, importVcfContacts } from '../../services/integrations/vcfParser';
 import { parseEmailZip, importEmailsToDb } from '../../services/integrations/emailParser';
+import { importLinkedInData } from '../../services/integrations/linkedinParser';
 
 const log = createLogger('Integrations');
 
@@ -64,6 +65,53 @@ export async function processGenericUpload(
   }, 1000);
 
   return integration;
+}
+
+/**
+ * Process LinkedIn ZIP upload.
+ */
+export async function processLinkedInUpload(userId: string, filePath: string, fileName: string) {
+  log.info('LinkedIn file uploaded', { fileName, userId });
+
+  const integration = await repo.upsertIntegrationForUpload({
+    userId,
+    name: 'linkedin',
+    config: { fileName, uploadedAt: new Date().toISOString() },
+  });
+
+  const jobId = integration.id;
+
+  try {
+    const result = await importLinkedInData(userId, filePath, jobId);
+
+    await repo.updateIntegrationStatus(integration.id, IntegrationStatus.CONNECTED, {
+      isActive: true,
+      lastSyncAt: new Date(),
+      lastSuccessfulSyncAt: new Date(),
+    });
+
+    fs.unlinkSync(filePath);
+
+    return { jobId, contacts: result.contacts, messages: result.messages };
+  } catch (parseError: unknown) {
+    log.error('LinkedIn parse/import error', {
+      error: parseError instanceof Error ? parseError.message : String(parseError),
+    });
+
+    await repo.updateIntegrationStatus(integration.id, IntegrationStatus.SYNC_FAILED, {
+      lastSyncAt: new Date(),
+      lastFailedSyncAt: new Date(),
+      failureReason: parseError instanceof Error ? parseError.message : 'Unknown error',
+    });
+
+    try {
+      fs.unlinkSync(filePath);
+    } catch {
+      // expected — file may already be removed
+    }
+
+    throw parseError;
+  }
 }
 
 /**

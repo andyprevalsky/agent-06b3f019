@@ -401,18 +401,13 @@ export const MACHINE_DATA_INGEST_ROUTES: { path: string; method?: string; body: 
     },
     { path: '/api/integrations/upload', body: () => ({ integrationType: 'generic' }) },
     { path: '/api/integrations/linkedin/upload', body: () => ({}) },
-    // The export agent reports the session account's LinkedIn sync phases.
-    {
-      path: '/api/integrations/linkedin/sync/phase',
-      body: () => ({ agent_id: 'impersonation-probe', phase: 'export_requested' }),
-    },
     { path: '/api/integrations/contacts/upload', body: () => ({}) },
     { path: '/api/integrations/email/upload', body: () => ({}) },
     { path: '/api/integrations/documents/upload', body: () => ({ documents: [] }) },
     { path: '/api/integrations/passwords/apple/upload', body: () => ({}) },
     // Sync progress reports describe THIS machine's sync for the session's account.
     {
-      path: '/api/integrations/imessage/accounts/impersonation-probe/progress',
+      path: '/api/integrations/imessage/accounts/default/progress',
       body: () => ({ runId: 'impersonation-probe', state: 'syncing' }),
     },
     // Outside /api/integrations — these were missed by the first version of this
