@@ -3747,6 +3747,10 @@ async def _run_all_tests():
         "format_code_events_transcript_failed_status",
         test_format_code_events_transcript_covers_failed_and_status_only_results,
     )
+    r.record(
+        "format_code_events_transcript_project_startup",
+        test_format_code_events_transcript_reports_project_startup,
+    )
     await r.record_async("repo_close_session_happy", test_repo_close_e2b_session_happy)
     await r.record_async("repo_close_session_non200", test_repo_close_e2b_session_non_200_returns_empty)
     await r.record_async("repo_health_happy", test_repo_check_sandbox_health_happy)
@@ -4070,6 +4074,26 @@ def test_format_code_events_transcript_skips_empty_tool_results():
     ]
 
 
+def test_format_code_events_transcript_reports_project_startup():
+    """PJ3: a project's startup outcome (ws-server event) is visible in the transcript."""
+    from domains.spawn_claude_code_agent.service import format_code_events_transcript
+
+    transcript = format_code_events_transcript(
+        [
+            {"type": "project_startup", "status": "running", "project": "Rose"},
+            {"type": "project_startup", "status": "ok", "project": "Rose", "durationMs": 12345},
+            {"type": "project_startup", "status": "failed", "project": "Rose", "exitCode": 3, "durationMs": 400},
+            {"type": "project_startup", "status": "timeout", "project": "Rose", "timeoutS": 120},
+            {"type": "project_startup", "status": "skipped"},
+        ]
+    )
+    assert transcript.splitlines() == [
+        "[Claude] Project startup (Rose): ok in 12.3s",
+        "[Claude] Project startup (Rose): failed (exit 3) in 0.4s",
+        "[Claude] Project startup (Rose): timed out after 120s",
+    ]
+
+
 def test_format_code_events_transcript_covers_failed_and_status_only_results():
     from domains.spawn_claude_code_agent.service import format_code_events_transcript
 
@@ -4316,6 +4340,7 @@ class _CCBoundaryRecorder:
         self.persisted: list[str] = []
         self.verified_events: list[list[dict]] = []
         self.logged: list[dict] = []
+        self.transcripts: list[dict] = []
         self.collector = AsyncMock()
 
     async def create_session(self, **kwargs):
@@ -4328,6 +4353,10 @@ class _CCBoundaryRecorder:
 
     async def save_message(self, **kwargs):
         self.titles.append(kwargs.get("title"))
+
+    async def save_transcript(self, **kwargs):
+        self.transcripts.append(kwargs)
+        return True
 
     async def persist_output(self, task_id, output, *args, **kwargs):
         self.persisted.append(output)
@@ -4349,6 +4378,7 @@ class _CCBoundaryRecorder:
             patch.object(service, "create_e2b_session", side_effect=self.create_session),
             patch.object(service, "close_e2b_session", side_effect=self.close_session),
             patch.object(service, "save_claude_code_message", side_effect=self.save_message),
+            patch.object(service, "save_code_transcript_batch", side_effect=self.save_transcript),
             patch.object(service, "persist_terminal_output", side_effect=self.persist_output),
             patch.object(service, "_run_verifier", side_effect=self.verifier),
             patch.object(service, "_log_code_agent_event", side_effect=lambda event, **kw: self.logged.append(event)),

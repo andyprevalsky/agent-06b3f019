@@ -405,6 +405,11 @@ export const MACHINE_DATA_INGEST_ROUTES: { path: string; method?: string; body: 
     { path: '/api/integrations/email/upload', body: () => ({}) },
     { path: '/api/integrations/documents/upload', body: () => ({ documents: [] }) },
     { path: '/api/integrations/passwords/apple/upload', body: () => ({}) },
+    // Sync progress reports describe THIS machine's sync for the session's account.
+    {
+      path: '/api/integrations/imessage/accounts/impersonation-probe/progress',
+      body: () => ({ runId: 'impersonation-probe', state: 'syncing' }),
+    },
     // Outside /api/integrations — these were missed by the first version of this
     // list, and POST /api/upload is the same class as /documents/upload.
     { path: '/api/upload', body: () => ({}) },

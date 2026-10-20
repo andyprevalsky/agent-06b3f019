@@ -127,7 +127,17 @@ before(() => {
   }) as typeof prisma.claudeCodeSession.update;
 });
 
+/** Session dirs this run created under /tmp/claude-code-local (removed in after()). */
+const createdTaskIds = new Set<string>();
+function trackTask(taskId: string): string {
+  createdTaskIds.add(taskId);
+  return taskId;
+}
+
 after(() => {
+  for (const taskId of createdTaskIds) {
+    rmSync(resolveLocalSessionWorkDir(taskId), { recursive: true, force: true });
+  }
   delete process.env.CLAUDE_CODE_LOCAL_WS_SERVER_PATH;
   prisma.claudeCodeSession.create = originalCreate;
   prisma.claudeCodeSession.update = originalUpdate;
@@ -141,7 +151,7 @@ test('createLocalClaudeCodeSession boots a local ws listener and close tears it 
     process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK = '1';
     delete process.env.FLY_APP_NAME;
 
-    const taskId = `local-session-test-${Date.now()}`;
+    const taskId = trackTask(`local-session-test-${Date.now()}`);
     const session = await createLocalClaudeCodeSession({
       taskId,
       agentId: 'agent-local-test',
@@ -187,7 +197,7 @@ test('createLocalClaudeCodeSessionIfBillingBlocked creates when billing-blocked'
   try {
     process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK = '1';
     delete process.env.FLY_APP_NAME;
-    const taskId = `local-session-billing-${Date.now()}`;
+    const taskId = trackTask(`local-session-billing-${Date.now()}`);
     const session = await createLocalClaudeCodeSessionIfBillingBlocked(
       new Error('403: team is blocked: missing payment method'),
       {
@@ -211,7 +221,7 @@ test('createLocalClaudeCodeSessionIfBillingBlocked creates when billing-blocked'
 });
 
 test('close preserves ownership metadata until the database records CLOSED', async () => {
-  const taskId = `local-session-close-retry-${Date.now()}`;
+  const taskId = trackTask(`local-session-close-retry-${Date.now()}`);
   await createLocalClaudeCodeSession({
     taskId,
     agentId: 'agent-close-retry',
@@ -255,7 +265,7 @@ test('createLocalClaudeCodeSession soft-fails undownloadable attachments', async
   try {
     process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK = '1';
     delete process.env.FLY_APP_NAME;
-    const taskId = `local-session-attach-${Date.now()}`;
+    const taskId = trackTask(`local-session-attach-${Date.now()}`);
     const session = await createLocalClaudeCodeSession({
       taskId,
       agentId: 'agent-attach',
@@ -321,7 +331,7 @@ test('closeLocalClaudeCodeSession extracts output files when userId is provided'
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       })) as typeof fetch;
-    const taskId = `local-session-output-${Date.now()}`;
+    const taskId = trackTask(`local-session-output-${Date.now()}`);
     await createLocalClaudeCodeSession({
       taskId,
       agentId: 'agent-output',
@@ -364,7 +374,7 @@ test('createLocalClaudeCodeSession throws when the ws-server never listens', asy
     await assert.rejects(
       () =>
         createLocalClaudeCodeSession({
-          taskId: `local-session-dead-${Date.now()}`,
+          taskId: trackTask(`local-session-dead-${Date.now()}`),
           agentId: 'agent-dead',
           goal: 'never listens',
           envs: {},

@@ -7,9 +7,13 @@
  *   - USER response-schema updates (`isResponseSchemaUpdate`)
  *   - direct-chat turns typed to a code session (`isDirectCodeTurn`,
  *     claude-code domain `sendDirectTurn`)
+ *   - structured transcript batches of a code session (`isCodeTranscript`,
+ *     agents `save_code_transcript_batch`, keyed by task + event range)
  *   - agent-graph (A2A) messages (`a2a` metadata, agents domain
  *     `agentGraphService`): the recipient's USER row and the code agent's
  *     sent/received chip rows
+ *   - inline `display` media (ASSISTANT, `source: 'display'`, agent-tools
+ *     domain): one row per (agent, content hash)
  */
 import { createHash } from 'node:crypto';
 import type { CreateMessageParams } from './messages';
@@ -23,7 +27,9 @@ function isAgentGraphMessage(params: CreateMessageParams): boolean {
 function hasIdempotentKind(params: CreateMessageParams): boolean {
   if (isAgentGraphMessage(params)) return params.role === 'USER' || params.role === 'TOOL';
   if (params.role === 'USER') return params.metadata?.isResponseSchemaUpdate === true;
-  return params.role === 'TOOL' && params.metadata?.isDirectCodeTurn === true;
+  if (params.role === 'ASSISTANT') return params.metadata?.source === 'display';
+  if (params.role !== 'TOOL') return false;
+  return params.metadata?.isDirectCodeTurn === true || params.metadata?.isCodeTranscript === true;
 }
 
 /** Row id for one (agent, key) write. */

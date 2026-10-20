@@ -16,7 +16,6 @@
  * outputs and terminate a surviving server after a backend restart.
  */
 import { type ChildProcess, spawn } from 'child_process';
-import { createServer } from 'net';
 import {
   existsSync,
   mkdirSync,
@@ -35,6 +34,9 @@ import { isMissingLocalFileError, readRegularFileNoFollow } from './claudeCodeLo
 import { isFilePointer } from './claudeCodeLocalOwnership';
 import { isSandboxCreateTimeoutOrAbortError } from './e2bSandboxCreate';
 import { materializeUserUiInLocalHome, type UserUiWorkspace } from './userUi/workspace';
+import { allocatePort, waitForChildReadiness } from './claudeCodeLocalProcess';
+import type { ProjectRestoreReport, ProjectWorkspace } from './projects/types';
+import { restoreLocalProject, unregisterWorkspaceExecutor } from './projects/workspace';
 
 const log = createLogger('ClaudeCodeLocal');
 
@@ -300,72 +302,6 @@ function findWsServerPath(): string {
   throw new Error(`Claude Code ws-server.mjs not found (tried ${candidates.join(', ')})`);
 }
 
-async function allocatePort(): Promise<number> {
-  return await new Promise((resolvePort, reject) => {
-    const server = createServer();
-    server.listen(0, '127.0.0.1', () => {
-      const addr = server.address();
-      if (!addr || typeof addr === 'string') {
-        server.close();
-        reject(new Error('Failed to allocate local port'));
-        return;
-      }
-      const { port } = addr;
-      server.close((err) => {
-        if (err) reject(err);
-        else resolvePort(port);
-      });
-    });
-    server.on('error', reject);
-  });
-}
-
-async function waitForChildReadiness(
-  child: ChildProcess,
-  port: number,
-  readinessToken: string,
-  timeoutMs: number
-): Promise<boolean> {
-  return await new Promise((resolveReady) => {
-    let settled = false;
-    let stdout = '';
-    const finish = (ready: boolean) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      child.stdout?.off('data', onData);
-      child.off('error', onFailure);
-      child.off('exit', onFailure);
-      resolveReady(ready);
-    };
-    const onFailure = () => finish(false);
-    const onData = (chunk: Buffer) => {
-      stdout += chunk.toString('utf8');
-      const lines = stdout.split('\n');
-      stdout = lines.pop() ?? '';
-      for (const line of lines) {
-        try {
-          const event = JSON.parse(line) as Record<string, unknown>;
-          if (
-            event.message === 'Server listening' &&
-            event.port === port &&
-            event.readinessToken === readinessToken
-          ) {
-            finish(true);
-            return;
-          }
-        } catch {
-          // Only the authenticated JSON readiness record can satisfy startup.
-        }
-      }
-    };
-    const timer = setTimeout(() => finish(false), timeoutMs);
-    child.stdout?.on('data', onData);
-    child.once('error', onFailure);
-    child.once('exit', onFailure);
-  });
-}
-
 export function resolveLocalAttachmentPath(workDir: string, filename: string): string {
   const attachmentDir = resolve(workDir, 'attachments');
   const target = resolve(attachmentDir, filename);
@@ -482,6 +418,8 @@ export async function createLocalClaudeCodeSession(params: {
   attachments?: FilePointer[];
   /** rose_user_ui folder + rose-ui CLI to materialize under the session HOME. */
   userUiWorkspace?: UserUiWorkspace | null;
+  /** Project checkout + env files restored into `<HOME>/workspace` before the CLI starts. */
+  projectWorkspace?: ProjectWorkspace | null;
   claudeTokenSource: string | null;
   claudeTokenIntegrationId: string | null;
 }): Promise<{
@@ -489,6 +427,7 @@ export async function createLocalClaudeCodeSession(params: {
   taskId: string;
   sandboxId: string;
   uploadedFiles: string[];
+  projectRestore?: ProjectRestoreReport | null;
 }> {
   const { taskId, agentId, goal, envs } = params;
   const sandboxId = `${LOCAL_SANDBOX_PREFIX}${taskId}`;
@@ -514,6 +453,12 @@ export async function createLocalClaudeCodeSession(params: {
   }
 
   const userUi = await materializeUserUiInLocalHome(workDir, params.userUiWorkspace, agentId);
+  const project = await restoreLocalProject(
+    taskId,
+    workDir,
+    buildLocalChildEnv(envs, {}),
+    params.projectWorkspace
+  );
 
   const port = await allocatePort();
   const readinessToken = randomUUID();
@@ -530,6 +475,7 @@ export async function createLocalClaudeCodeSession(params: {
     CLAUDE_CONFIG_DIR: join(workDir, '.claude'),
     ROSE_LOCAL_WS_READINESS_TOKEN: readinessToken,
     ...userUi?.envs,
+    ...project.envs,
   });
 
   log.info(
@@ -579,6 +525,7 @@ export async function createLocalClaudeCodeSession(params: {
         status: 'ACTIVE',
         claudeTokenSource: params.claudeTokenSource ?? 'local_fallback',
         claudeTokenIntegrationId: params.claudeTokenIntegrationId,
+        projectId: params.projectWorkspace?.project.id ?? null,
       },
     });
   } catch (persistErr) {
@@ -632,7 +579,7 @@ export async function createLocalClaudeCodeSession(params: {
   localSessions.set(taskId, { ...ownership, process: child });
   log.info(`Local Claude Code session ready: ${taskId} ws=${wsUrl}`);
 
-  return { wsUrl, taskId, sandboxId, uploadedFiles };
+  return { wsUrl, taskId, sandboxId, uploadedFiles, projectRestore: project.report };
 }
 
 async function runLocalClaudeCodeClose(
@@ -667,6 +614,7 @@ async function runLocalClaudeCodeClose(
     },
   });
 
+  unregisterWorkspaceExecutor(taskId);
   if (ownership?.outputFiles !== undefined) {
     clearOwnership(ownership.workDir);
     localSessions.delete(taskId);
