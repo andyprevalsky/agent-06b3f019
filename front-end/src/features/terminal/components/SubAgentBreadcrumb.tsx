@@ -24,7 +24,7 @@ interface SubAgentBreadcrumbProps {
 
 type LooseAncestor = AncestorNode & { agent_id?: string };
 
-export function resolveBreadcrumbAncestors(
+function resolveBreadcrumbAncestors(
   ancestors: AncestorNode[],
   agentDetail: AgentDetail,
 ): AncestorNode[] {

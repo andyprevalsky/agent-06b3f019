@@ -2,12 +2,12 @@
  * Shared fixtures and harness for the Plaid blackbox tests.
  *
  * Extracted so the spec files stay focused on assertions and none of them has
- * to carry the item/sync builders past the max-lines budget.
+ * to carry the item/sync builders past the max-lines budget. The rendered
+ * harness lives in plaid.harness.tsx (component-only module for
+ * react-refresh/only-export-components).
  */
 
-import PlaidSection from '@/features/integrations/components/PlaidSection';
 import type { PlaidItem, PlaidSyncSummary } from '@/features/integrations/types';
-import { usePlaidIntegration } from '@/features/integrations/hooks/usePlaidIntegration';
 
 export const API_BASE = 'http://localhost:3001/api';
 
@@ -67,20 +67,4 @@ export function makeItem(overrides: Partial<PlaidItem> = {}): PlaidItem {
     ],
     ...overrides,
   };
-}
-
-export function PlaidIntegrationHarness() {
-  const plaid = usePlaidIntegration();
-  return (
-    <PlaidSection
-      items={plaid.items}
-      itemsLoading={plaid.itemsLoading}
-      connectLoading={plaid.connectLoading}
-      disconnectingItemId={plaid.disconnectingItemId}
-      error={plaid.error}
-      onConnect={plaid.onConnect}
-      onUpdate={plaid.onUpdate}
-      onDisconnect={plaid.onDisconnect}
-    />
-  );
 }
