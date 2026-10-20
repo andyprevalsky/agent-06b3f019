@@ -140,7 +140,8 @@ export function CodeAgentTranscript({
           return <ThinkingRow key={key} text={event.text ?? ''} seconds={row.thinkingSeconds} />;
         }
         if (event.type === 'tool' && event.tool) return <ToolRow key={key} tool={event.tool} />;
-        if (event.role === 'user') return <YouRow key={key} text={event.text ?? ''} label={label} />;
+        if (event.role === 'user')
+          return <YouRow key={key} text={event.text ?? ''} label={label} />;
         return (
           <div key={key} className="text-foreground dark:text-[#ecece8]">
             {event.text}

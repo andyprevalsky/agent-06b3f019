@@ -145,9 +145,7 @@ export function PinnedQuestionCard({
             ))}
             {question.allow_other && (
               <li className="flex items-center gap-3 px-2 py-[7px] text-[13.5px]">
-                <span
-                  className={`w-3.5 flex-none font-mono text-[12.5px] font-semibold ${MUTED}`}
-                >
+                <span className={`w-3.5 flex-none font-mono text-[12.5px] font-semibold ${MUTED}`}>
                   {otherNumber}
                 </span>
                 <input
