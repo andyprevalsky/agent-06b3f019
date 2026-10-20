@@ -16811,7 +16811,7 @@ def test_local_isolated_stack_compute_token_authority_default():
 
             env = {"BENCHMARK_COMPUTE_TOKEN_AUTHORITY": "off", "COMPUTE_TOKEN_AUTHORITY_URL": "https://x"}
             local_bench.apply_compute_token_authority_env(env)
-            assert "COMPUTE_TOKEN_AUTHORITY_URL" not in env and "COMPUTE_TOKEN_AUTHORITY_API_KEY" not in env
+            assert env["COMPUTE_TOKEN_AUTHORITY_URL"] == "" and env["COMPUTE_TOKEN_AUTHORITY_API_KEY"] == ""
 
             (root / "back-end" / ".env").write_text("")
             try:

@@ -6546,6 +6546,7 @@ async def test_client_foundry_stream_exit_closes_http_owner():
             patch.dict(
                 os.environ,
                 {
+                    "BACKEND_API_KEY": "",  # Provider-only fixture; shared authority has its own regression.
                     "AZURE_FOUNDRY_ENDPOINT": "https://foundry.invalid",
                     "AZURE_FOUNDRY_API_KEY": "offline-fake",
                     "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
@@ -6688,7 +6689,7 @@ async def test_client_foundry_region_rate_limit_fails_over_before_openrouter():
             return httpx.Response(200, text=openrouter_sse, headers={"Content-Type": "text/event-stream"})
         return httpx.Response(500, text="unexpected route")
 
-    env = {"GPT_API_KEY": "", "ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}
+    env = {"BACKEND_API_KEY": "", "GPT_API_KEY": "", "ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}
     for host, (suffix, key) in regions.items():
         env[f"AZURE_FOUNDRY_ENDPOINT{suffix}"] = f"https://{host}"
         env[f"AZURE_FOUNDRY_API_KEY{suffix}"] = key
@@ -6863,7 +6864,8 @@ async def test_wmh_pool_uses_its_azure_gpt_6_1_deployment_before_openrouter():
         patch.dict(
             os.environ,
             {
-                "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
+                "BACKEND_API_KEY": "",  # Provider-only fixture; shared authority has its own regression.
+                    "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
                 "AZURE_FOUNDRY_API_KEY": "test-key",
                 "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
                 "GPT_API_KEY": "",
@@ -6924,7 +6926,8 @@ async def test_gpt56_foundry_turns_cache_markers_into_breakpoints_and_reports_tr
     ]
     set_mock_handler(handler)
     env = {
-        "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
+        "BACKEND_API_KEY": "",  # Provider-only fixture; shared authority has its own regression.
+                    "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
         "AZURE_FOUNDRY_API_KEY": "test-key",
         "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
         "GPT_API_KEY": "",
@@ -9380,6 +9383,7 @@ async def test_foundry_rate_limit_cooldown_hint_ladder_and_shared_store():
     from datetime import datetime, timedelta, timezone
 
     from providers.rose import foundry
+    from providers.rose.errors import RoseServerError
     from providers.rose.pools import foundry_model, get_pool
 
     hint = foundry._retry_hint_seconds
@@ -9388,6 +9392,7 @@ async def test_foundry_rate_limit_cooldown_hint_ladder_and_shared_store():
     assert hint(httpx.Headers({}), "Rate limit reached. Please try again in 7s.") == 7.0
     assert hint(httpx.Headers({}), "Please try again in 20 seconds") == 20.0
     assert hint(httpx.Headers({}), "try again in 250ms") == 0.25
+    assert hint(httpx.Headers({}), "try again in 900 seconds") == 900.0
     assert hint(httpx.Headers({}), "Requests have exceeded token rate limit.") is None
 
     model = foundry_model(get_pool("rose-1-ultra"))
@@ -9490,6 +9495,9 @@ async def test_foundry_rate_limit_cooldown_hint_ladder_and_shared_store():
         foundry._cooldown_until.pop(key, None)
         await run(env, provider("Rate limit reached. Please try again in 7s."))
         assert round(remaining()) == 7, "the in-stream retry hint sets the cooldown"
+        foundry._cooldown_until.pop(key, None)
+        await run(env, provider("Please try again in 900 seconds."))
+        assert round(remaining()) == 900, "provider advice must not be capped to the fallback ladder"
 
         # Shared store: the mark is published; another process's mark is honored.
         foundry._reset_foundry_cooldown_cache()
@@ -9507,7 +9515,7 @@ async def test_foundry_rate_limit_cooldown_hint_ladder_and_shared_store():
                 return httpx.Response(200, json={"cooldowns": {k: shared[k] for k in keys if k in shared}})
             if request.url.path.endswith("/token/rate-limited"):
                 marks.append(json.loads(request.content))
-                until = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
+                until = (datetime.now(timezone.utc) + timedelta(seconds=900)).isoformat()
                 shared[shared_key] = {"rateLimitedUntil": until, "strikes": 2}
                 return httpx.Response(200, json={"ok": True, "rateLimitedUntil": until, "strikes": 2})
             raise AssertionError(f"unexpected backend call {request.url}")
@@ -9516,21 +9524,30 @@ async def test_foundry_rate_limit_cooldown_hint_ladder_and_shared_store():
         assert marks == [
             {"type": "foundry", "source": "pool", "region": "foundry.example.test", "deployment": first[1]}
         ], marks
-        assert round(remaining()) == 60, "the shared store owns the escalated length"
+        assert round(remaining()) == 900, "the shared store preserves provider advice beyond the fallback cap"
         # A fresh process (empty cache) reads the shared mark and never hits the deployment.
         foundry._reset_foundry_cooldown_cache()
         hits = await run(shared_env, backend)
         assert first[1] not in hits, f"shared cooldown ignored: {hits}"
-        # An unavailable store never disables a usable route.
+        # A configured but unavailable authority fails closed, including on retry.
         foundry._reset_foundry_cooldown_cache()
+
+        unexpected_hits = []
 
         async def store_down(request: httpx.Request) -> httpx.Response:
             if request.url.host == "foundry.example.test":
+                unexpected_hits.append(request.url)
                 return await provider(None)(request)
             return httpx.Response(503)
 
-        hits = await run(shared_env, store_down)
-        assert hits == [first[1]], hits
+        for _ in range(2):
+            try:
+                await run(shared_env, store_down)
+            except RoseServerError as exc:
+                assert "authority unavailable" in str(exc)
+            else:
+                raise AssertionError("an unavailable shared cooldown authority must fail closed")
+        assert unexpected_hits == [], unexpected_hits
     finally:
         foundry._reset_foundry_cooldown_cache()
 

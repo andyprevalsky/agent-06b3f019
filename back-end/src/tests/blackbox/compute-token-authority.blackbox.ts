@@ -30,6 +30,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'url';
 import { PrismaClient } from '@prisma/client';
 import { GPT_LINEAGE_CAPACITY } from '../../providers/computeCredentials';
@@ -190,6 +191,55 @@ function runFoundryWorker(baseUrl: string, phase: 'reject' | 'observe'): Foundry
   return JSON.parse(line) as FoundryWorkerResult;
 }
 
+/** Keep the second process alive with a healthy cached read before A marks. */
+async function warmFoundryWorker(baseUrl: string): Promise<{
+  child: ChildProcess;
+  observe: () => Promise<FoundryWorkerResult>;
+}> {
+  const child = spawn(path.join(agentsDir, 'venv/bin/python'), [foundryWorkerFixture, 'warm'], {
+    cwd: agentsDir,
+    env: {
+      ...process.env,
+      PYTHONPATH: agentsDir,
+      BACKEND_API_URL: baseUrl,
+      BACKEND_API_KEY: GUEST_KEY,
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stderr?.on('data', (chunk: Buffer) => {
+    stderr += chunk.toString();
+  });
+  child.stdout?.on('data', (chunk: Buffer) => {
+    stdout += chunk.toString();
+  });
+  async function waitForLine(prefix: string): Promise<string> {
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
+      const line = stdout.split('\n').find((candidate) => candidate.startsWith(prefix));
+      if (line) return line;
+      assert(child.exitCode === null, `warm Foundry worker exited ${child.exitCode}: ${stderr}`);
+      await delay(20);
+    }
+    child.kill('SIGTERM');
+    throw new Error(`warm Foundry worker timeout: ${stderr}`);
+  }
+  try {
+    await waitForLine('{"ready"');
+  } catch (error) {
+    child.kill('SIGTERM');
+    throw error;
+  }
+  return {
+    child,
+    observe: async () => {
+      child.stdin?.end('observe\n');
+      return JSON.parse(await waitForLine('{"first"')) as FoundryWorkerResult;
+    },
+  };
+}
+
 async function foundryCall(
   baseUrl: string,
   route: string,
@@ -332,6 +382,8 @@ async function main() {
     );
 
     // 3. Two worker processes on two guests share one Foundry deployment cooldown.
+    const warmWorker = await warmFoundryWorker(guestB.baseUrl);
+    children.push(warmWorker.child);
     const workerA = runFoundryWorker(guestA.baseUrl, 'reject');
     assert.strictEqual(workerA.hits[0], workerA.first, `worker A hits: ${workerA.hits.join(',')}`);
     assert(
@@ -350,9 +402,26 @@ async function main() {
         `worker B hits=${workerB.hits.join(',')}; authority cooldown rows=${sharedRows.length}`
     );
     assert.strictEqual(workerB.served, workerB.hits[0], `worker B: ${JSON.stringify(workerB)}`);
-    console.log(
-      'PASS a Foundry rate limit seen by one worker process stops another from hitting that deployment'
+    // A previously healthy cache may lag by at most the production 5 s TTL.
+    // Keep B alive across A's mark, then re-enter routing after that interval.
+    await delay(5_100);
+    const warmedB = await warmWorker.observe();
+    assert(
+      !warmedB.hits.includes(workerA.first),
+      `warmed worker ignored shared cooldown: ${JSON.stringify(warmedB)}`
     );
+
+    // Expiry reopens exactly the same deployment in a fresh worker process.
+    await authorityDb.integration.updateMany({
+      where: {
+        name: 'foundry_deployment_cooldown',
+        accountId: `foundry-cta.example.test:${workerA.first}`,
+      },
+      data: { rateLimitedUntil: new Date(Date.now() - 1_000) },
+    });
+    const workerAfterExpiry = runFoundryWorker(guestB.baseUrl, 'observe');
+    assert.strictEqual(workerAfterExpiry.hits[0], workerA.first);
+    console.log('PASS a Foundry rate limit seen by one worker process stops another until expiry');
 
     // 4. Cooldown length: provider hint, else 30 s, 60 s, 300 s; no in-window escalation.
     const target = { region: 'ladder.example.test', deployment: `ladder-${suffix}` };
@@ -382,6 +451,13 @@ async function main() {
     assert.deepStrictEqual(seconds, [30, 60, 300, 300], `ladder ${seconds.join(',')}`);
     await expire();
     assert.strictEqual(Number((await mark({ retryAfterSeconds: 7 })).cooldownSeconds), 7);
+    await expire();
+    const longHint = await mark({ retryAfterSeconds: 900 });
+    assert.strictEqual(
+      Number(longHint.cooldownSeconds),
+      900,
+      'provider retry advice must not be capped to 300 s'
+    );
     await expire();
     assert.strictEqual(
       (await foundryCall(guestB.baseUrl, 'foundry-deployment/served', target)).reset,

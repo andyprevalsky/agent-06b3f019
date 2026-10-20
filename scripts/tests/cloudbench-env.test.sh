@@ -3607,7 +3607,7 @@ PYWIRE
   [ -n "$fragment" ] || { echo "cloudbench-run.sh has no compute-token authority fragment" >&2; exit 1; }
   mkdir -p "$dir/repo/back-end"
   run_fragment() {  # <authority-url> -> STACK_ENV entries, one per line
-    env -i PATH="$PATH" CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL="$1" bash -c '
+    env -i PATH="$PATH" CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL="$1" BENCHMARK_COMPUTE_TOKEN_AUTHORITY="${2:-on}" bash -c '
       set -eo pipefail
       source "$1"; REPO_DIR="$2"; STACK_ENV=()
       log() { echo "$*" >&2; }; finish() { exit "$1"; }
@@ -3616,9 +3616,11 @@ PYWIRE
     ' _ "$HELPER_SRC" "$dir/repo" "$fragment"
   }
   printf 'DATABASE_URL=x\nBACKEND_API_KEY="guest-internal-key"\n' > "$dir/repo/back-end/.env"
-  [ "$(run_fragment https://navi-j9a9.onrender.com)" = "$(printf 'COMPUTE_TOKEN_AUTHORITY_URL=https://navi-j9a9.onrender.com\nCOMPUTE_TOKEN_AUTHORITY_API_KEY=guest-internal-key')" ] \
+  [ "$(run_fragment https://navi-j9a9.onrender.com)" = "$(printf 'BENCHMARK_COMPUTE_TOKEN_AUTHORITY=on\nCOMPUTE_TOKEN_AUTHORITY_URL=https://navi-j9a9.onrender.com\nCOMPUTE_TOKEN_AUTHORITY_API_KEY=guest-internal-key')" ] \
     || { echo "the stack must receive the authority URL and the guest's BACKEND_API_KEY" >&2; exit 1; }
-  [ -z "$(run_fragment '')" ] || { echo "an opted-out guest must keep production-unchanged stack env" >&2; exit 1; }
+  [ "$(run_fragment '')" = "$(printf 'BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off\nCOMPUTE_TOKEN_AUTHORITY_URL=\nCOMPUTE_TOKEN_AUTHORITY_API_KEY=')" ] || { echo "an opted-out guest must disable local-stack defaults too" >&2; exit 1; }
+  [ "$(run_fragment https://authority.example off)" = "$(run_fragment '')" ] \
+    || { echo "explicit diagnostic opt-out must override a saved authority URL" >&2; exit 1; }
   printf 'DATABASE_URL=x\n' > "$dir/repo/back-end/.env"
   ! run_fragment https://navi-j9a9.onrender.com > /dev/null 2> "$dir/missing.err" \
     || { echo "a guest without BACKEND_API_KEY must refuse to start" >&2; exit 1; }

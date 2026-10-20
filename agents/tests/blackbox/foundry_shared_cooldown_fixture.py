@@ -79,26 +79,35 @@ async def main(phase: str) -> None:
         patch.object(foundry, "httpx", module_httpx),
         patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))),
     ):
-        async for chunk in foundry.foundry_complete(
-            pool_spec=get_pool("rose-1-ultra"),
-            messages=[{"role": "user", "content": "hi"}],
-            response_format=None,
-            tools=None,
-            context_tools=None,
-            tool_choice=None,
-            temperature=None,
-            effort=None,
-            provider_fast_mode=True,
-            request_id=f"foundry-shared-cooldown-{phase}",
-            route_key=ROUTE_KEY,
-            agent_id=None,
-            call_site="test",
-            cache_namespace="foundry-shared-cooldown",
-            ttft_timeout_s=30,
-            idle_timeout_s=30,
-        ):
-            if chunk.kind == "metadata" and served is None:
-                served = hits[-1] if hits else None
+        async def invoke() -> None:
+            nonlocal served
+            async for chunk in foundry.foundry_complete(
+                pool_spec=get_pool("rose-1-ultra"),
+                messages=[{"role": "user", "content": "hi"}],
+                response_format=None,
+                tools=None,
+                context_tools=None,
+                tool_choice=None,
+                temperature=None,
+                effort=None,
+                provider_fast_mode=True,
+                request_id=f"foundry-shared-cooldown-{phase}",
+                route_key=ROUTE_KEY,
+                agent_id=None,
+                call_site="test",
+                cache_namespace="foundry-shared-cooldown",
+                ttft_timeout_s=30,
+                idle_timeout_s=30,
+            ):
+                if chunk.kind == "metadata" and served is None:
+                    served = hits[-1] if hits else None
+        if phase == "warm":
+            await invoke()
+            hits.clear()
+            served = None
+            print(json.dumps({"ready": True}), flush=True)
+            await asyncio.to_thread(sys.stdin.readline)
+        await invoke()
     await real_transport.aclose()
     print(json.dumps({"first": first, "hits": hits, "served": served or (hits[-1] if hits else None)}))
 

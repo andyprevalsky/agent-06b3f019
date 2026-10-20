@@ -2549,5 +2549,5 @@ cloudbench_compute_token_authority_url() {
   case "${BENCHMARK_COMPUTE_TOKEN_AUTHORITY:-on}" in
     off|OFF|Off|0|false|no) return 0 ;;
   esac
-  printf '%s\n' "${CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL:-$CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_ORIGIN}"
+  printf '%s\n' "${CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL-$CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_ORIGIN}"
 }

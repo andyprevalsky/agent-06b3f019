@@ -1308,8 +1308,9 @@ def apply_compute_token_authority_env(env: dict[str, str]) -> None:
     ``COMPUTE_TOKEN_AUTHORITY_URL`` / ``_API_KEY`` in the environment wins.
     """
     if env.get("BENCHMARK_COMPUTE_TOKEN_AUTHORITY", "").strip().lower() in {"off", "0", "false", "no"}:
-        env.pop("COMPUTE_TOKEN_AUTHORITY_URL", None)
-        env.pop("COMPUTE_TOKEN_AUTHORITY_API_KEY", None)
+        # Empty exports also mask saved dotenv values in the child services.
+        env["COMPUTE_TOKEN_AUTHORITY_URL"] = ""
+        env["COMPUTE_TOKEN_AUTHORITY_API_KEY"] = ""
         return
     url = (env.get("COMPUTE_TOKEN_AUTHORITY_URL") or "").strip() or COMPUTE_TOKEN_AUTHORITY_DEFAULT_URL
     api_key = (env.get("COMPUTE_TOKEN_AUTHORITY_API_KEY") or "").strip()

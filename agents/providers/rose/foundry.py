@@ -29,8 +29,8 @@ import os
 import re
 import ssl
 import time
-from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Dict, FrozenSet, List, Optional
 from urllib.parse import urlsplit
 
@@ -58,7 +58,6 @@ _shared_reads: dict[tuple[tuple[str, str], ...], asyncio.Task] = {}
 # deployment (openclaw/src/agents/auth-profiles/usage-failure-state.ts:18-27).
 # Mirrors FOUNDRY_COOLDOWN_LADDER_SECONDS in the backend's shared store.
 _COOLDOWN_LADDER_S = (30.0, 60.0, 300.0)
-_COOLDOWN_MAX_S = 300.0
 # Bounds how long another process's fresh mark can go unseen here.
 _SHARED_RECHECK_S = 5.0
 _SHARED_RPC_TIMEOUT_S = 2.0
@@ -261,12 +260,12 @@ def _remember_local_rate_limit(key: tuple[str, str], hint: Optional[float]) -> f
     active_until = _cooldown_until.get(key, 0.0)
     if now < active_until:
         if hint is not None:
-            _cooldown_until[key] = max(active_until, now + min(_COOLDOWN_MAX_S, max(1.0, hint)))
+            _cooldown_until[key] = max(active_until, now + hint)
         return _cooldown_until[key] - now
     strikes = _strikes.get(key, 0) + 1
     _strikes[key] = strikes
     seconds = (
-        min(_COOLDOWN_MAX_S, max(1.0, hint))
+        hint
         if hint is not None
         else _COOLDOWN_LADDER_S[min(strikes, len(_COOLDOWN_LADDER_S)) - 1]
     )
@@ -295,7 +294,7 @@ def _apply_shared_until(key: tuple[str, str], until: Optional[str]) -> None:
     except ValueError:
         return
     if remaining > 0:
-        _cooldown_until[key] = max(_cooldown_until.get(key, 0.0), time.monotonic() + min(remaining, _COOLDOWN_MAX_S))
+        _cooldown_until[key] = max(_cooldown_until.get(key, 0.0), time.monotonic() + remaining)
 
 
 async def _refresh_shared_cooldowns(keys: list[tuple[str, str]]) -> None:
@@ -321,14 +320,16 @@ async def _refresh_shared_cooldowns(keys: list[tuple[str, str]]) -> None:
             for key in stale:
                 state = cooldowns.get(_shared_key(key)) or {}
                 _strikes[key] = int(state.get("strikes") or 0)
+                _cooldown_until.pop(key, None)
                 _apply_shared_until(key, state.get("rateLimitedUntil"))
         except Exception as exc:
-            # An unavailable store must not disable a usable route; the local cache stays.
+            # With a configured authority, unknown shared state must not send
+            # traffic to a deployment another worker may already have cooled.
             logger.warning("rose.foundry.shared_cooldown_read_failed", error_type=type(exc).__name__)
-        finally:
-            checked = time.monotonic()
-            for key in stale:
-                _shared_checked_at[key] = checked
+            raise RoseServerError("Foundry shared cooldown authority unavailable") from exc
+        checked = time.monotonic()
+        for key in stale:
+            _shared_checked_at[key] = checked
 
     task = _shared_reads.get(stale)
     if task is None:
@@ -377,6 +378,7 @@ async def _report_rate_limit(region: FoundryRegion, deployment: str, hint: Optio
         _shared_checked_at[key] = time.monotonic()
     except Exception as exc:
         logger.warning("rose.foundry.shared_cooldown_mark_failed", error_type=type(exc).__name__)
+        raise RoseServerError("Foundry shared cooldown authority unavailable") from exc
 
 
 async def _report_served(region: FoundryRegion, deployment: str) -> None:
@@ -530,13 +532,13 @@ async def foundry_complete(
                         await _report_served(region, deployment)
                         return
                     except RoseError as exc:
-                        if yielded_visible:
-                            raise
-                        last_error = exc
                         if isinstance(exc, RoseRateLimitError):
                             await _report_rate_limit(
                                 region, deployment, _retry_hint_seconds(response.headers, str(exc))
                             )
+                        if yielded_visible:
+                            raise
+                        last_error = exc
                         logger.warning(
                             "rose.foundry.stream_failed", request_id=request_id, error_type=type(exc).__name__, **where
                         )

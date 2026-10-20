@@ -66,23 +66,33 @@ backend, both delegating to one authority backend
   (`openclaw/src/agents/auth-profiles/usage-failure-state.ts:18-27`). The strike
   count survives expiry and resets on a served request (openclaw's rate-limit
   counter is half-open until success, `:94-97`); a rejection inside an active
-  window adds no strike (in-flight requests of the same burst). Cap 300 s.
+  window adds no strike (in-flight requests of the same burst). The 300 s cap
+  applies only to the fallback ladder: provider hints over 300 s are honored.
 - Agents: `foundry.py` marks the local cache at once, publishes the mark,
   adopts the shared expiry/strikes, and refreshes stale deployments (5 s) in
-  one single-flight read before routing. No backend key (tests) or an
-  unavailable store keeps the local cache; a read failure never disables a
-  usable route.
+  one single-flight read before routing. A previously healthy cache can miss
+  another process's new mark until its five-second TTL expires; the next
+  routing call refreshes it, with a two-second RPC deadline. This is bounded
+  cache propagation, not instantaneous exclusion or cancellation of in-flight
+  requests. No backend key keeps the local-only behavior; a configured but
+  unavailable authority fails closed for Foundry.
 - Regressions: `compute-token-authority.blackbox.ts` sections 3 and 4
-  (cross-process, ladder, hint, served reset, in-window no escalation) and
+  (fresh and already-warm cross-process readers, reopening after expiry,
+  ladder, 900 s hint, served reset, in-window no escalation) and
   `rose.blackbox.py` `foundry_rate_limit_cooldown_hint_ladder_shared`.
 
 Note: openclaw's current `rate_limit` reason uses a capped exponential from
 30 s (`usage-failure-state.ts:49`); 30/60/300 is its regular transient ladder,
 which is the bound Andy approved.
 
-10k-agent behavior: per worker process, at most one cooldown read per 5 s per
-route plan (one indexed query) and one write per rejection; nothing scales
-with agent count.
+Load: one indexed cooldown read per stale route-plan set per worker per five
+seconds, and one write per rejection. Traffic grows with active worker count
+and distinct deployment sets, rather than opening a database pool per worker.
+
+Rollout order: backend authority first (new routes must exist), then workers
+and benchmark launchers. Production workers keep their own backend URL;
+this implements the approved B1 production gap fix. No deploy or unchanged
+Polar task outcome proof was performed; this case remains open.
 
 ## Human feedback
 

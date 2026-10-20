@@ -17,7 +17,6 @@ import { prisma, runTransactionWithRetry } from './database';
  * without a failure (openclaw FAILURE_WINDOW_MS).
  */
 export const FOUNDRY_COOLDOWN_LADDER_SECONDS = [30, 60, 300] as const;
-export const FOUNDRY_COOLDOWN_MAX_SECONDS = 300;
 const STRIKE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const MAX_KEYS_PER_READ = 64;
 const SENTINEL_USER_ID = '00000000-0000-0000-0000-000000000000';
@@ -101,7 +100,7 @@ export async function markFoundryDeploymentCooldown(
     if (!Number.isFinite(retryAfterSeconds) || retryAfterSeconds <= 0) {
       throw new InvalidFoundryCooldownRequest('retryAfterSeconds must be a positive number');
     }
-    hint = Math.min(FOUNDRY_COOLDOWN_MAX_SECONDS, Math.max(1, retryAfterSeconds));
+    hint = retryAfterSeconds;
   }
   return runTransactionWithRetry(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`foundry-cooldown:${accountId}`}))`;
