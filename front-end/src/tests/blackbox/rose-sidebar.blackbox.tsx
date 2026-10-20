@@ -74,9 +74,13 @@ const AGENTS = [
   }),
 ];
 
-function renderBar(overrides: Parameters<typeof defaultProps>[0] = {}) {
+function renderBar(overrides: Parameters<typeof defaultProps>[0] = {}, { dark = false } = {}) {
+  const user = signedInUser();
+  // Dark = the signed-in user's stored Rose theme choice (features/rose-theme).
+  if (dark) localStorage.setItem(`rose-theme:${user.id}`, 'dark');
   return renderWithProviders(
-    <AppSidebar {...defaultProps({ agents: AGENTS, user: signedInUser(), ...overrides })} />,
+    <AppSidebar {...defaultProps({ agents: AGENTS, user, ...overrides })} />,
+    { roseThemeUserId: user.id },
   );
 }
 
@@ -203,10 +207,11 @@ describe('Rose left bar (flag on)', () => {
     expect(within(row('home-run')).queryByRole('img')).toBeNull();
     // Needs your input = amber alert.
     expect(row('home-done').querySelector('.text-amber-500')).not.toBeNull();
-    // Done = muted check, green only in dark.
+    // Done = muted check; light keeps the stock gray check (green only in
+    // dark — asserted on the code-agent rows below).
     const check = row('habits-done').querySelector('svg.lucide-check')!;
     expect(check.getAttribute('class')).toContain('text-gray-400');
-    expect(check.getAttribute('class')).toContain('dark:text-[#22c55e]');
+    expect(check.getAttribute('class')).not.toContain('22c55e');
     // Failed = muted red x.
     expect(
       within(row('rose-fail'))
@@ -446,7 +451,7 @@ describe('Rose left bar code agents (flag on)', () => {
   });
 
   it('uses the Claude / Codex icon instead of the Bot glyph, with only the supported status glyphs', async () => {
-    renderBar();
+    renderBar({}, { dark: true });
     const row = (id: string) => screen.getByTestId(`rose-code-agent-row-${id}`);
     await screen.findByTestId('rose-code-agent-row-cc-sub');
     await screen.findByTestId('rose-code-agent-row-cc-fix');

@@ -10,6 +10,7 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { AppDataProvider } from '@/hooks/useAppData';
 import { RoseDesktopContext } from '@/hooks/roseDesktopContext';
 import { RoseAppsProvider } from '@/features/terminal-component-group';
+import { RoseThemeProvider } from '@/features/rose-theme';
 import { AttentionScope } from './attention-scope';
 
 interface TestWrapperOptions {
@@ -17,6 +18,11 @@ interface TestWrapperOptions {
   routerProps?: MemoryRouterProps;
   /** Rose Desktop flag (lib/roseDesktop.ts). Defaults on; pass false to test the stock UI. */
   roseDesktop?: boolean;
+  /**
+   * Signed-in user id for RoseThemeProvider (mirrors TerminalLayout). Omitted,
+   * the theme stays stock light and the top-right Dark mode toggle is a no-op.
+   */
+  roseThemeUserId?: string;
 }
 
 function createTestWrapper(options: TestWrapperOptions = {}) {
@@ -42,7 +48,9 @@ function createTestWrapper(options: TestWrapperOptions = {}) {
                 {/* Mirrors TerminalLayout: the Browser drawer (which replaced the
                     fullscreen browser) is mounted by the RoseApps provider. */}
                 <RoseDesktopContext.Provider value={options.roseDesktop ?? true}>
-                  <RoseAppsProvider>{children}</RoseAppsProvider>
+                  <RoseThemeProvider userId={options.roseThemeUserId ?? null}>
+                    <RoseAppsProvider>{children}</RoseAppsProvider>
+                  </RoseThemeProvider>
                 </RoseDesktopContext.Provider>
               </MemoryRouter>
             </AttentionScope>
@@ -57,9 +65,9 @@ export function renderWithProviders(
   ui: React.ReactElement,
   options?: TestWrapperOptions & Omit<RenderOptions, 'wrapper'>,
 ) {
-  const { route, routerProps, roseDesktop, ...renderOptions } = options ?? {};
+  const { route, routerProps, roseDesktop, roseThemeUserId, ...renderOptions } = options ?? {};
   return render(ui, {
-    wrapper: createTestWrapper({ route, routerProps, roseDesktop }),
+    wrapper: createTestWrapper({ route, routerProps, roseDesktop, roseThemeUserId }),
     ...renderOptions,
   });
 }

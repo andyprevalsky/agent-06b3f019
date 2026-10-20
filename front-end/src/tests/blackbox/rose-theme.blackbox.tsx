@@ -563,9 +563,24 @@ describe('terminal wiring', () => {
     mockSession(ROSE_THEME_USER);
     storeDark(ROSE_THEME_USER);
     renderWithProviders(<Terminal />);
-    await screen.findByTestId('rose-app-bar');
+    await screen.findByTestId('rose-app-icons');
     await waitFor(() => expect(htmlIsDark()).toBe(true));
     expect(screen.getByTestId('terminal-small-tile-animation-canvas')).not.toBeVisible();
+  });
+
+  it("the top-right Dark mode icon drives the terminal's RoseThemeProvider", async () => {
+    const user = userEvent.setup();
+    mockSession(ROSE_THEME_USER);
+    renderWithProviders(<Terminal />);
+    const icon = await screen.findByTestId('rose-app-dark-mode');
+    expect(htmlIsDark()).toBe(false);
+    await user.click(icon);
+    await waitFor(() => expect(htmlIsDark()).toBe(true));
+    expect(localStorage.getItem(`rose-theme:${ROSE_THEME_USER}`)).toBe('dark');
+    expect(screen.getByTestId('rose-app-dark-mode')).toHaveAttribute('aria-label', 'Light mode');
+    await user.click(screen.getByTestId('rose-app-dark-mode'));
+    await waitFor(() => expect(htmlIsDark()).toBe(false));
+    expect(localStorage.getItem(`rose-theme:${ROSE_THEME_USER}`)).toBe('light');
   });
 
   it('a stock account with the same stored key stays light with the stock background', async () => {
@@ -573,7 +588,7 @@ describe('terminal wiring', () => {
     storeDark(OTHER_USER);
     renderWithProviders(<Terminal />);
     expect(await screen.findByTestId('terminal-small-tile-animation-canvas')).toBeVisible();
-    expect(screen.queryByTestId('rose-app-bar')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('rose-app-icons')).not.toBeInTheDocument();
     expect(htmlIsDark()).toBe(false);
   });
 });

@@ -235,19 +235,32 @@ describe('top-right app icons', () => {
     expect(screen.getByTestId('rose-app-panel')).toHaveAttribute('data-state', 'open');
   });
 
-  it('Dark mode is a toggle (moon → sun, label swaps) and opens no panel', async () => {
+  it('Dark mode is a toggle (moon → sun, label swaps) that drives RoseThemeProvider and opens no panel', async () => {
     const user = userEvent.setup();
-    renderWithProviders(<RoseAppIcons />);
+    renderWithProviders(<RoseAppIcons />, { roseThemeUserId: 'theme-user' });
     try {
       await user.click(screen.getByTestId('rose-app-dark-mode'));
       expect(screen.getByTestId('rose-app-dark-mode')).toHaveAttribute('aria-label', 'Light mode');
       expect(document.documentElement.classList.contains('dark')).toBe(true);
+      // One source of truth: the icon toggles features/rose-theme, which persists per user.
+      expect(localStorage.getItem('rose-theme:theme-user')).toBe('dark');
       expect(screen.getByTestId('rose-app-panel')).toHaveAttribute('data-state', 'closed');
       await user.click(screen.getByTestId('rose-app-dark-mode'));
       expect(screen.getByTestId('rose-app-dark-mode')).toHaveAttribute('aria-label', 'Dark mode');
+      expect(document.documentElement.classList.contains('dark')).toBe(false);
+      expect(localStorage.getItem('rose-theme:theme-user')).toBe('light');
     } finally {
+      localStorage.removeItem('rose-theme:theme-user');
       document.documentElement.classList.remove('dark');
     }
+  });
+
+  it('Dark mode is a no-op outside a signed-in Rose Desktop theme (stock stays light)', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<RoseAppIcons />);
+    await user.click(screen.getByTestId('rose-app-dark-mode'));
+    expect(screen.getByTestId('rose-app-dark-mode')).toHaveAttribute('aria-label', 'Dark mode');
+    expect(document.documentElement.classList.contains('dark')).toBe(false);
   });
 
   it('Integrations shows a red reconnect dot when an integration needs reconnection', async () => {

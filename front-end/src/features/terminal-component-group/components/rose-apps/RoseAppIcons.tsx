@@ -4,8 +4,11 @@
  *   [IDLE] every icon grey
  *   --click Browser | Phone | Integrations--> that app open (icon #e8507f);
  *     click it again --> [IDLE]; another icon --> switches app
- *   --click Dark mode--> useRoseTheme().toggle(); no panel. Light shows a moon
- *     labelled "Dark mode", dark shows a sun labelled "Light mode".
+ *   --click Dark mode--> useRoseTheme().toggle() (features/rose-theme, the one
+ *     theme source: RoseThemeProvider persists it per user and sets html.dark);
+ *     no panel. Light shows a moon labelled "Dark mode", dark shows a sun
+ *     labelled "Light mode". Outside a signed-in Rose Desktop theme the
+ *     toggle is a no-op (stock stays light).
  *
  * There is no right bar: four bare icons (34px hit targets, tooltip on hover)
  * in the window's top-right corner — no bar, background, tile or ring. They
@@ -23,11 +26,11 @@ import { useQuery } from '@tanstack/react-query';
 import { Globe, Moon, Plug, Smartphone, Sun, type LucideIcon } from 'lucide-react';
 
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { useRoseTheme } from '@/features/rose-theme';
 import { fetchIntegrationHealth, integrationsNeedingReconnect } from '@/lib/api/integrationHealth';
 
 import { APP_ICON_EDGE, APP_ICON_GAP, APP_ICON_SIZE } from './roseAppsLayout';
 import { useRoseApps, type RoseApp } from './roseAppsState';
-import { useRoseTheme } from './roseTheme';
 
 export const APP_ACTIVE_COLOR = '#e8507f';
 const IDLE_COLOR = 'hsl(240 8% 45%)';

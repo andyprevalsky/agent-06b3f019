@@ -242,6 +242,10 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
   'features/terminal-component-group/components/AgentStatusIndicator.tsx': [
     'Cross-domain import: "@/features/rose-theme"',
   ],
+  // Rose dark mode: the top-right Dark mode icon toggles useRoseTheme().
+  'features/terminal-component-group/components/rose-apps/RoseAppIcons.tsx': [
+    'Cross-domain import: "@/features/rose-theme"',
+  ],
   // Terminal-component-group MessageList split (U03) — legacy violations to be cleaned up per-domain
   'features/terminal-component-group/components/ChatModeActions.tsx': [
     'components layer imports "../api"',
