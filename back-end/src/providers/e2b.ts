@@ -5,7 +5,7 @@ import {
   buildFastModeCodexEnv,
   resolveFastModeWriteEnabled,
 } from './codeAgentFastModeEnv';
-import { FilePointer, downloadFromStorage } from './storage';
+import type { FilePointer } from './storage';
 import { v4 as uuidv4 } from 'uuid';
 import {
   fetchClaudeCodeCredentialsWithMeta,
@@ -17,12 +17,8 @@ import {
   isGptApiKeyOnCooldown,
   type GptCodeCredentialEnvelopeResult,
 } from './gptCredentials';
-import {
-  buildCodeAgentSystemPrompt,
-  buildCodexHarnessSystemPrompt,
-  CODE_AGENT_ATTACHMENTS_DIR,
-  CODE_AGENT_OUTPUT_DIR,
-} from './codeAgentPrompt';
+import { buildCodeAgentSystemPrompt, buildCodexHarnessSystemPrompt } from './codeAgentPrompt';
+import { uploadAttachmentsToSandbox } from './e2bAttachments';
 import { overlayCodexRoseBridge } from './e2bCodexHarness';
 import { workDirForGithubRepo } from './e2bWorkDir';
 import { createSandboxWithRetry } from './e2bSandboxCreate';
@@ -35,6 +31,11 @@ import {
 } from './e2bWsServerOverlay';
 import { createLocalClaudeCodeSessionIfBillingBlocked } from './claudeCodeLocalSession';
 import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
+import {
+  applyUserUiSandboxEnvs,
+  prepareUserUiWorkspaceSafe,
+  writeUserUiWorkspaceToSandboxSafe,
+} from './userUi/workspace';
 import {
   isRefreshOnlyOauthEnvelope,
   resolveClaudeCodeAuthEnvs,
@@ -93,9 +94,6 @@ const CODEX_WS_READY_TIMEOUT_MS = 30000;
 const WS_READY_POLL_INTERVAL_MS = 100;
 const DEFAULT_CODEX_CODE_TEMPLATE_ID = 'codex-code';
 
-// Directories for file transfer
-const ATTACHMENTS_DIR = CODE_AGENT_ATTACHMENTS_DIR;
-const OUTPUT_DIR = CODE_AGENT_OUTPUT_DIR;
 /**
  * Create a new E2B sandbox with Claude Code and WebSocket streaming.
  *
@@ -336,6 +334,9 @@ async function createClaudeCodeSessionUnlocked(
     log.info(`GitHub repo configured: ${githubRepoUrl}`);
   }
 
+  const userUiWorkspace = await prepareUserUiWorkspaceSafe(userId);
+  applyUserUiSandboxEnvs(envs, userUiWorkspace);
+
   // Create sandbox first (before DB record) to avoid placeholder conflicts.
   // When E2B team billing blocks creates, fall back to a same-host local
   // Claude Code ws-server so code-agent benches can still make progress.
@@ -357,6 +358,7 @@ async function createClaudeCodeSessionUnlocked(
       goal,
       envs,
       attachments,
+      userUiWorkspace,
       claudeTokenSource,
       claudeTokenIntegrationId:
         credentialMeta?.source === 'pool' ? (credentialMeta.poolTokenId ?? null) : null,
@@ -367,35 +369,9 @@ async function createClaudeCodeSessionUnlocked(
 
   log.info(`Created sandbox: ${sandbox.sandboxId}`);
   await overlayClaudeCodeWsServer(sandbox);
+  await writeUserUiWorkspaceToSandboxSafe(sandbox, userUiWorkspace, agentId);
 
-  // Upload attachments to sandbox if provided
-  const uploadedFiles: string[] = [];
-  if (attachments && attachments.length > 0) {
-    log.info(`Uploading ${attachments.length} attachments to sandbox`);
-
-    // Create attachments and output directories
-    await sandbox.commands.run(`mkdir -p ${ATTACHMENTS_DIR} ${OUTPUT_DIR}`);
-
-    for (const fp of attachments) {
-      try {
-        // Get file content - all files stored in storage
-        const content = await downloadFromStorage(fp.storage_path);
-
-        // Write to sandbox (convert Buffer to Blob for E2B API)
-        const remotePath = `${ATTACHMENTS_DIR}/${fp.original_filename}`;
-        const blob = new Blob([content]);
-        await sandbox.files.write(remotePath, blob);
-        uploadedFiles.push(remotePath);
-        log.info(`Uploaded: ${fp.original_filename} (${content.length} bytes)`);
-      } catch (err) {
-        log.error(`Failed to upload ${fp.original_filename}`, {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-
-    log.info(`Uploaded ${uploadedFiles.length}/${attachments.length} files`);
-  }
+  const uploadedFiles = await uploadAttachmentsToSandbox(sandbox, attachments, 'Claude Code');
 
   // Get WebSocket URL for the frontend to connect to
   const wsHost = sandbox.getHost(WS_PORT);
@@ -608,6 +584,9 @@ export async function createCodexCodeSession(
     log.info(`GitHub repo configured for Codex: ${githubRepoUrl}`);
   }
 
+  const userUiWorkspace = await prepareUserUiWorkspaceSafe(userId);
+  applyUserUiSandboxEnvs(envs, userUiWorkspace);
+
   const sandbox = await createSandboxWithRetry(
     templateId,
     {
@@ -623,27 +602,9 @@ export async function createCodexCodeSession(
   if (harnessMode === 'rose') {
     await overlayCodexRoseBridge(sandbox);
   }
+  await writeUserUiWorkspaceToSandboxSafe(sandbox, userUiWorkspace, agentId);
 
-  const uploadedFiles: string[] = [];
-  if (attachments && attachments.length > 0) {
-    log.info(`Uploading ${attachments.length} attachments to Codex sandbox`);
-    await sandbox.commands.run(`mkdir -p ${ATTACHMENTS_DIR} ${OUTPUT_DIR}`);
-
-    for (const fp of attachments) {
-      try {
-        const content = await downloadFromStorage(fp.storage_path);
-        const remotePath = `${ATTACHMENTS_DIR}/${fp.original_filename}`;
-        const blob = new Blob([content]);
-        await sandbox.files.write(remotePath, blob);
-        uploadedFiles.push(remotePath);
-        log.info(`Uploaded: ${fp.original_filename} (${content.length} bytes)`);
-      } catch (err) {
-        log.error(`Failed to upload ${fp.original_filename}`, {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-  }
+  const uploadedFiles = await uploadAttachmentsToSandbox(sandbox, attachments, 'Codex');
 
   const wsHost = sandbox.getHost(WS_PORT);
   const wsUrl = `wss://${wsHost}`;

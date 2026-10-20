@@ -57,6 +57,11 @@ case "${TRACE_ARCHIVE_BACKEND:-}" in
     ;;
 esac
 
+# rose_user_ui versions are stored hermetically on local disk for tests (the
+# user-ui blackbox reads back published bytes); prod uses Supabase Storage.
+export USER_UI_STORAGE_BACKEND=local
+export USER_UI_STORAGE_LOCAL_DIR="${USER_UI_STORAGE_LOCAL_DIR:-$ROOT_DIR/.context/user-ui-storage}"
+
 # Read the effective value of KEY from back-end/.env using dotenv last-in-wins
 # semantics (quoted values keep '#'; unquoted values drop inline comments).
 dotenv_effective_value() {

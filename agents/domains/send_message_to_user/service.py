@@ -6,9 +6,14 @@ No framework imports (Temporal, ToolManager) here.
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 
+from domains.send_message_to_user.config import INLINE_VIEW_MAX_PROPS_BYTES
 from domains.send_message_to_user.types import ValidationResult
+
+_VIEW_NAME_RE = re.compile(r"^[a-z0-9-]{1,64}$")
 
 
 def validate_tool_call(tool_call: dict[str, Any]) -> ValidationResult:
@@ -45,3 +50,30 @@ def validate_tool_call(tool_call: dict[str, Any]) -> ValidationResult:
 def is_sub_agent(workflow_instance: object) -> bool:
     """Return True when the workflow is running as a sub-agent (depth >= 1)."""
     return getattr(workflow_instance, "depth", 0) >= 1
+
+
+def validate_inline_view(raw: Any) -> tuple[dict[str, Any] | None, str | None]:
+    """Normalise the optional `inline_view` argument.
+
+    Returns ``(None, None)`` when absent, ``({"view", "props"}, None)`` when
+    valid, or ``(None, error_text)`` for a tool-error result.
+    """
+    if raw is None:
+        return None, None
+    if not isinstance(raw, dict):
+        return None, "`inline_view` must be an object like {\"view\": \"<name>\", \"props\": {...}}."
+    view = raw.get("view")
+    if not isinstance(view, str) or not _VIEW_NAME_RE.match(view):
+        return None, "`inline_view.view` must be a published inline view name matching [a-z0-9-]+."
+    props = raw.get("props")
+    if props is None:
+        props = {}
+    if not isinstance(props, dict):
+        return None, "`inline_view.props` must be a JSON object."
+    try:
+        encoded = json.dumps(props)
+    except (TypeError, ValueError):
+        return None, "`inline_view.props` must be JSON-serialisable."
+    if len(encoded.encode("utf-8")) > INLINE_VIEW_MAX_PROPS_BYTES:
+        return None, f"`inline_view.props` must be at most {INLINE_VIEW_MAX_PROPS_BYTES} bytes of JSON."
+    return {"view": view, "props": props}, None

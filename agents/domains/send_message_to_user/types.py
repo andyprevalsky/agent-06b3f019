@@ -18,9 +18,14 @@ def build_attention_metadata(
     message: str,
     is_question: bool,
     is_waiting: bool,
+    inline_view: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build the attention metadata dict for a send_message_to_user event."""
-    return {
+    """Build the attention metadata dict for a send_message_to_user event.
+
+    ``inline_view`` is the resolved ``{"view", "versionId", "props"}`` pin and
+    is persisted as ``metadata.inlineView`` when present.
+    """
+    metadata: dict[str, Any] = {
         "isUserAttentionMessage": True,
         "attentionMessage": message,
         "sendMessageToUser": {
@@ -29,3 +34,6 @@ def build_attention_metadata(
             "isWaitingForUser": is_waiting,
         },
     }
+    if inline_view is not None:
+        metadata["inlineView"] = inline_view
+    return metadata

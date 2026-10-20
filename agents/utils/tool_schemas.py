@@ -739,6 +739,16 @@ class GrepTool(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class InlineViewArg(BaseModel):
+    """A published rose_user_ui inline view rendered with the message."""
+
+    view: str = Field(description="Inline view name from the user's published rose-ui.json.")
+    props: Optional[Dict[str, Any]] = Field(default=None, description="Small JSON props passed to the view.")
+
+
+INLINE_VIEW_DESCRIPTION = "Optional inline view from the user's published Rose UI to render with this message."
+
+
 class SendMessageToUserTool(BaseModel):
     """Message the user during PLAN phase; optionally block for a reply."""
 
@@ -752,6 +762,7 @@ class SendMessageToUserTool(BaseModel):
         default=True,
         description=("True to block workflow until the user responds. False to send a non-blocking FYI."),
     )
+    inline_view: Optional[InlineViewArg] = Field(default=None, description=INLINE_VIEW_DESCRIPTION)
 
 
 class SendMessageToUserExecutePhaseTool(BaseModel):
@@ -763,6 +774,7 @@ class SendMessageToUserExecutePhaseTool(BaseModel):
             "The exact user-visible non-blocking update explaining what the user needs to know."
         )
     )
+    inline_view: Optional[InlineViewArg] = Field(default=None, description=INLINE_VIEW_DESCRIPTION)
 
 
 class MessagePersonTool(BaseModel):

@@ -390,6 +390,9 @@ model User {
   dataProviderSyncStates      UserDataProviderSyncState[]
   userSnapshot                UserSnapshot?
   userSnapshotRevisions       UserSnapshotRevision[]
+  /// Active published rose_user_ui version (UserUiVersion.id); null = stock UI.
+  activeUiVersionId           String?
+  uiVersions                  UserUiVersion[]
 
   @@index([userId])
   @@index([inviteCode])
@@ -1704,4 +1707,19 @@ model PlannerMemoryEmbedding {
   updatedAt       DateTime                    @updatedAt
 
   @@index([model])
+}
+
+/// One immutable published `rose_user_ui` bundle for a user. Files live in
+/// storage under `user-ui/<userId>/<id>/<path>`; `manifest` is the validated
+/// `rose-ui.json`. `User.activeUiVersionId` points at the version the app renders.
+model UserUiVersion {
+  id         String   @id @default(uuid())
+  userId     String
+  manifest   Json
+  fileCount  Int
+  totalBytes Int
+  createdAt  DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [userId], onDelete: Cascade)
+
+  @@index([userId, createdAt])
 }

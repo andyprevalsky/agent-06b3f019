@@ -34,6 +34,7 @@ import { randomUUID } from './crypto';
 import { isMissingLocalFileError, readRegularFileNoFollow } from './claudeCodeLocalFileRead';
 import { isFilePointer } from './claudeCodeLocalOwnership';
 import { isSandboxCreateTimeoutOrAbortError } from './e2bSandboxCreate';
+import { materializeUserUiInLocalHome, type UserUiWorkspace } from './userUi/workspace';
 
 const log = createLogger('ClaudeCodeLocal');
 
@@ -479,6 +480,8 @@ export async function createLocalClaudeCodeSession(params: {
   goal: string;
   envs: Record<string, string>;
   attachments?: FilePointer[];
+  /** rose_user_ui folder + rose-ui CLI to materialize under the session HOME. */
+  userUiWorkspace?: UserUiWorkspace | null;
   claudeTokenSource: string | null;
   claudeTokenIntegrationId: string | null;
 }): Promise<{
@@ -510,10 +513,14 @@ export async function createLocalClaudeCodeSession(params: {
     }
   }
 
+  const userUi = await materializeUserUiInLocalHome(workDir, params.userUiWorkspace, agentId);
+
   const port = await allocatePort();
   const readinessToken = randomUUID();
   const wsServerPath = findWsServerPath();
-  const pathEnv = ['/home/ubuntu/.local/bin', process.env.PATH || ''].filter(Boolean).join(':');
+  const pathEnv = [userUi?.binDir, '/home/ubuntu/.local/bin', process.env.PATH || '']
+    .filter(Boolean)
+    .join(':');
 
   const childEnv = buildLocalChildEnv(envs, {
     PORT: String(port),
@@ -522,6 +529,7 @@ export async function createLocalClaudeCodeSession(params: {
     HOME: workDir,
     CLAUDE_CONFIG_DIR: join(workDir, '.claude'),
     ROSE_LOCAL_WS_READINESS_TOKEN: readinessToken,
+    ...userUi?.envs,
   });
 
   log.info(

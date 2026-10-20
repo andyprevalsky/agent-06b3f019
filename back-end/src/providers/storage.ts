@@ -186,6 +186,46 @@ export async function downloadFromStorage(storagePath: string): Promise<Buffer> 
 }
 
 /**
+ * Write an object at an exact storage path (immutable: never upserts). Used by
+ * stores that own their own key layout, e.g. `user-ui/<userId>/<versionId>/…`.
+ * An already-existing identical key is treated as success so retries are safe.
+ */
+export async function putStorageObject(
+  storagePath: string,
+  body: Buffer,
+  contentType: string
+): Promise<void> {
+  const client = getSupabaseClient();
+  await retryWithBackoff(
+    async () => {
+      const result = await client.storage
+        .from(ATTACHMENT_BUCKET)
+        .upload(storagePath, body, { contentType, upsert: false });
+      if (result.error && !isAlreadyUploadedStorageError(result.error)) throw result.error;
+    },
+    {
+      maxRetries: 3,
+      initialBackoffMs: 500,
+      component: 'StoragePutObject',
+      isRetryable: isRetryableStorageError,
+    }
+  );
+}
+
+/** Read an object at an exact storage path; returns null when it does not exist. */
+export async function getStorageObject(storagePath: string): Promise<Buffer | null> {
+  const client = getSupabaseClient();
+  const { data, error } = await client.storage.from(ATTACHMENT_BUCKET).download(storagePath);
+  if (error) {
+    const status = storageErrorStatus(error);
+    const message = storageErrorMessage(error).toLowerCase();
+    if (status === 400 || status === 404 || message.includes('not found')) return null;
+    throw new Error(`Failed to download ${storagePath}: ${storageErrorMessage(error)}`);
+  }
+  return Buffer.from(await data.arrayBuffer());
+}
+
+/**
  * Generate a signed URL for a file (for frontend display of large files)
  */
 export async function getSignedUrl(storagePath: string, expiresIn: number = 3600): Promise<string> {

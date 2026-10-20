@@ -151,6 +151,7 @@ from helpers.sms_activities import (
     send_direct_sms_activity,
 )
 from helpers.summarize import summarize_and_filter_links
+from helpers.user_ui_activities import resolve_user_ui_inline_view_activity
 from helpers.update_tokens import update_agent_tree_cost_activity
 from helpers.worker_activation import wait_for_worker_build_activation
 from helpers.worker_event_loop import run_worker_event_loop
@@ -1633,6 +1634,7 @@ async def main():
         get_agent_source,
         send_direct_sms_activity,
         notify_sms_event_activity,
+        resolve_user_ui_inline_view_activity,
         populate_tool_params_activity,
         execute_reasoning_activity,
         query_parent_state_activity,

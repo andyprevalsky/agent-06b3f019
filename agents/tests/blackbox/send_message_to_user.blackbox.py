@@ -470,6 +470,199 @@ async def test_handler_non_sms_fallback_handoff_closes_finished_and_reraises():
     assert finished[-1].message == DEPLOY_INTERRUPTED_TOOL_MESSAGE
 
 
+# ── inline_view (rose_user_ui) ─────────────────────────────────────
+
+
+class _RecordingWorkflowModule(_FakeWorkflowModule):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.calls = []
+
+    async def execute_activity(self, fn, args=None, **kwargs):
+        self.calls.append((getattr(fn, "__name__", "?"), list(args or [])))
+        return await super().execute_activity(fn, args=args, **kwargs)
+
+
+async def test_inline_view_pinned_to_active_version_in_metadata():
+    """inline_view resolves against the ACTIVE version and persists as metadata.inlineView."""
+    from domains.send_message_to_user.handler import SendMessageToUserManager
+    from tools.base import MessageStatus
+
+    fake = _RecordingWorkflowModule(
+        activity_results={"resolve_user_ui_inline_view_activity": {"ok": True, "version_id": "ver-123"}}
+    )
+    restore = _patch_handler_workflow(fake)
+    try:
+        events = await _collect_events(
+            SendMessageToUserManager().execute_tool(
+                workflow_instance=_FakeWorkflow(user_id="user-ui-1"),
+                tool_call={
+                    "message": "Here is your chart.",
+                    "is_question": False,
+                    "inline_view": {"view": "sales-chart", "props": {"points": [1, 2, 3]}},
+                },
+                tool_call_id="tc-inline",
+            )
+        )
+    finally:
+        restore()
+
+    assert fake.calls == [("resolve_user_ui_inline_view_activity", ["user-ui-1", "sales-chart"])]
+    assert len(events) == 1 and events[0].status == MessageStatus.FINISHED
+    assert events[0].message == "Here is your chart."
+    assert events[0].metadata["inlineView"] == {
+        "view": "sales-chart",
+        "versionId": "ver-123",
+        "props": {"points": [1, 2, 3]},
+    }
+
+
+async def test_inline_view_question_keeps_pin_on_every_event():
+    """Blocking questions keep the same pinned inlineView through the reply cycle."""
+    from domains.send_message_to_user.handler import SendMessageToUserManager
+
+    fake = _RecordingWorkflowModule(
+        activity_results={
+            "resolve_user_ui_inline_view_activity": {"ok": True, "version_id": "ver-9"},
+            "get_agent_source": "WEB",
+        }
+    )
+    restore = _patch_handler_workflow(fake)
+    try:
+        events = await _collect_events(
+            SendMessageToUserManager().execute_tool(
+                workflow_instance=_FakeWorkflow(has_new_messages=True),
+                tool_call={"message": "Pick one?", "is_question": True, "inline_view": {"view": "picker"}},
+                tool_call_id="tc-inline-q",
+            )
+        )
+    finally:
+        restore()
+
+    assert len(events) >= 2
+    for event in events:
+        assert event.metadata["inlineView"] == {"view": "picker", "versionId": "ver-9", "props": {}}
+
+
+async def test_inline_view_unknown_view_is_tool_error():
+    """A view missing from the active manifest is rejected as tool error text, not an exception."""
+    from domains.send_message_to_user.handler import SendMessageToUserManager
+    from tools.base import MessageStatus
+
+    fake = _RecordingWorkflowModule(
+        activity_results={
+            "resolve_user_ui_inline_view_activity": {
+                "ok": False,
+                "error": "Inline view 'nope' is not in the user's published Rose UI (available: hello).",
+            }
+        }
+    )
+    restore = _patch_handler_workflow(fake)
+    try:
+        events = await _collect_events(
+            SendMessageToUserManager().execute_tool(
+                workflow_instance=_FakeWorkflow(),
+                tool_call={"message": "Look", "is_question": False, "inline_view": {"view": "nope"}},
+                tool_call_id="tc-inline-bad",
+            )
+        )
+    finally:
+        restore()
+
+    assert len(events) == 1
+    assert events[0].status == MessageStatus.ERROR
+    assert "not in the user's published Rose UI" in events[0].message
+    assert "inlineView" not in (events[0].metadata or {})
+
+
+async def test_inline_view_activity_failure_is_tool_error():
+    """Exhausted activity retries surface as a tool error instead of crashing the workflow."""
+    from domains.send_message_to_user.handler import SendMessageToUserManager
+    from tools.base import MessageStatus
+
+    fake = _RecordingWorkflowModule(
+        activity_results={"resolve_user_ui_inline_view_activity": RuntimeError("backend down")}
+    )
+    restore = _patch_handler_workflow(fake)
+    try:
+        events = await _collect_events(
+            SendMessageToUserManager().execute_tool(
+                workflow_instance=_FakeWorkflow(),
+                tool_call={"message": "Look", "is_question": False, "inline_view": {"view": "hello"}},
+                tool_call_id="tc-inline-down",
+            )
+        )
+    finally:
+        restore()
+
+    assert len(events) == 1 and events[0].status == MessageStatus.ERROR
+    assert "backend down" in events[0].message
+
+
+async def test_inline_view_invalid_shape_rejected_without_lookup():
+    """Malformed inline_view arguments never reach the backend."""
+    from domains.send_message_to_user.handler import SendMessageToUserManager
+    from tools.base import MessageStatus
+
+    for bad in ("hello", {"view": "Bad View"}, {"view": "ok", "props": [1]}, {"view": "ok", "props": {"x": "y" * 70000}}):
+        fake = _RecordingWorkflowModule()
+        restore = _patch_handler_workflow(fake)
+        try:
+            events = await _collect_events(
+                SendMessageToUserManager().execute_tool(
+                    workflow_instance=_FakeWorkflow(),
+                    tool_call={"message": "Look", "is_question": False, "inline_view": bad},
+                    tool_call_id="tc-inline-shape",
+                )
+            )
+        finally:
+            restore()
+        assert fake.calls == [], bad
+        assert len(events) == 1 and events[0].status == MessageStatus.ERROR, bad
+
+
+async def test_resolve_inline_view_activity_against_backend():
+    """The activity reads the ACTIVE manifest as the user and rejects unknown views / no UI."""
+    from _test_utils import setup_mock
+
+    from helpers.user_ui_activities import resolve_user_ui_inline_view_activity
+
+    manifest = {"version": 1, "inline": {"hello": {"entry": "inline/hello/index.html"}}}
+    setup_mock({"/api/user-ui/active": {"status": 200, "json": {"versionId": "ver-1", "manifest": manifest}}})
+    try:
+        ok = await resolve_user_ui_inline_view_activity("user-77", "hello")
+        assert ok == {"ok": True, "version_id": "ver-1"}
+        call = get_captured_requests()[-1]
+        headers = {k.lower(): v for k, v in call["requestHeaders"].items()}
+        assert headers.get("x-user-id") == "user-77"
+        assert "x-api-key" in headers
+        missing = await resolve_user_ui_inline_view_activity("user-77", "nope")
+        assert missing["ok"] is False and "available: hello" in missing["error"]
+    finally:
+        teardown_mock()
+
+    setup_mock({"/api/user-ui/active": {"status": 200, "json": {"versionId": None}}})
+    try:
+        none = await resolve_user_ui_inline_view_activity("user-77", "hello")
+        assert none["ok"] is False and "no published Rose UI" in none["error"]
+    finally:
+        teardown_mock()
+
+
+def test_tool_schemas_expose_inline_view():
+    """Both send_message_to_user variants declare the optional inline_view argument."""
+    from utils.tool_schemas import SendMessageToUserExecutePhaseTool, SendMessageToUserTool
+
+    for model in (SendMessageToUserTool, SendMessageToUserExecutePhaseTool):
+        schema = model.model_json_schema()
+        assert "inline_view" in schema["properties"]
+        assert "inline_view" not in schema.get("required", [])
+    parsed = SendMessageToUserTool.model_validate(
+        {"tool": "send_message_to_user", "message": "hi", "inline_view": {"view": "hello", "props": {"a": 1}}}
+    )
+    assert parsed.inline_view is not None and parsed.inline_view.view == "hello"
+
+
 async def run_all_tests():
     print("send-message-to-user blackbox tests:")
     r = BlackboxResult()
@@ -497,6 +690,13 @@ async def run_all_tests():
         "handler_non_sms_fallback_handoff",
         test_handler_non_sms_fallback_handoff_closes_finished_and_reraises,
     )
+    await r.record_async("inline_view_pinned_metadata", test_inline_view_pinned_to_active_version_in_metadata)
+    await r.record_async("inline_view_question_pin", test_inline_view_question_keeps_pin_on_every_event)
+    await r.record_async("inline_view_unknown_view", test_inline_view_unknown_view_is_tool_error)
+    await r.record_async("inline_view_activity_failure", test_inline_view_activity_failure_is_tool_error)
+    await r.record_async("inline_view_invalid_shape", test_inline_view_invalid_shape_rejected_without_lookup)
+    await r.record_async("inline_view_activity_backend", test_resolve_inline_view_activity_against_backend)
+    r.record("inline_view_tool_schema", test_tool_schemas_expose_inline_view)
     teardown_mock()
     return r.all_passed
 
