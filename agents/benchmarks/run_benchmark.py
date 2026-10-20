@@ -2756,6 +2756,32 @@ def _wmh_initial_state_evidence(task: BenchmarkTask) -> dict | None:
     }
 
 
+# One native retirement attempt joins every cancelled prediction within a bound.
+# After a timeout with a wide fan-out in flight, that drain can outlast it and
+# the attempt answers 500 while the session stays fenced (run 7, 2026-10-20).
+# The server accepts a fresh retirement, so server/transport failures are retried.
+_NATIVE_RETIREMENT_ATTEMPTS = 4
+_NATIVE_RETIREMENT_BACKOFF_SECONDS = (2.0, 5.0, 10.0)
+_NATIVE_RETIREMENT_SLEEP = asyncio.sleep
+
+
+async def _end_owned_native_session(owned: dict) -> dict:
+    for attempt in range(_NATIVE_RETIREMENT_ATTEMPTS):
+        try:
+            return await WMHHttpClient(owned["base_url"]).end_session(owned["model_name"], owned["session_id"])
+        except (httpx.HTTPStatusError, httpx.TransportError) as exc:
+            retryable = isinstance(exc, httpx.TransportError) or exc.response.status_code >= 500
+            if not retryable or attempt + 1 == _NATIVE_RETIREMENT_ATTEMPTS:
+                raise
+            delay = _NATIVE_RETIREMENT_BACKOFF_SECONDS[min(attempt, len(_NATIVE_RETIREMENT_BACKOFF_SECONDS) - 1)]
+            print(
+                f"    ⚠ Native WMH retirement attempt {attempt + 1}/{_NATIVE_RETIREMENT_ATTEMPTS} "
+                f"for session {owned['session_id'][:12]} failed ({type(exc).__name__}); retrying in {delay:g}s"
+            )
+            await _NATIVE_RETIREMENT_SLEEP(delay)
+    raise AssertionError("unreachable native retirement attempt bound")
+
+
 async def _retire_owned_native_world(task: BenchmarkTask, agent_id: str | None = None) -> dict | None:
     """Join this execution's admitted predictions before freezing its outcome.
 
@@ -2777,7 +2803,7 @@ async def _retire_owned_native_world(task: BenchmarkTask, agent_id: str | None =
     if operation is None:
 
         async def retire():
-            receipt = await WMHHttpClient(owned["base_url"]).end_session(owned["model_name"], owned["session_id"])
+            receipt = await _end_owned_native_session(owned)
             if (
                 receipt.get("engine") != "experiential"
                 or receipt.get("join_verified") is not True

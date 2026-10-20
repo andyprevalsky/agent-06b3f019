@@ -1007,6 +1007,64 @@ def test_served_retirement_joins_provider_freezes_receipt_and_fences_root_scope(
     asyncio.run(run())
 
 
+def test_served_retirement_slow_cancelled_drain_fails_one_attempt_and_retry_joins(monkeypatch):
+    """Run 7 (2026-10-20): DELETE after the benchmark timeout cancelled ~90 in-flight
+    predictions whose cleanup outlasted the join bound, so that attempt returned 500.
+    The session must stay fenced and a later retirement must return the joined receipt."""
+    import httpx
+
+    import benchmarks.experiential_world_model as native
+    from benchmarks.serve_experiential_world_model import create_app
+
+    monkeypatch.setattr(native, "NATIVE_SESSION_JOIN_SECONDS", 0.05)
+
+    async def run():
+        entered = asyncio.Event()
+        drained = asyncio.Event()
+        drain = asyncio.Event()
+
+        async def complete(request):
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await drain.wait()  # e.g. durable prediction record still writing
+                drained.set()
+                raise
+
+        model = ParallelWorldModel(complete, Retriever())
+        session = model.new_session("Raise", {"raised": 0}, "root")
+        transport = httpx.ASGITransport(app=create_app("rose", model), raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://wmh") as http:
+            step = asyncio.create_task(
+                http.post(f"/world_models/rose/sessions/{session.id}/step", json={"action": action(1)})
+            )
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                first = await http.delete(f"/world_models/rose/sessions/{session.id}")
+                assert first.status_code == 500 and not drained.is_set()
+                assert session.closed and not model.retired
+                late = await http.post(f"/world_models/rose/sessions/{session.id}/step", json={"action": action(2)})
+                assert late.status_code == 409, "a failed retirement attempt must keep the world fenced"
+                drain.set()
+                # Served by uvicorn this is a 500; the in-process transport re-raises it.
+                (outcome,) = await asyncio.wait_for(asyncio.gather(step, return_exceptions=True), 2)
+                assert isinstance(outcome, asyncio.CancelledError) or outcome.status_code == 500
+                assert drained.is_set()
+                second = await http.delete(f"/world_models/rose/sessions/{session.id}")
+                assert second.status_code == 200, second.text
+                receipt = second.json()
+                assert receipt["join_verified"] is True and receipt["ended"] == session.id
+                assert receipt["revision"] == 0 and receipt["state"] == {"raised": 0} and receipt["history"] == []
+                assert (await http.delete(f"/world_models/rose/sessions/{session.id}")).json() == receipt
+            finally:
+                drain.set()
+                await asyncio.gather(step, return_exceptions=True)
+                await model.close()
+
+    asyncio.run(run())
+
+
 def test_retirement_persists_once_checks_frozen_identity_and_bounds_fences(tmp_path):
     from benchmarks.build_experiential_world_model import atomic_json
 
