@@ -23,6 +23,8 @@
  *   - container providers: Gmail addresses and Plaid items are accounts; needs_reconnect wins
  *   - providers without account-scoped cleanup answer 501 and keep their data
  *   - validation 400s, per-user account cap, internal API-key writer path, auth 401
+ *   - Plaid per-item sync progress (I5): indeterminate total while syncing, final counts,
+ *     1 s coalescing, independent items, ITEM_LOGIN_REQUIRED, webhook re-sync reuses the row
  *
  * Usage: bash scripts/run-blackbox-tests.sh integration-accounts
  */
@@ -32,6 +34,7 @@ import { upsertIntegrationAccount } from '../../domains/integrations/repo.accoun
 import { reportIntegrationProgress } from '../../domains/integrations/service.progress';
 import { MAX_PROGRESS_ACCOUNTS_PER_USER } from '../../domains/integrations/syncAccountsContract';
 import { cases as advancedCases } from './integration-accounts.cases';
+import { cases as plaidProgressCases } from './integration-accounts.plaid.cases';
 import {
   accountsOf,
   anonymousSession,
@@ -360,7 +363,11 @@ async function cleanup(userIds: string[]): Promise<void> {
 async function main(): Promise<void> {
   sessions.a = await anonymousSession();
   sessions.b = await anonymousSession();
-  const tests = [...coreCases, ...advancedCases(() => ({ a: A(), b: B() }))];
+  const tests = [
+    ...coreCases,
+    ...advancedCases(() => ({ a: A(), b: B() })),
+    ...plaidProgressCases(),
+  ];
   let failed = 0;
   try {
     for (const test of tests) {
