@@ -15,7 +15,7 @@
  */
 
 import { Folder, Pencil, Plus, Settings as SettingsIcon, Trash2 } from 'lucide-react';
-import { useState, type KeyboardEvent } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 
 import {
   ContextMenu,
@@ -49,14 +49,22 @@ function InlineNameInput({
   onCancel: () => void;
 }) {
   const [value, setValue] = useState(initial);
+  const ref = useRef<HTMLInputElement>(null);
+  // Focus on the next tick, not via autoFocus: when Rename is chosen from the
+  // context menu, the closing menu still holds (and then drops) focus in the
+  // same commit, which would blur — i.e. cancel — an autoFocused input.
+  useEffect(() => {
+    const id = window.setTimeout(() => ref.current?.focus(), 0);
+    return () => window.clearTimeout(id);
+  }, []);
   const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Escape') onCancel();
     if (e.key === 'Enter' && value.trim() !== '') onSubmit(value.trim());
   };
   return (
     <input
+      ref={ref}
       aria-label={label}
-      autoFocus
       value={value}
       onChange={(e) => setValue(e.target.value)}
       onKeyDown={onKeyDown}
@@ -83,7 +91,14 @@ function ProjectRowMenu(props: RoseProjectRowProps) {
   const noBlur = { backdropFilter: 'none', WebkitBackdropFilter: 'none' };
   const icon = cn(MENU_ICON, 'text-[hsl(240_6%_45%)] dark:text-[#a3a39d]');
   return (
-    <ContextMenuContent data-testid="rose-project-menu" className={MENU_SURFACE} style={noBlur}>
+    <ContextMenuContent
+      data-testid="rose-project-menu"
+      className={MENU_SURFACE}
+      style={noBlur}
+      // Keep focus where the chosen item put it: Rename focuses the inline input,
+      // and returning focus to the row would blur (cancel) it immediately.
+      onCloseAutoFocus={(e) => e.preventDefault()}
+    >
       <ContextMenuItem onSelect={props.onStartRename} className={MENU_ROW}>
         <Pencil className={icon} strokeWidth={1.7} />
         Rename project
