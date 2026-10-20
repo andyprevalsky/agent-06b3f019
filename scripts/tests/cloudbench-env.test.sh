@@ -354,6 +354,13 @@ class WorldModelLaunch(unittest.TestCase):
         # other workspaces' guests serve); an explicit directory still wins.
         self.assertEqual(legacy["WMH_BUILD_DIR"], "/data/world-model")
         self.assertEqual(stack_env({"CLOUDBENCH_WMH_DIR": "/data/world-model"})["WMH_BUILD_DIR"], "/data/world-model")
+        # The isolated fleet launcher must not pin the legacy directory: it did,
+        # so native guests read /data/world-model regardless of engine.
+        generation = (root / "scripts/cloudbench-isolated-generation.py").read_text()
+        self.assertNotIn('os.environ["CLOUDBENCH_WMH_DIR"] =', generation)
+        generation_root = {"DATA_DIR": "/data/gen", "WMH_DIR": "/data/gen/world-model"}
+        self.assertEqual(stack_env(generation_root)["WMH_BUILD_DIR"], "/data/gen/world-model-native")
+        self.assertEqual(stack_env({**generation_root, "WMH_ENGINE": "legacy"})["WMH_BUILD_DIR"], "/data/gen/world-model")
         self.assertNotIn("WMH_NATIVE_PYTHON", legacy)
         self.assertNotIn("WMH_INFERENCE_POOL", legacy)
         rejected = subprocess.run(["bash", "-c", selection], env={"PATH": os.environ["PATH"], "WMH_MODEL_NAME": "a b"},
