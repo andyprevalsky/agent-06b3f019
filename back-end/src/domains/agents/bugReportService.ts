@@ -28,6 +28,7 @@ import {
   getBoxesBugReportSecret,
 } from './config';
 import * as repo from './repo';
+import { recordManualAgentBugReport } from './repoAgentBugReports';
 
 const log = createLogger('ReportBug');
 
@@ -87,6 +88,7 @@ export interface ReportBugDeps {
   findAgentById?: typeof repo.findAgentById;
   findAgentAcrossRuns?: typeof benchmarkHubLookup.findAgentAcrossRuns;
   launch?: (args: ReportBugLaunchArgs) => Promise<ReportBugLaunch>;
+  recordReport?: typeof recordManualAgentBugReport;
 }
 
 /** Collapse whitespace and truncate at a word boundary for the chat title. */
@@ -177,7 +179,8 @@ export async function reportAgentBug(
   const name = buildBugReportChatName(trimmed);
   const promptText = buildBugReportPrompt(agentId, trimmed);
   const idempotencyKey = buildBugReportIdempotencyKey(agentId, trimmed);
-  const launch = deps.launch ?? defaultLaunch;
+  const launch = deps.launch ?? launchBugReportAutomation;
+  const recordReport = deps.recordReport ?? recordManualAgentBugReport;
 
   // Do not log chat_name / description — they carry customer incident text.
   log.info('Submitting bug report to boxes.dev automation', {
@@ -187,6 +190,18 @@ export async function reportAgentBug(
 
   const launched = await launch({ name, promptText, idempotencyKey });
 
+  // Marks the agent reported so the 24h stuck-agent job skips it. The run already
+  // exists, so a failed write must not turn this launch into an error response.
+  try {
+    await recordReport(agentId, launched.run_id);
+  } catch (error) {
+    log.error('Failed to record manual bug report claim', {
+      rose_agent_id: agentId,
+      run_id: launched.run_id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
   return {
     success: true,
     name: launched.name,
@@ -195,7 +210,13 @@ export async function reportAgentBug(
   };
 }
 
-async function defaultLaunch(args: ReportBugLaunchArgs): Promise<ReportBugLaunch> {
+export function isBugReportAutomationConfigured(): boolean {
+  return getBoxesBugReportSecret() !== undefined;
+}
+
+export async function launchBugReportAutomation(
+  args: ReportBugLaunchArgs
+): Promise<ReportBugLaunch> {
   const secret = getBoxesBugReportSecret();
   if (secret === undefined) {
     throw new ReportBugNotConfiguredError();
