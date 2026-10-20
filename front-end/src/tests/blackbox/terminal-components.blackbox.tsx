@@ -165,6 +165,12 @@ function withAgentCtx(messages: Message[], children: React.ReactNode, agentId?: 
 // QueryInput
 // ═══════════════════════════════════════════════════════════════════════════
 
+/** Rose Desktop: toolbar items live on the tab behind the box; hover it open first. */
+async function clickNubItem(user: ReturnType<typeof userEvent.setup>, el: Element) {
+  await user.hover(screen.getByTestId('query-toolbar-nub'));
+  await user.click(el);
+}
+
 describe('QueryInput (blackbox)', () => {
   beforeEach(() => {
     mockSession();
@@ -298,7 +304,7 @@ describe('QueryInput (blackbox)', () => {
     const user = userEvent.setup();
     renderWithProviders(<QueryInput {...defaultProps} pendingPriceLimitCents={100} />);
     const chip = screen.getByText('0.00 / 1.00');
-    await user.click(chip.closest('button')!);
+    await clickNubItem(user, chip.closest('button')!);
 
     const input = document.querySelector('input[placeholder="1.00"]') as HTMLInputElement | null;
     expect(input).not.toBeNull();
@@ -314,7 +320,7 @@ describe('QueryInput (blackbox)', () => {
 
     // clicking opens the input
     const chip = screen.getByText('0.50 / 5.00').closest('button')!;
-    await user.click(chip);
+    await clickNubItem(user, chip);
     const input = document.querySelector('input[placeholder="1.00"]') as HTMLInputElement | null;
     expect(input).not.toBeNull();
   });
@@ -428,18 +434,19 @@ describe('QueryInput (blackbox)', () => {
     expect(spy).toHaveBeenCalled();
   });
 
-  it('tooltip toggle button next to rose-1-flash is clickable', async () => {
-    const user = userEvent.setup();
-    renderWithProviders(<QueryInput {...defaultProps} selectedModel="rose-labs/rose-1-flash" />);
-    // The info-circle tooltip button renders an inline svg with stroke path
-    // for the "i" info icon — target by the svg path d attribute.
-    const infoSvg = document.querySelector('svg path[d*="M13 16h-1v-4h-1"]');
-    expect(infoSvg).toBeTruthy();
-    const btn = (infoSvg as SVGElement)!.closest('button')!;
-    await user.click(btn);
-    expect(
-      screen.getByText(/Rose-fast runs execute and browser on Cerebras Qwen 3.8 27B/),
-    ).toBeInTheDocument();
+  it('Rose Desktop removes the info button next to the model selector (stock keeps it)', () => {
+    const infoSelector = 'svg path[d*="M13 16h-1v-4h-1"]';
+    const { unmount } = renderWithProviders(
+      <QueryInput {...defaultProps} selectedModel="rose-labs/rose-1-flash" />,
+    );
+    expect(screen.getByText('rose-labs/rose-fast')).toBeInTheDocument();
+    expect(document.querySelector(infoSelector)).toBeNull();
+    unmount();
+
+    renderWithProviders(<QueryInput {...defaultProps} selectedModel="rose-labs/rose-1-flash" />, {
+      roseDesktop: false,
+    });
+    expect(document.querySelector(infoSelector)).not.toBeNull();
   });
 
   it('drag over + drag leave cycle toggles the drop overlay class', async () => {
@@ -473,7 +480,7 @@ describe('QueryInput (blackbox)', () => {
 
     // Click chip to enter edit mode
     const chip = screen.getByText('0.00 / 1.00').closest('button')!;
-    await user.click(chip);
+    await clickNubItem(user, chip);
 
     const input = document.querySelector('input[placeholder="1.00"]') as HTMLInputElement;
     expect(input).not.toBeNull();
@@ -492,7 +499,7 @@ describe('QueryInput (blackbox)', () => {
     const user = userEvent.setup();
     renderWithProviders(<QueryInput {...defaultProps} pendingPriceLimitCents={100} />);
     const chip = screen.getByText('0.00 / 1.00').closest('button')!;
-    await user.click(chip);
+    await clickNubItem(user, chip);
 
     const input = document.querySelector('input[placeholder="1.00"]') as HTMLInputElement;
     await user.clear(input);
@@ -505,14 +512,14 @@ describe('QueryInput (blackbox)', () => {
     const agent = makeAgentDetail({ tree_cost_cents: 85, price_limit_cents: 100 });
     renderWithProviders(<QueryInput {...defaultProps} agentDetail={agent} />);
     const btn = screen.getByText('0.85 / 1.00').closest('button')!;
-    expect(btn.className).toMatch(/amber/);
+    expect(btn).toHaveAttribute('data-warning', 'amber');
   });
 
   it('cost chip shows red when tree cost reaches/exceeds the limit (root agent)', () => {
     const agent = makeAgentDetail({ tree_cost_cents: 150, price_limit_cents: 100 });
     renderWithProviders(<QueryInput {...defaultProps} agentDetail={agent} />);
     const btn = screen.getByText('1.50 / 1.00').closest('button')!;
-    expect(btn.className).toMatch(/red/);
+    expect(btn).toHaveAttribute('data-warning', 'red');
   });
 
   it('saving price limit for existing agent calls PATCH /api/agents/:id', async () => {
@@ -536,7 +543,7 @@ describe('QueryInput (blackbox)', () => {
     );
 
     const chip = screen.getByText('0.50 / 5.00').closest('button')!;
-    await user.click(chip);
+    await clickNubItem(user, chip);
 
     const input = document.querySelector('input[placeholder="1.00"]') as HTMLInputElement;
     await user.clear(input);
@@ -553,7 +560,7 @@ describe('QueryInput (blackbox)', () => {
     renderWithProviders(<QueryInput {...defaultProps} agentDetail={agent} />);
 
     const chip = screen.getByText('5.00 / 10.00').closest('button')!;
-    await user.click(chip);
+    await clickNubItem(user, chip);
 
     const input = document.querySelector('input[placeholder="1.00"]') as HTMLInputElement;
     await user.clear(input);
@@ -578,7 +585,7 @@ describe('QueryInput (blackbox)', () => {
       />,
     );
     const chip = screen.getByText('0.00 / 1.00').closest('button')!;
-    await user.click(chip);
+    await clickNubItem(user, chip);
 
     const input = document.querySelector('input[placeholder="1.00"]') as HTMLInputElement;
     await user.clear(input); // empty -> NaN

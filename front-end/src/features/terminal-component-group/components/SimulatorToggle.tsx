@@ -18,23 +18,51 @@
  * Hover shows an explanatory tooltip for the current state.
  *
  * Gating: only rendered for product administrators via SIMULATOR_USER_IDS.
+ *
+ * variant 'nub' (Rose Desktop tab): bare white Sparkles (dimmed when off),
+ * instant "Simulator on" / "Simulator off" tooltip.
  */
 
 import { Sparkles } from 'lucide-react';
 import { useCallback } from 'react';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
+import { NUB_ITEM_CLASS, NubTip } from './query-input/NubTip';
 
 interface SimulatorToggleProps {
   enabled: boolean;
   onChange: (enabled: boolean) => void;
+  variant?: 'chip' | 'nub';
 }
 
-export default function SimulatorToggle({ enabled, onChange }: SimulatorToggleProps) {
+export default function SimulatorToggle({
+  enabled,
+  onChange,
+  variant = 'chip',
+}: SimulatorToggleProps) {
   const handleToggle = useCallback(() => {
     onChange(!enabled);
   }, [enabled, onChange]);
   const label = enabled ? 'Simulator On' : 'Simulator Off';
+
+  if (variant === 'nub') {
+    return (
+      <NubTip label={enabled ? 'Simulator on' : 'Simulator off'}>
+        <button
+          type="button"
+          data-nub-item
+          onClick={handleToggle}
+          aria-label={label}
+          aria-pressed={enabled}
+          data-state={enabled ? 'on' : 'off'}
+          data-testid="simulator-toggle"
+          className={cn(NUB_ITEM_CLASS, !enabled && 'opacity-55')}
+        >
+          <Sparkles className={cn(enabled && 'fill-current')} />
+        </button>
+      </NubTip>
+    );
+  }
 
   return (
     <Tooltip>

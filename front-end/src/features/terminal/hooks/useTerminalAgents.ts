@@ -10,11 +10,12 @@ import { useCallback, useEffect, useMemo, useRef } from 'react';
 
 import { useAuth } from '@/features/auth';
 import { getClientSource } from '@/lib/clientSource';
+import { isRoseDesktopUser } from '@/lib/roseDesktop';
 import { useAgentContext } from '@/features/agent-context';
 import { useToast } from '@/hooks/use-toast';
 
 import type { TerminalView } from '../types';
-import { DEFAULT_MODEL } from '../config';
+import { DEFAULT_MODEL, ROSE_DESKTOP_DEFAULT_MODEL } from '../config';
 
 import { useAgentList } from './useAgentList';
 import type { useAgentActions } from './useAgentActions';
@@ -44,17 +45,29 @@ export function useSelectedAgentModel(
   model: string | undefined,
   setSelectedModel: (model: string) => void,
   isInitialLoadRef: React.MutableRefObject<boolean>,
+  defaultModel: string = DEFAULT_MODEL,
 ) {
   useEffect(() => {
-    setSelectedModel(modelOwnerId === selectedAgentId ? (model ?? DEFAULT_MODEL) : DEFAULT_MODEL);
+    setSelectedModel(modelOwnerId === selectedAgentId ? (model ?? defaultModel) : defaultModel);
     isInitialLoadRef.current = true;
-  }, [isInitialLoadRef, model, modelOwnerId, selectedAgentId, setSelectedModel]);
+  }, [defaultModel, isInitialLoadRef, model, modelOwnerId, selectedAgentId, setSelectedModel]);
+}
+
+/** New-agent model default: rose-flash for signed-in Rose Desktop accounts. */
+export function defaultModelForAccount(auth: {
+  isAnonymous: boolean;
+  isFullySignedIn: boolean;
+  user: { id?: string } | null;
+}): string {
+  const user = auth.isFullySignedIn ? auth.user : null;
+  return !auth.isAnonymous && isRoseDesktopUser(user) ? ROSE_DESKTOP_DEFAULT_MODEL : DEFAULT_MODEL;
 }
 
 function useContextSelectedAgentModel(
   ctx: ReturnType<typeof useAgentContext>,
   messaging: ReturnType<typeof useMessageSending>,
   isInitialLoadRef: React.MutableRefObject<boolean>,
+  defaultModel: string,
 ) {
   useSelectedAgentModel(
     ctx.selectedAgentId,
@@ -62,6 +75,7 @@ function useContextSelectedAgentModel(
     ctx.agent?.model,
     messaging.setSelectedModel,
     isInitialLoadRef,
+    defaultModel,
   );
 }
 
@@ -99,7 +113,7 @@ export function useTerminalAgents(
   const isInitialLoadRef = useRef(false);
   const { setIsSendingMessage, setMessageInput } = messaging;
   const { setSelectedAgentId } = ctx;
-  useContextSelectedAgentModel(ctx, messaging, isInitialLoadRef);
+  useContextSelectedAgentModel(ctx, messaging, isInitialLoadRef, defaultModelForAccount(auth));
 
   const cleanupAgentState = useCallback(() => {
     setSelectedAgentId(null);

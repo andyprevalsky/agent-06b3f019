@@ -1,96 +1,99 @@
 /**
- * STATE MACHINE: ToolbarNub (query-box toolbar reveal)
+ * STATE MACHINE: NubTab (Rose Desktop query-box tab; stock UI has no tab)
  *
- * The query box's top toolbar (Safe Writes, tools, cost, context, settings) is
- * hidden behind a small rose-gradient nub at the box's top-left corner.
+ * A small tab on the BACK of the query box, flush with its left edge. Its
+ * lower 12px sit behind the box and are masked so the Rose gradient wraps the
+ * box's 12px top-left curve but never shows through the box.
  *
- *   [COLLAPSED] --pointer enters nub | focus nub/toolbar | tap/Enter nub--> [EXPANDED]
- *   [EXPANDED]  --pointer over toolbar---------------------------------> [EXPANDED]
- *   [EXPANDED]  --pointer leaves nub+toolbar (LEAVE_GRACE_MS) and
- *                 focus left both and not pinned------------------------> [COLLAPSED]
- *   [EXPANDED/pinned] --tap/Enter nub again | touch outside------------> [COLLAPSED]
+ *   [CLOSED] 4px lip, 34px wide, strip hidden (opacity 0, no pointer events)
+ *      |  pointer enters tab | focus inside | tap/click tab
+ *      v
+ *   [OPEN]   grows to 18px tall (220ms) and slides sideways to the strip's
+ *            width (300ms): lock, context files, tools, budget, context %,
+ *            settings, info — white 12px icons / 10px text, instant tooltips
+ *      |  pointer leaves (TOOLBAR_LEAVE_GRACE_MS) and focus left and not
+ *      |  pinned | tap/click tab again | touch outside
+ *      v
+ *   [CLOSED]
  *
- * open = hovered || focused || pinned.
- *   hovered : mouse/pen pointer is over the nub or the toolbar (touch ignored,
- *             so emulated touch hovers can't hold the toolbar open).
- *   focused : keyboard focus is on the nub or inside the toolbar (including
- *             portaled popovers, which bubble through the React tree).
- *   pinned  : toggled by a non-mouse click (touch tap or keyboard Enter/Space).
- *
- * Collapse/expand animates max-height + opacity over 280ms
- * cubic-bezier(.2,.8,.2,1). The toolbar stays mounted while collapsed so its
- * children keep their state (e.g. auto-loaded test prompts).
+ * open = hovered || focused || pinned (owned by useToolbarReveal). Clicks on
+ * a strip item ([data-nub-item]) never toggle the pin. The strip stays mounted
+ * while closed so its children keep their state (e.g. auto-loaded prompts).
  */
 
-import { cn } from '@/lib/utils';
+import { useLayoutEffect, useState, type ReactNode } from 'react';
 import type { ToolbarReveal } from './useToolbarReveal';
 
-const REVEAL_EASE = 'cubic-bezier(.2,.8,.2,1)';
+const EASE = 'cubic-bezier(.2,.8,.2,1)';
+const CLOSED_HEIGHT = 4;
+const OPEN_HEIGHT = 18;
+const CLOSED_WIDTH = 34;
+/** Box corner radius (rounded-xl); the tab's masked lower part wraps it. */
+const BOX_RADIUS = 12;
 
-const NUB_STYLE: React.CSSProperties = {
-  background: 'linear-gradient(120deg,#ffb36b 0%,#ff5f8f 42%,#e43f9a 62%,#9b4dff 100%)',
-  transition: `width 280ms ${REVEAL_EASE}, box-shadow 280ms ${REVEAL_EASE}`,
-};
+const ROSE_GRADIENT = 'linear-gradient(120deg,#ffb36b 0%,#ff5f8f 42%,#e43f9a 62%,#9b4dff 100%)';
 
-const NUB_SHADOW =
-  'inset 0 1px 0 rgba(255,255,255,.65), inset 0 -1px 1px rgba(80,0,60,.25), 0 2px 8px rgba(255,80,140,.45), 0 0 0 .5px rgba(255,255,255,.6)';
-const NUB_SHADOW_OPEN =
-  'inset 0 1px 0 rgba(255,255,255,.7), 0 3px 14px rgba(255,80,140,.6), 0 0 0 .5px rgba(255,255,255,.7)';
 
-/** The 30×9 rose-gradient nub at the query box's top-left corner (7px inset). */
-export function ToolbarNub({ reveal }: { reveal: ToolbarReveal }) {
-  return (
-    <button
-      ref={reveal.nubRef}
-      type="button"
-      data-testid="query-toolbar-nub"
-      aria-label="Tools and settings"
-      title="Tools & settings"
-      aria-expanded={reveal.open}
-      aria-controls={reveal.toolbarId}
-      onClick={reveal.onNubClick}
-      {...reveal.regionHandlers}
-      className={cn(
-        'absolute left-[7px] top-[7px] z-30 h-[9px] cursor-pointer rounded-full p-0',
-        // Highlight streak along the top edge of the pill.
-        "after:pointer-events-none after:absolute after:left-1 after:right-1 after:top-px after:h-[3px] after:rounded-full after:bg-gradient-to-b after:from-white/75 after:to-white/0 after:content-['']",
-        // Invisible larger hit area for touch; no visual change.
-        "before:absolute before:-inset-2 before:content-['']",
-        'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#ff5f8f]/60',
-        reveal.open ? 'w-[44px]' : 'w-[30px]',
-      )}
-      style={{ ...NUB_STYLE, boxShadow: reveal.open ? NUB_SHADOW_OPEN : NUB_SHADOW }}
-    />
-  );
+function useStripWidth(stripRef: React.RefObject<HTMLDivElement | null>): number {
+  const [width, setWidth] = useState(0);
+  useLayoutEffect(() => {
+    const strip = stripRef.current;
+    if (!strip) return undefined;
+    const measure = () => setWidth(strip.scrollWidth);
+    measure();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(measure);
+    observer.observe(strip);
+    return () => observer.disconnect();
+  }, [stripRef]);
+  return width;
 }
 
-/**
- * Collapsible container for the toolbar row; hidden until the nub opens it.
- * Without a reveal (standalone TopBar renders) the row is always shown.
- */
-export function ToolbarRevealRegion({
-  reveal,
-  children,
-}: {
-  reveal?: ToolbarReveal;
-  children: React.ReactNode;
-}) {
-  if (!reveal) return <>{children}</>;
+export function NubTab({ reveal, children }: { reveal: ToolbarReveal; children: ReactNode }) {
+  const stripWidth = useStripWidth(reveal.toolbarRef);
+  const tabHeight = reveal.open ? OPEN_HEIGHT : CLOSED_HEIGHT;
+  const openWidth = Math.max(CLOSED_WIDTH, stripWidth || 300);
   return (
     <div
-      ref={reveal.toolbarRef}
-      id={reveal.toolbarId}
-      data-testid="query-toolbar-region"
+      ref={reveal.nubRef}
+      role="toolbar"
+      aria-label="Tools and settings"
+      data-testid="query-toolbar-nub"
       data-state={reveal.open ? 'open' : 'closed'}
       {...reveal.regionHandlers}
-      className={cn(reveal.open ? 'overflow-visible' : 'pointer-events-none overflow-hidden')}
+      onClick={(e) => {
+        if (e.target instanceof Element && e.target.closest('[data-nub-item]')) return;
+        reveal.onNubClick();
+      }}
+      // rose-nub-tab (roseQueryBox.css) = the mask: everything above the box's
+      // top edge plus the corner outside its 12px curve, anchored to the tab's
+      // bottom so it holds at any height. ::before = invisible hit area above
+      // the 4px lip (the painted area is masked).
+      className="rose-nub-tab absolute left-0 z-0 cursor-pointer before:absolute before:inset-x-0 before:-top-2.5 before:h-3.5 before:content-['']"
       style={{
-        maxHeight: reveal.open ? 60 : 0,
-        opacity: reveal.open ? 1 : 0,
-        transition: `max-height 280ms ${REVEAL_EASE}, opacity 200ms ease`,
+        top: -tabHeight,
+        height: tabHeight + BOX_RADIUS,
+        width: reveal.open ? openWidth : CLOSED_WIDTH,
+        borderRadius: '8px 8px 0 0',
+        background: ROSE_GRADIENT,
+        boxShadow: 'inset 0 1px 0 rgba(255,255,255,.45)',
+        transition: `width 300ms ${EASE}, height 220ms ${EASE}, top 220ms ${EASE}`,
       }}
     >
-      {children}
+      <div
+        ref={reveal.toolbarRef}
+        id={reveal.toolbarId}
+        data-testid="query-toolbar-region"
+        data-state={reveal.open ? 'open' : 'closed'}
+        className="absolute left-0 top-0 flex h-[18px] w-max items-center gap-[10px] whitespace-nowrap px-[10px] text-[10.5px] font-semibold text-white"
+        style={{
+          opacity: reveal.open ? 1 : 0,
+          pointerEvents: reveal.open ? 'auto' : 'none',
+          transition: reveal.open ? 'opacity 150ms ease 100ms' : 'opacity 120ms ease',
+        }}
+      >
+        {children}
+      </div>
     </div>
   );
 }

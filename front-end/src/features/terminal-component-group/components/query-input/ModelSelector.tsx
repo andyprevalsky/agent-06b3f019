@@ -16,6 +16,8 @@
  *     | (hover desktop / tap mobile info icon)
  *     v
  * [TOOLTIP_SHOWN] <-- showInfoTooltip: true
+ *
+ * showInfo=false (Rose Desktop query box): the info button is not rendered.
  */
 
 import { useState, useEffect } from 'react';
@@ -32,6 +34,8 @@ interface ModelSelectorProps {
   onModelChange?: (model: string) => void;
   availableModels: Model[];
   showModelSelector: boolean;
+  /** Info button next to the chip (Rose models); off in the Rose Desktop box. */
+  showInfo?: boolean;
 }
 
 export function ModelSelector({
@@ -39,6 +43,7 @@ export function ModelSelector({
   onModelChange,
   availableModels,
   showModelSelector,
+  showInfo = true,
 }: ModelSelectorProps) {
   const [showPicker, setShowPicker] = useState(false);
   const selectedInfo = availableModels.find((m) => m.id === selectedModel);
@@ -87,7 +92,7 @@ export function ModelSelector({
           </PopoverContent>
         )}
       </Popover>
-      {isRoseModel && <RoseModelTooltip selectedModel={selectedModel} />}
+      {showInfo && isRoseModel && <RoseModelTooltip selectedModel={selectedModel} />}
     </>
   );
 }

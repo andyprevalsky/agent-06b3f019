@@ -33,10 +33,14 @@
  * Prompt rows show a green check when lastFivePassed is true (last 5 runs passed).
  *
  * Only visible in development mode (gated by the parent `TopBar`).
+ *
+ * variant 'nub' (Rose Desktop tab): bare white document icon with the instant
+ * "Context files" tooltip (no native title, so it never doubles up).
  */
 
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { FileText, Search } from 'lucide-react';
+import { NUB_ITEM_CLASS, NubTip } from './query-input/NubTip';
 import { forwardRef, useEffect, useMemo, useState } from 'react';
 import type { ComponentPropsWithoutRef, MouseEvent } from 'react';
 import TagFilter from './test-prompts-selector/TagFilter';
@@ -101,10 +105,11 @@ function TestPromptSearchInput({ searchQuery, onSearchQueryChange }: TestPromptS
 interface TestPromptTriggerButtonProps extends ComponentPropsWithoutRef<'button'> {
   onOpen: () => void;
   onClose: () => void;
+  nub?: boolean;
 }
 
 const TestPromptTriggerButton = forwardRef<HTMLButtonElement, TestPromptTriggerButtonProps>(
-  ({ onOpen, onClose, onMouseEnter, onMouseLeave, type = 'button', ...props }, ref) => {
+  ({ onOpen, onClose, onMouseEnter, onMouseLeave, type = 'button', nub = false, ...props }, ref) => {
     const handleMouseEnter = (event: MouseEvent<HTMLButtonElement>): void => {
       onMouseEnter?.(event);
       onOpen();
@@ -118,13 +123,18 @@ const TestPromptTriggerButton = forwardRef<HTMLButtonElement, TestPromptTriggerB
         {...props}
         ref={ref}
         type={type}
-        className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-muted/50 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-        title="Select a test prompt"
+        data-nub-item={nub ? '' : undefined}
+        className={
+          nub
+            ? NUB_ITEM_CLASS
+            : 'inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-muted/50 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground'
+        }
+        title={nub ? undefined : 'Select a test prompt'}
         aria-label="Select a test prompt"
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
       >
-        <FileText className="h-3.5 w-3.5" />
+        <FileText className="h-3.5 w-3.5" strokeWidth={nub ? 2.2 : 2} />
       </button>
     );
   },
@@ -134,6 +144,7 @@ TestPromptTriggerButton.displayName = 'TestPromptTriggerButton';
 export default function TestPromptsSelector({
   onSelectPrompt,
   shouldAutoLoadDefaultPrompt,
+  variant = 'chip',
 }: TestPromptsSelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -181,11 +192,20 @@ export default function TestPromptsSelector({
     }
   };
 
+  const nub = variant === 'nub';
+  const trigger = (
+    <PopoverTrigger asChild>
+      <TestPromptTriggerButton
+        nub={nub}
+        onOpen={() => setIsOpen(true)}
+        onClose={() => setIsOpen(false)}
+      />
+    </PopoverTrigger>
+  );
+
   return (
     <Popover open={isOpen} onOpenChange={setIsOpen}>
-      <PopoverTrigger asChild>
-        <TestPromptTriggerButton onOpen={() => setIsOpen(true)} onClose={() => setIsOpen(false)} />
-      </PopoverTrigger>
+      {nub ? <NubTip label="Context files">{trigger}</NubTip> : trigger}
       <PopoverContent
         className="w-[min(400px,calc(100vw-32px))] max-h-[400px] overflow-y-auto p-4 z-50"
         align="start"

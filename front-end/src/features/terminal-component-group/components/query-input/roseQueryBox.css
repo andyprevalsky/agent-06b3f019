@@ -1,0 +1,139 @@
+/*
+ * Rose Desktop query box styles. Every selector here is keyed on a class that
+ * only flagged (Rose Desktop) query boxes render, so the stock UI is unchanged.
+ * html.dark rules never alter light mode.
+ */
+
+/* ── Nub tab mask (NubTab in ToolbarNub.tsx) ────────────────────────────── */
+/* Visible: the band above the box's top edge (all but the tab's bottom 12px)
+ * plus the corner outside the box's 12px top-left curve, so the gradient wraps
+ * the curve but never shows through the box. Anchored to the tab's bottom. */
+
+.rose-nub-tab {
+  -webkit-mask:
+    linear-gradient(#000, #000) 0 0 / 100% calc(100% - 12px) no-repeat,
+    radial-gradient(circle 12px at 12px 12px, transparent 11.5px, #000 12.5px) 0 100% / 12px 12px
+      no-repeat;
+  mask:
+    linear-gradient(#000, #000) 0 0 / 100% calc(100% - 12px) no-repeat,
+    radial-gradient(circle 12px at 12px 12px, transparent 11.5px, #000 12.5px) 0 100% / 12px 12px
+      no-repeat;
+}
+
+/* ── Speed toggle (SpeedToggle in FastModeToggle.tsx) ───────────────────── */
+
+.rose-speed[data-state='normal'] {
+  border-color: hsl(240 6% 90%);
+  background: hsl(240 5% 96% / 0.5);
+  color: hsl(240 4% 46%);
+}
+
+.rose-speed[data-state='fast'] {
+  border-color: #a9d8ff;
+  background: linear-gradient(135deg, #fdf6f9 0%, #eaf6ff 60%, #d9efff 100%);
+  color: #3a8fdc;
+  box-shadow: 0 1px 2px rgba(40, 110, 180, 0.08);
+}
+
+.rose-speed[data-state='ultra'] {
+  border-color: #9edcff;
+  background: linear-gradient(135deg, #fff4f8 0%, #e6f7ff 35%, #c4ebff 75%, #aee2ff 100%);
+  color: #1f8ff0;
+  box-shadow:
+    inset 0 1px 0 #fff,
+    0 0 0 1px rgba(170, 225, 255, 0.75),
+    0 0 14px rgba(125, 205, 255, 0.85),
+    0 0 26px rgba(255, 170, 205, 0.25);
+}
+
+.rose-speed[data-state='ultra'] svg {
+  filter: drop-shadow(0 0 2px #fff) drop-shadow(0 0 5px rgba(90, 190, 255, 0.95));
+}
+
+/* Dark: toned down, no glare. */
+html.dark .rose-speed[data-state='normal'] {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(236, 236, 234, 0.6);
+}
+
+html.dark .rose-speed[data-state='fast'] {
+  background: rgba(120, 190, 255, 0.07);
+  border-color: rgba(150, 210, 255, 0.28);
+  color: #7fb8e6;
+  box-shadow: none;
+}
+
+html.dark .rose-speed[data-state='ultra'] {
+  background: rgba(120, 190, 255, 0.12);
+  border-color: rgba(150, 210, 255, 0.4);
+  color: #8fcfff;
+  box-shadow: 0 0 6px rgba(110, 190, 255, 0.25);
+}
+
+html.dark .rose-speed[data-state='ultra'] svg {
+  filter: none;
+}
+
+/* ── Send / pause button: dark-only black glass (LiquidWhiteButton) ─────── */
+/* Light mode keeps the stock LiquidWhiteButton untouched. In dark mode the
+ * liquid-metal shader shows only as a ~3px outer ring and the face becomes
+ * black glass: dark radial tint, backdrop refraction through the SVG filter
+ * rendered next to the button, a minimal inset top highlight, a soft top
+ * specular, no rainbow. Inline layer styles need !important to override. */
+
+html.dark .rose-dark-glass canvas {
+  -webkit-mask-image: radial-gradient(
+    circle closest-side,
+    transparent calc(100% - 3.5px),
+    #000 calc(100% - 3px)
+  );
+  mask-image: radial-gradient(
+    circle closest-side,
+    transparent calc(100% - 3.5px),
+    #000 calc(100% - 3px)
+  );
+  opacity: 0.7;
+}
+
+html.dark .rose-dark-glass .liquid-white-shader {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35) !important;
+}
+
+html.dark .rose-dark-glass .liquid-white-chrome {
+  background: transparent !important;
+}
+
+html.dark .rose-dark-glass .liquid-white-face {
+  overflow: hidden;
+  isolation: isolate;
+  background: radial-gradient(
+    circle at 50% 115%,
+    rgba(58, 58, 62, 0.78),
+    rgba(6, 6, 8, 0.9) 62%
+  ) !important;
+  -webkit-backdrop-filter: url(#rose-dark-glass-refraction) saturate(1.4);
+  backdrop-filter: url(#rose-dark-glass-refraction) saturate(1.4);
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.28),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.1),
+    inset 0 -8px 12px rgba(0, 0, 0, 0.5) !important;
+}
+
+html.dark .rose-dark-glass .liquid-white-face::before {
+  content: '';
+  position: absolute;
+  left: 18%;
+  right: 18%;
+  top: 6%;
+  height: 38%;
+  border-radius: 50% / 60% 60% 40% 40%;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.02));
+}
+
+html.dark .rose-dark-glass .liquid-white-icon {
+  color: #fbfbf9 !important;
+  fill: #fbfbf9 !important;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.5));
+}
