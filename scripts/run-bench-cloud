@@ -3217,7 +3217,12 @@ if [ "$MODE" = "refresh-wmh" ]; then
     trap 'cleanup_refresh_wmh; exit 130' INT
     trap 'cleanup_refresh_wmh; exit 143' TERM
     CLOUDBENCH_HOLD_APP_ENV_LOCK=1
-    inject_secrets      # refresh secrets so R2 creds for the corpus read are current.
+    # Exclusive donor maintenance, but never restage the shared app secrets:
+    # restaging from this checkout's env reverted every concurrent guest to the
+    # prod Temporal namespace (2026-10-19). The donor already carries the app's
+    # R2 credentials; rotate them only with an explicit --refresh-secrets.
+    acquire_app_environment_lock || exit 1
+    verify_app_environment || exit 1
 
     mid="$(resolve_machine_id)"
     [ -z "$mid" ] && { echo "❌ No persistent machine — run 'run-bench-cloud --setup' first."; exit 1; }

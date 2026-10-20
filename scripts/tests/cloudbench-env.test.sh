@@ -157,6 +157,15 @@ class WorldModelLaunch(unittest.TestCase):
 
     def test_native_refresh_restores_the_serving_cache_without_building(self):
         refresh = source[source.index('if [ "$MODE" = "refresh-wmh" ]; then'):source.index("# MODE: run (default)")]
+        # The WMH refresh shares the bench app with concurrent fleets: it holds
+        # the maintenance lock and verifies secrets read-only, and never
+        # restages them (that reverted other guests' Temporal namespace).
+        refresh_mode = refresh[:refresh.index("# MODE: --build-wmh")] if "# MODE: --build-wmh" in refresh else refresh
+        self.assertNotIn("inject_secrets", refresh_mode)
+        self.assertLess(refresh_mode.index("acquire_app_environment_lock || exit 1"),
+                        refresh_mode.index("verify_app_environment || exit 1"))
+        self.assertLess(refresh_mode.index("verify_app_environment || exit 1"),
+                        refresh_mode.index('prepare_warm_source "$mid"'))
         # Experiential (the default) selects the cache restore; only legacy builds on the donor.
         self.assertRegex(refresh, r'if \[ "\$WMH_ENGINE" = experiential \]; then\n[^\n]*\n\s+BUILD_CMD="\$NATIVE_REFRESH_CMD"')
         fragment = re.search(r'^    NATIVE_REFRESH_CMD="set -e\n.*?^ {4}# Legacy', source, re.M | re.S).group(0)
