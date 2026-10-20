@@ -3281,6 +3281,7 @@ def _resolve_payment_card_tool_result_for_resume(
             continue
 
         finished_result: Dict[str, Any] = {
+            **previous_result,
             "success": True,
             "status": "payment_card_ready",
             "card_secret_refs": {
