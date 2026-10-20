@@ -10,7 +10,9 @@
  * never import other features):
  *   integrations → Integrations page   benchmarks → BenchmarksView
  *   health       → AdminHealth page ("Biz health", admins only)
- *   settings     → Settings page with its own tabs (Customization · Personal
+ *   settings     → admin account switcher (inline, admins only; it replaced the
+ *                  floating top-right pill for Rose Desktop accounts), then the
+ *                  Settings page with its own tabs (Customization · Personal
  *                  Info · Billing · API Keys); Billing adds the payments UI the
  *                  stock left bar's card icon showed; Sign out below the tabs
  *   feedback     → FeedbackAppPanel (existing submitFeedback)
@@ -36,6 +38,7 @@ const IntegrationsPage = lazy(() => import('@/pages/Integrations'));
 const BenchmarksPage = lazy(() => import('@/pages/Benchmarks'));
 const SettingsPage = lazy(() => import('@/pages/Settings'));
 const AdminHealthPage = lazy(() => import('@/pages/AdminHealth'));
+const AccountSwitcherPage = lazy(() => import('@/pages/AccountSwitcher'));
 
 type PanelApp = Extract<
   RoseApp,
@@ -74,6 +77,7 @@ function BillingPayments() {
 function SettingsBody({ onLogout }: { onLogout?: () => void }) {
   return (
     <div className="px-5 pb-6">
+      <AccountSwitcherPage />
       <SettingsPage embedded billingExtra={<BillingPayments />} />
       {onLogout !== undefined && (
         <button type="button" onClick={onLogout} className="mt-6 font-semibold text-[#e5484d]">

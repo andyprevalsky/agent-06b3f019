@@ -21,6 +21,10 @@
  * right of the model selector (when `speed` is passed: Fast Mode operators),
  * and the dark-only glass send/stop button.
  *
+ * ROSE DARK (roseDark = useRoseTheme().isDark): textarea text #f2f2ef with a
+ * #8c8c86 placeholder and the model chip on #2f2f2c (mock panels/dark.js).
+ * Light renders the exact stock classes.
+ *
  * KEYBOARD:
  *   plain Enter                 -> submit
  *   Cmd/Shift/Ctrl/Alt + Enter  -> native textarea newline
@@ -55,6 +59,8 @@ interface InputContainerProps {
   showModelSelector: boolean;
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
   roseDesktop?: boolean;
+  /** Rose Desktop dark mode: dark textarea + model chip. */
+  roseDark?: boolean;
   /** Rose Desktop speed toggle wiring; omitted when the account has no Fast Mode. */
   speed?: { fastMode: boolean; onFastModeChange?: (enabled: boolean) => void };
 }
@@ -78,6 +84,7 @@ export function InputContainer(props: InputContainerProps) {
     showModelSelector,
     textareaRef,
     roseDesktop = false,
+    roseDark = false,
     speed,
   } = props;
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -93,6 +100,7 @@ export function InputContainer(props: InputContainerProps) {
           onSubmit={onSubmit}
           disabled={disabled}
           placeholder={placeholder}
+          roseDark={roseDark}
         />
       </div>
       <div className="flex items-center justify-between gap-3 px-3 pt-2 w-full">
@@ -108,6 +116,7 @@ export function InputContainer(props: InputContainerProps) {
             availableModels={availableModels}
             showModelSelector={showModelSelector}
             roseDesktop={roseDesktop}
+            roseDark={roseDark}
           />
           {speed && (
             <SpeedToggle
@@ -156,10 +165,14 @@ interface TextareaRowProps {
   onSubmit: () => void;
   disabled: boolean;
   placeholder: string;
+  roseDark: boolean;
 }
 
+/** Rose dark textarea colors; light keeps the stock theme-variable classes. */
+const ROSE_DARK_TEXTAREA_CLASS = 'dark:text-[#f2f2ef] dark:placeholder:text-[#8c8c86]';
+
 const TextareaRow = forwardRef<HTMLTextAreaElement, TextareaRowProps>(
-  ({ value, onChange, onSubmit, disabled, placeholder }, ref) => {
+  ({ value, onChange, onSubmit, disabled, placeholder, roseDark }, ref) => {
     const hasTrackedTyping = useRef(false);
     const hasTrackedFocus = useRef(false);
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -195,6 +208,7 @@ const TextareaRow = forwardRef<HTMLTextAreaElement, TextareaRowProps>(
           'w-full bg-transparent border-none text-foreground placeholder:text-muted-foreground',
           'resize-none outline-none min-h-[56px] py-3',
           'font-normal text-base leading-6',
+          roseDark && ROSE_DARK_TEXTAREA_CLASS,
         )}
         rows={2}
       />

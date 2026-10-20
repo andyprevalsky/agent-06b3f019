@@ -24,8 +24,9 @@
  * (historical field name; server maps it to provider_fast_mode / LLM speed).
  *
  * SpeedToggle (Rose Desktop flag only, bottom row next to the model selector):
- * the same Zap-only square at the model selector's height (26px) with a
- * 10.4px Zap (20% smaller than the 13px mock), three states
+ * the same Zap-only rounded square at the model selector's height (26px, 8px
+ * corners as in the mock's .mk-spd; rounded-lg is 12px here and reads as a
+ * circle) with a 10.4px Zap (20% smaller than the 13px mock), three states
  *
  *   [NORMAL] --click--> [FAST] --click--> [ULTRA] (default) --click--> [NORMAL]
  *
@@ -119,7 +120,7 @@ export function SpeedToggle({ fastMode, onFastModeChange }: SpeedToggleProps) {
           aria-label={label}
           data-state={level}
           data-testid="speed-toggle"
-          className="rose-speed inline-flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-lg border transition-all duration-200"
+          className="rose-speed inline-flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-[8px] border transition-all duration-200"
         >
           <Zap
             className="h-[10.4px] w-[10.4px]"

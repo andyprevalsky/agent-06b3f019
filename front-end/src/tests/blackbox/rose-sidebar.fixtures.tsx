@@ -7,7 +7,8 @@
  *   POST   /api/projects { name, ... }         -> 201 ProjectDto | 409 duplicate name
  *   PUT    /api/projects/:id (edited subset)   -> ProjectDto | 400 unknown field (strict)
  *   DELETE /api/projects/:id                   -> 204
- *   GET    /api/projects/:id/env-files         -> EnvFileDto[] (never values)
+ *   GET    /api/projects/:id/env-files         -> { envFiles: EnvFileDto[], query: null }
+ *                                                 (never values)
  *   POST   /api/projects/:id/env-files { path, description?, content? } -> 201 EnvFileDto
  *   DELETE /api/projects/:id/env-files/:fileId -> 204
  * `mockProjectsApi` keeps in-memory lists so every call round-trips; envFileCount
@@ -160,7 +161,7 @@ export function mockProjectsApi(
       return new HttpResponse(null, { status: 204 });
     }),
     http.get(`${API_BASE}/projects/:id/env-files`, ({ params }) =>
-      HttpResponse.json(filesOf(params.id)),
+      HttpResponse.json({ envFiles: filesOf(params.id), query: null }),
     ),
     http.post(`${API_BASE}/projects/:id/env-files`, async ({ request, params }) => {
       const body = (await request.json()) as Record<string, unknown>;

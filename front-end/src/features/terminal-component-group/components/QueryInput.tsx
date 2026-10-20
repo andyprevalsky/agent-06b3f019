@@ -43,6 +43,11 @@
  * SURFACE:             opaqueSurface → solid white/black container (a per-user
  *                      background image shows through the app behind it);
  *                      otherwise the translucent drip surface
+ *   Rose dark (useRoseTheme().isDark, Rose Desktop accounts only):
+ *                      [LIGHT drip | opaque] --html.dark--> [DARK solid #2f2f2c,
+ *                      12% white border, deep shadow, no white marble; textarea
+ *                      #f2f2ef / placeholder #8c8c86; model chip #2f2f2c]
+ *                      Light keeps the exact stock styles (dripStyles.ts).
  */
 
 import { useRef } from 'react';
@@ -60,7 +65,12 @@ import { PinnedTools } from './query-input/PinnedTools';
 import { useToolbarReveal } from './query-input/useToolbarReveal';
 import { useTopBarProps } from './query-input/useTopBarProps';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
-import { buildDripContainerStyle, buildMarbleBackgroundStyle } from './query-input/dripStyles';
+import { useRoseTheme } from '@/features/rose-theme';
+import {
+  buildDripContainerStyle,
+  buildMarbleBackgroundStyle,
+  showsMarbleBackground,
+} from './query-input/dripStyles';
 import { DEFAULT_PENDING_PRICE_LIMIT_CENTS } from '../config';
 import './query-input/roseQueryBox.css';
 
@@ -81,6 +91,7 @@ export default function QueryInput(props: QueryInputProps) {
   const topBarProps = useTopBarProps(props, attachments, priceLimit, textareaRef);
   const reveal = useToolbarReveal();
   const roseDesktop = useRoseDesktop();
+  const roseDark = useRoseTheme().isDark;
 
   return (
     <div className="w-full md:px-0">
@@ -100,6 +111,7 @@ export default function QueryInput(props: QueryInputProps) {
           dragHandlers={attachments.dragHandlers}
           opaqueSurface={props.opaqueSurface === true}
           aboveTab={roseDesktop}
+          roseDark={roseDark}
         >
           <QueryInputBody
             {...props}
@@ -108,6 +120,7 @@ export default function QueryInput(props: QueryInputProps) {
             handleSubmit={handleSubmit}
             topBarProps={topBarProps}
             roseDesktop={roseDesktop}
+            roseDark={roseDark}
           />
         </QueryInputShell>
       </div>
@@ -145,6 +158,8 @@ interface QueryInputBodyProps extends QueryInputProps {
   topBarProps: TopBarProps;
   /** Rose Desktop: the tab carries the toolbar; speed moves to the bottom row. */
   roseDesktop: boolean;
+  /** Rose Desktop dark mode: dark textarea + model chip. */
+  roseDark: boolean;
 }
 
 function QueryInputBody(props: QueryInputBodyProps) {
@@ -166,6 +181,7 @@ function QueryInputBody(props: QueryInputBodyProps) {
     handleSubmit,
     topBarProps,
     roseDesktop,
+    roseDark,
   } = props;
   const agentCompleted = agentDetail?.status === 'COMPLETED' || agentDetail?.status === 'FAILED';
   const speed =
@@ -196,6 +212,7 @@ function QueryInputBody(props: QueryInputBodyProps) {
         showModelSelector={showModelSelector}
         textareaRef={textareaRef}
         roseDesktop={roseDesktop}
+        roseDark={roseDark}
         speed={speed}
       />
     </>
@@ -223,6 +240,8 @@ interface QueryInputShellProps {
   opaqueSurface: boolean;
   /** Rose Desktop: stack the box above the tab so the tab sits behind it. */
   aboveTab: boolean;
+  /** Rose Desktop dark mode: the solid dark surface (dripStyles.ts). */
+  roseDark: boolean;
   children: React.ReactNode;
 }
 
@@ -233,9 +252,11 @@ function QueryInputShell({
   dragHandlers,
   opaqueSurface,
   aboveTab,
+  roseDark,
   children,
 }: QueryInputShellProps) {
-  const dripStyle = buildDripContainerStyle(dripStyles, drippiness, isDragOver);
+  const dripStyle = buildDripContainerStyle(dripStyles, drippiness, isDragOver, roseDark);
+  const opaque = opaqueSurface && !roseDark;
   return (
     <div
       data-testid="query-input-surface"
@@ -244,14 +265,14 @@ function QueryInputShell({
         'relative rounded-xl p-3 shadow-lg border overflow-hidden transition-colors',
         aboveTab && 'z-[1]',
         isDragOver ? 'border-primary border-2 bg-primary/5' : 'border-border',
-        opaqueSurface && 'bg-white dark:bg-navi-black',
+        opaque && 'bg-white dark:bg-navi-black',
       )}
-      style={opaqueSurface ? { ...dripStyle, backgroundColor: undefined } : dripStyle}
+      style={opaque ? { ...dripStyle, backgroundColor: undefined } : dripStyle}
       onDragOver={dragHandlers.onDragOver}
       onDragLeave={dragHandlers.onDragLeave}
       onDrop={dragHandlers.onDrop}
     >
-      {dripStyles.backgroundColorsScalar > 0 && (
+      {showsMarbleBackground(dripStyles, roseDark) && (
         <div
           className="absolute inset-0 pointer-events-none"
           style={buildMarbleBackgroundStyle(dripStyles)}

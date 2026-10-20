@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import postcss, { type Rule } from 'postcss';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { flushSync } from 'react-dom';
 
@@ -25,6 +25,8 @@ import {
   backgroundElement,
   headerElement,
   headerPillMarkup,
+  queryBoxElement,
+  queryBoxMarkup,
   readLightMarkup,
   setViewport,
   themed,
@@ -174,6 +176,21 @@ describe('light mode is unchanged (markup frozen before dark mode existed)', () 
     await user.click(screen.getByTestId('theme-toggle'));
     expect(themedMarkup()).toBe(readLightMarkup('backgroundDesktop'));
     expect(htmlIsDark()).toBe(false);
+  });
+
+  it('flagged query box keeps the stock drip surface, marble, textarea and model chip', () => {
+    renderWithProviders(themed(queryBoxElement()));
+    expect(queryBoxMarkup(screen.getByTestId('themed'))).toBe(readLightMarkup('queryBoxDesktop'));
+  });
+
+  it('toggling dark then back to light restores the exact stock query box', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(themed(queryBoxElement()));
+    const box = () => queryBoxMarkup(screen.getByTestId('themed'));
+    await user.click(screen.getByTestId('theme-toggle'));
+    expect(box()).not.toBe(readLightMarkup('queryBoxDesktop'));
+    await user.click(screen.getByTestId('theme-toggle'));
+    expect(box()).toBe(readLightMarkup('queryBoxDesktop'));
   });
 
   it('toggling dark then back to light restores the exact stock header pill', async () => {
@@ -338,6 +355,87 @@ describe('dark background', () => {
       'dark:text-[#ececea]',
     );
     expect(header?.firstElementChild).toHaveClass('dark:hidden');
+  });
+});
+
+describe('dark query box (mock panels/dark.js; FE-13 visual pass)', () => {
+  const surface = () => screen.getByTestId('query-input-surface');
+  const modelChip = () => screen.getByText('rose-flash').closest('button')!;
+
+  it('is the solid #2f2f2c surface with a 12% white border, deep shadow and no white marble', () => {
+    storeDark(ROSE_THEME_USER);
+    renderWithProviders(themed(queryBoxElement()));
+    expect(htmlIsDark()).toBe(true);
+    const box = surface();
+    expect(box.style.backgroundColor).toBe('rgb(47, 47, 44)');
+    expect(box.style.borderColor).toBe('rgba(255, 255, 255, 0.12)');
+    expect(box.style.boxShadow).toBe('0 10px 40px rgba(0, 0, 0, 0.35)');
+    expect(box.getAttribute('style')).not.toContain('backdrop-filter');
+    // No translucent white drip or marble layer: the content wrapper is the only child.
+    expect(box.children).toHaveLength(1);
+    expect(box.firstElementChild).toHaveClass('relative', 'z-10');
+    expect(box.outerHTML).not.toMatch(/radial-gradient|rgba\(255, 255, 255, 0\.6\)/);
+  });
+
+  it('textarea reads #f2f2ef with a #8c8c86 placeholder; light keeps the theme classes', () => {
+    storeDark(ROSE_THEME_USER);
+    renderWithProviders(themed(queryBoxElement()));
+    const textarea = within(surface()).getByRole('textbox');
+    expect(textarea).toHaveClass(
+      'text-foreground',
+      'placeholder:text-muted-foreground',
+      'dark:text-[#f2f2ef]',
+      'dark:placeholder:text-[#8c8c86]',
+    );
+  });
+
+  it('model chip is #2f2f2c with a 12% white border and #e4e4df text, same shape; light unchanged', () => {
+    renderWithProviders(themed(queryBoxElement()));
+    const light = modelChip().className;
+    expect(light).toContain('dark:bg-gray-800');
+    expect(light).not.toMatch(/#2f2f2c|#e4e4df/);
+    act(() => screen.getByTestId('theme-toggle').click());
+    const dark = modelChip();
+    expect(dark).toHaveClass(
+      'dark:bg-[#2f2f2c]',
+      'dark:border-white/[0.12]',
+      'dark:text-[#e4e4df]',
+      // Same shape and light colors as the stock chip.
+      'rounded-lg',
+      'px-2',
+      'py-1',
+      'text-xs',
+      'border',
+      'border-gray-300',
+      'bg-gray-100',
+      'text-gray-700',
+    );
+    expect(dark.className).not.toMatch(/dark:(bg-gray-800|border-gray-700|text-gray-300)/);
+  });
+
+  it('the Rose toolset and World Simulator chips keep their exact light styling', () => {
+    renderWithProviders(themed(queryBoxElement()));
+    const lightTools = screen.getByTestId('query-pinned-tools').outerHTML;
+    act(() => screen.getByTestId('theme-toggle').click());
+    expect(htmlIsDark()).toBe(true);
+    expect(screen.getByTestId('query-pinned-tools').outerHTML).toBe(lightTools);
+  });
+
+  it('switches in the commit that flips html.dark, both ways', () => {
+    renderWithProviders(themed(queryBoxElement()));
+    toggleThemeInOneCommit();
+    expect(surface().style.backgroundColor).toBe('rgb(47, 47, 44)');
+    toggleThemeInOneCommit();
+    expect(surface().style.backgroundColor).toBe('rgba(255, 255, 255, 0.6)');
+    expect(queryBoxMarkup(screen.getByTestId('themed'))).toBe(readLightMarkup('queryBoxDesktop'));
+  });
+
+  it('a stock account with a stored dark choice keeps the stock translucent box', () => {
+    storeDark(ROSE_THEME_USER);
+    renderWithProviders(themed(queryBoxElement()), { roseDesktop: false });
+    expect(htmlIsDark()).toBe(false);
+    expect(surface().style.backgroundColor).toBe('rgba(255, 255, 255, 0.6)');
+    expect(surface().outerHTML).not.toMatch(/#2f2f2c|#f2f2ef|#8c8c86|#e4e4df|47, 47, 44/);
   });
 });
 

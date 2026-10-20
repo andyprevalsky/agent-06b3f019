@@ -2,8 +2,9 @@
  * Presentational rows for the Rose Desktop left bar (UI ledger rows 17/29/30/63):
  * account row: signed in = cursive initial, anonymous = member icon (both open
  * Settings); no session = member icon labelled "Sign in" (opens login).
- * Home (root project), the raw black "New Super Agent" button (row 76), the Search row, plain
- * nav rows (Archived, Browse, Health) and the account row. Stateless.
+ * Home (root project), the raw black "New Super Agent" button (row 76; dark mode
+ * inverts it: #f2f2ef fill, #1f1f1d label/plus, mock panels/dark.js .nb), the
+ * Search row, plain nav rows (Archived, Browse, Health) and the account row. Stateless.
  *
  * Every row keeps its icon at the same x whether the bar is collapsed (64px)
  * or hover-expanded (236px); labels fade in. Active = color/weight, no fills.
@@ -69,6 +70,7 @@ export function RoseNewAgentButton({
         onClick={onClick}
         className={cn(
           'flex h-10 w-full items-center gap-2 overflow-hidden whitespace-nowrap rounded-[10px] bg-gray-950 text-sm font-semibold text-white hover:bg-gray-800',
+          'dark:bg-[#f2f2ef] dark:text-[#1f1f1d] dark:hover:bg-[#e4e4df]',
           isExpanded ? 'justify-start px-3.5' : 'justify-center',
         )}
       >

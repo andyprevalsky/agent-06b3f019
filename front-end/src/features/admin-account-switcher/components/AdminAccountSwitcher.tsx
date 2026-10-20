@@ -5,6 +5,15 @@
  *   [HIDDEN] -- viewer is an admin OR is mid-impersonation --> [PILL]
  *   (an admin who switches into a NON-admin keeps the pill, because the stashed
  *    admin session is the only way back — hiding it would strand them)
+ *   pillOnlyWhileAway (Rose Desktop accounts, whose switcher lives in Settings):
+ *   the floating pill renders only while impersonating ([PILL:away], the exit);
+ *   [PILL:own] is HIDDEN so the top-right corner holds only the app icons.
+ *
+ * Variant:
+ *   pill   (default) floating top-right pill; the panel drops down beneath it
+ *   inline Rose Desktop Settings panel section: same pill + panel, in normal
+ *          flow (the panel opens below the row, never absolutely positioned),
+ *          neutral light/dark colors to match the flat Settings drawer
  *
  * Pill:
  *   [PILL:own]  neutral, shows the signed-in admin's name
@@ -16,8 +25,9 @@
  *   Current account · quick-switch admin chips (always visible, one click back
  *   to Andy or Tamy) · search box that expands into selectable results.
  *
- * Rendered inside the app shell's fixed top-right control rail so it is reachable
- * from any view without colliding with sibling global controls.
+ * The pill variant renders inside the app shell's fixed top-right control rail so
+ * it is reachable from any view without colliding with sibling global controls;
+ * the inline variant renders inside the Rose Desktop Settings panel.
  */
 
 import { ArrowLeftRight, Loader2, Search, ShieldCheck, X } from 'lucide-react';
@@ -30,14 +40,32 @@ import { cn } from '@/lib/utils';
 import { useAdminAccountSwitcher } from '../hooks/useAdminAccountSwitcher';
 import type { SwitchableAccount } from '../types';
 
+export type AdminAccountSwitcherVariant = 'pill' | 'inline';
+
 interface AdminAccountSwitcherProps {
   /** True when the signed-in viewer is on the product-wide admin allowlist. */
   isAdmin: boolean;
   /** Display name for the viewer's own account, shown when not impersonating. */
   ownAccountLabel: string | null;
+  /** 'pill' (default): floating top-right; 'inline': the Rose Desktop Settings section. */
+  variant?: AdminAccountSwitcherVariant;
+  /** Pill only: render it only while impersonating (Rose Desktop hosts it in Settings). */
+  pillOnlyWhileAway?: boolean;
 }
 
-export function AdminAccountSwitcher({ isAdmin, ownAccountLabel }: AdminAccountSwitcherProps) {
+const PILL_CONTAINER_CLASS = 'relative flex max-w-full min-w-0 flex-col items-end';
+const INLINE_CONTAINER_CLASS = 'relative my-4 flex max-w-full min-w-0 flex-col items-start';
+const PILL_OWN_CLASS = 'border-border/60 bg-background/90 text-foreground';
+const INLINE_OWN_CLASS =
+  'border-gray-200 bg-white text-[hsl(240_15%_8%)] dark:border-white/[0.12] dark:bg-[#2f2f2c] dark:text-[#e4e4df]';
+const AWAY_CLASS = 'border-purple-400/60 bg-purple-600/95 text-white';
+
+export function AdminAccountSwitcher({
+  isAdmin,
+  ownAccountLabel,
+  variant = 'pill',
+  pillOnlyWhileAway = false,
+}: AdminAccountSwitcherProps) {
   const switcher = useAdminAccountSwitcher();
   const containerRef = useRef<HTMLDivElement>(null);
   const { open, setOpen, impersonated } = switcher;
@@ -63,20 +91,25 @@ export function AdminAccountSwitcher({ isAdmin, ownAccountLabel }: AdminAccountS
   if (!isAdmin && impersonated === null) return null;
 
   const away = impersonated !== null;
+  const inline = variant === 'inline';
+  // The Settings section is the home of a Rose Desktop switcher; the floating
+  // pill stays only as the exit while impersonating.
+  if (!inline && pillOnlyWhileAway && !away) return null;
   const pillLabel = away ? `Viewing as ${switcher.currentLabel}` : (ownAccountLabel ?? 'Admin');
 
   return (
     <div
       ref={containerRef}
-      className="relative flex max-w-full min-w-0 flex-col items-end"
+      className={inline ? INLINE_CONTAINER_CLASS : PILL_CONTAINER_CLASS}
       data-testid="admin-account-switcher"
+      data-variant={variant}
     >
       <div
         className={cn(
-          'flex max-w-full min-w-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium shadow-lg backdrop-blur-md transition-colors',
-          away
-            ? 'border-purple-400/60 bg-purple-600/95 text-white'
-            : 'border-border/60 bg-background/90 text-foreground',
+          'flex max-w-full min-w-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium',
+          !inline && 'shadow-lg backdrop-blur-md',
+          'transition-colors',
+          away ? AWAY_CLASS : inline ? INLINE_OWN_CLASS : PILL_OWN_CLASS,
         )}
         data-testid={away ? 'admin-impersonation-badge' : 'admin-account-pill'}
         role="status"
@@ -108,23 +141,33 @@ export function AdminAccountSwitcher({ isAdmin, ownAccountLabel }: AdminAccountS
         )}
       </div>
 
-      {open && <SwitcherPanel switcher={switcher} ownAccountLabel={ownAccountLabel} />}
+      {open && (
+        <SwitcherPanel switcher={switcher} ownAccountLabel={ownAccountLabel} inline={inline} />
+      )}
     </div>
   );
 }
 
+const PILL_PANEL_CLASS =
+  'absolute right-0 top-full mt-2 w-[22rem] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-border/60 bg-background/98 shadow-2xl backdrop-blur-md';
+/** In flow below the Settings row (the drawer scrolls; nothing is clipped). */
+const INLINE_PANEL_CLASS =
+  'mt-2 w-full max-w-[22rem] overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-white/[0.12] dark:bg-[#2f2f2c]';
+
 function SwitcherPanel({
   switcher,
   ownAccountLabel,
+  inline,
 }: {
   switcher: ReturnType<typeof useAdminAccountSwitcher>;
   ownAccountLabel: string | null;
+  inline: boolean;
 }) {
   const { impersonated, query, setQuery, results, error, switchingUserId } = switcher;
 
   return (
     <div
-      className="absolute right-0 top-full mt-2 w-[22rem] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-border/60 bg-background/98 shadow-2xl backdrop-blur-md"
+      className={inline ? INLINE_PANEL_CLASS : PILL_PANEL_CLASS}
       role="dialog"
       aria-label="Account switcher"
     >
