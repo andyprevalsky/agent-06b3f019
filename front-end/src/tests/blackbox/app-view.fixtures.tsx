@@ -87,7 +87,7 @@ export function serveHandoff(refusal: HandoffRefusal | null = null, previewUrl =
 export function serveTurns() {
   server.use(
     http.post(`${API_BASE}/claude-code-session/:taskId/turns`, () =>
-      HttpResponse.json({ ok: true }, { status: 202 }),
+      HttpResponse.json({ status: 'delivered' }, { status: 200 }),
     ),
   );
 }

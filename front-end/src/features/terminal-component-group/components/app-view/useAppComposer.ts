@@ -10,16 +10,13 @@
  * The latest exchange (your line + the code agent's newest reply after it, when
  * the open trajectory holds that session's events) shows just above the box.
  */
-import { useMemo, useRef, useState } from 'react';
+import { useMemo, useState } from 'react';
+import type { FilePointer } from '@/lib/api/types';
+import { useDirectTurn } from '../../hooks/codeAgentDirectTurn';
 
 import { useAgentContext } from '../../hooks';
-import {
-  collectCodeAgentEvents,
-  eventTimeMs,
-  newDirectTurnId,
-  sendCodeAgentMessage,
-} from '../../hooks/codeAgentContract';
-import { addLocalEcho, useLocalEchoes } from '../../hooks/codeAgentLocalState';
+import { collectCodeAgentEvents, eventTimeMs } from '../../hooks/codeAgentContract';
+import { getCodeDraft, setCodeDraft, useLocalEchoes } from '../../hooks/codeAgentLocalState';
 
 export interface AppExchange {
   you: string;
@@ -32,7 +29,7 @@ export interface AppComposer {
   setValue: (value: string) => void;
   sending: boolean;
   error: string | null;
-  submit: () => void;
+  submit: (attachments?: FilePointer[]) => Promise<boolean>;
   exchange: AppExchange | null;
 }
 
@@ -50,33 +47,27 @@ function useExchange(taskId: string): AppExchange | null {
 }
 
 export function useAppComposer(taskId: string, label: string): AppComposer {
-  const [value, setValue] = useState('');
-  const [sending, setSending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const turn = useRef<{ text: string; id: string } | null>(null);
+  const [value, setText] = useState(() => getCodeDraft(taskId)?.text ?? '');
+  const { send, sending, error } = useDirectTurn(taskId);
   const exchange = useExchange(taskId);
-
-  const submit = () => {
-    const text = value.trim();
-    if (!text || sending) return;
-    if (turn.current?.text !== text) turn.current = { text, id: newDirectTurnId() };
-    setSending(true);
-    setError(null);
-    sendCodeAgentMessage({ taskId, text, clientMessageId: turn.current.id })
-      .then(
-        () => {
-          turn.current = null;
-          addLocalEcho(taskId, text);
-          setValue('');
-        },
-        (err: unknown) => {
-          setError(
-            `Couldn't reach ${label}: ${err instanceof Error ? err.message : 'send failed'}`,
-          );
-        },
-      )
-      .finally(() => setSending(false));
+  const setValue = (text: string) => {
+    setText(text);
+    setCodeDraft(taskId, { text, options: getCodeDraft(taskId)?.options ?? {} });
   };
-
-  return { value, setValue, sending, error, submit, exchange };
+  const submit = async (attachments?: FilePointer[]) => {
+    const delivered = await send(value, {
+      ...getCodeDraft(taskId)?.options,
+      ...(attachments?.length ? { attachments } : {}),
+    });
+    if (delivered) setValue('');
+    return delivered;
+  };
+  return {
+    value,
+    setValue,
+    sending,
+    error: error ? `Couldn't reach ${label}: ${error}` : null,
+    submit,
+    exchange,
+  };
 }

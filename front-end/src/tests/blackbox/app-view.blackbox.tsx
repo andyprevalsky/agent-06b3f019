@@ -79,6 +79,7 @@ describe('app view', () => {
     expect(within(view).getByRole('button', { name: 'Publish' })).toBeInTheDocument();
     // The normal query box floats over the app; the chat (and its composer) is gone.
     expect(within(view).getByTestId('query-input-surface')).toBeInTheDocument();
+    expect(within(view).queryByTestId('query-toolbar-nub')).not.toBeInTheDocument();
     expect(within(view).getByPlaceholderText('Message Claude Code directly…')).toBeInTheDocument();
     expect(screen.queryByText('Popular Goals')).not.toBeInTheDocument();
     expect(screen.queryByTestId('code-agent-chip')).not.toBeInTheDocument();
@@ -169,6 +170,47 @@ describe('app view', () => {
       "Couldn't reach Claude Code: Session is not running",
     );
     expect(box).toHaveValue('Add a score');
+  });
+
+  it('keeps an app attachment after failed delivery and retries the same native turn', async () => {
+    servePreview('running');
+    serveHandoff();
+    const file = {
+      id: 'app-file',
+      storage_path: 'user/notes.txt',
+      original_filename: 'notes.txt',
+      mime_type: 'text/plain',
+      size_bytes: 5,
+      created_at: '2026-10-20T12:00:00Z',
+    };
+    let attempts = 0;
+    server.use(
+      http.post(`${API_BASE}/upload`, () => HttpResponse.json({ file_pointer: file })),
+      http.post(`${API_BASE}/claude-code-session/:taskId/turns`, () =>
+        ++attempts === 1
+          ? HttpResponse.json({ error: 'Native turn unavailable' }, { status: 503 })
+          : HttpResponse.json({ status: 'delivered' }),
+      ),
+    );
+    const user = userEvent.setup({ delay: null });
+    const view = await openAppView();
+    const box = within(view).getByPlaceholderText('Message Claude Code directly…');
+    await user.upload(
+      view.querySelector('input[type="file"]') as HTMLInputElement,
+      new File(['hello'], 'notes.txt', { type: 'text/plain' }),
+    );
+    await within(view).findByText('notes.txt');
+    await user.type(box, 'Read these notes{Enter}');
+    await within(view).findByRole('alert');
+    expect(box).toHaveValue('Read these notes');
+    expect(within(view).getByText('notes.txt')).toBeInTheDocument();
+    await user.type(box, '{Enter}');
+    await waitFor(() => expect(box).toHaveValue(''));
+    const turns = requests('POST', `/claude-code-session/${TASK_ID}/turns`);
+    expect(turns).toHaveLength(2);
+    expect(turns[0].body).toEqual(turns[1].body);
+    expect(turns[1].body).toEqual(expect.objectContaining({ attachments: [file] }));
+    expect(within(view).queryByText('notes.txt')).not.toBeInTheDocument();
   });
 
   it('Escape returns to the chat; an agent row and the mobile close icon do too', async () => {

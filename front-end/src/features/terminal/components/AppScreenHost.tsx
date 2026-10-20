@@ -4,7 +4,8 @@
  * Stateless glue between the terminal and AppViewScreen
  * (terminal-component-group/components/app-view): it renders the normal query
  * box (same QueryInput; Popular Goals never mounted, no model choice since the
- * text goes to the code session) bound to the view's composer.
+ * text goes to the code session) bound to the view's composer. Attachments and
+ * text stay in the session draft until the delivery acknowledgement succeeds.
  */
 import {
   AppViewScreen,
@@ -26,9 +27,12 @@ interface AppScreenHostProps {
 export function AppScreenHost({ target, onClose, agents: a, drip }: AppScreenHostProps) {
   const renderQueryBox = (binding: AppQueryBoxBinding) => (
     <QueryInput
+      directChannel
+      draftKey={binding.draftKey}
+      canSubmit
       value={binding.value}
       onChange={binding.onChange}
-      onSubmit={() => binding.onSubmit()}
+      onSubmit={binding.onSubmit}
       disabled={binding.disabled}
       placeholder={binding.placeholder}
       selectedModel={a.selectedModel}

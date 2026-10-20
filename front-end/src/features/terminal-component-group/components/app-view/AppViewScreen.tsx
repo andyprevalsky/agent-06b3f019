@@ -23,6 +23,7 @@
  */
 import { X } from 'lucide-react';
 import type { ReactNode } from 'react';
+import type { FilePointer } from '@/lib/api/types';
 
 import { codeAgentLabel } from '../../hooks/codeAgentContract';
 import { AppViewFrame } from './AppViewFrame';
@@ -34,7 +35,8 @@ import { useAppComposer, type AppComposer } from './useAppComposer';
 export interface AppQueryBoxBinding {
   value: string;
   onChange: (value: string) => void;
-  onSubmit: () => void;
+  onSubmit: (attachments?: FilePointer[]) => Promise<boolean>;
+  draftKey: string;
   disabled: boolean;
   placeholder: string;
 }
@@ -98,6 +100,7 @@ export function AppViewScreen({ target, onClose, renderQueryBox }: AppViewScreen
               </p>
             )}
             {renderQueryBox({
+              draftKey: target.taskId,
               value: composer.value,
               onChange: composer.setValue,
               onSubmit: composer.submit,
