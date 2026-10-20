@@ -8,9 +8,11 @@
  *              · agent-to-agent rows ("Codex → Rose" / "Rose → Codex"; questions as "<agent> asks")
  *   new rows → scroll to bottom
  *
- * STEER INPUT:
+ * STEER INPUT (POST /api/claude-code-session/:taskId/turns):
  *   [IDLE] → (Enter / send, non-empty) → [SENDING] → ok: echo + clear → [IDLE]
  *                                                  → error: keep text, show error → [IDLE]
+ *   one client_message_id per text: retrying unchanged text reuses it (no second CLI turn);
+ *   editing the text or a successful send starts a new one
  */
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
@@ -19,6 +21,7 @@ import { ArrowUp, ChevronRight, Loader2 } from 'lucide-react';
 import {
   codeAgentLabel,
   eventTimeMs,
+  newDirectTurnId,
   sendCodeAgentMessage,
   type CodeAgentProvider,
   type CodeAgentToolCall,
@@ -190,27 +193,35 @@ export function ChipTabs({ tab, onChange }: { tab: ChipTab; onChange: (tab: Chip
 }
 
 export function CodeAgentSteerInput({
-  agentId,
   taskId,
+  toolCallId,
   provider,
 }: {
-  agentId: string | null;
   taskId: string;
+  toolCallId?: string;
   provider: CodeAgentProvider;
 }) {
   const label = codeAgentLabel(provider);
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const turn = useRef<{ text: string; id: string } | null>(null);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     const value = text.trim();
-    if (!value || sending || !agentId) return;
+    if (!value || sending) return;
+    if (turn.current?.text !== value) turn.current = { text: value, id: newDirectTurnId() };
     setSending(true);
     setError(null);
     try {
-      await sendCodeAgentMessage(agentId, taskId, value);
+      await sendCodeAgentMessage({
+        taskId,
+        text: value,
+        clientMessageId: turn.current.id,
+        toolCallId,
+      });
+      turn.current = null;
       addLocalEcho(taskId, value);
       setText('');
     } catch (err) {
@@ -231,7 +242,6 @@ export function CodeAgentSteerInput({
           onChange={(event) => setText(event.target.value)}
           placeholder={`Message ${label} directly…`}
           aria-label={`Message ${label} directly`}
-          disabled={!agentId}
           className="min-w-0 flex-1 bg-transparent text-[13.5px] text-foreground outline-none placeholder:text-muted-foreground dark:text-[#ecece8] dark:placeholder:text-[#a3a39d]"
         />
         <span className={`hidden whitespace-nowrap text-[11.5px] sm:inline ${MUTED}`}>
@@ -240,7 +250,7 @@ export function CodeAgentSteerInput({
         <button
           type="submit"
           aria-label={`Send to ${label}`}
-          disabled={sending || !text.trim() || !agentId}
+          disabled={sending || !text.trim()}
           className="grid h-[26px] w-[26px] flex-shrink-0 place-items-center rounded-full bg-[#272725] text-white disabled:opacity-50 dark:bg-[#ecece8] dark:text-[#262624]"
         >
           {sending ? (

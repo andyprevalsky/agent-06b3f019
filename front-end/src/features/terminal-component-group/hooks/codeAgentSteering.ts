@@ -10,6 +10,7 @@ import { useAgentContext, type Message } from '../hooks';
 import type { ChipState } from '../types';
 import {
   answeredQuestionIds,
+  codeAgentToolCallId,
   collectCodeAgentEvents,
   latestCodeAgentMeta,
   parseCodeAgentSender,
@@ -54,12 +55,13 @@ export interface DesktopCodeAgent {
   /** null → flag off or no `code_agent` snapshot: render the stock chip. */
   meta: CodeAgentMeta | null;
   events: CodeAgentTranscriptEvent[];
-  agentId: string | null;
+  /** The chip's spawn tool call, sent with direct turns. */
+  toolCallId: string | undefined;
 }
 
 export function useDesktopCodeAgent(taskId: string): DesktopCodeAgent {
   const roseDesktop = useRoseDesktop();
-  const { messages, selectedAgentId, agent } = useAgentContext();
+  const { messages } = useAgentContext();
   const meta = useMemo(
     () => (roseDesktop ? latestCodeAgentMeta(messages, taskId) : null),
     [messages, roseDesktop, taskId],
@@ -68,7 +70,11 @@ export function useDesktopCodeAgent(taskId: string): DesktopCodeAgent {
     () => (meta ? collectCodeAgentEvents(messages, taskId) : []),
     [meta, messages, taskId],
   );
-  return { meta, events, agentId: selectedAgentId ?? agent?.agent_id ?? null };
+  const toolCallId = useMemo(
+    () => (meta ? codeAgentToolCallId(messages, taskId) : undefined),
+    [messages, meta, taskId],
+  );
+  return { meta, events, toolCallId };
 }
 
 export interface PendingQuestion {

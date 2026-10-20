@@ -25,6 +25,7 @@ import {
   ROOT_AGENT_ID,
   WithAgent,
   chipMessage,
+  directTurnMessage,
   eventsMessage,
   msg,
   questionMessage,
@@ -211,12 +212,12 @@ describe('row 45: transcript, terminal and direct steering', () => {
     expect(screen.getByTestId('code-agent-transcript').closest('.hidden')).not.toBeNull();
   });
 
-  it('sends a direct message to the session and echoes it into the transcript', async () => {
+  it('sends a direct turn to the session and echoes it into the transcript', async () => {
     const posted: Array<{ url: string; body: unknown }> = [];
     server.use(
-      http.post(`${API_BASE}/agents/:agentId/code-agent/:taskId/messages`, async ({ request }) => {
+      http.post(`${API_BASE}/claude-code-session/:taskId/turns`, async ({ request }) => {
         posted.push({ url: request.url, body: await request.json() });
-        return HttpResponse.json({ ok: true });
+        return HttpResponse.json({ status: 'delivered', task_id: 'task-1' });
       }),
     );
     const view = renderChip([chipMessage(), eventsMessage(LIVE_EVENTS)]);
@@ -226,43 +227,60 @@ describe('row 45: transcript, terminal and direct steering', () => {
     await user.type(input, 'Keep the 26px button{Enter}');
 
     await waitFor(() => expect(posted).toHaveLength(1));
-    expect(posted[0].url).toBe(`${API_BASE}/agents/${ROOT_AGENT_ID}/code-agent/task-1/messages`);
-    expect(posted[0].body).toEqual({ text: 'Keep the 26px button' });
+    expect(posted[0].url).toBe(`${API_BASE}/claude-code-session/task-1/turns`);
+    expect(posted[0].body).toEqual({
+      client_message_id: expect.stringMatching(/^[A-Za-z0-9_-]{8,128}$/),
+      text: 'Keep the 26px button',
+      tool_call_id: 'call-task-1',
+    });
     expect(await screen.findByText('Keep the 26px button')).toBeInTheDocument();
     expect(screen.getByText('You → Codex:')).toBeInTheDocument();
     expect(input).toHaveValue('');
 
-    // The session echoes the same text back: still exactly one row.
+    // The backend persists the delivered turn (user_direct_turn): still exactly one row.
     view.rerender(
-      <WithAgent
-        messages={[
-          chipMessage(),
-          eventsMessage([
-            ...LIVE_EVENTS,
-            { type: 'message', role: 'user', ts: Date.now(), text: 'Keep the 26px button' },
-          ]),
-        ]}
-      >
+      <WithAgent messages={[chipMessage(), eventsMessage(LIVE_EVENTS), directTurnMessage()]}>
         <ClaudeCodeChip taskId="task-1" />
       </WithAgent>,
     );
     expect(screen.getAllByText('Keep the 26px button')).toHaveLength(1);
+    expect(screen.getAllByText('You → Codex:')).toHaveLength(1);
   });
 
-  it('keeps the text and shows an error when the session cannot be reached', async () => {
+  it('a persisted direct turn renders as "You → <agent>" without a local echo', () => {
+    renderChip([chipMessage(), directTurnMessage('Use the existing Zap icon')]);
+    expect(screen.getByTestId('code-agent-transcript')).toHaveTextContent(
+      'You → Codex: Use the existing Zap icon',
+    );
+  });
+
+  it('keeps the text on failure; retrying the same text reuses its client_message_id', async () => {
+    const bodies: Array<{ client_message_id: string }> = [];
+    let fail = true;
     server.use(
-      http.post(`${API_BASE}/agents/:agentId/code-agent/:taskId/messages`, () =>
-        HttpResponse.json({ error: 'Session is asleep' }, { status: 409 }),
-      ),
+      http.post(`${API_BASE}/claude-code-session/:taskId/turns`, async ({ request }) => {
+        bodies.push((await request.json()) as { client_message_id: string });
+        return fail
+          ? HttpResponse.json({ error: 'Code agent session is not running' }, { status: 409 })
+          : HttpResponse.json({ status: 'duplicate', task_id: 'task-1' });
+      }),
     );
     renderChip([chipMessage()]);
     const input = screen.getByPlaceholderText('Message Codex directly…');
-    await userEvent.setup().type(input, 'hello{Enter}');
+    const user = userEvent.setup();
+    await user.type(input, 'hello{Enter}');
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      "Couldn't reach Codex: Session is asleep",
+      "Couldn't reach Codex: Code agent session is not running",
     );
     expect(input).toHaveValue('hello');
     expect(screen.queryByText('You → Codex:')).not.toBeInTheDocument();
+
+    fail = false;
+    await user.type(input, '{Enter}');
+    await waitFor(() => expect(bodies).toHaveLength(2));
+    expect(bodies[1].client_message_id).toBe(bodies[0].client_message_id);
+    expect(await screen.findByText('You → Codex:')).toBeInTheDocument();
+    expect(input).toHaveValue('');
   });
 
   it('transcript rows are task-scoped and never render in the root trajectory', () => {

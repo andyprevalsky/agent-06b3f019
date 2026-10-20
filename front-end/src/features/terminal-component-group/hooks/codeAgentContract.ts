@@ -18,8 +18,10 @@
  *            → code agent's own timeline ("Codex → Rose" / "Rose → Codex")
  *          USER row on the recipient Rose agent → never a user bubble
  *          a2a.kind 'question' → inline question (routed to a parent agent, row 47b)
- *   POST /api/agents/:id/code-agent/:taskId/messages {text}     → steer the CLI session
- *   POST /api/agents/:id/questions/:questionId/answer {answer}  → answer a pinned question
+ *     └─ action_type 'user_direct_turn' (TOOL, task_id) → "You → <agent>" transcript row
+ *   POST /api/claude-code-session/:taskId/turns                 → steer the CLI session (merged:
+ *        {client_message_id, text, tool_call_id?}; idempotent per client_message_id)
+ *   POST /api/agents/:id/questions/:questionId/answer {answer}  → answer a pinned question (proposed)
  *
  * Everything is parsed defensively: a missing or malformed field yields null so
  * the existing chip / bubble behavior stays in charge.
@@ -324,11 +326,16 @@ export function collectCodeAgentEvents(
   for (const message of messages) {
     const metadata = message.metadata;
     if (!metadata || metadata.task_id !== taskId) continue;
-    // 'agent_message' is not in the shared ClaudeCodeActionType union yet; read it untyped here.
+    // These action types are not in the shared ClaudeCodeActionType union yet; read untyped.
     const actionType: unknown = metadata.action_type;
     if (actionType === 'agent_message') {
       const a2a = parseAgentToAgentMessage(message);
       if (a2a) events.push({ type: 'agent_message', ts: message.timestamp, a2a });
+      continue;
+    }
+    if (actionType === 'user_direct_turn') {
+      const text = str(message.text);
+      if (text) events.push({ type: 'message', role: 'user', ts: message.timestamp, text });
       continue;
     }
     const raw = metadata.code_agent_events;
@@ -479,7 +486,7 @@ export function agentToAgentCodeProvider(a2a: AgentToAgentMessage): CodeAgentPro
 
 // ── Writes ──────────────────────────────────────────────────────────────────
 
-async function postJson(path: string, body: Record<string, string>): Promise<void> {
+async function postJson(path: string, body: Record<string, string | undefined>): Promise<void> {
   const res = await fetch(`${API_BASE_WITH_PATH}${path}`, {
     method: 'POST',
     headers: getAuthHeaders(),
@@ -491,12 +498,38 @@ async function postJson(path: string, body: Record<string, string>): Promise<voi
   }
 }
 
-/** Send text straight into the code agent's CLI session. */
-export function sendCodeAgentMessage(agentId: string, taskId: string, text: string) {
-  return postJson(
-    `/agents/${encodeURIComponent(agentId)}/code-agent/${encodeURIComponent(taskId)}/messages`,
-    { text },
-  );
+/** A fresh idempotency key for one direct turn (reuse it when retrying the same text). */
+export function newDirectTurnId(): string {
+  return `turn-${crypto.randomUUID()}`;
+}
+
+/**
+ * Send text straight into the code agent's CLI session (backend
+ * directChatService). Retrying with the same `clientMessageId` never starts a
+ * second CLI turn.
+ */
+export function sendCodeAgentMessage(args: {
+  taskId: string;
+  text: string;
+  clientMessageId: string;
+  toolCallId?: string;
+}) {
+  return postJson(`/claude-code-session/${encodeURIComponent(args.taskId)}/turns`, {
+    client_message_id: args.clientMessageId,
+    text: args.text,
+    tool_call_id: args.toolCallId,
+  });
+}
+
+/** The spawn tool call that owns a code task's chip (sent with direct turns). */
+export function codeAgentToolCallId(messages: Message[], taskId: string): string | undefined {
+  for (const message of messages) {
+    const metadata = message.metadata;
+    if (metadata?.task_id !== taskId || metadata.toolName !== 'spawn_claude_code_agent') continue;
+    const id = str(metadata.toolCallId);
+    if (id) return id;
+  }
+  return undefined;
 }
 
 /** Answer a pinned question (option label or free text). */

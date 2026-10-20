@@ -73,7 +73,7 @@ export default function ClaudeCodeChip({
         meta={desktopMeta}
         vm={vm}
         events={desktop.events}
-        agentId={desktop.agentId}
+        toolCallId={desktop.toolCallId}
       />
     );
   }

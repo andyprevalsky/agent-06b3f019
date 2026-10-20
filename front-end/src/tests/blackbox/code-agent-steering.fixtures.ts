@@ -69,6 +69,24 @@ export function eventsMessage(events: unknown[], taskId = 'task-1') {
   });
 }
 
+/** A delivered direct turn as persisted by the backend (directChatService). */
+export function directTurnMessage(text = 'Keep the 26px button', taskId = 'task-1') {
+  return msg(
+    {
+      toolName: 'spawn_claude_code_agent',
+      title: 'You',
+      task_id: taskId,
+      action_type: 'user_direct_turn',
+      code_provider: 'claude',
+      subAgentId: taskId,
+      direct_turn_id: 'turn-1',
+      isDirectCodeTurn: true,
+      toolCallId: `call-${taskId}`,
+    },
+    { text },
+  );
+}
+
 export const LIVE_EVENTS = [
   {
     type: 'thinking',

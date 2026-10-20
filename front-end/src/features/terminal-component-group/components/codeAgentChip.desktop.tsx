@@ -122,10 +122,10 @@ interface DesktopCodeAgentChipProps {
   meta: CodeAgentMeta;
   vm: ClaudeCodeChipVM;
   events: CodeAgentTranscriptEvent[];
-  agentId: string | null;
+  toolCallId: string | undefined;
 }
 
-export function DesktopCodeAgentChip({ meta, vm, events, agentId }: DesktopCodeAgentChipProps) {
+export function DesktopCodeAgentChip({ meta, vm, events, toolCallId }: DesktopCodeAgentChipProps) {
   const state = desktopChipState(meta, vm.chipState);
   const running = state === 'live' || state === 'verifying' || state === 'spinning_up';
   const [open, setOpen] = useState(true);
@@ -203,7 +203,11 @@ export function DesktopCodeAgentChip({ meta, vm, events, agentId }: DesktopCodeA
               className="h-[300px] rounded-lg"
             />
           </div>
-          <CodeAgentSteerInput agentId={agentId} taskId={meta.task_id} provider={meta.provider} />
+          <CodeAgentSteerInput
+            taskId={meta.task_id}
+            toolCallId={toolCallId}
+            provider={meta.provider}
+          />
         </div>
       )}
 
