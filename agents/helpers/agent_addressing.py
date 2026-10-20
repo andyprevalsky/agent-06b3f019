@@ -74,28 +74,45 @@ def task_name_in_use(records: Iterable[Dict[str, Any]], task_name: str) -> bool:
     return any(isinstance(record, dict) and record.get("task_name") == task_name for record in records)
 
 
-def background_tree_entries(
-    records: Dict[str, Dict[str, Any]], child_workflow_types: Iterable[str]
-) -> List[Dict[str, Any]]:
-    """Running activity-backed tasks, persisted as Agent.backgroundTasks for list_agents.
+# Finished activity-backed tasks persisted per owner so their paths stay resolvable.
+MAX_FINISHED_TREE_ENTRIES = 10
 
-    Durable children (general_purpose / for_each) are Agent rows of their own and
-    are listed from the tree, so they are excluded here.
+
+def background_tree_entries(
+    records: Dict[str, Dict[str, Any]],
+    child_workflow_types: Iterable[str],
+    finished: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """Activity-backed tasks persisted as Agent.backgroundTasks for list_agents, grep and messaging.
+
+    Running tasks first, then the newest ``MAX_FINISHED_TREE_ENTRIES`` finished
+    ones (status completed/failed) so a finished task's path still resolves.
+    ``address`` is the inbox of the task's current run (a message to it lands
+    there). Durable children (general_purpose / for_each) are Agent rows of
+    their own and are listed from the tree, so they are excluded here.
     """
     excluded = set(child_workflow_types)
-    entries = []
-    for task_id, record in records.items():
-        if record.get("status") != "running" or record.get("agent_type") in excluded:
-            continue
-        entries.append(
-            {
-                "address": task_id,
-                "type": str(record.get("agent_type") or "agent"),
-                "goal": str(record.get("goal") or "")[:BACKGROUND_TREE_GOAL_LEN],
-                "status": "running",
-                "started_at": record.get("started_at"),
-                "task_name": record.get("task_name"),
-                "path": record.get("path"),
-            }
-        )
-    return entries
+
+    def _entry(task_id: str, record: Dict[str, Any], status: str) -> Dict[str, Any]:
+        inbox = record.get("inbox_address")
+        return {
+            "address": inbox if isinstance(inbox, str) and inbox else task_id,
+            "type": str(record.get("agent_type") or "agent"),
+            "goal": str(record.get("goal") or "")[:BACKGROUND_TREE_GOAL_LEN],
+            "status": status,
+            "started_at": record.get("started_at"),
+            "task_name": record.get("task_name"),
+            "path": record.get("path"),
+        }
+
+    entries = [
+        _entry(task_id, record, "running")
+        for task_id, record in records.items()
+        if record.get("status") == "running" and record.get("agent_type") not in excluded
+    ]
+    done = [
+        _entry(task_id, record, str(record.get("status") or "completed"))
+        for task_id, record in (finished or {}).items()
+        if task_id not in records and record.get("agent_type") not in excluded
+    ]
+    return entries + done[-MAX_FINISHED_TREE_ENTRIES:]

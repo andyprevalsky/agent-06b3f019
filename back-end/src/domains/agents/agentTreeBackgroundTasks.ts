@@ -1,13 +1,17 @@
 /**
- * In-flight background tasks (explore/browser/code activities) persisted on
- * Agent.backgroundTasks by the owner's tree-state PATCH. The tree view lists
- * them as leaf nodes under their owner, addressed by their task path
+ * Background tasks (explore/browser/code activities) persisted on
+ * Agent.backgroundTasks by the owner's tree-state PATCH: the running ones plus
+ * the owner's newest finished ones (status completed/failed). The tree view
+ * lists them as leaf nodes under their owner, addressed by their task path
  * (`<owner path>/<task_name>`, or `<owner id>/<task id>` for a path-less
- * owner); send_message_to_agent to that address lands in the owner's task inbox.
+ * owner); send_message_to_agent to that address lands in the owner's task
+ * inbox (a finished task's owner wakes it for another run), and grep
+ * trace_path resolves it to its owner.
  *
  * Bounded: they ride on rows the tree view already read (no extra query), at
- * most PER_OWNER_LIMIT per owner and TOTAL_LIMIT per response. Owners in a
- * terminal status list none, so a crashed worker cannot leave stale tasks.
+ * most PER_OWNER_LIMIT per owner and TOTAL_LIMIT per response. An owner in a
+ * terminal status lists only its finished tasks, so a crashed worker cannot
+ * leave a stale "running" task.
  */
 
 import { TERMINAL_STATUSES } from './statusBroadcastWorkflowId';
@@ -39,18 +43,28 @@ export interface BackgroundTaskNode {
   active_child_count: number;
 }
 
-/** The owner's in-flight tasks; malformed entries are skipped. */
-export function runningBackgroundTasks(owner: {
+interface TaskOwner {
   status: string;
   backgroundTasks: unknown;
-}): BackgroundTaskEntry[] {
-  if (TERMINAL_STATUSES.has(owner.status) || !Array.isArray(owner.backgroundTasks)) return [];
+}
+
+/** Running and finished tasks; malformed entries (and a terminal owner's "running" ones) are skipped. */
+export function listedBackgroundTasks(owner: TaskOwner): BackgroundTaskEntry[] {
+  if (!Array.isArray(owner.backgroundTasks)) return [];
+  const ownerEnded = TERMINAL_STATUSES.has(owner.status);
   const entries: BackgroundTaskEntry[] = [];
   for (const raw of owner.backgroundTasks as unknown[]) {
     const parsed = backgroundTaskEntrySchema.safeParse(raw);
-    if (parsed.success && parsed.data.status === 'running') entries.push(parsed.data);
+    if (parsed.success && !(ownerEnded && parsed.data.status === 'running')) {
+      entries.push(parsed.data);
+    }
   }
   return entries;
+}
+
+/** The owner's in-flight tasks. */
+export function runningBackgroundTasks(owner: TaskOwner): BackgroundTaskEntry[] {
+  return listedBackgroundTasks(owner).filter((entry) => entry.status === 'running');
 }
 
 function startedAt(entry: BackgroundTaskEntry, fallback: Date): Date {
@@ -61,11 +75,11 @@ function startedAt(entry: BackgroundTaskEntry, fallback: Date): Date {
   return Number.isNaN(date.getTime()) ? fallback : date;
 }
 
-/** Leaf nodes for the listed owners' running tasks, in owner order. */
+/** Leaf nodes for the listed owners' tasks (running first, then finished), in owner order. */
 export function backgroundTaskNodes(owners: BackgroundTaskOwner[]): BackgroundTaskNode[] {
   const nodes: BackgroundTaskNode[] = [];
   for (const owner of owners) {
-    for (const entry of runningBackgroundTasks(owner).slice(0, PER_OWNER_LIMIT)) {
+    for (const entry of listedBackgroundTasks(owner).slice(0, PER_OWNER_LIMIT)) {
       if (nodes.length >= TOTAL_LIMIT) return nodes;
       nodes.push({
         agent_id: entry.path ?? `${owner.id}/${entry.address}`,

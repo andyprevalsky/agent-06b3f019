@@ -5,15 +5,15 @@
  *
  *   "parent"                  → caller's parent agent
  *   "/root"                   → tree root
- *   "/root/a/b"               → live agent with that task path, else the running
- *                               background task with that path on agent /root/a
+ *   "/root/a/b"               → agent with that task path, else the background
+ *                               task (running or finished) with that path on /root/a
  *   "<agent uuid>"            → that agent (fallback for agents without a path)
- *   "<agent uuid>/<task id>"  → running background task on a path-less owner
+ *   "<agent uuid>/<task id>"  → background task on a path-less owner
  *
  * Cost: at most one primary-key read plus one (busId, taskPath) read.
  */
 
-import { runningBackgroundTasks } from './agentTreeBackgroundTasks';
+import { listedBackgroundTasks } from './agentTreeBackgroundTasks';
 import { ROOT_TASK_PATH, agentTaskPath, isTaskPath, parentTaskPath, rootOf } from './agentTaskPath';
 import * as treeRepo from './repoAgentTree';
 import * as pathRepo from './repoTaskPath';
@@ -75,9 +75,9 @@ async function resolvePath(
     ownerPath === ROOT_TASK_PATH ? row.id === rootId : row.taskPath === ownerPath
   );
   const task =
-    owner !== undefined ? runningBackgroundTasks(owner).find((t) => t.path === path) : undefined;
+    owner !== undefined ? listedBackgroundTasks(owner).find((t) => t.path === path) : undefined;
   if (owner === undefined || task === undefined) {
-    return { error: `No live agent or running background task at ${path}`, status: 404 };
+    return { error: `No agent or background task at ${path}`, status: 404 };
   }
   return { agent_id: owner.id, recipient_task_id: task.address, path, type: task.type };
 }
@@ -90,9 +90,9 @@ async function resolveOwnerTask(
   const owner = await resolveAgentId(caller, ownerId, ownerId);
   if ('error' in owner) return owner;
   const [row] = await treeRepo.findTreeNodesByIds([ownerId]);
-  const task = runningBackgroundTasks(row).find((t) => t.address === taskId);
+  const task = listedBackgroundTasks(row).find((t) => t.address === taskId);
   if (task === undefined) {
-    return { error: `No running background task ${taskId} on agent ${ownerId}`, status: 404 };
+    return { error: `No background task ${taskId} on agent ${ownerId}`, status: 404 };
   }
   return { agent_id: ownerId, recipient_task_id: taskId, path: task.path ?? null, type: task.type };
 }

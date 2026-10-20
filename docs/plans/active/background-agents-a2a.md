@@ -182,7 +182,7 @@ FAILED with error_reason "Killed by …"). Pause reuses the existing pause path:
 children get the pause cascade, in-flight background activities are cancelled and notify FAILED.
 
 Semantics: only descendants and own background tasks can be stopped (not self, parent, ancestors or other
-branches); finished explore/browser/code tasks cannot be messaged ("spawn a new one"). Prompt: one shared
+branches). Prompt: one shared
 "Working with other agents" section at the end of MAIN_SYSTEM_PROMPT (static, cached prefix).
 Tests: agents `agent-control` blackbox domain; backend `agents-agent-control.cases.ts`.
 
@@ -215,3 +215,27 @@ Tests: agents `agent-control` blackbox domain; backend `agents-agent-control.cas
   wait floor); above 3600 is rejected.
 - Tests: agents `background-agents`, `spawn-agent`, `spawn-browser-agent-v3`, `wait-for`,
   `agent-control`; backend `agents-agent-message-guard.cases.ts`.
+
+## Waking finished explore/browser/code tasks (user decision 2026-10-20)
+
+```
+ send_message_to_agent(to=<finished own task path>)
+   ──▶ store the row on the finished run's inbox (backend guards: rate + unread cap, NEW_TASK)
+   ──▶ _wake_background_task (workflow, deduped by message id): same task id / path / task_name,
+       run n+1, inbox `<id>.run<n+1>` (earlier runs' rows are never re-read), goal =
+       message + previous goal + previous result (capped head+tail), launched like any
+       background task; refused while the owner is paused / killed / finishing / at its cost limit
+   ──▶ rows carry `backgroundRun` (workflow stamp; backend copies it onto activity rows)
+       → FE dock shows it running again, the trajectory gets a chip per run
+   ──▶ new FINAL_ANSWER / FAILED notification (idempotency key `…:run<n>`)
+ another agent's send (backend path resolution) ──▶ owner signal receive_agent_message
+       {message_id, wake_task_id, message} ──▶ same wake (loop not woken)
+```
+
+- Agent.backgroundTasks keeps running tasks plus the owner's 10 newest finished ones
+  (completed/failed), so list_agents, grep `trace_path` and send_message_to_agent resolve a
+  finished task's path; a terminal owner lists only finished ones. The workflow keeps wake
+  context (args + previous result) for its 10 newest finished tasks.
+- Tests: agents `agent-control` (wake, dedupe, refusals, signal), `background-agents`
+  (persisted finished entries); backend `agents-agent-address.cases.ts`,
+  `data-agent-task-path.cases.ts`; front-end `background-agents.blackbox.tsx`.

@@ -398,17 +398,127 @@ async def test_handlers_send_and_metadata():
         assert meta["message"] == "Also check parking." and meta["to"] == "/root/kid"
         assert meta["resolvedPath"] == "/root/kid" and meta["woke"] is True, meta
 
+        # A finished task too old to keep its wake context: stored, not woken (actionable reason).
         wf._background_finished["toolu_old"] = {
             "agent_type": "browser",
             "address": "/root/booker",
             "status": "completed",
             "path": "/root/booker",
         }
+        harness.activity_results["send_agent_message_activity"] = {"message_id": "m-old", "delivered": False}
         status, text = await send_message_to_agent(wf, {"to": "/root/booker", "message": "again"}, "toolu_s2")
-        assert status.value == "ERROR" and "cannot be continued" in text and "Spawn a new one" in text, text
+        assert status.value == "FINISHED" and "was not woken" in text and "spawn a new one" in text, text
 
         bg_gate.set()
         await asyncio.gather(*wf._background_handles.values(), return_exceptions=True)
+
+
+async def test_send_to_finished_explore_task_wakes_its_next_run():
+    """A message to a finished own explore task starts its next run at the same path (user decision 2026-10-20)."""
+    from domains.agent_messaging.handler import send_message_to_agent
+    from helpers.agent_addressing import background_tree_entries
+    from helpers.background_agents import CHILD_WORKFLOW_AGENT_TYPES
+
+    harness = _Harness()
+    with _env(harness):
+        wf = _workflow(harness)
+        bg_gate, fg_gate, calls = asyncio.Event(), asyncio.Event(), []
+        executor = _fake_executor(wf, bg_gate=bg_gate, fg_gate=fg_gate, calls=calls)
+        goals = []
+
+        async def _recording_executor(tool_name, tool_args, tool_call_id):
+            goals.append(tool_args.get("goal"))
+            return await executor(tool_name, tool_args, tool_call_id)
+
+        wf._execute_tool = _recording_executor
+        await wf._execute_tool_once("spawn_agent", dict(EXPLORE_ARGS), "toolu_a")
+        bg_gate.set()
+        await asyncio.gather(*wf._background_handles.values(), return_exceptions=True)
+        assert wf._background_finished["toolu_a"]["status"] == "completed"
+        assert len(harness.notifications()) == 1
+        # The finished task stays listed (path resolvable by list_agents / grep / send).
+        entries = background_tree_entries(wf._background_tasks, CHILD_WORKFLOW_AGENT_TYPES, wf._background_finished)
+        assert [(e["address"], e["path"], e["status"]) for e in entries] == [("toolu_a", "/root/tokyo", "completed")]
+
+        bg_gate.clear()
+        harness.activity_results["send_agent_message_activity"] = {"message_id": "m-1", "delivered": False}
+        status, text = await send_message_to_agent(
+            wf, {"to": "/root/tokyo", "message": "Also give the 2020 census figure."}, "toolu_s"
+        )
+        assert status.value == "FINISHED" and "had finished; this message started its next run" in text, text
+        sends = [a for a in harness.activities if a[0] == "send_agent_message_activity"]
+        assert sends[-1][1][0] == "agent-mid" and sends[-1][1][4] == "toolu_a", "stored on the finished run's inbox"
+        assert harness.tool_rows("toolu_s")[-1]["metadata"]["woke"] is True
+        record = wf._background_tasks["toolu_a"]
+        assert (record["status"], record["run"], record["inbox_address"]) == ("running", 2, "toolu_a.run2"), record
+        assert (record["path"], record["task_name"]) == ("/root/tokyo", "tokyo")
+        for _ in range(200):
+            if len(goals) == 2:
+                break
+            await asyncio.sleep(0.002)
+        assert goals[1].startswith("Also give the 2020 census figure.\n\n"), goals
+        assert EXPLORE_ARGS["goal"] in goals[1] and "Its result (completed):\ndone" in goals[1], goals[1]
+        assert wf._background_inbox_address("toolu_a") == "toolu_a.run2"
+        run_rows = [r for r in harness.tool_rows("toolu_a") if r["metadata"].get("backgroundRun") == 2]
+        assert run_rows and all(r["metadata"]["excludeFromModel"] is True for r in run_rows), harness.tool_rows(
+            "toolu_a"
+        )
+        entries = background_tree_entries(wf._background_tasks, CHILD_WORKFLOW_AGENT_TYPES, wf._background_finished)
+        assert [(e["address"], e["status"]) for e in entries] == [("toolu_a.run2", "running")]
+
+        # The same message again (Temporal retry / duplicate signal) never starts another run.
+        again = await wf._wake_background_task("toolu_a", "x", message_id="m-1", sender="/root")
+        assert again["woke"] is True and len(goals) == 2
+
+        bg_gate.set()
+        await asyncio.gather(*wf._background_handles.values(), return_exceptions=True)
+        notes = harness.notifications()
+        assert len(notes) == 2 and notes[1]["metadata"]["backgroundRun"] == 2, notes
+        assert notes[0]["metadata"]["idempotencyKey"] != notes[1]["metadata"]["idempotencyKey"]
+        assert wf._background_finished["toolu_a"]["run"] == 2
+        assert await wf._wake_background_task("toolu_a", "x", message_id="m-1", sender=None) == {
+            "woke": True,
+            "already_running": True,
+        }, "a finished run remembers the message that woke it"
+
+        # Another agent's message to the finished task arrives as a signal; retries are deduped.
+        bg_gate.clear()
+        signal = {
+            "message_id": "m-9",
+            "from_agent_path": "/root/peer",
+            "wake_task_id": "toolu_a.run2",
+            "message": "And Osaka.",
+        }
+        await wf.receive_agent_message(signal)
+        await wf.receive_agent_message(signal)
+        assert wf._background_tasks["toolu_a"]["run"] == 3
+        for _ in range(200):
+            if len(goals) == 3:
+                break
+            await asyncio.sleep(0.002)
+        assert len(goals) == 3 and goals[2].startswith("And Osaka."), goals
+        assert not [e for e in wf._wait_wake_events if e["kind"] == "agent_message"], "the owner's loop is not woken"
+        bg_gate.set()
+        await asyncio.gather(*wf._background_handles.values(), return_exceptions=True)
+
+        # A paused owner (also killed / cost limit) does not start another run; the sender is told why.
+        wf.is_paused = True
+        harness.activity_results["send_agent_message_activity"] = {"message_id": "m-2", "delivered": False}
+        status, text = await send_message_to_agent(wf, {"to": "/root/tokyo", "message": "more"}, "toolu_s3")
+        assert status.value == "FINISHED" and "was not woken (its owner agent is paused)" in text, text
+        assert "toolu_a" not in wf._background_tasks and len(goals) == 3
+        wf.is_paused = False
+        wf._cost_limit_reached = True
+        assert (await wf._wake_background_task("toolu_a", "m", message_id="m-3", sender=None))["woke"] is False
+        wf._cost_limit_reached = False
+        wf._kill_request = {"by_agent_id": "agent-root"}
+        assert (await wf._wake_background_task("toolu_a", "m", message_id="m-4", sender=None))["woke"] is False
+        wf._kill_request = None
+
+        # Guard refusal (rate / unread cap): nothing is stored, nothing wakes.
+        harness.activity_results["send_agent_message_activity"] = {"error": "Message rate limit: wait a moment"}
+        status, text = await send_message_to_agent(wf, {"to": "/root/tokyo", "message": "more"}, "toolu_s4")
+        assert status.value == "ERROR" and "rate limit" in text and "toolu_a" not in wf._background_tasks, text
 
 
 def test_prompts_schemas_and_registration():
@@ -587,6 +697,7 @@ async def run_all_tests():
         "carried_child_killed_notifies_failed", test_carried_child_killed_by_other_agent_notifies_failed
     )
     await r.record_async("handlers_send_metadata", test_handlers_send_and_metadata)
+    await r.record_async("send_wakes_finished_explore_task", test_send_to_finished_explore_task_wakes_its_next_run)
     await r.record_async("message_guard_refusals_reach_tool_result", test_message_guard_refusals_reach_the_tool_result)
     r.record("prompts_schemas_registration", test_prompts_schemas_and_registration)
     await r.record_async("wait_for_parent_wakes_on_parent_message", test_wait_for_parent_wakes_on_the_parents_message)

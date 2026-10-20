@@ -1449,7 +1449,7 @@ async def test_agent_messaging_tools_decode_results_in_real_sandbox():
 
 
 async def test_background_tasks_persist_in_tree_state_and_names_stay_unique():
-    """In-flight tasks reach Agent.backgroundTasks (other agents' list_agents); task_name collisions error."""
+    """Running and finished tasks reach Agent.backgroundTasks (list_agents / grep / send); task_name collisions error."""
     from temporalio import workflow as temporal_workflow
 
     harness = _Harness()
@@ -1484,7 +1484,9 @@ async def test_background_tasks_persist_in_tree_state_and_names_stay_unique():
 
         gate.set()
         await wf._background_handles["toolu_1"]
-        assert patches[-1] == [], "the finished task is dropped from the persisted tree state"
+        assert [(e["address"], e["path"], e["status"]) for e in patches[-1]] == [
+            ("toolu_1", "/root/tokyo", "completed")
+        ], "the finished task stays in the persisted tree state (its path keeps resolving)"
         again = await wf._execute_tool_once("spawn_agent", dict(EXPLORE_ARGS), "toolu_3")
         assert again.get("error"), "a finished sibling still owns its task_name"
 

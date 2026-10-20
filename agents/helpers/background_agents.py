@@ -174,9 +174,15 @@ def build_pending_background_status_text(records: List[Dict[str, Any]]) -> Optio
 
 
 def agent_notification_metadata(
-    *, address: str, agent_type: str, status: str, background_task_id: Optional[str], idempotency_key: str
+    *,
+    address: str,
+    agent_type: str,
+    status: str,
+    background_task_id: Optional[str],
+    idempotency_key: str,
+    run: int = 1,
 ) -> Dict[str, Any]:
-    return {
+    metadata = {
         "agentNotification": True,
         "toolName": AGENT_NOTIFICATION_TOOL_NAME,
         "fromAgentAddress": address,
@@ -186,6 +192,35 @@ def agent_notification_metadata(
         "backgroundTaskId": background_task_id,
         "idempotencyKey": idempotency_key,
     }
+    if run > 1:
+        metadata["backgroundRun"] = run
+    return metadata
+
+
+# A woken explore/browser/code task gets its previous result (head + tail) as context.
+WAKE_PREVIOUS_RESULT_MAX_TOKENS = 2000
+
+
+def build_background_wake_result(summary: Any, structured_response: Any = None) -> str:
+    """A finished run's result as the next run sees it (capped head + tail)."""
+    sections = [str(summary or "").strip()]
+    if structured_response not in (None, {}, []):
+        sections.append(
+            "Structured Response: " + json.dumps(structured_response, ensure_ascii=False, sort_keys=True, default=str)
+        )
+    return truncate_middle_tokens("\n\n".join(part for part in sections if part), WAKE_PREVIOUS_RESULT_MAX_TOKENS)
+
+
+def build_background_wake_goal(*, message: str, base_goal: str, previous_status: str, previous_result: str) -> str:
+    """Goal of a finished explore/browser/code task's next run: the message, then what it already did."""
+    previous = truncate_middle_tokens(previous_result.strip(), WAKE_PREVIOUS_RESULT_MAX_TOKENS) or "(no result text)"
+    return (
+        f"{message.strip()}\n\n"
+        "This continues your previous run of this task. Its goal was:\n"
+        f"{base_goal.strip()}\n\n"
+        f"Its result ({previous_status}):\n"
+        f"{previous}"
+    )
 
 
 __all__ = [
@@ -197,7 +232,10 @@ __all__ = [
     "agent_message_type",
     "agent_notification_metadata",
     "background_execution_metadata",
+    "WAKE_PREVIOUS_RESULT_MAX_TOKENS",
     "build_agent_notification_text",
+    "build_background_wake_goal",
+    "build_background_wake_result",
     "build_pending_background_status_text",
     "inter_agent_body",
     "is_agent_authored_user_metadata",

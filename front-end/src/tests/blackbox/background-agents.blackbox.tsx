@@ -149,6 +149,60 @@ describe('background spawn grouping (original toolCallId)', () => {
     expect(spawn.subAgentIds).toEqual(['fe-a', 'fe-b', 'fe-c']);
   });
 
+  it('a woken explore task (backgroundRun 2) is running again, then completes its next run', () => {
+    const finished = [
+      ...explore(),
+      row({
+        toolCallId: 'call_ex',
+        toolName: 'spawn_agent',
+        toolStatus: 'FINISHED',
+        excludeFromModel: true,
+        agentType: 'explore',
+        taskId: 't-ex',
+        title: 'Find the average hotel price',
+      }),
+      done('call_ex', '/root/hotel_price', 'completed', 'About $210.'),
+    ];
+    expect(deriveBackgroundSpawns(finished).get('call_ex')!.state).toBe('completed');
+    const rerun = row({
+      toolCallId: 'call_ex',
+      toolName: 'spawn_agent',
+      toolStatus: 'IN_PROGRESS',
+      excludeFromModel: true,
+      agentType: 'explore',
+      taskId: 't-ex-2',
+      title: 'Exploring',
+      backgroundRun: 2,
+    });
+    const woken = deriveBackgroundSpawns([...finished, rerun]).get('call_ex')!;
+    expect(woken).toMatchObject({
+      state: 'running',
+      run: 2,
+      finishedAt: null,
+      resultSummary: null,
+      path: '/root/hotel_price',
+    });
+    const second = row(
+      {
+        agentNotification: true,
+        toolName: 'agent_notification',
+        fromAgentAddress: '/root/hotel_price',
+        status: 'completed',
+        backgroundTaskId: 'call_ex',
+        backgroundRun: 2,
+      },
+      'Message Type: FINAL_ANSWER\nTask name: x\nSender: /root/hotel_price\nPayload:\nAbout $230 in 2027.',
+      'USER',
+    );
+    expect(deriveBackgroundSpawns([...finished, rerun, second]).get('call_ex')).toMatchObject({
+      state: 'completed',
+      run: 2,
+      resultSummary: 'About $230 in 2027.',
+    });
+    renderDock([...finished, rerun]);
+    expect(screen.getByTestId('background-agents-banner')).toHaveTextContent('Running 1 agent');
+  });
+
   it('leaves foreground spawns (no background markers) alone', () => {
     const fg = row({
       toolCallId: 'call_fg',

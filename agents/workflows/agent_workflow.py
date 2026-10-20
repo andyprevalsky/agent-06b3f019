@@ -1542,6 +1542,11 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         Only wakes the loop: the row is polled like any other, never counts as
         user feedback, and never lifts a pause.
         """
+        if isinstance(data, dict) and data.get("wake_task_id"):
+            # Another agent messaged one of our finished explore/browser/code tasks:
+            # start its next run (the row is task-addressed, so our loop is not woken).
+            await self._wake_background_task_from_signal(data)
+            return
         if self._accept_agent_message_signal(data):
             workflow.logger.info(f"📨 Received agent message {str((data or {}).get('message_id'))[:36]}")
 
@@ -5459,7 +5464,11 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         # In-flight activity-backed background tasks, persisted as
         # Agent.backgroundTasks so other agents' list_agents can see and
         # message them. A change is always written, even without a bus.
-        background_tasks = background_tree_entries(getattr(self, "_background_tasks", {}), CHILD_WORKFLOW_AGENT_TYPES)
+        background_tasks = background_tree_entries(
+            getattr(self, "_background_tasks", {}),
+            CHILD_WORKFLOW_AGENT_TYPES,
+            getattr(self, "_background_finished", {}),
+        )
         background_changed = background_tasks != getattr(self, "_persisted_background_tasks", [])
         if not self.bus_id:
             if background_changed:

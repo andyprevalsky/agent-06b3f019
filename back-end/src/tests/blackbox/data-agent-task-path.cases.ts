@@ -68,6 +68,14 @@ async function createTree(userId: string): Promise<Tree> {
           task_name: 'venues',
           path: '/root/outreach/venues',
         },
+        {
+          address: 'toolu_explore_0',
+          type: 'explore',
+          goal: 'Find caterers',
+          status: 'completed',
+          task_name: 'caterers',
+          path: '/root/outreach/caterers',
+        },
       ],
     },
   });
@@ -179,6 +187,11 @@ async function proveAgentNetworkScope(headers: Record<string, string>, tree: Tre
   assert(
     JSON.stringify(agentIds(task.data)) === JSON.stringify([tree.childId]),
     `a background task path narrows to its owner, got ${JSON.stringify(task.data)}`
+  );
+  const finished = await grep(headers, { ...base, trace_path: '/root/outreach/caterers' });
+  assert(
+    JSON.stringify(agentIds(finished.data)) === JSON.stringify([tree.childId]),
+    `a finished background task path still narrows to its owner, got ${JSON.stringify(finished.data)}`
   );
   const missing = await grep(headers, { ...base, trace_path: '/root/nobody' });
   assert(

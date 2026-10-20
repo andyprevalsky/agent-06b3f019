@@ -200,13 +200,21 @@ export interface AgentMessageSignalPayload {
   /** Sender identity lets the target's wait_for(agents=[...]) match it. */
   from_agent_id?: string;
   from_agent_path?: string;
+  wake_task_id?: string;
+  message?: string;
 }
 
 export async function signalAgentMessage(
   agentId: string,
   workflowId: string,
   messageId: string,
-  sender: { from_agent_id?: string; from_agent_path?: string | null } = {},
+  sender: {
+    from_agent_id?: string;
+    from_agent_path?: string | null;
+    /** A finished own background task to start the next run of, with the message text. */
+    wake_task_id?: string;
+    message?: string;
+  } = {},
   send: (workflowId: string, payload: AgentMessageSignalPayload) => Promise<void> = async (
     id,
     payload
@@ -219,6 +227,10 @@ export async function signalAgentMessage(
     const payload: AgentMessageSignalPayload = { message_id: messageId };
     if (sender.from_agent_id) payload.from_agent_id = sender.from_agent_id;
     if (sender.from_agent_path) payload.from_agent_path = sender.from_agent_path;
+    if (sender.wake_task_id !== undefined && sender.message !== undefined) {
+      payload.wake_task_id = sender.wake_task_id;
+      payload.message = sender.message;
+    }
     await send(workflowId, payload);
     return true;
   } catch (error) {

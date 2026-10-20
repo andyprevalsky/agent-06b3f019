@@ -215,13 +215,33 @@ function withBackgroundExecutionStamp(
   candidates: Message[]
 ): CreateMessageParams {
   const metadata = params.metadata;
-  if (metadata?.runInBackground === true || metadata?.excludeFromModel === true) return params;
+  if (metadata?.runInBackground === true) return params;
   const backgroundSpawn = candidates.some(
     (candidate) => messageMetadata(candidate)?.runInBackground === true
   );
-  return backgroundSpawn
-    ? { ...params, metadata: { ...metadata, excludeFromModel: true } }
-    : params;
+  if (!backgroundSpawn) return params;
+  // A woken task's later run: its workflow rows carry `backgroundRun`; rows its
+  // activity writes under the same id join that run (FE chip/dock per run).
+  const run =
+    typeof metadata?.backgroundRun === 'number' ? undefined : latestBackgroundRun(candidates);
+  if (metadata?.excludeFromModel === true && run === undefined) return params;
+  return {
+    ...params,
+    metadata: {
+      ...metadata,
+      excludeFromModel: true,
+      ...(run !== undefined ? { backgroundRun: run } : {}),
+    },
+  };
+}
+
+function latestBackgroundRun(candidates: Message[]): number | undefined {
+  let run: number | undefined;
+  for (const candidate of candidates) {
+    const value = messageMetadata(candidate)?.backgroundRun;
+    if (typeof value === 'number' && value > 1 && (run === undefined || value > run)) run = value;
+  }
+  return run;
 }
 
 export async function persistLockedToolLifecycleMessage(

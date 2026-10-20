@@ -636,6 +636,12 @@ def _oai_demo_first_level_gp_count(workflow_instance) -> int:
     return count
 
 
+def _inbox_address(workflow_instance: Any, tool_call_id: str) -> str:
+    """Inbox id of this spawn's current run (workflows/background_agents.py)."""
+    resolver = getattr(workflow_instance, "_background_inbox_address", None)
+    return resolver(tool_call_id) if callable(resolver) else tool_call_id
+
+
 class SpawnAgentManager(ToolManager):
     """Unified manager that dispatches to browser/code/general_purpose/explore based on type."""
 
@@ -907,8 +913,9 @@ class SpawnAgentManager(ToolManager):
                 world_model_mode,
                 local_data_summary,
                 oai_demo,
-                # Agent-to-agent inbox address: this spawning tool call's id.
-                tool_call_id,
+                # Agent-to-agent inbox address: this spawning tool call's id
+                # (``<id>.run<n>`` for a woken background task's later run).
+                _inbox_address(workflow_instance, tool_call_id),
                 # list_agents names this task <owner path>/<task_name>.
                 tool_call.get("task_name"),
             ]
@@ -1141,8 +1148,9 @@ class SpawnAgentManager(ToolManager):
             "start_url": tool_call.get("start_url"),
             "goal": tool_call.get("goal"),
             "output_schema": tool_call.get("output_schema"),
-            # Agent-to-agent inbox address: this spawning tool call's id.
-            "inbox_address": tool_call_id,
+            # Agent-to-agent inbox address: this spawning tool call's id
+            # (``<id>.run<n>`` for a woken background task's later run).
+            "inbox_address": _inbox_address(workflow_instance, tool_call_id),
         }
         if tool_call.get("attachments"):
             browser_tool_call["attachments"] = tool_call["attachments"]

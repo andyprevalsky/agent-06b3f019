@@ -109,10 +109,17 @@ test('GET /:id/resolve-address — paths, parent, /root, ids and background task
     const byOwnerId = await resolve(fx.userId, ids.draftA, `${ids.outreach}/bg_call-7`);
     assertStatus(byOwnerId.status, 200, byOwnerId.data);
 
-    for (const missing of ['/root/outreach/old', '/root/nobody', `${ids.outreach}/bg_done`]) {
-      const res = await resolve(fx.userId, ids.draftA, missing);
-      assertStatus(res.status, 404, res.data);
+    // A finished task stays addressable (its owner wakes it for another run).
+    for (const finished of ['/root/outreach/old', `${ids.outreach}/bg_done`]) {
+      const res = await resolve(fx.userId, ids.draftA, finished);
+      assertStatus(res.status, 200, res.data);
+      assert(
+        (res.data as { recipient_task_id: string }).recipient_task_id === 'bg_done',
+        `${finished} → ${JSON.stringify(res.data)}`
+      );
     }
+    const missing = await resolve(fx.userId, ids.draftA, '/root/nobody');
+    assertStatus(missing.status, 404, missing.data);
     const bad = await resolve(fx.userId, ids.draftA, 'Root/Outreach');
     assertStatus(bad.status, 400, bad.data);
     const rootParent = await resolve(fx.userId, ids.root, 'parent');
@@ -182,14 +189,41 @@ test("POST /:id/send-agent-message — path delivery to an agent and to another 
 
     const self = await sendTo(fx.userId, ids.draftA, '/root/outreach/draft_a', 'hi');
     assertStatus(self.status, 400, self.data);
-    const nowhere = await sendTo(fx.userId, ids.draftA, '/root/outreach/old', 'hi');
+    const nowhere = await sendTo(fx.userId, ids.draftA, '/root/nobody', 'hi');
     assertStatus(nowhere.status, 404, nowhere.data);
+
+    // A finished task: stored as its next task (NEW_TASK) and its owner asked to wake it.
+    // The fixture owner has no running workflow, so the sender learns it was not woken.
+    const toFinished = await sendTo(fx.userId, ids.draftA, '/root/outreach/old', 'Redo for 2027.');
+    assertStatus(toFinished.status, 201, toFinished.data);
+    const finishedBody = toFinished.data as {
+      message_id: string;
+      task_running: boolean;
+      woke: boolean;
+      wake_error: string;
+    };
+    assert(
+      finishedBody.task_running === false &&
+        finishedBody.woke === false &&
+        finishedBody.wake_error === 'its owner agent is not running',
+      `finished task delivery ${JSON.stringify(finishedBody)}`
+    );
+    const finishedRow = await prisma.message.findUniqueOrThrow({
+      where: { id: finishedBody.message_id },
+    });
+    const finishedMeta = finishedRow.metadata as Record<string, unknown>;
+    assert(
+      finishedMeta.recipientTaskId === 'bg_done' &&
+        finishedMeta.messageType === 'NEW_TASK' &&
+        finishedMeta.toAgentPath === '/root/outreach/old',
+      `finished task row ${JSON.stringify(finishedMeta)}`
+    );
   } finally {
     await deleteFixture(fx);
   }
 });
 
-test('GET /:id/tree — paths, path nodes and in-flight background tasks of listed agents', async () => {
+test('GET /:id/tree — paths, path nodes and background tasks (running and finished) of listed agents', async () => {
   const fx = await withScanTask('addr-tree');
   const { ids } = fx;
   try {
@@ -205,7 +239,10 @@ test('GET /:id/tree — paths, path nodes and in-flight background tasks of list
         scan.task_id === 'bg_call-7',
       `running task listed under its owner: ${JSON.stringify(scan)}`
     );
-    assert(!byId.has('/root/outreach/old'), 'finished tasks are not listed');
+    assert(
+      byId.get('/root/outreach/old')?.status === 'completed',
+      'finished tasks stay listed as completed'
+    );
     assert(
       same(
         view.caller_path.map((entry) => entry.path),
@@ -229,8 +266,9 @@ test('GET /:id/tree — paths, path nodes and in-flight background tasks of list
     await prisma.agent.update({ where: { id: ids.outreach }, data: { status: 'COMPLETED' } });
     const ended = await getView(fx.userId, ids.draftA);
     assert(
-      !idsOf(ended.nodes).includes('/root/outreach/scan'),
-      'a terminal owner lists no stale tasks'
+      !idsOf(ended.nodes).includes('/root/outreach/scan') &&
+        idsOf(ended.nodes).includes('/root/outreach/old'),
+      'a terminal owner lists no stale running task, only its finished ones'
     );
   } finally {
     await deleteFixture(fx);

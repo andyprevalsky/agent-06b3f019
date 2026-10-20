@@ -77,6 +77,8 @@ from helpers.background_agents import (
     agent_notification_metadata,
     background_execution_metadata,
     build_agent_notification_text,
+    build_background_wake_goal,
+    build_background_wake_result,
     build_pending_background_status_text,
     is_background_started_metadata,
 )
@@ -92,6 +94,24 @@ BACKGROUND_GOAL_RECORD_LEN = 500
 DAG_MESSAGE_WAKE_KINDS = frozenset({"user_message", "agent_message"})
 # Finished tasks kept for addressing (send_message_to_agent / kill_agent / rewake); bounded so a long run cannot grow it.
 MAX_FINISHED_BACKGROUND_TASKS = 50
+# Activity-backed types a message can wake for another run (durable children wake via the backend).
+WAKEABLE_TASK_TYPES = frozenset({"explore", "browser", "code"})
+# Finished explore/browser/code tasks that keep what a wake needs (args + previous result).
+MAX_WAKEABLE_FINISHED_TASKS = 10
+FINISHED_RECORD_KEYS = (
+    "tool_call_id",
+    "agent_type",
+    "address",
+    "goal",
+    "status",
+    "task_name",
+    "path",
+    "run",
+    "inbox_address",
+    "started_at",
+    "finished_at",
+    "wake_message_ids",
+)
 MAX_SEEN_AGENT_MESSAGE_IDS = 200
 
 
@@ -199,12 +219,27 @@ class BackgroundAgentsMixin:
         """
         if is_background_started_metadata(metadata) or not self._is_background_execution_id(tool_call_id):
             return metadata
-        return background_execution_metadata(metadata)
+        stamped = background_execution_metadata(metadata)
+        run = self._background_run(str(tool_call_id).split(":", 1)[0])
+        if run > 1:
+            stamped["backgroundRun"] = run  # a woken task's rows form a new run (FE chip/dock)
+        return stamped
+
+    def _background_run(self, task_id: str) -> int:
+        record = self._background_tasks.get(task_id) or self._background_finished.get(task_id) or {}
+        run = record.get("run")
+        return run if isinstance(run, int) and run > 0 else 1
+
+    def _background_inbox_address(self, task_id: str) -> str:
+        """Inbox of the task's current run: its spawn id, or ``<id>.run<n>`` after a wake."""
+        record = self._background_tasks.get(task_id) or self._background_finished.get(task_id) or {}
+        inbox = record.get("inbox_address")
+        return inbox if isinstance(inbox, str) and inbox else task_id
 
     def _background_task_for_address(self, address: str) -> Optional[Dict[str, Any]]:
         for source in (self._background_tasks, self._background_finished):
             for key, record in source.items():
-                if address in (key, record.get("address")):
+                if address in (key, record.get("address"), record.get("inbox_address")):
                     summary = dict(record)
                     summary["background_task_id"] = key
                     summary["child_workflow"] = record.get("agent_type") in CHILD_WORKFLOW_AGENT_TYPES
@@ -548,17 +583,22 @@ class BackgroundAgentsMixin:
         # foreground spawn (helpers/tool_interrupts.py): it reports failed.
         status = "failed" if failed else "completed"
         record["status"] = status
+        record["finished_at"] = workflow.now().isoformat()
         self._background_tasks.pop(task_id, None)
-        self._background_finished[task_id] = {
-            key: record.get(key)
-            for key in ("tool_call_id", "agent_type", "address", "goal", "status", "task_name", "path")
-        }
-        while len(self._background_finished) > MAX_FINISHED_BACKGROUND_TASKS:
-            self._background_finished.pop(next(iter(self._background_finished)))
+        finished = {key: record.get(key) for key in FINISHED_RECORD_KEYS}
+        if record.get("agent_type") in WAKEABLE_TASK_TYPES:
+            # What send_message_to_agent needs to wake this task for another run.
+            finished["wake"] = {
+                "tool_args": dict(record.get("tool_args") or {}),
+                "base_goal": str(record.get("base_goal") or (record.get("tool_args") or {}).get("goal") or ""),
+                "result": build_background_wake_result(summary, structured_response),
+            }
+        self._remember_finished_background_task(task_id, finished)
         if record.get("agent_type") not in CHILD_WORKFLOW_AGENT_TYPES:
-            await self._update_tree_state()  # drop the finished task from the persisted tree state
+            await self._update_tree_state()  # the persisted tree state lists it as finished
 
-        key = f"{self.agent_id}:{task_id}:notification"
+        run = self._background_run(task_id)
+        key = f"{self.agent_id}:{task_id}:notification" + (f":run{run}" if run > 1 else "")
         if key not in self._background_notified:
             self._background_notified.add(key)
             text = build_agent_notification_text(
@@ -580,6 +620,7 @@ class BackgroundAgentsMixin:
                         status=status,
                         background_task_id=task_id,
                         idempotency_key=key,
+                        run=run,
                     ),
                 )
             except Exception as exc:
@@ -595,6 +636,110 @@ class BackgroundAgentsMixin:
             child_agent_ids=list(self._background_child_ids_for(task_id, record)),
             status=status,
         )
+
+    def _remember_finished_background_task(self, task_id: str, finished: Dict[str, Any]) -> None:
+        """Keep a finished record (bounded); only the newest few keep their wake context."""
+        self._background_finished.pop(task_id, None)
+        self._background_finished[task_id] = finished
+        while len(self._background_finished) > MAX_FINISHED_BACKGROUND_TASKS:
+            self._background_finished.pop(next(iter(self._background_finished)))
+        wakeable = [key for key, value in self._background_finished.items() if isinstance(value.get("wake"), dict)]
+        for stale in wakeable[:-MAX_WAKEABLE_FINISHED_TASKS]:
+            self._background_finished[stale].pop("wake", None)
+
+    def _background_wake_refusal(self) -> Optional[str]:
+        """Why this agent cannot start another run of a finished task right now (None when it can)."""
+        if getattr(self, "_is_finished", False) or getattr(self, "_orphaned", False):
+            return "its owner agent is finishing"
+        if getattr(self, "_kill_request", None) is not None:
+            return "its owner agent was killed"
+        if getattr(self, "is_paused", False):
+            return "its owner agent is paused"
+        if getattr(self, "_cost_limit_reached", False) or getattr(self, "_has_credits", True) is False:
+            return "its owner agent reached its cost limit"
+        return None
+
+    async def _wake_background_task(
+        self, task_id: str, message: str, *, message_id: Optional[str], sender: Optional[str]
+    ) -> Dict[str, Any]:
+        """send_message_to_agent to a finished explore/browser/code task: start its next run.
+
+        Same task id, path and task_name; the new run's goal is the message plus
+        the previous run's goal and result, its inbox is ``<id>.run<n>`` (earlier
+        runs' messages are never re-read) and it posts a new notification when it
+        finishes. Idempotent per message id (a retried send or a duplicate signal
+        never starts a second run). The message was already stored by the
+        backend, which applies the per-sender rate and unread guards first.
+        """
+        if task_id in self._background_tasks:
+            return {"woke": True, "already_running": True}
+        record = self._background_finished.get(task_id)
+        if record is None:
+            return {"woke": False, "reason": "no such background task"}
+        if message_id and message_id in (record.get("wake_message_ids") or []):
+            return {"woke": True, "already_running": True}
+        wake = record.get("wake")
+        if record.get("agent_type") not in WAKEABLE_TASK_TYPES or not isinstance(wake, dict):
+            return {"woke": False, "reason": "it is too old to continue; spawn a new one"}
+        refusal = self._background_wake_refusal()
+        if refusal is not None:
+            return {"woke": False, "reason": refusal}
+        run = self._background_run(task_id) + 1
+        base_goal = str(wake.get("base_goal") or record.get("goal") or "")
+        args = dict(wake.get("tool_args") or {})
+        args["goal"] = build_background_wake_goal(
+            message=message,
+            base_goal=base_goal,
+            previous_status=str(record.get("status") or "completed"),
+            previous_result=str(wake.get("result") or ""),
+        )
+        self._background_finished.pop(task_id, None)
+        self._background_tasks[task_id] = {
+            **{key: record.get(key) for key in FINISHED_RECORD_KEYS if key not in ("status", "finished_at")},
+            "tool_call_id": task_id,
+            "tool_args": args,
+            "base_goal": base_goal,
+            "status": "running",
+            "run": run,
+            "inbox_address": f"{task_id}.run{run}",
+            "started_at": workflow.now().isoformat(),
+            "goal": str(message)[:BACKGROUND_GOAL_RECORD_LEN],
+            "child_agent_ids": [],
+            "wake_message_ids": [*(record.get("wake_message_ids") or []), *([message_id] if message_id else [])][-20:],
+        }
+        self._background_settled.discard(task_id)
+        self._background_outcomes.pop(task_id, None)
+        workflow.logger.info(
+            f"[background] woke {task_id} ({record.get('agent_type')}, {record.get('path') or record.get('address')}) "
+            f"for run {run} with a message from {sender or 'an agent'}"
+        )
+        self._launch_background_task(task_id)
+        await self._update_tree_state()
+        return {"woke": True, "run": run}
+
+    async def _wake_background_task_from_signal(self, data: Dict[str, Any]) -> None:
+        """receive_agent_message for a finished own task (sent by another agent through the backend)."""
+        address = data.get("wake_task_id")
+        message = data.get("message")
+        if not isinstance(address, str) or not isinstance(message, str) or not message.strip():
+            return
+        message_id = data.get("message_id")
+        if isinstance(message_id, str) and message_id:
+            if message_id in self._seen_agent_message_ids:
+                return  # a retried send re-signals the same row
+            self._seen_agent_message_ids.append(message_id)
+            del self._seen_agent_message_ids[:-MAX_SEEN_AGENT_MESSAGE_IDS]
+        record = self._background_task_for_address(address)
+        if record is None or record.get("child_workflow"):
+            return
+        result = await self._wake_background_task(
+            record["background_task_id"],
+            message,
+            message_id=message_id if isinstance(message_id, str) else None,
+            sender=data.get("from_agent_path") if isinstance(data.get("from_agent_path"), str) else None,
+        )
+        if not result.get("woke"):
+            workflow.logger.warning(f"[background] did not wake {address}: {result.get('reason')}")
 
     async def _notification_recipient(self) -> str:
         """ "Task name" of a notification this agent receives: its own task path."""
@@ -692,10 +837,8 @@ class BackgroundAgentsMixin:
             record = self._background_tasks.pop(task_id)
             children = self._background_child_ids_for(task_id, record)
             record["status"] = "failed"
-            self._background_finished[task_id] = {
-                key: record.get(key)
-                for key in ("tool_call_id", "agent_type", "address", "goal", "status", "task_name", "path")
-            }
+            record["finished_at"] = workflow.now().isoformat()
+            self._background_finished[task_id] = {key: record.get(key) for key in FINISHED_RECORD_KEYS}
             self._background_outcomes.pop(task_id, None)
             self._background_settled.add(task_id)
             handle = self._background_handles.pop(task_id, None)

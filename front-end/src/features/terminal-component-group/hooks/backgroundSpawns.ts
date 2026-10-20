@@ -8,9 +8,12 @@
  *   - UI rows in main's shapes under `<owner>` / `<owner>:<idx>` (for_each
  *     children) with `excludeFromModel`
  *   - one completion row (agentNotification, backgroundTaskId = owner)
+ *   - a finished explore/browser/code task woken by an agent message runs again
+ *     under the same owner: its rows carry `backgroundRun` (2, 3, …)
  *
  * STATE per spawn (derived, never stored):
  * [RUNNING] -- completion row OR terminal `<owner>` spawn row --> [COMPLETED | FAILED]
+ * [COMPLETED | FAILED] -- row with a higher backgroundRun --> [RUNNING]
  *
  * The trajectory renders these rows with main's spawn UI unchanged; the
  * query-box dock reads this derivation (spawned agent ids, for_each groups,
@@ -48,6 +51,8 @@ export interface BackgroundSpawn {
   childTotal: number;
   childDone: number;
   childFailed: number;
+  /** Run of the task (1, or 2+ after a message woke the finished task). */
+  run: number;
 }
 
 const SPAWN_TOOL_NAMES = new Set([
@@ -176,7 +181,20 @@ function emptySpawn(owner: string, startedAt: string): BackgroundSpawn {
     childTotal: 0,
     childDone: 0,
     childFailed: 0,
+    run: 1,
   };
+}
+
+/** A row of a later run of a woken task restarts the spawn's derived state. */
+function absorbRun(spawn: BackgroundSpawn, message: Message): void {
+  const run = message.metadata?.backgroundRun;
+  if (typeof run !== 'number' || run <= spawn.run) return;
+  spawn.run = run;
+  spawn.state = 'running';
+  spawn.rawStatus = null;
+  spawn.finishedAt = null;
+  spawn.resultSummary = null;
+  spawn.activity = null;
 }
 
 function absorbMetadata(spawn: BackgroundSpawn, message: Message): void {
@@ -276,6 +294,7 @@ export function deriveBackgroundSpawns(messages: Message[]): Map<string, Backgro
       spawns.set(owner, spawn);
       childStatuses.set(owner, new Map());
     }
+    absorbRun(spawn, message);
     if (message.role !== 'TOOL') absorbNotification(spawn, message);
     else absorbToolRow(spawn, message, childStatuses.get(owner)!);
   }

@@ -6,7 +6,9 @@
  *                       USER row on target (deterministic id = idempotency)
  *                                              │
  *            recipient_task_id? ──yes──▶ excludeFromModel, no signal
- *                                              │      (other sender: task_running reported)
+ *                                              │      (other sender: task_running reported;
+ *                                              │       a finished task: signal the owner
+ *                                              │       {wake_task_id}, it starts the next run)
  *                                              │      (explore/browser activity polls
  *                                              │       GET /:target/agent-inbox)
  *                                              no
@@ -28,7 +30,7 @@ import type { AgentAddressMessageBody, AgentInboxQuery, AgentMessageBody } from 
 import * as repo from './repoAgentMessages';
 import { agentTaskPath, rootOf } from './agentTaskPath';
 import { type ResolvedAddress, resolveTreeAddress } from './agentAddressResolver';
-import { runningBackgroundTasks } from './agentTreeBackgroundTasks';
+import { listedBackgroundTasks } from './agentTreeBackgroundTasks';
 import { WAKEABLE_TERMINAL_STATUSES, wakeFinishedAgent } from './agentWakeService';
 import { guardAgentMessage, noteAgentMessagesConsumed } from './agentMessageGuardService';
 
@@ -94,17 +96,51 @@ function deliveryShape(target: TreeAgent, sender: TreeAgent, body: AgentMessageB
   // stored either way; the sender learns when nothing will read it. The owner's
   // own task messages are checked by its workflow.
   const recipientTask = addressedToTask
-    ? runningBackgroundTasks(target).find((task) => task.address === body.recipient_task_id)
+    ? listedBackgroundTasks(target).find((task) => task.address === body.recipient_task_id)
     : undefined;
-  const taskRunning =
-    addressedToTask && sender.id !== target.id ? recipientTask !== undefined : undefined;
+  const recipientTaskRunning = recipientTask?.status === 'running';
+  const taskRunning = addressedToTask && sender.id !== target.id ? recipientTaskRunning : undefined;
   const wakesFinishedAgent =
     !addressedToTask &&
     target.temporalWorkflowId !== null &&
     ENDED_STATUSES.includes(target.status);
-  const messageType = wakesFinishedAgent ? 'NEW_TASK' : 'MESSAGE';
+  // A finished explore/browser/code task is woken by its owner's workflow: the
+  // owner itself (its own send) or, for another sender, a signal from here.
+  const wakesFinishedTask = recipientTask !== undefined && !recipientTaskRunning;
+  const messageType = wakesFinishedAgent || wakesFinishedTask ? 'NEW_TASK' : 'MESSAGE';
   const toAgentPath = addressedToTask ? (recipientTask?.path ?? null) : agentTaskPath(target);
-  return { addressedToTask, taskRunning, wakesFinishedAgent, messageType, toAgentPath };
+  return {
+    addressedToTask,
+    taskRunning,
+    wakesFinishedAgent,
+    wakesFinishedTask,
+    messageType,
+    toAgentPath,
+  };
+}
+
+/** Ask a running owner to start the next run of its finished task (owner workflow dedupes by message id). */
+async function wakeFinishedTaskOwner(
+  owner: TreeAgent,
+  sender: TreeAgent,
+  messageId: string,
+  body: AgentMessageBody
+): Promise<{ woke: boolean; reason?: string }> {
+  if (ENDED_STATUSES.includes(owner.status)) {
+    return { woke: false, reason: 'its owner agent has finished' };
+  }
+  if (owner.temporalWorkflowId === null) {
+    return { woke: false, reason: 'its owner agent is not running' };
+  }
+  const signalled = await signalAgentMessage(owner.id, owner.temporalWorkflowId, messageId, {
+    from_agent_id: sender.id,
+    from_agent_path: agentTaskPath(sender),
+    wake_task_id: body.recipient_task_id,
+    message: body.message,
+  });
+  return signalled
+    ? { woke: true }
+    : { woke: false, reason: 'its owner agent could not be reached' };
 }
 
 /** Persist one agent message on the target and wake the target's workflow. */
@@ -117,8 +153,14 @@ export async function sendAgentMessage(
   const resolved = await resolveSameTree(targetId, body.from_agent_id, userId);
   if ('error' in resolved) return resolved;
   const { target, sender } = resolved;
-  const { addressedToTask, taskRunning, wakesFinishedAgent, messageType, toAgentPath } =
-    deliveryShape(target, sender, body);
+  const {
+    addressedToTask,
+    taskRunning,
+    wakesFinishedAgent,
+    wakesFinishedTask,
+    messageType,
+    toAgentPath,
+  } = deliveryShape(target, sender, body);
   // Prime-style guard: per-sender rate + per-recipient unread cap (retries are free).
   const refused = await guardAgentMessage(
     target,
@@ -148,9 +190,14 @@ export async function sendAgentMessage(
   });
 
   // Task-addressed rows are read by the target's activity inbox poll; the
-  // target's own LLM never sees them, so its workflow is not woken.
+  // target's own LLM never sees them, so its workflow is not woken — except
+  // to start the next run of a finished task another agent messaged.
   let delivered = false;
   let wake: Awaited<ReturnType<typeof wakeFinishedAgent>> | undefined;
+  if (wakesFinishedTask && sender.id !== target.id) {
+    wake = await wakeFinishedTaskOwner(target, sender, message.id, body);
+    delivered = wake.woke;
+  }
   if (!addressedToTask && target.temporalWorkflowId !== null) {
     const senderIdentity = { from_agent_id: sender.id, from_agent_path: agentTaskPath(sender) };
     if (wakesFinishedAgent) {

@@ -66,7 +66,10 @@ function isTerminalTool(message: Message): boolean {
  * unrelated writer adds a chip instead of destroying one.
  */
 function chipKey(message: Message): string {
-  return `${String(message.metadata?.toolCallId)}::${String(message.metadata?.toolName ?? '')}`;
+  const key = `${String(message.metadata?.toolCallId)}::${String(message.metadata?.toolName ?? '')}`;
+  // A woken background task's later run gets its own chip (earlier runs stay as they finished).
+  const run = message.metadata?.backgroundRun;
+  return typeof run === 'number' && run > 1 ? `${key}::run${run}` : key;
 }
 
 function dedupByToolCallId(messages: Message[]): {

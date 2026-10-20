@@ -4,7 +4,8 @@
         ├─ "parent" / own background task (address, path or bg id) → by id
         └─ anything else (a /root/... path, an agent id) → backend resolver
         a finished agent wakes with the message as its next task (backend);
-        a finished explore/browser/code task cannot (spawn a new one)
+        a finished own explore/browser/code task wakes here: its next run (same
+        path) gets the message plus its previous result (_wake_background_task)
     kill_agent(to)                own task → killed here; else backend (descendants only)
     own task path: depth 0 → "/root"; otherwise resolved once via
         resolve_agent_address_activity and cached on the workflow instance.
@@ -80,17 +81,14 @@ def resolve_message_target(workflow_instance: Any, to: str) -> Tuple[Optional[st
             "A for_each address has no inbox; message its child agents by their addresses (see your environment block).",
         )
     if own_task is not None and not own_task.get("child_workflow"):
-        if own_task.get("status") != "running":
-            return (
-                None,
-                None,
-                (
-                    f"Background {own_task.get('agent_type') or 'agent'} task {to} has {own_task.get('status') or 'finished'}; "
-                    "explore/browser/code tasks cannot be continued. Spawn a new one with what it should do."
-                ),
-            )
-        # In-activity agents read a parent-owned inbox addressed by task id.
-        return workflow_instance.agent_id, own_task["background_task_id"], None
+        # In-activity agents read a parent-owned inbox addressed by the current
+        # run's inbox id. A finished task's row is stored on that run's inbox
+        # (never re-read) and the send wakes its next run.
+        return (
+            workflow_instance.agent_id,
+            workflow_instance._background_inbox_address(own_task["background_task_id"]),
+            None,
+        )
     if own_task is not None:
         child_ids = own_task.get("child_agent_ids") or []
         if child_ids:
@@ -164,6 +162,19 @@ async def send_message_to_agent(
     resolved = result.get("to") if isinstance(result.get("to"), dict) else {}
     target = target or resolved.get("agent_id")
     recipient_task_id = recipient_task_id or resolved.get("recipient_task_id")
+    own_task = workflow_instance._background_task_for_address(to) if recipient_task_id else None
+    if own_task is not None and own_task.get("status") != "running" and not own_task.get("child_workflow"):
+        # Finished before (or while) the message was stored: start its next run.
+        message_id = result.get("message_id") if isinstance(result.get("message_id"), str) else None
+        wake = await workflow_instance._wake_background_task(
+            own_task["background_task_id"],
+            message,
+            message_id=message_id or idempotency_key,
+            sender=await resolve_own_task_path(workflow_instance),
+        )
+        result = {**result, "woke": bool(wake.get("woke"))}
+        if not wake.get("woke"):
+            result["wake_error"] = wake.get("reason")
     text = f"Message sent to {to}."
     if result.get("task_running") is False:
         text += " Note: that background task is no longer running, so it will not read this message."
