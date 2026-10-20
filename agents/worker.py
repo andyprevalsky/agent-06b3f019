@@ -127,6 +127,7 @@ from helpers import (
     summarize_tool_result,
     update_agent_status,
 )
+from helpers.agent_graph import ask_code_agent_question_activity, send_agent_graph_message_activity
 from helpers.attachments import fetch_parent_attachments_activity, resolve_attachments_activity
 from helpers.error_alert import report_failure_activity
 from helpers.generation_handoff import parse_shutdown_grace_seconds
@@ -1578,6 +1579,8 @@ async def main():
         web_fetch_download_activity,
         resolve_user_tools_activity,
         run_user_tool_activity,
+        send_agent_graph_message_activity,
+        ask_code_agent_question_activity,
         save_tool_usage,
         read_message_history_activity,
         generate_message_activity,

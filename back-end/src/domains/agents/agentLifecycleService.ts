@@ -2,6 +2,7 @@
  * Agent lifecycle service — create and delete agents.
  */
 
+import { resolveAgentProjectId } from './agentProject';
 import { randomUUID } from '../../providers/crypto';
 import { startAgentWorkflowExecution } from '../../providers/temporal';
 import { bindStartedRunIdentity } from '../../providers/workflowGeneration';
@@ -11,7 +12,7 @@ import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailu
 import { deleteAgentRecursive as killAgentRecursive } from '../../providers/agentKill';
 import { createGithubRepo } from '../../providers/github';
 import { createLogger } from '../../providers/logger';
-import { findOwnedLocalDevice } from '../../providers/localDevices/store';
+import { originDeviceFields } from './agentOriginService';
 import { resolvePriceLimitCents } from '../../providers/priceLimitDefaults';
 import type { CreateAgentBody } from './types';
 import { getPromptSecret } from './config';
@@ -180,18 +181,17 @@ export interface CreateAgentOptions {
   originDeviceHeader?: string;
 }
 
-/** The Mac that started this root agent; nothing for web/PWA/SMS roots and sub-agents. */
-export async function originDeviceFields(
+/** Server-side create fields: the root repository and the Mac that started it. */
+async function serverCreateFields(
   body: CreateAgentBody,
   userId: string,
   isSubAgent: boolean,
-  header: string | undefined
-): Promise<{ originDeviceId?: string }> {
-  if (isSubAgent || body.source !== 'MAC_APP' || header === undefined || header === '') {
-    return {};
-  }
-  const device = await findOwnedLocalDevice(header, userId);
-  return device === null ? {} : { originDeviceId: device.id };
+  options: CreateAgentOptions
+): Promise<{ githubRepoUrl?: string; originDeviceId?: string }> {
+  return {
+    ...(options.githubRepoUrl !== undefined ? { githubRepoUrl: options.githubRepoUrl } : {}),
+    ...(await originDeviceFields(body, userId, isSubAgent, options.originDeviceHeader)),
+  };
 }
 
 export async function createAgent(
@@ -213,6 +213,7 @@ export async function createAgent(
   assertWorldModelModeAccess(body, userId);
   const existingSubAgent = await resumeExistingSubAgent(body, userId, verifier);
   if (existingSubAgent !== null) return existingSubAgent;
+  const projectId = await resolveAgentProjectId(body, userId);
   const { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo } =
     await resolveCreateMetadata(body.model, clientIP, body.parent_agent_id ?? null, userId);
   const agentId = body.agent_id ?? randomUUID();
@@ -253,8 +254,8 @@ export async function createAgent(
     workflowContextGates: body.context_gates,
     workflowStartPhase: body.start_phase,
     workflowTaskQueue: body.task_queue,
-    ...(options.githubRepoUrl !== undefined ? { githubRepoUrl: options.githubRepoUrl } : {}),
-    ...(await originDeviceFields(body, userId, isSubAgent, options.originDeviceHeader)),
+    ...(await serverCreateFields(body, userId, isSubAgent, options)),
+    projectId,
   });
   const archiveStartFixture = !isSubAgent ? await prepareAgentStartArchive(agent.agent.id) : null;
 
@@ -276,6 +277,7 @@ export async function createAgent(
     fast_mode_cache_enabled: agent.agent.fastModeCacheEnabled,
     memory_enabled: agent.agent.memoryEnabled,
     world_model_mode: agent.agent.worldModelMode,
+    project_id: agent.agent.projectId,
     created_at: agent.agent.createdAt,
     updated_at: agent.agent.updatedAt,
     available_endpoints: getX402Endpoints(agent.agent.id),

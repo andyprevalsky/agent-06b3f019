@@ -11,7 +11,7 @@ import { prisma } from '../../providers/database';
 export async function findAgentGithubInfo(agentId: string) {
   return prisma.agent.findUnique({
     where: { id: agentId },
-    select: { githubRepoUrl: true, userId: true, busId: true },
+    select: { githubRepoUrl: true, userId: true, busId: true, projectId: true },
   });
 }
 
@@ -21,7 +21,7 @@ export async function findAgentGithubInfo(agentId: string) {
 export async function findRootAgentGithubInfo(busId: string) {
   return prisma.agent.findUnique({
     where: { id: busId },
-    select: { githubRepoUrl: true, userId: true },
+    select: { githubRepoUrl: true, userId: true, projectId: true },
   });
 }
 
@@ -85,4 +85,12 @@ export async function findAgentFastModeCache(agentId: string): Promise<boolean> 
     select: { fastModeCacheEnabled: true },
   });
   return agent?.fastModeCacheEnabled ?? false;
+}
+
+/** Session fields needed to address a live code session for direct chat. */
+export async function findSessionForDirectChat(taskId: string) {
+  return prisma.claudeCodeSession.findUnique({
+    where: { id: taskId },
+    select: { id: true, agentId: true, status: true, streamUrl: true },
+  });
 }

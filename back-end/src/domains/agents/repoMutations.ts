@@ -46,8 +46,12 @@ function optionalAgentCreateFields(params: {
   isBenchmark?: boolean;
   githubRepoUrl?: string;
   originDeviceId?: string;
+  projectId?: string | null;
 }): Partial<Prisma.AgentUncheckedCreateInput> {
   return {
+    ...(params.projectId !== undefined && params.projectId !== null
+      ? { projectId: params.projectId }
+      : {}),
     ...(params.temporalWorkflowId !== undefined && params.temporalWorkflowId !== null
       ? { temporalWorkflowId: params.temporalWorkflowId }
       : {}),
@@ -131,6 +135,7 @@ export interface CreateAgentParams {
   githubRepoUrl?: string;
   /** Rose Mac app device that started this root agent (C14 local code agents). */
   originDeviceId?: string;
+  projectId?: string | null;
 }
 
 /** Create an agent with verifier and goal message in a transaction. */

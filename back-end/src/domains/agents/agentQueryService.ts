@@ -3,6 +3,7 @@
  */
 
 import * as repo from './repo';
+import { listGraphCodeSessions } from './repoGraph';
 import {
   findAgentAcrossRuns,
   findAncestorsAcrossRuns,
@@ -38,6 +39,7 @@ function toListItem(agent: ListedAgent) {
     fast_mode_cache_enabled: agent.fastModeCacheEnabled,
     world_model_mode: agent.worldModelMode,
     memory_enabled: agent.memoryEnabled,
+    project_id: agent.projectId,
     created_at: agent.createdAt,
     updated_at: agent.updatedAt,
   };
@@ -68,7 +70,11 @@ export async function listArchivedAgents(userId: string, limit: number) {
 // Get agent tree
 // ---------------------------------------------------------------------------
 
-/** Get all agents in a sub-agent tree by busId. */
+/**
+ * Get all agents in a sub-agent tree by busId. Code agents (Claude Code /
+ * Codex sessions) are listed alongside in `code_agents`, keyed to the Rose
+ * agent that owns each session; `agents` keeps its Agent-row shape.
+ */
 export async function getAgentTree(busId: string, allowBenchmarkArchive = false) {
   const agents = await repo.findAgentsByBusId(busId);
 
@@ -77,7 +83,15 @@ export async function getAgentTree(busId: string, allowBenchmarkArchive = false)
     if (archived !== null) return archived;
   }
 
+  const codeSessions = await listGraphCodeSessions(agents.map((agent) => agent.id));
   return {
+    code_agents: codeSessions.map((session) => ({
+      code_agent_id: session.id,
+      owner_agent_id: session.agentId,
+      goal: session.goal,
+      status: session.status,
+      created_at: session.createdAt,
+    })),
     agents: agents.map((agent) => ({
       agent_id: agent.id,
       parent_agent_id: agent.parentAgentId,
@@ -236,6 +250,7 @@ export async function getAgentDetail(agentId: string, options: AgentDetailOption
       fast_mode_cache_enabled: agent.fastModeCacheEnabled,
       world_model_mode: agent.worldModelMode,
       memory_enabled: agent.memoryEnabled,
+      project_id: agent.projectId,
       token_in_price_microdollars: agent.tokenInPriceMicrodollars,
       token_out_price_microdollars: agent.tokenOutPriceMicrodollars,
       created_at: agent.createdAt,

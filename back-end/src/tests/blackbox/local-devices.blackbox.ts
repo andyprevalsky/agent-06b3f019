@@ -23,7 +23,7 @@
 import assert from 'node:assert';
 import { randomUUID } from 'node:crypto';
 import jwt from 'jsonwebtoken';
-import { originDeviceFields } from '../../domains/agents/agentLifecycleService';
+import { originDeviceFields } from '../../domains/agents/agentOriginService';
 import type { CreateAgentBody } from '../../domains/agents/types';
 import { prisma } from '../../providers/database';
 import {
