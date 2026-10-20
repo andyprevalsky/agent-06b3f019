@@ -119,7 +119,6 @@ export type DisplayRequestBody = z.infer<typeof displayRequestSchema>;
 export type MessageRequestBody = z.infer<typeof messageRequestSchema>;
 export type ApprovalRequestBody = z.infer<typeof approvalRequestSchema>;
 
-/** Who is calling: a code-agent sandbox (token) or a Rose agent (agents worker). */
 /**
  * POST /api/agent-tools/:agentId/environment/size — a code agent asks for
  * another sandbox size (C16). Either dimension alone keeps the other; the
@@ -133,6 +132,7 @@ export const environmentSizeSchema = z
   })
   .strict();
 
+/** Who is calling: a code-agent sandbox (token) or a Rose agent (agents worker). */
 export type AgentToolsCaller =
   | {
       kind: 'code_agent';
