@@ -40,6 +40,23 @@ export async function fetchIntegrationsApi(): Promise<ConnectedIntegration[]> {
   return data.integrations ?? [];
 }
 
+/**
+ * Remove a connected account (Rose Desktop chip ×).
+ *
+ * With `accountId`: ONE account of a multi-account provider
+ * (DELETE /api/integrations/:name/accounts/:accountId, lane L-INTEG-CORE).
+ * Without: the whole one-row integration (DELETE /api/integrations/:name), used
+ * when the backend reports no per-account list. A 404 means already removed.
+ */
+export async function deleteIntegrationAccountApi(name: string, accountId?: string): Promise<void> {
+  const account = accountId === undefined ? '' : `/accounts/${encodeURIComponent(accountId)}`;
+  const url = `${API_BASE_WITH_PATH}/integrations/${encodeURIComponent(name)}${account}`;
+  const response = await fetch(url, { method: 'DELETE', headers: getAuthHeaders() });
+  if (response.ok || response.status === 404) return;
+  const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+  throw new Error(payload?.error ?? `Failed to remove account (HTTP ${response.status})`);
+}
+
 export async function uploadFileApi(
   type: 'vcf' | 'email-zip',
   file: File,

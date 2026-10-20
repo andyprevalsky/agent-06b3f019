@@ -15,6 +15,63 @@ export interface EmailCredentialHealth {
   lastFailedSyncAt: string | null;
 }
 
+/**
+ * Progress of ONE account's running sync, as GET /api/integrations reports it
+ * (`accounts[].progress`).
+ *
+ * `total` is null when the server does not know it yet: the bar is then
+ * indeterminate and no percentage is ever invented. `eta_sec` is null when
+ * unknown: the ETA text is hidden.
+ */
+export interface SyncProgressWire {
+  pct?: number | null;
+  done?: number | null;
+  total?: number | null;
+  /** Plural noun for the items being synced, e.g. "messages", "transactions". */
+  unit?: string | null;
+  eta_sec?: number | null;
+}
+
+/**
+ * Normalized progress for one syncing account (see hooks/useSyncProgress).
+ * `pct` is null exactly when the total is unknown (indeterminate bar).
+ */
+export interface SyncProgress {
+  pct: number | null;
+  done: number | null;
+  total: number | null;
+  unit: string;
+  etaSec: number | null;
+}
+
+/**
+ * One connected account of an integration, as GET /api/integrations reports it
+ * per provider row. A browser-cookie account is one browser profile; connecting
+ * again creates another account; removal is per account.
+ */
+export interface IntegrationAccountWire {
+  accountId: string;
+  label: string;
+  /** Server health/sync state, e.g. `synced`, `syncing`, `needs_reconnect`, `error`. */
+  state: string;
+  progress?: SyncProgressWire | null;
+  lastSyncAt?: string | null;
+}
+
+/** Chip tone for one account (ConnectedAccountChip). */
+export type AccountTone = 'synced' | 'syncing' | 'warning' | 'error';
+
+/** Parsed account (hooks/integrationAccounts). */
+export interface IntegrationAccount {
+  accountId: string;
+  label: string;
+  tone: AccountTone;
+  /** Raw server state, kept for titles and repair decisions. */
+  state: string;
+  progress: SyncProgress | null;
+  lastSyncAt: string | null;
+}
+
 export interface ConnectedIntegration {
   id: string;
   name: string;
@@ -30,6 +87,11 @@ export interface ConnectedIntegration {
     [key: string]: unknown;
   };
   lastSuccessfulSyncAt?: string;
+  /**
+   * Connected accounts of this provider (multi-account backend). Absent on
+   * backends that predate it; the UI then derives one account from the row.
+   */
+  accounts?: IntegrationAccountWire[] | null;
   /**
    * Per-account health. A `gmail` row fans out to N addresses, so a single
    * integration status cannot say which address broke.

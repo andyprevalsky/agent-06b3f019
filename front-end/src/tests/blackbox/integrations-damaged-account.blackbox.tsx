@@ -77,7 +77,7 @@ describe('Integrations page', () => {
         ),
       );
 
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
 
       // The header must stop claiming "Connected" while an account is broken —
       // that mislabel is what hid a dead account for five weeks.
@@ -126,7 +126,7 @@ describe('Integrations page', () => {
         }),
       );
 
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
       await expandMessages(user);
 
       const resync = await screen.findByRole('button', { name: /reconnect broken@gmail.com/i });
@@ -163,7 +163,7 @@ describe('Integrations page', () => {
         ),
       );
 
-      renderWithProviders(<Integrations />);
+      renderWithProviders(<Integrations />, { roseDesktop: false });
       await expandMessages(user);
 
       const resync = await screen.findByRole('button', { name: /reconnect broken@gmail.com/i });
