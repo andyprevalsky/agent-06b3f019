@@ -34600,7 +34600,12 @@ case "$CASE" in
  # Recover only after the waiter observed the pending generation and entered
  # its retry pause; a timed background writer can win before the first read.
  recovers) stale; sleep() { healthy; command sleep "$@"; } ;;
- exhausts) stale; CAPACITY_ADMISSION_DEADLINE=$((SECONDS+1)) ;;
+ # Controlled clock: SECONDS ticks on whole-second boundaries, so a
+ # SECONDS+1 deadline can expire milliseconds after assignment on a loaded
+ # host before the first retry is observed. The waiter's integer retry
+ # pause advances the same SECONDS clock instead of real time.
+ exhausts) stale; CAPACITY_ADMISSION_DEADLINE=$((SECONDS+3))
+  sleep() { case "$1" in *[!0-9]*|'') command sleep "$@" ;; *) SECONDS=$((SECONDS+$1)) ;; esac; } ;;
  expired) stale; CAPACITY_ADMISSION_DEADLINE=$SECONDS ;;
  foreign) printf 'publisher_token=foreign\nvalid_until=%s\n' "$((INVENTORY_CLOCK_EPOCH+90))" > "$INVENTORY_INDEX/current/health" ;;
  dead) kill "$owned_publisher"; wait "$owned_publisher" 2>/dev/null || true ;;
