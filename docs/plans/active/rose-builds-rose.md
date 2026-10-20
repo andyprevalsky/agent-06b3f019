@@ -162,7 +162,7 @@ Status: **done** = merged into `feat/rose-user-ui` with tests; **running** = a l
 | 15 | Rose in Rose: sync Rose repo, live HMR preview on screen, Publish = PR | A1 | L-APPS | queued (needs W5) |
 | 16 | Apps (Lovable-style), "Make me an app", "+ new app", Rose is one app | A2 | L-APPS + UI | queued (needs W5) |
 | 17 | Recordings of it working | — | UI thread | flow 1 pass; flows 2–3 fail → #24 |
-| 18 | Codex tool to talk to other agents in the Rose graph | C6 | L-A2A | running |
+| 18 | Codex tool to talk to other agents in the Rose graph | C6 | L-A2A | done (6d1b49779: rose-agents CLI list/send/grep, exactly-once delivery, spawner routing; 5/5); root-side tool pending A2A-thread merge |
 | 19 | Talking to the coding agent directly (is relaying clunky?) | C7 | L-DIRECT | running |
 | 20 | Code benchmarks; replicate the underlying CLI's results | C8 | L-BENCH | running |
 | 21 | Codebase sync like boxes.dev (secrets, symlinks) | C9 | L-SYNC | running |
@@ -188,7 +188,7 @@ Status: **done** = merged into `feat/rose-user-ui` with tests; **running** = a l
 | 41 | One sub-agent per integration: real sync progress + multiple accounts (iMessage, WhatsApp, Gmail, LinkedIn, Plaid, cookies, passwords/passkeys, Telegram; Messenger/Instagram only if they sync) | I0–I8 | L-INTEG-CORE then one lane each | core running; per-integration queued |
 | 42 | Sub-agents keep going after interruptions | — | parent | done: all 8 lanes resumed after the 2026-10-20 usage-limit stop |
 
-Open follow-ups with owners: **flag the backend side of Rose Desktop** — `rose_user_ui` workspace materialization (W1 `workspace.ts`), the code-agent `rose_user_ui` instructions (`codeAgentPrompt.ts`) and the `code`/`spawn_agent` tool descriptions should apply only to Rose Desktop accounts, because a non-flag account can't see published UI (queued: L-FLAG-BE); code agents need a headless browser in the sandbox to actually play-test games (A4 template, L-UIKIT); bench-only `SpawnAgentToolNoGP` description unchanged; C10 crash-between-create-and-start stuck agent (L-TOOLS2 queue); retire `.github/workflows/auto-rca*.yml`; W1: live E2B check that `rose-ui` is on PATH (needs a real E2B sandbox; no deploy); W2 bridge `rose.*` capability calls + write confirmations (UI thread, plus a backend if one is needed).
+Open follow-ups with owners: ~~C10 stuck agent on crash between create and start~~ **done (b33bfed97, fail→pass, 5/5)**; C6 root→code-agent messaging: L-A2A backend done (6d1b49779), root-side tool belongs to the A2A thread's `send_message_to_agent` — wire its address resolver to `send_agent_graph_message` after both branches merge (A2A thread agreed; contract `to, message`, idempotency `workflow_id:tool_call_id`); **flag the backend side of Rose Desktop** — `rose_user_ui` workspace materialization (W1 `workspace.ts`), the code-agent `rose_user_ui` instructions (`codeAgentPrompt.ts`) and the `code`/`spawn_agent` tool descriptions should apply only to Rose Desktop accounts, because a non-flag account can't see published UI (queued: L-FLAG-BE); code agents need a headless browser in the sandbox to actually play-test games (A4 template, L-UIKIT); bench-only `SpawnAgentToolNoGP` description unchanged; C10 crash-between-create-and-start stuck agent (L-TOOLS2 queue); retire `.github/workflows/auto-rca*.yml`; W1: live E2B check that `rose-ui` is on PATH (needs a real E2B sandbox; no deploy); W2 bridge `rose.*` capability calls + write confirmations (UI thread, plus a backend if one is needed).
 
 ## Deploy approvals (collect at `/deploy`)
 
