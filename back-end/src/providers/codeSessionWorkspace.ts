@@ -1,7 +1,7 @@
 /**
  * Everything a code-agent session gets in its HOME, assembled in one place:
  *
- *   prepareUserUiWorkspaceSafe(userId)      rose_user_ui/ + rose-ui CLI     (W1)
+ *   prepareUserUiWorkspaceSafe(userId, agentId)  rose_user_ui/ + rose-ui CLI (W1)
  *     └─ withAgentGraphWorkspace(...)       rose-agents CLI + graph token   (L-A2A)
  *          └─ withAgentTools(...)           rose CLI / MCP + tools token    (L-DISPLAY)
  *
@@ -17,7 +17,7 @@ export async function prepareCodeSessionWorkspace(
   taskId: string,
   provider: 'claude' | 'codex'
 ): Promise<UserUiWorkspace | null> {
-  const graph = await withAgentGraphWorkspace(await prepareUserUiWorkspaceSafe(userId), {
+  const graph = await withAgentGraphWorkspace(await prepareUserUiWorkspaceSafe(userId, agentId), {
     userId,
     ownerAgentId: agentId,
     sessionId: taskId,

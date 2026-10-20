@@ -51,14 +51,17 @@ export function userUiPublishBaseUrl(): string {
   return `http://localhost:${process.env.PORT || 3001}`;
 }
 
-export async function prepareUserUiWorkspace(userId: string): Promise<UserUiWorkspace> {
+export async function prepareUserUiWorkspace(
+  userId: string,
+  agentId?: string
+): Promise<UserUiWorkspace> {
   const active = await findActiveUserUiVersion(userId);
   const bundle = active ? await readUserUiVersionFiles(userId, active.id) : userUiSeedFiles();
   const withReadme = [
     ...bundle.filter((file) => file.path !== 'README.md'),
     { path: 'README.md', content: Buffer.from(USER_UI_README, 'utf8') },
   ];
-  const { token } = mintUserUiPublishToken(userId);
+  const { token } = mintUserUiPublishToken(userId, { agentId });
   return {
     files: [
       ...withReadme.map((file) => ({
@@ -80,11 +83,12 @@ export async function prepareUserUiWorkspace(userId: string): Promise<UserUiWork
 
 /** Best-effort wrapper: a UI-folder failure must never block a code session. */
 export async function prepareUserUiWorkspaceSafe(
-  userId: string | undefined
+  userId: string | undefined,
+  agentId?: string
 ): Promise<UserUiWorkspace | null> {
   if (!userId) return null;
   try {
-    const workspace = await prepareUserUiWorkspace(userId);
+    const workspace = await prepareUserUiWorkspace(userId, agentId);
     log.info('Prepared rose_user_ui workspace', {
       userId,
       source: workspace.source.kind,
