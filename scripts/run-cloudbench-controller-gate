@@ -73,7 +73,8 @@ fly_bounded() {
 # whose ID was never read. Once the ID is printed the Machine exists, so flyctl
 # gets CLOUDBENCH_GATE_RUN_AFTER_ID_S (default 600) to finish its start wait,
 # and CLOUDBENCH_GATE_RUN_AFTER_START_S (default 30) once it reports "Machine
-# started". The caller already tolerates a non-zero flyctl exit.
+# started". SECONDS ticks once a second, so each deadline adds one to give the
+# full window. The caller already tolerates a non-zero flyctl exit.
 fly_machine_run_bounded() {
   local log="$1" pid rc=0 printed=0 complete id_deadline="" start_deadline=""; shift
   local after_id="${CLOUDBENCH_GATE_RUN_AFTER_ID_S:-600}" after_start="${CLOUDBENCH_GATE_RUN_AFTER_START_S:-30}"
@@ -82,8 +83,8 @@ fly_machine_run_bounded() {
   while kill -0 "$pid" 2>/dev/null; do
     complete="$(wc -l < "$log" | tr -d ' ')"
     if [ "$complete" -gt "$printed" ]; then sed -n "$((printed + 1)),${complete}p" "$log"; printed="$complete"; fi
-    if [ -z "$id_deadline" ] && grep -qiE 'Machine ID: [0-9a-f]+' "$log"; then id_deadline=$((SECONDS + after_id)); fi
-    if [ -z "$start_deadline" ] && [ -n "$id_deadline" ] && grep -q 'Machine started' "$log"; then start_deadline=$((SECONDS + after_start)); fi
+    if [ -z "$id_deadline" ] && grep -qiE 'Machine ID: [0-9a-f]+' "$log"; then id_deadline=$((SECONDS + after_id + 1)); fi
+    if [ -z "$start_deadline" ] && [ -n "$id_deadline" ] && grep -q 'Machine started' "$log"; then start_deadline=$((SECONDS + after_start + 1)); fi
     if { [ -n "$id_deadline" ] && [ "$SECONDS" -ge "$id_deadline" ]; } || { [ -n "$start_deadline" ] && [ "$SECONDS" -ge "$start_deadline" ]; }; then
       echo "⚠️  flyctl machine run still running after it reported the Machine ID; stopped exact pid $pid" >&2
       fly_stop_exact "$pid"; rc=124; break
