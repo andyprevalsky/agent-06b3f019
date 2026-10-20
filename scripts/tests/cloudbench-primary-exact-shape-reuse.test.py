@@ -209,7 +209,7 @@ resize_pool_machine() { printf '%s\n' "$1" >> "$CASE_DIR/resized"; return 9; }
 FLY() { printf 'unexpected-provider\n' >&2; return 90; }
 normalize_current_pool_shape
 '''
-            r = subprocess.run(['bash', '-c', script], env={**os.environ, 'CASE_DIR': str(root)}, capture_output=True, text=True, timeout=60)
+            r = subprocess.run(['bash', '-c', script], env={**os.environ, 'CASE_DIR': str(root)}, capture_output=True, text=True, timeout=30)
             count = len((root / 'full-parses').read_text()) if (root / 'full-parses').exists() else 0
             resized = (root / 'resized').read_text().splitlines() if (root / 'resized').exists() else []
             self.assertEqual((root / 'pool.ids').read_text(), ''.join(mid + '\n' for mid in rows))
