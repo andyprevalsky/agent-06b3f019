@@ -519,11 +519,17 @@ def test_local_benchmark_cleanup_deadline_survives_stdout_eof():
     with patch.object(local, "_owned_shutdown_timeout", return_value=0.2):
         owner = local.LocalBenchmarkOwner(stack)
     owner.token = "fixture-eof-token"
+    # Interpreter startup under load can exceed the timer; arm the interrupt
+    # only after the child ignores SIGINT and has closed stdout, otherwise the
+    # default handler exits it early and drain reports a missing receipt.
+    ready = folder / "child.ready"
     child = subprocess.Popen(
         [
             sys.executable,
             "-c",
-            "import os,signal,time; signal.signal(signal.SIGINT,lambda *a:None); os.close(1); os.close(2); time.sleep(1.2)",
+            "import os,signal,sys,time; signal.signal(signal.SIGINT,lambda *a:None); os.close(1); os.close(2); "
+            "open(sys.argv[1],'w').close(); time.sleep(1.2)",
+            str(ready),
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -534,6 +540,12 @@ def test_local_benchmark_cleanup_deadline_survives_stdout_eof():
     error = ""
     try:
         owner.bind(child)
+        ready_deadline = time.monotonic() + 10
+        while not ready.exists():
+            assert child.poll() is None, "EOF fixture child exited before arming"
+            assert time.monotonic() < ready_deadline, "EOF fixture child never became ready"
+            time.sleep(0.01)
+        started = time.monotonic()
         timer.start()
         try:
             owner.drain(echo=False)
