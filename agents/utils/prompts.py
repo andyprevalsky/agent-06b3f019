@@ -305,7 +305,9 @@ def _format_output_field_contract(field: Dict[str, Any]) -> str:
         parts.append("nullable")
     properties = field.get("properties")
     if isinstance(properties, list) and properties:
-        nested = "; ".join(_format_nested_output_field(item) for item in properties if isinstance(item, dict) and item.get("name"))
+        nested = "; ".join(
+            _format_nested_output_field(item) for item in properties if isinstance(item, dict) and item.get("name")
+        )
         parts.append(f"properties={{{nested}}}")
     return ", ".join(parts)
 
@@ -496,7 +498,9 @@ def build_verifier_prompt(response_schema: dict = None) -> str:
         For each field with evidence, find the most precise value in the tool-result
         evidence and transform it into the declared type yourself (round,
         parse, or extract as needed; the agent doesn't have to format it
-        perfectly). Omit optional keys without evidence; do not use JSON null
+        perfectly). Field descriptions restate the user's requests; when a
+        later user message changes a requirement, the later message wins.
+        Omit optional keys without evidence; do not use JSON null
         as a substitute for omission.
 
         Score using the 3-band rubric:

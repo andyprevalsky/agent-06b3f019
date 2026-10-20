@@ -165,6 +165,9 @@ def test_schema_contracts_render_nested_field_descriptions():
     assert expected in build_verifier_prompt(schema)
     assert expected in build_system_prompt(phase="EXECUTE", enabled_tools=[], response_schema=schema)
     assert expected in format_required_output_schema_system_section(schema)
+    # A stale description never outranks the user's later correction (tree-feedback-routing 8f344422).
+    flat = " ".join(build_verifier_prompt(schema).split())
+    assert "when a later user message changes a requirement, the later message wins." in flat
 
 
 async def run_all_tests():
