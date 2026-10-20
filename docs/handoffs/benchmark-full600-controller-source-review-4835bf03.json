@@ -1,0 +1,51 @@
+{
+  "schema": "finite-controller-cli-reuse-billing-source-review-v1",
+  "reviewed": true,
+  "reviewer": "Benchmark Infra root plus independent source peer",
+  "source_ref": "043659fa80d5e26127ca7e9491dadea3ceab97d7",
+  "source_review_fingerprint": "4835bf03ecedea58a52ff93ccf6e5b77c949ae2a82fab9435654b56a5f7f585d",
+  "pre_service_boundaries": [
+    "before-stack-launch",
+    "agent-network-index-bootstrap"
+  ],
+  "actual_recipe": {
+    "ref": "043659fa80d5e26127ca7e9491dadea3ceab97d7",
+    "recipe_sha256": "a32e0fe4189c179781cb8da3086ade994ff3d30120ba2f341eac45279bae90c9",
+    "fingerprint": "4835bf03ecedea58a52ff93ccf6e5b77c949ae2a82fab9435654b56a5f7f585d"
+  },
+  "actual_recipe_receipt_sha256": "61b650ad4760cb44f1f8e06ef72374ccd23cd1b80f4c9e9b8627f8c73f0ef7fe",
+  "component_packet_sha256": "d285b46f32656d9d4abdfbf03e04d5dedb58de31ee7dbd9741495dae78f458d6",
+  "source_diff_sha256": "7608f026cc6ef643cdc721359a245a9b680aafd9cd193e96dd9049497492768f",
+  "root_review_sha256": "f2d4b60e8196146039b46d5ae131737d91dcd2da2a41724c07082a585c43f6bc",
+  "independent_final_source_review_sha256": "313ff45f9e307574d0c1fd237c6d2efc516fc34e828c9f350b526d1d1b83c4e2",
+  "source_artifacts": {
+    "scripts/run-bench-fleet": "e5e234e87fbfb525421e502dcdeae5151ecb4811fb511f85690969941b31f375",
+    "scripts/run-bench-cloud": "7dd9d7e97963db05daade888fb0d7a69c9f0ca4b769ac7147e294543e03d7e57",
+    "scripts/run-bench": "b590141053af448b7c910fcb31cc81630b1ae967f48342b203ada3f71e44cda7",
+    "scripts/run-cloudbench-controller-gate": "fcf50e6f754563d616d08fa05857d71a33261f7217aa13a81dd01b12c5a7712d",
+    "agents/benchmarks/cloudbench_dependency_sync_test.py": "1f2f07cd198290c51ba4e0a80a14185163c65f20b2e5e94bf381290f246a7815",
+    "scripts/cloudbench-original-volume-capture.py": "9468496cc13d9580fdd2e73576d083a29c958f7b861eecae945e72993bfc3c04",
+    "scripts/tests/cloudbench-bootstrap-recovery.test.py": "56f3f52a49e9dbc7ba2c886649ab69a705360eb26ba74cbb75b43aa9065c08d1"
+  },
+  "runtime_scope": {
+    "change": "Default existing primary reuse; primary/worker/controller/warm creation withheld without measured admission; guarded physical billing STOP-retain for joined current exactREAP fresh inert allocations",
+    "allocation": "No new admission capability or worker reuse redesign; missing/unsupported capacity truthfully refuses, ambient fresh overrides do not authorize create",
+    "billing": "After owned joins and evidence reads, same canonical recovery/claim guards, strict ALLUID quiescence and nativeID/name/version/config/image/solevolume pair; one STOP and positive finalSTOPPED pair, all original data/latches/claims/config/grades retained",
+    "clock": "One min180/existing realtimer encloses preflight/auth/helper; metadata publication and each target consume remaining original clock",
+    "preserved": "All prior source policy entries; original scheduled600/settings/timeouts; no pool/warm/RETAIN/unknown cleanup or grade/release credit"
+  },
+  "verification": {
+    "registered_root_combined": "123 PASS / 24.40s; all25 old assertion ASTs preserved; exact affected existing/new admission/outer/hook/caller cases",
+    "registered_billing_helper": "Producer12 PASS / 2.148s; independent root same12 PASS / 2.238s",
+    "caller_clock_owning_RED_GREEN": "Original exacta8ec constructor .6586s against .25 inherited clock RED; same four added plus prior14 hook controls18PASS/.71s",
+    "sealed_dependency": "Normal recovery-only immutable entry1PASS1.362s; exact helper/manifest verified, no native call",
+    "actual_recipe": "Once unmodified actual native_recipe; two fixture setup refusals preceded function entry, disclosed; no peer repeat"
+  },
+  "limits": [
+    "Exact fingerprint and only two existing phases; every prior entry retained.",
+    "Future stack-phase registration only; no authorization for native STOP, Machine allocation, provider operation, paid launch or deletion.",
+    "Configured/pool/warm/currentRETAIN/partial/unknown phases remain PENDING; cold eligibility and cross-controller bootstrap/import remain unproved operationally.",
+    "Original600 remains PENDING; source review does not claim outcome or operational savings.",
+    "No full suite/deployment PASS claimed. Provider/auth/PID observations in local controls are mocked and disclosed."
+  ]
+}

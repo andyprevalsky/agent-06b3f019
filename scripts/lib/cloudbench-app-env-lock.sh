@@ -14,17 +14,19 @@
 # any set of concurrent workstreams". `shlock -p "$$"` still breaks a lock whose
 # recorded PID is DEAD immediately, so a generous budget only ever waits on a
 # LIVE, progressing holder (which will release), never on a crashed one.
+# On 2026-10-12 one refresh held the lock about 20 minutes (a 14-minute Fly
+# snapshot) and its snapshot wait allows 30, so 1800s was no longer enough.
 #
 # Tunables (env, all optional):
-#   CLOUDBENCH_APP_ENV_LOCK_WAIT_SECONDS  total wait budget      (default 1800)
+#   CLOUDBENCH_APP_ENV_LOCK_WAIT_SECONDS  total wait budget      (default 3600)
 #   CLOUDBENCH_APP_ENV_LOCK_POLL_SECONDS  poll interval          (default 2)
 
-: "${CLOUDBENCH_APP_ENV_LOCK_WAIT_SECONDS:=1800}"
+: "${CLOUDBENCH_APP_ENV_LOCK_WAIT_SECONDS:=3600}"
 : "${CLOUDBENCH_APP_ENV_LOCK_POLL_SECONDS:=2}"
 
 acquire_app_environment_lock() {
     local owner elapsed=0 announced_at=-1
-    local budget="${CLOUDBENCH_APP_ENV_LOCK_WAIT_SECONDS:-1800}"
+    local budget="${CLOUDBENCH_APP_ENV_LOCK_WAIT_SECONDS:-3600}"
     local poll="${CLOUDBENCH_APP_ENV_LOCK_POLL_SECONDS:-2}"
     command -v shlock >/dev/null 2>&1 || {
         echo "❌ shlock is required for cross-workspace benchmark environment locking." >&2

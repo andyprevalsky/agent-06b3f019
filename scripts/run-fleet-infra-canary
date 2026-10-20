@@ -89,6 +89,21 @@ echo "   sample: seed=$SEED slice=0 (unified catalog)"
 # without needing detach-status plumbing. Override with --detach via env if
 # a supervisor wants lifecycle isolation.
 EXTRA=()
+# Forward only the invoking fleet's explicit bootstrap opt-in. The nested
+# controller otherwise resets its mode and rejects authenticated cold pools.
+case "${CLOUDBENCH_INFRA_CANARY_COLD_BOOTSTRAP:-0}" in
+  0) ;;
+  1) EXTRA+=(--cold-primary-bootstrap) ;;
+  *) echo "invalid infra canary cold bootstrap mode" >&2; exit 2 ;;
+esac
+# The benchmark baseline can differ from the current harness checkout. Keep
+# the parent's canonical ref, including its exact admitted-pool binding.
+if [ -n "${CLOUDBENCH_INFRA_CANARY_REF:-}" ]; then
+  [[ "$CLOUDBENCH_INFRA_CANARY_REF" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "invalid infra canary source ref" >&2; exit 2;
+  }
+  EXTRA+=(--ref "$CLOUDBENCH_INFRA_CANARY_REF")
+fi
 if [ "${FLEET_INFRA_CANARY_DETACH:-0}" = "1" ]; then
   EXTRA+=(--detach --wait)
 else

@@ -5,6 +5,7 @@ import json
 import os
 import runpy
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -242,12 +243,28 @@ fleet_recovery_confirm_forensic_retirement {shlex.quote(str(registry))}
 
 
 @pytest.mark.parametrize(
-    "corrupt", ["none", "missing", "hash", "symlink", "extra-worker", "wrong-owner", "borrowed-sibling"]
+    "corrupt",
+    [
+        "none",
+        "missing",
+        "hash",
+        "symlink",
+        "extra-worker",
+        "wrong-owner",
+        "borrowed-sibling",
+        "absent-seal",
+        "absent-listed-file",
+    ],
 )
 def test_primary_retention_rechecks_complete_capture(tmp_path: Path, corrupt: str) -> None:
     out = tmp_path / "task"
     root = primary_fixture(out)
-    if corrupt == "missing":
+    if corrupt == "absent-seal":
+        # A guest stopped before collection never produced remote-logs at all.
+        shutil.rmtree(out / "remote-logs")
+    elif corrupt == "absent-listed-file":
+        (root / "stack.log").unlink()
+    elif corrupt == "missing":
         (root / "logs/worker.1.log").unlink()
     elif corrupt == "hash":
         (root / "logs/worker.1.log").write_text("mutated log\n")
@@ -274,6 +291,10 @@ def test_primary_retention_rechecks_complete_capture(tmp_path: Path, corrupt: st
         check=False,
     )
     assert (result.returncode == 0) == (corrupt == "none"), result.stderr
+    if corrupt.startswith("absent-"):
+        # The absence is reported as such, never as a raw resolver traceback.
+        assert "Traceback" not in result.stderr and "FileNotFoundError" not in result.stderr, result.stderr
+        assert "absent" in result.stderr, result.stderr
 
 
 @pytest.mark.parametrize("failure", ["none", "pending", "missing-owner", "worker", "missing-worker-owner"])

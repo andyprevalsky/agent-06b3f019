@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -12,7 +13,11 @@ from pathlib import Path
 from benchmarks.fixture_host_guard import FIXTURE_HOST_GUARD_SECONDS
 
 ROOT = Path(__file__).resolve().parents[2]
-ROOT = Path(os.environ.get("CLOUDBENCH_FLEET_SCRIPT_UNDER_TEST", str(ROOT / "scripts/run-bench-fleet"))).resolve().parents[1]
+ROOT = (
+    Path(os.environ.get("CLOUDBENCH_FLEET_SCRIPT_UNDER_TEST", str(ROOT / "scripts/run-bench-fleet")))
+    .resolve()
+    .parents[1]
+)
 
 
 def run_campaign(tmp_path: Path, *, strict=True, runs=3, concurrency=3, fail_job=0, fail_jobs=()):
@@ -94,7 +99,55 @@ def run_campaign(tmp_path: Path, *, strict=True, runs=3, concurrency=3, fail_job
     ]
     if strict:
         command.append("--forward-arg=--strict-barrier")
-    result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
+        # Strict cohorts run the parent N2 preflight with cleanup tickets bound to committed source.
+        for name in ("cloudbench-cleanup-tickets.py", "cloudbench-infra-canary-preflight.py"):
+            (scripts / name).write_bytes((ROOT / "scripts" / name).read_bytes())
+        (scripts / "run-fleet-infra-canary").write_text("#!/usr/bin/env bash\nexit 0\n")
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        subprocess.run(["git", "-C", str(tmp_path), "add", "scripts"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(tmp_path),
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "owning cleanup ticket source",
+            ],
+            check=True,
+        )
+        # Isolate the host-wide cleanup admission namespace, as the owning ticket fixture does.
+        device = int.from_bytes(os.urandom(5), "big")
+        admission = Path("/tmp") / ("rose-cloudbench-cleanup-admission-" + str(os.getuid())) / str(device)
+        transport = tmp_path / "transport"
+        transport.mkdir()
+        (transport / "sitecustomize.py").write_text(
+            "import os, stat\n"
+            "prefix = os.environ['FIXTURE_RESERVE_PREFIX']\n"
+            "def wrapper(original):\n"
+            " def observed(path, *a, **k):\n"
+            "  value = original(path, *a, **k)\n"
+            "  if isinstance(path, (str, bytes, os.PathLike)) and os.path.abspath(os.fsdecode(path)).startswith(prefix) "
+            "and stat.S_ISDIR(value.st_mode):\n"
+            "   fields = list(value); fields[2] = int(os.environ['FIXTURE_DEVICE']); return os.stat_result(fields)\n"
+            "  return value\n"
+            " return observed\n"
+            "os.stat = wrapper(os.stat); os.lstat = wrapper(os.lstat)\n"
+        )
+        env.update(
+            PYTHONPATH=os.pathsep.join(filter(None, (str(transport), env.get("PYTHONPATH")))),
+            FIXTURE_DEVICE=str(device),
+            FIXTURE_RESERVE_PREFIX=str(tmp_path / ".git/cloudbench-fleet-ownership"),
+        )
+    try:
+        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
+    finally:
+        if strict:
+            shutil.rmtree(admission, ignore_errors=True)
     summary = json.loads(next((tmp_path / ".context/benchmarks/campaigns").glob("*/summary.json")).read_text())
     records = [json.loads(line) for line in events.read_text().splitlines()]
     return result, summary, records
@@ -125,9 +178,13 @@ def test_campaign_start_barrier_child_failure_releases_only_ready_survivors(tmp_
     cohort = summary["startup_cohorts"][0]
     assert cohort["expected_count"] == 3 and cohort["released_count"] == 2
     assert cohort["failed_count"] == 1 and cohort["ready_count"] == 2
-    manifest = json.loads(next((tmp_path / ".context/benchmarks/campaigns").glob("*/startup-cohorts/*/manifest.json")).read_text())
+    manifest = json.loads(
+        next((tmp_path / ".context/benchmarks/campaigns").glob("*/startup-cohorts/*/manifest.json")).read_text()
+    )
     assert len(manifest["jobs"]) == 3, "failed-member-removed-from-custody-manifest"
-    release = json.loads(next((tmp_path / ".context/benchmarks/campaigns").glob("*/startup-cohorts/*/release.json")).read_text())
+    release = json.loads(
+        next((tmp_path / ".context/benchmarks/campaigns").glob("*/startup-cohorts/*/release.json")).read_text()
+    )
     assert len(release["jobs"]) == 2
     assert summary["jobs"][2]["job_id"] not in release["jobs"]
 
@@ -158,18 +215,26 @@ def test_campaign_start_barrier_rejects_excluded_job_and_wrong_pid_release(tmp_p
         for name, release_jobs in [("excluded", {}), ("wrong-pid", {job_id: controller_pid + 1})]:
             directory = parent / name
             (directory / "ready").mkdir(parents=True)
-            (directory / "manifest.json").write_text(
-                json.dumps({"cohort_id": name, "jobs": {job_id: controller_pid}})
-            )
-            (directory / "release.json").write_text(
-                json.dumps({"cohort_id": name, "jobs": release_jobs})
-            )
+            (directory / "manifest.json").write_text(json.dumps({"cohort_id": name, "jobs": {job_id: controller_pid}}))
+            (directory / "release.json").write_text(json.dumps({"cohort_id": name, "jobs": release_jobs}))
             result = subprocess.run(
-                [sys.executable, str(ROOT / "scripts/cloudbench-campaign-barrier.py"),
-                 "--deadline", str(time.time() + 20), "--controller-pid", str(controller_pid)],
-                env=dict(os.environ, RUN_BENCH_CAMPAIGN_BARRIER_DIR=str(directory),
-                         RUN_BENCH_CAMPAIGN_JOB_ID=job_id, RUN_BENCH_CAMPAIGN_COHORT=name),
-                capture_output=True, text=True, timeout=40,
+                [
+                    sys.executable,
+                    str(ROOT / "scripts/cloudbench-campaign-barrier.py"),
+                    "--deadline",
+                    str(time.time() + 20),
+                    "--controller-pid",
+                    str(controller_pid),
+                ],
+                env=dict(
+                    os.environ,
+                    RUN_BENCH_CAMPAIGN_BARRIER_DIR=str(directory),
+                    RUN_BENCH_CAMPAIGN_JOB_ID=job_id,
+                    RUN_BENCH_CAMPAIGN_COHORT=name,
+                ),
+                capture_output=True,
+                text=True,
+                timeout=40,
             )
             assert result.returncode != 0, f"{name}-release-accepted"
             assert "campaign release does not own this controller" in result.stderr

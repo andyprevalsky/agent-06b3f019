@@ -355,7 +355,8 @@ raise SystemExit(1 if os.environ['MODE']=='partial' else 0)
         MODE=mode,
         REJECTED=str(rejected),
     )
-    command = "set -euo pipefail\n" + function + '\n_with_timeout() { shift; "$@"; }\n'
+    command = "set -euo pipefail\n" + _archived_generation_transport(cloud) + function
+    command += '\n_with_timeout() { shift; "$@"; }\n'
     command += "APP=owned-fixture-app\nmid=" + owner["machine_id"] + "\nRUN_LOG_TOKEN=" + owner["run_token"] + "\n"
     command += (
         "OUT_DIR="
@@ -438,7 +439,12 @@ def test_explicit_codex_never_enters_actual_boot_payload(tmp_path):
         CODEX_AUTH_SOURCE=str(private),
         CODEX_AUTH_SHA256=hashlib.sha256(raw).hexdigest(),
     )
-    command = "set -euo pipefail\n_envargs=()\n" + block + '\nprintf "%s\\n" "${_boot_file_args[@]}"\n'
+    command = (
+        "set -euo pipefail\n_envargs=()\n"
+        + _archived_generation_transport(cloud)
+        + block
+        + '\nprintf "%s\\n" "${_boot_file_args[@]}"\n'
+    )
     result = subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     envelope = json.loads(gzip.decompress((tmp_path / "cloudbench-boot-payload.json.gz").read_bytes()))
@@ -731,6 +737,12 @@ def _cloud_controller_source():
     ).read_text()
 
 
+def _archived_generation_transport(cloud):
+    """The controller always defines this ordinary-path transport before its SSH/boot callers."""
+    begin = cloud.index("# BEGIN archived-generation transport")
+    return cloud[begin : cloud.index("# END archived-generation transport.", begin)]
+
+
 @pytest.mark.parametrize(
     "probe_timeout,delay,expected,slack",
     [(None, 0, 10, 0), ("8", 5.2, 8, 0), ("999", 0, 270, 1)],
@@ -772,7 +784,8 @@ if args[1]=='console' and ' stage ' in shlex.split(args[-1])[-1]:
         env["CLOUDBENCH_SSH_PROBE_TIMEOUT_SECONDS"] = probe_timeout
     # Stop this fixture after its first real failed connection, rather than
     # spending the production retry ceiling repeating the same deterministic fault.
-    script = "set -eu\n" + timeout.replace("_with_timeout()", "_actual_with_timeout()", 1) + stage
+    script = "set -eu\n" + _archived_generation_transport(cloud)
+    script += timeout.replace("_with_timeout()", "_actual_with_timeout()", 1) + stage
     script += f"""
 _with_timeout() {{
   printf '%s\\n' "$1" >> {shlex.quote(str(tmp_path / "budgets"))}

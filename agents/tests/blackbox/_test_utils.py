@@ -30,26 +30,31 @@ os.environ["BLACKBOX_TEST_CAPTURE_OUTBOUND"] = "1"
 os.environ["GPT_API_KEY"] = ""
 # Likewise, only Foundry-specific tests opt into the funded Azure route; real
 # provider replays (declared LLM judges) opt back in with live_funded_azure().
-_LIVE_AZURE_FOUNDRY_API_KEY = os.environ.get("AZURE_FOUNDRY_API_KEY", "")
-os.environ["AZURE_FOUNDRY_API_KEY"] = ""
+# Every regional key (AZURE_FOUNDRY_API_KEY and _2.._9) is blanked together.
+_FOUNDRY_KEY_NAMES = ("AZURE_FOUNDRY_API_KEY", *(f"AZURE_FOUNDRY_API_KEY_{slot}" for slot in range(2, 10)))
+_LIVE_AZURE_FOUNDRY_API_KEYS = {name: os.environ.get(name, "") for name in _FOUNDRY_KEY_NAMES}
+for _name in _FOUNDRY_KEY_NAMES:
+    os.environ[_name] = ""
 
 
 @contextlib.contextmanager
 def live_funded_azure():
-    """Restore the developer's funded Azure Foundry key for a real-provider replay.
+    """Restore the developer's funded Azure Foundry keys for a real-provider replay.
 
     Production judges reach Foundry after direct credentials; a live replay must
     use the same funded route instead of depending on OpenRouter credit alone.
     """
-    previous = os.environ.get("AZURE_FOUNDRY_API_KEY")
-    os.environ["AZURE_FOUNDRY_API_KEY"] = _LIVE_AZURE_FOUNDRY_API_KEY
+    previous = {name: os.environ.get(name) for name in _FOUNDRY_KEY_NAMES}
+    os.environ.update(_LIVE_AZURE_FOUNDRY_API_KEYS)
     try:
         yield
     finally:
-        if previous is None:
-            os.environ.pop("AZURE_FOUNDRY_API_KEY", None)
-        else:
-            os.environ["AZURE_FOUNDRY_API_KEY"] = previous
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
 
 
 import httpx

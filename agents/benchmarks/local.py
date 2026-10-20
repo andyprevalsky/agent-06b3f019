@@ -577,6 +577,21 @@ def _release_port_range(base: int | None) -> None:
         handle.close()
 
 
+def workspace_preferred_base(conductor_port: str | None) -> int | None:
+    """Prefer the workspace-adjacent range unless the kernel can hand it out.
+
+    An explicit --base-port is the caller's own range. This derived preference
+    is not, so it obeys the same ephemeral-range exclusion as automatic ranges.
+    """
+    if not conductor_port or not conductor_port.isdigit():
+        return None
+    base = int(conductor_port) + 200
+    ephemeral_range = _linux_ephemeral_port_range()
+    if ephemeral_range is not None and _overlaps_port_range(base, ephemeral_range):
+        return None
+    return base
+
+
 def allocate_port_range(preferred_base: int | None = None) -> int:
     docker_ports = _docker_ports_snapshot()
     candidates: list[int] = []
@@ -640,9 +655,7 @@ def build_service_stack(args: argparse.Namespace) -> ServiceStack:
     workspace_name = isolated_workspace_name(base_name, run_id)
     preferred_base = args.base_port
     if preferred_base is None:
-        env_base = os.environ.get("CONDUCTOR_PORT")
-        if env_base and env_base.isdigit():
-            preferred_base = int(env_base) + 200
+        preferred_base = workspace_preferred_base(os.environ.get("CONDUCTOR_PORT"))
     return ServiceStack(
         run_id=run_id,
         context_dir=context_dir,
@@ -1516,6 +1529,17 @@ def _context_dir_env_value(context_dir: Path) -> str:
         return str(context_dir.relative_to(REPO_ROOT))
     except ValueError:
         return str(context_dir)
+
+
+def print_scorecard_instruction(run_dir: Path) -> None:
+    """Print the mandatory CLI scorecard command for this run's report card directory."""
+    renderer = REPO_ROOT / "scripts" / "cloudbench-scorecard.py"
+    if not renderer.is_file():
+        return
+    try:
+        runpy.run_path(str(renderer))["print_instruction"](run_dir)
+    except Exception:  # a reporting aid never blocks the benchmark
+        return
 
 
 def _dashboard_context_dir(stack: ServiceStack) -> Path:
@@ -2962,6 +2986,17 @@ def run_eval_suite_invocation(*, port: int, args: argparse.Namespace) -> int:
     return subprocess.run(command, cwd=AGENTS_DIR, env=env).returncode
 
 
+def enforce_provider_capacity(benches: int) -> None:
+    """Refuse a local width above the shared provider rate-limit cap (the cloud registry)."""
+    capacity = runpy.run_path(str(REPO_ROOT / "scripts/cloudbench-provider-capacity.py"))
+    try:
+        refused = capacity["check"](benches)
+    except capacity["RegistryError"] as error:
+        raise SystemExit(f"❌ {error}; no local benchmark stack started") from None
+    if refused:
+        raise SystemExit(refused)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     world_ready_fd = getattr(args, "world_ready_fd", None)
@@ -2981,6 +3016,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     selected_tasks = tasks_from_args(args)
     if getattr(args, "wmh_initial_state_file", None) and len(selected_tasks) != 1:
         raise ValueError("--wmh-initial-state-file requires exactly one benchmark task")
+    if not getattr(args, "cohort_tasks", []) and not args.eval_suite:
+        # Before any stack, child world or provider call; child worlds belong
+        # to this already-admitted parent width.
+        enforce_provider_capacity(min(args.max_concurrency, len(selected_tasks)))
     validate_agentcard_org_credentials(selected_tasks)
     if checkpoint_requested(args) and len(selected_tasks) != 1:
         raise ValueError("--checkpoint requires exactly one resolved benchmark task")
@@ -3115,6 +3154,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # a browser. run_benchmark.py resolves the same dir via BENCHMARK_CONTEXT_DIR.
         if dashboard_enabled(ci=args.no_dashboard):
             dashboard = maybe_launch_dashboard(_dashboard_context_dir(stack), enabled=True)
+        print_scorecard_instruction(_dashboard_context_dir(stack))
         if needs_payment_fixture(cohort_tasks):
             seed_payment_fixture(manifest)
         if needs_frontend_tunnel(selected_tasks):
@@ -3180,6 +3220,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if diag_dir:
                     print(f"Diagnostics saved: {diag_dir}")
         all_failures = [failure for path in result_paths for failure in failed_tasks_from_run(path)]
+        print_scorecard_instruction(_dashboard_context_dir(stack))
         if all_failures:
             print("\nFailed tasks:")
             for failure in all_failures:

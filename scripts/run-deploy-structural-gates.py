@@ -104,6 +104,15 @@ GATES = (
     Gate("descend-command", ("bash", "scripts/tests/descend-command.test.sh")),
     Gate("auto-rca-workflow", ("bash", "scripts/tests/auto-rca-workflow.test.sh")),
     Gate("benchmark-live-results", ("python3", "scripts/tests/benchmark-live-results.test.py")),
+    Gate("benchmark-scorecard", ("python3", "scripts/tests/cloudbench-scorecard.test.py")),
+    Gate(
+        "original600-portable-operator",
+        ("python3", "scripts/tests/original600-portable-operator.test.py"),
+    ),
+    Gate(
+        "benchmark-provider-capacity",
+        ("python3", "scripts/tests/cloudbench-provider-capacity.test.py"),
+    ),
     Gate("benchmark-campaign-grouping", ("bash", "scripts/tests/campaign-hub-grouping.test.sh")),
     Gate("cloudbench-fetch-ref", ("bash", "scripts/tests/cloudbench-fetch-ref.test.sh")),
     Gate(
@@ -120,6 +129,10 @@ GATES = (
     ),
     Gate("seed-memory-ratchet", ("bash", "scripts/tests/seed-memory-ratchet.test.sh")),
     Gate("semantic-deploy", ("bash", "scripts/tests/semantic-deploy-gate.test.sh")),
+    Gate(
+        "prompt-human-approval",
+        ("bash", "scripts/tests/check-prompt-human-approval.test.sh"),
+    ),
     Gate(
         "agent-behavior-approval",
         ("bash", "scripts/tests/check-agent-behavior-approval.test.sh"),
@@ -159,6 +172,7 @@ GATES = (
         ("bash", "scripts/tests/agent-surface-hash.test.sh"),
     ),
     Gate("factory-review", ("python3", "scripts/tests/factory-review.test.py")),
+    Gate("biz-review", ("python3", "scripts/biz_review.py", "self-test")),
     Gate(
         "cloudbench-rejected-start-recovery",
         ("python3", "scripts/tests/cloudbench-rejected-start-recovery.test.py"),
@@ -168,8 +182,41 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-prestack-recovery.test.py"),
     ),
     Gate(
+        "cloudbench-explicit-idle-admission",
+        ("python3", "scripts/tests/cloudbench-explicit-idle-admission.test.py"),
+    ),
+    Gate(
+        "cloudbench-fixed-native-worker",
+        ("python3", "scripts/tests/cloudbench-fixed-native-worker.test.py"),
+    ),
+    Gate(
+        "cloudbench-protected-resources",
+        ("python3", "scripts/tests/cloudbench-protected-resources.test.py"),
+    ),
+    Gate(
+        "cloudbench-pool-run-token",
+        ("python3", "scripts/tests/cloudbench-pool-run-token.test.py"),
+    ),
+    Gate(
+        "cloudbench-live-primary-return",
+        ("python3", "scripts/tests/cloudbench-live-primary-return.test.py"),
+    ),
+    Gate(
+        "cloudbench-primary-exact-shape-reuse",
+        ("python3", "scripts/tests/cloudbench-primary-exact-shape-reuse.test.py"),
+    ),
+    Gate(
+        "cloudbench-maintenance-env",
+        ("python3", "scripts/tests/cloudbench-maintenance-env.test.py"),
+    ),
+    Gate("cloudbench-staged-boot", ("python3", "scripts/tests/cloudbench-staged-boot.test.py")),
+    Gate(
         "cloudbench-bootstrap-recovery",
         ("python3", "scripts/tests/cloudbench-bootstrap-recovery.test.py"),
+    ),
+    Gate(
+        "cloudbench-static-service-observation",
+        ("python3", "scripts/tests/cloudbench-static-service-observation.test.py"),
     ),
     Gate(
         "wait-for-code-review",

@@ -6,6 +6,7 @@ import {
   existsSync,
   symlinkSync,
   chmodSync,
+  createWriteStream,
 } from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
@@ -94,23 +95,22 @@ function owningBoundary() {
         true,
       ).statements,
     );
-  // Follow the facade's actual detail-owner re-export after module extraction.
-  const detailOwner = tree.statements.find(
-    (node) =>
-      ts.isExportDeclaration(node) &&
-      node.moduleSpecifier &&
-      ts.isStringLiteral(node.moduleSpecifier) &&
-      node.moduleSpecifier.text === "./benchmarkHubRunDetail",
-  );
-  if (detailOwner) {
-    const detailFilename = path.join(
-      path.dirname(filename),
-      "benchmarkHubRunDetail.ts",
+  // Follow the facade's actual detail and run-bundle owner re-exports after
+  // module extraction.
+  for (const owner of ["benchmarkHubRunDetail", "benchmarkHubRunBundles"]) {
+    const reexported = tree.statements.some(
+      (node) =>
+        ts.isExportDeclaration(node) &&
+        node.moduleSpecifier &&
+        ts.isStringLiteral(node.moduleSpecifier) &&
+        node.moduleSpecifier.text === `./${owner}`,
     );
+    if (!reexported) continue;
+    const ownerFilename = path.join(path.dirname(filename), `${owner}.ts`);
     declarations.push(
       ...ts.createSourceFile(
-        detailFilename,
-        readFileSync(detailFilename, "utf8"),
+        ownerFilename,
+        readFileSync(ownerFilename, "utf8"),
         ts.ScriptTarget.Latest,
         true,
       ).statements,
@@ -308,13 +308,17 @@ async function apiBoundary(boundary: ReturnType<typeof owningBoundary>) {
   const app = express();
   app.use(express.json({ limit: "32mb" }));
   app.use("/api/benchmarks", context.router);
+  const rejections: Array<{ run_id: unknown; error: string }> = [];
   app.use(
     (
       error: Error,
-      _req: unknown,
+      req: { body?: { run_id?: unknown } },
       res: { status: (code: number) => { json: (value: unknown) => void } },
       _next: unknown,
-    ) => res.status(500).json({ error: error.message }),
+    ) => {
+      rejections.push({ run_id: req.body?.run_id, error: error.message });
+      res.status(500).json({ error: error.message });
+    },
   );
   const server = http.createServer(app);
   server.listen(0, "127.0.0.1");
@@ -322,6 +326,7 @@ async function apiBoundary(boundary: ReturnType<typeof owningBoundary>) {
   const port = (server.address() as { port: number }).port;
   return {
     base: `http://127.0.0.1:${port}`,
+    rejections,
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }
@@ -343,22 +348,26 @@ async function request(
 function fixtureRoot(name: string) {
   const root = path.join(workRoot, name);
   mkdirSync(path.join(root, "scripts"), { recursive: true, mode: 0o700 });
-  mkdirSync(path.join(root, "agents/benchmarks"), {
-    recursive: true,
-    mode: 0o700,
-  });
   mkdirSync(path.join(root, ".claude/shared"), {
     recursive: true,
     mode: 0o700,
   });
-  symlinkSync(
-    path.join(project, ".claude/shared/benchmark-report-format.txt"),
+  writeFileSync(
     path.join(root, ".claude/shared/benchmark-report-format.txt"),
+    readFileSync(
+      path.join(project, ".claude/shared/benchmark-report-format.txt"),
+    ),
   );
+  mkdirSync(path.join(root, "agents/benchmarks"), {
+    recursive: true,
+    mode: 0o700,
+  });
   for (const name of [
     "run-bench",
     "cloudbench_catalog.py",
     "cloudbench-production-only-tasks.py",
+    // run-bench reads the sharded operator's per-controller copy bound.
+    "cloudbench-shard-coordinator.py",
   ])
     symlinkSync(
       path.join(project, "scripts", name),
@@ -445,9 +454,10 @@ function schedule(id: string, members = ["m1", "m2"], status = "running") {
 test(
   "campaign copies publish one durable group before cleanup",
   { timeout: 90_000 },
-  async () => {
+  async (t) => {
     const boundary = owningBoundary();
     const api = await apiBoundary(boundary);
+    t.after(() => api.close());
     const fixture = fixtureRoot("scheduler");
     const receipts = path.join(workRoot, "scheduler-observations");
     mkdirSync(receipts, { mode: 0o700 });
@@ -543,7 +553,6 @@ test(
       writeFileSync(path.join(receipts, "release"), "");
       await completed;
       stream.end();
-      await api.close();
     }
     assert.equal(child.exitCode, 0);
     assert.ok(
@@ -576,6 +585,297 @@ test(
         actual_guest_acks: ackCount,
       }) + "\n",
       { mode: 0o600 },
+    );
+  },
+);
+
+const OPERATOR_GROUP = `import json, runpy, sys
+from pathlib import Path
+campaign = runpy.run_path(sys.argv[1])
+root, directory, spec = Path(sys.argv[2]), Path(sys.argv[3]), json.loads(sys.argv[4])
+jobs = campaign["sharded_campaign_jobs"](spec["shards"], spec["task_total"])
+for summary in spec.get("summaries", []):
+    outcomes = {job["job_id"]: job for job in json.loads(Path(summary).read_text())["jobs"]}
+    jobs = [{**job, **{k: outcomes[job["job_id"]][k] for k in ("status", "controller_exit_code")}} if job["job_id"] in outcomes else job for job in jobs]
+state = campaign["campaign_group_state"](spec["group"], spec["started_at"], jobs, status=spec["status"],
+                                         finished_at=spec.get("finished_at"), wall_clock_seconds=spec.get("wall_clock_seconds"))
+directory.mkdir(mode=0o700)
+completed = campaign["publish_campaign_group"](root, directory, state, live=spec["live"], stop_requested=lambda: False)
+print(json.dumps({"members": [job["job_id"] for job in jobs], "timestamp": state["started_at"], "completed": completed}))
+`;
+
+async function operatorGroup(
+  fixture: { root: string },
+  api: { base: string },
+  name: string,
+  spec: Record<string, unknown>,
+) {
+  const child = spawn(
+    path.join(project, "agents/venv/bin/python"),
+    [
+      "-c",
+      OPERATOR_GROUP,
+      path.join(sourceRoot, "scripts/run-bench-campaign.py"),
+      fixture.root,
+      path.join(fixture.root, name),
+      JSON.stringify(spec),
+    ],
+    {
+      cwd: fixture.root,
+      env: {
+        ...process.env,
+        BENCHMARK_HUB_API_KEY: "fixture-key",
+        BENCHMARK_HUB_UPLOAD_URL: api.base,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let output = "";
+  child.stdout!.on("data", (chunk) => (output += chunk.toString()));
+  child.stderr!.on("data", (chunk) => (output += chunk.toString()));
+  await once(child, "close");
+  assert.equal(child.exitCode, 0, output);
+  return JSON.parse(output.trim().split("\n").at(-1)!);
+}
+
+// K shard campaigns join one operator-owned group through the same uploader,
+// Express routes and storage owner; only execution and storage are fixtures.
+test(
+  "sharded campaigns publish one operator-owned group and reject a mismatched total",
+  { timeout: 120_000 },
+  async (t) => {
+    const boundary = owningBoundary();
+    const api = await apiBoundary(boundary);
+    t.after(() => api.close());
+    const fixture = fixtureRoot("sharded");
+    const receipts = path.join(workRoot, "sharded-observations");
+    mkdirSync(receipts, { mode: 0o700 });
+    const group = "sharded-group";
+    const startedAt = 1792287011.18;
+    const manifest = [
+      "demo-fleet-alpha",
+      "demo-fleet-beta",
+      "demo-fleet-gamma",
+    ];
+    const shards = manifest.map((task, index) => ({
+      tasks: [task],
+      runs: 2,
+      task_indexes: [index],
+    }));
+    const plan = { group, started_at: startedAt, shards, task_total: 3 };
+    const registered = await operatorGroup(fixture, api, "operator-live", {
+      ...plan,
+      status: "running",
+      live: true,
+    });
+    // Single-controller IDs for 3 tasks x 2 runs, independent of sharding.
+    assert.deepEqual(registered.members, [
+      "r001-j0001",
+      "r001-j0002",
+      "r001-j0003",
+      "r002-j0004",
+      "r002-j0005",
+      "r002-j0006",
+    ]);
+    const scheduled = await request(api.base, `/runs/${group}`);
+    assert.equal(scheduled.status, 200);
+    assert.equal(scheduled.body.run.tasks.length, 6);
+    assert.equal(scheduled.body.run.task_counts.queued, 6);
+    const campaigns = path.join(fixture.root, "campaigns");
+    const shardRuns = shards.map((shard, index) => {
+      const log = path.join(workRoot, `shard-${index}.private.log`);
+      const child = spawn(
+        path.join(project, "agents/venv/bin/python"),
+        [
+          path.join(sourceRoot, "scripts/run-bench-campaign.py"),
+          "--root",
+          fixture.root,
+          "--runs",
+          "2",
+          "--concurrency",
+          "2",
+          "--task",
+          shard.tasks[0],
+        ],
+        {
+          cwd: fixture.root,
+          env: {
+            ...process.env,
+            BENCHMARK_HUB_API_KEY: "fixture-key",
+            BENCHMARK_HUB_UPLOAD_URL: api.base,
+            BENCHMARK_HUB_GROUP_RUN_ID: group,
+            RUN_BENCH_CAMPAIGN_ID: `shard-${index}`,
+            RUN_BENCH_CAMPAIGN_ROOT: campaigns,
+            RUN_BENCH_CAMPAIGN_TASK_INDEXES: String(shard.task_indexes[0]),
+            // The last shard misstates the group size; the Hub must refuse it.
+            RUN_BENCH_CAMPAIGN_GROUP_TOTAL: index === 2 ? "8" : "6",
+            RUN_BENCH_CAMPAIGN_GROUP_STARTED_AT: String(startedAt),
+            RUN_BENCH_FLEET_BIN_UNDER_TEST: fixture.fleet,
+            CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY: "0",
+            GROUP_CONTROL_WORK: receipts,
+            GROUP_PROJECT_ROOT: project,
+            PYTHONPATH: path.join(project, "agents"),
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      const stream = createWriteStream(log, { mode: 0o600 });
+      child.stdout!.pipe(stream, { end: false });
+      child.stderr!.pipe(stream, { end: false });
+      return { child, stream, exit: once(child, "exit") };
+    });
+    const healthy = ["r001-j0001", "r002-j0004", "r001-j0002", "r002-j0005"];
+    try {
+      const deadline = Date.now() + 60_000;
+      while (
+        !healthy.every((job) =>
+          existsSync(path.join(receipts, `evaluated-${job}`)),
+        ) ||
+        shardRuns[2].child.exitCode === null
+      ) {
+        assert.ok(
+          Date.now() < deadline,
+          "sharded fixture boundary was not reached",
+        );
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      assert.notEqual(
+        shardRuns[2].child.exitCode,
+        0,
+        "mismatched total must fail its shard",
+      );
+      const list = await request(api.base, "/runs?grouped=1");
+      assert.equal(list.status, 200);
+      assert.deepEqual(
+        list.body.runs.map((run: { run_id: string }) => run.run_id),
+        [group],
+        "K shards remain one visible Hub group",
+      );
+      const detail = await request(api.base, `/runs/${group}`);
+      assert.equal(detail.body.run.tasks.length, 6);
+      assert.equal(detail.body.run.totals.passed, 4);
+      assert.equal(detail.body.run.task_counts.queued, 2);
+      assert.equal(detail.body.run.timestamp, registered.timestamp);
+      for (const job of healthy) {
+        const child = JSON.parse(
+          boundary.objects.get(
+            `runs/owned-shard-${job.endsWith("1") || job.endsWith("4") ? 0 : 1}-${job}.json`,
+          )!,
+        );
+        assert.equal(child.group_run_id, group);
+        assert.equal(child.group_member_id, job);
+        assert.equal(child.group_total, 6);
+        assert.equal(child.group_timestamp, registered.timestamp);
+      }
+      // r001-j0003 is a scheduled gamma member: its total alone is refused,
+      // before any durable child write.
+      for (const job of ["r001-j0003", "r002-j0007"]) {
+        assert.equal(
+          boundary.objects.has(`runs/owned-shard-2-${job}.json`),
+          false,
+        );
+        assert.ok(
+          api.rejections.some(
+            (rejection) =>
+              rejection.run_id === `owned-shard-2-${job}` &&
+              rejection.error ===
+                "Benchmark Hub group member differs from its schedule",
+          ),
+        );
+      }
+      assert.ok(
+        api.rejections.every((rejection) =>
+          String(rejection.run_id).startsWith("owned-shard-2-"),
+        ),
+        "only the mismatched shard is refused",
+      );
+      for (const index of [0, 1, 2]) {
+        assert.equal(boundary.objects.has(`runs/shard-${index}.json`), false);
+        assert.equal(
+          existsSync(path.join(campaigns, `shard-${index}`, "hub-group.json")),
+          false,
+          "a shard with a preset group never publishes its own group record",
+        );
+      }
+    } finally {
+      writeFileSync(path.join(receipts, "release"), "");
+      await Promise.all(shardRuns.map((run) => run.exit));
+      for (const run of shardRuns) run.stream.end();
+    }
+    assert.deepEqual(
+      shardRuns.map((run) => run.child.exitCode),
+      [0, 0, 1],
+    );
+    const final = await operatorGroup(fixture, api, "operator-final", {
+      ...plan,
+      status: "failed",
+      live: false,
+      finished_at: "2026-10-18T02:00:00+00:00",
+      wall_clock_seconds: 60,
+      summaries: [0, 1, 2].map((index) =>
+        path.join(campaigns, `shard-${index}`, "summary.json"),
+      ),
+    });
+    assert.equal(final.completed, true);
+    const terminal = await boundary.owner.getRunDetail(group);
+    assert.equal(terminal.live, false);
+    assert.equal(terminal.tasks.length, 6);
+    assert.equal(terminal.totals.passed, 4);
+    // r001-j0003 failed before publishing a result; the misconfigured shard
+    // derived r002-j0007 instead of r002-j0006, which never ran.
+    assert.equal(terminal.task_counts.infra_error, 1);
+    assert.equal(terminal.task_counts.queued, 1);
+    assert.equal((await boundary.owner.listRuns({ grouped: true })).length, 1);
+  },
+);
+
+test(
+  "fixture setup failure closes the already acquired local API",
+  { timeout: 90_000 },
+  async (t) => {
+    const control = path.join(workRoot, "setup-failure");
+    mkdirSync(path.join(control, "scheduler"), {
+      recursive: true,
+      mode: 0o700,
+    });
+    writeFileSync(
+      path.join(control, "scheduler/scripts"),
+      "intentional fixture directory collision\n",
+    );
+    const childEnv = { ...process.env, ROSE_GROUPING_CONTROL_ROOT: control };
+    delete childEnv.NODE_TEST_CONTEXT;
+    const child = spawn(
+      process.execPath,
+      [
+        require.resolve("tsx/cli"),
+        "--test",
+        "--test-name-pattern=^campaign copies publish one durable group before cleanup$",
+        fileURLToPath(import.meta.url),
+      ],
+      {
+        env: childEnv,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    t.after(() => {
+      if (child.exitCode === null) child.kill("SIGTERM");
+    });
+    let output = "";
+    child.stdout!.on("data", (chunk) => {
+      output += chunk.toString();
+    });
+    child.stderr!.on("data", (chunk) => {
+      output += chunk.toString();
+    });
+    await once(child, "close");
+    writeFileSync(path.join(control, "child.private.log"), output, {
+      mode: 0o600,
+    });
+    assert.equal(child.exitCode, 1);
+    assert.match(output, /EEXIST/);
+    assert.match(
+      output,
+      /not ok 1 - campaign copies publish one durable group before cleanup/,
     );
   },
 );

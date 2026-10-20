@@ -2,6 +2,88 @@ WHEN COMMUNICATING TO THE USER, BE CONCISE, LET THE USER ASK FOR MORE CONTEXT IF
 
 For code review or approval requests, never give file pointers (paths or line links); paste the exact diff in chat.
 
+All user-facing code-block displays from any skill or command follow
+`.claude/shared/report-display-format.md`: 12-hour America/Los_Angeles time
+(PDT/PST by date), one status emoji per worker and recorded token usage.
+Show current-assignment tokens spent and rolling 15-minute tokens/min instead
+of PCT and pp/min. Count recorded input + output, including cached input; do not
+double-count reasoning output or infer credits, cost or completion from tokens.
+Keep LIFE at the far right; remove UPD and progress wheels. Preserve same-scope
+usage history and original lifetime; less than 15 minutes reads warming <age>,
+missing counters read UNMETERED. Beneath red rows, state the blocker and
+corrective owner/action. Completed work and healthy monitoring need no false
+stall alarm. No nulls or explanatory legends.
+Benchmark cards start with the Experiment Number and numeric experiments/day
+for this goal. Show only the latest three actual experiments with concise timing,
+queue/verdict, cost/cache/LLM and lifecycle subrows, replacing the old standalone
+active-run/progress/metrics and last-slice blocks. Preserve unknown classifications
+and original clocks; never invent zero measurements or failures.
+Color-code the card itself: green verified successes, red failures/blockers,
+blue active work and amber warnings/unmeasured coverage. On boxes.dev render
+actual CSS-colored text in a published HTML scorecard; diff highlighting and
+emoji alone do not satisfy this request. Preserve every measurement and
+classification. Keep approval packets' exact inline diffs unchanged.
+`/descend` main-thread approval packets use `.claude/shared/approval-format.md`:
+paste the exact diff inline and retain that format's required evidence/Scope
+links. A file pointer never substitutes for the diff.
+
+
+### Standing scorecard memory — all current and future agents
+
+- Every future CLI benchmark uses the shared scorecard: headline **QUEUED / IN_PROGRESS / COMPLETED**, then **PASS / HARNESS FAILURE / INFRA FAILURE**; preserve genuine agent failures, cancellations and unknowns separately, keep the infra threshold in a minor note, and refresh on agent starts/completions, every fixed 15 minutes and benchmark-state changes. Follow `.claude/shared/report-display-format.md` and the CLI-emitted `.claude/shared/benchmark-report-format.txt`.
+- Use actual text colors, latest **3** runs, Experiment # and launches/day,
+  Pacific local time, one status emoji, no UPD/nulls, and LIFE far right.
+- At the top, show elapsed time since the latest actual benchmark ended, from
+  its producer terminal timestamp. Diagnostics, cleanup and card renders never
+  reset it. A missing end stays UNRECORDED; an active benchmark shows RUNNING.
+- Show the live HTML scorecard inline in the answer, with readable text and a
+  compact first view; keep QA screenshots private and never send image previews.
+- Show **current-assignment tokens spent** and rolling **15-minute tokens/min**
+  in worker and parent rows, replacing percentages and pp/min. Use actual
+  timestamped harness counters (input + output, including cached input), with a
+  recorded baseline before the assignment. Preserve previous scopes and LIFE;
+  show UNMETERED when counters or the scope baseline are unavailable. Never
+  estimate tokens from text length, elapsed time or milestone percentages.
+- Record verified milestones and outcomes separately: spending tokens is not
+  evidence of completion, success, savings or billed dollars. Do not add
+  reasoning-output tokens again when already included in output. Rates use
+  same-scope counter differences over a full 15 minutes; show warming <age>
+  before that, and never bridge a counter reset without verified continuity.
+- Keep fixed-cohort receipt counts for long batches and original clocks. A new
+  rendering or reread of old evidence must not create a usage or outcome delta.
+- After publishing, atomically update the existing latest-card URL and fixed
+  checkpoint fields together; do not create competing URL aliases.
+  Refresh lifecycle labels from verified receipts; completed exports must not
+  remain displayed as pending.
+- State blockers plainly: exact limit, measured usage, known cap or explicit
+  evidence gap, and what the agent/user can do. A planner ceiling is not a
+  measured need for more capacity; reconcile reuse before suggesting more quota.
+  For Fly, check authenticated organization settings (`machines_per_org_limit`)
+  before asking the user to find the cap; app counts are not organization totals.
+- Report Machines **started / stopped / verified idle / protected warm**
+  separately, with timestamped counts and compute/rootfs/volume costs. Idle
+  started Machines remain billable; stopped is not free storage. Preserve
+  designated warm resources and never label all running Machines idle.
+- Keep ownership matches, verified idle, reuse eligibility and qualified tasks
+  separate. Ownership alone grants no reuse or cleanup authority; retain-policy
+  resources stay protected.
+- After each run, normally stop exact-owned terminal idle controllers once
+  consumer/process guards pass. Retain data and warm capacity; credit compute
+  savings only after actual STOPPED confirmation, never from a stop request.
+- Failed, cancelled or interrupted work must not leave unused Machines running.
+  Reconcile and stop verified idle owned task Machines as well as controllers;
+  preserve their IDs, volumes, evidence and explicitly protected warm services.
+  Reuse eligible existing Machines before any new allocation. Fresh-only flags
+  must not bypass reuse; creating more requires measured unmet need after reuse
+  and verified provider headroom. A limit error is not permission to retry creates.
+  Agents blocked by Fly limits must continue safe work on existing Machines or
+  local gates, coordinate supported reuse, and report the remaining allocation gap.
+- Refresh native running/stopped counts after material cleanup before presenting
+  them as current; keep older snapshots clearly dated and separate from live facts.
+- Infra stop means **5% of the original scheduled total: 30 of 600**. Display
+  `infra jobs / scheduled jobs`; never use finished attempts as denominator.
+  Earlier wrong 1/1 stops are erroneous early aborts, not valid threshold hits.
+
 # Rose Labs
 
 AI agent platform.
@@ -12,6 +94,27 @@ AI agent platform.
 
 ## Sub-agent delegation
 
+- Every agent-created thread title must start with the exact prefix `--ai--`; include it in creation instructions and have the child set and verify its title as soon as it starts, preserving the prefix on later renames.
+- Sub-agents must inherit the parent agent's model, reasoning/effort level, and
+  speed/service-tier settings. Do not silently substitute a lower-effort model
+  or a different speed setting. Use automatic inheritance when supported;
+  otherwise pass the parent's effective settings explicitly. Deviate only when
+  the user explicitly requests different settings for that sub-agent.
+  A tool's defaults or saved devbox settings are not proof of the active
+  parent's settings; verify the effective parent settings before delegating.
+  For boxes.dev managed threads, omitting execution flags inherits the source
+  box's saved defaults, **not** the active parent thread's live settings. Read
+  `threads options`, then pass the verified parent model, reasoning effort and
+  speed explicitly with `--model`, `--reasoning-effort` and `--speed`. Verify the
+  child's effective settings after launch; a prompt instruction is not
+  configuration. Only for a live parent setting that cannot be verified, fall
+  back to `medium` reasoning effort and the fastest available speed
+  (`ultrafast` on boxes.dev). Inherit every setting that can be
+  verified, including the model; do not silently accept catalog defaults. If the
+  selected model does not support the required fallback, report that limitation
+  rather than silently substituting another effort, speed, or model. Never
+  claim a setting was applied when the platform cannot confirm it.
+  Do not interrupt existing workers merely to inspect or change presentation.
 - Use sub-agents maximally for independent work. Keep the main agent unblocked
   and focused on coordination and the critical path.
 - Give each sub-agent ordered priorities, a clear deliverable, and a deadline
@@ -19,6 +122,236 @@ AI agent platform.
   work completes on time.
 - The user's north star goal must always take priority when assigning work,
   resolving tradeoffs, and deciding what to do next.
+
+### Mandatory experiment iteration loop
+
+1. Run the requested experiment on its recorded source and monitor its actual
+   outcomes. Freeze `scheduled_total` from the original run manifest. Stop the
+   exact owned run when `20 * infra_failed_jobs >= scheduled_total` (infra
+   **>=5% of all scheduled benchmarks**, never of completed attempts).
+   **For 600 scheduled benchmarks: 1 and 29 infra failures continue; 30 stops.**
+   Count each scheduled job once; retries, completions and cancellations never
+   change the denominator. Unknown outcomes and cancellations without confirmed infra evidence
+   do not count. Preserve confirmed TRUE evidence across logical cancellation. Keep physical-attempt telemetry separately. Use the normal
+   controller/traps and preserve the trigger, all attempts and original clocks.
+   An explicit user threshold overrides this default.
+2. Triage every error from each completed or stopped experiment, starting while
+   it runs. Group independent first-bad causes, including recovered errors and
+   errors on passing tasks. Assign a separate available sub-agent **`/RCA`** for
+   each independent cluster; queue excess clusters explicitly. Do not funnel
+   all causes through one author or wait for the complete batch to delegate.
+3. Each RCA owner reads the methodology, uses runtime evidence, reproduces the
+   owning failure, fixes it, makes the identical test pass and registers the
+   regression. Verify the unchanged affected task/outcome before calling it
+   fixed. A successful diagnostic or transport repair does not fix the original
+   failure; an unreproduced cause remains an open observability gap.
+4. The parent coordinates the critical path, reviews concrete proof and removes
+   blockers while independent workers continue. Give every owner milestones,
+   ordered priorities and a time budget. Use other available workers for
+   independent hypotheses or reviews without competing edits or live queries.
+5. When critical fixes are in progress and no useful independent work remains,
+   **sleep**, leaving workers and operational monitors running. Wake on an
+   actionable event or the fixed **15-minute** checkpoint. Check progress, send
+   the full scorecard, take corrective action on stalls and ask what can be
+   accelerated or parallelized; then sleep again if still waiting.
+6. As soon as the critical repairs and affected checks are verified, rerun the
+   original authorized experiment. Do not wait for unrelated RCA lanes, duplicate
+   proof packets or a full `/deploy`. Repeat until the requested goal passes,
+   then finish normal deployment, publication and verified owned cleanup.
+
+Infra fixes do not require human approval. Existing approval requirements for
+runtime/product changes apply only to the affected action, through the parent.
+Do not change tasks, assertions, concurrency, timeouts or acceptance rules to
+make an iteration pass.
+
+### Waiting for delegated work
+
+- Never sleep or wait for more than 15 minutes at once; wake sooner for new
+  results or user input, and retain the fixed scorecard deadline.
+- When the next action depends on a sub-agent and no useful independent work
+  remains, sleep using an interruptible wait. Resume when a sub-agent reports
+  meaningful progress, a failure, a blocker or a decision that needs action.
+- Otherwise wake once every 15 minutes to check the assigned work and send the
+  user the current scorecard, even when nothing changed. Use the workflow's
+  existing scorecard format, retain verified values and show observation ages.
+  Keep this reporting deadline independent of event-driven wakeups; sub-agent
+  messages must not postpone the next 15-minute scorecard.
+- At every 15-minute checkpoint, explicitly think about whether progress can
+  be sped up: identify the current critical path, unnecessary waits and the
+  smallest useful next experiment or check. Act on concrete opportunities and
+  embed reusable learnings in the owning instructions or command. Include the
+  chosen speedup in the scorecard, or state briefly that no concrete speedup
+  was found. Then return to waiting; do not create status-only busywork.
+- Verified lack of milestone gain is a control signal; token burn alone is not
+  progress. Its row must name the blocker and the concrete action taken or
+  already in flight.
+  Narrow a failing hypothesis, remove a redundant dependency, split independent
+  work, reassign an idle owner or choose a more discriminating experiment.
+  If the same blocker persists at the next checkpoint without new causal
+  evidence, change the approach; repeating the same explanation is insufficient.
+  Never reset scope, milestones or start times merely to hide a stall.
+- At every 15-minute checkpoint, explicitly ask: "Can any remaining work be
+  parallelized to speed up iteration?" If yes, assign independent hypotheses,
+  evidence analysis, regressions or reviews to available authorized sub-agents.
+  One owner per cause does not mean one investigator. Keep one fix owner and
+  coordinate live experiments so they do not interfere. Include the resulting
+  parallel assignments in the scorecard, or the concrete dependency or resource
+  constraint that requires serial work.
+- After each scheduled check, return to waiting if nothing actionable changed.
+  Between checks, do not busy-poll, repeat unchanged reports, send status nudges
+  or create extra audits just to remain active.
+- This idle-wait rule takes precedence over frequent parent reporting or polling
+  cadences. Active workers still own any required operational monitoring and
+  cleanup; waiting does not cancel their work or reset its clocks.
+  A user question, scorecard edit or parent-side discussion does not pause
+  active workers. Stop a worker only when the user actually cancels its work,
+  its own safety boundary requires it, or a coordinated reassignment needs it.
+- Sub-agents should batch routine status updates and notify the parent when an
+  actionable milestone, result, failure or blocker occurs. Keep other idle
+  checks quiet; the scheduled 15-minute scorecard is still required.
+  Compute refs and hashes before sending a handoff; do not send placeholders
+  that require corrective follow-up messages.
+- Report infrastructure failures immediately when the first authentic failure
+  is observed; do not wait for the full campaign, suite or 15-minute scorecard.
+  Include the exact run/task/attempt, first failing boundary and available
+  original evidence. Start diagnosis and the owning regression while healthy
+  independent work continues. Preserve all attempts, classifications and clocks;
+  an early failure report does not authorize a restart or broader cancellation.
+- Verify early stopping and parent notification separately: redirected step
+  output or an unattended background sampler does not wake the parent. Reuse
+  the existing observer for idempotent first-failure and terminal notifications.
+  Also report the first verified shared-dependency failure through that observer
+  so RCA starts before terminal task failures. Keep such warnings separate from
+  terminal-attempt counts and preserve the existing cancellation predicate.
+  Select the first failure from original physical attempts even when the logical
+  member was cancelled; preserve the trigger and delivery receipts.
+- Verify a monitoring handoff with the successor's actual owner receipt and
+  first source-bound sample before reporting it active. Prepared configuration
+  and predecessor success do not prove successor execution. Report startup or
+  exec failures immediately through the existing notification path. When
+  re-executing Python, preserve the absolute `sys.executable` as `argv[0]`;
+  relocated interpreters can otherwise resolve a missing standard library.
+  Repair only the observer setup, keeping one reader and the original clock.
+- In bounded observations, capture canonical first-failure logs and stop
+  receipts before rotating partial metadata. Record capture completion only
+  after the exact file has a successful, hash-bearing copy receipt; startup
+  log copies do not complete failure capture. Test the sampler and copier
+  that execute, including file/byte limits and late-arriving receipts.
+- For experiment iteration, including the remaining simultaneous 600-task
+  qualification, the >=5% denominator is the **original scheduled total**:
+  `scheduled_total > 0 && 20 * infra_failed_jobs >= scheduled_total`.
+  At 600 scheduled jobs, stop at **30 confirmed infrastructure-failed jobs**;
+  a first failure among one completed attempt is **1/600, not 1/1** for this rule.
+  Count each scheduled job once and retain separate physical-attempt/retry
+  evidence. Do not shrink the denominator to terminal attempts, change it as
+  work completes, or infer infra failure from unknown/cancelled status alone. Preserve confirmed
+  TRUE evidence across logical cancellation. As soon
+  as the fixed-total predicate is met, cancel that exact owned campaign through
+  its normal controller/traps and repair the critical causes before retrying.
+  Fence the controller identity; never signal unrelated campaigns. Preserve
+  earlier erroneous early stops as aborted runs, never retroactive passes.
+
+### Experiment iteration speed
+
+- Before an experiment, name the hypothesis, the result that would distinguish
+  it, its original bounds and the next decision. Afterward, update the owning
+  RCA from the observed result. If it passes without reproducing the reported
+  failure, keep that failure open and choose a different discriminating check;
+  do not promote diagnostic completion into outcome progress or blindly retry
+  the broad run.
+- Review a concrete candidate once against the actual diff, causal proof,
+  registered regression and required runtime binding. Return blocking findings
+  together. Review again only for changed bytes, a failed check or a named
+  unresolved risk. Accept already verified unchanged dependencies and existing
+  authorization; do not make repeated hashes, packet rewrites or additional
+  parent acknowledgements into new execution gates. Verification remains
+  mandatory; serial bookkeeping is not a replacement for fixing the failure.
+- When iterating on infrastructure or an experiment, never block the next
+  experiment on a full `/deploy`. The user reports that a full deploy costs
+  roughly three hours. Keep experiment prerequisites separate from deployment
+  qualification: run the smallest checks that establish the changed behavior
+  and the experiment's actual dependencies. Full deployment gates remain
+  required when deploying; they are not an automatic experiment prerequisite.
+- Continuously improve iteration speed. At launch, at meaningful milestones
+  and during scheduled checks of long executions, think critically about the
+  critical path: what is this wait proving, what evidence already exists, and
+  what smaller or earlier check would let the next useful experiment start?
+  Act on concrete improvements instead of repeatedly waiting through the same
+  slow sequence. Preserve the quiet-wait and scorecard cadence above; reflection
+  does not justify busy-polling or extra status-only agent turns.
+- Use an owning causal regression before a broad experiment, report authentic
+  infrastructure failures immediately, and stop a disqualified run under its
+  applicable user-defined threshold. Preserve the original failure evidence
+  and verify the repair before retrying. Do not wait for unrelated gates or
+  the rest of a run to finish before diagnosing an observed failure.
+- Reuse verified, source-bound results for unchanged dependencies; rerun checks
+  affected by the change. Reuse supported isolated environments and healthy
+  dependencies, and overlap genuinely independent work when resources permit.
+  Do not weaken assertions, change acceptance criteria, hide failed attempts or
+  claim that an experiment tested a repair absent from its actual service path.
+- Reuse an age-limited precheck only from its normal successful producer and
+  authenticated source/environment evidence. Preserve the exact artifact bytes
+  and original timestamp used by its TTL; copying must not refresh its age.
+  Record origin and destination, keep normal expiry checks, and rerun the
+  precheck when expired. A restored cache is not a new execution or proof of
+  greater capacity than the original check measured.
+  Before fanout, compare the remaining TTL with the observed startup delay
+  until members recheck that artifact. If startup would consume its remaining
+  lifetime, run the normal precheck before fanout instead of restoring a
+  near-expiry cache. Never refresh the timestamp to avoid that normal check.
+- Campaign and publication-group identities must be unique across hosts and
+  original experiment epochs. A local PID alone is not globally unique. Bind
+  the namespace to the original epoch and native boot identity before publishing,
+  and check the same-PID/different-host case without a paid experiment. Preserve
+  prior identities and rows; repair the producer's namespace rather than
+  weakening ownership checks or overwriting another run's membership.
+- Where supported, run an already-required shared precheck through its normal
+  producer before creating hundreds of local controllers that would wait on it.
+  Reuse its genuine source-bound result within the original TTL and experiment
+  deadline. This changes scheduling; it must not add a new qualification gate,
+  fabricate a passing result or change the selected tasks and their profiles.
+  Bind its generated operator limits to the campaign's normal planner, selected
+  profiles and observed baseline. Recompute stale generated limits through that
+  supported planner while preserving explicit user ceilings and native admission
+  checks. Derived local defaults do not certify provider quota or capacity.
+- Embed each reusable speed improvement in the owning instructions, runbook,
+  command or regression so the next similar experiment starts with it. Record
+  the exact setup, source/service binding, applicable scope and observed timing
+  when available. Turn recurring manual steps into small supported commands;
+  do not leave the learning only in chat or a private agent's memory.
+
+### Delegated workspace lifecycle and disk ownership
+
+- A new thread does not need a new worktree. Read-only reviewers and triage
+  workers should use an existing immutable checkout without installing
+  dependencies or copying datasets. Give editing workers isolated worktrees
+  when concurrent edits require them; do not share a mutable checkout.
+- The parent owns workspace retirement. Record each child's exact owned paths,
+  source SHA, resource/process owners, expected disk footprint and retirement
+  condition at dispatch. Coordinate with other parent threads on the same box;
+  keep one owner per shared infrastructure cause and never clean up their work.
+- Keep new worktrees small: reuse matching healthy dependencies and avoid
+  materializing historical datasets that the assigned consumer does not read.
+  Preserve canonical/Git copies. Restore the complete required history before
+  any consumer that needs it; never substitute empty history or weaken a test.
+  Check actual shared disk headroom, existing reservations and the planned peak
+  footprint before allocating another checkout, installation or test fixture.
+- Workspace retirement is part of completing a delegation. First preserve its
+  changes in a durable Git ref and retain required original evidence, receipts
+  and unique files outside the retiring workspace. Compress or publish sealed
+  evidence as appropriate; preserve private permissions and never publish
+  secrets. Then verify that no live process, mount, publisher, benchmark or
+  recovery operation still consumes that exact workspace or its resources.
+- After those checks, remove only the child's owned temporary artifacts and
+  clean worktree, using the supported ownership-aware teardown for services,
+  databases and provider resources. Preserve canonical dependencies, shared
+  caches, other threads' assets, Freedom and protected instructions. Do not
+  force removal of dirty, locked, unknown-owner or still-needed paths.
+- A finished or idle thread is not cleanup evidence. The parent verifies and
+  records actual retirement and reclaimed bytes. If retention remains necessary,
+  record its owner, exact paths, reason and next retirement condition instead
+  of silently abandoning the workspace. Keep thread history and durable evidence;
+  retiring a workspace does not mean deleting the conversation.
 
 ## Architecture
 
@@ -562,6 +895,8 @@ Typical signatures to look for: `peer closed connection` during streaming, `[NO 
 
 ## Deploy command regression scheduling
 
+New tests must pass five consecutive runs with unchanged test code before being finalized, to catch flaky behavior.
+
 `python3 scripts/run-deploy-structural-gates.py` runs the complete deploy
 command registry with eight concurrent suites by default. Use `--max-workers N`
 for a different host limit; this never changes benchmark fleet width. Fixture
@@ -595,7 +930,7 @@ Run `/factory-review` (canonical behavior in `.claude/commands/factory-review.md
 
 ## Critical Rules
 
-1. **NEVER fire an async/background task and then passively wait for it to wake you up later.** This is the number-one guideline. Do not launch a background job — a `run_in_background` Bash task, a spawned sub-agent, a benchmark/smoke/`run.sh`, a cloud fleet run, any detached `&` — and then sit idle expecting a completion notification. **The wake-up may never come:** the task can be SIGKILLed by resource pressure, die silently, leak paid resources (Fly machines, sandboxes), or the notification can simply be missed — and you stall indefinitely while cost bleeds. ALWAYS actively drive every async task you start: poll it on the rule-19 cadence (every 10s for the first 60s, then every 60s), check BOTH output growth AND liveness (`ps`/`pgrep`), and the instant it dies or finishes, react — clean up leaked resources, diagnose, re-run. Treat any harness notification as a bonus signal, never the primary one. If you catch yourself writing "waiting for it to complete" or "I'll continue when it notifies me," stop and go poll it instead.
+1. **Every async task needs an operational owner.** That owner checks output growth, exact process liveness, exit and owned cleanup on rule 19's cadence, and reports actionable failures immediately. Delegation does not remove monitoring responsibility. Once that handoff is verified, the parent follows the experiment loop: coordinate useful independent work, otherwise sleep interruptibly and check workers every 15 minutes. Do not duplicate the worker's polling or pause workers while the parent waits.
 
 1b. **Every trajectory must leave the system more reliable than it found it.** When you hit friction in a part of the codebase or tooling you're using — a broken teardown that leaks resources, a script that orphans child processes on kill, a missing retry on a transient error, a footgun that nearly clobbered a shared resource, a flaky gate — do NOT just work around it for yourself. FIX the underlying issue so no future agent (or human) hits it again, then verify the fix. The cost of a workaround is paid once by you; the cost of the unfixed defect is paid by every future run. This is not scope creep — it is the job (see rule 24). If a fix is genuinely too large to land now, at minimum capture it durably (a memory, a tracked issue, a `TODO` with full context) so it is not silently re-encountered. "It worked for me this time" is not done; "future runs can't hit this" is.
 
@@ -650,6 +985,17 @@ Run `/factory-review` (canonical behavior in `.claude/commands/factory-review.md
 
 6. **Follow RCA methodology for every bug** - Invoke `/RCA` (or read `docs/root-cause-analysis.md`) and follow the steps exactly. Never skip the evidence-gathering step (Step 0), never fix a symptom without tracing the critical path, never rationalize a failure as "pre-existing". **HARD GATE: never report a root cause without a LOCAL REPRO you ran and watched fail, plus a fix that makes that same repro pass. A theory ("probably load/a race/a 404") is not a deliverable — reproduce it or classify it as an open observability gap. For a benchmark failure, proxy tests do not prove the outcome: the exact unchanged task must also fail locally on the buggy revision and pass locally on the fixed revision via `scripts/run-bench --local <task>`.**
 
+   For an RCA delegated by `/descend`, follow that command's staged parent-owned
+   approval and default cloud outcome-proof contract. A local causal fail/pass
+   pair permits a concrete candidate packet labelled Causal proof; outcome
+   pending. The original failed benchmark and exact unchanged post-approval
+   cloud member reruns supply outcome proof; no fix is Complete without it.
+   Workers return approvals to main, infra repair is autonomous, and only the
+   confirmed infra-failed scheduled jobs >=5% of the original scheduled total
+   stops that exact owned run immediately (30 of 600). Ordinary
+   task failures, other open RCAs and pending independent approvals do not add
+   global gates.
+
 7. **Search before implementing** - When adding new features, first search the codebase for similar patterns (e.g., when adding a new tool, study existing tools)
 
 8. **No fallbacks during development** - When testing a new integration, don't add fallback paths; they obscure whether the primary path actually works
@@ -686,11 +1032,11 @@ sqlite3 ~/Library/Application\ Support/com.conductor.app/conductor.db \
 
 18. **Validate via blackbox tests, not hand-rolled scripts** - When validating credentials, tokens, integrations, or any pipeline behavior, run the existing blackbox test (e.g. `testSmoke_claudeCodeAnswersQuestion` in `back-end/src/tests/blackbox/claude-code.blackbox.ts`) — NEVER write ad-hoc curl/python scripts to hit Anthropic/Supabase/etc. directly. The blackbox exercises the FULL path (DB read → decryption → E2B sandbox → Claude Code CLI → Anthropic) the way production does; a raw curl only tests one hop and misses layer-specific bugs. If no blackbox covers the case, extend the existing suite first, then run it.
 
-19. **Background-task monitoring cadence** - Whenever a long-running task is launched in the background (smoke suites, benchmark runs, `run.sh`, agent polling, any `run_in_background=true` bash, or a raw `&` shell job), monitor it on this schedule:
+19. **Background-task monitoring cadence** - The operational owner of a long-running background task (smoke suites, benchmark runs, `run.sh`, any `run_in_background=true` bash, or a raw `&` shell job) monitors it on this schedule:
     - **First 60 seconds:** poll every **10 seconds**. Catches silent early deaths (0-byte log, missing env, queue mismatch, PID died at startup). Check both log growth AND `ps -p <pid>` — a dead PID with no output means the task never started.
     - **After 60 seconds:** poll every **60 seconds**. The early-death window is over; longer intervals save context and tokens.
     - **Exit the moment the task finishes.** The instant you see the completion signal (exit code, "RESULTS: N/N passed", PID gone, "DONE" line), stop polling and move on. Do NOT sleep out the remaining interval. Do NOT keep polling after completion "to be safe."
-    - This rule is universal — it applies everywhere, not just in `/deploy`. If a background task burns 10+ minutes before you notice it died, that is a rule-19 violation.
+    - This applies to operational monitoring everywhere, not just in `/deploy`. A coordinating parent with a verified monitoring handoff uses the fixed 15-minute worker check-in instead; it does not duplicate this polling. More specific live campaign and safety-monitor cadences still apply to their operational owners.
 
 20. **Temporal activities must be idempotent** - Temporal activities are at-least-once. Any activity can run, complete its external side effect, and then fail to report completion back to Temporal because the worker-to-Temporal completion RPC was canceled, disconnected, or otherwise not recorded. Temporal will then retry the activity after the attempt timeout. Therefore every activity that writes to the backend, calls an external service, creates files, sends messages, charges money, or performs any other side effect MUST be safe to run more than once. Before performing a side effect, check whether the intended result already exists and return it when possible; otherwise use an idempotency key/deduplication record so retries do not duplicate work. Never assume "the activity returned locally" means Temporal recorded completion.
 

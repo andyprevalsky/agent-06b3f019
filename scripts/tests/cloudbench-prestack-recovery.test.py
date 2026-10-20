@@ -46,6 +46,43 @@ def pairs(path: Path, values: dict[str, str]) -> None:
     write(path, "".join(f"{key}={value}\n" for key, value in values.items()))
 
 
+class BoundRecipeLoaderTest(unittest.TestCase):
+    def test_bound_comparison_reads_through_the_validated_shared_loader(self) -> None:
+        ref = "c" * 40
+        reads: list[tuple[Path, str, str]] = []
+
+        def loader(root: Path, at: str, path: str) -> bytes:
+            reads.append((root, at, path))
+            return path.encode()
+
+        def native(meta, config):
+            # The fingerprint side of the shared loader.
+            recovery.git_blob(Path(meta["workspace_root"]), ref, "scripts/run-bench-fleet")
+            return ref, "recipe", "fingerprint"
+
+        saved = recovery.git_blob, recovery.native_recipe, recovery._bound_optional_executables
+        # The fake root is not a Git checkout, so its tree has no optional helper.
+        recovery.git_blob, recovery.native_recipe = loader, native
+        recovery._bound_optional_executables = lambda root, at: ()
+        try:
+            root = Path(tempfile.gettempdir()).resolve()
+            expected = {
+                path: hashlib.sha256(path.encode()).hexdigest()
+                for path in recovery.recipe_paths(lambda path: path.encode())
+            }
+            provenance = {"git_head": ref, "git_exit_code": 0, "tracked_change_exit_code": 0,
+                          "tracked_changed_paths": [], "source_file_sha256": expected}
+            self.assertEqual(recovery.bound_recipe({"workspace_root": str(root)}, {}, provenance),
+                             (ref, "recipe", "fingerprint"))
+            self.assertTrue(reads and all(item[:2] == (root, ref) for item in reads))
+            self.assertEqual({item[2] for item in reads[1:]}, set(expected) | {"scripts/run-bench-fleet"})
+            changed = dict(provenance, source_file_sha256=dict(expected, **{"package.json": "0" * 64}))
+            with self.assertRaises(ValueError):
+                recovery.bound_recipe({"workspace_root": str(root)}, {}, changed)
+        finally:
+            recovery.git_blob, recovery.native_recipe, recovery._bound_optional_executables = saved
+
+
 class PrestackRecoveryTest(unittest.TestCase):
     def setUp(self) -> None:
         temp = tempfile.TemporaryDirectory()

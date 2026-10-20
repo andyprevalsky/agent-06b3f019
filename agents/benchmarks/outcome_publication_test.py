@@ -65,7 +65,8 @@ def test_outcome_publication_http_ownership_and_terminal_fence(tmp_path, monkeyp
 
             raw = self.rfile.read(int(self.headers["Content-Length"]))
             bundle = json.loads(gzip.decompress(raw))
-            body = json.dumps({"run": {"run_id": parent, "live": stored_live, "tasks": bundle["tasks"]}}).encode()
+            # The supported Hub summary preserves immutable run/campaign identity.
+            body = json.dumps({"run": {**bundle, "run_id": parent, "live": stored_live}}).encode()
             self.send_response(201)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()

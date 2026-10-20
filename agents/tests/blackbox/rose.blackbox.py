@@ -3208,6 +3208,95 @@ def test_build_codex_responses_body_contract():
     )
     assert max_effort_body["reasoning"]["effort"] == "xhigh"
 
+    # Exercise the actual root-system producer, including its final boundary.
+    from utils.prompts import build_system_prompt, MAIN_SYSTEM_PROMPT
+    from utils.tool_schemas import create_agent_action_model, EXECUTE_PHASE_TOOLS
+
+    native_tools = build_anthropic_tools_from_response_model(create_agent_action_model(EXECUTE_PHASE_TOOLS))
+    literal_data = "keep __SYSTEM_PROMPT_DYNAMIC_BOUNDARY__ as user/tool data"
+    history = [
+        {"role": "user", "content": literal_data},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "call_boundary_data", "function": {"name": "spawn_agent", "arguments": {"goal": literal_data}}}
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_boundary_data", "content": literal_data},
+    ]
+    fields = {
+        "fields": [
+            {"name": "observed_value", "type": "str", "required": True, "description": "Grounded fixture value."}
+        ]
+    }
+
+    def produced(context="Fixture user context A", phase="EXECUTE", schema=fields):
+        return build_system_prompt(
+            phase=phase, enabled_tools=EXECUTE_PHASE_TOOLS, user_context_section=context, response_schema=schema
+        )
+
+    def wire(system, namespace="serializer-owner"):
+        return build_codex_responses_body(
+            pool_spec=pool,
+            messages=[{"role": "system", "content": system}, *history],
+            tools=native_tools,
+            cache_namespace=namespace,
+            request_id="boundary-owner",
+        )
+
+    raw_system = produced()
+    native_body = wire(raw_system)
+    # Data and tool protocol survive system-only serialization unchanged.
+    reference = wire("plain system")
+    assert native_body["input"] == reference["input"]
+    assert native_body["tools"] == reference["tools"]
+    assert native_body["input"][0]["content"][0]["text"] == literal_data
+    assert any(
+        row.get("call_id") == "call_boundary_data" and row.get("output") == literal_data for row in native_body["input"]
+    )
+    assert native_body["prompt_cache_key"] == wire(produced(context="Fixture user context B"))["prompt_cache_key"]
+    assert native_body["prompt_cache_key"] == wire(produced(phase="PLAN", schema=None))["prompt_cache_key"]
+    assert native_body["prompt_cache_key"] != wire(raw_system, namespace="other-owner")["prompt_cache_key"]
+    assert (
+        native_body["prompt_cache_key"]
+        != wire(raw_system.replace(MAIN_SYSTEM_PROMPT.strip(), "different static rules", 1))["prompt_cache_key"]
+    )
+    sections = [
+        MAIN_SYSTEM_PROMPT.strip(),
+        "# User Context",
+        "# Current Phase",
+        "# Required Output Schema",
+        "observed_value",
+    ]
+    positions = [native_body["instructions"].index(section) for section in sections]
+    assert positions == sorted(positions)
+    assert "Grounded fixture value." in native_body["instructions"]
+    inline = "ordinary __SYSTEM_PROMPT_DYNAMIC_BOUNDARY__ prose\r\nkeep\u2028Unicode separator"
+    assert wire(inline)["instructions"] == inline
+    assert (
+        wire("first\r\nline\n" + SYSTEM_PROMPT_DYNAMIC_BOUNDARY + "second\u2028section")["instructions"]
+        == "first\r\nline\n\nsecond\u2028section"
+    )
+    assert wire("first\n \t__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__ \t\r\nsecond")["instructions"] == "first\n\nsecond"
+    multiple = build_codex_responses_body(
+        pool_spec=pool,
+        messages=[
+            {"role": "system", "content": raw_system},
+            {"role": "system", "content": "extra system section"},
+            *history,
+        ],
+        tools=native_tools,
+        request_id="multiple-system-owner",
+    )
+    assert "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__" not in multiple["instructions"]
+    assert multiple["instructions"].endswith("extra system section")
+    assert multiple["input"] == native_body["input"]
+    for system_variant in (raw_system, raw_system.rstrip(), SYSTEM_PROMPT_DYNAMIC_BOUNDARY + raw_system):
+        assert "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__" not in wire(system_variant)["instructions"], (
+            "reserved system-only boundary reached provider instructions"
+        )
+
 
 def test_codex_cache_scope_uses_canonical_session_headers():
     """Every Codex affinity header must select the provider cache session."""
@@ -5300,7 +5389,7 @@ async def test_cerebras_and_foundry_raw_tls_failures_become_route_errors():
     with (
         patch.object(foundry, "httpx", module_httpx),
         patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))),
-        patch.object(foundry, "_auth_cooldown_until", 0.0),
+        patch.object(foundry, "_auth_cooldown_until", {}),
         patch.object(foundry, "_cooldown_until", {}),
     ):
         try:
@@ -6450,7 +6539,7 @@ async def test_client_foundry_stream_exit_closes_http_owner():
             patch("providers.rose.client._openai_api_key", return_value=""),
             patch("providers.rose.client._cerebras_api_key", return_value=""),
             patch("providers.rose.client.load_config", lambda: SimpleNamespace(anthropic=SimpleNamespace(api_key=""))),
-            patch.object(foundry, "_auth_cooldown_until", 0.0),
+            patch.object(foundry, "_auth_cooldown_until", {}),
             patch.object(foundry, "_cooldown_until", {}),
             patch.dict(
                 os.environ,
@@ -6553,6 +6642,193 @@ async def test_client_foundry_server_error_falls_through_to_openrouter():
     assert any(c.kind == "content" and c.data.get("text") == "openrouter ok" for c in chunks)
 
 
+async def test_client_foundry_region_rate_limit_fails_over_before_openrouter():
+    """A rate-limited Azure region hands the Ultra call to another region, not OpenRouter.
+
+    Only when every configured region is cooling does the waterfall continue.
+    """
+    import providers.rose.foundry as foundry
+
+    regions = {
+        "a-4989-resource.openai.azure.com": ("", "key-1"),
+        "rose-eastus2.openai.azure.com": ("_2", "key-2"),
+        "rose-swedencentral.openai.azure.com": ("_3", "key-3"),
+    }
+    foundry_sse = "\n".join(
+        [
+            'data: {"type":"response.output_text.delta","delta":"region ok"}',
+            'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}',
+            "data: [DONE]",
+            "",
+        ]
+    )
+    openrouter_sse = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": "openrouter ok"}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+        )
+    )
+    attempted: list[str] = []
+    limited: set[str] = set()
+
+    def handler(req):
+        host = req.url.host
+        if host in regions:
+            assert req.headers["api-key"] == regions[host][1], "region used another region's key"
+            attempted.append(host)
+            if host in limited:
+                return httpx.Response(429, headers={"retry-after": "30"})
+            return httpx.Response(200, text=foundry_sse, headers={"Content-Type": "text/event-stream"})
+        if host == "openrouter.ai":
+            attempted.append("openrouter")
+            return httpx.Response(200, text=openrouter_sse, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(500, text="unexpected route")
+
+    env = {"GPT_API_KEY": "", "ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}
+    for host, (suffix, key) in regions.items():
+        env[f"AZURE_FOUNDRY_ENDPOINT{suffix}"] = f"https://{host}"
+        env[f"AZURE_FOUNDRY_API_KEY{suffix}"] = key
+        env[f"AZURE_FOUNDRY_DEPLOYMENTS{suffix}"] = "gpt-6-sol"
+
+    async def run(agent_id: str) -> list:
+        return await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "hi"}],
+                agent_id=agent_id,
+                dump_context=False,
+                _exclude_anthropic_family=True,
+                call_site="test-foundry-region-failover",
+            )
+        )
+
+    set_mock_handler(handler)
+    with (
+        patch.dict(os.environ, env),
+        patch.object(foundry, "_cooldown_until", {}),
+        patch.object(foundry, "_auth_cooldown_until", {}),
+    ):
+        agent_id = "agent-region-failover"
+        plan = [r.host for r, _ in foundry._route_plan(foundry.foundry_regions(), "gpt-6-sol", agent_id)]
+        assert sorted(plan) == sorted(regions)
+        limited.add(plan[0])
+        chunks = await run(agent_id)
+        assert attempted == plan[:2], attempted
+        assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "gpt-6-sol-foundry"
+        assert any(c.kind == "content" and c.data.get("text") == "region ok" for c in chunks)
+
+        attempted.clear()
+        limited.update(regions)
+        chunks = await run(agent_id)
+        assert attempted == plan[1:] + ["openrouter"], attempted
+        assert any(c.kind == "content" and c.data.get("text") == "openrouter ok" for c in chunks)
+
+
+async def test_client_foundry_skips_non_https_optional_region_and_keeps_serving():
+    """A typo (``http://``) in one optional Foundry slot must not stop Foundry.
+
+    Before 2026-10-19 one non-HTTPS optional region made every Foundry request
+    raise ``RoseInvalidRequest`` while ``foundry_configured`` stayed true, so
+    every Ultra call left Azure credit for OpenRouter. The bad slot is skipped
+    with one warning naming it; a non-HTTPS region 1 still rejects the config.
+    """
+    import providers.rose.foundry as foundry
+    from structlog.testing import capture_logs
+
+    foundry_sse = "\n".join(
+        [
+            'data: {"type":"response.output_text.delta","delta":"region ok"}',
+            'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}',
+            "data: [DONE]",
+            "",
+        ]
+    )
+    attempted: list[str] = []
+
+    def handler(req):
+        if req.url.host.endswith(".openai.azure.com"):
+            attempted.append(f"{req.url.scheme}://{req.url.host}")
+        if req.url.host == "a-4989-resource.openai.azure.com" and req.url.scheme == "https":
+            return httpx.Response(200, text=foundry_sse, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(500, text="unexpected route")
+
+    env = {name: "" for name in foundry.FOUNDRY_REGION_ENV_NAMES}
+    env.update(
+        {
+            "GPT_API_KEY": "",
+            "ANTHROPIC_API_KEY": "",
+            "CEREBRAS_API_KEY": "",
+            "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
+            "AZURE_FOUNDRY_API_KEY": "key-1",
+            "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+            "AZURE_FOUNDRY_ENDPOINT_7": "http://typo-region.openai.azure.com",
+            "AZURE_FOUNDRY_API_KEY_7": "key-7",
+            "AZURE_FOUNDRY_DEPLOYMENTS_7": "gpt-6-sol",
+        }
+    )
+
+    async def run() -> list:
+        return await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "hi"}],
+                agent_id="agent-insecure-optional-region",
+                dump_context=False,
+                _exclude_anthropic_family=True,
+                call_site="test-foundry-insecure-optional-region",
+            )
+        )
+
+    set_mock_handler(handler)
+    with (
+        patch.dict(os.environ, env),
+        patch.object(foundry, "_cooldown_until", {}),
+        patch.object(foundry, "_auth_cooldown_until", {}),
+        patch.object(foundry, "_warned_insecure_regions", set()),
+    ):
+        with capture_logs() as logs:
+            assert foundry.foundry_configured(get_pool("rose-1-ultra"))
+            for _ in range(2):
+                chunks = await run()
+                assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "gpt-6-sol-foundry"
+                assert any(c.kind == "content" and c.data.get("text") == "region ok" for c in chunks)
+        assert attempted == ["https://a-4989-resource.openai.azure.com"] * 2, attempted
+        warnings = [entry for entry in logs if entry["event"] == "rose.foundry.region_not_https"]
+        assert [entry["env"] for entry in warnings] == ["AZURE_FOUNDRY_ENDPOINT_7"], warnings
+
+        # A non-HTTPS region 1 is still a whole-configuration error.
+        os.environ["AZURE_FOUNDRY_ENDPOINT"] = "http://a-4989-resource.openai.azure.com"
+        attempted.clear()
+        try:
+            await _drain(
+                foundry.foundry_complete(
+                    pool_spec=get_pool("rose-1-ultra"),
+                    messages=[{"role": "user", "content": "hi"}],
+                    response_format=None,
+                    tools=None,
+                    context_tools=None,
+                    tool_choice=None,
+                    temperature=None,
+                    effort="high",
+                    provider_fast_mode=False,
+                    request_id="req-insecure-primary",
+                    route_key="agent-insecure-primary",
+                    agent_id="agent-insecure-primary",
+                    call_site="test",
+                    cache_namespace=None,
+                    ttft_timeout_s=2,
+                    idle_timeout_s=2,
+                )
+            )
+        except RoseInvalidRequest as exc:
+            assert "AZURE_FOUNDRY_ENDPOINT must be HTTPS" in str(exc)
+        else:
+            raise AssertionError("non-HTTPS region 1 must reject the configuration")
+        assert attempted == [], attempted
+
+
 async def test_wmh_pool_uses_its_azure_gpt_6_1_deployment_before_openrouter():
     """Azure credit serves the world model ahead of OpenRouter, on the WMH model.
 
@@ -6580,7 +6856,7 @@ async def test_wmh_pool_uses_its_azure_gpt_6_1_deployment_before_openrouter():
 
     set_mock_handler(handler)
     with (
-        patch.object(foundry, "_auth_cooldown_until", 0.0),
+        patch.object(foundry, "_auth_cooldown_until", {}),
         patch.object(foundry, "_cooldown_until", {}),
         patch.dict(
             os.environ,
@@ -6656,7 +6932,7 @@ async def test_gpt56_foundry_turns_cache_markers_into_breakpoints_and_reports_tr
     }
     usages = []
     with (
-        patch.object(foundry, "_auth_cooldown_until", 0.0),
+        patch.object(foundry, "_auth_cooldown_until", {}),
         patch.object(foundry, "_cooldown_until", {}),
         patch.dict(os.environ, env),
     ):
@@ -8956,7 +9232,7 @@ async def test_wmh_native_response_model_reaches_foundry_http():
         patch.object(
             foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda key, default=None: env.get(key, default))
         ),
-        patch.object(foundry, "_auth_cooldown_until", 0.0),
+        patch.object(foundry, "_auth_cooldown_until", {}),
         patch.object(foundry, "_cooldown_until", {}),
     ):
         rose = RoseClient(openrouter_key="offline-test")
@@ -9130,7 +9406,7 @@ async def test_wmh_foundry_preserves_requested_output_budget():
         ),
         patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))),
         patch.object(foundry, "_cooldown_until", {}),
-        patch.object(foundry, "_auth_cooldown_until", 0.0),
+        patch.object(foundry, "_auth_cooldown_until", {}),
     ):
         owner = RoseWMHProvider(
             pool="rose-1-flash",
@@ -9298,7 +9574,7 @@ async def test_funded_openai_preserves_requested_output_budget():
     with (
         patch.object(foundry, "httpx", module_httpx),
         patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))),
-        patch.object(foundry, "_auth_cooldown_until", 0.0),
+        patch.object(foundry, "_auth_cooldown_until", {}),
         patch.object(foundry, "_cooldown_until", {}),
     ):
         try:
@@ -9396,7 +9672,7 @@ async def test_wmh_response_schema_binds_exact_candidate_call_ids():
         ),
         patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))),
         patch.object(foundry, "_cooldown_until", {}),
-        patch.object(foundry, "_auth_cooldown_until", 0.0),
+        patch.object(foundry, "_auth_cooldown_until", {}),
     ):
         owner = RoseWMHProvider(
             pool="rose-1-flash",
@@ -9562,7 +9838,7 @@ async def test_public_responses_uses_existing_larger_limit_stage():
                 patch.object(foundry, "httpx", module_httpx),
                 patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))),
                 patch.object(foundry, "_cooldown_until", {}),
-                patch.object(foundry, "_auth_cooldown_until", 0.0),
+                patch.object(foundry, "_auth_cooldown_until", {}),
                 patch.object(client, "_openai_api_key", return_value="offline-key" if route == "funded" else ""),
                 patch.object(client, "_cerebras_api_key", return_value=""),
                 patch.object(client, "_gpt_api_key_on_cooldown", AsyncMock(return_value=False)),
@@ -9682,7 +9958,7 @@ async def test_wmh_probability_bounds_reach_provider_schema():
         ),
         patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))),
         patch.object(foundry, "_cooldown_until", {}),
-        patch.object(foundry, "_auth_cooldown_until", 0.0),
+        patch.object(foundry, "_auth_cooldown_until", {}),
     ):
         owner = RoseWMHProvider(
             pool="rose-1-flash",
@@ -10240,6 +10516,14 @@ async def run_all_tests():
     await r.record_async(
         "client_foundry_server_error_falls_through_to_openrouter",
         test_client_foundry_server_error_falls_through_to_openrouter,
+    )
+    await r.record_async(
+        "client_foundry_region_rate_limit_fails_over_before_openrouter",
+        test_client_foundry_region_rate_limit_fails_over_before_openrouter,
+    )
+    await r.record_async(
+        "client_foundry_skips_non_https_optional_region",
+        test_client_foundry_skips_non_https_optional_region_and_keeps_serving,
     )
     await r.record_async(
         "client_foundry_luna_backs_mini_and_speed_pools",

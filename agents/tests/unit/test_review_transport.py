@@ -81,7 +81,7 @@ def test_foundry_original_body_read_failure_matches_observer_off(monkeypatch):
             ttft_timeout_s=2,idle_timeout_s=2)]
     errors=[]
     for observer in [None, lambda row: None]:
-        foundry._cooldown_until.clear();foundry._auth_cooldown_until=0
+        foundry._cooldown_until.clear();foundry._auth_cooldown_until.clear()
         token=FAILURE_OBSERVER.set(observer)
         try:
             with pytest.raises(Exception) as error: asyncio.run(call())

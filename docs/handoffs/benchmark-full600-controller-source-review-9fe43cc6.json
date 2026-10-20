@@ -1,0 +1,163 @@
+{
+  "schema": "finite-source-review-addendum-v1",
+  "reviewed": true,
+  "source_ref": "f187ee384741c07e99d8393d49c02ac4149340b0",
+  "source_fingerprint": "9fe43cc6e41c420adfb8948f3b26f02a87bd6115d04f07d032e16871425b3878",
+  "prior_review_source": "3cbefaa23533b817131ce504be8438de2d95a5d1",
+  "prior_review_document_sha256": "21b1263cae12e16999498550794a719dffccd0a6449d17cda807dd98526418a0",
+  "actual25input_comparison": {
+    "back-end/package.json": {
+      "prior_sha256": "2b466d4362ccb48ae00a7d3f043ce49f3ed423a27c7bcbe6a207b7c3da72d2d1",
+      "current_sha256": "2b466d4362ccb48ae00a7d3f043ce49f3ed423a27c7bcbe6a207b7c3da72d2d1",
+      "unchanged": true
+    },
+    "back-end/scripts/apply-local-workflow-ddl.sh": {
+      "prior_sha256": "b349eb7350578aca283969360749e094b6f78b4b64b9707d74ac13ab47d96f36",
+      "current_sha256": "b349eb7350578aca283969360749e094b6f78b4b64b9707d74ac13ab47d96f36",
+      "unchanged": true
+    },
+    "back-end/scripts/ensure-agent-network-grep-indexes.ts": {
+      "prior_sha256": "653de4f229b9ea3bb71f8f6d2cc5de113d63e37e85899efb239f559d42edd709",
+      "current_sha256": "653de4f229b9ea3bb71f8f6d2cc5de113d63e37e85899efb239f559d42edd709",
+      "unchanged": true
+    },
+    "back-end/scripts/ensure-fast-mode-cache-schema.ts": {
+      "prior_sha256": "085230371c95de56845ceb3bd4eef4948144cfab31231d4e06ac527320463f8f",
+      "current_sha256": "085230371c95de56845ceb3bd4eef4948144cfab31231d4e06ac527320463f8f",
+      "unchanged": true
+    },
+    "front-end/package.json": {
+      "prior_sha256": "ac5d4c244d39877641ed9753cb18511ba958df94d0887d574ca189207c75a3c1",
+      "current_sha256": "ac5d4c244d39877641ed9753cb18511ba958df94d0887d574ca189207c75a3c1",
+      "unchanged": true
+    },
+    "package.json": {
+      "prior_sha256": "fd89d0959d0217634caa3ea4757ff1bd5a040d602fd86b727574621663a2a219",
+      "current_sha256": "fd89d0959d0217634caa3ea4757ff1bd5a040d602fd86b727574621663a2a219",
+      "unchanged": true
+    },
+    "scripts/cloudbench-campaign-mutation.py": {
+      "prior_sha256": "0dbafc9513c13e75e7ac18b172b2a41e9e053c835ea8d6dfb26e7161b3c3a2ad",
+      "current_sha256": "0dbafc9513c13e75e7ac18b172b2a41e9e053c835ea8d6dfb26e7161b3c3a2ad",
+      "unchanged": true
+    },
+    "scripts/cloudbench-guest-recovery.py": {
+      "prior_sha256": "d5c0a36d9eb903998fa156ee0d22fa78c8cdedba73d0798d28fc6613c890905b",
+      "current_sha256": "d5c0a36d9eb903998fa156ee0d22fa78c8cdedba73d0798d28fc6613c890905b",
+      "unchanged": true
+    },
+    "scripts/cloudbench-port-lease.py": {
+      "prior_sha256": "183116af91e2044a91c3d497d4229db78caa8c867af408a3448fb15c58b021e1",
+      "current_sha256": "183116af91e2044a91c3d497d4229db78caa8c867af408a3448fb15c58b021e1",
+      "unchanged": true
+    },
+    "scripts/cloudbench-run.sh": {
+      "prior_sha256": "55d4faec82afa676ecd6dde64dc5685508bc0f3c4ad42e466709b1a95a53635f",
+      "current_sha256": "55d4faec82afa676ecd6dde64dc5685508bc0f3c4ad42e466709b1a95a53635f",
+      "unchanged": true
+    },
+    "scripts/cloudbench-script-snapshot.py": {
+      "prior_sha256": "fc6fabcdf8724d28d5bedbf5c87019ca92d930beafbf817b489cc405d186bfbd",
+      "current_sha256": "fc6fabcdf8724d28d5bedbf5c87019ca92d930beafbf817b489cc405d186bfbd",
+      "unchanged": true
+    },
+    "scripts/cloudbench-status-server.py": {
+      "prior_sha256": "6901d035b4b0ac76fff8faafa0fa015e69671c12ea3793d423277e79d05eadc3",
+      "current_sha256": "6901d035b4b0ac76fff8faafa0fa015e69671c12ea3793d423277e79d05eadc3",
+      "unchanged": true
+    },
+    "scripts/ensure-workspace-dependencies.sh": {
+      "prior_sha256": "c5c13af190c43ec8dc88f743ed481c8c1121ad390c68bdfa9e98b89eb3970cb1",
+      "current_sha256": "c5c13af190c43ec8dc88f743ed481c8c1121ad390c68bdfa9e98b89eb3970cb1",
+      "unchanged": true
+    },
+    "scripts/lib/fast-mode-cache-schema.sh": {
+      "prior_sha256": "154637d61a8728bbfb3dfe286b5202c9e89f5fdee8a2b168ffb76e715612590a",
+      "current_sha256": "154637d61a8728bbfb3dfe286b5202c9e89f5fdee8a2b168ffb76e715612590a",
+      "unchanged": true
+    },
+    "scripts/lib/local-pg-image.sh": {
+      "prior_sha256": "a5a3b3f57eaa4fc2fe1c2a32b65c830bd2a4d619bc2ec040608e2d02b23bb889",
+      "current_sha256": "a5a3b3f57eaa4fc2fe1c2a32b65c830bd2a4d619bc2ec040608e2d02b23bb889",
+      "unchanged": true
+    },
+    "scripts/lib/ngrok-tunnel.sh": {
+      "prior_sha256": "d53a51a4e43e956ccd36f997fcfa15ffef2bcb9d33e3533e8c1673eda11e561e",
+      "current_sha256": "d53a51a4e43e956ccd36f997fcfa15ffef2bcb9d33e3533e8c1673eda11e561e",
+      "unchanged": true
+    },
+    "scripts/lib/run-context.sh": {
+      "prior_sha256": "0be5db39d87319d11e3d2afc4ccea97581f46754021bee0f3020939788a0d22a",
+      "current_sha256": "0be5db39d87319d11e3d2afc4ccea97581f46754021bee0f3020939788a0d22a",
+      "unchanged": true
+    },
+    "scripts/lib/run-process-cleanup.sh": {
+      "prior_sha256": "ecc491254ef4e0e7b1712215757045ddf797ca3414c2185e55e09e346690a338",
+      "current_sha256": "ecc491254ef4e0e7b1712215757045ddf797ca3414c2185e55e09e346690a338",
+      "unchanged": true
+    },
+    "scripts/lib/run-service-readiness.sh": {
+      "prior_sha256": "3b8a264ea7a785219faea9fcd1cf2ab37a53060a37951f95d4c0a00688d819b6",
+      "current_sha256": "3b8a264ea7a785219faea9fcd1cf2ab37a53060a37951f95d4c0a00688d819b6",
+      "unchanged": true
+    },
+    "scripts/lib/seed-cache.sh": {
+      "prior_sha256": "87a4b83a73c58f67513b2e3402eeb27005a7c9bf7ef78dae039aa4161244e65e",
+      "current_sha256": "87a4b83a73c58f67513b2e3402eeb27005a7c9bf7ef78dae039aa4161244e65e",
+      "unchanged": true
+    },
+    "scripts/lib/workspace-env.sh": {
+      "prior_sha256": "ea649a1212dab724c16f3da995c796ff099caa5dabbcb106c6a359260b5bc9d2",
+      "current_sha256": "ea649a1212dab724c16f3da995c796ff099caa5dabbcb106c6a359260b5bc9d2",
+      "unchanged": true
+    },
+    "scripts/run-bench-campaign.py": {
+      "prior_sha256": "4a81113129734fcf3e13457472e204b6f40316230da3e61afadc58e3778a8a60",
+      "current_sha256": "e43e34fa52dde8b7fd22086b404421b195f4a1f678826e2a3083440169240f44",
+      "unchanged": false
+    },
+    "scripts/run-bench-cloud": {
+      "prior_sha256": "279aa310b9dda8e9ecdca5e1370657cb03f58790685b01cbb359c84b9facbabe",
+      "current_sha256": "279aa310b9dda8e9ecdca5e1370657cb03f58790685b01cbb359c84b9facbabe",
+      "unchanged": true
+    },
+    "scripts/run-bench-fleet": {
+      "prior_sha256": "ed3c3d1ff79b5d10811e5fac731405e4609e8556bd862b03a52095f3f5e8ac97",
+      "current_sha256": "8f9ae56e9790d27627bae2b0a333c4746075d992c4cefa7814fc6c646f06cc09",
+      "unchanged": false
+    },
+    "scripts/run.sh": {
+      "prior_sha256": "dc24bbb33bd7913e7f206ae2a148f09f387399cc3e9fbd7bfbaf97c7ebc676cc",
+      "current_sha256": "dc24bbb33bd7913e7f206ae2a148f09f387399cc3e9fbd7bfbaf97c7ebc676cc",
+      "unchanged": true
+    }
+  },
+  "requested_pre_service_boundaries": [
+    "before-stack-launch",
+    "agent-network-index-bootstrap"
+  ],
+  "basis": "23/25 exact prior independently reviewed recipe blobs, including run.sh and every guest startup/index/DB/cleanup executable; only controller run-bench-fleet and run-bench-campaign changed. These controller deltas are already independently scoped-reviewed but explicit aggregate phase acceptance has not been committed. Root must review and approve this transitive boundary addendum before any adoption.",
+  "guard_changes": false,
+  "limitations": [
+    "No production or task qualification inferred.",
+    "No capture-local marker can approve unknown source/phase.",
+    "Native inventory/controller fixes do not authorize new pre-service boundaries.",
+    "Actual future committed candidate must run normal focused trusted-source tests after sparse exact Git inputs materialized; private model is not a substituted full runner PASS."
+  ],
+  "approved_epoch": 1792090167.2096004,
+  "approved_by": "Benchmark Infra root",
+  "actual_entire_two_controller_diff_read": true,
+  "approved_phases": [
+    "before-stack-launch",
+    "agent-network-index-bootstrap"
+  ],
+  "root_component_review": "b111ad56875d9ae9694460b8ecb62bb91bc8a70aa2c9e7dc688addf44ff7b51d",
+  "independent_components": [
+    "73a3ac3c8553f12b96394c116262b227fb9f8394f2166febccb45c7187a4b522",
+    "260ea01b08349baaacf0e2716d8246a6c5987c02ec45f50d6648daab1cb90b9e"
+  ],
+  "actual_recipe_fingerprint": "9fe43cc6e41c420adfb8948f3b26f02a87bd6115d04f07d032e16871425b3878",
+  "adoption": "Only exact reviewed fingerprint/two existing phases; no guard/schema expansion. Sourcef187 remains frozen duringV40. Later committed candidate must run actual normal trusted-source and snapshot controls after exact sparseGitinputs restored. Private futureGitmodel is not that qualification.",
+  "runtime_extra_bindings_scope": "helperca977/library08d2 exactf187 reviewed separately; fingerprint25 does not silently certify future changes to them",
+  "no_task_or_provider_failure_cure_claim": true
+}

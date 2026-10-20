@@ -909,14 +909,22 @@ clone_function_source="$(awk '
 ' "$ROOT_DIR/scripts/run-bench-fleet")"
 [ -n "$clone_function_source" ] || fail "could not load production clone command builder"
 fleet_production_function() {
+  # Subshell-bodied functions (`name() (`) close with a column-zero `)`.
   awk -v function_name="$1" '
-    $0 ~ "^" function_name "\\(\\)" { capture = 1 }
+    !capture && $0 ~ "^" function_name "\\(\\)" {
+      capture = 1
+      terminator = ($0 ~ "^" function_name "\\(\\) \\(") ? ")" : "}"
+    }
     capture { print }
-    capture && /^}$/ { exit }
+    capture && $0 == terminator { exit }
   ' "$ROOT_DIR/scripts/run-bench-fleet" "$ROOT_DIR/scripts/lib/cloudbench-inventory.sh"
 }
-for function_name in worker_ledger_lock_acquire worker_ledger_lock_release \
-  inventory_index_healthy inventory_machine_record_path inventory_machine_field; do
+# clone_machine_target verifies every new storage-ready target through the
+# production disposable-Volume bridge; outside a disposable lifecycle that
+# bridge is an exact no-op, so load it rather than stubbing the call away.
+for function_name in machine_creation_admission fleet_clone_with_queue_admission worker_ledger_lock_acquire worker_ledger_lock_release \
+  inventory_index_healthy inventory_machine_record_path inventory_machine_field fleet_disable_disposable_volume_snapshots \
+  clone_volume_receipt_field clone_attach_failure_prelaunch clone_retire_owned_volume clone_create_owned_volume; do
   function_source="$(fleet_production_function "$function_name")"
   [ -n "$function_source" ] || fail "could not load production function $function_name"
   eval "$function_source"
@@ -941,13 +949,38 @@ python3 "$ROOT_DIR/scripts/cloudbench-machine-readiness.py" --publish-index \
 fleet_registry_record_name() { return 0; }
 fleet_registry_record_id() { return 0; }
 fleet_registry_release_name() { return 0; }
-machine_volume_id() { printf 'vol-primary-owned'; }
+machine_volume_id() { printf 'vol_primaryowned'; }
+# Fake Machines API for the exact owned Volume created before the clone.
+volume_args="$TMP_ROOT/primary-volume.args"
+fleet_clone_volume_request() {
+  shift
+  printf '%s\n' "$*" > "$volume_args"
+  printf '{"outcome":"created","id":"vol_primaryowned"}\n'
+}
+fleet_registry_record_volume() { return 0; }
 machine_storage_ready() { return 0; }
 machine_storage_failed() { return 1; }
 fly_with_timeout() {
   shift
   printf '%s\n' "$*" > "$clone_args"
   echo "Machine abcdef12345678 has been created..."
+}
+# The real entry point now refuses unmeasured new allocation. Exercise that
+# guard before the historical shape replay; it must not reach even our fake
+# provider or publish a target ledger.
+clone_admission_rc=0
+clone_machine_target "$TMP_ROOT/withheld-primary.ids" \
+  > "$TMP_ROOT/withheld-primary.stdout" 2> "$TMP_ROOT/withheld-primary.stderr" \
+  || clone_admission_rc=$?
+[ "$clone_admission_rc" -eq 78 ] || fail "real clone admission must refuse unmeasured allocation"
+require_text "$TMP_ROOT/withheld-primary.stderr" "new Machine allocation withheld" \
+  "real clone admission must explain its refusal"
+[ ! -e "$clone_args" ] && [ ! -e "$TMP_ROOT/withheld-primary.ids" ] || \
+  fail "refused clone admission reached transport or published a ledger"
+# Mock only admission for this exact fake-provider fixture. Keep the complete
+# production command builder and its CPU/memory assertions below unchanged.
+machine_creation_admission() {
+  [ "$1" = "$TMP_ROOT/primary.ids" ] || return 78
 }
 primary_id="$(clone_machine_target "$TMP_ROOT/primary.ids")" ||
   fail "production clone command builder failed in the capacity replay"
@@ -956,14 +989,20 @@ require_text "$clone_args" "--vm-size shared-cpu-2x" \
   "primary clone must avoid both the running CPU ceiling and performance reservation ceiling"
 require_text "$clone_args" "--vm-memory 4096" \
   "primary clone memory must fit Fly's shared-cpu-2x memory ceiling"
+require_text "$clone_args" "--attach-volume vol_primaryowned" \
+  "primary clone must attach its exact pre-created owned Volume"
+require_text "$volume_args" "--vm-size shared-cpu-2x --vm-memory 4096" \
+  "owned Volume placement must request the same primary compute shape"
 primary_cpus="$(sed -nE 's/.*--vm-size ([^ ]+).*/\1/p' "$clone_args" | sed -nE 's/.*-([0-9]+)x$/\1/p')"
 [ -n "$primary_cpus" ] || fail "capacity replay could not parse primary CPU allocation"
 [ $((16 + 37 * primary_cpus)) -le 160 ] ||
   fail "daily fleet primary shape exceeds the observed Fly CPU governor ceiling"
-unset -f clone_machine_target fleet_registry_record_name fleet_registry_record_id \
+unset -f clone_machine_target machine_creation_admission fleet_registry_record_name fleet_registry_record_id \
   fleet_registry_release_name machine_volume_id machine_storage_ready machine_storage_failed fly_with_timeout \
-  worker_ledger_lock_acquire worker_ledger_lock_release fleet_production_function \
-  inventory_index_healthy inventory_machine_record_path inventory_machine_field
+  fleet_clone_with_queue_admission worker_ledger_lock_acquire worker_ledger_lock_release fleet_production_function \
+  inventory_index_healthy inventory_machine_record_path inventory_machine_field fleet_disable_disposable_volume_snapshots \
+  clone_volume_receipt_field clone_attach_failure_prelaunch clone_retire_owned_volume clone_create_owned_volume \
+  fleet_clone_volume_request fleet_registry_record_volume
 unset INVENTORY_INDEX INVENTORY_CLOCK_EPOCH INVENTORY_CLOCK_SECONDS SNAPSHOT_LOOP_PID SNAPSHOT_LOOP_TOKEN
 
 resize_function_source="$(awk '
@@ -1009,6 +1048,10 @@ normalize_function_source="$(awk '
   fail "could not load production pool shape normalizer"
 eval "$shape_function_source"
 eval "$normalize_function_source"
+# The normalizer first honors explicit per-Machine reuse admissions under the
+# git-common directory; keep that real guard on an isolated empty root.
+GIT_COMMON_DIR="$TMP_ROOT/shape-normalize-common"
+mkdir -p "$GIT_COMMON_DIR"
 POOL_IDS_FILE="$TMP_ROOT/shape-pool.ids"
 printf 'old-shape\ncorrect-shape\n' > "$POOL_IDS_FILE"
 FLEET_DIR="$TMP_ROOT/shape-run"
@@ -1043,6 +1086,20 @@ claim_function_source="$(awk '
   fail "could not load production shape-aware pool claims"
 eval "$shape_hints_source"
 eval "$claim_function_source"
+# The current claimer checks outgoing handoffs and reuse proofs even in this
+# shape-only fixture. Keep those real guards on an isolated empty Gitcommon.
+GIT_COMMON_DIR="$TMP_ROOT/mixed-shape-common"
+mkdir -p "$GIT_COMMON_DIR"
+proof_path_source="$(grep '^pool_reuse_proof_file()' "$ROOT_DIR/scripts/run-bench-fleet")"
+proof_verify_source="$(awk '
+  /^pool_verify_reuse_proof\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-fleet")"
+[ -n "$proof_path_source" ] && [ -n "$proof_verify_source" ] ||
+  fail "could not load production pool reuse proof guards"
+eval "$proof_path_source"
+eval "$proof_verify_source"
 POOL_IDS_FILE="$TMP_ROOT/mixed-shape-pool.ids"
 printf 'a1\nb2\n' > "$POOL_IDS_FILE"
 FLEET_DIR="$TMP_ROOT/mixed-shape-run"
@@ -1090,7 +1147,8 @@ small_claim="$(claim_pool_machine shared-cpu-2x 4096)"
 unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
 unset -f pool_machine_shape_from_json normalize_current_pool_shape pool_write_shape_hints \
   claim_pool_machine resize_pool_machine machine_volume_id_from_json write_pool_claim \
-  cloudbench_env_sha256 fleet_audit_record_pool_machine
+  cloudbench_env_sha256 fleet_audit_record_pool_machine pool_reuse_proof_file pool_verify_reuse_proof
+unset GIT_COMMON_DIR
 
 boot_update_source="$(awk '
   /^boot_update_with_capacity_recovery\(\)/ { capture = 1 }
@@ -1119,6 +1177,142 @@ boot_update_with_capacity_recovery "$TMP_ROOT/host-capacity-update.log" fake upd
 unset -f boot_update_with_capacity_recovery _with_timeout sleep
 unset CLOUDBENCH_BOOT_UPDATE_ATTEMPTS CLOUDBENCH_BOOT_UPDATE_CAPACITY_WAIT_SECONDS \
   CLOUDBENCH_BOOT_UPDATE_CAPACITY_RETRY_SECONDS
+
+# A shared mutation lease is joined exactly when _with_timeout wrote its
+# join-native receipt for the latest attempt, whatever its exit status: a
+# signal-killed child (137) or an interruption after the child exists (143)
+# is reaped and joined; an interruption before any child handle is not.
+boot_release_source="$(awk '
+  /^release_boot_config_update_slot\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-cloud")"
+[ -n "$boot_release_source" ] || fail "missing production boot config slot release"
+(
+eval "$boot_update_source"
+eval "$boot_release_source"
+APP=fixture-app
+MUTATION_OWNER_PID_START=fixture-start
+CLOUDBENCH_RUNTIME_SCRIPT_ROOT=/fixture
+CLOUDBENCH_BOOT_UPDATE_ATTEMPTS=1
+CLOUDBENCH_BOOT_UPDATE_RETRY_SECONDS=0
+sleep() { :; }
+cloudbench_mutation_admission() { printf '%s\n' "$2" >> "$TMP_ROOT/boot-lease-events"; }
+# _with_timeout fake: <rc>:<receipt> where receipt=1 writes the join-native receipt.
+boot_fake_attempts=""
+_with_timeout() {
+  local attempt
+  attempt="${boot_fake_attempts%% *}"
+  boot_fake_attempts="${boot_fake_attempts#* }"
+  [ "${attempt#*:}" != 1 ] || : > "${CLOUDBENCH_TIMEOUT_NATIVE_JOIN_RECEIPT:?join receipt path not passed}"
+  return "${attempt%%:*}"
+}
+for boot_case in 0:1:0:1:released 1:1:1:1:released 124:1:1:1:released 137:1:1:1:released \
+    143:1:1:1:released 143:0:1:0:retained 130:0:1:0:retained 1:0:1:0:retained; do
+  IFS=: read -r boot_native_rc boot_receipt boot_expect_rc boot_expect_joined boot_expect_release <<EOF_CASE
+$boot_case
+EOF_CASE
+  : > "$TMP_ROOT/boot-lease-events"
+  boot_fake_attempts="$boot_native_rc:$boot_receipt "
+  BOOT_CONFIG_UPDATE_SLOT=fixture-lease
+  BOOT_CONFIG_UPDATE_SLOT_SHARED=1
+  BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=0
+  boot_update_rc=0
+  boot_update_with_capacity_recovery "$TMP_ROOT/boot-lease-update.log" fake update || boot_update_rc=$?
+  [ "$boot_update_rc" = "$boot_expect_rc" ] ||
+    fail "boot update wrapper rc $boot_native_rc returned $boot_update_rc"
+  [ "$BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED" = "$boot_expect_joined" ] ||
+    fail "boot update wrapper rc $boot_native_rc marked joined=$BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED"
+  release_rc=0
+  release_boot_config_update_slot || release_rc=$?
+  if [ "$boot_expect_release" = released ]; then
+    [ "$release_rc" = 0 ] && [ -z "$BOOT_CONFIG_UPDATE_SLOT" ] &&
+      grep -qx release "$TMP_ROOT/boot-lease-events" ||
+      fail "joined boot update lease (rc $boot_native_rc) was not released"
+  else
+    [ "$release_rc" != 0 ] && [ "$BOOT_CONFIG_UPDATE_SLOT" = fixture-lease ] &&
+      ! grep -qx release "$TMP_ROOT/boot-lease-events" ||
+      fail "unjoined boot update lease (rc $boot_native_rc) was released"
+  fi
+done
+# Joined state follows the latest attempt's receipt: an earlier joined failure
+# (signal-killed child) is not sticky, and a later receiptless attempt fences.
+# The helper refuses start-native after an unjoined owner, so a receipt on a
+# later attempt also proves every earlier native owner was joined.
+CLOUDBENCH_BOOT_UPDATE_ATTEMPTS=2
+for boot_retry in "137:1 0:1 :0:1" "137:1 1:0 :1:0"; do
+  boot_fake_attempts="${boot_retry% :*:*} "
+  boot_retry_expect="${boot_retry##* :}"
+  : > "$TMP_ROOT/boot-lease-events"
+  BOOT_CONFIG_UPDATE_SLOT=fixture-lease
+  BOOT_CONFIG_UPDATE_SLOT_SHARED=1
+  BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=0
+  boot_update_rc=0
+  boot_update_with_capacity_recovery "$TMP_ROOT/boot-lease-update.log" fake update || boot_update_rc=$?
+  [ "$boot_update_rc:$BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED" = "$boot_retry_expect" ] ||
+    fail "boot update retry ($boot_retry) returned rc:joined $boot_update_rc:$BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED"
+done
+# The actual wrapper writes the join receipt after reaping its child, including
+# a signal-killed child, and never without a child handle.
+boot_timeout_source="$(awk '
+  /^_with_timeout\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-cloud")"
+[ -n "$boot_timeout_source" ] || fail "missing production native timeout wrapper"
+(
+  eval "$boot_timeout_source"
+  BOOT_CONFIG_UPDATE_SLOT_SHARED=0
+  for boot_child in "0:true" "137:kill -KILL \$\$" "3:exit 3"; do
+    rm -f "$TMP_ROOT/real-join-receipt"
+    boot_real_rc=0
+    CLOUDBENCH_TIMEOUT_NATIVE_JOIN_RECEIPT="$TMP_ROOT/real-join-receipt" \
+      _with_timeout 20 sh -c "${boot_child#*:}" || boot_real_rc=$?
+    [ "$boot_real_rc" = "${boot_child%%:*}" ] && [ -f "$TMP_ROOT/real-join-receipt" ] ||
+      fail "native timeout wrapper ($boot_child) returned $boot_real_rc without its join receipt"
+  done
+  rm -f "$TMP_ROOT/real-join-receipt"
+  boot_real_rc=0
+  CLOUDBENCH_TIMEOUT_NATIVE_JOIN_RECEIPT="$TMP_ROOT/real-join-receipt" \
+    _with_timeout 20 "$TMP_ROOT/absent-native-command" 2>/dev/null || boot_real_rc=$?
+  [ "$boot_real_rc" != 0 ] && [ ! -e "$TMP_ROOT/real-join-receipt" ] ||
+    fail "native timeout wrapper wrote a join receipt without a child handle"
+) || fail "native timeout wrapper join receipt checks failed"
+# A refusal before any native attempt has nothing in flight: its lease is
+# released (invalid contract, then a pacing failure on the first attempt).
+for boot_early in contract pace; do
+  : > "$TMP_ROOT/boot-lease-events"
+  _with_timeout() { fail "early boot update refusal ($boot_early) started a native attempt"; }
+  CLOUDBENCH_BOOT_UPDATE_ATTEMPTS=2
+  CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION=0
+  if [ "$boot_early" = contract ]; then
+    CLOUDBENCH_BOOT_UPDATE_ATTEMPTS=0
+  else
+    CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION=1
+    cloudbench_mutation_admission() {
+      printf '%s\n' "$2" >> "$TMP_ROOT/boot-lease-events"
+      [ "$2" != pace ]
+    }
+  fi
+  BOOT_CONFIG_UPDATE_SLOT=fixture-lease
+  BOOT_CONFIG_UPDATE_SLOT_SHARED=1
+  BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=0
+  boot_update_with_capacity_recovery "$TMP_ROOT/boot-lease-update.log" fake update &&
+    fail "early boot update refusal ($boot_early) reported success"
+  release_boot_config_update_slot && [ -z "$BOOT_CONFIG_UPDATE_SLOT" ] &&
+    grep -qx release "$TMP_ROOT/boot-lease-events" ||
+    fail "early boot update refusal ($boot_early) retained an unused lease"
+done
+CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION=0
+# Outside the wrapper's own bookkeeping, no call site may mark the lease joined.
+if awk '
+  /^boot_update_with_capacity_recovery\(\)/ { inside = 1 }
+  !inside { print }
+  inside && /^}$/ { inside = 0 }
+' "$ROOT_DIR/scripts/run-bench-cloud" | grep -Eq '^[[:space:]]*BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=1[[:space:]]*$'; then
+  fail "boot config update call site marks the native lease joined unconditionally"
+fi
+)
 
 # The resize optimization only changes pool admission. A real large-primary
 # task keeps its 8GB request, while the default path still forks a separate
@@ -2405,3 +2599,227 @@ bash "$ROOT_DIR/scripts/tests/cloudbench-pid-identity.test.sh" ||
   fail "cloudbench PID birth identities must survive a wall-clock step"
 
 echo "All cloud benchmark environment checks passed."
+# BEGIN registered controller lock race controls
+python3 - "$HELPER_SRC" <<'PYLOCK'
+import os, pathlib, subprocess, sys, tempfile, unittest
+HELPER=sys.argv[1]
+class ControllerKernelLock(unittest.TestCase):
+ def run_case(self,mode):
+  with tempfile.TemporaryDirectory()as td:
+   script=r'''
+set -eu
+PATH=/usr/bin:/bin; export PATH
+source "$1"
+d="$2"; mode="$3"; lock="$d/controller.lock"
+actual_flock="$(command -v flock)"
+export actual_flock
+bash -c 'exec 9<> "$1"; "$actual_flock" 9; printf "99999999\n" > "$1"; touch "$2/ready"; while [ ! -e "$2/release" ]; do sleep .01; done; "$actual_flock" -u 9; exec 9>&-; touch "$2/released"' _ "$lock" "$d" &
+holder=$!
+trap 'touch "$d/release"; wait "$holder"' EXIT
+for n in $(seq 1 200); do [ -e "$d/ready" ] && break; sleep .01; done
+[ -e "$d/ready" ]
+first=1
+flock(){
+ local rc=0
+ "$actual_flock" "$@" || rc=$?
+ if [ "$1" = -n ] && [ "$first" = 1 ]; then
+  first=0
+  [ "$rc" = 1 ]
+  if [ "$mode" != held ]; then
+   touch "$d/release"
+   for n in $(seq 1 200); do [ -e "$d/released" ] && break; sleep .01; done
+   [ -e "$d/released" ]
+   if [ "$mode" = replaced ]; then mv "$lock" "$lock.old"; printf '99999999\n' > "$lock"; fi
+  fi
+ fi
+ return "$rc"
+}
+rc=0
+cloudbench_controller_lock_acquire_wait "$lock" 1 || rc=$?
+if [ "$mode" = released ]; then
+ [ "$rc" = 0 ]
+ [ "$(cat "$lock")" = "$$" ]
+ ! "$actual_flock" -n "$lock" true
+ cloudbench_controller_lock_release "$lock"
+else
+ [ "$rc" != 0 ]
+ [ "$(cat "$lock")" = 99999999 ]
+fi
+'''
+   result=subprocess.run(['bash','-c',script,'_',HELPER,td,mode],capture_output=True,text=True,timeout=8)
+   self.assertEqual(result.returncode,0,result.stderr)
+ def test_released_owner_reacquires_same_kernel_inode(self):self.run_case('released')
+ def test_dead_metadata_with_live_kernel_holder_refuses(self):self.run_case('held')
+ def test_replaced_inode_is_not_acquired(self):self.run_case('replaced')
+unittest.main(argv=['controller-kernel-lock'],verbosity=2)
+PYLOCK
+# END registered controller lock race controls
+
+# ── Benchmark guests use their own Temporal namespace (run600c, 2026-10-18) ──
+# 600 guests on the production namespace exhausted its Visibility API budget and
+# blinded production's autoscaler for ~35 minutes. The real _inject_secrets_locked
+# stages guest copies of agents/.env and back-end/.env with only TEMPORAL_ADDRESS,
+# TEMPORAL_NAMESPACE and TEMPORAL_API_KEY replaced from a private override file;
+# the controller's own env files stay byte-identical, and no override file keeps
+# the historical byte-identical blobs.
+# Earlier sections unset helper functions they stub; reload the real helper.
+# shellcheck source=../lib/cloudbench-env.sh
+source "$HELPER_SRC"
+guest_temporal_case() {  # <case> ; prints nothing on success
+  local case_name="$1" dir="$TMP_ROOT/guest-temporal-$1"
+  mkdir -p "$dir/repo/agents" "$dir/repo/back-end" "$dir/tmp"
+  chmod 700 "$dir/tmp"
+  printf 'OPENAI_API_KEY=sk-agents\nTEMPORAL_ADDRESS=prod.example:7233\nTEMPORAL_NAMESPACE=prod-ns.acct\nTEMPORAL_API_KEY=prod-secret-key\nTEMPORAL_TASK_QUEUE=navi-agent-tasks\nTEMPORAL_ADDRESS_NOTE=keep\n' > "$dir/repo/agents/.env"
+  if [ "$case_name" = appended ]; then
+    printf 'DATABASE_URL=postgres://prod\nTEMPORAL_TASK_QUEUE=navi-agent-tasks' > "$dir/repo/back-end/.env"
+  else
+    printf 'DATABASE_URL=postgres://prod\r\nexport TEMPORAL_NAMESPACE=prod-ns.acct\r\nTEMPORAL_API_KEY="prod-secret-key"\r\nTEMPORAL_ADDRESS=prod.example:7233\r\n' > "$dir/repo/back-end/.env"
+  fi
+  chmod 600 "$dir/repo/agents/.env" "$dir/repo/back-end/.env"
+  local override="$dir/repo/agents/.env.benchmark-temporal"
+  case "$case_name" in
+    missing) ;;
+    *)
+      printf '# guest only\nCLOUDBENCH_GUEST_TEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\nCLOUDBENCH_GUEST_TEMPORAL_NAMESPACE=bench-ns.acct\nCLOUDBENCH_GUEST_TEMPORAL_API_KEY=guest-secret-key\n' > "$override"
+      chmod 600 "$override"
+      ;;
+  esac
+  [ "$case_name" != loose-mode ] || chmod 640 "$override"
+  [ "$case_name" != incomplete ] || sed -i '/API_KEY/d' "$override"
+  local before_agents before_backend
+  before_agents="$(cloudbench_env_sha256 "$dir/repo/agents/.env")"
+  before_backend="$(cloudbench_env_sha256 "$dir/repo/back-end/.env")"
+  local function_body rc=0
+  function_body="$(awk '
+    $0 ~ /^_inject_secrets_locked\(\)/ { capture = 1 }
+    capture { print }
+    capture && /^}$/ { exit }
+  ' "$ROOT_DIR/scripts/run-bench-cloud")"
+  [ -n "$function_body" ] || fail "could not load _inject_secrets_locked"
+  (
+    cd "$dir/repo"
+    eval "$function_body"
+    APP=cloudbench-guest-temporal
+    ROOT_DIR="$dir/repo"
+    export TMPDIR="$dir/tmp"
+    case "$case_name" in
+      off) export CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE=off ;;
+      explicit-missing) export CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE="$dir/absent" ;;
+      *) unset CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE ;;
+    esac
+    validate_environment_contract() { CLOUDBENCH_PROD_BROWSER_PROVIDER=kernel; }
+    resolve_durable_github_token() { echo gh-token; }
+    assert_app_environment_lock_ownership() { return 0; }
+    environment_activation_targets() { printf 'pool\tpool-1\n'; }
+    activate_machine_environment() { echo "$1" >> "$dir/activated"; }
+    FLY() {
+      local arg
+      for arg in "$@"; do
+        case "$arg" in
+          AGENTS_ENV_B64=*) printf '%s' "${arg#*=}" | base64 -d > "$dir/staged-agents.env" ;;
+          BACKEND_ENV_B64=*) printf '%s' "${arg#*=}" | base64 -d > "$dir/staged-backend.env" ;;
+          AGENTS_ENV_SHA256=*) printf '%s' "${arg#*=}" > "$dir/staged-agents.sha" ;;
+          BACKEND_ENV_SHA256=*) printf '%s' "${arg#*=}" > "$dir/staged-backend.sha" ;;
+        esac
+      done
+    }
+    _inject_secrets_locked
+  ) > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  [ "$(cloudbench_env_sha256 "$dir/repo/agents/.env")" = "$before_agents" ] ||
+    fail "$case_name: controller agents/.env must stay byte-identical"
+  [ "$(cloudbench_env_sha256 "$dir/repo/back-end/.env")" = "$before_backend" ] ||
+    fail "$case_name: controller back-end/.env must stay byte-identical"
+  ! grep -Rq 'secret-key' "$dir/stdout" "$dir/stderr" || fail "$case_name: staging output leaked a Temporal key"
+  [ -z "$(ls -A "$dir/tmp")" ] || fail "$case_name: private guest env copies were left behind"
+  case "$case_name" in
+    explicit-missing|loose-mode|incomplete)
+      [ "$rc" -ne 0 ] || fail "$case_name: unusable override must fail closed"
+      [ ! -e "$dir/staged-agents.env" ] && [ ! -e "$dir/activated" ] ||
+        fail "$case_name: unusable override must stage and activate nothing"
+      return 0
+      ;;
+  esac
+  [ "$rc" -eq 0 ] || fail "$case_name: staging failed: $(cat "$dir/stderr")"
+  [ "$(cat "$dir/activated")" = pool-1 ] || fail "$case_name: pool machine was not activated"
+  # Each staged digest is the one the guest checks after decoding.
+  cloudbench_verify_env_file "$dir/staged-agents.env" "$(cat "$dir/staged-agents.sha")" agents >/dev/null ||
+    fail "$case_name: staged agents digest must verify on the guest"
+  cloudbench_verify_env_file "$dir/staged-backend.env" "$(cat "$dir/staged-backend.sha")" backend >/dev/null ||
+    fail "$case_name: staged backend digest must verify on the guest"
+  local manifest_namespace
+  manifest_namespace="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["guest_temporal_namespace"])' "$dir/repo/.context/cloudbench-env-manifest.json")"
+  case "$case_name" in
+    missing|off)
+      cmp -s "$dir/staged-agents.env" "$dir/repo/agents/.env" && cmp -s "$dir/staged-backend.env" "$dir/repo/back-end/.env" ||
+        fail "$case_name: without an override the staged env must equal the controller env byte-for-byte"
+      [ "$manifest_namespace" = None ] || fail "$case_name: manifest must not claim a guest namespace"
+      ;;
+    applied)
+      printf 'OPENAI_API_KEY=sk-agents\nTEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\nTEMPORAL_NAMESPACE=bench-ns.acct\nTEMPORAL_API_KEY=guest-secret-key\nTEMPORAL_TASK_QUEUE=navi-agent-tasks\nTEMPORAL_ADDRESS_NOTE=keep\n' > "$dir/expected-agents"
+      printf 'DATABASE_URL=postgres://prod\r\nexport TEMPORAL_NAMESPACE=bench-ns.acct\r\nTEMPORAL_API_KEY=guest-secret-key\r\nTEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\r\n' > "$dir/expected-backend"
+      cmp -s "$dir/staged-agents.env" "$dir/expected-agents" || fail "applied: guest agents env must change only the three Temporal keys"
+      cmp -s "$dir/staged-backend.env" "$dir/expected-backend" || fail "applied: guest backend env must change only the three Temporal keys"
+      grep -Fq 'guest Temporal namespace override: bench-ns.acct' "$dir/stdout" || fail "applied: staging must report the guest namespace"
+      [ "$manifest_namespace" = bench-ns.acct ] || fail "applied: manifest must record the guest namespace"
+      ;;
+    appended)
+      printf 'DATABASE_URL=postgres://prod\nTEMPORAL_TASK_QUEUE=navi-agent-tasks\nTEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\nTEMPORAL_NAMESPACE=bench-ns.acct\nTEMPORAL_API_KEY=guest-secret-key\n' > "$dir/expected-backend"
+      cmp -s "$dir/staged-backend.env" "$dir/expected-backend" || fail "appended: absent guest Temporal keys must be appended"
+      ;;
+  esac
+}
+for guest_case in applied appended missing off explicit-missing loose-mode incomplete; do
+  guest_temporal_case "$guest_case"
+done
+# A linked worktree env finds the override beside the authoritative file.
+(
+  dir="$TMP_ROOT/guest-temporal-linked"
+  mkdir -p "$dir/authority/agents" "$dir/worktree/agents"
+  : > "$dir/authority/agents/.env"
+  : > "$dir/authority/agents/.env.benchmark-temporal"
+  ln -s "$dir/authority/agents/.env" "$dir/worktree/agents/.env"
+  unset CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE
+  [ "$(cloudbench_guest_temporal_override_file "$dir/worktree/agents/.env")" = "$dir/authority/agents/.env.benchmark-temporal" ]
+) || fail "a linked agents/.env must resolve the authoritative guest Temporal override"
+# A copied env in a linked Git worktree falls back to the main checkout's file.
+(
+  dir="$TMP_ROOT/guest-temporal-worktree"
+  mkdir -p "$dir/main/agents"
+  git -C "$dir/main" init -q
+  git -C "$dir/main" -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m init
+  git -C "$dir/main" worktree add -q "$dir/linked" >/dev/null 2>&1
+  mkdir -p "$dir/linked/agents"
+  : > "$dir/linked/agents/.env"
+  unset CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE
+  [ -z "$(cloudbench_guest_temporal_override_file "$dir/linked/agents/.env")" ]
+  : > "$dir/main/agents/.env.benchmark-temporal"
+  [ "$(cloudbench_guest_temporal_override_file "$dir/linked/agents/.env")" = "$(cd "$dir/main" && pwd -P)/agents/.env.benchmark-temporal" ]
+) || fail "a linked Git worktree must resolve the main checkout's guest Temporal override"
+# A launcher-bound guest namespace (original600 operator → controller fleet →
+# boot env) must fail a guest whose decoded bench-app secrets still carry the
+# controller/production namespace, before any Temporal worker starts. No bound
+# namespace keeps the historical behavior; guest/fleet wiring stays explicit.
+(
+  dir="$TMP_ROOT/guest-temporal-require"
+  mkdir -p "$dir"
+  printf 'TEMPORAL_NAMESPACE=rose-labs-bench.acct\nTEMPORAL_API_KEY=bench-secret\n' > "$dir/agents.env"
+  printf 'DATABASE_URL=x\nTEMPORAL_NAMESPACE="rose-labs-bench.acct"\n' > "$dir/backend.env"
+  printf 'TEMPORAL_NAMESPACE=prod-ns.acct\nTEMPORAL_API_KEY=prod-secret\n' > "$dir/stale-agents.env"
+  : > "$dir/unset.env"
+  cloudbench_require_guest_temporal_namespace "$dir/agents.env" "$dir/backend.env" rose-labs-bench.acct
+  cloudbench_require_guest_temporal_namespace "$dir/stale-agents.env" "$dir/backend.env" ""
+  ! cloudbench_require_guest_temporal_namespace "$dir/stale-agents.env" "$dir/backend.env" rose-labs-bench.acct 2> "$dir/stale.err"
+  grep -q 'TEMPORAL_NAMESPACE=prod-ns.acct differs' "$dir/stale.err"
+  ! grep -q -e prod-secret -e bench-secret "$dir/stale.err"
+  ! cloudbench_require_guest_temporal_namespace "$dir/agents.env" "$dir/unset.env" rose-labs-bench.acct 2>/dev/null
+  python3 - "$ROOT_DIR/scripts/cloudbench-run.sh" "$ROOT_DIR/scripts/run-bench-cloud" <<'PYWIRE'
+import sys
+from pathlib import Path
+run, cloud = (Path(path).read_text() for path in sys.argv[1:])
+check = 'cloudbench_require_guest_temporal_namespace "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env"'
+verify = 'cloudbench_verify_env_file "$REPO_DIR/back-end/.env"'
+assert run.count(check) == 1 and run.index(verify) < run.index(check) < run.index('step stack_launch'), 'guest check after digest verify, before stack'
+assert '--env "CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE=${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-}"' in cloud
+assert 'echo "export CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE=$(printf \'%q\' "${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-}")"' in cloud
+PYWIRE
+) || fail "a launcher-bound guest Temporal namespace must reject stale bench-app secrets"

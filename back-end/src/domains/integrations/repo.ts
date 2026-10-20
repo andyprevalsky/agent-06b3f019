@@ -307,7 +307,6 @@ export {
   findGmailCredentialForSend,
   findGmailCredentialForDisconnect,
   findAvailableGmailEmails,
-  findMintedAccountEmails,
   updateEmailCredentialToken,
 } from './repo.email';
 

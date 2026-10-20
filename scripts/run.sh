@@ -1,6 +1,16 @@
 #!/bin/bash
 set -eo pipefail
 
+for arg in "$@"; do
+    case "$arg" in
+        --help|-h)
+            printf '%s\n' 'Usage: bash scripts/run.sh [--benchmark]' \
+                'Start the configured local stack; --benchmark enables benchmark mode.'
+            exit 0
+            ;;
+    esac
+done
+
 # Parse flags
 BENCHMARK_MODE=false
 for arg in "$@"; do

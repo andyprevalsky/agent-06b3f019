@@ -8,10 +8,10 @@ classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: Isolated tests invoked the real clone command without providing its native inventory reader and source Machine metadata
 symptoms:
+  - "machine_creation_admission: command not found"
   - "inventory_machine_field: command not found"
   - "production clone command builder failed in the capacity replay"
   - "test_exact_volume_ownership_survives_delayed_visibility_and_failed_delete returned 21"
-  - "test_demo_cache_probe_repeated_copies_keep_guard_and_existing_topology failed before either fake fleet launched"
   - "shared inventory snapshot did not initialize"
 tags:
   - cloudbench
@@ -19,6 +19,7 @@ tags:
   - inventory
   - exact-ownership
 sources:
+  - PR #1525, October 16 environment fixture recurrence
   - PR #1299
   - commit e5586839726b96306ebbf9b45a619774bb5db630 (native Linux Step 4cb batch)
   - PR #1450, exact 9712327589e7ac51c5b8abb2cf1459e9e374ed8f command registry
@@ -54,6 +55,21 @@ why the production admission check must remain. No live provider failure or new
 teardown defect is established by these fixture errors.
 
 ## Solution
+
+### 2026-10-16: worker claim fixtures omitted the new explicit-idle helper
+
+The existing worker terminal family passed 27 cases and failed three after the
+new claim dispatcher was added. Its extracted shell omitted
+`claim_explicit_idle_worker`, yielding `command not found`; the minimal empty
+inventory fixture also lacked the current owner/dependency context. The real
+CLI supplies both before reaching this boundary.
+
+Include the actual new helper in both extracted call graphs and bind the
+existing caller's owner and dependency fields in the minimal fixture. Preserve
+the no-create, exclusive claim, return and interrupted-release assertions. The
+same three cases failed with the original fixture, then passed five unchanged
+runs; the full 30-case family passed. Production files were unchanged by this
+fixture repair. Logs are retained in `.context/worker-fixture-closure`.
 
 Publish explicit started, CMD-only source Machine JSON through the actual
 `cloudbench-machine-readiness.py --publish-index` helper. Extract the production
@@ -116,6 +132,43 @@ test stage, provider/model calls, or production/runtime changes. Production
 release, final composed gates and the five width-fifty LIVE streak remain
 separate required evidence. At ten thousand agents this fixture-only repair
 adds no runtime work.
+
+### 2026-10-16: capacity replay omitted the new allocation gate
+
+During PR #1525 verification, the existing registered environment suite failed
+with `machine_creation_admission: command not found`, followed by
+`production clone command builder failed in the capacity replay`. Its isolated
+fixture extracted the real `clone_machine_target` but omitted its new admission
+dependency. The production gate deliberately returns 78 because authenticated
+measured creation admission is unavailable; this was a fixture failure, not a
+provider failure or a cause of the original REAL600 outcome.
+
+The same command was used before and after, with Python 3.11.9 on PATH:
+
+```bash
+PATH="/home/boxes/rose/agents/venv/bin:$PATH" bash scripts/tests/cloudbench-env.test.sh
+```
+
+The RED receipt is
+`.context/pr1525-continuation/worktree-symlink-rca/env-fixture-pinned-red.json`
+(exit 1, test SHA256
+`6e71e8a258ff393a39bf25ad59796befc78a3cd088616600f7fef896de0415f5`).
+The repair loads the real gate and asserts exit 78, the refusal explanation,
+and no fake-provider call or target-ledger publication. Only then does an
+explicit fixture-only admission double accept the exact fake-provider ledger
+for the original CPU/memory command-builder replay. The full production cloner
+and all existing shape assertions remain intact; no production guard changed.
+
+The next full run exposed a separate missing Gitcommon fixture dependency,
+recorded in `2026-09-10-recovery-fixtures-omitted-controller-bootstrap`. After
+that correction, the identical registered command passed with terminal output
+`All cloud benchmark environment checks passed.` The GREEN receipt is
+`env-fixture-pinned-green.json` in the same directory (exit 0, test SHA256
+`ad52ba01f17b1d59f20e31763a528c580f72b2c755b338edd31e4520bced6da6`).
+Original stdout/stderr and the exact diff are retained beside both receipts.
+This adds no production behavior or runtime cost, and supplies no original600
+qualification credit. Archive searches for the literal error and capacity
+replay found this existing case; no new runtime mechanism was proposed.
 
 ## Human feedback
 

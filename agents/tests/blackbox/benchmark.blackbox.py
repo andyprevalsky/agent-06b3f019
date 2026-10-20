@@ -254,6 +254,266 @@ def test_hub_registration_recovers_ambiguous_committed_post_timeout():
                 os.environ[name] = value
 
 
+def test_hub_transport_owned_root_projection_preserves_evidence():
+    from benchmarks.hub_upload_test import (
+        test_hub_transport_projects_every_owned_root_without_changing_evidence as control,
+    )
+
+    control()
+
+
+def test_hub_terminal_upload_reconciles_committed_final_before_replay():
+    """LIVE50 trials 1-2: a terminal POST queued behind the serial Hub writer
+    committed after its client timed out; the replay then queued again and the
+    controller declared publication failed. Read back the exact final first."""
+    from benchmarks.hub_upload import HubVisibilityError, upload_run_bundle
+
+    terminal = {
+        "run_id": "live50-terminal",
+        "timestamp": "2026-10-12T20:22:09+00:00",
+        "suite": "cloud-fleet",
+        "source": "cloud-fleet",
+        "status": "failed",
+        "tasks": [
+            {
+                "name": "browser-auth-existing-browser-session",
+                "passed": False,
+                "status": "INFRA_ERROR",
+                "failure_reason": "no current run artifact produced",
+                "lifecycle_stage": "released",
+            }
+        ],
+    }
+    # The real backend's GET /api/benchmarks/runs/:id projection of that bundle.
+    captured_view = {
+        "run_id": "live50-terminal",
+        "timestamp": "2026-10-12T20:22:09+00:00",
+        "suite": "cloud-fleet",
+        "source": "cloud-fleet",
+        "live": False,
+        "tasks": [
+            {
+                "name": "browser-auth-existing-browser-session",
+                "passed": None,
+                "status": "INFRA_ERROR",
+                "agent_id": None,
+                "duration_seconds": None,
+                "cost_cents": None,
+                "world_model_mode": None,
+                "fast_mode": False,
+                "tree_agent_count": None,
+                "failure_reason": "no current run artifact produced",
+                "lifecycle_stage": "released",
+                "tokens_in": None,
+                "tokens_out": None,
+                "cache_hit_pct": None,
+                "llm_call_count": None,
+                "message_count": None,
+            }
+        ],
+        "totals": {"passed": 0, "failed": 0, "running": 0, "cost_cents": 0, "tokens_in": 0, "tokens_out": 0},
+        "code": None,
+        "elapsed_s": 2354,
+        "cost": None,
+    }
+    posts = []
+    views = {}
+    release = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length)
+            decoded = gzip.decompress(raw) if self.headers.get("Content-Encoding") == "gzip" else raw
+            run_id = json.loads(decoded)["run_id"]
+            posts.append(run_id)
+            # The queued write commits, but only after the client gave up.
+            views.setdefault(run_id, {**captured_view, "run_id": run_id})
+            release.wait(30)
+            try:
+                self.send_response(201)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def do_GET(self):
+            view = views.get(self.path.rsplit("/", 1)[-1])
+            payload = json.dumps({"run": view}).encode() if view else b"{}"
+            self.send_response(200 if view else 404)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "BENCHMARK_HUB_UPLOAD_URL": f"http://127.0.0.1:{server.server_address[1]}",
+                    "BENCHMARK_HUB_API_KEY": "terminal-fixture-key",
+                },
+            ),
+            patch("benchmarks.hub_upload.time.sleep", lambda _delay: None),
+        ):
+            assert upload_run_bundle(terminal, required=True, timeout=2.0)
+            assert posts == ["live50-terminal"], "a committed final must not be replayed"
+            # A different committed outcome for the run is not this upload's commit.
+            views["live50-cancelled"] = {**captured_view, "run_id": "live50-cancelled"}
+            cancelled = {
+                **terminal,
+                "run_id": "live50-cancelled",
+                "tasks": [{**terminal["tasks"][0], "status": "cancelled"}],
+            }
+            try:
+                upload_run_bundle(cancelled, required=True, timeout=2.0, max_attempts=2)
+                raise AssertionError("a mismatched final was accepted as committed")
+            except HubVisibilityError as error:
+                assert "timed out" in str(error)
+            assert posts.count("live50-cancelled") == 2, "an unmatched final replays within its budget"
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+
+def test_hub_reconciliation_preserves_required_ack_identity():
+    """An ambiguous POST must not borrow another outcome or campaign's ACK."""
+    from benchmarks.hub_upload import HubVisibilityError, upload_run_bundle
+
+    bundle = {
+        "run_id": "ack-identity",
+        "timestamp": "2026-10-12T22:26:28+00:00",
+        "suite": "cloud-fleet",
+        "source": "direct-cloud-fleet",
+        "group_run_id": "campaign-original",
+        "group_member_id": "r001-j0044",
+        "group_run_number": 1,
+        "group_timestamp": "2026-10-12T22:26:13+00:00",
+        "group_total": 50,
+        "group_attempt": 1,
+        "tasks": [
+            {
+                "name": "browser-opentable-reservation",
+                "passed": True,
+                "status": "ACTIVE",
+                "agent_id": "root-original",
+                "lifecycle_stage": "released",
+            }
+        ],
+    }
+    exact = {**bundle, "live": False, "tasks": [{**bundle["tasks"][0], "status": "passed"}]}
+    current_view = exact
+    post_status = 503
+    posts = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            raw = self.rfile.read(int(self.headers["Content-Length"]))
+            posts.append(json.loads(gzip.decompress(raw)))
+            payload = json.dumps({"run": current_view}).encode() if post_status == 201 else b""
+            self.send_response(post_status)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self):
+            raw = json.dumps({"run": current_view}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    wrongly_acknowledged = []
+    try:
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "BENCHMARK_HUB_UPLOAD_URL": f"http://127.0.0.1:{server.server_address[1]}",
+                    "BENCHMARK_HUB_API_KEY": "fixture-key",
+                },
+            ),
+            patch("benchmarks.hub_upload.time.sleep", lambda _delay: None),
+        ):
+            for verified_live in (False, True):
+                for field, wrong in (
+                    ("run_id", "foreign-run"),
+                    ("timestamp", "2026-10-13T00:00:00Z"),
+                    ("suite", "foreign-suite"),
+                    ("source", "foreign-source"),
+                    ("group_run_id", "campaign-foreign"),
+                    ("group_member_id", "r001-j0001"),
+                    ("group_run_number", 2),
+                    ("group_timestamp", "2026-10-13T00:00:00Z"),
+                    ("group_total", 49),
+                    ("group_attempt", 2),
+                    ("group_attempt", True),
+                ):
+                    current_view = {**exact, "live": verified_live, field: wrong}
+                    try:
+                        upload_run_bundle(
+                            bundle,
+                            live=verified_live,
+                            required=True,
+                            verify_live_response=verified_live,
+                            max_attempts=1,
+                        )
+                        wrongly_acknowledged.append(str(verified_live) + ":" + field + ":" + str(wrong))
+                    except HubVisibilityError:
+                        pass
+            for live in (True, False):
+                current_view = {
+                    **exact,
+                    "live": live,
+                    "tasks": [{**exact["tasks"][0], "passed": False, "status": "failed"}],
+                }
+                try:
+                    upload_run_bundle(bundle, live=True, required=True, verify_live_response=True, max_attempts=1)
+                    wrongly_acknowledged.append("verified-live:" + str(live))
+                except HubVisibilityError:
+                    pass
+            current_view = {**exact, "live": True, "tasks": [{**exact["tasks"][0], "passed": 1}]}
+            try:
+                upload_run_bundle(bundle, live=True, required=True, verify_live_response=True, max_attempts=1)
+                wrongly_acknowledged.append("numeric passed reconciled as boolean")
+            except HubVisibilityError:
+                pass
+            post_status = 201
+            if upload_run_bundle(bundle, live=True, required=True, verify_live_response=True, max_attempts=1):
+                wrongly_acknowledged.append("numeric passed in successful POST ACK")
+            post_status = 503
+            # Matching outcomes can reconcile on the final attempt, from this same Hub.
+            current_view = exact
+            assert upload_run_bundle(bundle, required=True, max_attempts=1)
+            current_view = {**exact, "live": True}
+            assert upload_run_bundle(bundle, live=True, required=True, verify_live_response=True, max_attempts=1)
+            assert len(posts) == 28, "one POST per case; reconciliation must not add retries"
+            expected_body = {**bundle, "tasks": [{**bundle["tasks"][0], "logs": {}}]}
+            assert all(post == expected_body for post in posts), "reconciliation must preserve packet bytes"
+            assert not wrongly_acknowledged, f"foreign ACK accepted: {wrongly_acknowledged}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+
 def test_hub_requests_preserve_external_proxy_routing():
     from pytest import MonkeyPatch
 
@@ -523,6 +783,67 @@ def test_cloudbench_result_preserves_fresh_failure_but_never_counts_it_as_pass()
     assert any("not all passing" in error for error in pass_errors)
 
 
+# Original operator boundary regressions, shared with script-only maintenance.
+def test_controller_maintenance_process_identity():
+    from controller_maintenance_cases import test_process_identity
+
+    test_process_identity()
+
+
+def test_controller_maintenance_optional_inventory():
+    from controller_maintenance_cases import test_optional_inventory
+
+    test_optional_inventory()
+
+
+def test_controller_maintenance_privilege_separation():
+    from controller_maintenance_cases import test_privilege_separation
+
+    test_privilege_separation()
+
+
+def test_controller_maintenance_typed_inventory():
+    from controller_maintenance_cases import test_typed_inventory
+
+    test_typed_inventory()
+
+
+def test_controller_maintenance_operation_directory():
+    from controller_maintenance_cases import test_operation_directory
+
+    test_operation_directory()
+
+
+def test_controller_maintenance_stop_transition():
+    from controller_maintenance_cases import test_stop_transition
+
+    test_stop_transition()
+
+
+def test_controller_maintenance_retained_path():
+    from controller_maintenance_cases import test_retained_path
+
+    test_retained_path()
+
+
+def test_controller_v39_full_native_pair():
+    from controller_v39_cases import test_v39_full_native_pair
+
+    test_v39_full_native_pair()
+
+
+def test_controller_v39_cleanup_all_uid_writers():
+    from controller_v39_cases import test_v39_cleanup_all_uid_writers
+
+    test_v39_cleanup_all_uid_writers()
+
+
+def test_controller_v39_receipt_bound_runtime():
+    from controller_v39_cases import test_v39_receipt_bound_runtime
+
+    test_v39_receipt_bound_runtime()
+
+
 def test_cloudbench_shell_controllers_require_fresh_identity_and_child_success():
     repo_root = Path(__file__).resolve().parents[3]
     driver = (repo_root / "scripts" / "cloudbench-run.sh").read_text()
@@ -753,6 +1074,12 @@ def test_boot_terminal_runtime_evidence_is_in_permanent_gate():
             suite + "::test_watchdog_collects_cancelled_artifact_after_bounded_shutdown",
             suite + "::test_controller_term_collects_original_runtime_evidence_before_proxy_retirement",
             suite + "::test_failed_fleet_forensic_retirement_requires_originals_and_provider_absence",
+            suite + "::test_failed_fleet_forensic_original_volume_capture_is_inert_exact_and_fail_closed",
+            suite + "::test_failed_fleet_forensic_original_volume_restore_only_returns_exact_config",
+            suite + "::test_failed_fleet_forensic_original_volume_preflight_is_read_only",
+            suite + "::test_failed_fleet_forensic_original_volume_controls_are_in_permanent_gate",
+            suite + "::test_failed_fleet_forensic_original_volume_service_isolation",
+            suite + "::test_failed_fleet_forensic_original_volume_recovery_lock_fences_stale_successor",
             suite + "::test_boot_terminal_runtime_evidence_admission_precedes_guest_start",
             str(repo_root / "agents/benchmarks/cloudbench_runtime_retention_test.py"),
             str(repo_root / "agents/benchmarks/cloudbench_worker_evidence_test.py"),
@@ -1102,6 +1429,77 @@ def test_cloudbench_worktree_patch_includes_tracked_and_untracked_files():
         assert tracked.read_text() == "after\n"
         assert staged.read_text() == "staged\n"
         assert (fixture / "untracked.txt").read_text() == "new\n"
+
+
+def test_cloudbench_worktree_patch_excludes_linked_dependency_environment():
+    """A local venv link must not become a source patch or a DIRTY code panel."""
+    import shlex
+
+    repo_root = Path(__file__).resolve().parents[3]
+    patch_script = repo_root / "scripts/create-worktree-patch.sh"
+    with tempfile.TemporaryDirectory() as raw_dir:
+        base = Path(raw_dir)
+        fixture, dependencies = base / "repo", base / "dependencies"
+        (fixture / "agents").mkdir(parents=True)
+        dependencies.mkdir()
+        (dependencies / "marker").write_text("retained dependency data\n")
+        for relative in (".gitignore", "agents/.gitignore"):
+            (fixture / relative).write_bytes((repo_root / relative).read_bytes())
+        (fixture / "source.txt").write_text("before\n")
+        for args in (
+            ("init", "-q"),
+            ("config", "user.email", "bench@example.com"),
+            ("config", "user.name", "Bench"),
+            ("add", "-A"),
+            ("commit", "-qm", "fixture"),
+        ):
+            subprocess.run(["git", "-C", str(fixture), *args], check=True)
+        (fixture / "agents/venv").symlink_to(dependencies, target_is_directory=True)
+        command = ["bash", str(patch_script), str(fixture)]
+        result = subprocess.run(command, check=True, capture_output=True)
+        assert result.stderr == b"", result.stderr.decode()
+        assert result.stdout == b"", "local dependency links must not ship"
+
+        source = (repo_root / "scripts/run-bench-fleet").read_text()
+        start = source.index("print_code_provenance() {")
+        panel_function = source[start : source.index("\n}\n", start) + 3]
+        head = subprocess.check_output(["git", "-C", str(fixture), "rev-parse", "HEAD"], text=True).strip()
+        panel = subprocess.run(
+            [
+                "bash",
+                "-c",
+                "source "
+                + shlex.quote(str(repo_root / "scripts/lib/cloudbench-env.sh"))
+                + "\n"
+                + panel_function
+                + "\nprint_code_provenance",
+            ],
+            env={
+                **os.environ,
+                "ROOT_DIR": str(fixture),
+                "BENCH_REF": head,
+                "REQUESTED_BENCH_REF": head,
+                "CLOUDBENCH_SKIP_LOCAL_PATCH": "0",
+            },
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert "clean working tree" in panel.stdout, panel.stdout
+        assert "DIRTY" not in panel.stdout, panel.stdout
+
+        (fixture / "source.txt").write_text("after\n")
+        (fixture / "source-link").symlink_to("source.txt")
+        result = subprocess.run(command, check=True, capture_output=True)
+        assert result.stderr == b"", result.stderr.decode()
+        assert b"agents/venv" not in result.stdout
+        subprocess.run(["git", "-C", str(fixture), "reset", "--hard", "-q", "HEAD"], check=True)
+        (fixture / "source-link").unlink()
+        subprocess.run(["git", "-C", str(fixture), "apply", "-"], input=result.stdout, check=True)
+        assert (fixture / "source.txt").read_text() == "after\n"
+        assert (fixture / "source-link").is_symlink()
+        assert os.readlink(fixture / "source-link") == "source.txt"
+        assert (dependencies / "marker").read_text() == "retained dependency data\n"
 
 
 def test_run_context_normalization_keeps_absolute_workspace_path_single_rooted():
@@ -1456,6 +1854,51 @@ async def test_live_report_repeated_occurrences_keep_early_outcomes_and_agent_li
                 coordinator.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await coordinator
+
+
+async def test_live_report_primary_excludes_fixture_and_keeps_first_graded():
+    from types import SimpleNamespace
+    from benchmarks import run_benchmark as bench
+
+    fixture = "00000000-0000-4000-8000-000000000021"
+    graded = ["00000000-0000-4000-8000-000000000022", "00000000-0000-4000-8000-000000000023"]
+    for with_graded in (False, True):
+        entered = asyncio.Event()
+        task = SimpleNamespace(name="chat-mode", requires_browser_agent=False, world_model_mode=None, tags=[])
+
+        async def executor(_base_url, actual, *, on_agent_created, **_kwargs):
+            custody = {
+                "task_name": actual.name,
+                "roots": [],
+                "callback": on_agent_created,
+                "graded_creation": "not_started",
+            }
+            token = bench._task_root_custody.set(custody)
+            try:
+                bench._register_task_root(actual.name, fixture, "fixture_first_run")
+                if with_graded:
+                    for aid in graded:
+                        bench._register_task_root(actual.name, aid, "graded")
+                entered.set()
+                await asyncio.Event().wait()
+            finally:
+                bench._task_root_custody.reset(token)
+
+        namespace, cards = _live_report_producer_harness([task], executor, 1)
+        with patch.object(bench.cloud_batch_cleanup, "contract", return_value=None):
+            coordinator = asyncio.create_task(namespace["_drive_parallel"]())
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=10)
+                namespace["_tick_report_once"]()
+                url = cards[-1]["per_task"][0]["agent_url"]
+                assert url.endswith("=" + graded[0]) if with_graded else url is None
+                assert namespace["_live_task_agent_ids"][task.name] == (
+                    [fixture, *graded] if with_graded else [fixture]
+                )
+            finally:
+                coordinator.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait_for(coordinator, timeout=10)
 
 
 async def test_live_report_keeps_all_created_roots_for_batch_finalization():
@@ -3465,7 +3908,7 @@ async def _exercise_failure_evidence_exit(phase, refresh, logger_fails=False, ar
             result["messages"] = result["messages"][:1]
         return result
 
-    async def collect(_agent, snapshot, _start):
+    async def collect(_agent, snapshot, _start, *, backend_url):
         if logger_fails:
             raise RuntimeError("log transport unavailable")
         return {"messages": bench.extract_message_transcript(snapshot)}
@@ -3628,10 +4071,19 @@ async def test_cancelled_preparation_archives_only_with_positive_task_and_owner_
 
     async def refresh(rows, snapshot=owner):
         logs = {}
+        original_to_thread = bench.asyncio.to_thread
+
+        async def mocked_owner_read(function, *args, **kwargs):
+            if function is exact_snapshot:
+                assert args == ("http://localhost:1", root) and not kwargs
+                return function(*args, **kwargs)
+            return await original_to_thread(function, *args, **kwargs)
+
         with (
             patch.object(bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": root}])),
             patch.object(bench, "get_agent", AsyncMock(return_value={"messages": rows})),
-            patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", return_value=snapshot),
+            patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", return_value=snapshot) as exact_snapshot,
+            patch.object(bench.asyncio, "to_thread", mocked_owner_read),
         ):
             await bench._refresh_browser_archive_snapshot(
                 "http://localhost:1",
@@ -3732,6 +4184,45 @@ async def test_paused_browser_before_session_allocation_archives_with_exact_zero
         "archive_browser_sessions": [],
     }
     assert logs["tree"][root]["messages"][-1]["metadata"]["task_id"] == task
+
+
+def test_cancelled_preparation_owner_proof_is_executor_independent():
+    repo_root = Path(__file__).resolve().parents[3]
+    child = (
+        "import asyncio, concurrent.futures, runpy, sys, threading\n"
+        "from pathlib import Path\n"
+        "repo = Path(sys.argv[1])\n"
+        'sys.path[:0] = [str(repo / "agents/tests/blackbox"), str(repo / "agents")]\n'
+        "namespace = runpy.run_path(sys.argv[2])\n"
+        "import benchmarks.run_benchmark\n"
+        "import benchmarks.browser_zero_allocation\n"
+        "release = threading.Event()\n"
+        'executor = concurrent.futures.ThreadPoolExecutor(thread_name_prefix="owned-proof-control")\n'
+        "ready = [threading.Event() for _ in range(executor._max_workers)]\n"
+        "def occupy(signal):\n"
+        "    signal.set()\n"
+        "    release.wait()\n"
+        "async def run():\n"
+        "    asyncio.get_running_loop().set_default_executor(executor)\n"
+        "    for signal in ready:\n"
+        "        executor.submit(occupy, signal)\n"
+        "    try:\n"
+        '        assert all(signal.wait(5) for signal in ready), "owned blockers did not start"\n'
+        '        await namespace["test_cancelled_preparation_archives_only_with_positive_task_and_owner_proof"]()\n'
+        '        assert not release.is_set(), "executor contention removed before ownership proof"\n'
+        "    finally:\n"
+        "        release.set()\n"
+        "asyncio.run(run())\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", child, str(repo_root), str(Path(__file__).resolve())],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_agent_messages_have_browser_terminal_requires_explicit_close():
@@ -4358,6 +4849,22 @@ async def test_payment_cleanup_polls_with_reads_after_one_abandonment_post():
     assert lifecycle_reads == 1
 
 
+def _synthetic_production_stripe_provenance(lifecycle: dict) -> dict:
+    """Complete a synthetic live-shaped test input, never amend the retained native capture.
+
+    The historical JSON predates Stripe mode fields. Its transfer mode does not
+    prove Stripe mode; these explicit fields are invented fixture data only.
+    """
+    from copy import deepcopy
+
+    result = deepcopy(lifecycle)
+    assert result["orgTransfer"]["livemode"] is True
+    result["stripeHold"]["livemode"] = True
+    if isinstance(result.get("stripeRefund"), dict):
+        result["stripeRefund"]["paymentIntentLivemode"] = True
+    return result
+
+
 async def _exercise_owned_payment_reconciliation_caller(
     caller: str,
     outcome: str,
@@ -4392,6 +4899,7 @@ async def _exercise_owned_payment_reconciliation_caller(
     terminal["purchase"]["id"] = purchase_id
     terminal["agentCard"].update({"id": card_id, "status": "CLOSED"})
     terminal["orgTransfer"].update({"id": transfer_id, "cardId": card_id})
+    terminal = _synthetic_production_stripe_provenance(terminal)
     pending = deepcopy(terminal)
     pending["purchase"]["status"] = "HELD"
     pending["walletFunding"]["status"] = "RECLAIMING"
@@ -4815,6 +5323,7 @@ async def test_agentcard_cleanup_preserves_the_typed_release_skip():
     lifecycle = json.loads(
         (Path(__file__).parents[1] / "fixtures" / "agentcard-production-release-stall.json").read_text()
     )["lifecycle"]
+    lifecycle = _synthetic_production_stripe_provenance(lifecycle)
     with (
         patch.object(bench, "_start_payment_abandonment_with_recovery", AsyncMock(return_value=lifecycle)),
         patch.object(
@@ -12490,6 +12999,133 @@ def test_timeout_default_respects_explicit_floor():
     assert _default_timeout_for_task(task, max_seconds=120) == 600
 
 
+def _exercise_history_output_sink(mode):
+    import json
+    import sys
+    import tempfile
+    import types
+    from pathlib import Path
+    from unittest.mock import patch
+    from benchmarks import results, timeout_history, span_history
+
+    with tempfile.TemporaryDirectory() as directory:
+        d = Path(directory)
+        hub = []
+        sink_calls = []
+
+        def span_edge(**kwargs):
+            return span_history.record_span_observations(
+                [
+                    span_history.make_observation(
+                        agent_id=kwargs["agent_id"],
+                        benchmark=kwargs["benchmark"],
+                        environment=kwargs["environment"],
+                        span_key="synthetic:owned",
+                        span_name="synthetic",
+                        duration_ms=10,
+                        run_status="passed",
+                    )
+                ],
+                history_file=str(d / "spans.jsonl"),
+            )
+
+        def output(message):
+            sink_calls.append(message)
+            if mode == "unrelated" and (d / "spans.jsonl").exists():
+                raise ValueError("synthetic unrelated sink error")
+            if mode in ("success", "recorder_failure") and ((d / "spans.jsonl").exists() or mode == "recorder_failure"):
+                raise BrokenPipeError("synthetic diagnostic sink closed")
+
+        real_pass = timeout_history.record_pass
+
+        def passes(**kwargs):
+            if mode in ("recorder_failure", "healthy_recorder_failure") and kwargs["task_name"] == "first":
+                raise ValueError("synthetic recorder failure")
+            return real_pass(**kwargs)
+
+        run = results.BenchmarkRun(
+            suite="synthetic-history",
+            base_url="http://localhost",
+            task_results=[
+                results.TaskResult(
+                    name=n,
+                    passed=True,
+                    agent_id=n,
+                    status="COMPLETED",
+                    progress_score=1,
+                    duration_seconds=1,
+                    cost_cents=0,
+                    message_count=0,
+                    logs={"worker_logs": ["synthetic"]},
+                )
+                for n in ("first", "second")
+            ],
+        )
+        error = None
+        with (
+            patch.dict(
+                sys.modules,
+                {"benchmarks.agent_latency": types.SimpleNamespace(record_span_history_from_logs=span_edge)},
+            ),
+            patch.object(timeout_history, "HISTORY_DIR", str(d)),
+            patch.object(timeout_history, "HISTORY_FILE", str(d / "durations.jsonl")),
+            patch.object(timeout_history, "ATTEMPTS_FILE", str(d / "attempts.jsonl")),
+            patch.object(timeout_history, "record_pass", passes),
+            patch.object(results, "print", output, create=True),
+            patch.object(results.BenchmarkRun, "_upload_to_hub", lambda self: hub.append(self.to_dict())),
+        ):
+            try:
+                run.save(str(d / "runs"))
+            except BaseException as exc:
+                error = f"{type(exc).__name__}: {exc}"
+
+        def rows(p):
+            return [json.loads(x) for x in (d / p).read_text().splitlines()] if (d / p).exists() else []
+
+        fact = {
+            "mode": mode,
+            "error": error,
+            "attempts": [r["task"] for r in rows("attempts.jsonl")],
+            "durations": [r["task"] for r in rows("durations.jsonl")],
+            "spans": [r["benchmark"] for r in rows("spans.jsonl")],
+            "hub_calls": len(hub),
+            "grades": [r.passed for r in run.task_results],
+            "saved_json": len(list((d / "runs").glob("*.json"))),
+            "sink_calls": sink_calls,
+        }
+        if mode == "unrelated":
+            assert error == "ValueError: synthetic unrelated sink error", fact
+            assert fact["hub_calls"] == 0, fact
+            return
+        print(json.dumps(fact))
+        assert error is None, fact
+        assert (
+            fact["attempts"] == ["first", "second"]
+            and fact["spans"] == ["first", "second"]
+            and (fact["hub_calls"] == 1)
+        ), fact
+        assert fact["durations"] == (
+            ["second"] if mode in ("recorder_failure", "healthy_recorder_failure") else ["first", "second"]
+        ), fact
+        assert fact["grades"] == [True, True], fact
+
+
+def test_history_success_output_pipe_preserves_save_and_later_tasks():
+    _exercise_history_output_sink("success")
+
+
+def test_history_recorder_warning_pipe_preserves_save_and_later_tasks():
+    _exercise_history_output_sink("recorder_failure")
+
+
+def test_history_recorder_failure_remains_per_task_best_effort():
+    _exercise_history_output_sink("healthy_recorder_failure")
+
+
+def test_history_unrelated_output_error_is_not_suppressed():
+    _exercise_history_output_sink("unrelated")
+
+
 def test_fast_mode_pass_does_not_seed_timeout_history():
     """Fast-mode smoke passes must not tighten cold-cache timeout pXX ranges."""
     import benchmarks.timeout_history as timeout_history
@@ -15986,7 +16622,8 @@ async def test_tree_log_collection_fetches_supabase_once():
         fetch_calls.append((agent_id, start_time, end_time, limit))
         return ["root research log"]
 
-    async def fake_collect_logs(agent_id, agent_data, start_time, research_logs=None):
+    async def fake_collect_logs(agent_id, agent_data, start_time, research_logs=None, *, backend_url):
+        assert backend_url == "https://navi-j9a9.onrender.com"
         collect_calls.append((agent_id, research_logs))
         return {
             "messages": [],
@@ -16025,6 +16662,7 @@ async def test_tree_log_collection_fetches_supabase_once():
             ],
             start_time,
             get_agent_fn=fake_get_agent,
+            backend_url="https://navi-j9a9.onrender.com",
         )
     finally:
         logs.fetch_supabase_logs = original_fetch
@@ -17867,6 +18505,27 @@ def test_local_automatic_port_range_excludes_reported_ephemeral_window():
     finally:
         if base is not None:
             local_bench._release_port_range(base)
+
+
+def test_local_workspace_derived_base_skips_reported_ephemeral_window():
+    """A base derived from CONDUCTOR_PORT is a preference, not an owned range.
+
+    On 2026-10-19 the AgentCard lane derived 56060 + 200 = 56260 inside Linux's
+    32768-60999 client range, and its backend failed both starts with
+    EADDRINUSE. Derived preferences inside the reported range must fall back to
+    automatic allocation; outside it they stay preferred.
+    """
+    from unittest.mock import patch
+
+    from benchmarks import local as local_bench
+
+    with patch.object(local_bench, "_linux_ephemeral_port_range", return_value=(32768, 60999)):
+        assert local_bench.workspace_preferred_base("56060") is None
+        assert local_bench.workspace_preferred_base("3001") == 3201
+        assert local_bench.workspace_preferred_base("") is None
+        assert local_bench.workspace_preferred_base("abc") is None
+    with patch.object(local_bench, "_linux_ephemeral_port_range", return_value=None):
+        assert local_bench.workspace_preferred_base("56060") == 56260
 
 
 # This fixture models setup/readiness; native ownership is exercised by the real owner fixture.
@@ -22054,11 +22713,142 @@ async def test_collect_logs_prefers_local_worker_logs_over_remote_placeholders()
             agent_id,
             {},
             datetime(2026, 8, 31, 3, 0, tzinfo=timezone.utc),
+            backend_url="https://navi-j9a9.onrender.com",
         )
 
     assert result["worker_logs"] == [local_line]
     assert not any(line.startswith("[fly.io]") for line in result["worker_logs"])
     assert not any(line.startswith("[clickhouse]") for line in result["worker_logs"])
+
+
+async def test_local_stack_log_collection_makes_no_prod_log_api_calls():
+    """A loopback/guest stack never queries prod log APIs; a prod-backed run still does.
+
+    run600c: each of 600 isolated cloudbench guests queried prod Render
+    ``/v1/logs`` and the prod Supabase Management API (``SUPABASE_PROJECT_REF``
+    defaulted to the prod project) after its run, for 291 + 441 HTTP 429s. Those
+    stores only index agents served by the deployed backend and Fly workers, so
+    a local stack's agents can never appear there.
+    """
+    from datetime import datetime, timezone
+
+    import httpx
+
+    import benchmarks.logs as logs
+
+    agent_id = "aaaaaaaa-1111-2222-3333-444444444444"
+    child_id = "bbbbbbbb-1111-2222-3333-444444444444"
+    start_time = datetime(2026, 10, 18, 3, 0, tzinfo=timezone.utc)
+    local_line = json.dumps({"timestamp": "2026-10-18T03:01:00+00:00", "agent_id": agent_id, "event": "local"})
+    clickhouse_line = json.dumps({"agent_id": agent_id, "event": "retained"})
+    requests: list[tuple[str, str, str]] = []
+    subprocesses: list[tuple] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.host, request.url.path))
+        if request.url.host == "api.render.com":
+            return httpx.Response(200, json={"logs": [{"message": f"GET /api/agents/{agent_id} 200"}]})
+        if request.url.host == "api.supabase.com":
+            return httpx.Response(200, json={"result": [{"event_message": "POST /functions/v1/completions 200"}]})
+        return httpx.Response(200, text=json.dumps({"raw": clickhouse_line}) + "\n")
+
+    real_async_client = httpx.AsyncClient
+
+    def mock_async_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)
+
+    class FakeFlyctl:
+        stdout = None
+        stderr = None
+
+        async def communicate(self):
+            return b"", b""
+
+        def terminate(self):
+            pass
+
+        async def wait(self):
+            return 0
+
+    async def fake_exec(*argv, **_kwargs):
+        subprocesses.append(argv)
+        return FakeFlyctl()
+
+    async def get_agent(_aid):
+        return {"agent": {}}
+
+    tree_agents = [
+        {"agent_id": agent_id, "parent_agent_id": None, "goal": "root", "status": "COMPLETED"},
+        {"agent_id": child_id, "parent_agent_id": agent_id, "goal": "child", "status": "COMPLETED"},
+    ]
+
+    with (
+        patch.object(httpx, "AsyncClient", mock_async_client),
+        patch.object(asyncio, "create_subprocess_exec", fake_exec),
+        patch.object(logs, "RENDER_API_KEY", "render-test-key"),
+        patch.object(logs, "SUPABASE_ACCESS_TOKEN", "supabase-test-token"),
+        patch.object(logs, "SUPABASE_PROJECT_REF", "prodproject"),
+        patch.object(logs, "FLY_API_TOKEN", "fly-test-token"),
+        patch.object(logs, "DISABLE_FLY_LOG_STREAM", False),
+        patch.object(logs, "CLICKHOUSE_ENDPOINT", "https://clickhouse.test"),
+        patch.object(logs, "CLICKHOUSE_USER", "clickhouse-user"),
+        patch.object(logs, "CLICKHOUSE_PASSWORD", "clickhouse-password"),
+        patch.object(logs, "_find_flyctl", return_value="flyctl"),
+        patch.object(
+            logs,
+            "fetch_local_worker_logs",
+            side_effect=lambda aid, *_a, **_k: [local_line] if aid == agent_id else [],
+        ),
+        patch.object(logs, "get_supabase_realtime_logs_for_agent", return_value=[]),
+    ):
+        for backend_url in ("http://localhost:4100", "http://127.0.0.1:4100", "http://[::1]:4100", "localhost:4100"):
+            status = await logs.start_fly_log_collector(backend_url=backend_url)
+            single = await logs.collect_logs(agent_id, {}, start_time, backend_url=backend_url)
+            tree = await logs.collect_tree_logs(
+                agent_id, tree_agents, start_time, get_agent_fn=get_agent, backend_url=backend_url
+            )
+            assert requests == [] and subprocesses == [], (backend_url, requests, subprocesses)
+            assert logs._fly_collector is None and "skipped" in status, status
+            assert single["worker_logs"] == [local_line]
+            assert single["backend_logs"] == [f"[render] {logs._prod_logs_skipped_note(backend_url)}"]
+            assert single["research_logs"] == [f"[supabase] {logs._prod_logs_skipped_note(backend_url)}"]
+            assert set(tree) == {agent_id, child_id}
+            assert tree[agent_id]["logs"]["worker_logs"] == [local_line]
+            assert tree[agent_id]["logs"]["research_logs"] == single["research_logs"]
+            assert tree[child_id]["logs"]["worker_logs"] == [f"[local-worker] 0 logs for agent {child_id[:12]}"]
+
+        prod_url = "https://navi-j9a9.onrender.com"
+        await logs.start_fly_log_collector(backend_url=prod_url)
+        try:
+            prod = await logs.collect_logs(agent_id, {}, start_time, backend_url=prod_url)
+        finally:
+            await logs.stop_fly_log_collector()
+
+        no_ref_requests = len(requests)
+        with patch.object(logs, "SUPABASE_PROJECT_REF", ""):
+            unresolved = await logs.fetch_supabase_logs(agent_id, start_time)
+
+    assert sorted(requests) == sorted(
+        [
+            ("GET", "api.render.com", "/v1/logs"),
+            ("GET", "api.supabase.com", "/v1/projects/prodproject/analytics/endpoints/logs.all"),
+            ("POST", "clickhouse.test", "/"),
+        ]
+    ), requests
+    assert [argv[1:] for argv in subprocesses] == [
+        ("logs", "-a", "navi-whisper-lux"),
+        ("logs", "-a", "navi-whisper-lux", "--no-tail"),
+    ], subprocesses
+    assert prod["backend_logs"] == [f"GET /api/agents/{agent_id} 200"]
+    assert prod["research_logs"] == ["POST /functions/v1/completions 200"]
+    assert prod["worker_logs"] == [local_line, clickhouse_line]
+    assert len(requests) == no_ref_requests and unresolved[0].startswith("[supabase] SUPABASE_PROJECT_REF not set")
+    assert logs._supabase_project_ref_from_url("https://abcdefghij.supabase.co") == "abcdefghij"
+    assert logs._supabase_project_ref_from_url("http://localhost:54321") == ""
+    assert not logs.prod_log_sources_enabled("http://0.0.0.0:4100")
+    assert not logs.prod_log_sources_enabled("")
+    assert logs.prod_log_sources_enabled(prod_url)
 
 
 def test_agent_latency_reads_isolated_benchmark_stack_logs():
@@ -23557,9 +24347,253 @@ def test_fly_infra_detector_ignores_collector_placeholders():
         bench_logs._fly_collector = previous
 
 
+# Native elapsed-clock owning regression: real _poll_agent, only external edges fake.
+async def _clock_poll_case(
+    name, wall_delta, elapsed_delta, status="COMPLETED", expect_timeout=False, mode=None, next_times=()
+):
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from contextlib import ExitStack
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+    import socket
+    import hashlib
+
+    task = deepcopy(get_task_by_name(name))
+    if name.startswith("browser-auth-"):
+        assert task.timeout_seconds in (900, 1200)
+    task.approval_handling = "ignore"
+
+    class Clock:
+        def __init__(self):
+            self.calls = {"wall": 0, "elapsed": 0}
+            self.wall = 10000 + wall_delta
+            self.elapsed = 20000 + elapsed_delta
+
+        def time(self):
+            self.calls["wall"] += 1
+            return 10000 if self.calls["wall"] == 1 else self.wall
+
+        def monotonic(self):
+            self.calls["elapsed"] += 1
+            return 20000 if self.calls["elapsed"] == 1 else self.elapsed
+
+    clock = Clock()
+    reads = []
+    pending = list(next_times)
+    denial = []
+    payment = []
+
+    async def read(*args):
+        reads.append(1)
+        msgs = [{"role": "USER", "text": str(i)} for i in range(len(reads))] if mode == "progress" else []
+        if mode == "chat":
+            msgs = [{"role": "ASSISTANT", "text": "answer"}]
+        if mode == "payment":
+            msgs = [{"role": "TOOL", "metadata": {"title": "Payment card ready"}}]
+        return {"agent": {"id": "00000000-0000-4000-8000-000000000001", "status": status}, "messages": msgs}
+
+    async def sleep(*args):
+        if not pending:
+            raise AssertionError("poll did not terminate on declared clock schedule")
+        clock.wall, clock.elapsed = pending.pop(0)
+
+    async def tree(*args):
+        return {
+            "total_messages": len(reads) if mode == "progress" else 0,
+            "agent_count": 1,
+            "total_cost_cents": 0,
+            "failed_count": 0,
+            "error_agents": [],
+            "all_agents": [
+                {
+                    "agent_id": "00000000-0000-4000-8000-000000000001",
+                    "message_count": len(reads) if mode == "progress" else 0,
+                    "status": status,
+                }
+            ],
+        }
+
+    def deny(*args, **kwargs):
+        denial.append("external")
+        raise AssertionError("external network forbidden")
+
+    async def start_payment(*args):
+        return {"status": "pending"}
+
+    async def wait_payment(*args, **kwargs):
+        payment.append(kwargs["timeout_seconds"])
+        return {"status": "reclaimed"}
+
+    if mode == "chat":
+        task.is_chat_mode = True
+    if mode == "payment":
+        task.payment_card_request_action = "abandon"
+    with ExitStack() as stack:
+        for target, attr, value in [
+            (socket.socket, "connect", deny),
+            (socket, "getaddrinfo", deny),
+            (bench, "time", clock),
+            (bench, "get_agent", read),
+            (bench, "get_attention_requests", AsyncMock(return_value=[])),
+            (bench, "_fetch_tree_stats", tree),
+            (bench, "_fetch_message_counts", AsyncMock(return_value={})),
+            (bench, "_detect_infra_errors_from_fly", lambda *args: []),
+            (bench, "_mark_expected_gate_from_data", lambda *args: None),
+            (bench, "_start_payment_abandonment_with_recovery", start_payment),
+            (bench, "_wait_for_expected_payment_lifecycle", wait_payment),
+            (bench.asyncio, "sleep", sleep),
+        ]:
+            stack.enter_context(patch.object(target, attr, value))
+        result = await bench._poll_agent("http://offline.invalid", "00000000-0000-4000-8000-000000000001", task)
+    assert denial == []
+    assert result[0]["agent"]["status"] == status
+    reason = result[3]
+    assert bool(reason and reason.startswith("Timeout after")) is expect_timeout, (mode, reason)
+    if mode == "stall":
+        assert reason and "tree stalled" in reason
+    if mode == "payment":
+        assert reason is None and payment == [min(420, task.timeout_seconds - elapsed_delta)]
+    if mode == "progress":
+        assert len(reads) == 3 and reason is not None
+    if mode == "chat":
+        assert len(reads) == 2 and reason is None
+    return result
+
+
+async def _clock_deadline_cases(name, limit):
+    if True:
+        for wall, elapsed, status, expired in [
+            (30, 30, "COMPLETED", False),
+            (30, 30, "FAILED", False),
+            (2900, 30, "COMPLETED", False),
+            (-2900, 30, "COMPLETED", False),
+            (limit + 1, limit + 1, "ACTIVE", True),
+            (limit + 1, limit + 1, "COMPLETED", True),
+            (-2900, limit + 1, "COMPLETED", True),
+        ]:
+            await _clock_poll_case(name, wall, elapsed, status, expired)
+
+
+async def test_poll_elapsed_deadlines_900():
+    await _clock_deadline_cases("browser-auth-signup-already-registered", 900)
+
+
+async def test_poll_elapsed_deadlines_1200():
+    await _clock_deadline_cases("browser-auth-all-options-fail-assistance", 1200)
+
+
+async def test_poll_elapsed_progress_does_not_reset_deadline():
+    await _clock_poll_case(
+        "browser-auth-signup-already-registered",
+        30,
+        30,
+        "ACTIVE",
+        True,
+        "progress",
+        [(10000 + 899, 20000 + 899), (10000 + 901, 20000 + 901)],
+    )
+
+
+async def test_poll_elapsed_disabled_polar():
+    from benchmarks.polar_catalog import polar_wall_clock_disabled
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    assert polar_wall_clock_disabled(get_task_by_name("polar-bu-001"))
+    await _clock_poll_case("polar-bu-001", 100000, 100000)
+
+
+async def test_poll_elapsed_payment_budget():
+    await _clock_poll_case("browser-auth-signup-already-registered", 2900, 800, "ACTIVE", False, "payment")
+
+
+async def test_poll_elapsed_stall_and_chat():
+    await _clock_poll_case(
+        "browser-auth-signup-already-registered", 30, 30, "ACTIVE", False, "stall", [(10000 - 2900, 20000 + 600)]
+    )
+    await _clock_poll_case(
+        "browser-auth-signup-already-registered", 30, 30, "ACTIVE", False, "chat", [(10000 - 2900, 20000 + 41)]
+    )
+
+
+async def test_stale_workflow_count_backs_off_on_namespace_rate_limit():
+    """Guest stale cleanup must not multiply visibility load on a throttled namespace.
+
+    run600c: 27 of 30 sampled guests issued six CountWorkflowExecutions calls
+    each (SDK count_workflows: one call + five quick retries) against the
+    production namespace's spent Visibility API budget at startup.
+    """
+    from types import SimpleNamespace
+
+    from temporalio.service import RPCError, RPCStatusCode
+
+    from benchmarks.run_benchmark import STALE_WORKFLOW_COUNT_ATTEMPTS, _count_stale_workflows
+
+    def client_failing(times: int, status=RPCStatusCode.RESOURCE_EXHAUSTED):
+        calls = []
+
+        async def count_workflow_executions(request, *, retry, timeout):
+            calls.append((request.namespace, request.query, retry))
+            if len(calls) <= times:
+                raise RPCError("namespace rate limit exceeded", status, b"")
+            return SimpleNamespace(count=7)
+
+        service = SimpleNamespace(count_workflow_executions=count_workflow_executions)
+        return SimpleNamespace(workflow_service=service), calls
+
+    sleeps = []
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+
+    client, calls = client_failing(2)
+    assert await _count_stale_workflows(client, "ns", "q", sleep=sleep) == 7
+    assert calls == [("ns", "q", False)] * 3, calls
+    assert len(sleeps) == 2 and 1.0 <= sleeps[0] <= 2.0 and 1.0 <= sleeps[1] <= 4.0, sleeps
+
+    sleeps.clear()
+    client, calls = client_failing(99)
+    try:
+        await _count_stale_workflows(client, "ns", "q", sleep=sleep)
+    except RPCError as error:
+        assert error.status == RPCStatusCode.RESOURCE_EXHAUSTED
+    else:
+        raise AssertionError("a namespace that stays throttled must surface its error")
+    assert len(calls) == STALE_WORKFLOW_COUNT_ATTEMPTS == 3, calls
+    assert len(sleeps) == 2, sleeps
+
+    sleeps.clear()
+    client, calls = client_failing(1, status=RPCStatusCode.UNAVAILABLE)
+    try:
+        await _count_stale_workflows(client, "ns", "q", sleep=sleep)
+    except RPCError as error:
+        assert error.status == RPCStatusCode.UNAVAILABLE
+    else:
+        raise AssertionError("non-throttling errors keep their original single-attempt failure")
+    assert len(calls) == 1 and sleeps == [], (calls, sleeps)
+
+
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("poll_elapsed_deadlines_900", test_poll_elapsed_deadlines_900)
+    await r.record_async("poll_elapsed_deadlines_1200", test_poll_elapsed_deadlines_1200)
+    await r.record_async(
+        "poll_elapsed_progress_does_not_reset_deadline", test_poll_elapsed_progress_does_not_reset_deadline
+    )
+    await r.record_async("poll_elapsed_disabled_polar", test_poll_elapsed_disabled_polar)
+    await r.record_async("poll_elapsed_payment_budget", test_poll_elapsed_payment_budget)
+    await r.record_async("poll_elapsed_stall_and_chat", test_poll_elapsed_stall_and_chat)
+    r.record("controller_v39_full_native_pair", test_controller_v39_full_native_pair)
+    r.record("controller_v39_cleanup_all_uid_writers", test_controller_v39_cleanup_all_uid_writers)
+    r.record("controller_v39_receipt_bound_runtime", test_controller_v39_receipt_bound_runtime)
+    r.record("controller_maintenance_process_identity", test_controller_maintenance_process_identity)
+    r.record("controller_maintenance_optional_inventory", test_controller_maintenance_optional_inventory)
+    r.record("controller_maintenance_privilege_separation", test_controller_maintenance_privilege_separation)
+    r.record("controller_maintenance_typed_inventory", test_controller_maintenance_typed_inventory)
+    r.record("controller_maintenance_operation_directory", test_controller_maintenance_operation_directory)
+    r.record("controller_maintenance_stop_transition", test_controller_maintenance_stop_transition)
+    r.record("controller_maintenance_retained_path", test_controller_maintenance_retained_path)
     from benchmarks import lantern_people_trace_tests
 
     for name in (
@@ -23677,6 +24711,14 @@ async def run_all_tests():
         test_hub_registration_recovers_ambiguous_committed_post_timeout,
     )
     r.record(
+        "hub_terminal_upload_reconciles_committed_final_before_replay",
+        test_hub_terminal_upload_reconciles_committed_final_before_replay,
+    )
+    r.record(
+        "hub_reconciliation_preserves_required_ack_identity",
+        test_hub_reconciliation_preserves_required_ack_identity,
+    )
+    r.record(
         "hub_upload_rejection_retains_safe_response_identity_without_retry",
         test_hub_upload_rejection_retains_safe_response_identity_without_retry,
     )
@@ -23685,6 +24727,10 @@ async def run_all_tests():
         test_hub_upload_gzip_preserves_live_and_final_bundles_across_retry,
     )
     r.record("hub_requests_preserve_external_proxy_routing", test_hub_requests_preserve_external_proxy_routing)
+    r.record(
+        "hub_transport_owned_root_projection_preserves_evidence",
+        test_hub_transport_owned_root_projection_preserves_evidence,
+    )
     r.record("evaluated_fleet_outcomes_publish_before_teardown", test_evaluated_fleet_outcomes_publish_before_teardown)
     r.record(
         "cloudbench_rejects_stale_wrong_task",
@@ -23773,6 +24819,10 @@ async def run_all_tests():
     r.record(
         "cloudbench_patch_includes_untracked_files",
         test_cloudbench_worktree_patch_includes_tracked_and_untracked_files,
+    )
+    r.record(
+        "cloudbench_patch_excludes_linked_dependency_environment",
+        test_cloudbench_worktree_patch_excludes_linked_dependency_environment,
     )
     r.record(
         "run_context_absolute_path_single_rooted",
@@ -23865,6 +24915,22 @@ async def run_all_tests():
     )
     r.record("fast_mode_pass_skips_timeout_history", test_fast_mode_pass_does_not_seed_timeout_history)
     r.record("non_fast_mode_pass_records_timeout_history", test_non_fast_mode_pass_still_seeds_timeout_history)
+    r.record(
+        "test_history_success_output_pipe_preserves_save_and_later_tasks",
+        test_history_success_output_pipe_preserves_save_and_later_tasks,
+    )
+    r.record(
+        "test_history_recorder_warning_pipe_preserves_save_and_later_tasks",
+        test_history_recorder_warning_pipe_preserves_save_and_later_tasks,
+    )
+    r.record(
+        "test_history_recorder_failure_remains_per_task_best_effort",
+        test_history_recorder_failure_remains_per_task_best_effort,
+    )
+    r.record(
+        "test_history_unrelated_output_error_is_not_suppressed", test_history_unrelated_output_error_is_not_suppressed
+    )
+
     r.record(
         "benchmark_run_serializes_world_model_fidelity",
         test_benchmark_run_serializes_world_model_fidelity_and_ignores_unknown_task_fields,
@@ -23960,6 +25026,10 @@ async def run_all_tests():
     await r.record_async(
         "live_report_repeated_occurrences_keep_early_outcomes_and_agent_links",
         test_live_report_repeated_occurrences_keep_early_outcomes_and_agent_links,
+    )
+    await r.record_async(
+        "live_report_primary_excludes_fixture_and_keeps_first_graded",
+        test_live_report_primary_excludes_fixture_and_keeps_first_graded,
     )
     await r.record_async(
         "live_report_keeps_all_created_roots_for_batch_finalization",
@@ -25191,6 +26261,10 @@ async def run_all_tests():
         test_cancelled_preparation_archives_only_with_positive_task_and_owner_proof,
     )
     r.record(
+        "cancelled_preparation_owner_proof_is_executor_independent",
+        test_cancelled_preparation_owner_proof_is_executor_independent,
+    )
+    r.record(
         "agent_messages_have_browser_terminal_requires_explicit_close",
         test_agent_messages_have_browser_terminal_requires_explicit_close,
     )
@@ -25269,6 +26343,10 @@ async def run_all_tests():
         "collect_logs_prefers_local_worker_logs",
         test_collect_logs_prefers_local_worker_logs_over_remote_placeholders,
     )
+    await r.record_async(
+        "local_stack_log_collection_makes_no_prod_log_api_calls",
+        test_local_stack_log_collection_makes_no_prod_log_api_calls,
+    )
     r.record(
         "agent_latency_explicit_context_excludes_neighbor_stacks",
         test_agent_latency_explicit_context_excludes_neighbor_stacks,
@@ -25319,6 +26397,10 @@ async def run_all_tests():
         test_local_service_start_timeout_extends_only_for_first_wmh_build,
     )
     r.record("cache_coverage_uses_root_scoped_tool_counts", test_cache_coverage_uses_root_scoped_tool_counts)
+    await r.record_async(
+        "stale_workflow_count_backs_off_on_namespace_rate_limit",
+        test_stale_workflow_count_backs_off_on_namespace_rate_limit,
+    )
     await r.record_async(
         "user_data_prod_grep_final_answer_semantic_judge",
         test_user_data_prod_grep_final_answer_semantic_judge,
@@ -25378,6 +26460,10 @@ async def run_all_tests():
     r.record(
         "local_automatic_port_range_excludes_reported_ephemeral_window",
         test_local_automatic_port_range_excludes_reported_ephemeral_window,
+    )
+    r.record(
+        "local_workspace_derived_base_skips_reported_ephemeral_window",
+        test_local_workspace_derived_base_skips_reported_ephemeral_window,
     )
     r.record(
         "code_agent_sdk_evidence_chips_count_as_grounded_steps",

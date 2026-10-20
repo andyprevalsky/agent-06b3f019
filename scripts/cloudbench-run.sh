@@ -692,9 +692,9 @@ if [ -n "${CLOUDBENCH_CODEX_AUTH_SHA256:-}" ]; then
 fi
 
 # ── 0. Sanity: the volume + repo checkout must exist (created at box setup) ──
-if [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ] && [ ! -d "$REPO_DIR/.git" ]; then
+if [ "${CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP:-0}" = 1 ] || { [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ] && [ ! -d "$REPO_DIR/.git" ]; }; then
     [ "$BENCH_SIMULATE" = 0 ] && [ -n "$REF" ] || { log "FATAL: fresh checkout requires an exact REAL task ref"; finish 1; }
-    if ! CLOUDBENCH_APP_USER="$APP_USER" bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF" 2>&1 | sed 's/^/   /'; then
+    if ! CLOUDBENCH_REQUIRE_EMPTY_CHECKOUT="${CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP:-0}" CLOUDBENCH_APP_USER="$APP_USER" bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF" 2>&1 | sed 's/^/   /'; then
         log "FATAL: could not bootstrap requested ref on fresh storage"
         finish 1
     fi
@@ -724,7 +724,7 @@ step git_sync
 # box provisioning), so a plain fetch/checkout/reset needs NO token handling here.
 if [ -n "$REF" ]; then
     log "git-syncing + verifying $REPO_DIR → $REF"
-    if ! CLOUDBENCH_APP_USER="$APP_USER" bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF" 2>&1 | sed 's/^/   /'; then
+    if ! CLOUDBENCH_REQUIRE_EMPTY_CHECKOUT=0 CLOUDBENCH_APP_USER="$APP_USER" bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF" 2>&1 | sed 's/^/   /'; then
         log "FATAL: could not verify requested ref $REF"
         finish 1
     fi
@@ -735,7 +735,15 @@ unset CLOUDBENCH_GITHUB_TOKEN_B64
 # reset --hard does not remove untracked files created by an earlier uploaded
 # worktree patch. Remove only non-ignored untracked files; dependency/cache trees
 # are ignored and remain warm.
-if ! gosu "$APP_USER" git -C "$REPO_DIR" clean -ffd 2>&1 | sed 's/^/   /'; then
+clean_exclusions=()
+if [ -e "$REPO_DIR/.cloudbench-deps-overlays" ] || [ -L "$REPO_DIR/.cloudbench-deps-overlays" ]; then
+    if ! bash "$SYNC_DEPS_SCRIPT" --verify-overlay-cache "$DEPS_DIR" "$REPO_DIR"; then
+        log "FATAL: invalid dependency overlay cache before worktree cleanup"
+        finish 1
+    fi
+    clean_exclusions=(-e '/.cloudbench-deps-overlays/')
+fi
+if ! gosu "$APP_USER" git -C "$REPO_DIR" clean -ffd "${clean_exclusions[@]}" 2>&1 | sed 's/^/   /'; then
     log "FATAL: could not remove stale untracked worktree files"
     finish 1
 fi
@@ -854,6 +862,8 @@ chown "$APP_USER:$APP_USER" "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env"
 chmod 600 "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env"
 cloudbench_verify_env_file "$REPO_DIR/agents/.env" "${AGENTS_ENV_SHA256:-}" agents || finish 1
 cloudbench_verify_env_file "$REPO_DIR/back-end/.env" "${BACKEND_ENV_SHA256:-}" backend || finish 1
+cloudbench_require_guest_temporal_namespace "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env" \
+    "${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-}" || finish 1
 cloudbench_require_agentcard_org_oauth "$REPO_DIR/back-end/.env" || finish 1
 cloudbench_validate_browser_provider_contract \
     "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env" \
@@ -1104,6 +1114,12 @@ fi
 if [ "${#TASK_WORKER_ENV[@]}" -gt 0 ]; then
     STACK_ENV+=("${TASK_WORKER_ENV[@]}")
 fi
+case "${CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS:-}" in
+    ''|*[!0-9]*|0) ;;
+    # Controller-budgeted queue observation: N guests share the Temporal
+    # namespace's Visibility API budget with production workers.
+    *) STACK_ENV+=("AUTOSCALER_POLL_INTERVAL_SECONDS=$CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS") ;;
+esac
 if [ "${CLOUDBENCH_INFRA_PROBE:-0}" = "1" ]; then
     # The probe executes no benchmark task. One Temporal worker proves stack
     # readiness without starting eight idle Python processes on a 4 GB guest

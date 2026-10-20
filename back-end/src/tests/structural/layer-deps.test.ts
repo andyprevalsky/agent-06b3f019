@@ -23,6 +23,7 @@
  *   npx tsx src/tests/structural/layer-deps.test.ts
  */
 
+import { createHash } from 'node:crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import {
@@ -523,6 +524,16 @@ runCheck('utils/ has zero src/ dependencies', checkUtilsBoundary());
 
 // Invariant 9: server.ts wiring
 runCheck('server.ts wires from domains/, not routes/', checkServerWiring(domains));
+
+// PR1480 preserves the original implementation for causal comparisons. Its
+// historical transaction exception must never cover an edited comparison.
+const hubComparison = fs.readFileSync(path.join(PROVIDERS_DIR, 'benchmarkHubStore.base.ts'));
+if (
+  createHash('sha256').update(hubComparison).digest('hex') !==
+  'a4a6089d5a26d8b2379ca96b4d51b387507ad333d233e27d429335313495efe5'
+) {
+  throw new Error('The preserved PR1480 Benchmark Hub comparison changed');
+}
 
 // Invariant 10: canonical interactive-transaction timeout/retry policy
 if (

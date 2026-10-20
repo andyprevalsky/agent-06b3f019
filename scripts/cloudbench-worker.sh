@@ -147,6 +147,9 @@ export CONDUCTOR_WORKSPACE_NAME="$WORKSPACE_NAME"
 export TEMPORAL_TASK_QUEUE="navi-agent-tasks-$WORKSPACE_NAME"
 export BACKEND_URL BACKEND_API_URL="$BACKEND_URL"
 export AUTOSCALER_ACTUATE=0            # controller is the sole scaler
+# The controller reads desired capacity only from the primary. A clone's queue
+# observation would spend 3 shared Temporal Visibility API calls/s for nothing.
+export AUTOSCALER_QUEUE_METRICS=0
 export HEALTH_CHECK_PORT="$HEALTH_PORT"
 export SDK_METRICS_PORT="$SDK_PORT"
 export ENABLE_BENCHMARK_MEMORY_BASELINE=1
@@ -174,6 +177,7 @@ exec gosu "$APP_USER" env \
     TEMPORAL_TASK_QUEUE="$TEMPORAL_TASK_QUEUE" \
     BACKEND_URL="$BACKEND_URL" BACKEND_API_URL="$BACKEND_URL" \
     AUTOSCALER_ACTUATE=0 \
+    AUTOSCALER_QUEUE_METRICS=0 \
     HEALTH_CHECK_PORT="$HEALTH_PORT" SDK_METRICS_PORT="$SDK_PORT" \
     BENCHMARK_WORLD_MODEL_MODE="${BENCHMARK_WORLD_MODEL_MODE}" \
     ${WMH_BASE_URL:+WMH_BASE_URL="$WMH_BASE_URL"} \

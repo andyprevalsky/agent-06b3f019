@@ -1,0 +1,56 @@
+{
+  "schema": "finite-owned-primary-reuse-preconfig-source-review-v1",
+  "reviewed": true,
+  "reviewer": "Benchmark Infra root plus independent source peer",
+  "source_ref": "659e3d6964f7b88d14a20f66d2fc8f14251beaf9",
+  "source_review_fingerprint": "0259480c2a5f974a94c1848fec16e0d49e6d18939e1858fcc5d549b5c78e8511",
+  "pre_service_boundaries": [
+    "before-stack-launch",
+    "agent-network-index-bootstrap"
+  ],
+  "actual_recipe": {
+    "ref": "659e3d6964f7b88d14a20f66d2fc8f14251beaf9",
+    "recipe_sha256": "c7b0c7d52dba02d07e605e8498ae6be819901fd0b3dd2de4d47208b4b3a6881b",
+    "fingerprint": "0259480c2a5f974a94c1848fec16e0d49e6d18939e1858fcc5d549b5c78e8511"
+  },
+  "actual_recipe_receipt_sha256": "cda34990cdfc7b6e92f08abae565df9e961efe4a0c613e1c09dd99eda875f405",
+  "component_packet_sha256": "891d05a11d9dc413ad6cad1082660cca74dda2c8e365be5e545ed85e2cceb78c",
+  "source_diff_sha256": "203b1d5959b2baaddd44258b942cd7c0231f94c87a2adacf6b2b00daa63ac959",
+  "root_review_sha256": "1daf0b7857d5f7e42e57624080c629115d5808cf55da2a8890da4483aa3713a1",
+  "independent_final_source_review_sha256": "183482c5d824ad8b6d43684a0132b6d8f76b48bc5a671da966e177770db55d9c",
+  "verification": {
+    "all35_git_materialized_pairs_verified": true,
+    "all12_producer_evidence_hashes_verified": true,
+    "root_independent": "11PASS2.72s exact entrypoint/refusal and per-record native reaper phase guards",
+    "producer": "94PASS20.08s before final bounded-read/refusal refinements; affected10PASS2.70s and final entrypoint2PASS4.43s; unchanged publisher22PASS14.36s",
+    "owning_red_green": "Original actual recover_exact_stale_fleet_owner entrypoint, SAME permanent test:1FAIL4.18s at exact stdin378 missing stale-owner status proxy mapping. Reuse is explicit new requirement: old fallback4FAIL/3PASS6.25s. -> Same entrypoint test PASS0.75s; final entrypoint normal+never-configured pool-refusal2PASS4.43s; actual archive/cohort/lifecycle crash recovery17PASS6.45s."
+  },
+  "runtime_scope": {
+    "native25_changed_input": "scripts/run-bench-fleet owned stopped-primary reuse and phase-specific never-configured recovery",
+    "explicit_extra_sources": {
+      "agents/benchmarks/hub_upload.py": "90a19012a3e47b2810711b520e6c741a264c108d9186ca18d19e4bc9d7e577fc",
+      "scripts/cloudbench-campaign-machines.py": "e85eb826790c70e87b4d397467e01b2d1f9e805ce1efedb458edc16bff60353b",
+      "scripts/cloudbench-campaign-stop.py": "bef770429b3cc877337fbd3ec48f5191cb47938ab9dd60a369d78397e27af75b",
+      "scripts/cloudbench-startup-failure-archive.py": "a2603aba171e1a73dd80cb203a97c9375e4827ebb199887e8ed1035f0f749eca",
+      "scripts/cloudbench_execution_provenance.py": "e2b1bce89dba032df09f72609cd82cbfbe5cee1833c5b202bfc57a05d53595f2",
+      "scripts/lib/cloudbench-inventory.sh": "af68b44183cb056c2dbbcb6be5c8e353e2380a12bc5cb683492cabd0e99d9945"
+    },
+    "boundaries": [
+      "Exact stopped Machine/config/version/image/shape/volume and provenance before adoption and claim; canonical return proof refresh",
+      "Existing pending transfer claim/audit FSM resumes after clone registry unlink",
+      "Explicit primary-only no-create admission; default provision and worker autoscaling unchanged",
+      "Whole-owner PRECONFIG original evidence archive and durable consumption receipt before pending unlink; archive-only retry and fresh native pair at canonical reaper",
+      "Never-configured pool promotion explicitly refused; no fabricated ACK/lifecycle/run or task credit"
+    ]
+  },
+  "limits": [
+    "No provider/guest/paid experiment/action executed by author. Original600 remains pending; priorwrong1/1aborts remain aborted.",
+    "Existing-ID pool adoption requires full started runtime/dependency/config/version/image/profile/native ownership proof; never-configured volume is explicitly REFUSED without authenticated bootstrap. No eligible600 claim.",
+    "Reuse-only prevents PRIMARY cloning only. Additional-worker admission/autoscaling unchanged; initialonein-guestworkerperprimary, max15 not measuredinitialneed.",
+    "Known pre-existing affected structural test environment_mutation failed obsolete cleanup helper substring (9PASS1FAIL1.45s), preserved separately; no full family PASS claimed.",
+    "PRECONFIG path is whole-owner fresh/no-guest-only, no mixed/pool/worker/unresolved ownership. No ACK/lifecycle/run fabrication; zero taskcredit/native-release authority. Actual native mutation requires parent exact operation approval and normal reaper identity/404/state/journal.",
+    "Exact fingerprint and only the two existing phases; retain every prior policy entry.",
+    "This registration grants no provider mutation, paid launch, cleanup authority or original600 PASS; it is not a gate on current never-started canonical REAP.",
+    "Known affected structural assertion failure predates this delta: cleanup body byte-identical to base and already lacks test-required terminate_and_wait substring; no full-family PASS claimed."
+  ]
+}

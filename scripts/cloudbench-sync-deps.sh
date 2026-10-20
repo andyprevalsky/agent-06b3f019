@@ -5,6 +5,9 @@
 # rebuilt rather than letting services fail later with MODULE_NOT_FOUND.
 set -euo pipefail
 
+VERIFY_OVERLAY_CACHE=0
+if [ "${1:-}" = --verify-overlay-cache ]; then VERIFY_OVERLAY_CACHE=1; shift; fi
+
 DEPS_DIR="${1:?usage: cloudbench-sync-deps.sh <donor-dir> <repo-dir>}"
 REPO_DIR="${2:?usage: cloudbench-sync-deps.sh <donor-dir> <repo-dir>}"
 DEPS_DIR="$(cd "$DEPS_DIR" && pwd -P)"
@@ -152,6 +155,40 @@ mount_fresh_dependency_overlay() {
     echo "[cloudbench] dependency overlay unavailable; copying baked tree → $repo_tree"
     return 1
 }
+
+# Git cleanup runs as the application user, while these private backing files
+# are intentionally root-owned. Preserve only a validated producer namespace.
+if [ "$VERIFY_OVERLAY_CACHE" = 1 ]; then
+    python3 - "$DEPS_DIR" "$REPO_DIR" <<'PYOVERLAY'
+import os, stat, subprocess, sys
+from pathlib import Path
+donor, repo = map(Path, sys.argv[1:])
+base = repo / '.cloudbench-deps-overlays'
+assert os.geteuid() == 0
+assert base.resolve(strict=True) == base
+info = base.lstat()
+assert stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and stat.S_IMODE(info.st_mode) == 0o700
+assert not subprocess.check_output(['git', '-c', 'safe.directory='+str(repo), '-C', str(repo), 'ls-files', '-z', '--', '.cloudbench-deps-overlays'])
+expected = {name.replace('/', '-'): name for name in ('node_modules', 'back-end/node_modules', 'front-end/node_modules', 'agents/node_modules', 'agents/venv')}
+for state in base.iterdir():
+    assert state.name in expected and state.resolve(strict=True) == state
+    info = state.lstat()
+    assert stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and stat.S_IMODE(info.st_mode) == 0o700
+    assert {p.name for p in state.iterdir()} == {'owner', 'upper', 'work'}
+    for name in ('upper', 'work'):
+        path = state / name
+        assert path.resolve(strict=True) == path and stat.S_ISDIR(path.lstat().st_mode)
+    owner = state / 'owner'
+    fd = os.open(owner, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        assert stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600 and info.st_size <= 4096
+        raw = stream.read(4097)
+    relative = expected[state.name]
+    assert raw == (str(donor / relative)+'\n'+str(repo / relative)+'\n').encode()
+PYOVERLAY
+    exit $?
+fi
 
 if ! command -v rsync >/dev/null 2>&1; then
     echo "[cloudbench] FATAL: rsync is required to refresh baked dependency trees." >&2

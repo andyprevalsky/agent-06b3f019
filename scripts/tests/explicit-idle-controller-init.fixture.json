@@ -1,0 +1,19 @@
+{
+  "origin": "sanitized-selected-fields-from-authentic-saved-native",
+  "source_path": "/home/boxes/rose/.context/pr1525-continuation/v41-final-f091-bound/bound-current-native.json",
+  "source_sha256": "e70a1ce6b4fe496f536d2fb1e181f822f5eb55c82812325d1fe2be9f5272f5f5",
+  "machine_id": "2862e42f0973e8",
+  "state": "started",
+  "init": {
+    "cmd": [
+      "/tmp/gate.sh"
+    ],
+    "entrypoint": [
+      "/bin/bash"
+    ]
+  },
+  "rootfs": {
+    "persist": "always",
+    "size_gb": 50
+  }
+}

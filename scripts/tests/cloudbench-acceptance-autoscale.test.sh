@@ -62,9 +62,11 @@ assert_rejected_before_fly fleet-single-machine-ceiling \
 # empty, 2, and 3 suffix respectively.
 # shellcheck source=../lib/cloudbench-env.sh
 source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
-workspace_6="$(cloudbench_fleet_workspace_name plaid-transactions-dead-subscriptions 39148 6)"
-workspace_29="$(cloudbench_fleet_workspace_name agent-payment-idempotent-abandonment 39148 29)"
-workspace_31="$(cloudbench_fleet_workspace_name agent-payment-production-abandonment 39148 31)"
+owner_a=0123456789abcdef0123456789abcdef
+owner_b=fedcba9876543210fedcba9876543210
+workspace_6="$(cloudbench_fleet_workspace_name plaid-transactions-dead-subscriptions "$owner_a" 6)"
+workspace_29="$(cloudbench_fleet_workspace_name agent-payment-idempotent-abandonment "$owner_a" 29)"
+workspace_31="$(cloudbench_fleet_workspace_name agent-payment-production-abandonment "$owner_a" 31)"
 for workspace in "$workspace_6" "$workspace_29" "$workspace_31"; do
     [ "${#workspace}" -le 48 ] || {
         echo "FAIL: fleet workspace exceeds the 48-character queue namespace ceiling: $workspace" >&2
@@ -76,19 +78,103 @@ done
         echo "FAIL: long benchmark names produced colliding fleet workspaces" >&2
         exit 1
     }
+guest_identity_a="$(cloudbench_fleet_guest_identity "$owner_a")" || {
+    echo "FAIL: could not derive a guest identity from a valid fleet owner token" >&2
+    exit 1
+}
+case "$guest_identity_a" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) : ;;
+    *) echo "FAIL: guest identity is not a 12-hex owner digest: $guest_identity_a" >&2; exit 1 ;;
+esac
 case "$workspace_6:$workspace_29:$workspace_31" in
-    *-39148-6:*-39148-29:*-39148-31) : ;;
+    *"-$guest_identity_a-6:"*"-$guest_identity_a-29:"*"-$guest_identity_a-31") : ;;
     *)
-        echo "FAIL: fleet workspaces did not preserve the complete controller/ordinal suffix" >&2
+        echo "FAIL: fleet workspaces did not preserve the complete owner/ordinal suffix" >&2
         printf '%s\n' "$workspace_6" "$workspace_29" "$workspace_31" >&2
         exit 1
         ;;
 esac
-grep -qF 'cloudbench_fleet_workspace_name "$bench" "$$" "$i"' \
-    "$ROOT_DIR/scripts/run-bench-fleet" || {
-        echo "FAIL: fleet launch path bypasses the suffix-preserving workspace helper" >&2
+case "$workspace_6$workspace_29$workspace_31" in
+    *"$owner_a"*) echo "FAIL: the raw fleet owner token leaked into a shared Temporal queue name" >&2; exit 1 ;;
+esac
+for bad_owner in 39148 "" 0123456789ABCDEF0123456789ABCDEF 0123456789abcdef0123456789abcde; do
+    if cloudbench_fleet_workspace_name browser-event-ticket "$bad_owner" 0 >/dev/null 2>&1; then
+        echo "FAIL: fleet workspace accepted a non-owner-token controller identity: '$bad_owner'" >&2
+        exit 1
+    fi
+done
+
+# Guest workspace names become the shared Temporal Cloud task queue
+# (navi-agent-tasks-<workspace>), the guest's pre-run stale-workflow
+# termination scope and its Steel ownership marker (BENCHMARK_RUN_ID). Sharded
+# disposable controllers boot identically, so two hosts can run the same bench
+# and ordinal under the same controller PID in the same second (run600c: eight
+# canary queues collided across 2-4 shards). Execute the fleet's actual launch
+# derivation twice under one shell PID ($$ is inherited by subshells), as two
+# independent fleets with distinct owners; their workspaces must differ, while
+# the same owner must re-derive its own exact workspace for recovery.
+launch_derivation="$(awk '/# Deterministic per-bench workspace/ {p=1} p {print} p && /^    fi$/ {exit}' \
+    "$ROOT_DIR/scripts/run-bench-fleet")"
+grep -qF 'cloudbench_fleet_workspace_name' <<<"$launch_derivation" || {
+    echo "FAIL: fleet launch path bypasses the suffix-preserving workspace helper" >&2
+    exit 1
+}
+derive_launch_workspace() {  # <fleet-owner-token> -> workspace from the real launch block
+    (
+        FLEET_OWNER_TOKEN="$1"
+        bench=browser-auth-code-never-arrives
+        i=0
+        eval "$launch_derivation" || exit 1
+        printf '%s\n' "$local_ws"
+    )
+}
+host_a_workspace="$(derive_launch_workspace "$owner_a")" \
+    && host_b_workspace="$(derive_launch_workspace "$owner_b")" \
+    && host_a_recovered="$(derive_launch_workspace "$owner_a")" || {
+        echo "FAIL: the fleet launch block could not derive a guest workspace" >&2
         exit 1
     }
+[ "$host_a_workspace" != "$host_b_workspace" ] || {
+    echo "FAIL: two fleets sharing a controller PID derived the same shared Temporal queue: navi-agent-tasks-$host_a_workspace" >&2
+    exit 1
+}
+[ "$host_a_workspace" = "$host_a_recovered" ] || {
+    echo "FAIL: one fleet owner did not re-derive its exact guest workspace ($host_a_workspace != $host_a_recovered)" >&2
+    exit 1
+}
+case "$host_a_workspace:$host_b_workspace" in
+    *"-$$-0:"*|*"-$$-0") echo "FAIL: guest workspace still embeds the controller PID: $host_a_workspace" >&2; exit 1 ;;
+esac
+for workspace in "$host_a_workspace" "$host_b_workspace"; do
+    [ "${#workspace}" -le 48 ] || {
+        echo "FAIL: launch workspace exceeds the 48-character queue namespace ceiling: $workspace" >&2
+        exit 1
+    }
+done
+
+# A direct run-bench-cloud invocation (no fleet-supplied workspace) has the
+# same shared-namespace exposure. Execute its actual fallback twice under one
+# PID and second; the two guests must still get distinct workspaces.
+direct_fallback="$(grep -E '^RUN_WORKSPACE_NAME="\$\{CLOUDBENCH_WORKSPACE_NAME:-' "$ROOT_DIR/scripts/run-bench-cloud")"
+[ "$(printf '%s\n' "$direct_fallback" | grep -c .)" -eq 1 ] || {
+    echo "FAIL: could not extract run-bench-cloud's single workspace fallback" >&2
+    exit 1
+}
+derive_direct_workspace() {
+    ( unset CLOUDBENCH_WORKSPACE_NAME; date() { printf '20261018103918\n'; }; eval "$direct_fallback"; printf '%s\n' "$RUN_WORKSPACE_NAME" )
+}
+direct_a="$(derive_direct_workspace)" && direct_b="$(derive_direct_workspace)" || {
+    echo "FAIL: run-bench-cloud's workspace fallback did not evaluate" >&2
+    exit 1
+}
+[ -n "$direct_a" ] && [ "$direct_a" != "$direct_b" ] || {
+    echo "FAIL: direct cloud runs sharing a PID and second derived one workspace: $direct_a" >&2
+    exit 1
+}
+[ "${#direct_a}" -le 48 ] || {
+    echo "FAIL: direct cloud workspace exceeds the 48-character queue namespace ceiling: $direct_a" >&2
+    exit 1
+}
 
 echo "PASS: cloud benchmarks expose no autoscale off-state"
 

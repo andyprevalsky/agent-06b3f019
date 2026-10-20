@@ -200,6 +200,15 @@ def get_element_description(element: Any, max_length: int = 40) -> str:
 # ========================================
 
 
+class BrowserEvaluateDeadlineExceeded(asyncio.TimeoutError):
+    """The owned Runtime.evaluate deadline expired, before its outer supervisor."""
+
+    def __init__(self, timeout_seconds: float, elapsed_seconds: float):
+        super().__init__("Runtime.evaluate deadline exceeded")
+        self.timeout_seconds = timeout_seconds
+        self.elapsed_seconds = elapsed_seconds
+
+
 async def move_visual_cursor(dom_service: DOMService, x: int, y: int) -> None:
     """Move the injected visual cursor to coordinates."""
     try:
@@ -920,11 +929,13 @@ async def _execute_request_payment_card_action(context: _ActionContext) -> Dict[
             "success": False,
             "error": f"request_payment_card receipt is incomplete: {'; '.join(image_errors)}.",
         }
-    return {
+    from browser_tools.control_projection import OperationalResult
+
+    return OperationalResult({
         "status": "awaiting_payment_card_approval",
-        "payment_request": context.params,
+        "payment_request": payment_request.model_dump(exclude={"tool"}, exclude_unset=True),
         "current_url": context.current_url,
-    }
+    }, field="payment_request", source=payment_request)
 
 
 def _browser_state_action_result(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -1555,15 +1566,16 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
         cdp_session = await context.session.get_or_create_cdp_session(focus=True)
         session_acquire_ms = round((time_module.monotonic() - started) * 1000)
         eval_started = time_module.monotonic()
+        evaluate_deadline = asyncio.timeout(timeout_s)
         try:
-            result = await asyncio.wait_for(
-                cdp_session.cdp_client.send.Runtime.evaluate(
+            async with evaluate_deadline:
+                result = await cdp_session.cdp_client.send.Runtime.evaluate(
                     params={"expression": code, "returnByValue": True, "awaitPromise": True},
                     session_id=cdp_session.session_id,
-                ),
-                timeout=timeout_s,
-            )
+                )
         except asyncio.TimeoutError:
+            if not evaluate_deadline.expired():
+                raise
             eval_ms = round((time_module.monotonic() - eval_started) * 1000)
             logger.warning(
                 "Browser evaluate timed out waiting for Runtime.evaluate",
@@ -1575,7 +1587,7 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
             )
             # Propagate so the outer supervisor classify + hard-recover path
             # runs instead of burning the full action budget on a wedged CDP.
-            raise
+            raise BrowserEvaluateDeadlineExceeded(timeout_s, eval_ms / 1000) from None
         eval_ms = round((time_module.monotonic() - eval_started) * 1000)
         from .service_crypto import mask_secret_values
 
@@ -1697,6 +1709,8 @@ async def execute_action(
     """Resolve private values and report successful use privately to the caller."""
     execution = locals().copy()
     execution.pop("successful_secret_refs")
+    previous_action_step = None
+    action_execution_started = False
     if successful_secret_refs is not None:
         successful_secret_refs.clear()
     refs = dict(secret_refs or {})
@@ -1711,7 +1725,8 @@ async def execute_action(
         # Keep the public boundary safe for adapters without DOMService policy.
         action_policy = getattr(type(dom_service), "model_visible_action_result", None)
         if isinstance(value, dict) and callable(action_policy):
-            return action_policy(dom_service, action_name, value)
+            from browser_tools.control_projection import retain_operational_source
+            return retain_operational_source(value, action_policy(dom_service, action_name, value))
         policy = getattr(type(dom_service), "model_visible_value", None)
         return policy(dom_service, value) if callable(policy) else mask_secret_values(value, refs)
 
@@ -1742,6 +1757,8 @@ async def execute_action(
         execution["action"] = {**action, "params": params}
         execution["model_params"] = model_params
         execution["action_history"] = _PrivateActionHistory(action_history, refs)
+        previous_action_step = action_history.last_action_step()
+        action_execution_started = True
         with secret_logging_context(refs):
             result = await _execute_resolved_action(**execution)
         if result.get("success") and len(used) == 1:
@@ -1759,6 +1776,14 @@ async def execute_action(
     if result.get("success") and successful_secret_refs is not None:
         successful_secret_refs.update(used)
     safe_result = visible(result)
+    completed_action_step = action_history.last_action_step() if action_execution_started else None
+    attach_observation = action_name == "read_browser_state" or (
+        auth_context_for_url is not None and not result.get("status")
+        and (action_name in _INTERACTION_ACTIONS or action_name in _NAVIGATION_ACTIONS or action_name == "evaluate")
+    )
+    if attach_observation and completed_action_step is not None and completed_action_step != previous_action_step:
+        action_history.attach_observed_result(completed_action_step, safe_result)
+
     if used_credential:
         # Credential bookkeeping comes from the private binding inventory,
         # rather than page data. Preserve its exact routing identity even if

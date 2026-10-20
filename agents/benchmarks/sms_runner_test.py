@@ -1932,7 +1932,7 @@ def test_actual_admitted_sms_wrapper_retires_only_verified_exact_roots(monkeypat
     ns={'asyncio':asyncio,'BenchmarkTask':bench.BenchmarkTask,'TaskResult':bench.TaskResult,
         'base_url':'http://localhost:39999','run_single_task':delegate,
         'cloud_batch_cleanup':SimpleNamespace(contract=lambda:None),
-        '_admitted_tasks':admitted,'_admitted_agent_ids':agents,'_evaluated_task_results':evaluated,
+        '_admitted_tasks':admitted,'_entered_task_futures':set(),'_task_root_custody':bench._task_root_custody,'_admitted_agent_ids':agents,'_evaluated_task_results':evaluated,
         '_outcome_signatures':signatures,'_live_task_agent_ids':live,
         '_remember_live_agent':lambda name,aid:live.setdefault(name,[]).append(aid),'_emit_report':lambda **kw:None}
     module=ast.fix_missing_locations(ast.Module(body=[wrapper],type_ignores=[]))

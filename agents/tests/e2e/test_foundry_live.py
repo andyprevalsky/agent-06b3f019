@@ -1,12 +1,14 @@
 """Opt-in live Foundry Responses contract: text, forced tool, and JSON schema.
 
-Run from the repository root with Azure credentials available:
+Every configured region (AZURE_FOUNDRY_* and AZURE_FOUNDRY_*_2.._9) is probed
+on its own. Run from the repository root with Azure credentials available:
 RUN_FOUNDRY_LIVE=1 PYTHONPATH=agents python3 -m pytest -q agents/tests/e2e/test_foundry_live.py
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -14,9 +16,10 @@ from pathlib import Path
 import pytest
 from dotenv import load_dotenv
 
+from providers.rose import foundry
 from providers.rose.client import RoseClient
-from providers.rose.foundry import foundry_complete, foundry_configured
-from providers.rose.pools import get_pool
+from providers.rose.foundry import FOUNDRY_REGION_ENV_NAMES, foundry_complete, foundry_configured, foundry_regions
+from providers.rose.pools import foundry_model, get_pool
 from providers.rose.structured_output import StructuredOutputAccumulator
 
 
@@ -68,6 +71,37 @@ async def test_foundry_live_responses_contract():
     repo = Path(__file__).resolve().parents[3]
     load_dotenv(repo / "agents" / ".env", override=False)
     assert foundry_configured(get_pool("rose-1-ultra")), "Foundry endpoint and key are required"
+    ultra_model = foundry_model(get_pool("rose-1-ultra"))
+    for region in foundry_regions():
+        if not foundry._region_deployments(region, ultra_model):
+            continue  # This region serves no GPT-6 Sol deployment.
+        with _only_region(region):
+            await _probe_contract()
+            print(f"region {region.slot} ({region.host}): Foundry Responses contract passed")
+    await _rose_ultra_route()
+
+
+@contextlib.contextmanager
+def _only_region(region):
+    """Pin the route to one configured region by making it the sole region."""
+    saved = {name: os.environ.get(name) for name in FOUNDRY_REGION_ENV_NAMES}
+    for name in FOUNDRY_REGION_ENV_NAMES:
+        os.environ.pop(name, None)
+    os.environ["AZURE_FOUNDRY_ENDPOINT"] = region.endpoint
+    os.environ["AZURE_FOUNDRY_API_KEY"] = region.api_key
+    os.environ["AZURE_FOUNDRY_DEPLOYMENTS"] = ",".join(region.deployments)
+    foundry._cooldown_until.clear()
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+async def _probe_contract() -> None:
     await _probe("text")
     await _probe(
         "tool",
@@ -102,6 +136,8 @@ async def test_foundry_live_responses_contract():
         },
     )
 
+
+async def _rose_ultra_route() -> None:
     gpt_key = os.environ.get("GPT_API_KEY")
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
     try:

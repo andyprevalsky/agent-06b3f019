@@ -1,0 +1,23 @@
+{
+  "schema": "rose-swap-harness-private-v1",
+  "old_devbox_id": "c5f40427-00e7-4554-b3a8-ef48bd5f0222",
+  "bucket": "trace-archive",
+  "object_key": "swap-harness-private/c5f40427-00e7-4554-b3a8-ef48bd5f0222/benchmark-infra-recovery-delta-fcfbce8e1b5bd171ba49818b204ee3b58b7d39a437f1c22fdd3018827f99123f.tar.gz.aesgcm",
+  "encrypted_bytes": 1248425,
+  "sha256": "fcfbce8e1b5bd171ba49818b204ee3b58b7d39a437f1c22fdd3018827f99123f",
+  "remote_full_readback_verified": true,
+  "file_count": 91,
+  "roots": [
+    "/home/boxes/rose/.context/fleet/runs/20261012-223552-3311793",
+    "/home/boxes/rose/.git/cloudbench-fleet-audits/cf682c265d574835995c4afc2c334104",
+    "/home/boxes/rose/.git/cloudbench-fleet-ownership/38970c3c5c824638a2e1ccc90e6dcd4f",
+    "/home/boxes/rose/.context/swap-harness/recovery-cf682c.log",
+    "/home/boxes/rose/.context/swap-harness/recovery-38970c3.log",
+    "/home/boxes/rose/.context/swap-harness/owned-native-before.private.json"
+  ],
+  "key_source": "authoritative agents/.env BACKEND_API_KEY",
+  "restore": "Read ROSESWAP1 magic, 4-byte big-endian JSON header length and JSON header; derive AES key with HKDF-SHA256 salt/header hkdf_info and authoritative BACKEND_API_KEY; AES-GCM nonce from header, header bytes as AAD, final 16 bytes as tag. Decrypt to gzip tar. Extract privately into an isolated recovery directory; never overwrite live .git or runtime identities.",
+  "authenticated_decryption_verified": true,
+  "decrypted_gzip_sha256": "6022f6d2ad765c5ee56ce93cbd4f41c40fba01b297503918c956c29cb4e9d46e",
+  "replacement_download_decryption_required_before_archival": true
+}

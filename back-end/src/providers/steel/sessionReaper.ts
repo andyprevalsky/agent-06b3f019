@@ -22,6 +22,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../database';
 import { createLogger } from '../logger';
 import { releaseSteelRemoteSession, steel } from './session';
+import { reconcileSteelCandidateCleanup } from './candidateCleanup';
 import {
   SHARED_STEEL_IDENTITY,
   inFlightSteelSessionIds,
@@ -195,6 +196,7 @@ export async function runSteelSessionReaperWithLease(): Promise<SteelReaperSumma
   const ownerId = randomUUID();
   if (!(await acquireLease(ownerId))) return null;
   try {
+    await reconcileSteelCandidateCleanup();
     return await reconcileOrphanedSteelSessions();
   } finally {
     await releaseLease(ownerId).catch((error: unknown) => {

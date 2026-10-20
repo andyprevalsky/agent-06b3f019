@@ -1334,13 +1334,13 @@ async def test_worker_metrics_stop_prevents_later_peer_and_provider_requests():
     from unittest.mock import patch
     import worker
 
-    for phase in ("memory", "admission", "list", "start", "stop"):
+    for phase in ("fleet", "leadership", "list", "start", "stop"):
         stopped = asyncio.Event()
         calls = []
 
         async def get(url, **kwargs):
             calls.append(("get", url))
-            if phase in ("memory", "admission", "list"):
+            if phase in ("fleet", "leadership", "list"):
                 stopped.set()
             return SimpleNamespace(
                 status_code=200,
@@ -1370,23 +1370,501 @@ async def test_worker_metrics_stop_prevents_later_peer_and_provider_requests():
                     "FLY_API_TOKEN": "fixture",
                     "FLY_MACHINE_ID": "fixture-owner",
                     "TEMPORAL_WORKER_SURFACE_HASH": "",
+                    "FLY_PRIVATE_IP": "::5",
                 },
             ),
             patch.object(worker, "_get_peer_ips", return_value=["::1", "::2", "::3", "::4"]),
         ):
-            if phase == "memory":
-                await worker._get_fleet_memory_used_percent(http, 20, stopped)
-            elif phase == "admission":
-                await worker._get_fleet_activity_admission_unavailable_count(
-                    http,
-                    local_activity_admission_open=True,
-                    current_machines=4,
-                    stop_event=stopped,
-                )
+            if phase == "fleet":
+                await worker._scrape_fleet_peer_views(http, ["::1", "::2", "::3", "::4"], stopped)
+            elif phase == "leadership":
+                await worker._resolve_autoscaler_role(http, stopped)
             else:
                 await worker._scale_fleet(4 if phase == "start" else 0, http, stopped)
         expected = ["get"] * 5 + ["post"] if phase == "stop" else (["get", "post"] if phase == "start" else ["get"])
         assert [method for method, _ in calls] == expected, f"{phase}: another fleet request began after shutdown"
+
+
+def _queue_metrics_fixture(
+    worker,
+    *,
+    rate_limited_counts: int,
+    workflow_count: int = 0,
+    backlog: int = 0,
+    describe_rate_limited: int = 0,
+    patch_publication: bool = True,
+):
+    """Patch everything except the Temporal visibility calls under test."""
+    from contextlib import ExitStack
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from temporalio.service import RPCError, RPCStatusCode
+
+    calls = []
+    scaled = []
+
+    async def count_workflow_executions(request, **kwargs):
+        calls.append("count")
+        if calls.count("count") <= rate_limited_counts:
+            raise RPCError("namespace rate limit exceeded", RPCStatusCode.RESOURCE_EXHAUSTED, b"")
+        return SimpleNamespace(count=workflow_count)
+
+    async def describe_task_queue(request, **kwargs):
+        calls.append("describe")
+        if calls.count("describe") <= describe_rate_limited:
+            raise RPCError("namespace rate limit exceeded", RPCStatusCode.RESOURCE_EXHAUSTED, b"")
+        if not backlog:
+            return SimpleNamespace(task_queue_status=None)
+        return SimpleNamespace(task_queue_status=SimpleNamespace(backlog_count_hint=backlog))
+
+    async def sdk_metrics(http):
+        return {}
+
+    async def scale_fleet(desired, http, stop_event=None):
+        scaled.append(desired)
+
+    client = SimpleNamespace(
+        workflow_service=SimpleNamespace(
+            count_workflow_executions=count_workflow_executions,
+            describe_task_queue=describe_task_queue,
+        )
+    )
+    stack = ExitStack()
+    patches = [
+        ("_get_sdk_worker_metrics", sdk_metrics),
+        ("_get_machine_memory_used_percent", lambda: 10.0),
+        ("_scale_fleet", scale_fleet),
+    ]
+    if patch_publication:
+        for name in ("set_queue_observation", "set_local_autoscaler_metrics", "set_autoscaler_role"):
+            patches.append((name, lambda *args, **kwargs: None))
+    try:
+        for name, value in patches:
+            stack.enter_context(patch.object(worker, name, value))
+        # Deterministic full jitter: always take the upper edge of each window.
+        stack.enter_context(
+            patch.object(worker, "_AUTOSCALER_RANDOM", SimpleNamespace(uniform=lambda low, high: high), create=True)
+        )
+    except BaseException:
+        stack.close()  # never leak a partial patch set into later tests
+        raise
+    admission = SimpleNamespace(
+        snapshot=lambda: {
+            "activity_admission_open": True,
+            "activity_admission_memory_percent": 10.0,
+            "activity_admission_close_memory_percent": 80.0,
+            "activity_admission_open_memory_percent": 75.0,
+        }
+    )
+    return SimpleNamespace(client=client, admission=admission, calls=calls, scaled=scaled, stack=stack)
+
+
+def _peer_view(*, surface="gen-a", eligible=True, age=0.5, queue=None, memory=30.0, admission=True, slots=0):
+    """One peer's /autoscaler/peer answer."""
+    return {
+        "surface_hash": surface,
+        "leader_eligible": eligible,
+        "heartbeat_age_seconds": age,
+        "role": "leader",
+        "machine_memory_used_percent": memory,
+        "activity_admission_open": admission,
+        "activity_slots_used": slots,
+        "queue": queue,
+    }
+
+
+def _peer_transport(views, requests):
+    """Serve each peer's view over the 6PN; a None view is an unreachable peer."""
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.url.host, request.url.path))
+        view = views.get(request.url.host)
+        if view is None:
+            raise httpx.ConnectError("peer unreachable", request=request)
+        if view == "legacy" or request.url.path != "/autoscaler/peer":
+            return httpx.Response(404)
+        return httpx.Response(200, json=view)
+
+    return httpx.MockTransport(handler)
+
+
+def _fleet_fixture(worker, *, me, peers, views, surface="gen-a"):
+    """Simulate this worker on a Fly app: DNS peers plus their autoscaler views."""
+    from contextlib import ExitStack
+    from unittest.mock import patch
+
+    import httpx
+
+    requests = []
+    real_client = httpx.AsyncClient
+    transport = _peer_transport(views, requests)
+    stack = ExitStack()
+    try:
+        stack.enter_context(patch.object(worker, "_get_peer_ips", lambda app: list(peers)))
+        stack.enter_context(
+            patch.object(worker.httpx, "AsyncClient", lambda **kwargs: real_client(transport=transport, **kwargs))
+        )
+        stack.enter_context(
+            patch_env(FLY_APP_NAME="fixture-app", FLY_PRIVATE_IP=me, TEMPORAL_WORKER_SURFACE_HASH=surface)
+        )
+    except BaseException:
+        stack.close()
+        raise
+    return requests, stack
+
+
+async def _run_queue_metrics_until_waits(worker, client, admission, wait_count: int) -> list[float]:
+    """Drive poll_queue_metrics, recording each requested wait without sleeping."""
+    from unittest.mock import patch
+
+    stop = asyncio.Event()
+    waits: list[float] = []
+    original_wait_for = asyncio.wait_for
+
+    async def recording_wait_for(awaitable, timeout=None):
+        if getattr(awaitable, "cr_code", None) is not stop.wait.__func__.__code__:
+            return await original_wait_for(awaitable, timeout)
+        awaitable.close()
+        waits.append(timeout)
+        if len(waits) >= wait_count:
+            stop.set()
+        raise asyncio.TimeoutError
+
+    with patch.object(worker.asyncio, "wait_for", recording_wait_for):
+        await original_wait_for(
+            worker.poll_queue_metrics(client, "fixture-ns", "fixture-queue", admission, 10, stop),
+            timeout=10,
+        )
+    return waits
+
+
+async def test_autoscaler_backs_off_on_namespace_rate_limit_and_recovers():
+    """ResourceExhausted must back off exponentially, then return to the base cadence.
+
+    run600c: 600 guests plus 25 prod workers retried CountWorkflowExecutions every
+    second against the shared Visibility API budget; ~90% of cycles were rejected
+    for 35 minutes because each rejection was retried at full cadence.
+    """
+    import worker
+
+    fx = _queue_metrics_fixture(worker, rate_limited_counts=4)
+    with fx.stack, patch_env(AUTOSCALER_POLL_INTERVAL_SECONDS=None, AUTOSCALER_QUEUE_METRICS=None, FLY_APP_NAME=None):
+        waits = await _run_queue_metrics_until_waits(worker, fx.client, fx.admission, 6)
+    assert waits == [2.0, 4.0, 8.0, 16.0, 1.0, 1.0], waits
+    # A rejected count ends the cycle; it must not also spend two describe calls.
+    calls = fx.calls
+    assert calls == ["count"] * 5 + ["describe", "describe", "count", "describe", "describe"], calls
+    assert all(delay <= worker.AUTOSCALER_RATE_LIMIT_BACKOFF_MAX_SECS for delay in waits)
+
+
+async def test_autoscaler_queue_observation_honors_budgeted_cadence_and_opt_out():
+    """Benchmark guests poll at the controller budget; unread clones never poll."""
+    import worker
+
+    fx = _queue_metrics_fixture(worker, rate_limited_counts=0)
+    with fx.stack, patch_env(AUTOSCALER_POLL_INTERVAL_SECONDS="90", AUTOSCALER_QUEUE_METRICS=None, FLY_APP_NAME=None):
+        waits = await _run_queue_metrics_until_waits(worker, fx.client, fx.admission, 3)
+    # One random start phase within the interval, then the budgeted interval.
+    assert waits == [90.0, 90.0, 90.0], waits
+    assert fx.calls.count("count") == 2, fx.calls
+
+    for invalid in ("0", "-5", "abc", "inf", "nan"):
+        with patch_env(AUTOSCALER_POLL_INTERVAL_SECONDS=invalid):
+            assert worker._autoscaler_poll_interval_seconds() == 1.0, invalid
+    with patch_env(AUTOSCALER_POLL_INTERVAL_SECONDS=None):
+        assert worker._autoscaler_poll_interval_seconds() == 1.0
+
+    fx = _queue_metrics_fixture(worker, rate_limited_counts=0)
+    client, admission, calls = fx.client, fx.admission, fx.calls
+    stop = asyncio.Event()
+    with fx.stack, patch_env(AUTOSCALER_QUEUE_METRICS="0"):
+        task = asyncio.create_task(
+            worker.poll_queue_metrics(client, "fixture-ns", "fixture-queue", admission, 10, stop)
+        )
+        await asyncio.sleep(0.05)
+        assert not task.done(), "an opted-out worker must still own its metrics task until shutdown"
+        stop.set()
+        await asyncio.wait_for(task, timeout=2)
+    assert calls == [], f"an opted-out worker spent namespace visibility calls: {calls}"
+
+
+async def test_autoscaler_followers_spend_no_visibility_calls_and_mirror_the_leader():
+    """Only the leader's desired count drives scaling, so only the leader observes Temporal.
+
+    Every prod worker spent CountWorkflowExecutions + 2 DescribeTaskQueue per
+    second on the namespace's shared Visibility API budget (~75 calls/s at 25
+    machines, ~120/s at 40). A follower publishes its own readings and mirrors
+    the leader's observation instead.
+    """
+    import health_server
+    import worker
+
+    leader_queue = {
+        "backlog": 7,
+        "workflow_count": 11,
+        "desired_machines": 9,
+        "current_machines": 3,
+        "age_seconds": 0.5,
+        "source": "self",
+    }
+    views = {"fdaa::1": _peer_view(queue=leader_queue), "fdaa::3": _peer_view()}
+    fx = _queue_metrics_fixture(worker, rate_limited_counts=0, patch_publication=False)
+    requests, fleet = _fleet_fixture(worker, me="fdaa::2", peers=["fdaa::3", "fdaa::1", "fdaa::2"], views=views)
+    with fx.stack, fleet, patch_env(AUTOSCALER_POLL_INTERVAL_SECONDS=None, AUTOSCALER_QUEUE_METRICS=None):
+        waits = await _run_queue_metrics_until_waits(worker, fx.client, fx.admission, 3)
+    snapshot = health_server.get_queue_metrics_snapshot()
+    view = health_server.autoscaler_peer_view()
+    assert fx.calls == [], f"a follower spent namespace visibility calls: {fx.calls}"
+    assert fx.scaled == [], fx.scaled
+    assert waits == [1.0, 1.0, 1.0], waits
+    assert snapshot["autoscaler_role"] == "follower" and snapshot["autoscaler_is_leader"] is False, snapshot
+    assert snapshot["task_queue_backlog"] == 7 and snapshot["running_workflow_count"] == 11, snapshot
+    assert snapshot["task_queue_metrics_source"] == "leader" and snapshot["desired_machine_count"] == 9, snapshot
+    # The follower's own readings stay published for the leader's fleet view.
+    assert view["machine_memory_used_percent"] == 10.0 and view["activity_admission_open"] is True, view
+    # A stopped observer must never remain the peer others defer to.
+    assert view["leader_eligible"] is False, view
+    # Only lower peers decide leadership; the higher peer is the leader's to scrape.
+    assert {host for host, _ in requests} == {"fdaa::1"}, requests
+
+    # Compute-only workers (benchmark guests) keep observing: their consumer is
+    # an external controller reading that exact machine's desired count.
+    fx = _queue_metrics_fixture(worker, rate_limited_counts=0, patch_publication=False)
+    requests, fleet = _fleet_fixture(worker, me="fdaa::2", peers=["fdaa::1", "fdaa::2"], views=views)
+    from unittest.mock import patch
+
+    with (
+        fx.stack,
+        fleet,
+        patch.object(worker, "AUTOSCALER_ACTUATE", False),
+        patch_env(AUTOSCALER_POLL_INTERVAL_SECONDS=None, AUTOSCALER_QUEUE_METRICS=None),
+    ):
+        await _run_queue_metrics_until_waits(worker, fx.client, fx.admission, 2)
+    assert fx.calls == ["count", "describe", "describe"] * 2, fx.calls
+    assert fx.scaled == [], fx.scaled
+    health_server.set_queue_metrics(0, 0, 2, 1)
+
+
+async def test_autoscaler_leader_observes_and_counts_only_its_own_generation():
+    """The leader observes every cycle and aggregates only its generation's peers."""
+    import health_server
+    import worker
+
+    views = {
+        "fdaa::2": _peer_view(memory=91.0),
+        "fdaa::3": _peer_view(surface="gen-old", memory=99.0, admission=False),
+        "fdaa::4": None,
+    }
+    fx = _queue_metrics_fixture(worker, rate_limited_counts=0, workflow_count=5, patch_publication=False)
+    requests, fleet = _fleet_fixture(
+        worker, me="fdaa::1", peers=["fdaa::1", "fdaa::2", "fdaa::3", "fdaa::4"], views=views
+    )
+    with fx.stack, fleet, patch_env(AUTOSCALER_POLL_INTERVAL_SECONDS=None, AUTOSCALER_QUEUE_METRICS=None):
+        waits = await _run_queue_metrics_until_waits(worker, fx.client, fx.admission, 2)
+    snapshot = health_server.get_queue_metrics_snapshot()
+    assert fx.calls == ["count", "describe", "describe"] * 2, fx.calls
+    assert waits == [1.0, 1.0], waits
+    assert snapshot["autoscaler_role"] == "leader" and snapshot["autoscaler_is_leader"] is True, snapshot
+    assert snapshot["task_queue_backlog"] == 0 and snapshot["task_queue_metrics_source"] == "self", snapshot
+    # Self + same-generation + unverified peers; the draining old generation is not this fleet.
+    assert snapshot["current_machine_count"] == 3, snapshot
+    # Same-generation peer pressure counts; another generation's does not.
+    assert snapshot["autoscaler_memory_signal_percent"] == 91.0, snapshot
+    assert fx.scaled == [], f"memory pressure with running workflows must hold, not scale: {fx.scaled}"
+    assert {host for host, _ in requests} == {"fdaa::2", "fdaa::3", "fdaa::4"}, requests
+    health_server.set_queue_metrics(0, 0, 2, 1)
+
+
+async def test_autoscaler_unknown_leadership_observes_at_reduced_cadence_without_actuating():
+    """Unverifiable leadership must keep a budgeted observer, never zero and never two actuators.
+
+    An unreachable lower peer may be a live leader behind a GIL-starved health
+    thread, so this worker must not actuate; but it may also be dead, so it must
+    still observe at a reduced cadence.
+    """
+    import health_server
+    import worker
+
+    from unittest.mock import patch
+
+    fx = _queue_metrics_fixture(worker, rate_limited_counts=0, workflow_count=40, backlog=500, patch_publication=False)
+    _, fleet = _fleet_fixture(worker, me="fdaa::5", peers=["fdaa::2", "fdaa::5"], views={"fdaa::2": None})
+    with (
+        fx.stack,
+        fleet,
+        patch.object(worker, "_last_scale_up_time", 0.0),
+        patch_env(AUTOSCALER_POLL_INTERVAL_SECONDS=None, AUTOSCALER_QUEUE_METRICS=None),
+    ):
+        waits = await _run_queue_metrics_until_waits(worker, fx.client, fx.admission, 2)
+    snapshot = health_server.get_queue_metrics_snapshot()
+    assert fx.calls == ["count", "describe", "describe"] * 2, fx.calls
+    assert waits == [2 * worker.AUTOSCALER_UNKNOWN_LEADER_POLL_SECS] * 2, waits
+    assert fx.scaled == [], f"an unverified leader actuated the fleet: {fx.scaled}"
+    # 500 per describe (activity + workflow); the scale-up is computed and published, not applied.
+    assert snapshot["autoscaler_role"] == "unknown" and snapshot["task_queue_backlog"] == 1000, snapshot
+    assert snapshot["desired_machine_count"] == worker.MAX_MACHINES, snapshot
+    health_server.set_queue_metrics(0, 0, 2, 1)
+
+
+async def test_autoscaler_leadership_never_leaves_a_generation_without_an_observer():
+    """Exhaustively: every live generation keeps >=1 observer and at most one leader."""
+    import itertools
+
+    import httpx
+    import worker
+    from unittest.mock import patch
+
+    ips = ["fdaa::1", "fdaa::2", "fdaa::3", "fdaa::4"]
+    for generations in (("a", "a", "a", "a"), ("b", "a", "b", "a"), ("a", "b", "b", "a")):
+        for dead in itertools.product([False, True], repeat=len(ips)):
+            views = {
+                ip: _peer_view(surface=gen) for ip, gen, gone in zip(ips, generations, dead, strict=True) if not gone
+            }
+            roles: dict[str, list[str]] = {}
+            for ip, gen in zip(ips, generations, strict=True):
+                if ip not in views:
+                    continue
+                with (
+                    patch.object(worker, "_get_peer_ips", lambda app: list(ips)),
+                    patch_env(FLY_APP_NAME="fixture-app", FLY_PRIVATE_IP=ip, TEMPORAL_WORKER_SURFACE_HASH=gen),
+                ):
+                    async with httpx.AsyncClient(transport=_peer_transport(views, [])) as http:
+                        role = await worker._resolve_autoscaler_role(http, asyncio.Event())
+                roles.setdefault(gen, []).append(role.role)
+            for gen, members in roles.items():
+                case = f"generations={generations} dead={dead} gen={gen} roles={members}"
+                assert any(role in ("leader", "unknown") for role in members), f"zero observers: {case}"
+                assert members.count("leader") <= 1, f"two actuators: {case}"
+                if not any(dead):
+                    assert members.count("leader") == 1 and "unknown" not in members, case
+
+    async def role_for(me, peers, views, **env):
+        with (
+            patch.object(worker, "_get_peer_ips", lambda app: list(peers)),
+            patch_env(
+                FLY_APP_NAME=env.get("app", "fixture-app"),
+                FLY_PRIVATE_IP=me,
+                TEMPORAL_WORKER_SURFACE_HASH=env.get("surface", "gen-a"),
+            ),
+        ):
+            async with httpx.AsyncClient(transport=_peer_transport(views, [])) as http:
+                return await worker._resolve_autoscaler_role(http, asyncio.Event())
+
+    # A lower peer whose loop stopped publishing is not provably dead: never actuate over it.
+    stale = await role_for("fdaa::2", ["fdaa::1", "fdaa::2"], {"fdaa::1": _peer_view(age=600.0)})
+    assert stale.role == "unknown", stale
+    # Standby, opted-out and compute-only peers are not candidates.
+    standby = await role_for("fdaa::2", ["fdaa::1", "fdaa::2"], {"fdaa::1": _peer_view(eligible=False)})
+    assert standby.role == "leader", standby
+    # Pre-upgrade peers expose no view: unverified, not absent.
+    legacy = await role_for("fdaa::2", ["fdaa::1", "fdaa::2"], {"fdaa::1": "legacy"})
+    assert legacy.role == "unknown", legacy
+    # DNS failure used to make every worker a leader at once (split-brain actuation).
+    assert (await role_for("fdaa::2", [], {})).role == "unknown"
+    assert (await role_for("", ["fdaa::1"], {})).role == "unknown"
+    # Off Fly (local dev, isolated benchmark guests) the worker is the only observer.
+    assert (await role_for("fdaa::2", ["fdaa::1"], {}, app="")).role == "leader"
+    # A non-canonical private IP still orders and matches its canonical DNS record.
+    upper = await role_for("FDAA:0:0:0:0:0:0:1", ["fdaa::1", "fdaa::2"], {"fdaa::2": _peer_view()})
+    assert upper.role == "leader", upper
+
+
+async def test_autoscaler_publishes_fresh_local_readings_while_temporal_is_throttled():
+    """Memory/admission readings must not freeze behind failing Temporal calls.
+
+    They used to be published only after all three visibility calls succeeded,
+    so under namespace throttling every worker's readings froze and the leader
+    scaled (and chose stop candidates) on stale peer data.
+    """
+    import itertools
+    from unittest.mock import patch
+
+    import health_server
+    import worker
+
+    fx = _queue_metrics_fixture(worker, rate_limited_counts=10**6, patch_publication=False)
+    readings = itertools.count(1)
+    stop = asyncio.Event()
+    with (
+        fx.stack,
+        patch.object(worker, "_get_machine_memory_used_percent", lambda: float(next(readings))),
+        patch.object(worker, "LOCAL_TELEMETRY_INTERVAL_SECS", 0.01),
+        patch_env(AUTOSCALER_POLL_INTERVAL_SECONDS="0.05", AUTOSCALER_QUEUE_METRICS=None, FLY_APP_NAME=None),
+    ):
+        health_server.set_queue_metrics(0, 0, 2, 1)
+        task = asyncio.create_task(
+            worker.poll_queue_metrics(fx.client, "fixture-ns", "fixture-queue", fx.admission, 10, stop)
+        )
+        await asyncio.sleep(0.4)
+        published = health_server.autoscaler_peer_view()
+        text = health_server.app.test_client().get("/metrics").get_data(as_text=True)
+        stop.set()
+        await asyncio.wait_for(task, timeout=5)
+    assert fx.calls and set(fx.calls) == {"count"}, fx.calls
+    assert published["machine_memory_used_percent"] >= 5, published
+    assert published["heartbeat_age_seconds"] < 1, published
+    # Never observed successfully: unknown, not an idle queue.
+    assert "task_queue_backlog NaN" in text and "task_queue_metrics_present 0" in text, text
+    health_server.set_queue_metrics(0, 0, 2, 1)
+
+
+async def test_autoscaler_missing_backlog_is_unknown_and_never_drives_scale_down():
+    """A rejected DescribeTaskQueue used to count as backlog 0 and could start a scale-down."""
+    import time
+    from unittest.mock import patch
+
+    import health_server
+    import worker
+
+    views = {"fdaa::2": _peer_view(memory=20.0), "fdaa::3": _peer_view(memory=20.0)}
+    fx = _queue_metrics_fixture(
+        worker, rate_limited_counts=0, workflow_count=5, describe_rate_limited=10**6, patch_publication=False
+    )
+    _, fleet = _fleet_fixture(worker, me="fdaa::1", peers=["fdaa::1", "fdaa::2", "fdaa::3"], views=views)
+    with (
+        fx.stack,
+        fleet,
+        patch.object(worker, "MIN_MACHINES", 1),
+        # As if the queue had looked idle for an hour before throttling began.
+        patch.object(worker, "_backlog_zero_since", time.monotonic() - 3600),
+        patch_env(AUTOSCALER_POLL_INTERVAL_SECONDS=None, AUTOSCALER_QUEUE_METRICS=None),
+    ):
+        waits = await _run_queue_metrics_until_waits(worker, fx.client, fx.admission, 2)
+        zero_since = worker._backlog_zero_since
+    snapshot = health_server.get_queue_metrics_snapshot()
+    # A rejected describe ends the cycle instead of spending the second one.
+    assert fx.calls == ["count", "describe"] * 2, fx.calls
+    assert waits == [2.0, 4.0], waits
+    assert fx.scaled == [], f"an unobserved backlog drove scaling: {fx.scaled}"
+    assert zero_since is None, "an unknown backlog must not extend the zero-backlog window"
+    assert "task_queue_backlog" not in snapshot and snapshot["autoscaler_role"] == "leader", snapshot
+    health_server.set_queue_metrics(0, 0, 2, 1)
+
+
+def patch_env(**values):
+    """patch.dict for os.environ where None removes the variable."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def manager():
+        saved = {key: os.environ.get(key) for key in values}
+        try:
+            for key, value in values.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            yield
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    return manager()
 
 
 async def test_autoscaler_scale_down_never_stops_machines_with_in_flight_activities():
@@ -2486,8 +2964,40 @@ async def run_all_tests():
     )
     await r.record_async("worker_health_bind_failure", test_worker_health_bind_failure_stops_before_temporal_connect)
     await r.record_async(
+        "autoscaler_backs_off_on_namespace_rate_limit",
+        test_autoscaler_backs_off_on_namespace_rate_limit_and_recovers,
+    )
+    await r.record_async(
+        "autoscaler_budgeted_cadence_and_opt_out",
+        test_autoscaler_queue_observation_honors_budgeted_cadence_and_opt_out,
+    )
+    await r.record_async(
         "autoscaler_scale_down_never_stops_machines_with_in_flight_activities",
         test_autoscaler_scale_down_never_stops_machines_with_in_flight_activities,
+    )
+    await r.record_async(
+        "autoscaler_followers_spend_no_visibility_calls",
+        test_autoscaler_followers_spend_no_visibility_calls_and_mirror_the_leader,
+    )
+    await r.record_async(
+        "autoscaler_leader_observes_its_generation",
+        test_autoscaler_leader_observes_and_counts_only_its_own_generation,
+    )
+    await r.record_async(
+        "autoscaler_unknown_leadership_reduced_cadence",
+        test_autoscaler_unknown_leadership_observes_at_reduced_cadence_without_actuating,
+    )
+    await r.record_async(
+        "autoscaler_leadership_never_zero_observers",
+        test_autoscaler_leadership_never_leaves_a_generation_without_an_observer,
+    )
+    await r.record_async(
+        "autoscaler_local_readings_fresh_while_throttled",
+        test_autoscaler_publishes_fresh_local_readings_while_temporal_is_throttled,
+    )
+    await r.record_async(
+        "autoscaler_missing_backlog_is_unknown",
+        test_autoscaler_missing_backlog_is_unknown_and_never_drives_scale_down,
     )
     teardown_mock()
     return r.summary()

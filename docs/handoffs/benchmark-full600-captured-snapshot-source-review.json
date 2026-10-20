@@ -1,0 +1,102 @@
+{
+  "actual_captured_checkout_recipe_receipt": "/home/boxes/rose/.context/stress600-root/final-captured3cbe-actual-recipe.safe.json",
+  "actual_captured_checkout_recipe_receipt_sha256": "7b060ec44855db8c1cebe8b30e748c612cdea8c5a4496b710f92c1b8e23c96f0",
+  "actual_recipe_input_count": 25,
+  "actual_recipe_input_hashes": {
+    "back-end/package.json": "2b466d4362ccb48ae00a7d3f043ce49f3ed423a27c7bcbe6a207b7c3da72d2d1",
+    "back-end/scripts/apply-local-workflow-ddl.sh": "b349eb7350578aca283969360749e094b6f78b4b64b9707d74ac13ab47d96f36",
+    "back-end/scripts/ensure-agent-network-grep-indexes.ts": "653de4f229b9ea3bb71f8f6d2cc5de113d63e37e85899efb239f559d42edd709",
+    "back-end/scripts/ensure-fast-mode-cache-schema.ts": "085230371c95de56845ceb3bd4eef4948144cfab31231d4e06ac527320463f8f",
+    "front-end/package.json": "ac5d4c244d39877641ed9753cb18511ba958df94d0887d574ca189207c75a3c1",
+    "package.json": "fd89d0959d0217634caa3ea4757ff1bd5a040d602fd86b727574621663a2a219",
+    "scripts/cloudbench-campaign-mutation.py": "0dbafc9513c13e75e7ac18b172b2a41e9e053c835ea8d6dfb26e7161b3c3a2ad",
+    "scripts/cloudbench-guest-recovery.py": "d5c0a36d9eb903998fa156ee0d22fa78c8cdedba73d0798d28fc6613c890905b",
+    "scripts/cloudbench-port-lease.py": "183116af91e2044a91c3d497d4229db78caa8c867af408a3448fb15c58b021e1",
+    "scripts/cloudbench-run.sh": "55d4faec82afa676ecd6dde64dc5685508bc0f3c4ad42e466709b1a95a53635f",
+    "scripts/cloudbench-script-snapshot.py": "fc6fabcdf8724d28d5bedbf5c87019ca92d930beafbf817b489cc405d186bfbd",
+    "scripts/cloudbench-status-server.py": "6901d035b4b0ac76fff8faafa0fa015e69671c12ea3793d423277e79d05eadc3",
+    "scripts/ensure-workspace-dependencies.sh": "c5c13af190c43ec8dc88f743ed481c8c1121ad390c68bdfa9e98b89eb3970cb1",
+    "scripts/lib/fast-mode-cache-schema.sh": "154637d61a8728bbfb3dfe286b5202c9e89f5fdee8a2b168ffb76e715612590a",
+    "scripts/lib/local-pg-image.sh": "a5a3b3f57eaa4fc2fe1c2a32b65c830bd2a4d619bc2ec040608e2d02b23bb889",
+    "scripts/lib/ngrok-tunnel.sh": "d53a51a4e43e956ccd36f997fcfa15ffef2bcb9d33e3533e8c1673eda11e561e",
+    "scripts/lib/run-context.sh": "0be5db39d87319d11e3d2afc4ccea97581f46754021bee0f3020939788a0d22a",
+    "scripts/lib/run-process-cleanup.sh": "ecc491254ef4e0e7b1712215757045ddf797ca3414c2185e55e09e346690a338",
+    "scripts/lib/run-service-readiness.sh": "3b8a264ea7a785219faea9fcd1cf2ab37a53060a37951f95d4c0a00688d819b6",
+    "scripts/lib/seed-cache.sh": "87a4b83a73c58f67513b2e3402eeb27005a7c9bf7ef78dae039aa4161244e65e",
+    "scripts/lib/workspace-env.sh": "ea649a1212dab724c16f3da995c796ff099caa5dabbcb106c6a359260b5bc9d2",
+    "scripts/run-bench-campaign.py": "4a81113129734fcf3e13457472e204b6f40316230da3e61afadc58e3778a8a60",
+    "scripts/run-bench-cloud": "279aa310b9dda8e9ecdca5e1370657cb03f58790685b01cbb359c84b9facbabe",
+    "scripts/run-bench-fleet": "ed3c3d1ff79b5d10811e5fac731405e4609e8556bd862b03a52095f3f5e8ac97",
+    "scripts/run.sh": "dc24bbb33bd7913e7f206ae2a148f09f387399cc3e9fbd7bfbaf97c7ebc676cc"
+  },
+  "base_source": "074c17bfd8019c59647e3ed4485c0b5a0504aed8",
+  "exact_full_delta_read": true,
+  "full_composition_packet_sha256": "5bb4f86c17ba65447491ba138e692dd15e7fd5dc8b592a0aa1da8d32dbb71168",
+  "independent_checks": [
+    "7 COLUMNS80 native ownership controls PASS0.82s including all six refusal cases",
+    "Root actual unmocked combined25 recipe fingerprint MATCH",
+    "Peer38 captured-proof and diagnostic controls PASS1.86s",
+    "Root actual original623B snapshot response plus native donor metadata/current manifest functions through configured-file/pin/final preflight PASS0.35149s; legacy receipt absent and provider forbidden",
+    "Author combined11 canary/cancelled cleanup controls PASS4.41s",
+    "Test-only semantic JSON and cancellation-zombie original RED/GREEN packets reviewed; original native failure state remains UNKNOWN"
+  ],
+  "limitations": [
+    "Original pin-run live snapshot-created epoch response/status was not recorded; stale snapshot contents are not proven. All600 original attempt flags and epochs remain unchanged.",
+    "Captured inventory is explicit trusted operator configuration whose hash/source/epoch/warm/volume/pin are bound in the reviewed caller. Current native donor metadata and actual manifests are still validated before internal hydration.",
+    "This source review is not provider quota/reservation admission, task execution,600 ready/release/simultaneity, task grades, deployment gate PASS, financial release or permission to merge production.",
+    "Original1fc native and owning failures remain preserved; corrected a089 complete suite6 PASS applies to its actual immutable runtime and needs transitive assessment for this final source."
+  ],
+  "observed_epoch": 1792016758.0387745,
+  "pre_service_boundaries": [
+    "before-stack-launch",
+    "agent-network-index-bootstrap"
+  ],
+  "reviewed": true,
+  "reviewer": "root",
+  "root_actual_input_integration_receipt": "/home/boxes/rose/.context/stress600-root/pin-db33-actual-integration/result.safe.json",
+  "root_actual_input_integration_receipt_sha256": "8d95368f0ff8c9d124c6870d3f95391937a6121ff85192f30387eb92f5996ee4",
+  "schema": "full600-captured-snapshot-source-root-review-v1",
+  "scope": "Explicit hash-bound captured snapshot inventory at the existing donor hydration boundary; distinguish unavailable snapshot epoch from stale proof. Includes reviewed full native canary argv observation and terminal cancellation cleanup failure reporting. All current donor/app/mount/volume/dependency/epoch/pin and cleanup ownership guards remain.",
+  "source_components": [
+    {
+      "root_review": "/home/boxes/rose/.context/stress600-root/canary-argv-width34-source-root-review.safe.json",
+      "sha256": "fd0f5f96e2e8a341ffebf6180364757c6007130f9574c252c74cd502b31d504f"
+    },
+    {
+      "root_review": "/home/boxes/rose/.context/stress600-root/cancelled-worker22-source-root-review.safe.json",
+      "sha256": "127f55df6e0bc54e63443ea46d34f7e4e70b26e99acd12a994fca26a1fc52588"
+    },
+    {
+      "root_review": "/home/boxes/rose/.context/stress600-root/captured-snapshot-db33-source-root-review.safe.json",
+      "sha256": "d6f19792b0e5f29c398218623f8e36badb47599fdc415b3d83e80782106655a4"
+    },
+    {
+      "root_review": "/home/boxes/rose/.context/stress600-root/mandatory-metrics-a089-source-root-review.safe.json",
+      "sha256": "520b00ba609435687447a941298c0b3c88aec2832d3baa1f1d0b04c2b14e8b36"
+    },
+    {
+      "root_review": "/home/boxes/rose/.context/stress600-root/inventory-semantic-ecece-source-root-review.safe.json",
+      "sha256": "e6ac809b4e905a828d939ffa21a394fd37578272cd26cdd154d660d6654d6828"
+    },
+    {
+      "root_review": "/home/boxes/rose/.context/stress600-root/publication-cancellation-e1-source-root-review.safe.json",
+      "sha256": "efd65d71d7b5aa502be69fce2da02c82e151c6a09e2966b07dfc2c9237d86638"
+    }
+  ],
+  "source_recipe_sha256": "0cf353a0116cba89d8132d97978913e03705506639a75516da7d7b79e0ddd372",
+  "source_ref": "3cbefaa23533b817131ce504be8438de2d95a5d1",
+  "unchanged_contract": {
+    "clone_rate_per_second": 1,
+    "concurrency": 600,
+    "controller_shape": "performance16/131072MiB/rootfs50/encrypted256GiBORD",
+    "distinct_tasks": 200,
+    "native_clone_rpc_seconds": 240,
+    "native_identity_recovery_teardown_guards": "preserved",
+    "native_refresh_seconds": 30,
+    "refresh_wait_seconds": 95,
+    "runs": 3,
+    "task_evaluator_app_agent_bytes": "unchanged",
+    "task_seconds": 1200,
+    "whole_experiment_seconds": 5400
+  }
+}

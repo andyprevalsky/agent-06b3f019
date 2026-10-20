@@ -7,7 +7,14 @@ import { randomUUID } from 'node:crypto';
 import { EmailProvider, IntegrationStatus, IntegrationType } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import { getAuthOptions, saveMintedAccountPassword } from '../../domains/auth-options/service';
-import { upsertSignupPassword } from '../../providers/authOptionsStore';
+import {
+  findReadableInboxEmails,
+  findReadableInboxes,
+  upsertSignupPassword,
+} from '../../providers/authOptionsStore';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { primitiveDomain } from '../../providers/primitive';
 import { mintedAccountPassword } from '../../providers/mintedAccountPassword';
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -59,6 +66,72 @@ async function connectInbox(
 }
 
 export const identityCases: Array<{ name: string; fn: () => Promise<void> }> = [
+  {
+    // The inbox list the agent sees and the inboxes the one-time-code poller
+    // reads come from one source, with full addresses, minted inbox included.
+    name: 'readable inbox emails list exactly the inboxes the code poller reads',
+    fn: () =>
+      withFreshUser(async (userId) => {
+        const suffix = randomUUID().slice(0, 8);
+        const gmail = `person.${suffix}@gmail.example`;
+        const ownDomainInbox = `inbox.${suffix}@${primitiveDomain().toLowerCase()}`;
+        const minted = `rose.agent.${suffix}@${primitiveDomain().toLowerCase()}`;
+        try {
+          await connectInbox(userId, gmail, { accessToken: 'a', refreshToken: 'r' });
+          await connectInbox(userId, ownDomainInbox, { accessToken: 'a', refreshToken: 'r' });
+          await connectInbox(userId, `stale.${suffix}@gmail.example`, {
+            accessToken: 'a',
+            refreshToken: 'r',
+            state: 'needs_reconnect',
+          });
+          await connectInbox(userId, `tokenless.${suffix}@gmail.example`, {});
+          await prisma.mintedAccount.create({
+            data: { userId, authRealm: `shop-${suffix}.example`, accountLabel: minted },
+          });
+
+          const userInboxes = [gmail, ownDomainInbox].sort();
+          const expected = [gmail, ownDomainInbox, minted].sort();
+          const listed = (await findReadableInboxEmails(userId)).sort();
+          assert(
+            JSON.stringify(listed) === JSON.stringify(userInboxes),
+            `readable inbox emails are the user's own inboxes, full addresses: ${JSON.stringify(listed)}`
+          );
+          const sources = await findReadableInboxes(userId);
+          const read = [
+            ...sources.gmailCredentials.map((row) => row.email ?? ''),
+            ...sources.primitiveInboxEmails,
+          ].sort();
+          assert(
+            JSON.stringify(read) === JSON.stringify(expected),
+            `the poller reads exactly the listed inboxes: ${JSON.stringify(read)}`
+          );
+          const options = await getAuthOptions(userId, `https://shop-${suffix}.example/login`);
+          assert(
+            JSON.stringify([...options.email_otp.connected_emails].sort()) ===
+              JSON.stringify(userInboxes),
+            `email OTP lists the user's inboxes: ${JSON.stringify(options.email_otp.connected_emails)}`
+          );
+          assert(
+            JSON.stringify([...options.readable_identifiers].sort()) === JSON.stringify(expected),
+            `readable identifiers are exactly what the poller reads: ${JSON.stringify(options.readable_identifiers)}`
+          );
+          // fetchEmailsSince must take its inboxes from the shared source only.
+          const poller = readFileSync(
+            resolve(__dirname, '../../domains/integrations/service.ts'),
+            'utf8'
+          );
+          const body = poller.slice(poller.indexOf('export async function fetchEmailsSince'));
+          assert(
+            body.includes('await findReadableInboxes(userId)') &&
+              !body.slice(0, body.indexOf('\n}\n')).includes('emailCredentials'),
+            'fetchEmailsSince must read inboxes only from findReadableInboxes'
+          );
+        } finally {
+          await prisma.emailIntegrationCredential.deleteMany({ where: { userId } });
+          await prisma.integration.deleteMany({ where: { userId } });
+        }
+      }),
+  },
   {
     // An account the agent signs up for used to be unreachable afterwards: the
     // password it made up was never saved. The minted identity now carries the

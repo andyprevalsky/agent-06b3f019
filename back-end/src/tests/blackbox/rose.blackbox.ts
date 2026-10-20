@@ -54,6 +54,7 @@ import {
   type CompletionChunk,
 } from '../../providers/rose';
 import { buildAnthropicBody, claudeAuthComplete } from '../../providers/rose/claudeAuth';
+import { FOUNDRY_REGION_ENV_NAMES } from '../../providers/rose/foundry';
 import { buildCerebrasChatBody } from '../../providers/rose/cerebrasRoute';
 import { buildOpenRouterCerebrasBody } from '../../providers/rose/openrouterCerebrasRoute';
 import { buildOpenRouterFastChatBody } from '../../providers/rose/openrouterFastRoute';
@@ -1917,6 +1918,8 @@ async function testGptApiKey_insufficientQuotaCoolsLaterRequestsBeforeFoundry() 
   await __resetGptApiKeyCooldown();
   process.env.GPT_API_KEY = 'sk-proj-test-key';
   process.env.ANTHROPIC_API_KEY = '';
+  // Region 1 only: a developer .env may configure AZURE_FOUNDRY_*_2.._9.
+  for (const name of FOUNDRY_REGION_ENV_NAMES) delete process.env[name];
   process.env.AZURE_FOUNDRY_ENDPOINT = 'https://a-4989-resource.openai.azure.com';
   process.env.AZURE_FOUNDRY_API_KEY = 'test-foundry-key';
   process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol';
@@ -1953,9 +1956,7 @@ async function testGptApiKey_insufficientQuotaCoolsLaterRequestsBeforeFoundry() 
     restoreFetch();
     delete process.env.GPT_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
-    delete process.env.AZURE_FOUNDRY_ENDPOINT;
-    delete process.env.AZURE_FOUNDRY_API_KEY;
-    delete process.env.AZURE_FOUNDRY_DEPLOYMENTS;
+    for (const name of FOUNDRY_REGION_ENV_NAMES) delete process.env[name];
     await __resetGptApiKeyCooldown();
   }
 }

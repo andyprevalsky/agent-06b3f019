@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import signal
 import subprocess
@@ -78,8 +79,13 @@ def manifest(barrier):
     if path.is_symlink():
         raise ValueError("symlinked cohort manifest")
     value = json.loads(path.read_text())
-    if set(value) != {"cohort_id", "jobs"} or not value["jobs"]:
+    required = {"cohort_id", "jobs"}
+    if not isinstance(value, dict) or not required <= set(value) or set(value) - required - {"e2e_deadline_monotonic"} or not value["jobs"]:
         raise ValueError("invalid cohort manifest")
+    if "e2e_deadline_monotonic" in value:
+        deadline = value["e2e_deadline_monotonic"]
+        if isinstance(deadline, bool) or not isinstance(deadline, (int, float)) or not math.isfinite(deadline) or deadline <= 0:
+            raise ValueError("invalid cohort deadline")
     return value
 
 
@@ -298,7 +304,7 @@ def prepare(root, helpers, inventory, barrier, deadline=None):
     if owner(inventory, barrier) != authority:
         raise ValueError("campaign owner changed during full GET")
     current = manifest(barrier)
-    if current["cohort_id"] != cohort["cohort_id"] or sorted(current["jobs"]) != sorted(cohort["jobs"]):
+    if current["cohort_id"] != cohort["cohort_id"] or sorted(current["jobs"]) != sorted(cohort["jobs"]) or current.get("e2e_deadline_monotonic") != cohort.get("e2e_deadline_monotonic"):
         raise ValueError("campaign membership changed during full GET")
     value = {
         "version": 1,

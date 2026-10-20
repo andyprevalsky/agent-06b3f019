@@ -1,0 +1,401 @@
+{
+  "schema": "rose-swap-harness-resumed-v1",
+  "old_devbox_id": "c5f40427-00e7-4554-b3a8-ef48bd5f0222",
+  "new_devbox_id": "cc964e89-00d3-4dc6-acb2-37077cbce788",
+  "new_devbox_identity_source": "normal managed daemon config controlAuth.instanceId; only instanceId extracted",
+  "new_thread_internal_id": "ph71gtg4ntdz4sd4xkzp8qqn2n8g7nss",
+  "new_thread_url": "https://boxes.dev/thread/thr_0bcbcf7b53c84ee79ab4d3d902c6a0df",
+  "harness": "codex",
+  "checkpoint_sha": "f187a3cfe656cbfec00401ad8a3989a19037d2d3",
+  "metadata_manifest_commit": "0983db0902d4956dd685a6747e5f7aa2b34f4638",
+  "handoff_path": "docs/handoffs/swap-harness-c5f40427-00e7-4554-b3a8-ef48bd5f0222.md",
+  "utc_time": "2026-10-13T00:11:41.975425+00:00",
+  "checkout_verification": {
+    "exact_checkpoint_checked_out": true,
+    "initial_tracked_checkout_clean": true,
+    "initial_head": "194008e9ef41fee28b513b38f3ff618dbe4ddfb9",
+    "no_reset_or_source_reconstruction": true,
+    "manifest_update_fast_forward_metadata_only": true,
+    "CLAUDE_read_completely": true,
+    "AGENTS_read": true,
+    "all_component_handoffs_read": true,
+    "source_hash_verification": [
+      {
+        "kind": "capture",
+        "ref": "e6c4a2d1906581011729584d8695aa1a935ae9f7",
+        "verified_source_hashes": 7
+      },
+      {
+        "kind": "hub",
+        "ref": "718ab9a1eed72ca17c8a768baa592330da38e3f1",
+        "verified_source_hashes": 11
+      },
+      {
+        "kind": "image-push",
+        "ref": "1d903162bf4affbb3f7d9bc22603e35801b4a95d",
+        "verified_source_hashes": 0
+      },
+      {
+        "kind": "herd",
+        "ref": "609f65a05f95a8047584c5f6ceba6a16a6c597f1",
+        "verified_source_hashes": 0
+      },
+      {
+        "kind": "live50",
+        "ref": "f187a3cfe656cbfec00401ad8a3989a19037d2d3",
+        "verified_source_hashes": 43
+      }
+    ],
+    "temporary_original_source_hashes_verified": 19,
+    "donor_ref_fetched_and_read": "3bf688f49b7777cffc9dd3585ff6fb3a6d8f1244",
+    "skill_revision": "47102e700",
+    "skill_installed_both_harnesses": true
+  },
+  "first_continuation_action": {
+    "action": "Read-only authenticated R2 download/decryption, complete streaming member hashing, safe private restoration and original terminal campaign/resource-owner inspection",
+    "started_utc": "2026-10-13T00:08:06Z",
+    "completed_utc": "2026-10-13T00:11:02.873413+00:00",
+    "result": "All three original archives authenticate, encrypted/gzip hashes match receipts, EVERY archive member matches original preservation manifest; original terminal campaigns and both owner records inspected",
+    "archive_verification": [
+      {
+        "kind": "environment",
+        "encrypted_sha256": "e566f041e22fbe150252c74a73b23f1113fc760b6e363a4a473b74037ac5c805",
+        "decrypted_gzip_sha256": "aa54c483203971cbada8e350fdb7ec0aa2eda5a70993f89a533de503cfc69609",
+        "members": 4,
+        "regular_files": 4,
+        "member_manifest_sha256": "88cc37d77190bee38c4d3d060911670291915b72bd743052123f28bb6b8babff",
+        "extracted_files": 4,
+        "authenticated": true
+      },
+      {
+        "kind": "delta",
+        "encrypted_sha256": "fcfbce8e1b5bd171ba49818b204ee3b58b7d39a437f1c22fdd3018827f99123f",
+        "decrypted_gzip_sha256": "6022f6d2ad765c5ee56ce93cbd4f41c40fba01b297503918c956c29cb4e9d46e",
+        "members": 122,
+        "regular_files": 91,
+        "member_manifest_sha256": "9130b4811b39adb0b97071435925fea48876f3e7c4f8662cb6e2285bc36b9537",
+        "extracted_files": 91,
+        "authenticated": true
+      },
+      {
+        "kind": "archive",
+        "encrypted_sha256": "a6b7629e3bfca6e124c8aada41647792d50e78328c2ad1f4619cd51db5d9a3ce",
+        "decrypted_gzip_sha256": "b143504836425000b19e8c773a27761c3a16709cddc6972ac6eb762dcaabc1d9",
+        "members": 243138,
+        "regular_files": 211197,
+        "member_manifest_sha256": "ddf940c0dc5d5a9204426cd5f469b2576955c16212bac4ee01dac81b152cbd49",
+        "extracted_files": 7642,
+        "authenticated": true
+      }
+    ],
+    "member_comparison": {
+      "original_manifest_json_sha256": "dfbf54bb87e154b84aeed1a08ee605758278b02f8a4484001d0b6bfd9ae43fca",
+      "comparison_utc": "2026-10-13T00:11:02.873413+00:00",
+      "archives": [
+        {
+          "archive": "archive",
+          "matched_members": 243138,
+          "matched_regular_file_hashes": 211197,
+          "mismatches": 0
+        },
+        {
+          "archive": "delta",
+          "matched_members": 122,
+          "matched_regular_file_hashes": 91,
+          "mismatches": 0
+        },
+        {
+          "archive": "environment",
+          "matched_members": 4,
+          "matched_regular_file_hashes": 4,
+          "mismatches": 0
+        }
+      ],
+      "every_member_matches": true
+    },
+    "manifest_archive_verification": [
+      {
+        "kind": "member-manifest",
+        "encrypted_sha256": "3fd0bdfaeb2142cc42ff7d22534c523f39afb79b8d155f6b510d48e92f2b8c88",
+        "decrypted_gzip_sha256": "31c30df9c772b1a8b71d699d1dc85397defbb8a443845274b631d4817f69caa5",
+        "members": 1,
+        "regular_files": 1,
+        "member_manifest_sha256": "1bd69a01ef76a782b6f3387196096a66a7959699539f92766c2d6ff7d423edeb",
+        "extracted_files": 1,
+        "authenticated": true
+      }
+    ],
+    "private_recovery_directory": "/home/boxes/benchmark-recovery-c5f40427",
+    "symlink_path_safety": "Rejected absolute and parent traversal member paths; extracted regular files only, created no symlinks/hardlinks; originals remain isolated from live checkout .git",
+    "keys_retained_private": true,
+    "keys_and_env_excluded_from_git": true
+  },
+  "environment_verification": {
+    "files": {
+      "agents/.env": {
+        "present": true,
+        "names": 75,
+        "missing": []
+      },
+      "back-end/.env": {
+        "present": true,
+        "names": 140,
+        "missing": []
+      },
+      "front-end/.env": {
+        "present": true,
+        "names": 3,
+        "missing": []
+      },
+      "backend_api_keys_match": true,
+      "injected_backend_key_matches": true
+    },
+    "original_private_api_key_matches_new_authoritative_files": true,
+    "authoritative_api_key_source_retained": "agents/.env and back-end/.env inherited complete private files, plus encrypted original environment archive; never printed or committed",
+    "managed_metadata_note": "dvb-onbox env list currently lists Azure rows only; complete inherited authoritative files were checked against original names manifest. No centrally managed BACKEND_API_KEY row claimed or changed.",
+    "python": "3.11.9",
+    "node": "22.23.3",
+    "existing_dependency_layout": "root node_modules plus backend/frontend package trees and agents/venv retained; source dependency manifests match template main; backend actual seed-cache import passed",
+    "fresh_workspace_queue_database_ports": "not allocated yet; use isolated identities before any new stack",
+    "missing_runner_tool": "flyctl not presently on PATH; setup pending before cloud recovery"
+  },
+  "original_campaigns": [
+    {
+      "campaign_id": "campaign-20261012-222613-2892947",
+      "status": "failed",
+      "started_at": "2026-10-12T22:26:13.530696+00:00",
+      "finished_at": "2026-10-12T23:14:40.858621+00:00",
+      "wall_clock_seconds": 2380.345,
+      "e2e_wall_clock_seconds": 3357.859,
+      "e2e_timeout_exceeded": false,
+      "job_status_counts": {
+        "passed": 48,
+        "failed": 2
+      },
+      "summary_sha256": "bc51dc536938e75fd35d0be30ad49fb7705cee48a5b006a1ff34a75ce290624f",
+      "credit": 0
+    },
+    {
+      "campaign_id": "campaign-20261012-202154-3278589",
+      "status": "failed",
+      "started_at": "2026-10-12T20:21:54.705122+00:00",
+      "finished_at": "2026-10-12T21:44:08.082798+00:00",
+      "wall_clock_seconds": 4933.376,
+      "e2e_wall_clock_seconds": 6566.083,
+      "e2e_timeout_exceeded": true,
+      "job_status_counts": {
+        "failed": 14,
+        "cancelled": 36
+      },
+      "summary_sha256": "8955290e6251106a62ba78eba37b12b216881e85e2caf01edcb5baeacba35a9a",
+      "credit": 0
+    }
+  ],
+  "accepted_streak": "0/5",
+  "external_resource_transfer": {
+    "explicit_acceptance": true,
+    "accepted_utc": "2026-10-13T00:11:41.975425+00:00",
+    "accepting_devbox_id": "cc964e89-00d3-4dc6-acb2-37077cbce788",
+    "accepting_thread_internal_id": "ph71gtg4ntdz4sd4xkzp8qqn2n8g7nss",
+    "app": "navi-whisper-lux-bench",
+    "original_owner_token": "38970c3c5c824638a2e1ccc90e6dcd4f",
+    "original_task": "minted-agent-accounts-x",
+    "original_run_id": "20261012-202210-3280999",
+    "machine_id": "81245db9215698",
+    "volume_id": "vol_4ql7650wx9yqlqwr",
+    "accepted_scope": "Custody of exact stopped external Machine/volume, original retained owner latch/source/evidence, and pending canonical original-volume capture/cleanup. Explicit transfer, never a claim of new local allocation.",
+    "preserved_record_sha256": {
+      "38970c3_original_meta": "2ca7e5ae0ce7f4da49d0df5b559c8e65735966e37d196318136da0e4e26aef1b",
+      "38970c3_delta_meta": "2ca7e5ae0ce7f4da49d0df5b559c8e65735966e37d196318136da0e4e26aef1b",
+      "38970c3_delta_clone": "66a36e8bac42ec03403da6bf7637451d53ffb1717b722eccd4f557a6d787f4ff",
+      "cf682c_release_meta": "66cab08fc4ad617258ae069850967ed23fdd34727310702fb907a5f1b1a8ea89"
+    },
+    "original_preflight_finding": "unsupported Machine config: services is set; no mutation",
+    "pending_capture_cleanup": false,
+    "original_host_birth_owner_records_unmodified": true,
+    "provider_mutations_performed": false,
+    "cf682c_disposition": "Original canonical recovery exit0/native Machine and volume release verified in recovered delta; no duplicate recovery. Shared original local Hub retirement obligation remains old-host scope.",
+    "final_disposition": "Exact transferred original stopped Machine/volume now retired by original same-host canonical recovery; no new local allocation ever claimed."
+  },
+  "coordination": {
+    "capture_worker_internal_id": "ph726g9hapm4pxe04pax5fhx7d8g6ak6",
+    "capture_worker_same_devbox": true,
+    "capture_worker_scope": "isolated original PR1479 source/evidence/offline regressions; no provider mutation/paid/merge/deploy authority",
+    "hub_worker_internal_id": "ph76xdf0syxng7c12924a5fxbn8g7rve",
+    "inventory_worker_internal_id": "ph72h305a64vbj50j8mfnzn9gd8g7s6w"
+  },
+  "archival": {
+    "replacement_must_remain": true,
+    "old_box_archival_not_requested_by_this_receipt": true,
+    "remaining_old_host_closeout": "None for original task source/evidence or exact owned resource recovery; old helper may perform final no-unsaved-writers check and request its own managed archival. Replacement remains active; five-run goal remains0/5.",
+    "old_host_dependency_cleared": true,
+    "preservation_resource_and_old_local_owner_gates_verified": true,
+    "replacement_authorizes_preservation_conditioned_old_archival": true,
+    "actual_old_archival_status": "not yet observed/request disposition pending old helper"
+  },
+  "freedom_and_protected_instructions_preserved": true,
+  "paid_work_or_deployment_by_replacement": false,
+  "late_verification": {
+    "utc": "2026-10-13T00:24:08.288024+00:00",
+    "archives": [
+      {
+        "kind": "local-closeout",
+        "encrypted_sha256": "6112c492b3a1854d9b3747cd4479f5d82b87f6b7f8eaf7a0ca38d23928178886",
+        "decrypted_gzip_sha256": "b9b22538258d06abb2baa767c00cf4a0deabd3873425fa44efbbd6766cee9c63",
+        "members": 4,
+        "regular_files": 4,
+        "member_manifest_sha256": "0f5c868d0312f508c2ad578381419e74eff20ad7de4cdd4a5c0ecff9a33c8e5a",
+        "extracted_files": 4,
+        "authenticated": true
+      },
+      {
+        "kind": "old-host-observation",
+        "encrypted_sha256": "78d7f7ee0b2505272e7e6e9e6b6a4b720732faf0d9a23ffab87c4fc428977bbf",
+        "decrypted_gzip_sha256": "b3e0a62fdce89068c6c0f37bf1b118ee9183de3e6cccb47b7d1fc07a1e98dd1d",
+        "members": 1,
+        "regular_files": 1,
+        "member_manifest_sha256": "1b324149366e8872821d9bbac5da8cfb8d73497cf24c4ecd3ed22e9fd1721fbe",
+        "extracted_files": 1,
+        "authenticated": true
+      },
+      {
+        "kind": "original-session",
+        "encrypted_sha256": "84cc46107787e02d8c506bd9f71ab6f802c4dc735c3fc81c85fb73d4ca97264a",
+        "decrypted_gzip_sha256": "b4dfeb53c37ead56d78d060b4de1887c33ed88cebef3c7dba80a43336b253804",
+        "members": 43,
+        "regular_files": 40,
+        "member_manifest_sha256": "aa244b3fe2176b86dd2da9629c96b48935048a2f417de4bc11b7abf88563b860",
+        "extracted_files": 40,
+        "authenticated": true
+      }
+    ],
+    "member_comparison": {
+      "late_receipt_commit": "51c62e3bf8d293b7e841aa4f879bf9b9be86d777",
+      "local_closeout_members_verified": 4,
+      "old_host_observation_members_verified": 1,
+      "original_session_members_verified": 43,
+      "original_session_file_hashes_verified": 40,
+      "original_session_manifest_json_sha256": "ce5525b4dbe02416393b5ec01b557dc9684eff1efdc5972c135aeb1c4d45ff5e",
+      "mismatches": 0
+    },
+    "all_original_symlink_targets_also_compared": true,
+    "original_controller_absence_receipt": "docs/handoffs/swap-harness-c5f40427-00e7-4554-b3a8-ef48bd5f0222-original-host-controller-absence.json",
+    "old_host_absence_is_current_observation_not_historical_release": true,
+    "original_local_hub_watch_terminal_receipts_downloaded_and_hash_verified": true,
+    "original_closed_native_session_and_subagents_restored_privately": true,
+    "original_deployment_authority_read": "Original user instruction2026-10-09T02:22:54Z says finish /deploy then five qualifying LIVE50 runs;2026-10-12T21:49:36Z directs independent deployment work instead of stalling the main coordinating thread. Snapshot approval and exact normal gates remain effective."
+  },
+  "setup_continuation": {
+    "cloud_init_exit_code": 0,
+    "post_setup_backend_api_keys_match": true,
+    "flyctl": "0.4.115 installed at /home/boxes/.fly/bin/flyctl; initial missing PATH resolved",
+    "isolated_candidate_worktree": "/home/boxes/rose-benchmark-infra-candidate",
+    "workspace_name": "rose-benchmark-infra-candidate-9beed9d6cf81",
+    "base_port": 56000,
+    "db_mode": "system Postgres; separately owned isolated database",
+    "queue": "navi-agent-tasks-rose-benchmark-infra-candidate-9beed9d6cf81",
+    "canonical_prepare_and_check_passed": true,
+    "candidate_source_ref": "e1de6a4af",
+    "preserved_original_donor_and_image_commits_composed": true,
+    "offline_checks": {
+      "image_publisher": "98 passed",
+      "donor_refresh": "26 passed",
+      "deploy_worktree_preflight": "passed",
+      "workspace_cloud_init": "passed"
+    },
+    "checks_precede_final_source_composition_and_are_not_full_deploy_or_live_credit": true,
+    "capture_route": "Same-host original helper invocation only after independently reviewed explicit services-isolation/full exact config restore repair and owning gates. Original foreign-host rejection preserved; no new-host identity transplant.",
+    "remaining_old_host_dependency": "Keep old box until this narrowly scoped capture/canonical recovery and its late originals are verified; no wait for whole LIVE50 goal.",
+    "normal_repo_hooks_path": "Inherited missing Mac hooks path preserved privately, corrected locally to repository .husky; existing hook executes successfully; no Mac paths changed in replacement commits."
+  },
+  "native_observation": {
+    "81245db9215698": {
+      "state": "stopped",
+      "name": "cloudbench-a87f045417be4848a5c1e14e",
+      "services_count": 1,
+      "volume_ids": [
+        "vol_4ql7650wx9yqlqwr"
+      ],
+      "image_digest_pinned": true
+    },
+    "85137da4416108": {
+      "state": "destroyed",
+      "name": "cloudbench-78db23e13bc94783a0b8a60f",
+      "services_count": 1,
+      "volume_ids": [
+        "vol_r1jgnp6j1dx93lzr"
+      ],
+      "image_digest_pinned": true
+    },
+    "vol_4ql7650wx9yqlqwr": {
+      "state": "created",
+      "attached_machine_id": "81245db9215698"
+    },
+    "vol_r1jgnp6j1dx93lzr": {
+      "state": "pending_destroy",
+      "attached_machine_id": null
+    }
+  },
+  "final_original_resource_closure": {
+    "verified_utc": "2026-10-13T00:41:29.859163+00:00",
+    "canonical_old_host_receipt": "docs/handoffs/swap-harness-c5f40427-00e7-4554-b3a8-ef48bd5f0222-canonical-capture-release.json",
+    "source_review_commit": "f4ab9385382d5a883539b6139593f8aa8931f4c1",
+    "reviewed_capture_source": "7d535c0440fb22543dc50818a6423d502e22742e",
+    "encrypted_final_capture_verification": [
+      {
+        "kind": "final-capture",
+        "encrypted_sha256": "66158c63466ede8a0c681ba76c20cfe55f3987bcaa084cdceaa2c15c9fe8ffe5",
+        "decrypted_gzip_sha256": "5d3529b0f5c6f7756ac42e7e265427fa416e4065c2ec534c130360706c2af19a",
+        "members": 123,
+        "regular_files": 97,
+        "member_manifest_sha256": "9ce02f9367dea236ce03e74e883307cb226bcb1e98bd38845d13c7a7c44fa26b",
+        "extracted_files": 97,
+        "authenticated": true
+      }
+    ],
+    "every_final_original_member_comparison": {
+      "receipt_commit": "46b93df02",
+      "matched_original_members": 122,
+      "manifest_member_hash_matches": true,
+      "total_members_verified": 123,
+      "regular_file_hashes_verified": 97,
+      "mismatches": 0,
+      "manifest_json_sha256": "fca904ab4fc77816e0535d3a54536ad94a197ee9f8d6cf629f842eb41ac1df7b"
+    },
+    "independent_native_read": {
+      "utc": "2026-10-13T00:37:01.108419+00:00",
+      "81245db9215698": {
+        "state": "destroyed",
+        "name": "cloudbench-a87f045417be4848a5c1e14e",
+        "attached_machine_id": null
+      },
+      "vol_4ql7650wx9yqlqwr": {
+        "state": "pending_destroy",
+        "name": "cloudbench_data",
+        "attached_machine_id": null
+      }
+    },
+    "original_capture_provenance_and_reviewed_helper_hash_verified": true,
+    "captured_original_files": 9,
+    "missing_original_files": 6,
+    "missing_ACK_pid_and_run_json_not_fabricated": true,
+    "full_original_config_restored_and_stopped_before_canonical_reaper": true,
+    "sealed_audit_meta_sha256": "0ee724898e1f7aa6ad63ee1f625fbe64031b4b10e1bf72f124dad0bc5ca6b13a",
+    "sealed_native_audit_status": "provider-teardown-verified",
+    "hub_disposition": "retired-exact-owner-verified-absent",
+    "canonical_recovery_exit": 0,
+    "registry_absent": true,
+    "resource_release_verified": true,
+    "proof_credit": 0
+  },
+  "credential_diagnostic_incident": {
+    "delegated_thread": "ph76xdf0syxng7c12924a5fxbn8g7rve",
+    "incident": "One process-argument diagnostic exposed a credential in private managed tool output; value never copied into this receipt",
+    "mitigation": "Worker stopped printing command arguments; subsequent diagnostics expose PID/state only. Credentials left unchanged under original authority restrictions.",
+    "tracked_candidate_key_inclusion_check": {
+      "checked_files": 177,
+      "matching_files": 0,
+      "credential_value_not_logged": true
+    }
+  }
+}

@@ -34,12 +34,14 @@ Supabase note:
 
 import asyncio
 import heapq
+import ipaddress
 import json
 import os
 import shutil
 import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -118,12 +120,54 @@ CLICKHOUSE_TABLE = load_env_var("CLICKHOUSE_TABLE", _AGENTS_ENV, _BACKEND_ENV) o
 
 # Supabase (edge functions — completions, cost, etc.)
 SUPABASE_ACCESS_TOKEN = load_env_var("SUPABASE_ACCESS_TOKEN", _AGENTS_ENV)
-SUPABASE_PROJECT_REF = load_env_var("SUPABASE_PROJECT_REF", _AGENTS_ENV) or "kzlurqihzaolhzsbkctf"
 SUPABASE_URL = load_env_var("SUPABASE_URL", _AGENTS_ENV, _BACKEND_ENV)
+
+
+def _supabase_project_ref_from_url(url: str) -> str:
+    host = (urlparse(url).hostname or "").lower()
+    suffix = ".supabase.co"
+    return host[: -len(suffix)] if host.endswith(suffix) else ""
+
+
+# Explicit configuration, else the project the configured SUPABASE_URL names.
+# Never a hard-coded production project: Management API reads spend that
+# project's shared rate limit.
+SUPABASE_PROJECT_REF = load_env_var("SUPABASE_PROJECT_REF", _AGENTS_ENV) or _supabase_project_ref_from_url(SUPABASE_URL)
 SUPABASE_ANON_KEY = load_env_var("SUPABASE_ANON_KEY", _AGENTS_ENV, _BACKEND_ENV) or load_env_var(
     "VITE_SUPABASE_ANON_KEY",
     os.path.join(os.path.dirname(__file__), "..", "..", "front-end", ".env"),
 )
+
+
+# ---------------------------------------------------------------------------
+# Which backend served the agents
+# ---------------------------------------------------------------------------
+
+
+def prod_log_sources_enabled(backend_url: str) -> bool:
+    """Whether production log stores can contain agents created via ``backend_url``.
+
+    Render, the Supabase Management API, ClickHouse ``fly_logs`` and
+    ``flyctl logs`` index agents served by the deployed backend and its Fly
+    workers. A loopback backend (``run-bench --local``, ``scripts/run.sh`` or an
+    isolated cloudbench guest) runs its own backend, worker and in-process
+    completions; its worker logs are read from local files and the rest stay in
+    its stack archive. Querying production for those agents cannot find them
+    and spends shared production API budgets once per benchmark copy.
+    """
+    raw = (backend_url or "").strip()
+    host = (urlparse(raw if "://" in raw else f"http://{raw}").hostname or "").lower()
+    if not host or host == "localhost" or host.endswith(".localhost"):
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return True
+    return not (address.is_loopback or address.is_unspecified)
+
+
+def _prod_logs_skipped_note(backend_url: str) -> str:
+    return f"prod log query skipped: agents ran on local backend {backend_url}; see its stack logs"
 
 
 # ---------------------------------------------------------------------------
@@ -533,12 +577,15 @@ class FlyLogCollector:
 _fly_collector: Optional[FlyLogCollector] = None
 
 
-async def start_fly_log_collector() -> str:
+async def start_fly_log_collector(*, backend_url: str) -> str:
     """Start the global Fly.io log collector. Call once before running tasks."""
     global _fly_collector
     if DISABLE_FLY_LOG_STREAM:
         _fly_collector = None
         return "[fly.io] disabled by BENCHMARK_DISABLE_FLY_LOG_STREAM"
+    if not prod_log_sources_enabled(backend_url):
+        _fly_collector = None
+        return f"[fly.io] {_prod_logs_skipped_note(backend_url)}"
     _fly_collector = FlyLogCollector()
     return await _fly_collector.start()
 
@@ -785,6 +832,8 @@ async def fetch_supabase_logs(
         return [
             "[supabase] SUPABASE_ACCESS_TOKEN not set in agents/.env — generate: https://supabase.com/dashboard/account/tokens"
         ]
+    if not SUPABASE_PROJECT_REF:
+        return ["[supabase] SUPABASE_PROJECT_REF not set and SUPABASE_URL names no Supabase project"]
 
     if end_time is None:
         end_time = datetime.now(timezone.utc)
@@ -990,9 +1039,15 @@ async def collect_logs(
     agent_data: dict,
     start_time: datetime,
     research_logs: Optional[List[str]] = None,
+    *,
+    backend_url: str,
 ) -> dict:
     """
     Collect all available logs for a benchmark agent.
+
+    ``backend_url`` is the backend that served the agent. Production log APIs
+    are queried only when it is not a loopback stack (see
+    ``prod_log_sources_enabled``).
 
     Returns:
         {
@@ -1010,6 +1065,16 @@ async def collect_logs(
     # Prefer those over remote placeholders so Claude Code tool_use / SDK progress is retained
     # in the run JSON (prod ClickHouse/Fly often empty or DNS-fail on cloud VMs).
     local_worker_logs = fetch_local_worker_logs(agent_id, start_time)
+
+    if not prod_log_sources_enabled(backend_url):
+        skipped = _prod_logs_skipped_note(backend_url)
+        return {
+            "messages": messages,
+            "backend_logs": [f"[render] {skipped}"],
+            "worker_logs": local_worker_logs or [f"[local-worker] 0 logs for agent {agent_id[:12]}"],
+            "research_logs": research_logs if research_logs is not None else [f"[supabase] {skipped}"],
+            "realtime_logs": realtime_logs,
+        }
 
     # Fly.io logs: merge retained ClickHouse rows + streaming collector + one-shot snapshot (deduped)
     stream_logs = get_flyio_logs_for_agent(agent_id)
@@ -1135,6 +1200,8 @@ async def collect_tree_logs(
     tree_agents: List[dict],
     start_time: datetime,
     get_agent_fn=None,
+    *,
+    backend_url: str,
 ) -> Dict[str, dict]:
     """
     Collect logs for every agent in a tree.
@@ -1146,6 +1213,7 @@ async def collect_tree_logs(
         start_time: When the benchmark started (for time-window log queries).
         get_agent_fn: Async callable(agent_id) -> agent_data dict.
                       Used to fetch full message transcripts per agent.
+        backend_url: Backend that served the tree (gates production log APIs).
 
     Returns:
         {
@@ -1158,7 +1226,10 @@ async def collect_tree_logs(
             ...
         }
     """
-    tree_research_logs = await fetch_supabase_logs(root_agent_id, start_time)
+    if prod_log_sources_enabled(backend_url):
+        tree_research_logs = await fetch_supabase_logs(root_agent_id, start_time)
+    else:
+        tree_research_logs = [f"[supabase] {_prod_logs_skipped_note(backend_url)}"]
     child_research_logs = [
         f"[supabase] Gateway logs are tree-scoped; see root agent {root_agent_id[:12]} research logs"
     ]
@@ -1180,6 +1251,7 @@ async def collect_tree_logs(
             agent_data,
             start_time,
             research_logs=tree_research_logs if aid == root_agent_id else child_research_logs,
+            backend_url=backend_url,
         )
 
         # Extract agent state from the full agent response

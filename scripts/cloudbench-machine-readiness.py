@@ -55,6 +55,31 @@ def readiness(payload: dict[str, Any], machine_id: str) -> tuple[bool, str]:
     return True, "ready"
 
 
+def startup_command_overridable(config: Any) -> bool:
+    """Whether replacing ``init.cmd`` alone fully controls guest startup.
+
+    Fly runs ``init.exec`` or ``init.entrypoint`` in preference to ``init.cmd``,
+    so an inert ``sleep infinity`` command is only authoritative when neither is
+    inherited. Clone admission and original-volume capture share this predicate.
+    """
+    init = startup_init(config)
+    return init is not None and not init.get("exec") and not init.get("entrypoint")
+
+
+def startup_init(config: Any) -> dict[str, Any] | None:
+    """The Machine's ``init`` mapping, ``{}`` when absent, or None when unusable."""
+    if not isinstance(config, dict):
+        return None
+    init = config.get("init") or {}
+    return init if isinstance(init, dict) else None
+
+
+def startup_command_inert(config: Any) -> bool:
+    """Whether the overridable startup command is the inert ``sleep infinity``."""
+    init = startup_init(config)
+    return startup_command_overridable(config) and init is not None and init.get("cmd") == ["sleep", "infinity"]
+
+
 def _load_inventory_file(path: Path, label: str) -> list[dict[str, Any]]:
     value = json.loads(path.read_text())
     if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
@@ -186,6 +211,24 @@ def publish_index(machines_path: Path, volumes_path: Path, root: Path) -> None:
         name_dir = generation / "names"
         machine_dir.mkdir()
         name_dir.mkdir()
+        # Keep native originals private and exact; admission consumers need no
+        # inline boot files or environment payload. Publish with this generation.
+        admission_machines = []
+        for machine in machines:
+            config = machine.get("config")
+            if config is not None and not isinstance(config, dict):
+                raise ValueError("invalid admission machine config")
+            guest = (config or {}).get("guest")
+            if guest is not None and not isinstance(guest, dict):
+                raise ValueError("invalid admission machine guest")
+            projected = dict(machine)
+            if config is not None:
+                projected["config"] = {key: value for key, value in config.items()
+                                       if key not in {"files", "env"}}
+            admission_machines.append(projected)
+        (generation / "admission-machines.json").write_text(
+            json.dumps(admission_machines, separators=(",", ":")) + "\n"
+        )
         for machine in machines:
             machine_id = _safe_index_value(machine.get("id"), "machine id")
             state = _safe_index_value(machine.get("state"), "machine state")
@@ -195,7 +238,8 @@ def publish_index(machines_path: Path, volumes_path: Path, root: Path) -> None:
             private_ip = machine.get("private_ip") or ""
             if not isinstance(private_ip, str) or "\n" in private_ip:
                 raise ValueError(f"unsafe private IP for {machine_id}")
-            mounts = (machine.get("config") or {}).get("mounts") or []
+            config = machine.get("config")
+            mounts = (config.get("mounts") if isinstance(config, dict) else None) or []
             volume_ids = [mount.get("volume") for mount in mounts if mount.get("volume")]
             storage_ready = all(
                 volume_states.get(volume_id) in MOUNTABLE_VOLUME_STATES
@@ -205,17 +249,13 @@ def publish_index(machines_path: Path, volumes_path: Path, root: Path) -> None:
                 volume_states.get(volume_id) in TERMINAL_FAILED_VOLUME_STATES
                 for volume_id in volume_ids
             )
-            config = machine.get("config")
-            init = config.get("init") or {} if isinstance(config, dict) else None
-            clone_cmd_overridable = (
-                isinstance(init, dict) and not init.get("exec") and not init.get("entrypoint")
-            )
+            clone_cmd_overridable = startup_command_overridable(config)
             (machine_dir / machine_id).write_text(
                 f"state={state}\n"
                 f"instance_id={instance_id}\n"
                 f"private_ip={private_ip}\n"
                 f"clone_cmd_overridable={int(clone_cmd_overridable)}\n"
-                f"clone_cmd_inert={int(clone_cmd_overridable and init.get('cmd') == ['sleep', 'infinity'])}\n"
+                f"clone_cmd_inert={int(startup_command_inert(config))}\n"
                 f"storage_ready={int(storage_ready)}\n"
                 f"storage_failed={int(storage_failed)}\n"
             )

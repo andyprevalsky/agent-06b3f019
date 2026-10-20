@@ -1,0 +1,39 @@
+{
+  "schema": "finite-controller-snapshot-native-reader-source-review-v1",
+  "reviewed": true,
+  "reviewer": "Benchmark Infra root plus independent source peer",
+  "source_ref": "e58633c5a25ff808e7c4f92d007d1cefeab24f3d",
+  "source_review_fingerprint": "b2c17ce8fa1494d281fc74ad8fb3242b055290a5e50522bffedd0581fb08a1ef",
+  "pre_service_boundaries": [
+    "before-stack-launch",
+    "agent-network-index-bootstrap"
+  ],
+  "actual_recipe": {
+    "ref": "e58633c5a25ff808e7c4f92d007d1cefeab24f3d",
+    "recipe_sha256": "5f5c16bc64f40b051203ca4034b7aa307f7a25f9f6ab5ba10900e3b3792a777b",
+    "fingerprint": "b2c17ce8fa1494d281fc74ad8fb3242b055290a5e50522bffedd0581fb08a1ef"
+  },
+  "actual_recipe_receipt_sha256": "0a44346603d3dbc692645a25b0869497604134c24e390978f070f7c81c9b915e",
+  "component_packet_sha256": "bdf72c282c40e017232e86eb5b3ab3a2caae0abefd54607b9fecd1aa12cd194c",
+  "source_diff_sha256": "27f1ed3be06ae8393bbf1f1150224c0711b75d06e5e0eb78e2d5bc15607b9bde",
+  "root_review_sha256": "ff1bc6dfc6f25db4a6df5061c6577bfc5a2e016dd223c056ae8fa83206113281",
+  "independent_final_source_review_sha256": "fe3643d48c22d042b3b053ddfe177afd3042388d127b5be14b6f3727352764b0",
+  "runtime_scope": {
+    "change": "One run-bench-fleet snapshot cp-list dependency line for cloudbench-campaign-machines.py; same accepted helper carried and sealed before recovery/pool consumers enter",
+    "inventory_reader_sha256": "e85eb826790c70e87b4d397467e01b2d1f9e805ce1efedb458edc16bff60353b",
+    "preserved": "No reader HTTP/config/timeout semantics, mutable ROOT fallback, task/profile/stop policy, original clocks or recovery authorization changes"
+  },
+  "verification": {
+    "authentic_original659_log_sha256": "186358ec560bb7638cf91180377361110840864a1d3e099b0c5638f4784ac546",
+    "owning_registered_RED": "Actual recovery-only entry creates immutable child snapshot, exact staged runpy boundary missing-file:1FAIL1.324s",
+    "same_GREEN": "1PASS1.331s: exact staged bytes, manifest SHA and staged verify_snapshot, invalid-token final2 before provider/recovery, normal child join/snapshot removal",
+    "root_independent": "Same registered owning case1PASS1.404s",
+    "actual_recipe": "Author once unmodified native_recipe0.256s; no provider or mocks; peer did not repeat"
+  },
+  "limits": [
+    "Exact fingerprint and only the two existing phases; retain every prior policy entry.",
+    "Future stack-phase closure only; no gate on current recovery-only canonical REAP.",
+    "No provider/guest operation, paid trial, cleanup/latch permission or original600 PASS follows from registration.",
+    "Original659 failed/release0 remains unchanged until actual successor operator proof."
+  ]
+}

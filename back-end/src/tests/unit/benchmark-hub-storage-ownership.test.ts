@@ -46,6 +46,9 @@ function storage<T>(name: string, bindings: Record<string, unknown>): T {
       Buffer,
       process: { env: { R2_BUCKET_TRACE_ARCHIVE: 'fixture' } },
       LOCAL_DIR: '/fixture-never-used',
+      // The isolated-R2 scope is an imported boundary; production scope is inactive here.
+      isolatedObjectKey: () => null,
+      isolatedR2Prefix: () => null,
       ...bindings,
     });
   } finally {

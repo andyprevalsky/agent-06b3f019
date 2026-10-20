@@ -1,48 +1,84 @@
-BENCHMARK PARENT AGENT INSTRUCTIONS · FORMAT v1
+BENCHMARK PARENT AGENT INSTRUCTIONS · FORMAT v8
 
 Communication contract (mandatory)
-- Every benchmark progress/final message to the user MUST be exactly one fenced
-  text code block using the template below. No prose before or after it. Keep
-  every section, label, ordering and separator; replace placeholders with recorded
-  values. Do not replace the card with Markdown tables or a narrative summary.
-- Use the /deploy Step 15 scorecard's 64-column frame. Align labels and numbers,
-  wrap explanations to fit, and use the same units on every observation. Preserve
-  full evidence URLs and exact code/prompt diffs without reflowing their contents.
+- The scorecard is generated, never hand-written. Every launch prints its exact
+  command; render the card only with
+  `scripts/run-bench scorecard <run-dir> --html <run-dir>/scorecard.html`
+  and publish that file unchanged through `boxes-inline-visualizations`
+  (`dvb-onbox visuals publish --file <run-dir>/scorecard.html --title "<label> scorecard"`),
+  returning its standalone link. No prose before or after it. A hand-written,
+  edited or re-typed card is non-compliant; `scripts/run-bench scorecard
+  --validate <card.html>` rejects it. Off boxes.dev, or when HTML is
+  unavailable, post `scripts/run-bench scorecard <run-dir> --text` in one diff
+  fence and state that limitation.
+- Pass active sub-agent rows with `--agents <rows.json>` and owner-assigned
+  issues with `--issues <issues.json>`; every other value comes from recorded
+  run artifacts and the git-common experiments ledger. If a value is wrong or
+  missing, fix its producer or artifact; never patch the rendered card.
+- Apply `.claude/shared/report-display-format.md` to this card and every other
+  skill display: 12-hour America/Los_Angeles timestamps (PDT/PST by date), one
+  status emoji, current-assignment tokens and rolling 15-minute tokens/min, with
+  LIFE at the far right and no UPD. Stored/raw evidence timestamps remain unchanged.
+- This is the standard display for every future CLI benchmark route: cloud,
+  local, eval, campaign, sharded and production-only. The card leads with the
+  Experiment # and state, then KPI tiles (pass %, infra % with the stop
+  threshold, QUEUED/IN_PROGRESS/COMPLETED progress, elapsed and execution
+  window), the outcome bar with PASS, HARNESS FAILURE and INFRA FAILURE always
+  shown, failure causes, timing/cost/cache/LLM coverage, the lifecycle
+  checklist, LAST 3 EXPERIMENTS, active sub-agents and ISSUES / NEXT ACTION.
+- Publish the card on agent start/completion, every fixed 15-minute checkpoint,
+  and benchmark-state changes. Events never reset the checkpoint or run clock.
 - User-requested approval messages use .claude/shared/approval-format.md instead:
   the same styled text frame, all seven required sections with How: immediately
   before TL;DR:, exact inline diffs and the clickable Links list immediately below.
   This changes presentation, not when approval is required. Continue independent
   authorized work meanwhile.
-- Unknown values are — with a concrete reason, never an invented zero. Keep empty
-  sections as None. Never present example numbers as observations.
+- The renderer colors the text itself: green verified successes/healthy checks,
+  red failures/blockers, blue active work and headings, amber warnings or
+  unmeasured coverage. HTML publication never pauses workers or cancels the
+  ongoing experiment.
+- The card never displays null, —, N/A, blank fields or empty sentinels; missing
+  evidence renders as RUNNING, UNMEASURED, UNMETERED, UNRECORDED or NOT SCORED.
+  Never invent zeros or measurements.
 
 Maintain the run (mandatory; this card is not a stopping point)
 - Continuously make progress toward the authorized benchmark goal: observe,
   delegate, diagnose, fix, verify, publish and run the next slice. Do not return
   after merely launching a fleet/sub-agent or sending a progress card. End only
   when the requested goal is complete or the user explicitly stops the work.
-- Poll the exact CLI-printed monitor handle every 30 seconds, including controller
+- The assigned operational owner polls the exact CLI-printed monitor every
+  30 seconds, including controller
   exit and cleanup receipts on every observation, even when the card is stale.
   Campaign summary.json and each child's printed monitor handle are distinct.
   Read missing/stale observations again; they do not authorize a restart, broadened
   cleanup, resetting a clock, or cancelling healthy siblings.
-- Pause starting a new slice if and only if infrastructure errors are strictly
-  greater than 10% of terminal attempts: 10 * infra_failed > terminal_attempts.
-  Exactly 10% is allowed. With no terminal attempts, show — (no terminal attempts),
-  not 0%. Unknown classifications remain unknown; inspect them promptly rather
-  than relabeling them PASS, task FAIL or infrastructure FAIL.
-- This is the root agent's next-slice decision, not a change to the current CLI
-  campaign scheduler, smoke acceptance, provider capacity, task timeouts or owned
-  cleanup. At >10%, keep healthy current tasks and RCA/fix/verification work moving.
-  At <=10%, continue the next authorized slice without a discretionary pause for
-  ordinary task failures, ongoing RCA work, or a deploy. Respect existing explicit
-  user stop requests, approval boundaries, execution budgets and resource safety.
-  Do not infer authorization for additional paid campaigns beyond the given goal.
-- Delegate each independent issue to a sub-agent with /RCA, the exact unchanged
-  failing task/run evidence, ordered priorities and a time budget. Require the
+- During an active run, immediately stop that exact owned run through its
+  normal controller when scheduled_total > 0 and
+  20 * infra_failed_jobs >= scheduled_total (>=5% of original scheduled total).
+  For 600 scheduled benchmarks, stop at 30 confirmed infra-failed jobs; 1/600 and
+  29/600 continue. Never use completed attempts as the denominator or double-count
+  a scheduled job because it retried. Exactly 5% disqualifies.
+  Preserve the first breach, original clocks and every physical attempt/retry.
+  With no terminal attempts, report NO TERMINAL ATTEMPTS; do not invent 0%.
+  Unknown classifications remain unknown and require evidence gathering.
+- Start error management immediately; assign each independent cause a /RCA
+  owner, verify critical repairs and rerun the original authorized experiment.
+  Do not wait for unrelated RCAs or a full /deploy. Keep independent campaigns
+  and workers moving, respecting scope, ownership, approvals and resource bounds.
+- Cluster all observed errors by a proven shared first-bad boundary, including
+  infra, runtime, recovered and post-verdict errors. Preserve each occurrence;
+  recovered errors do not automatically count as terminal infrastructure failures.
+  Delegate one owner per independent cluster with /RCA, the exact unchanged
+  member task/run evidence, ordered priorities and a time budget. Require the
   owning-boundary local pre-fix failure, post-fix pass, registered regression and
   unchanged-task verification prescribed by /RCA. Track and actively review its
   work; never diagnose solely from a notification or discard an original failure.
+- Infra repairs need no human fix approval. Runtime/product and required deploy
+  approvals are delivered in the main thread; workers return concrete packets
+  to the parent and wait only on their own gated action. Under /descend, do not
+  wait for an infra-zero run, all cluster RCAs or all decisions before continuing
+  a below 5% authorized next slice. Ready independent approval packets may be
+  delivered separately without waiting for a different cluster's answer.
 - Delegate /deploy to a separate sub-agent with an immutable full commit SHA
   captured at dispatch and an isolated checkout/worktree based on that checkpoint.
   Include reviewed intended dirty changes in the checkpoint, excluding secrets.
@@ -57,25 +93,34 @@ Measurement contract
 - Preserve the logical slice's original triggered_at timestamp (with timezone),
   requested names/count, run/group IDs, full source checkpoint, original timeouts
   and every attempt. Retries, later uploads and recovery never reset those clocks.
-- LAST SLICE TRIGGERED is now minus the most recent original slice trigger, not
-  time since the agent started observing it. At >=10800 seconds (3 hours), WHY NO
-  NEW SLICE? must contain a concrete reason, responsible agent/action and condition
-  for the next slice. Under three hours keep the section and state the current
-  next-slice plan. Missing trigger evidence is an explicit observability gap.
+- The first card row names the current Experiment # and state. Launch paths
+  (fleet, campaign, sharded operator) append one immutable line per actual launch
+  and end to `<git-common>/cloudbench-experiments.jsonl`; the CLI computes the
+  Experiment #, Experiments/day = verified launches / elapsed goal days and LAST
+  3 EXPERIMENTS from it. Exclude local diagnostics, tests and prepared drafts.
+  Backfilled history is labelled a lower bound; never equate the experiment
+  sequence number with the launch count or type these values by hand.
+- Show only the latest three actual qualification experiments, newest first, as
+  compact rows with a mini outcome bar. For each, retain trigger, producer end,
+  total elapsed, QUEUED/IN_PROGRESS/COMPLETED counts, task verdicts, infrastructure
+  reliability, costs, cache rates, LLM latencies and lifecycle coverage. These
+  replace the old standalone active-run/progress/cost blocks. A live experiment
+  ends RUNNING; an unknown historical end reads END UNRECORDED, not capture time.
 - Progress counts refer to scheduled logical members, not child agents or retries:
-  queued + in_progress + complete = requested total. Queued has not started;
+  QUEUED + IN_PROGRESS + COMPLETED = requested total. Queued has not started;
   in_progress includes startup, execution and evaluation before a terminal outcome;
   complete is a recorded terminal outcome, including infrastructure/cancellation
   or skipped outcomes when applicable. Show additional terminal categories rather
   than silently folding them into PASS/FAIL. Retrying members remain in progress.
-- Bar: 25 cells. Allocate whole cells to queued/in_progress/complete proportionally
-  using largest remainders (ties: complete, in_progress, queued). Display in this
-  order: █ complete, ▓ in_progress, ░ queued. Percentages use unrounded counts/total,
-  formatted to one decimal. For zero total, show an empty bar and — percentages.
 - Execution time starts at actual task execution, not provisioning/controller
-  start. Queued execution is —; report oldest wait separately. Active execution
+  start. Queued execution is NOT STARTED; report oldest wait separately. Active execution
   shows min/max elapsed across executing members. Completed execution p50/p95
-  uses tasks with measured execution only; unavailable clocks remain —.
+  uses tasks with measured execution only; omit unmeasured quantiles with a coverage note.
+- Show PASS, HARNESS FAILURE and INFRA FAILURE on every card. Classify harness
+  failure only from evidence of orchestration/runner failure; keep genuine
+  AGENT FAILURE, cancelled, skipped, unscored and unknown outcomes separately.
+  A prepared run is NOT LAUNCHED; label any queued count as planned, not dispatched.
+  Missing classifications are not zeroes, and overlapping categories are not summed.
 - TASK PASS/FAIL denominator is all scored task verdicts (PASS + task FAIL),
   excluding infra, cancellation, skip and pending. INFRA FAIL is infra failures /
   ALL terminal attempts, including retained retry attempts, with numerator and
@@ -84,7 +129,8 @@ Measurement contract
 - Show full elapsed since trigger and since the overall goal started, blocked
   windows and their reasons, per-stage p50/p95 and all attempt/retry counts.
   Parallel stage timings overlap: do not sum their medians as total wall time.
-- PASS/FAIL can publish before cleanup. COMPLETE requires the controller to exit,
+- PASS/FAIL and the experiment's terminal-member COMPLETE count can publish
+  before cleanup. The card's final workflow status COMPLETE requires the controller to exit,
   final results to publish, and exact owned resources to have verified release.
   An early outcome ACK, pool return or preservation archive is not full release.
 - Costs accumulate across every attempt: agents, WMH, infrastructure, Azure and
@@ -92,83 +138,54 @@ Measurement contract
   Keep DEMO response replay separate from agent and WMH prompt-cache rates; show
   their actual hit/look-up or cached-input/all-input denominators. An enabled flag
   does not prove a hit. Report agent and WMH LLM avg/p95/p99 separately.
-- Active sub-agents: one line each, short name + /RCA or /deploy + short description,
-  absolute start/block timestamp and elapsed time. ⛔ means their current work is
-  blocking the next slice; 🔄 is independent active work; 🚀 is an active deploy.
-  If blocked, report the block's start and age as well; do not reset ages on updates.
-  Keep each agent on one line with brief labels; include its frozen SHA if deploying.
-  Use None when no sub-agents are active. Never imply that a queued child is running.
+- At the top, show time since the latest actual benchmark ended, with its label
+  and actual producer end as baseline. Diagnostics, cleanup and card refreshes
+  never reset this clock; a live run shows RUNNING, missing end END UNRECORDED.
+- Active sub-agents: one line each, one status emoji + short name/work + recorded
+  current-assignment tokens spent + rolling 15-minute tokens/min. LIFE stays at
+  the far right; remove PCT, pp/min, UPD and progress wheels. Use actual harness
+  input + output counters including cached input, without double-counting
+  reasoning output. Keep source counters, scope baseline, original lifetime and
+  observation times. Missing coverage reads UNMETERED; less than a full window
+  reads warming <age>. Tokens are usage, not completion or billed credits.
+  Keep actual milestones and result counts separately. Low usage alone is not
+  a stall. Every red row names its real blocker and corrective owner/action;
+  completed work and healthy monitoring get no false stall alarm. No legends.
+  If any worker blocks the next action, put the whole agent section above LAST 3
+  EXPERIMENTS; otherwise put it after that history. Include it once. Show No active
+  agents when empty. Do not pause workers to edit or discuss their scorecard.
 - Evidence must identify this concrete slice/group and its durable viewer, retaining
   individual run/agent references. Do not cite ephemeral localhost/tunnel viewers.
 
-Parent message template (fill from recorded evidence; repeat only sub-agent and
-issue rows as needed; keep every section even when empty):
+Text fallback (the exact shape `scripts/run-bench scorecard <run-dir> --text`
+prints; never type it by hand):
 
-```text
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- 📊 BENCHMARK SCORECARD                                 <STATUS>
- <slice> · <tasks> × <runs> · <cloud/local> / <mode> · <checkpoint>
- Updated <timestamp + timezone> · observation age <age>
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- ⏱ LAST SLICE TRIGGERED                                   <age>
-   Trigger: <original timestamp> · execution limit: <per task>
-   Goal elapsed: <duration> · attempts: <total> · retries: <count>
-
- <mark> WHY NO NEW SLICE?                  <REQUIRED AT ≥3 HOURS>
-   <Concrete reason/plan; responsible agent/action; resume condition>
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- BENCHMARK PROGRESS
- [<25-cell stacked bar>]                      <percent> complete
-  █ complete    ▓ in progress    ░ queued
-
- QUEUED        <percent> <count>/<total> execution — · wait <age>
- IN PROGRESS   <percent> <count>/<total> execution <min>–<max>
- COMPLETE      <percent> <count>/<total> exec p50 <time> · p95 <time>
-
- Complete means a terminal outcome; cleanup is tracked below.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- ACTIVE RUN · PASS / FAILURE
- ✅ TASK PASS       <count>/<scored> scored             <percent>
- ❌ TASK FAIL       <count>/<scored> scored             <percent>
- ⛔ INFRA FAIL      <count>/<terminal attempts>         <percent>
- ⏳ PENDING         <count>/<scheduled> scheduled benchmarks
- Other outcomes    <cancelled/skipped/unknown counts or None>
-
- Infra rate = infra failures / all terminal attempts.
- Next slice: <CONTINUE at ≤10% | HOLD at >10% | no terminal data>
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- TIMING / LIFECYCLE
- Startup       p50 <time> · p95 <time>
- Execution     p50 <time> · p95 <time> · executed tasks only
- Evaluation    p50 <time> · p95 <time>
- Cleanup       p50 <time> · p95 <time>
- Blocked       <total duration> · <each window and concrete reason>
- Stage timings overlap; total elapsed remains <since trigger>.
-
- Publication   <published>/<terminal outcomes> published
- Cleanup       <verified released>/<scheduled> members
- Controller    <state/exit code> · last progress <age>
- Evidence      <durable group viewer URL or explicit missing reason>
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- 💸 COST / CACHE / LLM LATENCY
- Recorded estimate    <total> · metering <coverage/limitations>
- Components           Agents <cost> · WMH <cost> · infra <cost>
- LLM providers        Azure <cost> · other <cost>
-
- DEMO replay          <percent> · <hits>/<lookups> · <enabled/off>
- Agent prompt cache   <percent> · <cached>/<all input> tokens
- WMH prompt cache     <percent> · <cached>/<all input> tokens
-
- Agent LLM            avg <time> · p95 <time> · p99 <time>
- WMH LLM              avg <time> · p95 <time> · p99 <time>
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- ACTIVE SUB-AGENTS                        ⛔ = blocking next slice
- <mark> <name> · <task> · <start UTC>/<age> · <block start/age or SHA>
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- ISSUES / NEXT ACTION
- <one short row per issue, owner and evidence-backed status or None>
- <next root action and condition for the next slice>
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- <RUNNING | NEXT SLICE HELD | COMPLETE | USER STOPPED> · <reason>
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```diff
+🧪 EXPERIMENT #<number> · <state emoji> <STATE>
+<slice> · <scheduled> scheduled · <cloud/local> · src <checkpoint>
+Triggered <Month D, h:mm:ss AM/PM PDT/PST>
+<rate> experiments/day · <verified launches> launches / <elapsed days> d | experiments/day warming <goal age> · <n> launches (rate after 1 d)
+Since last benchmark ended: <age (label) | RUNNING | END UNRECORDED>
+QUEUED <n> · IN_PROGRESS <n> · COMPLETED <n>/<scheduled>
+PASS <n>/<scored> <pct> · HARNESS <n/UNCLASSIFIED> · INFRA <pct> (<n>/<terminal attempts>)
+<AGENT FAIL / UNKNOWN / CANCELLED / SKIPPED counts, if present>
+Stop at <threshold>/<original scheduled> unique infra-failed jobs (5%)
+  <count> <category>: <top failure cause>
+Cost <metered or UNMETERED> · <unmetered providers> UNMETERED
+Cache <rate and denominator or UNMEASURED> · LLM latency <UNMEASURED or measured>
+Lifecycle
+  <✅/🔴/🟠/🔵> <release, controllers, exports, results, publication evidence>
+LAST 3 EXPERIMENTS
+  #<n> <state> <label> · <TRIGGERED> → <ENDED/RUNNING> · PASS <n>/<scored> · INFRA <n>/<attempts>
+ACTIVE SUB-AGENTS / PARENT
+  <status> <name>/<work> · <tokens> · <15m tok/min | warming <age> | UNMETERED> · <LIFE>
+ISSUES / NEXT ACTION
+  • <concrete issue> Owner <owner> → <action>
+<state emoji> <STATE> · <reason>
 ```
+
+Use NO SCORED TASKS or NO TERMINAL ATTEMPTS instead of 0/0 rates; preserve
+actual zero counts. ELAPSED for a live experiment runs from its original
+trigger. Preserve the original bounds (including a recorded 10800-second
+no-new-run delay) in telemetry; put the concrete owner/action in ISSUES / NEXT
+ACTION when a delay needs action, not a separate last-slice block.

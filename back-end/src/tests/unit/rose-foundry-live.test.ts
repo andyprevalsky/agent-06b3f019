@@ -4,7 +4,14 @@ import 'dotenv/config';
 import assert from 'node:assert/strict';
 
 import { createStreamingCompletion } from '../../providers/rose';
-import { foundryComplete } from '../../providers/rose/foundry';
+import {
+  FOUNDRY_REGION_ENV_NAMES,
+  __resetFoundryCooldowns,
+  foundryComplete,
+  foundryRegions,
+  foundryRoutePlan,
+  type FoundryRegion,
+} from '../../providers/rose/foundry';
 import { getPool } from '../../providers/rose/pools';
 import { StructuredOutputAccumulator } from '../../providers/rose/structuredOutput';
 import type { ResponseFormat, RoseStreamChunk } from '../../providers/rose/types';
@@ -49,9 +56,37 @@ async function probe(
   process.stdout.write(`${name}: Foundry Responses contract passed\n`);
 }
 
+/** Probe one configured region (AZURE_FOUNDRY_* or *_2.._9) by making it the sole region. */
+async function probeRegion(region: FoundryRegion): Promise<void> {
+  const saved = FOUNDRY_REGION_ENV_NAMES.map((name) => [name, process.env[name]] as const);
+  for (const name of FOUNDRY_REGION_ENV_NAMES) delete process.env[name];
+  process.env.AZURE_FOUNDRY_ENDPOINT = region.endpoint;
+  process.env.AZURE_FOUNDRY_API_KEY = region.apiKey();
+  process.env.AZURE_FOUNDRY_DEPLOYMENTS = region.deployments.join(',');
+  __resetFoundryCooldowns();
+  try {
+    await probeContract();
+    process.stdout.write(`region ${region.slot} (${region.host}): Foundry contract passed\n`);
+  } finally {
+    for (const [name, value] of saved) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
 async function main(): Promise<void> {
   if (process.env.RUN_FOUNDRY_LIVE !== '1') return;
-  assert(process.env.AZURE_FOUNDRY_ENDPOINT && process.env.AZURE_FOUNDRY_API_KEY);
+  // Regions that serve the Ultra pool's GPT-6 Sol deployment.
+  const regions = foundryRegions().filter(
+    (region) => foundryRoutePlan([region], getPool('rose-1-ultra').gptAuthModel, 'live').length > 0
+  );
+  assert(regions.length > 0, 'Foundry endpoint and key are required');
+  for (const region of regions) await probeRegion(region);
+  await roseUltraRoute();
+}
+
+async function probeContract(): Promise<void> {
   await probe('text');
   await probe('tool', {
     tools: [
@@ -84,6 +119,9 @@ async function main(): Promise<void> {
       },
     },
   });
+}
+
+async function roseUltraRoute(): Promise<void> {
   const gptKey = process.env.GPT_API_KEY;
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
   try {
