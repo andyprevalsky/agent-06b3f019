@@ -147,6 +147,45 @@
     --sidebar-border: 240 3.7% 15.9%;
     --sidebar-ring: 217.2 91.2% 59.8%;
   }
+
+  /* Rose dark mode (features/rose-theme RoseThemeProvider adds html.dark): solid
+     navi-black page, dark native controls and scrollbars everywhere. Every rule
+     is scoped under html.dark so light mode is untouched (rose-theme.blackbox
+     asserts the scoping). */
+  html.dark {
+    color-scheme: dark;
+  }
+
+  html.dark,
+  html.dark body {
+    background-color: #272725;
+  }
+
+  html.dark,
+  html.dark * {
+    scrollbar-color: #4a4a46 transparent;
+  }
+
+  html.dark ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+    background: transparent;
+  }
+
+  html.dark ::-webkit-scrollbar-thumb {
+    background: #4a4a46;
+    border-radius: 10px;
+    border: 2px solid #272725;
+  }
+
+  html.dark ::-webkit-scrollbar-thumb:hover {
+    background: #5c5c57;
+  }
+
+  html.dark ::-webkit-scrollbar-track,
+  html.dark ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
 }
 
 @layer base {

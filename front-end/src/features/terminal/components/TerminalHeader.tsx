@@ -16,6 +16,12 @@
  *                                   trails on the hamburger AND the tab)
  * [SIGNED_OUT] -- tap Login ------> parent PhoneAuthModal opens
  *
+ * THEME (useRoseTheme; Rose Desktop dark mode):
+ * [LIGHT] --> stock pill classes, byte-identical to before dark mode
+ * [DARK]  --> desktop pill adds dark: classes: dark glass rgba(32,32,30,.78)
+ *             with light text (overriding the inline drip colours); the
+ *             whitish marble layer is hidden
+ *
  * Notifications live in the desktop AttentionInbox bell OR the mobile drawer's
  * Notifications tab — never both mount (viewport-branched), so a single
  * useAttentionRequests subscription is active.
@@ -31,6 +37,7 @@ import type { CSSProperties } from 'react';
 import { AttentionInbox, MobileAgentDrawer } from '@/features/terminal-component-group';
 import type { Agent } from '@/features/terminal-component-group';
 import { useIsMobile } from '@/hooks/use-mobile';
+import { useRoseTheme } from '@/features/rose-theme';
 import { cn } from '@/lib/utils';
 
 import type { DripStyles } from '../types';
@@ -82,15 +89,18 @@ function buildHeaderStyle({
   };
 }
 
+const STOCK_MARBLE_CLASSES = 'absolute inset-0 pointer-events-none';
+
 function MarbleBackground({
   backgroundColors,
   dripStyles,
-}: Pick<TerminalHeaderProps, 'backgroundColors' | 'dripStyles'>) {
+  isDark,
+}: Pick<TerminalHeaderProps, 'backgroundColors' | 'dripStyles'> & { isDark: boolean }) {
   if (backgroundColors <= 0) return null;
 
   return (
     <div
-      className="absolute inset-0 pointer-events-none"
+      className={isDark ? `${STOCK_MARBLE_CLASSES} dark:hidden` : STOCK_MARBLE_CLASSES}
       style={{
         background: `radial-gradient(circle at 10% 20%, rgba(255, 248, 245, ${0.7 * dripStyles.backgroundColorsScalar}) 0%, transparent 40%),
                      radial-gradient(circle at 90% 80%, rgba(248, 245, 255, ${0.6 * dripStyles.backgroundColorsScalar}) 0%, transparent 40%),
@@ -168,16 +178,28 @@ function HeaderAuthAction({
   );
 }
 
+const STOCK_PILL_CLASSES =
+  'absolute top-4 left-[calc(50%_-_var(--rose-apps-inset,0px)/2_+_var(--rose-apps-inset-left,0px)/2)] -translate-x-1/2 z-50 transition-[left] duration-[520ms] ease-[cubic-bezier(.22,1,.36,1)] flex items-center justify-between p-2 rounded-2xl border border-border/50 dark:border-navi-light-black/50 shadow-lg';
+
+/** Rose dark mode only; `!` beats the inline drip background/border/shadow. */
+const ROSE_DARK_PILL_CLASSES =
+  'dark:!border-white/[0.08] dark:!bg-[rgba(32,32,30,0.78)] dark:!shadow-[0_6px_20px_rgba(0,0,0,0.35)] dark:text-[#ececea]';
+
 /** Desktop (>= md): the original floating blur pill — brand + AttentionInbox bell. */
 function DesktopHeaderPill(props: TerminalHeaderProps) {
   const { onCreateNewAgent, onSelectAgent, onLoginClick, isSignedIn } = props;
   const { dripStyles, blur, backgroundColors, borderColor, shadowIntensity } = props;
+  const { isDark } = useRoseTheme();
   return (
     <header
-      className="absolute top-4 left-[calc(50%_-_var(--rose-apps-inset,0px)/2_+_var(--rose-apps-inset-left,0px)/2)] -translate-x-1/2 z-50 transition-[left] duration-[520ms] ease-[cubic-bezier(.22,1,.36,1)] flex items-center justify-between p-2 rounded-2xl border border-border/50 dark:border-navi-light-black/50 shadow-lg"
+      className={isDark ? `${STOCK_PILL_CLASSES} ${ROSE_DARK_PILL_CLASSES}` : STOCK_PILL_CLASSES}
       style={buildHeaderStyle({ dripStyles, blur, backgroundColors, borderColor, shadowIntensity })}
     >
-      <MarbleBackground backgroundColors={backgroundColors} dripStyles={dripStyles} />
+      <MarbleBackground
+        backgroundColors={backgroundColors}
+        dripStyles={dripStyles}
+        isDark={isDark}
+      />
       <BrandButton onCreateNewAgent={onCreateNewAgent} />
       <HeaderAuthAction
         isSignedIn={isSignedIn}

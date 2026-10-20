@@ -171,6 +171,8 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
   ],
   'features/terminal/components/BackgroundPattern.tsx': [
     'Cross-domain import: "@/features/terminal-component-group"',
+    // Rose dark mode: the background layers read useRoseTheme().
+    'Cross-domain import: "@/features/rose-theme"',
   ],
   'features/terminal/components/TerminalContent.tsx': [
     'Cross-domain import: "@/features/terminal-component-group"',
@@ -178,6 +180,8 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
     // Per-user UI runtime: provider, shell and sidebar slots mount in the
     // terminal layout (the one place the session user is known).
     'Cross-domain import: "@/features/user-ui"',
+    // Rose dark mode: RoseThemeProvider mounts where the session user is known.
+    'Cross-domain import: "@/features/rose-theme"',
   ],
   // Per-user UI runtime: user background layer + fading app backdrop.
   'features/terminal/components/TerminalBackdrop.tsx': [
@@ -191,6 +195,8 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
   ],
   'features/terminal/components/TerminalHeader.tsx': [
     'Cross-domain import: "@/features/terminal-component-group"',
+    // Rose dark mode: the desktop header pill reads useRoseTheme().
+    'Cross-domain import: "@/features/rose-theme"',
   ],
   // blog is a shared component/data library consumed by research-blog and research-blog-post
   'features/research-blog/types.ts': ['Cross-domain import: "@/features/blog"'],

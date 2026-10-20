@@ -22,6 +22,9 @@
  *     fadeAfterFirstMessage once the selected agent has a USER message
  * RIGHT APP BAR (RoseAppsProvider): Browser + Voice drawers; the main column
  *   re-centers via --rose-apps-inset.
+ * THEME (RoseThemeProvider, Rose Desktop accounts only): light (default) <->
+ *   dark via useRoseTheme().toggle(); dark adds html.dark and the calm dark
+ *   background. Stock accounts and shared views never leave light.
  */
 
 import { useState, useMemo, lazy } from 'react';
@@ -41,6 +44,7 @@ import { IS_DEV_MODE } from '@/features/terminal-component-group/config';
 import { isAdminOperator } from '@/lib/adminAccounts';
 import { isRoseDesktopUser } from '@/lib/roseDesktop';
 import { RoseDesktopContext } from '@/hooks/roseDesktopContext';
+import { RoseThemeProvider } from '@/features/rose-theme';
 import { isBenchmarkSharedView } from '@/lib/benchmarkShare';
 import { isBenchmarkArchiveMode } from '@/lib/benchmarkArchive';
 import {
@@ -120,15 +124,17 @@ function TerminalLayout(props: TerminalLayoutProps) {
   const roseDesktop = isRoseDesktopAccount(props.agents);
   return (
     <RoseDesktopContext.Provider value={roseDesktop}>
-      <RoseAppsProvider
-        agents={props.agents.agents}
-        selectedAgentId={props.agents.selectedAgentId}
-        onSelectAgent={props.agents.handleSelectAgent}
-        publishLayout={roseDesktop}
-      >
-        <InteractiveTerminalLayout {...props} />
-        {roseDesktop && <RoseAppBar />}
-      </RoseAppsProvider>
+      <RoseThemeProvider userId={props.agents.user?.id ?? null}>
+        <RoseAppsProvider
+          agents={props.agents.agents}
+          selectedAgentId={props.agents.selectedAgentId}
+          onSelectAgent={props.agents.handleSelectAgent}
+          publishLayout={roseDesktop}
+        >
+          <InteractiveTerminalLayout {...props} />
+          {roseDesktop && <RoseAppBar />}
+        </RoseAppsProvider>
+      </RoseThemeProvider>
     </RoseDesktopContext.Provider>
   );
 }

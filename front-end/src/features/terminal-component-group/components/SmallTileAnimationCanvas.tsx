@@ -16,6 +16,15 @@
  *     +--> everColoredTiles: Set<TileKey> (all tiles that ever had color > 0)
  *     +--> renders dots, animations, borders on separate canvases
  *
+ * THEME (hidden prop = Rose dark mode, BackgroundPattern):
+ * [SHOWN]  hidden absent → stock markup and behaviour, unchanged
+ *   --hidden--> [HIDDEN] same render: container gets the `hidden` attribute
+ *               (dots + animations vanish on the frame html.dark flips), the
+ *               canvases are cleared, nothing is drawn and no animation spawns
+ *   --shown---> [SHOWN] same commit: attribute removed and the dots repainted
+ *               synchronously in a layout effect (html.dark already removed, so
+ *               the light dot colour); spawning resumes after its delay
+ *
  * Layer structure (bottom to top):
  * 1. Root container (z-[2]) - Animation canvases
  *    - Canvas: Dots (z-[-3]) - BELOW animations
@@ -34,6 +43,8 @@ import { useTileRenderLoop } from './smallTileAnimationCanvas/useTileRenderLoop'
 
 interface SmallTileAnimationCanvasProps {
   enabled: boolean;
+  /** Rose dark mode: hide dots + animations and stop spawning (omit in light). */
+  hidden?: boolean;
   tileAnimationComplete: boolean;
   currentFrame: number;
   tileColors: Map<string, number>;
@@ -50,6 +61,7 @@ const CANVAS_STYLE: CSSProperties = {
 
 export default function SmallTileAnimationCanvas({
   enabled,
+  hidden,
   tileAnimationComplete,
   tileColors,
   selectedAgentId,
@@ -69,7 +81,7 @@ export default function SmallTileAnimationCanvas({
   }, [tileColors]);
 
   const { animatingTiles, removeAnimatingTile } = useSmallTileAnimations({
-    enabled: enabled && tileAnimationComplete,
+    enabled: enabled && tileAnimationComplete && hidden !== true,
     viewportWidth,
     viewportHeight,
     tileSize: TILE_SIZE,
@@ -84,6 +96,7 @@ export default function SmallTileAnimationCanvas({
 
   useTileRenderLoop({
     enabled,
+    hidden,
     dotsRef: dotsCanvasRef,
     animationsRef: animationsCanvasRef,
     bordersRef: bordersCanvasRef,
@@ -101,6 +114,7 @@ export default function SmallTileAnimationCanvas({
     <div
       data-testid="terminal-small-tile-animation-canvas"
       className="pointer-events-none fixed inset-0 z-[2]"
+      hidden={hidden}
     >
       <canvas
         ref={dotsCanvasRef}

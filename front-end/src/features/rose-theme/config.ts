@@ -1,0 +1,7 @@
+/** localStorage key prefix; the full key is `rose-theme:<userId>`. */
+export const ROSE_THEME_STORAGE_PREFIX = 'rose-theme:';
+
+/** Per-user key holding 'dark' | 'light'. */
+export function roseThemeStorageKey(userId: string): string {
+  return `${ROSE_THEME_STORAGE_PREFIX}${userId}`;
+}
