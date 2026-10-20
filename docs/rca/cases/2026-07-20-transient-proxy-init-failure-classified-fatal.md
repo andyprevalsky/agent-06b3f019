@@ -55,3 +55,26 @@ None recorded.
 Classify retryability by what the error _means_, not by its status class — a 400 that
 reports transient capacity must acquire a fresh resource and retry within a bounded
 budget.
+
+## 2026-10-20 backend rotation recurrence
+
+PR #1555's deployment hit this class in the backend proxy ladder: Kernel
+mobile browser creation returned `Proxy health check failed`, then `Proxy is
+marked unavailable from the last health check`. The existing availability
+classifier did not recognize either response (or the equivalent `error when
+testing a connection through the proxy` response), so the already bounded
+location ladder stopped before trying the next location.
+
+The owning `browser-provider` blackbox now replays all three captured errors
+through `createSessionOnKernelProxyLadder` with its real cache invalidation:
+explicit unavailability drops the stale local cache row; transport health
+failures retain it and try the next location. Authentication and malformed
+request errors remain terminal. No timeout, rotation count, or live assertion
+changes. The permanent regression failed before the four classification
+entries were added and passed afterward, including five consecutive runs.
+
+Reproduction: from `back-end`, run
+`node --import tsx --input-type=module -e "import {assertKernelProxyHealthFallback} from './src/tests/blackbox/browser-provider.kernel-health.support.ts'; await assertKernelProxyHealthFallback();"`.
+It is registered in `browser-provider.blackbox.ts`, executed by backend
+coverage and the live browser-provider deploy gate. Live outcome verification
+is retained in deploy run `20261020-024230-4191617`.
