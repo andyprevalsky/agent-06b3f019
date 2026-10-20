@@ -40,7 +40,8 @@ export interface RoseProjectActions {
   onRename: (project: Project, name: string) => void;
   onCancelRename: () => void;
   onRequestDelete: (project: Project) => void;
-  onCreateProject: (name: string) => void;
+  /** Resolves to an inline error for the "+ New project" input (409), else null. */
+  onCreateProject: (name: string) => Promise<string | null>;
 }
 
 export interface RoseAgentGroupsProps {

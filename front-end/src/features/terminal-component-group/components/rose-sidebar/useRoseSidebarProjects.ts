@@ -8,13 +8,14 @@
  * (Account settings open in the right-panel slot, owned by RoseAppsProvider.)
  *
  * PROJECT MUTATIONS (useProjects): create (inline "+ New project"), rename
- * (inline), delete (after the confirm dialog). Failures surface as toasts.
+ * (inline, PUT { name }), delete (after the confirm dialog). Failures surface as
+ * toasts, except a duplicate name on create (409), which the inline input shows.
  */
 
 import { useCallback, useState } from 'react';
 
 import { useToast } from '@/hooks/use-toast';
-import type { Project } from '@/lib/api/projects';
+import { DuplicateProjectNameError, type Project } from '@/lib/api/projects';
 
 import { useCreateProject, useDeleteProject, useProjects, useUpdateProject } from './useProjects';
 import type { RoseProjectActions } from './RoseAgentGroups';
@@ -60,8 +61,16 @@ export function useRoseSidebarProjects(onCreateAgentInProject: (project: Project
       );
     },
     onRequestDelete: setDeleteTarget,
-    onCreateProject: (name) =>
-      createMutation.mutate(name, { onError: () => fail('Could not create project') }),
+    onCreateProject: async (name) => {
+      try {
+        await createMutation.mutateAsync(name);
+        return null;
+      } catch (err) {
+        if (err instanceof DuplicateProjectNameError) return err.message;
+        fail('Could not create project');
+        return null;
+      }
+    },
   };
 
   const openProject =

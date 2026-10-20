@@ -313,6 +313,7 @@ function SidebarSection({
       selectedAgentId={agents.selectedAgentId}
       onSelectAgent={agents.handleSelectAgent}
       onCreateAgent={agents.handleCreateNewAgent}
+      roseActions={{ onCreateAgentInProject: agents.handleCreateNewAgentInProject }}
       onRefreshAgents={agents.loadAgents}
       onRefreshAttention={onRefreshAttention}
       attentionAgentIds={attentionAgentIds}

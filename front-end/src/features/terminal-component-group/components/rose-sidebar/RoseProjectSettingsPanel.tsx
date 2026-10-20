@@ -3,18 +3,21 @@
  *
  *   Opened from a project row's ⚙ (or its right-click menu), flush beside the
  *   left bar (LeftPanelShell). Draft/save state lives in useProjectSettingsForm:
- *   [PRISTINE] --edit--> [DIRTY] --Save--> [SAVING] --ok--> [PRISTINE]
- *                                                   --fail--> [DIRTY] + error
+ *   [PRISTINE] --edit--> [DIRTY] --Save (PUT edited subset)--> [SAVING] --ok--> [PRISTINE]
+ *                                                              --fail--> [DIRTY] + error
+ *   [DIRTY] + timeout outside 1..3600 --> [INVALID] inline hint, Save disabled
  *   Code repo: [SHOWING URL] --Change--> [EDITING URL] (saved with Save)
  *
  * Sections (Rose light styles): Code repo (repository URL + Change, default
- * branch, GitHub connection status) · Startup script · Startup timeout ·
- * Environment files · Lifecycle (Auto-wake, Startup script set/not set).
+ * branch, GitHub "Connected"/"Not connected" — never an error — and Last synced)
+ * · Startup script · Startup timeout · Environment files (own resource, saved
+ * immediately; header count = project.envFileCount) · Lifecycle (Auto-wake,
+ * Startup script set/not set).
  */
 
 import { useState } from 'react';
 
-import type { Project } from '@/lib/api/projects';
+import { MAX_STARTUP_TIMEOUT_S, MIN_STARTUP_TIMEOUT_S, type Project } from '@/lib/api/projects';
 import { cn } from '@/lib/utils';
 
 import LeftPanelShell from './LeftPanelShell';
@@ -30,15 +33,20 @@ const H3 = 'mb-2 mt-[22px] text-[13px] font-semibold';
 
 type SetField = <K extends keyof ProjectDraft>(key: K, value: ProjectDraft[K]) => void;
 
+function formatSyncedAt(iso: string): string {
+  return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
+
 function CodeRepoSection({
   draft,
   setField,
-  githubConnected,
+  project,
 }: {
   draft: ProjectDraft;
   setField: SetField;
-  githubConnected: boolean;
+  project: Project;
 }) {
+  const lastSyncedAt = project.sync.lastSyncedAt;
   const [editingUrl, setEditingUrl] = useState(false);
   return (
     <section aria-label="Code repo">
@@ -80,14 +88,32 @@ function CodeRepoSection({
       <div className={FIELD_ROW}>
         <span>GitHub</span>
         <span data-testid="project-github-status" className={MONO}>
-          {githubConnected ? 'Connected' : 'Not connected'}
+          {project.githubConnected ? 'Connected' : 'Not connected'}
+        </span>
+      </div>
+      <div className={FIELD_ROW}>
+        <span>Last synced</span>
+        <span data-testid="project-last-synced" className={MONO}>
+          {lastSyncedAt === null ? (
+            'Never'
+          ) : (
+            <time dateTime={lastSyncedAt}>{formatSyncedAt(lastSyncedAt)}</time>
+          )}
         </span>
       </div>
     </section>
   );
 }
 
-function StartupSection({ draft, setField }: { draft: ProjectDraft; setField: SetField }) {
+function StartupSection({
+  draft,
+  setField,
+  isTimeoutValid,
+}: {
+  draft: ProjectDraft;
+  setField: SetField;
+  isTimeoutValid: boolean;
+}) {
   return (
     <section aria-label="Startup">
       <h3 className={H3}>Startup script</h3>
@@ -106,14 +132,21 @@ function StartupSection({ draft, setField }: { draft: ProjectDraft; setField: Se
           <input
             aria-label="Startup timeout (seconds)"
             type="number"
-            min={1}
-            value={draft.startupTimeoutSec}
-            onChange={(e) => setField('startupTimeoutSec', Number(e.target.value))}
+            min={MIN_STARTUP_TIMEOUT_S}
+            max={MAX_STARTUP_TIMEOUT_S}
+            aria-invalid={!isTimeoutValid}
+            value={draft.startupTimeoutS}
+            onChange={(e) => setField('startupTimeoutS', Number(e.target.value))}
             className={cn(MONO, 'w-16 bg-transparent text-right outline-none')}
           />
           <span className={MONO}>s</span>
         </span>
       </label>
+      {!isTimeoutValid && (
+        <p data-testid="project-timeout-error" className="mt-1 text-right text-[#e5484d]">
+          Use {MIN_STARTUP_TIMEOUT_S}–{MAX_STARTUP_TIMEOUT_S} seconds
+        </p>
+      )}
     </section>
   );
 }
@@ -162,13 +195,13 @@ export default function RoseProjectSettingsPanel({
     >
       <h2 className="mb-0.5 text-[17px] font-semibold">{project.name}</h2>
       <p className={MUTED}>Project settings</p>
-      <CodeRepoSection
+      <CodeRepoSection draft={form.draft} setField={form.setField} project={project} />
+      <StartupSection
         draft={form.draft}
         setField={form.setField}
-        githubConnected={project.githubConnected === true}
+        isTimeoutValid={form.isTimeoutValid}
       />
-      <StartupSection draft={form.draft} setField={form.setField} />
-      <ProjectEnvFilesSection envFiles={form.draft.envFiles} onChange={form.setEnvFiles} />
+      <ProjectEnvFilesSection projectId={project.id} envFileCount={project.envFileCount} />
       <LifecycleSection draft={form.draft} setField={form.setField} />
       <div className="mt-6 flex items-center justify-end gap-3">
         {form.error !== null && (
@@ -178,7 +211,7 @@ export default function RoseProjectSettingsPanel({
         )}
         <button
           type="button"
-          disabled={!form.isDirty || form.isSaving}
+          disabled={!form.canSave}
           onClick={() => void form.save()}
           className="h-9 rounded-[10px] bg-[#0a0a0a] px-4 font-semibold text-white disabled:opacity-40"
         >

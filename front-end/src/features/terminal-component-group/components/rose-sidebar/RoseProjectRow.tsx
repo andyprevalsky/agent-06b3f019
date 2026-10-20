@@ -11,7 +11,11 @@
  * the selected agent) = rose color + semibold; no fills.
  *
  * NewProjectRow: [IDLE] "+ New project" --click--> [EDITING] inline input
- *   --Enter (non-empty)--> onCreate(name) --> [IDLE];  --Escape | blur--> [IDLE]
+ *   [EDITING] --Enter (non-empty)--> [CREATING] (POST /api/projects)
+ *   [CREATING] --created | other failure (toast)--> [IDLE]
+ *   [CREATING] --409 duplicate name--> [EDITING + inline error] (value kept)
+ *   [EDITING + inline error] --type--> [EDITING] (error cleared)
+ *   [EDITING] --Escape | blur--> [IDLE]
  */
 
 import { Folder, Pencil, Plus, Settings as SettingsIcon, Trash2 } from 'lucide-react';
@@ -44,11 +48,16 @@ function InlineNameInput({
   initial,
   onSubmit,
   onCancel,
+  errorId,
+  onEdit,
 }: {
   label: string;
   initial: string;
   onSubmit: (name: string) => void;
   onCancel: () => void;
+  /** Id of the inline error describing this input; set while it is shown. */
+  errorId?: string;
+  onEdit?: () => void;
 }) {
   const [value, setValue] = useState(initial);
   const ref = useRef<HTMLInputElement>(null);
@@ -68,9 +77,14 @@ function InlineNameInput({
       ref={ref}
       aria-label={label}
       value={value}
-      onChange={(e) => setValue(e.target.value)}
+      onChange={(e) => {
+        setValue(e.target.value);
+        onEdit?.();
+      }}
       onKeyDown={onKeyDown}
       onBlur={onCancel}
+      aria-invalid={errorId !== undefined}
+      aria-describedby={errorId}
       className="min-w-0 flex-1 bg-transparent font-semibold text-[hsl(240_15%_8%)] dark:text-[#ecece8] outline-none"
     />
   );
@@ -170,13 +184,28 @@ export default function RoseProjectRow(props: RoseProjectRowProps) {
   );
 }
 
-export function NewProjectRow({ onCreate }: { onCreate: (name: string) => void }) {
+const NEW_PROJECT_ERROR_ID = 'rose-new-project-error';
+
+export function NewProjectRow({
+  onCreate,
+}: {
+  /** Resolves to an inline error (duplicate name) or null when the row can close. */
+  onCreate: (name: string) => Promise<string | null>;
+}) {
   const [isEditing, setIsEditing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const close = () => {
+    setIsEditing(false);
+    setError(null);
+  };
   if (!isEditing) {
     return (
       <button
         type="button"
-        onClick={() => setIsEditing(true)}
+        onClick={() => {
+          setError(null);
+          setIsEditing(true);
+        }}
         className="flex h-[30px] flex-none items-center whitespace-nowrap pl-[54px] text-left text-[13px] text-[hsl(240_8%_45%)] dark:text-[#a3a39d] hover:text-[hsl(240_15%_8%)] dark:hover:text-[#ecece8]"
       >
         + New project
@@ -184,20 +213,36 @@ export function NewProjectRow({ onCreate }: { onCreate: (name: string) => void }
     );
   }
   return (
-    <div className={ROW}>
-      <Folder
-        className="h-5 w-5 flex-none text-[hsl(240_8%_40%)] dark:text-[#a3a39d]"
-        strokeWidth={1.7}
-      />
-      <InlineNameInput
-        label="New project name"
-        initial=""
-        onSubmit={(name) => {
-          setIsEditing(false);
-          onCreate(name);
-        }}
-        onCancel={() => setIsEditing(false)}
-      />
+    <div className="flex flex-none flex-col">
+      <div className={ROW}>
+        <Folder
+          className="h-5 w-5 flex-none text-[hsl(240_8%_40%)] dark:text-[#a3a39d]"
+          strokeWidth={1.7}
+        />
+        <InlineNameInput
+          label="New project name"
+          initial=""
+          errorId={error === null ? undefined : NEW_PROJECT_ERROR_ID}
+          onEdit={() => setError(null)}
+          onSubmit={(name) => {
+            void onCreate(name).then((inlineError) => {
+              if (inlineError === null) close();
+              else setError(inlineError);
+            });
+          }}
+          onCancel={close}
+        />
+      </div>
+      {error !== null && (
+        <p
+          id={NEW_PROJECT_ERROR_ID}
+          data-testid={NEW_PROJECT_ERROR_ID}
+          role="alert"
+          className="whitespace-normal pb-1 pl-[54px] pr-4 text-[12px] text-[#e5484d]"
+        >
+          {error}
+        </p>
+      )}
     </div>
   );
 }

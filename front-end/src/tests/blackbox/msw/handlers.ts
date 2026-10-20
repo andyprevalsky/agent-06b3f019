@@ -12,7 +12,7 @@ export const handlers = [
   http.get(`${API_BASE}/user-ui/active`, () => HttpResponse.json({ versionId: null })),
   http.get(`${API_BASE}/user-ui/versions`, () => HttpResponse.json({ versions: [] })),
   // Rose Desktop left bar groups agents by project; none unless a test overrides.
-  http.get(`${API_BASE}/projects`, () => HttpResponse.json([])),
+  http.get(`${API_BASE}/projects`, () => HttpResponse.json({ projects: [] })),
   // Rose Desktop Integrations icon reads integration health; nothing connected by default.
   http.get(`${API_BASE}/integrations`, () => HttpResponse.json({ integrations: [] })),
   http.get(`${API_BASE}/integrations/plaid/items`, () => HttpResponse.json({ items: [] })),
