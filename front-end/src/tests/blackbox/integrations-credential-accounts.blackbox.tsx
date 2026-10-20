@@ -1,10 +1,12 @@
 /**
- * Password and passkey accounts on Rose Desktop (plan row I7), on the real
- * backend contract (back-end/src/domains/integrations/service.credentialAccounts.ts):
+ * Password and passkey accounts on Rose Desktop (plan rows I7, A6), on the real
+ * backend contract (back-end/src/domains/integrations/service.credentialAccounts.ts,
+ * service.accountLabels.ts):
  *
  *   `<source>_passwords`, accountId `<source>:<profile>` ('default' = no profile)
- *     → one chip per profile, "Chrome · Profile 1"
- *   `<source>_passkeys`, a single 'default' account → "Agent passkeys", "Apple passkeys"
+ *     → one chip per profile, labelled by the server ("Chrome · Profile 1", "Chrome")
+ *   `<source>_passkeys`, a single 'default' account ("Rose agent", "Apple passkeys")
+ *   the chip shows the server label verbatim; a missing label shows the bare id
  *   DELETE /api/integrations/:provider/accounts/:accountId (URL-encoded)
  *   cdp_virtual_passkeys: the confirm dialog states Rose holds the only copy
  *   Order: Browser Cookies, then Passwords (Chrome, Apple, Atlas, other browsers)
@@ -14,10 +16,8 @@ import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 
-import {
-  passkeyAccountLabel,
-  passwordAccountLabel,
-} from '@/features/integrations/components/credentialAccountLabels';
+import { credentialAccountLabel } from '@/features/integrations/components/credentialAccountLabels';
+import { parseIntegrationAccounts } from '@/features/integrations/hooks/integrationAccounts';
 
 import { capturedRequests } from './msw/capture';
 import { server } from './msw/server';
@@ -32,15 +32,16 @@ import {
 } from './integrations-accounts.fixtures';
 import { mockTerminalHookSession as mockSession } from './terminal-hooks.fixtures';
 
+// Labels exactly as service.accountLabels.ts names them.
 const chromeAccounts = [
-  account('chrome_passwords', 'chrome:Profile 1'),
-  account('chrome_passwords', 'default'),
+  account('chrome_passwords', 'chrome:Profile 1', { label: 'Chrome · Profile 1' }),
+  account('chrome_passwords', 'default', { label: 'Chrome' }),
 ];
-const atlasAccounts = [account('atlas_passwords', 'atlas:Default')];
-const braveAccounts = [account('brave_passwords', 'brave:Work')];
-const agentPasskeys = [account('cdp_virtual_passkeys', 'default')];
-const applePasskeys = [account('apple_passwords_passkeys', 'default')];
-const applePasswords = [account('apple_passwords', 'default')];
+const atlasAccounts = [account('atlas_passwords', 'atlas:Default', { label: 'Atlas' })];
+const braveAccounts = [account('brave_passwords', 'brave:Work', { label: 'Brave · Work' })];
+const agentPasskeys = [account('cdp_virtual_passkeys', 'default', { label: 'Rose agent' })];
+const applePasskeys = [account('apple_passwords_passkeys', 'default', { label: 'Apple passkeys' })];
+const applePasswords = [account('apple_passwords', 'default', { label: 'Apple Passwords' })];
 
 function credentialList() {
   return {
@@ -81,36 +82,53 @@ describe('Passwords I7: one chip per credential account', () => {
   beforeEach(() => mockSession());
   afterEach(() => localStorage.clear());
 
-  it('labels each password profile "<Browser> · <Profile>", one chip per account', async () => {
+  it('shows each password profile under its server label, one chip per account', async () => {
     serveList(credentialList);
     renderIntegrations();
     await waitFor(() => expect(chipFor('chrome-passwords', 'Chrome · Profile 1')).not.toBeNull());
     const chrome = within(rowEl('chrome-passwords')).getByTestId('accounts-chrome-passwords');
     expect(
       within(chrome)
-        .getAllByText(/^Chrome · /)
+        .getAllByText(/^Chrome/)
         .map((el) => el.textContent),
-    ).toEqual(['Chrome · Profile 1', 'Chrome · Default profile']);
+    ).toEqual(['Chrome · Profile 1', 'Chrome']);
+    // Never prefixed twice, never a client-derived name.
+    expect(screen.queryByText('Chrome · Chrome · Profile 1')).toBeNull();
+    expect(screen.queryByText('Chrome · Default profile')).toBeNull();
     // Rows sharing a provider carry one list: no duplicate chips.
     expect(within(chrome).getAllByRole('button', { name: /^Remove Chrome/ })).toHaveLength(2);
-    expect(chipFor('atlas-passwords', 'ChatGPT Atlas · Default')).toHaveAttribute(
-      'data-tone',
-      'synced',
-    );
+    expect(chipFor('atlas-passwords', 'Atlas')).toHaveAttribute('data-tone', 'synced');
     expect(chipFor('passwords-brave', 'Brave · Work')).toBeInTheDocument();
     expect(screen.queryByText('chrome:Profile 1')).toBeNull();
   });
 
-  it('passkey stores are labeled by source in the Apple row, each listed once', async () => {
+  it('a missing server label shows the bare account id, never a derived name', async () => {
+    const unlabeled = [
+      account('chrome_passwords', 'chrome:Profile 1'),
+      account('chrome_passwords', 'default'),
+    ];
+    serveList(() => ({
+      integrations: [row('chrome_passwords', unlabeled, { accountId: 'chrome:Profile 1' })],
+      accountsByProvider: { chrome_passwords: unlabeled },
+    }));
+    renderIntegrations();
+    await waitFor(() => expect(chipFor('chrome-passwords', 'chrome:Profile 1')).not.toBeNull());
+    expect(chipFor('chrome-passwords', 'default')).toBeInTheDocument();
+    expect(screen.queryByText('Chrome · Profile 1')).toBeNull();
+    expect(screen.queryByText('Chrome · Default profile')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Remove chrome:Profile 1' })).toBeInTheDocument();
+  });
+
+  it('passkey stores show their server labels in the Apple row, each listed once', async () => {
     serveList(credentialList);
     renderIntegrations();
-    await waitFor(() => expect(chipFor('apple-passwords', 'Agent passkeys')).not.toBeNull());
+    await waitFor(() => expect(chipFor('apple-passwords', 'Rose agent')).not.toBeNull());
     const apple = within(rowEl('apple-passwords')).getByTestId('accounts-apple-passwords');
     expect(
       within(apple)
-        .getAllByText(/Passwords$|passkeys$/)
+        .getAllByText(/^(Apple Passwords|Rose agent|Apple passkeys)$/)
         .map((el) => el.textContent),
-    ).toEqual(['Apple Passwords', 'Agent passkeys', 'Apple passkeys']);
+    ).toEqual(['Apple Passwords', 'Rose agent', 'Apple passkeys']);
   });
 
   it('keeps Browser Cookies first, then Passwords: Chrome, Apple, Atlas, other browsers', async () => {
@@ -154,7 +172,7 @@ describe('Passwords I7: one chip per credential account', () => {
     const deleted = captureDeletes();
     const user = userEvent.setup();
     renderIntegrations();
-    await user.click(await screen.findByRole('button', { name: 'Remove Agent passkeys' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove Rose agent' }));
     const dialog = await screen.findByRole('dialog');
     const warning = within(dialog).getByTestId('remove-account-warning');
     expect(warning).toHaveTextContent('only copy of the passkeys your agents enrolled');
@@ -164,7 +182,7 @@ describe('Passwords I7: one chip per credential account', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     expect(deleted).toEqual([]);
 
-    await user.click(screen.getByRole('button', { name: 'Remove Agent passkeys' }));
+    await user.click(screen.getByRole('button', { name: 'Remove Rose agent' }));
     await user.click(
       within(await screen.findByRole('dialog')).getByRole('button', { name: 'Remove' }),
     );
@@ -187,7 +205,7 @@ describe('Passwords I7: one chip per credential account', () => {
     renderIntegrations({ roseDesktop: false });
     expect(await screen.findByText('Enable web automation and browsing')).toBeInTheDocument();
     expect(screen.queryByText('Chrome · Profile 1')).toBeNull();
-    expect(screen.queryByText('Agent passkeys')).toBeNull();
+    expect(screen.queryByText('Rose agent')).toBeNull();
     expect(
       capturedRequests.some((r) => r.method === 'DELETE' && r.url.includes('/integrations/')),
     ).toBe(false);
@@ -195,31 +213,24 @@ describe('Passwords I7: one chip per credential account', () => {
 });
 
 describe('credential account labels', () => {
-  const parsed = (accountId: string, label: string | null = null) => ({
-    accountId,
-    label: label ?? accountId,
-    unlabeled: label === null,
-    tone: 'synced' as const,
-    state: 'synced',
-    progress: null,
-    lastSyncAt: null,
-    lastError: null,
-  });
-
-  it('spells sources and profiles readably', () => {
-    expect(passwordAccountLabel('chrome_passwords', parsed('chrome:Profile 1'))).toBe(
+  it('are the server label verbatim; a missing label is the bare account id', () => {
+    const parsed = parseIntegrationAccounts({
+      id: 'int-chrome',
+      name: 'chrome_passwords',
+      status: 'CONNECTED',
+      isActive: true,
+      accounts: [
+        account('chrome_passwords', 'chrome:Profile 1', { label: 'Chrome · Profile 1' }),
+        account('chrome_passwords', 'chrome:Default', { label: 'Chrome' }),
+        account('chrome_passwords', 'chrome:Work', { label: '' }),
+        account('chrome_passwords', 'chrome:Spare'),
+      ],
+    });
+    expect(parsed?.map(credentialAccountLabel)).toEqual([
       'Chrome · Profile 1',
-    );
-    expect(passwordAccountLabel('chrome_passwords', parsed('default'))).toBe(
-      'Chrome · Default profile',
-    );
-    expect(passwordAccountLabel('edge_passwords', parsed('edge:Profile 2', 'Work'))).toBe(
-      'Edge · Work',
-    );
-    expect(passwordAccountLabel('apple_passwords', parsed('default'))).toBe('Apple Passwords');
-    expect(passwordAccountLabel('netscape_passwords', parsed('netscape:P'))).toBe('Netscape · P');
-    expect(passkeyAccountLabel('cdp_virtual_passkeys')).toBe('Agent passkeys');
-    expect(passkeyAccountLabel('apple_passwords_passkeys')).toBe('Apple passkeys');
-    expect(passkeyAccountLabel('chrome_passkeys')).toBe('Chrome passkeys');
+      'Chrome',
+      'chrome:Work',
+      'chrome:Spare',
+    ]);
   });
 });

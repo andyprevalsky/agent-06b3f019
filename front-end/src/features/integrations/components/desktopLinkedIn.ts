@@ -12,6 +12,9 @@
  *   config.linkedinSync             the run's timestamped timeline, on the account's
  *                                   own Integration row (row.accountId '' = default)
  *
+ *   chip label                      the server label verbatim ('linkedin.com/in/<id>',
+ *                                   'LinkedIn member <n>'); missing → the bare account id
+ *
  *   account                         chip
  *   ─────────────────────────────── ─────────────────────────────────────────────
  *   syncing                         sky chip; bar with the phase as words, ETA only
@@ -26,7 +29,7 @@
 
 import { parseIntegrationAccounts, parseSyncProgress } from '../hooks/integrationAccounts';
 import { removalKey } from '../hooks/useIntegrationRemoval';
-import type { ConnectedIntegration, IntegrationAccount, SyncProgress } from '../types';
+import type { ConnectedIntegration, SyncProgress } from '../types';
 import type { DesktopAccountView } from './DesktopIntegrationRow';
 import { rowAccounts, stringConfig, toneDetail, type RemovalPort } from './desktopAccounts';
 
@@ -56,24 +59,6 @@ function accountRow(
 ): ConnectedIntegration | undefined {
   const storage = accountId === DEFAULT_ACCOUNT_ID ? '' : accountId;
   return rows.find((row) => (row.accountId ?? '') === storage);
-}
-
-/** "Andy Prevalsky" from the imported profile, else null. */
-function profileName(row: ConnectedIntegration | undefined): string | null {
-  const profile = object(row?.config?.profile);
-  if (profile === null) return null;
-  const parts = [profile.firstName, profile.lastName].filter(
-    (part): part is string => typeof part === 'string' && part.trim() !== '',
-  );
-  return parts.length > 0 ? parts.join(' ') : null;
-}
-
-function accountLabel(account: IntegrationAccount, row: ConnectedIntegration | undefined): string {
-  if (!account.unlabeled) return account.label;
-  const name = profileName(row);
-  if (name !== null) return name;
-  if (account.accountId !== DEFAULT_ACCOUNT_ID) return account.accountId;
-  return stringConfig(row, 'name') ?? FALLBACK_LABEL;
 }
 
 /**
@@ -120,7 +105,9 @@ export function linkedinAccountViews(
     .filter((account) => account.state !== 'idle')
     .map((account) => {
       const row = accountRow(rows, account.accountId);
-      const label = accountLabel(account, row);
+      // The server names every account ('linkedin.com/in/<id>', 'LinkedIn member
+      // <n>'); a missing label is the bare account id (never blank).
+      const label = account.label;
       const failed = account.tone === 'error';
       return {
         provider: LINKEDIN_PROVIDER,

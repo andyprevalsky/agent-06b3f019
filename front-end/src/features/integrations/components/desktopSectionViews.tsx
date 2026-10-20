@@ -29,10 +29,9 @@ import {
   AGENT_PASSKEYS_PROVIDER,
   AGENT_PASSKEYS_REMOVAL_WARNING,
   credentialSourceName,
+  credentialAccountLabel,
   extraPasswordRows,
-  passkeyAccountLabel,
   passkeyProviderRows,
-  passwordAccountLabel,
   passwordSource,
 } from './credentialAccountLabels';
 import {
@@ -166,7 +165,11 @@ function browserCookieRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
   });
 }
 
-/** Chips of one `<source>_passwords` provider: one per browser profile, "Chrome · Profile 1". */
+/**
+ * Chips of one `<source>_passwords` provider: one per browser profile, named by
+ * the server ("Chrome · Profile 1"). `label` is only for a backend that sends no
+ * account list.
+ */
 function passwordAccounts(
   row: ConnectedIntegration | undefined,
   removal: RemovalPort,
@@ -180,7 +183,7 @@ function passwordAccounts(
       displayName: `${credentialSourceName(source)} passwords`,
       label: source === 'apple' ? 'Apple Passwords' : 'Default profile',
       localSyncing,
-      labelFor: (account) => passwordAccountLabel(row.name, account),
+      labelFor: credentialAccountLabel,
     },
     removal,
   );
@@ -188,13 +191,12 @@ function passwordAccounts(
 
 /** Chips of one `<source>_passkeys` store; agent-enrolled ones warn before removal. */
 function passkeyAccounts(row: ConnectedIntegration, removal: RemovalPort) {
-  const label = passkeyAccountLabel(row.name);
   return rowAccounts(
     row,
     {
       displayName: 'Passkeys',
-      label,
-      labelFor: () => label,
+      label: 'Passkeys',
+      labelFor: credentialAccountLabel,
       removalWarning:
         row.name === AGENT_PASSKEYS_PROVIDER ? AGENT_PASSKEYS_REMOVAL_WARNING : undefined,
     },
