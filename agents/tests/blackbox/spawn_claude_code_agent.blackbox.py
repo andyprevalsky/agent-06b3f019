@@ -25,6 +25,7 @@ from _test_utils import (
     assert_captured_call,
     get_captured_requests,
     setup_mock,
+    setup_mock_fn,
     teardown_mock,
 )
 
@@ -1667,6 +1668,87 @@ async def test_run_verifier_exception_fallback():
     assert "Verification failed" in reasoning
     assert struct is None
     assert itok == 0 and otok == 0
+
+
+_PARTIAL_VERDICT_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "spawn_claude_code_agent" / "partial-verdict-missing-required-field.json"
+)
+
+
+async def test_run_verifier_partial_verdict_missing_required_field_reaches_parent():
+    """A recorded partial verdict reaches the parent instead of a judge parse error.
+
+    Replays agent 9698df4f's first Codex game run: the verifier scored 0.5,
+    returned ``game_file`` and ``view_name``, and explained that the required
+    ``description`` was not grounded. Every recorded call was rejected with
+    ``output.description: Field required`` until the activity reported
+    ``Progress check failed``. The real ``check_progress`` parser runs here;
+    only the Rose stream is replayed from the recorded verifier output.
+    """
+    from domains.spawn_claude_code_agent import service
+    from providers.rose.schema import build_openai_response_format
+    from providers.rose.types import StreamChunk
+    from utils.terminal_filter import TerminalFilter
+
+    fixture = json.loads(_PARTIAL_VERDICT_FIXTURE.read_text())
+    recorded = fixture["verifier_responses"]
+    assert {response["actual_model"] for response in recorded} == {"gpt-6-sol-gpt"}
+    first_verdict = json.loads(recorded[0]["content"])
+    assert first_verdict["score"] == 0.5
+    assert "description" not in first_verdict["output"]
+
+    verifier_requests: list[dict] = []
+
+    class RecordedVerifierRose:
+        async def complete(self, **kwargs):
+            response = recorded[min(len(verifier_requests), len(recorded) - 1)]
+            verifier_requests.append(kwargs)
+            yield StreamChunk(
+                kind="metadata",
+                data={"actual_model": response["actual_model"], "pool_name": response["pool_name"]},
+            )
+            yield StreamChunk(kind="content", data={"text": response["content"]})
+            yield StreamChunk(
+                kind="usage",
+                data={"prompt_tokens": 5841, "completion_tokens": 571, "total_tokens": 6412},
+            )
+            yield StreamChunk(kind="done", data={"finish_reason": response["finish_reason"]})
+
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    terminal = TerminalFilter(cols=200, rows=50)
+    try:
+        with patch("temporalio.activity.heartbeat"), patch("helpers.llm.RoseClient", RecordedVerifierRose):
+            score, reasoning, struct, _itok, _otok = await service._run_verifier(
+                agent_id="9698df4f-0492-415d-962d-a0dbb3b0bf92",
+                task_id="6c26a13d-fac3-4743-b74b-a659a29c6d42",
+                goal=fixture["goal"],
+                model="rose-labs/rose-1-ultra",
+                terminal=terminal,
+                action_summary=["Agentic loop finished: 0 interactions", "Extracted 1 output files"],
+                output_schema=fixture["output_schema"],
+                claude_token=None,
+                code_provider=fixture["code_provider"],
+                exit_code=fixture["exit_code"],
+                code_events=fixture["code_events"],
+                output_files=fixture["output_files"],
+            )
+    finally:
+        teardown_mock()
+
+    assert not reasoning.startswith("Progress check failed"), reasoning
+    assert reasoning == first_verdict["reasoning"]
+    assert score == 0.5
+    assert struct == {
+        "game_file": {"path": "/home/user/output/neon-orbit-run.html"},
+        "view_name": "neon-orbit-run",
+    }
+    # A well-formed verdict is consumed once; it is not regenerated as malformed.
+    assert len(verifier_requests) == 1
+    # The provider-facing contract is unchanged: completion still requires
+    # both required fields, and the optional view keeps strict mode off.
+    request_format = build_openai_response_format(verifier_requests[0]["response_model"])["json_schema"]
+    assert request_format["strict"] is False
+    assert request_format["schema"]["properties"]["output"]["required"] == ["game_file", "description"]
 
 
 async def test_run_verifier_uses_code_event_json_for_codex_context():
@@ -3790,6 +3872,10 @@ async def _run_all_tests():
         test_run_verifier_disabled_includes_sdk_event_stdout,
     )
     await r.record_async("run_verifier_exception", test_run_verifier_exception_fallback)
+    await r.record_async(
+        "run_verifier_partial_verdict_missing_required_field",
+        test_run_verifier_partial_verdict_missing_required_field_reaches_parent,
+    )
     await r.record_async(
         "run_verifier_codex_event_json",
         test_run_verifier_uses_code_event_json_for_codex_context,
