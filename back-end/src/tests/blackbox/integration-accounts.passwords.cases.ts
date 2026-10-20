@@ -248,6 +248,11 @@ async function eachSourceProfileIsAnAccount(): Promise<void> {
       );
       assert(account.lastSyncAt !== null, `${accountId} has a sync time`);
     }
+    assert(byId.get('chrome:Default')!.label === 'Chrome', 'default profile labelled by browser');
+    assert(
+      byId.get('chrome:Profile 1')!.label === 'Chrome · Profile 1',
+      `profile label, got ${byId.get('chrome:Profile 1')!.label}`
+    );
     const stored = await prisma.integration.findUniqueOrThrow({ where: { id: legacy.id } });
     assert(
       stored.accountId === 'chrome:Default',
