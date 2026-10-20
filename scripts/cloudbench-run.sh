@@ -102,6 +102,11 @@ case "$WMH_ENGINE" in legacy|experiential) ;; *) echo "Invalid WMH_ENGINE: $WMH_
 for _wmh_value in "$WMH_MODEL_NAME" "$WMH_ROSE_POOL" "$WMH_EXECUTION_POLICY"; do
     [[ "$_wmh_value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "Invalid WMH setting: $_wmh_value" >&2; exit 2; }
 done
+# Each engine serves its own donor directory: the native model is restored to
+# world-model-native so it never replaces the legacy model other workspaces serve.
+if [ -z "${CLOUDBENCH_WMH_DIR:-}" ] && [ "$WMH_ENGINE" = experiential ]; then
+    WMH_DIR="$DATA_DIR/world-model-native"
+fi
 # The native venv (and its uv-managed Python under /data/uv-python) is created on
 # the donor volume by `run-bench-cloud --refresh-wmh`; guests never install it.
 WMH_NATIVE_VENV="${CLOUDBENCH_WMH_NATIVE_VENV:-$REPO_DIR/.context/experiential-venv}"

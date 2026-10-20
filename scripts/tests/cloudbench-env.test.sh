@@ -171,6 +171,9 @@ class WorldModelLaunch(unittest.TestCase):
         fragment = re.search(r'^    NATIVE_REFRESH_CMD="set -e\n.*?^ {4}# Legacy', source, re.M | re.S).group(0)
         fragment = fragment[:fragment.rfind("    # Legacy")]
         self.assertNotIn("update_world_model_for_simulation", fragment)
+        # The native restore never writes the legacy model directory.
+        self.assertNotIn("$REMOTE_WMH'", fragment)
+        self.assertNotIn("$REMOTE_WMH/", fragment)
         self.assertIn("create_volume_snapshot_exact", refresh[refresh.index('BUILD_CMD="$NATIVE_REFRESH_CMD"'):])
         # Fleets rehydrate the donor proof from Machine metadata (observed
         # 2026-10-19: a refreshed WMH snapshot was never forked because only the
@@ -192,7 +195,6 @@ class WorldModelLaunch(unittest.TestCase):
             "    if os.environ.get('PULL_MODE')!='no-pointer':\n"
             "        (root/'models/rose-archive/experiential.json').write_text('{}')\n"
             "    (root/'build.manifest.json').write_text('{}')\n"
-            "    Path(str(root)+'.replaced-1').mkdir(exist_ok=True)\n"
             "sys.exit(3 if os.environ.get('PULL_MODE')=='fail' and 'benchmarks.wmh_build_cache' in argv else 0)\n"
         )
         for mode, ok in (("ok", True), ("no-pointer", False), ("fail", False)):
@@ -210,11 +212,18 @@ class WorldModelLaunch(unittest.TestCase):
                     "printf '{\"tool\":\"setup\",\"uv_python\":\"%s\",\"cwd\":\"%s\"}\\n' "
                     "\"$UV_PYTHON_INSTALL_DIR\" \"$PWD\" >> \"$CALLS\"\n")
                 world = scratch / "world-model"
-                (world / "stale").mkdir(parents=True)
+                legacy_model = world / "models/rose-r2-archive-anthropic/model.json"
+                legacy_model.parent.mkdir(parents=True)
+                legacy_model.write_text("legacy")
+                (world / "build.manifest.json").write_text("legacy-manifest")
+                native = scratch / "world-model-native"
+                (native / "models/rose-archive").mkdir(parents=True)
+                (native / "models/rose-archive/experiential.json").write_text("previous")
                 result = run(
                     "gosu() { shift; \"$@\"; }; chown() { :; }; rsync() { return 1; };\n" + fragment
                     + '\neval "$NATIVE_REFRESH_CMD"',
-                    {"REMOTE_REPO": str(repo), "REMOTE_WMH": str(world), "WMH_MODEL_NAME": "rose-archive",
+                    {"REMOTE_REPO": str(repo), "REMOTE_WMH": str(world), "REMOTE_WMH_NATIVE": str(native),
+                     "WMH_MODEL_NAME": "rose-archive",
                      "WMH_CACHE_NAME": "rose-archive-serving", "REMOTE_UV_PYTHON": str(scratch / "uv-python"),
                      "CALLS": str(calls), "PULL_MODE": mode},
                 )
@@ -224,14 +233,59 @@ class WorldModelLaunch(unittest.TestCase):
                 pythons = [record["argv"] for record in records if record["tool"] == "python"]
                 self.assertEqual(pythons[0], ["-m", "pip", "install", "--quiet", "uv"])
                 self.assertEqual(pythons[1], ["-u", "-m", "benchmarks.wmh_build_cache", "pull", "--build-dir",
-                                              str(world), "--name", "rose-archive-serving", "--force"])
+                                              str(native) + ".incoming", "--name", "rose-archive-serving", "--force"])
+                # Other workspaces' legacy model and manifest survive every outcome.
+                self.assertEqual(legacy_model.read_text(), "legacy")
+                self.assertEqual((world / "build.manifest.json").read_text(), "legacy-manifest")
+                self.assertEqual(sorted(path.name for path in scratch.iterdir() if path.name.startswith("world-model")),
+                                 ["world-model", "world-model-native"])
+                pointer = (native / "models/rose-archive/experiential.json").read_text()
+                self.assertEqual(pointer, "{}" if ok else "previous")
                 self.assertEqual(len(pythons), 2)
                 setup = [record for record in records if record["tool"] == "setup"]
                 self.assertEqual(setup, [{"tool": "setup", "uv_python": str(scratch / "uv-python"),
                                           "cwd": str(repo)}])
                 self.assertTrue((scratch / "uv-python").is_dir())
-                if ok:
-                    self.assertFalse(Path(str(world) + ".replaced-1").exists())
+
+    def test_refresh_republishes_only_the_donors_current_dependency_proof(self):
+        # 2026-10-19: --refresh-wmh republished this checkout's local receipt.
+        # The donor volume holds whichever trees the newest refresh installed
+        # (any devbox; the app env lock is per clone), so the cut snapshot may
+        # only be published under the newest donor proof's fingerprints.
+        refresh = source[source.index('if [ "$MODE" = "refresh-wmh" ]; then'):source.index("# MODE: --build-wmh")]
+        self.assertNotIn("WARM_DEPS_STATE_FILE\" 2>/dev/null", refresh)
+        self.assertNotRegex(refresh, r"read -r RECORDED_NODE_FP[^\n]*\n[^\n]*< \"\$WARM_DEPS_STATE_FILE\"")
+        self.assertLess(refresh.index("WMH_DONOR_PROOF=\"$(wmh_refresh_donor_proof)\""),
+                        refresh.index('prepare_warm_source "$mid"'))
+        recheck = refresh.index("WMH_DONOR_PROOF_AFTER=\"$(wmh_refresh_donor_proof)\"")
+        self.assertLess(refresh.index('stop_machine_strict "$mid"'), recheck)
+        self.assertLess(recheck, refresh.index('create_volume_snapshot_exact "$VOL_ID"'))
+        helper = (root / "scripts/lib/cloudbench-env.sh").read_text()
+        latest = re.search(r"^cloudbench_warm_deps_latest_proof\(\) \{.*?^\}\n", helper, re.M | re.S).group(0)
+        proof_fn = re.search(r"^    # Begin WMH donor dependency proof\.\n.*?^    # End WMH donor dependency proof\.\n",
+                             refresh, re.M | re.S).group(0)
+        a, b, c = "a" * 64, "b" * 64, "c" * 64
+        def donor(metadata, volume="vol_donor"):
+            return [{"id": "m1", "name": "cloudbench-warm",
+                     "config": {"mounts": [{"volume": volume}], "metadata": metadata}},
+                    {"id": "other", "config": {"mounts": [{"volume": "vol_x"}],
+                                               "metadata": {"rose_cloudbench_deps_z": f"{c} {c} 9999999999 vs_z vol_x other app"}}}]
+        stale = {"rose_cloudbench_deps_1": f"{a} {b} 100 vs_old vol_donor m1 app",
+                 "rose_cloudbench_deps_2": f"{c} {b} 200 vs_new vol_donor m1 app",
+                 "rose_cloudbench_deps_3": "probe same-session 0 diagnostic vol_donor m1 app",
+                 "rose_cloudbench_deps_4": f"{a} {a} 900 vs_foreign vol_elsewhere m1 app",
+                 "unrelated": "x"}
+        def proof(inventory):
+            script = latest + proof_fn + 'FLY() { printf "%s" "$INVENTORY"; }\nmaintenance_mid=m1 APP=app wmh_refresh_donor_proof'
+            return subprocess.run(["bash", "-c", script], env={"PATH": os.environ["PATH"],
+                                  "INVENTORY": json.dumps(inventory)}, text=True, capture_output=True)
+        newest = proof(donor(stale))
+        self.assertEqual(newest.returncode, 0, newest.stderr)
+        # The newest proof bound to this donor+volume wins over an older local receipt.
+        self.assertEqual(newest.stdout.split(), [c, b, "200", "vs_new", "vol_donor"])
+        self.assertNotEqual(proof(donor({"rose_cloudbench_deps_3": stale["rose_cloudbench_deps_3"]})).returncode, 0)
+        self.assertNotEqual(proof(donor(stale, volume="")).returncode, 0)
+        self.assertNotEqual(proof([]).returncode, 0)
 
     def test_guest_guard_requires_the_native_pointer_and_pre_created_venv(self):
         run_script = (root / "scripts/cloudbench-run.sh").read_text()
@@ -272,7 +326,7 @@ class WorldModelLaunch(unittest.TestCase):
         stack = run_script[run_script.index("STACK_ENV=(\n"):run_script.index('if [ -n "$BENCHMARK_FAST_MODE_CACHE" ]; then\n    STACK_ENV')]
         def stack_env(values):
             outcome = subprocess.run(["bash", "-c", selection + stack + 'printf "%s\\n" "${STACK_ENV[@]}"'],
-                                     env={"PATH": os.environ["PATH"], "REPO_DIR": "/data/repo",
+                                     env={"PATH": os.environ["PATH"], "REPO_DIR": "/data/repo", "DATA_DIR": "/data",
                                           "WMH_DIR": "/data/world-model", **values}, text=True, capture_output=True)
             self.assertEqual(outcome.returncode, 0, outcome.stderr)
             return dict(line.split("=", 1) for line in outcome.stdout.splitlines() if "=" in line)
@@ -281,7 +335,7 @@ class WorldModelLaunch(unittest.TestCase):
             "WMH_ENGINE", "WMH_MODEL_NAME", "WMH_ROSE_POOL", "WMH_EXECUTION_POLICY", "WMH_BUILD_DIR",
             "BENCHMARK_SKIP_WMH_DELTA", "WMH_NATIVE_PYTHON")}, {
             "WMH_ENGINE": "experiential", "WMH_MODEL_NAME": "rose-archive", "WMH_ROSE_POOL": "rose-wmh-gpt61",
-            "WMH_EXECUTION_POLICY": "rose-outcome-distribution-v4", "WMH_BUILD_DIR": "/data/world-model",
+            "WMH_EXECUTION_POLICY": "rose-outcome-distribution-v4", "WMH_BUILD_DIR": "/data/world-model-native",
             "BENCHMARK_SKIP_WMH_DELTA": "1", "WMH_NATIVE_PYTHON": "/data/repo/.context/experiential-venv/bin/python"})
         self.assertNotIn("WMH_CONTEXT_TOKENS", native)
         # Native inference matches the validated local instantiate-whm runs.
@@ -296,6 +350,10 @@ class WorldModelLaunch(unittest.TestCase):
         legacy = stack_env({"WMH_ENGINE": "legacy"})
         self.assertEqual((legacy["WMH_MODEL_NAME"], legacy["WMH_ROSE_POOL"], legacy["WMH_EXECUTION_POLICY"]),
                          ("rose-r2-archive-anthropic", "rose-1-ultra", "upstream"))
+        # Engines serve separate donor directories (the legacy one is what
+        # other workspaces' guests serve); an explicit directory still wins.
+        self.assertEqual(legacy["WMH_BUILD_DIR"], "/data/world-model")
+        self.assertEqual(stack_env({"CLOUDBENCH_WMH_DIR": "/data/world-model"})["WMH_BUILD_DIR"], "/data/world-model")
         self.assertNotIn("WMH_NATIVE_PYTHON", legacy)
         self.assertNotIn("WMH_INFERENCE_POOL", legacy)
         rejected = subprocess.run(["bash", "-c", selection], env={"PATH": os.environ["PATH"], "WMH_MODEL_NAME": "a b"},
@@ -1818,7 +1876,7 @@ rows = get_task_metadata(
 assert rows[0]["requires_browser_agent"] is True
 assert rows[1]["requires_browser_agent"] is not True
 PY_BROWSER_METADATA
-for function_name in bench_needs_large_primary primary_vm_size_for_bench \
+for function_name in is_sim_on bench_needs_large_primary primary_vm_size_for_bench \
   primary_vm_memory_for_bench bench_uses_default_pool_shape; do
   function_source="$(awk -v name="$function_name" '
     $0 ~ ("^" name "\\(\\)") { capture = 1 }
@@ -1831,6 +1889,7 @@ done
 FLEET_BUNDLED_FRONTEND_VM_SIZE="shared-cpu-4x"
 FLEET_BUNDLED_FRONTEND_VM_MEMORY="8192"
 INFRA_PROBE=0
+SIM_ON_CSV=""
 CATALOG_BROWSER_REQUIRED_TASKS=(polar-bu-065)
 unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
 bench_uses_default_pool_shape parallel-tool-calls ||
@@ -1853,8 +1912,33 @@ INFRA_PROBE=1
   fail "task-free infra probes must retain the default primary shape"
 INFRA_PROBE=0
 unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
+# --sim-on guests serve the native WMH themselves and get the measured large
+# shape; every task NOT named by --sim-on keeps exactly its previous shape and
+# pool eligibility, so other workstreams' REAL runs are unchanged.
+FLEET_SIM_VM_SIZE="performance-8x"
+FLEET_SIM_VM_MEMORY="65536"
+SIM_ON_CSV="raise-5m-rose-labs-brex"
+[ "$(primary_vm_size_for_bench raise-5m-rose-labs-brex)/$(primary_vm_memory_for_bench raise-5m-rose-labs-brex)" = "performance-8x/65536" ] ||
+  fail "--sim-on tasks must request the native WMH serving shape"
+if bench_uses_default_pool_shape raise-5m-rose-labs-brex; then
+  fail "--sim-on tasks must not claim a default-shape pool Machine"
+fi
+[ "$(primary_vm_size_for_bench parallel-tool-calls)/$(primary_vm_memory_for_bench parallel-tool-calls)" = "$FLEET_PRIMARY_VM_SIZE/$FLEET_PRIMARY_VM_MEMORY" ] ||
+  fail "tasks outside --sim-on must keep the default primary shape"
+[ "$(primary_vm_size_for_bench polar-bu-065)/$(primary_vm_memory_for_bench polar-bu-065)" = "shared-cpu-4x/8192" ] ||
+  fail "browser tasks outside --sim-on must keep the large primary shape"
+bench_uses_default_pool_shape parallel-tool-calls ||
+  fail "tasks outside --sim-on must retain default pool admission"
+INFRA_PROBE=1
+[ "$(primary_vm_size_for_bench raise-5m-rose-labs-brex)" = "$FLEET_PRIMARY_VM_SIZE" ] ||
+  fail "task-free infra probes must never request the SIM shape"
+INFRA_PROBE=0
+SIM_ON_CSV=""
+[ "$(primary_vm_size_for_bench raise-5m-rose-labs-brex)" = "$FLEET_PRIMARY_VM_SIZE" ] ||
+  fail "a REAL run of a SIM-capable task must keep the default primary shape"
+unset SIM_ON_CSV FLEET_SIM_VM_SIZE FLEET_SIM_VM_MEMORY
 unset CATALOG_BROWSER_REQUIRED_TASKS
-unset -f bench_needs_large_primary primary_vm_size_for_bench \
+unset -f is_sim_on bench_needs_large_primary primary_vm_size_for_bench \
   primary_vm_memory_for_bench bench_uses_default_pool_shape
 
 machine_states="$TMP_ROOT/machine-states"

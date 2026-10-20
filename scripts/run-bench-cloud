@@ -162,6 +162,9 @@ REMOTE_REPO="/data/repo"
 REMOTE_WMH="/data/world-model"
 # uv-managed Python for the native WMH venv; must live on the volume so clones keep it.
 REMOTE_UV_PYTHON="/data/uv-python"
+# The native experiential model lives beside, never inside, the legacy model
+# directory: every engine's guests fork the same donor snapshot.
+REMOTE_WMH_NATIVE="/data/world-model-native"
 REMOTE_LOG="/data/bench.log"      # detached on-box driver logs here; we poll it.
 REMOTE_TMP_SCRIPT="/tmp/rb.sh"    # the base64'd on-box invocation lands here.
 REMOTE_DASH_PORT="8009"           # on-box static dashboard http.server port.
@@ -3228,7 +3231,33 @@ if [ "$MODE" = "refresh-wmh" ]; then
     [ -z "$mid" ] && { echo "❌ No persistent machine — run 'run-bench-cloud --setup' first."; exit 1; }
     write_state "$mid"
 
+    # The snapshot this refresh cuts carries the donor's CURRENT dependency
+    # trees, so it may only be republished under the fingerprints of the newest
+    # donor proof — never this checkout's local receipt, which a peer devbox's
+    # dependency refresh can have superseded (the lock is per clone, not global).
+    # Resolve it before touching the donor; it is re-checked before publication.
+    # Begin WMH donor dependency proof.
+    wmh_refresh_donor_proof() {  # → "node python epoch snapshot volume"
+        local inventory volume proof
+        inventory="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 1
+        volume="$(printf '%s' "$inventory" | ID="$maintenance_mid" python3 -c '
+import json, os, sys
+for m in json.load(sys.stdin) or []:
+    if m.get("id") == os.environ["ID"]:
+        mounts = (m.get("config") or {}).get("mounts") or []
+        print(mounts[0].get("volume", "") if len(mounts) == 1 else "")
+')" || return 1
+        [ -n "$volume" ] || return 1
+        proof="$(printf '%s' "$inventory" | cloudbench_warm_deps_latest_proof "$APP" "$maintenance_mid" "$volume")" || return 1
+        printf '%s %s\n' "$proof" "$volume"
+    }
+    # End WMH donor dependency proof.
     maintenance_mid="$mid"
+    if ! WMH_DONOR_PROOF="$(wmh_refresh_donor_proof)"; then
+        echo "❌ the donor publishes no dependency proof for its volume; run --refresh-deps first" >&2
+        exit 1
+    fi
+    read -r RECORDED_NODE_FP RECORDED_PY_FP _ _ VOL_ID <<< "$WMH_DONOR_PROOF"
     prepare_warm_source "$mid" || exit 1
     require_machine_ready "$mid" || exit 1
 
@@ -3245,6 +3274,10 @@ if [ "$MODE" = "refresh-wmh" ]; then
     # owned machine and published with `wmh_build_cache push --serving-only`; here
     # the donor restores that serving-only cache, and pre-creates the native venv
     # (and its uv-managed Python) on the volume so guests never install at run time.
+    # The cache is restored and verified beside the live tree, then swapped into
+    # its own directory: the legacy model under $REMOTE_WMH, which other
+    # workspaces' guests still serve, is never replaced (2026-10-19 a --force
+    # restore into $REMOTE_WMH deleted rose-r2-archive-anthropic from the donor).
     NATIVE_REFRESH_CMD="set -e
 [ -n \"\${AGENTS_ENV_B64:-}\" ] && echo \"\$AGENTS_ENV_B64\" | base64 -d > '$REMOTE_REPO/agents/.env'
 [ -n \"\${BACKEND_ENV_B64:-}\" ] && echo \"\$BACKEND_ENV_B64\" | base64 -d > '$REMOTE_REPO/back-end/.env'
@@ -3256,13 +3289,16 @@ cd '$REMOTE_REPO'
 [ -x agents/venv/bin/uv ] || gosu rose env HOME=/home/rose agents/venv/bin/python -m pip install --quiet uv
 gosu rose env HOME=/home/rose UV_PYTHON_INSTALL_DIR='$REMOTE_UV_PYTHON' UV_CACHE_DIR=/tmp/rose-uv-cache UV_LINK_MODE=copy bash scripts/setup-world-model.sh
 cd agents
-PYTHONDONTWRITEBYTECODE=1 venv/bin/python -u -m benchmarks.wmh_build_cache pull --build-dir '$REMOTE_WMH' --name '$WMH_CACHE_NAME' --force
-rm -rf '$REMOTE_WMH'.replaced-*
-chown -R rose:rose '$REMOTE_WMH'
-[ -f '$REMOTE_WMH/models/$WMH_MODEL_NAME/experiential.json' ] || { echo 'restored cache $WMH_CACHE_NAME lacks models/$WMH_MODEL_NAME/experiential.json' >&2; exit 1; }
-[ -f '$REMOTE_WMH/build.manifest.json' ] || { echo 'restored cache $WMH_CACHE_NAME lacks build.manifest.json' >&2; exit 1; }
+rm -rf '$REMOTE_WMH_NATIVE.incoming' '$REMOTE_WMH_NATIVE.incoming'.replaced-* '$REMOTE_WMH_NATIVE.previous'
+PYTHONDONTWRITEBYTECODE=1 venv/bin/python -u -m benchmarks.wmh_build_cache pull --build-dir '$REMOTE_WMH_NATIVE.incoming' --name '$WMH_CACHE_NAME' --force
+[ -f '$REMOTE_WMH_NATIVE.incoming/models/$WMH_MODEL_NAME/experiential.json' ] || { rm -rf '$REMOTE_WMH_NATIVE.incoming'; echo 'restored cache $WMH_CACHE_NAME lacks models/$WMH_MODEL_NAME/experiential.json' >&2; exit 1; }
+[ -f '$REMOTE_WMH_NATIVE.incoming/build.manifest.json' ] || { rm -rf '$REMOTE_WMH_NATIVE.incoming'; echo 'restored cache $WMH_CACHE_NAME lacks build.manifest.json' >&2; exit 1; }
+chown -R rose:rose '$REMOTE_WMH_NATIVE.incoming'
+if [ -e '$REMOTE_WMH_NATIVE' ]; then mv '$REMOTE_WMH_NATIVE' '$REMOTE_WMH_NATIVE.previous'; fi
+mv '$REMOTE_WMH_NATIVE.incoming' '$REMOTE_WMH_NATIVE'
+rm -rf '$REMOTE_WMH_NATIVE.previous'
 echo '::WMH-REFRESH-DONE::'
-ls -la '$REMOTE_WMH/models' 2>/dev/null || true"
+ls -la '$REMOTE_WMH_NATIVE/models' 2>/dev/null || true"
     # Legacy (explicit WMH_ENGINE=legacy): decode secrets into the checkout .env,
     # mirror deps if needed, then run the WMH build. This is the ONLY place
     # update_world_model_for_simulation() runs cloud-side. Runs as rose from the
@@ -3282,7 +3318,7 @@ gosu rose env HOME=/home/rose WMH_BUILD_DIR='$REMOTE_WMH' WMH_MODEL_NAME='$WMH_M
 echo '::WMH-REFRESH-DONE::'
 ls -la '$REMOTE_WMH/models' 2>/dev/null || true"
     if [ "$WMH_ENGINE" = experiential ]; then
-        echo "🌍 Restoring native WMH cache $WMH_CACHE_NAME → $REMOTE_WMH (model $WMH_MODEL_NAME; no on-box build) ..."
+        echo "🌍 Restoring native WMH cache $WMH_CACHE_NAME → $REMOTE_WMH_NATIVE (model $WMH_MODEL_NAME; no on-box build) ..."
         BUILD_CMD="$NATIVE_REFRESH_CMD"
     else
         echo "🌍 Building the legacy WMH model on the box → $REMOTE_WMH (WMH_GEPA_BUDGET=0 index-only) ..."
@@ -3303,23 +3339,15 @@ ls -la '$REMOTE_WMH/models' 2>/dev/null || true"
     # Fleet clones fork a snapshot, not the mutable warm volume. Publish the exact rebuilt
     # volume only after the model reported ready and the source is proven quiescent; otherwise
     # successful maintenance silently leaves every benchmark on the previous WMH corpus.
-    read -r RECORDED_NODE_FP RECORDED_PY_FP _ _ \
-        < "$WARM_DEPS_STATE_FILE" 2>/dev/null || true
-    if [ -z "${RECORDED_NODE_FP:-}" ] || [ -z "${RECORDED_PY_FP:-}" ]; then
-        echo "❌ cannot publish WMH snapshot without the existing dependency proof" >&2
-        exit 1
-    fi
     stop_machine_strict "$mid" || exit 1
     mid=""
-    VOL_ID="$(FLY machines list -a "$APP" --json 2>/dev/null | MN="$MACHINE_NAME" python3 -c '
-import json, os, sys
-for m in json.load(sys.stdin) or []:
-    if m.get("name") == os.environ["MN"]:
-        mounts = m.get("config", {}).get("mounts") or []
-        if mounts: print(mounts[0].get("volume", ""))
-        break
-')"
-    [ -n "$VOL_ID" ] || { echo "❌ could not resolve the rebuilt WMH volume id"; exit 1; }
+    # A peer dependency refresh during this window replaced the volume's trees:
+    # never publish this snapshot under the fingerprints read at the start.
+    if ! WMH_DONOR_PROOF_AFTER="$(wmh_refresh_donor_proof)" \
+        || [ "$WMH_DONOR_PROOF_AFTER" != "$WMH_DONOR_PROOF" ]; then
+        echo "❌ the donor dependency proof changed during the WMH refresh; not cutting or publishing a snapshot" >&2
+        exit 1
+    fi
     SNAP_START_EPOCH="$(date +%s)"
     create_volume_snapshot_exact "$VOL_ID" || exit 1
     NEW_SNAP="$CREATED_SNAPSHOT_ID"
