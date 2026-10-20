@@ -32,6 +32,33 @@ for raw in Path(path).read_text().splitlines():
 PY
 }
 
+# Number of distinct values assigned to <key> in a dotenv file (`KEY=` or
+# `export KEY=`). Repeated identical assignments count once.
+cloudbench_env_distinct_value_count() {  # <path> <key>
+  python3 - "$1" "$2" <<'PY'
+from pathlib import Path
+import sys
+
+path, wanted = sys.argv[1:3]
+values = set()
+for raw in Path(path).read_text().splitlines():
+    line = raw.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    key = key.strip()
+    if key.startswith("export") and key[6:7].isspace():
+        key = key[6:].strip()
+    if key != wanted:
+        continue
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1]
+    values.add(value)
+print(len(values))
+PY
+}
+
 cloudbench_env_sha256() {
   local path="$1"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -487,10 +514,18 @@ cloudbench_expected_guest_temporal_namespace() {  # <app>; prints namespace or n
 # Refuses, before any secret is staged, guest copies whose TEMPORAL_NAMESPACE is
 # not the app's committed guest namespace. Apps without one are unchecked.
 cloudbench_require_staged_guest_temporal_namespace() {
-  local app="$1" override="$2" agents_env="$3" backend_env="$4" expected path actual
+  local app="$1" override="$2" agents_env="$3" backend_env="$4" expected path actual count
   expected="$(cloudbench_expected_guest_temporal_namespace "$app")"
   [ -n "$expected" ] || return 0
   for path in "$agents_env" "$backend_env"; do
+    # cloudbench_env_value reads the first assignment while guest dotenv loaders
+    # apply the last, so conflicting repeats could pass this check and still run
+    # the guest on another namespace. Identical repeats are harmless.
+    count="$(cloudbench_env_distinct_value_count "$path" TEMPORAL_NAMESPACE 2>/dev/null)" || count=""
+    if [ "$count" != 0 ] && [ "$count" != 1 ]; then
+      echo "❌ Refusing to stage $app guest secrets: $(basename "$path") assigns ${count:-an unreadable number of} different TEMPORAL_NAMESPACE values; keep one value, then retry." >&2
+      return 1
+    fi
     actual="$(cloudbench_env_value "$path" TEMPORAL_NAMESPACE 2>/dev/null)" || actual=""
     [ "$actual" = "$expected" ] && continue
     if [ -z "$override" ]; then
@@ -510,9 +545,14 @@ cloudbench_require_staged_guest_temporal_namespace() {
 # fail before any Temporal worker instead of silently running every guest on the
 # controller/production namespace. Empty = no check (apps without one).
 cloudbench_require_guest_temporal_namespace() {
-  local agents_env="$1" backend_env="$2" expected="${3:-}" path actual
+  local agents_env="$1" backend_env="$2" expected="${3:-}" path actual count
   [ -n "$expected" ] || return 0
   for path in "$agents_env" "$backend_env"; do
+    count="$(cloudbench_env_distinct_value_count "$path" TEMPORAL_NAMESPACE 2>/dev/null)" || count=""
+    if [ "$count" != 0 ] && [ "$count" != 1 ]; then
+      echo "FATAL: guest $(basename "$path") assigns ${count:-an unreadable number of} different TEMPORAL_NAMESPACE values; the loaded value is ambiguous. Restage the bench app secrets with one value." >&2
+      return 1
+    fi
     actual="$(cloudbench_env_value "$path" TEMPORAL_NAMESPACE 2>/dev/null)" || actual=""
     if [ "$actual" != "$expected" ]; then
       echo "FATAL: guest $(basename "$path") TEMPORAL_NAMESPACE=${actual:-<unset>} differs from the launcher's guest namespace $expected; the bench app secrets predate the guest override. Restage them: bash scripts/run-bench-cloud --refresh-secrets" >&2

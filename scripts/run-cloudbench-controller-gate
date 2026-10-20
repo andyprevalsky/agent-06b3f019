@@ -75,22 +75,29 @@ fly_bounded() {
   return "$rc"
 }
 # fly_machine_run_bounded <log> <machine run args...>: streams flyctl's output
-# and keeps it in <log>, where the caller reads the Machine ID. Without a
-# Machine ID line there is no deadline: stopping flyctl could orphan a Machine
-# whose ID was never read. Once the ID is printed the Machine exists, so flyctl
-# gets CLOUDBENCH_GATE_RUN_AFTER_ID_S (default 600) to finish its start wait,
-# and CLOUDBENCH_GATE_RUN_AFTER_START_S (default 30) once it reports "Machine
-# started". SECONDS ticks once a second, so each deadline adds one to give the
-# full window. The caller already tolerates a non-zero flyctl exit.
+# and keeps it in <log>, where the caller reads the Machine ID. Before the ID
+# line flyctl gets CLOUDBENCH_GATE_RUN_BEFORE_ID_S (default 900); a Machine it
+# may have created is then found by its unique name (fly_machine_id_from_run_log)
+# so cleanup still destroys or retains it. Once the ID is printed the Machine
+# exists, so flyctl gets CLOUDBENCH_GATE_RUN_AFTER_ID_S (default 600) to finish
+# its start wait, and CLOUDBENCH_GATE_RUN_AFTER_START_S (default 30) once it
+# reports "Machine started". SECONDS ticks once a second, so each deadline adds
+# one to give the full window. The caller already tolerates a non-zero exit.
 fly_machine_run_bounded() {
   local log="$1" pid rc=0 printed=0 complete id_deadline="" start_deadline=""; shift
+  local before_id="${CLOUDBENCH_GATE_RUN_BEFORE_ID_S:-900}"
   local after_id="${CLOUDBENCH_GATE_RUN_AFTER_ID_S:-600}" after_start="${CLOUDBENCH_GATE_RUN_AFTER_START_S:-30}"
+  local pre_id_deadline=$((SECONDS + before_id + 1))
   flyctl machine run "$@" > "$log" 2>&1 &
   pid=$!; FLY_CHILD_PID=$pid
   while kill -0 "$pid" 2>/dev/null; do
     complete="$(wc -l < "$log" | tr -d ' ')"
     if [ "$complete" -gt "$printed" ]; then sed -n "$((printed + 1)),${complete}p" "$log"; printed="$complete"; fi
     if [ -z "$id_deadline" ] && grep -qiE 'Machine ID: [0-9a-f]+' "$log"; then id_deadline=$((SECONDS + after_id + 1)); fi
+    if [ -z "$id_deadline" ] && [ "$SECONDS" -ge "$pre_id_deadline" ]; then
+      echo "⚠️  flyctl machine run printed no Machine ID within ${before_id}s; stopped exact pid $pid" >&2
+      fly_stop_exact "$pid"; rc=124; break
+    fi
     if [ -z "$start_deadline" ] && [ -n "$id_deadline" ] && grep -q 'Machine started' "$log"; then start_deadline=$((SECONDS + after_start + 1)); fi
     if { [ -n "$id_deadline" ] && [ "$SECONDS" -ge "$id_deadline" ]; } || { [ -n "$start_deadline" ] && [ "$SECONDS" -ge "$start_deadline" ]; }; then
       echo "⚠️  flyctl machine run still running after it reported the Machine ID; stopped exact pid $pid" >&2
@@ -102,6 +109,26 @@ fly_machine_run_bounded() {
   FLY_CHILD_PID=""
   tail -n +"$((printed + 1))" "$log"
   return "$rc"
+}
+# fly_machine_id_from_run_log <log> <machine-name>: the Machine ID flyctl
+# printed, else the ID of the one Machine with this run's unique name (flyctl
+# can stop or fail before printing it). Prints nothing when neither exists.
+fly_machine_id_from_run_log() {
+  local log="$1" name="$2" id=""
+  [ -n "$log" ] && [ -f "$log" ] && id="$(grep -oiE 'Machine ID: [0-9a-f]+' "$log" | tail -1 | awk '{print $3}' || true)"
+  if [ -z "$id" ] && [ -n "$name" ]; then
+    id="$(fly_bounded 60 machines list -a "$APP" --json 2>/dev/null | NAME="$name" python3 -c '
+import json, os, sys
+try:
+    rows = json.load(sys.stdin)
+except ValueError:
+    rows = []
+ids = [m.get("id", "") for m in rows if isinstance(m, dict) and m.get("name") == os.environ["NAME"]]
+if len(ids) == 1:
+    print(ids[0])
+' || true)"
+  fi
+  printf '%s' "$id"
 }
 python3 -I -B "$ROOT_DIR/scripts/cloudbench-operator-preflight.py" --require-flyctl
 DISPOSABLE_AUTHORITY=""
@@ -365,7 +392,7 @@ cleanup() {
   # Interrupted inside the post-ID window: the Machine exists and its ID is only
   # in RUN_LOG. Recover it so the Machine is destroyed or reported retained.
   if [ -z "$MACHINE_ID" ] && [ -n "$RUN_LOG" ] && [ -f "$RUN_LOG" ]; then
-    MACHINE_ID="$(grep -oiE 'Machine ID: [0-9a-f]+' "$RUN_LOG" | tail -1 | awk '{print $3}' || true)"
+    MACHINE_ID="$(fly_machine_id_from_run_log "$RUN_LOG" "${MACHINE_NAME:-}")"
   fi
   rm -f "$GATE_SCRIPT" "$RUN_LOG" "${GATE_TOKEN_FILE:-}" "${CLOUDBENCH_GATE_SELF_COPY:-}" "${GATE_EXPORT_HELPER:-}"
   if [ -n "$WORKSPACE_VOLUME_INTENT" ]; then
@@ -649,7 +676,9 @@ fly_machine_run_bounded "$RUN_LOG" "$IMAGE_REF" \
   -e "GATE_REF=$GATE_REF" -e "GATE_REPO_URL=$REPO_URL" -e "GATE_NODE_VERSION=$GATE_NODE_VERSION" \
   -e "CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE=$KEEP_FIXTURE_ON_FAILURE" \
   "/tmp/gate.sh" || true
-MACHINE_ID="$(grep -oiE 'Machine ID: [0-9a-f]+' "$RUN_LOG" | tail -1 | awk '{print $3}')"
+MACHINE_ID="$(fly_machine_id_from_run_log "$RUN_LOG" "$MACHINE_NAME")"
+MACHINE_ID_FROM_NAME=0
+if [ -n "$MACHINE_ID" ] && ! grep -qiE 'Machine ID: [0-9a-f]+' "$RUN_LOG"; then MACHINE_ID_FROM_NAME=1; fi
 if [ "$EXPORT_HOST" = 1 ]; then
   cp "$RUN_LOG" "$GATE_EXPORT_LOCAL_DIR/create.private.log"
   python3 -I -B - "$GATE_EXPORT_LOCAL_DIR/host-identity.private.json" "$MACHINE_ID" "$APP" "$GATE_REF" "$IMAGE_REF" <<'PY_EXPORT_ID'
@@ -661,6 +690,8 @@ PY_EXPORT_ID
 fi
 rm -f "$RUN_LOG" "$GATE_TOKEN_FILE"
 [ -n "$MACHINE_ID" ] || { echo "❌ Could not read the gate machine id" >&2; exit 1; }
+# flyctl never reported this Machine; fail closed so cleanup destroys or retains it.
+[ "$MACHINE_ID_FROM_NAME" = 0 ] || { echo "❌ flyctl machine run reported no Machine ID; found Machine $MACHINE_ID by its exact name and cleaning it up" >&2; exit 1; }
 if [ -n "$DISPOSABLE_AUTHORITY" ]; then
   disposable_controller seal --authority "$DISPOSABLE_AUTHORITY" --directory "$GATE_EXPORT_LOCAL_DIR" --workspace "$GATE_EXPORT_LOCAL_DIR/workspace-volume.ownership.json" --machine "$MACHINE_ID" --name "$MACHINE_NAME" --image "$IMAGE_REF"
 fi

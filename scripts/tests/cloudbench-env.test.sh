@@ -2837,6 +2837,22 @@ done
   grep -q 'TEMPORAL_NAMESPACE=prod-ns.acct differs' "$dir/stale.err"
   ! grep -q -e prod-secret -e bench-secret "$dir/stale.err"
   ! cloudbench_require_guest_temporal_namespace "$dir/agents.env" "$dir/unset.env" rose-labs-bench.acct 2>/dev/null
+  # Conflicting repeats: the first value matches, but dotenv loaders apply the
+  # last one. Guest and staging checks both refuse them. Identical repeats (real
+  # env files repeat the key; the override rewrites every line) still pass.
+  printf 'TEMPORAL_NAMESPACE=rose-labs-bench.tch2n\nexport TEMPORAL_NAMESPACE=prod-ns.acct\n' > "$dir/dup-agents.env"
+  printf 'TEMPORAL_NAMESPACE=rose-labs-bench.tch2n\nTEMPORAL_NAMESPACE="rose-labs-bench.tch2n"\n' > "$dir/same-agents.env"
+  printf 'export TEMPORAL_NAMESPACE=rose-labs-bench.tch2n\n' > "$dir/one-backend.env"
+  [ "$(cloudbench_env_distinct_value_count "$dir/dup-agents.env" TEMPORAL_NAMESPACE)" = 2 ]
+  [ "$(cloudbench_env_distinct_value_count "$dir/same-agents.env" TEMPORAL_NAMESPACE)" = 1 ]
+  [ "$(cloudbench_env_distinct_value_count "$dir/unset.env" TEMPORAL_NAMESPACE)" = 0 ]
+  ! cloudbench_require_guest_temporal_namespace "$dir/dup-agents.env" "$dir/one-backend.env" rose-labs-bench.tch2n 2> "$dir/dup-guest.err"
+  grep -q 'assigns 2 different TEMPORAL_NAMESPACE values' "$dir/dup-guest.err"
+  ! cloudbench_require_staged_guest_temporal_namespace navi-whisper-lux-bench "" "$dir/dup-agents.env" "$dir/one-backend.env" 2> "$dir/dup-stage.err"
+  grep -q 'assigns 2 different TEMPORAL_NAMESPACE values' "$dir/dup-stage.err"
+  ! grep -q prod-ns.acct "$dir/dup-stage.err"
+  cloudbench_require_staged_guest_temporal_namespace navi-whisper-lux-bench "" "$dir/same-agents.env" "$dir/one-backend.env"
+  cloudbench_require_guest_temporal_namespace "$dir/same-agents.env" "$dir/one-backend.env" rose-labs-bench.tch2n
   python3 - "$ROOT_DIR/scripts/cloudbench-run.sh" "$ROOT_DIR/scripts/run-bench-cloud" <<'PYWIRE'
 import sys
 from pathlib import Path

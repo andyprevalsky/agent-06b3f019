@@ -15,7 +15,9 @@ FAKE = r'''#!/usr/bin/env bash
 printf '%s\n' "$$" >> "$FAKE_PID_LOG"
 printf '%s\n' "$*" >> "$FAKE_ARGS_LOG"
 [ "$1 $2" = "machine destroy" ] && exit 0
+if [ "$1 $2" = "machines list" ] && [ -n "${FAKE_MACHINES_JSON:-}" ]; then printf '%s\n' "$FAKE_MACHINES_JSON"; exit 0; fi
 case "$FAKE_MODE" in
+  pre-id-block) echo " Pulling container image..."; exec sleep 600 ;;
   started-block|id-block|exit-ok)
     echo "Success! A Machine has been successfully launched in app fixture"
     echo " Machine ID: 8d99dd7be69478"
@@ -43,7 +45,7 @@ def gate_parts():
             helpers.append(line)
             inside = line != '}'
     start = next(i for i, line in enumerate(lines) if line.startswith('RUN_LOG="$(mktemp -t cloudbench-gate-run.'))
-    end = next(i for i, line in enumerate(lines) if i > start and line.startswith('MACHINE_ID="$(grep -oiE'))
+    end = next(i for i, line in enumerate(lines) if i > start and line.startswith('MACHINE_ID="$(fly_machine_id_from_run_log'))
     return '\n'.join(helpers), '\n'.join(lines[start:end + 1])
 
 
@@ -156,15 +158,39 @@ class GateFlyctlBounds(unittest.TestCase):
         self.assertLess(elapsed, 5)
 
     def test_no_machine_id_still_fails_closed_without_a_deadline(self):
-        # No ID: never stopped early (a Machine may exist), and no ID is invented.
-        rc, out, err, elapsed = self.launch('no-id-slow')
-        self.assertNotEqual(rc, 0)
-        self.assertNotIn('RESULT_MACHINE_ID=', out)
+        # No ID within the pre-ID window: flyctl runs to its own exit and no ID is
+        # invented; the gate's explicit empty-ID check then fails closed.
+        rc, out, err, elapsed = self.launch('no-id-slow', FAKE_MACHINES_JSON='[]')
+        self.assertIn('RESULT_MACHINE_ID=\n', out)
         self.assertGreaterEqual(elapsed, 3, 'flyctl ran to its own exit')
         self.assertNotIn('stopped exact pid', err)
-        rc, out, err, _ = self.launch('no-id-fail')
-        self.assertNotEqual(rc, 0)
-        self.assertNotIn('RESULT_MACHINE_ID=', out)
+        rc, out, err, _ = self.launch('no-id-fail', FAKE_MACHINES_JSON='[]')
+        self.assertIn('RESULT_MACHINE_ID=\n', out)
+        self.assertIn('[ -n "$MACHINE_ID" ] || { echo "❌ Could not read the gate machine id" >&2; exit 1; }',
+                      GATE.read_text())
+
+    def test_no_machine_id_before_the_pre_id_deadline_is_stopped_and_found_by_name(self):
+        # flyctl hangs before printing any ID: bounded, and a Machine it created is
+        # recovered by this run's unique name so cleanup can still own it.
+        self.start_decoy()
+        listing = '[{"id":"0ther0000000000","name":"other"},{"id":"aa11bb22cc33dd","name":"fixture"}]'
+        rc, out, err, elapsed = self.launch('pre-id-block', CLOUDBENCH_GATE_RUN_BEFORE_ID_S='2',
+                                            FAKE_MACHINES_JSON=listing)
+        self.assertEqual(rc, 0, err)
+        self.assertIn('printed no Machine ID within 2s', err)
+        self.assertIn('RESULT_MACHINE_ID=aa11bb22cc33dd', out)
+        self.assertGreaterEqual(elapsed, 2)
+        self.assertLess(elapsed, 15)
+        self.assert_fake_gone()
+        self.assertIsNone(self.decoy.poll(), 'unrelated flyctl was signalled')
+
+    def test_pre_id_timeout_without_a_named_machine_invents_no_id(self):
+        for listing in ('[]', '[{"id":"aa11bb22cc33dd","name":"fixture"},{"id":"bb11bb22cc33dd","name":"fixture"}]'):
+            with self.subTest(listing=listing):
+                rc, out, err, _ = self.launch('pre-id-block', CLOUDBENCH_GATE_RUN_BEFORE_ID_S='1',
+                                              FAKE_MACHINES_JSON=listing)
+                self.assertIn('RESULT_MACHINE_ID=\n', out)
+                self.assert_fake_gone()
 
     def test_fly_bounded_stops_only_its_child_and_returns_124(self):
         self.start_decoy()

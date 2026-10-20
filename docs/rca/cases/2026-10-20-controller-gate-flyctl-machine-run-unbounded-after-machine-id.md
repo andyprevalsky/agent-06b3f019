@@ -92,6 +92,13 @@ On the fix it returns within about 2 s with the Machine ID.
   destroyed nor reported retained. Cleanup now recovers the ID from the run
   log. Both cases fail on the pre-fix gate (4 subtests) and pass in the same
   regression file.
+- Second review round (PR #1558): the phase before the Machine ID had no
+  deadline either. It now gets `CLOUDBENCH_GATE_RUN_BEFORE_ID_S` (default
+  900 s). When flyctl stops or fails without printing an ID, the gate looks up
+  the one Machine with the run's unique name (bounded `machines list`), fails
+  closed, and cleanup destroys or retains that exact Machine. The run log is
+  kept until the ID is read. `scripts/test.sh` auto-RCA mode now selects this
+  suite when the gate script changes.
 - 10k-agent behavior: there is one gate per controller. The change adds a
   0.2 s local poll while a flyctl call is running, and no per-agent work.
 

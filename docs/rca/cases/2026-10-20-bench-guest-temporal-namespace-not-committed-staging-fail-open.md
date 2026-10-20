@@ -114,6 +114,14 @@ staging the real app without an override succeeded and staged `prod-ns.acct`.
 - 10k-agent behavior: there is one additional local file read per staging and a
   constant-time env check per guest boot. Nothing scales with agent count.
 
+Review follow-up (PR #1558): `cloudbench_env_value` reads the first
+assignment, but guest dotenv loaders apply the last. A file with conflicting
+`TEMPORAL_NAMESPACE` lines could therefore pass the first-value check and still
+run guests on another namespace. Both the staging check and the guest check
+now refuse a file that assigns more than one distinct value
+(`cloudbench_env_distinct_value_count`). Identical repeats still pass; the
+real controller env files repeat the key, and the override rewrites every line.
+
 ## Human feedback
 
 None recorded.
