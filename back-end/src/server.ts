@@ -32,6 +32,9 @@ import authAssistanceRouter from './domains/auth-assistance/routes';
 import agentPhoneRouter from './domains/agent-phone/routes';
 import x402Router from './domains/x402/routes';
 import claudeCodeRouter from './domains/claude-code/routes';
+import codeAgentDirectChatRouter, {
+  sessionScopedRouter as codeSessionDirectChatRouter,
+} from './domains/claude-code/routes.directChat';
 import codexCodeRouter from './domains/codex-code/routes';
 import billingRouter from './domains/billing/routes';
 import apiKeysRouter from './domains/api-keys/routes';
@@ -514,6 +517,8 @@ if (x402ReceivingWallet) {
 
 // Routes with authentication
 // Note: Each router handles its own auth per-route (hybridAuth for agents)
+// Direct chat with a code agent: /api/agents/:id/code-agent/:taskId/* (per-route hybridAuth).
+app.use('/api/agents', codeAgentDirectChatRouter);
 app.use('/api/agents', agentsRouter);
 app.use('/api/agent-graph', agentGraphRouter);
 app.use('/api/agent-queue-pointer', agentQueuePointerRouter);
@@ -532,6 +537,7 @@ app.use('/api/imessage', imessageRouter);
 app.use('/api/vapi', vapiRouter);
 app.use('/api/voices', voicesRouter); // public — exposes ElevenLabs preview MP3 URLs
 app.use('/api/browser-session', browserSessionRouter);
+app.use('/api/claude-code-session', codeSessionDirectChatRouter);
 app.use('/api/claude-code-session', claudeCodeRouter);
 app.use('/api/codex-code-session', codexCodeRouter);
 app.use('/api/people', peopleRouter);

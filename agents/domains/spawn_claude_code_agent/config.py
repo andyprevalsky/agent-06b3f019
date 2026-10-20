@@ -66,6 +66,12 @@ CODE_AGENT_ERROR_RETRY_LIMIT: Final[int] = 5
 # Tool result status for an idle session that was paused (resumable).
 CODE_AGENT_PAUSED_STATUS: Final[str] = "paused"
 
+# Structured transcript rows (utils/code_transcript.py) are persisted in batches at most
+# this often while new events arrive, plus once when monitoring ends. Live
+# token streaming reaches viewers over the sandbox ws (`code_agent_delta`);
+# the batches are the durable record, so ≤0.5 writes/s per active code agent.
+TRANSCRIPT_FLUSH_INTERVAL_S: Final[float] = 2.0
+
 # ── Deploy drain / reattach ──
 # Same value as BROWSER_DRAIN_YIELD_STATUS: the activity detached from a sandbox
 # that is still running and returned the session for the next attempt.

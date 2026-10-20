@@ -148,6 +148,84 @@ async def save_claude_code_message(
         )
 
 
+async def save_code_transcript_batch(
+    *,
+    agent_id: str,
+    task_id: str,
+    tool_call_id: str,
+    code_provider: str,
+    records: list[dict[str, Any]],
+    events_from: int,
+    events_to: int,
+    text: str,
+) -> bool:
+    """Persist one batch of structured transcript records on the code agent's rows.
+
+    The row is child-scoped (``subAgentId``) like the chip's progress rows, so
+    it never enters the parent planner's context. It carries no ``toolStatus``
+    (it is not a lifecycle transition); ``isCodeTranscript`` +
+    ``idempotencyKey`` give it a deterministic id, so an activity retry that
+    re-flushes the same event range writes nothing new. Returns False on a
+    transient failure so the caller keeps the batch and retries it.
+    """
+    config = load_config()
+    metadata: dict[str, Any] = {
+        "toolCallId": tool_call_id,
+        "toolName": "spawn_claude_code_agent",
+        "title": "Transcript",
+        "task_id": task_id,
+        "action_type": "code_transcript",
+        "code_provider": code_provider,
+        "subAgentId": task_id,
+        "isCodeTranscript": True,
+        "idempotencyKey": f"code-transcript:{task_id}:{events_from}-{events_to}",
+        # UI contract: parsed transcript events for the Transcript tab, each
+        # {type, ts, text?, tool?{name, target, added?, removed?, result?}}
+        # plus upsert keys (id, rev, seq). Keep the latest rev per id.
+        "code_agent_events": records,
+        "transcript": {
+            "version": 1,
+            "task_id": task_id,
+            "provider": code_provider,
+            "events": [events_from, events_to],
+        },
+    }
+    metadata = stamp_tool_workflow_generation(metadata) or metadata
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(
+                f"{config.backend.api_url}/api/agents/{agent_id}/messages",
+                headers={
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
+                json={"message": text, "role": "TOOL", "metadata": metadata},
+            )
+            raise_if_generation_sealed(response.status_code, "spawn_claude_code_agent")
+            ok = response.status_code in (200, 201)
+            logger.info(
+                "[ClaudeCode] Saved transcript batch",
+                agent_id=agent_id,
+                task_id=task_id,
+                records=len(records),
+                events_from=events_from,
+                events_to=events_to,
+                response_status=response.status_code,
+            )
+            return ok
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
+    except Exception as e:
+        logger.warning(
+            "[ClaudeCode] Failed to save transcript batch",
+            agent_id=agent_id,
+            task_id=task_id,
+            error=extract_error_message(e),
+        )
+        return False
+
+
 async def create_e2b_session(
     agent_id: str,
     goal: str,
