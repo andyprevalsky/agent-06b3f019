@@ -11,6 +11,10 @@ export const handlers = [
   // Per-user UI: stock UI (nothing published) unless a test overrides it.
   http.get(`${API_BASE}/user-ui/active`, () => HttpResponse.json({ versionId: null })),
   http.get(`${API_BASE}/user-ui/versions`, () => HttpResponse.json({ versions: [] })),
+  // Rose Desktop left-bar Apps: no apps (a non-dev account) unless a test overrides.
+  http.get(`${API_BASE}/user-ui/apps`, () =>
+    HttpResponse.json({ activeVersionId: null, apps: [] }),
+  ),
   // Rose Desktop left bar groups agents by project; none unless a test overrides.
   http.get(`${API_BASE}/projects`, () => HttpResponse.json({ projects: [] })),
   // Rose Desktop Integrations icon reads integration health; nothing connected by default.
