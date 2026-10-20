@@ -51,6 +51,42 @@ Task-specific DB deltas remain separate from the base image. The dedicated gate-
 
 Suite selection (`run_benchmark.py --suite ...`) runs only `status: "ready"` benchmark entries; explicit `--task <name>` still targets incomplete agent evals for dev iteration. **Never rename an existing task `name`** — it is the primary key into `history/task_durations.jsonl` (success ledger), `history/span_durations.jsonl` (p99 baselines), and `runs/*.json`; a rename orphans that history (guarded by `test_history_ledger_task_names_still_exist_in_catalog`). The FE dev query box reads this same catalog via `GET /api/benchmarks/test-prompts`.
 
+### Code bench (`code-bench-*`, plan C8)
+
+Seven `rose-bench` code-capability tasks (`deploy_category: "claude-code"`):
+Python and JavaScript bug fixes, a feature with tests, a behaviour-preserving
+refactor, stack-trace debugging, commit-locally-without-pushing and a front-end
+component build. Each fixture lives in `fixtures/code_bench/<id>/` (`repo/`
+start state, `hidden/` tests the agent never sees, `reference/` known-good
+overlay). `code_bench.py` builds a byte-identical one-commit git archive that is
+uploaded as the task attachment; the code agent returns `result.tar.gz` as a
+Task Complete file_pointer, and the `code_bench_hidden_tests` static check runs
+the visible and hidden tests on it in a scratch copy with a minimal environment.
+Only the front-end task adds an LLM judge (`code_bench_screenshot_judge`, one
+Chromium screenshot). `code_bench_test.py` proves every grader fails the
+unmodified repo and passes the reference; the agents `benchmark` blackbox
+domain runs it.
+
+Raw-CLI parity runs the same tasks through Claude Code or Codex directly, with
+the template flags, the same model and the same archive, in an isolated CLI
+config outside the repository:
+
+```bash
+scripts/run-bench code-parity --skip-rose -k 3 --raw-concurrency 2 --out-dir .context/code-bench-parity/raw
+scripts/run-bench code-parity --rose-records agents/benchmarks/runs/<r1>.json <r2>.json <r3>.json \
+  --raw-results .context/code-bench-parity/raw/parity.json -k 3 --publish-evidence
+# or both legs in one command (Rose leg = K sequential --local runs):
+scripts/run-bench code-parity --run-rose local -k 3 --raw-concurrency 2 --publish-evidence
+```
+
+The report gives per-task x/K, per-run passes, stdev and flaky tasks for each
+leg; `parity_ok` is mean(Rose) >= mean(raw) - max(1 task, 5%), and `c8_ok` also
+requires both legs to reproduce within that tolerance. Raw-leg credentials are
+the template variables (`CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY`,
+`CODEX_AUTH_JSON`/`OPENAI_API_KEY`) or the CLI's managed login. Each attempt
+records loaded host hooks/plugins/MCP servers; on boxes.dev devboxes the managed
+settings add a SessionStart hook and platform skills to the raw leg.
+
 ## Quick Start
 
 Every detached launcher prints the private log and exact controller exit marker.
