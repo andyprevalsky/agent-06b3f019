@@ -115,6 +115,7 @@ class FakeUserUiBackend:
         self.run_bodies: List[Dict[str, Any]] = []
         self.hang_runs = False
         self.lose_run_responses = False
+        self.busy_runs = 0
 
     def publish(self, user_id: str, version_id: str, tools: Dict[str, Dict[str, Any]], handlers: Dict[str, str]) -> str:
         base = f"{CDN}/{user_id}/{version_id}/"
@@ -175,6 +176,9 @@ class FakeUserUiBackend:
             assert read_timeout is not None, "the code-session run call must carry a read timeout"
             await asyncio.sleep(float(read_timeout))
             raise httpx.ReadTimeout("backend never answered", request=request)
+        if self.busy_runs > 0:
+            self.busy_runs -= 1
+            return httpx.Response(503, json={"error": "all tool sessions busy", "code": "USER_TOOL_SESSION_BUSY"})
         key = body.get("idempotency_key")
         if key:
             record = self.records.get((user_id, key))
@@ -928,6 +932,31 @@ async def test_lost_run_response_replays_the_stored_record():
     assert _runs(counter) == 1 and len(backend.run_bodies) == 1
 
 
+async def test_code_session_busy_waits_then_reports_structured_error():
+    """All of the user's tool sessions busy: the call waits for one; past the wait it is a
+    structured session_busy error and a side-effect claim is released (never ran)."""
+    from domains.user_tools import repo as repo_mod
+
+    with _code_session_executor():
+        backend = _weather_backend()
+        backend.busy_runs = 2
+        pinned = await _resolve()
+        waited = await _run(pinned, "weather", {"city": "Bern"})
+    assert waited["ok"] and waited["result"]["city"] == "Bern", waited
+    assert len(backend.run_bodies) == 3
+
+    counter = Path(tempfile.mkdtemp(prefix="user-tools-counter-")) / "runs.txt"
+    with _code_session_executor(), patch.object(repo_mod, "CODE_SESSION_BUSY_WAIT_SECONDS", 0.5):
+        backend = _charge_backend(counter)
+        backend.busy_runs = 1000
+        pinned = await _resolve()
+        key = _call_key("tc-busy")
+        busy = await _run(pinned, "charge", {"city": "Bern"}, key=key)
+    assert not busy["ok"] and busy["error_kind"] == "session_busy", busy
+    assert [r["status"] for r in backend.records.values()] == ["FAILED"], "never-started claim is released"
+    assert _runs(counter) == 0
+
+
 async def test_read_only_tools_unchanged_by_side_effect_path():
     """Read-only calls never touch the side-effect record and keep the 7-argument activity call."""
     from domains.user_tools.handler import pin_user_tools, run_user_tool
@@ -1163,6 +1192,10 @@ async def run_all_tests():
             "code_session_never_uses_another_users_session", test_code_session_never_uses_another_users_session
         )
         await r.record_async("code_session_timeout_is_structured_error", test_code_session_timeout_is_structured_error)
+        await r.record_async(
+            "code_session_busy_waits_then_reports_structured_error",
+            test_code_session_busy_waits_then_reports_structured_error,
+        )
         await r.record_async(
             "invalid_tool_json_is_skipped_not_declared", test_invalid_tool_json_is_skipped_not_declared
         )

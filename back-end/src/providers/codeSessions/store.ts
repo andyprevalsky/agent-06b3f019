@@ -8,7 +8,8 @@
  *     └─ lease ─────► conditional update; a lease held by another spawn means
  *                     a parallel spawn: explicit id / shared → CodeSessionBusyError,
  *                     default → an idle parallel session, else a new one whose
- *                     branch is cut from the busy one
+ *                     branch is cut from the busy one (or CodeSessionBusyError
+ *                     once maxLiveSessions are all leased: user tools)
  *
  * 10k agents: every query is keyed by (userId, ownerAgentId, repoKey) or the
  * session id (bounded scan of OWNER_SESSION_SCAN rows); no shared row or
@@ -78,6 +79,11 @@ export interface ResolveCodeSessionParams {
   planBranch: (parallelOf: CodeSessionRow | null) => Promise<CodeSessionBranchPlan>;
   /** Shared session ("New agent in this branch"): a busy session is an error, never a fork. */
   shared?: boolean;
+  /**
+   * Cap on the owner's live sessions: when every one is leased and this many
+   * exist, a busy error instead of another parallel session (user tools).
+   */
+  maxLiveSessions?: number;
   now?: Date;
 }
 
@@ -199,6 +205,13 @@ export async function resolveCodeSession(
     if (params.shared === true) throw new CodeSessionBusyError(candidate.id);
   }
   const parallelOf = live[0] ?? null;
+  if (
+    parallelOf !== null &&
+    params.maxLiveSessions !== undefined &&
+    live.length >= params.maxLiveSessions
+  ) {
+    throw new CodeSessionBusyError(parallelOf.id);
+  }
   if (parallelOf !== null) {
     log.info('Code session is leased by another spawn; starting a parallel session', {
       codeSessionId: parallelOf.id,

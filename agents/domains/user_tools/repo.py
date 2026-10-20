@@ -50,6 +50,7 @@ from .config import (
     CACHE_DIR_ENV,
     CLAIM_POLL_SECONDS,
     CLAIM_STALE_GRACE_SECONDS,
+    CODE_SESSION_BUSY_WAIT_SECONDS,
     CODE_SESSION_HTTP_MARGIN_SECONDS,
     COMPLETE_MAX_ATTEMPTS,
     EXECUTOR_LOCAL,
@@ -391,6 +392,9 @@ async def _run_handler_process(
 
 Execution = Dict[str, Any]
 
+# Backend code for "every one of this user's tool sessions is running another call".
+SESSION_BUSY_CODE = "USER_TOOL_SESSION_BUSY"
+
 
 def _timeout_s(spec: UserToolSpec) -> int:
     value = spec.get("timeout_s")
@@ -512,11 +516,19 @@ async def _execute_code_session(
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(float(timeout_s + CODE_SESSION_HTTP_MARGIN_SECONDS), connect=10.0)
         ) as client:
-            response = await client.post(
-                f"{backend_url}/api/user-ui/tools/run",
-                json=body,
-                headers=_backend_headers(api_key, user_id),
-            )
+            busy_waits = 0
+            while True:
+                response = await client.post(
+                    f"{backend_url}/api/user-ui/tools/run",
+                    json=body,
+                    headers=_backend_headers(api_key, user_id),
+                )
+                busy = response.status_code == 503 and _response_json(response).get("code") == SESSION_BUSY_CODE
+                if not busy or time.monotonic() - started >= CODE_SESSION_BUSY_WAIT_SECONDS:
+                    break
+                # Every tool session of this user is running another call: wait for one.
+                await asyncio.sleep(CLAIM_POLL_SECONDS[min(busy_waits, len(CLAIM_POLL_SECONDS) - 1)])
+                busy_waits += 1
     except httpx.HTTPError as exc:
         message = f"code session run failed: {type(exc).__name__}: {exc}"[:500]
         logger.warning("[UserTools] code session run transport error", agent_id=agent_id, tool=name, error=message)
@@ -539,7 +551,8 @@ async def _execute_code_session(
             return {"error": outcome_error("executor", "code session returned a malformed run record"), "started": None}
         return {"run": run}
     if response.status_code == 503:
-        return {"error": outcome_error("sandbox_unavailable", error_text), "started": False}
+        kind = "session_busy" if payload.get("code") == SESSION_BUSY_CODE else "sandbox_unavailable"
+        return {"error": outcome_error(kind, error_text), "started": False}
     if 400 <= response.status_code < 500:
         return {"error": outcome_error("invalid", error_text), "started": False}
     return {"error": outcome_error("executor", error_text), "started": None}

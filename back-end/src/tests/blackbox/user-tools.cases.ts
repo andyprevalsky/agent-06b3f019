@@ -21,6 +21,7 @@ import { retireCodeSession } from '../../providers/codeSessions/lifecycle';
 import { userToolOperationKey } from '../../providers/userTools/callRecords';
 import {
   runUserToolInCodeSession,
+  USER_TOOL_MAX_LIVE_SESSIONS,
   USER_TOOLS_SESSION_OWNER,
   UserToolRunError,
   userToolSandboxMode,
@@ -504,6 +505,36 @@ export function userUiToolCases(ctx: UserToolCaseContext) {
             data: { sandboxKind: null, sandboxId: null },
           });
         }
+      },
+    },
+    {
+      name: 'user tools: a user with every tool session busy gets 503, never a fifth session',
+      fn: async () => {
+        const user = await ctx.newUser();
+        extraUserIds.push(user.userId);
+        const versionId = await versionFor(user);
+        for (let i = 0; i < USER_TOOL_MAX_LIVE_SESSIONS; i++) {
+          const row = await prisma.codeSession.create({
+            data: {
+              userId: user.userId,
+              rootAgentId: randomUUID(),
+              ownerAgentId: USER_TOOLS_SESSION_OWNER,
+              repoKey: '',
+              codeProvider: USER_TOOLS_SESSION_OWNER,
+              state: 'ACTIVE',
+              leaseOwner: `user-tool:${randomUUID()}`,
+              leaseExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+            },
+          });
+          createdSessionIds.add(row.id);
+        }
+        const res = await run(user.userId, runBody(versionId, 'where', { city: 'z' }));
+        assert(res.status === 503, `busy: ${res.status} ${JSON.stringify(res.data)}`);
+        assert(res.data.code === 'USER_TOOL_SESSION_BUSY', JSON.stringify(res.data));
+        const count = await prisma.codeSession.count({
+          where: { userId: user.userId, ownerAgentId: USER_TOOLS_SESSION_OWNER },
+        });
+        assert(count === USER_TOOL_MAX_LIVE_SESSIONS, `no extra session (${count})`);
       },
     },
     {

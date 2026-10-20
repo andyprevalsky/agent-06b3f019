@@ -10,8 +10,8 @@
  *     ▼
  *   resolveCodeSession(user, owner "user-tools", repo-less, lease per call)   (W5b)
  *     │ the user's tools session; one leased by a concurrent call of the same
- *     │ user → an idle parallel session or a new one (W5b default, no forks of
- *     │ another user's rows: every lookup is keyed by userId)
+ *     │ user → an idle parallel session or a new one, at most 4 live; beyond
+ *     │ that a busy 503 the worker retries (every lookup is keyed by userId)
  *     ▼
  *   sandbox: E2B — resume the paused sandbox (fs + memory) or create one and
  *            restore the latest checkpoint (acquireCodeSessionSandbox);
@@ -32,8 +32,9 @@
  * heartbeat-only liveness (rose-user-ui ledger row 48).
  *
  * 10k agents: per call one owner-scoped indexed session lookup, one lease
- * update and one sandbox exec; sessions are per user (parallel ones only under
- * that user's concurrent calls). No shared row, lock or channel across users.
+ * update and one sandbox exec; at most 4 tool sessions (sandboxes) per user,
+ * however many of that user's agents call tools. No shared row, lock or
+ * channel across users.
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
@@ -51,6 +52,7 @@ import {
   type CodeSessionFs,
 } from '../codeSessions/sandboxFs';
 import {
+  CodeSessionBusyError,
   markPaused,
   recordSandbox,
   resolveCodeSession,
@@ -71,6 +73,8 @@ const log = createLogger('UserToolSessionRunner');
 
 /** ownerAgentId of a user's tools session (scoped by userId like every session). */
 export const USER_TOOLS_SESSION_OWNER = 'user-tools';
+/** Parallel tool sessions per user; a call beyond them while all run gets a busy 503. */
+export const USER_TOOL_MAX_LIVE_SESSIONS = 4;
 export const USER_TOOL_MAX_STDOUT_BYTES = 256 * 1024;
 export const USER_TOOL_STDERR_TAIL_BYTES = 4 * 1024;
 /** Sandbox exec bound beyond the handler's own timeout (copy, kill grace, reads). */
@@ -332,6 +336,38 @@ async function runInSandbox(
   }
 }
 
+/** Lease one of the caller's tools sessions (at most USER_TOOL_MAX_LIVE_SESSIONS). */
+async function leaseToolSession(params: UserToolRunParams) {
+  sweepExpiredCodeSessions(params.userId);
+  try {
+    return await resolveCodeSession({
+      userId: params.userId,
+      rootAgentId: params.agentId,
+      ownerAgentId: USER_TOOLS_SESSION_OWNER,
+      repoUrl: null,
+      codeProvider: USER_TOOLS_SESSION_OWNER,
+      leaseOwner: `user-tool:${randomUUID()}`,
+      maxLiveSessions: USER_TOOL_MAX_LIVE_SESSIONS,
+      planBranch: () =>
+        Promise.resolve({
+          branch: null,
+          baseBranch: null,
+          mergeTarget: null,
+          parentCodeSessionId: null,
+        }),
+    });
+  } catch (error) {
+    if (error instanceof CodeSessionBusyError) {
+      throw new UserToolRunError(
+        503,
+        'USER_TOOL_SESSION_BUSY',
+        `all ${USER_TOOL_MAX_LIVE_SESSIONS} of this user's tool sessions are running other calls`
+      );
+    }
+    throw error;
+  }
+}
+
 /** Run one user tool call in the caller's own code session (see the header diagram). */
 export async function runUserToolInCodeSession(
   params: UserToolRunParams
@@ -355,22 +391,7 @@ export async function runUserToolInCodeSession(
     throw new UserToolRunError(404, 'USER_UI_VERSION_NOT_FOUND', 'Version not found');
   }
   const mode = sandboxProviderOverride === null ? userToolSandboxMode() : 'override';
-  sweepExpiredCodeSessions(params.userId);
-  const { session, created } = await resolveCodeSession({
-    userId: params.userId,
-    rootAgentId: params.agentId,
-    ownerAgentId: USER_TOOLS_SESSION_OWNER,
-    repoUrl: null,
-    codeProvider: USER_TOOLS_SESSION_OWNER,
-    leaseOwner: `user-tool:${randomUUID()}`,
-    planBranch: () =>
-      Promise.resolve({
-        branch: null,
-        baseBranch: null,
-        mergeTarget: null,
-        parentCodeSessionId: null,
-      }),
-  });
+  const { session, created } = await leaseToolSession(params);
   const started = Date.now();
   try {
     const sandbox = await acquireSandbox(session);

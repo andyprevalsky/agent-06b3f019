@@ -24,6 +24,10 @@ RUN_ACTIVITY_MAX_ATTEMPTS = 2
 # write handler files). Below RUN_ACTIVITY_MARGIN_SECONDS so the activity's
 # start-to-close never cuts a run the backend can still finish.
 CODE_SESSION_HTTP_MARGIN_SECONDS = 45
+# How long a call waits for one of the user's tool sessions (the backend caps
+# them per user) before reporting session_busy. Fits inside the activity
+# margin above the HTTP margin.
+CODE_SESSION_BUSY_WAIT_SECONDS = 10
 
 # A side-effect claim still STARTED this long after the handler's own timeout
 # (plus the HTTP margin) belongs to an attempt that died mid-run: the outcome is
