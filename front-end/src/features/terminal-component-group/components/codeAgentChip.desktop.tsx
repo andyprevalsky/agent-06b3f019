@@ -6,6 +6,11 @@
  *   [live]        → header (pulsing dot · Active · running timer · target) + body
  *   [completed]   → header (check · Completed Successfully · duration · target) + summary
  *   [failed]      → header (✕ · Failed · duration · target) + red failure box (always shown)
+ *                   with the backend's failure text verbatim (LOCAL_TARGET_UNAVAILABLE etc.)
+ *
+ * TARGET (code_agent.target): 'local' → "This Mac · <folder>" (device_name tooltip),
+ *   else "Cloud". Mac app only (window.api.localCode) + local + running →
+ *   "Open in Terminal" → window.api.localCode.openTerminal(taskId); hidden on web.
  *
  * BODY: [OPEN] (default) ⇄ [CLOSED] via header click
  *   live:      TAB [TRANSCRIPT] (default) ⇄ [TERMINAL] (existing xterm, kept mounted)
@@ -24,7 +29,6 @@ import {
   codeAgentLabel,
   codeAgentTargetLabel,
   eventTimeMs,
-  localFailureText,
   type CodeAgentMeta,
   type CodeAgentSummary,
   type CodeAgentTranscriptEvent,
@@ -95,16 +99,12 @@ function Summary({ summary }: { summary: CodeAgentSummary }) {
   );
 }
 
+/**
+ * The backend's failure text verbatim (a LOCAL_TARGET_UNAVAILABLE message is
+ * already the exact user-facing sentence); never re-worded on the client.
+ */
 function FailureBox({ meta, fallback }: { meta: CodeAgentMeta; fallback: string | null }) {
-  let body: ReactNode = meta.failure_message ?? fallback;
-  if (meta.failure_kind) {
-    const text = localFailureText(meta.failure_kind, meta.device_name);
-    body = (
-      <>
-        <strong className="font-semibold">{text.lead}</strong> {text.rest}
-      </>
-    );
-  }
+  const body: ReactNode = meta.failure_message ?? fallback;
   if (!body) return null;
   return (
     <div className="mx-3 mb-3 rounded-lg border border-red-500/30 bg-red-500/10 p-3">
@@ -115,6 +115,24 @@ function FailureBox({ meta, fallback }: { meta: CodeAgentMeta; fallback: string 
         {body}
       </p>
     </div>
+  );
+}
+
+/** Mac app only: open this local session in Terminal.app (window.api.localCode). */
+function OpenInTerminal({ taskId }: { taskId: string }) {
+  const localCode = typeof window === 'undefined' ? undefined : window.api?.localCode;
+  if (!localCode || taskId === 'pending') return null;
+  return (
+    <button
+      type="button"
+      onClick={(event) => {
+        event.stopPropagation();
+        void localCode.openTerminal(taskId);
+      }}
+      className="whitespace-nowrap text-xs font-semibold text-[#e8507f] hover:underline"
+    >
+      Open in Terminal
+    </button>
   );
 }
 
@@ -162,9 +180,14 @@ export function DesktopCodeAgentChip({ meta, vm, events, toolCallId }: DesktopCo
             </span>
           )}
         </div>
-        <span data-testid="code-agent-target" className={`whitespace-nowrap text-xs ${MUTED}`}>
+        <span
+          data-testid="code-agent-target"
+          title={meta.target === 'local' ? meta.device_name : undefined}
+          className={`whitespace-nowrap text-xs ${MUTED}`}
+        >
           {codeAgentTargetLabel(meta)}
         </span>
+        {isLive && meta.target === 'local' && <OpenInTerminal taskId={meta.task_id} />}
         {elapsed && (
           <span data-testid="code-agent-elapsed" className={`text-xs tabular-nums ${MUTED}`}>
             {elapsed}

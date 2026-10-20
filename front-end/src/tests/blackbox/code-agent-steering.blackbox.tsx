@@ -12,6 +12,7 @@ import ClaudeCodeChip from '@/features/terminal-component-group/components/Claud
 import ApprovalChip from '@/features/terminal-component-group/components/ApprovalChip';
 import { PinnedQuestionMount } from '@/features/terminal-component-group/components/PinnedQuestion';
 import { filterMessagesForSubAgent } from '@/features/terminal-component-group/components/useMessageFiltering';
+import { localFailureText } from '@/features/terminal-component-group/hooks/codeAgentContract';
 import { resetCodeAgentLocalState } from '@/features/terminal-component-group/hooks/codeAgentLocalState';
 import { derivePendingApproval } from '@/features/terminal/hooks/derivations';
 import type { Message } from '@/lib/api';
@@ -513,34 +514,99 @@ describe('row 51: execution target and local failures', () => {
     expect(screen.getByTestId('code-agent-target')).toHaveTextContent(/^Cloud$/);
   });
 
-  it('Mac app closed: exact canonical text in the red failure box', () => {
-    renderChip([
-      chipMessage({
-        target: 'local',
-        state: 'failed',
-        device_name: "Andy's MacBook Pro",
-        failure_kind: 'local_disconnected',
-        ended_at: '2026-10-20T12:00:01.000Z',
-      }),
-    ]);
+  /** The spawn tool's ERROR row for an unavailable local target (agents handler, L-LOCAL). */
+  function localUnavailableRow(text: string, deviceName?: string) {
+    return msg(
+      {
+        toolName: 'spawn_claude_code_agent',
+        toolCallId: 'call-local-1',
+        toolStatus: 'ERROR',
+        title: 'Code session failed',
+        code_provider: 'codex',
+        error_code: 'LOCAL_TARGET_UNAVAILABLE',
+        code_agent: { target: 'local', ...(deviceName ? { device_name: deviceName } : {}) },
+      },
+      { text },
+    );
+  }
+
+  function renderPendingChip(messages: Message[], roseDesktop = true) {
+    return renderWithProviders(
+      <WithAgent messages={messages}>
+        <ClaudeCodeChip taskId="pending" toolCallId="call-local-1" codeProvider="codex" />
+      </WithAgent>,
+      { roseDesktop },
+    );
+  }
+
+  const oracle = (text: { lead: string; rest: string }) => `${text.lead} ${text.rest}`;
+
+  it('Mac app closed: the LOCAL_TARGET_UNAVAILABLE message verbatim in the red failure box', () => {
+    const message = oracle(localFailureText('local_disconnected', "Andy's MacBook Pro"));
+    renderPendingChip([localUnavailableRow(message, "Andy's MacBook Pro")]);
     const box = screen.getByTestId('code-agent-failure');
-    expect(box).toHaveTextContent(
-      "Can't run locally: the Rose Mac app on Andy's MacBook Pro is closed or disconnected. Open the Rose Mac app and retry, or run this agent in the cloud.",
-    );
-    expect(box.querySelector('strong')).toHaveTextContent(
-      "Can't run locally: the Rose Mac app on Andy's MacBook Pro is closed or disconnected.",
-    );
+    expect(box.textContent).toBe(message);
     expect(box.closest('.border-red-500\\/30')).not.toBeNull();
     expect(screen.getByText('Codex Failed')).toBeInTheDocument();
+    expect(screen.getByTestId('code-agent-target')).toHaveAttribute('title', "Andy's MacBook Pro");
   });
 
-  it('web-initiated agent: exact canonical text for local runs', () => {
-    renderChip([
-      chipMessage({ target: 'local', state: 'failed', failure_kind: 'local_requires_mac_app' }),
-    ]);
-    expect(screen.getByTestId('code-agent-failure')).toHaveTextContent(
-      'Local runs need an agent started from the Rose Mac app. Start this agent from the Mac app, or run it in the cloud.',
+  it('web-initiated agent: the backend text verbatim, never re-worded client-side', () => {
+    const message = oracle(localFailureText('local_requires_mac_app', undefined));
+    renderPendingChip([localUnavailableRow(message)]);
+    expect(screen.getByTestId('code-agent-failure').textContent).toBe(message);
+    // Any other backend wording is shown as sent (no hardcoded client strings).
+    const custom =
+      "Can't run locally: no folder on Andy's Mac is shared with Rose. Share a folder in the Rose Mac app and retry, or run this agent in the cloud.";
+    renderPendingChip([localUnavailableRow(custom)]);
+    expect(screen.getAllByTestId('code-agent-failure')[1].textContent).toBe(custom);
+  });
+
+  it('real partial snapshot ({target, device_name, folder} + row task_id/provider) drives the desktop chip', () => {
+    const started = msg({
+      toolName: 'spawn_claude_code_agent',
+      toolCallId: 'call-task-1',
+      task_id: 'task-1',
+      action_type: 'claude_code_started',
+      toolStatus: 'IN_PROGRESS',
+      code_provider: 'codex',
+      code_agent: { target: 'local', device_name: 'Andy MBP', folder: '~/Developer/rose' },
+    });
+    renderChip([started]);
+    expect(screen.getByTestId('code-agent-chip')).toHaveAttribute('data-code-agent-state', 'live');
+    expect(screen.getByTestId('code-agent-target')).toHaveTextContent(
+      'This Mac · ~/Developer/rose',
     );
+    expect(screen.getByTestId('code-agent-target')).toHaveAttribute('title', 'Andy MBP');
+  });
+
+  it('Mac app: "Open in Terminal" on a live local session calls localCode.openTerminal(taskId); hidden on web and cloud', async () => {
+    const openTerminal = vi.fn().mockResolvedValue({ success: true });
+    const live = (target: 'local' | 'cloud') =>
+      msg({
+        toolName: 'spawn_claude_code_agent',
+        toolCallId: 'call-task-1',
+        task_id: 'task-1',
+        action_type: 'claude_code_started',
+        toolStatus: 'IN_PROGRESS',
+        code_provider: 'claude',
+        code_agent: { target, folder: '~/Developer/rose' },
+      });
+    const web = renderChip([live('local')]);
+    expect(screen.queryByRole('button', { name: 'Open in Terminal' })).not.toBeInTheDocument();
+    web.unmount();
+
+    window.api = { isElectron: true, localCode: { openTerminal } };
+    try {
+      const cloud = renderChip([live('cloud')]);
+      expect(screen.queryByRole('button', { name: 'Open in Terminal' })).not.toBeInTheDocument();
+      cloud.unmount();
+      renderChip([live('local')]);
+      await userEvent.setup().click(screen.getByRole('button', { name: 'Open in Terminal' }));
+      expect(openTerminal).toHaveBeenCalledWith('task-1');
+    } finally {
+      delete window.api;
+    }
   });
 
   it('other failures show failure_message verbatim', () => {

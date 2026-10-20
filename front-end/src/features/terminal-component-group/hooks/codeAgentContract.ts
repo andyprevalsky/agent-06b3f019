@@ -303,13 +303,74 @@ export function parseCodeAgentMeta(value: unknown): CodeAgentMeta | null {
   };
 }
 
-/** Latest `code_agent` snapshot for one task (later messages win). */
-export function latestCodeAgentMeta(messages: Message[], taskId: string): CodeAgentMeta | null {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const meta = parseCodeAgentMeta(messages[i]?.metadata?.code_agent);
-    if (meta && meta.task_id === taskId) return meta;
+/** The spawn tool's error code for a local run that cannot start (L-LOCAL 4570ecefd). */
+export const LOCAL_TARGET_UNAVAILABLE = 'LOCAL_TARGET_UNAVAILABLE';
+
+/** A row of this code task: same task id, or (no task yet) the same spawn tool call. */
+function isTaskRow(metadata: Message['metadata'], taskId: string, toolCallId?: string): boolean {
+  const rowTask = str(metadata?.task_id);
+  if (rowTask && rowTask !== 'pending') return rowTask === taskId;
+  return toolCallId !== undefined && metadata?.toolCallId === toolCallId;
+}
+
+interface TaskFold {
+  snapshot: Rec;
+  provider: CodeAgentProvider | null;
+  firstTs: string | number | undefined;
+  state: CodeAgentState;
+  failure?: string;
+}
+
+function foldTaskRow(fold: TaskFold, message: Message): void {
+  const metadata = message.metadata;
+  const partial = rec(metadata?.code_agent);
+  if (partial) Object.assign(fold.snapshot, partial);
+  fold.provider = fold.provider ?? provider(metadata?.code_provider);
+  fold.firstTs = fold.firstTs ?? message.timestamp;
+  const action: unknown = metadata?.action_type;
+  if (metadata?.error_code === LOCAL_TARGET_UNAVAILABLE || metadata?.toolStatus === 'ERROR') {
+    fold.state = 'failed';
+    // The local-target error text is the exact user-facing message: shown verbatim.
+    fold.failure = str(message.text) ?? fold.failure;
+  } else if (action === 'task_complete') {
+    fold.state = metadata?.success === false ? 'failed' : 'completed';
+  } else if (action === 'claude_code_started' && fold.state === 'spinning_up') {
+    fold.state = 'live';
   }
-  return null;
+}
+
+/**
+ * The chip snapshot for one task: the backend writes PARTIAL `code_agent`
+ * objects ({target, device_name, folder} from the local-target lane; richer
+ * fields when present), so later rows merge over earlier ones and the rest
+ * comes from the rows themselves (task_id, code_provider, lifecycle action,
+ * first timestamp, LOCAL_TARGET_UNAVAILABLE text). No `code_agent` on any row,
+ * or a present-but-invalid provider/state → null (stock chip).
+ */
+export function latestCodeAgentMeta(
+  messages: Message[],
+  taskId: string,
+  toolCallId?: string,
+): CodeAgentMeta | null {
+  const fold: TaskFold = { snapshot: {}, provider: null, firstTs: undefined, state: 'spinning_up' };
+  let seen = false;
+  for (const message of messages) {
+    if (!isTaskRow(message.metadata, taskId, toolCallId)) continue;
+    if (rec(message.metadata?.code_agent)) seen = true;
+    foldTaskRow(fold, message);
+  }
+  if (!seen) return null;
+  const s = fold.snapshot;
+  if (s.provider !== undefined && !provider(s.provider)) return null;
+  if (s.state !== undefined && !STATES.some((state) => state === s.state)) return null;
+  return parseCodeAgentMeta({
+    ...s,
+    task_id: str(s.task_id) ?? taskId,
+    provider: s.provider ?? fold.provider ?? 'claude',
+    state: s.state ?? fold.state,
+    started_at: s.started_at ?? fold.firstTs,
+    failure_message: s.failure_message ?? fold.failure,
+  });
 }
 
 function parseEvent(value: unknown): CodeAgentTranscriptEvent | null {

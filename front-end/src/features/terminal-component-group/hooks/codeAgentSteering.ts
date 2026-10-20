@@ -65,12 +65,12 @@ export interface DesktopCodeAgent {
   toolCallId: string | undefined;
 }
 
-export function useDesktopCodeAgent(taskId: string): DesktopCodeAgent {
+export function useDesktopCodeAgent(taskId: string, spawnToolCallId?: string): DesktopCodeAgent {
   const roseDesktop = useRoseDesktop();
   const { messages } = useAgentContext();
   const meta = useMemo(
-    () => (roseDesktop ? latestCodeAgentMeta(messages, taskId) : null),
-    [messages, roseDesktop, taskId],
+    () => (roseDesktop ? latestCodeAgentMeta(messages, taskId, spawnToolCallId) : null),
+    [messages, roseDesktop, spawnToolCallId, taskId],
   );
   const events = useMemo(
     () => (meta ? collectCodeAgentEvents(messages, taskId) : []),

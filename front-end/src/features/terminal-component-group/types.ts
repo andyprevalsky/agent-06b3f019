@@ -133,6 +133,8 @@ export interface ClaudeCodeChipProps {
   codeProvider?: CodeProvider;
   /** Always show terminal regardless of state. */
   forceShow?: boolean;
+  /** The spawn tool call (finds rows written before a task id exists, e.g. a local-target failure). */
+  toolCallId?: string;
 }
 
 // ─── Completion Summary Card ──────────────────────────────────────────────

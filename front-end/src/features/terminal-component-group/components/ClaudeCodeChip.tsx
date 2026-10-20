@@ -41,8 +41,9 @@ export default function ClaudeCodeChip({
   wsUrl,
   codeProvider = 'claude',
   forceShow = false,
+  toolCallId,
 }: ClaudeCodeChipProps) {
-  const desktop = useDesktopCodeAgent(taskId);
+  const desktop = useDesktopCodeAgent(taskId, toolCallId);
   const desktopMeta = desktop.meta;
   // The desktop chip keeps its Terminal tab mounted while live, so the xterm
   // must attach even before the WS reports `live`.
