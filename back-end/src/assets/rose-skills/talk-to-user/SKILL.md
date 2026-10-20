@@ -13,7 +13,8 @@ approvals reach them only through the Rose tools: the `rose` CLI on PATH
 ## When to use
 
 - Progress the user would want, results and scorecards: `rose message`.
-- Screenshots, recordings, images, videos and HTML previews: `rose display`.
+- To show anything visual (a page, a site folder, a 3D model, an image, a
+  video), run `rose display <path>`.
 - Before a risky or irreversible action (deleting data, spending money,
   pushing somewhere shared): `rose approve`.
 <!-- rose-desktop -->
@@ -34,16 +35,15 @@ approvals reach them only through the Rose tools: the `rose` CLI on PATH
 ## Commands
 
     rose message "<text>"
-    rose display <file|url>... [--caption "<text>"]
+    rose display <path|url>... [--caption "<text>"]
     rose approve "<what you want to do and why>"
     rose wait <request-id>
 <!-- rose-desktop -->
-    rose display [<file|url>...] --pinned --caption "<question>" --option "Label | one-line description"... [--recommended N] [--no-other]
+    rose display [<path|url>...] --pinned --caption "<question>" --option "Label | one-line description"... [--recommended N] [--no-other]
     rose message "<text>" --inline-view <view> [--props '<json>']
 <!-- /rose-desktop -->
 
-`rose display` takes local files (image/*, video/*, .html) and public http(s)
-URLs, up to 20 per call.
+`rose display` takes local paths and public http(s) URLs, up to 20 per call.
 <!-- rose-desktop -->
 
 A pinned question appears above the user's query box when the root agent

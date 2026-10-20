@@ -14,7 +14,7 @@ files) in headless Chromium at 1280x800 and exits 1 on any violation:
   pixels changing per 400 ms, median of 3 intervals);
 - size: <= 5 MB per entry folder, <= 1.5 MB of JS/WASM, <= 2 MB per media
   file, GIFs <= 512 KB (use MP4/WebM or animated WebP/AVIF instead);
-- no uncaught errors; theme tokens valid.
+- no uncaught errors.
 
 `rose-ui perf [--entry path.html | --route /]` prints the numbers as JSON: fps
 p50/p5 (main + workers), long tasks, layout shift, bytes loaded, a GPU memory
