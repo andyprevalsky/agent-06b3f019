@@ -2343,10 +2343,69 @@ def prepare_admission_request(args, root, runner):
         os.close(fd)
 
 
+def adopt_live_sharded(argv):
+    """Re-adopt a live sharded run whose operator and host runners died (service restart).
+
+    Restores the cross-shard infra stop, live shard-status/scorecard counters, barrier
+    delivery and exact supervisor TERM over the original journal, release and clocks.
+    Each shard's re-adopting runner refuses unless its recorded runner and gate are gone.
+    Cleanup after the supervisors join stays with the documented dead-owner route."""
+    parser = argparse.ArgumentParser(prog='run-original600-controller.py --adopt-live')
+    parser.add_argument('--adopt-live', type=Path, required=True, help='sharded admission directory holding coordination.json')
+    parser.add_argument('--workspace', type=Path, help="checkout whose env files resolve the Fly credential (default: the shards' original source root)")
+    parser.add_argument('--check', action='store_true', help='local binding checks only; no credential read or provider request')
+    args = parser.parse_args(argv)
+    os.umask(0o077)
+    root = Path(__file__).resolve().parents[1]
+    runner = runpy.run_path(str(root / 'scripts/cloudbench-original600-runner.py'))
+    coordinator = runpy.run_path(str(root / 'scripts/cloudbench-shard-coordinator.py'))
+    directory = args.adopt_live.absolute()
+    if directory.resolve(strict=True) != directory or directory.stat().st_uid != os.geteuid() or directory.stat().st_mode & 0o077:
+        raise ValueError('private physical sharded admission directory required')
+    journal = directory / 'coordination.json'
+    record = json.loads(runner['read'](journal))
+    shards = [dict(index=int(i), out=Path(v['out'])) for i, v in sorted((record.get('shards') or {}).items(), key=lambda kv: int(kv[0]))]
+    if not shards or any(directory not in s['out'].parents for s in shards):
+        raise ValueError('every adopted shard output must belong to this admission')
+    coordinator['adoptable'](record, shards, record.get('scheduled_total'), record.get('infra_early_stop'))
+    bindings = [runner['adoption_binding'](s['out']) for s in shards]  # refuse all before spawning any
+    workspace = args.workspace
+    if workspace is None:
+        sources = {json.loads(runner['read'](s['out'].parent / 'config.private.json'))['source_root'] for s in shards}
+        if len(sources) != 1:
+            raise ValueError('pass --workspace: the shards do not share one original source root')
+        workspace = Path(sources.pop())
+    plan = dict(status='ADOPT_LIVE_PLAN', directory=str(directory), scheduled_total=record['scheduled_total'],
+                infra_early_stop=record['infra_early_stop'], release_id=record['release_id'], released_at=record.get('released_at'),
+                workspace=str(workspace), shards=[dict(index=s['index'], out=str(s['out']), machine=b['machine'],
+                                                       dead_runner_pid=b['caller']['pid']) for s, b in zip(shards, bindings)])
+    print(json.dumps(plan), flush=True)
+    if args.check:
+        return 0
+    runner_path = root / 'scripts/cloudbench-original600-runner.py'
+
+    def spawn(shard):
+        log_path = Path(shard['out']).parent / ('adopt-runner.private.log')
+        with open(log_path, 'ab') as log:
+            os.chmod(log_path, 0o600)
+            return subprocess.Popen([sys.executable, str(runner_path), '--adopt-live', str(shard['out']), '--workspace', str(workspace)],
+                                    cwd=root, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+
+    result = coordinator['coordinate'](shards, spawn, journal, scheduled_total=record['scheduled_total'],
+                                       infra_early_stop=record['infra_early_stop'], adopt=record)
+    print(json.dumps(dict(status='ADOPTED_SHARDS_JOINED', directory=str(directory), exit_codes=result['exit_codes'],
+                          terminate_reason=result.get('terminate_reason'), infra_true=result.get('infra_true'),
+                          next_step='per shard: cloudbench-resume-controller-export.py --dead-owner (docs/original600-operator-cli.md)')),
+          flush=True)
+    return 0 if all(code == 0 for code in result['exit_codes'].values()) else 1
+
+
 def main():
     if sys.argv[1:2] == ['--status']:
         status = runpy.run_path(str(Path(__file__).with_name('original600-status.py')))
         return status['main'](sys.argv[2:])
+    if sys.argv[1:2] == ['--adopt-live']:
+        return adopt_live_sharded(sys.argv[1:])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run', action='store_true', help='perform fresh capacity reads, then allocate and own one original600 controller')
     parser.add_argument('--source-ref', required=True)

@@ -390,7 +390,7 @@ def binding(run,config=None,agents_env=None):
     if cfg.get('shard') is not None:
         # Totals come from the bound shard config; absent shard keeps the original 600/30 payload.
         shard=cfg['shard']
-        payload.update(total_jobs=RUNNER['shard_shape'](shard),campaign_total_jobs=shard['group_total'],infra_stop_threshold=shard.get('infra_threshold',30),
+        payload.update(total_jobs=RUNNER['shard_shape'](shard),campaign_total_jobs=shard['group_total'],infra_stop_threshold=RUNNER['group_infra_threshold'](shard),
                        task_indexes=shard['task_indexes'],runs=shard['runs'])
     return dict(mode='REMOTE',app=auth['app'],machine=mid,source_ref=ref,root=root,
                 agents_env=credential,credential_sha256=auth['env_files']['agents']['sha256'],source_files=cfg['source_files'],

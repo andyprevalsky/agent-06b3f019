@@ -101,6 +101,9 @@ def shard_manifest(shard,manifest):
  need(isinstance(manifest,list) and manifest and all(isinstance(t,str) and t for t in manifest) and len(set(manifest))==len(manifest) and manifest_sha(manifest)==bound,
       'bound ordered task manifest required' if 'manifest_sha256' in shard else 'original ordered task manifest required')
  return bound
+def group_infra_threshold(shard):
+ """Explicit bound threshold, else 5% of the group's scheduled total (the supervisor's own stop)."""
+ return shard.get('infra_threshold',-(-shard['group_total']//20)) if isinstance(shard.get('group_total'),int) else shard.get('infra_threshold',30)
 def shard_shape(shard):
  """Self-consistent shard fields; returns the shard's logical job count."""
  need(isinstance(shard,dict) and SHARD_FIELDS<=set(shard)<=SHARD_FIELDS|SHARD_OPTIONAL,'exact shard fields required')
@@ -114,7 +117,7 @@ def shard_shape(shard):
  # Campaign job IDs are r{run}-j{(run-1)*width+index+1}; indexes beyond the group width would collide.
  need(all(i<shard['group_total']//runs for i in indexes),'task index outside the group width')
  started=shard['group_started_at'];need(type(started)in(int,float) and math.isfinite(started) and started>0,'invalid shared group start')
- threshold=shard.get('infra_threshold',30);need(type(threshold)is int and threshold>=1,'invalid infrastructure threshold')
+ threshold=group_infra_threshold(shard);need(type(threshold)is int and threshold>=1,'invalid infrastructure threshold')
  shard_timeouts(shard);shard_task_ref(shard)
  return len(names)*runs
 def validate_shard(shard,manifest):
@@ -779,6 +782,89 @@ def run(config_path,config_sha,out,*,github_token=None):
   if not stream.closed:stream.close()
   # Intentionally no terminate/kill gate, VM, process group or unrelated PID here.
 
+def owner_gone(pid,expected):
+ """True only when the recorded PID no longer names the recorded process (absent, reused or zombie)."""
+ try:return birth(pid)!=expected
+ except (OSError,ValueError):return True
+
+def adoption_binding(out):
+ """The exact dead owner of a live sharded output: its authority, controller and supervisor path.
+
+ Refuses unless the recorded runner and its gate are both gone and no terminal exists. The
+ adopter never becomes the cleanup owner; cleanup stays with the dead-owner release route."""
+ out=Path(out).absolute();need(out.is_dir() and out.resolve()==out,'physical original runner output required')
+ need(not(out/'terminal.json').exists(),'runner already terminal; nothing to adopt')
+ caller=json.loads(read(out/'caller.json'));auth_raw=read(out/'authority.private.json');auth=json.loads(auth_raw)
+ need(caller.get('authority_sha256')==sha(auth_raw),'original authority changed')
+ identity=json.loads(read(out/'controller.identity.json'));mid=identity.get('machine')
+ need(identity.get('authority_sha256')==sha(auth_raw) and identity.get('source_ref')==caller.get('source_ref'),'original controller identity changed')
+ need(isinstance(mid,str) and re.fullmatch('[0-9a-f]{14}',mid) and mid not in auth.get('protected_machines',[]),'protected/invalid controller ID')
+ path=caller.get('identity_path');need(isinstance(path,str) and Path(path).is_absolute() and Path(path).name.startswith('original600-supervisor.'),'original supervisor identity path required')
+ need(type(caller.get('deadline'))in(int,float) and math.isfinite(caller['deadline']),'original deadline required')
+ need(owner_gone(caller['pid'],caller['birth']),'original runner owner still live')
+ need(owner_gone(caller['gate_pid'],caller['gate_birth']),'original gate still live')
+ return dict(out=out,caller=caller,machine=mid,base=dict(machine=mid,source_ref=caller['source_ref'],epoch=caller['epoch'],identity_path=path))
+
+def next_probe_index(out):
+ numbers=[int(p.name.rsplit('-',1)[1][:6])for p in out.glob('supervisor-*-[0-9][0-9][0-9][0-9][0-9][0-9].json')]
+ return max(numbers,default=-1)+1
+
+def adopt_live(out,*,api,probe_interval=5.0):
+ """Re-adopt observation and stop authority for a live shard whose host runner died.
+
+ Same exact-owner controls as run(): PROBE, shard-status.json for the coordinator and
+ scorecard, coordinator barrier delivery, and one never-replayed supervisor TERM on an
+ owner stop or the original deadline. Never signals a gate, VM or process group and never
+ runs cleanup; it returns once the supervisor has joined (then use the dead-owner route)."""
+ import fcntl
+ bound=adoption_binding(out);out,caller,mid,base=bound['out'],bound['caller'],bound['machine'],bound['base']
+ lock=os.open(out/'adoption.lock',os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
+ try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+ except BlockingIOError:os.close(lock);raise ValueError('another adopter owns this output')
+ number=1
+ while(out/('adoption-%02d.json'%number)).exists():number+=1
+ receipt=out/('adoption-%02d.json'%number)
+ save(receipt,dict(schema='original600-runner-adoption-v1',adopter_pid=os.getpid(),adopter_birth=birth(os.getpid()),machine=mid,
+                   original_owner_pid=caller['pid'],original_owner_birth=caller['birth'],original_gate_pid=caller['gate_pid'],
+                   original_gate_birth=caller['gate_birth'],identity_path=base['identity_path'],original_deadline=caller['deadline'],
+                   adopted_at=time.time(),cleanup_owner=False))
+ stop=[False];old={s:signal.getsignal(s)for s in(signal.SIGTERM,signal.SIGINT)}
+ def cancel(*unused):stop[0]=True # never forwarded to a gate, VM or process group
+ for s in old:signal.signal(s,cancel)
+ attempt=next_probe_index(out);probe={};delivery={};next_probe=0
+ try:
+  print(json.dumps(dict(status='ADOPTED_LIVE_SHARD',machine=mid,receipt=str(receipt))),flush=True)
+  while True:
+   late=time.time()>=caller['deadline']
+   if time.monotonic()>=next_probe:
+    payload=dict(base,action='PROBE')
+    try:
+     probe=machine_control(api,mid,payload);save(out/('supervisor-probe-%06d.json'%attempt),probe);attempt+=1
+     if(stop[0]or late)and probe['state']=='LIVE':request_term(api,mid,payload,probe,out)
+     shard_status(out,probe,mid)
+    except (Exception,Deadline) as e:
+     save(out/('supervisor-read-pending-%06d.json'%attempt),dict(error=type(e).__name__,no_gate_signal=True,adopter=receipt.name));attempt+=1
+    next_probe=time.monotonic()+probe_interval
+   state=probe.get('state')
+   if state in('JOINED','ABSENT_UNCONFIRMED')or(state=='NOT_PUBLISHED'and(stop[0]or late)):
+    save(receipt.with_name(receipt.stem+'.terminal.json'),dict(supervisor_state=state,stop_requested=stop[0],deadline_passed=late,
+         observed_at=time.time(),next_step='dead-owner export and release (docs/original600-operator-cli.md)',benchmark_success_inferred=False))
+    print(json.dumps(dict(status='ADOPTED_SUPERVISOR_SETTLED',machine=mid,supervisor_state=state,
+                          next_step='cloudbench-resume-controller-export.py --dead-owner')),flush=True)
+    return 0
+   try:deliver_global(api,mid,base,out,probe,delivery,stop[0]or late)
+   except (Exception,Deadline):pass # retried next loop; never a cleanup or signal decision
+   time.sleep(.25)
+ finally:
+  for s,h in old.items():signal.signal(s,h)
+  os.close(lock)
+
+def adopt_cli(out,workspace):
+ capture=Path(__file__).absolute().with_name('cloudbench-original-volume-capture.py')
+ scope={'__file__':str(capture),'__name__':'bound_external_controller'};exec(compile(capture.read_bytes(),str(capture),'exec'),scope)
+ adoption_binding(out) # refuse locally before any credential read
+ return adopt_live(out,api=scope['Fly'](APP,scope['resolve_token']({'workspace':str(workspace)})))
+
 def self_test():
  import tempfile,unittest
  class Tests(unittest.TestCase):
@@ -981,6 +1067,10 @@ def self_test():
     finally:sup.close()
  suite=unittest.defaultTestLoader.loadTestsFromTestCase(Tests);result=unittest.TextTestRunner().run(suite);return 0 if result.wasSuccessful()else 1
 if __name__=='__main__':
- p=argparse.ArgumentParser();p.add_argument('--self-test',action='store_true');p.add_argument('--config',type=Path);p.add_argument('--config-sha256');p.add_argument('--output',type=Path);args=p.parse_args()
+ p=argparse.ArgumentParser();p.add_argument('--self-test',action='store_true');p.add_argument('--config',type=Path);p.add_argument('--config-sha256');p.add_argument('--output',type=Path)
+ p.add_argument('--adopt-live',type=Path,help='re-adopt observation/stop authority for a live shard output whose runner and gate died')
+ p.add_argument('--workspace',type=Path,default=Path(__file__).absolute().parents[1],help='checkout whose env files resolve the Fly credential')
+ args=p.parse_args()
  if args.self_test:raise SystemExit(self_test())
+ if args.adopt_live:raise SystemExit(adopt_cli(args.adopt_live,args.workspace))
  need(args.config and args.config_sha256 and args.output,'explicit root config/hash/new output required');raise SystemExit(run(args.config,args.config_sha256,args.output))

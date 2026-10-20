@@ -52,6 +52,14 @@ def shard_task_ref(shard):
         raise ValueError('invalid bound task ref')
     return ref
 
+def group_infra_threshold(shard):
+    """The shard's own stop count: an explicitly bound one, else 5% of its group's scheduled total.
+
+    The host coordinator sums shards against the same fixed predicate. Binding it here keeps a
+    stop alive on the guest when the host owner dies: any one shard reaching the group threshold
+    implies the group reached it, so this never stops earlier than the global rule."""
+    return shard.get('infra_threshold', -(-shard['group_total'] // 20))
+
 def bound_manifest(tasks, shard):
     """The ordered launch manifest: the pinned original 200, or a shard's explicitly bound one."""
     bound = ORIGINAL_TASK_NAMES_SHA256 if shard is None else shard.get('manifest_sha256', ORIGINAL_TASK_NAMES_SHA256)
@@ -204,7 +212,7 @@ def validate_shard(shard, manifest):
         raise ValueError('task index outside the group width')
     if type(started) not in (int, float) or not math.isfinite(started) or started <= 0:
         raise ValueError('invalid shared group start')
-    threshold = shard.get('infra_threshold', INFRA_THRESHOLD)
+    threshold = group_infra_threshold(shard)
     if type(threshold) is not int or threshold < 1:
         raise ValueError('invalid infrastructure threshold')
     shard_timeouts(shard)
@@ -250,7 +258,7 @@ def validate_snapshot(summary, manifest, epoch, campaign_id, deadline, tasks=Non
         if {(j.get('task'), j.get('run')) for j in jobs.values()} != {(t, r) for t in tasks for r in (1, 2, 3)}:
             raise ValueError('original task/run identities mismatch')
     # Ready/released counts never change the fixed threshold/scheduled denominator.
-    return fold(summary, INFRA_THRESHOLD if shard is None else shard.get('infra_threshold', INFRA_THRESHOLD))
+    return fold(summary, INFRA_THRESHOLD if shard is None else group_infra_threshold(shard))
 
 def publish_status(path, value):
     """Atomically replace a small private status file for the external runner PROBE."""

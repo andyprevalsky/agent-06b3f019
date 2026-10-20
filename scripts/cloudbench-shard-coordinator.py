@@ -7,6 +7,8 @@
                         a shard fails first    -> global-abort.json in each runner dir
                         infra threshold (opt.) -> SIGTERM every runner (existing TERM path)
                         operator signal        -> SIGTERM every runner, then join all
+    coordinate(adopt=) -> after the host owner died: the same loop over re-adopted
+                        runners, continuing the original journal, release and clocks
     merge()        -> one combined outcome from the K shard results
 
 Each runner still owns exactly one controller (creation, export, teardown);
@@ -153,18 +155,49 @@ def runner_terminal_status(out):
     return value.get('status') if isinstance(value, dict) else None
 
 
+def process_birth(pid):
+    """Linux /proc birth of a live non-zombie PID, or None."""
+    try:
+        fields = Path('/proc', str(pid), 'stat').read_text().rsplit(') ', 1)[1].split()
+        if fields[0] == 'Z':
+            return None
+        return 'proc-start:' + Path('/proc/sys/kernel/random/boot_id').read_text().strip() + ':' + fields[19]
+    except (OSError, IndexError):
+        return None
+
+
+def adoptable(record, shards, scheduled_total, infra_early_stop):
+    """An unfinished original journal whose coordinator is gone, for exactly these shards."""
+    need(isinstance(record, dict) and record.get('schema') == 'original600-shard-coordination-v1', 'original coordination journal required')
+    need(record.get('finished_at') is None, 'coordination already finished; nothing to adopt')
+    need(record.get('scheduled_total') == scheduled_total and record.get('infra_early_stop') == infra_early_stop,
+         'adoption must keep the original scheduled total and early-stop policy')
+    need(sorted(record.get('shards') or {}) == sorted(str(s['index']) for s in shards)
+         and all(record['shards'][str(s['index'])]['out'] == str(s['out']) for s in shards),
+         'adoption must cover exactly the original shard outputs')
+    owner = record.get('coordinator') or {}
+    if owner.get('pid') is not None:
+        need(process_birth(owner['pid']) != owner.get('birth'), 'original coordinator still live')
+
+
 def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='enabled',
                poll_seconds=1.0, clock=time.time, sleep=time.sleep, respawn=None,
-               stagger_seconds=0.0, max_attempts=MAX_SHARD_ATTEMPTS):
+               stagger_seconds=0.0, max_attempts=MAX_SHARD_ATTEMPTS, adopt=None):
     """Run K runners to completion under one global barrier. Returns the coordination record.
 
     shards: [{'index': i, 'out': Path}], spawn(shard) -> Popen-like (poll/wait/send_signal/pid).
     respawn(shard) -> (shard, Popen-like): a fresh attempt for a shard whose runner ended
     before release with a retryable startup terminal; None disables retries.
+    adopt: the unfinished original journal of a run whose coordinator and runners died;
+    spawn() then starts re-adopting owners. Its release identity, decision, clocks and
+    prior shard PIDs are kept; the fixed scheduled total and threshold are unchanged.
     """
     journal = Path(journal)
     need(scheduled_total > 0 and shards, 'scheduled shards required')
-    release_id = secrets.token_hex(12)
+    if adopt is not None:
+        adoptable(adopt, shards, scheduled_total, infra_early_stop)
+        respawn = None  # an adopted shard's original attempt already allocated
+    release_id = adopt['release_id'] if adopt is not None else secrets.token_hex(12)
     stop = [None]
     previous = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT)}
 
@@ -173,12 +206,21 @@ def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='ena
 
     for number in previous:
         signal.signal(number, request_stop)
-    record = dict(schema='original600-shard-coordination-v1', release_id=release_id, controllers=len(shards),
-                  scheduled_total=scheduled_total, infra_early_stop=infra_early_stop, started_at=clock(),
-                  released_at=None, aborted_at=None, abort_reason=None, terminated_at=None,
-                  terminate_reason=None, shards={})
+    owner = dict(pid=os.getpid(), birth=process_birth(os.getpid()))
+    if adopt is None:
+        record = dict(schema='original600-shard-coordination-v1', release_id=release_id, controllers=len(shards),
+                      scheduled_total=scheduled_total, infra_early_stop=infra_early_stop, started_at=clock(),
+                      released_at=None, aborted_at=None, abort_reason=None, terminated_at=None,
+                      terminate_reason=None, shards={}, coordinator=owner)
+        record['retries'] = []
+    else:
+        record = dict(adopt)
+        record.setdefault('retries', [])
+        record['adoptions'] = list(record.get('adoptions') or []) + [dict(
+            at=clock(), coordinator=owner, previous_coordinator=adopt.get('coordinator'),
+            previous_shards=dict(adopt['shards']))]
+        record['coordinator'] = owner
     runners, attempts = {}, {}
-    record['retries'] = []
     try:
         for position, shard in enumerate(shards):
             if position and stagger_seconds:
@@ -188,6 +230,12 @@ def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='ena
             record['shards'][str(shard['index'])] = dict(out=str(shard['out']), pid=runners[shard['index']].pid)
         save(journal, record)
         decided, decision = None, None
+        if adopt is not None and record.get('aborted_at'):
+            decided, decision = 'abort', ('global-abort.json', dict(release_id=release_id, reason=record['abort_reason']))
+        elif adopt is not None and record.get('released_at'):
+            decided, decision = 'release', ('global-release.json', dict(
+                release_id=release_id, reason='all %d shards ready' % len(shards)))
+        term_sent = False
         while True:
             exited = {i: p.poll() for i, p in runners.items()}
             statuses = {s['index']: read_status(s['out']) for s in shards}
@@ -243,10 +291,13 @@ def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='ena
             if record['terminated_at'] is None and (stop[0] or threshold):
                 record.update(terminated_at=clock(), terminate_reason=(
                     'operator ' + stop[0] if stop[0] else 'infra %d/%d reached the 5%% threshold' % (infra, scheduled_total)))
+                save(journal, record)
+            if record['terminated_at'] is not None and not term_sent:
+                # Includes an adopted journal whose original owner terminated before it died.
+                term_sent = True
                 for process in runners.values():
                     if process.poll() is None:
                         process.send_signal(signal.SIGTERM)  # runner forwards TERM to its own supervisor only
-                save(journal, record)
             if all(code is not None for code in exited.values()):
                 break
             sleep(poll_seconds)

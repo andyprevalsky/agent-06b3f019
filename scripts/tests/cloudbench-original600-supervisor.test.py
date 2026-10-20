@@ -303,6 +303,25 @@ class Shard(unittest.TestCase):
     progress=status['progress'];self.assertEqual((progress['jobs'],sum(c[3] for c in progress['combos'])),(9,9),'live scorecard counters cover every logical job')
     self.assertLess(len(raw),16384,'the runner PROBE reads at most 16 KiB')
     self.assertEqual(identity.with_suffix('.infra.json').stat().st_mode&0o777,0o600);self.assertEqual(sorted(x.name for x in identity.parent.iterdir() if x.name.startswith('.original600')),[])
+ def test_shard_supervisor_enforces_the_group_threshold_without_a_host(self):
+  # 2026-10-20: a host restart killed the operator and both shard runners after
+  # release; the guest supervisors kept running a 60-job group with their own
+  # threshold left at 30 (= every job of a 30-job shard), so no stop survived.
+  import hashlib
+  names=[self.tasks[i] for i in range(0,20,2)]
+  shard=shard_fixture(self.tasks,index=0,count=2,tasks=names,tasks_sha256=hashlib.sha256(('\n'.join(names)+'\n').encode()).hexdigest(),
+                      task_indexes=list(range(0,20,2)),group_total=60)
+  self.assertEqual(S['validate_shard'](shard,self.tasks),30)
+  for infra,expected_code,ending in ((2,0,'natural'),(3,7,'term')):
+   with self.subTest(infra=infra),tempfile.TemporaryDirectory()as name:
+    repo=Path(name);(repo/'agents').mkdir()
+    result,campaigns,children,identity=self.run_main(repo,shard,{},infra)
+    self.assertEqual((result,(campaigns[0]/'ending').read_text()),(expected_code,ending),'3/60 of the group stops this shard; 2/60 continues')
+  for total,threshold in ((60,3),(61,4),(70,4),(600,30)):
+   with self.subTest(total=total):
+    self.assertEqual(S['group_infra_threshold'](dict(group_total=total)),threshold)
+    self.assertTrue(20*threshold>=total>20*(threshold-1),'the fixed 5% predicate of the original scheduled group total')
+  self.assertEqual(S['group_infra_threshold'](dict(group_total=60,infra_threshold=2)),2,'an explicit bound threshold is kept')
  def test_progress_counters_are_bounded_and_read_each_terminal_card_once(self):
   with tempfile.TemporaryDirectory()as name:
    fleet=Path(name)/'fleet';(fleet/'_batch').mkdir(parents=True)

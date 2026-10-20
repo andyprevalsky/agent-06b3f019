@@ -576,11 +576,34 @@ into private staging and verifies every original archive member. It publishes
 the canonical verified-export marker only after all remote helpers have joined.
 An uncertain export dispatch never authorizes repeating that export.
 
-If a host or service restart killed the operator, a shard's runner and its gate
-while the controller was still running, nothing remains to verify the export
-or run controller cleanup: the run's pinned disposable helper refuses every
-action for a dead cleanup owner. First stop new work through the runner's own
-barrier ABORT and wait for the supervisor to report JOINED. Then write one
+If a host or service restart killed the sharded operator and its host runners
+after the global release, the guest supervisors keep running. Each supervisor
+still stops its own shard at the group threshold (5% of the original scheduled
+group total, for example 3 of 60), because any one shard reaching it implies
+the group did. Re-adopt the cross-shard stop, the live `shard-status.json`
+counters that the scorecard reads, barrier delivery, and the exact supervisor
+TERM path over the original journal, release ID, and clocks:
+
+```bash
+python3 scripts/run-original600-controller.py --adopt-live "$ADMISSION_DIR" --check   # local only
+python3 scripts/run-original600-controller.py --adopt-live "$ADMISSION_DIR"
+```
+
+Run it from a checkout that includes this mode. `--workspace` selects the
+checkout whose env files resolve the Fly credential. The default is the shards'
+original source root. Every shard refuses unless the PID and birth of its
+recorded runner and gate are gone, no `terminal.json` exists, and no other
+adopter holds `adoption.lock`. The adopter writes `adoption-NN.json`, sends at
+most one never-replayed supervisor TERM on an owner stop, the threshold, or the
+original deadline, and exits once the supervisor reports JOINED. It never
+signals a gate, VM, or process group, and never runs cleanup. Launch it under a
+process manager that survives the session; `setsid nohup` did not survive the
+2026-10-20 boxes.dev service restart.
+
+Nothing remains to verify the export or run controller cleanup: the run's
+pinned disposable helper refuses every action for a dead cleanup owner. Without
+an adopter, first stop new work through the runner's own barrier ABORT. In
+either case, wait for the supervisor to report JOINED. Then write one
 private `controller-export-dead-owner-window-v1` window per controller: the
 ordinary cleanup-window fields (at most one hour, `cleanup_only: true`,
 `benchmark_credit: 0`) plus `dead_owner_pid`/`dead_owner_birth` from the run's
