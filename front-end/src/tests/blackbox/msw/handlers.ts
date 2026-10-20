@@ -20,6 +20,8 @@ export const handlers = [
   http.get(`${API_BASE}/integrations/progress`, () =>
     HttpResponse.json({ cursor: '2026-10-20T00:00:00.000Z', changed: false }),
   ),
+  // Rose Desktop Phone: no iPhone attached unless a test overrides it.
+  http.get(`${API_BASE}/phones`, () => HttpResponse.json({ phones: [] })),
   // No persisted binding by default: live views fall back to the transcript URL.
   http.get(`${API_BASE}/browser-session/task/:taskId/live-view`, () =>
     HttpResponse.json({ error: 'Session not found' }, { status: 404 }),
