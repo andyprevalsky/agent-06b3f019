@@ -123,6 +123,55 @@ ledger" in `rose-user-ui.md`). This file is the cross-cutting checklist, and
 - **L-PERF:** mobile performance validation (P1–P6), run last over the merged branch.
 - **Auditor:** an independent judge that re-checks every row against its evidence before `/deploy`.
 
+## Accountability ledger: every ask in the code thread (audit 2026-10-20)
+
+Status: **done** = merged into `feat/rose-user-ui` with tests; **running** = a lane is building it; **queued** = has an owner but no lane yet; **UI** = UI sister thread; **gap** = has no owner yet (fix listed). Nothing is deployed or pushed (Andy: "don't deploy anything yet").
+
+| # | Ask (Andy's words, paraphrased) | Row | Owner | Status |
+|---|---|---|---|---|
+| 1 | Code agent persistence; restart from exact last state; failed agent keeps state on retry | C1–C2 | W5 | running |
+| 2 | Commit locally when done, merge when sharing state; "merged" only if real | C3–C4 | W5 | running |
+| 3 | Grep over code agents' work | C5 | W5 | running |
+| 4 | `rose_user_ui` folder in every workspace, per user, publish | A3 | W1 | done (7cdddf5bf) |
+| 5 | Instructions + **screenshots of the current UI / a way for the code agent to view them** (`rose-ui screenshot/record/perf/check`) | A4 | L-UIKIT | **gap → launching L-UIKIT** |
+| 6 | **Hyper-expressive, high-res, smooth, performant examples** (plan lists 6; only 2 seeded) | A4 | L-UIKIT | **gap → L-UIKIT** |
+| 7 | `root/` alters the whole app (colors, gifs, dashboards, "a whole OS") | A3 | W2 runtime | done (87d1f3532); recordings pending |
+| 8 | `inline/` views in the trajectory | A3 | W1/W2 | done; game flow failing → #24 |
+| 9 | Write a tool for root and render its result any way | A3 | W4 | done (read-only v1). **Gap:** production executor (`USER_TOOLS_EXECUTOR=code_session`) and side-effect tools (needs an idempotency store) → queued L-TOOLS2 |
+| 10 | "Change my background photo" goal; background fade (now 80%); query box + left bar opaque | U14 / row 34 | W2 + UI | backend README done (5accf4e82); front-end UI |
+| 11 | Nub, Join Waitlist white, no wrappers, mic, rose tint | U14 | W3 + UI | merged; Join Waitlist reverted to stock for signed-out visitors by the flag rule (UI thread to confirm) |
+| 12 | Browser app follows selected agent; drawer replaces fullscreen, smooth | U14 | W3 | done (legacy fullscreen kept for non-flag accounts) |
+| 13 | Root browser always available; agents splice by world state | A6 | L-BROWSER | queued |
+| 14 | **"Another app should be sent to the agent working on the demo video"** | — | parent | **gap: no demo-video thread found; asked UI thread to get Andy's answer** |
+| 15 | Rose in Rose: sync Rose repo, live HMR preview on screen, Publish = PR | A1 | L-APPS | queued (needs W5) |
+| 16 | Apps (Lovable-style), "Make me an app", "+ new app", Rose is one app | A2 | L-APPS + UI | queued (needs W5) |
+| 17 | Recordings of it working | — | UI thread | flow 1 pass; flows 2–3 fail → #24 |
+| 18 | Codex tool to talk to other agents in the Rose graph | C6 | L-A2A | running |
+| 19 | Talking to the coding agent directly (is relaying clunky?) | C7 | L-DIRECT | running |
+| 20 | Code benchmarks; replicate the underlying CLI's results | C8 | L-BENCH | running |
+| 21 | Codebase sync like boxes.dev (secrets, symlinks) | C9 | L-SYNC | running |
+| 22 | Bug detection runs on Rose infra | C10 | L-RCA | done (b437add6b); live smoke after deploy |
+| 23 | Must-have / nice-to-have split | — | parent | done (this file) |
+| 24 | Route coding / look-and-feel asks to a code agent (flows 2–3 fixes) | row 41 / C12 | L-ROUTING | running |
+| 25 | Code agents talk to the user only via Rose tools (messages, approvals, scorecards, pinned questions); routing by spawner | C12 | L-DISPLAY + L-A2A | running |
+| 26 | Code-agent chips: Transcript / Terminal tabs, direct box, completed summary | rows 44–45 | L-DIRECT (backend) + UI | running + UI |
+| 27 | No timeouts for code agents (heartbeat only, pause when idle) | C11 | W5 | running |
+| 28 | Branch model (new agent from main; sub-agent from parent; shared only via right-click) | C13 | W5 | running |
+| 29 | Local laptop target via the Mac app (local Terminal window, Mac-app-only, exact errors) | C14 | L-LOCAL | running |
+| 30 | Projects (default branch, startup script + timeout, env files, autowake); Rose project seeded; agents grouped by project | PJ1–PJ4, row 57 | L-SYNC + UI | running + UI |
+| 31 | Home button = root project; boxes.dev functions in agents pane; hover-expand; flush drawers; right-bar layout | U1–U4, U15, U17, rows 29–33, 55–58 | UI | UI |
+| 32 | Mobile makes sense; query box hugs screen curve; inline images by default | U10–U12 | UI (W6 WIP handed over) | UI |
+| 33 | Fast/ultrafast visible on mobile, ultrafast default; rose-flash default model | U5–U6 | UI | UI (front-end defaults; backend API default `rose-1-ultra` kept so other accounts and benchmarks are unchanged) |
+| 34 | Dark mode app; youtube/instagram/linkedin/website goals; phone app | U7–U9, U18, rows 52–53 | UI + L-PHONE (backend) | UI; L-PHONE queued |
+| 35 | Display HTML + JS (games) | row 54 | UI front-end done (a151a214c) + L-DISPLAY (`text/html`) | done (preview) + running |
+| 36 | Feature flag: all new UI only for Andy | row 42 | parent | done (7fbe04b59) |
+| 37 | Approvals collected at deploy; don't deploy yet | — | all lanes | in force (memory + every lane prompt) |
+| 38 | iPhone web app hella performant, validated (phone harness → WebKit iPhone 15 emulation) | P1–P6 | L-PERF | queued (runs on the merged branch) |
+| 39 | Each criterion analysed by its own sub-agent with an eval/judge suite; iterate until met | all rows | lane owners + Auditor | lanes running; **Auditor queued** (re-checks every row against evidence before any deploy) |
+| 40 | Recording blockers: decode hang, account pill overlaps | — | parent | done (ac42c75f4, ab8f1bcf8, a151a214c) |
+
+Open follow-ups with owners: C10 crash-between-create-and-start stuck agent (L-TOOLS2 queue); retire `.github/workflows/auto-rca*.yml`; W1: live E2B check that `rose-ui` is on PATH (needs a real E2B sandbox; no deploy); W2 bridge `rose.*` capability calls + write confirmations (UI thread, plus a backend if one is needed).
+
 ## Deploy approvals (collect at `/deploy`)
 
 - Harness: user tools in root toolset (W4); `display` tool with `placement` (A5); code-agent graph tools (C6); `code_session_id` tool param (C1); code-agent Rose tools + approval blocking (C12); removing code-agent Temporal/sandbox timeouts (C11); code-agent `target` param (C14); root routes coding work to code agents (UI ledger 41).
