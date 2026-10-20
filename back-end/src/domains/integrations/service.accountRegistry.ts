@@ -19,6 +19,7 @@ import { findIntegrationAccount } from './repo.accounts';
 import { findPlaidItemForUser, PlaidItemStatus } from './repo.plaid';
 import { disconnectGmailAccount, GmailAccountNotFoundError } from './service';
 import { disconnectPlaidItem } from './service.plaid';
+import { deleteIMessageAccount } from './service.imessageAccounts';
 import { deleteLanternIntegration, LanternCredentialError } from './service.lantern';
 import { KNOWN_SOURCES as DOCUMENT_SOURCES } from './uploadService.documents';
 
@@ -121,10 +122,8 @@ const EXACT: Record<string, IntegrationAccountAdapter> = {
     list: 'email_credentials',
     cleanup: todo('unassigned', 'Yahoo has no per-address disconnect or data purge yet'),
   },
-  imessage: {
-    list: 'row',
-    cleanup: todo('L-INT-IMESSAGE', 'messages are keyed by user+source, not by Mac device id'),
-  },
+  // One account per Mac device id; its messages carry sourceAccountId (I1).
+  imessage: { list: 'row', cleanup: hook(deleteIMessageAccount) },
   whatsapp: {
     list: 'row',
     cleanup: todo('L-INT-WHATSAPP', 'messages and auth state are not keyed by WhatsApp account'),

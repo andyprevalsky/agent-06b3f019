@@ -60,6 +60,8 @@ export interface ContactToUpsert {
     timestamp: Date;
     message: string;
     externalId?: string; // Platform-native message ID for deduplication
+    /** Integration account the message came from (e.g. an iMessage Mac device id). */
+    sourceAccountId?: string;
   }>;
 }
 
@@ -240,6 +242,7 @@ export async function upsertPersonAndMessageRecords(
               timestamp: msg.timestamp,
               message: msg.message,
               externalId: msg.externalId,
+              sourceAccountId: msg.sourceAccountId ?? null,
               googleAccountEmail: googleAccountEmail?.toLowerCase() ?? null,
             })),
             userId,

@@ -63,6 +63,12 @@ export class IntegrationCache {
     return all.find((i) => i.name === integrationName);
   }
 
+  /** Every account row of one provider (multi-account providers have one per account). */
+  static async getAccounts(integrationName: string): Promise<Integration[]> {
+    const { all } = await this.getIntegrations();
+    return all.filter((i) => i.name === integrationName);
+  }
+
   /**
    * Invalidate cache to force fresh fetch on next call.
    * Call this after connecting/disconnecting an integration.

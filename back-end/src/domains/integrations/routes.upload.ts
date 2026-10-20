@@ -13,6 +13,11 @@ import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { UPLOAD_LIMITS } from './config';
 import * as service from './service';
+import {
+  IMessageAccountRemovedError,
+  imessageDeviceAccountSchema,
+  processIMessageDeviceUpload,
+} from './service.imessageAccounts';
 
 const log = createLogger('Integrations');
 const router = Router({ mergeParams: true });
@@ -213,10 +218,29 @@ router.post(
   authenticateMachineUpload,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;
-    const { contacts, accessedAt } = req.body;
+    const { contacts, accessedAt, account } = req.body;
 
     if (!Array.isArray(contacts) || contacts.length === 0) {
       return res.status(400).json({ error: 'contacts array is required' });
+    }
+
+    if (account !== undefined) {
+      // One account per Mac: the batch is stored before the response (I1).
+      const parsed = imessageDeviceAccountSchema.safeParse(account);
+      if (!parsed.success) {
+        return res
+          .status(400)
+          .json({ error: parsed.error.errors[0]?.message ?? 'Invalid account' });
+      }
+      try {
+        const stored = await processIMessageDeviceUpload(userId, contacts, parsed.data);
+        return res.json({ message: 'iMessage batch stored', ...stored });
+      } catch (error: unknown) {
+        if (error instanceof IMessageAccountRemovedError) {
+          return res.status(410).json({ error: 'ACCOUNT_REMOVED', accountId: error.accountId });
+        }
+        throw error;
+      }
     }
 
     const result = await service.processIMessageUpload(userId, contacts, accessedAt);

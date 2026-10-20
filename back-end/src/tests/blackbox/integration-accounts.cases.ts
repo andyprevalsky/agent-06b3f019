@@ -198,7 +198,6 @@ async function plaidItemsAreAccounts(users: Users): Promise<void> {
 async function todoHooksRefuse(users: Users): Promise<void> {
   const { a } = users();
   for (const [provider, owner] of [
-    ['imessage', 'L-INT-IMESSAGE'],
     ['atlas_passwords', 'L-INT-PASSWORDS'],
     ['chrome', 'L-INT-COOKIES'],
   ]) {
