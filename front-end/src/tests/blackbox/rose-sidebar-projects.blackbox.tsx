@@ -285,6 +285,9 @@ describe('Rose projects in the left bar', () => {
   });
 
   it('Environment files load from GET …/env-files; rows expand to variable NAMES only', async () => {
+    // The fixture answers with the backend's { envFiles, query } envelope
+    // (envFileService.listEnvFiles); reading it as a bare array crashed the
+    // whole app on opening project settings (FE-13 visual pass, :3902).
     const user = userEvent.setup();
     renderBar();
     const panel = await openSettings(user);

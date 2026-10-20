@@ -7,7 +7,8 @@
  *   POST   /api/projects { name }              -> 201 Project | 409 duplicate name
  *   PUT    /api/projects/:id (ProjectUpdate)   -> Project (only the edited subset)
  *   DELETE /api/projects/:id                   -> 204
- *   GET    /api/projects/:id/env-files         -> ProjectEnvFile[] (values never returned)
+ *   GET    /api/projects/:id/env-files         -> { envFiles: ProjectEnvFile[], query }
+ *                                                 (values never returned)
  *   POST   /api/projects/:id/env-files (NewProjectEnvFile) -> 201 ProjectEnvFile
  *   DELETE /api/projects/:id/env-files/:fileId -> 204
  *
@@ -130,7 +131,9 @@ export async function deleteProject(id: string): Promise<void> {
 export async function fetchProjectEnvFiles(projectId: string): Promise<ProjectEnvFile[]> {
   const response = await fetch(envFilesUrl(projectId), { headers: getAuthHeaders() });
   if (!response.ok) throw new Error(`Failed to load environment files (${response.status})`);
-  return (await response.json()) as ProjectEnvFile[];
+  // Backend envFileService.listEnvFiles wraps the list (it also serves ?q= search).
+  const body = (await response.json()) as { envFiles: ProjectEnvFile[] };
+  return body.envFiles;
 }
 
 export async function createProjectEnvFile(
