@@ -104,12 +104,11 @@ def configure(registry,owner,app,name,mid,vid,protected,command,*,audit,run,snap
                 attached=value.get('attached_machine_id')
                 need(attached in (None,mid),'Volume attached to a different Machine')
                 need(fields(registry/'clones'/name)==row,'ownership changed during read')
-                if attached==mid:return value
+                # A volume restored from a large snapshot keeps reporting
+                # attached_machine_id=null while the owned Machine runs with exactly
+                # this mount (checked above). Accept that only for an explicit restore.
+                if attached==mid or (snapshot_restored and attached is None):return value
                 if settle<SETTLE_READS:pause(min(settle,2))
-            # A volume restored from a large snapshot keeps reporting
-            # attached_machine_id=null while the owned Machine runs with exactly
-            # this mount (checked above). Accept that only for an explicit restore.
-            if snapshot_restored:return value
             raise ValueError('Volume not attached to the exact owned Machine')
         before=inspect()
         if before['auto_backup_enabled'] is False:

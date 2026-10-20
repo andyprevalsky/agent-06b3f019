@@ -105,7 +105,7 @@ print(json.dumps(v))
         self.env['CLI_ATTACHED'] = '"other123"'
         result = self.invoke('--snapshot-restored')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn(b'Volume not attached to the exact owned Machine', result.stderr)
+        self.assertIn(b'Volume attached to a different Machine', result.stderr)
         self.assertFalse((self.fixture.audit/'volume-backups/vol_owned/verified.json').exists())
 
     def test_observed_transient_volume_not_found_update_is_replayed_after_exact_read(self):
