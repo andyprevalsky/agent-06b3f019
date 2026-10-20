@@ -146,6 +146,8 @@ export interface DisplayFilePointer {
   mime_type: string;
   size_bytes: number;
   created_at: string;
+  /** text/html only: frame this URL (sandboxed usercontent origin), not storage. */
+  usercontent_url?: string;
 }
 
 export interface DisplayItemResult {
