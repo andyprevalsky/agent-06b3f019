@@ -141,6 +141,9 @@ Status: `done` (merged + verified in a recording), `building`, `queued`,
 | 86 | Phone app = floating iPhone with a calm **Coming soon** screen (phone harness built in its own devbox; no /api/phones) | spec'd, live in panels/phone.js; FE-17 |
 | 87 | Browser app is not auto-opened; opening it with an agent selected starts at that root tree's default_url | spec'd → FE-17 |
 | 88 | Dark mode dividers/hairlines are subtle (row separators ≈ rgba(255,255,255,.07), outer borders ≤ .10), never bright white | spec'd, live in nav.js; FE-13 |
+| 89 | **Removed (Andy, 2026-10-20):** whole-app user settings — user theme/tokens, background image + fade (rows 1, 25, 34), and slots (sidebar header/menu, home dashboard, agent panel, background). Apps, versions/rollback, inline views and the Rose dark-mode toggle stay | removing → FE-18 + backend |
+| 90 | Display is a full inline renderer (page/bundle/model/image/video/pdf via usercontent_url; frame sandbox "allow-scripts allow-pointer-lock allow-popups", never same-origin; models get a viewer page) | backend L-DISPLAY3; FE after contract |
+| 91 | Integrations: multi-account support that already existed stays; only the new per-phone/per-profile/LinkedIn-multi additions are removed; every account gets the sync loader | supersedes the multi-account part of 78/85 → FE-17 |
 
 ### UI ledger owners (audit 2026-10-20)
 
