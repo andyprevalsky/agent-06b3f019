@@ -18,6 +18,8 @@ import {
   type GptCodeCredentialEnvelopeResult,
 } from './gptCredentials';
 import { buildCodeAgentSystemPrompt, buildCodexHarnessSystemPrompt } from './codeAgentPrompt';
+import { withAgentGraphInstructions } from './agentGraph/cli';
+import { withAgentGraphWorkspace } from './agentGraph/workspace';
 import { uploadAttachmentsToSandbox } from './e2bAttachments';
 import { overlayCodexRoseBridge } from './e2bCodexHarness';
 import { workDirForGithubRepo } from './e2bWorkDir';
@@ -170,10 +172,12 @@ async function createClaudeCodeSessionUnlocked(
     `wrapper:${fileHash(findLocalClaudeCodeWsServer())}`,
     `env:${process.env.FAST_MODE_CODE_AGENT_ENV_FINGERPRINT ?? 'default'}`,
   ].join('|');
-  const systemPrompt = buildCodeAgentSystemPrompt({
-    githubRepoUrl,
-    workDir,
-  });
+  const systemPrompt = withAgentGraphInstructions(
+    buildCodeAgentSystemPrompt({
+      githubRepoUrl,
+      workDir,
+    })
+  );
 
   // Build environment variables for sandbox
   const envs: Record<string, string> = {
@@ -334,7 +338,12 @@ async function createClaudeCodeSessionUnlocked(
     log.info(`GitHub repo configured: ${githubRepoUrl}`);
   }
 
-  const userUiWorkspace = await prepareUserUiWorkspaceSafe(userId);
+  const userUiWorkspace = await withAgentGraphWorkspace(await prepareUserUiWorkspaceSafe(userId), {
+    userId,
+    ownerAgentId: agentId,
+    sessionId: taskId,
+    provider: 'claude',
+  });
   applyUserUiSandboxEnvs(envs, userUiWorkspace);
 
   // Create sandbox first (before DB record) to avoid placeholder conflicts.
@@ -486,10 +495,12 @@ export async function createCodexCodeSession(
           roseUserId: userId,
           anchorAgentId: agentId,
         })
-      : buildCodeAgentSystemPrompt({
-          githubRepoUrl,
-          workDir,
-        });
+      : withAgentGraphInstructions(
+          buildCodeAgentSystemPrompt({
+            githubRepoUrl,
+            workDir,
+          })
+        );
 
   const credentialMeta: GptCodeCredentialEnvelopeResult | null =
     await fetchGptCodeCredentialsWithMeta(userId);
@@ -584,7 +595,12 @@ export async function createCodexCodeSession(
     log.info(`GitHub repo configured for Codex: ${githubRepoUrl}`);
   }
 
-  const userUiWorkspace = await prepareUserUiWorkspaceSafe(userId);
+  const userUiWorkspace = await withAgentGraphWorkspace(await prepareUserUiWorkspaceSafe(userId), {
+    userId,
+    ownerAgentId: agentId,
+    sessionId: taskId,
+    provider: 'codex',
+  });
   applyUserUiSandboxEnvs(envs, userUiWorkspace);
 
   const sandbox = await createSandboxWithRetry(

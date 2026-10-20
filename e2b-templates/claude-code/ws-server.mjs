@@ -67,6 +67,36 @@ let eventBuffer = [];
 // Track connected clients
 const clients = new Set();
 
+// Agent-to-agent inbox. A queued message starts as the CLI's next user turn
+// (`--resume <session_id>`) once the current turn's process exits cleanly.
+// Ids are deduped for the server's lifetime, so a retried send (backend or
+// activity retry) can never start a second turn.
+const inboxSeen = new Set();
+const inboxQueue = [];
+let inboxClosed = false;
+let claudeSessionId = null;
+
+function acceptInboundMessage(ws, msg) {
+  const id = typeof msg.id === "string" ? msg.id : "";
+  const text = typeof msg.text === "string" ? msg.text.replace(/\0/g, "") : "";
+  const ack = (status, reason) =>
+    ws.send(
+      JSON.stringify({
+        type: "user_message_ack",
+        id,
+        status,
+        ...(reason ? { reason } : {}),
+      }),
+    );
+  if (!id || !text.trim()) return ack("rejected", "id and text are required");
+  if (inboxSeen.has(id)) return ack("duplicate");
+  if (inboxClosed) return ack("rejected", "session has finished");
+  inboxSeen.add(id);
+  inboxQueue.push({ id, text });
+  log("info", "Queued inbound user message", { id, bytes: text.length });
+  return ack("queued");
+}
+
 // After the CLI exits the server keeps serving its final buffer so an agent
 // activity that detached for a deploy (or crashed and is retried after its 5m
 // heartbeat timeout) can reattach and read the result. Closing the session
@@ -107,6 +137,11 @@ wss.on("connection", (ws) => {
   ws.on("message", (data) => {
     try {
       const msg = JSON.parse(data.toString());
+
+      if (msg.type === "user_message") {
+        acceptInboundMessage(ws, msg);
+        return;
+      }
 
       if (msg.type === "stdin") {
         log("info", "Received stdin", { bytes: msg.data?.length || 0 });
@@ -189,6 +224,13 @@ function announceExit(exitCode) {
   if (exitAnnounced) return;
   exitAnnounced = true;
   finalExitCode = exitCode;
+  inboxClosed = true;
+  if (inboxQueue.length > 0) {
+    appendEvent({
+      type: "user_message_undelivered",
+      message_ids: inboxQueue.map((turn) => turn.id),
+    });
+  }
   appendEvent({
     type: "final",
     status: exitCode === 0 ? "completed" : "failed",
@@ -403,6 +445,9 @@ function detailFromToolInput(input, paths) {
 
 function emitClaudeMessage(message) {
   if (message.type === "system" && message.subtype === "init") {
+    if (typeof message.session_id === "string" && message.session_id) {
+      claudeSessionId = message.session_id;
+    }
     appendEvent({
       type: "session",
       raw_type: "system.init",
@@ -487,20 +532,33 @@ function emitClaudeMessage(message) {
   });
 }
 
-async function runClaudeCli() {
-  const sanitizedGoal = GOAL.replace(/\0/g, "");
-  const prompt = `Task:\n${sanitizedGoal}`;
+/** Start the next queued inbound message as a resumed turn, if any. */
+function startNextInboundTurn() {
+  if (shuttingDown || inboxQueue.length === 0 || !claudeSessionId) return false;
+  const turn = inboxQueue.shift();
+  appendEvent({ type: "user_turn", message_id: turn.id, text: turn.text });
+  appendOutput("stdout", `[Rose] New user turn ${turn.id}\n`);
+  runClaudeCli(turn);
+  return true;
+}
 
-  appendEvent({
-    type: "session",
-    status: "starting",
-    cwd: workDir,
-    prompt_version: promptVersion(),
-  });
+function runClaudeCli(turn = null) {
+  const sanitizedGoal = GOAL.replace(/\0/g, "");
+  const prompt = turn ? turn.text : `Task:\n${sanitizedGoal}`;
+
+  if (!turn) {
+    appendEvent({
+      type: "session",
+      status: "starting",
+      cwd: workDir,
+      prompt_version: promptVersion(),
+    });
+  }
   log("info", "Starting Claude Code CLI", {
     model: CLAUDE_CODE_MODEL,
     workDir,
     goal: sanitizedGoal.slice(0, 100),
+    resumeTurn: turn ? turn.id : null,
   });
 
   const args = [
@@ -520,6 +578,9 @@ async function runClaudeCli() {
   }
   if (CODE_AGENT_SYSTEM_PROMPT) {
     args.push("--append-system-prompt", CODE_AGENT_SYSTEM_PROMPT);
+  }
+  if (turn) {
+    args.push("--resume", claudeSessionId);
   }
 
   // The prompt is delivered on stdin, NOT as a positional argument.
@@ -620,6 +681,7 @@ async function runClaudeCli() {
     processExited = true;
     const exitCode = Number.isInteger(code) ? code : 1;
     log("info", "Claude Code CLI exited", { exitCode, sawResult });
+    if (exitCode === 0 && startNextInboundTurn()) return;
     finishRun(exitCode);
   });
 }

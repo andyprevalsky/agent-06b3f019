@@ -1,7 +1,6 @@
 /** Shared message creation for API routes, workers, and chat handlers. */
 
 import { Prisma, type Message } from '@prisma/client';
-import { createHash } from 'node:crypto';
 import { broadcastMessageInsert } from './chat/supabaseBroadcast';
 import { prisma, runTransactionWithRetry } from './database';
 import { createLogger } from './logger';
@@ -15,6 +14,7 @@ import {
 } from './toolLifecycleMessages';
 import { lockAgentWorkflowGeneration } from './workflowGeneration';
 import { scheduleMessageGmvCapture } from './messageGmvCapture';
+import { agentGraphMessageRowId, deterministicMessageId } from './messageIds';
 
 const log = createLogger('Messages');
 
@@ -68,12 +68,12 @@ async function findDuplicateToolMessage(params: CreateMessageParams) {
 }
 
 function idempotentMessageId(params: CreateMessageParams): string | null {
+  const a2aKey = stringMetadataValue(params.metadata, 'a2aMessageId');
+  if (a2aKey !== null) return agentGraphMessageRowId(params.agentId, a2aKey);
   if (params.role !== 'USER' || params.metadata?.isResponseSchemaUpdate !== true) return null;
   const key = stringMetadataValue(params.metadata, 'idempotencyKey');
   if (key === null) return null;
-  const hex = createHash('sha256').update(`${params.agentId}:${key}`).digest('hex').slice(0, 32);
-  const variant = ((Number.parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20)}`;
+  return deterministicMessageId(`${params.agentId}:${key}`);
 }
 
 async function findIdempotentMessage(params: CreateMessageParams) {

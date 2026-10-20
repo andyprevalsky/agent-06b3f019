@@ -1001,6 +1001,14 @@ async def _run_agentic_loop(
                     status=event.get("status"),
                 )
             effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
+        elif event_type == "user_turn":
+            # An agent-graph message started a resumed CLI turn after the
+            # previous result: that result no longer ends the session, so the
+            # post-result exit grace restarts with the next result.
+            sdk_result_at = None
+            wait_tool_armed = False
+            in_flight_tool_count = 0
+            effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
         # code_events mirrors the sandbox's append-only event history, so an
         # event's index identifies it across reconnect replays and reattaches.
         if len(code_events) <= logged_events:

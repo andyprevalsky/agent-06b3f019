@@ -51,6 +51,35 @@ let stdoutLineBuffer = "";
 // surfaces mid-run — a null-credential fallback in the backend cannot catch it.
 let oauthFallbackReason = null;
 const clients = new Set();
+// Agent-to-agent inbox. A queued message runs as the next turn of the same
+// Codex thread (`codex exec … resume <thread_id> <text>`) after the current
+// run exits cleanly. Ids are deduped for the server's lifetime, so a retried
+// send can never start a second turn.
+const inboxSeen = new Set();
+const inboxQueue = [];
+let inboxClosed = false;
+let codexThreadId = null;
+
+function acceptInboundMessage(ws, msg) {
+  const id = typeof msg.id === "string" ? msg.id : "";
+  const text = typeof msg.text === "string" ? msg.text.replace(/\0/g, "") : "";
+  const ack = (status, reason) =>
+    ws.send(
+      JSON.stringify({
+        type: "user_message_ack",
+        id,
+        status,
+        ...(reason ? { reason } : {}),
+      }),
+    );
+  if (!id || !text.trim()) return ack("rejected", "id and text are required");
+  if (inboxSeen.has(id)) return ack("duplicate");
+  if (inboxClosed) return ack("rejected", "session has finished");
+  inboxSeen.add(id);
+  inboxQueue.push({ id, text });
+  log("info", "Queued inbound user message", { id, bytes: text.length });
+  return ack("queued");
+}
 // After Codex exits the server keeps serving its final buffer so an agent
 // activity that detached for a deploy (or crashed and is retried after its 5m
 // heartbeat timeout) can reattach and read the result. Closing the session
@@ -131,6 +160,9 @@ function renderCodexJsonLine(line) {
   }
 
   if (event.type === "thread.started") {
+    if (typeof event.thread_id === "string" && event.thread_id) {
+      codexThreadId = event.thread_id;
+    }
     appendEvent({
       type: "session",
       raw_type: event.type,
@@ -274,6 +306,10 @@ wss.on("connection", (ws) => {
   ws.on("message", (data) => {
     try {
       const msg = JSON.parse(data.toString());
+      if (msg.type === "user_message") {
+        acceptInboundMessage(ws, msg);
+        return;
+      }
       if (msg.type === "stdin") {
         ws.send(
           JSON.stringify({
@@ -518,7 +554,7 @@ const sanitizedGoal = [
 // The ChatGPT fast-mode proxy only makes sense for the OAuth token — it forwards
 // to the ChatGPT codex backend, which won't authenticate an OpenAI API key. So
 // the API-key path (initial or fallback) runs against the default OpenAI endpoint.
-function buildCodexArgs({ useFastModeProxy }) {
+function buildCodexArgs({ useFastModeProxy, resume = null }) {
   const args = [
     "exec",
     "--ignore-user-config",
@@ -529,7 +565,7 @@ function buildCodexArgs({ useFastModeProxy }) {
     workDir,
     "-m",
     CODEX_MODEL,
-    sanitizedGoal,
+    ...(resume ? ["resume", resume.threadId, resume.text] : [sanitizedGoal]),
   ];
   if (useFastModeProxy && codexFastModeProxy) {
     args.splice(
@@ -618,6 +654,26 @@ if (code !== 0 && !usingApiKey && OPENAI_API_KEY && oauthFallbackReason) {
       buildCodexArgs({ useFastModeProxy: false }),
     ));
   }
+}
+
+// Inbound agent messages: each runs as a resumed turn of the same thread.
+while (code === 0 && codexThreadId && inboxQueue.length > 0) {
+  const turn = inboxQueue.shift();
+  appendEvent({ type: "user_turn", message_id: turn.id, text: turn.text });
+  appendOutput("stdout", `[Rose] New user turn ${turn.id}\n`);
+  ({ code, signal } = await runCodex(
+    buildCodexArgs({
+      useFastModeProxy: !usingApiKey,
+      resume: { threadId: codexThreadId, text: turn.text },
+    }),
+  ));
+}
+inboxClosed = true;
+if (inboxQueue.length > 0) {
+  appendEvent({
+    type: "user_message_undelivered",
+    message_ids: inboxQueue.map((turn) => turn.id),
+  });
 }
 
 exitCode = code ?? 1;
