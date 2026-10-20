@@ -83,7 +83,7 @@ Andy: "sub agent for each". There is one lane per integration that syncs today, 
 | A3 | N | `rose_user_ui` per user: `root/` changes the whole app, `inline/` renders in the trajectory (version pinned), `tools/` adds root-agent tools whose results render inline; safe mode | W1/W2/W4 suites (passing) + recordings | merged | code merged; recordings pending |
 | A4 | N | Code agents get UI instructions, current screenshots and `rose-ui screenshot/record/perf/check` | E2B template test | L-APPS | **built** (43de031b5): rose-ui dev/screenshot/record/perf/check, screenshots/current/, six examples; unit + smoke + blackbox 5× green; live E2B check after template rebuild |
 | A5 | M | `display(paths\|urls, caption?)` tool for root, sub-agents and code agents; media posts inline in that agent's trajectory; idempotent per content hash | agents blackbox | L-DISPLAY | **done** (b10b038c1; display 14 cases ×5) — approval at deploy |
-| A6 | N | Root browser with world state split by website: agents fork Root's state; logins merge back; you can take over any tab | agents/browser blackbox | L-BROWSER | open |
+| A6 | N | Root browser with world state split by website: agents fork Root's state; logins merge back; you can take over any tab | agents/browser blackbox | L-BROWSER | **built + merged** (d0b6000ba): per-site Root state, fork on prepare-auth, guarded last-writer-wins merge on close, Root browser on the persistent profile, take over any tab; browser-world-state 8 cases ×5. Agents still load the shared profile (per-task profiles need a provider change + live Kernel check) |
 
 ## UI (specs live in the UI ledger, owned by the UI-agent thread)
 
@@ -156,7 +156,7 @@ Status: **done** = merged into `feat/rose-user-ui` with tests; **running** = a l
 | 6 | **Hyper-expressive, high-res, smooth, performant examples** (plan lists 6; only 2 seeded) | A4 | L-UIKIT | **done** (L-UIKIT 43de031b5); live E2B pending template rebuild |
 | 7 | `root/` alters the whole app (colors, gifs, dashboards, "a whole OS") | A3 | W2 runtime | done (87d1f3532); recordings pending |
 | 8 | `inline/` views in the trajectory | A3 | W1/W2 | done; game flow failing → #24 |
-| 9 | Write a tool for root and render its result any way | A3 | W4 | done (read-only v1). **Gap:** production executor (`USER_TOOLS_EXECUTOR=code_session`) and side-effect tools (needs an idempotency store) → queued L-TOOLS2 |
+| 9 | Write a tool for root and render its result any way | A3 | W4 | **done** (ed4069172): `code_session` executor in the user's own tools session + side-effecting tools at-most-once via `ToolSideEffect` |
 | 10 | "Change my background photo" goal; background fade (now 80%); query box + left bar opaque | U14 / row 34 | W2 + UI | backend README done (5accf4e82); front-end UI |
 | 11 | Nub, Join Waitlist white, no wrappers, mic, rose tint | U14 | W3 + UI | merged; Join Waitlist reverted to stock for signed-out visitors by the flag rule (UI thread to confirm) |
 | 12 | Browser app follows selected agent; drawer replaces fullscreen, smooth | U14 | W3 | done (legacy fullscreen kept for non-flag accounts) |
@@ -298,3 +298,13 @@ Per the 2026-10-20 goal ("make intelligent guesses; keep critical ones for revie
 - Mac app release (L-PHONE, L-LOCAL, I1, I2, I6, I8) plus a real-Mac run of their suites, which have only run on the Linux electron-stub harness so far.
 - Canonical seed re-publication for the new schema cache key (PG15).
 - Set `USERCONTENT_BASE_URL` to a separate origin before any user UI goes live.
+- A6 root browser (merged d0b6000ba):
+  - Migration `20261020224000_browser_world_state`: `BrowserSiteState`, `BrowserSiteFork` (RLS).
+  - Zod: `signed_in_sites` on browser close; `openRootBrowserSchema`, `agentIdParamSchema`, `siteParamSchema`.
+  - Browser harness: sign-in evidence recorded and sent on close (not LLM-visible).
+  - Product behaviour: one extra read and upsert per prepare-auth; one CDP cookie read plus merge per close (6 s budget). Kill switch `BROWSER_WORLD_STATE=off`.
+- L-TOOLS2 (merged ed4069172):
+  - Zod: `userToolRunRecordSchema`, `userToolCallClaimSchema`, `userToolCallCompleteSchema`, `userToolCallReleaseSchema`, `userToolRunSchema`.
+  - Code-agent-facing README text on `side_effects` and `idempotency_key_field`.
+  - Harness: the workflow passes the idempotency key; side-effecting user tools are declared to the root agent.
+  - Prod env at deploy: Fly `USER_TOOLS_EXECUTOR=code_session`.
