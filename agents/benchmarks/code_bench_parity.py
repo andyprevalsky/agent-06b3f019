@@ -162,6 +162,72 @@ def _run_cli(argv: list[str], *, cwd: Path, stdin: Optional[str], timeout: int, 
     return proc.returncode, out or ""
 
 
+def _json_lines(transcript: str) -> Iterable[dict]:
+    for line in transcript.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            with contextlib.suppress(json.JSONDecodeError):
+                event = json.loads(line)
+                if isinstance(event, dict):
+                    yield event
+
+
+def summarize_transcript(cli: str, transcript: str) -> dict[str, Any]:
+    """Usage, cost and loaded extensions from the CLI's JSON event stream.
+
+    Extensions (skills, plugins, MCP servers, hooks) come from the host's managed
+    or user configuration, not from the task; a non-empty list means this raw leg
+    did not run the bare CLI and the report says so.
+    """
+    summary: dict[str, Any] = {}
+    if cli == "claude":
+        hooks = 0
+        for event in _json_lines(transcript):
+            kind, subtype = event.get("type"), event.get("subtype")
+            if kind == "system" and subtype == "init":
+                summary["cli_version"] = event.get("claude_code_version")
+                summary["model"] = event.get("model")
+                summary["skills"] = list(event.get("skills") or [])
+                summary["plugins"] = [
+                    p.get("name")
+                    for p in event.get("plugins") or []
+                    if isinstance(p, dict) and p.get("path") != "builtin"
+                ]
+                summary["mcp_servers"] = [
+                    s.get("name") if isinstance(s, dict) else s for s in event.get("mcp_servers") or []
+                ]
+            elif kind == "system" and subtype == "hook_started":
+                hooks += 1
+            elif kind == "result":
+                usage = event.get("usage") or {}
+                summary.update(
+                    {
+                        "result": subtype,
+                        "is_error": event.get("is_error"),
+                        "num_turns": event.get("num_turns"),
+                        "cost_usd": event.get("total_cost_usd"),
+                        "input_tokens": usage.get("input_tokens"),
+                        "output_tokens": usage.get("output_tokens"),
+                        "cache_read_input_tokens": usage.get("cache_read_input_tokens"),
+                        "cache_creation_input_tokens": usage.get("cache_creation_input_tokens"),
+                    }
+                )
+        summary["hooks_run"] = hooks
+        # Built-in CLI skills ship in both legs; hooks, MCP servers and installed
+        # plugins come from the host configuration.
+        summary["host_extensions"] = bool(summary.get("plugins") or summary.get("mcp_servers") or hooks)
+    else:
+        totals = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
+        turns = 0
+        for event in _json_lines(transcript):
+            if event.get("type") == "turn.completed":
+                turns += 1
+                for key in totals:
+                    totals[key] += int((event.get("usage") or {}).get(key) or 0)
+        summary.update(totals, num_turns=turns)
+    return summary
+
+
 def load_catalog_task(task_name: str) -> dict:
     for task in json.loads(TASKS_JSON.read_text()):
         if task.get("name") == task_name:
@@ -222,6 +288,7 @@ async def run_raw_attempt(
         )
         result["duration_seconds"] = round(time.monotonic() - started, 1)
         result["exit_code"] = exit_code
+        result["cli_run"] = summarize_transcript(cli, transcript)
         if evidence_dir is not None:
             evidence_dir.mkdir(parents=True, exist_ok=True)
             (evidence_dir / "cli-transcript.log").write_text(transcript)
@@ -360,7 +427,12 @@ def build_report(
     raw_stats = _leg_stats(tasks, raw, k)
     for stats in (rose_stats, raw_stats):
         stats["reproducible"] = stats["complete"] and stats["spread"] <= tolerance
-    parity_ok = rose_stats["mean_passes"] >= raw_stats["mean_passes"] - tolerance
+    # No verdict from a missing leg: an empty Rose leg must not read as parity.
+    parity_ok = (
+        rose_stats["complete"]
+        and raw_stats["complete"]
+        and rose_stats["mean_passes"] >= raw_stats["mean_passes"] - tolerance
+    )
     return {
         "tasks": tasks,
         "k": k,
@@ -394,10 +466,12 @@ def render_text(report: dict[str, Any], *, rose_agents: dict[str, list[str]], ra
             f"complete={stats['complete']} reproducible={stats['reproducible']}"
         )
     lines.append(f"parity_ok={report['parity_ok']} c8_ok={report['c8_ok']}")
-    for task, ids in rose_agents.items():
-        for agent_id in ids:
-            if agent_id:
-                lines.append(f"Rose {task}: {FRONTEND_URL}/?agent-id={agent_id}")
+    links = report.get("rose_agent_links") or {
+        task: [f"{FRONTEND_URL}/?agent-id={a}" for a in ids if a] for task, ids in rose_agents.items()
+    }
+    for task, urls in links.items():
+        for url in urls:
+            lines.append(f"Rose {task}: {url}")
     return "\n".join(lines)
 
 
@@ -422,18 +496,59 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     rose.add_argument("--skip-rose", action="store_true", help="Raw leg only")
     parser.add_argument("--raw-results", type=Path, help="Reuse a previous raw-leg results JSON instead of rerunning")
     parser.add_argument("--no-judge", action="store_true", help="Skip the screenshot judge on the raw leg")
+    parser.add_argument("--raw-concurrency", type=int, default=1, help="Raw-leg attempts in flight (default 1)")
+    parser.add_argument(
+        "--publish-evidence",
+        action="store_true",
+        help="Publish and fresh-browser-verify each Rose agent's durable FE link (scripts/publish_evidence_links.py)",
+    )
     parser.add_argument("--out-dir", type=Path, help="Evidence directory (default .context/code-bench-parity/<ts>)")
     args = parser.parse_args(argv)
     if args.runs < 1:
         parser.error("-k must be >= 1")
+    if args.raw_concurrency < 1:
+        parser.error("--raw-concurrency must be >= 1")
     return args
+
+
+def publish_rose_evidence(records: list[Path], tasks: list[str]) -> dict[str, str]:
+    """Durable, fresh-browser-verified FE link per Rose agent (or the publisher's failure)."""
+    links: dict[str, str] = {}
+    for record in records:
+        for row in json.loads(Path(record).read_text()).get("tasks") or []:
+            agent_id = str(row.get("agent_id") or "")
+            if row.get("name") not in tasks or not agent_id or agent_id in links:
+                continue
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts" / "publish_evidence_links.py"),
+                    "--run-json",
+                    str(record),
+                    "--agent-id",
+                    agent_id,
+                ],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=600,
+                check=False,
+            )
+            line = next((ln for ln in proc.stdout.splitlines() if ln.startswith("FE link: ")), "")
+            if proc.returncode == 0 and line:
+                links[agent_id] = line[len("FE link: ") :].split(" ", 1)[0]
+            else:
+                tail = (proc.stdout + proc.stderr).strip()[-300:]
+                links[agent_id] = f"UNVERIFIED (publish_evidence_links exit {proc.returncode}): {tail}"
+    return links
 
 
 async def _raw_leg(args: argparse.Namespace, tasks: list[str], out_dir: Path) -> dict[str, list[dict]]:
     model = args.model or default_model(args.cli)
-    attempts: dict[str, list[dict]] = {}
-    for run in range(args.runs):
-        for task in tasks:
+    gate = asyncio.Semaphore(args.raw_concurrency)
+
+    async def one(run: int, task: str) -> dict:
+        async with gate:
             print(f"[code-parity] raw {args.cli} ({model}) run {run + 1}/{args.runs}: {task}", flush=True)
             attempt = await run_raw_attempt(
                 task,
@@ -444,8 +559,17 @@ async def _raw_leg(args: argparse.Namespace, tasks: list[str], out_dir: Path) ->
                 pass_env=args.pass_env,
                 evidence_dir=out_dir / "raw" / task / f"run-{run + 1}",
             )
-            print(f"    -> {'PASS' if attempt['passed'] else 'FAIL'} {attempt.get('reason', '')[:300]}", flush=True)
-            attempts.setdefault(task, []).append(attempt)
+            verdict = "PASS" if attempt["passed"] else "FAIL"
+            print(f"    <- {task} run {run + 1}: {verdict} {attempt.get('reason', '')[:300]}", flush=True)
+            attempt["run"] = run + 1
+            return attempt
+
+    # Each attempt has its own sandbox and CLI config, so runs are independent;
+    # results keep run order regardless of completion order.
+    results = await asyncio.gather(*(one(run, task) for run in range(args.runs) for task in tasks))
+    attempts: dict[str, list[dict]] = {}
+    for attempt in sorted(results, key=lambda a: a["run"]):
+        attempts.setdefault(attempt["task"], []).append(attempt)
     return attempts
 
 
@@ -475,6 +599,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     elif args.run_rose == "local":
         rose_records = run_rose_local(tasks, args.runs, out_dir)
     rose_outcomes, rose_agents = rose_outcomes_from_records(rose_records, tasks)
+    verified_links = publish_rose_evidence(rose_records, tasks) if args.publish_evidence else {}
 
     if args.raw_results:
         raw_attempts = json.loads(args.raw_results.read_text())["raw_attempts"]
@@ -492,14 +617,33 @@ def main(argv: Optional[list[str]] = None) -> int:
             "raw_cli_path": shutil.which(args.cli_bin or args.cli),
             "rose_records": [str(p) for p in rose_records],
             "rose_agent_links": {
-                t: [f"{FRONTEND_URL}/?agent-id={a}" for a in ids if a] for t, ids in rose_agents.items()
+                t: [verified_links.get(a) or f"{FRONTEND_URL}/?agent-id={a}" for a in ids if a]
+                for t, ids in rose_agents.items()
             },
+            "rose_links_verified": bool(verified_links),
             "rose_skipped": bool(args.skip_rose or not rose_records),
+            "raw_cost_usd": round(
+                sum(
+                    float((a.get("cli_run") or {}).get("cost_usd") or 0) for runs in raw_attempts.values() for a in runs
+                ),
+                4,
+            ),
+            "raw_host_extensions": any(
+                (a.get("cli_run") or {}).get("host_extensions") for runs in raw_attempts.values() for a in runs
+            ),
             "raw_attempts": raw_attempts,
         }
     )
     (out_dir / "parity.json").write_text(json.dumps(report, indent=2))
     text = render_text(report, rose_agents=rose_agents, raw_cli=args.cli)
+    text += f"\nraw {args.cli} {report['raw_cli_version']} cost ${report['raw_cost_usd']:.2f}"
+    if report["raw_host_extensions"]:
+        text += (
+            "\nnote: the raw CLI loaded host hooks/plugins/MCP servers (managed settings); "
+            "see raw_attempts[].cli_run in parity.json"
+        )
+    if report["rose_skipped"]:
+        text += "\nnote: Rose leg not run; parity_ok needs --run-rose local or --rose-records"
     (out_dir / "parity.txt").write_text(text + "\n")
     print("\n" + text)
     print(f"\nParity evidence: {out_dir}")

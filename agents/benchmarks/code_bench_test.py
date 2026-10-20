@@ -618,3 +618,86 @@ def test_parity_is_reachable_through_run_bench():
     )
     assert result.returncode == 0, result.stderr
     assert "--run-rose" in result.stdout and "--rose-records" in result.stdout
+
+
+def test_parity_concurrent_raw_leg_keeps_run_order(tmp_path, monkeypatch):
+    import time as _time
+
+    calls: list[str] = []
+
+    async def fake_attempt(task, *, cli, model, judge, cli_bin, pass_env, evidence_dir):
+        calls.append(evidence_dir.name)
+        await asyncio.sleep(0.05 if evidence_dir.name == "run-1" else 0)
+        return {"task": task, "passed": evidence_dir.name != "run-2", "reason": "", "finished": _time.monotonic()}
+
+    monkeypatch.setattr(parity, "run_raw_attempt", fake_attempt)
+    args = parity._parse_args(["-k", "3", "--skip-rose", "--raw-concurrency", "3"])
+    task = "code-bench-bugfix-invoice-rounding"
+    attempts = asyncio.run(parity._raw_leg(args, [task], tmp_path))
+    assert [a["run"] for a in attempts[task]] == [1, 2, 3]
+    assert [a["passed"] for a in attempts[task]] == [True, False, True]
+    assert attempts[task][0]["finished"] > attempts[task][1]["finished"]  # run 1 finished last, still first
+
+
+def test_parity_publishes_verified_rose_links(tmp_path, monkeypatch):
+    task = "code-bench-bugfix-invoice-rounding"
+    record = tmp_path / "rose.json"
+    record.write_text(json.dumps({"tasks": [{"name": task, "passed": True, "agent_id": "a1"}]}))
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(argv)
+        out = "FE link: https://www.roselabs.ai/?agent-id=a1#benchmark-share=x — verified in fresh browser (22 msgs)\n"
+        return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+
+    monkeypatch.setattr(parity.subprocess, "run", fake_run)
+    links = parity.publish_rose_evidence([record], [task])
+    assert links == {"a1": "https://www.roselabs.ai/?agent-id=a1#benchmark-share=x"}
+    assert seen[0][-4:] == ["--run-json", str(record), "--agent-id", "a1"]
+
+
+def test_parity_without_a_rose_leg_has_no_verdict():
+    task = "code-bench-bugfix-invoice-rounding"
+    report = parity.build_report([task], {}, {task: [True]}, k=1)
+    assert report["parity_ok"] is False and report["c8_ok"] is False
+    assert report["rose"]["complete"] is False and report["raw"]["complete"] is True
+
+
+def test_parity_summarizes_claude_stream_json_usage_and_host_extensions():
+    events = [
+        {"type": "system", "subtype": "hook_started", "hook_name": "SessionStart:startup"},
+        {
+            "type": "system",
+            "subtype": "init",
+            "claude_code_version": "2.1.284",
+            "model": "claude-sonnet-5",
+            "skills": ["debug"],
+            "plugins": [{"name": "agents-md", "path": "builtin"}, {"name": "host-plugin", "path": "/etc/x"}],
+            "mcp_servers": [],
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "num_turns": 10,
+            "total_cost_usd": 0.195,
+            "usage": {
+                "input_tokens": 18,
+                "output_tokens": 3259,
+                "cache_read_input_tokens": 344768,
+                "cache_creation_input_tokens": 23373,
+            },
+        },
+    ]
+    transcript = "not json\n" + "\n".join(json.dumps(e) for e in events)
+    summary = parity.summarize_transcript("claude", transcript)
+    assert summary["cli_version"] == "2.1.284" and summary["num_turns"] == 10 and summary["cost_usd"] == 0.195
+    assert summary["plugins"] == ["host-plugin"] and summary["hooks_run"] == 1 and summary["host_extensions"]
+    assert summary["cache_read_input_tokens"] == 344768
+    codex = parity.summarize_transcript(
+        "codex",
+        json.dumps(
+            {"type": "turn.completed", "usage": {"input_tokens": 5, "cached_input_tokens": 2, "output_tokens": 7}}
+        ),
+    )
+    assert codex == {"input_tokens": 5, "cached_input_tokens": 2, "output_tokens": 7, "num_turns": 1}
