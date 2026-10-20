@@ -14,6 +14,9 @@ export const createSessionSchema = z.object({
   code_session_id: z.string().uuid().optional(),
   lease_owner: z.string().min(1).max(200).optional(),
   base_branch: z.string().min(1).max(255).optional(),
+  // C14: 'local' starts the session on the agent tree's Mac (Rose Mac app).
+  target: z.enum(['cloud', 'local']).optional(),
+  device_id: z.string().uuid().optional(),
 });
 
 export const closeSessionSchema = z.object({

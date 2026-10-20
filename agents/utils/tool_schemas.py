@@ -1022,6 +1022,13 @@ class SpawnAgentTool(BaseModel):
             "branch and conversation). Omit it to resume your own latest session for the repo."
         ),
     )
+    target: Optional[Literal["cloud", "local"]] = Field(
+        default="cloud",
+        description=(
+            "Optional when type='code': 'local' runs the coding agent on the user's Mac in a folder they "
+            "shared (only for agents started from the Rose Mac app), 'cloud' (default) runs it in a sandbox."
+        ),
+    )
     start_phase: Optional[Literal["PLAN", "EXECUTE"]] = Field(
         default=None,
         description=(
@@ -1173,6 +1180,13 @@ class SpawnAgentToolNoGP(BaseModel):
             "Optional when type='code'. Ignored for every other type. The code_session_id a "
             "previous code-agent result reported, to resume that exact session (files, commits, "
             "branch and conversation). Omit it to resume your own latest session for the repo."
+        ),
+    )
+    target: Optional[Literal["cloud", "local"]] = Field(
+        default="cloud",
+        description=(
+            "Optional when type='code': 'local' runs the coding agent on the user's Mac in a folder they "
+            "shared (only for agents started from the Rose Mac app), 'cloud' (default) runs it in a sandbox."
         ),
     )
     context_gates: Optional[Dict[str, bool]] = Field(

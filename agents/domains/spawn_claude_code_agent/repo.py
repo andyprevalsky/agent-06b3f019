@@ -10,6 +10,7 @@ import structlog
 from temporalio.exceptions import ApplicationError
 
 from config import load_config
+from domains.spawn_claude_code_agent.config import LOCAL_TARGET_UNAVAILABLE_CODE
 from helpers.workflow_generation import (
     WorkflowGenerationSealed,
     raise_if_generation_sealed,
@@ -20,6 +21,14 @@ from tools.base import MessageStatus
 from utils.error_utils import extract_error_message
 
 logger = structlog.get_logger()
+
+
+def _json_or_empty(response: httpx.Response) -> dict[str, Any]:
+    try:
+        body = response.json()
+    except ValueError:
+        return {}
+    return body if isinstance(body, dict) else {}
 
 
 def _session_base_path(code_provider: str = "claude") -> str:
@@ -53,7 +62,10 @@ async def save_claude_code_message(
 
     ``code_session`` (persistent session facts: id, branch, merge target, merge
     facts) rides on every message's metadata, so each trajectory entry of a
-    code agent reports its branch.
+    code agent reports its branch. ``code_agent`` merges into
+    ``metadata.code_agent`` (UI contract: the local-target lane owns
+    ``target``/``device_name``/``folder``; the code-session lane owns
+    ``branch``/``base_branch``/``state``/``summary``/``failure_message``).
     """
     config = load_config()
     unique_tool_call_id = tool_call_id or str(uuid_module.uuid4())
@@ -95,10 +107,12 @@ async def save_claude_code_message(
 
     if code_session:
         metadata["code_session"] = code_session
-    # UI contract (rose-user-ui): {task_id, provider, target, branch, state,
-    # started_at, ended_at?, summary?{commit, branch, merged_into?, files}}.
+    # UI contract (rose-user-ui): {task_id, provider, target, device_name?,
+    # folder?, branch, base_branch, state, started_at, ended_at?,
+    # failure_message?, summary?{commit, branch, merged_into?, files}}.
     if code_agent:
-        metadata["code_agent"] = code_agent
+        existing = metadata.get("code_agent")
+        metadata["code_agent"] = {**(existing if isinstance(existing, dict) else {}), **code_agent}
     # Intermediate chip rows (progress, task_started, system) are child-scoped
     # UI and must stay out of the parent LLM context via subAgentId.
     # Parent-facing task_complete terminals reuse the spawn toolCallId — if they
@@ -236,6 +250,8 @@ async def create_e2b_session(
     fast_mode_cache_enabled: bool = False,
     code_session_id: Optional[str] = None,
     lease_owner: Optional[str] = None,
+    target: str = "cloud",
+    local_device_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Create an E2B sandbox session via back-end API.
 
@@ -245,7 +261,11 @@ async def create_e2b_session(
 
     Returns the session data dict with task_id, sandbox_id, ws_url,
     code_session_id, branch, merge_target, resumed_from, etc.
-    Raises on HTTP failure.
+    Raises on HTTP failure. ``target="local"`` asks the backend to start the
+    same ws-server on the agent's Mac instead (no persistent code session: the
+    work stays in the folder the user granted); an unavailable Mac answers 409
+    ``LOCAL_TARGET_UNAVAILABLE``, raised as a non-retryable error carrying the
+    exact user-facing text (no retry, no cloud fallback).
     """
     config = load_config()
 
@@ -257,12 +277,17 @@ async def create_e2b_session(
     }
     if attachments:
         create_payload["attachments"] = attachments
-    if github_repo_url:
+    if github_repo_url and target != "local":
         create_payload["github_repo_url"] = github_repo_url
-    if code_session_id:
-        create_payload["code_session_id"] = code_session_id
-    if lease_owner:
-        create_payload["lease_owner"] = lease_owner[:200]
+    if target == "local":
+        create_payload["target"] = "local"
+        if local_device_id:
+            create_payload["device_id"] = local_device_id
+    else:
+        if code_session_id:
+            create_payload["code_session_id"] = code_session_id
+        if lease_owner:
+            create_payload["lease_owner"] = lease_owner[:200]
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(
@@ -273,6 +298,16 @@ async def create_e2b_session(
             },
             json=create_payload,
         )
+
+        if response.status_code == 409 and target == "local":
+            body = _json_or_empty(response)
+            if body.get("code") == LOCAL_TARGET_UNAVAILABLE_CODE and isinstance(body.get("error"), str):
+                raise ApplicationError(
+                    body["error"],
+                    {"reason": body.get("reason"), "device_name": body.get("device_name")},
+                    type=LOCAL_TARGET_UNAVAILABLE_CODE,
+                    non_retryable=True,
+                )
 
         if response.status_code not in (200, 201):
             response_text = response.text[:500]
@@ -478,6 +513,26 @@ async def fetch_code_credential_availability(user_id: str) -> Optional[dict[str,
     except Exception as e:
         logger.warning("[ClaudeCode] Credential availability lookup failed", error=extract_error_message(e))
         return None
+
+
+async def fetch_local_agent_target(agent_id: str) -> dict[str, Any]:
+    """Ask the backend whether ``agent_id`` may run a code agent on its Mac now.
+
+    ``GET /api/local-devices/agent-target/:agentId`` answers from the agent
+    tree's recorded origin and the Mac's live control channel; it never waits.
+    """
+    config = load_config()
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.get(
+            f"{config.backend.api_url}/api/local-devices/agent-target/{agent_id}",
+            headers={"x-api-key": config.backend.api_key or ""},
+        )
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Local target lookup failed for agent {agent_id}: HTTP {response.status_code} {response.text[:200]}"
+        )
+    payload = response.json()
+    return payload if isinstance(payload, dict) else {}
 
 
 async def check_sandbox_health(

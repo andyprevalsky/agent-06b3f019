@@ -13,7 +13,7 @@ from typing import Any, AsyncGenerator, Dict, Optional
 import structlog
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError
+from temporalio.exceptions import ActivityError, ApplicationError
 from temporalio.exceptions import CancelledError as TemporalCancelledError
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
@@ -24,12 +24,20 @@ from domains.spawn_claude_code_agent.config import (
     CODE_AGENT_PAUSED_STATUS,
     CODE_AGENT_USAGE_LIMIT_STATUS,
     CODE_SESSION_HEARTBEAT_KEY,
+    CODE_TARGET_LOCAL,
+    LOCAL_TARGET_UNAVAILABLE_CODE,
 )
 from domains.spawn_claude_code_agent.service import (
     close_detached_code_session_activity,
     code_session_record,
     resolve_code_agent_provider_activity,
     spawn_claude_code_activity,
+)
+from domains.spawn_claude_code_agent.service_target import (
+    cloud_target,
+    code_agent_metadata,
+    normalize_code_target,
+    resolve_code_agent_target_activity,
 )
 from helpers.activity_generation_drain import GENERATION_SUPERSEDED
 from helpers.attachments import extract_attachments_from_context
@@ -203,6 +211,33 @@ def _maybe_soft_fail_session_create_result(
     return None
 
 
+def _local_target_unavailable(error: BaseException) -> Optional[ApplicationError]:
+    """The backend's non-retryable "Mac unavailable" error, if that is what failed."""
+    cur: Optional[BaseException] = error
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, ApplicationError) and cur.type == LOCAL_TARGET_UNAVAILABLE_CODE:
+            return cur
+        cur = getattr(cur, "cause", None) or cur.__cause__
+    return None
+
+
+def _resumed_target(code_session: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Target recorded on a parked/drained session, so a reattach keeps its Mac."""
+    if not code_session or code_session.get("target") != CODE_TARGET_LOCAL:
+        return None
+    return {
+        "target": CODE_TARGET_LOCAL,
+        "available": True,
+        "reason": None,
+        "device_id": code_session.get("device_id"),
+        "device_name": code_session.get("device_name"),
+        "error": None,
+        "folder": code_session.get("folder"),
+    }
+
+
 def _drained_code_session(
     result: Dict[str, Any], prior_session: Optional[Dict[str, Any]]
 ) -> Dict[str, Any]:
@@ -260,6 +295,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             if isinstance(requested_code_session_id, str) and requested_code_session_id
             else None
         )
+        requested_target = normalize_code_target(tool_call.get("target"))
         user_id = workflow_instance.user_id
         agent_id = workflow_instance.agent_id
 
@@ -282,12 +318,69 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             num_attachments=len(attachments),
             github_repo_url=github_repo_url,
             resumed_task_id=(code_session or {}).get("task_id"),
+            target=requested_target,
         )
 
+        code_provider = "unknown"
+        target_info: Dict[str, Any] = dict(_resumed_target(code_session) or cloud_target())
+        if code_session is None and requested_target == CODE_TARGET_LOCAL:
+            # Local runs only on the Mac that started this agent tree, and only
+            # while its Rose Mac app is connected. Never wait, never fall back.
+            try:
+                target_info = dict(
+                    await workflow.execute_activity(
+                        resolve_code_agent_target_activity,
+                        args=[agent_id, requested_target],
+                        start_to_close_timeout=timedelta(seconds=20),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
+                    )
+                )
+            except ActivityError as lookup_error:
+                logger.error(
+                    "[ClaudeCode] Local target lookup failed",
+                    agent_id=agent_id,
+                    error=extract_error_message(lookup_error),
+                )
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Code session failed",
+                    message=extract_error_message(lookup_error),
+                    status=MessageStatus.ERROR,
+                    metadata={
+                        "toolName": "spawn_claude_code_agent",
+                        "code_agent": {"target": CODE_TARGET_LOCAL},
+                    },
+                )
+                return
+            if not target_info.get("available"):
+                logger.warning(
+                    "[ClaudeCode] Local target unavailable; failing the tool call",
+                    agent_id=agent_id,
+                    reason=target_info.get("reason"),
+                    device_id=target_info.get("device_id"),
+                )
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Code session failed",
+                    message=target_info.get("error") or "",
+                    status=MessageStatus.ERROR,
+                    metadata={
+                        "toolName": "spawn_claude_code_agent",
+                        "error_code": LOCAL_TARGET_UNAVAILABLE_CODE,
+                        "code_agent": code_agent_metadata(target_info),
+                    },
+                )
+                return
+
         if code_session is None:
+            local_device_name = target_info.get("device_name")
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title="Starting Claude Code sandbox",
+                title=(
+                    f"Starting code agent on {local_device_name}"
+                    if target_info.get("target") == CODE_TARGET_LOCAL and local_device_name
+                    else "Starting Claude Code sandbox"
+                ),
                 message="",
                 status=MessageStatus.IN_PROGRESS,
                 metadata={
@@ -295,16 +388,16 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     "code_agent": {
                         "task_id": None,
                         "provider": None,
-                        "target": "cloud",
                         "branch": None,
                         "state": "spinning_up",
                         # workflow.now() keeps the timestamp deterministic on replay.
                         "started_at": workflow.now().isoformat(),
+                        # target / device_name / folder (cloud unless a Mac was resolved).
+                        **code_agent_metadata(target_info),
                     },
                 },
             )
 
-        code_provider = "unknown"
         try:
             model = getattr(workflow_instance, "model", "rose-labs/rose-1-flash")
             active_gpt_token = getattr(workflow_instance, "_active_gpt_token", None)
@@ -379,6 +472,12 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                             fast_mode_cache_enabled,
                             code_session,
                             code_session_request,
+                            # A cloud run schedules exactly the pre-C14 arguments.
+                            *(
+                                [CODE_TARGET_LOCAL, target_info.get("device_id"), target_info.get("device_name")]
+                                if target_info.get("target") == CODE_TARGET_LOCAL
+                                else []
+                            ),
                         ],
                         # No runtime limit (C11): Temporal needs a value, so this is
                         # effectively infinite; liveness is heartbeat_timeout only.
@@ -431,8 +530,10 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                                         task_id=abandoned.get("task_id"),
                                         error=extract_error_message(close_error),
                                     )
-                            soft = _maybe_soft_fail_session_create_result(
-                                code_provider=code_provider, error=e
+                            soft = (
+                                None
+                                if _local_target_unavailable(e) is not None
+                                else _maybe_soft_fail_session_create_result(code_provider=code_provider, error=e)
                             )
                             if soft is not None:
                                 logger.warning(
@@ -516,6 +617,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     "toolName": "spawn_claude_code_agent",
                     "action_type": "task_complete",
                     "success": False,
+                    "code_agent": code_agent_metadata(target_info),
                 }
                 if result:
                     if result.get("task_id"):
@@ -574,8 +676,10 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             }
             if isinstance(result.get("code_session"), dict):
                 completed_metadata["code_session"] = result["code_session"]
-            if isinstance(result.get("code_agent"), dict):
-                completed_metadata["code_agent"] = result["code_agent"]
+            completed_metadata["code_agent"] = {
+                **code_agent_metadata(target_info),
+                **(result.get("code_agent") if isinstance(result.get("code_agent"), dict) else {}),
+            }
             if paused:
                 completed_metadata["session_paused"] = True
             usage_limited = result.get("status") == CODE_AGENT_USAGE_LIMIT_STATUS
@@ -620,6 +724,28 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             if isinstance(e, asyncio.CancelledError):
                 raise
 
+            local_unavailable = _local_target_unavailable(e)
+            if local_unavailable is not None:
+                # The Mac went away between the target check and session create:
+                # same exact tool error, no retry, no cloud fallback.
+                details = local_unavailable.details[0] if local_unavailable.details else {}
+                device_name = details.get("device_name") if isinstance(details, dict) else None
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Code session failed",
+                    message=local_unavailable.message,
+                    status=MessageStatus.ERROR,
+                    metadata={
+                        "toolName": "spawn_claude_code_agent",
+                        "code_provider": code_provider,
+                        "error_code": LOCAL_TARGET_UNAVAILABLE_CODE,
+                        "code_agent": code_agent_metadata(
+                            {**target_info, "device_name": device_name or target_info.get("device_name")}
+                        ),
+                    },
+                )
+                return
+
             soft = _maybe_soft_fail_session_create_result(
                 code_provider=code_provider, error=e
             )
@@ -658,7 +784,11 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 title="Code session failed",
                 message=extract_error_message(e),
                 status=MessageStatus.ERROR,
-                metadata={"toolName": "spawn_claude_code_agent", "code_provider": code_provider},
+                metadata={
+                    "toolName": "spawn_claude_code_agent",
+                    "code_provider": code_provider,
+                    "code_agent": code_agent_metadata(target_info),
+                },
             )
 
 

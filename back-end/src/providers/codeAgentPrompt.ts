@@ -111,3 +111,27 @@ export function buildCodexHarnessSystemPrompt(args: BuildCodexHarnessPromptArgs)
     '- Checkout/write-lock approvals are expected terminal states for ecommerce benchmarks.',
   ].join('\n');
 }
+
+/**
+ * Instructions for a code agent running on the user's own Mac (C14): the same
+ * contract as the sandbox prompt, but the work lives in the shared folder.
+ */
+export function buildLocalCodeAgentSystemPrompt(): string {
+  return [
+    `Rose Labs code-agent instructions (${CODE_AGENT_INSTRUCTIONS_VERSION}.local-mac)`,
+    '',
+    "You are running on the user's own Mac, in a folder they shared with Rose. That folder is your working directory.",
+    'Complete the requested coding or file task autonomously.',
+    '',
+    'File contract:',
+    '- Work only inside the working directory. Do not read or change files outside it.',
+    '- Leave results in the folder. In your final response, name the exact paths of files you created or changed.',
+    '- If no file output is requested, do not create placeholder files.',
+    '',
+    'Execution contract:',
+    '- Prefer direct, verifiable commands over prose-only claims.',
+    '- Finish only after the requested work exists and has been checked.',
+    '- Surface real configuration or credential failures directly.',
+    '- If task text says to use Claude Code or a code agent, treat that as this current Rose Labs code-agent session. Do not launch a separate claude/Claude Code CLI, run claude login, or start any interactive authentication flow.',
+  ].join('\n');
+}

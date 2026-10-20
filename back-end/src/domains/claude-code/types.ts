@@ -33,6 +33,9 @@ export const createSessionSchema = z.object({
   lease_owner: z.string().min(1).max(200).optional(),
   // Project default branch a new root session's branch is cut from (default: the repo's).
   base_branch: z.string().min(1).max(255).optional(),
+  // C14: 'local' starts the session on the agent tree's Mac (Rose Mac app).
+  target: z.enum(['cloud', 'local']).optional(),
+  device_id: z.string().uuid().optional(),
   /** Project to restore; defaults to the agent's own (or its root's) project. */
   project_id: z.string().uuid().optional(),
 });

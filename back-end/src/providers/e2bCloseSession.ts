@@ -12,6 +12,8 @@ import { checkpointCodeSession, type RepoFacts } from './codeSessions/lifecycle'
 import { e2bSandboxFs, localSandboxFs } from './codeSessions/sandboxFs';
 import { markPaused, type CodeSessionRow } from './codeSessions/store';
 import { resolveMergeFacts, type CodeSessionMergeFacts } from './codeSessions/mergeFacts';
+import { isLocalDeviceSandboxId } from './localDevices/hub';
+import { closeLocalDeviceCodeSession } from './localDevices/session';
 
 const log = createLogger('E2B');
 const OUTPUT_DIR = CODE_AGENT_OUTPUT_DIR;
@@ -198,6 +200,11 @@ export async function closeClaudeCodeSession(
           }
         : {}),
     };
+  }
+
+  if (isLocalDeviceSandboxId(session.sandboxId)) {
+    // The work stays in the user's Mac folder; nothing is uploaded from their disk.
+    return await closeLocalDeviceCodeSession(taskId, session.sandboxId);
   }
 
   const outputFiles: FilePointer[] = [];

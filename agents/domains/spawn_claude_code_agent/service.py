@@ -771,6 +771,11 @@ _CODE_SESSION_FIELDS = (
     "code_session_id",
     "branch",
     "merge_target",
+    # A local (Mac) run: a reattaching attempt keeps the same target, device and folder.
+    "target",
+    "device_id",
+    "device_name",
+    "folder",
     # Sandbox events whose transcript records are already persisted.
     "transcript_events",
 )
@@ -2340,6 +2345,7 @@ def build_code_agent_metadata(
     ended_at: Optional[float] = None,
     facts: Optional[Dict[str, Any]] = None,
     failure_message: Optional[str] = None,
+    target_meta: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """The ``code_agent`` message metadata block the UI thread renders.
 
@@ -2347,13 +2353,15 @@ def build_code_agent_metadata(
     idle or user-paused session, resumable; an addition to the UI contract).
     ``summary.merged_into`` is set only when the merge was confirmed (C4).
     ``failure_message`` is the human-readable reason when state is failed.
-    The target ('cloud' | 'local'), device_name and folder belong to L-LOCAL.
+    ``target_meta`` carries the run target ('cloud' | 'local'), device_name and
+    folder (owned by the local-target lane); cloud when omitted.
     """
     facts = facts or {}
     block: Dict[str, Any] = {
         "task_id": task_id,
         "provider": "codex" if provider == "codex" else "claude",
         "target": "cloud",
+        **(target_meta or {}),
         "branch": facts.get("branch"),
         # Where this branch merges back: the parent's branch for sub-agents,
         # the project/repo default branch for new agents (C13).
@@ -2510,6 +2518,9 @@ async def spawn_claude_code_activity(
     fast_mode_cache_enabled: bool = False,
     resume_session: Optional[Dict[str, Any]] = None,
     code_session_request: Optional[Dict[str, Any]] = None,
+    target: str = "cloud",
+    local_device_id: Optional[str] = None,
+    local_device_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Claude Code agent activity using E2B Desktop Sandbox.
 
@@ -2537,6 +2548,11 @@ async def spawn_claude_code_activity(
         resume_session: Session returned by a drained attempt; its sandbox is reattached
             when still reachable. ``generation_yield=False`` keeps the run on this worker
             when its generation is superseded (no parked handoff is available).
+        target: "cloud" (E2B sandbox) or "local" (the same ws-server on the agent's Mac,
+            relayed by the backend; ``ws_url`` is then the backend relay URL). Everything
+            after session create is identical for both targets.
+        local_device_id / local_device_name: the Mac resolved by
+            ``resolve_code_agent_target_activity`` for a local run.
         code_session_request: ``{"code_session_id": ...}`` to resume a specific
             persistent code session; omitted, the backend resumes the spawning
             agent's latest session for the repo (or creates one on a new branch).
@@ -2579,6 +2595,16 @@ async def spawn_claude_code_activity(
         raise ValueError(
             "output_schema is required for Claude Code agent - parent agent must provide structured output schema in tool call"
         )
+
+    if isinstance(attached, dict) and attached.get("target") == "local":
+        target = "local"
+        local_device_id = attached.get("device_id") or local_device_id
+        local_device_name = attached.get("device_name") or local_device_name
+    code_agent_meta: Dict[str, Any] = {"target": "local" if target == "local" else "cloud"}
+    if target == "local" and local_device_name:
+        code_agent_meta["device_name"] = local_device_name
+    if isinstance(attached, dict) and attached.get("folder"):
+        code_agent_meta["folder"] = attached["folder"]
 
     logger.info(
         "[ClaudeCode] Using response schema from tool call",
@@ -2670,6 +2696,8 @@ async def spawn_claude_code_activity(
                 fast_mode_cache_enabled=fast_mode_cache_enabled,
                 code_session_id=code_session_id,
                 lease_owner=lease_owner,
+                target=target,
+                local_device_id=local_device_id,
             )
             code_session_id = session_data.get("code_session_id") or code_session_id
             code_session_facts = _spawn_code_session_facts(session_data)
@@ -2679,6 +2707,9 @@ async def spawn_claude_code_activity(
             uploaded_files = session_data.get("uploaded_files", [])
             actual_github_repo_url = session_data.get("github_repo_url")
             loop_started_at = None
+            if target == "local" and session_data.get("folder"):
+                # Display path of the folder the Mac granted (e.g. "~/Developer/rose").
+                code_agent_meta["folder"] = session_data["folder"]
 
             logger.info(
                 "[ClaudeCode] Session created",
@@ -2688,7 +2719,11 @@ async def spawn_claude_code_activity(
                 ws_url=ws_url[:100] if ws_url else None,
                 uploaded_files=len(uploaded_files),
             )
-            action_summary.append(f"Created E2B sandbox: {sandbox_id}")
+            action_summary.append(
+                f"Started local session on {local_device_name or 'the Mac'}: {sandbox_id}"
+                if target == "local"
+                else f"Created E2B sandbox: {sandbox_id}"
+            )
 
         session_record = {
             "task_id": task_id,
@@ -2711,6 +2746,16 @@ async def spawn_claude_code_activity(
                 "branch": session_record["branch"],
                 "merge_target": session_record["merge_target"],
             }
+        if target == "local":
+            # A drained/retried attempt must reattach to the same Mac, never the cloud.
+            session_record.update(
+                {
+                    "target": "local",
+                    "device_id": local_device_id,
+                    "device_name": local_device_name,
+                    "folder": code_agent_meta.get("folder"),
+                }
+            )
         # An attempt's first heartbeat goes out at once and later ones only every
         # throttle interval, so nothing may heartbeat before the session rides
         # along, and the session must ride along before anything else can fail:
@@ -2741,6 +2786,7 @@ async def spawn_claude_code_activity(
                 code_provider=code_provider,
                 code_session=code_session_facts,
                 code_agent=build_code_agent_metadata(
+                    target_meta=code_agent_meta,
                     task_id=task_id,
                     provider=code_provider,
                     state="live",
@@ -2759,6 +2805,7 @@ async def spawn_claude_code_activity(
                 tool_call_id=tool_call_id,
                 code_provider=code_provider,
                 code_agent=build_code_agent_metadata(
+                    target_meta=code_agent_meta,
                     task_id=task_id,
                     provider=code_provider,
                     state="live",
@@ -2873,6 +2920,7 @@ async def spawn_claude_code_activity(
                 code_provider=code_provider, resets_at_iso=resets_at_iso, facts=code_session_facts
             )
             code_agent = build_code_agent_metadata(
+                target_meta=code_agent_meta,
                 task_id=task_id,
                 provider=code_provider,
                 state="failed",
@@ -2988,6 +3036,7 @@ async def spawn_claude_code_activity(
                 code_provider=code_provider,
                 code_session=code_session_facts,
                 code_agent=build_code_agent_metadata(
+                    target_meta=code_agent_meta,
                     task_id=task_id,
                     provider=code_provider,
                     state="paused",
@@ -3009,6 +3058,7 @@ async def spawn_claude_code_activity(
                 "code_provider": code_provider,
                 "code_session": code_session_facts,
                 "code_agent": build_code_agent_metadata(
+                    target_meta=code_agent_meta,
                     task_id=task_id,
                     provider=code_provider,
                     state="paused",
@@ -3132,6 +3182,7 @@ async def spawn_claude_code_activity(
             "completed_turns": codex_completed_turn_count(code_events) if code_provider == "codex" else None,
             "code_session": code_session_facts,
             "code_agent": build_code_agent_metadata(
+                target_meta=code_agent_meta,
                 task_id=task_id,
                 provider=code_provider,
                 state="completed",
@@ -3212,6 +3263,7 @@ async def spawn_claude_code_activity(
                     tool_call_id=tool_call_id,
                     code_provider=code_provider,
                     code_agent=build_code_agent_metadata(
+                        target_meta=code_agent_meta,
                         task_id=task_id,
                         provider=code_provider,
                         state="paused",
@@ -3298,6 +3350,7 @@ async def spawn_claude_code_activity(
                     tool_call_id=tool_call_id,
                     code_provider=code_provider,
                     code_agent=build_code_agent_metadata(
+                        target_meta=code_agent_meta,
                         task_id=task_id,
                         provider=code_provider,
                         state="failed",
