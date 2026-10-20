@@ -86,3 +86,11 @@ export async function findAgentFastModeCache(agentId: string): Promise<boolean> 
   });
   return agent?.fastModeCacheEnabled ?? false;
 }
+
+/** Session fields needed to address a live code session for direct chat. */
+export async function findSessionForDirectChat(taskId: string) {
+  return prisma.claudeCodeSession.findUnique({
+    where: { id: taskId },
+    select: { id: true, agentId: true, status: true, streamUrl: true },
+  });
+}
