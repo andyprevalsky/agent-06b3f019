@@ -13,7 +13,7 @@ interface PlaidLogoIconProps {
 }
 
 export default function PlaidLogoIcon({
-  className = 'h-full w-full text-[#111111] dark:text-[#d6d6d2]',
+  className = 'h-full w-full text-[#111111]',
 }: PlaidLogoIconProps): JSX.Element {
   return (
     <svg className={className} viewBox="0 0 47 48" fill="none" aria-hidden>

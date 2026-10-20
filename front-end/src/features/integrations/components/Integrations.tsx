@@ -18,9 +18,6 @@
  * File System is a FE-only section: website is Download for Mac; Mac app
  * plus click stays [IDLE/READY] (no hook).
  *
- * `embedded` (Rose Desktop Integrations drawer) only drops the page's top
- * inset; sections and their order (Browser Cookies first) are unchanged.
- *
  * This component is a thin orchestrator: it calls hooks, renders sections,
  * and wires up modals. All business logic lives in ../hooks/.
  */
@@ -47,12 +44,7 @@ import IntegrationModals from './IntegrationModals';
 import IntegrationSections from './IntegrationSections';
 import FileInputs from './FileInputs';
 
-interface IntegrationsProps {
-  /** Rendered inside the Rose Desktop Integrations drawer (it has its own header): no page top inset. */
-  embedded?: boolean;
-}
-
-export default function Integrations({ embedded = false }: IntegrationsProps = {}) {
+export default function Integrations() {
   const handlers = useIntegrationHandlers();
   const { isFullySignedIn } = useAuth();
 
@@ -87,7 +79,7 @@ export default function Integrations({ embedded = false }: IntegrationsProps = {
 
   return (
     <div className="h-full overflow-y-auto">
-      <div className={`container max-w-3xl mx-auto ${embedded ? 'pt-4' : 'pt-20'} pb-12 px-4`}>
+      <div className="container max-w-3xl mx-auto pt-20 pb-12 px-4">
         {displayError && (
           <div className="mb-6 p-4 bg-destructive/10 border border-destructive rounded-lg text-destructive text-sm">
             {displayError}

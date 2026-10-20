@@ -78,7 +78,10 @@ export default function RoseAgentRow({
             <span className="relative inline-grid flex-none">
               <Bot
                 data-sidebar-agent-icon
-                className={cn('h-5 w-5', isSelected ? 'text-gray-800' : 'text-gray-500')}
+                className={cn(
+                  'h-5 w-5',
+                  isSelected ? 'text-gray-800 dark:text-[#ecece8]' : 'text-gray-500 dark:text-[#a3a39d]',
+                )}
               />
               {runStatus.state !== 'active' && (
                 <span className="absolute -right-1.5 -top-1">

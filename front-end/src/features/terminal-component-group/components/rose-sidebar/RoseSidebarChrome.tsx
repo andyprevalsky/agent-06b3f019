@@ -1,6 +1,8 @@
 /**
  * Presentational rows for the Rose Desktop left bar (UI ledger rows 17/29/30/63):
- * Home (root project), the raw black New Agent button, the Search row, plain
+ * account row: signed in = cursive initial, anonymous = member icon (both open
+ * Settings); no session = member icon labelled "Sign in" (opens login).
+ * Home (root project), the raw black "New Super Agent" button (row 76), the Search row, plain
  * nav rows (Archived, Browse, Health) and the account row. Stateless.
  *
  * Every row keeps its icon at the same x whether the bar is collapsed (64px)
@@ -59,7 +61,7 @@ export function RoseNewAgentButton({
     <div className="flex-none px-3 pb-2 pt-1.5">
       <button
         type="button"
-        aria-label="New Agent"
+        aria-label="New Super Agent"
         onClick={onClick}
         className={cn(
           'flex h-10 w-full items-center gap-2 overflow-hidden whitespace-nowrap rounded-[10px] bg-gray-950 text-sm font-semibold text-white hover:bg-gray-800',
@@ -67,7 +69,7 @@ export function RoseNewAgentButton({
         )}
       >
         <Plus className="h-4 w-4 flex-none" />
-        {isExpanded && <span>New Agent</span>}
+        {isExpanded && <span>New Super Agent</span>}
       </button>
     </div>
   );
@@ -145,14 +147,16 @@ export function RoseAccountRow({
   onOpenSettings: () => void;
   onLoginClick: () => void;
 }) {
+  // No session at all: the row signs in. A session (anonymous or not) opens Settings.
   const signedIn = user !== null && user.is_anonymous !== true;
+  const label = user === null ? 'Sign in' : signedIn ? accountDisplayName(user) : 'Guest';
   return (
     <RoseNavRow
       icon={<AccountGlyph user={signedIn ? user : null} />}
-      label={signedIn ? accountDisplayName(user) : 'Sign in'}
+      label={label}
       isExpanded={isExpanded}
       isActive={isActive}
-      onClick={signedIn ? onOpenSettings : onLoginClick}
+      onClick={user === null ? onLoginClick : onOpenSettings}
     />
   );
 }

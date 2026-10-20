@@ -8,7 +8,7 @@
  *   A right-click menu, the search box or an inline name input keeps it EXPANDED.
  *
  * LAYOUT (top → bottom, rows 17/30/57/59/63):
- *   Home (root project) · New Agent (black) · Search
+ *   Home (root project) · New Super Agent (black) · Search
  *   agents grouped by project (RoseAgentGroups) · + New project
  *   ── Feedback · [Biz health, admins] · Archived · [Browse] · account row.
  *      Feedback, Biz health and the account row (Settings) open in the

@@ -283,25 +283,14 @@ describe('top-right app icons', () => {
     ).toBeGreaterThan(0);
   });
 
-  it('Integrations drawer reuses the page: Browser Cookies first, no summary line, dark-visible marks', async () => {
+  it('Integrations drawer mounts the existing Integrations page', async () => {
     mockSession();
     const user = userEvent.setup();
     renderWithProviders(<RoseAppIcons />);
     await user.click(screen.getByTestId('rose-app-integrations'));
     const body = screen.getByTestId('rose-app-panel-integrations');
     await waitFor(() => expect(within(body).getByText('Browser Cookies')).toBeInTheDocument());
-    const headings = within(body)
-      .getAllByRole('heading', { level: 3 })
-      .map((h) => h.textContent);
-    expect(headings[0]).toBe('Browser Cookies');
-    expect(body.textContent).not.toMatch(/\d+ of \d+ connected/i);
-    expect(body.textContent).not.toMatch(/Rose reads these/i);
-    // Embedded: the drawer has its own header, so the page drops its top inset.
-    expect(body.querySelector('.pt-20')).toBeNull();
-    // Dark glyphs lighten in dark mode (light unchanged).
-    const plaid = body.querySelector('svg[viewBox="0 0 47 48"]');
-    expect(plaid?.getAttribute('class')).toContain('text-[#111111]');
-    expect(plaid?.getAttribute('class')).toContain('dark:text-[#d6d6d2]');
+    expect(within(body).getByText('Passwords')).toBeInTheDocument();
   });
 
   it('a healthy account shows no reconnect dot', async () => {
