@@ -309,6 +309,8 @@ function cliEnv(ctx: AdversarialContext, home: string, extra: Record<string, str
     HOME: home,
     ROSE_AGENTS_URL: `${ctx.baseUrl}/api/agent-graph`,
     ROSE_TOOLS_WAIT_SECONDS: '2',
+    // These cases exercise pinned questions in a Rose Desktop session.
+    ROSE_TOOLS_ROSE_DESKTOP: '1',
     ...extra,
   };
   delete env.ROSE_TOOLS_CONFIG;
@@ -494,10 +496,7 @@ async function testDeepChainRoutesEachLevelToItsSpawner(ctx: AdversarialContext)
   );
   assert((await route(ids.SC, ids.C)).agent_id === ids.C, 'depth-2 code agent → C');
   const rootRoute = await route(ids.SR, ids.R);
-  assert(
-    rootRoute.deliver_to === 'user' && rootRoute.agent_id === ids.R,
-    'root-spawned → user'
-  );
+  assert(rootRoute.deliver_to === 'user' && rootRoute.agent_id === ids.R, 'root-spawned → user');
 
   const counts = async () => ({
     R: await a2aRowCount(ids.R),
@@ -579,7 +578,10 @@ async function testQuestionToFinishedOrDeletedSpawnerFailsClearly(
     /finished/i.test(String(finished.data.error)),
     `clear error: ${String(finished.data.error)}`
   );
-  assert((await a2aRowsFrom(ids.F, ids.SF)).length === 0, 'nothing delivered to the finished agent');
+  assert(
+    (await a2aRowsFrom(ids.F, ids.SF)).length === 0,
+    'nothing delivered to the finished agent'
+  );
   const after = await prisma.agent.findUnique({
     where: { id: ids.F },
     select: { status: true, temporalWorkflowId: true },
@@ -616,9 +618,7 @@ async function testDuplicateMessageIdDeliversExactlyOnce(ctx: AdversarialContext
   // Eight attempts of one send in flight at once (a Temporal retry racing a
   // slow first attempt, or a CLI re-run).
   const attempts = await Promise.all(
-    Array.from({ length: 8 }, () =>
-      call(ctx, '/api/agent-graph/messages', { bearer: token, body })
-    )
+    Array.from({ length: 8 }, () => call(ctx, '/api/agent-graph/messages', { bearer: token, body }))
   );
   for (const attempt of attempts) expectStatus(attempt, 200, 'concurrent attempt');
   const statuses = attempts.map((attempt) => attempt.data.status);
@@ -696,7 +696,11 @@ async function testFloodingSenderIsCappedWithoutStarvingOthers(
         Array.from({ length: 12 }, (_, i) =>
           call(ctx, '/api/agent-graph/messages', {
             bearer: token,
-            body: { to: ids.B1, text: `flood ${batch + i}`, message_id: `flood-${batch + i}-${RUN}` },
+            body: {
+              to: ids.B1,
+              text: `flood ${batch + i}`,
+              message_id: `flood-${batch + i}-${RUN}`,
+            },
           })
         )
       ))
@@ -709,14 +713,20 @@ async function testFloodingSenderIsCappedWithoutStarvingOthers(
     delivered.length + limited.length === total,
     `only 200 or 429: ${JSON.stringify(results.map((res) => res.status))}`
   );
-  assert(limited.length > 0, `a flooding sender is capped (${delivered.length}/${total} delivered)`);
+  assert(
+    limited.length > 0,
+    `a flooding sender is capped (${delivered.length}/${total} delivered)`
+  );
   assert(
     delivered.length <= SEND_BURST + Math.ceil(elapsedS * SEND_REFILL_PER_SECOND) + 1,
     `delivered ${delivered.length} in ${elapsedS}s exceeds the cap`
   );
   const retryAfter = Number(limited[0].headers.get('retry-after'));
   assert(Number.isFinite(retryAfter) && retryAfter >= 1, `Retry-After header: ${retryAfter}`);
-  assert(/too many/i.test(String(limited[0].data.error)), `clear 429: ${String(limited[0].data.error)}`);
+  assert(
+    /too many/i.test(String(limited[0].data.error)),
+    `clear 429: ${String(limited[0].data.error)}`
+  );
   const flooded = await a2aRowsFrom(ids.B1, ids.SX);
   assert(
     flooded.length === delivered.length,
@@ -870,7 +880,10 @@ async function testStaleTokenOnDiskLosesToTheSpawnMintedToken(
   const now = Math.floor(Date.now() / 1000);
   const cases: Array<[string, string]> = [
     // A token refreshed by the previous task, still valid, left on disk.
-    ['refreshed token of the previous task', graphToken(ids.SCold, ids.C, { nowSeconds: now - 600 })],
+    [
+      'refreshed token of the previous task',
+      graphToken(ids.SCold, ids.C, { nowSeconds: now - 600 }),
+    ],
     // This task's own token, expired while the session was paused.
     ['expired token', graphToken(ids.SC, ids.C, { nowSeconds: now - 7200, ttlSeconds: 60 })],
   ];
