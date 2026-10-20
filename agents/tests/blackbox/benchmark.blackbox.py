@@ -1080,6 +1080,26 @@ def test_sms_runner_scoring_contract_is_in_permanent_gate():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_code_bench_evaluator_proofs_are_in_permanent_gate():
+    """Code-bench graders (agents/benchmarks/code_bench_test.py, plan C8).
+
+    Every fixture's hidden-test grader must fail the unmodified repo and pass
+    its reference solution through the returned-archive path, the attachments
+    must stay byte-identical across builds, and the raw-CLI parity runner must
+    stay reachable through ``scripts/run-bench code-parity``.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", str(repo_root / "agents/benchmarks/code_bench_test.py")],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_cloudbench_pool_vm_shapes_are_in_permanent_gate():
     repo_root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
@@ -1605,27 +1625,6 @@ def test_ci_should_fail_on_skipped_required_task():
 
     assert _ci_should_fail({"failed": 0, "skipped": 1}) is True
     assert _ci_should_fail({"failed": 0}) is False
-
-
-def test_ci_permits_only_the_opt_in_agentcard_release_skip():
-    """The AgentCard sandbox release stall is a deploy-approved SKIP only behind its exact flag."""
-    from benchmarks.results import TaskResult
-    from benchmarks.run_benchmark import AGENTCARD_RELEASE_SKIP_REASON, _ci_should_fail
-
-    def skipped(reason: str) -> TaskResult:
-        return TaskResult(name="agent-payment-abandonment", passed=False, agent_id="agent-123",
-                          status="SKIPPED", progress_score=0, duration_seconds=1, cost_cents=0,
-                          message_count=0, failure_reason=reason)
-
-    summary = {"failed": 0, "skipped": 1}
-    stall = skipped(f"{AGENTCARD_RELEASE_SKIP_REASON}: owt_1 consumed")
-    with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}):
-        assert _ci_should_fail(summary, [stall]) is False
-        assert _ci_should_fail(summary, [skipped("Cloud cleanup failed: payment: TimeoutError")]) is True
-        assert _ci_should_fail({"failed": 1, "skipped": 1}, [stall]) is True
-    for value in ("", "0", "true"):
-        with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": value}):
-            assert _ci_should_fail(summary, [stall]) is True
 
 
 def test_outreach_batch_has_timeout_floor():

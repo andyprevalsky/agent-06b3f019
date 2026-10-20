@@ -1,0 +1,13 @@
+{
+  "id": "bugfix-invoice-rounding",
+  "kind": "bug fix with hidden failing test",
+  "language": "python",
+  "task": "Bug report from finance: an invoice line of 7 x 143 cents with a 5% discount shows 950 cents, but our policy says 951. Totals with tax are off by a cent in the same way. The rounding policy is documented at the top of invoice/totals.py. Fix the bug so every amount follows that policy, keep the existing tests passing, and add a regression test for the reported case.",
+  "hidden_tests": {
+    "dir": "hidden",
+    "commands": [
+      ["python3", "-m", "unittest", "discover", "-s", "tests", "-t", "."],
+      ["python3", "-m", "unittest", "discover", "-s", "_hidden_tests", "-t", "."]
+    ]
+  }
+}
