@@ -1398,6 +1398,42 @@ _BANNED_MARKETING_ADJECTIVES = (
 )
 
 
+_ENV_SIZE_SKILL = (
+    AGENTS_ROOT.parent / "back-end" / "src" / "assets" / "rose-skills" / "change-environment-size" / "SKILL.md"
+)
+
+
+def test_change_environment_size_skill_guards_against_runaways():
+    """C16: the change-environment-size skill says when NOT to resize, not only when to.
+
+    A bigger sandbox hides a runaway process, an infinite loop or a leak. The
+    skill must send the code agent to kill, fix or clean up first, to look at
+    `rose env status` before asking, and to downsize after the heavy phase.
+    It is read by the code-agent CLI, so it follows the prompt style rules.
+    """
+    text = _ENV_SIZE_SKILL.read_text()
+    front = re.match(r"^---\nname: change-environment-size\ndescription: (Use [^\n]+)\n---\n", text)
+    assert front, "SKILL.md needs frontmatter: name change-environment-size and a one-line 'Use ...' description"
+    assert len(front.group(1)) < 160, f"description must stay one short line: {front.group(1)!r}"
+    lower = text.lower()
+    for needle in (
+        "## when to use",
+        "## when not to use",
+        "runaway",
+        "leak",
+        "kill",
+        "rose env status",
+        "rose env size",
+        "--reason",
+        "downsize",
+        "continues automatically",
+    ):
+        assert needle in lower, f"SKILL.md must cover {needle!r}"
+    assert "\u2014" not in text and "\u2013" not in text, "no em-dashes or en-dashes in the skill"
+    for phrase in _BANNED_HEDGE_PHRASES + _BANNED_BRAND_TERMS:
+        assert phrase not in lower, f"banned phrase {phrase!r} in the skill"
+
+
 def test_no_banned_phrases_in_prompt_strings():
     """Banned phrases must not appear in prompt-source string literals.
 
@@ -2185,6 +2221,10 @@ async def run_all_tests():
     r.record(
         "no_banned_phrases_in_prompt_strings",
         test_no_banned_phrases_in_prompt_strings,
+    )
+    r.record(
+        "change_environment_size_skill_guards_against_runaways",
+        test_change_environment_size_skill_guards_against_runaways,
     )
 
     # 12. No restating-the-schema patterns / broken cross-refs (C6, C7)
