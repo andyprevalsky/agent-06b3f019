@@ -761,7 +761,11 @@ async def test_prepare_browser_auth_uses_unified_realm_endpoint() -> None:
 
 
 def test_password_use_is_sign_in_evidence_for_world_state_merge() -> None:
-    """Only a typed saved/minted password marks a site as signed in (plan A6)."""
+    """Only a typed saved/minted password marks a site as signed in (plan A6).
+
+    The backend no longer needs this evidence to merge a login into the user's
+    browser template; it marks the login as validated, which wins keep-best.
+    """
     from domains.spawn_browser_agent_v3.service_crypto import signed_in_realm_for_secret_refs
 
     assert signed_in_realm_for_secret_refs({"pwd:me@github"}, "https://github.com/login") == "github.com"
@@ -782,7 +786,9 @@ async def test_browser_close_sends_sign_in_evidence_and_returns_world_state_rece
         "sites": [
             {
                 "site": "github.com",
+                "account": "",
                 "outcome": "merged",
+                "rule": "validated",
                 "base_revision": 0,
                 "head_revision": 1,
                 "merged_revision": 1,
@@ -814,6 +820,31 @@ async def test_browser_close_sends_sign_in_evidence_and_returns_world_state_rece
         assert body == {"session_id": "session-2", "pause": False}, body
     finally:
         teardown_mock()
+
+
+def test_world_state_receipt_summary_names_account_outcome_and_rule() -> None:
+    """The close log names each site's template account, outcome and keep-best rule."""
+    from domains.spawn_browser_agent_v3.repo import world_state_receipt_summary
+
+    receipt = {
+        "task_id": "task-1",
+        "kind": "agent",
+        "sites": [
+            {"site": "github.com", "account": "", "outcome": "merged", "rule": "validated"},
+            {"site": "google.com", "account": "chrome:Profile 2", "outcome": "kept", "rule": "later_expiry"},
+            {"site": "example.com", "account": "", "outcome": "signed_out", "rule": None},
+            "not-an-entry",
+            {"outcome": "merged"},
+        ],
+    }
+    assert world_state_receipt_summary(receipt) == {
+        "github.com": "merged/validated",
+        "google.com [chrome:Profile 2]": "kept/later_expiry",
+        "example.com": "signed_out",
+    }, world_state_receipt_summary(receipt)
+    # Observability only: an absent or malformed receipt summarizes to nothing.
+    assert world_state_receipt_summary(None) == {}
+    assert world_state_receipt_summary({"sites": "nope"}) == {}
 
 
 async def test_failed_restoration_preserves_target_credential_inventory() -> None:
@@ -1682,6 +1713,10 @@ async def run_all_tests():
     await runner.record_async(
         "browser_close_sends_sign_in_evidence_and_returns_world_state_receipt",
         test_browser_close_sends_sign_in_evidence_and_returns_world_state_receipt,
+    )
+    runner.record(
+        "world_state_receipt_summary_names_account_outcome_and_rule",
+        test_world_state_receipt_summary_names_account_outcome_and_rule,
     )
     await runner.record_async(
         "passkey_injection_reenables_virtual_environment_at_use_boundary",

@@ -1,19 +1,21 @@
 /**
- * Browser world service (plan row A6): the user's Root browser and the
- * per-site world state agents fork from and merge into.
+ * Browser world service (plan row A6): the user's one browser template, split
+ * by website and account, and the home browser that shows it.
  *
- *   UI ──open──▶ Root browser (persistent provider profile)
- *                 + inject Root's per-site cookies ("rose_root")
- *                 + fork every site of its jar (base = what it already holds)
- *   agent browser task ──prepare-auth(site)──▶ fork that site only
- *   any close ──▶ providers/browser/worldState merge (guarded per-site LWW)
- *   UI ──list──▶ Root sites (head revision, last writer) and per-agent forks
+ *   any browser task close ──▶ every credential in its jar percolates into the
+ *                              template; keep-best within one account
+ *   agent task ──prepare-auth(site)──▶ fork that site on the injected account
+ *   Browser app opened ──open──▶ home browser on the persistent profile, opened
+ *                              at start_url, else the root agent tree's
+ *                              default_url; seeded with one account per site
+ *   home browser close ──▶ same percolation as any task
+ *   UI ──list──▶ template sites per account and per-agent forks
  *   UI ──take over──▶ existing /api/browser-session/task/:taskId/{live-view,control}
  *
- * The merge and conflict rule live in providers/browser/worldState.ts so every
- * provider close path applies them.
+ * The home browser is never opened automatically: reading state, closing tasks
+ * and percolating credentials do not start it. The merge and keep-best rule
+ * live in providers/browser/worldState*.ts so every provider close applies them.
  */
-import type { Browser } from 'playwright';
 import { DEFAULT_GEOLOCATION } from '../../providers/geoip';
 import { createLogger } from '../../providers/logger';
 import {
@@ -23,16 +25,14 @@ import {
   getOrCreateContext,
 } from '../../providers/browser';
 import type { BrowserProviderSession } from '../../providers/browser/types';
-import { playwrightCookiesFromRows } from '../../providers/steel/injectionCookies';
 import {
   browserWorldStateEnabled,
-  recordRootForks,
   rootBrowserAgentId,
-  worldStateCookiesFrom,
   type WorldStateMergeReceipt,
 } from '../../providers/browser/worldState';
 import { controlPath, liveViewPath, LIVE_PROVIDER_STATUSES } from './config';
 import * as repo from './repo';
+import { seedRootBrowser } from './service.home';
 import {
   RootBrowserNotOpenError,
   type AgentBrowserTaskView,
@@ -81,6 +81,7 @@ function rootView(session: {
   status: string;
   provider: string;
   debugUrl: string | null;
+  startUrl: string | null;
   _count: { siteForks: number };
 }): RootBrowserView {
   return {
@@ -89,6 +90,7 @@ function rootView(session: {
     status: session.status,
     provider: session.provider,
     live_view_url: session.debugUrl,
+    start_url: session.startUrl,
     forked_sites: session._count.siteForks,
     live_view_path: liveViewPath(session.id),
     control_path: controlPath(session.id),
@@ -99,8 +101,11 @@ export async function listRootSites(userId: string): Promise<RootSiteView[]> {
   const rows = await repo.listRootSites(userId);
   return rows.map((row) => ({
     site: row.site,
+    account: row.account,
     revision: row.revision,
     cookie_count: row.cookieCount,
+    validated_at: row.validatedAt?.toISOString() ?? null,
+    auth_expires_at: row.authExpiresAt?.toISOString() ?? null,
     updated_at: row.updatedAt.toISOString(),
     last_writer: {
       kind: row.lastWriterKind,
@@ -110,50 +115,37 @@ export async function listRootSites(userId: string): Promise<RootSiteView[]> {
   }));
 }
 
-export async function getRootBrowser(userId: string): Promise<{
-  root: RootBrowserView | null;
-  sites: RootSiteView[];
-}> {
-  const [session, sites] = await Promise.all([
-    repo.findActiveRootSession(userId, rootBrowserAgentId(userId)),
-    listRootSites(userId),
-  ]);
-  return { root: session === null ? null : rootView(session), sites };
+/** The URL the root agent's tree is working on: its newest active browser task's. */
+export async function defaultRootBrowserUrl(
+  userId: string,
+  agentId: string | undefined
+): Promise<string | null> {
+  if (agentId === undefined) return null;
+  return repo.findTreeBrowserUrl(userId, agentId);
 }
 
-/** Root cookies into the fresh Root browser, then fork its whole jar. */
-async function seedRootBrowser(
+/** Read-only: never opens the home browser. */
+export async function getRootBrowser(
   userId: string,
-  session: BrowserProviderSession,
-  browser: Browser
-): Promise<void> {
-  const context = browser.contexts()[0];
-  if (context === undefined) throw new Error('Root browser has no default context');
-  const rootCookies = playwrightCookiesFromRows(await repo.listRootCookies(userId)).filter(
-    (cookie) => cookie.name !== ''
-  );
-  if (rootCookies.length > 0) await context.addCookies(rootCookies);
-  const forked = await recordRootForks({
-    browserSessionId: session.taskId,
-    userId,
-    agentId: rootBrowserAgentId(userId),
-    liveCookies: worldStateCookiesFrom(await context.cookies()),
-  });
-  log.info('root_browser.seeded', {
-    userId,
-    taskId: session.taskId,
-    rootCookies: rootCookies.length,
-    forkedSites: forked.length,
-  });
+  options: { agentId?: string } = {}
+): Promise<{ root: RootBrowserView | null; sites: RootSiteView[]; default_url: string | null }> {
+  const [session, sites, defaultUrl] = await Promise.all([
+    repo.findActiveRootSession(userId, rootBrowserAgentId(userId)),
+    listRootSites(userId),
+    defaultRootBrowserUrl(userId, options.agentId),
+  ]);
+  return { root: session === null ? null : rootView(session), sites, default_url: defaultUrl };
 }
 
 /**
- * Open (or return) the user's Root browser. Idempotent per user: a live Root
- * session is reused; an ended one is closed (merging what it can) and replaced.
+ * Open (or return) the user's home browser, on request only. Idempotent per
+ * user: a live session is reused as it is (not re-navigated); an ended one is
+ * closed (merging what it can) and replaced. A new session opens at
+ * `startUrl`, else at the default URL of `agentId`'s tree, else the provider's.
  */
 export async function openRootBrowser(
   userId: string,
-  options: { startUrl?: string } = {},
+  options: { startUrl?: string; agentId?: string } = {},
   deps: RootBrowserDeps = defaultDeps
 ): Promise<RootBrowserView> {
   if (!browserWorldStateEnabled()) throw new Error('Browser world state is disabled');
@@ -171,15 +163,17 @@ export async function openRootBrowser(
     });
   }
 
+  const startUrl =
+    options.startUrl ?? (await defaultRootBrowserUrl(userId, options.agentId)) ?? undefined;
   const contextId = await getOrCreateContext(userId);
-  const session = await deps.createSession(contextId, rootAgentId, options.startUrl);
+  const session = await deps.createSession(contextId, rootAgentId, startUrl);
   try {
     if (session.validationBrowser !== null) {
       await seedRootBrowser(userId, session, session.validationBrowser);
     }
   } catch (error) {
-    // A Root browser without its world state is still the user's browser;
-    // they can sign in by hand. Log loudly instead of releasing it.
+    // A home browser without the template is still the user's browser; they
+    // can sign in by hand. Log loudly instead of releasing it.
     log.error('root_browser.seed_failed', {
       userId,
       taskId: session.taskId,
@@ -193,7 +187,7 @@ export async function openRootBrowser(
   return rootView(created);
 }
 
-/** Close the Root browser; its changed sites merge into Root on the way out. */
+/** Close the home browser; its credentials percolate into the template. */
 export async function closeRootBrowser(
   userId: string,
   deps: RootBrowserDeps = defaultDeps
@@ -221,7 +215,7 @@ export async function listAgentBrowserWorld(
   const tasks = await repo.listAgentBrowserTasks(userId, agentId);
   const sites = [...new Set(tasks.flatMap((task) => task.siteForks.map((fork) => fork.site)))];
   const heads = await repo.findRootRevisions(userId, sites);
-  const revisionBySite = new Map(heads.map((head) => [head.site, head.revision]));
+  const revisionOf = new Map(heads.map((head) => [`${head.site}|${head.account}`, head.revision]));
   return tasks.map((task) => ({
     task_id: task.id,
     session_id: task.sessionId,
@@ -231,10 +225,11 @@ export async function listAgentBrowserWorld(
     control_path: controlPath(task.id),
     sites: task.siteForks.map((fork): ForkView => ({
       site: fork.site,
+      account: fork.account,
       state: forkState(fork),
       base_revision: fork.baseRevision,
       merged_revision: fork.mergedRevision,
-      root_revision: revisionBySite.get(fork.site) ?? 0,
+      root_revision: revisionOf.get(`${fork.site}|${fork.account}`) ?? 0,
       forked_at: fork.forkedAt.toISOString(),
       merged_at: fork.mergedAt?.toISOString() ?? null,
     })),

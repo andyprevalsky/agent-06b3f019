@@ -10,6 +10,7 @@ import { playwrightCookiesFromRows, storedCookieIsLive } from './injectionCookie
 import { benchmarkSavedBrowserAuthDisabled } from '../benchmarkBrowserAuth';
 import { type FingerprintData, log } from './types';
 import { steelCdpConnectionUrl } from './urls';
+import type { InjectedCookieBundle } from '../browser/worldStateKeepBest';
 import { createOriginPayloadWriter } from './injectionOriginPage';
 import {
   injectCacheStorageState,
@@ -283,11 +284,15 @@ export async function injectUserData(
     browser?: import('playwright').Browser;
     /**
      * Runs on this same connection once the realm's cookies are in place, so a
-     * caller can snapshot the jar the session actually starts from (the Root
-     * world-state fork) without a second CDP handshake. Its failure is logged
-     * and never fails credential preparation.
+     * caller can snapshot the jar the session actually starts from (the
+     * browser-template fork) without a second CDP handshake, together with the
+     * one CookieBundle (account) injected for the realm, or null. Its failure
+     * is logged and never fails credential preparation.
      */
-    onCookiesReady?: (context: import('playwright').BrowserContext) => Promise<void>;
+    onCookiesReady?: (
+      context: import('playwright').BrowserContext,
+      injectedBundle: InjectedCookieBundle | null
+    ) => Promise<void>;
   }
 ): Promise<{
   cookies: {
@@ -557,7 +562,10 @@ export async function injectUserData(
 
     if (options?.onCookiesReady !== undefined) {
       try {
-        await options.onCookiesReady(context);
+        await options.onCookiesReady(
+          context,
+          authSource.kind === 'cookie_bundle' && hasCookies ? authSource : null
+        );
       } catch (error) {
         log.warn('  [cookies] Post-injection snapshot failed; continuing', {
           sessionId,

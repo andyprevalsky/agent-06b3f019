@@ -926,10 +926,12 @@ async def close_browser_session(
 ) -> Optional[Dict[str, Any]]:
     """Close only the named browser; propagate an unacknowledged cleanup request.
 
-    ``signed_in_sites`` are the sites where this task typed a saved password: the
-    sign-in evidence the backend's Root world-state merge needs before a site the
-    task started signed out of can merge into Root. Returns the backend's merge
-    receipt (``world_state``), which a retried close repeats without writing.
+    The backend merges every credential in the closing browser into the user's
+    browser template. ``signed_in_sites`` are the sites where this task typed a
+    saved password or asserted a passkey: sign-in evidence that marks those
+    logins as validated, which wins the template's keep-best rule. Returns the
+    backend's merge receipt (``world_state``); a retried close reaches the same
+    decisions without writing again.
     """
     payload: Dict[str, Any] = {"session_id": session_id, "pause": pause}
     if current_url:
@@ -957,6 +959,27 @@ async def close_browser_session(
         return None
     world_state = body.get("world_state") if isinstance(body, dict) else None
     return world_state if isinstance(world_state, dict) else None
+
+
+def world_state_receipt_summary(receipt: Any) -> Dict[str, str]:
+    """``site [account]`` -> ``outcome/rule`` for the close log (observability only).
+
+    The default template account (``""``) is left out of the key, and entries
+    the backend did not shape as sites are skipped.
+    """
+    sites = receipt.get("sites") if isinstance(receipt, dict) else None
+    if not isinstance(sites, list):
+        return {}
+    summary: Dict[str, str] = {}
+    for entry in sites:
+        if not isinstance(entry, dict) or not isinstance(entry.get("site"), str):
+            continue
+        account = entry.get("account")
+        key = f"{entry['site']} [{account}]" if isinstance(account, str) and account else entry["site"]
+        rule = entry.get("rule")
+        outcome = str(entry.get("outcome"))
+        summary[key] = f"{outcome}/{rule}" if isinstance(rule, str) and rule else outcome
+    return summary
 
 
 async def inject_local_storage(config: Any, session_id: str, origin: str) -> Optional[Dict[str, Any]]:

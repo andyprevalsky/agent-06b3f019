@@ -2,12 +2,18 @@
  * Browser world routes (plan row A6) — thin controller layer. Every route is
  * owner-scoped to the authenticated user (JWT, or API key + X-User-Id).
  *
- * GET    /api/browser-world/root              Root browser session (or null) + Root sites
- * POST   /api/browser-world/root/open         open or reuse the Root browser → live view
- * POST   /api/browser-world/root/close        close it; its changed sites merge into Root
- * GET    /api/browser-world/sites             Root's per-site state (revision, last writer)
- * DELETE /api/browser-world/sites/:site       forget one site in Root
+ * GET    /api/browser-world/root[?agent_id=]  home browser (or null), template sites, and
+ *                                             default_url: the URL agent_id's tree is on
+ * POST   /api/browser-world/root/open         open or reuse the home browser → live view
+ *                                             {start_url?, agent_id?}; no start_url →
+ *                                             agent_id's default_url
+ * POST   /api/browser-world/root/close        close it; its credentials percolate
+ * GET    /api/browser-world/sites             template state per (site, account)
+ * DELETE /api/browser-world/sites/:site       forget one site (every account)
  * GET    /api/browser-world/agents/:agentId   that agent's browser tasks and their forks
+ *
+ * Only POST /root/open starts a home browser; the UI calls it when the user
+ * opens the Browser app. Nothing here opens one as a side effect.
  *
  * Taking over any tab (Root's or an agent's) uses the existing
  * /api/browser-session/task/:taskId/live-view and /control routes; every view
@@ -39,7 +45,13 @@ router.get(
   asyncHandler<HybridAuthRequest>(async (req, res: Response) => {
     const userId = ownerOf(req, res);
     if (userId === null) return;
-    res.json(await service.getRootBrowser(userId));
+    const rawAgentId = req.query.agent_id;
+    const agentId = rawAgentId === undefined ? undefined : agentIdParamSchema.safeParse(rawAgentId);
+    if (agentId !== undefined && !agentId.success) {
+      res.status(400).json({ error: 'Invalid agent id' });
+      return;
+    }
+    res.json(await service.getRootBrowser(userId, { agentId: agentId?.data }));
   })
 );
 
@@ -55,7 +67,10 @@ router.post(
       return;
     }
     try {
-      const root = await service.openRootBrowser(userId, { startUrl: parsed.data.start_url });
+      const root = await service.openRootBrowser(userId, {
+        startUrl: parsed.data.start_url,
+        agentId: parsed.data.agent_id,
+      });
       res.json({ root });
     } catch (error) {
       log.error('Failed to open Root browser', {

@@ -645,11 +645,11 @@ def auth_realm_from_url(url: str) -> str:
 def signed_in_realm_for_secret_refs(used_refs: Any, url: str) -> str:
     """Realm where an action just typed a saved (or newly minted) password.
 
-    This is the sign-in evidence the browser close sends as ``signed_in_sites``
-    so the backend may merge a site the task started signed out of into the
-    user's Root browser state. Card and other non-password refs are not a
-    sign-in. Empty when there is no evidence. The backend canonicalizes the
-    host to its registrable domain.
+    This is the sign-in evidence the browser close sends as ``signed_in_sites``:
+    the backend marks that site's login in the user's browser template as
+    validated, which wins its keep-best rule. Card and other non-password refs
+    are not a sign-in. Empty when there is no evidence. The backend
+    canonicalizes the host to its registrable domain.
     """
     if not any(isinstance(ref, str) and ref.startswith("pwd:") for ref in (used_refs or ())):
         return ""

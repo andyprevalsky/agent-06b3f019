@@ -160,6 +160,7 @@ from .repo import (
     save_browser_credential_ref_message,
     save_minted_account_password,
     upload_file_to_session,
+    world_state_receipt_summary,
 )
 from .resume_store import hydrate_resume_context, persist_resume_context
 from .service import (
@@ -7419,8 +7420,8 @@ async def _spawn_browser_agent_activity_v3_real(
         for credential_id in (write_lock_resume_state or {}).get("recorded_passkey_credential_ids", [])
         if isinstance(credential_id, str) and credential_id
     }
-    # Sites where this task typed a saved password or asserted a passkey: the
-    # sign-in evidence the backend's Root world-state merge needs (plan A6).
+    # Sites where this task typed a saved password or asserted a passkey: sign-in
+    # evidence that validates those logins in the user's browser template (A6).
     credential_signin_realms: set[str] = set()
 
     async def record_passkey_usage_once() -> None:
@@ -7510,17 +7511,13 @@ async def _spawn_browser_agent_activity_v3_real(
             if credential_signin_realms:
                 options["signed_in_sites"] = sorted(credential_signin_realms)
             world_state = await close_browser_session(config, exact_session_id, **options)
-            receipt_sites = world_state.get("sites") if isinstance(world_state, dict) else None
-            if isinstance(receipt_sites, list) and receipt_sites:
+            receipt_sites = world_state_receipt_summary(world_state)
+            if receipt_sites:
                 logger.info(
                     "Browser world state merge receipt",
                     task_id=task_id,
                     session_id=exact_session_id,
-                    sites={
-                        str(entry.get("site")): entry.get("outcome")
-                        for entry in receipt_sites
-                        if isinstance(entry, dict)
-                    },
+                    sites=receipt_sites,
                 )
         except BrowserSessionCloseError as cleanup_error:
             cleanup_failure = cleanup_error.receipt()
