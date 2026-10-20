@@ -13,7 +13,6 @@
  *   [CONNECTED, multiAccount] rows that listed several accounts before Rose Desktop
  *     (Gmail addresses, Plaid institutions, compute subscriptions): one chip per
  *     account, one bar per syncing account, "+ Add account" re-runs connect
- *     chip [QUEUED] (Gmail address waiting its turn) → quiet neutral chip, no bar
  *     chip [SYNCING + light] (Gmail `history`) → "checking for new mail", no bar
  *     rowSync (the backend reports one account for the whole row) → one row bar,
  *       no per-chip bars
@@ -40,8 +39,7 @@ export interface DesktopAccountView {
   accountId?: string;
   label: string;
   detail?: string;
-  /** `queued`: a Gmail address waiting its turn to sync (quiet, never an error). */
-  tone: AccountTone | 'queued';
+  tone: AccountTone;
   title?: string;
   onRemove?: () => void;
   removeLabel?: string;
@@ -103,7 +101,6 @@ export function DesktopSectionHeader({ children }: { children: ReactNode }) {
 
 function defaultTitle(tone: DesktopAccountView['tone']): string {
   if (tone === 'warning') return 'Needs reconnect';
-  if (tone === 'queued') return 'Waiting for its turn to sync';
   return tone;
 }
 
@@ -120,7 +117,7 @@ function DesktopAccountChip({ account }: { account: DesktopAccountView }) {
       variant="desktop"
       label={account.label}
       detail={account.detail ?? pctDetail}
-      tone={tone === 'queued' ? 'neutral' : tone}
+      tone={tone}
       title={account.title ?? defaultTitle(tone)}
       onRemove={account.onRemove}
       removeLabel={account.removeLabel ?? `Disconnect ${account.label}`}

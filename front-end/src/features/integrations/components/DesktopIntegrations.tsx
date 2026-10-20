@@ -8,9 +8,9 @@
  *   row's ONE account chip (Gmail addresses, Plaid institutions and compute
  *   subscriptions keep listing several, as the stock page does) and a gradient
  *   sync bar; no Manage state, no "X of Y connected" summary.
- *   [ANY ACCOUNT SYNCING OR QUEUED] --every 5 s--> GET /integrations/progress?since=<cursor>
+ *   [ANY ACCOUNT SYNCING] --every 5 s--> GET /integrations/progress?since=<cursor>
  *     (cheap; changed → fresh accountsByProvider overlay + Plaid items refresh)
- *     --nothing syncing or queued--> polling stops
+ *     --nothing syncing--> polling stops
  *   [UNMOUNTED] (the Integrations panel closed) → no polling at all
  *   chip × (single-account rows) --> [CONFIRM DISCONNECT] --confirm--> DELETE
  *     /integrations/:name --> full list refetch (the delta poll cannot see
@@ -56,8 +56,7 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 
 function rowIsSyncing(row: DesktopIntegrationView): boolean {
   return (
-    row.rowSync?.syncing === true ||
-    row.accounts.some((account) => account.tone === 'syncing' || account.tone === 'queued')
+    row.rowSync?.syncing === true || row.accounts.some((account) => account.tone === 'syncing')
   );
 }
 

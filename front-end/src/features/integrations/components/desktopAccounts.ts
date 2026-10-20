@@ -11,7 +11,7 @@
  *                     when the backend sends no `accounts`); not connected → none;
  *                     × = confirmed row DELETE; sync_failed → lastError line
  *   gmailAccountViews one chip per address (existing disconnect / reconnect);
- *                     progress matched by address; idle = queued (quiet),
+ *                     progress matched by address; idle = not syncing (synced),
  *                     phase `history` = light "checking for new mail" (no bar)
  *   plaidAccountViews one chip per institution (existing disconnect / update);
  *                     progress matched by item id
@@ -156,11 +156,8 @@ type GmailSyncView = Pick<
 
 /** Tone, detail and bar choice of one healthy Gmail address from its contract entry. */
 function gmailSyncView(match: IntegrationAccount | undefined): GmailSyncView {
+  // No entry, or `idle` (connected, not syncing): a plain synced chip.
   if (match === undefined) return { tone: 'synced' };
-  // The shared row is syncing and this address has not started yet.
-  if (match.state === 'idle') {
-    return { tone: 'queued', detail: 'queued', title: 'Waiting for its turn to sync' };
-  }
   if (match.tone === 'syncing' && match.progress?.phase === GMAIL_LIGHT_PHASE) {
     return { tone: 'syncing', detail: 'checking for new mail', hideProgress: true };
   }
