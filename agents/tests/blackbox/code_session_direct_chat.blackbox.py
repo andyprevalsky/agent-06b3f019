@@ -441,7 +441,7 @@ async def test_monitor_keeps_held_session_open_and_never_writes_to_cli():
         await sandbox.start()
         with (
             patch.object(service, "SDK_POST_RESULT_EXIT_GRACE_S", 0.3),
-            patch.object(service, "SDK_IDLE_TIMEOUT_S", 0.3),
+            patch.object(service, "CODE_SESSION_IDLE_PAUSE_S", 0.3),
             patch.object(service, "TRANSCRIPT_FLUSH_INTERVAL_S", 0.0),
             patch.object(service, "save_claude_code_message", AsyncMock()),
             patch.object(service, "save_code_transcript_batch", side_effect=sink.save),

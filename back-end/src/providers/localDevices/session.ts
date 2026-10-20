@@ -104,7 +104,12 @@ export async function buildLocalSessionEnvs(params: {
   userId: string;
   goal: string;
   deviceName: string;
-}): Promise<{ envs: Record<string, string>; claudeTokenSource: string | null }> {
+}): Promise<{
+  envs: Record<string, string>;
+  claudeTokenSource: string | null;
+  /** The user's own integration row, so a usage limit marks exactly it (C15). */
+  integrationId: string | null;
+}> {
   // The Mac sets ROSE_LOCAL_WORKDIR to the granted folder (the CLI's cwd).
   const systemPrompt = buildLocalCodeAgentSystemPrompt();
   const noCredentials = (): LocalTargetUnavailableError =>
@@ -124,7 +129,8 @@ export async function buildLocalSessionEnvs(params: {
         CODE_AGENT_SYSTEM_PROMPT: systemPrompt,
         CODE_AGENT_HARNESS_MODE: 'code',
       },
-      claudeTokenSource: null,
+      claudeTokenSource: 'user',
+      integrationId: credential.integrationId ?? null,
     };
   }
   const credential = await fetchClaudeCodeCredentialsWithMeta(params.userId);
@@ -136,7 +142,7 @@ export async function buildLocalSessionEnvs(params: {
   };
   if (credential.credentials !== undefined) envs.CLAUDE_CODE_CREDENTIALS = credential.credentials;
   if (credential.accessToken !== undefined) envs.CLAUDE_CODE_OAUTH_TOKEN = credential.accessToken;
-  return { envs, claudeTokenSource: 'user' };
+  return { envs, claudeTokenSource: 'user', integrationId: null };
 }
 
 function startErrorToTarget(error: LocalSessionStartError, deviceName: string): Error {
@@ -186,7 +192,7 @@ export async function createLocalDeviceCodeSession(
   if (!target.available) {
     throw new LocalTargetUnavailableError(target.reason, target.deviceName, target.message);
   }
-  const { envs, claudeTokenSource } = await buildLocalSessionEnvs({
+  const { envs, claudeTokenSource, integrationId } = await buildLocalSessionEnvs({
     provider: params.provider,
     userId: target.userId,
     goal: params.goal,
@@ -238,6 +244,9 @@ export async function createLocalDeviceCodeSession(
         goal: params.goal,
         status: 'ACTIVE',
         claudeTokenSource,
+        claudeTokenIntegrationId: integrationId,
+        // Per-task provider: the agent tree lists it (W5 code_agents[].provider).
+        codeProvider: params.provider,
       },
     });
   } catch (error) {

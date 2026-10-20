@@ -63,6 +63,12 @@ export class IntegrationCache {
     return all.find((i) => i.name === integrationName);
   }
 
+  /** Every account row of one provider (multi-account providers have one per account). */
+  static async getAccounts(integrationName: string): Promise<Integration[]> {
+    const { all } = await this.getIntegrations();
+    return all.filter((i) => i.name === integrationName);
+  }
+
   /** The row of ONE account of a multi-account integration (e.g. a Telegram user id). */
   static async getIntegrationAccount(
     integrationName: string,

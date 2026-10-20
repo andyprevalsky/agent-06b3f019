@@ -1238,6 +1238,7 @@ async def _execute_single_task(
                     params.pop("output_schema", None)
                     params.pop("start_url", None)
                     params.pop("github_repo_link", None)
+                    params.pop("code_session_id", None)
                     # Clamp planner/DAG explores to a fast breadth-scan. The param-populator
                     # LLM tends to pick depth="deep" for "comprehensive" goals, turning a
                     # gating "identify the list" explore into a 50-turn crawl that blocks

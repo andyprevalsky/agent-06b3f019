@@ -22,7 +22,6 @@ import { withAgentGraphInstructions } from './agentGraph/cli';
 import { uploadAttachmentsToSandbox } from './e2bAttachments';
 import { overlayCodexRoseBridge } from './e2bCodexHarness';
 import { workDirForGithubRepo } from './e2bWorkDir';
-import { createSandboxWithRetry } from './e2bSandboxCreate';
 import {
   fileHash,
   findLocalClaudeCodeWsServer,
@@ -31,15 +30,21 @@ import {
   overlayCodexCodeWsServer,
 } from './e2bWsServerOverlay';
 import {
-  createLocalClaudeCodeSessionIfBillingBlocked,
-  resolveLocalSessionWorkDir,
-} from './claudeCodeLocalSession';
-import type { ProjectRestoreReport, ProjectWorkspace } from './projects/types';
+  acquireCodeSandbox,
+  codeSessionBranchEnvs,
+  codeSessionTaskFields,
+  type CodeAgentSessionResult,
+  createLocalCodeSessionFallback,
+  recordE2bCodeSessionSandbox,
+  releaseSandboxAfterFailedStart,
+} from './e2bCodeSessionSandbox';
+import { type CodeSessionRow } from './codeSessions/store';
+import type { ProjectWorkspace } from './projects/types';
 import { restoreSandboxProject } from './projects/workspace';
 import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
+import { waitForSandboxWsServer } from './e2bWsReady';
 import { codeSessionTurnToken } from './codeSessionTurns';
 import { applyUserUiSandboxEnvs, writeUserUiWorkspaceToSandboxSafe } from './userUi/workspace';
-import { agentToolsForLocalHome } from './agentTools/workspace';
 import { prepareCodeSessionWorkspace } from './codeSessionWorkspace';
 import {
   isRefreshOnlyOauthEnvelope,
@@ -54,6 +59,7 @@ import {
   shouldSkipSandboxAnthropicGatewayForOauth,
 } from './claudeCodeSandboxAuth';
 export { createSandboxWithRetry, isTransientSandboxCreateError } from './e2bSandboxCreate';
+export type { CodeAgentSessionResult } from './e2bCodeSessionSandbox';
 export {
   closeClaudeCodeSession,
   connectToSandbox,
@@ -93,7 +99,6 @@ if (!process.env.E2B_CLAUDE_CODE_TEMPLATE_ID) {
 }
 
 const WS_PORT = 3000;
-const SANDBOX_TIMEOUT_MS = 1800000; // 30 minutes (matches agents MAX_RUNTIME_S)
 const WS_READY_TIMEOUT_MS = 10000;
 const CODEX_WS_READY_TIMEOUT_MS = 30000;
 const WS_READY_POLL_INTERVAL_MS = 100;
@@ -111,6 +116,8 @@ const DEFAULT_CODEX_CODE_TEMPLATE_ID = 'codex-code';
 export interface ClaudeCodeSessionOptions {
   /** Project restored into `~/workspace` before the CLI starts (PJ3 / C9). */
   projectWorkspace?: ProjectWorkspace | null;
+  /** Persistent code session to resume or start (C1, C13). */
+  codeSession?: CodeSessionRow | null;
 }
 
 export async function createClaudeCodeSession(
@@ -121,13 +128,7 @@ export async function createClaudeCodeSession(
   userId?: string,
   fastModeCacheEnabled?: boolean,
   options: ClaudeCodeSessionOptions = {}
-): Promise<{
-  wsUrl: string;
-  taskId: string;
-  sandboxId: string;
-  uploadedFiles: string[];
-  projectRestore?: ProjectRestoreReport | null;
-}> {
+): Promise<CodeAgentSessionResult> {
   // Serialize creates — concurrent reserve-script calls stampede E2B redis.
   return withClaudeCodeCreateSlot(() =>
     createClaudeCodeSessionUnlocked(
@@ -145,19 +146,14 @@ export async function createClaudeCodeSession(
 async function createClaudeCodeSessionUnlocked(
   agentId: string,
   goal: string,
-  attachments?: FilePointer[],
-  githubRepoUrl?: string,
-  userId?: string,
-  fastModeCacheEnabled?: boolean,
-  options: ClaudeCodeSessionOptions = {}
-): Promise<{
-  wsUrl: string;
-  taskId: string;
-  sandboxId: string;
-  uploadedFiles: string[];
-  projectRestore?: ProjectRestoreReport | null;
-}> {
+  attachments: FilePointer[] | undefined,
+  githubRepoUrl: string | undefined,
+  userId: string | undefined,
+  fastModeCacheEnabled: boolean | undefined,
+  options: ClaudeCodeSessionOptions
+): Promise<CodeAgentSessionResult> {
   const projectWorkspace = options.projectWorkspace ?? null;
+  const codeSession = options.codeSession ?? null;
   log.info(`Creating Claude Code session for agent ${agentId}`);
 
   if (!process.env.E2B_API_KEY || !process.env.E2B_CLAUDE_CODE_TEMPLATE_ID) {
@@ -190,6 +186,8 @@ async function createClaudeCodeSessionUnlocked(
     buildCodeAgentSystemPrompt({
       githubRepoUrl,
       workDir,
+      branch: codeSession?.branch,
+      mergeTarget: codeSession?.mergeTarget,
     })
   );
 
@@ -198,6 +196,7 @@ async function createClaudeCodeSessionUnlocked(
     CLAUDE_CODE_GOAL: goal,
     CLAUDE_CODE_MODEL: model,
     CODE_AGENT_SYSTEM_PROMPT: systemPrompt,
+    ...codeSessionBranchEnvs(codeSession),
     // Write capability for direct-chat user turns (codeSessionTurns.ts). The
     // ws URL the browser reads stays read-only without it.
     ...(process.env.BACKEND_API_KEY
@@ -363,26 +362,18 @@ async function createClaudeCodeSessionUnlocked(
   // Create sandbox first (before DB record) to avoid placeholder conflicts.
   // When E2B team billing blocks creates, fall back to a same-host local
   // Claude Code ws-server so code-agent benches can still make progress.
-  let sandbox;
+  const templateIdForCreate = process.env.E2B_CLAUDE_CODE_TEMPLATE_ID;
+  let acquired;
   try {
-    sandbox = await createSandboxWithRetry(
-      process.env.E2B_CLAUDE_CODE_TEMPLATE_ID,
-      {
-        apiKey: process.env.E2B_API_KEY,
-        timeoutMs: SANDBOX_TIMEOUT_MS,
-        envs,
-      },
-      'Claude Code'
-    );
+    acquired = await acquireCodeSandbox(codeSession, templateIdForCreate, envs, 'Claude Code');
   } catch (err) {
-    const local = await createLocalClaudeCodeSessionIfBillingBlocked(err, {
+    const local = await createLocalCodeSessionFallback(err, codeSession, {
       taskId,
       agentId,
       goal,
       envs,
       attachments,
-      // Same-host session: loopback tools URL, MCP path under the local HOME.
-      userUiWorkspace: agentToolsForLocalHome(userUiWorkspace, resolveLocalSessionWorkDir(taskId)),
+      userUiWorkspace,
       projectWorkspace,
       claudeTokenSource,
       claudeTokenIntegrationId:
@@ -391,8 +382,10 @@ async function createClaudeCodeSessionUnlocked(
     if (local) return local;
     throw err;
   }
+  const { sandbox, resumedFrom, cliSessionId } = acquired;
+  if (cliSessionId !== null) envs.CLAUDE_CODE_RESUME_SESSION_ID = cliSessionId;
 
-  log.info(`Created sandbox: ${sandbox.sandboxId}`);
+  log.info(`Using sandbox: ${sandbox.sandboxId} (${resumedFrom})`);
   await overlayClaudeCodeWsServer(sandbox);
   await writeUserUiWorkspaceToSandboxSafe(sandbox, userUiWorkspace, agentId);
   const project = await restoreSandboxProject(taskId, sandbox, projectWorkspace);
@@ -405,11 +398,12 @@ async function createClaudeCodeSessionUnlocked(
 
   // Start the WebSocket server (runs Claude Code internally)
   // timeoutMs: 0 = no timeout (default is 60s which was killing the process!)
+  // envs: a resumed sandbox keeps its creation env; pass this spawn's explicitly.
   sandbox.commands
     .run('node /home/user/ws-server.mjs', {
       background: true,
       timeoutMs: 0,
-      ...(project.envs ? { envs: project.envs } : {}),
+      envs: { ...envs, ...(project.envs ?? {}) },
     })
     .catch((err) =>
       log.error('Failed to start WS server', {
@@ -419,32 +413,15 @@ async function createClaudeCodeSessionUnlocked(
 
   // Wait for WS server to be ready
   log.info('Waiting for WebSocket server to start');
-  const startTime = Date.now();
-  let wsReady = false;
-
-  // eslint-disable-next-line no-restricted-syntax -- polling loop (wait-until-ready), not a retry-on-error pattern
-  while (Date.now() - startTime < WS_READY_TIMEOUT_MS) {
-    await new Promise((resolve) => setTimeout(resolve, WS_READY_POLL_INTERVAL_MS));
-    try {
-      // Check if port 3000 is listening
-      const result = await sandbox.commands.run(`netstat -tln | grep :${WS_PORT}`, {
-        timeoutMs: 2000,
-      });
-      if (result.exitCode === 0 && result.stdout.includes(`:${WS_PORT}`)) {
-        const elapsedMs = Date.now() - startTime;
-        log.info(`WebSocket server ready in ${elapsedMs}ms`);
-        wsReady = true;
-        break;
-      }
-    } catch {
-      // Ignore errors, just retry
-    }
-  }
-
-  const totalElapsed = Date.now() - startTime;
-  if (!wsReady) {
-    log.warn(`WebSocket server readiness check timed out after ${totalElapsed}ms`);
-    await sandbox.kill();
+  const ws = await waitForSandboxWsServer(sandbox, {
+    port: WS_PORT,
+    timeoutMs: WS_READY_TIMEOUT_MS,
+    pollMs: WS_READY_POLL_INTERVAL_MS,
+  });
+  if (ws.ready) log.info(`WebSocket server ready in ${ws.elapsedMs}ms`);
+  else {
+    log.warn(`WebSocket server readiness check timed out after ${ws.elapsedMs}ms`);
+    await releaseSandboxAfterFailedStart(sandbox, codeSession);
     throw new Error('Claude Code WebSocket server failed to become ready');
   }
 
@@ -460,9 +437,11 @@ async function createClaudeCodeSessionUnlocked(
       claudeTokenSource,
       claudeTokenIntegrationId:
         credentialMeta?.source === 'pool' ? (credentialMeta.poolTokenId ?? null) : null,
+      ...codeSessionTaskFields(codeSession, 'claude'),
       projectId: projectWorkspace?.project.id ?? null,
     },
   });
+  await recordE2bCodeSessionSandbox(codeSession, sandbox.sandboxId);
 
   log.info(`Session ready: ${taskId}, WS: ${wsUrl}`);
 
@@ -471,6 +450,8 @@ async function createClaudeCodeSessionUnlocked(
     taskId,
     sandboxId: sandbox.sandboxId,
     uploadedFiles,
+    resumedFrom,
+    cliSessionId,
     projectRestore: project.report,
   };
 }
@@ -486,8 +467,9 @@ export async function createCodexCodeSession(
     harnessMode?: 'code' | 'rose';
     roseApiBaseUrl?: string;
     memoryEnabled?: boolean;
-  }
-): Promise<{ wsUrl: string; taskId: string; sandboxId: string; uploadedFiles: string[] }> {
+  },
+  codeSession: CodeSessionRow | null = null
+): Promise<CodeAgentSessionResult> {
   log.info(`Creating Codex Code session for agent ${agentId}`);
 
   if (!process.env.E2B_API_KEY) {
@@ -519,6 +501,8 @@ export async function createCodexCodeSession(
           buildCodeAgentSystemPrompt({
             githubRepoUrl,
             workDir,
+            branch: codeSession?.branch,
+            mergeTarget: codeSession?.mergeTarget,
           })
         );
 
@@ -543,6 +527,7 @@ export async function createCodexCodeSession(
     CODEX_MODEL: model,
     CODE_AGENT_SYSTEM_PROMPT: systemPrompt,
     CODE_AGENT_HARNESS_MODE: harnessMode,
+    ...codeSessionBranchEnvs(codeSession),
     // Write capability for inbound turns (agent-graph messages, direct chat);
     // same per-task token as the Claude Code session.
     ...(process.env.BACKEND_API_KEY
@@ -623,17 +608,15 @@ export async function createCodexCodeSession(
   const userUiWorkspace = await prepareCodeSessionWorkspace(userId, agentId, taskId, 'codex');
   applyUserUiSandboxEnvs(envs, userUiWorkspace);
 
-  const sandbox = await createSandboxWithRetry(
+  const { sandbox, resumedFrom, cliSessionId } = await acquireCodeSandbox(
+    codeSession,
     templateId,
-    {
-      apiKey: process.env.E2B_API_KEY,
-      timeoutMs: SANDBOX_TIMEOUT_MS,
-      envs,
-    },
+    envs,
     'Codex Code'
   );
+  if (cliSessionId !== null) envs.CODEX_RESUME_SESSION_ID = cliSessionId;
 
-  log.info(`Created Codex sandbox: ${sandbox.sandboxId}`);
+  log.info(`Using Codex sandbox: ${sandbox.sandboxId} (${resumedFrom})`);
   await overlayCodexCodeWsServer(sandbox);
   if (harnessMode === 'rose') {
     await overlayCodexRoseBridge(sandbox);
@@ -649,6 +632,7 @@ export async function createCodexCodeSession(
     .run('node /home/user/ws-server.mjs', {
       background: true,
       timeoutMs: 0,
+      envs,
     })
     .catch((err) =>
       log.error('Failed to start Codex WS server', {
@@ -657,28 +641,15 @@ export async function createCodexCodeSession(
     );
 
   log.info('Waiting for Codex WebSocket server to start');
-  const startTime = Date.now();
-  let wsReady = false;
-  // eslint-disable-next-line no-restricted-syntax -- polling loop (wait-until-ready), not retry fallback
-  while (Date.now() - startTime < CODEX_WS_READY_TIMEOUT_MS) {
-    await new Promise((resolve) => setTimeout(resolve, WS_READY_POLL_INTERVAL_MS));
-    try {
-      const result = await sandbox.commands.run(`netstat -tln | grep :${WS_PORT}`, {
-        timeoutMs: 2000,
-      });
-      if (result.exitCode === 0 && result.stdout.includes(`:${WS_PORT}`)) {
-        log.info(`Codex WebSocket server ready in ${Date.now() - startTime}ms`);
-        wsReady = true;
-        break;
-      }
-    } catch {
-      // Ignore readiness probe failures until timeout.
-    }
-  }
-
-  if (!wsReady) {
-    log.warn(`Codex WebSocket server readiness check timed out after ${Date.now() - startTime}ms`);
-    await sandbox.kill();
+  const ws = await waitForSandboxWsServer(sandbox, {
+    port: WS_PORT,
+    timeoutMs: CODEX_WS_READY_TIMEOUT_MS,
+    pollMs: WS_READY_POLL_INTERVAL_MS,
+  });
+  if (ws.ready) log.info(`Codex WebSocket server ready in ${ws.elapsedMs}ms`);
+  else {
+    log.warn(`Codex WebSocket server readiness check timed out after ${ws.elapsedMs}ms`);
+    await releaseSandboxAfterFailedStart(sandbox, codeSession);
     throw new Error('Codex WebSocket server failed to become ready');
   }
 
@@ -693,8 +664,10 @@ export async function createCodexCodeSession(
       claudeTokenSource: credentialMeta?.source ?? null,
       claudeTokenIntegrationId:
         credentialMeta?.integrationId ?? credentialMeta?.poolTokenId ?? null,
+      ...codeSessionTaskFields(codeSession, 'codex'),
     },
   });
+  await recordE2bCodeSessionSandbox(codeSession, sandbox.sandboxId);
 
   log.info(`Codex session ready: ${taskId}, WS: ${wsUrl}`);
 
@@ -703,5 +676,7 @@ export async function createCodexCodeSession(
     taskId,
     sandboxId: sandbox.sandboxId,
     uploadedFiles,
+    resumedFrom,
+    cliSessionId,
   };
 }

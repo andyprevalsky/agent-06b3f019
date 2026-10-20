@@ -8,7 +8,9 @@
  *
  * State precedence: a provider health of `needs_reconnect` always wins (only
  * re-consent fixes it); otherwise a progress row, when present, is
- * authoritative; otherwise the legacy health (row status / credential state).
+ * authoritative; otherwise the legacy health (row status / credential state;
+ * a Gmail row's SYNCING lease makes an address without progress `idle`, never
+ * `syncing`).
  */
 
 import type { CookieProfileSource, EmailCredentialSource, PlaidItemSource } from './repo.accounts';
@@ -71,7 +73,9 @@ function credentialAccounts(row: AccountViewRow): KnownAccount[] {
   const accounts: KnownAccount[] = [];
   for (const credential of row.emailCredentials ?? []) {
     if (credential.email === null || credential.email === '') continue;
-    let health: SyncState = row.status === 'SYNCING' ? 'syncing' : 'synced';
+    // The shared row's SYNCING is a job lease, not a per-address claim: an address
+    // only reads `syncing` from its own progress row. Without one it is queued.
+    let health: SyncState = row.status === 'SYNCING' ? 'idle' : 'synced';
     if (credential.state === 'needs_reconnect') health = 'needs_reconnect';
     else if (credential.state === 'sync_failed') health = 'failed';
     accounts.push({
@@ -82,7 +86,8 @@ function credentialAccounts(row: AccountViewRow): KnownAccount[] {
       health,
       // The shared row's sync time is not a per-address claim.
       lastSyncAt: null,
-      lastError: health === 'synced' || health === 'syncing' ? null : credential.lastErrorReason,
+      lastError:
+        health === 'failed' || health === 'needs_reconnect' ? credential.lastErrorReason : null,
     });
   }
   return accounts;
@@ -183,8 +188,11 @@ export function buildAccountsView(input: {
       progressByKey.delete(key);
     }
   }
-  // A first sync can report progress before its account row exists.
+  // A first sync can report progress before its account row exists. An email
+  // address (Gmail) is always connected before its first sync, so its unmatched
+  // progress is a late write for a removed address, not a new account.
   for (const progress of progressByKey.values()) {
+    if (resolveAccountAdapter(progress.provider).list === 'email_credentials') continue;
     const snapshot = snapshotOf(progress);
     push({
       provider: snapshot.provider,

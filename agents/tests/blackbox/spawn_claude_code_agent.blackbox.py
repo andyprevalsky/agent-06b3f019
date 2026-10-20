@@ -2073,422 +2073,232 @@ async def test_run_agentic_loop_connect_fail_raises():
             assert "Failed to connect" in str(e)
 
 
-async def test_run_agentic_loop_sdk_idle_timeout_breaks():
-    """Hung CLI with no exit_code must break on SDK idle, not spin to MAX_RUNTIME.
+def _loop_kwargs(summary, **extra):
+    from utils.terminal_filter import TerminalFilter
 
-    Repro shape from cuda-kernel k=3 r12: Bash/ScheduleWakeup then only progress
-    chips (which do not refresh last_output_time). After silence flips
-    pending_output=False, autonomous CC waits for SDK exit forever without the
-    idle break.
+    return {
+        "agent_id": "a",
+        "task_id": "t",
+        "sandbox_id": "sb",
+        "goal": "g",
+        "ws_url": "wss://x",
+        "terminal": TerminalFilter(cols=80, rows=50),
+        "model": "rose-labs/rose-1-flash",
+        "claude_token": None,
+        "action_summary": summary,
+        "tool_call_id": "tc",
+        **extra,
+    }
+
+
+async def test_run_agentic_loop_idle_cli_is_paused_not_failed():
+    """A CLI with nothing in flight that goes quiet is paused (resumable), not killed.
+
+    C11: the old SDK_IDLE_TIMEOUT_S=180 broke the loop and the run was judged
+    incomplete. Now the loop ends with loop_outcome["idle_paused"] so the
+    activity pauses the session and reports status "paused".
     """
     import asyncio as aio
 
     from domains.spawn_claude_code_agent import service
-    from utils.terminal_filter import TerminalFilter
 
     class HangAfterOutput(_FakeWsClient):
         async def listen(self):
             await self.on_output("partial work", True)
-            # Stay connected with no further events and no on_exit.
             await aio.Event().wait()
 
-    terminal = TerminalFilter(cols=80, rows=50)
     setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
     summary: list[str] = []
-
+    outcome: dict = {}
     with (
         patch.object(service, "ClaudeCodeWsClient", HangAfterOutput),
-        patch.object(service, "SDK_IDLE_TIMEOUT_S", 0.05),
+        patch.object(service, "CODE_SESSION_IDLE_PAUSE_S", 0.05),
         patch.object(service, "SILENCE_TIMEOUT_S", 0.01),
-        patch.object(service, "MAX_RUNTIME_S", 30),
         patch("temporalio.activity.heartbeat"),
     ):
         t0 = aio.get_event_loop().time()
-        exit_code, attempt, history, itok, otok, events = await service._run_agentic_loop(
-            agent_id="a",
-            task_id="t",
-            sandbox_id="sb",
-            goal="g",
-            ws_url="wss://x",
-            terminal=terminal,
-            model="rose-labs/rose-1-flash",
-            claude_token=None,
-            action_summary=summary,
-            tool_call_id="tc",
-        )
+        exit_code, attempt, *_ = await service._run_agentic_loop(**_loop_kwargs(summary, loop_outcome=outcome))
         elapsed = aio.get_event_loop().time() - t0
 
-    assert exit_code == -1
-    assert attempt is False
-    assert elapsed < 5.0, f"idle break should be fast, took {elapsed:.2f}s"
-    assert any("SDK idle timeout" in s for s in summary), summary
+    assert exit_code == -1 and attempt is False
+    assert elapsed < 5.0, f"idle pause should be prompt, took {elapsed:.2f}s"
+    assert outcome.get("idle_paused") is True, outcome
+    assert any("pausing it (resumable)" in line for line in summary), summary
+    assert not any("timeout" in line.lower() for line in summary), summary
 
 
-async def test_run_agentic_loop_wait_tool_extends_sdk_idle_timeout():
-    """Monitor/ScheduleWakeup must stretch idle so productive waits aren't killed.
-
-    Repro: cuda-kernel-github-top100-code-agent k=3 r21 agent ce189356 —
-    ScheduleWakeup/Monitor then ~180s WebSocket silence while background work
-    continued → SDK idle kill, 0 artifacts, score 0.5 under verifier-disabled.
-    Progress chips do not refresh last_output_time; wait tools must.
-    """
+async def _assert_session_stays_attached(events: list, *, hold_s: float, end_with_exit: bool = True):
+    """Drive the loop with `events`, stay silent for hold_s (past the idle window), then exit."""
     import asyncio as aio
 
     from domains.spawn_claude_code_agent import service
-    from utils.terminal_filter import TerminalFilter
 
-    class HangAfterWaitTool(_FakeWsClient):
+    class Scripted(_FakeWsClient):
         async def listen(self):
-            await self.on_output("partial work", True)
-            if self.on_event:
-                await self.on_event(
-                    {
-                        "version": 1,
-                        "provider": "claude",
-                        "type": "tool_use",
-                        "name": "ScheduleWakeup",
-                    }
-                )
+            await self.on_output("working", True)
+            for event in events:
+                await self.on_event({"version": 1, "provider": "claude", **event})
+            await aio.sleep(hold_s)
+            if end_with_exit:
+                await self.on_exit(0)
             await aio.Event().wait()
 
-    terminal = TerminalFilter(cols=80, rows=50)
     setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
     summary: list[str] = []
-
+    outcome: dict = {}
     with (
-        patch.object(service, "ClaudeCodeWsClient", HangAfterWaitTool),
-        patch.object(service, "SDK_IDLE_TIMEOUT_S", 0.05),
-        patch.object(service, "SDK_WAIT_TOOL_IDLE_TIMEOUT_S", 0.35),
+        patch.object(service, "ClaudeCodeWsClient", Scripted),
+        patch.object(service, "CODE_SESSION_IDLE_PAUSE_S", 0.1),
         patch.object(service, "SILENCE_TIMEOUT_S", 0.01),
-        patch.object(service, "MAX_RUNTIME_S", 30),
         patch("temporalio.activity.heartbeat"),
     ):
         t0 = aio.get_event_loop().time()
-        exit_code, attempt, history, itok, otok, events = await service._run_agentic_loop(
-            agent_id="a",
-            task_id="t",
-            sandbox_id="sb",
-            goal="g",
-            ws_url="wss://x",
-            terminal=terminal,
-            model="rose-labs/rose-1-flash",
-            claude_token=None,
-            action_summary=summary,
-            tool_call_id="tc",
+        exit_code, attempt, _history, _i, _o, seen = await service._run_agentic_loop(
+            **_loop_kwargs(summary, loop_outcome=outcome)
         )
         elapsed = aio.get_event_loop().time() - t0
+    return exit_code, elapsed, outcome, summary, seen
 
-    assert exit_code == -1
-    assert attempt is False
-    assert elapsed >= 0.25, (
-        f"wait-tool idle extension should survive short 0.05s idle, took {elapsed:.2f}s"
+
+async def test_run_agentic_loop_in_flight_tool_has_no_idle_limit():
+    """A long Bash (tool_use with no tool_result) is work: never paused or killed.
+
+    Repro: cuda-kernel k=3 r22 CC#4 was idle-killed mid-Bash. With no runtime
+    limit the loop waits past 10x the idle window and returns on the CLI's exit.
+    """
+    exit_code, elapsed, outcome, summary, seen = await _assert_session_stays_attached(
+        [{"type": "tool_use", "name": "Bash"}], hold_s=1.0
     )
-    assert elapsed < 2.0, f"wait-tool idle should still break, took {elapsed:.2f}s"
-    assert any("SDK idle timeout" in s for s in summary), summary
-    assert any(e.get("name") == "ScheduleWakeup" for e in events), events
+    assert exit_code == 0, (exit_code, summary)
+    assert elapsed >= 0.9, f"in-flight Bash must hold the session past the idle window, took {elapsed:.2f}s"
+    assert "idle_paused" not in outcome, outcome
+    assert any(e.get("name") == "Bash" for e in seen), seen
 
 
-async def test_run_agentic_loop_in_flight_bash_extends_sdk_idle_timeout():
-    """Long-running Bash must stretch idle until tool_result, not die mid-command.
+async def test_run_agentic_loop_nameless_in_flight_tool_has_no_idle_limit():
+    """tool_use without a name still counts as in flight (CodeRabbit #1260 symmetry)."""
+    exit_code, elapsed, outcome, summary, _seen = await _assert_session_stays_attached(
+        [{"type": "tool_use"}], hold_s=0.8
+    )
+    assert exit_code == 0 and elapsed >= 0.7 and "idle_paused" not in outcome, (exit_code, elapsed, outcome)
 
-    Repro: cuda-kernel-github-top100-code-agent k=3 r22 CC#4 — Bash tool_use
-    with no tool_result for >180s (command still running) → SDK idle kill while
-    work was in flight. Progress chips do not refresh last_output_time.
+
+async def test_run_agentic_loop_finished_tool_then_quiet_cli_is_paused():
+    """After tool_result with nothing in flight, a quiet CLI pauses (resumable)."""
+    exit_code, elapsed, outcome, summary, _seen = await _assert_session_stays_attached(
+        [{"type": "tool_use", "name": "Bash"}, {"type": "tool_result", "name": "Bash"}],
+        hold_s=5.0,
+        end_with_exit=False,
+    )
+    assert exit_code == -1 and outcome.get("idle_paused") is True, (exit_code, outcome, summary)
+    assert elapsed < 3.0, f"idle pause should fire on the idle window, took {elapsed:.2f}s"
+
+
+async def test_run_agentic_loop_sdk_result_zombie_ends_on_exit_grace():
+    """After SDK result, a zombie CLI that keeps tooling ends on the exit grace (r31 a2).
+
+    Not a failure: the run is verified on its result and the session pauses.
     """
     import asyncio as aio
 
     from domains.spawn_claude_code_agent import service
-    from utils.terminal_filter import TerminalFilter
-
-    class HangDuringBash(_FakeWsClient):
-        async def listen(self):
-            await self.on_output("starting bash", True)
-            if self.on_event:
-                await self.on_event(
-                    {
-                        "version": 1,
-                        "provider": "claude",
-                        "type": "tool_use",
-                        "name": "Bash",
-                    }
-                )
-            # No tool_result — Bash still running. Stay connected.
-            await aio.Event().wait()
-
-    terminal = TerminalFilter(cols=80, rows=50)
-    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
-    summary: list[str] = []
-
-    with (
-        patch.object(service, "ClaudeCodeWsClient", HangDuringBash),
-        patch.object(service, "SDK_IDLE_TIMEOUT_S", 0.2),
-        patch.object(service, "SDK_WAIT_TOOL_IDLE_TIMEOUT_S", 1.0),
-        patch.object(service, "SILENCE_TIMEOUT_S", 0.01),
-        patch.object(service, "MAX_RUNTIME_S", 30),
-        patch("temporalio.activity.heartbeat"),
-    ):
-        t0 = aio.get_event_loop().time()
-        exit_code, attempt, history, itok, otok, events = await service._run_agentic_loop(
-            agent_id="a",
-            task_id="t",
-            sandbox_id="sb",
-            goal="g",
-            ws_url="wss://x",
-            terminal=terminal,
-            model="rose-labs/rose-1-flash",
-            claude_token=None,
-            action_summary=summary,
-            tool_call_id="tc",
-        )
-        elapsed = aio.get_event_loop().time() - t0
-
-    assert exit_code == -1
-    assert attempt is False
-    # Base idle is wide enough that a loaded event loop still delivers the Bash
-    # tool_use before it can fire (0.05s flaked under the 30-way suite).
-    assert elapsed >= 0.8, (
-        f"in-flight Bash idle extension should survive short 0.2s idle, took {elapsed:.2f}s"
-    )
-    assert elapsed < 3.0, f"in-flight Bash idle should still break, took {elapsed:.2f}s"
-    assert any("SDK idle timeout" in s for s in summary), summary
-    assert any(e.get("name") == "Bash" for e in events), events
-
-
-async def test_run_agentic_loop_bash_tool_result_keeps_stretched_sdk_idle():
-    """Bash tool_result must NOT snap idle back to 180s (background work continues).
-
-    Repro: cuda-kernel-github-top100-code-agent k=3 r24 — Bash tool_use stretched
-    idle to 900s, then tool_result restored 180s while background Bash/network
-    work continued with no WS events → SDK idle kill, 0 artifacts, score 0.5.
-    Arm Bash like wait tools so post-result stretch survives until SDK `result`.
-    """
-    import asyncio as aio
-
-    from domains.spawn_claude_code_agent import service
-    from utils.terminal_filter import TerminalFilter
-
-    class HangAfterBashResult(_FakeWsClient):
-        async def listen(self):
-            await self.on_output("running bash", True)
-            if self.on_event:
-                await self.on_event(
-                    {
-                        "version": 1,
-                        "provider": "claude",
-                        "type": "tool_use",
-                        "name": "Bash",
-                    }
-                )
-                await self.on_event(
-                    {
-                        "version": 1,
-                        "provider": "claude",
-                        "type": "tool_result",
-                        "name": "Bash",
-                    }
-                )
-            # Background work continues — no further WS events.
-            await aio.Event().wait()
-
-    terminal = TerminalFilter(cols=80, rows=50)
-    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
-    summary: list[str] = []
-
-    with (
-        patch.object(service, "ClaudeCodeWsClient", HangAfterBashResult),
-        patch.object(service, "SDK_IDLE_TIMEOUT_S", 0.05),
-        patch.object(service, "SDK_WAIT_TOOL_IDLE_TIMEOUT_S", 0.35),
-        patch.object(service, "SILENCE_TIMEOUT_S", 0.01),
-        patch.object(service, "MAX_RUNTIME_S", 30),
-        patch("temporalio.activity.heartbeat"),
-    ):
-        t0 = aio.get_event_loop().time()
-        exit_code, attempt, history, itok, otok, events = await service._run_agentic_loop(
-            agent_id="a",
-            task_id="t",
-            sandbox_id="sb",
-            goal="g",
-            ws_url="wss://x",
-            terminal=terminal,
-            model="rose-labs/rose-1-flash",
-            claude_token=None,
-            action_summary=summary,
-            tool_call_id="tc",
-        )
-        elapsed = aio.get_event_loop().time() - t0
-
-    assert exit_code == -1
-    assert attempt is False
-    assert elapsed >= 0.25, (
-        f"post-Bash-result stretch should survive short 0.05s idle, took {elapsed:.2f}s"
-    )
-    assert elapsed < 2.0, f"post-Bash-result idle should still break, took {elapsed:.2f}s"
-    assert any("SDK idle timeout" in s for s in summary), summary
-    assert any(e.get("name") == "Bash" for e in events), events
-
-
-async def test_run_agentic_loop_sdk_result_blocks_stretch_rearm():
-    """After SDK result, Bash must not re-arm 900s stretch (r31 a2 repro).
-
-    Repro: cuda-kernel-github-top100-code-agent k=3 r31 a2 — SDK emitted
-    result=completed, then Bash/ScheduleWakeup re-armed the post-result stretch
-    and the session burned Max runtime (1800s) with 0 artifacts. Healthy
-    sessions (r31 a1) exit within ~1s of result. After result, stretch must
-    stay disarmed so short idle ends the zombie CLI.
-    """
-    import asyncio as aio
-
-    from domains.spawn_claude_code_agent import service
-    from utils.terminal_filter import TerminalFilter
 
     class HangAfterResultThenBash(_FakeWsClient):
         async def listen(self):
             await self.on_output("working", True)
-            if self.on_event:
-                await self.on_event(
-                    {
-                        "version": 1,
-                        "provider": "claude",
-                        "type": "tool_use",
-                        "name": "Bash",
-                    }
-                )
-                await self.on_event(
-                    {
-                        "version": 1,
-                        "provider": "claude",
-                        "type": "tool_result",
-                        "name": "Bash",
-                    }
-                )
-                await self.on_event(
-                    {
-                        "version": 1,
-                        "provider": "claude",
-                        "type": "result",
-                        "status": "completed",
-                    }
-                )
-                # Zombie CLI continues tooling after result (r31 a2 pattern).
-                await self.on_event(
-                    {
-                        "version": 1,
-                        "provider": "claude",
-                        "type": "tool_use",
-                        "name": "Bash",
-                    }
-                )
-                await self.on_event(
-                    {
-                        "version": 1,
-                        "provider": "claude",
-                        "type": "tool_result",
-                        "name": "Bash",
-                    }
-                )
+            for event in (
+                {"type": "tool_use", "name": "Bash"},
+                {"type": "tool_result", "name": "Bash"},
+                {"type": "result", "status": "completed"},
+                {"type": "tool_use", "name": "Bash"},
+            ):
+                await self.on_event({"version": 1, "provider": "claude", **event})
             await aio.Event().wait()
 
-    terminal = TerminalFilter(cols=80, rows=50)
     setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
     summary: list[str] = []
-
+    outcome: dict = {}
     with (
         patch.object(service, "ClaudeCodeWsClient", HangAfterResultThenBash),
-        patch.object(service, "SDK_IDLE_TIMEOUT_S", 0.05),
-        patch.object(service, "SDK_WAIT_TOOL_IDLE_TIMEOUT_S", 0.35),
-        patch.object(service, "SDK_POST_RESULT_EXIT_GRACE_S", 2.0),
+        patch.object(service, "CODE_SESSION_IDLE_PAUSE_S", 0.05),
+        patch.object(service, "SDK_POST_RESULT_EXIT_GRACE_S", 0.2),
         patch.object(service, "SILENCE_TIMEOUT_S", 0.01),
-        patch.object(service, "MAX_RUNTIME_S", 30),
         patch("temporalio.activity.heartbeat"),
     ):
         t0 = aio.get_event_loop().time()
-        exit_code, attempt, history, itok, otok, events = await service._run_agentic_loop(
-            agent_id="a",
-            task_id="t",
-            sandbox_id="sb",
-            goal="g",
-            ws_url="wss://x",
-            terminal=terminal,
-            model="rose-labs/rose-1-flash",
-            claude_token=None,
-            action_summary=summary,
-            tool_call_id="tc",
+        exit_code, attempt, _h, _i, _o, events = await service._run_agentic_loop(
+            **_loop_kwargs(summary, loop_outcome=outcome)
         )
         elapsed = aio.get_event_loop().time() - t0
 
-    assert exit_code == -1
-    assert attempt is False
-    # Must end on short idle (~0.05s), NOT the 0.35s stretch window.
-    assert elapsed < 0.25, (
-        f"post-SDK-result Bash must not re-arm stretch; took {elapsed:.2f}s (summary={summary})"
-    )
-    assert any(
-        "SDK idle timeout" in s or "Post-result exit grace" in s for s in summary
-    ), summary
+    assert exit_code == -1 and attempt is False
+    assert elapsed < 2.0, f"post-result zombie must end on the grace, took {elapsed:.2f}s ({summary})"
+    assert any("Post-result exit grace" in line for line in summary), summary
+    assert "idle_paused" not in outcome, "a declared result is verified, not paused"
     assert any(e.get("type") == "result" for e in events), events
 
 
 async def test_run_agentic_loop_post_result_exit_grace_breaks():
-    """Stdout after SDK result that refreshes idle must still hit exit grace.
-
-    If the zombie CLI keeps emitting PTY output after result, last_output_time
-    never goes silent long enough for short idle — grace is the backstop so we
-    do not burn MAX_RUNTIME_S.
-    """
+    """Stdout after SDK result that keeps refreshing silence must still hit exit grace."""
     import asyncio as aio
 
     from domains.spawn_claude_code_agent import service
-    from utils.terminal_filter import TerminalFilter
 
     class ChattyAfterResult(_FakeWsClient):
         async def listen(self):
             await self.on_output("working", True)
-            if self.on_event:
-                await self.on_event(
-                    {
-                        "version": 1,
-                        "provider": "claude",
-                        "type": "result",
-                        "status": "completed",
-                    }
-                )
-            # Keep refreshing last_output_time so short idle never fires.
+            await self.on_event({"version": 1, "provider": "claude", "type": "result", "status": "completed"})
             while True:
                 await aio.sleep(0.02)
                 await self.on_output("chip\n", False)
 
-    terminal = TerminalFilter(cols=80, rows=50)
     setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
     summary: list[str] = []
-
     with (
         patch.object(service, "ClaudeCodeWsClient", ChattyAfterResult),
-        patch.object(service, "SDK_IDLE_TIMEOUT_S", 5.0),
-        patch.object(service, "SDK_WAIT_TOOL_IDLE_TIMEOUT_S", 5.0),
         patch.object(service, "SDK_POST_RESULT_EXIT_GRACE_S", 0.15),
         patch.object(service, "SILENCE_TIMEOUT_S", 0.01),
-        patch.object(service, "MAX_RUNTIME_S", 30),
         patch("temporalio.activity.heartbeat"),
     ):
         t0 = aio.get_event_loop().time()
-        exit_code, attempt, history, itok, otok, events = await service._run_agentic_loop(
-            agent_id="a",
-            task_id="t",
-            sandbox_id="sb",
-            goal="g",
-            ws_url="wss://x",
-            terminal=terminal,
-            model="rose-labs/rose-1-flash",
-            claude_token=None,
-            action_summary=summary,
-            tool_call_id="tc",
-        )
+        exit_code, attempt, *_ = await service._run_agentic_loop(**_loop_kwargs(summary))
         elapsed = aio.get_event_loop().time() - t0
 
-    assert exit_code == -1
-    assert attempt is False
+    assert exit_code == -1 and attempt is False
     assert elapsed < 1.0, f"grace should end chatty post-result session quickly, took {elapsed:.2f}s"
-    assert any("Post-result exit grace" in s for s in summary), summary
+    assert any("Post-result exit grace" in line for line in summary), summary
+
+
+async def test_run_agentic_loop_keepalive_extends_attached_sandbox():
+    """While attached, the loop keeps the sandbox's idle window open (no auto-pause)."""
+    import asyncio as aio
+
+    from domains.spawn_claude_code_agent import service
+
+    class Working(_FakeWsClient):
+        async def listen(self):
+            await self.on_output("working", True)
+            await self.on_event({"version": 1, "provider": "claude", "type": "tool_use", "name": "Bash"})
+            await aio.sleep(0.6)
+            await self.on_exit(0)
+
+    keepalives: list = []
+
+    async def record_keepalive(task_id, code_provider="claude"):
+        keepalives.append((task_id, code_provider))
+        return True
+
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    with (
+        patch.object(service, "ClaudeCodeWsClient", Working),
+        patch.object(service, "CODE_SESSION_KEEPALIVE_INTERVAL_S", 0.1),
+        patch.object(service, "keepalive_e2b_session", side_effect=record_keepalive),
+        patch.object(service, "SILENCE_TIMEOUT_S", 0.01),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        exit_code, *_ = await service._run_agentic_loop(**_loop_kwargs([]))
+    assert exit_code == 0
+    assert len(keepalives) >= 3 and all(call == ("t", "claude") for call in keepalives), keepalives
 
 
 def test_log_code_agent_event_promotes_codex_fast_cache_request():
@@ -3220,6 +3030,12 @@ class _FakeCCWorkflow:
     async def wait_condition(self, predicate):
         return None
 
+    @staticmethod
+    def now():
+        from datetime import datetime, timezone
+
+        return datetime(2026, 10, 20, tzinfo=timezone.utc)
+
     async def execute_activity(self, fn, args=None, **kwargs):
         assert fn.__name__ == "resolve_code_agent_provider_activity"
         return args[0]
@@ -3686,18 +3502,50 @@ async def test_cc_execute_tool_readtimeout_soft_fails_finished():
     await _assert_cc_sandbox_infra_soft_fail("ReadTimeout('')", "tc-readtimeout")
 
 
-def test_cc_spawn_activity_retries_capacity_flakes_before_soft_fail():
-    """spawn_claude_code_activity must retry enough times for brief E2B 503s.
+def test_code_agent_activity_has_no_deadline_and_no_attempt_cap():
+    """C11 structural check: the code-agent activity's only liveness limit is its heartbeat.
 
-    r10 agent1 soft-failed after only 2 attempts, then DAG advanced into
-    attempt_completion with incomplete verification and timed out at 4200s.
+    Temporal requires start_to_close or schedule_to_close, so the call passes
+    CODE_AGENT_ACTIVITY_NO_DEADLINE (>= 10 years), never schedule_to_close, and
+    an unlimited retry policy. Capacity flakes still get bounded in-activity
+    retries before the soft-fail path (cuda-kernel k=3 r10 agent1) through
+    CODE_AGENT_ERROR_RETRY_LIMIT.
     """
+    import ast
     import inspect
+    import textwrap
+    from datetime import timedelta
 
+    from domains.spawn_claude_code_agent import config
     from domains.spawn_claude_code_agent import handler as cc_handler
 
-    src = inspect.getsource(cc_handler.SpawnClaudeCodeAgentManager.execute_tool)
-    assert "maximum_attempts=5" in src
+    tree = ast.parse(textwrap.dedent(inspect.getsource(cc_handler.SpawnClaudeCodeAgentManager.execute_tool)))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"start_activity", "execute_activity"}
+        and node.args
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "spawn_claude_code_activity"
+    ]
+    assert len(calls) == 1, f"expected one spawn_claude_code_activity schedule, found {len(calls)}"
+    keywords = {kw.arg: kw.value for kw in calls[0].keywords}
+    assert "schedule_to_close_timeout" not in keywords, "code-agent activity must not have a schedule_to_close limit"
+    deadline = keywords.get("start_to_close_timeout")
+    assert isinstance(deadline, ast.Name) and deadline.id == "CODE_AGENT_ACTIVITY_NO_DEADLINE", ast.dump(deadline)
+    assert config.CODE_AGENT_ACTIVITY_NO_DEADLINE >= timedelta(days=3650)
+    assert "heartbeat_timeout" in keywords, "liveness must stay heartbeat-based"
+    retry = keywords.get("retry_policy")
+    assert isinstance(retry, ast.Call), ast.dump(retry) if retry else "retry_policy missing"
+    attempts = {kw.arg: kw.value for kw in retry.keywords}.get("maximum_attempts")
+    assert attempts is None or (isinstance(attempts, ast.Constant) and attempts.value == 0), (
+        "code-agent retries must be unlimited (maximum_attempts=0)"
+    )
+    assert config.CODE_AGENT_ERROR_RETRY_LIMIT >= 5
+    for removed in ("MAX_RUNTIME_S", "SDK_IDLE_TIMEOUT_S", "SDK_WAIT_TOOL_IDLE_TIMEOUT_S"):
+        assert not hasattr(config, removed), f"{removed} is a code-agent runtime limit (C11)"
 
 
 async def test_cc_execute_tool_paused_cancels_activity():
@@ -3891,29 +3739,30 @@ async def _run_all_tests():
     # _run_agentic_loop
     await r.record_async("run_agentic_loop_exit_zero", test_run_agentic_loop_exit_zero_completes)
     await r.record_async("run_agentic_loop_connect_fail", test_run_agentic_loop_connect_fail_raises)
+    await r.record_async("run_agentic_loop_idle_cli_paused", test_run_agentic_loop_idle_cli_is_paused_not_failed)
     await r.record_async(
-        "run_agentic_loop_sdk_idle_timeout",
-        test_run_agentic_loop_sdk_idle_timeout_breaks,
+        "run_agentic_loop_in_flight_tool_no_idle_limit",
+        test_run_agentic_loop_in_flight_tool_has_no_idle_limit,
     )
     await r.record_async(
-        "run_agentic_loop_wait_tool_extends_sdk_idle",
-        test_run_agentic_loop_wait_tool_extends_sdk_idle_timeout,
+        "run_agentic_loop_nameless_in_flight_tool_no_idle_limit",
+        test_run_agentic_loop_nameless_in_flight_tool_has_no_idle_limit,
     )
     await r.record_async(
-        "run_agentic_loop_in_flight_bash_extends_sdk_idle",
-        test_run_agentic_loop_in_flight_bash_extends_sdk_idle_timeout,
+        "run_agentic_loop_finished_tool_then_quiet_paused",
+        test_run_agentic_loop_finished_tool_then_quiet_cli_is_paused,
     )
     await r.record_async(
-        "run_agentic_loop_bash_tool_result_keeps_stretched_sdk_idle",
-        test_run_agentic_loop_bash_tool_result_keeps_stretched_sdk_idle,
-    )
-    await r.record_async(
-        "run_agentic_loop_sdk_result_blocks_stretch_rearm",
-        test_run_agentic_loop_sdk_result_blocks_stretch_rearm,
+        "run_agentic_loop_sdk_result_zombie_exit_grace",
+        test_run_agentic_loop_sdk_result_zombie_ends_on_exit_grace,
     )
     await r.record_async(
         "run_agentic_loop_post_result_exit_grace_breaks",
         test_run_agentic_loop_post_result_exit_grace_breaks,
+    )
+    await r.record_async(
+        "run_agentic_loop_keepalive_extends_sandbox",
+        test_run_agentic_loop_keepalive_extends_attached_sandbox,
     )
     r.record("log_codex_fast_cache_event", test_log_code_agent_event_promotes_codex_fast_cache_request)
     r.record(
@@ -3982,14 +3831,10 @@ async def _run_all_tests():
         test_cc_execute_tool_readtimeout_soft_fails_finished,
     )
     r.record(
-        "cc_spawn_activity_retries_capacity_flakes",
-        test_cc_spawn_activity_retries_capacity_flakes_before_soft_fail,
+        "cc_activity_no_deadline_no_attempt_cap",
+        test_code_agent_activity_has_no_deadline_and_no_attempt_cap,
     )
     await r.record_async("cc_exec_paused", test_cc_execute_tool_paused_cancels_activity)
-    r.record(
-        "claude_code_max_runtime_cuda_kernel_headroom",
-        test_claude_code_max_runtime_leaves_cuda_kernel_bench_headroom,
-    )
     await r.record_async(
         "cc_local_sandbox_stop_ends_its_cli",
         test_local_code_sandbox_stop_ends_the_claude_cli_it_spawned,
@@ -4195,32 +4040,6 @@ def test_format_code_events_transcript_covers_failed_and_status_only_results():
         "[Claude result] failed - rank script exited 1",
         "[Claude result] cancelled",
     ]
-
-
-def test_claude_code_max_runtime_leaves_cuda_kernel_bench_headroom():
-    """Hung Claude Code must return before the cuda-kernel bench budget is gone.
-
-    Local repro (k=3, 2026-09-02): with MAX_RUNTIME_S=3600 and task timeout=4200,
-    two roots waited 3009s/3721s on claude_code_activity_wait and timed out with
-    no recovery. A completed code-agent path finished CC in ~947s. Cap CC at 30m
-    so a hang still leaves ≥15m of parent budget inside the 70m task timeout.
-    """
-    import json
-    from pathlib import Path
-
-    from domains.spawn_claude_code_agent.config import MAX_RUNTIME_S
-
-    tasks = json.loads(
-        (Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json").read_text()
-    )
-    if isinstance(tasks, dict):
-        tasks = tasks.get("tasks", tasks)
-    cuda = next(t for t in tasks if t["name"] == "cuda-kernel-github-top100-code-agent")
-    task_timeout = int(cuda["timeout_seconds"])
-
-    assert MAX_RUNTIME_S == 1800
-    assert task_timeout >= 4200
-    assert task_timeout - MAX_RUNTIME_S >= 900
 
 
 # ── Deploy drain: detach from the sandbox, reattach to the same run ──────────
@@ -5070,28 +4889,22 @@ def test_sandbox_ws_servers_linger_past_the_activity_heartbeat_timeout():
     """Every code sandbox keeps its final result reachable for a crash retry.
 
     The retry after a dead worker starts only once the activity heartbeat
-    timeout passes. If the ws-server exits sooner after the CLI finishes, the
-    retry finds nothing to reattach to and reruns the task in a new sandbox.
+    timeout passes. If the ws-server exits after the CLI finishes, the retry
+    finds nothing to reattach to and reruns the task. With no timeouts (C11)
+    the servers serve the final buffer until the session is closed: no linger
+    deadline may shut them down.
     """
     import re
-
-    from domains.spawn_claude_code_agent.config import CODE_ACTIVITY_HEARTBEAT_TIMEOUT_S, MAX_RUNTIME_S
 
     servers = sorted((Path(__file__).resolve().parents[3] / "e2b-templates").glob("*/ws-server.mjs"))
     assert len(servers) >= 2, f"expected the Claude Code and Codex ws-servers, found {servers}"
     for server in servers:
         src = server.read_text()
-        match = re.search(r"const REATTACH_LINGER_MS = ([\d\s*]+);", src)
-        assert match, f"{server.parent.name}/ws-server.mjs must define REATTACH_LINGER_MS"
-        linger_ms = 1
-        for factor in match.group(1).split("*"):
-            linger_ms *= int(factor)
-        assert (CODE_ACTIVITY_HEARTBEAT_TIMEOUT_S + 60) * 1000 <= linger_ms <= MAX_RUNTIME_S * 1000, (
-            f"{server.parent.name} lingers {linger_ms}ms; a retry starts after {CODE_ACTIVITY_HEARTBEAT_TIMEOUT_S}s"
+        assert "REATTACH_LINGER_MS" not in src, f"{server.parent.name}/ws-server.mjs must not time out its linger"
+        assert not re.search(r"setTimeout\(\s*\(\)\s*=>\s*shutdown\(", src), (
+            f"{server.parent.name}/ws-server.mjs must shut down only when the session is closed"
         )
-        assert re.search(r"setTimeout\(\s*\(\)\s*=>\s*shutdown\([^)]*\),\s*REATTACH_LINGER_MS\s*\)", src), (
-            f"{server.parent.name}/ws-server.mjs must shut down only after REATTACH_LINGER_MS"
-        )
+        assert "Serving final buffer for reattach until closed" in src, server
 
 
 _DRAINED_SESSION = {
@@ -5191,7 +5004,9 @@ async def test_cc_manager_reattaches_after_worker_drain_on_same_queue():
         restore()
 
     assert len(fake.started) == 2, fake.started
-    assert len(fake.started[0]) == 16 and fake.started[0][15] is None, fake.started[0]
+    # 17 args: ..., resume_session (15), code_session_request (16).
+    assert len(fake.started[0]) == 17 and fake.started[0][15] is None, fake.started[0]
+    assert fake.started[0][16] is None, "no code_session_id requested"
     assert fake.started[1][15] == _DRAINED_SESSION, fake.started[1][15]
     titles = _cc_titles(events)
     assert titles.count("Starting Claude Code sandbox") == 1, titles

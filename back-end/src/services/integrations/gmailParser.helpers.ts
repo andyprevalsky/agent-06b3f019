@@ -3,6 +3,8 @@ import { createLogger } from '../../providers/logger';
 const log = createLogger('GmailParser');
 
 export interface ParsedEmail {
+  /** Gmail's per-mailbox message id (absent on non-Gmail sources). */
+  gmailId?: string;
   from: string;
   fromName: string | null;
   to: string[];
@@ -84,6 +86,8 @@ export interface EmailMetadata {
   to: string[];
   cc: string[];
   isSent: boolean;
+  /** Gmail internalDate in ms since epoch (0 when Google omitted it). */
+  internalDate: number;
 }
 
 /**
@@ -130,6 +134,7 @@ export function parseGmailMessage(msg: GmailMessageResponse): ParsedEmail | null
     const isSent = labels.includes('SENT');
 
     return {
+      gmailId: msg.id,
       from,
       fromName,
       to,

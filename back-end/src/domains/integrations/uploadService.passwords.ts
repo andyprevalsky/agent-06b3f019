@@ -1,29 +1,31 @@
 /**
  * Integrations upload service — cacheStorage, passwords, and Apple passwords.
  * Split from uploadService.ts for max-lines compliance.
+ *
+ * Passwords (plan row I7): one BrowserPassword row per
+ * (origin, username, browserSource, browserProfile). Each source is the
+ * provider `<source>_passwords` and each of its profiles one account
+ * `<source>:<profile>` (`default` = no profile), with upload progress
+ * done/total = the batch.
  */
 
-import {
-  type CacheStoragePayload,
-  type PasswordPayload,
-  type ApplePasswordEntry,
-  IntegrationType,
-  IntegrationStatus,
-} from './types';
+import { type CacheStoragePayload, type PasswordPayload, type ApplePasswordEntry } from './types';
 import { createLogger } from '../../providers/logger';
 import { encryptPasswordForStorage } from '../../providers/credentialEnvelope';
 import * as repo from './repo';
+import { passwordIntegrationName } from './service.credentialAccounts';
+import { cookieAccountStorageId } from './syncAccountsContract';
+import {
+  trackCredentialUpload,
+  upsertCredentialAccountRow,
+  type CredentialUploadAccount,
+  type UploadedCredentialAccount,
+} from './uploadService.credentialAccounts';
 
 export { encryptPasswordForStorage };
 
 const log = createLogger('Integrations');
-
-function passwordIntegrationName(browserSource: string): string {
-  if (browserSource === 'apple_passwords') {
-    return 'apple_passwords';
-  }
-  return `${browserSource}_passwords`;
-}
+const APPLE_PASSWORDS_SOURCE = 'apple_passwords';
 
 function normalizeBrowserProfile(profile: unknown): string {
   if (typeof profile === 'string') return profile;
@@ -70,6 +72,76 @@ export async function processCacheStorageUpload(
   return { originCount: origins.length };
 }
 
+interface PasswordRow {
+  origin: string;
+  username: string;
+  encryptedPassword: string;
+  dateLastUsed: number | null;
+  dateCreated: number | null;
+  browserSource: string;
+  browserProfile: string;
+}
+
+const accountKey = (row: { browserSource: string; browserProfile: string }) =>
+  `${passwordIntegrationName(row.browserSource)}\u0000${row.browserProfile}`;
+
+/** Deduplicate by the stored key (origin, username, source, profile), keeping the most recently used. */
+function deduplicatePasswordsByStoredKey(passwords: PasswordRow[]): PasswordRow[] {
+  const byKey = new Map<string, PasswordRow>();
+  for (const pwd of passwords) {
+    const key = `${pwd.origin}\u0000${pwd.username}\u0000${pwd.browserSource}\u0000${pwd.browserProfile}`;
+    const existing = byKey.get(key);
+    if (existing === undefined || (pwd.dateLastUsed ?? 0) > (existing.dateLastUsed ?? 0)) {
+      byKey.set(key, pwd);
+    }
+  }
+  return Array.from(byKey.values());
+}
+
+interface PasswordUploadAccount extends CredentialUploadAccount {
+  browserSource: string;
+  browserProfile: string;
+}
+
+function passwordAccounts(passwords: PasswordRow[]): PasswordUploadAccount[] {
+  const accounts = new Map<string, PasswordUploadAccount>();
+  for (const pwd of passwords) {
+    const key = accountKey(pwd);
+    const account = accounts.get(key) ?? {
+      provider: passwordIntegrationName(pwd.browserSource),
+      // Same `<source>:<profile>` spelling as browser-cookie accounts (I6).
+      accountId: cookieAccountStorageId(pwd.browserSource, pwd.browserProfile),
+      browserSource: pwd.browserSource,
+      browserProfile: pwd.browserProfile,
+      count: 0,
+    };
+    account.count += 1;
+    accounts.set(key, account);
+  }
+  return [...accounts.values()];
+}
+
+/** Store deduplicated rows with per-account progress and one Integration row per account. */
+async function storePasswordUpload(
+  userId: string,
+  passwords: PasswordRow[],
+  configFor: (account: PasswordUploadAccount) => Record<string, string | number>
+): Promise<UploadedCredentialAccount[]> {
+  const accounts = passwordAccounts(passwords);
+  return trackCredentialUpload(userId, accounts, 'passwords', async () => {
+    await bulkUpsertPasswordEntries(userId, passwords);
+    for (const account of accounts) {
+      await upsertCredentialAccountRow(userId, account, configFor(account));
+      log.info('Upserted password account', {
+        provider: account.provider,
+        hasProfile: account.accountId !== '',
+        count: account.count,
+        userId,
+      });
+    }
+  });
+}
+
 /**
  * Process browser passwords upload.
  */
@@ -77,68 +149,36 @@ export async function processPasswordsUpload(userId: string, passwordData: Passw
   log.info('Received passwords', { count: passwordData.passwords.length, userId });
 
   if (passwordData.passwords.length === 0) {
-    return { passwordCount: 0 };
+    return { passwordCount: 0, accounts: [] as UploadedCredentialAccount[] };
   }
 
-  const deduplicatedPasswords = deduplicatePasswordsByOriginUsername(passwordData.passwords);
+  const deduplicatedPasswords = deduplicatePasswordsByStoredKey(
+    passwordData.passwords.map((pwd) => ({
+      origin: pwd.origin,
+      username: pwd.username,
+      encryptedPassword: pwd.encryptedPassword,
+      dateLastUsed: pwd.dateLastUsed,
+      dateCreated: pwd.dateCreated,
+      browserSource: pwd.browserSource,
+      browserProfile: normalizeBrowserProfile(pwd.browserProfile),
+    }))
+  );
   log.info('Deduplicated passwords', { count: deduplicatedPasswords.length });
 
-  await bulkUpsertPasswordEntries(userId, deduplicatedPasswords);
+  const uploadedAt = new Date().toISOString();
+  const accounts = await storePasswordUpload(userId, deduplicatedPasswords, (account) => ({
+    browserSource: account.browserSource,
+    browserProfile: account.browserProfile,
+    passwordCount: account.count,
+    uploadedAt,
+  }));
   log.info('Upserted passwords', { count: deduplicatedPasswords.length, userId });
 
-  // Create integration records per browser source
-  const browserSources = new Set(deduplicatedPasswords.map((p) => p.browserSource));
-  for (const source of browserSources) {
-    const sourceCount = deduplicatedPasswords.filter((p) => p.browserSource === source).length;
-    const integrationName = passwordIntegrationName(source);
-    await repo.upsertIntegration({
-      userId,
-      name: integrationName,
-      type: IntegrationType.DATA_SOURCE,
-      status: IntegrationStatus.CONNECTED,
-      isActive: true,
-      lastSyncAt: new Date(),
-      lastSuccessfulSyncAt: new Date(),
-      config: {
-        browserSource: source,
-        passwordCount: sourceCount,
-        uploadedAt: new Date().toISOString(),
-      },
-    });
-    log.info('Upserted password integration', { integrationName, userId });
-  }
-
-  return { passwordCount: deduplicatedPasswords.length };
+  return { passwordCount: deduplicatedPasswords.length, accounts };
 }
 
-/** Deduplicate passwords by (origin, username), keeping most recently used. */
-function deduplicatePasswordsByOriginUsername<
-  T extends { origin: string; username: string; dateLastUsed: number },
->(passwords: T[]): T[] {
-  const passwordMap = new Map<string, T>();
-  for (const pwd of passwords) {
-    const key = `${pwd.origin}|${pwd.username}`;
-    const existing = passwordMap.get(key);
-    if (existing === undefined || pwd.dateLastUsed > existing.dateLastUsed) {
-      passwordMap.set(key, pwd);
-    }
-  }
-  return Array.from(passwordMap.values());
-}
-
-/** Bulk upsert password entries. */
-async function bulkUpsertPasswordEntries(
-  userId: string,
-  passwords: Array<{
-    origin: string;
-    username: string;
-    encryptedPassword: string;
-    dateLastUsed: number | null;
-    dateCreated: number | null;
-    browserSource: string;
-    browserProfile?: { id?: string; path?: string } | string | null;
-  }>
-) {
+/** Bulk upsert password entries (already deduplicated by the stored key). */
+async function bulkUpsertPasswordEntries(userId: string, passwords: PasswordRow[]) {
   const values = passwords
     .map(
       (_, i) =>
@@ -156,7 +196,7 @@ async function bulkUpsertPasswordEntries(
       pwd.dateLastUsed,
       pwd.dateCreated,
       pwd.browserSource,
-      normalizeBrowserProfile(pwd.browserProfile)
+      pwd.browserProfile
     );
   }
 
@@ -294,7 +334,7 @@ export async function processApplePasswordsUpload(userId: string, csvContent: st
   log.info('Parsed Apple passwords', { count: passwords.length, userId });
 
   const now = Date.now();
-  const encryptedPasswords = passwords.map((p) => {
+  const encryptedPasswords: PasswordRow[] = passwords.map((p) => {
     let origin = p.url;
     try {
       const urlObj = new URL(p.url);
@@ -309,12 +349,13 @@ export async function processApplePasswordsUpload(userId: string, csvContent: st
       encryptedPassword: encryptPasswordForStorage(p.password),
       dateLastUsed: now,
       dateCreated: now,
-      browserSource: 'apple_passwords',
+      browserSource: APPLE_PASSWORDS_SOURCE,
+      browserProfile: '',
     };
   });
 
-  // Deduplicate by (origin, username)
-  const passwordMap = new Map<string, (typeof encryptedPasswords)[0]>();
+  // One source and no profile: the stored key reduces to (origin, username).
+  const passwordMap = new Map<string, PasswordRow>();
   for (const pwd of encryptedPasswords) {
     const key = `${pwd.origin}|${pwd.username}`;
     if (!passwordMap.has(key)) {
@@ -324,21 +365,12 @@ export async function processApplePasswordsUpload(userId: string, csvContent: st
   const deduplicatedPasswords = Array.from(passwordMap.values());
   log.info('Deduplicated Apple passwords', { count: deduplicatedPasswords.length });
 
-  if (deduplicatedPasswords.length > 0) {
-    await bulkUpsertPasswordEntries(userId, deduplicatedPasswords);
-    log.info('Imported Apple passwords', { count: deduplicatedPasswords.length, userId });
-  }
+  const lastImportAt = new Date().toISOString();
+  const accounts = await storePasswordUpload(userId, deduplicatedPasswords, (account) => ({
+    passwordCount: account.count,
+    lastImportAt,
+  }));
+  log.info('Imported Apple passwords', { count: deduplicatedPasswords.length, userId });
 
-  await repo.upsertIntegration({
-    userId,
-    name: 'apple_passwords',
-    type: IntegrationType.DATA_SOURCE,
-    status: IntegrationStatus.CONNECTED,
-    isActive: true,
-    lastSyncAt: new Date(),
-    lastSuccessfulSyncAt: new Date(),
-    config: { passwordCount: deduplicatedPasswords.length, lastImportAt: new Date().toISOString() },
-  });
-
-  return { passwordCount: deduplicatedPasswords.length };
+  return { passwordCount: deduplicatedPasswords.length, accounts };
 }

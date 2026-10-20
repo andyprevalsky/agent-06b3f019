@@ -23,9 +23,18 @@ import {
   IMPERSONATED_MACHINE_DATA_MESSAGE,
 } from '../../base/impersonation';
 import { getErrorMessageOrFallback } from '../../../shared/utils/error';
-import { postWhatsAppConnect, postWhatsAppContacts } from './repo';
-import { dispatchUploadWithTransportRetry, resolveStrategy } from './service';
-import type { UploadResult } from './types';
+import { postIMessagePayload, postWhatsAppConnect, postWhatsAppContacts } from './repo';
+import { buildIMessagePayload, dispatchUploadWithTransportRetry, resolveStrategy } from './service';
+import type {
+  DeviceUploadResult,
+  IMessageData,
+  IMessageDeviceAccount,
+  IMessageUploadContact,
+  UploadResult,
+} from './types';
+
+/** HTTP 410: the device account was removed on the backend. */
+const ACCOUNT_REMOVED_STATUS = 410;
 
 /** Emit an `upload:progress` event on the supplied renderer window, if any. */
 function emitProgress(
@@ -80,6 +89,39 @@ export class Uploader {
       return { success: true };
     } catch (error) {
       return { success: false, message: getErrorMessageOrFallback(error) };
+    }
+  }
+
+  /**
+   * Upload one iMessage batch for this Mac's device account. The backend
+   * stores it before answering (so the caller can advance its cursor), and
+   * answers 410 when the account was removed.
+   */
+  static async uploadIMessageDeviceBatch(
+    data: readonly unknown[],
+    accessToken: string,
+    account: IMessageDeviceAccount
+  ): Promise<DeviceUploadResult> {
+    if (accessTokenIsImpersonated(accessToken)) {
+      return { success: false, accountRemoved: false, message: IMPERSONATED_MACHINE_DATA_MESSAGE };
+    }
+    try {
+      // Raw reader rows or already-grouped contacts, as for the device-less path.
+      const payload = buildIMessagePayload(data as IMessageData[] | IMessageUploadContact[]);
+      const result = await postIMessagePayload(payload, accessToken, account);
+      if (result.status === ACCOUNT_REMOVED_STATUS) {
+        return { success: false, accountRemoved: true, message: 'iMessage account removed' };
+      }
+      if (!result.ok) {
+        return {
+          success: false,
+          accountRemoved: false,
+          message: `Upload failed: ${result.status} ${result.statusText}`.trim(),
+        };
+      }
+      return { success: true, accountRemoved: false };
+    } catch (error) {
+      return { success: false, accountRemoved: false, message: getErrorMessageOrFallback(error) };
     }
   }
 

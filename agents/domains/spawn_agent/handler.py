@@ -6,7 +6,6 @@ workflow sandbox where lazy imports trigger threading.Lock errors.
 
 from __future__ import annotations
 
-from helpers.wmh_activity_policy import wmh_activity_timeout_options
 import asyncio
 import json
 import uuid as uuid_module
@@ -53,17 +52,18 @@ from helpers.generation_handoff import (
 )
 from helpers.source_connect_gates import raise_source_connect_gates
 from helpers.tracing import span
-from helpers.world_model_runtime import world_model_specialized_agent_activity
 from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
 from helpers.wait_on_world_clock import hold_on_children, release_children
+from helpers.wmh_activity_policy import wmh_activity_timeout_options
+from helpers.world_model_runtime import world_model_specialized_agent_activity
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 from tools.grep import fetch_local_data_summary
 from tools.spawn_browser_agent_v3 import get_manager as get_browser_manager
 from tools.spawn_claude_code_agent import get_manager as get_code_manager
 from tools.spawn_sub_agents import get_manager as get_sub_agent_manager
 from tools.spawn_sub_agents import spawn_sub_agents_batch_activity
-from utils.simulated_clock import simulated_timestamp_ms
 from utils.oai_demo_july import apply_oai_demo_july_for_each
+from utils.simulated_clock import simulated_timestamp_ms
 from utils.tool_call_ids import spawn_group_id
 
 _FAST_MODE_USER_COPY = (
@@ -1177,6 +1177,8 @@ class SpawnAgentManager(ToolManager):
             code_tool_call["attachments"] = tool_call["attachments"]
         if tool_call.get("github_repo_link"):
             code_tool_call["github_repo_link"] = tool_call["github_repo_link"]
+        if tool_call.get("code_session_id"):
+            code_tool_call["code_session_id"] = tool_call["code_session_id"]
         if tool_call.get("target"):
             code_tool_call["target"] = tool_call["target"]
 

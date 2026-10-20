@@ -197,12 +197,8 @@ async function plaidItemsAreAccounts(users: Users): Promise<void> {
 
 async function todoHooksRefuse(users: Users): Promise<void> {
   const { a } = users();
-  for (const [provider, owner] of [
-    ['imessage', 'L-INT-IMESSAGE'],
-    ['atlas_passwords', 'L-INT-PASSWORDS'],
-    // WhatsApp's cleanup is implemented (I2); VCF contacts still have no account key.
-    ['contacts', 'unassigned'],
-  ]) {
+  // WhatsApp's cleanup is implemented (I2); VCF contacts still have no account key.
+  for (const [provider, owner] of [['contacts', 'unassigned']]) {
     await postProgress(a.token, provider, 'acct', { runId: 'r', state: 'synced' });
     const res = await call(`/api/integrations/${provider}/accounts/acct`, {
       method: 'DELETE',

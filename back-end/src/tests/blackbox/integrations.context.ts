@@ -401,6 +401,11 @@ export const MACHINE_DATA_INGEST_ROUTES: { path: string; method?: string; body: 
     },
     { path: '/api/integrations/upload', body: () => ({ integrationType: 'generic' }) },
     { path: '/api/integrations/linkedin/upload', body: () => ({}) },
+    // The export agent reports the session account's LinkedIn sync phases.
+    {
+      path: '/api/integrations/linkedin/sync/phase',
+      body: () => ({ agent_id: 'impersonation-probe', phase: 'export_requested' }),
+    },
     { path: '/api/integrations/contacts/upload', body: () => ({}) },
     { path: '/api/integrations/email/upload', body: () => ({}) },
     { path: '/api/integrations/documents/upload', body: () => ({ documents: [] }) },

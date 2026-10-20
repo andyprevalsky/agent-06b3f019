@@ -242,6 +242,23 @@ export async function putDisplayObject(key: string, body: Buffer, contentType: s
   });
 }
 
+/**
+ * Public URL that serves a displayed HTML page from the sandboxed usercontent
+ * origin (same CSP as inline views), so the FE never frames storage directly
+ * (hosted storage may serve .html as text/plain). Content-addressed: the page
+ * is the write-once `<owner>/display/<sha256>.html` of that agent's owner.
+ */
+export function displayUsercontentUrl(agentId: string, sha256: string): string {
+  const configured = process.env.USERCONTENT_BASE_URL?.trim();
+  const base =
+    configured ||
+    process.env.ROSE_UI_PUBLISH_BASE_URL?.trim() ||
+    process.env.BACKEND_URL?.trim() ||
+    process.env.RENDER_EXTERNAL_URL?.trim() ||
+    `http://localhost:${process.env.PORT || 3001}`;
+  return `${base.replace(/\/+$/, '')}/usercontent/display/${agentId}/${sha256}.html`;
+}
+
 export async function getDisplayObject(key: string): Promise<Buffer | null> {
   if (!useLocalBackend()) return getStorageObject(key);
   try {

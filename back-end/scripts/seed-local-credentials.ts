@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import type {
   BrowserPassword,
   BrowserPermission,
@@ -8,7 +9,6 @@ import type {
   Integration,
   LocalStorageOrigin,
   PasskeyCredential,
-  Prisma,
   SteelSessionAuth,
 } from '@prisma/client';
 
@@ -280,8 +280,13 @@ export async function syncIntegrationCredentials(
   }
   const syncedIds: string[] = [];
   for (const integration of integrations) {
-    const { id: remoteId, ...updateData } = integration;
+    const { id: remoteId, config, ...rest } = integration;
     void remoteId;
+    // Prisma writes a SQL NULL into a Json? column only as DbNull, never a bare null.
+    const updateData = {
+      ...rest,
+      config: config === null ? Prisma.DbNull : (config as Prisma.InputJsonValue),
+    };
     const synced = await localIntegration.upsert({
       where: {
         userId_name_accountId: {
@@ -756,7 +761,15 @@ export async function syncBrowserPermissionCredentials(
 
 export type BrowserPasswordModel = SnapshotLookupModel<BrowserPassword> & {
   upsert(args: {
-    where: { userId_origin_username: { userId: string; origin: string; username: string } };
+    where: {
+      userId_origin_username_browserSource_browserProfile: {
+        userId: string;
+        origin: string;
+        username: string;
+        browserSource: string;
+        browserProfile: string;
+      };
+    };
     create: BrowserPassword;
     update: Omit<BrowserPassword, 'id'>;
   }): Promise<unknown>;
@@ -769,7 +782,14 @@ export async function syncBrowserPasswordCredentials(
   const passwordsToSync = await rowsNeedingContentSync(
     passwords,
     localPassword,
-    (password) => rowSignature([password.userId, password.origin, password.username]),
+    (password) =>
+      rowSignature([
+        password.userId,
+        password.origin,
+        password.username,
+        password.browserSource,
+        password.browserProfile,
+      ]),
     (remote, local) => browserPasswordContent(remote) === browserPasswordContent(local),
     (rows) => ({
       OR: rows.map((password) => ({
@@ -783,10 +803,12 @@ export async function syncBrowserPasswordCredentials(
     void remoteId;
     await localPassword.upsert({
       where: {
-        userId_origin_username: {
+        userId_origin_username_browserSource_browserProfile: {
           userId: password.userId,
           origin: password.origin,
           username: password.username,
+          browserSource: password.browserSource,
+          browserProfile: password.browserProfile,
         },
       },
       create: password,

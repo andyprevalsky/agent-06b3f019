@@ -18,7 +18,7 @@ export class MessageAccountRemovedError extends Error {
 
 /**
  * Attribution for messages synced by ONE provider-side account (a Telegram
- * user id). Rows carry `sourceAccountId`; inserts stop once `integrationId`
+ * user id, an iMessage Mac device id). Rows carry `sourceAccountId`; inserts stop once `integrationId`
  * (that account's Integration row) is deleted.
  */
 export interface MessageAccountScope {
@@ -45,6 +45,11 @@ async function createAccountScopedBatch(
     },
     { timeout: 30_000 }
   );
+}
+
+/** The Gmail address was disconnected while its sync was saving messages. */
+export function isDisconnectedGoogleCredentialError(error: unknown): boolean {
+  return error instanceof DisconnectedGoogleCredentialError;
 }
 
 async function createMessageBatch(
@@ -168,6 +173,53 @@ function calculateCommunicationFrequency(messages: Array<{ timestamp: Date }>): 
   return 'rarely';
 }
 
+const YEARLY_WINDOW_MS = 360 * 24 * 60 * 60 * 1000;
+
+export interface UpsertMessagesOptions {
+  /**
+   * Derive each person's messagesExchanged / communicationFrequency from their
+   * STORED records of this channel instead of from this call's messages. A
+   * batched sync saves one person across many calls; per-call stats would let
+   * the last (oldest) batch overwrite the person's real totals.
+   */
+  statsFromStoredChannel?: MessageChannel;
+}
+
+/**
+ * Stats for the given persons from their stored records of `channel`: two
+ * grouped queries per chunk (counts; one row per person-day in the last year).
+ */
+async function applyStoredStats(personIds: string[], channel: MessageChannel): Promise<void> {
+  if (personIds.length === 0) return;
+  const cutoff = new Date(Date.now() - YEARLY_WINDOW_MS);
+  const counts = await prisma.$queryRaw<Array<{ personId: string; n: number }>>`
+    SELECT "personId", COUNT(*)::int AS n FROM "MessageRecord"
+    WHERE "personId" = ANY(${personIds}) AND "channel" = ${channel}::"MessageChannel"
+    GROUP BY "personId"`;
+  const days = await prisma.$queryRaw<Array<{ personId: string; latest: Date }>>`
+    SELECT "personId", MAX("timestamp") AS latest FROM "MessageRecord"
+    WHERE "personId" = ANY(${personIds}) AND "channel" = ${channel}::"MessageChannel"
+      AND "timestamp" >= ${cutoff}
+    GROUP BY "personId", date_trunc('day', "timestamp")`;
+  const timestampsByPerson = new Map<string, Array<{ timestamp: Date }>>();
+  for (const row of days) {
+    const list = timestampsByPerson.get(row.personId) ?? [];
+    list.push({ timestamp: row.latest });
+    timestampsByPerson.set(row.personId, list);
+  }
+  for (const { personId, n } of counts) {
+    await prisma.person.update({
+      where: { id: personId },
+      data: {
+        messagesExchanged: n,
+        communicationFrequency: calculateCommunicationFrequency(
+          timestampsByPerson.get(personId) ?? []
+        ),
+      },
+    });
+  }
+}
+
 /**
  * Upsert persons and their message records with efficient batching and parallelism.
  * This is the shared logic for iMessage, email, and Gmail parsers.
@@ -178,7 +230,8 @@ export async function upsertPersonAndMessageRecords(
   jobId: string,
   googleAccountEmail?: string,
   googleCredentialId?: string,
-  accountScope?: MessageAccountScope
+  accountScope?: MessageAccountScope,
+  options: UpsertMessagesOptions = {}
 ): Promise<{ contacts: number; messages: number }> {
   const totalMessages = contacts.reduce((sum, c) => sum + c.messages.length, 0);
   log.info('Processing messages', {
@@ -251,6 +304,7 @@ export async function upsertPersonAndMessageRecords(
     });
 
     // Process each contact's messages
+    const touchedPersonIds = new Set<string>();
     for (const contact of chunk) {
       try {
         const personId = personMap.get(contact.identifier);
@@ -296,16 +350,20 @@ export async function upsertPersonAndMessageRecords(
           );
         }
 
-        // Calculate communication frequency and update person stats
-        const frequency = calculateCommunicationFrequency(contact.messages);
+        if (options.statsFromStoredChannel !== undefined) {
+          touchedPersonIds.add(personId);
+        } else {
+          // Calculate communication frequency and update person stats
+          const frequency = calculateCommunicationFrequency(contact.messages);
 
-        await prisma.person.update({
-          where: { id: personId },
-          data: {
-            messagesExchanged: contact.messages.length,
-            communicationFrequency: frequency,
-          },
-        });
+          await prisma.person.update({
+            where: { id: personId },
+            data: {
+              messagesExchanged: contact.messages.length,
+              communicationFrequency: frequency,
+            },
+          });
+        }
 
         contactsProcessed++;
         messagesProcessed += contact.messages.length;
@@ -327,6 +385,9 @@ export async function upsertPersonAndMessageRecords(
           jobId,
         });
       }
+    }
+    if (options.statsFromStoredChannel !== undefined) {
+      await applyStoredStats([...touchedPersonIds], options.statsFromStoredChannel);
     }
   }
 

@@ -20,7 +20,10 @@ import { deleteCookiesForProfile, deleteCookieBundlesForProfile } from './repo.b
 import { findPlaidItemForUser, PlaidItemStatus } from './repo.plaid';
 import { disconnectGmailAccount, GmailAccountNotFoundError } from './service';
 import { disconnectPlaidItem } from './service.plaid';
+import { deleteIMessageAccount } from './service.imessageAccounts';
+import { deletePasskeyAccount, deletePasswordAccount } from './service.credentialAccounts';
 import { deleteLanternIntegration, LanternCredentialError } from './service.lantern';
+import { deleteLinkedInAccountData } from './service.linkedinImport';
 import { deleteWhatsAppAccount } from './service.whatsappAccounts';
 import { KNOWN_SOURCES as DOCUMENT_SOURCES } from './uploadService.documents';
 import { cookieProfileFromAccountId } from './syncAccountsContract';
@@ -94,6 +97,16 @@ async function deletePlaidAccount(ctx: AccountCleanupContext): Promise<boolean> 
 }
 
 /**
+ * LinkedIn account = one member: its messages (ids prefixed with the account;
+ * the default account owns every unprefixed legacy id) and its row, which holds
+ * the imported profile, positions and sync history. Contacts are shared Person
+ * records, deduplicated across every source, so they are kept.
+ */
+async function deleteLinkedInAccount(ctx: AccountCleanupContext): Promise<boolean> {
+  return deleteLinkedInAccountData(ctx.userId, ctx.accountId);
+}
+
+/**
  * Cookie account = one browser profile. The account id spells the profile as
  * `<browser>:<profile>` (legacy empty profile = `default`/storage `''`), so the
  * deletion resolves back to the exact rows the account view derived. Removes
@@ -146,24 +159,16 @@ const EXACT: Record<string, IntegrationAccountAdapter> = {
     list: 'email_credentials',
     cleanup: todo('unassigned', 'Yahoo has no per-address disconnect or data purge yet'),
   },
-  imessage: {
-    list: 'row',
-    cleanup: todo('L-INT-IMESSAGE', 'messages are keyed by user+source, not by Mac device id'),
-  },
+  // One account per Mac device id; its messages carry sourceAccountId (I1).
+  imessage: { list: 'row', cleanup: hook(deleteIMessageAccount) },
   // One row per linked phone; messages/contacts are attributed to it (plan row I2).
   whatsapp: { list: 'row', cleanup: hook(deleteWhatsAppAccount) },
   telegram: { list: 'row', cleanup: hook(deleteTelegramAccountData) },
-  linkedin: {
-    list: 'row',
-    cleanup: todo('L-INT-LINKEDIN', 'imported connections are not keyed by LinkedIn account'),
-  },
+  linkedin: { list: 'row', cleanup: hook(deleteLinkedInAccount) },
   // The fingerprint is one credential blob on the Integration row (not keyed by
   // profile), so its single `default` account is removed by dropping the row.
   browser_fingerprint: ROW_ONLY,
-  apple_passwords: {
-    list: 'row',
-    cleanup: todo('L-INT-PASSWORDS', 'BrowserPassword is unique per origin+username, not source'),
-  },
+  apple_passwords: { list: 'row', cleanup: hook(deletePasswordAccount) },
   contacts: { list: 'row', cleanup: todo('unassigned', 'VCF contacts are not keyed by source') },
   email: { list: 'row', cleanup: todo('unassigned', 'archive-imported email is not keyed') },
   agentcard: {
@@ -176,12 +181,10 @@ function familyAdapter(provider: string): IntegrationAccountAdapter | null {
   if (VALID_BROWSERS.includes(provider)) {
     return { list: 'browser_cookies', cleanup: hook(deleteCookieProfileAccount) };
   }
-  if (provider.endsWith('_passwords') || provider.endsWith('_passkeys')) {
-    return {
-      list: 'row',
-      cleanup: todo('L-INT-PASSWORDS', 'passwords/passkeys are not keyed by source+profile'),
-    };
-  }
+  // Passwords: account = one browser profile of the source (I7). Passkeys:
+  // account = the source (`default`).
+  if (provider.endsWith('_passwords')) return { list: 'row', cleanup: hook(deletePasswordAccount) };
+  if (provider.endsWith('_passkeys')) return { list: 'row', cleanup: hook(deletePasskeyAccount) };
   if (DOCUMENT_SOURCES.has(provider)) {
     return { list: 'row', cleanup: todo('unassigned', 'documents are keyed by source only') };
   }
