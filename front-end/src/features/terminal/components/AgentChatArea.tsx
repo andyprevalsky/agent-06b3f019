@@ -11,6 +11,8 @@
  *   shared recording / inspection / selected detail loading → omit mutation controls
  *   pendingApproval === null  → show QueryInput
  *   pendingApproval !== null  → replace QueryInput with ApprovalChip
+ *   Rose Desktop pinned question → PinnedQuestionMount directly above the
+ *     approval/query box (renders nothing when flag off or none pending)
  *
  * TEST OBSERVABILITY:
  *   terminal-input-area[data-chat-mode] mirrors the rendered chat/agent mode
@@ -28,7 +30,7 @@ import { useRef, Suspense, type ComponentType, type ReactNode } from 'react';
 import * as analytics from '@/lib/analytics';
 import { isBenchmarkSharedView } from '@/lib/benchmarkShare';
 
-import { ApprovalChip } from '@/features/terminal-component-group';
+import { ApprovalChip, PinnedQuestionMount } from '@/features/terminal-component-group';
 import { QueryInput } from '@/features/terminal-component-group';
 import { UserUiSlot, useUserUiOpaqueSurfaces } from '@/features/user-ui';
 import { GateStack } from './GateStack';
@@ -219,6 +221,9 @@ function InputArea({
           if (a.selectedAgentId) void a.refreshAgentDetail(a.selectedAgentId);
         }}
       />
+
+      {/* Rose Desktop: a code agent's pinned question sits directly above the query box. */}
+      {a.selectedAgentId && <PinnedQuestionMount />}
 
       {pendingApproval ? (
         <ApprovalChip

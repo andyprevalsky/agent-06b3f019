@@ -43,6 +43,9 @@
  * [FITS]
  * Re-measured on scroll and on ResizeObserver resize.
  *
+ * REQUESTER LABEL (Rose Desktop only): a request from a code agent
+ * (`from_code_agent`) shows that agent's icon + name in the header.
+ *
  * Props:
  * - pendingApproval: { attentionRequestId, question } | null
  * - onApprovalHandled: () => void
@@ -52,15 +55,19 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { X, Check, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import type { RequestPaymentCardPayload } from '@/lib/realtime-types';
 import { respondToAttentionRequest, rejectAttentionRequest, useToast } from '../hooks';
 import { ApprovalScrollBody } from './ApprovalCardBody';
+import { codeAgentLabel, parseCodeAgentSender } from '../hooks/codeAgentContract';
+import { ProviderIcon } from './claudeCodeChip.shared';
 
 interface PendingApproval {
   attentionRequestId: string;
   question: string;
   imageUrl?: string | null;
   requestPaymentCard?: RequestPaymentCardPayload;
+  fromCodeAgent?: unknown;
 }
 
 interface ApprovalChipProps {
@@ -228,6 +235,22 @@ function useHasMoreBelow(resetKey?: string) {
   return { scrollerRef, contentRef, hasMoreBelow, onScroll: measure };
 }
 
+function RequesterLabel({ fromCodeAgent }: { fromCodeAgent: unknown }) {
+  const roseDesktop = useRoseDesktop();
+  const sender = roseDesktop ? parseCodeAgentSender({ from_code_agent: fromCodeAgent }) : null;
+  if (!sender) return null;
+  const label = codeAgentLabel(sender.provider);
+  return (
+    <span
+      data-testid="approval-requester"
+      className="ml-auto flex items-center gap-1.5 text-xs text-muted-foreground dark:text-[#a3a39d]"
+    >
+      <ProviderIcon codeProvider={sender.provider} className="h-3.5 w-3.5" />
+      {label}
+    </span>
+  );
+}
+
 export default function ApprovalChip({ pendingApproval, onApprovalHandled }: ApprovalChipProps) {
   const [contextInput, setContextInput] = useState('');
   const [actionState, setActionState] = useState<ActionState>(null);
@@ -265,6 +288,7 @@ export default function ApprovalChip({ pendingApproval, onApprovalHandled }: App
               <div className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
               <span className="text-sm font-medium text-foreground">Approval Required</span>
             </div>
+            <RequesterLabel fromCodeAgent={pendingApproval.fromCodeAgent} />
           </div>
           <ApprovalScrollBody
             scrollerRef={scrollerRef}

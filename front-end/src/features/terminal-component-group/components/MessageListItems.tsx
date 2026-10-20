@@ -16,8 +16,14 @@
  *
  * With a web-search grouping, a turn's searches render as one row at the first
  * search's position (WebSearchGroupItem); the other searches render nothing.
+ *
+ * ROSE DESKTOP (flag on; stock rendering otherwise):
+ *   send_message_to_user from a code agent → "<agent> · via send_message_to_user" above it
+ *   inlineView { view: 'scorecard' } with no versionId → host ScorecardCard beneath it
+ *   pinned question (display.placement 'pinned') → not inline; PinnedQuestionMount shows it
  */
 import { InlineUserView, parseInlineViewMetadata } from '@/features/user-ui';
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 
 import MessageBubble from './MessageBubble';
 import type { Message } from '../hooks';
@@ -27,6 +33,12 @@ import {
   type SubAgentStreamingMetrics,
 } from './useMessageFiltering';
 import { WebSearchGroupItem } from './WebSearchGroupItem';
+import {
+  parseCodeAgentSender,
+  parsePinnedQuestion,
+  parseScorecardInlineView,
+} from '../hooks/codeAgentContract';
+import { CodeAgentAttribution, ScorecardCard } from './CodeAgentScorecard';
 import { EMPTY_WEB_SEARCH_GROUPING, type WebSearchTurnGrouping } from './webSearchTurnGroups';
 
 interface MessageListItemsProps {
@@ -86,6 +98,11 @@ function getMessageRenderKey(message: Message): string {
   return message.message_id;
 }
 
+function isSendMessageToUser(message: Message): boolean {
+  const toolName = message.metadata?.toolName;
+  return toolName === 'send_message_to_user' || toolName === 'send_message_to_user_execute_phase';
+}
+
 function MessageListItem({
   message,
   currentAnimatingId,
@@ -101,6 +118,7 @@ function MessageListItem({
   streamingPlanStartedAtMs,
   streamingMetricsBySubAgentId,
 }: MessageListItemProps) {
+  const roseDesktop = useRoseDesktop();
   const planCharCount = resolvePlanCharCount(message, streamingPlanCharCount);
   const thinkingMetrics = resolveMessageThinkingMetrics(message, streamingMetricsBySubAgentId);
   const isFinalAnswer = message.metadata?.isUserAttentionMessage === true;
@@ -117,6 +135,11 @@ function MessageListItem({
       ? rawAgentStartPhase
       : undefined;
   const inlineView = parseInlineViewMetadata(message.metadata?.inlineView);
+  const scorecard = roseDesktop ? parseScorecardInlineView(message.metadata?.inlineView) : null;
+  const sender = roseDesktop ? parseCodeAgentSender(message.metadata) : null;
+  const showAttribution = sender !== null && (scorecard !== null || isSendMessageToUser(message));
+
+  if (roseDesktop && parsePinnedQuestion(message.metadata)) return null;
 
   return (
     <div
@@ -130,6 +153,7 @@ function MessageListItem({
       data-agent-start-phase={agentStartPhase}
       className="min-w-0 max-w-full"
     >
+      {showAttribution && sender && <CodeAgentAttribution sender={sender} />}
       <MessageBubble
         message={message}
         shouldType={message.message_id === currentAnimatingId}
@@ -148,6 +172,11 @@ function MessageListItem({
         streamingMetricsBySubAgentId={streamingMetricsBySubAgentId}
       />
       {inlineView && <InlineUserView inlineView={inlineView} messageId={message.message_id} />}
+      {scorecard && (
+        <div className="mt-2">
+          <ScorecardCard scorecard={scorecard} />
+        </div>
+      )}
     </div>
   );
 }

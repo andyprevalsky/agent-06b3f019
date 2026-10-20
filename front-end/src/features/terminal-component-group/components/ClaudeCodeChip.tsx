@@ -16,12 +16,19 @@
  * CHIP STATE (derived from agent messages + WS signals):
  * spinning_up -> live -> (verifying) -> (completed | failed)
  *
+ * ROSE DESKTOP (flag on AND a `metadata.code_agent` snapshot for this task):
+ * [DESKTOP] <-- DesktopCodeAgentChip (target label, timer, Transcript/Terminal
+ *               tabs, steer input, commit summary; see codeAgentChip.desktop.tsx)
+ * Flag off, or no snapshot → the stock branches below, unchanged.
+ *
  * All effects, refs, and sub-hooks live in `useClaudeCodeChip`. This file is a
  * presentational router: it picks one renderer branch per state.
  */
 
+import { useDesktopCodeAgent } from '../hooks/codeAgentSteering';
 import { type ClaudeCodeChipProps } from '../types';
 import { useClaudeCodeChip } from './claudeCodeChip.hooks';
+import { DesktopCodeAgentChip } from './codeAgentChip.desktop';
 import {
   CollapsedChip,
   FullscreenView,
@@ -35,7 +42,16 @@ export default function ClaudeCodeChip({
   codeProvider = 'claude',
   forceShow = false,
 }: ClaudeCodeChipProps) {
-  const vm = useClaudeCodeChip(taskId, wsUrl, forceShow, codeProvider);
+  const desktop = useDesktopCodeAgent(taskId);
+  const desktopMeta = desktop.meta;
+  // The desktop chip keeps its Terminal tab mounted while live, so the xterm
+  // must attach even before the WS reports `live`.
+  const vm = useClaudeCodeChip(
+    taskId,
+    wsUrl,
+    forceShow || desktopMeta?.state === 'live',
+    desktopMeta?.provider ?? codeProvider,
+  );
 
   if (vm.isFullscreen) {
     return (
@@ -47,6 +63,17 @@ export default function ClaudeCodeChip({
         terminalTranscript={vm.terminalTranscript}
         terminalContainerRef={vm.fullscreenContainerRef}
         onClose={vm.closeFullscreen}
+      />
+    );
+  }
+
+  if (desktopMeta) {
+    return (
+      <DesktopCodeAgentChip
+        meta={desktopMeta}
+        vm={vm}
+        events={desktop.events}
+        agentId={desktop.agentId}
       />
     );
   }
