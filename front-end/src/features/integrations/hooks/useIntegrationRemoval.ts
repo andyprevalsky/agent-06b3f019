@@ -17,7 +17,7 @@
 
 import { useCallback, useState } from 'react';
 
-import { deleteIntegrationAccountApi, deleteIntegrationApi } from '../api';
+import { deleteIntegrationAccountApi } from '../api';
 
 export interface PendingRemoval {
   /** Integration row name, e.g. `chrome`, `chrome_passwords`, `imessage`. */
@@ -51,8 +51,7 @@ export function useIntegrationRemoval(fetchIntegrations: () => Promise<void>) {
     setPending(null);
     setRemovingKey(removalKey(name, accountId));
     try {
-      if (accountId === undefined) await deleteIntegrationApi(name);
-      else await deleteIntegrationAccountApi(name, accountId);
+      await deleteIntegrationAccountApi(name, accountId);
       await fetchIntegrations();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to remove account');

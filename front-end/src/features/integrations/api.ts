@@ -40,33 +40,21 @@ export async function fetchIntegrationsApi(): Promise<ConnectedIntegration[]> {
   return data.integrations ?? [];
 }
 
-async function deleteOrThrow(url: string): Promise<void> {
-  const response = await fetch(url, { method: 'DELETE', headers: getAuthHeaders() });
-  if (!response.ok && response.status !== 404) {
-    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(payload?.error ?? `Failed to remove account (HTTP ${response.status})`);
-  }
-}
-
 /**
- * Remove one connected integration row (DELETE /api/integrations/:name).
+ * Remove a connected account (Rose Desktop chip ×).
  *
- * Used by Rose Desktop account chips when the backend reports no per-account
- * list for that provider (browser cookies, passwords, iMessage, WhatsApp,
- * LinkedIn, desktop compute credentials). A 404 means already removed.
- */
-export async function deleteIntegrationApi(name: string): Promise<void> {
-  await deleteOrThrow(`${API_BASE_WITH_PATH}/integrations/${encodeURIComponent(name)}`);
-}
-
-/**
- * Remove ONE account of a multi-account provider
+ * With `accountId`: ONE account of a multi-account provider
  * (DELETE /api/integrations/:name/accounts/:accountId, lane L-INTEG-CORE).
+ * Without: the whole one-row integration (DELETE /api/integrations/:name), used
+ * when the backend reports no per-account list. A 404 means already removed.
  */
-export async function deleteIntegrationAccountApi(name: string, accountId: string): Promise<void> {
-  await deleteOrThrow(
-    `${API_BASE_WITH_PATH}/integrations/${encodeURIComponent(name)}/accounts/${encodeURIComponent(accountId)}`,
-  );
+export async function deleteIntegrationAccountApi(name: string, accountId?: string): Promise<void> {
+  const account = accountId === undefined ? '' : `/accounts/${encodeURIComponent(accountId)}`;
+  const url = `${API_BASE_WITH_PATH}/integrations/${encodeURIComponent(name)}${account}`;
+  const response = await fetch(url, { method: 'DELETE', headers: getAuthHeaders() });
+  if (response.ok || response.status === 404) return;
+  const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+  throw new Error(payload?.error ?? `Failed to remove account (HTTP ${response.status})`);
 }
 
 export async function uploadFileApi(

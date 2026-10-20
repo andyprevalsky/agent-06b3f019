@@ -53,7 +53,6 @@ import IntegrationSections from './IntegrationSections';
 import FileInputs from './FileInputs';
 
 export default function Integrations() {
-  const roseDesktop = useRoseDesktop();
   const handlers = useIntegrationHandlers();
   const { isFullySignedIn } = useAuth();
 
@@ -112,7 +111,6 @@ export default function Integrations() {
             </div>
           ) : (
             <IntegrationSectionsSwitch
-              roseDesktop={roseDesktop}
               isBrowserCookiesAvailable={!!handlers.browserCookies?.isAvailable}
               isPasskeysAvailable={!!handlers.passkeys?.isAvailable}
               isIMessageAvailable={!!handlers.iMessage?.isAvailable}
@@ -142,10 +140,9 @@ export default function Integrations() {
 
 /** Stock cards with the flag off; the Rose Desktop list with it on. */
 function IntegrationSectionsSwitch({
-  roseDesktop,
   accordion,
   ...props
-}: React.ComponentProps<typeof IntegrationSections> & { roseDesktop: boolean }) {
-  if (roseDesktop) return <DesktopIntegrations {...props} />;
+}: React.ComponentProps<typeof IntegrationSections>) {
+  if (useRoseDesktop()) return <DesktopIntegrations {...props} />;
   return <IntegrationSections accordion={accordion} {...props} />;
 }
