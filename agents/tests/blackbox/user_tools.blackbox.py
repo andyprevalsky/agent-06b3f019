@@ -17,8 +17,11 @@ from unittest.mock import AsyncMock, patch
 import httpx
 from _test_utils import BlackboxResult, setup_mock_fn, teardown_mock
 
-USER_A = "user-a-1111"
+# USER_A is a Rose Desktop account (utils.rose_desktop): user tools come from the
+# Rose Desktop rose_user_ui, so only flagged root agents pin them.
+USER_A = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 USER_B = "user-b-2222"
+STOCK_USER = "user-stock-3333"
 CDN = "https://usercontent.test"
 
 PY_ECHO = """
@@ -378,6 +381,27 @@ async def test_sub_agent_and_disabled_executor_get_no_tools():
     assert [t["name"] for t in pinned["tools"]] == ["user__weather"]
 
 
+async def test_unflagged_root_agent_pins_no_tools_without_resolving():
+    """A stock (non-Rose Desktop) root agent never resolves or declares user tools.
+
+    Even with a published version holding tools, the pin is empty, no resolve
+    activity runs, and run_agent declares only the built-in tools.
+    """
+    from domains.user_tools.handler import declared_user_tools, pin_user_tools
+
+    calls: List[Any] = []
+    with _local_executor():
+        backend = _weather_backend()
+        backend.publish(STOCK_USER, "v1", {"weather": _tool_json("weather")}, {"tools/weather/handler.py": PY_ECHO})
+        wf = _FakeWorkflow(user_id=STOCK_USER)
+        with _workflow_runtime(calls):
+            await pin_user_tools(wf, is_root=True)
+    assert calls == [], "no resolve activity for a stock account"
+    assert wf.user_tools_pinned and declared_user_tools(wf) == []
+    assert wf.user_tools["tools"] == [] and "Rose Desktop" in wf.user_tools["disabled_reason"]
+    assert not any(request.headers.get("X-User-Id") == STOCK_USER for request in backend.requests)
+
+
 async def test_pinned_version_survives_mid_run_publish():
     """A version published mid-run changes neither the declared set nor the handler that runs."""
     from domains.user_tools.handler import declared_user_tools, pin_user_tools
@@ -631,6 +655,10 @@ async def run_all_tests():
         )
         await r.record_async(
             "sub_agent_and_disabled_executor_get_no_tools", test_sub_agent_and_disabled_executor_get_no_tools
+        )
+        await r.record_async(
+            "unflagged_root_agent_pins_no_tools_without_resolving",
+            test_unflagged_root_agent_pins_no_tools_without_resolving,
         )
         await r.record_async("pinned_version_survives_mid_run_publish", test_pinned_version_survives_mid_run_publish)
         await r.record_async(

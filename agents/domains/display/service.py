@@ -7,9 +7,16 @@ activity is re-exported from repo for the handler.
 import re
 from typing import Any, Dict, List, Optional
 
-from domains.display.config import DISPLAY_MAX_ITEMS, DISPLAY_MAX_OPTIONS, PLACEMENTS, REJECTED_RESPONSE
+from domains.display.config import (
+    DISPLAY_MAX_ITEMS,
+    DISPLAY_MAX_OPTIONS,
+    PINNED_ONLY_ARGUMENTS,
+    PLACEMENTS,
+    REJECTED_RESPONSE,
+)
 from domains.display.repo import display_media_activity
 from domains.display.types import DisplayOptionInput, DisplayValidation
+from utils.rose_desktop import is_rose_desktop_user
 
 # The handler schedules the activity through this layer (handler → service → repo).
 __all__ = [
@@ -63,7 +70,13 @@ def validate_tool_call(
     workflow_id: str,
     tool_call_id: str,
 ) -> DisplayValidation:
-    """Normalise the LLM's arguments into one backend request, or explain the error."""
+    """Normalise the LLM's arguments into one backend request, or explain the error.
+
+    Accounts without Rose Desktop get inline media only: pinned-question
+    arguments are dropped, as the stock display schema has none.
+    """
+    if not is_rose_desktop_user(user_id):
+        tool_call = {key: value for key, value in tool_call.items() if key not in PINNED_ONLY_ARGUMENTS}
     paths, error = _string_list(tool_call.get("paths"), "paths")
     if error:
         return {"ok": False, "error": error}

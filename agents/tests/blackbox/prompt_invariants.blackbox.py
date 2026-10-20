@@ -395,21 +395,26 @@ def test_general_purpose_faulty_tool_retry_warns_recursion():
 
 
 def test_code_agent_advertises_rose_user_ui_and_inline_views():
-    """Root and planner learn that coding and Rose-app changes belong to a code agent.
+    """Rose Desktop root and planner learn that coding and Rose-app changes belong to a code agent.
 
     The code sandbox holds the user's rose_user_ui and its `rose-ui publish`
     CLI. Without saying so, the root explored and drove a browser against
     roselabs.ai to change the user's Rose background, and a game was returned
     only as a file. Execute-phase tools see the `type` description; the planner
     also sees the spawn_agent prompt. Both must advertise the capability, and
-    the inline_view argument must say it shows code-agent work.
+    the inline_view argument must say it shows code-agent work. These are Rose
+    Desktop surfaces (utils.rose_desktop), so the flagged variants carry them.
     """
     from domains.set_plan.service import get_planner_tools_description
-    from tools.prompts.spawn_agent import PROMPT
+    from tools.prompts.spawn_agent import PROMPT_ROSE_DESKTOP as PROMPT
     from utils.tool_schemas import (
         INLINE_VIEW_DESCRIPTION,
-        SendMessageToUserExecutePhaseTool,
-        SpawnAgentTool,
+    )
+    from utils.tool_schemas import (
+        SendMessageToUserExecutePhaseRoseDesktopTool as SendMessageToUserExecutePhaseTool,
+    )
+    from utils.tool_schemas import (
+        SpawnAgentRoseDesktopTool as SpawnAgentTool,
     )
 
     type_desc = " ".join((SpawnAgentTool.model_fields["type"].description or "").split())
@@ -432,13 +437,94 @@ def test_code_agent_advertises_rose_user_ui_and_inline_views():
         assert phrase in code_line, f"spawn_agent prompt code line lost {phrase!r}"
     assert "Anthropic's Claude Code" not in code_line, "code agents also run Codex CLI"
 
-    planner_tools = get_planner_tools_description()
+    planner_tools = get_planner_tools_description(rose_desktop=True)
     assert code_line in planner_tools, "planner must render the spawn_agent code line"
     assert "user's Rose app UI (rose_user_ui)" in " ".join(planner_tools.split())
 
     assert "a code agent published" in INLINE_VIEW_DESCRIPTION
     inline_field = SendMessageToUserExecutePhaseTool.model_fields["inline_view"]
     assert inline_field.description == INLINE_VIEW_DESCRIPTION
+
+
+STOCK_SPAWN_CODE_LINE = (
+    "- code: An agent specialized in executing code commands. It lives in a persistent E2B sandbox and uses "
+    "Anthropic's Claude Code. It syncs results to a GitHub repo initialized to this agent network after "
+    "completion. The task should be tightly scoped and self-sufficient."
+)
+ROSE_DESKTOP_PROMPT_TERMS = ("inline_view", "rose_user_ui", "Rose app UI", "pinned", "inline view")
+
+
+def test_stock_planner_and_tool_prompts_omit_rose_desktop_surfaces():
+    """Unflagged accounts: the planner tool text and tool prompts carry no new-UI surface.
+
+    The stock spawn_agent `code` line is main's line with the persistent-sandbox
+    wording (W5b); display documents inline media only. The Rose Desktop prompt
+    differs from the stock one only in that `code` line.
+    """
+    from domains.set_plan.service import get_planner_tools_description
+    from tools.prompts import TOOL_PROMPTS, get_tool_prompts, tool_prompts_for
+    from tools.prompts.display import PROMPT as DISPLAY_PROMPT
+    from tools.prompts.display import PROMPT_ROSE_DESKTOP as DISPLAY_PROMPT_ROSE_DESKTOP
+    from tools.prompts.spawn_agent import PROMPT, PROMPT_ROSE_DESKTOP
+
+    stock = get_planner_tools_description()
+    assert stock == get_planner_tools_description(rose_desktop=False), "the default is the stock text"
+    for term in ROSE_DESKTOP_PROMPT_TERMS:
+        assert term not in stock, f"stock planner tools mention {term!r}"
+    assert STOCK_SPAWN_CODE_LINE in stock.splitlines()
+
+    assert tool_prompts_for() == dict(TOOL_PROMPTS) == tool_prompts_for(rose_desktop=False)
+    assert get_tool_prompts()["spawn_agent"] == PROMPT
+    for name, prompt in TOOL_PROMPTS.items():
+        for term in ROSE_DESKTOP_PROMPT_TERMS:
+            assert term not in prompt, f"stock {name} prompt mentions {term!r}"
+
+    stock_lines, flagged_lines = PROMPT.splitlines(), PROMPT_ROSE_DESKTOP.splitlines()
+    assert len(stock_lines) == len(flagged_lines)
+    changed = [(a, b) for a, b in zip(stock_lines, flagged_lines) if a != b]
+    assert len(changed) == 1 and changed[0][0] == STOCK_SPAWN_CODE_LINE, changed
+    assert DISPLAY_PROMPT_ROSE_DESKTOP.startswith(DISPLAY_PROMPT + '\n- placement "pinned"')
+
+    flagged = get_planner_tools_description(rose_desktop=True)
+    assert flagged != stock
+    assert tool_prompts_for(rose_desktop=True)["display"] == DISPLAY_PROMPT_ROSE_DESKTOP
+    assert 'placement "pinned"' in flagged and "inline_view" in flagged
+
+
+async def test_planner_tools_description_follows_the_workflow_account():
+    """set_plan renders the planner tool text for the workflow's own account."""
+    import datetime
+    from unittest.mock import patch
+
+    from domains.set_plan.handler import SetPlanManager
+
+    captured: list = []
+
+    def fake_description(*, rose_desktop: bool = False) -> str:
+        captured.append(rose_desktop)
+        return "tools"
+
+    async def fake_attempt(**kwargs):
+        raise RuntimeError("stop after the description is built")
+
+    class _Wf:
+        context: list = []
+        user_context_section = ""
+        output_schema = None
+
+        def __init__(self, user_id):
+            self.user_id = user_id
+
+    for user_id in ("1f85ff25-6e29-4c1b-8739-f917bd101a30", "00000000-0000-4000-8000-000000000001", None):
+        with (
+            patch("domains.set_plan.handler.get_planner_tools_description", fake_description),
+            patch("domains.set_plan.handler.run_planner_attempt", fake_attempt),
+            patch("domains.set_plan.handler.workflow") as wf_mod,
+        ):
+            wf_mod.now.return_value = datetime.datetime(2026, 10, 20)
+            async for _event in SetPlanManager().execute_tool(_Wf(user_id), {"tool": "set_plan"}, "call-1"):
+                pass
+    assert captured == [True, False, False]
 
 
 def test_planner_spawn_aliases_documented_in_prompt():
@@ -2263,6 +2349,16 @@ async def run_all_tests():
     r.record(
         "code_agent_advertises_rose_user_ui_and_inline_views",
         test_code_agent_advertises_rose_user_ui_and_inline_views,
+    )
+
+    # 23. Rose Desktop gate: stock accounts get no new-UI prompt text
+    r.record(
+        "stock_planner_and_tool_prompts_omit_rose_desktop_surfaces",
+        test_stock_planner_and_tool_prompts_omit_rose_desktop_surfaces,
+    )
+    await r.record_async(
+        "planner_tools_description_follows_the_workflow_account",
+        test_planner_tools_description_follows_the_workflow_account,
     )
     teardown_mock()
     return r.all_passed

@@ -1,6 +1,9 @@
 import { USER_UI_DIR_NAME } from './userUi/seed';
 
+/** Rose Desktop accounts' instructions (rose_user_ui, rose-ui kit, branch model). */
 export const CODE_AGENT_INSTRUCTIONS_VERSION = '2026-10-20.code-agent-rose-ui-kit-branch.v6';
+/** Every other account: the same contract without the Rose Desktop sections. */
+export const CODE_AGENT_STOCK_INSTRUCTIONS_VERSION = '2026-10-20.code-agent-branch.v6';
 export const CODEX_HARNESS_INSTRUCTIONS_VERSION = '2026-08-25.codex-rose-harness.v1';
 
 export const CODE_AGENT_ATTACHMENTS_DIR = '/home/user/attachments';
@@ -15,7 +18,38 @@ interface BuildCodeAgentPromptArgs {
   branch?: string | null;
   /** Branch it merges into; null/undefined = the repository's default branch. */
   mergeTarget?: string | null;
+  /**
+   * Rose Desktop account (providers/roseDesktop): adds the "Rose app UI"
+   * section and the pinned-question / inline-view lines. Default: stock prompt.
+   */
+  roseDesktop?: boolean;
 }
+
+/** Rose Desktop only: the session's rose_user_ui and `rose-ui` (prepareUserUiWorkspaceSafe). */
+const ROSE_APP_UI_LINES = [
+  'Rose app UI:',
+  `- ${CODE_AGENT_USER_UI_DIR} is the Rose app UI of the user you work for. Its README.md explains the layout and \`rose-ui publish\`.`,
+  '- To change how Rose looks or behaves for the user, edit that folder and run `rose-ui publish` so the user sees the change.',
+  `- ${CODE_AGENT_USER_UI_DIR}/screenshots/current/ shows what the user sees now. \`rose-ui screenshot\` renders your local changes; \`rose-ui check\` must pass before \`rose-ui publish\`.`,
+  '- When asked for something the user should look at or play (a game, app, chart or other visual), build it as an inline view there, publish it, and name the view in your final response so it can be shown in the chat. Still put any requested files in the output directory.',
+  '',
+];
+
+const ROSE_DESKTOP_TALKING_LINES = [
+  'Talking to the user:',
+  '- Never rely on the user reading your terminal. Messages, results, scorecards, visuals, questions and approvals go through the Rose tools (MCP server `rose`, or the `rose` CLI on PATH; run `rose --help`).',
+  '- `send_message_to_user` for updates and results; `display` for screenshots, recordings and HTML previews; `display` with placement "pinned" and options for a question; `request_user_approval` before risky or irreversible actions. Questions and approvals wait for the answer.',
+  '- After `rose-ui publish` of something the user should see, show it yourself: `send_message_to_user` with `inline_view` (`rose message "<text>" --inline-view <view>`). Naming it in your final response is not enough.',
+  '',
+];
+
+/** Stock accounts: the same Rose tools without pinned questions or inline views. */
+const STOCK_TALKING_LINES = [
+  'Talking to the user:',
+  '- Never rely on the user reading your terminal. Messages, results, scorecards, visuals and approvals go through the Rose tools (MCP server `rose`, or the `rose` CLI on PATH; run `rose --help`).',
+  '- `send_message_to_user` for updates and results; `display` for screenshots, recordings and HTML previews; `request_user_approval` before risky or irreversible actions. Approvals wait for the answer.',
+  '',
+];
 
 export function buildCodeAgentSystemPrompt(args: BuildCodeAgentPromptArgs = {}): string {
   const workDir = args.workDir ?? '/home/user';
@@ -39,7 +73,7 @@ export function buildCodeAgentSystemPrompt(args: BuildCodeAgentPromptArgs = {}):
     : [];
 
   return [
-    `Rose Labs code-agent instructions (${CODE_AGENT_INSTRUCTIONS_VERSION})`,
+    `Rose Labs code-agent instructions (${args.roseDesktop ? CODE_AGENT_INSTRUCTIONS_VERSION : CODE_AGENT_STOCK_INSTRUCTIONS_VERSION})`,
     '',
     'You are running inside a persistent E2B sandbox for a parent agent. Your files, commits and conversation are kept between sessions.',
     'Complete the requested coding or file task autonomously.',
@@ -52,17 +86,9 @@ export function buildCodeAgentSystemPrompt(args: BuildCodeAgentPromptArgs = {}):
     '- In your final response, name the exact absolute paths of files you created for the user.',
     '- If no file output is requested, do not create placeholder files.',
     '',
-    'Rose app UI:',
-    `- ${CODE_AGENT_USER_UI_DIR} is the Rose app UI of the user you work for. Its README.md explains the layout and \`rose-ui publish\`.`,
-    '- To change how Rose looks or behaves for the user, edit that folder and run `rose-ui publish` so the user sees the change.',
-    `- ${CODE_AGENT_USER_UI_DIR}/screenshots/current/ shows what the user sees now. \`rose-ui screenshot\` renders your local changes; \`rose-ui check\` must pass before \`rose-ui publish\`.`,
-    '- When asked for something the user should look at or play (a game, app, chart or other visual), build it as an inline view there, publish it, and name the view in your final response so it can be shown in the chat. Still put any requested files in the output directory.',
-    '',
-    'Talking to the user:',
-    '- Never rely on the user reading your terminal. Messages, results, scorecards, visuals, questions and approvals go through the Rose tools (MCP server `rose`, or the `rose` CLI on PATH; run `rose --help`).',
-    '- `send_message_to_user` for updates and results; `display` for screenshots, recordings and HTML previews; `display` with placement "pinned" and options for a question; `request_user_approval` before risky or irreversible actions. Questions and approvals wait for the answer.',
-    '- After `rose-ui publish` of something the user should see, show it yourself: `send_message_to_user` with `inline_view` (`rose message "<text>" --inline-view <view>`). Naming it in your final response is not enough.',
-    '',
+    ...(args.roseDesktop
+      ? [...ROSE_APP_UI_LINES, ...ROSE_DESKTOP_TALKING_LINES]
+      : STOCK_TALKING_LINES),
     'Execution contract:',
     '- Prefer direct, verifiable commands over prose-only claims.',
     '- Finish only after the requested artifacts exist and have been checked.',
@@ -119,7 +145,7 @@ export function buildCodexHarnessSystemPrompt(args: BuildCodexHarnessPromptArgs)
  */
 export function buildLocalCodeAgentSystemPrompt(): string {
   return [
-    `Rose Labs code-agent instructions (${CODE_AGENT_INSTRUCTIONS_VERSION}.local-mac)`,
+    `Rose Labs code-agent instructions (${CODE_AGENT_STOCK_INSTRUCTIONS_VERSION}.local-mac)`,
     '',
     "You are running on the user's own Mac, in a folder they shared with Rose. That folder is your working directory.",
     'Complete the requested coding or file task autonomously.',

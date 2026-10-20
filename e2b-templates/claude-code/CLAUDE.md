@@ -10,11 +10,10 @@ This is an isolated E2B sandbox environment for completing coding tasks.
 ## Talking to the user
 
 The user never reads this terminal. Send messages, results, scorecards,
-visuals, questions and approvals through the Rose tools (MCP server `rose`, or
-the `rose` CLI on PATH): `send_message_to_user`, `display` (placement
-"pinned" with options for a question) and `request_user_approval`. After
-`rose-ui publish` of something to look at, show it with `send_message_to_user`
-and `inline_view` (`rose message "<text>" --inline-view <view>`).
+visuals and approvals through the Rose tools (MCP server `rose`, or the `rose`
+CLI on PATH; run `rose --help`): `send_message_to_user`, `display` and
+`request_user_approval`. Your instructions say which further tools your
+session has.
 
 ## Environment
 

@@ -89,6 +89,7 @@ from utils.response_schema_constraints import (
     explicitly_allows_empty_value,
     value_satisfies_output_field_constraints,
 )
+from utils.rose_desktop import is_rose_desktop_user
 from utils.tool_schemas import (
     ResponseSchemaBound,
     create_agent_action_model,
@@ -6379,16 +6380,18 @@ async def call_llm_activity(
         if extra_user_message:
             messages.append({"role": "user", "content": extra_user_message})
 
-        # Create dynamic action model
+        # Create dynamic action model. Rose Desktop accounts get their tool schemas
+        # (utils.rose_desktop); every other account the stock ones.
         # Pinned user tools (root agent) are declared after the built-ins, sorted.
+        tool_registry = get_tool_models(rose_desktop=is_rose_desktop_user(user_id))
         user_tool_decls = llm_declarations(user_tools)
         if user_tool_decls:
             AgentActionModel = create_agent_action_model(
                 [*tool_names, *(decl["name"] for decl in user_tool_decls)],
-                tool_registry={**get_tool_models(), **build_user_tool_registry(user_tool_decls)},
+                tool_registry={**tool_registry, **build_user_tool_registry(user_tool_decls)},
             )
         else:
-            AgentActionModel = create_agent_action_model(tool_names)
+            AgentActionModel = create_agent_action_model(tool_names, tool_registry=tool_registry)
 
         # Direct-token mode is detected from actual_model in stream response, not from input token presence.
         _is_claude = [False]  # Mutable list so closures can update it
@@ -7531,7 +7534,7 @@ async def call_planner_llm_activity(
             effort="max",
             # Constant declared-only toolset: the phase tools (so real tool history in
             # the pre-plan context stays native) + get_memories. Never callable here.
-            context_tools=planner_context_tools(),
+            context_tools=planner_context_tools(rose_desktop=is_rose_desktop_user(planner_user_id)),
             deadline_s=220.0,
             ttft_timeout_s=120.0,
         )

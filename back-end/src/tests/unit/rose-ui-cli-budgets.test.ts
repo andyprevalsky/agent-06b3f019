@@ -323,7 +323,8 @@ test('preview CSP is the production usercontent CSP', () => {
 });
 
 test('code agents are pointed at the README, current screenshots and check', () => {
-  const prompt = buildCodeAgentSystemPrompt();
+  // rose_user_ui is a Rose Desktop surface (providers/roseDesktop).
+  const prompt = buildCodeAgentSystemPrompt({ roseDesktop: true });
   for (const term of [
     '~/rose_user_ui is the Rose app UI',
     'README.md',

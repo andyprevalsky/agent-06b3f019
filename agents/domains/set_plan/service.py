@@ -24,9 +24,9 @@ from domains.set_plan.types import PlanData, TaskObject
 from helpers.attachments import FilePointer
 from helpers.context_scope import is_internal_subagent_message
 from providers.rose.pools import PLANNER_MODEL
-from tools.prompts import TOOL_PROMPTS
+from tools.prompts import tool_prompts_for
 from utils.simulated_clock import world_time_cursor_ms
-from utils.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS, TOOL_MODELS
+from utils.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS, ROSE_DESKTOP_TOOL_MODELS, TOOL_MODELS
 
 PLANNER_CONTEXT_FULL_TEXT_LIMIT = 6000
 PLANNER_CONTEXT_HEAD_CHARS = 3000
@@ -320,18 +320,21 @@ def _render_llm_tool_schema(name: str, description: str, model: Any) -> str:
     )
 
 
-def get_planner_tools_description() -> str:
+def get_planner_tools_description(*, rose_desktop: bool = False) -> str:
     """Get compact execute-tool schemas and descriptions for the planner.
 
     Single source of truth: execute-phase tools, their prompt fragments, and
     their Pydantic schemas. Planner-only spawn aliases are documented in the
-    planner prompt itself.
+    planner prompt itself. ``rose_desktop`` (``utils.rose_desktop``) renders the
+    Rose Desktop schemas and fragments; the default is the stock text.
     """
+    models = {**TOOL_MODELS, **ROSE_DESKTOP_TOOL_MODELS} if rose_desktop else TOOL_MODELS
+    prompts = tool_prompts_for(rose_desktop=rose_desktop)
     sections = []
     for name in EXECUTE_PHASE_TOOLS:
-        model = TOOL_MODELS.get(name)
-        if name in TOOL_PROMPTS:
-            description = TOOL_PROMPTS[name].strip()
+        model = models.get(name)
+        if name in prompts:
+            description = prompts[name].strip()
         elif model:
             description = (model.__doc__ or "").strip() or "No description"
         else:

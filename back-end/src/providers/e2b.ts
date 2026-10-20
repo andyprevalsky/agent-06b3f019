@@ -18,6 +18,7 @@ import {
   type GptCodeCredentialEnvelopeResult,
 } from './gptCredentials';
 import { buildCodeAgentSystemPrompt, buildCodexHarnessSystemPrompt } from './codeAgentPrompt';
+import { isRoseDesktopUser } from './roseDesktop';
 import { withAgentGraphInstructions } from './agentGraph/cli';
 import { uploadAttachmentsToSandbox } from './e2bAttachments';
 import { overlayCodexRoseBridge } from './e2bCodexHarness';
@@ -188,6 +189,7 @@ async function createClaudeCodeSessionUnlocked(
       workDir,
       branch: codeSession?.branch,
       mergeTarget: codeSession?.mergeTarget,
+      roseDesktop: isRoseDesktopUser(userId),
     })
   );
 
@@ -503,6 +505,7 @@ export async function createCodexCodeSession(
             workDir,
             branch: codeSession?.branch,
             mergeTarget: codeSession?.mergeTarget,
+            roseDesktop: isRoseDesktopUser(userId),
           })
         );
 

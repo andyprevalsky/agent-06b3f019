@@ -1039,6 +1039,193 @@ def test_agent_action_openai_schema_has_typed_spawn_agent_items():
     assert "anyOf" in items_schema or "type" in items_schema
 
 
+# ── Rose Desktop flag (utils.rose_desktop) ──
+# New-UI-only surfaces (inline views, pinned questions, the rose_user_ui clause
+# in spawn_agent) reach Rose Desktop accounts only; every other account keeps
+# the stock schema, byte-stable so its cached tool prefix is unchanged.
+
+ROSE_DESKTOP_USER = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
+STOCK_USER = "00000000-0000-4000-8000-000000000001"
+ROSE_DESKTOP_TERMS = ("inline_view", "rose_user_ui", "Rose app UI", "pinned", "inline view")
+
+
+def _native_tools(rose_desktop: bool, phase=None):
+    from providers.rose.schema import build_anthropic_tools_from_response_model
+    from utils.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS, create_agent_action_model, get_tool_models
+
+    names = PLAN_PHASE_TOOLS if phase == "plan" else EXECUTE_PHASE_TOOLS
+    registry = get_tool_models(phase=phase, rose_desktop=rose_desktop)
+    tools = build_anthropic_tools_from_response_model(create_agent_action_model(list(names), tool_registry=registry))
+    return {tool["name"]: tool for tool in tools}
+
+
+def test_rose_desktop_flag_covers_only_listed_accounts():
+    """The flag is the code-reviewed account list; anything else is a stock account."""
+    from utils.rose_desktop import ROSE_DESKTOP_USER_IDS, is_rose_desktop_user
+
+    assert ROSE_DESKTOP_USER_IDS == (ROSE_DESKTOP_USER,)
+    assert is_rose_desktop_user(ROSE_DESKTOP_USER)
+    for other in (STOCK_USER, "", None, 42, ROSE_DESKTOP_USER.upper()):
+        assert not is_rose_desktop_user(other), other
+
+
+def test_stock_tool_schemas_have_no_rose_desktop_surfaces():
+    """Unflagged accounts: no inline_view, no pinned placement, no rose_user_ui text in any tool schema."""
+    import json
+
+    from utils.tool_schemas import (
+        PLAN_TOOL_MODELS,
+        TOOL_MODELS,
+        DisplayTool,
+        SendMessageToUserExecutePhaseTool,
+        SendMessageToUserTool,
+        SpawnAgentTool,
+        create_agent_action_model,
+        get_tool_models,
+    )
+
+    # The default registries are the stock ones: a caller that never passes the flag is stock.
+    assert get_tool_models() == get_tool_models(rose_desktop=False) == dict(TOOL_MODELS)
+    assert get_tool_models(phase="plan") == dict(PLAN_TOOL_MODELS)
+    assert TOOL_MODELS["send_message_to_user"] is SendMessageToUserTool
+    assert TOOL_MODELS["send_message_to_user_execute_phase"] is SendMessageToUserExecutePhaseTool
+    assert TOOL_MODELS["display"] is DisplayTool
+    assert TOOL_MODELS["spawn_agent"] is SpawnAgentTool
+    default_action = create_agent_action_model(["send_message_to_user_execute_phase", "display"])
+    assert "inline_view" not in json.dumps(default_action.model_json_schema())
+
+    for phase in (None, "plan"):
+        tools = _native_tools(False, phase)
+        blob = json.dumps(tools)
+        for term in ROSE_DESKTOP_TERMS:
+            assert term not in blob, f"stock {phase or 'execute'} tools mention {term!r}"
+
+    execute = _native_tools(False)
+    plan = _native_tools(False, "plan")
+    assert list(execute["send_message_to_user_execute_phase"]["input_schema"]["properties"]) == ["message"]
+    assert list(plan["send_message_to_user"]["input_schema"]["properties"]) == ["message", "is_question"]
+    assert list(execute["display"]["input_schema"]["properties"]) == ["paths", "urls", "caption"]
+    assert execute["display"]["description"] == "Show images, videos or HTML to the user inline."
+    type_description = execute["spawn_agent"]["input_schema"]["properties"]["type"]["description"]
+    assert (
+        "'code' starts a coding agent using Claude Code or Codex CLI in a persistent sandbox, selected by "
+        "available credentials and configuration; 'general_purpose' starts a full autonomous agent for "
+    ) in type_description
+
+
+def test_rose_desktop_tool_schemas_add_only_new_ui_surfaces():
+    """Flagged accounts get inline_view, pinned questions and the rose_user_ui clause, and nothing else changes."""
+    from utils.tool_schemas import (
+        INLINE_VIEW_DESCRIPTION,
+        SPAWN_AGENT_TYPE_DESCRIPTION,
+        SPAWN_AGENT_TYPE_DESCRIPTION_ROSE_DESKTOP,
+    )
+
+    stock, flagged = _native_tools(False), _native_tools(True)
+    stock_plan, flagged_plan = _native_tools(False, "plan"), _native_tools(True, "plan")
+    assert list(stock) == list(flagged) and list(stock_plan) == list(flagged_plan), "same tools, same order"
+
+    for tools_stock, tools_flagged, name in (
+        (stock, flagged, "send_message_to_user_execute_phase"),
+        (stock_plan, flagged_plan, "send_message_to_user"),
+    ):
+        flagged_tool = tools_flagged[name]
+        props = dict(flagged_tool["input_schema"]["properties"])
+        inline = props.pop("inline_view")
+        assert inline["description"] == INLINE_VIEW_DESCRIPTION
+        assert props == tools_stock[name]["input_schema"]["properties"], f"{name}: only inline_view is added"
+        assert flagged_tool["description"] == tools_stock[name]["description"]
+
+    display = flagged["display"]["input_schema"]["properties"]
+    assert list(display) == ["paths", "urls", "caption", "placement", "options", "allow_other"]
+    assert display["placement"]["anyOf"][0]["enum"] == ["inline", "pinned"]
+    assert "pin a question" in flagged["display"]["description"]
+
+    flagged_type = flagged["spawn_agent"]["input_schema"]["properties"]["type"]["description"]
+    assert flagged_type == SPAWN_AGENT_TYPE_DESCRIPTION_ROSE_DESKTOP
+    assert "user's Rose app UI (rose_user_ui)" in flagged_type
+    assert stock["spawn_agent"]["input_schema"]["properties"]["type"]["description"] == SPAWN_AGENT_TYPE_DESCRIPTION
+    other_stock = {k: v for k, v in stock["spawn_agent"]["input_schema"]["properties"].items() if k != "type"}
+    other_flagged = {k: v for k, v in flagged["spawn_agent"]["input_schema"]["properties"].items() if k != "type"}
+    assert other_stock == other_flagged
+    # PLAN's explore-only spawn_agent is the same for both groups.
+    assert stock_plan["spawn_agent"] == flagged_plan["spawn_agent"]
+
+
+def test_tool_schemas_are_byte_stable_within_each_group():
+    """Each group's tool declarations are deterministic, so its cached tool prefix holds."""
+    import json
+
+    for flag in (False, True):
+        for phase in (None, "plan"):
+            first = json.dumps(list(_native_tools(flag, phase).values()), sort_keys=False)
+            second = json.dumps(list(_native_tools(flag, phase).values()), sort_keys=False)
+            assert first == second
+    assert json.dumps(_native_tools(False)) != json.dumps(_native_tools(True))
+
+
+def test_gpa_kill_switch_keeps_no_gp_spawn_for_rose_desktop():
+    """The no-general-purpose spawn_agent wins over the Rose Desktop swap."""
+    import os
+
+    from domains.spawn_agent.config import ROSE_DISABLE_GENERAL_PURPOSE_AGENT_ENV
+    from utils.tool_schemas import SpawnAgentToolNoGP, get_tool_models
+
+    previous = os.environ.get(ROSE_DISABLE_GENERAL_PURPOSE_AGENT_ENV)
+    os.environ[ROSE_DISABLE_GENERAL_PURPOSE_AGENT_ENV] = "1"
+    try:
+        assert get_tool_models(rose_desktop=True)["spawn_agent"] is SpawnAgentToolNoGP
+    finally:
+        if previous is None:
+            os.environ.pop(ROSE_DISABLE_GENERAL_PURPOSE_AGENT_ENV, None)
+        else:
+            os.environ[ROSE_DISABLE_GENERAL_PURPOSE_AGENT_ENV] = previous
+
+
+async def test_call_llm_activity_declares_tools_for_the_calling_account():
+    """The LLM activity declares Rose Desktop schemas only when its user_id is flagged."""
+    import json
+    from unittest.mock import patch
+
+    from helpers.llm import call_llm_activity
+    from providers.rose.schema import build_anthropic_tools_from_response_model
+
+    declared: dict = {}
+
+    async def fake_structured_streaming(**kwargs):
+        response_model = kwargs["response_model"]
+        declared[kwargs["call_site"]] = build_anthropic_tools_from_response_model(response_model)
+        return (
+            response_model(response="", tool_calls=[{"tool": "attempt_completion"}]),
+            {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            [],
+        )
+
+    with (
+        patch("helpers.llm.call_llm_structured_streaming", fake_structured_streaming),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        for site, user_id in (("rose-desktop", ROSE_DESKTOP_USER), ("stock", STOCK_USER), ("no-user", None)):
+            await call_llm_activity(
+                messages_or_agent_id=[{"role": "user", "content": "Tell the user"}],
+                model="rose-labs/rose-1-flash",
+                tool_names=["send_message_to_user_execute_phase", "display", "attempt_completion"],
+                reasoning_max_tokens=0,
+                call_site=site,
+                user_id=user_id,
+            )
+
+    by_site = {site: {tool["name"]: tool for tool in tools} for site, tools in declared.items()}
+    flagged = by_site["rose-desktop"]
+    assert "inline_view" in flagged["send_message_to_user_execute_phase"]["input_schema"]["properties"]
+    assert "placement" in flagged["display"]["input_schema"]["properties"]
+    for site in ("stock", "no-user"):
+        blob = json.dumps(by_site[site])
+        for term in ROSE_DESKTOP_TERMS:
+            assert term not in blob, f"{site} account declared {term!r}"
+    assert by_site["stock"] == by_site["no-user"]
+
+
 async def run_all_tests():
     print("tool-schemas blackbox tests:")
     r = BlackboxResult()
@@ -1127,6 +1314,20 @@ async def run_all_tests():
     r.record("create_action_no_tools", test_create_agent_action_model_no_tools_available)
     r.record("create_action_custom_registry", test_create_agent_action_model_custom_registry)
     r.record("agent_action_openai_schema_spawn_items", test_agent_action_openai_schema_has_typed_spawn_agent_items)
+    # Rose Desktop flag
+    r.record("rose_desktop_flag_covers_only_listed_accounts", test_rose_desktop_flag_covers_only_listed_accounts)
+    r.record("stock_tool_schemas_have_no_rose_desktop_surfaces", test_stock_tool_schemas_have_no_rose_desktop_surfaces)
+    r.record(
+        "rose_desktop_tool_schemas_add_only_new_ui_surfaces", test_rose_desktop_tool_schemas_add_only_new_ui_surfaces
+    )
+    r.record("tool_schemas_byte_stable_within_each_group", test_tool_schemas_are_byte_stable_within_each_group)
+    r.record(
+        "gpa_kill_switch_keeps_no_gp_spawn_for_rose_desktop", test_gpa_kill_switch_keeps_no_gp_spawn_for_rose_desktop
+    )
+    await r.record_async(
+        "call_llm_activity_declares_tools_for_the_calling_account",
+        test_call_llm_activity_declares_tools_for_the_calling_account,
+    )
     teardown_mock()
     r.record("all_phase_tools_superset", test_all_phase_tools_superset)
     return r.all_passed

@@ -25,9 +25,12 @@ export async function testPromptBuilder_sharedContractMentionsOutputRules() {
   const { buildCodeAgentSystemPrompt, CODE_AGENT_INSTRUCTIONS_VERSION } =
     await import('../../providers/codeAgentPrompt');
 
+  // A Rose Desktop account's prompt (providers/roseDesktop): the shared
+  // contract plus the rose_user_ui section asserted below.
   const prompt = buildCodeAgentSystemPrompt({
     githubRepoUrl: 'https://github.com/acme/widgets.git',
     workDir: '/home/user/workspace',
+    roseDesktop: true,
   });
 
   assert(prompt.includes(CODE_AGENT_INSTRUCTIONS_VERSION), 'Prompt version missing');
@@ -60,6 +63,17 @@ export async function testPromptBuilder_sharedContractMentionsOutputRules() {
   assert(
     prompt.includes('Still put any requested files in the output directory'),
     'Inline view must not replace requested output files'
+  );
+
+  // Every other account gets the same contract without the rose_user_ui section.
+  const stock = buildCodeAgentSystemPrompt({
+    githubRepoUrl: 'https://github.com/acme/widgets.git',
+    workDir: '/home/user/workspace',
+  });
+  assert(stock.includes('Do not launch a separate claude/Claude Code CLI'), 'stock contract');
+  assert(
+    !stock.includes('rose_user_ui') && !stock.includes('rose-ui'),
+    'stock prompt has no rose_user_ui'
   );
 }
 

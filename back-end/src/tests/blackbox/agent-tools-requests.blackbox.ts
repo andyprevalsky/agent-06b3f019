@@ -17,6 +17,8 @@
  *     --inline-view` lands that row in its own trajectory (C12)
  *   - the shipped `rose` CLI: display posts once then reports already displayed;
  *     `rose approve` blocks across long-polls until the user answers, then exits 0
+ *   - Rose Desktop gate (agent-tools-rose-desktop.cases): a stock session gets no
+ *     rose_user_ui / rose-ui and stock rose tools; a Rose Desktop session gets both
  *
  * Usage: bash scripts/run-blackbox-tests.sh agent-tools-requests
  */
@@ -64,6 +66,7 @@ import {
   type Auth,
   type BlackboxTest,
 } from './agent-tools.support';
+import { roseDesktopGateCases } from './agent-tools-rose-desktop.cases';
 
 const tests: BlackboxTest[] = [
   {
@@ -435,7 +438,14 @@ const tests: BlackboxTest[] = [
       // lands in its own trajectory whatever the root does next.
       const home = mkdtempSync(join(tmpdir(), 'rose-tools-publish-'));
       try {
-        const created = await prepareCodeSessionWorkspace(userB, agentB, 'task-game', 'claude');
+        // rose_user_ui is a Rose Desktop surface: this session runs as one.
+        const created = await prepareCodeSessionWorkspace(
+          userB,
+          agentB,
+          'task-game',
+          'claude',
+          true
+        );
         assert(created !== null, 'code-session workspace');
         const workspace = agentToolsForLocalHome(created, home);
         assert(
@@ -609,6 +619,7 @@ const tests: BlackboxTest[] = [
       }
     },
   },
+  ...roseDesktopGateCases,
 ];
 
 runSuite(tests).catch((err) => {
