@@ -7,10 +7,13 @@
  *   [LOADING] --other failure--> [ERROR]
  *
  * usePreviewFrameSrc (each frame load gets a fresh single-use sign-in code):
- *   disabled / no URL → null
- *   [HANDOFF] --POST …/preview/handoff ok--> preview_url#rose_preview_handoff=<code>
- *   [HANDOFF] --fails (e.g. 404 before L-APPS2 ships)--> preview_url (no fragment)
- *   URL / task / enabled change → a new handoff
+ *   disabled → [IDLE]
+ *   [MINTING] --POST …/preview/handoff 201 {code, preview_url}-->
+ *       [READY] <mint preview_url>#rose_preview_handoff=<code> (never the app origin)
+ *   [MINTING] --409 PREVIEW_UNAVAILABLE / no usable preview_url--> [STARTING]
+ *   [MINTING] --403 USER_SESSION_REQUIRED | ROSE_DEV_ONLY--> [HIDDEN] (nothing)
+ *   [MINTING] --404 / other failure--> [ERROR]
+ *   task / enabled change → a new code (codes are single-use, 60 s)
  *
  * useOnScreen: one IntersectionObserver per card; the card's frame only lives
  * while it is on screen.
@@ -21,11 +24,12 @@ import {
   CodePreviewApiError,
   createPreviewHandoff,
   fetchCodePreview,
+  PREVIEW_UNAVAILABLE,
   ROSE_DEV_ONLY,
   type CodePreviewView,
 } from '@/lib/api/codePreview';
 
-import { withPreviewHandoff } from './appFrame';
+import { isCrossOriginHttpUrl, withPreviewHandoff } from './appFrame';
 
 export type CodePreviewState =
   | { kind: 'loading' }
@@ -57,33 +61,45 @@ export function useCodePreviewStatus(taskId: string): CodePreviewState {
   return state;
 }
 
-export function usePreviewFrameSrc({
-  taskId,
-  previewUrl,
-  enabled,
-}: {
-  taskId: string;
-  previewUrl: string | null;
-  enabled: boolean;
-}): string | null {
-  const [src, setSrc] = useState<string | null>(null);
+export type PreviewFrameState =
+  | { kind: 'idle' }
+  | { kind: 'ready'; src: string }
+  | { kind: 'starting' }
+  | { kind: 'hidden' }
+  | { kind: 'error' };
+
+function handoffFailure(error: unknown): PreviewFrameState {
+  if (error instanceof CodePreviewApiError) {
+    if (error.code === PREVIEW_UNAVAILABLE) return { kind: 'starting' };
+    if (error.status === 403) return { kind: 'hidden' };
+  }
+  return { kind: 'error' };
+}
+
+export function usePreviewFrameSrc(taskId: string, enabled: boolean): PreviewFrameState {
+  const [state, setState] = useState<PreviewFrameState>({ kind: 'idle' });
   useEffect(() => {
-    setSrc(null);
-    if (!enabled || previewUrl === null) return;
+    setState({ kind: 'idle' });
+    if (!enabled) return;
     let cancelled = false;
     createPreviewHandoff(taskId).then(
-      ({ code }) => {
-        if (!cancelled) setSrc(withPreviewHandoff(previewUrl, code));
+      ({ code, preview_url: previewUrl }) => {
+        if (cancelled) return;
+        setState(
+          isCrossOriginHttpUrl(previewUrl)
+            ? { kind: 'ready', src: withPreviewHandoff(previewUrl, code) }
+            : { kind: 'starting' },
+        );
       },
-      () => {
-        if (!cancelled) setSrc(previewUrl);
+      (error: unknown) => {
+        if (!cancelled) setState(handoffFailure(error));
       },
     );
     return () => {
       cancelled = true;
     };
-  }, [taskId, previewUrl, enabled]);
-  return src;
+  }, [taskId, enabled]);
+  return state;
 }
 
 export function useOnScreen(ref: RefObject<Element>): boolean {

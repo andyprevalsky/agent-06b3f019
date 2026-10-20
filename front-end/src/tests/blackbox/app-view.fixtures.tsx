@@ -1,11 +1,12 @@
 /**
  * Fixtures for the Rose Desktop app view suites (a code-agent chip's live
  * preview card → the full-screen app view). Wire shapes follow the A1 backend
- * (feat/rose-user-ui @ 7826a2a6b) plus the pending L-APPS2 handoff:
+ * (feat/rose-user-ui @ 7826a2a6b) and the L-APPS2 handoff (d0a33fefa):
  *
  *   metadata.code_agent { task_id, provider, preview_url, title, … } on the spawn row
  *   GET  /api/claude-code-session/:taskId/preview -> { preview_url, status, … }
- *   POST /api/claude-code-session/:taskId/preview/handoff -> { code, expires_at } (L-APPS2)
+ *   POST /api/claude-code-session/:taskId/preview/handoff -> 201 { code, expires_at, preview_url }
+ *        403 USER_SESSION_REQUIRED | ROSE_DEV_ONLY · 404 CODE_TASK_NOT_FOUND · 409 PREVIEW_UNAVAILABLE
  *   POST /api/claude-code-session/:taskId/publish -> { pr: { number, url }, created, … }
  *   POST /api/claude-code-session/:taskId/turns (the existing steer route)
  */
@@ -44,14 +45,40 @@ export function servePreview(
   );
 }
 
-/** Handoff codes hc-1, hc-2, … per call; `fail` answers 404 (before L-APPS2 ships). */
-export function serveHandoff(mode: 'ok' | 'fail' = 'ok') {
+/** The exact refusals of the mint route (back-end routes.previewHandoff.ts + handoff.ts). */
+export type HandoffRefusal =
+  'USER_SESSION_REQUIRED' | 'ROSE_DEV_ONLY' | 'CODE_TASK_NOT_FOUND' | 'PREVIEW_UNAVAILABLE';
+
+const HANDOFF_REFUSAL_STATUS: Record<HandoffRefusal, number> = {
+  USER_SESSION_REQUIRED: 403,
+  ROSE_DEV_ONLY: 403,
+  CODE_TASK_NOT_FOUND: 404,
+  PREVIEW_UNAVAILABLE: 409,
+};
+
+/**
+ * The mint: 201 { code: hc-1, hc-2, … per call, expires_at, preview_url } with
+ * Cache-Control no-store, or one of the refusals above.
+ */
+export function serveHandoff(refusal: HandoffRefusal | null = null, previewUrl = PREVIEW_URL) {
   let calls = 0;
   server.use(
     http.post(`${API_BASE}/claude-code-session/:taskId/preview/handoff`, () => {
       calls += 1;
-      if (mode === 'fail') return HttpResponse.json({ error: 'Not found' }, { status: 404 });
-      return HttpResponse.json({ code: `hc-${calls}`, expires_at: '2026-10-20T22:01:00.000Z' });
+      if (refusal !== null) {
+        return HttpResponse.json(
+          { error: `refused: ${refusal}`, code: refusal },
+          { status: HANDOFF_REFUSAL_STATUS[refusal] },
+        );
+      }
+      return HttpResponse.json(
+        {
+          code: `hc-${calls}`,
+          expires_at: '2026-10-20T22:01:00.000Z',
+          preview_url: previewUrl,
+        },
+        { status: 201, headers: { 'Cache-Control': 'no-store' } },
+      );
     }),
   );
   return { calls: () => calls };
@@ -150,19 +177,6 @@ export function serveAgentWithChip(codeAgent: Record<string, unknown> = {}) {
       }),
     ),
   );
-}
-
-/** IntersectionObserver that reports every observed element as on screen. */
-export class VisibleIntersectionObserver {
-  constructor(private readonly callback: IntersectionObserverCallback) {}
-  observe(target: Element) {
-    this.callback(
-      [{ isIntersecting: true, target } as IntersectionObserverEntry],
-      this as unknown as IntersectionObserver,
-    );
-  }
-  unobserve() {}
-  disconnect() {}
 }
 
 export function renderTerminal() {

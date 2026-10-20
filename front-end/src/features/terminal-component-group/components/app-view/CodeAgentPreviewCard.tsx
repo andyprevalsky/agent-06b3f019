@@ -6,7 +6,8 @@
  * an AppViewProvider is mounted (Rose Desktop terminal).
  *   [OFF SCREEN] → empty card, no frame and no reads
  *   [ON SCREEN]  → POST …/preview/handoff (fresh single-use code) → scaled live
- *                  frame of the 1280×800 preview (pointer-events off, lazy)
+ *                  frame of the mint's 1280×800 preview (pointer-events off,
+ *                  lazy); a refused / unavailable mint leaves the card empty
  *   [ON SCREEN] --scrolled away--> [OFF SCREEN] (frame unmounted)
  *   click → open the full-screen app view for this code session
  *
@@ -40,11 +41,7 @@ export function CodeAgentPreviewCard({
   const cardRef = useRef<HTMLDivElement>(null);
   const onScreen = useOnScreen(cardRef);
   const valid = isCrossOriginHttpUrl(previewUrl);
-  const src = usePreviewFrameSrc({
-    taskId,
-    previewUrl: valid ? previewUrl : null,
-    enabled: onScreen && appView !== null,
-  });
+  const frame = usePreviewFrameSrc(taskId, valid && onScreen && appView !== null);
   if (appView === null || !valid) return null;
   const height = Math.round(PREVIEW_CARD_VIEWPORT.height * PREVIEW_CARD_SCALE);
   return (
@@ -55,10 +52,10 @@ export function CodeAgentPreviewCard({
         className="relative overflow-hidden rounded-lg border border-border bg-white dark:border-white/[.09]"
         style={{ width: PREVIEW_CARD_WIDTH, height }}
       >
-        {onScreen && src !== null && (
+        {onScreen && frame.kind === 'ready' && (
           <iframe
             data-testid="code-agent-preview-frame"
-            src={src}
+            src={frame.src}
             title={`${title ?? 'App'} live preview`}
             sandbox={PREVIEW_FRAME_SANDBOX}
             referrerPolicy="no-referrer"
@@ -76,7 +73,7 @@ export function CodeAgentPreviewCard({
         <button
           type="button"
           aria-label={`Open ${title ?? 'app'} preview`}
-          onClick={() => appView.openApp({ taskId, previewUrl, title, provider })}
+          onClick={() => appView.openApp({ taskId, title, provider })}
           className="absolute inset-0 h-full w-full cursor-pointer"
         />
       </div>

@@ -1,13 +1,16 @@
 /**
  * Code-session preview REST client (Rose Desktop full-screen app view, opened
  * from a code-agent chip's live preview card). Backend contract:
- * feat/rose-user-ui @ 7826a2a6b (A1 Rose-in-Rose) plus the pending L-APPS2
- * preview sign-in handoff.
+ * feat/rose-user-ui @ 7826a2a6b (A1 Rose-in-Rose) + d0a33fefa (L-APPS2 preview
+ * sign-in handoff).
  *
  *   GET  /api/claude-code-session/:taskId/preview -> CodePreviewView
  *        403 ROSE_DEV_ONLY · 404 CODE_TASK_NOT_FOUND
- *   POST /api/claude-code-session/:taskId/preview/handoff -> { code, expires_at }
- *        (L-APPS2: 60 s, single-use sign-in code for the preview origin)
+ *   POST /api/claude-code-session/:taskId/preview/handoff (the user's own JWT)
+ *        -> 201 { code, expires_at, preview_url } (L-APPS2, d0a33fefa: 60 s,
+ *        single-use sign-in code; open preview_url#rose_preview_handoff=<code>)
+ *        403 USER_SESSION_REQUIRED | ROSE_DEV_ONLY · 404 CODE_TASK_NOT_FOUND ·
+ *        409 PREVIEW_UNAVAILABLE (no preview to sign in to yet)
  *   POST /api/claude-code-session/:taskId/publish {} -> CodePublishResult
  *        (pushes the branch and opens a PR; never merges or deploys)
  *        409 NOT_A_GITHUB_REPO | NO_CODE_SESSION | SESSION_RETIRED | NO_BRANCH |
@@ -35,6 +38,8 @@ export interface CodePreviewView {
 export interface CodePreviewHandoff {
   code: string;
   expires_at: string;
+  /** The preview to open with the code (the mint response is authoritative). */
+  preview_url: string | null;
 }
 
 export interface CodePublishResult {
@@ -51,6 +56,7 @@ export interface CodePublishResult {
 }
 
 export const ROSE_DEV_ONLY = 'ROSE_DEV_ONLY';
+export const PREVIEW_UNAVAILABLE = 'PREVIEW_UNAVAILABLE';
 
 export class CodePreviewApiError extends Error {
   constructor(
@@ -103,7 +109,7 @@ export async function createPreviewHandoff(taskId: string): Promise<CodePreviewH
   );
   const code = str(body?.code);
   if (!code) throw new CodePreviewApiError(502, null, 'Handoff returned no code');
-  return { code, expires_at: str(body?.expires_at) ?? '' };
+  return { code, expires_at: str(body?.expires_at) ?? '', preview_url: str(body?.preview_url) };
 }
 
 /** Push the session's branch and open (or update) its PR. Never merges or deploys. */

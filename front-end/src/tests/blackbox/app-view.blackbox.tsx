@@ -85,12 +85,45 @@ describe('app view', () => {
     expect(screen.queryByPlaceholderText('Type your message...')).not.toBeInTheDocument();
   });
 
-  it('loads preview_url without a fragment when the handoff call fails', async () => {
+  it("opens the mint response's preview_url with the encoded single-use code", async () => {
+    const minted = 'https://5173-sbx-minted.e2b.test/app/';
     servePreview('running');
-    serveHandoff('fail');
+    serveHandoff(null, minted);
     const view = await openAppView();
-    expect(await within(view).findByTestId('app-view-frame')).toHaveAttribute('src', PREVIEW_URL);
+    expect(await within(view).findByTestId('app-view-frame')).toHaveAttribute(
+      'src',
+      `${minted}#rose_preview_handoff=hc-1`,
+    );
+    expect(requests('POST', `/claude-code-session/${TASK_ID}/preview/handoff`)[0].body).toEqual({});
   });
+
+  it.each([
+    ['PREVIEW_UNAVAILABLE', 'Preview is starting…'],
+    ['CODE_TASK_NOT_FOUND', 'Preview unavailable'],
+  ] as const)('a %s mint shows quiet text, no frame', async (refusal, text) => {
+    servePreview('running');
+    serveHandoff(refusal);
+    const view = await openAppView();
+    expect(await within(view).findByTestId('app-view-quiet')).toHaveTextContent(text);
+    expect(within(view).queryByTestId('app-view-frame')).not.toBeInTheDocument();
+  });
+
+  it.each(['USER_SESSION_REQUIRED', 'ROSE_DEV_ONLY'] as const)(
+    'a 403 %s mint renders nothing (no frame, no error text)',
+    async (refusal) => {
+      servePreview('running');
+      const handoff = serveHandoff(refusal);
+      const view = await openAppView();
+      await waitFor(() => expect(handoff.calls()).toBe(1));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(within(view).queryByTestId('app-view-frame')).not.toBeInTheDocument();
+      expect(within(view).queryByTestId('app-view-quiet')).not.toBeInTheDocument();
+      expect(screen.queryByText(/refused/)).not.toBeInTheDocument();
+      expect(
+        within(view).getByPlaceholderText('Message Claude Code directly…'),
+      ).toBeInTheDocument();
+    },
+  );
 
   it("a message sent over the app goes to that code session's steer route, never a new agent", async () => {
     servePreview('running');
