@@ -54,9 +54,12 @@
 #   --builder native|depot  image-build only; native default, Depot app scope/zstd 3
 #   --no-cache         explicitly bypass image build layers (build/setup only)
 #   --build-context D  build the unchanged source in another checkout
-#   --refresh-wmh      explicit-only: refresh the cached WMH model on /data/world-model
-#                      (native default: restore WMH_CACHE_NAME from the R2 build cache
-#                      + pre-create the native venv; WMH_ENGINE=legacy rebuilds on-box)
+#   --refresh-wmh      explicit-only: refresh the cached WMH models on the donor
+#                      (native default: restore WMH_CACHE_NAME into /data/world-model-native
+#                      + pre-create the native venv, and restore WMH_LEGACY_CACHE_NAME
+#                      (default rose-r2-archive-legacy) into /data/world-model only when
+#                      the legacy model is missing; fails before a pull without room;
+#                      WMH_ENGINE=legacy rebuilds on-box)
 #   --build-wmh        explicit-only: build the native WMH on an OWNED ephemeral
 #                      Machine+Volume forked from the donor snapshot (WMH_BUILD_VM_SIZE
 #                      performance-8x, WMH_BUILD_VM_MEMORY_MB 65536, WMH_BUILD_VOLUME_GB
@@ -218,6 +221,17 @@ if ! [[ "$WMH_CACHE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
     echo "Invalid WMH_CACHE_NAME" >&2
     exit 2
 fi
+# Both engines serve from one donor snapshot: the legacy model (main's default)
+# under /data/world-model and the native one beside it. When the donor lost the
+# legacy model, the native --refresh-wmh restores it from this R2 cache.
+WMH_LEGACY_CACHE_NAME="${WMH_LEGACY_CACHE_NAME:-rose-r2-archive-legacy}"
+WMH_LEGACY_MODEL_NAME="${WMH_LEGACY_MODEL_NAME:-rose-r2-archive-anthropic}"
+for _wmh_name_key in WMH_LEGACY_CACHE_NAME WMH_LEGACY_MODEL_NAME; do
+    if ! [[ "${!_wmh_name_key}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+        echo "Invalid $_wmh_name_key" >&2
+        exit 2
+    fi
+done
 if ! [[ "$WMH_ROSE_POOL" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
     echo "Invalid WMH_ROSE_POOL" >&2
     exit 2
@@ -3289,7 +3303,36 @@ cd '$REMOTE_REPO'
 [ -x agents/venv/bin/uv ] || gosu rose env HOME=/home/rose agents/venv/bin/python -m pip install --quiet uv
 gosu rose env HOME=/home/rose UV_PYTHON_INSTALL_DIR='$REMOTE_UV_PYTHON' UV_CACHE_DIR=/tmp/rose-uv-cache UV_LINK_MODE=copy bash scripts/setup-world-model.sh
 cd agents
+# A streaming pull stages beside its target and needs the cache's full size free
+# there (the previous tree stays until the swap): fail before pulling otherwise.
+wmh_require_room() {
+    local need avail
+    need=\$(PYTHONDONTWRITEBYTECODE=1 venv/bin/python -u -m benchmarks.wmh_build_cache status --name \"\$1\" | venv/bin/python -c 'import json, sys; print(int(json.load(sys.stdin)[\"plaintext_bytes\"]))') || { echo \"cannot read the published size of WMH cache \$1\" >&2; return 1; }
+    avail=\$(df -PB1 \"\$(dirname \"\$2\")\" | awk 'NR == 2 { print \$4 }')
+    if ! [ \"\$avail\" -ge \$((need + 1073741824)) ] 2>/dev/null; then
+        echo \"insufficient donor disk for WMH cache \$1: needs \$need bytes + 1 GiB margin beside \$2, \${avail:-unknown} bytes free\" >&2
+        return 1
+    fi
+    echo \"disk headroom ok for \$1: \$need bytes needed, \$avail free\"
+}
+# The legacy model (main's default engine) must survive beside the native one.
+# Restore it atomically only when it is missing or was replaced by another model.
+if [ -f '$REMOTE_WMH/build.manifest.json' ] && [ -d '$REMOTE_WMH/models/$WMH_LEGACY_MODEL_NAME' ] && [ ! -e '$REMOTE_WMH/models/$WMH_LEGACY_MODEL_NAME/experiential.json' ]; then
+    echo 'legacy WMH model $WMH_LEGACY_MODEL_NAME intact at $REMOTE_WMH; leaving it'
+else
+    echo 'legacy WMH model $WMH_LEGACY_MODEL_NAME missing at $REMOTE_WMH; restoring cache $WMH_LEGACY_CACHE_NAME'
+    rm -rf '$REMOTE_WMH.incoming' '$REMOTE_WMH.incoming'.replaced-* '$REMOTE_WMH.previous'
+    wmh_require_room '$WMH_LEGACY_CACHE_NAME' '$REMOTE_WMH.incoming'
+    PYTHONDONTWRITEBYTECODE=1 venv/bin/python -u -m benchmarks.wmh_build_cache pull --build-dir '$REMOTE_WMH.incoming' --name '$WMH_LEGACY_CACHE_NAME' --force
+    [ -f '$REMOTE_WMH.incoming/build.manifest.json' ] && [ -d '$REMOTE_WMH.incoming/models/$WMH_LEGACY_MODEL_NAME' ] || { rm -rf '$REMOTE_WMH.incoming'; echo 'restored cache $WMH_LEGACY_CACHE_NAME lacks build.manifest.json or models/$WMH_LEGACY_MODEL_NAME' >&2; exit 1; }
+    chown -R rose:rose '$REMOTE_WMH.incoming'
+    if [ -e '$REMOTE_WMH' ]; then mv '$REMOTE_WMH' '$REMOTE_WMH.previous'; fi
+    mv '$REMOTE_WMH.incoming' '$REMOTE_WMH'
+    rm -rf '$REMOTE_WMH.previous'
+    echo 'restored legacy WMH model $WMH_LEGACY_MODEL_NAME at $REMOTE_WMH'
+fi
 rm -rf '$REMOTE_WMH_NATIVE.incoming' '$REMOTE_WMH_NATIVE.incoming'.replaced-* '$REMOTE_WMH_NATIVE.previous'
+wmh_require_room '$WMH_CACHE_NAME' '$REMOTE_WMH_NATIVE.incoming'
 PYTHONDONTWRITEBYTECODE=1 venv/bin/python -u -m benchmarks.wmh_build_cache pull --build-dir '$REMOTE_WMH_NATIVE.incoming' --name '$WMH_CACHE_NAME' --force
 [ -f '$REMOTE_WMH_NATIVE.incoming/models/$WMH_MODEL_NAME/experiential.json' ] || { rm -rf '$REMOTE_WMH_NATIVE.incoming'; echo 'restored cache $WMH_CACHE_NAME lacks models/$WMH_MODEL_NAME/experiential.json' >&2; exit 1; }
 [ -f '$REMOTE_WMH_NATIVE.incoming/build.manifest.json' ] || { rm -rf '$REMOTE_WMH_NATIVE.incoming'; echo 'restored cache $WMH_CACHE_NAME lacks build.manifest.json' >&2; exit 1; }
@@ -3298,7 +3341,8 @@ if [ -e '$REMOTE_WMH_NATIVE' ]; then mv '$REMOTE_WMH_NATIVE' '$REMOTE_WMH_NATIVE
 mv '$REMOTE_WMH_NATIVE.incoming' '$REMOTE_WMH_NATIVE'
 rm -rf '$REMOTE_WMH_NATIVE.previous'
 echo '::WMH-REFRESH-DONE::'
-ls -la '$REMOTE_WMH_NATIVE/models' 2>/dev/null || true"
+ls -la '$REMOTE_WMH/models' '$REMOTE_WMH_NATIVE/models' 2>/dev/null || true
+df -h /data 2>/dev/null || true"
     # Legacy (explicit WMH_ENGINE=legacy): decode secrets into the checkout .env,
     # mirror deps if needed, then run the WMH build. This is the ONLY place
     # update_world_model_for_simulation() runs cloud-side. Runs as rose from the

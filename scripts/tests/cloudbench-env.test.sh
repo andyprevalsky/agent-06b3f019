@@ -65,6 +65,9 @@ def run(script, values=None):
     return subprocess.run(["bash", "-c", configuration + script], env=environment,
                           text=True, capture_output=True)
 
+# Donor free space as `df -PB1` reports it; DF_AVAIL sets the available bytes.
+DF_FAKE = "df() { printf 'Filesystem 1-blocks Used Available Capacity Mounted\\nfake 0 0 %s 0%% /data\\n' \"$DF_AVAIL\"; };\n"
+
 class WorldModelLaunch(unittest.TestCase):
     def assert_handoff(self, values, *, engine="experiential", pool="rose-1-mini",
                        policy="rose-outcome-distribution-v4"):
@@ -146,7 +149,9 @@ class WorldModelLaunch(unittest.TestCase):
             "experiential", "custom-model", "rose-1-ultra", "upstream", "", "custom-cache"])
         self.assertEqual(run(":", {"WMH_ENGINE": "legacy",
                                    "WMH_EXECUTION_POLICY": "rose-outcome-distribution-v4"}).returncode, 2)
-        for key in ("WMH_MODEL_NAME", "WMH_CACHE_NAME"):
+        legacy_names = run('printf "%s\\n" "$WMH_LEGACY_CACHE_NAME" "$WMH_LEGACY_MODEL_NAME"', unset)
+        self.assertEqual(legacy_names.stdout.splitlines(), ["rose-r2-archive-legacy", "rose-r2-archive-anthropic"])
+        for key in ("WMH_MODEL_NAME", "WMH_CACHE_NAME", "WMH_LEGACY_CACHE_NAME", "WMH_LEGACY_MODEL_NAME"):
             with self.subTest(unsafe=key):
                 self.assertEqual(run(":", {key: "x';id'"}).returncode, 2)
         for key, value in (("WMH_ENGINE", "unknown"),
@@ -171,9 +176,16 @@ class WorldModelLaunch(unittest.TestCase):
         fragment = re.search(r'^    NATIVE_REFRESH_CMD="set -e\n.*?^ {4}# Legacy', source, re.M | re.S).group(0)
         fragment = fragment[:fragment.rfind("    # Legacy")]
         self.assertNotIn("update_world_model_for_simulation", fragment)
-        # The native restore never writes the legacy model directory.
-        self.assertNotIn("$REMOTE_WMH'", fragment)
-        self.assertNotIn("$REMOTE_WMH/", fragment)
+        # The native restore writes the legacy model directory only through the
+        # guarded legacy-cache restore (2026-10-19 a --force restore into
+        # $REMOTE_WMH deleted rose-r2-archive-anthropic from the donor).
+        legacy_block = re.search(r"^if \[ -f '\$REMOTE_WMH/build\.manifest\.json' \].*?^fi\n", fragment, re.M | re.S).group(0)
+        # (the closing read-only listing reports both model directories)
+        outside = "\n".join(line for line in fragment.replace(legacy_block, "").splitlines()
+                             if not line.startswith("ls -la "))
+        self.assertNotIn("$REMOTE_WMH'", outside)
+        self.assertNotIn("$REMOTE_WMH/", outside)
+        self.assertNotIn("$REMOTE_WMH.", outside)
         self.assertIn("create_volume_snapshot_exact", refresh[refresh.index('BUILD_CMD="$NATIVE_REFRESH_CMD"'):])
         # Fleets rehydrate the donor proof from Machine metadata (observed
         # 2026-10-19: a refreshed WMH snapshot was never forked because only the
@@ -189,6 +201,19 @@ class WorldModelLaunch(unittest.TestCase):
             "'user_home':os.environ.get('HOME')})+'\\n')\n"
             "if argv[:4]==['-m','pip','install','--quiet']:\n"
             "    uv=Path(sys.argv[0]).parent/'uv'; uv.write_text('#!/bin/sh\\n'); uv.chmod(0o755)\n"
+            "if argv[:1]==['-c']:\n"
+            "    os.execv(sys.executable,[sys.executable]+argv)\n"
+            "if 'status' in argv:\n"
+            "    print(json.dumps({'name':argv[-1],'plaintext_bytes':int(os.environ['CACHE_BYTES'])})); sys.exit(0)\n"
+            "if 'benchmarks.wmh_build_cache' in argv and argv[argv.index('--name')+1]==os.environ.get('LEGACY_CACHE'):\n"
+            "    root=Path(argv[argv.index('--build-dir')+1])\n"
+            "    (root/'models/rose-r2-archive-anthropic').mkdir(parents=True)\n"
+            "    if os.environ.get('LEGACY_PULL')!='no-model':\n"
+            "        (root/'models/rose-r2-archive-anthropic/model.json').write_text('restored-legacy')\n"
+            "    else:\n"
+            "        (root/'models/rose-r2-archive-anthropic').rmdir()\n"
+            "    (root/'build.manifest.json').write_text('restored-legacy-manifest')\n"
+            "    sys.exit(0)\n"
             "if 'benchmarks.wmh_build_cache' in argv and os.environ.get('PULL_MODE')!='fail':\n"
             "    root=Path(argv[argv.index('--build-dir')+1])\n"
             "    (root/'models/rose-archive').mkdir(parents=True, exist_ok=True)\n"
@@ -220,18 +245,23 @@ class WorldModelLaunch(unittest.TestCase):
                 (native / "models/rose-archive").mkdir(parents=True)
                 (native / "models/rose-archive/experiential.json").write_text("previous")
                 result = run(
-                    "gosu() { shift; \"$@\"; }; chown() { :; }; rsync() { return 1; };\n" + fragment
+                    "gosu() { shift; \"$@\"; }; chown() { :; }; rsync() { return 1; };\n" + DF_FAKE + fragment
                     + '\neval "$NATIVE_REFRESH_CMD"',
                     {"REMOTE_REPO": str(repo), "REMOTE_WMH": str(world), "REMOTE_WMH_NATIVE": str(native),
-                     "WMH_MODEL_NAME": "rose-archive",
+                     "WMH_MODEL_NAME": "rose-archive", "WMH_LEGACY_CACHE_NAME": "rose-r2-archive-legacy",
+                     "WMH_LEGACY_MODEL_NAME": "rose-r2-archive-anthropic", "LEGACY_CACHE": "rose-r2-archive-legacy",
                      "WMH_CACHE_NAME": "rose-archive-serving", "REMOTE_UV_PYTHON": str(scratch / "uv-python"),
-                     "CALLS": str(calls), "PULL_MODE": mode},
+                     "CALLS": str(calls), "PULL_MODE": mode, "CACHE_BYTES": "1000", "DF_AVAIL": str(2 << 30)},
                 )
                 self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
                 self.assertEqual("::WMH-REFRESH-DONE::" in result.stdout, ok)
                 records = [json.loads(line) for line in calls.read_text().splitlines()]
-                pythons = [record["argv"] for record in records if record["tool"] == "python"]
+                pythons = [record["argv"] for record in records if record["tool"] == "python" and record["argv"][:1] != ["-c"]]
                 self.assertEqual(pythons[0], ["-m", "pip", "install", "--quiet", "uv"])
+                # An intact legacy model is left alone: only the native cache is sized and pulled.
+                self.assertEqual(pythons[1], ["-u", "-m", "benchmarks.wmh_build_cache", "status", "--name",
+                                              "rose-archive-serving"])
+                pythons.pop(1)
                 self.assertEqual(pythons[1], ["-u", "-m", "benchmarks.wmh_build_cache", "pull", "--build-dir",
                                               str(native) + ".incoming", "--name", "rose-archive-serving", "--force"])
                 # Other workspaces' legacy model and manifest survive every outcome.
@@ -246,6 +276,114 @@ class WorldModelLaunch(unittest.TestCase):
                 self.assertEqual(setup, [{"tool": "setup", "uv_python": str(scratch / "uv-python"),
                                           "cwd": str(repo)}])
                 self.assertTrue((scratch / "uv-python").is_dir())
+
+    def test_native_refresh_restores_a_lost_legacy_model_beside_the_native_one(self):
+        # 2026-10-19 a native restore overwrote /data/world-model, so main's
+        # legacy engine lost rose-r2-archive-anthropic. One refresh must leave
+        # both engines servable: legacy restored from its R2 cache atomically
+        # when missing, after a disk-headroom check, before the native pull.
+        fragment = re.search(r'^    NATIVE_REFRESH_CMD="set -e\n.*?^ {4}# Legacy', source, re.M | re.S).group(0)
+        fragment = fragment[:fragment.rfind("    # Legacy")]
+        fake_python = (
+            "#!" + sys.executable + "\nimport json,os,sys\nfrom pathlib import Path\nargv=sys.argv[1:]\n"
+            "if argv[:1]==['-c']:\n    os.execv(sys.executable,[sys.executable]+argv)\n"
+            "open(os.environ['CALLS'],'a').write(json.dumps(argv)+'\\n')\n"
+            "if argv[:4]==['-m','pip','install','--quiet']:\n"
+            "    uv=Path(sys.argv[0]).parent/'uv'; uv.write_text('#!/bin/sh\\n'); uv.chmod(0o755); sys.exit(0)\n"
+            "name=argv[argv.index('--name')+1] if '--name' in argv else ''\n"
+            "if 'status' in argv:\n"
+            "    print(json.dumps({'name':name,'plaintext_bytes':int(os.environ['BYTES_'+name.replace('-','_')])})); sys.exit(0)\n"
+            "root=Path(argv[argv.index('--build-dir')+1])\n"
+            "if name=='rose-r2-archive-legacy':\n"
+            "    root.mkdir(parents=True)\n"
+            "    if os.environ.get('LEGACY_PULL')!='no-model':\n"
+            "        (root/'models/rose-r2-archive-anthropic').mkdir(parents=True)\n"
+            "        (root/'models/rose-r2-archive-anthropic/model.json').write_text('restored-legacy')\n"
+            "    (root/'build.manifest.json').write_text('legacy-manifest')\n"
+            "else:\n"
+            "    (root/'models/rose-archive').mkdir(parents=True)\n"
+            "    (root/'models/rose-archive/experiential.json').write_text('native')\n"
+            "    (root/'build.manifest.json').write_text('native-manifest')\n"
+        )
+        gib = 1 << 30
+        legacy_pull = ["-u", "-m", "benchmarks.wmh_build_cache", "pull", "--build-dir", "{world}.incoming",
+                       "--name", "rose-r2-archive-legacy", "--force"]
+        native_pull = ["-u", "-m", "benchmarks.wmh_build_cache", "pull", "--build-dir", "{native}.incoming",
+                       "--name", "rose-archive-serving", "--force"]
+        status = lambda name: ["-u", "-m", "benchmarks.wmh_build_cache", "status", "--name", name]
+        # (case, donor legacy dir state, legacy pull, free bytes, ok, expected cache calls, legacy after)
+        cases = (
+            ("native-in-legacy-dir", "native", "ok", 30 * gib, True,
+             [status("rose-r2-archive-legacy"), legacy_pull, status("rose-archive-serving"), native_pull], "restored-legacy"),
+            ("legacy-dir-absent", "absent", "ok", 30 * gib, True,
+             [status("rose-r2-archive-legacy"), legacy_pull, status("rose-archive-serving"), native_pull], "restored-legacy"),
+            ("legacy-intact", "legacy", "ok", 30 * gib, True,
+             [status("rose-archive-serving"), native_pull], "donor-legacy"),
+            ("legacy-cache-lacks-model", "native", "no-model", 30 * gib, False,
+             [status("rose-r2-archive-legacy"), legacy_pull], None),
+            ("no-room-for-legacy", "native", "ok", 5 * gib, False,
+             [status("rose-r2-archive-legacy")], None),
+            ("no-room-for-native", "legacy", "ok", 10 * gib, False,
+             [status("rose-archive-serving")], "donor-legacy"),
+        )
+        for case, donor_state, legacy_mode, free, ok, expected, legacy_after in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory(prefix="wmh-dual-refresh-") as temporary:
+                scratch = Path(temporary)
+                repo = scratch / "repo"
+                python = repo / "agents/venv/bin/python"
+                python.parent.mkdir(parents=True)
+                (repo / "back-end").mkdir()
+                (repo / "scripts").mkdir()
+                (repo / "scripts/setup-world-model.sh").write_text(":\n")
+                python.write_text(fake_python)
+                python.chmod(0o755)
+                calls = scratch / "calls.jsonl"
+                world = scratch / "world-model"
+                native = scratch / "world-model-native"
+                if donor_state == "native":
+                    (world / "models/rose-archive").mkdir(parents=True)
+                    (world / "models/rose-archive/experiential.json").write_text("stale-native")
+                    (world / "build.manifest.json").write_text("stale-native-manifest")
+                elif donor_state == "legacy":
+                    (world / "models/rose-r2-archive-anthropic").mkdir(parents=True)
+                    (world / "models/rose-r2-archive-anthropic/model.json").write_text("donor-legacy")
+                    (world / "build.manifest.json").write_text("donor-legacy-manifest")
+                before = sorted(str(path.relative_to(scratch)) for path in scratch.rglob("*") if "world-model" in str(path))
+                result = run(
+                    "gosu() { shift; \"$@\"; }; chown() { :; }; rsync() { return 1; };\n" + DF_FAKE + fragment
+                    + '\neval "$NATIVE_REFRESH_CMD"',
+                    {"REMOTE_REPO": str(repo), "REMOTE_WMH": str(world), "REMOTE_WMH_NATIVE": str(native),
+                     "WMH_MODEL_NAME": "rose-archive", "WMH_CACHE_NAME": "rose-archive-serving",
+                     "WMH_LEGACY_CACHE_NAME": "rose-r2-archive-legacy",
+                     "WMH_LEGACY_MODEL_NAME": "rose-r2-archive-anthropic",
+                     "REMOTE_UV_PYTHON": str(scratch / "uv-python"), "CALLS": str(calls),
+                     "LEGACY_PULL": legacy_mode, "DF_AVAIL": str(free),
+                     # Published sizes: legacy ~4.6 GB, native ~19 GB.
+                     "BYTES_rose_r2_archive_legacy": str(4600 * 10**6),
+                     "BYTES_rose_archive_serving": str(19 * 10**9)},
+                )
+                self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
+                self.assertEqual("::WMH-REFRESH-DONE::" in result.stdout, ok)
+                cache_calls = [json.loads(line) for line in calls.read_text().splitlines()]
+                cache_calls = [call for call in cache_calls if "benchmarks.wmh_build_cache" in call]
+                self.assertEqual(cache_calls, [[arg.format(world=world, native=native) for arg in call]
+                                               for call in expected])
+                if not ok and "no-room" in case:
+                    self.assertIn("insufficient donor disk for WMH cache", result.stderr)
+                # No staging residue survives any outcome.
+                self.assertEqual(sorted(path.name for path in scratch.iterdir() if path.name.startswith("world-model")),
+                                 [name for name in ("world-model", "world-model-native")
+                                  if (scratch / name).exists()])
+                legacy_model = world / "models/rose-r2-archive-anthropic/model.json"
+                if legacy_after is None:
+                    # A failed legacy restore leaves the donor's directory exactly as it was.
+                    after = sorted(str(path.relative_to(scratch)) for path in scratch.rglob("*") if "world-model" in str(path))
+                    self.assertEqual(after, before)
+                else:
+                    self.assertEqual(legacy_model.read_text(), legacy_after)
+                    self.assertFalse((world / "models/rose-archive").exists())
+                if ok:
+                    self.assertEqual((native / "models/rose-archive/experiential.json").read_text(), "native")
 
     def test_refresh_republishes_only_the_donors_current_dependency_proof(self):
         # 2026-10-19: --refresh-wmh republished this checkout's local receipt.
