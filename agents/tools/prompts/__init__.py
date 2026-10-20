@@ -13,10 +13,10 @@ from tools.prompts.attempt_completion_with_result import (
 )
 from tools.prompts.call_phone_number import PROMPT as call_phone_number_prompt
 from tools.prompts.display import PROMPT as display_prompt
-from tools.prompts.inspect_code import PROMPT as inspect_code_prompt
 from tools.prompts.display import PROMPT_ROSE_DESKTOP as display_rose_desktop_prompt
 from tools.prompts.google_workspace_run import PROMPT as google_workspace_run_prompt
 from tools.prompts.grep import PROMPT as grep_prompt
+from tools.prompts.inspect_code import PROMPT as inspect_code_prompt
 from tools.prompts.message_person import PROMPT as message_person_prompt
 from tools.prompts.people_search import PROMPT as people_search_prompt
 from tools.prompts.reasoning import PROMPT as reasoning_prompt
