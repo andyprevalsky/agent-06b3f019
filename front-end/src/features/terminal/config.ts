@@ -20,9 +20,14 @@ export const OPENING_MESSAGES: OpeningMessage[] = [
 
 // ── Popular goals carousel ────────────────────────────────────────────────
 
-export const POPULAR_GOALS: string[] = [
+/** Extra goals shown first for Rose Desktop accounts only (lib/roseDesktop.ts). */
+export const ROSE_DESKTOP_POPULAR_GOALS: string[] = [
+  'Import Code Repo',
   'Change my background photo',
   'Make me a game',
+];
+
+export const POPULAR_GOALS: string[] = [
   'Maximize my luck surface area',
   'Save children in Gaza',
   'Raise me 1 million dollars',

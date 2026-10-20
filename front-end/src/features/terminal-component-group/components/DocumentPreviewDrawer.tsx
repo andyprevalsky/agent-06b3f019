@@ -7,7 +7,8 @@
  * [READY|ERROR|LOADING] --onOpenChange(false)--> [CLOSED] (blob URLs revoked via useDocumentPreview)
  *
  * Content is mandatory for previewable types:
- *   html         -> iframe srcDoc (sandboxed, opaque origin) — always shows markup body
+ *   html         -> iframe srcDoc (sandboxed, opaque origin) — always shows markup body;
+ *                   Rose Desktop accounts also run its inline scripts (network still blocked)
  *   image        -> <img>
  *   markdown     -> MarkdownText
  *   text         -> <pre>
@@ -25,6 +26,7 @@
  */
 
 import { useEffect, useState } from 'react';
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { Download, FileIcon } from 'lucide-react';
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet';
 import { cn } from '@/lib/utils';
@@ -46,7 +48,10 @@ export function DocumentPreviewDrawer({ file, open, onOpenChange }: DocumentPrev
   // into useDocumentPreview would remount the load and race blackbox assertions.
   const [selectedSheet, setSelectedSheet] = useState<string | undefined>(undefined);
   const fileKey = documentPreviewFileKey(file);
-  const loadState = useDocumentPreview(file, open, { activeSheet: selectedSheet });
+  const loadState = useDocumentPreview(file, open, {
+    activeSheet: selectedSheet,
+    allowInlineScripts: useRoseDesktop(),
+  });
 
   // Reset on close AND on file change. `fileKey` was already a dependency, but
   // clearing only on close meant switching files in an open drawer carried the
@@ -74,6 +79,8 @@ export function DocumentPreviewDrawer({ file, open, onOpenChange }: DocumentPrev
         className={cn(
           'flex w-full max-w-2xl flex-col gap-0 p-0 sm:max-w-2xl',
           'h-full overflow-hidden',
+          // Above the top-right account rail (z-[100]) so it never covers Download.
+          'z-[110]',
         )}
       >
         <div className="flex items-start gap-3 border-b border-border px-4 py-4 pr-12">

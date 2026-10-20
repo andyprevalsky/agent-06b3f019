@@ -1,11 +1,14 @@
 /**
  * STATE MACHINE: PopularGoalsCarousel
  * STATIC: Renders a horizontally scrolling ticker of popular goal buttons.
+ * Rose Desktop accounts see ROSE_DESKTOP_POPULAR_GOALS first.
  */
 
 import type { RefObject } from 'react';
 
-import { POPULAR_GOALS } from '../config';
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
+
+import { POPULAR_GOALS, ROSE_DESKTOP_POPULAR_GOALS } from '../config';
 import type { DripStyles } from '../types';
 
 interface PopularGoalsCarouselProps {
@@ -23,6 +26,9 @@ export function PopularGoalsCarousel({
   dripStyles,
   borderColor,
 }: PopularGoalsCarouselProps) {
+  const goals = useRoseDesktop()
+    ? [...ROSE_DESKTOP_POPULAR_GOALS, ...POPULAR_GOALS]
+    : POPULAR_GOALS;
   return (
     <div className="mb-4 relative z-10">
       <div className="flex items-center gap-3">
@@ -35,7 +41,7 @@ export function PopularGoalsCarousel({
             className="flex gap-2"
             style={{ transform: `translateX(-${tickerOffset}px)` }}
           >
-            {[...POPULAR_GOALS, ...POPULAR_GOALS, ...POPULAR_GOALS].map((goal, i) => (
+            {[...goals, ...goals, ...goals].map((goal, i) => (
               <button
                 key={i}
                 onClick={() => onGoalClick(goal)}

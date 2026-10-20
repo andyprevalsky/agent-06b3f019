@@ -7,7 +7,7 @@
 import { createContext, useContext } from 'react';
 import type { Agent } from '../../hooks';
 
-export type RoseApp = 'browser' | 'voice';
+export type RoseApp = 'browser';
 
 export interface AgentBrowserTab {
   agentId: string;

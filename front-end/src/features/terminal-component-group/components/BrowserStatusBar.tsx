@@ -12,6 +12,9 @@
  *     v
  * [COLLAPSED]
  *
+ * FLAG: Rose Desktop accounts (lib/roseDesktop.ts) → drawer path below; others →
+ * LegacyBrowserStatusBar (stock chip + portaled fullscreen view).
+ *
  * BROWSER DRAWER STATE (replaces the old fullscreen view):
  * [INLINE] <-- isInDrawer: false
  *     |
@@ -74,6 +77,8 @@ import { BrowserAgentPane } from './browser-status-bar/BrowserAgentPane';
 import { BrowserStatusBarExpanded } from './browser-status-bar/BrowserStatusBarExpanded';
 import { BrowserStatusBarMinimized } from './browser-status-bar/BrowserStatusBarMinimized';
 import { useRoseApps } from './rose-apps/roseAppsState';
+import { LegacyBrowserStatusBar } from './browser-status-bar/legacy/LegacyBrowserStatusBar';
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { resolveBrowserControlState } from './browserControlState';
 import { useBrowserStatusBarState } from './browser-status-bar/useBrowserStatusBarState';
 import {
@@ -230,5 +235,14 @@ function BrowserStatusBarImpl(props: BrowserStatusBarProps) {
   );
 }
 
-const BrowserStatusBar = memo(BrowserStatusBarImpl);
+/** Rose Desktop accounts get the Browser drawer; everyone else keeps the stock fullscreen view. */
+function BrowserStatusBarSwitch(props: BrowserStatusBarProps) {
+  return useRoseDesktop() ? (
+    <BrowserStatusBarImpl {...props} />
+  ) : (
+    <LegacyBrowserStatusBar {...props} />
+  );
+}
+
+const BrowserStatusBar = memo(BrowserStatusBarSwitch);
 export default BrowserStatusBar;
