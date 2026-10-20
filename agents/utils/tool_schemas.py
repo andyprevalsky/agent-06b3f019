@@ -952,7 +952,7 @@ class SpawnAgentTool(BaseModel):
     type: Literal["browser", "code", "general_purpose", "explore", "for_each"] = Field(
         description=(
             "Select by capability: 'browser' starts a browser session for stateful or authenticated web work; "
-            "'code' starts a coding agent using Claude Code or Codex CLI in an ephemeral sandbox, selected by "
+            "'code' starts a coding agent using Claude Code or Codex CLI in a persistent sandbox, selected by "
             "available credentials and configuration. Delegate all code writing to it. Its sandbox holds the "
             "user's Rose app UI (rose_user_ui): it edits and publishes changes to how Rose looks or behaves for "
             "the user, and it can publish a game, app or visual it builds as an inline view, which you show "
@@ -1128,7 +1128,7 @@ class SpawnAgentToolNoGP(BaseModel):
         description=(
             "Select by capability: 'browser' starts a browser session for stateful "
             "or authenticated web work; 'code' starts a coding agent (Claude Code / "
-            "Codex CLI) in an ephemeral sandbox; 'explore' performs read-only "
+            "Codex CLI) in a persistent sandbox; 'explore' performs read-only "
             "research for web or user-data facts. "
             "general_purpose and for_each are disabled for this run -  use "
             "type='code' for GitHub discovery/ranking work."
