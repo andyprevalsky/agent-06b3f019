@@ -30079,6 +30079,235 @@ def test_browser_payment_resume_accepts_already_finalized_mint_result():
     )
 
 
+async def test_payment_finalizer_preserves_receipt_in_short_verifier_history():
+    """Captured awaiting result survives the actual approval/resume transition."""
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3.handler import _complete_pending_payment_card_result
+    from domains.spawn_browser_agent_v3.service import build_browser_verifier_context
+    from domains.spawn_browser_agent_v3.service_crypto import finalize_parked_payment_card_approval_history
+
+    original = {'status': 'awaiting_payment_card_approval',
+     'payment_request': {'merchant': 'Rose Labs Test Payment',
+                         'currency': 'USD',
+                         'line_items': [{'name': 'Aurora Notebook',
+                                         'image_url': 'https://placehold.co/320x220/png?text=Aurora+Notebook',
+                                         'product_url': 'https://investigation-cameras-nirvana-pupils.trycloudflare.com/p/aurora-notebook',
+                                         'rating': '4.8 stars',
+                                         'review_count': '1,284 reviews',
+                                         'unit_price_cents': 1200,
+                                         'quantity': 1,
+                                         'line_total_cents': 1200},
+                                        {'name': 'Ceramic Mug',
+                                         'image_url': 'https://placehold.co/320x220/png?text=Ceramic+Mug',
+                                         'product_url': 'https://investigation-cameras-nirvana-pupils.trycloudflare.com/p/ceramic-mug',
+                                         'rating': '4.6 stars',
+                                         'review_count': '932 reviews',
+                                         'unit_price_cents': 900,
+                                         'quantity': 1,
+                                         'line_total_cents': 900},
+                                        {'name': 'Canvas Tote',
+                                         'image_url': 'https://placehold.co/320x220/png?text=Canvas+Tote',
+                                         'product_url': 'https://investigation-cameras-nirvana-pupils.trycloudflare.com/p/canvas-tote',
+                                         'rating': '4.9 stars',
+                                         'review_count': '2,051 reviews',
+                                         'unit_price_cents': 1500,
+                                         'quantity': 1,
+                                         'line_total_cents': 1500}],
+                         'fees': [{'label': 'Tax', 'amount_cents': 297},
+                                  {'label': 'Shipping', 'amount_cents': 499}],
+                         'subtotal_cents': 3600,
+                         'total_cents': 4396},
+     'current_url': 'https://investigation-cameras-nirvana-pupils.trycloudflare.com/test_payment'}
+    original_snapshot = copy.deepcopy(original)
+    call_id = 'call_sZmySlbP4xdDnRuAyvYASO1G'
+    parked = {
+        "action_history": [{"step": 3, "action": "request_payment_card", "result": copy.deepcopy(original)}],
+        "simulated_action_entries": [{"step": 3, "action": "request_payment_card", "result": copy.deepcopy(original)}],
+        "browser_turn_messages": [{"role": "tool", "name": "request_payment_card", "tool_call_id": call_id, "content": json.dumps(original)}],
+        "simulated_turn_messages": [{"role": "tool", "name": "request_payment_card", "tool_call_id": call_id, "content": json.dumps(original)}],
+    }
+    finalize_parked_payment_card_approval_history(parked, last4="2828")
+    once = copy.deepcopy(parked)
+    finalize_parked_payment_card_approval_history(parked, last4="2828")
+    assert parked == once, "same-card approval finalization must remain idempotent"
+    assert original == original_snapshot, "approval finalization mutated the source receipt"
+    history = ActionHistory()
+    history.restore_entries(parked["action_history"])
+    assert _complete_pending_payment_card_result(
+        parked["browser_turn_messages"], history, last4="2828", card_refs={
+            "card_number": "synthetic-private-pan", "card_name": "synthetic-private-name",
+            "card_expiry": "synthetic-private-expiry", "card_cvv": "synthetic-private-cvv",
+        },
+    )
+    with patch("domains.spawn_browser_agent_v3.service.list_session_files", AsyncMock(return_value=[])):
+        context = await build_browser_verifier_context(
+            goal="Prepare the existing checkout, leave it unsubmitted, and preserve exact replication inputs",
+            current_url=original["current_url"],
+            browser_state={"dom_tree": "Pay $43.96", "page_stats": {}, "scroll_position": {}},
+            action_history=history, config=SimpleNamespace(), session_id="payment-receipt-regression",
+        )
+    verifier_history = next(m["text"] for m in context if m.get("metadata", {}).get("toolName") == "action_history")
+    rows = [history.get_entries()[0]["result"], parked["simulated_action_entries"][0]["result"]]
+    rows += [json.loads(parked[k][0]["content"]) for k in ("browser_turn_messages", "simulated_turn_messages")]
+    receipt = original["payment_request"]
+    verifier_has_receipt = all(value in verifier_history for value in (receipt["merchant"], "USD", "4396"))
+    print(json.dumps({"receipt_preserved_in_all_four": all(row.get("payment_request") == receipt for row in rows), "actual_short_verifier_has_receipt": verifier_has_receipt}))
+    assert verifier_has_receipt, "approval finalization lost receipt before the actual short-history verifier context"
+    assert all(row.get("payment_request") == receipt for row in rows), "approved receipt must survive all four approval adapters"
+    assert all(row.get("current_url") == original["current_url"] for row in rows)
+    assert all(row.get("status") == "payment_card_ready" and row.get("last4") == "2828" for row in rows)
+    assert all(item["name"] in verifier_history for item in receipt["line_items"])
+    assert "synthetic-private-" not in verifier_history
+    assert all(parked[k][0]["tool_call_id"] == call_id for k in ("browser_turn_messages", "simulated_turn_messages"))
+
+
+async def test_payment_completion_survives_hydrated_actor_and_verifier():
+    """Only a real approval completes the pending call; handoff alone is lossless."""
+    from tempfile import TemporaryDirectory
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3.handler import (
+        _append_browser_turn_messages, _browser_resume_continuity_state,
+        _complete_pending_payment_card_result, _copy_browser_resume_continuity_fields,
+        _resolve_payment_card_tool_result_for_resume,
+    )
+    from domains.spawn_browser_agent_v3 import resume_store
+    from domains.spawn_browser_agent_v3.service import build_browser_verifier_context
+    from providers.rose.browser_use import build_browser_use_messages
+
+    receipt = {
+        "merchant": "Rose Labs Test Payment", "currency": "USD",
+        "line_items": [{"name": "Aurora Notebook", "quantity": 1, "unit_price_cents": 1200},
+                       {"name": "Ceramic Mug", "quantity": 1, "unit_price_cents": 900},
+                       {"name": "Canvas Tote", "quantity": 1, "unit_price_cents": 1500}],
+        "subtotal_cents": 3600, "total_cents": 4396,
+        "fees": [{"label": "Tax", "amount_cents": 297}, {"label": "Shipping", "amount_cents": 499}],
+    }
+    url = "https://investigation-cameras-nirvana-pupils.trycloudflare.com/test_payment"
+    pending = {"status": "awaiting_payment_card_approval", "payment_request": receipt, "current_url": url}
+    refs = {key: "private-" + key for key in ("card_number", "card_name", "card_expiry", "card_cvv")}
+    turns = [{"role": "user", "content": "Prepare checkout without submitting."}]
+    _append_browser_turn_messages(turns, unified_action={"action": "read_browser_state"},
+                                  result={"current_url": url}, tool_call_id="read-before-payment")
+    _append_browser_turn_messages(turns, unified_action={"action": "request_payment_card", "params": receipt},
+                                  result=pending, tool_call_id="call_sZmySlbP4xdDnRuAyvYASO1G")
+    untouched = copy.deepcopy(turns[:-1])
+    browser_state = {"url": url, "dom_tree": "Pay $43.96", "page_stats": {}, "scroll_position": {}}
+
+    def actor(state, history):
+        return build_browser_use_messages(
+            task="Prepare the existing checkout and leave it unsubmitted", browser_state=browser_state,
+            action_history=history.get_entries(), available_actions=["request_payment_card"],
+            dynamic_system_context="Same runtime and phase", turn_messages=state["browser_turn_messages"],
+        )
+
+    for approved in (False, True):
+        history = ActionHistory()
+        history.restore_entries([{"step": 1, "action": "read_browser_state", "result": {"current_url": url}},
+                                 {"step": 2, "action": "request_payment_card", "result": copy.deepcopy(pending)}])
+        state = _browser_resume_continuity_state(
+            action_history=history, visited_urls=[url], verifier_checkpoints=[],
+            browser_turn_messages=copy.deepcopy(turns), reasoning_messages=["Checkout inspected"],
+            action_summary=["Read checkout", "Requested payment card"],
+        )
+        before = actor(state, history)
+        if approved:
+            assert _resolve_payment_card_tool_result_for_resume(state["browser_turn_messages"], refs, "2828")
+        with TemporaryDirectory() as archive_root, patch.dict(os.environ, {
+            "TRACE_ARCHIVE_LOCAL_ROOT": archive_root, "TRACE_ARCHIVE_BACKEND": "local",
+            "TRACE_ARCHIVE_ENCRYPTION_KEY_B64": base64.b64encode(b"0" * 32).decode(),
+        }):
+            pointer = await resume_store.persist_resume_context(
+                agent_id="payment-completion", task_id="same-pending-call", state=state, force_private=True,
+            )
+            assert "browser_turn_messages" not in pointer
+            hydrated = await resume_store.hydrate_resume_context(agent_id="payment-completion", resume_state=pointer)
+        resumed = {}
+        _copy_browser_resume_continuity_fields(hydrated, resumed)
+        history.restore_entries(resumed["action_history"])
+        if not approved:
+            assert actor(resumed, history) == before, "no-event handoff changed the next actor messages"
+            assert resumed["browser_turn_messages"] == turns
+            print("NO_EVENT_HANDOFF exact_actor_messages=PASS")
+            continue
+        assert _complete_pending_payment_card_result(resumed["browser_turn_messages"], history, last4="2828", card_refs=refs)
+        result = json.loads(resumed["browser_turn_messages"][-1]["content"])
+        assert result.get("payment_request") == receipt, "alternate approval completion lost the actual receipt"
+        assert result.get("current_url") == url
+        assert result["status"] == "payment_card_ready" and result["card_last4"] == "2828"
+        assert result["card_secret_refs"] == {key: "{{secret:" + key + "}}" for key in refs}
+        assert resumed["browser_turn_messages"][:-1] == untouched
+        assert resumed["browser_turn_messages"][-1]["tool_call_id"] == "call_sZmySlbP4xdDnRuAyvYASO1G"
+        after = actor(resumed, history)
+        assert json.loads(after[-1]["content"]) == result
+        with patch("domains.spawn_browser_agent_v3.service.list_session_files", AsyncMock(return_value=[])):
+            context = await build_browser_verifier_context(
+                goal="Prepare checkout without submitting", current_url=url, browser_state=browser_state,
+                action_history=history, config=SimpleNamespace(), session_id="payment-completion",
+            )
+        verifier = next(m["text"] for m in context if m.get("metadata", {}).get("toolName") == "action_history")
+        assert all(value in verifier for value in ("Rose Labs Test Payment", "USD", "4396", "Aurora Notebook", url))
+        assert "private-" not in json.dumps(after) + verifier
+        completed_turns, completed_entries = copy.deepcopy(resumed["browser_turn_messages"]), copy.deepcopy(history.get_entries())
+        assert not _resolve_payment_card_tool_result_for_resume(resumed["browser_turn_messages"], refs, "2828")
+        assert _complete_pending_payment_card_result(resumed["browser_turn_messages"], history, last4="2828", card_refs=refs)
+        assert resumed["browser_turn_messages"] == completed_turns
+        assert history.get_entries() == completed_entries
+        assert actor(resumed, history) == after
+        print("APPROVAL_COMPLETION receipt_actor_verifier_and_repeat=PASS")
+
+
+async def test_completed_payment_no_event_drain_preserves_next_actor_request():
+    """Carried payment bindings do not turn an ordinary worker drain into a completion."""
+    from tempfile import TemporaryDirectory
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3 import resume_store
+    from domains.spawn_browser_agent_v3.handler import (
+        _browser_resume_continuity_state, _complete_pending_payment_card_result,
+        _drain_resume_state, _resolve_payment_card_tool_result_for_resume,
+    )
+    from domains.spawn_browser_agent_v3.service_crypto import finalize_parked_payment_card_approval_history
+    from providers.rose.browser_use import build_browser_use_messages
+
+    refs = {key: "private-" + key for key in ("card_number", "card_name", "card_expiry", "card_cvv")}
+    result = {"success": True, "status": "payment_card_ready", "last4": "2828",
+              "payment_request": {"merchant": "Rose Labs Test Payment", "currency": "USD", "total_cents": 4396},
+              "current_url": "https://example.com/checkout"}
+    turns = [
+        {"role": "assistant", "content": "Request the recorded cart", "tool_calls": [{"id": "paid-call", "type": "function", "function": {"name": "request_payment_card", "arguments": "{}"}}]},
+        {"role": "tool", "name": "request_payment_card", "tool_call_id": "paid-call", "content": json.dumps(result, indent=2)},
+        {"role": "assistant", "content": "Inspect checkout", "tool_calls": [{"id": "read-call", "type": "function", "function": {"name": "read_browser_state", "arguments": "{}"}}]},
+        {"role": "tool", "name": "read_browser_state", "tool_call_id": "read-call", "content": '{ "url": "https://example.com/checkout" }'},
+        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWuoAAAAASUVORK5CYII="}}]},
+    ]
+    history = ActionHistory()
+    history.restore_entries([{"step": 4, "action": "request_payment_card", "result": result},
+                             {"step": 5, "action": "read_browser_state", "result": {"url": "https://example.com/checkout"}}])
+    original_entries = copy.deepcopy(history.get_entries())
+    state = _browser_resume_continuity_state(action_history=history, visited_urls=[result["current_url"]],
+        verifier_checkpoints=[], browser_turn_messages=copy.deepcopy(turns))
+    def actor(state, history):
+        return build_browser_use_messages(task="Leave the checkout unsubmitted", browser_state={"url": result["current_url"]},
+            action_history=history.get_entries(), available_actions=["read_browser_state", "request_payment_card"],
+            dynamic_system_context="Unchanged runtime and schema", turn_messages=state["browser_turn_messages"])
+    before = actor(state, history)
+    for force_private in (False, True):
+        drained = _drain_resume_state(copy.deepcopy(state), {"approval_type": "payment", "payment_card_refs": refs, "payment_card_last4": "2828"})
+        with TemporaryDirectory() as archive_root, patch.dict(os.environ, {
+            "TRACE_ARCHIVE_LOCAL_ROOT": archive_root, "TRACE_ARCHIVE_BACKEND": "local",
+            "TRACE_ARCHIVE_ENCRYPTION_KEY_B64": base64.b64encode(b"0" * 32).decode(),
+        }):
+            pointer = await resume_store.persist_resume_context(agent_id="paid-drain", task_id="paid-call", state=drained, force_private=force_private)
+            resumed = await resume_store.hydrate_resume_context(agent_id="paid-drain", resume_state=pointer)
+        finalize_parked_payment_card_approval_history(resumed, last4="2828")
+        history.restore_entries(resumed["action_history"])
+        assert not _resolve_payment_card_tool_result_for_resume(resumed["browser_turn_messages"], refs, "2828")
+        assert _complete_pending_payment_card_result(resumed["browser_turn_messages"], history, last4="2828", card_refs=refs)
+        assert not _complete_pending_payment_card_result(resumed["browser_turn_messages"], history, last4="9999", card_refs=refs)
+        assert resumed["browser_turn_messages"] == turns
+        assert history.get_entries() == original_entries
+        assert actor(resumed, history) == before
+
+
 async def test_browser_resume_store_preserves_inline_and_external_snapshots():
     from tempfile import TemporaryDirectory
 
@@ -32026,6 +32255,18 @@ async def run_all_tests():
     r.record(
         "finalize_parked_payment_card_approval_history_leaves_other_tools_alone",
         test_finalize_parked_payment_card_approval_history_leaves_other_tools_alone,
+    )
+    await r.record_async(
+        "payment_finalizer_preserves_receipt_in_short_verifier_history",
+        test_payment_finalizer_preserves_receipt_in_short_verifier_history,
+    )
+    await r.record_async(
+        "payment_completion_survives_hydrated_actor_and_verifier",
+        test_payment_completion_survives_hydrated_actor_and_verifier,
+    )
+    await r.record_async(
+        "completed_payment_no_event_drain_preserves_next_actor_request",
+        test_completed_payment_no_event_drain_preserves_next_actor_request,
     )
     r.record("build_passwords_prompt_section_empty", test_build_passwords_prompt_section_empty)
     r.record("build_passwords_prompt_section_unique", test_build_passwords_prompt_section_unique_usernames)
