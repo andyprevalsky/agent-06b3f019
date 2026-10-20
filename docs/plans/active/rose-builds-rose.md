@@ -128,5 +128,6 @@ ledger" in `rose-user-ui.md`). This file is the cross-cutting checklist, and
 - Harness: user tools in root toolset (W4); `display` tool with `placement` (A5); code-agent graph tools (C6); `code_session_id` tool param (C1); code-agent Rose tools + approval blocking (C12); removing code-agent Temporal/sandbox timeouts (C11); code-agent `target` param (C14); root routes coding work to code agents (UI ledger 41).
 - Prompt text: code-agent "never rely on the raw terminal" rule (C12).
 - Prompt text: code-agent template commit/merge guidance (C3); tool descriptions added by each lane.
+- Prompt text (L-ROUTING, UI ledger 41 + flows 2/3): spawn_agent `code` type description and planner `code:` line (coding and Rose-app changes go to code agents; viewable work ships as an inline view shown with `inline_view`); `INLINE_VIEW_DESCRIPTION`; code-agent "Rose app UI" instructions (`codeAgentPrompt.ts`); rose_user_ui README "Something for the user to see or play".
 - Schemas: `rose-ui.json` and `tool.json` validation; any new Zod schemas.
 - Env and prod: `USERCONTENT_BASE_URL` (separate origin), `USER_UI_TOKEN_SECRET`, E2B template rebuild.

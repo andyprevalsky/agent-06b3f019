@@ -454,6 +454,10 @@ const tests: { name: string; fn: () => Promise<void> }[] = [
         'prefers-reduced-motion',
         'devicePixelRatio',
         'rose-ui publish',
+        // A code agent delivers games/apps/visuals as an inline view and names it.
+        '## Something for the user to see or play',
+        'add it under "inline" in rose-ui.json',
+        'then name the view in your\nfinal response',
       ]) {
         assert(readme.includes(term), `README documents ${term}`);
       }

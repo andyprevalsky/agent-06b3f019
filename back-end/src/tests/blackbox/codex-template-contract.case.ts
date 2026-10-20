@@ -47,6 +47,20 @@ export async function testPromptBuilder_sharedContractMentionsOutputRules() {
     'Nested Claude CLI guard missing'
   );
   assert(prompt.includes('/home/user/workspace'), 'Repo workDir missing');
+
+  // The session HOME holds the user's rose_user_ui + `rose-ui` CLI; the agent
+  // must know it exists, publish UI changes, and deliver viewable work as an
+  // inline view whose name reaches the parent so it can be shown in the chat.
+  assert(prompt.includes('~/rose_user_ui is the Rose app UI'), 'rose_user_ui location missing');
+  assert(prompt.includes('run `rose-ui publish`'), 'rose-ui publish rule missing');
+  assert(
+    prompt.includes('build it as an inline view there, publish it, and name the view'),
+    'Inline-view delivery rule missing'
+  );
+  assert(
+    prompt.includes('Still put any requested files in the output directory'),
+    'Inline view must not replace requested output files'
+  );
 }
 
 export async function testTemplate_pinsCodexCliForGpt56() {
