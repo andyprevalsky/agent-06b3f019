@@ -9,6 +9,13 @@ export { useFileUpload } from './useFileUpload';
 export { useGmailConnect } from './useGmailConnect';
 export { useOAuthRedirect } from './useOAuthRedirect';
 export { useIntegrationActions } from './useIntegrationActions';
+export { useIntegrationRemoval } from './useIntegrationRemoval';
+export {
+  SyncProgressContext,
+  useSyncProgress,
+  useSyncProgressSource,
+  useSyncRefresh,
+} from './useSyncProgress';
 export { usePlaidIntegration } from './usePlaidIntegration';
 export { usePlaidConnect } from './usePlaidConnect';
 export { usePlaidItems } from './usePlaidItems';

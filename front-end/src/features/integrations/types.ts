@@ -13,7 +13,43 @@ export interface EmailCredentialHealth {
   state: EmailCredentialState;
   lastErrorReason: string | null;
   lastFailedSyncAt: string | null;
+  /** Running backfill of this address, when the server reports one. */
+  syncProgress?: SyncProgressWire | null;
 }
+
+/**
+ * Progress of ONE account's running sync, as the server reports it.
+ *
+ * `pct` may be omitted (derived from done/total); `eta_sec` may be omitted
+ * (the client estimates it from the observed rate between refreshes).
+ */
+export interface SyncProgressWire {
+  pct?: number | null;
+  done: number;
+  total: number;
+  /** Plural noun for the items being synced, e.g. "messages", "transactions". */
+  unit: string;
+  eta_sec?: number | null;
+}
+
+/** Normalized progress for one syncing account (see hooks/useSyncProgress). */
+export interface SyncProgress {
+  pct: number;
+  done: number;
+  total: number;
+  unit: string;
+  etaSec: number | null;
+}
+
+/** Integrations whose accounts can report sync progress. */
+export type SyncProgressProvider =
+  | 'browser_cookies'
+  | 'passwords'
+  | 'imessage'
+  | 'whatsapp'
+  | 'gmail'
+  | 'linkedin'
+  | 'plaid';
 
 export interface ConnectedIntegration {
   id: string;
@@ -30,6 +66,8 @@ export interface ConnectedIntegration {
     [key: string]: unknown;
   };
   lastSuccessfulSyncAt?: string;
+  /** Running sync of this integration's single account, when the server reports one. */
+  syncProgress?: SyncProgressWire | null;
   /**
    * Per-account health. A `gmail` row fans out to N addresses, so a single
    * integration status cannot say which address broke.
@@ -89,7 +127,7 @@ export interface PlaidItem {
   createdAt: string;
   lastSyncAt: string | null;
   disconnectedAt: string | null;
-  sync: PlaidSyncSummary & { state: PlaidSyncState };
+  sync: PlaidSyncSummary & { state: PlaidSyncState; progress?: SyncProgressWire | null };
   accounts: PlaidAccount[];
 }
 
