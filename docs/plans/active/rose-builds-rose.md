@@ -338,3 +338,11 @@ Per the 2026-10-20 goal ("make intelligent guesses; keep critical ones for revie
   - Prompt: dev-only "Live preview and apps" block in `codeAgentPrompt.ts` (`code-agent-rose-in-rose-apps.v1`; non-dev prompts byte-identical); README "Apps" section and the manifest example.
   - Zod: `apps` in the rose-ui.json schema; `codePublishSchema`.
   - Harness (watched file, metadata only): `preview_url` copied into `code_agent`.
+- L-APPS2 (merged d0a33fefa):
+  - Migration `20261021000000_preview_handoff_and_app_publisher`: `UserUiVersion.publishedByAgentId`/`publishedByTaskId`; `PreviewHandoffCode` (RLS, no client policy).
+  - Zod: `previewHandoffRedeemSchema`.
+  - Auth: `req.user.authMethod` (first `amr`); `generatePreviewHandoffSession` (8 h, not refreshable, `amr: preview_handoff`) with shared session-signing helpers; the publish token gains a `tsk` claim.
+  - New public route `/api/preview-handoff/redeem` with its own CORS, mounted before global CORS.
+  - FE: `main.tsx` boot order plus the new `lib/previewHandoff.ts`.
+  - Follow-up: API-key and publish-token minting don't yet refuse preview sessions.
+
