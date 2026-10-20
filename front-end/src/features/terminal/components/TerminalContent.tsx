@@ -39,6 +39,8 @@ import {
 import { useAppData } from '@/hooks/appDataContext';
 import { IS_DEV_MODE } from '@/features/terminal-component-group/config';
 import { isAdminOperator } from '@/lib/adminAccounts';
+import { isRoseDesktopUser } from '@/lib/roseDesktop';
+import { RoseDesktopContext } from '@/hooks/roseDesktopContext';
 import { isBenchmarkSharedView } from '@/lib/benchmarkShare';
 import { isBenchmarkArchiveMode } from '@/lib/benchmarkArchive';
 import {
@@ -104,22 +106,30 @@ export function TerminalContent() {
 
 /** The per-user UI belongs to the signed-in session user only. */
 function resolveUserUiUserId(agents: ReturnType<typeof useTerminalAgents>): string | null {
-  if (agents.isAnonymous || isBenchmarkArchiveMode()) return null;
+  if (!isRoseDesktopAccount(agents) || isBenchmarkArchiveMode()) return null;
   return agents.user?.id ?? null;
+}
+
+/** Rose Desktop chrome is on only for flagged, signed-in accounts (lib/roseDesktop.ts). */
+function isRoseDesktopAccount(agents: ReturnType<typeof useTerminalAgents>): boolean {
+  return !agents.isAnonymous && isRoseDesktopUser(agents.user);
 }
 
 function TerminalLayout(props: TerminalLayoutProps) {
   if (isBenchmarkSharedView()) return <SharedBenchmarkLayout {...props} />;
+  const roseDesktop = isRoseDesktopAccount(props.agents);
   return (
-    <RoseAppsProvider
-      agents={props.agents.agents}
-      selectedAgentId={props.agents.selectedAgentId}
-      onSelectAgent={props.agents.handleSelectAgent}
-      publishLayout
-    >
-      <InteractiveTerminalLayout {...props} />
-      <RoseAppBar />
-    </RoseAppsProvider>
+    <RoseDesktopContext.Provider value={roseDesktop}>
+      <RoseAppsProvider
+        agents={props.agents.agents}
+        selectedAgentId={props.agents.selectedAgentId}
+        onSelectAgent={props.agents.handleSelectAgent}
+        publishLayout={roseDesktop}
+      >
+        <InteractiveTerminalLayout {...props} />
+        {roseDesktop && <RoseAppBar />}
+      </RoseAppsProvider>
+    </RoseDesktopContext.Provider>
   );
 }
 

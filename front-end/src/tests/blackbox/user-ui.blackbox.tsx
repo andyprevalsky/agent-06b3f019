@@ -28,27 +28,32 @@ import {
   validateThemeTokens,
   type UserUiManifest,
 } from '@/features/user-ui';
+import { ROSE_DESKTOP_USER_IDS } from '@/lib/roseDesktop';
 import AppSidebar from '@/features/terminal-component-group/components/AppSidebar';
 import Terminal from '@/pages/Terminal';
 
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
+import { BackdropHarness } from './user-ui-backdrop-harness';
 
 const API_BASE = 'http://localhost:3001/api';
 const USERCONTENT = 'https://u-test.usercontent.roselabs.test';
 const ACTIVE_BASE = `${USERCONTENT}/v2/`;
 
-function mockSession() {
+/** The Rose Desktop flag (lib/roseDesktop.ts) gates the per-user UI in the real Terminal. */
+const ROSE_DESKTOP_USER = ROSE_DESKTOP_USER_IDS[0];
+
+function mockSession(userId = 'test-user') {
   const session = {
     access_token: 'test-token',
     refresh_token: 'test-refresh',
     expires_in: 3600,
     expires_at: Math.floor(Date.now() / 1000) + 3600,
     token_type: 'bearer',
-    user: { id: 'test-user', is_anonymous: false },
+    user: { id: userId, is_anonymous: false },
   };
   localStorage.setItem('rose-session', JSON.stringify(session));
-  localStorage.setItem('app-user', JSON.stringify({ id: 'test-user', is_anonymous: false }));
+  localStorage.setItem('app-user', JSON.stringify({ id: userId, is_anonymous: false }));
 }
 
 const FULL_MANIFEST: UserUiManifest = {
@@ -176,17 +181,6 @@ describe('theme tokens', () => {
   });
 });
 
-function BackdropHarness({ hasUserMessage }: { hasUserMessage: boolean }) {
-  return (
-    <UserUiProvider userId="test-user">
-      <UserUiBackgroundLayer />
-      <UserUiAppBackdrop hasUserMessage={hasUserMessage} appBackgroundClassName="bg-background">
-        <svg data-testid="pattern" />
-      </UserUiAppBackdrop>
-    </UserUiProvider>
-  );
-}
-
 describe('background backdrop', () => {
   it('keeps the app backdrop opaque until the first user message, then fades it', async () => {
     serveActive(FULL_MANIFEST, {
@@ -247,6 +241,7 @@ describe('opaque chrome over a user background', () => {
   });
 
   it('wires the terminal: background layer behind, opaque sidebar and query box', async () => {
+    mockSession(ROSE_DESKTOP_USER);
     serveActive(FULL_MANIFEST, { background: { image: 'root/assets/wallpaper.jpg' } });
     renderWithProviders(<Terminal />);
     await screen.findByTestId('user-ui-background-image');
@@ -271,6 +266,29 @@ describe('opaque chrome over a user background', () => {
     // home.dashboard slot mounts above the popular goals on the landing page.
     const dashboard = await screen.findByTestId('user-ui-slot-home.dashboard');
     expect(dashboard.querySelector('iframe')).toHaveAttribute('sandbox', 'allow-scripts');
+    expect(screen.getByTestId('rose-app-bar')).toBeInTheDocument();
+  });
+
+  it('keeps the stock UI for accounts without the Rose Desktop flag, even with a published UI', async () => {
+    let activeRequests = 0;
+    serveActive(FULL_MANIFEST, { background: { image: 'root/assets/wallpaper.jpg' } });
+    server.use(
+      http.get(`${API_BASE}/user-ui/active`, () => {
+        activeRequests += 1;
+        return HttpResponse.json({
+          versionId: 'v2',
+          manifest: FULL_MANIFEST,
+          baseUrl: ACTIVE_BASE,
+        });
+      }),
+    );
+    renderWithProviders(<Terminal />);
+    const surface = await screen.findByTestId('query-input-surface');
+    expect(surface).toHaveAttribute('data-surface', 'translucent');
+    expect(screen.queryByTestId('user-ui-background-image')).toBeNull();
+    expect(screen.queryByTestId('user-ui-slot-home.dashboard')).toBeNull();
+    expect(screen.queryByTestId('rose-app-bar')).toBeNull();
+    expect(activeRequests).toBe(0);
   });
 
   it('keeps the stock translucent chrome when nothing is published', async () => {
