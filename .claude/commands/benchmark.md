@@ -24,13 +24,22 @@ QUEUED / IN_PROGRESS / COMPLETED, then PASS / HARNESS FAILURE / INFRA FAILURE.
 Preserve genuine agent failures, cancellations and unknown classifications
 separately; keep the infra threshold in a minor note. Include the latest three
 experiments, last-run age, recorded tokens/15-minute rate, LIFE and lifecycle
-coverage. Refresh on agent start/completion, fixed 15-minute checkpoints and
-benchmark-state changes, without resetting clocks or stopping ongoing work.
+coverage. Refresh on the 10-minute checkpoints and transitions below, without
+resetting clocks or stopping ongoing work.
 Use the original scheduled denominator for the existing 5% infra stop policy,
 not completed attempts. Delegate issues with `/RCA` and `/deploy` only within
 the user's authorized scope, using isolated immutable checkpoints.
 Required approval requests follow `.claude/shared/approval-format.md` instead,
 using the same styling and its complete evidence/diff/Links requirements.
+
+**Default delegation and parent cadence (user instruction, October 20, 2026).**
+By default, a sub-agent owns each benchmark run: launch (or adoption of an
+already-launched run), operational monitoring, infra-failure `/RCA` delegation,
+exact-owner cleanup and the returned results with clustered failures. The main
+agent does not poll the run itself. It posts only the CLI-rendered batch
+scorecard, every **10 minutes** and on three transitions: tasks started, no more
+queued, and run end (an infra early stop counts as the end). Approval requests
+for harness and eval fixes still go to the user from the main agent.
 
 For the current user-requested five consecutive LIVE DAILY runs of fifty,
 follow the **Current width-fifty LIVE acceptance** subsection of

@@ -62,7 +62,7 @@ infra; it does not approve a runtime/product fix or a different paid workload.
    before the next useful experiment. Human approval blocks only its scoped action.
 5. **Sleep when the critical owners are working and no useful independent work
    remains.** Operational monitors and workers continue. Wake for actionable
-   events or every **15 minutes**; inspect evidence, send the full scorecard,
+   events or every **10 minutes**; inspect evidence, send the full scorecard,
    act on stalls and increase parallelization where useful. Put a one-line
    cause **and corrective action** directly beneath every red progress row.
    If the same blocker persists without new causal evidence at the next check,
@@ -102,11 +102,12 @@ and Downstream Implications sections or their code-block presentation.
    proof; outcome pending, or Open observability gap when causal proof is absent.
 3. **Every fix is cemented.** Promote the repro into the consistently-run suite
    that owns the first-bad boundary.
-4. **Actively drive asynchronous work.** Give a named owner the operational
-   monitor, immediate infra-stop/error notifications and normal cleanup. The
-   parent acts on events and uses the fixed 15-minute check-in when otherwise
-   waiting. Check real output growth and liveness; parent sleep never pauses
-   workers. Do not duplicate the monitor with parent-side busy polling.
+4. **Actively drive asynchronous work.** By default a sub-agent owns each run:
+   launch, operational monitor, immediate infra-stop/error notifications,
+   infra `/RCA` delegation, normal cleanup and the returned clustered results.
+   The parent posts only the CLI batch scorecard, every 10 minutes and on three
+   transitions (tasks started, no more queued, run end), and acts on events.
+   Check real output growth and liveness; parent sleep never pauses workers. Do not duplicate the monitor with parent-side busy polling.
    4a. **Measure progress from the work itself.** At five minutes with no
    started tasks, inspect the current build/activation/guest stage and its
    original deadline. The assigned operational monitor continues its required
@@ -681,7 +682,7 @@ while the requested goal still has authorized work:
     else:
         sleep interruptibly; workers and operational monitors keep running
     on an actionable event: act without waiting for the scheduled checkpoint
-    every 15 minutes, on a fixed deadline:
+    every 10 minutes, on a fixed deadline, and on start / no-more-queued / end:
         check evidence-backed milestones and publish the full scorecard
         put reason + specific action beneath every red progress row
         remove a wait, narrow/reassign a stall or add useful parallel work
