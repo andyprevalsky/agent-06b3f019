@@ -50,6 +50,8 @@ export interface CodeAgentSessionResult {
   cliSessionId?: string | null;
   /** Restore summary when the session materialized a Project (PJ3). */
   projectRestore?: ProjectRestoreReport | null;
+  /** Public URL of the session's live dev-server preview (Rose dev accounts, A1). */
+  previewUrl?: string | null;
 }
 
 /**

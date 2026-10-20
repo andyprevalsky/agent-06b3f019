@@ -49,30 +49,35 @@ function githubApiBase(): string {
   return (process.env.GITHUB_API_BASE_URL || 'https://api.github.com').replace(/\/+$/, '');
 }
 
-async function githubJson(
+/** One GitHub REST call (GET by default) with the backend's GITHUB_TOKEN; shared with publish. */
+export async function githubJson(
   fetchImpl: FetchLike,
-  path: string
+  path: string,
+  init: { method?: 'GET' | 'POST'; body?: unknown } = {}
 ): Promise<{ status: number; body: unknown }> {
   const headers: Record<string, string> = {
     Accept: 'application/vnd.github+json',
     'X-GitHub-Api-Version': '2022-11-28',
   };
   if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+  if (init.body !== undefined) headers['Content-Type'] = 'application/json';
   const response = await fetchImpl(`${githubApiBase()}${path}`, {
+    method: init.method ?? 'GET',
     headers,
+    ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
     signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
   });
   const body: unknown = response.status === 204 ? null : await response.json().catch(() => null);
   return { status: response.status, body };
 }
 
-function record(value: unknown): Record<string, unknown> | null {
+export function record(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
 }
 
-function newestPull(body: unknown): CodeSessionPullRequest | null {
+export function newestPull(body: unknown): CodeSessionPullRequest | null {
   if (!Array.isArray(body)) return null;
   const pulls = body
     .map(record)

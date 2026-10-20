@@ -1,3 +1,4 @@
+import { isRoseRepoUrl } from './codePreview/preview';
 import { USER_UI_DIR_NAME } from './userUi/seed';
 
 export const CODE_AGENT_INSTRUCTIONS_VERSION = '2026-10-20.code-agent-rose-ui-kit-branch.v6';
@@ -15,6 +16,30 @@ interface BuildCodeAgentPromptArgs {
   branch?: string | null;
   /** Branch it merges into; null/undefined = the repository's default branch. */
   mergeTarget?: string | null;
+  /** Rose dev account (Rose Desktop): rose-preview and apps are installed (A1, A2). */
+  roseDev?: boolean;
+  /** The checkout is the Rose repo itself (Rose-in-Rose, A1); detected from githubRepoUrl too. */
+  roseRepo?: boolean;
+}
+
+export const ROSE_IN_ROSE_INSTRUCTIONS_VERSION = 'code-agent-rose-in-rose-apps.v1';
+
+/** Dev-account lines: live preview, Rose-in-Rose publish rules and apps. Empty otherwise. */
+function roseDevLines(args: BuildCodeAgentPromptArgs): string[] {
+  if (args.roseDev !== true) return [];
+  const roseRepo = args.roseRepo === true || isRoseRepoUrl(args.githubRepoUrl);
+  return [
+    '',
+    `Live preview and apps (${ROSE_IN_ROSE_INSTRUCTIONS_VERSION}):`,
+    '- `rose-preview start [--dir <app dir>]` serves a vite app from this session with hot reload; the user sees each saved file about a second later. `rose-preview url` prints the address and `rose-preview status` says whether it runs.',
+    `- An app the user asks for ("make me an app") lives in ${CODE_AGENT_USER_UI_DIR}/apps/<slug>/ with an index.html entry and a title under "apps" in rose-ui.json (see its README). \`rose-ui publish\` gives it the user's app URL and adds it to the Apps section; \`rose-ui dev\` previews it at /file/apps/<slug>/index.html.`,
+    ...(roseRepo
+      ? [
+          '- The checkout in ~/workspace is Rose itself. Its front-end preview runs from front-end/ and talks to Rose as the user: a cloud session starts it for you, and `rose-preview start` starts or restarts it.',
+          '- Publishing a Rose change means pushing your branch and opening a pull request (`gh pr create`) against your merge target. Never merge it, never push to main and never deploy: Rose ships only through `/deploy`.',
+        ]
+      : []),
+  ];
 }
 
 export function buildCodeAgentSystemPrompt(args: BuildCodeAgentPromptArgs = {}): string {
@@ -69,6 +94,7 @@ export function buildCodeAgentSystemPrompt(args: BuildCodeAgentPromptArgs = {}):
     '- Surface real configuration or credential failures directly.',
     '- If task text says to use Claude Code or a code agent, treat that as this current Rose Labs code-agent session. Do not launch a separate claude/Claude Code CLI, run claude login, or start any interactive authentication flow.',
     ...repoLines,
+    ...roseDevLines(args),
   ].join('\n');
 }
 
