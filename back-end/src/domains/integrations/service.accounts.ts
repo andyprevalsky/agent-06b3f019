@@ -27,7 +27,11 @@ import {
   type IntegrationLane,
 } from './service.accountRegistry';
 import { buildAccountsView, type AccountViewRow } from './service.accountsView';
-import { LINKEDIN_INTEGRATION_NAME, settleLinkedInSync } from './service.linkedinSync';
+import {
+  LINKEDIN_INTEGRATION_NAME,
+  settleLinkedInAccounts,
+  settleLinkedInSync,
+} from './service.linkedinSync';
 import { clearAccountProgress, clearProviderProgress } from './service.progress';
 import {
   assertProviderSlug,
@@ -72,7 +76,10 @@ export async function getIntegrationsWithAccounts(userId: string) {
     listCookieProfileSources(userId),
   ]);
   const rows: AccountViewRow[] = base.integrations;
-  const accountsByProvider = buildAccountsView({ rows, plaidItems, cookieProfiles, progress });
+  const accountsByProvider = settleLinkedInAccounts(
+    buildAccountsView({ rows, plaidItems, cookieProfiles, progress }),
+    rows
+  );
   const integrations = base.integrations.map((integration) => ({
     ...integration,
     accounts: accountsByProvider[integration.name] ?? ([] as IntegrationAccount[]),
@@ -108,29 +115,41 @@ export async function getAccountsDelta(
   return {
     cursor,
     changed: true,
-    accountsByProvider: buildAccountsView({ rows, plaidItems, cookieProfiles, progress }),
+    accountsByProvider: settleLinkedInAccounts(
+      buildAccountsView({ rows, plaidItems, cookieProfiles, progress }),
+      rows
+    ),
   };
 }
 
 /**
  * A SYNCING LinkedIn row whose export agent ended reads SYNC_FAILED in the full
  * list (settleLinkedInSync); apply the same read-time settle to the light rows.
- * Only that row's config is read, and only while it is SYNCING.
+ * Only SYNCING LinkedIn rows' configs are read (one per LinkedIn account).
  */
 async function settleLightLinkedInRow<T extends AccountViewRow>(
   userId: string,
   rows: T[]
 ): Promise<T[]> {
-  const syncing = rows.find(
+  const syncing = rows.filter(
     (row) => row.name === LINKEDIN_INTEGRATION_NAME && row.status === 'SYNCING'
   );
-  if (syncing === undefined) return rows;
-  const stored = await findIntegrationAccount(userId, syncing.name, syncing.accountId);
-  if (stored === null) return rows;
-  const [settled] = await settleLinkedInSync(userId, [stored]);
-  return rows.map((row) =>
-    row === syncing ? { ...row, status: settled.status, failureReason: settled.failureReason } : row
+  if (syncing.length === 0) return rows;
+  const settled = new Map<T, { status: string; failureReason: string | null }>();
+  await Promise.all(
+    syncing.map(async (row) => {
+      const stored = await findIntegrationAccount(userId, row.name, row.accountId);
+      if (stored === null) return;
+      const [result] = await settleLinkedInSync(userId, [stored]);
+      settled.set(row, result);
+    })
   );
+  return rows.map((row) => {
+    const result = settled.get(row);
+    return result === undefined
+      ? row
+      : { ...row, status: result.status, failureReason: result.failureReason };
+  });
 }
 
 export async function deleteIntegrationAccount(

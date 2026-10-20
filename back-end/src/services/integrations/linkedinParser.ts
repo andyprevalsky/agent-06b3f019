@@ -1,5 +1,4 @@
-import { MessageChannel, Prisma } from '@prisma/client';
-import { prisma } from '../../providers/database';
+import { MessageChannel } from '@prisma/client';
 import { createLogger } from '../../providers/logger';
 import { upsertPersonAndMessageRecords, ContactToUpsert } from './personMessageManager';
 import AdmZip from 'adm-zip';
@@ -55,6 +54,8 @@ export interface LinkedInExportData {
   messages: LinkedInMessage[];
   profile: LinkedInProfile | null;
   positions: LinkedInPosition[];
+  /** Data rows read per imported CSV file present in the archive. */
+  files: Record<string, number>;
 }
 
 // ── Date Parsing ────────────────────────────────────────
@@ -114,6 +115,7 @@ export function parseLinkedInZip(zipPath: string): LinkedInExportData {
     messages: [],
     profile: null,
     positions: [],
+    files: {},
   };
 
   for (const entry of entries) {
@@ -124,6 +126,7 @@ export function parseLinkedInZip(zipPath: string): LinkedInExportData {
     switch (name) {
       case 'Connections.csv': {
         const rows = parseCsvBuffer(buffer, ['First Name', 'Last Name', 'URL']);
+        result.files[name] = rows.length;
         result.connections = rows.map((r) => ({
           firstName: r['First Name'] || '',
           lastName: r['Last Name'] || '',
@@ -137,6 +140,7 @@ export function parseLinkedInZip(zipPath: string): LinkedInExportData {
       }
       case 'messages.csv': {
         const rows = parseCsvBuffer(buffer, ['CONVERSATION ID', 'FROM', 'CONTENT']);
+        result.files[name] = rows.length;
         result.messages = rows.map((r) => ({
           conversationId: r['CONVERSATION ID'] || '',
           conversationTitle: r['CONVERSATION TITLE'] || '',
@@ -153,6 +157,7 @@ export function parseLinkedInZip(zipPath: string): LinkedInExportData {
       }
       case 'Profile.csv': {
         const rows = parseCsvBuffer(buffer, ['First Name', 'Last Name']);
+        result.files[name] = rows.length;
         if (rows.length > 0) {
           const r = rows[0];
           result.profile = {
@@ -168,6 +173,7 @@ export function parseLinkedInZip(zipPath: string): LinkedInExportData {
       }
       case 'Positions.csv': {
         const rows = parseCsvBuffer(buffer, ['Company Name', 'Title']);
+        result.files[name] = rows.length;
         result.positions = rows.map((r) => ({
           companyName: r['Company Name'] || '',
           title: r['Title'] || '',
@@ -193,7 +199,9 @@ export function parseLinkedInZip(zipPath: string): LinkedInExportData {
 
 export function transformLinkedInContacts(
   data: LinkedInExportData,
-  userProfileUrl?: string
+  userProfileUrl?: string,
+  /** Prefix of every message id (`li:<hex>:` for a named account, empty for the default). */
+  externalIdPrefix = ''
 ): ContactToUpsert[] {
   // Group messages by sender profile URL (excluding messages from the user themselves)
   const messagesBySender = new Map<string, LinkedInMessage[]>();
@@ -238,7 +246,7 @@ export function transformLinkedInContacts(
         to: 'me',
         timestamp: parseLinkedInDate(msg.date),
         message: msg.content,
-        externalId: `${msg.conversationId}_${idx}`,
+        externalId: `${externalIdPrefix}${msg.conversationId}_${idx}`,
       })),
     });
 
@@ -264,7 +272,7 @@ export function transformLinkedInContacts(
         to: 'me',
         timestamp: parseLinkedInDate(msg.date),
         message: msg.content,
-        externalId: `${msg.conversationId}_${idx}`,
+        externalId: `${externalIdPrefix}${msg.conversationId}_${idx}`,
       })),
     });
   }
@@ -296,7 +304,7 @@ export function transformLinkedInContacts(
           to: msg.to || 'unknown',
           timestamp: parseLinkedInDate(msg.date),
           message: msg.content,
-          externalId: `${msg.conversationId}_sent_${existingContact.messages.length}`,
+          externalId: `${externalIdPrefix}${msg.conversationId}_sent_${existingContact.messages.length}`,
         });
       }
     }
@@ -305,98 +313,83 @@ export function transformLinkedInContacts(
   return contacts;
 }
 
-// ── Main Import Function ────────────────────────────────
+// ── Import ──────────────────────────────────────────────
 
-export async function importLinkedInData(
-  userId: string,
-  zipPath: string,
-  jobId: string
-): Promise<{ contacts: number; messages: number }> {
-  log.info('Parsing LinkedIn ZIP', { jobId, zipPath });
-
-  const data = parseLinkedInZip(zipPath);
-
-  // Determine user's profile URL
-  let userProfileUrl: string | undefined;
-
+/** The archive owner's profile URL, so their own messages are filed as sent. */
+function detectUserProfileUrl(data: LinkedInExportData): string | undefined {
   // Strategy 1: Match profile name against message senders
   if (data.profile?.firstName && data.profile?.lastName) {
     const userName = `${data.profile.firstName} ${data.profile.lastName}`;
     const userMsg = data.messages.find((m) => m.from === userName);
-    if (userMsg?.senderProfileUrl) {
-      userProfileUrl = userMsg.senderProfileUrl;
-    }
+    if (userMsg?.senderProfileUrl) return userMsg.senderProfileUrl;
   }
 
   // Strategy 2 (fallback): The user is the sender who appears in the most
   // distinct conversations — no other contact appears in every conversation.
-  if (!userProfileUrl && data.messages.length > 0) {
-    const convoBySender = new Map<string, Set<string>>();
-    for (const msg of data.messages) {
-      if (!msg.senderProfileUrl) continue;
-      const url = msg.senderProfileUrl.replace(/\/$/, '').toLowerCase();
-      if (!convoBySender.has(url)) convoBySender.set(url, new Set());
-      convoBySender.get(url)!.add(msg.conversationId);
-    }
-    let maxConvos = 0;
-    for (const [url, convos] of convoBySender) {
-      if (convos.size > maxConvos) {
-        maxConvos = convos.size;
-        userProfileUrl = url;
-      }
-    }
-    if (userProfileUrl) {
-      log.info('Detected user profile URL via frequency heuristic', {
-        jobId,
-        userProfileUrl,
-      });
+  let userProfileUrl: string | undefined;
+  const convoBySender = new Map<string, Set<string>>();
+  for (const msg of data.messages) {
+    if (!msg.senderProfileUrl) continue;
+    const url = msg.senderProfileUrl.replace(/\/$/, '').toLowerCase();
+    if (!convoBySender.has(url)) convoBySender.set(url, new Set());
+    convoBySender.get(url)!.add(msg.conversationId);
+  }
+  let maxConvos = 0;
+  for (const [url, convos] of convoBySender) {
+    if (convos.size > maxConvos) {
+      maxConvos = convos.size;
+      userProfileUrl = url;
     }
   }
-
-  const contactsToUpsert = transformLinkedInContacts(data, userProfileUrl);
-  const totalMessages = contactsToUpsert.reduce((sum, c) => sum + c.messages.length, 0);
-
-  log.info('Processing LinkedIn messages', {
-    jobId,
-    totalMessages,
-    contacts: contactsToUpsert.length,
-    userId,
-  });
-
-  // Upsert via shared manager
-  const result = await upsertPersonAndMessageRecords(userId, contactsToUpsert, jobId);
-
-  // Update integration metadata
-  const integration = await prisma.integration.findUnique({
-    where: { userId_name_accountId: { userId, name: 'linkedin', accountId: '' } },
-  });
-
-  if (integration) {
-    const existingConfig =
-      (integration.config as Prisma.JsonObject | null) || ({} as Prisma.JsonObject);
-    const existingTotalMessages = Number(existingConfig.totalMessagesProcessed ?? 0);
-    const existingTotalContacts = Number(existingConfig.totalContactsProcessed ?? 0);
-    const existingBatches = Number(existingConfig.batchesReceived ?? 0);
-    await prisma.integration.update({
-      where: { id: integration.id },
-      data: {
-        config: {
-          ...existingConfig,
-          lastUploadedAt: new Date().toISOString(),
-          totalMessagesProcessed: existingTotalMessages + totalMessages,
-          totalContactsProcessed: existingTotalContacts + contactsToUpsert.length,
-          batchesReceived: existingBatches + 1,
-          profile: data.profile as unknown as Prisma.InputJsonValue,
-          positions: data.positions as unknown as Prisma.InputJsonValue,
-        },
-      },
-    });
+  if (userProfileUrl) {
+    log.info('Detected user profile URL via frequency heuristic', { userProfileUrl });
   }
+  return userProfileUrl;
+}
 
-  log.info('LinkedIn sync complete', {
-    jobId,
-    contacts: result.contacts,
-    messages: result.messages,
-  });
-  return result;
+export interface PreparedLinkedInImport {
+  data: LinkedInExportData;
+  contacts: ContactToUpsert[];
+  /** Records the import will write: contacts plus their messages. */
+  records: number;
+  messages: number;
+}
+
+/** Read the archive and build its contacts (no database access). */
+export function prepareLinkedInImport(
+  zipPath: string,
+  externalIdPrefix: string
+): PreparedLinkedInImport {
+  log.info('Parsing LinkedIn ZIP', { zipPath });
+  const data = parseLinkedInZip(zipPath);
+  const contacts = transformLinkedInContacts(data, detectUserProfileUrl(data), externalIdPrefix);
+  const messages = contacts.reduce((sum, c) => sum + c.messages.length, 0);
+  return { data, contacts, records: contacts.length + messages, messages };
+}
+
+/** Contacts per write batch; each batch reports its progress once. */
+export const LINKEDIN_IMPORT_CHUNK = 200;
+
+/**
+ * Upsert the prepared contacts in bounded batches, calling `onBatch` with the
+ * records saved so far after each one.
+ */
+export async function importLinkedInContacts(
+  userId: string,
+  contacts: ContactToUpsert[],
+  jobId: string,
+  onBatch: (recordsDone: number) => Promise<void>
+): Promise<{ contacts: number; messages: number }> {
+  const total = { contacts: 0, messages: 0 };
+  let done = 0;
+  for (let i = 0; i < contacts.length; i += LINKEDIN_IMPORT_CHUNK) {
+    const chunk = contacts.slice(i, i + LINKEDIN_IMPORT_CHUNK);
+    const saved = await upsertPersonAndMessageRecords(userId, chunk, jobId);
+    total.contacts += saved.contacts;
+    total.messages += saved.messages;
+    done += chunk.length + chunk.reduce((sum, c) => sum + c.messages.length, 0);
+    await onBatch(done);
+  }
+  log.info('LinkedIn sync complete', { jobId, ...total });
+  return total;
 }

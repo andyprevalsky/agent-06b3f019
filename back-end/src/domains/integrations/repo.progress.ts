@@ -35,20 +35,25 @@ const keyOf = (key: ProgressKey) => ({
   },
 });
 
+/** Take the account's progress lock inside `tx` (released at commit). */
+export async function lockAccountProgress(tx: Tx, key: ProgressKey): Promise<void> {
+  await tx.$queryRaw`
+    WITH acquired AS MATERIALIZED (
+      SELECT pg_advisory_xact_lock(
+        hashtextextended(${`${key.userId}:${key.provider}:${key.accountId}`}, 907311)
+      )
+    )
+    SELECT 1::int AS locked FROM acquired
+  `;
+}
+
 /** Run `fn` holding the account's progress lock (released at commit). */
 export async function withAccountProgressLock<T>(
   key: ProgressKey,
   fn: (tx: Tx) => Promise<T>
 ): Promise<T> {
   return runTransactionWithRetry(async (tx) => {
-    await tx.$queryRaw`
-      WITH acquired AS MATERIALIZED (
-        SELECT pg_advisory_xact_lock(
-          hashtextextended(${`${key.userId}:${key.provider}:${key.accountId}`}, 907311)
-        )
-      )
-      SELECT 1::int AS locked FROM acquired
-    `;
+    await lockAccountProgress(tx, key);
     return fn(tx);
   });
 }

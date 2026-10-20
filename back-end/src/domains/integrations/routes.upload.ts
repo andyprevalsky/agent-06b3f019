@@ -72,49 +72,6 @@ router.post(
   })
 );
 
-/** POST /api/integrations/linkedin/upload */
-router.post(
-  '/linkedin/upload',
-  authenticateMachineUpload,
-  upload.single('file') as unknown as RequestHandler,
-  asyncHandler(async (req: AuthRequest, res: Response) => {
-    try {
-      const userId = req.user!.id;
-
-      if (req.file === undefined || req.file === null) {
-        return res.status(400).json({ error: 'No file uploaded' });
-      }
-
-      const filePath = req.file.path;
-      const fileName = req.file.originalname;
-
-      if (!fileName.toLowerCase().endsWith('.zip')) {
-        fs.unlinkSync(filePath);
-        return res.status(400).json({ error: 'File must be a .zip file' });
-      }
-
-      try {
-        const result = await service.processLinkedInUpload(userId, filePath, fileName);
-        return res.json({ message: 'LinkedIn data imported successfully', ...result });
-      } catch (parseError: unknown) {
-        return res.status(500).json({
-          error: 'Failed to parse LinkedIn data',
-          details: parseError instanceof Error ? parseError.message : 'Unknown error',
-        });
-      }
-    } catch (error: unknown) {
-      if (req.file !== undefined && req.file !== null) {
-        try {
-          fs.unlinkSync(req.file.path);
-        } catch {
-          // expected — file may already be removed
-        }
-      }
-      throw error;
-    }
-  })
-);
-
 /** POST /api/integrations/contacts/upload */
 router.post(
   '/contacts/upload',

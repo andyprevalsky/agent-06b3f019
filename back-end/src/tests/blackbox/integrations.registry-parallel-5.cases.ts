@@ -7,6 +7,19 @@ import {
   testLinkedinSync_runningWorkflowStaysSyncingAndBlocksDuplicate,
 } from './integrations.linkedin-sync-1.cases';
 import {
+  testLinkedinPhases_inOrderOnlyAfterEachEvent,
+  testLinkedinPhases_expiredExportEndsFailed,
+  testLinkedinPhases_agentEndsWhileWaitingReadsFailed,
+  testLinkedinUpload_corruptArchiveEndsFailed,
+  testLinkedinUpload_withoutSyncImportsDefaultAccount,
+  testLinkedinAccounts_reportNamesTheAccount,
+  testLinkedinAccounts_twoAccountsSyncIndependentlyAndDeleteOne,
+  testLinkedinPhase_unknownAgentAndOtherUser,
+  testLinkedinAccounts_namingAnAccountHandsBackTheImportedDefault,
+  testLinkedinUpload_twoWaitingSyncsNeedAccountId,
+  testLinkedinUpload_cutOffBodyEndsFailed,
+} from './integrations.linkedin-sync-2.cases';
+import {
   testEmailSend_missingFields,
   testEmailSend_noAuthCoverage,
   testEmailMessages_noAuthCoverage,
@@ -184,6 +197,50 @@ export function parallelTestsPart5() {
     {
       name: 'POST /linkedin/sync running workflow stays SYNCING and blocks a duplicate -> 409',
       fn: testLinkedinSync_runningWorkflowStaysSyncingAndBlocksDuplicate,
+    },
+    {
+      name: 'LinkedIn phases appear in order, each only after its event',
+      fn: testLinkedinPhases_inOrderOnlyAfterEachEvent,
+    },
+    {
+      name: 'LinkedIn expired export ends failed with lastError',
+      fn: testLinkedinPhases_expiredExportEndsFailed,
+    },
+    {
+      name: 'LinkedIn export agent ending while waiting reads failed (list = delta)',
+      fn: testLinkedinPhases_agentEndsWhileWaitingReadsFailed,
+    },
+    {
+      name: 'POST /linkedin/upload corrupt archive ends failed',
+      fn: testLinkedinUpload_corruptArchiveEndsFailed,
+    },
+    {
+      name: 'POST /linkedin/upload without a sync imports the default account',
+      fn: testLinkedinUpload_withoutSyncImportsDefaultAccount,
+    },
+    {
+      name: 'LinkedIn agent report names the account of an unnamed sync',
+      fn: testLinkedinAccounts_reportNamesTheAccount,
+    },
+    {
+      name: 'LinkedIn two accounts sync independently; delete one keeps the other',
+      fn: testLinkedinAccounts_twoAccountsSyncIndependentlyAndDeleteOne,
+    },
+    {
+      name: 'POST /linkedin/sync/phase unknown agent, other user, no auth',
+      fn: testLinkedinPhase_unknownAgentAndOtherUser,
+    },
+    {
+      name: 'LinkedIn naming an account hands an imported default account back',
+      fn: testLinkedinAccounts_namingAnAccountHandsBackTheImportedDefault,
+    },
+    {
+      name: 'POST /linkedin/upload with two waiting syncs needs account_id -> 400',
+      fn: testLinkedinUpload_twoWaitingSyncsNeedAccountId,
+    },
+    {
+      name: 'POST /linkedin/upload cut off mid-body ends failed',
+      fn: testLinkedinUpload_cutOffBodyEndsFailed,
     },
   ];
 }
