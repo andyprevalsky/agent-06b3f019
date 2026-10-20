@@ -14,6 +14,14 @@ class Rejected(ValueError):
 # attached. Every call here is a read or the absolute, idempotent backup
 # setting, so a completed rejection is retried a bounded number of times.
 ATTEMPTS=3
+# Fly reported a just-updated Volume as unattached once: original600
+# r004-j0014's update response showed the exact attachment, then the next GET
+# 113 ms after it returned attached_machine_id null while the clone Machine
+# still existed with the same mount (recovery was not observed: our teardown
+# destroyed it). Only a null attachment is re-observed, a bounded number of
+# times under the existing deadline; an attachment to any other Machine fails
+# closed at once, and a null that persists still fails without a receipt.
+SETTLE_READS=4
 
 def pause(attempt):
     # Exponential backoff with jitter keeps a burst's retries from realigning.
@@ -62,7 +70,7 @@ def save(path,value):
     try:os.fsync(fd)
     finally:os.close(fd)
 
-def configure(registry,owner,app,name,mid,vid,protected,command,*,audit,run):
+def configure(registry,owner,app,name,mid,vid,protected,command,*,audit,run,snapshot_restored=False):
     registry=Path(registry).absolute()
     with bounded(60):
         need(registry.resolve(strict=True)==registry and registry.name==owner,'wrong registry')
@@ -86,15 +94,22 @@ def configure(registry,owner,app,name,mid,vid,protected,command,*,audit,run):
         if not directory.exists():directory.mkdir(mode=0o700)
         need(directory.resolve(strict=True)==directory and directory.is_dir(),'linked evidence directory')
         def inspect():
-            config=retried(lambda:command(['machine','status',mid,'-a',app,'-d']))
-            mounts=config.get('mounts',[])
-            need(len(mounts)==1 and mounts[0].get('volume')==vid,'native mount changed')
-            value=retried(lambda:command(['volumes','show',vid,'-a',app,'--json']))
-            need(value.get('id')==vid and value.get('state')=='created','Volume identity/state changed')
-            need(type(value.get('auto_backup_enabled')) is bool,'backup setting missing')
-            need(value.get('attached_machine_id')==mid,'Volume not attached to the exact owned Machine')
-            need(fields(registry/'clones'/name)==row,'ownership changed during read')
-            return value
+            for settle in range(SETTLE_READS+1):
+                config=retried(lambda:command(['machine','status',mid,'-a',app,'-d']))
+                mounts=config.get('mounts',[])
+                need(len(mounts)==1 and mounts[0].get('volume')==vid,'native mount changed')
+                value=retried(lambda:command(['volumes','show',vid,'-a',app,'--json']))
+                need(value.get('id')==vid and value.get('state')=='created','Volume identity/state changed')
+                need(type(value.get('auto_backup_enabled')) is bool,'backup setting missing')
+                attached=value.get('attached_machine_id')
+                need(attached in (None,mid),'Volume attached to a different Machine')
+                need(fields(registry/'clones'/name)==row,'ownership changed during read')
+                # A volume restored from a large snapshot keeps reporting
+                # attached_machine_id=null while the owned Machine runs with exactly
+                # this mount (checked above). Accept that only for an explicit restore.
+                if attached==mid or (snapshot_restored and attached is None):return value
+                if settle<SETTLE_READS:pause(min(settle,2))
+            raise ValueError('Volume not attached to the exact owned Machine')
         before=inspect()
         if before['auto_backup_enabled'] is False:
             if not (directory/'verified.json').exists():save(directory/'verified.json',dict(owner=owner,app=app,run_id=run,machine=mid,volume=vid,auto_backup_enabled=False,native=before))
@@ -126,6 +141,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     for key in ('registry','owner','app','name','machine','volume','audit','run'):parser.add_argument('--'+key,required=True)
     parser.add_argument('--protected',action='append',default=[])
+    parser.add_argument('--snapshot-restored',action='store_true')
     args=parser.parse_args()
     with bounded(60):
         helper=runpy.run_path(str(Path(__file__).resolve().with_name('cloudbench-original-volume-capture.py')))
@@ -146,5 +162,5 @@ def main():
                 # 142 is the bounded child's deadline: that request may still be in flight.
                 raise (ValueError if status==142 else Rejected)('Volume configuration CLI failed (exit '+str(status)+'; private receipt '+str(result)+')')
             value=json.loads(out);need(isinstance(value,dict),'invalid native JSON');return value
-        configure(args.registry,args.owner,args.app,args.name,args.machine,args.volume,args.protected,command,audit=args.audit,run=args.run)
+        configure(args.registry,args.owner,args.app,args.name,args.machine,args.volume,args.protected,command,audit=args.audit,run=args.run,snapshot_restored=args.snapshot_restored)
 if __name__=='__main__':main()

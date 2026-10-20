@@ -60,12 +60,19 @@ from providers.rose.transforms import (
     apply_anthropic_tool_config,
     transform_messages_for_anthropic,
 )
-from providers.rose.transport import get_error_body, post_anthropic_stream
+from providers.rose.transport import anthropic_error_fields, get_error_body, post_anthropic_stream
 from providers.rose.types import ClaudeAuthContext, StreamChunk
 from providers.rose.uncached_context import is_uncached_context
 from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
 logger = structlog.get_logger()
+
+
+def _anthropic_400_message(error_body: str) -> str:
+    """Name the provider's error code so a fall-through reason is diagnosable."""
+    code = anthropic_error_fields(error_body)["error_code"]
+    return f"Anthropic 400 ({code})" if code else "Anthropic 400"
+
 
 _MAX_ATTEMPTS_PER_TOKEN = 3
 _BACKOFF_CAP_S = 5.0
@@ -642,7 +649,7 @@ async def anthropic_api_key_complete(
                 ):
                     raise RosePaymentRequiredError("Anthropic 400 (out of credits)", status=status)
                 if status == 400:
-                    raise RoseInvalidRequest("Anthropic 400", status=status)
+                    raise RoseInvalidRequest(_anthropic_400_message(error_body), status=status)
                 if status >= 500:
                     if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
                         await asyncio.sleep(min(2**attempt, _BACKOFF_CAP_S))
@@ -807,7 +814,7 @@ async def _attempt_with_token(
                         body_len=len(error_body),
                     )
                     raise RoseInvalidRequest(
-                        "Anthropic 400",
+                        _anthropic_400_message(error_body),
                         status=status,
                     )
 

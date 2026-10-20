@@ -18,6 +18,7 @@ import re
 from pathlib import Path
 import runpy
 import signal
+import ssl
 import shlex
 import subprocess
 import sys
@@ -32,6 +33,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location('operator_cli', Path(os.environ.get('PORTABLE_OPERATOR_SOURCE', ROOT/'scripts/run-original600-controller.py')))
 CLI = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CLI)
+AUDIT = runpy.run_path(str(ROOT/'scripts/cloudbench-native-release-audit.py'))
 RUNNER = runpy.run_path(os.environ.get('ORIGINAL600_RUNNER_SOURCE',str(ROOT/'scripts/cloudbench-original600-runner.py')))
 
 
@@ -1911,7 +1913,7 @@ class Portable(unittest.TestCase):
             self.assertEqual((check['status'], check['controllers'], check['copies'], check['copies_per_controller_bound'], check['provider_calls']),
                              ('CHECKED_NOT_LAUNCHED', 3, 70, 32, 2))
             self.assertEqual(check['manifest'], dict(sha256=RUNNER['manifest_sha'](names), tasks=70, original=False, task_timeout=480,
-                                                     e2e_timeout=5400, catalog_eligible=70))
+                                                     e2e_timeout=5400, catalog_eligible=70, catalog_eligibility='live'))
             self.assertEqual(check['shard_bindings'], dict(manifest_sha256=RUNNER['manifest_sha'](names), task_timeout=480))
             self.assertEqual(check['shard_campaign_options'], ['--strict-barrier', '--concurrency', '24', '-k', '1', '--retry-infra', '1',
                                                                '--timeout', '480', '--e2e-timeout', '5400'])
@@ -1924,6 +1926,7 @@ class Portable(unittest.TestCase):
                                                ('not-ready', names[:3] + not_ready, [], 'non-ready tasks'),
                                                ('duplicate', names[:3] + names[:1], [], 'distinct task names'),
                                                ('rootless', names[:3] + rootless, [], 'cloud-root'),
+                                               ('rootless-ordinary', names[:3] + rootless, ['--catalog-eligibility', 'ordinary'], 'cloud-root'),
                                                ('timeout', names, ['--task-timeout', '30'], 'task-timeout must be 60'),
                                                ('e2e', names, ['--task-timeout', '480', '--e2e-timeout', '2000'], 'e2e-timeout must cover'),
                                                ('continuation', names, ['--resume-admission', str(fx.state)], 'original 200-task manifest')]:
@@ -2194,6 +2197,85 @@ class Portable(unittest.TestCase):
 
 
 
+    def test_transient_app_inventory_timeout_is_retried_and_persistent_failure_fails_closed(self):
+        """Live proof 1792433714160918322 lost launch attempt 1 to one 20 s `flyctl apps list` timeout."""
+        settings = {'data': {'organization': {'slug': 'personal', 'settings': {'machines_per_org_limit': 1000}, 'billingStatus': 'fixture'}}}
+        apps = subprocess.CompletedProcess([], 0, json.dumps([{'Name': 'navi-whisper-lux-bench', 'Organization': {'Slug': 'personal'}}]), '')
+        argv = ['flyctl', 'apps', 'list', '--org', 'personal', '--json']
+        slow = subprocess.TimeoutExpired(argv, 20)
+        attempts = 3  # bounded: the read-only inventory gets two more tries, then refuses
+
+        class API:
+            def __init__(self, app, token):
+                pass
+            def api(self, method, path, timeout):
+                return [{'id': 'm1'}]
+
+        for name, effects, outcome in (('one slow read', [slow, apps], 2),
+                                       ('one failed read', [subprocess.CalledProcessError(1, argv), apps], 2),
+                                       ('persistent slow reads', [slow] * attempts, subprocess.TimeoutExpired)):
+            with self.subTest(name), tempfile.TemporaryDirectory() as directory, \
+                 patch.object(CLI.urllib.request, 'urlopen', side_effect=lambda *a, **k: io.BytesIO(json.dumps(settings).encode())), \
+                 patch.object(CLI.time, 'sleep') as pause, \
+                 patch.object(CLI.subprocess, 'run', side_effect=effects) as run:
+                if isinstance(outcome, int):
+                    cap = CLI.capacity_snapshot(API, 'fixture', 'personal', Path(directory), 1)
+                    self.assertEqual(cap['available_slots_conservative'], 998)
+                    self.assertEqual(run.call_count, outcome)
+                else:
+                    with self.assertRaises(outcome):
+                        CLI.capacity_snapshot(API, 'fixture', 'personal', Path(directory), 1)
+                    self.assertEqual(run.call_count, attempts)
+                    self.assertEqual(list(Path(directory).iterdir()), [], 'no partial inventory is saved')
+                self.assertTrue(all(c.kwargs['timeout'] == 20 and c.args[0] == argv for c in run.call_args_list))
+                self.assertEqual(pause.call_count, run.call_count - 1)
+        # A malformed but successful read is not transient: it still refuses at once.
+        bad = subprocess.CompletedProcess([], 0, json.dumps([{'Name': 'unrelated', 'Organization': {'Slug': 'personal'}}]), '')
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(CLI.urllib.request, 'urlopen', return_value=io.BytesIO(json.dumps(settings).encode())), \
+             patch.object(CLI.time, 'sleep'), patch.object(CLI.subprocess, 'run', return_value=bad) as run:
+            with self.assertRaisesRegex(ValueError, 'does not include'):
+                CLI.capacity_snapshot(API, 'fixture', 'personal', Path(directory), 1)
+            self.assertEqual(run.call_count, 1)
+        # The organization settings read is retried the same way; an authorization refusal is not.
+        import urllib.error
+        for name, effects, calls in (('slow settings read', [TimeoutError('read timed out')], 2),
+                                     ('settings 503', [urllib.error.HTTPError('https://api.fly.io/graphql', 503, 'busy', {}, io.BytesIO())], 2),
+                                     ('settings 401', [urllib.error.HTTPError('https://api.fly.io/graphql', 401, 'denied', {}, io.BytesIO())], 1),
+                                     ('untrusted certificate', [urllib.error.URLError(ssl.SSLCertVerificationError('bad cert'))], 1)):
+            responses = iter(effects + [io.BytesIO(json.dumps(settings).encode())])
+            def urlopen(*a, **k):
+                value = next(responses)
+                if isinstance(value, Exception):
+                    raise value
+                return value
+            with self.subTest(name), tempfile.TemporaryDirectory() as directory, \
+                 patch.object(CLI.urllib.request, 'urlopen', side_effect=urlopen) as opened, \
+                 patch.object(CLI.time, 'sleep'), patch.object(CLI.subprocess, 'run', return_value=apps):
+                if calls == 1:
+                    with self.assertRaises(urllib.error.URLError):
+                        CLI.capacity_snapshot(API, 'fixture', 'personal', Path(directory), 1)
+                else:
+                    self.assertEqual(CLI.capacity_snapshot(API, 'fixture', 'personal', Path(directory), 1)['machine_limit'], 1000)
+                self.assertEqual(opened.call_count, calls)
+        # A missing flyctl binary is not transient either.
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(CLI.urllib.request, 'urlopen', return_value=io.BytesIO(json.dumps(settings).encode())), \
+             patch.object(CLI.time, 'sleep'), patch.object(CLI.subprocess, 'run', side_effect=FileNotFoundError('flyctl')) as run:
+            with self.assertRaises(FileNotFoundError):
+                CLI.capacity_snapshot(API, 'fixture', 'personal', Path(directory), 1)
+            self.assertEqual(run.call_count, 1)
+        # Retries never outlive the caller's existing I/O alarm: its Deadline ends the read at once.
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(CLI.urllib.request, 'urlopen', return_value=io.BytesIO(json.dumps(settings).encode())), \
+             patch.object(CLI.time, 'sleep') as pause, \
+             patch.object(CLI.subprocess, 'run', side_effect=RUNNER['Deadline']('external controller I/O deadline')) as run:
+            with self.assertRaises(RUNNER['Deadline']):
+                CLI.capacity_snapshot(API, 'fixture', 'personal', Path(directory), 1)
+            self.assertEqual((run.call_count, pause.call_count), (1, 0))
+        self.assertEqual((CLI.INVENTORY_READ_ATTEMPTS, len(CLI.INVENTORY_RETRY_PAUSES)), (attempts, attempts - 1))
+
+
 class Sharded(unittest.TestCase):
     def setUp(self):
         # Launches append to the experiments ledger and run a read-only native audit;
@@ -2204,9 +2286,10 @@ class Sharded(unittest.TestCase):
         self.addCleanup(self.ledger.unlink, missing_ok=True)
         self.audits = []
         for patcher in (patch.dict(os.environ, CLOUDBENCH_EXPERIMENTS_LEDGER=str(self.ledger)),
-                        patch.object(CLI, 'native_release_audit', lambda root, directory, token, owned: (
-                            self.audits.append((directory, owned)) or dict(released=True, present=[],
-                                                                           checked=dict(guest_names=sorted(owned[0])))))):
+                        patch.object(CLI, 'native_release_audit', lambda root, directory, token: (
+                            self.audits.append((directory, AUDIT['guest_identities'](directory)[0]))
+                            or dict(released=True, present=[], present_volumes=[], retained_owners=[],
+                                    checked=dict(guest_names=sorted(self.audits[-1][1]['names'])))))):
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -2232,6 +2315,24 @@ class Sharded(unittest.TestCase):
                     total_active_inventory_objects=1000-free-1, conservative_extra_destroying_bench_objects=1, apps=[],
                     available_slots_conservative=free, new_controller_slots=1, requested_original_primary_slots=600,
                     proof_path=str(private(directory/'capacity-proof.private.json', {})))
+
+    def test_final_group_status_uses_the_hub_vocabulary(self):
+        """Every coordination outcome maps onto the Hub's passed|failed|cancelled group statuses."""
+        ok = dict(exit_codes={'0': 0, '1': 0}, abort_reason=None, terminate_reason=None)
+        cases = [
+            (0, ok, 'passed'),
+            (1, ok, 'failed'),  # a scheduled job never reported
+            (0, dict(ok, exit_codes={'0': 0, '1': 1}), 'failed'),
+            (0, dict(ok, exit_codes={}), 'failed'),
+            (0, dict(ok, abort_reason='shard [1] failed before global release'), 'failed'),
+            (0, dict(ok, terminate_reason='infra 30/600 reached the 5% threshold'), 'failed'),
+            (0, dict(ok, abort_reason='operator SIGTERM', terminate_reason='operator SIGTERM'), 'cancelled'),
+            (0, dict(ok, abort_reason='shard [0] failed before global release', terminate_reason='operator SIGINT'),
+             'cancelled'),
+        ]
+        for missing, coordination, expected in cases:
+            with self.subTest(coordination=coordination, missing=missing):
+                self.assertEqual(CLI.shard_group_status(dict(missing_jobs=missing), coordination), expected)
 
     def test_selection_defaults_to_controllers_sized_by_copies(self):
         with tempfile.TemporaryDirectory() as name:
@@ -2499,12 +2600,13 @@ class Sharded(unittest.TestCase):
             self.assertEqual([(e['event'], e['goal']) for e in ledger], [('launch', 'original600'), ('end', 'original600')])
             self.assertEqual((ledger[0]['scheduled_total'], ledger[0]['controllers'], ledger[0]['slice']), (36, 3, 'tasks'))
             self.assertEqual(len(self.audits), 1)
-            self.assertIn('cloudbench-owned', self.audits[0][1][0], 'the native audit checks owned guest names from the exports')
+            self.assertIn('cloudbench-owned', self.audits[0][1]['names'], 'the native audit reads owned guest names from the exports')
             self.assertEqual([p['outcomes'] is None for p in published], [True, False])
             self.assertEqual({p['group_id'] for p in published}, {launched[0].config['shard']['group_run_id']})
             self.assertEqual(published[0]['members'], 36)
             self.assertEqual(len(published[1]['outcomes']), 36)
-            self.assertEqual(published[1]['finished']['status'], 'completed')
+            # The Hub's terminal vocabulary: every shard exited 0 and every job reported.
+            self.assertEqual(published[1]['finished']['status'], 'passed')
             self.assertEqual(code, 0)
             self.assertEqual(len(launched), 3)
             self.assertEqual(sorted(r.env['CLOUDBENCH_GATE_NAME_SUFFIX'] for r in launched), ['s00', 's01', 's02'])
@@ -2517,6 +2619,48 @@ class Sharded(unittest.TestCase):
             costed = [row for row in result['jobs'] if row['cost_usd'] is not None]
             self.assertEqual([(row['cost_usd'], row['exec_s'], row['wall_s']) for row in costed], [(0.25, 42.0, 61.5)] * 3)  # one carded job per shard
             self.assertEqual(json.loads((admission/'capacity-proof.private.json').read_bytes())['new_machine_demand'], 45)
+
+    def test_preallocation_abort_ends_the_ledger_entry_and_admission_as_aborted(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            (directory/'state').mkdir(mode=0o700)
+            args = self.args(directory, task_count=12, repetitions=3, tasks_per_controller=4)
+            plan = CLI.shard_selection(args, RUNNER)
+            timeout = subprocess.TimeoutExpired(['flyctl', 'apps', 'list', '--org', 'personal', '--json'], 20)
+            guest_env = CLI.guest_temporal_env(ROOT, args.agents_env, args.backend_env)  # rendered before Popen is refused
+            with patch.object(CLI, 'capacity_snapshot', side_effect=timeout), \
+                 patch.object(CLI, 'hub_interpreter', lambda args: sys.executable), \
+                 patch.object(CLI, 'missing_prompt_secrets', lambda *a: []), \
+                 patch.object(CLI.subprocess, 'Popen', side_effect=AssertionError('nothing launches')), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan, guest_env=guest_env)
+            ledger = [json.loads(line) for line in self.ledger.read_text().splitlines()]
+            self.assertEqual([e['event'] for e in ledger], ['launch', 'end'])
+            end = ledger[1]
+            self.assertEqual(end['state'], 'ABORTED')
+            self.assertGreaterEqual(end['ended_at'], ledger[0]['triggered_at'])
+            self.assertEqual(end['outcome'], {'allocated': False})
+            self.assertIn('TimeoutExpired', end['abort_reason'])
+            admission = next((directory/'state').iterdir())
+            receipt = json.loads((admission/'preallocation-abort.json').read_bytes())
+            self.assertEqual((receipt['ended_at'], receipt['allocated']), (end['ended_at'], False))
+            card = CLI.scorecard_module(ROOT)['build'](admission, ledger=self.ledger)
+            self.assertEqual(card['experiment']['state'], 'ABORTED')
+            self.assertEqual(card['experiment']['ended_at'], end['ended_at'])
+            self.assertIn('TimeoutExpired', card['experiment']['state_reason'])
+            self.assertEqual(card['since']['state'], 'ENDED')
+            self.assertEqual(card['history'][0]['state'], 'ABORTED')
+            self.assertEqual(self.audits, [], 'nothing was allocated, so there is nothing to audit')
+
+    def test_preallocation_abort_reports_an_unrecorded_ledger_end(self):
+        with tempfile.TemporaryDirectory() as name:
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                CLI.preallocation_abort({'record': lambda *a, **k: None}, ROOT, Path(name), RUNNER, 'goal',
+                                        OSError('fixture'))
+            warning = json.loads(stderr.getvalue().strip().splitlines()[-1])
+            self.assertEqual(warning, {'status': 'PREALLOCATION_ABORT_LEDGER_WARNING', 'experiment': Path(name).name})
 
     def test_sharded_run_refuses_a_hub_interpreter_without_agents_dependencies(self):
         with tempfile.TemporaryDirectory() as name:
@@ -2885,6 +3029,84 @@ class TaskRefBinding(unittest.TestCase):
             self.assertEqual(supervisor['shard_task_ref'](None), RUNNER['TASK_REF'])
 
 
+class WideRunCatalogModes(unittest.TestCase):
+    """An ordinary user-requested wide run admits and places SIM/DEMO catalog tasks as the ordinary fleet
+    does; LIVE acceptance (the operator default) keeps refusing zero-spend and DEMO-replay tasks."""
+    # A main commit whose catalog has the native-WMH simulate task tagged DEMO.
+    SIM_REF = '851937ca339765ce0aaf28a05a1b45fcdc870d2e'
+    SIM_TASK = 'raise-5m-rose-labs-brex'
+
+    def names(self):
+        rows = json.loads(subprocess.check_output(['git', '--no-replace-objects', '-C', str(ROOT), 'show',
+                                                   self.SIM_REF + ':agents/benchmarks/polar_tasks.json']))
+        return [self.SIM_TASK] + [row['name'] for row in rows if row.get('status', 'ready') == 'ready'][:7]
+
+    def args(self, directory, **overrides):
+        values = dict(source_ref=self.SIM_REF, task_ref=self.SIM_REF, tasks=private(directory/'tasks', self.names()),
+                      backend_env=private(directory/'backend.env', 'COMPLETE=fixture\n'), task_count=None,
+                      repetitions=5, controllers='auto', tasks_per_controller=None, task_timeout=1200, e2e_timeout=5400)
+        values.update(overrides)
+        return argparse.Namespace(**values)
+
+    def test_live_acceptance_refuses_demo_replay_and_ordinary_runs_admit_it(self):
+        with tempfile.TemporaryDirectory() as name, \
+                patch.object(CLI, 'capacity_snapshot', side_effect=AssertionError('no provider read')):
+            directory = Path(name)
+            for live in (self.args(directory), self.args(directory, catalog_eligibility='live')):
+                with self.assertRaisesRegex(ValueError, r"DEMO-replay tasks: \['raise-5m-rose-labs-brex'\]"):
+                    CLI.task_manifest(live, ROOT, RUNNER)
+            bound = CLI.task_manifest(self.args(directory, catalog_eligibility='ordinary'), ROOT, RUNNER)
+            self.assertEqual((bound['catalog_eligibility'], bound['catalog_eligible'], bound['original']), ('ordinary', 8, False))
+            # Ordinary eligibility keeps the cloud-runnable rule: a non-ready name still refuses.
+            bad = self.args(directory, tasks=private(directory/'bad', self.names() + ['no-such-benchmark-task']),
+                            catalog_eligibility='ordinary')
+            with self.assertRaisesRegex(ValueError, 'non-ready tasks'):
+                CLI.task_manifest(bad, ROOT, RUNNER)
+
+    def fleet_admission(self, env, modes):
+        """The ordinary fleet's actual fresh-placement admission for one shard's env and catalog modes."""
+        source = (ROOT/'scripts/run-bench-fleet').read_text()
+        def fn(name):
+            start = source.index(name + '() {')
+            return source[start:source.index('\n}\n', start) + 3]
+        script = ('set -u\nREGION=ord\nFRESH_TARGET_REGION=\nFRESH_VOLUMES=1\nPRIVATE_SOURCE_FILE=\nPROVISION_POOL=\nSIM_ON_CSV=\n'
+                  'POOL_IDS_FILE=\nRECOVER_STALE_ONLY=0\nCLOUDBENCH_BOOT_LAUNCH=1\n'
+                  + 'BENCHES=(' + ' '.join('b%d' % i for i in range(len(modes))) + ')\nCATALOG_MODES=(' + ' '.join(modes) + ')\n'
+                  + ''.join('export %s=%s\n' % (k, shlex.quote(v)) for k, v in env.items())
+                  + '\n'.join(fn(n) for n in ('is_sim_on', 'primary_clone_storage_mode', 'fresh_target_region_admission',
+                                               'fresh_volume_placement_admission'))
+                  + '\nfresh_target_region_admission && fresh_volume_placement_admission\n')
+        return subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=10)
+
+    def test_every_shard_placement_passes_the_ordinary_fleet_admission(self):
+        with tempfile.TemporaryDirectory() as name:
+            args = self.args(Path(name), catalog_eligibility='ordinary')
+            plan = CLI.shard_selection(args, RUNNER)
+            self.assertEqual((plan['controllers'], plan['copies']), (2, 40))
+            catalog = runpy.run_path(str(ROOT/'scripts/cloudbench_catalog.py'))
+            sim_shards = 0
+            for item in plan['shards']:
+                shard = CLI.bound_shard(item, args, RUNNER, 'g', plan['copies'], 1.0)
+                simulate = RUNNER['shard_simulate_tasks'](ROOT, shard)
+                self.assertEqual(simulate, [t for t in shard['tasks'] if t == self.SIM_TASK])
+                env = RUNNER['shard_placement_env'](ROOT, shard)
+                modes = ['simulate' if t in simulate else 'real' for t in shard['tasks']]
+                result = self.fleet_admission(env, modes)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                if simulate:
+                    sim_shards += 1
+                    self.assertEqual(env, {})  # snapshot-backed WMH guests keep the ordinary donor-region placement
+                    # The former fixed fresh-only placement is exactly what the fleet refuses for this shard.
+                    refused = self.fleet_admission(RUNNER['FRESH_ONLY_PLACEMENT'], modes)
+                    self.assertNotEqual(refused.returncode, 0)
+                    self.assertIn('cannot route snapshot or simulated tasks', refused.stderr)
+                else:
+                    self.assertEqual(env, RUNNER['FRESH_ONLY_PLACEMENT'])  # REAL-only shards keep the iad fresh-only placement
+            self.assertEqual(sim_shards, 1)
+        # The original600 legacy controller (no shard) is unchanged.
+        self.assertEqual(RUNNER['shard_placement_env'](ROOT, None), RUNNER['FRESH_ONLY_PLACEMENT'])
+
+
 class RunBenchShardedRouting(unittest.TestCase):
     """scripts/run-bench routes wide cloud runs to the sharded operator with the pushed HEAD."""
     @contextmanager
@@ -2922,7 +3144,8 @@ class RunBenchShardedRouting(unittest.TestCase):
             env = dict(os.environ, RUN_BENCH_SHARDED_OPERATOR_UNDER_TEST=str(operator), OPERATOR_CALLS=str(calls),
                        RUN_BENCH_FLEET_BIN_UNDER_TEST=str(fake_fleet), FLEET_CALLS=str(fleet),
                        GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
-            for key in ('RUN_BENCH_SHARDED_ROUTE', 'RUN_BENCH_SHARDED_STATE_DIR', 'RUN_BENCH_GOAL', 'RUN_BENCH_CATALOG_UNDER_TEST'):
+            for key in ('RUN_BENCH_SHARDED_ROUTE', 'RUN_BENCH_SHARDED_STATE_DIR', 'RUN_BENCH_GOAL', 'RUN_BENCH_CATALOG_UNDER_TEST',
+                        'RUN_BENCH_CATALOG_ELIGIBILITY'):
                 env.pop(key, None)
             def run(*argv):
                 result = subprocess.run(['bash', str(root/'scripts/run-bench'), *argv], cwd=root, env=env,
@@ -2976,6 +3199,18 @@ class RunBenchShardedRouting(unittest.TestCase):
             self.assertEqual((result.returncode, len(ops)), (2, 1))  # a refused check never launches
             self.assertIn('nothing was launched', result.stderr)
             fx.env.pop('OPERATOR_EXIT')
+
+    def test_wide_runs_select_ordinary_catalog_eligibility_and_live_acceptance_opts_in(self):
+        names = ['raise-5m-rose-labs-brex'] + polar_names(7)
+        with self.checkout() as fx:
+            result, ops, fleets = fx.run(*names, '-k', '5', '--concurrency', '40', '--check')
+            self.assertEqual((result.returncode, len(ops), fleets), (0, 1, []), result.stderr)
+            self.assertEqual(self.option(ops[0], '--catalog-eligibility'), 'ordinary')
+            fx.env['RUN_BENCH_CATALOG_ELIGIBILITY'] = 'live'
+            result, ops, fleets = fx.run(*names, '-k', '5', '--concurrency', '40', '--check')
+            self.assertEqual((result.returncode, len(ops)), (0, 1), result.stderr)
+            self.assertEqual(self.option(ops[0], '--catalog-eligibility'), 'live')
+            fx.env.pop('RUN_BENCH_CATALOG_ELIGIBILITY')
 
     def test_narrow_runs_keep_the_fleet_path_and_refuse_a_sharded_dry_run(self):
         names = polar_names(10)

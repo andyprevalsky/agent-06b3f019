@@ -2255,6 +2255,45 @@ raise SystemExit(1)
 ' "$1" "$2" "$3" "$4" "$5" "$key"
 }
 
+# Print "node python epoch snapshot" of the NEWEST dependency proof published on
+# the donor (stdin: `machines list --json`). Every dependency refresh installs
+# its trees on the one donor volume and publishes with its snapshot epoch, so
+# the newest proof names the trees the volume currently holds — whichever
+# checkout or devbox wrote it. Snapshot-only maintenance (--refresh-wmh) must
+# republish under exactly these fingerprints, never a checkout's local receipt.
+cloudbench_warm_deps_latest_proof() {  # <app> <machine-id> <volume-id>
+  python3 -c '
+import json, re, sys
+
+app, machine_id, volume_id = sys.argv[1:]
+try:
+    machines = [m for m in json.load(sys.stdin) if isinstance(m, dict) and m.get("id") == machine_id]
+    if len(machines) != 1:
+        raise ValueError("ambiguous donor")
+    config = machines[0]["config"]
+    if not any(m.get("volume") == volume_id for m in config.get("mounts", [])):
+        raise ValueError("donor volume changed")
+    best = None
+    for key, value in (config.get("metadata") or {}).items():
+        if not key.startswith("rose_cloudbench_deps_") or not isinstance(value, str):
+            continue
+        fields = value.split()
+        if len(fields) != 7 or fields[4:] != [volume_id, machine_id, app]:
+            continue
+        if not all(re.fullmatch(r"[0-9a-f]{64}", fp) for fp in fields[:2]):
+            continue
+        if not re.fullmatch(r"[1-9][0-9]*", fields[2]) or not re.fullmatch(r"[A-Za-z0-9_-]+", fields[3]):
+            continue
+        if best is None or int(fields[2]) > int(best[2]):
+            best = fields
+    if best is None:
+        raise ValueError("no dependency proof")
+    print(" ".join(best[:4]))
+except (KeyError, TypeError, ValueError, AttributeError):
+    raise SystemExit(1)
+' "$1" "$2" "$3"
+}
+
 cloudbench_manifest_fingerprint() {
     local root="$1"
     shift
@@ -2474,4 +2513,26 @@ PY
 
 cloudbench_mutation_admission() {
   python3 -S -c "$(cloudbench_mutation_launch_code)" "$@"
+}
+
+# Central Rose credential broker: the same origin production worker plans bind
+# (scripts/production_worker_process.py).
+CLOUDBENCH_PEOPLE_CREDENTIAL_BROKER_ORIGIN="https://navi-j9a9.onrender.com"
+
+# Prints the people credential broker a benchmark stack's worker must use, or
+# nothing when the operator configured one explicitly. Benchmark stacks route
+# BACKEND_API_URL to their own isolated backend, whose seeded database never
+# holds a rotating Lantern grant, so without an explicit bearer or broker every
+# people_search fails with LANTERN_NOT_CONNECTED. A nonblank value in the
+# process environment or the agents env file counts as explicit.
+cloudbench_people_credential_broker_default() {  # <agents-env-file>
+  local env_file="$1" key value
+  for key in PEOPLE_CREDENTIAL_BROKER_URL PEOPLE_API_TOKEN; do
+    value="${!key:-}"
+    if [ -z "$value" ] && [ -f "$env_file" ]; then
+      value="$(cloudbench_env_value "$env_file" "$key")"
+    fi
+    [ -n "${value//[[:space:]]/}" ] && return 0
+  done
+  printf '%s\n' "$CLOUDBENCH_PEOPLE_CREDENTIAL_BROKER_ORIGIN"
 }

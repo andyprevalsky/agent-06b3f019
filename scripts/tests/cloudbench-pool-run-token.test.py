@@ -24,8 +24,10 @@ ROW = dict(id=MACHINE, name='cloudbench-native-proof-fixture', state='stopped', 
 
 
 class NativeRunIdentity(unittest.TestCase):
-    def proof(self, token=None, barrier=None, change_second=False):
+    def proof(self, token=None, barrier=None, change_second=False, guest=None, sim_values=False):
         row = copy.deepcopy(ROW)
+        if guest is not None:
+            row['config']['guest'] = guest
         if token is not None:
             row['config']['env']['CLOUDBENCH_RUN_TOKEN'] = token
         if barrier is not None:
@@ -44,7 +46,7 @@ class NativeRunIdentity(unittest.TestCase):
             (root / 'cloudbench-campaign-machines.py').write_text(
                 'import json\nfrom pathlib import Path\ni=0\ndef fetch(*args):\n global i\n rows=json.loads(Path(__file__).with_name("rows.json").read_text())\n row=rows[i];i+=1\n return json.dumps(row)\n')
             (root / 'cloudbench_execution_provenance.py').write_text(
-                "def load_provenance(path):\n return {'base_sha': '" + REF + "', 'config': {'values': {'primary_vm_size': 'shared-cpu-2x', 'primary_vm_memory_mb': '4096', 'bundled_frontend_vm_size': 'shared-cpu-4x', 'bundled_frontend_vm_memory_mb': '8192'}}}\n"
+                "def load_provenance(path):\n return {'base_sha': '" + REF + "', 'config': {'values': {'primary_vm_size': 'shared-cpu-2x', 'primary_vm_memory_mb': '4096', 'bundled_frontend_vm_size': 'shared-cpu-4x', 'bundled_frontend_vm_memory_mb': '8192'" + (", 'sim_vm_size': 'performance-8x', 'sim_vm_memory_mb': '65536'" if sim_values else '') + "}}}\n"
                 "def load_task_matrix(path):\n return {'tasks': [{'name': 'task'}]}\n"
                 "def validate_task_matrix_binding(*args):\n return []\n")
             match = re.search(r'^pool_native_reuse_proof\(\).*?^}\n', SOURCE.read_text(), re.M | re.S)
@@ -63,6 +65,12 @@ class NativeRunIdentity(unittest.TestCase):
     def test_changing_barrier_does_not_change_run_identity(self):
         result = self.proof(barrier='another-sanitized-barrier')
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_sim_shaped_primary_is_accepted_only_with_recorded_sim_shape(self):
+        sim = {'cpu_kind': 'performance', 'cpus': 8, 'memory_mb': 65536}
+        result = self.proof(guest=sim, sim_values=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotEqual(self.proof(guest=sim).returncode, 0)
 
     def test_changed_native_pair_still_refuses(self):
         self.assertNotEqual(self.proof(change_second=True).returncode, 0)

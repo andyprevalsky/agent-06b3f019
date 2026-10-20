@@ -271,3 +271,62 @@ def test_units_are_byte_identical_for_identical_evidence_in_any_key_order():
     a = asyncio.run(StreamBook().render("s:a", ev))
     b = asyncio.run(StreamBook().render("s:b", reordered))
     assert a == b
+
+
+def _change_stream(changes, unit_patch=None):
+    units = [json.dumps({"task": {"instruction": "Raise"}}),
+             json.dumps({"environment_state_baseline": {"structured": {"log": [], "funds": ["y" * 200] * 50}}})]
+    for n in range(changes):
+        patch = unit_patch(n) if unit_patch else [{"op": "add", "path": "/structured/log/-", "value": {"n": n}}]
+        units.append(json.dumps({"environment_state_changes": patch}))
+    return units, json.dumps({"current_call": {"visible_conversation_tail": []}})
+
+
+def _reference_state(units):
+    state = None
+    for text in units:
+        (tag, value), = json.loads(text).items()
+        if tag == "environment_state_baseline":
+            state = deepcopy(value)
+        elif tag == "environment_state_changes":
+            state = apply_state_patch(state, value)
+    return state
+
+
+def test_fold_encodes_the_whole_state_once_not_once_per_change(monkeypatch):
+    """SIM run 7: a fold re-copied and re-encoded the whole world state per change unit (quadratic)."""
+    import benchmarks.wmh_wire_stream as wire
+
+    units, final = _change_stream(300)
+    full = []
+    real = wire.apply_state_patch
+
+    def counted(state, patch):
+        full.append(1)
+        return real(state, patch)
+
+    monkeypatch.setattr(wire, "apply_state_patch", counted)
+    folded = fold_stream(units, final)
+    assert len(full) == 1, f"{len(full)} whole-state copies for 300 changes"
+    assert same(folded["environment_state"], _reference_state(units))
+    assert [entry["n"] for entry in folded["environment_state"]["structured"]["log"]] == list(range(300))
+
+
+def test_linear_fold_keeps_per_unit_finite_json_and_error_semantics():
+    nan = float("nan")
+    # A non-finite value written and removed within one unit is finite at that unit's end.
+    transient, final = _change_stream(3, lambda n: [{"op": "add", "path": "/structured/tmp", "value": nan},
+                                                    {"op": "remove", "path": "/structured/tmp"}])
+    assert same(fold_stream(transient, final)["environment_state"], _reference_state(transient))
+    # A non-finite value that survives a later unit fails exactly like the per-unit reference.
+    kept, final = _change_stream(
+        3, lambda n: [{"op": "add", "path": f"/structured/v{n}", "value": nan if n == 2 else n}]
+    )
+    with pytest.raises(ValueError):
+        _reference_state(kept)
+    with pytest.raises(ValueError):
+        fold_stream(kept, final)
+    # A missing target still fails the fold.
+    broken, final = _change_stream(2, lambda n: [{"op": "replace", "path": "/structured/absent", "value": n}])
+    with pytest.raises(ValueError):
+        fold_stream(broken, final)

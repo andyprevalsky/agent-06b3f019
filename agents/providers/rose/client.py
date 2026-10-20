@@ -62,7 +62,7 @@ from providers.rose.errors import (
     RoseServerError,
     RoseStallError,
 )
-from providers.rose.foundry import foundry_complete, foundry_configured
+from providers.rose.foundry import foundry_candidates, foundry_complete, foundry_configured
 from providers.rose.gpt_auth import gpt_auth_complete, openai_api_key_complete
 from providers.rose.inter_agent_context import settle_trailing_inter_agent_messages
 from providers.rose.legacy_adapter import classify_claude_token_error, classify_gpt_token_error
@@ -1940,11 +1940,7 @@ class RoseClient:
                         model=foundry_model(pool_spec),
                         reason="images_need_vision",
                     )
-                if (
-                    foundry_configured(pool_spec)
-                    and not foundry_blind
-                    and model_key(foundry_model(pool_spec)) not in _skip_models
-                ):
+                if foundry_configured(pool_spec) and not foundry_blind and foundry_candidates(pool_spec, _skip_models):
                     active_route = "foundry"
                     foundry_yielded_any = False
                     try:
@@ -1968,6 +1964,7 @@ class RoseClient:
                                 cache_namespace=cache_namespace,
                                 ttft_timeout_s=ttft_timeout_s,
                                 idle_timeout_s=idle_timeout_s,
+                                skip_models=_skip_models,
                             )
                         ) as foundry_source:
                             async for chunk in _guarded(foundry_source):

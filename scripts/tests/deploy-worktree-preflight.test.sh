@@ -189,6 +189,65 @@ deploy_two_name="$(
 [ "$deploy_two_name" != "$deploy_one_name" ] || fail "same-basename deploy worktrees must receive path-unique resource identities"
 echo "PASS: same-basename deploy worktrees receive path-unique resource identities"
 
+# Two concurrent deploys that ran preparation under different TMPDIR values
+# (/tmp vs the documented Linux /var/tmp) once used separate TMPDIR-scoped
+# registries and both received base port 56000 (2026-10-20). The default
+# registry is per repository, and earlier TMPDIR-scoped claims stay reserved.
+deploy_tmp_a="$TMP_ROOT/descend-I99-tmp-a"
+deploy_tmp_b="$TMP_ROOT/descend-I99-tmp-b"
+git -C "$controller" worktree add -q -b deploy-tmp-a "$deploy_tmp_a"
+git -C "$controller" worktree add -q -b deploy-tmp-b "$deploy_tmp_b"
+mkdir -p "$TMP_ROOT/tmpdir-a" "$TMP_ROOT/tmpdir-b"
+# Earlier-protocol registries are fixtures here; never mirror into the host's.
+mkdir -p "$TMP_ROOT/tmpdir-a/legacy" "$TMP_ROOT/tmpdir-b/legacy"
+export ROSE_DEPLOY_LEGACY_PORT_REGISTRIES="$TMP_ROOT/tmpdir-a/legacy:$TMP_ROOT/tmpdir-b/legacy"
+TMPDIR="$TMP_ROOT/tmpdir-a" bash "$PREFLIGHT" --worktree "$deploy_tmp_a" --source "$controller" \
+  --skip-dependencies --skip-database >/dev/null
+TMPDIR="$TMP_ROOT/tmpdir-b" bash "$PREFLIGHT" --worktree "$deploy_tmp_b" --source "$controller" \
+  --skip-dependencies --skip-database >/dev/null
+tmp_a_port="$(sed -nE 's/^export CONDUCTOR_PORT=([0-9]+)$/\1/p' "$deploy_tmp_a/.context/deploy-worktree.env")"
+tmp_b_port="$(sed -nE 's/^export CONDUCTOR_PORT=([0-9]+)$/\1/p' "$deploy_tmp_b/.context/deploy-worktree.env")"
+[ -n "$tmp_a_port" ] && [ "$tmp_a_port" != "$tmp_b_port" ] \
+  || fail "deploys prepared under different TMPDIR values must receive distinct ports ($tmp_a_port/$tmp_b_port)"
+[ -f "$(git -C "$controller" rev-parse --path-format=absolute --git-common-dir)/rose-deploy-worktree-ports/$tmp_a_port.json" ] \
+  || fail "the default port registry must live in the repository's git common directory"
+echo "PASS: deploys prepared under different TMPDIR values receive distinct ports"
+
+foreign_repo="$TMP_ROOT/foreign-repo"
+git init -q "$foreign_repo"
+GIT_DIR="$foreign_repo/.git" GIT_COMMON_DIR="$foreign_repo/.git" bash "$PREFLIGHT" \
+  --worktree "$deploy_tmp_b" --source "$controller" --skip-dependencies --skip-database >/dev/null
+expect_eq "$(sed -nE 's/^export CONDUCTOR_PORT=([0-9]+)$/\1/p' "$deploy_tmp_b/.context/deploy-worktree.env")" "$tmp_b_port" \
+  "inherited GIT_DIR/GIT_COMMON_DIR cannot redirect the port registry"
+[ ! -e "$foreign_repo/.git/rose-deploy-worktree-ports" ] \
+  || fail "an inherited foreign GIT_DIR must not receive this repository's port claims"
+
+legacy_registry="$TMP_ROOT/legacy-ports"
+fresh_registry="$TMP_ROOT/fresh-ports"
+mkdir -p "$legacy_registry"
+printf '{"base_port": 56000, "owner": "%s", "schema_version": 1}\n' "$deploy_tmp_a" >"$legacy_registry/56000.json"
+respected_port="$(python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" claim --registry "$fresh_registry" \
+  --owner "$deploy_tmp_b" --respect-registry "$legacy_registry")"
+[ "$respected_port" != 56000 ] || fail "a live claim in a respected legacy registry must reserve its range"
+grep -q "\"owner\": \"$deploy_tmp_a\"" "$legacy_registry/56000.json" \
+  || fail "a respected legacy claim must stay with its owner"
+grep -q "\"owner\": \"$deploy_tmp_b\"" "$legacy_registry/$respected_port.json" \
+  || fail "a new claim must be mirrored into the legacy registry so earlier-protocol claimants observe it"
+echo "PASS: a live legacy-registry claim reserves its range and new claims are mirrored to it"
+
+# The same legacy registry named twice (directly and via a symlink) is locked
+# once, and a configured but absent legacy registry is created and mirrored.
+ln -s "$legacy_registry" "$TMP_ROOT/legacy-alias"
+absent_registry="$TMP_ROOT/absent-legacy"
+deploy_tmp_c="$TMP_ROOT/descend-I99-tmp-c"
+git -C "$controller" worktree add -q -b deploy-tmp-c "$deploy_tmp_c"
+alias_port="$(timeout 30 python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" claim --registry "$fresh_registry" \
+  --owner "$deploy_tmp_c" --respect-registry "$legacy_registry" --respect-registry "$TMP_ROOT/legacy-alias" \
+  --respect-registry "$absent_registry")" || fail "an aliased legacy registry must not deadlock the claim"
+grep -q "\"owner\": \"$deploy_tmp_c\"" "$absent_registry/$alias_port.json" \
+  || fail "an absent configured legacy registry must be created and receive the mirrored claim"
+echo "PASS: aliased legacy registries lock once and absent ones are created and mirrored"
+
 mkdir -p "$deploy_one/node_modules"
 write_fake_venv "$deploy_one/agents/venv"
 PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \

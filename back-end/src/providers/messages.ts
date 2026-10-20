@@ -15,26 +15,11 @@ import {
 import { lockAgentWorkflowGeneration } from './workflowGeneration';
 import { scheduleMessageGmvCapture } from './messageGmvCapture';
 import { idempotentMessageId } from './messageIdempotency';
+import { type CreateMessageParams, storableMessageParams, withoutNulJson } from './messageParams';
 
 const log = createLogger('Messages');
 
-export interface CreateMessageParams {
-  agentId: string;
-  text: string;
-  role: 'USER' | 'ASSISTANT' | 'TOOL' | 'SYSTEM';
-  metadata?: Record<string, unknown> | null;
-  filePointer?: object | null;
-  /** The caller generated a unique toolCallId inside a non-retried request. */
-  skipDuplicateToolCheck?: boolean;
-  /** Finalize lifecycle writes that do not belong to the Agent's current workflow. */
-  enforceCurrentWorkflowGeneration?: boolean;
-  /** Server-only authority to create a deployment fence. */
-  allowDeploymentFinalizer?: boolean;
-  /** Immutable Temporal Workflow ID that produced an internal message. */
-  workflowGeneration?: string;
-  /** Test/internal batch control; persistence semantics are unchanged. */
-  skipBroadcast?: boolean;
-}
+export type { CreateMessageParams };
 
 async function findDuplicateToolMessage(params: CreateMessageParams) {
   if (params.role !== 'TOOL' || (params.filePointer !== undefined && params.filePointer !== null)) {
@@ -172,11 +157,14 @@ export async function createUserMessageInTransaction(
   tx: Prisma.TransactionClient,
   params: Pick<CreateMessageParams, 'agentId' | 'text' | 'metadata'>
 ): Promise<Message> {
-  return (await persistOrdinaryMessage({ ...params, role: 'USER' }, null, tx)).message;
+  return (
+    await persistOrdinaryMessage(storableMessageParams({ ...params, role: 'USER' }), null, tx)
+  ).message;
 }
 
 /** Create, deduplicate, fence, persist, and broadcast one message. */
-export async function createMessage(params: CreateMessageParams): Promise<Message> {
+export async function createMessage(input: CreateMessageParams): Promise<Message> {
+  const params = storableMessageParams(input);
   const idempotentId = idempotentMessageId(params);
   const idempotentDuplicate = await findIdempotentMessage(params);
   if (idempotentDuplicate !== null) return idempotentDuplicate;
@@ -297,10 +285,12 @@ function broadcastWorkflowMessageGroup(
  * createMessage and are deliberately not generation-fenced.
  */
 export async function createWorkflowMessageGroup(
-  params: CreateMessageParams,
-  attachments: Array<Record<string, unknown>>,
+  input: CreateMessageParams,
+  inputAttachments: Array<Record<string, unknown>>,
   workflowGeneration: string
 ): Promise<WorkflowMessageGroupResult> {
+  const params = storableMessageParams(input);
+  const attachments = withoutNulJson(inputAttachments);
   const stampedParams: CreateMessageParams = {
     ...params,
     workflowGeneration,

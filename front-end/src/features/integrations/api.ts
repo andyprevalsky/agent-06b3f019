@@ -1,3 +1,5 @@
+import { createAgent } from '@/lib/api';
+import { getClientSource } from '@/lib/clientSource';
 import { getStoredSession } from '@/lib/supabase';
 
 import { API_BASE_URL, API_BASE_WITH_PATH } from './config';
@@ -150,7 +152,12 @@ export async function uploadApplePasswordsApi(file: File): Promise<{ passwordCou
   return payload;
 }
 
-export async function createLinkedInSyncAgentApi(): Promise<void> {
+/**
+ * Spawn the LinkedIn export directly as a cloud agent (no chat routing: the
+ * task is fully specified), then record it as the user's LinkedIn sync so
+ * every client shows "Connecting" until that agent ends.
+ */
+export async function createLinkedInSyncAgentApi(): Promise<string> {
   const session = getStoredSession();
   const backendUrl = API_BASE_URL;
   const goal = `Download my LinkedIn data export and upload it to the platform.
@@ -168,24 +175,18 @@ Steps:
 4. After downloading the ZIP file, use a claude code agent to upload it to the backend:
    curl -X POST ${backendUrl}/api/integrations/linkedin/upload -H "Authorization: Bearer ${session?.access_token}" -F "file=@/path/to/downloaded-linkedin-export.zip"`;
 
-  const response = await fetch(`${backendUrl}/api/agents`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${session?.access_token}`,
-    },
-    body: JSON.stringify({
-      goal,
-      depth: 1,
-      source: 'MAC_APP',
-      price_limit_cents: 500,
-    }),
-  });
+  const agent = await createAgent({ goal, source: getClientSource(), start_phase: 'execute' });
 
+  const response = await fetch(`${API_BASE_WITH_PATH}/integrations/linkedin/sync`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ agent_id: agent.agent_id }),
+  });
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || 'Failed to create agent');
+    const error = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(error.error ?? `Failed to record LinkedIn sync (HTTP ${response.status})`);
   }
+  return agent.agent_id;
 }
 
 // ─── Plaid (consolidated from former features/plaid) ────────────────────────

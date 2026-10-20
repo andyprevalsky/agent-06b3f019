@@ -93,6 +93,16 @@ mkdir -p "$CASE/out"
   r,v,_=self.run_case('HOLD=1;printf stopped > "$CASE/machine-state";reap_machine abcd1234 "$CASE/log" vol_owned;reap_machine abcd1234 "$CASE/log2" vol_owned');self.assertNotEqual(r.returncode,0);self.assertEqual(v['calls'].splitlines(),['machine destroy --force abcd1234 -a fixture'])
  def test_soft_deleted_volume_is_typed_retained_not_absence(self):
   r,v,_=self.run_case('SOFT=pending_destroy;reap_volume vol_owned');self.assertEqual(r.returncode,74,r.stderr);self.assertEqual(len(v['calls'].splitlines()),1)
+ def test_disposable_reconcile_reads_are_not_reported_as_failed_destroys(self):
+  # Observed r004-j0014: one accepted DELETE, then exact GETs until
+  # pending_destroy, logged as "volume destroy attempt 2/6 rc=1 response=<empty>"
+  # although no DELETE was sent after attempt 1.
+  body='volume_inventory_contains_id(){ local n;n=$(( $(cat "$CASE/reads" 2>/dev/null || echo 0) + 1 ));echo $n > "$CASE/reads";[ $n -ge 4 ] && echo pending_destroy || echo created; }\n'
+  for tail in ('reap_volume vol_owned','reap_volume vol_owned "$CASE/log";rc=$?;cat "$CASE/log" >&2;exit $rc'):
+   r,v,_=self.run_case(body+'SOFT=created;'+tail)
+   self.assertEqual(r.returncode,74,r.stderr);self.assertEqual(v['calls'].splitlines(),['volumes destroy vol_owned -a fixture --yes'])
+   self.assertNotIn('rc=1',r.stderr);self.assertIsNone(re.search(r'volume destroy attempt [2-6]/6',r.stderr),r.stderr)
+   self.assertEqual(len(re.findall(r'volume destroy reconcile [23]/6 id=vol_owned state=created \(DELETE not resent\)',r.stderr)),2,r.stderr)
  def test_warm_whm_borrowed_no_mutation(self):
   for body in ['reap_machine warm "$CASE/log" vol_warm','reap_machine 820224f7e069e8 "$CASE/log" vol_whm','mkdir -p "$GIT_COMMON_DIR/cloudbench-worker-reuse/proofs";touch "$GIT_COMMON_DIR/cloudbench-worker-reuse/proofs/abcd1234.json";reap_machine abcd1234 "$CASE/log" vol_owned','reap_volume vol_warm']:
    r,v,_=self.run_case(body);self.assertNotEqual(r.returncode,0);self.assertEqual(v['calls'],'')

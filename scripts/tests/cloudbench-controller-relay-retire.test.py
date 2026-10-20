@@ -23,7 +23,8 @@ M = runpy.run_path(str(ROOT / "scripts/cloudbench-controller-relay-retire.py"))
 
 class Relay(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="cb-relay-")
+        # run-bench-campaign.py creates the relay namespace under /tmp exactly.
+        self.tmp = tempfile.TemporaryDirectory(prefix="cb-relay-", dir="/tmp")
         self.root = Path(self.tmp.name)
         self.repo = self.root / "repo"
         self.repo.mkdir()

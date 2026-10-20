@@ -21,7 +21,7 @@ import os
 import ssl
 import time
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, FrozenSet, List, Optional
 from urllib.parse import urlsplit
 
 import httpx
@@ -29,8 +29,9 @@ import structlog
 
 from providers.rose.errors import RoseAuthError, RoseError, RoseInvalidRequest, RoseRateLimitError, RoseServerError
 from providers.rose.gpt_auth import build_codex_responses_body
-from providers.rose.pools import PoolSpec, foundry_model
+from providers.rose.pools import PoolSpec, foundry_model, foundry_models
 from providers.rose.streaming import parse_responses_sse
+from providers.rose.truncation import model_key
 from providers.rose.types import StreamChunk
 
 logger = structlog.get_logger()
@@ -120,9 +121,10 @@ def foundry_configured(pool_spec: PoolSpec) -> bool:
         # Routing rejects this configuration; let foundry_complete surface that error.
         return True
     now = time.monotonic()
-    model = foundry_model(pool_spec)
+    models = foundry_models(pool_spec)
+    listed = _listed(regions, models)
     return any(
-        now >= _auth_cooldown_until.get(region.endpoint, 0.0) and _region_deployments(region, model)
+        now >= _auth_cooldown_until.get(region.endpoint, 0.0) and _region_deployments(region, models, listed)
         for region in regions
     )
 
@@ -132,21 +134,47 @@ def foundry_configured(pool_spec: PoolSpec) -> bool:
 _NO_REASONING_MODELS = frozenset({"DeepSeek-V3.2"})
 
 
-def _matching(configured: tuple[str, ...], model: str) -> list[str]:
-    return [name for name in configured if name == model or name.startswith(f"{model}-")]
+def foundry_candidates(pool_spec: PoolSpec, skip_models: FrozenSet[str] = frozenset()) -> tuple[str, ...]:
+    """The pool's Foundry models minus any excluded (by ``model_key``) after a truncation."""
+    return tuple(model for model in foundry_models(pool_spec) if model_key(model) not in skip_models)
 
 
-def _region_deployments(region: FoundryRegion, model: str) -> list[str]:
-    """Deployments serving ``model``: configured names equal to it or prefixed ``<model>-``.
+def _as_models(models: str | tuple[str, ...]) -> tuple[str, ...]:
+    return (models,) if isinstance(models, str) else models
+
+
+def _served_model(deployment: str, models: str | tuple[str, ...]) -> str:
+    """The model a deployment name serves: the first of ``models`` it equals or extends."""
+    models = _as_models(models)
+    return next((model for model in models if deployment == model or deployment.startswith(f"{model}-")), models[0])
+
+
+def _matching(configured: tuple[str, ...], models: str | tuple[str, ...]) -> list[str]:
+    models = _as_models(models)
+    return [name for name in configured if any(name == m or name.startswith(f"{m}-") for m in models)]
+
+
+def _listed(regions: list[FoundryRegion], models: str | tuple[str, ...]) -> bool:
+    return any(_matching(region.deployments, models) for region in regions)
+
+
+def _region_deployments(
+    region: FoundryRegion, models: str | tuple[str, ...], listed_elsewhere: bool = False
+) -> list[str]:
+    """Deployments serving ``models``: configured names equal to one or prefixed ``<model>-``.
 
     A region's deployment list is shared by every Foundry pool, so one pool's
     deployments must never receive another pool's model. Without a matching
-    name, region 1 uses Foundry's deploymentless inference for the model id;
-    other regions serve only the names they list, so a new resource holding
+    name, region 1 uses Foundry's deploymentless inference for the pool's own
+    model unless another region lists one of ``models`` (that region is where
+    it is deployed; region 1's deploymentless call would be a terminal 400).
+    Other regions serve only the names they list, so a new resource holding
     only GPT-6 Sol never receives Luna or DeepSeek traffic.
     """
-    matching = _matching(region.deployments, model)
-    return (matching or [model]) if region.slot == 1 else matching
+    matching = _matching(region.deployments, models)
+    if matching or region.slot != 1 or listed_elsewhere:
+        return matching
+    return [_as_models(models)[0]]
 
 
 def _rotated(names: list[str], route_key: str) -> list[str]:
@@ -160,14 +188,17 @@ def _rendezvous_weight(route_key: str, region: FoundryRegion) -> int:
     return int(hashlib.sha256(f"{route_key}\n{region.endpoint}".encode()).hexdigest()[:16], 16)
 
 
-def _route_plan(regions: list[FoundryRegion], model: str, route_key: str) -> list[tuple[FoundryRegion, str]]:
+def _route_plan(
+    regions: list[FoundryRegion], models: str | tuple[str, ...], route_key: str
+) -> list[tuple[FoundryRegion, str]]:
     """Every (region, deployment) to try, primary region first, for this route key."""
-    serving = [region for region in regions if _region_deployments(region, model)]
+    listed = _listed(regions, models)
+    serving = [region for region in regions if _region_deployments(region, models, listed)]
     serving.sort(key=lambda region: (-_rendezvous_weight(route_key, region), region.slot))
     return [
         (region, deployment)
         for region in serving
-        for deployment in _rotated(_region_deployments(region, model), route_key)
+        for deployment in _rotated(_region_deployments(region, models, listed), route_key)
     ]
 
 
@@ -216,8 +247,13 @@ async def foundry_complete(
     ttft_timeout_s: float,
     idle_timeout_s: Optional[float],
     max_tokens: Optional[int] = None,
+    skip_models: FrozenSet[str] = frozenset(),
 ) -> AsyncIterator[StreamChunk]:
     model = foundry_model(pool_spec)
+    # A model cut off at its output limit is excluded from every route serving it.
+    candidates = foundry_candidates(pool_spec, skip_models)
+    if not candidates:
+        raise RoseServerError("Every Foundry model for this pool is excluded")
     regions = _routable_regions()
     last_error: Optional[RoseError] = None
     skipped_cooling = False
@@ -226,7 +262,7 @@ async def foundry_complete(
     route_key = route_key or agent_id or request_id
 
     async with httpx.AsyncClient(timeout=timeout) as client:
-        for region, deployment in _route_plan(regions, model, route_key):
+        for region, deployment in _route_plan(regions, candidates, route_key):
             now = time.monotonic()
             if now < _auth_cooldown_until.get(region.endpoint, 0.0):
                 continue
@@ -280,7 +316,7 @@ async def foundry_complete(
                     try:
                         async for chunk in parse_responses_sse(
                             response,
-                            actual_model=f"{model}-foundry",
+                            actual_model=f"{_served_model(deployment, candidates)}-foundry",
                             pool_name="foundry",
                             request_id=request_id,
                             idle_timeout_s=idle_timeout_s,

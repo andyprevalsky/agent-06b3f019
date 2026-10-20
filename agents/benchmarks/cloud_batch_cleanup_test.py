@@ -567,6 +567,11 @@ def test_evaluated_wrapper_completion_publishes_once_before_owner_release(tmp_pa
         and isinstance(node.body[0].test, ast.Name)
         and node.body[0].test.id == "checkpoint_source_mode"
     )
+    finalize_and_save = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_finalize_owned_batch_and_save_run"
+    )
     coordinator = ast.AsyncFunctionDef(
         name="_owning_coordinator",
         args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
@@ -667,8 +672,10 @@ def test_evaluated_wrapper_completion_publishes_once_before_owner_release(tmp_pa
         "_wmh_evidence": SimpleNamespace(finalize=lambda: None),
         "Path": Path,
         "os": os,
+        "Any": bench.Any,
+        "Callable": bench.Callable,
     }
-    module = ast.fix_missing_locations(ast.Module(body=[wrapper, coordinator], type_ignores=[]))
+    module = ast.fix_missing_locations(ast.Module(body=[wrapper, finalize_and_save, coordinator], type_ignores=[]))
     exec(compile(module, str(bench.__file__), "exec"), namespace)
     if path in ("cancelled", "raised"):
         with pytest.raises(asyncio.CancelledError if path == "cancelled" else RuntimeError):
@@ -1859,6 +1866,201 @@ async def test_disconnected_delete_seal_wait_rejects_owner_drift_and_has_a_deadl
             await bench._wait_for_owned_root_seal("http://localhost:1", ROOT, before, evidence, timeout_seconds=0.02)
     assert all(not call.kwargs.get("require_deleted") for call in read.call_args_list)
     assert evidence["delete_seal_observation"]["snapshot"]["unsealed_tree_agent_ids"] == [CHILD]
+
+
+def test_native_world_retirement_retries_a_transient_unjoined_server_error(monkeypatch):
+    """Run 7 (2026-10-20): the first native DELETE after the 600s timeout returned
+    500 while ~90 cancelled predictions were still draining. The server keeps the
+    session fenced and accepts a fresh retirement, so a server/transport failure is
+    retried; a 4xx (unknown/foreign session) stays terminal."""
+    import httpx
+
+    def owned_task():
+        task = copy.deepcopy(bench.get_task_by_name("parallel-tool-calls"))
+        task._wmh_owned_session = {
+            "base_url": "http://native.test",
+            "model_name": "rose-test",
+            "session_id": "owned",
+            "root_agent_id": ROOT,
+            "engine": "experiential",
+        }
+        return task
+
+    receipt = {
+        "ended": "owned",
+        "engine": "experiential",
+        "session_id": "owned",
+        "session_scope_id": ROOT,
+        "revision": 3,
+        "state": {"raised": 0},
+        "history": [],
+        "usage": {"calls": 3},
+        "join_verified": True,
+    }
+    url = "http://native.test/world_models/rose-test/sessions/owned"
+
+    def status_error(code):
+        request = httpx.Request("DELETE", url)
+        return httpx.HTTPStatusError(f"{code}", request=request, response=httpx.Response(code, request=request))
+
+    def client_for(outcomes, calls):
+        class Client:
+            def __init__(self, base):
+                assert base == "http://native.test"
+
+            async def end_session(self, model, session_id):
+                calls.append((model, session_id))
+                outcome = outcomes.pop(0)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return outcome
+
+        return Client
+
+    sleeps = []
+
+    async def no_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(bench, "_NATIVE_RETIREMENT_SLEEP", no_sleep, raising=False)
+
+    calls = []
+    monkeypatch.setattr(
+        bench,
+        "WMHHttpClient",
+        client_for([status_error(500), httpx.ReadTimeout("slow", request=httpx.Request("DELETE", url)), receipt], calls),
+    )
+    task = owned_task()
+    assert asyncio.run(bench._retire_owned_native_world(task, ROOT)) == receipt
+    assert calls == [("rose-test", "owned")] * 3 and len(sleeps) == 2
+    assert task._wmh_retirement_receipt == receipt and getattr(task, "_wmh_retirement_error", None) is None
+
+    calls.clear()
+    monkeypatch.setattr(bench, "WMHHttpClient", client_for([status_error(409)], calls))
+    task = owned_task()
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(bench._retire_owned_native_world(task, ROOT))
+    assert calls == [("rose-test", "owned")] and task._wmh_retirement_error["join_verified"] is False
+
+    calls.clear()
+    attempts = getattr(bench, "_NATIVE_RETIREMENT_ATTEMPTS", 1)
+    persistent = [status_error(500) for _ in range(attempts + 1)]
+    monkeypatch.setattr(bench, "WMHHttpClient", client_for(persistent, calls))
+    task = owned_task()
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(bench._retire_owned_native_world(task, ROOT))
+    assert len(calls) == attempts > 1
+    assert task._wmh_retirement_error["cost_verified"] is False
+
+
+@async_case
+async def test_interrupt_during_archive_wait_keeps_run_record_and_exact_cleanup():
+    """SIGINT during the diagnostic archive wait must not lose the evaluated run.
+
+    polar70 (2026-10-19): a FAIL outcome was evaluated and Hub-acknowledged,
+    then the owned-batch archive refresh waited for two browser activities
+    that ignored pause. The guest watchdog interrupted it; the CancelledError
+    skipped ``run.save()`` and the remaining roots' exact cleanup, and the
+    interrupt receipt read ``failed`` although provider cleanup was verified.
+    """
+    for provider_fails in (False, True):
+        events = []
+        entered = asyncio.Event()
+        rows = [result(ROOT), result(CHILD)]
+        verdicts = [(row.passed, row.benchmark_status, row.failure_reason) for row in rows]
+
+        def query(_url, aid, **_kwargs):
+            return {"root_user_id": ROOT, "tree_agent_ids": [aid], "browser_sessions": [], "purchase_cleanup": []}
+
+        async def snapshot(_url, aid, _data, _logs, **_kwargs):
+            events.append(("snapshot", aid))
+            entered.set()
+            await asyncio.Event().wait()  # browser terminals never arrive
+
+        async def delete(_url, aid):
+            events.append(("delete", aid))
+
+        def close(_url, aid, _before, **_kwargs):
+            events.append(("release", aid))
+            if provider_fails and aid == CHILD:
+                raise RuntimeError("provider session still live")
+            return {"root_agent_id": aid}
+
+        async def payments(_url, aid, _evidence):
+            events.append(("payments", aid))
+            return {"root_agent_id": aid, "purchases": []}
+
+        saved = []
+        run = SimpleNamespace(task_results=rows, world_model_retrieval_audit=None)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            status_file = Path(temporary) / "interrupt.status"
+            record = Path(temporary) / "run-record.json"
+
+            def save():
+                saved.append([row.logs.get("cloud_cleanup_evidence") for row in rows])
+                record.write_text("{}", encoding="utf-8")
+                return str(record)
+
+            run.save = save
+            env = {
+                "BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE": str(status_file),
+                "BENCHMARK_INTERRUPT_CLEANUP_TOKEN": "polar70-token",
+                "BENCHMARK_CONTEXT_DIR": temporary,
+            }
+            with (
+                patch.dict(os.environ, env),
+                patch.object(bench, "_INTERRUPT_CLEANUP_STARTED", 0),
+                patch.object(bench, "_INTERRUPT_CLEANUP_COMPLETED", 0),
+                patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
+                patch.object(cleanup, "exact_root_sessions", query),
+                patch.object(bench, "_refresh_browser_archive_snapshot", snapshot),
+                patch.object(bench, "finalize_archive_and_score_world_model", AsyncMock(return_value=("ref", {}))),
+                patch.object(bench, "delete_agent", delete),
+                patch.object(cleanup, "close_exact_root_sessions", close),
+                patch.object(bench, "_finalize_owned_root_payments", payments),
+                patch.object(bench, "fetch_local_worker_logs", return_value=[]),
+            ):
+                bench._begin_interrupt_cleanup()
+                finalize = asyncio.create_task(
+                    bench._finalize_owned_batch_and_save_run(
+                        "http://localhost:1",
+                        run,
+                        {},
+                        owned_batch_cleanup=True,
+                        retrieval_audit=lambda: {"audited": True},
+                    )
+                )
+                async with asyncio.timeout(10):
+                    await entered.wait()
+                    finalize.cancel()  # asyncio.run's SIGINT delivery
+                    with pytest.raises(asyncio.CancelledError):
+                        await finalize
+                bench._finalize_interrupt_cleanup_status()
+                state = status_file.read_text(encoding="utf-8")
+
+        # The evaluated outcome is durable and unchanged by the interruption.
+        assert len(saved) == 1, "interrupted finalization skipped run.save()"
+        assert run.world_model_retrieval_audit == {"audited": True}
+        # Every owned root still crosses exact provider and payment cleanup;
+        # the interrupted archive wait is never resumed for later roots.
+        for aid in (ROOT, CHILD):
+            assert ("delete", aid) in events and ("release", aid) in events and ("payments", aid) in events
+        assert [event for event in events if event[0] == "snapshot"] == [("snapshot", ROOT)]
+        root_evidence, child_evidence = (row.logs["cloud_cleanup_evidence"] for row in rows)
+        assert any(warning.startswith("archive:") for warning in root_evidence["warnings"])
+        assert any(warning.startswith("archive:") for warning in child_evidence["warnings"])
+        if provider_fails:
+            # Unverified provider release stays fail-closed.
+            assert "state=failed" in state
+            assert child_evidence["errors"] == ["provider: provider session still live"]
+            assert (rows[1].passed, rows[1].benchmark_status) == (False, "ERROR")
+            assert (rows[0].passed, rows[0].benchmark_status, rows[0].failure_reason) == verdicts[0]
+        else:
+            assert "state=clean" in state, state
+            assert root_evidence["errors"] == [] and child_evidence["errors"] == []
+            assert [(row.passed, row.benchmark_status, row.failure_reason) for row in rows] == verdicts
+
 
 @async_case
 async def test_fixture_root_custody_refuses_unknown_foreign_and_duplicate_bindings():

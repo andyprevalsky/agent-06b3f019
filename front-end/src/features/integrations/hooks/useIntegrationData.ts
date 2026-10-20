@@ -18,6 +18,8 @@ interface IntegrationSyncState {
   iMessageSynced: boolean;
   whatsAppConnected: boolean;
   telegramConnected: boolean;
+  /** LinkedIn export sync: SYNCING while its export agent runs, CONNECTED once uploaded. */
+  linkedinStatus: ConnectedIntegration['status'] | null;
 }
 
 export interface GmailAccountView {
@@ -92,6 +94,7 @@ function deriveStateFromIntegrations(integrations: ConnectedIntegration[]): Inte
     iMessageSynced: find('imessage'),
     whatsAppConnected: find('whatsapp'),
     telegramConnected: find('telegram'),
+    linkedinStatus: integrations.find((i) => i.name === 'linkedin')?.status ?? null,
   };
 }
 
@@ -109,6 +112,7 @@ export function useIntegrationData() {
     iMessageSynced: false,
     whatsAppConnected: false,
     telegramConnected: false,
+    linkedinStatus: null,
   });
 
   const fetchIntegrations = useCallback(async () => {
