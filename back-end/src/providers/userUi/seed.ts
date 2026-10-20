@@ -68,12 +68,12 @@ theme.json:
 
     {
       "tokens": { "--primary": "#7c3aed", "--radius": "14px" },
-      "background": { "image": "root/assets/wallpaper.jpg", "fadeAfterFirstMessage": 0.2 }
+      "background": { "image": "root/assets/wallpaper.jpg", "fadeAfterFirstMessage": 0.8 }
     }
 
 Token names are CSS custom properties; values are plain CSS values (no url(),
 no ";", "{", "}" or markup). fadeAfterFirstMessage is the chat pane opacity
-(0..1, default 0.2) once the first message is sent.
+(0..1, default 0.8) once the first message is sent.
 
 ## How your code runs
 
