@@ -8,19 +8,23 @@
  *          ROSE_AGENTS_URL / _TOKEN / ROSE_AGENT_ID ─► sandbox env
  *
  * Rides on the session-HOME workspace that already carries rose_user_ui, so
- * E2B and the local fallback write and PATH it the same way.
+ * E2B and the local fallback write and PATH it the same way. A same-host
+ * (local fallback) session gets the loopback URL via `localEnvs`.
  */
-import { prisma } from '../database';
 import { createLogger } from '../logger';
-import type { UserUiWorkspace } from '../userUi/workspace';
+import {
+  USER_UI_CLI_BIN_DIR,
+  userUiPublishBaseUrl,
+  type UserUiWorkspace,
+} from '../userUi/workspace';
+import { findGraphRootId } from './tree';
 import { AGENT_GRAPH_CLI_NAME, AGENT_GRAPH_CLI_SCRIPT } from './cli';
 import { mintAgentGraphToken } from './token';
 
 const log = createLogger('AgentGraphWorkspace');
 
-const CLI_BIN_DIR = '.rose/bin';
-const MAX_ROOT_WALK = 64;
 export const AGENT_GRAPH_ROUTE_PREFIX = '/api/agent-graph';
+export const AGENT_GRAPH_CLI_PATH = `${USER_UI_CLI_BIN_DIR}/${AGENT_GRAPH_CLI_NAME}`;
 
 export interface AgentGraphSessionInput {
   userId: string | undefined;
@@ -29,37 +33,10 @@ export interface AgentGraphSessionInput {
   provider: 'claude' | 'codex';
 }
 
-function publicBaseUrl(): string {
-  const configured =
-    process.env.ROSE_AGENTS_BASE_URL ??
-    process.env.ROSE_UI_PUBLISH_BASE_URL ??
-    process.env.BACKEND_URL ??
-    process.env.RENDER_EXTERNAL_URL;
-  if (configured && configured.trim()) return configured.trim().replace(/\/+$/, '');
-  return `http://localhost:${process.env.PORT || 3001}`;
-}
-
-async function findRootAgentId(agentId: string, userId: string): Promise<string | null> {
-  let currentId: string | null = agentId;
-  let rootId: string | null = null;
-  const seen = new Set<string>();
-  while (currentId !== null && !seen.has(currentId) && seen.size < MAX_ROOT_WALK) {
-    seen.add(currentId);
-    const row: { parentAgentId: string | null } | null = await prisma.agent.findFirst({
-      where: { id: currentId, userId },
-      select: { parentAgentId: true },
-    });
-    if (row === null) break;
-    rootId = currentId;
-    currentId = row.parentAgentId;
-  }
-  return rootId;
-}
-
 export async function prepareAgentGraphWorkspace(
   input: AgentGraphSessionInput & { userId: string }
 ): Promise<UserUiWorkspace | null> {
-  const rootAgentId = await findRootAgentId(input.ownerAgentId, input.userId);
+  const rootAgentId = await findGraphRootId(input.ownerAgentId, input.userId);
   if (rootAgentId === null) return null;
   const { token } = mintAgentGraphToken({
     sub: input.userId,
@@ -71,12 +48,12 @@ export async function prepareAgentGraphWorkspace(
   return {
     files: [
       {
-        path: `${CLI_BIN_DIR}/${AGENT_GRAPH_CLI_NAME}`,
+        path: AGENT_GRAPH_CLI_PATH,
         content: Buffer.from(AGENT_GRAPH_CLI_SCRIPT, 'utf8'),
       },
     ],
     envs: {
-      ROSE_AGENTS_URL: `${publicBaseUrl()}${AGENT_GRAPH_ROUTE_PREFIX}`,
+      ROSE_AGENTS_URL: `${userUiPublishBaseUrl()}${AGENT_GRAPH_ROUTE_PREFIX}`,
       ROSE_AGENTS_TOKEN: token,
       ROSE_AGENT_ID: input.sessionId,
     },
@@ -95,7 +72,7 @@ function mergeWorkspaces(
   if (base === null) return extra;
   return {
     ...base,
-    files: [...base.files, ...extra.files],
+    files: [...base.files.filter((file) => file.path !== AGENT_GRAPH_CLI_PATH), ...extra.files],
     envs: { ...base.envs, ...extra.envs },
     localEnvs: { ...base.localEnvs, ...extra.localEnvs },
   };

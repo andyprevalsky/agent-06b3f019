@@ -529,6 +529,11 @@ export async function createCodexCodeSession(
     CODEX_MODEL: model,
     CODE_AGENT_SYSTEM_PROMPT: systemPrompt,
     CODE_AGENT_HARNESS_MODE: harnessMode,
+    // Write capability for inbound turns (agent-graph messages, direct chat);
+    // same per-task token as the Claude Code session.
+    ...(process.env.BACKEND_API_KEY
+      ? { CODE_SESSION_TURN_TOKEN: codeSessionTurnToken(taskId) }
+      : {}),
   };
   if (harnessMode === 'rose' && roseApiBaseUrl) {
     const apiKey = process.env.BACKEND_API_KEY ?? '';

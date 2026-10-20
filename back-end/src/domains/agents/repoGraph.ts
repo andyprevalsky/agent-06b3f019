@@ -6,9 +6,10 @@
  * the number of agents a user or the system owns.
  */
 import { prisma } from '../../providers/database';
+import { GRAPH_MAX_DEPTH, findGraphRootId } from '../../providers/agentGraph/tree';
 
 /** Hard bounds: a tree walk can never run away on a cycle or a huge tree. */
-export const GRAPH_MAX_DEPTH = 64;
+export { GRAPH_MAX_DEPTH };
 export const GRAPH_MAX_NODES = 500;
 
 export interface GraphAgentRow {
@@ -39,22 +40,7 @@ export async function findGraphAgent(agentId: string): Promise<GraphAgentRow | n
 }
 
 /** Walk up parentAgentId links (same user) and return the root id. */
-export async function findGraphRootId(agentId: string, userId: string): Promise<string | null> {
-  let currentId: string | null = agentId;
-  let rootId: string | null = null;
-  const seen = new Set<string>();
-  while (currentId !== null && !seen.has(currentId) && seen.size < GRAPH_MAX_DEPTH) {
-    seen.add(currentId);
-    const row: { parentAgentId: string | null } | null = await prisma.agent.findFirst({
-      where: { id: currentId, userId },
-      select: { parentAgentId: true },
-    });
-    if (row === null) break;
-    rootId = currentId;
-    currentId = row.parentAgentId;
-  }
-  return rootId;
-}
+export { findGraphRootId };
 
 /** BFS from the root (level by level), capped at GRAPH_MAX_NODES. */
 export async function listGraphTreeAgents(
@@ -124,20 +110,36 @@ export async function findGraphCodeSession(sessionId: string): Promise<GraphCode
   });
 }
 
-/** The spawn tool call that owns a code session's chips on its parent agent. */
-export async function findCodeSessionToolCallId(
+export interface CodeSessionChip {
+  /** The spawn tool call whose chip renders this code session. */
+  toolCallId: string | null;
+  provider: 'claude' | 'codex' | null;
+}
+
+/** Spawn-chip facts for a code session: its tool call id and CLI provider. */
+export async function findCodeSessionChip(
   ownerAgentId: string,
   sessionId: string
-): Promise<string | null> {
+): Promise<CodeSessionChip> {
   const row = await prisma.message.findFirst({
     where: { agentId: ownerAgentId, metadata: { path: ['task_id'], equals: sessionId } },
     orderBy: { timestamp: 'asc' },
     select: { metadata: true },
   });
   const metadata = row?.metadata;
-  if (metadata === null || metadata === undefined || typeof metadata !== 'object') return null;
-  const toolCallId = (metadata as Record<string, unknown>).toolCallId;
-  return typeof toolCallId === 'string' && toolCallId.length > 0 ? toolCallId : null;
+  if (metadata === null || metadata === undefined || typeof metadata !== 'object') {
+    return { toolCallId: null, provider: null };
+  }
+  const fields = metadata as Record<string, unknown>;
+  const toolCallId =
+    typeof fields.toolCallId === 'string' && fields.toolCallId.length > 0
+      ? fields.toolCallId
+      : null;
+  const provider =
+    fields.code_provider === 'claude' || fields.code_provider === 'codex'
+      ? fields.code_provider
+      : null;
+  return { toolCallId, provider };
 }
 
 export async function findMessageById(id: string) {

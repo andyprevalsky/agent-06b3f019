@@ -510,6 +510,11 @@ function emitClaudeMessage(message) {
 // one-shot prompt. The first user turn puts the session on a "direct hold": stdin stays
 // open between turns until the user hands back (or the hold idles out), so
 // the user can keep talking to the same CLI conversation.
+//
+// Agent-graph messages (sender "agent", e.g. the root answering a code
+// agent's question) are ordinary queued turns: they never take the direct
+// hold, and stdin stays open until every written turn has its `result`, so a
+// message that arrives mid-run is answered before the CLI exits.
 const TURN_TOKEN = process.env.CODE_SESSION_TURN_TOKEN || "";
 const DIRECT_HOLD_IDLE_MS = (() => {
   const raw = Number.parseInt(process.env.CODE_SESSION_DIRECT_HOLD_IDLE_MS || "", 10);
@@ -520,7 +525,9 @@ const MAX_TURN_ID_CHARS = 128;
 
 let cliChild = null;
 let cliStdinOpen = false;
-let turnActive = false;
+// Turns written to stdin (the task prompt + delivered user turns) that have
+// not produced their `result` yet.
+let pendingTurns = 0;
 let directHold = false;
 let directHoldTimer = null;
 const deliveredTurnIds = new Set();
@@ -556,11 +563,12 @@ function releaseDirectHold(reason) {
   if (!directHold) return;
   directHold = false;
   appendEvent({ type: "direct_chat", status: "released", reason });
-  if (!turnActive) endCliStdin(`direct hold released: ${reason}`);
+  if (pendingTurns === 0) endCliStdin(`direct hold released: ${reason}`);
 }
 
 function onCliTurnResult() {
-  turnActive = false;
+  pendingTurns = Math.max(0, pendingTurns - 1);
+  if (pendingTurns > 0) return;
   if (!directHold) {
     endCliStdin("autonomous turn finished");
     return;
@@ -596,13 +604,13 @@ function handleUserTurn(msg) {
     clearTimeout(directHoldTimer);
     directHoldTimer = null;
   }
-  if (!directHold) {
+  if (!directHold && sender === "user") {
     directHold = true;
     appendEvent({ type: "direct_chat", status: "held", sender });
   }
   appendEvent({ type: "user_turn", turn_id: id, sender, text });
   appendOutput("stdout", `[${sender === "user" ? "You" : "Agent"}] ${text}\n`);
-  turnActive = true;
+  pendingTurns += 1;
   cliChild.stdin.write(userMessageLine(text));
   log("info", "Delivered user turn", { id, sender, chars: text.length });
   return turnAck(id, "delivered");
@@ -693,7 +701,7 @@ async function runClaudeCli() {
   });
   cliChild = child;
   cliStdinOpen = true;
-  turnActive = true;
+  pendingTurns = 1;
   child.stdin.write(prompt);
 
   let stdoutRemainder = "";

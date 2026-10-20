@@ -1,12 +1,17 @@
 /**
- * Agent graph: code agents (Claude Code / Codex sessions) and Rose agents of
+ * Agent graph (callers, scope, list, grep, token refresh): code agents (Claude Code / Codex sessions) and Rose agents of
  * ONE tree can list each other, message each other and grep the tree.
  *
- *   caller (token: code session | API key + X-Agent-Id: Rose agent)
+ *   caller (token: code session | API key + X-Agent-Id [+ X-Code-Session-Id])
  *     ├─ list  → tree agents (BFS from root) + their code sessions
- *     ├─ send  → Rose agent: idempotent USER message (normal postMessage path)
- *     │          code agent: ws user_message → CLI's next user turn, plus an
- *     │                      idempotent chip row on the owning agent
+ *     ├─ send  → (agentGraphSendService) Rose agent: idempotent USER message (normal postMessage path)
+ *     │          code agent: deliverUserTurnToCodeSession (sender "agent") →
+ *     │                      the CLI's next user turn, delivered once per id
+ *     │          + child-scoped chip rows so the code agent's own timeline
+ *     │            shows "<sender> → Codex" / "Codex → <target>"
+ *     ├─ ask   → (agentGraphQuestionService) question routing by spawner (UI ledger 47b): a root-spawned
+ *     │          code agent asks the user (root pins); any other code agent
+ *     │          sends the question to the Rose agent that spawned it
  *     └─ grep  → agent_trajectories, path pinned to agent_trajectories/<root>
  *
  * Scope: every target is resolved by walking ITS parent links to a root and
@@ -15,18 +20,14 @@
  * request (O(depth) indexed lookups), one short ws per code-agent message,
  * no fan-out and no shared channel.
  */
-import { createMessage } from '../../providers/messages';
-import { agentGraphMessageRowId } from '../../providers/messageIds';
-import { deliverToCodeSession } from '../../providers/agentGraph/codeSessionInbox';
+import { mintAgentGraphToken, type AgentGraphClaims } from '../../providers/agentGraph/token';
 import { executeUserDataGrep, type UserDataGrepResult } from '../../providers/userDataSearch';
-import { createLogger } from '../../providers/logger';
-import * as messageService from './agentMessageService';
 import * as graphRepo from './repoGraph';
 
-const log = createLogger('AgentGraph');
+export type CodeProvider = 'claude' | 'codex';
 
 export type GraphSelf =
-  | { kind: 'code'; id: string; ownerAgentId: string; provider: 'claude' | 'codex' }
+  | { kind: 'code'; id: string; ownerAgentId: string; provider: CodeProvider }
   | { kind: 'agent'; id: string };
 
 export interface GraphCaller {
@@ -44,7 +45,7 @@ export class AgentGraphError extends Error {
   }
 }
 
-const NOT_FOUND = 'Agent not found in this tree';
+export const NOT_FOUND = 'Agent not found in this tree';
 
 /** Resolve an internal (API key) caller from the Rose agent it acts for. */
 export async function callerForAgent(agentId: string): Promise<GraphCaller> {
@@ -55,18 +56,51 @@ export async function callerForAgent(agentId: string): Promise<GraphCaller> {
   return { userId: agent.userId, rootAgentId, self: { kind: 'agent', id: agent.id } };
 }
 
+/**
+ * Internal (API key) caller acting AS one code session, e.g. the agents
+ * worker relaying a question a code agent emitted. The session must belong to
+ * `agentId`, the worker's own Rose agent.
+ */
+export async function callerForCodeSession(
+  agentId: string,
+  sessionId: string,
+  provider: CodeProvider
+): Promise<GraphCaller> {
+  const owner = await callerForAgent(agentId);
+  const session = await graphRepo.findGraphCodeSession(sessionId);
+  if (session === null || session.agentId !== agentId) {
+    throw new AgentGraphError(404, 'Code session not found');
+  }
+  return {
+    ...owner,
+    self: { kind: 'code', id: session.id, ownerAgentId: agentId, provider },
+  };
+}
+
 /** A code-session caller is valid only while its session still exists. */
 export async function assertCodeCallerLive(caller: GraphCaller): Promise<void> {
   if (caller.self.kind !== 'code') return;
   const session = await graphRepo.findGraphCodeSession(caller.self.id);
   if (session === null || session.agentId !== caller.self.ownerAgentId) {
-    throw new AgentGraphError(401, 'Code session no longer exists');
+    throw new AgentGraphError(401, 'Code session is not registered');
   }
 }
 
-async function inCallerTree(caller: GraphCaller, agentId: string): Promise<boolean> {
+export async function inCallerTree(caller: GraphCaller, agentId: string): Promise<boolean> {
   const root = await graphRepo.findGraphRootId(agentId, caller.userId);
   return root === caller.rootAgentId;
+}
+
+/** `root` / `parent` aliases, so an agent can escalate without knowing ids. */
+export async function resolveAlias(caller: GraphCaller, to: string): Promise<string> {
+  if (to === 'root') return caller.rootAgentId;
+  if (to !== 'parent') return to;
+  if (caller.self.kind === 'code') return caller.self.ownerAgentId;
+  const self = await graphRepo.findGraphAgent(caller.self.id);
+  if (self === null || self.parentAgentId === null) {
+    throw new AgentGraphError(400, 'The root agent has no parent; ask the user instead');
+  }
+  return self.parentAgentId;
 }
 
 // ---------------------------------------------------------------------------
@@ -76,7 +110,7 @@ async function inCallerTree(caller: GraphCaller, agentId: string): Promise<boole
 export interface GraphNode {
   id: string;
   kind: 'agent' | 'code';
-  provider?: 'claude' | 'codex';
+  provider?: CodeProvider;
   parent_id: string | null;
   depth: number;
   status: string;
@@ -110,7 +144,12 @@ export async function listGraph(caller: GraphCaller): Promise<{
 }> {
   const agents = await graphRepo.listGraphTreeAgents(caller.rootAgentId, caller.userId);
   const sessions = await graphRepo.listGraphCodeSessions(agents.map((agent) => agent.id));
-  const depthById = new Map(agents.map((agent) => [agent.id, agent.treeDepth]));
+  const sessionsByOwner = new Map<string, graphRepo.GraphCodeSessionRow[]>();
+  for (const session of sessions) {
+    const owned = sessionsByOwner.get(session.agentId) ?? [];
+    owned.push(session);
+    sessionsByOwner.set(session.agentId, owned);
+  }
   const selfParentId =
     caller.self.kind === 'code'
       ? caller.self.ownerAgentId
@@ -134,8 +173,7 @@ export async function listGraph(caller: GraphCaller): Promise<{
       ),
       created_at: agent.createdAt.toISOString(),
     });
-    for (const session of sessions) {
-      if (session.agentId !== agent.id) continue;
+    for (const session of sessionsByOwner.get(agent.id) ?? []) {
       nodes.push({
         id: session.id,
         kind: 'code',
@@ -143,7 +181,7 @@ export async function listGraph(caller: GraphCaller): Promise<{
           ? { provider: caller.self.provider }
           : {}),
         parent_id: session.agentId,
-        depth: (depthById.get(session.agentId) ?? 0) + 1,
+        depth: agent.treeDepth + 1,
         status: session.status,
         title: null,
         goal: session.goal.slice(0, GOAL_PREVIEW_CHARS),
@@ -162,137 +200,6 @@ export async function listGraph(caller: GraphCaller): Promise<{
     self_id: caller.self.id,
     truncated: agents.length >= graphRepo.GRAPH_MAX_NODES,
     agents: nodes,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Send
-// ---------------------------------------------------------------------------
-
-export interface SendInput {
-  to: string;
-  text: string;
-  message_id: string;
-}
-
-export interface SendResult {
-  message_id: string;
-  status: 'queued' | 'delivered' | 'duplicate';
-  to: { id: string; kind: 'agent' | 'code' };
-}
-
-function senderLabel(caller: GraphCaller): string {
-  if (caller.self.kind === 'code') return `code agent ${caller.self.id}`;
-  if (caller.self.id === caller.rootAgentId) return `root agent ${caller.self.id}`;
-  return `agent ${caller.self.id}`;
-}
-
-function senderMetadata(caller: GraphCaller): Record<string, unknown> {
-  return caller.self.kind === 'code'
-    ? {
-        id: caller.self.id,
-        kind: 'code',
-        provider: caller.self.provider,
-        owner_agent_id: caller.self.ownerAgentId,
-      }
-    : { id: caller.self.id, kind: 'agent' };
-}
-
-/** LLM-visible framing of an inbound agent message (prompt-scoped text). */
-export function formatInboundAgentMessage(label: string, text: string): string {
-  return `Message from ${label} (reply with its id):\n\n${text}`;
-}
-
-type Target =
-  | { kind: 'agent'; id: string }
-  | { kind: 'code'; id: string; ownerAgentId: string; streamUrl: string | null; status: string };
-
-async function resolveTarget(caller: GraphCaller, to: string): Promise<Target> {
-  const agent = await graphRepo.findGraphAgent(to);
-  if (agent !== null) {
-    if (agent.userId !== caller.userId || !(await inCallerTree(caller, agent.id))) {
-      throw new AgentGraphError(404, NOT_FOUND);
-    }
-    return { kind: 'agent', id: agent.id };
-  }
-  const session = await graphRepo.findGraphCodeSession(to);
-  if (session !== null && (await inCallerTree(caller, session.agentId))) {
-    return {
-      kind: 'code',
-      id: session.id,
-      ownerAgentId: session.agentId,
-      streamUrl: session.streamUrl,
-      status: session.status,
-    };
-  }
-  throw new AgentGraphError(404, NOT_FOUND);
-}
-
-export async function sendGraphMessage(caller: GraphCaller, input: SendInput): Promise<SendResult> {
-  if (input.to === caller.self.id) throw new AgentGraphError(400, 'Cannot message yourself');
-  const target = await resolveTarget(caller, input.to);
-  // Keyed by sender so two agents can never collide on a client-chosen id.
-  const key = `${caller.self.id}:${input.message_id}`;
-  const label = senderLabel(caller);
-  const a2a = { from: senderMetadata(caller), to: { id: target.id, kind: target.kind } };
-  const text = formatInboundAgentMessage(label, input.text);
-
-  if (target.kind === 'agent') {
-    const existing = await graphRepo.findMessageById(agentGraphMessageRowId(target.id, key));
-    if (existing !== null) {
-      return { message_id: input.message_id, status: 'duplicate', to: target };
-    }
-    const posted = await messageService.postMessage(
-      target.id,
-      { message: text, role: 'USER', metadata: { a2aMessageId: key, a2a } },
-      false,
-      caller.userId
-    );
-    if ('error' in posted) throw new AgentGraphError(posted.status ?? 500, posted.error);
-    log.info('Delivered agent message', { from: caller.self.id, to: target.id, key });
-    return { message_id: input.message_id, status: 'delivered', to: target };
-  }
-
-  // Code agent: the ws-server dedupes by key, so a retry after a lost ack (or
-  // after the chip write below failed) never starts a second CLI turn.
-  if (target.streamUrl === null || target.status !== 'ACTIVE') {
-    throw new AgentGraphError(409, 'Code agent session is not running');
-  }
-  const delivery = await deliverToCodeSession(target.streamUrl, { id: key, text });
-  if (delivery.status === 'finished') {
-    throw new AgentGraphError(409, delivery.reason ?? 'Code agent session has finished');
-  }
-  if (delivery.status === 'rejected') {
-    throw new AgentGraphError(502, delivery.reason ?? 'Code agent rejected the message');
-  }
-  const toolCallId = await graphRepo.findCodeSessionToolCallId(target.ownerAgentId, target.id);
-  // Child-scoped chip (subAgentId) so it renders in the code agent's timeline
-  // and stays out of the owning agent's LLM context. No toolStatus: this is
-  // not a lifecycle row of the spawn tool call.
-  await createMessage({
-    agentId: target.ownerAgentId,
-    role: 'TOOL',
-    text,
-    metadata: {
-      a2aMessageId: key,
-      a2a,
-      title: `Message from ${label}`,
-      task_id: target.id,
-      subAgentId: target.id,
-      action_type: 'agent_message',
-      ...(toolCallId !== null ? { toolCallId, toolName: 'spawn_claude_code_agent' } : {}),
-    },
-  });
-  log.info('Delivered code agent message', {
-    from: caller.self.id,
-    to: target.id,
-    key,
-    status: delivery.status,
-  });
-  return {
-    message_id: input.message_id,
-    status: delivery.status === 'duplicate' ? 'duplicate' : 'queued',
-    to: { id: target.id, kind: 'code' },
   };
 }
 
@@ -329,4 +236,23 @@ export async function grepGraph(
     ...(input.since !== undefined ? { since: input.since } : {}),
     ...(input.until !== undefined ? { until: input.until } : {}),
   });
+}
+
+// ---------------------------------------------------------------------------
+// Token refresh
+// ---------------------------------------------------------------------------
+
+/** A live code session swaps its still-valid token for a fresh one. */
+export function refreshCodeSessionToken(claims: AgentGraphClaims): {
+  token: string;
+  expires_at: string;
+} {
+  const { token, expiresAt } = mintAgentGraphToken({
+    sub: claims.sub,
+    rootAgentId: claims.rootAgentId,
+    ownerAgentId: claims.ownerAgentId,
+    sessionId: claims.sessionId,
+    provider: claims.provider,
+  });
+  return { token, expires_at: expiresAt };
 }

@@ -862,6 +862,12 @@ async def _run_agentic_loop(
     # end the session on post-result grace / SDK idle, and never writes to
     # stdin, so no parent instruction competes with the user.
     direct_chat_active = False
+    # Every delivered user turn (direct chat or an agent-graph message) adds
+    # one more SDK `result` before the CLI is done: a message that arrives
+    # mid-run makes the first result an intermediate one, so the post-result
+    # exit grace arms only once results catch up with turns.
+    user_turns_seen = 0
+    sdk_results_seen = 0
 
     def _mark_terminal_output_persisted() -> None:
         if terminal_output_persisted is not None:
@@ -907,9 +913,11 @@ async def _run_agentic_loop(
         # The ws-server resends its whole history on every (re)connect, so it
         # replaces everything seen so far instead of appending to it.
         nonlocal completed_codex_turns, effective_idle_timeout_s, wait_tool_armed, in_flight_tool_count
-        nonlocal direct_chat_active
+        nonlocal direct_chat_active, user_turns_seen, sdk_results_seen
         code_events.clear()
         direct_chat_active = False
+        user_turns_seen = 0
+        sdk_results_seen = 0
         completed_codex_turn_keys.clear()
         completed_codex_turns = 0
         in_flight_tool_count = 0
@@ -924,7 +932,7 @@ async def _run_agentic_loop(
     async def on_event(event: dict[str, Any]) -> None:
         nonlocal completed_codex_turns, last_output_time, effective_idle_timeout_s
         nonlocal wait_tool_armed, in_flight_tool_count, sdk_result_at, logged_events
-        nonlocal direct_chat_active
+        nonlocal direct_chat_active, user_turns_seen, sdk_results_seen
         last_output_time = safe_time()
         code_events.append(event)
         if event.get("type") == "direct_chat":
@@ -935,6 +943,7 @@ async def _run_agentic_loop(
                 sdk_result_at = safe_time()
         elif event.get("type") == "user_turn":
             # A new turn: the next SDK result belongs to it.
+            user_turns_seen += 1
             sdk_result_at = None
         if is_codex_completed_turn_event(event):
             key = codex_completed_turn_event_key(event, len(code_events) - 1)
@@ -1016,7 +1025,8 @@ async def _run_agentic_loop(
             # result is reaped on the short idle window, not 900s. Record the
             # first result time for the exit-grace backstop (r31 a2/a3).
             wait_tool_armed = False
-            if sdk_result_at is None:
+            sdk_results_seen += 1
+            if sdk_result_at is None and sdk_results_seen > user_turns_seen:
                 sdk_result_at = safe_time()
                 logger.info(
                     "[ClaudeCode] SDK result observed; arming post-result exit grace",
@@ -1025,14 +1035,6 @@ async def _run_agentic_loop(
                     grace_s=SDK_POST_RESULT_EXIT_GRACE_S,
                     status=event.get("status"),
                 )
-            effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
-        elif event_type == "user_turn":
-            # An agent-graph message started a resumed CLI turn after the
-            # previous result: that result no longer ends the session, so the
-            # post-result exit grace restarts with the next result.
-            sdk_result_at = None
-            wait_tool_armed = False
-            in_flight_tool_count = 0
             effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
         # code_events mirrors the sandbox's append-only event history, so an
         # event's index identifies it across reconnect replays and reattaches.
