@@ -502,18 +502,24 @@ def stress_default_requirements(root: Path, rows: list[dict[str, object]], *, pe
     source = source_bytes.decode()
     assignments = []
     for key in ("FLEET_PRIMARY_VM_SIZE", "FLEET_PRIMARY_VM_MEMORY",
-                "FLEET_BUNDLED_FRONTEND_VM_SIZE", "FLEET_BUNDLED_FRONTEND_VM_MEMORY"):
+                "FLEET_BUNDLED_FRONTEND_VM_SIZE", "FLEET_BUNDLED_FRONTEND_VM_MEMORY",
+                "FLEET_SIM_VM_SIZE", "FLEET_SIM_VM_MEMORY"):
         matches = [line for line in source.splitlines() if line.startswith(key + "=")]
         if len(matches) != 1:
             raise ValueError("ambiguous actual VM profile")
         assignments.extend(matches)
-    functions = []
-    for name in ("bench_needs_large_primary", "primary_vm_size_for_bench", "primary_vm_memory_for_bench"):
+    functions = [next(line for line in source.splitlines() if line.startswith("is_sim_on() {"))]
+    for name in ("bench_simulates", "bench_needs_large_primary", "primary_vm_size_for_bench",
+                 "primary_vm_memory_for_bench"):
         start = source.index(name + "() {")
         functions.append(source[start:source.index("\n}\n", start) + 3])
     browser_names = [row["name"] for row in rows if row.get("requires_browser_agent")]
-    script = "set -euo pipefail\nINFRA_PROBE=0\n" + "\n".join(assignments + functions)
+    # A catalog simulate task serves the native WMH on a large guest; plan it so.
+    modes = ["simulate" if str(row.get("world_model_mode") or "").lower() == "simulate" else "real" for row in rows]
+    script = "set -euo pipefail\nINFRA_PROBE=0\nSIM_ON_CSV=\n" + "\n".join(assignments + functions)
     script += "\nCATALOG_BROWSER_REQUIRED_TASKS=(" + " ".join(shlex.quote(name) for name in browser_names) + ")\n"
+    script += "BENCHES=(" + " ".join(shlex.quote(name) for name in names) + ")\n"
+    script += "CATALOG_MODES=(" + " ".join(modes) + ")\n"
     for name in names:
         script += "printf '%s\\t%s\\n' \"$(primary_vm_size_for_bench " + shlex.quote(name) + ")\" \"$(primary_vm_memory_for_bench " + shlex.quote(name) + ")\"\n"
     profiles = subprocess.check_output(["bash", "-s"], input=script, text=True).splitlines()

@@ -123,6 +123,10 @@ for needle in ('--env "CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS=${CLOUDBENCH_GUE
 worker = read("scripts/cloudbench-worker.sh")
 if "export AUTOSCALER_QUEUE_METRICS=0" not in worker or "    AUTOSCALER_QUEUE_METRICS=0 \\\n" not in worker:
     sys.exit("FAIL: worker-only clones must disable unread queue observation in env and exec env")
+if '${WMH_BASE_URL:+${WMH_EXECUTION_POLICY:+WMH_EXECUTION_POLICY="$WMH_EXECUTION_POLICY"}}' not in worker:
+    sys.exit("FAIL: autoscaled workers must run with the primary's WMH execution policy (fast-cache partition)")
+if 'echo "export WMH_EXECUTION_POLICY=$(printf \'%q\' "$WMH_EXECUTION_POLICY")"' not in read("scripts/run-bench-fleet"):
+    sys.exit("FAIL: the fleet must hand autoscaled workers its WMH execution policy")
 run = read("scripts/cloudbench-run.sh")
 block = re.search(r'case "\$\{CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS:-\}" in\n.*?\nesac\n', run, re.S)
 probe = 'if [ "${CLOUDBENCH_INFRA_PROBE:-0}" = "1" ]; then\n    # The probe executes'

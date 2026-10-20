@@ -1151,8 +1151,15 @@ def bound_shard(item, args, runner, group_id, group_total, started_at):
                 group_total=group_total, group_started_at=started_at, **shard_bindings(args, runner))
 
 
-def catalog_ineligible_reason(root, runner, tasks, backend_env, task_ref=None):
-    """None when every name is ready, Linux/cloud-root and LIVE eligible in the unified catalog at the task ref."""
+# LIVE acceptance (original600/polar70/live-query proofs, the operator default)
+# requires >=3 correlated live LLM calls per task, so it refuses zero-spend and
+# DEMO-replay tasks. An ordinary user-requested wide run (run-bench's sharded
+# route) admits every task the ordinary fleet runs: ready and cloud-root runnable.
+CATALOG_ELIGIBILITY = {'live': 3, 'ordinary': 0}
+
+
+def catalog_ineligible_reason(root, runner, tasks, backend_env, task_ref=None, eligibility='live'):
+    """None when every name is ready, Linux/cloud-root (and, for LIVE, live-query) eligible at the task ref."""
     import tempfile
     members = ('agents/benchmarks/tasks.json', 'agents/benchmarks/polar_tasks.json',
                'agents/providers/fast_cache/normalize.py', 'agents/utils/__init__.py',
@@ -1171,13 +1178,15 @@ def catalog_ineligible_reason(root, runner, tasks, backend_env, task_ref=None):
         sys.path.insert(0, str(root / 'scripts'))
         try:
             sample = runpy.run_path(str(root / 'scripts/fleet_infra_sample.py'))
-            # The canonical CLI eligibility: ready, cloud-root runnable and LIVE (no zero-spend/DEMO replay).
-            eligible = sample['eligible_pool'](Path(scratch), pool, require_cloud_root=True, minimum_successful_llm=3)
+            # The canonical CLI eligibility: ready, cloud-root runnable and, for LIVE acceptance,
+            # live-query capable (no zero-spend/DEMO replay).
+            eligible = sample['eligible_pool'](Path(scratch), pool, require_cloud_root=True,
+                                               minimum_successful_llm=CATALOG_ELIGIBILITY[eligibility])
         except ValueError as error:  # includes the unified catalog's CatalogError
             return str(error)
         finally:
             sys.path.remove(str(root / 'scripts'))
-    return None if eligible == tasks else 'manifest tasks are not all LIVE eligible: ' + ', '.join(sorted(set(tasks) - set(eligible)))
+    return None if eligible == tasks else 'manifest tasks are not all %s eligible: ' % eligibility.upper() + ', '.join(sorted(set(tasks) - set(eligible)))
 
 
 def task_manifest(args, root, runner):
@@ -1191,11 +1200,13 @@ def task_manifest(args, root, runner):
     if (not isinstance(manifest, list) or not manifest or any(not isinstance(t, str) or not t for t in manifest)
             or len(set(manifest)) != len(manifest)):
         raise ValueError('--tasks must be an ordered JSON list of distinct task names')
-    reason = catalog_ineligible_reason(root, runner, manifest, args.backend_env, bound_task_ref(args, runner))
+    eligibility = getattr(args, 'catalog_eligibility', 'live')
+    reason = catalog_ineligible_reason(root, runner, manifest, args.backend_env, bound_task_ref(args, runner), eligibility)
     if reason:
         raise ValueError('--tasks refused at task ref ' + bound_task_ref(args, runner) + ': ' + reason)
     return dict(sha256=runner['manifest_sha'](manifest), tasks=len(manifest), original=False,
-                task_timeout=task_timeout, e2e_timeout=e2e_timeout, catalog_eligible=len(manifest))
+                task_timeout=task_timeout, e2e_timeout=e2e_timeout, catalog_eligible=len(manifest),
+                catalog_eligibility=eligibility)
 
 
 def shard_selection(args, runner):
@@ -2379,6 +2390,9 @@ def main():
     parser.add_argument('--hub-python', type=Path, help='interpreter with the agents dependencies (httpx) for Hub group publication')
     parser.add_argument('--goal', help='experiments-ledger goal for numbering and experiments/day (default original600)')
     parser.add_argument('--label', help='operator slice label for the scorecard (default: tasks file name)')
+    parser.add_argument('--catalog-eligibility', choices=sorted(CATALOG_ELIGIBILITY), default='live',
+                        help="'live' (default): LIVE acceptance refuses zero-spend/DEMO-replay tasks; "
+                             "'ordinary': a user-requested wide run admits every cloud-runnable ready task, as the ordinary fleet does")
     args = parser.parse_args()
     if args.controllers != 'auto' and not re.fullmatch('[1-9][0-9]{0,2}', args.controllers):
         raise ValueError("--controllers must be 'auto' or a positive integer")
@@ -2488,6 +2502,11 @@ def main():
             first = bound_shard(plan['shards'][0], args, runner, 'original600-check', plan['copies'], time.time())
             argv = runner['campaign_argv'](json.loads(runner['read'](args.tasks)), first['group_started_at'], first)
             check.update(shard_campaign_options=argv[2:argv.index('--e2e-started-at')], shard_bindings=shard_bindings(args, runner))
+            # Each controller's volume placement: fresh-only unless it runs a snapshot-backed simulate task.
+            check.update(shard_placement=[
+                dict(index=item['index'], simulate_tasks=runner['shard_simulate_tasks'](root, dict(item, **shard_bindings(args, runner))),
+                     **runner['shard_placement_env'](root, dict(item, **shard_bindings(args, runner))))
+                for item in plan['shards']])
             check.update(controllers=plan['controllers'], copies=plan['copies'],
                          copies_per_controller_bound=plan['copies_per_controller_bound'],
                          native_slots_required=runpy.run_path(str(root/'scripts/cloudbench-shard-coordinator.py'))['capacity_demand'](

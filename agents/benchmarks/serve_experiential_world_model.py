@@ -377,9 +377,17 @@ def main():
         response.raise_for_status()
         return response.json()
 
-    from benchmarks.wmh_native_prediction_writer import NativePredictionWriter
+    async def close_owned():
+        await client.aclose()
+        # After the model closed, so no admitted write still needs the pool.
+        redactor.shutdown(wait=True)
 
-    record_prediction = NativePredictionWriter(args.root, artifact.world_model_id, artifact.prompt_sha256)
+    from benchmarks.wmh_native_prediction_writer import NativePredictionWriter, redaction_pool
+
+    redactor = redaction_pool()
+    record_prediction = NativePredictionWriter(
+        args.root, artifact.world_model_id, artifact.prompt_sha256, redactor=redactor
+    )
 
     def record_retirement(receipt):
         path = Path(args.root) / "native-retirements" / (receipt["session_id"] + ".json")
@@ -405,7 +413,7 @@ def main():
         args.name,
         model,
         usage,
-        client.aclose,
+        close_owned,
         identity={
             "world_model_id": artifact.world_model_id,
             "world_model_manifest_sha256": retriever.world_model_manifest_sha256,
