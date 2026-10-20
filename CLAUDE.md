@@ -840,7 +840,8 @@ ledgered big machine forked from the donor snapshot, pushes the
 destroys the machine and volume) → `bash scripts/run-bench-cloud --refresh-wmh`
 (restores that cache and the native venv on the donor volume, then snapshots it;
 the 2 GB donor never builds). Then run
-`scripts/run-bench <task> --sim-on <task>`. Guests fail clearly if the native
+`scripts/run-bench <task> --sim-on <task>`. Each `--sim-on` guest is a `performance-8x`/64 GB machine: native serving holds
+~30 GB and loads for ~10 minutes before the task starts. Guests fail clearly if the native
 pointer or venv is missing; they never build or install at run time.
 
 ## Log Files

@@ -10758,10 +10758,14 @@ def _terminate_test_owned_central_hubs(hub_context: Path, runs_root: Path) -> No
 
 
 def _fleet_primary_shape_helpers(source: str) -> str:
+    sim_on = next(line for line in source.splitlines() if line.startswith("is_sim_on() {"))
     return """FLEET_PRIMARY_VM_MEMORY=${FLEET_PRIMARY_VM_MEMORY:-4096}
 FLEET_BUNDLED_FRONTEND_VM_SIZE=${FLEET_BUNDLED_FRONTEND_VM_SIZE:-shared-cpu-4x}
 FLEET_BUNDLED_FRONTEND_VM_MEMORY=${FLEET_BUNDLED_FRONTEND_VM_MEMORY:-8192}
-""" + "".join(
+FLEET_SIM_VM_SIZE=${FLEET_SIM_VM_SIZE:-performance-8x}
+FLEET_SIM_VM_MEMORY=${FLEET_SIM_VM_MEMORY:-65536}
+SIM_ON_CSV=${SIM_ON_CSV:-}
+""" + sim_on + "\n" + "".join(
         _extract_fleet_function(source, signature)
         for signature in (
             "bench_needs_large_primary() {",
@@ -11680,6 +11684,32 @@ done
         check=False,
         timeout=5,
     )
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
+def test_sim_on_primary_gets_the_measured_native_wmh_shape() -> None:
+    """A --sim-on guest serves the native WMH itself: ~30 GB steady (42 GB peak)
+    and a ~620 s load on 8 vCPUs (measured 2026-10-19). A 4 GB guest ran out of
+    memory and never answered /healthz. Only simulated tasks get the large
+    shape; infra probes and real tasks keep theirs."""
+    fleet = fleet_source_text()
+    assert 'FLEET_SIM_VM_SIZE="${CLOUDBENCH_FLEET_SIM_VM_SIZE:-performance-8x}"' in fleet
+    assert 'FLEET_SIM_VM_MEMORY="${CLOUDBENCH_FLEET_SIM_VM_MEMORY:-65536}"' in fleet
+    helpers = _fleet_primary_shape_helpers(fleet)
+    script = f"""set -eu
+CATALOG_BROWSER_REQUIRED_TASKS=()
+FLEET_PRIMARY_VM_SIZE=shared-cpu-2x
+SIM_ON_CSV=raise-5m-rose-labs-brex
+{helpers}
+[ "$(primary_vm_size_for_bench raise-5m-rose-labs-brex)" = performance-8x ]
+[ "$(primary_vm_memory_for_bench raise-5m-rose-labs-brex)" = 65536 ]
+! bench_uses_default_pool_shape raise-5m-rose-labs-brex
+[ "$(primary_vm_size_for_bench chat-mode)" = shared-cpu-2x ]
+[ "$(primary_vm_memory_for_bench chat-mode)" = 4096 ]
+INFRA_PROBE=1
+[ "$(primary_vm_size_for_bench raise-5m-rose-labs-brex)" = shared-cpu-2x ]
+"""
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False, timeout=5)
     assert result.returncode == 0, result.stderr + result.stdout
 
 
@@ -20399,8 +20429,13 @@ wait "$WMH_PID" 2>/dev/null || true
     assert "--connect-timeout 1 --max-time 1" in result.stdout
 
 
-def test_wmh_health_wait_caps_untrusted_timeout_without_expanding_seq(tmp_path: Path) -> None:
-    """An extreme readiness timeout must fall back to the bounded default."""
+@pytest.mark.parametrize("engine,default", [("legacy", 180), ("experiential", 1200)])
+def test_wmh_health_wait_caps_untrusted_timeout_without_expanding_seq(
+    tmp_path: Path, engine: str, default: int
+) -> None:
+    """An extreme readiness timeout must fall back to the bounded default. The
+    native engine loads its full store before binding (measured ~620 s on 8
+    vCPUs), so its default covers that load; legacy keeps 180 s."""
     stack = STACK_SCRIPT.read_text()
     wmh = _extract_fleet_function(stack, "start_world_model_harness() {")
 
@@ -20425,6 +20460,7 @@ NAMES=()
 RUN_CONTEXT_DIR=.context/isolated
 WMH_BUILD_DIR=.context/model
 WMH_MODEL_NAME=fixture
+WMH_ENGINE={engine}
 WMH_PORT=39999
 WMH_HEALTH_TIMEOUT_SECONDS=999999999999999999999999999999999999999999999999999999999999
 BENCHMARK_MODE=true
@@ -20448,9 +20484,9 @@ wait "$WMH_PID" 2>/dev/null || true
     assert result.returncode == 0, result.stdout + result.stderr
     assert (
         "Invalid WMH_HEALTH_TIMEOUT_SECONDS="
-        "999999999999999999999999999999999999999999999999999999999999; using 180s" in result.stdout
+        f"999999999999999999999999999999999999999999999999999999999999; using {default}s" in result.stdout
     )
-    assert "attempts=180" in result.stdout
+    assert f"attempts={default}" in result.stdout
 
 
 def test_refresh_deps_mode_contract() -> None:

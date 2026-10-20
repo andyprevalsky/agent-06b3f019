@@ -904,6 +904,11 @@ FLEET_PRIMARY_VM_MEMORY="${CLOUDBENCH_FLEET_PRIMARY_VM_MEMORY:-4096}"
 # bypass the 4GB pool and clone fresh with this shape.
 FLEET_BUNDLED_FRONTEND_VM_SIZE="${CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_SIZE:-shared-cpu-4x}"
 FLEET_BUNDLED_FRONTEND_VM_MEMORY="${CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_MEMORY:-8192}"
+# A --sim-on guest serves the native WMH itself: measured 2026-10-19 on the
+# 318k-observation model, serving holds ~30 GB steady (42 GB peak) and loads in
+# ~620 s on 8 vCPUs, beside the isolated stack.
+FLEET_SIM_VM_SIZE="${CLOUDBENCH_FLEET_SIM_VM_SIZE:-performance-8x}"
+FLEET_SIM_VM_MEMORY="${CLOUDBENCH_FLEET_SIM_VM_MEMORY:-65536}"
 FLEET_WORKER_VM_SIZE="${CLOUDBENCH_FLEET_WORKER_VM_SIZE:-performance-1x}"
 FLEET_WORKER_VM_MEMORY="${CLOUDBENCH_FLEET_WORKER_VM_MEMORY:-2048}"
 FLEET_WORKER_HEALTH_PORT="${CLOUDBENCH_WORKER_HEALTH_PORT:-3103}"
@@ -968,7 +973,9 @@ bench_needs_large_primary() {  # bench_needs_large_primary <task>
 }
 
 primary_vm_size_for_bench() {  # primary_vm_size_for_bench <task>
-    if bench_needs_large_primary "$1"; then
+    if [ "${INFRA_PROBE:-0}" != "1" ] && is_sim_on "$1"; then
+        printf '%s\n' "$FLEET_SIM_VM_SIZE"
+    elif bench_needs_large_primary "$1"; then
         printf '%s\n' "$FLEET_BUNDLED_FRONTEND_VM_SIZE"
     else
         printf '%s\n' "$FLEET_PRIMARY_VM_SIZE"
@@ -976,7 +983,9 @@ primary_vm_size_for_bench() {  # primary_vm_size_for_bench <task>
 }
 
 primary_vm_memory_for_bench() {  # primary_vm_memory_for_bench <task>
-    if bench_needs_large_primary "$1"; then
+    if [ "${INFRA_PROBE:-0}" != "1" ] && is_sim_on "$1"; then
+        printf '%s\n' "$FLEET_SIM_VM_MEMORY"
+    elif bench_needs_large_primary "$1"; then
         printf '%s\n' "$FLEET_BUNDLED_FRONTEND_VM_MEMORY"
     else
         printf '%s\n' "$FLEET_PRIMARY_VM_MEMORY"
