@@ -1,6 +1,6 @@
 """Blackbox tests for persistent code sessions on the agents side.
 
-Covers rose-builds-rose rows C1, C2, C4, C11, C13 and C15 at the activity / sandbox
+Covers rose-builds-rose rows C1, C2, C4, C11, C13, C15 and C16 at the activity / sandbox
 boundary, for cloud sessions and for local (Mac, C14) runs. Every case runs the production ``ws-server.mjs`` on localhost with a
 scripted ``claude`` CLI; the backend session API is recorded. Like a paused E2B
 sandbox, the session HOME outlives each ws-server, so "resume" restarts the
@@ -181,7 +181,12 @@ class _Backend:
     """Records the session API; create/resume start ws-servers in one persistent HOME."""
 
     def __init__(
-        self, session_home: _SessionHome, *, fail_first_persist: bool = False, question_after: int | None = None
+        self,
+        session_home: _SessionHome,
+        *,
+        fail_first_persist: bool = False,
+        question_after: int | None = None,
+        resize_after: int | None = None,
     ) -> None:
         self.session_home = session_home
         self.created: list[dict] = []
@@ -199,6 +204,10 @@ class _Backend:
         self.availability: list[dict] = []
         self.availability_own_only: list[bool] = []
         self.local = False
+        # Keepalive number after which the code agent's resize request is pending (C16).
+        self.resize_after = resize_after
+        self.resize_calls: list[tuple] = []
+        self.resized_ws_url: str | None = None
 
     async def create_session(self, **kwargs):
         self.created.append(kwargs)
@@ -266,7 +275,38 @@ class _Backend:
         awaiting = None
         if self.question_after is not None and self.keepalives >= self.question_after:
             awaiting = {"message_id": "q-1", "question": "Which database should I use?", "at": "2026-10-20T00:00:00Z"}
-        return {"alive": True, "code_session_id": "6c1d6f1e-0000-4000-8000-00000000c0de", "awaiting_parent": awaiting}
+        reply = {"alive": True, "code_session_id": "6c1d6f1e-0000-4000-8000-00000000c0de", "awaiting_parent": awaiting}
+        if self.resize_after is not None and self.keepalives >= self.resize_after and not self.resize_calls:
+            reply["resize_requested"] = {
+                "request_id": _RESIZE_REQUEST_ID,
+                "from": {"cpu": 2, "memory_gb": 4},
+                "to": {"cpu": 2, "memory_gb": 16},
+            }
+        return reply
+
+    async def resize(self, task_id, request_id, code_provider="claude"):
+        """The backend's resize: the held sandbox stops; a new one resumes the CLI with the resize turn."""
+        self.resize_calls.append((task_id, request_id, code_provider))
+        self.session_home.pause()
+        self.resized_ws_url = await self.session_home.start(
+            CLAUDE_CODE_RESUME_SESSION_ID=_CLI_SESSION_ID,
+            CLAUDE_CODE_GOAL="Your environment was resized from 2 vCPU, 4 GB RAM to 2 vCPU, 16 GB RAM.",
+        )
+        return {
+            "task_id": "task-resized",
+            "sandbox_id": "sb-resized",
+            "ws_url": self.resized_ws_url,
+            "code_session_id": "6c1d6f1e-0000-4000-8000-00000000c0de",
+            "sandbox_size": {"cpu": 2, "memory_gb": 16},
+            "resized": True,
+            "request": {
+                "request_id": request_id,
+                "status": "done",
+                "from": {"cpu": 2, "memory_gb": 4},
+                "to": {"cpu": 2, "memory_gb": 16},
+                "reason": "jest workers OOM-killed at 4 GB",
+            },
+        }
 
     async def report_usage(self, task_id, code_provider, resets_at):
         self.usage_reports.append((task_id, code_provider, resets_at))
@@ -293,6 +333,7 @@ class _Backend:
             patch.object(service, "persist_terminal_output", side_effect=self.persist_output),
             patch.object(service, "keepalive_e2b_session", side_effect=self.keepalive),
             patch.object(service, "report_code_usage_limit", side_effect=self.report_usage),
+            patch.object(service, "resize_e2b_session", side_effect=self.resize),
             patch.object(service, "fetch_code_credential_availability", side_effect=self.credential_availability),
             patch.object(service, "_run_verifier", side_effect=self.verifier),
             patch.object(service, "_log_code_agent_event", lambda event, **kw: None),
@@ -318,6 +359,7 @@ class _Backend:
 
 
 _MAC = "Andy's MacBook"
+_RESIZE_REQUEST_ID = "7d2e3f40-0000-4000-8000-00000000c16a"
 _MAC_FOLDER = "~/Developer/rose"
 
 
@@ -428,6 +470,65 @@ async def test_question_to_blocked_spawner_pauses_session_and_returns_it():
         assert [call.get("reason") for call in backend.closed] == ["awaiting_parent"], backend.closed
         assert outcome["code_agent"]["state"] == "paused", outcome["code_agent"]
         assert backend.keepalives >= 3, backend.keepalives
+    finally:
+        session_home.cleanup()
+
+
+async def test_resize_request_moves_session_and_next_attempt_reattaches():
+    """C16: the CLI's `rose env size` reaches the activity on a keepalive while a tool is in flight.
+
+    The activity detaches (no close: the backend's resize owns the old sandbox),
+    the backend moves the session into the new-size sandbox and resumes the CLI
+    conversation there, an `environment_resized` row names the new task and size,
+    and the attempt the workflow schedules next reattaches to that task (no
+    second create) and completes on the resumed conversation.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+    from domains.spawn_claude_code_agent.config import CODE_AGENT_DRAIN_YIELD_STATUS
+
+    session_home = _SessionHome()
+    backend = _Backend(session_home, resize_after=2)
+    try:
+        with backend.patched(clock=_virtual_clock(2000.0)):
+            first = await asyncio.wait_for(
+                ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args()), timeout=30
+            )
+        assert first["status"] == CODE_AGENT_DRAIN_YIELD_STATUS, first
+        assert first["yield_reason"] == "environment_resize", first
+        moved = first["code_session"]
+        assert moved["task_id"] == "task-resized" and moved["ws_url"] == backend.resized_ws_url, moved
+        assert moved["sandbox_size"] == {"cpu": 2, "memory_gb": 16}, moved
+        assert moved["code_session_id"] == "6c1d6f1e-0000-4000-8000-00000000c0de", moved
+        assert backend.resize_calls == [("task-1", _RESIZE_REQUEST_ID, "claude")], backend.resize_calls
+        assert backend.closed == [], f"the backend's resize owns the old sandbox: {backend.closed}"
+        rows = [m for m in backend.messages if m.get("action_type") == "environment_resized"]
+        assert len(rows) == 1, backend.messages
+        row = rows[0]
+        assert row["task_id"] == "task-resized" and row["ws_url"] == backend.resized_ws_url, row
+        assert row["title"] == "Environment resized to 2 vCPU, 16 GB RAM", row["title"]
+        assert row["code_agent"]["sandbox_size"] == {"cpu": 2, "memory_gb": 16}, row["code_agent"]
+        resize_meta = row["code_agent"]["environment_resize"]
+        assert resize_meta["from_task_id"] == "task-1" and resize_meta["status"] == "done", resize_meta
+        assert resize_meta["to"] == {"cpu": 2, "memory_gb": 16}, resize_meta
+        await _wait_until(lambda: len(session_home.runs()) >= 2, "the resumed CLI to start")
+        resumed_run = session_home.runs()[-1]
+        assert "--resume" in resumed_run["argv"], resumed_run
+        assert resumed_run["argv"][resumed_run["argv"].index("--resume") + 1] == _CLI_SESSION_ID, resumed_run
+
+        args = _activity_args()
+        args[15] = moved  # what the workflow schedules after a yield
+        with backend.patched():
+            second = await asyncio.wait_for(
+                ActivityEnvironment().run(service.spawn_claude_code_activity, *args), timeout=30
+            )
+        assert second["status"] == "completed" and second["success"] is True, second
+        assert len(backend.created) == 1, f"the next attempt reattaches, it does not create: {backend.created}"
+        assert [call.get("task_id") for call in backend.closed] == ["task-resized"], backend.closed
+        assert second["code_agent"]["sandbox_size"] == {"cpu": 2, "memory_gb": 16}, second["code_agent"]
+        texts = [e.get("text") for e in backend.verified_events[-1] if e.get("type") == "agent_message"]
+        assert "notes: uncommitted work" in texts, f"the resumed session keeps its files: {texts}"
     finally:
         session_home.cleanup()
 
@@ -823,6 +924,10 @@ async def _run_all_tests():
         test_question_to_blocked_spawner_pauses_session_and_returns_it,
     )
     await r.record_async("failed_attempt_retry_keeps_state", test_failed_attempt_retry_keeps_state_and_code_session_id)
+    await r.record_async(
+        "resize_request_moves_session_and_reattaches",
+        test_resize_request_moves_session_and_next_attempt_reattaches,
+    )
     await r.record_async(
         "usage_limit_saves_session_and_retry_leases_next",
         test_usage_limit_saves_session_and_retry_leases_next_credential,
