@@ -3467,6 +3467,45 @@ async def test_failed_tool_posts_no_duplicate_chip_but_still_reaches_context():
 
 
 @_owned_realtime_fixture()
+async def test_attempt_completion_result_reaches_the_verifier_as_authored_work():
+    """attempt_completion(result=...) is the agent's own writing; the verifier must see it.
+
+    tree-feedback-routing b056f571: a drafter had no tool that could show its
+    draft to the verifier, so it spawned a code agent just to archive the text.
+    """
+    seen = []
+
+    async def verifier(*args, **kwargs):
+        seen.append([dict(m) for m in args[0]])
+        return {"score": 1.0, "reasoning": "ok", "structured_response": None, "usage": {}}
+
+    for args, expected in (
+        ({"tool": "attempt_completion", "result": "Hi Garry,\n...\nAndy Prevalskii, Founder, Rose Labs"}, True),
+        ({"tool": "attempt_completion"}, False),
+    ):
+        seen.clear()
+        await _run_single_iteration(
+            [args],
+            [("attempt_completion", "tc-1", 1.0)],
+            skip_verification=False,
+            max_iterations=1,
+            verifier_override=verifier,
+        )
+        assert seen, "verifier did not run"
+        authored = [
+            m
+            for m in seen[-1]
+            if (m.get("metadata") or {}).get("toolName") == "attempt_completion"
+            and (m.get("metadata") or {}).get("title") == "Authored result"
+        ]
+        if expected:
+            assert len(authored) == 1, seen[-1]
+            assert authored[0]["role"] == "TOOL" and authored[0]["metadata"]["toolStatus"] == "FINISHED"
+            assert authored[0]["message"].endswith("Andy Prevalskii, Founder, Rose Labs")
+        else:
+            assert authored == [], seen[-1]
+
+
 async def run_all_tests():
     from helpers.messages import flush_realtime_broadcasts_for_tests
 
@@ -3735,6 +3774,10 @@ async def run_all_tests():
     await r.record_async(
         "failed_tool_posts_no_duplicate_chip",
         test_failed_tool_posts_no_duplicate_chip_but_still_reaches_context,
+    )
+    await r.record_async(
+        "attempt_completion_result_reaches_the_verifier_as_authored_work",
+        test_attempt_completion_result_reaches_the_verifier_as_authored_work,
     )
     await flush_realtime_broadcasts_for_tests()
     teardown_mock()

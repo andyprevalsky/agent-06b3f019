@@ -2250,6 +2250,7 @@ async def run_agent(
                         pending_background_status=(
                             get_pending_background_status() if get_pending_background_status else None
                         ),
+                        authored_result=(tool_args.get("result") if isinstance(tool_args, dict) else None),
                     )
                 except Exception as error:
                     if any(
@@ -2789,6 +2790,32 @@ def _verifier_superseded_by_user_feedback(
     return result.get("superseded_by_user_feedback") is True
 
 
+def _with_authored_result(context: List[Dict], authored_result: Optional[str], call_id: str) -> List[Dict]:
+    """The verifier's view: context plus this attempt's own authored result, if any.
+
+    attempt_completion(result=...) carries content the agent wrote itself (a
+    draft, message, summary). Its pending row is replaced by verifier feedback,
+    so the text reaches the verifier as one last TOOL row for this call only.
+    """
+    if not isinstance(authored_result, str) or not authored_result.strip():
+        return context
+    timestamps = [str(m.get("timestamp")) for m in context if isinstance(m, dict) and m.get("timestamp")]
+    return [
+        *context,
+        {
+            "role": "TOOL",
+            "message": authored_result,
+            "timestamp": max(timestamps) if timestamps else "1970-01-01T00:00:00Z",
+            "metadata": {
+                "toolName": "attempt_completion",
+                "toolStatus": "FINISHED",
+                "toolCallId": f"{call_id}:result",
+                "title": "Authored result",
+            },
+        },
+    ]
+
+
 async def _run_verifier(
     execute_activity,
     context: List[Dict],
@@ -2818,6 +2845,7 @@ async def _run_verifier(
     poll_messages: Optional[Callable[[datetime], Awaitable[List[Dict]]]] = None,
     get_requirement_revision: Optional[Callable[[], int]] = None,
     pending_background_status: Optional[str] = None,
+    authored_result: Optional[str] = None,
 ) -> Dict:
     """Run verifier to check completion."""
     verifier_call_id = tool_call_id or str(_safe_uuid4())
@@ -2912,7 +2940,7 @@ async def _run_verifier(
     # after dropping spawned-agent work rows tagged with singular
     # metadata.subAgentId, plus locally-appended tool results.
     check_progress_args = [
-        context,
+        _with_authored_result(context, authored_result, verifier_call_id),
         verifier_prompt,
         model,
         current_response_schema,

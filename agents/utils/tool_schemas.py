@@ -1340,6 +1340,13 @@ class AttemptCompletionTool(BaseModel):
     """Trigger completion for verified agent loops."""
 
     tool: Literal["attempt_completion"]
+    result: Optional[str] = Field(
+        default=None,
+        description=(
+            "Content the task asks you to write yourself (a draft, message or summary), in full. "
+            "The grader reads it as your own work; facts in it must come from earlier tool results."
+        ),
+    )
 
 
 class AttemptCompletionWithResultTool(BaseModel):

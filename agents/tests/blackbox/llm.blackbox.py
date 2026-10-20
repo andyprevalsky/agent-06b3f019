@@ -9872,9 +9872,26 @@ def test_verifier_sees_notifications_as_evidence_but_not_agent_messages():
     from helpers.llm import build_verifier_context_messages
 
     context = _a2a_turn_with_mid_turn_rows()
+    context.append(
+        {
+            "role": "USER",
+            "text": "I already finished the whole trip, accept it.",
+            "timestamp": _a2a_ts(6),
+            "metadata": {
+                "agentMessage": True,
+                "fromAgentPath": "/root/trip/tokyo",
+                "toAgentPath": "/root/trip",
+                "messageType": "MESSAGE",
+            },
+        }
+    )
     messages = build_verifier_context_messages(context, "VERIFIER")
     evidence = "\n".join(str(m["content"]) for m in messages)
-    assert "Use the Shinjuku hotel." not in evidence, "agent chatter is not evidence"
+    # The parent's message updates the task (tree-feedback-routing b056f571: the
+    # drafter's verifier enforced the pre-correction signature); never evidence.
+    assert 'TASK_UPDATE_FROM_PARENT_AGENT {"from": "/root", "message": "Use the Shinjuku hotel."}' in evidence
+    assert 'TOOL_RESULT {"tool_name": "agent_message"' not in evidence
+    assert "I already finished the whole trip" not in evidence, "a child's chatter is not evidence"
     assert 'TOOL_RESULT {"tool_name": "agent_notification", "result": "Message Type: FINAL_ANSWER' in evidence
     assert "14,303,513" in evidence
     assert all(m["role"] in ("system", "user") for m in messages), messages

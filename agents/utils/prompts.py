@@ -407,7 +407,15 @@ In `reasoning`, for each unpopulatable required `output` field, name the missing
 tool-result evidence and recommend the agent produce it via any tool that
 emits a verifiable TOOL message (do NOT prescribe a specific tool). An
 `attempt_completion` call is itself NOT proof; only the tool results that
-came BEFORE it count.
+came BEFORE it count. Its `result` (TOOL[attempt_completion] "Authored
+result") is the agent's own writing: it populates fields the agent composes
+itself (a draft, message or summary) but never proves an action or a fact;
+facts in it must come from the earlier tool results.
+
+`TASK_UPDATE_FROM_PARENT_AGENT` lines are instructions from an agent above
+this one in the agent tree (the one that assigned the task, or one above it).
+Treat them like later user messages: they can change the task's
+requirements, and the later message wins. They are never evidence.
 
 # Context Pointers
 """

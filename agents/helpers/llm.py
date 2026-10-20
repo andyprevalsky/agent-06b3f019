@@ -1040,7 +1040,18 @@ def build_verifier_context_messages(
         if role == "USER":
             if metadata.get("agentMessage") is True:
                 # Agent-to-agent chatter is not evidence (like the agent's own
-                # assistant turns, it could argue for its own completion).
+                # assistant turns, it could argue for its own completion). A
+                # message from an agent above this one is its task giver
+                # updating the task, like a later user message.
+                if _is_from_ancestor_agent(metadata):
+                    current_batch.append(
+                        "TASK_UPDATE_FROM_PARENT_AGENT "
+                        + json.dumps(
+                            {"from": metadata.get("fromAgentPath"), "message": text},
+                            ensure_ascii=False,
+                            default=str,
+                        )
+                    )
                 continue
             if metadata.get("agentNotification") is True:
                 # A child's completion result is factual, like a tool result
@@ -5273,6 +5284,15 @@ def _synthetic_completion_handoff_identity(tool_call_id: Any) -> Optional[str]:
     suffix = tool_call_id[len(_COMPLETED_CHILD_SYNTHETIC_PREFIX) :]
     match = re.match(r"^([0-9a-f]{16})-", suffix)
     return match.group(1) if match else None
+
+
+def _is_from_ancestor_agent(metadata: Dict[str, Any]) -> bool:
+    """True when an agent message's sender is above its recipient in the agent tree."""
+    sender = metadata.get("fromAgentPath")
+    recipient = metadata.get("toAgentPath")
+    if not isinstance(sender, str) or not isinstance(recipient, str) or not sender:
+        return False
+    return recipient.startswith(sender.rstrip("/") + "/")
 
 
 def _is_rejected_completion_feedback(metadata: Dict[str, Any]) -> bool:
