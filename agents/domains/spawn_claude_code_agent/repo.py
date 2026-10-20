@@ -165,12 +165,15 @@ async def save_code_transcript_batch(
         "subAgentId": task_id,
         "isCodeTranscript": True,
         "idempotencyKey": f"code-transcript:{task_id}:{events_from}-{events_to}",
+        # UI contract: parsed transcript events for the Transcript tab, each
+        # {type, ts, text?, tool?{name, target, added?, removed?, result?}}
+        # plus upsert keys (id, rev, seq). Keep the latest rev per id.
+        "code_agent_events": records,
         "transcript": {
             "version": 1,
             "task_id": task_id,
             "provider": code_provider,
             "events": [events_from, events_to],
-            "records": records,
         },
     }
     metadata = stamp_tool_workflow_generation(metadata) or metadata

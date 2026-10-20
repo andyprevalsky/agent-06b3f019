@@ -53,6 +53,8 @@ const CLOSED_TASK_ID = 'task-direct-chat-closed';
 
 const fixtureDir = mkdtempSync(join(tmpdir(), 'direct-chat-blackbox-'));
 const messages = new Map<string, Record<string, unknown>>();
+// The code session's spawn chip row (first message with metadata.task_id).
+let chipMetadata: Record<string, unknown> = { toolCallId: 'tc-spawn-1', code_provider: 'claude' };
 let messageCreates = 0;
 let sandbox: ChildProcess | undefined;
 let sandboxUrl = '';
@@ -63,6 +65,7 @@ const originals = {
   sessionFindUnique: prisma.claudeCodeSession.findUnique,
   agentFindUnique: prisma.agent.findUnique,
   messageFindUnique: prisma.message.findUnique,
+  messageFindFirst: prisma.message.findFirst,
   messageCreate: prisma.message.create,
   fetch: globalThis.fetch,
 };
@@ -173,6 +176,9 @@ before(async () => {
   }) as unknown as typeof prisma.claudeCodeSession.findUnique;
   prisma.agent.findUnique = (async ({ where }: { where: { id: string } }) =>
     where.id === AGENT_ID ? { userId: OWNER } : null) as unknown as typeof prisma.agent.findUnique;
+  prisma.message.findFirst = (async () => ({
+    metadata: { task_id: TASK_ID, ...chipMetadata },
+  })) as unknown as typeof prisma.message.findFirst;
   prisma.message.findUnique = (async ({ where }: { where: { id: string } }) =>
     messages.get(where.id) ?? null) as unknown as typeof prisma.message.findUnique;
   prisma.message.create = (async ({ data }: { data: Record<string, unknown> }) => {
@@ -183,10 +189,12 @@ before(async () => {
   }) as unknown as typeof prisma.message.create;
   globalThis.fetch = (async () => new Response('{}', { status: 200 })) as typeof fetch;
 
-  const { default: router } = await import('../../domains/claude-code/directChatRoutes');
+  const { default: router, sessionScopedRouter } =
+    await import('../../domains/claude-code/directChatRoutes');
   const app = express();
   app.use(express.json());
   app.use('/api/agents', router);
+  app.use('/api/claude-code-session', sessionScopedRouter);
   await new Promise<void>((resolveListen) => {
     api = app.listen(0, '127.0.0.1', () => resolveListen());
   });
@@ -197,6 +205,7 @@ after(async () => {
   prisma.claudeCodeSession.findUnique = originals.sessionFindUnique;
   prisma.agent.findUnique = originals.agentFindUnique;
   prisma.message.findUnique = originals.messageFindUnique;
+  prisma.message.findFirst = originals.messageFindFirst;
   prisma.message.create = originals.messageCreate;
   globalThis.fetch = originals.fetch;
   await new Promise<void>((resolveClose) =>
@@ -260,6 +269,8 @@ test('owner message reaches the CLI once and retries return the same row', async
   assert.equal(metadata.action_type, 'user_direct_turn');
   assert.equal(metadata.subAgentId, TASK_ID, 'the row stays out of the parent planner context');
   assert.equal(metadata.direct_turn_id, 'cm-owner-0001');
+  assert.equal(metadata.code_provider, 'claude');
+  assert.equal(metadata.toolCallId, 'tc-spawn-1');
 });
 
 test('another user or another agent id cannot address the session', async () => {
@@ -291,6 +302,30 @@ test('closed session and invalid bodies are rejected before delivery', async () 
   assert.equal(empty.status, 400);
   const noId = await post(turnPath(), { text: 'missing id' });
   assert.equal(noId.status, 400);
+});
+
+test('session route turns persist the provider and chip of a Codex session', async () => {
+  chipMetadata = { toolCallId: 'tc-spawn-codex', code_provider: 'codex' };
+  try {
+    const res = await post(`/api/claude-code-session/${TASK_ID}/turns`, {
+      client_message_id: 'cm-codex-0001',
+      text: 'codex: also run the linter',
+    });
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    assert.equal(res.json.code_provider, 'codex');
+    const row = messages.get(String(res.json.message_id));
+    const metadata = row?.metadata as Record<string, unknown>;
+    assert.equal(metadata.code_provider, 'codex', 'a Codex session row must not say claude');
+    assert.equal(metadata.toolCallId, 'tc-spawn-codex', 'the row groups under the spawn chip');
+    const stranger = await post(
+      `/api/claude-code-session/${TASK_ID}/turns`,
+      { client_message_id: 'cm-codex-stranger', text: 'hi' },
+      STRANGER
+    );
+    assert.equal(stranger.status, 404);
+  } finally {
+    chipMetadata = { toolCallId: 'tc-spawn-1', code_provider: 'claude' };
+  }
 });
 
 test('hand back releases the hold once', async () => {

@@ -44,7 +44,7 @@ export class DirectChatError extends Error {
 }
 
 async function requireOwnedLiveSession(
-  agentId: string,
+  agentId: string | undefined,
   taskId: string,
   userId: string | undefined
 ) {
@@ -58,7 +58,7 @@ async function requireOwnedLiveSession(
   const session = await repo.findSessionForDirectChat(taskId);
   // Not found and not yours look the same, so session ids cannot be probed.
   const agent =
-    session === null || session.agentId !== agentId
+    session === null || (agentId !== undefined && session.agentId !== agentId)
       ? null
       : await repo.findAgentById(session.agentId);
   if (session === null || agent === null || agent.userId !== userId) {
@@ -105,10 +105,12 @@ export interface DirectTurnResult {
   message_id: string;
   task_id: string;
   agent_id: string;
+  code_provider: 'claude' | 'codex';
 }
 
 export async function sendDirectTurn(params: {
-  agentId: string;
+  /** From `/api/agents/:id/code-agent/...`; absent on the claude-code-session route. */
+  agentId?: string;
   taskId: string;
   userId: string | undefined;
   clientMessageId: string;
@@ -117,20 +119,24 @@ export async function sendDirectTurn(params: {
 }): Promise<DirectTurnResult> {
   const { taskId, userId, clientMessageId, text } = params;
   const session = await requireOwnedLiveSession(params.agentId, taskId, userId);
+  // The chip row names the CLI (Claude Code or Codex share this table) and the
+  // spawn tool call the UI groups the code agent's rows under.
+  const chip = await repo.findCodeSessionChip(session.agentId, taskId);
+  const toolCallId = params.toolCallId ?? chip.toolCallId ?? undefined;
 
   const metadata: Record<string, unknown> = {
     toolName: 'spawn_claude_code_agent',
     title: 'You',
     task_id: taskId,
     action_type: 'user_direct_turn',
-    code_provider: 'claude',
+    code_provider: chip.provider,
     // Child-scoped like the chip's progress rows: visible in the code agent's
     // trajectory and tree grep, not replayed into the root planner mid-run.
     subAgentId: taskId,
     direct_turn_id: clientMessageId,
     isDirectCodeTurn: true,
     idempotencyKey: `code-turn:${taskId}:${clientMessageId}`,
-    ...(params.toolCallId !== undefined ? { toolCallId: params.toolCallId } : {}),
+    ...(toolCallId !== undefined ? { toolCallId } : {}),
   };
 
   const startedAt = Date.now();
@@ -171,11 +177,12 @@ export async function sendDirectTurn(params: {
     message_id: message.id,
     task_id: taskId,
     agent_id: session.agentId,
+    code_provider: chip.provider,
   };
 }
 
 export async function handBackDirectChat(params: {
-  agentId: string;
+  agentId?: string;
   taskId: string;
   userId: string | undefined;
 }): Promise<{ status: 'released' | 'not_held' }> {

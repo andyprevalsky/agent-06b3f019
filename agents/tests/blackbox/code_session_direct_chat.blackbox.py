@@ -561,6 +561,41 @@ async def test_transcript_batches_persist_once_across_reattach():
     ]
 
 
+async def test_transcript_batch_row_carries_code_agent_events():
+    """The persisted row the UI reads: child-scoped, idempotent, events under `code_agent_events`."""
+    from _test_utils import get_captured_requests, setup_mock
+
+    from domains.spawn_claude_code_agent.repo import save_code_transcript_batch
+
+    events = json.loads(CODEX_EVENTS.read_text())
+    records = [to_ui_record(r) for r in build_code_transcript(events, "codex", goal="Fix the bug")]
+    setup_mock({"/api/agents/": {"status": 201, "json": {"id": "m1"}}})
+    saved = await save_code_transcript_batch(
+        agent_id="agent-1",
+        task_id="task-9",
+        tool_call_id="tc-9",
+        code_provider="codex",
+        records=records,
+        events_from=0,
+        events_to=len(events),
+        text=render_transcript_text(build_code_transcript(events, "codex")),
+    )
+    assert saved is True
+    posts = [
+        c for c in get_captured_requests() if c.get("method") == "POST" and "/api/agents/agent-1/messages" in c["url"]
+    ]
+    assert len(posts) == 1, posts
+    body = json.loads(posts[0]["requestBody"])
+    meta = body["metadata"]
+    assert body["role"] == "TOOL" and "[command ✗]" in body["message"]
+    assert meta["action_type"] == "code_transcript" and meta["subAgentId"] == "task-9" and meta["toolCallId"] == "tc-9"
+    assert meta["code_provider"] == "codex" and "toolStatus" not in meta
+    assert meta["isCodeTranscript"] is True and meta["idempotencyKey"] == f"code-transcript:task-9:0-{len(events)}"
+    assert meta["code_agent_events"] == records
+    assert {r["type"] for r in meta["code_agent_events"]} >= {"message", "tool"}
+    assert meta["transcript"] == {"version": 1, "task_id": "task-9", "provider": "codex", "events": [0, len(events)]}
+
+
 async def run_all_tests():
     print("code-session-direct-chat blackbox tests:")
     r = BlackboxResult()
@@ -599,6 +634,9 @@ async def run_all_tests():
     )
     await r.record_async(
         "transcript_batches_persist_once_across_reattach", test_transcript_batches_persist_once_across_reattach
+    )
+    await r.record_async(
+        "transcript_batch_row_carries_code_agent_events", test_transcript_batch_row_carries_code_agent_events
     )
     teardown_mock()
     return r.summary()
