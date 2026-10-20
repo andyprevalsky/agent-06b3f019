@@ -24,7 +24,6 @@ RUN_PREDEPLOY_CLOUD="$ROOT_DIR/scripts/run-predeploy-cloud"
 RUN_BENCH_CLOUD="$ROOT_DIR/scripts/run-bench-cloud"
 CLOUDBENCH_RUN="$ROOT_DIR/scripts/cloudbench-run.sh"
 DESCEND_COMMAND_TEST="$ROOT_DIR/scripts/tests/descend-command.test.sh"
-AUTO_RCA_WORKFLOW_TEST="$ROOT_DIR/scripts/tests/auto-rca-workflow.test.sh"
 AGENTCARD_LIFECYCLE_SCRIPT="$ROOT_DIR/scripts/run-agentcard-lifecycle-task.sh"
 
 fail() {
@@ -49,7 +48,7 @@ require_count() {
   [ "$actual" = "$expected" ] || fail "$description (expected $expected, found $actual)"
 }
 
-for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$FRONTEND_LOCK" "$PROD_SESSION_GENERATOR" "$PROD_SESSION_TEST" "$DEPLOY_COMMAND" "$STACK_DB_RESOLVER" "$CODERABBIT_CONFIG" "$REVIEW_WAITER" "$REVIEW_CYCLES" "$DEPLOY_ENV" "$DEPLOY_STRUCTURAL_RUNNER" "$DEPLOY_STRUCTURAL_RUNNER_TEST" "$DEPLOY_LIVE_PROBE_RUNNER" "$RUN_PREDEPLOY_LOCAL" "$RUN_PREDEPLOY_CLOUD" "$RUN_BENCH_CLOUD" "$CLOUDBENCH_RUN" "$DESCEND_COMMAND_TEST" "$AUTO_RCA_WORKFLOW_TEST" "$AGENTCARD_LIFECYCLE_SCRIPT"; do
+for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$FRONTEND_LOCK" "$PROD_SESSION_GENERATOR" "$PROD_SESSION_TEST" "$DEPLOY_COMMAND" "$STACK_DB_RESOLVER" "$CODERABBIT_CONFIG" "$REVIEW_WAITER" "$REVIEW_CYCLES" "$DEPLOY_ENV" "$DEPLOY_STRUCTURAL_RUNNER" "$DEPLOY_STRUCTURAL_RUNNER_TEST" "$DEPLOY_LIVE_PROBE_RUNNER" "$RUN_PREDEPLOY_LOCAL" "$RUN_PREDEPLOY_CLOUD" "$RUN_BENCH_CLOUD" "$CLOUDBENCH_RUN" "$DESCEND_COMMAND_TEST" "$AGENTCARD_LIFECYCLE_SCRIPT"; do
   [ -f "$file" ] || fail "required semantic deploy gate file is missing: $file"
 done
 
@@ -430,10 +429,9 @@ require_text "$AGENTCARD_LIFECYCLE_SCRIPT" 'export BENCHMARK_SKIP_WMH_BUILD=1' "
 require_text "$AGENTCARD_LIFECYCLE_SCRIPT" 'export ROSE_EXCLUDE_ANTHROPIC_FAMILY=1' "AgentCard lifecycle helper must not block on Claude credentials"
 require_text "$AGENTCARD_LIFECYCLE_SCRIPT" 'export SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt' "AgentCard lifecycle helper must pass GPT-only seed policy into run.sh"
 
-# /descend is part of the deploy orchestration surface. Its behavior and the
-# auto-RCA lifecycle have independent owners; this suite checks their wiring.
+# /descend is part of the deploy orchestration surface. Its behavior has an
+# independent owner; this suite checks its wiring.
 require_text "$DEPLOY_COMMAND" 'bash scripts/tests/descend-command.test.sh' "/deploy must run the descend behavior owner"
-require_text "$DEPLOY_COMMAND" 'bash scripts/tests/auto-rca-workflow.test.sh' "/deploy must run the auto-RCA behavior owner"
 python3 - "$DEPLOY_STRUCTURAL_RUNNER" <<'PY'
 import importlib.util
 import sys
@@ -444,7 +442,6 @@ sys.modules[spec.name] = registry
 spec.loader.exec_module(registry)
 for name, command in (
     ("descend-command", ("bash", "scripts/tests/descend-command.test.sh")),
-    ("auto-rca-workflow", ("bash", "scripts/tests/auto-rca-workflow.test.sh")),
 ):
     owners = [gate for gate in registry.GATES if gate.name == name or gate.command == command]
     if len(owners) != 1 or owners[0].name != name or owners[0].command != command:

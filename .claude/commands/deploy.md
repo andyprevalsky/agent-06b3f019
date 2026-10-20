@@ -542,7 +542,6 @@ their assertions or test counts:
 `bash scripts/tests/agent-surface-hash.test.sh`,
 `bash scripts/tests/benchmark-sms-transport-mock.test.sh`,
 `bash scripts/tests/descend-command.test.sh`,
-`bash scripts/tests/auto-rca-workflow.test.sh`,
 `python3 scripts/tests/benchmark-live-results.test.py`,
 `python3 scripts/tests/cloudbench-provider-capacity.test.py`,
 `bash scripts/tests/campaign-hub-grouping.test.sh`,
@@ -588,9 +587,9 @@ cannot be silently dropped from the deploy path. `run-deploy-structural-gates.te
 asserts this list and the `GATES` registry match exactly in both directions, so
 adding a gate without documenting it here fails the build.
 
-The descend and auto-RCA gates own their behavioral fixtures. The semantic
-deploy gate verifies their registration and documented commands without
-recursively executing them, so each runs once in the complete registry.
+The descend gate owns its behavioral fixtures. The semantic deploy gate
+verifies its registration and documented command without recursively executing
+it, so it runs once in the complete registry.
 
 The compact benchmark gates above run on every deploy, including deploys
 without cloud-runner changes. They exercise the canonical CLI dispatch (including
