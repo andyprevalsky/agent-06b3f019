@@ -10,6 +10,9 @@ export const createSessionSchema = z.object({
   memory_enabled: z.boolean().optional(),
   harness_mode: z.enum(['code', 'rose']).optional(),
   rose_api_base_url: z.string().url().optional(),
+  // C14: 'local' starts the session on the agent tree's Mac (Rose Mac app).
+  target: z.enum(['cloud', 'local']).optional(),
+  device_id: z.string().uuid().optional(),
 });
 
 export const closeSessionSchema = z.object({

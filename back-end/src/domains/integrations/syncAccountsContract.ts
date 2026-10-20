@@ -138,3 +138,28 @@ export function toStorageAccountId(accountId: string): string {
 export function toWireAccountId(storageAccountId: string): string {
   return storageAccountId === '' ? DEFAULT_ACCOUNT_ID : storageAccountId;
 }
+
+/**
+ * Browser-cookie accounts are one per (browserSource, browserProfile). The
+ * provider slug is the browser; the account id spells the profile as
+ * `<browser>:<profileDir>` so it is unambiguous and URL-safe. The legacy
+ * empty profile (`''`, cookies synced before profile detection) has no profile
+ * dir and maps to the `default` account (storage `''`), matching every other
+ * provider's legacy row.
+ *
+ * `cookieAccountStorageId` / `cookieProfileFromAccountId` are the single
+ * source of truth both the account view (derivation) and the cleanup hook
+ * (deletion) use, so a listed account id always resolves back to the exact
+ * cookie rows it was derived from.
+ */
+export function cookieAccountStorageId(browser: string, profile: string): string {
+  return profile === '' ? '' : `${browser}:${profile}`;
+}
+
+export function cookieProfileFromAccountId(browser: string, storageAccountId: string): string {
+  if (storageAccountId === '') return '';
+  const prefix = `${browser}:`;
+  return storageAccountId.startsWith(prefix)
+    ? storageAccountId.slice(prefix.length)
+    : storageAccountId;
+}

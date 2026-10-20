@@ -16,6 +16,7 @@ import {
   validateUserUiBundle,
   type UserUiBundleFile,
 } from '../../providers/userUi/manifest';
+import { getDisplayObject } from '../../providers/agentTools/media';
 import { broadcastUserUiActiveChanged } from '../../providers/chat/supabaseBroadcast';
 import { createLogger } from '../../providers/logger';
 import { mintUserUiPublishToken } from '../../providers/userUi/publishToken';
@@ -131,4 +132,14 @@ export async function readUsercontent(versionId: string, path: string) {
   if (!isSafeUserUiPath(path)) return null;
   const content = await repo.readUserUiFile(versionId, path);
   return content ? { content, contentType: userUiContentType(path) } : null;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const DISPLAY_HTML_RE = /^[0-9a-f]{64}\.html$/;
+
+/** A `display` HTML page by (agent, content hash); null when not found. */
+export async function readDisplayHtml(agentId: string, file: string): Promise<Buffer | null> {
+  if (!UUID_RE.test(agentId) || !DISPLAY_HTML_RE.test(file)) return null;
+  const ownerId = await repo.findAgentOwnerId(agentId);
+  return ownerId === null ? null : getDisplayObject(`${ownerId}/display/${file}`);
 }

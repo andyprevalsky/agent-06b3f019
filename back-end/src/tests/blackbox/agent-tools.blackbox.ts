@@ -18,11 +18,13 @@
  *     a user-style call without the internal key → refused
  * Usage: bash scripts/run-blackbox-tests.sh agent-tools
  */
+import { USERCONTENT_CSP } from '../../domains/user-ui/config';
 import { mintAgentToolsToken } from '../../providers/agentTools/token';
 import { mintUserUiPublishToken } from '../../providers/userUi/publishToken';
 import {
   agentB,
   b64,
+  BASE_URL,
   call,
   childA,
   codeToken,
@@ -165,6 +167,32 @@ const tests: BlackboxTest[] = [
       expectStatus(html, 201, 'declared html page');
       assert(items(html)[0].mime_type === 'text/html', 'text/html allowed when declared');
       assert(items(html)[0].file_pointer.original_filename === 'preview.html', 'html filename');
+
+      // HTML is framed from the sandboxed usercontent origin, never storage.
+      const served = items(html)[0].file_pointer as { usercontent_url?: string };
+      const url = served.usercontent_url ?? '';
+      const match = /\/usercontent\/display\/([0-9a-f-]{36})\/([0-9a-f]{64})\.html$/.exec(url);
+      assert(match && match[1] === otherA, `usercontent_url for html: ${url}`);
+      const page200 = await fetch(`${BASE_URL}${new URL(url).pathname}`);
+      assert(page200.status === 200, `usercontent display page: ${page200.status}`);
+      assert(
+        (page200.headers.get('content-type') ?? '').startsWith('text/html'),
+        `served as html: ${page200.headers.get('content-type')}`
+      );
+      assert(page200.headers.get('content-security-policy') === USERCONTENT_CSP, 'usercontent CSP');
+      assert((await page200.text()) === page, 'exact html bytes');
+      for (const path of [
+        `/usercontent/display/${agentB}/${match[2]}.html`,
+        `/usercontent/display/${otherA}/${'0'.repeat(64)}.html`,
+        `/usercontent/display/${otherA}/..%2F..%2Fsecret.html`,
+        `/usercontent/display/not-a-uuid/${match[2]}.html`,
+      ]) {
+        const res = await fetch(`${BASE_URL}${path}`);
+        assert(res.status === 404, `${path} must 404, got ${res.status}`);
+      }
+      const png1 = await display(otherA, { items: [b64(png())] }, { apiKeyUser: userA });
+      const pngPointer = items(png1)[0].file_pointer as { usercontent_url?: string };
+      assert(pngPointer.usercontent_url === undefined, 'images keep their storage pointer only');
     },
   },
   {

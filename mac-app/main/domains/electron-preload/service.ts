@@ -26,6 +26,8 @@ import type {
   ReadBrowserCookiesConfig,
   PasskeyEnrollParams,
   AutoFillSettingsResult,
+  LocalCodeGrantResult,
+  LocalCodeStatus,
 } from '../../../shared/types/ipc';
 import {
   buildEventBridge,
@@ -95,6 +97,27 @@ function buildGptCodeBridge(ipcRenderer: IpcRenderer): IPC['gptCode'] {
   };
 }
 
+function buildLocalCodeBridge(ipcRenderer: IpcRenderer): IPC['localCode'] {
+  return {
+    getStatus: () => ipcRenderer.invoke('localCode:getStatus') as Promise<LocalCodeStatus>,
+    addGrant: (path?: string) =>
+      ipcRenderer.invoke('localCode:addGrant', path) as Promise<LocalCodeGrantResult>,
+    removeGrant: (grantId: string) =>
+      ipcRenderer.invoke('localCode:removeGrant', grantId) as Promise<LocalCodeGrantResult>,
+    setDefaultGrant: (grantId: string) =>
+      ipcRenderer.invoke('localCode:setDefaultGrant', grantId) as Promise<LocalCodeGrantResult>,
+    openTerminal: (taskId: string) =>
+      ipcRenderer.invoke('localCode:openTerminal', taskId) as Promise<{ success: boolean }>,
+    onStatus: (callback: (status: LocalCodeStatus) => void) => {
+      const listener = (_event: unknown, status: unknown) => callback(status as LocalCodeStatus);
+      ipcRenderer.on('localCode:status', listener);
+      return () => {
+        ipcRenderer.removeListener('localCode:status', listener);
+      };
+    },
+  };
+}
+
 function buildAtlasBridge(ipcRenderer: IpcRenderer): IPC['atlas'] {
   return {
     storePassword: (password: string) =>
@@ -140,10 +163,18 @@ function buildTelegramBridge(ipcRenderer: IpcRenderer): IPC['telegram'] {
       }>,
     disconnect: () =>
       ipcRenderer.invoke('telegram:disconnect') as Promise<{ success: boolean; error?: string }>,
-    logout: () =>
-      ipcRenderer.invoke('telegram:logout') as Promise<{ success: boolean; error?: string }>,
-    syncHistorical: (messagesPerDialog?: number) =>
-      ipcRenderer.invoke('telegram:syncHistorical', messagesPerDialog) as Promise<{
+    // Optional args are forwarded only when given, so main sees exactly the caller's call.
+    logout: (...args: [accountId?: string]) =>
+      ipcRenderer.invoke('telegram:logout', ...args) as Promise<{
+        success: boolean;
+        error?: string;
+      }>,
+    listAccounts: () =>
+      ipcRenderer.invoke('telegram:listAccounts') as Promise<
+        Array<{ accountId: string; label: string | null; connected: boolean }>
+      >,
+    syncHistorical: (...args: [messagesPerDialog?: number, accountId?: string]) =>
+      ipcRenderer.invoke('telegram:syncHistorical', ...args) as Promise<{
         success: boolean;
         count?: number;
         error?: string;
@@ -276,6 +307,7 @@ export function buildIpcApi(ipcRenderer: IpcRenderer): IPC {
     claudeCode: buildClaudeCodeBridge(ipcRenderer),
     gptCode: buildGptCodeBridge(ipcRenderer),
     atlas: buildAtlasBridge(ipcRenderer),
+    localCode: buildLocalCodeBridge(ipcRenderer),
     passkeys: buildPasskeysBridge(ipcRenderer),
     whatsapp: buildWhatsAppBridge(ipcRenderer),
     telegram: buildTelegramBridge(ipcRenderer),

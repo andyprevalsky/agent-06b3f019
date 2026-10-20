@@ -17,6 +17,7 @@ import {
   findIntegrationAccount,
   listAccountRowSources,
   listActivePlaidItemSources,
+  listCookieProfileSources,
 } from './repo.accounts';
 import { accountSourcesChangedSince, listProgressForUser } from './repo.progress';
 import * as service from './service';
@@ -68,14 +69,15 @@ export { InvalidAccountKeyError };
  * progress.
  */
 export async function getIntegrationsWithAccounts(userId: string) {
-  const [base, progress, plaidItems] = await Promise.all([
+  const [base, progress, plaidItems, cookieProfiles] = await Promise.all([
     service.getIntegrations(userId),
     listProgressForUser(userId),
     listActivePlaidItemSources(userId),
+    listCookieProfileSources(userId),
   ]);
   const rows: AccountViewRow[] = base.integrations;
   const accountsByProvider = settleLinkedInAccounts(
-    buildAccountsView({ rows, plaidItems, progress }),
+    buildAccountsView({ rows, plaidItems, cookieProfiles, progress }),
     rows
   );
   const integrations = base.integrations.map((integration) => ({
@@ -102,18 +104,19 @@ export async function getAccountsDelta(
   }
   // Same Google scope-health and LinkedIn settle derivations as the full list,
   // so both views agree.
-  const [rows, plaidItems, progress] = await Promise.all([
+  const [rows, plaidItems, cookieProfiles, progress] = await Promise.all([
     listAccountRowSources(userId)
       .then(withGoogleScopeHealth)
       .then((light) => settleLightLinkedInRow(userId, light)),
     listActivePlaidItemSources(userId),
+    listCookieProfileSources(userId),
     listProgressForUser(userId),
   ]);
   return {
     cursor,
     changed: true,
     accountsByProvider: settleLinkedInAccounts(
-      buildAccountsView({ rows, plaidItems, progress }),
+      buildAccountsView({ rows, plaidItems, cookieProfiles, progress }),
       rows
     ),
   };

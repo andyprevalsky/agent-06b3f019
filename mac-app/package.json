@@ -59,7 +59,8 @@
     "react-router-dom": "^7.9.6",
     "tailwind-merge": "^3.4.0",
     "tailwindcss-animate": "^1.0.7",
-    "telegram": "^2.26.22"
+    "telegram": "^2.26.22",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
@@ -70,6 +71,7 @@
     "@types/dotenv": "^6.1.1",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
+    "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^4.2.0",
     "@vitest/coverage-v8": "^2.1.9",
     "@vitest/ui": "2.1.9",
@@ -105,6 +107,18 @@
       {
         "from": "dist/native",
         "to": "native"
+      },
+      {
+        "from": "../e2b-templates/claude-code/ws-server.mjs",
+        "to": "code-agent/claude-code/ws-server.mjs"
+      },
+      {
+        "from": "../e2b-templates/codex-code/ws-server.mjs",
+        "to": "code-agent/codex-code/ws-server.mjs"
+      },
+      {
+        "from": "node_modules/ws",
+        "to": "code-agent/node_modules/ws"
       }
     ],
     "afterSign": "scripts/notarize.js",

@@ -25,6 +25,9 @@ export const createSessionSchema = z.object({
   attachments: z.array(filePointerSchema).optional(),
   github_repo_url: z.string().optional(),
   user_id: z.string().uuid().optional(), // Required for GitHub repo access check
+  // C14: 'local' starts the session on the agent tree's Mac (Rose Mac app).
+  target: z.enum(['cloud', 'local']).optional(),
+  device_id: z.string().uuid().optional(),
   /** Project to restore; defaults to the agent's own (or its root's) project. */
   project_id: z.string().uuid().optional(),
 });

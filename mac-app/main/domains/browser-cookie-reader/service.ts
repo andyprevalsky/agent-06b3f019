@@ -43,14 +43,15 @@ import {
   resolveCookiePaths,
 } from './repo';
 import { parseSafariBinaryCookies } from './safariCookies';
-import type {
-  BrowserProfileMetadata,
-  BrowserConfig,
-  BrowserInfo,
-  BrowserType,
-  CookieData,
-  CookieRow,
-  ReadCookiesConfig,
+import {
+  SINGLE_STORE_PROFILE,
+  type BrowserProfileMetadata,
+  type BrowserConfig,
+  type BrowserInfo,
+  type BrowserType,
+  type CookieData,
+  type CookieRow,
+  type ReadCookiesConfig,
 } from './types';
 
 /**
@@ -186,7 +187,10 @@ function getProfileMetadataFromCookiePath(cookiePath: string): BrowserProfileMet
 }
 
 function resolveCookiePathsForRead(browser: BrowserConfig): string[] {
-  if (browser.type === 'chrome') {
+  // Multi-profile Chromium browsers keep one cookie store per profile dir
+  // (`<UserData>/<Profile>/Cookies`, modern Chromium under `.../Network/Cookies`).
+  // The `*` in the pattern globs every profile dir, so one read covers them all.
+  if (browser.profileLayout === 'multi') {
     const legacyPaths = resolveCookiePaths(browser.cookiePathPattern);
     const networkCookiePattern = path.join(
       path.dirname(browser.cookiePathPattern),
@@ -201,7 +205,7 @@ function resolveCookiePathsForRead(browser: BrowserConfig): string[] {
 }
 
 function resolveInstalledCookiePath(browser: BrowserConfig): string | null {
-  if (browser.type !== 'chrome') {
+  if (browser.profileLayout !== 'multi') {
     return resolveCookiePath(browser.cookiePathPattern);
   }
   return resolveCookiePathsForRead(browser)[0] ?? null;
@@ -333,7 +337,12 @@ export async function readBrowserCookies(
   }
 
   if (browser.cookieStore === 'safariBinary') {
-    const cookies = parseSafariBinaryCookies(readSafariCookieFile(cookiePaths[0]));
+    // Safari has one cookie store; tag it with the single-store profile so it
+    // becomes the `<safari>:Default` account like every other provider.
+    const cookies = parseSafariBinaryCookies(readSafariCookieFile(cookiePaths[0])).map((cookie) => ({
+      ...cookie,
+      browserProfile: SINGLE_STORE_PROFILE,
+    }));
     console.log(
       `${BROWSER_COOKIE_READER_LOG_PREFIX} Read ${cookies.length} ${browser.name} cookies`
     );
@@ -353,8 +362,12 @@ export async function readBrowserCookies(
       }
       const rows = handle.queryCookieRows();
       totalCookies += rows.length;
+      // Every cookie carries its account's profile: the profile dir for
+      // multi-profile Chromium browsers, the single-store name otherwise.
       const browserProfile =
-        browserType === 'chrome' ? getProfileMetadataFromCookiePath(cookiePath) : undefined;
+        browser.profileLayout === 'multi'
+          ? getProfileMetadataFromCookiePath(cookiePath)
+          : SINGLE_STORE_PROFILE;
 
       for (const row of rows) {
         const value = decryptCookieValue(row.encrypted_value, key);
@@ -370,7 +383,7 @@ export async function readBrowserCookies(
   }
 
   const deduplicatedCookies =
-    browserType === 'chrome' ? deduplicateCookiesByIdentity(cookies) : cookies;
+    browser.profileLayout === 'multi' ? deduplicateCookiesByIdentity(cookies) : cookies;
 
   // Wrong-password heuristic: with a meaningful row count but near-zero
   // decryption success, the user's password is almost certainly wrong.

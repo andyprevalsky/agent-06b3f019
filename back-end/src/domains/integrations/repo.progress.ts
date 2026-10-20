@@ -125,6 +125,9 @@ export async function accountSourcesChangedSince(
       select: { id: true },
     }),
     prisma.plaidItem.findFirst({ where: { userId, updatedAt: after }, select: { id: true } }),
+    // Cookie syncs change the per-profile browser accounts; `syncedAt` is the
+    // row's @updatedAt. Indexed existence probe, no row bodies read.
+    prisma.cookie.findFirst({ where: { userId, syncedAt: after }, select: { id: true } }),
   ]);
   return probes.some((probe) => probe !== null);
 }
