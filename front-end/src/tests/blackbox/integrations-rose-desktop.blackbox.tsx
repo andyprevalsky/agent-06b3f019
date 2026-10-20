@@ -20,7 +20,7 @@ import {
   parseIntegrationAccounts,
   parseSyncProgress,
 } from '@/features/integrations/hooks/integrationAccounts';
-import { formatEta } from '@/features/integrations/components/SyncProgressBar';
+import { formatEta } from '@/features/integrations/components/syncProgressFormat';
 import type { ConnectedIntegration } from '@/features/integrations/types';
 
 import { capturedRequests } from './msw/capture';

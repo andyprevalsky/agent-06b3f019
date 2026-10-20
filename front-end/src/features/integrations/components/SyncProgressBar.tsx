@@ -14,6 +14,8 @@
 import { useSyncProgress } from '../hooks/useSyncProgress';
 import type { SyncProgress } from '../types';
 
+import { formatEta } from './syncProgressFormat';
+
 export const SYNC_GRADIENT = 'linear-gradient(90deg,#ffb36b,#ff5f8f 45%,#e43f9a 70%,#9b4dff)';
 const FLOWING_GRADIENT =
   'linear-gradient(90deg,#ffb36b,#ff5f8f,#e43f9a,#9b4dff,#e43f9a,#ff5f8f,#ffb36b)';
@@ -21,16 +23,6 @@ const SHIMMER = 'linear-gradient(90deg,transparent,rgba(255,255,255,.7),transpar
 const GLOW = '0 0 8px rgba(255,95,143,.45)';
 
 const fmt = (n: number) => n.toLocaleString('en-US');
-
-/** "45 s", "4 min", "1 h 5 min". */
-export function formatEta(seconds: number): string {
-  if (seconds < 60) return `${Math.max(seconds, 1)} s`;
-  const minutes = Math.ceil(seconds / 60);
-  if (minutes < 60) return `${minutes} min`;
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  return m === 0 ? `${h} h` : `${h} h ${m} min`;
-}
 
 function ProgressText({ progress }: { progress: SyncProgress | null }) {
   if (progress === null || progress.done === null) return <span>Syncing…</span>;
