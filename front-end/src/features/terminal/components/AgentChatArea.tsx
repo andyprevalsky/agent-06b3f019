@@ -18,10 +18,6 @@
  *   terminal-input-area[data-chat-mode] mirrors the rendered chat/agent mode
  *   transition without changing interaction or visual behavior.
  *
- * PER-USER UI:
- *   NO_AGENT + published home.dashboard slot → dashboard frame above popular goals
- *   per-user background showing              → query box renders opaque
- *
  * LEGAL LINKS:
  *   stock         → About, Privacy, and Terms footer remains while chatting.
  *   Rose Desktop  → no footer (UI ledger #14); the links live behind the
@@ -40,7 +36,6 @@ import { isBenchmarkSharedView } from '@/lib/benchmarkShare';
 
 import { ApprovalChip, PinnedQuestionMount } from '@/features/terminal-component-group';
 import { QueryInput } from '@/features/terminal-component-group';
-import { UserUiSlot, useUserUiOpaqueSurfaces } from '@/features/user-ui';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { cn } from '@/lib/utils';
 import { GateStack } from './GateStack';
@@ -213,10 +208,6 @@ function InputArea({
       }}
     >
       {!a.selectedAgentId && (
-        <UserUiSlot name="home.dashboard" autoHeight className="relative z-10 mb-3" />
-      )}
-
-      {!a.selectedAgentId && (
         <PopularGoalsCarousel
           tickerOffset={tickerOffset}
           tickerRef={tickerRef}
@@ -277,11 +268,9 @@ function ChatQueryInputBox({
   modelsLoading,
   canSubmit,
 }: ChatQueryInputBoxProps) {
-  const opaqueSurface = useUserUiOpaqueSurfaces();
   return (
     <div className="relative z-10">
       <QueryInput
-        opaqueSurface={opaqueSurface}
         value={a.messageInput}
         onChange={a.setMessageInput}
         onSubmit={(attachments) => {

@@ -3,19 +3,14 @@
  *
  * The backend contract (`GET /api/user-ui/active`, `GET /api/user-ui/versions`)
  * returns a published manifest plus the usercontent base URL its files live at.
- * Every user-authored file runs inside a sandboxed cross-origin iframe; only
- * `theme.json` is read on the app origin, and it is data (validated tokens).
+ * Every user-authored file runs inside a sandboxed cross-origin iframe; nothing
+ * user-authored is read or applied on the app origin.
+ *
+ * Whole-app settings (theme.json tokens, background image + fade, and the
+ * background / sidebar.header / menu / home.dashboard / agent.panel slots) were
+ * removed (UI ledger row 89). A manifest that still carries `theme` or `slots`
+ * (or any other unknown field) is accepted and those fields are ignored.
  */
-
-export const USER_UI_SLOT_NAMES = [
-  'background',
-  'sidebar.header',
-  'menu',
-  'home.dashboard',
-  'agent.panel',
-] as const;
-
-export type UserUiSlotName = (typeof USER_UI_SLOT_NAMES)[number];
 
 export interface UserUiEntry {
   entry: string;
@@ -28,9 +23,7 @@ export interface UserUiInlineEntry extends UserUiEntry {
 
 export interface UserUiManifest {
   version: 1;
-  theme?: string;
   shell?: UserUiEntry;
-  slots?: Partial<Record<UserUiSlotName, UserUiEntry>>;
   inline?: Record<string, UserUiInlineEntry>;
   capabilities?: string[];
 }
@@ -56,16 +49,6 @@ export interface UserUiVersionSummary {
   active?: boolean;
 }
 
-export interface UserUiThemeBackground {
-  image?: string;
-  fadeAfterFirstMessage?: number;
-}
-
-export interface UserUiTheme {
-  tokens?: Record<string, string>;
-  background?: UserUiThemeBackground;
-}
-
 /** `message.metadata.inlineView` — pinned to the version that produced it. */
 export interface InlineViewMetadata {
   view: string;
@@ -78,12 +61,6 @@ export interface ActiveUserUi {
   versionId: string;
   manifest: UserUiManifest;
   baseUrl: string;
-}
-
-export interface ResolvedBackground {
-  /** Theme background image (null when only a `background` slot exists). */
-  imageUrl: string | null;
-  fadeOpacity: number;
 }
 
 /** Name of the backend realtime event emitted when a user UI version is published/activated. */

@@ -17,8 +17,7 @@
  *      Feedback, Biz health and the account row (Settings) open in the
  *      right-panel slot (RoseAppsProvider); clicking again closes it.
  *
- * SURFACE: always solid (bg-white / dark #262624), so data-surface="opaque" —
- * legible over a per-user background image without the stock rail's switch.
+ * SURFACE: always solid (bg-white / dark #262624), so data-surface="opaque".
  * MOBILE (< md): not mounted at all; the mobile agent drawer lists agents.
  *
  * PANELS: project settings beside the bar (useRoseSidebarProjects); archive dialog;
@@ -163,7 +162,6 @@ function RoseSidebarBar(props: AppSidebarProps) {
         <RoseHomeRow isExpanded={isExpanded} onClick={props.onCreateAgent} />
         <RoseNewAgentButton isExpanded={isExpanded} onClick={props.onCreateAgent} />
         <RoseSearchRow isExpanded={isExpanded} value={query} onChange={setQuery} />
-        {isExpanded && props.userUi?.headerSlot}
         <ScrollArea className="min-h-0 flex-1">
           <RoseAgentGroups
             grouped={grouped}
@@ -183,7 +181,6 @@ function RoseSidebarBar(props: AppSidebarProps) {
             codeAgentsNeedingInput={codeAgentsNeedingInput}
           />
         </ScrollArea>
-        {isExpanded && props.userUi?.menuSlot}
         <div className="flex flex-none flex-col pb-2">
           <RoseNavRow
             icon={<Megaphone className="h-5 w-5" strokeWidth={1.7} />}

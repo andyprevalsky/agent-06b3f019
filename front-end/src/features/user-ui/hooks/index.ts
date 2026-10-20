@@ -4,5 +4,4 @@ export * from './liveRefresh';
 export * from './useActiveUserUi';
 export * from './useInlineView';
 export * from './useSafeMode';
-export * from './useUserUiTheme';
 export * from './useUserViewBridge';

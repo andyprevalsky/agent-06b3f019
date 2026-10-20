@@ -40,11 +40,10 @@
  * SIMULATOR:           shown for admin users; session-only and default off
  * TEST PROMPTS:        shown only on desktop for dev/admin users; never mounted on mobile
  * SUBMISSION:          canSubmit prop decides send-vs-stop button
- * SURFACE:             opaqueSurface → solid white/black container (a per-user
- *                      background image shows through the app behind it);
- *                      otherwise the translucent drip surface
+ * SURFACE:             the translucent drip surface (data-surface="translucent";
+ *                      the mobile hug rule in index.css targets it)
  *   Rose dark (useRoseTheme().isDark, Rose Desktop accounts only):
- *                      [LIGHT drip | opaque] --html.dark--> [DARK solid #2f2f2c,
+ *                      [LIGHT drip] --html.dark--> [DARK solid #2f2f2c,
  *                      12% white border, deep shadow, no white marble; textarea
  *                      #f2f2ef / placeholder #8c8c86; model chip #2f2f2c]
  *                      Light keeps the exact stock styles (dripStyles.ts).
@@ -109,7 +108,6 @@ export default function QueryInput(props: QueryInputProps) {
           drippiness={drippiness}
           isDragOver={attachments.isDragOver}
           dragHandlers={attachments.dragHandlers}
-          opaqueSurface={props.opaqueSurface === true}
           aboveTab={roseDesktop}
           roseDark={roseDark}
         >
@@ -237,7 +235,6 @@ interface QueryInputShellProps {
     onDragLeave: (e: React.DragEvent) => void;
     onDrop: (e: React.DragEvent) => void;
   };
-  opaqueSurface: boolean;
   /** Rose Desktop: stack the box above the tab so the tab sits behind it. */
   aboveTab: boolean;
   /** Rose Desktop dark mode: the solid dark surface (dripStyles.ts). */
@@ -250,24 +247,21 @@ function QueryInputShell({
   drippiness,
   isDragOver,
   dragHandlers,
-  opaqueSurface,
   aboveTab,
   roseDark,
   children,
 }: QueryInputShellProps) {
   const dripStyle = buildDripContainerStyle(dripStyles, drippiness, isDragOver, roseDark);
-  const opaque = opaqueSurface && !roseDark;
   return (
     <div
       data-testid="query-input-surface"
-      data-surface={opaqueSurface ? 'opaque' : 'translucent'}
+      data-surface="translucent"
       className={cn(
         'relative rounded-xl p-3 shadow-lg border overflow-hidden transition-colors',
         aboveTab && 'z-[1]',
         isDragOver ? 'border-primary border-2 bg-primary/5' : 'border-border',
-        opaque && 'bg-white dark:bg-navi-black',
       )}
-      style={opaque ? { ...dripStyle, backgroundColor: undefined } : dripStyle}
+      style={dripStyle}
       onDragOver={dragHandlers.onDragOver}
       onDragLeave={dragHandlers.onDragLeave}
       onDrop={dragHandlers.onDrop}

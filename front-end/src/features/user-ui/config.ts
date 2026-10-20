@@ -2,17 +2,11 @@
  * Constants and pure validators for the per-user UI runtime.
  *
  * Everything that decides whether user-authored data may touch the app origin
- * lives here so the security rules are testable without rendering:
- *   - theme tokens are CSS data, never code (name + value allow-lists)
- *   - user files load only from an http(s) usercontent origin that differs
- *     from the app origin (never `srcdoc`, `blob:`, `data:` or same-origin)
+ * lives here so the security rules are testable without rendering: user files
+ * load only from an http(s) usercontent origin that differs from the app
+ * origin (never `srcdoc`, `blob:`, `data:` or same-origin).
  */
-import type {
-  InlineViewMetadata,
-  ResolvedBackground,
-  UserUiTheme,
-  UserUiViewMessage,
-} from './types';
+import type { InlineViewMetadata, UserUiViewMessage } from './types';
 
 /** The ONLY sandbox flags a user frame ever gets (no allow-same-origin). */
 export const USER_UI_IFRAME_SANDBOX = 'allow-scripts';
@@ -23,9 +17,6 @@ export const INLINE_VIEW_DEFAULT_HEIGHT = 240;
 export const INLINE_VIEW_LIVE_CAP = 4;
 /** How far outside the viewport an inline view may be and still go live. */
 export const INLINE_VIEW_ROOT_MARGIN = '400px 0px';
-/** Backdrop opacity after the first user message when the theme sets none (ledger row 34). */
-export const DEFAULT_BACKGROUND_FADE = 0.8;
-export const BACKGROUND_FADE_TRANSITION_MS = 600;
 export const LIVE_RELOAD_POLL_MS = 5_000;
 /** Any number of live-refresh requests inside this window collapse into one GET. */
 export const USER_UI_REFRESH_WINDOW_MS = 750;
@@ -33,61 +24,6 @@ export const SAFE_MODE_STORAGE_KEY = 'rose_safe_mode';
 export const SAFE_MODE_QUERY_PARAM = 'rose_safe';
 export const LIVE_RELOAD_QUERY_PARAM = 'rose_ui_live';
 export const USER_UI_IS_DEV = import.meta.env.DEV === true;
-
-const TOKEN_NAME_RE = /^--[a-z0-9-]+$/;
-const TOKEN_VALUE_MAX_LENGTH = 256;
-/**
- * Anything that could fetch a resource, run script or escape the declaration.
- * Backslash is banned because CSS escapes can spell `url(` indirectly.
- */
-const FORBIDDEN_TOKEN_VALUE_PARTS = [
-  'url(',
-  'src(',
-  'image(',
-  'image-set(',
-  'element(',
-  'expression',
-  'javascript:',
-  '@import',
-  ';',
-  '{',
-  '}',
-  '<',
-  '\\',
-];
-
-export interface TokenValidationResult {
-  accepted: Record<string, string>;
-  rejected: string[];
-}
-
-export function isValidThemeTokenName(name: string): boolean {
-  return TOKEN_NAME_RE.test(name);
-}
-
-export function isValidThemeTokenValue(value: unknown): value is string {
-  if (typeof value !== 'string') return false;
-  if (value.length === 0 || value.length > TOKEN_VALUE_MAX_LENGTH) return false;
-  const lower = value.toLowerCase();
-  return !FORBIDDEN_TOKEN_VALUE_PARTS.some((part) => lower.includes(part));
-}
-
-/** Split theme tokens into the safe CSS custom properties and rejected names. */
-export function validateThemeTokens(tokens: unknown): TokenValidationResult {
-  const accepted: Record<string, string> = {};
-  const rejected: string[] = [];
-  if (!tokens || typeof tokens !== 'object' || Array.isArray(tokens)) {
-    return { accepted, rejected };
-  }
-  for (const [name, value] of Object.entries(tokens as Record<string, unknown>)) {
-    if (isValidThemeTokenName(name) && isValidThemeTokenValue(value)) {
-      accepted[name] = value;
-    } else {
-      rejected.push(name);
-    }
-  }
-  return { accepted, rejected };
-}
 
 function currentAppOrigin(): string | null {
   return typeof window === 'undefined' ? null : window.location.origin;
@@ -140,32 +76,6 @@ export function userContentOrigin(url: string): string | null {
 export function versionBaseUrl(backendBaseUrl: string, versionId: string): string {
   const backend = backendBaseUrl.replace(/\/$/, '');
   return `${backend}/usercontent/${encodeURIComponent(versionId)}/`;
-}
-
-/**
- * The backdrop behind the app: a theme image and/or a `background` slot.
- * Null when neither exists, so the stock opaque app background stays.
- */
-export function resolveBackground(
-  theme: UserUiTheme | null,
-  baseUrl: string,
-  hasBackgroundSlot = false,
-): ResolvedBackground | null {
-  const image = theme?.background?.image;
-  const imageUrl =
-    typeof image === 'string' && image.length > 0 ? joinUserContentUrl(baseUrl, image) : null;
-  if (!imageUrl && !hasBackgroundSlot) return null;
-  const rawFade = theme?.background?.fadeAfterFirstMessage;
-  const fadeOpacity =
-    typeof rawFade === 'number' && Number.isFinite(rawFade)
-      ? Math.min(1, Math.max(0, rawFade))
-      : DEFAULT_BACKGROUND_FADE;
-  return { imageUrl, fadeOpacity };
-}
-
-/** App backdrop opacity: opaque until the agent has a USER message. */
-export function backdropOpacity(fade: number | null, hasUserMessage: boolean): number {
-  return fade !== null && hasUserMessage ? fade : 1;
 }
 
 export function parseInlineViewMetadata(value: unknown): InlineViewMetadata | null {
