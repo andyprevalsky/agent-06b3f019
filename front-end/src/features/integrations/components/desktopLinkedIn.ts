@@ -139,9 +139,8 @@ export function linkedinAccountViews(
           }),
         removeLabel: `Remove LinkedIn account ${label}`,
         removing: removal.removingKey === removalKey(LINKEDIN_PROVIDER, account.accountId),
-        removeBlockedReason: removal.blockedReasons?.[
-          removalKey(LINKEDIN_PROVIDER, account.accountId)
-        ],
+        removeBlockedReason:
+          removal.blockedReasons?.[removalKey(LINKEDIN_PROVIDER, account.accountId)],
         onResync: failed ? () => port.onRetry(account.accountId) : undefined,
         resyncLabel: `Retry LinkedIn export for ${label}`,
         resyncing: port.startingAccountId === account.accountId,

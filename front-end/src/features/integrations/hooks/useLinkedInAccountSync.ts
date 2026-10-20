@@ -20,7 +20,7 @@ import { useCallback, useRef, useState } from 'react';
 import { toast } from '@/hooks/use-toast';
 import { deleteAgent } from '@/lib/api';
 
-import { createLinkedInSyncAgentApi, LinkedInExportRunningError } from '../api';
+import { createLinkedInSyncAgentApi, LinkedInExportRunningError } from '../api/linkedin';
 
 /** `startingAccountId` while a new (not yet known) account's export is starting. */
 export const NEW_LINKEDIN_ACCOUNT = '__new__';

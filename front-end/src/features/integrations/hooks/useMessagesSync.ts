@@ -3,7 +3,7 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import type { useIntegrationHandlers } from '@/features/integration-handlers-context';
 import { toast } from '@/hooks/use-toast';
 
-import { createLinkedInSyncAgentApi } from '../api';
+import { createLinkedInSyncAgentApi } from '../api/linkedin';
 import type { ConnectedIntegration, MessageSyncType } from '../types';
 
 /** How often a running LinkedIn sync re-reads its state, so the row settles when the agent ends. */

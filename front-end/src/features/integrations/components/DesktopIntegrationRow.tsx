@@ -88,8 +88,7 @@ function defaultTitle(tone: DesktopAccountView['tone']): string {
 /** One chip; flips a syncing account to synced the moment its progress hits 100%. */
 function DesktopAccountChip({ account }: { account: DesktopAccountView }) {
   const progress = useSyncProgress(account.provider, account.accountId);
-  const tone =
-    account.tone === 'syncing' && isProgressComplete(progress) ? 'synced' : account.tone;
+  const tone = account.tone === 'syncing' && isProgressComplete(progress) ? 'synced' : account.tone;
   const pctDetail =
     tone === 'syncing' && progress !== null && progress.pct !== null
       ? `${Math.round(progress.pct)}%`

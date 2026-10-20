@@ -155,7 +155,10 @@ describe('L-INTEG-CORE: Rose Desktop integrations on the real contract', () => {
     expect(served.progressCalls).toEqual(['', 'c1']);
     expect(served.listCalls).toBe(1);
 
-    // Nothing syncs any more: the poll stops.
+    // Nothing syncs any more: the poll stops. React clears the interval in a
+    // passive effect after the commit the waitFor above saw; yield one real
+    // macrotask so that effect runs before the clock moves.
+    await new Promise((resolve) => setTimeout(resolve, 20));
     vi.advanceTimersByTime(15_000);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(served.progressCalls).toEqual(['', 'c1']);
