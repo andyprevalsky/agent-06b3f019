@@ -1,6 +1,7 @@
 """Owning simulator regressions, run from the existing WMH blackbox gate in 3.12."""
 
 import asyncio
+import inspect
 import json
 from copy import deepcopy
 
@@ -2604,3 +2605,42 @@ def test_v4_placeholder_reply_is_rejected_and_never_commits():
         assert session.revision == 0 and session.state["structured"]["scheduled_events"] == []
 
     asyncio.run(run())
+
+
+def test_concurrent_prediction_records_redact_in_parallel_outside_the_serving_gil(tmp_path, monkeypatch):
+    """SIM run 7: every step's full-request redaction serialized on the native server's GIL."""
+    import os
+    from concurrent.futures import ThreadPoolExecutor
+
+    from benchmarks import serve_experiential_world_model as serving
+    from benchmarks.wmh_archive_io import redact_archive
+    from benchmarks.wmh_native_prediction_writer import redaction_pool, redaction_workers
+
+    for invalid in ("0", "65"):
+        monkeypatch.setenv("WMH_NATIVE_REDACTION_WORKERS", invalid)
+        with pytest.raises(ValueError):
+            redaction_workers()
+    monkeypatch.setenv("WMH_NATIVE_REDACTION_WORKERS", "2")
+    assert redaction_workers() == 2
+    # The served entrypoint owns the pool, passes it to its writer and closes it.
+    source = inspect.getsource(serving.main)
+    assert "redactor=redactor" in source and "redactor.shutdown(wait=True)" in source
+    pool = redaction_pool()
+    try:
+        assert pool._max_workers == 2
+        writer = NativePredictionWriter(tmp_path, "artifact", "a" * 64, redactor=pool)
+        secret = {"goal": "Use sk-exampleCredentialOnlyForUnitTests", "password": "unit-test-value"}
+        record = {
+            "schema": "rose.wmh_native_prediction.v1",
+            "session_id": "s1",
+            "request": {"messages": [{"role": "user", "content": json.dumps(secret)}]},
+        }
+        with ThreadPoolExecutor(8) as threads:
+            receipts = list(threads.map(lambda n: writer({**record, "prediction_id": f"p{n}"}), range(8)))
+        expected, count = redact_archive({**record, "prediction_id": "p0"})
+        written = [json.loads((tmp_path / receipt["path"]).read_text()) for receipt in receipts]
+        assert all(row["redaction_count"] == count >= 2 for row in written)
+        assert written[0]["request"] == expected["request"] and "unit-test-value" not in json.dumps(written)
+        assert pool.submit(os.getpid).result() != os.getpid()
+    finally:
+        pool.shutdown(wait=True)

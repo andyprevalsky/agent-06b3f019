@@ -702,6 +702,7 @@ def test_boot_admission_archives_only_verified_completed_standalone_runs(tmp_pat
 @pytest.mark.parametrize(
     "case",
     [
+        "wmh-serve-log",
         "seal-transition",
         "manifest-url",
         "manifest-timeout",
