@@ -30,8 +30,10 @@
  * RESIZE_HISTORY rows of that session's own resize history (indexed by
  * codeSessionId); keepalive adds one indexed read. No shared row or counter.
  */
+import { Sandbox } from 'e2b';
 import { prisma } from '../database';
 import { createLogger } from '../logger';
+import { unregisterWorkspaceExecutor } from '../projects/workspaceExecutor';
 import { isLocalClaudeCodeSandboxId } from '../claudeCodeLocalSession';
 import { isLocalDeviceSandboxId } from '../localDevices/hub';
 import { isRoseDevUser } from '../../utils/roseDevAccess';
@@ -49,11 +51,17 @@ export interface SandboxSize {
   memoryGb: number;
 }
 
-/** The template grid the sized build config produces (e2b-templates/sized-templates.json). */
+/**
+ * The template grid the sized build config produces (e2b-templates/sized-templates.json,
+ * pinned equal by a structural test): 4 templates per provider. Every point is a
+ * separately built E2B template, so the grid stays small.
+ */
 export const DEFAULT_SANDBOX_GRID: { cpu: number[]; memoryGb: number[] } = {
-  cpu: [2, 4, 8],
-  memoryGb: [4, 8, 16],
+  cpu: [2, 8],
+  memoryGb: [4, 16],
 };
+/** A configured grid larger than this (per provider) is refused. */
+export const MAX_GRID_POINTS = 9;
 
 const DEFAULT_CODEX_TEMPLATE = 'codex-code';
 const DEFAULT_COOLDOWN_MIN = 10;
@@ -70,7 +78,10 @@ function positiveInts(value: unknown): number[] | null {
   return out.length === value.length ? [...new Set(out)].sort((a, b) => a - b) : null;
 }
 
-/** CODE_SANDBOX_GRID (`{"cpu":[2,4,8],"memoryGb":[4,8,16]}`), else the default grid. */
+/**
+ * CODE_SANDBOX_GRID (`{"cpu":[2,8],"memoryGb":[4,16]}`), else the default grid.
+ * A grid of more than MAX_GRID_POINTS templates is refused (default grid).
+ */
 export function sandboxGrid(): { cpu: number[]; memoryGb: number[] } {
   const raw = process.env.CODE_SANDBOX_GRID?.trim();
   if (raw) {
@@ -78,11 +89,13 @@ export function sandboxGrid(): { cpu: number[]; memoryGb: number[] } {
       const parsed = JSON.parse(raw) as { cpu?: unknown; memoryGb?: unknown };
       const cpu = positiveInts(parsed.cpu);
       const memoryGb = positiveInts(parsed.memoryGb);
-      if (cpu !== null && memoryGb !== null) return { cpu, memoryGb };
+      if (cpu !== null && memoryGb !== null && cpu.length * memoryGb.length <= MAX_GRID_POINTS) {
+        return { cpu, memoryGb };
+      }
     } catch {
       // fall through to the warning
     }
-    log.warn('CODE_SANDBOX_GRID is invalid; using the default grid');
+    log.warn(`CODE_SANDBOX_GRID is invalid or over ${MAX_GRID_POINTS} sizes; using the default grid`);
   }
   return DEFAULT_SANDBOX_GRID;
 }
@@ -231,7 +244,11 @@ export function closestAvailableSize(
   return fits[0] ?? null;
 }
 
-/** Largest vCPUs / memory this user's code agents may resize to. */
+/**
+ * Largest vCPUs / memory this user's code agents may resize to: the user's
+ * own cap (User.codeSandboxMax*), else CODE_SANDBOX_MAX_CPU / _MEMORY_GB, else
+ * the grid's largest size. Rose dev accounts ignore the deployment cap.
+ */
 export async function maxSizeFor(userId: string): Promise<SandboxSize> {
   const grid = sandboxGrid();
   const top = {
@@ -245,8 +262,8 @@ export async function maxSizeFor(userId: string): Promise<SandboxSize> {
   const fallback = isRoseDevUser(userId)
     ? top
     : {
-        cpu: intEnv('CODE_SANDBOX_MAX_CPU') ?? 4,
-        memoryGb: intEnv('CODE_SANDBOX_MAX_MEMORY_GB') ?? 8,
+        cpu: intEnv('CODE_SANDBOX_MAX_CPU') ?? top.cpu,
+        memoryGb: intEnv('CODE_SANDBOX_MAX_MEMORY_GB') ?? top.memoryGb,
       };
   return {
     cpu: user?.codeSandboxMaxCpu ?? fallback.cpu,
@@ -347,6 +364,17 @@ export class SandboxResizeError extends Error {
     super(message);
     this.name = 'SandboxResizeError';
   }
+}
+
+/** HTTP status + body for a resize error, or null when it is not one. */
+export function sandboxResizeHttpError(
+  error: unknown
+): { status: number; body: Record<string, unknown> } | null {
+  if (!(error instanceof SandboxResizeError)) return null;
+  return {
+    status: error.status,
+    body: { error: error.message, code: error.code, ...error.details },
+  };
 }
 
 export interface SizeView {
@@ -647,11 +675,12 @@ export async function environmentStatus(params: {
 
 // ── applying a request ──
 
+/** The task that continues the session (a create response carries more fields). */
 export interface ResizeSessionResult {
   task_id: string;
   sandbox_id: string;
   ws_url: string;
-  [field: string]: unknown;
+  code_session_id?: string | null;
 }
 
 export interface ResizeCreateInput {
@@ -697,10 +726,11 @@ async function existingResult(row: ResizeRow): Promise<ResizeSessionResult | nul
   };
 }
 
-export interface PerformResizeResult {
+export interface PerformResizeResult<T extends ResizeSessionResult = ResizeSessionResult> {
   resized: boolean;
   request: ResizeRequestView;
-  session: ResizeSessionResult;
+  /** The create response; an idempotent replay returns only the task identity. */
+  session: T | ResizeSessionResult;
 }
 
 /**
@@ -708,21 +738,21 @@ export interface PerformResizeResult {
  * retry after completion returns the same continuing task; a concurrent one
  * gets 409 RESIZE_IN_PROGRESS and retries.
  */
-export async function performSandboxResize(params: {
+export async function performSandboxResize<T extends ResizeSessionResult>(params: {
   taskId: string;
   requestId: string;
-  create: (input: ResizeCreateInput) => Promise<ResizeSessionResult>;
+  create: (input: ResizeCreateInput) => Promise<T>;
   stopCli: (sandboxId: string) => Promise<void>;
   closeTask: (taskId: string) => Promise<void>;
   now?: Date;
-}): Promise<PerformResizeResult> {
+}): Promise<PerformResizeResult<T>> {
   const now = params.now ?? new Date();
   const task = await prisma.claudeCodeSession.findUnique({ where: { id: params.taskId } });
   const row = await prisma.codeSessionResize.findUnique({ where: { id: params.requestId } });
   if (task === null || row === null || row.codeSessionId !== task.codeSessionId) {
     throw new SandboxResizeError(404, 'RESIZE_NOT_FOUND', 'Resize request not found');
   }
-  const settled = async (current: ResizeRow): Promise<PerformResizeResult | null> => {
+  const settled = async (current: ResizeRow): Promise<PerformResizeResult<T> | null> => {
     if (current.status !== 'DONE' && current.status !== 'FAILED') return null;
     const session = await existingResult(current);
     if (session === null) {
@@ -810,4 +840,22 @@ export async function performSandboxResize(params: {
     });
     return { resized: false, request: resizeView(updated), session: created };
   }
+}
+
+/** Stop the ws-server and its CLI in an E2B sandbox, leaving the sandbox (and its files) up. */
+export async function stopSandboxCli(sandboxId: string): Promise<void> {
+  const sandbox = await Sandbox.connect(sandboxId, { apiKey: process.env.E2B_API_KEY });
+  await sandbox.commands.run(
+    "for p in $(pgrep -f 'node /home/user/ws-server.mjs'); do pkill -TERM -P \"$p\"; kill -TERM \"$p\"; done; sleep 1; true",
+    { timeoutMs: 15_000 }
+  );
+}
+
+/** The resized session continues as a new task; the old task row is closed (no output extraction). */
+export async function closeTaskForResize(taskId: string): Promise<void> {
+  unregisterWorkspaceExecutor(taskId);
+  await prisma.claudeCodeSession.updateMany({
+    where: { id: taskId, status: { not: 'CLOSED' } },
+    data: { status: 'CLOSED', closedAt: new Date() },
+  });
 }

@@ -6,6 +6,7 @@
  * POST   /checkpoint         - checkpoint a running task (worker drain) without pausing
  * POST   /:taskId/keepalive  - extend an attached task's sandbox idle window + lease
  * POST   /:taskId/usage-limit - the CLI stopped on a usage limit: rate-limit its credential (C15)
+ * POST   /:taskId/resize    - apply a pending sandbox size change; returns the continuing task (C16)
  * GET    /:taskId/preview   - live dev-server preview of the task's session (dev accounts, A1)
  * POST   /:taskId/publish   - push its branch + open a PR, never merge (dev accounts, A1)
  * GET    /credential-availability?user_id[&own_only=true] - can a Claude / Codex credential be leased now
@@ -33,9 +34,12 @@ import { ROSE_DEV_ONLY_BODY, isRoseDevUser } from '../../utils/roseDevAccess';
 import {
   codePublishSchema,
   codeSessionCheckpointSchema,
+  codeTaskResizeSchema,
   codeTaskUsageLimitSchema,
   credentialAvailabilityQuerySchema,
 } from './types';
+import { resizeSession } from './service';
+import { sandboxResizeHttpError } from '../../providers/codeSessions/sandboxSize';
 import {
   codeCredentialAvailability,
   markCodeTaskUsageLimited,
@@ -247,6 +251,34 @@ export function registerCodeSessionTaskRoutes(router: Router): void {
       const resetsAt = parseResetsAt(resets_at);
       const result = await markCodeTaskUsageLimited(req.params.taskId, 'claude', resetsAt);
       res.json({ ...result, resets_at: resetsAt?.toISOString() ?? null });
+    })
+  );
+
+  router.post(
+    '/:taskId/resize',
+    authenticate,
+    asyncHandler(async (req: AuthRequest, res: Response) => {
+      if (req.isInternal !== true) {
+        res.status(403).json({ error: 'Internal callers only' });
+        return;
+      }
+      const parsed = codeTaskResizeSchema.safeParse(req.body ?? {});
+      if (!UUID.test(req.params.taskId) || !parsed.success) {
+        res.status(400).json({ error: 'task id and request_id (uuid) are required' });
+        return;
+      }
+      try {
+        const result = await resizeSession(req.params.taskId, parsed.data.request_id);
+        res.json({ ...result.session, resized: result.resized, request: result.request });
+      } catch (error) {
+        const mapped = sandboxResizeHttpError(error);
+        if (mapped !== null) {
+          res.status(mapped.status).json(mapped.body);
+          return;
+        }
+        if (sendCodeSessionError(res, error)) return;
+        throw error;
+      }
     })
   );
 }

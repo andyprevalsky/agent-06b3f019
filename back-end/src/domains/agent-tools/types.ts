@@ -120,6 +120,19 @@ export type MessageRequestBody = z.infer<typeof messageRequestSchema>;
 export type ApprovalRequestBody = z.infer<typeof approvalRequestSchema>;
 
 /** Who is calling: a code-agent sandbox (token) or a Rose agent (agents worker). */
+/**
+ * POST /api/agent-tools/:agentId/environment/size — a code agent asks for
+ * another sandbox size (C16). Either dimension alone keeps the other; the
+ * reason is required (checked by the service so the error says so).
+ */
+export const environmentSizeSchema = z
+  .object({
+    cpu: z.number().int().min(1).max(64).optional(),
+    memory_gb: z.number().int().min(1).max(256).optional(),
+    reason: z.string().max(1000).optional(),
+  })
+  .strict();
+
 export type AgentToolsCaller =
   | {
       kind: 'code_agent';

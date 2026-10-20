@@ -13,6 +13,8 @@ import { isAgentToolsToken, verifyAgentToolsToken } from '../../providers/agentT
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { displayMedia } from './displayService';
+import { readEnvironment, requestEnvironmentSize } from './environmentService';
+import { sandboxResizeHttpError } from '../../providers/codeSessions/sandboxSize';
 import { sendMessageToUser } from './messageService';
 import { answerQuestion } from './questionService';
 import { createApproval, waitForRequest } from './requestService';
@@ -22,6 +24,7 @@ import {
   answerQuestionSchema,
   approvalRequestSchema,
   displayRequestSchema,
+  environmentSizeSchema,
   messageRequestSchema,
   waitQuerySchema,
   type AgentToolsCaller,
@@ -102,6 +105,11 @@ function sendError(res: Response, err: unknown): void {
       .json({ error: err.message, ...(err.details ? { details: err.details } : {}) });
     return;
   }
+  const resize = sandboxResizeHttpError(err);
+  if (resize !== null) {
+    res.status(resize.status).json(resize.body);
+    return;
+  }
   throw err;
 }
 
@@ -159,6 +167,39 @@ router.post(
         requestKey: parsed.data.request_key,
       });
       res.status(201).json(result);
+    } catch (err) {
+      sendError(res, err);
+    }
+  })
+);
+
+/** GET /:agentId/environment — the session's sandbox size, cap, built sizes, recent resizes (C16). */
+router.get(
+  '/:agentId/environment',
+  agentToolsAuth,
+  asyncHandler<AgentToolsRequest>(async (req, res) => {
+    const caller = callerFor(req, res);
+    if (caller === null) return;
+    try {
+      res.json(await readEnvironment(caller));
+    } catch (err) {
+      sendError(res, err);
+    }
+  })
+);
+
+/** POST /:agentId/environment/size {cpu?, memory_gb?, reason} — 202 accepted (C16). */
+router.post(
+  '/:agentId/environment/size',
+  agentToolsAuth,
+  asyncHandler<AgentToolsRequest>(async (req, res) => {
+    const caller = callerFor(req, res);
+    if (caller === null) return;
+    const parsed = environmentSizeSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return invalidBody(res, parsed.error.issues);
+    try {
+      const result = await requestEnvironmentSize(caller, parsed.data);
+      res.status(result.httpStatus).json(result.body);
     } catch (err) {
       sendError(res, err);
     }
