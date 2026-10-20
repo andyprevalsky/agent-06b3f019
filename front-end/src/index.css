@@ -156,6 +156,32 @@
     color-scheme: dark;
   }
 
+  /* Rose dark palette (mock panels/dark.js): the theme tokens that every
+     shadcn surface reads (cards, popovers/menus, tooltips, toasts, dialogs,
+     tabs, inputs, secondary chips) move from the stock navy .dark values to
+     the mock's neutral greys. Only RoseThemeProvider ever sets html.dark
+     (Rose Desktop accounts), so stock accounts and light mode never see these;
+     html.dark outranks the stock .dark block. Hex in comments. */
+  html.dark {
+    --background: 60 2.6% 14.9%; /* #272725 page */
+    --foreground: 60 9.5% 91.8%; /* #ecece8 */
+    --card: 60 2.9% 13.3%; /* #232321 panel */
+    --card-foreground: 60 9.5% 91.8%;
+    --popover: 60 3.3% 17.8%; /* #2f2f2c menus, tooltips */
+    --popover-foreground: 60 9.5% 91.8%;
+    --primary: 60 10.3% 94.3%; /* #f2f2ef */
+    --primary-foreground: 60 3.3% 11.8%; /* #1f1f1d */
+    --secondary: 60 3.3% 17.8%; /* #2f2f2c controls */
+    --secondary-foreground: 60 8.5% 88.4%; /* #e4e4df */
+    --muted: 60 3.3% 17.8%; /* #2f2f2c */
+    --muted-foreground: 60 3.2% 62.7%; /* #a3a39d */
+    --accent: 60 2.8% 21.4%; /* #383835 hover */
+    --accent-foreground: 60 10.3% 94.3%;
+    --border: 60 1.6% 25.1%; /* rgba(255,255,255,.12) over #272725 */
+    --input: 60 1.6% 25.1%;
+    --ring: 60 3.2% 62.7%;
+  }
+
   html.dark,
   html.dark body {
     background-color: #272725;

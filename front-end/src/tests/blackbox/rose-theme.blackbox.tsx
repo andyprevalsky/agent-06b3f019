@@ -1,11 +1,9 @@
 /**
  * Rose Desktop dark mode (UI ledger rows 25/52/62): useRoseTheme() toggles
  * light <-> dark per user, dark adds html.dark and the calm dark background,
- * and light mode stays byte-identical to the stock UI.
+ * and light mode stays byte-identical to the stock UI. The index.css
+ * contracts (scrollbars, dark palette tokens) live in rose-theme-css.blackbox.ts.
  */
-import fs from 'node:fs';
-import path from 'node:path';
-import postcss, { type Rule } from 'postcss';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -558,88 +556,6 @@ describe('completed agent check (row 71)', () => {
   it('a failed run keeps its muted red x in both themes', () => {
     const { container } = render(<AgentStatusIndicator status={{ ...done, failed: true }} />);
     expect(container.querySelector('svg')?.getAttribute('class')).not.toContain('22c55e');
-  });
-});
-
-describe('dark scrollbars (row 62)', () => {
-  const css = fs.readFileSync(path.resolve(__dirname, '../../index.css'), 'utf-8');
-  const root = postcss.parse(css);
-  const scrollbarRules: Rule[] = [];
-  root.walkRules((rule) => {
-    const touchesScrollbars =
-      rule.selector.includes('::-webkit-scrollbar') ||
-      rule.some(
-        (node) =>
-          node.type === 'decl' && (node.prop === 'color-scheme' || node.prop === 'scrollbar-color'),
-      );
-    // The code-agent terminal keeps its own green scrollbar in both themes.
-    if (touchesScrollbars && !rule.selector.includes('.code-agent-terminal-host')) {
-      scrollbarRules.push(rule);
-    }
-  });
-
-  function decls(selector: string): Record<string, string> {
-    const rule = scrollbarRules.find((r) => r.selectors.includes(selector));
-    if (rule === undefined) throw new Error(`missing rule ${selector}`);
-    const out: Record<string, string> = {};
-    rule.walkDecls((d) => {
-      out[d.prop] = d.value;
-    });
-    return out;
-  }
-
-  it('scopes every scrollbar / color-scheme rule under html.dark (light untouched)', () => {
-    expect(scrollbarRules.length).toBeGreaterThanOrEqual(6);
-    for (const rule of scrollbarRules) {
-      for (const selector of rule.selectors) {
-        expect(selector).toMatch(/^html\.dark(\s|$)/);
-      }
-    }
-  });
-
-  it('uses dark native controls and the navi scrollbar colours', () => {
-    expect(decls('html.dark')['color-scheme']).toBe('dark');
-    expect(decls('html.dark *')['scrollbar-color']).toBe('#4a4a46 transparent');
-    expect(decls('html.dark ::-webkit-scrollbar-thumb')).toMatchObject({
-      background: '#4a4a46',
-      'border-radius': '10px',
-      border: '2px solid #272725',
-    });
-    expect(decls('html.dark ::-webkit-scrollbar-thumb:hover').background).toBe('#5c5c57');
-    expect(decls('html.dark ::-webkit-scrollbar-track').background).toBe('transparent');
-    expect(decls('html.dark ::-webkit-scrollbar-corner').background).toBe('transparent');
-    expect(decls('html.dark ::-webkit-scrollbar').background).toBe('transparent');
-  });
-
-  it('keeps the webkit hover thumb in Chromium: scrollbar-color only where ::-webkit-scrollbar is unsupported', () => {
-    // Chromium ignores every ::-webkit-scrollbar rule on an element with a
-    // non-auto scrollbar-color, which would drop the #5c5c57 hover thumb.
-    const colorRules = scrollbarRules.filter((rule) =>
-      rule.some((node) => node.type === 'decl' && node.prop === 'scrollbar-color'),
-    );
-    expect(colorRules.length).toBeGreaterThan(0);
-    for (const rule of colorRules) {
-      const parent = rule.parent;
-      expect(parent?.type).toBe('atrule');
-      expect(parent?.type === 'atrule' && `@${parent.name} ${parent.params}`).toBe(
-        '@supports not selector(::-webkit-scrollbar)',
-      );
-    }
-  });
-
-  it('paints the page solid navi black, scoped to html.dark', () => {
-    const pageRules: Rule[] = [];
-    root.walkRules((rule) => {
-      if (rule.selectors.includes('html.dark body')) pageRules.push(rule);
-    });
-    expect(pageRules).toHaveLength(1);
-    const [page] = pageRules;
-    page.selectors.forEach((selector) => expect(selector).toMatch(/^html\.dark(\s|$)/));
-    const background: string[] = [];
-    page.walkDecls('background-color', (d) => {
-      background.push(d.value);
-    });
-    expect(background).toEqual(['#272725']);
   });
 });
 
