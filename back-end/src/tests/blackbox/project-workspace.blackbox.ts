@@ -144,14 +144,31 @@ function installFakeClaude(): void {
   writeFileSync(
     path,
     `#!${process.execPath}
+// ws-server keeps stdin open until the turn's result (direct chat / agent
+// messages), so answer the first stream-json prompt line instead of waiting
+// for end-of-input.
 const { writeFileSync } = require('node:fs');
 let stdin = '';
+let answered = false;
 process.stdin.setEncoding('utf8');
-process.stdin.on('data', (c) => { stdin += c; });
-process.stdin.on('end', () => {
-  writeFileSync(process.env.FAKE_CLAUDE_CAPTURE_PATH, JSON.stringify({ cwd: process.cwd(), stdin }));
+process.stdin.on('data', (c) => {
+  stdin += c;
+  if (answered || !stdin.includes('\\n')) return;
+  answered = true;
+  // The prompt arrives as a stream-json user message; record its text.
+  const line = stdin.split('\\n')[0];
+  let text = line;
+  try {
+    const msg = JSON.parse(line);
+    text = (msg.message?.content ?? []).map((part) => part.text ?? '').join('');
+  } catch {}
+  writeFileSync(
+    process.env.FAKE_CLAUDE_CAPTURE_PATH,
+    JSON.stringify({ cwd: process.cwd(), stdin: text, raw: stdin })
+  );
   process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result: 'ok' }) + '\\n');
 });
+process.stdin.on('end', () => process.exit(0));
 `
   );
   chmodSync(path, 0o755);

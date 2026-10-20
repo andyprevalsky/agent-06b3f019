@@ -774,7 +774,9 @@ function projectStartupNote(report) {
 async function runClaudeCli(startupReport = null) {
   const sanitizedGoal = GOAL.replace(/\0/g, "");
   // Direct-chat stream-json user message; the project startup note leads the task.
-  const prompt = userMessageLine(`${projectStartupNote(startupReport)}Task:\n${sanitizedGoal}`);
+  const prompt = userMessageLine(
+    `${projectStartupNote(startupReport)}Task:\n${sanitizedGoal}`,
+  );
 
   appendEvent({
     type: "session",
