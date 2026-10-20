@@ -34,8 +34,5 @@ export const JPEG_QUALITY_CEILING = 80;
 /** The mirrored iPhone is portrait; ask for a thumbnail this tall per px wide. */
 export const THUMBNAIL_HEIGHT_RATIO = 2.2;
 
-/** Salt for the per-install Mac id hash; the raw hardware UUID never leaves. */
-export const MAC_DEVICE_ID_SALT = 'rose-phone-mirroring-v1';
-
 /** Timeout for the local probes (`pgrep`, `ioreg`, `scutil`). */
 export const PROBE_TIMEOUT_MS = 3_000;

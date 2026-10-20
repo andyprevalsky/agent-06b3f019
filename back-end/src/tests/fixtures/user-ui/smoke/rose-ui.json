@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "theme": "root/theme.json",
+  "slots": {
+    "home.dashboard": { "entry": "root/slots/dashboard/index.html" }
+  },
+  "inline": {
+    "hello": { "entry": "inline/hello/index.html", "summary": "Smoke inline view" }
+  }
+}

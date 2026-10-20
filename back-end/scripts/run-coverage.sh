@@ -490,9 +490,17 @@ fi
 if ! $DB_FOUND; then
   SYSTEM_PG_PORT=5432
   if pg_isready -h localhost -p "$SYSTEM_PG_PORT" -U postgres -q 2>/dev/null; then
+    # Never the shared `victoria`: this workspace's own database only.
+    # Created after the Prisma freshness check: stale deps touch no DB.
+    if ! SYSTEM_DB_NAME="$(workspace_system_db_name "$WORKSPACE_HINT")"; then
+      echo "❌ Workspace name '$WORKSPACE_HINT' cannot name a test database (letters, digits, - and _ only)." >&2
+      exit 1
+    fi
+    ENSURE_SYSTEM_DB_NAME="$SYSTEM_DB_NAME"
     LOCAL_DB_PORT="$SYSTEM_PG_PORT"
+    LOCAL_PSQL_URL="postgresql://postgres:postgres@localhost:$SYSTEM_PG_PORT/$SYSTEM_DB_NAME"
     DB_FOUND=true
-    echo "Using local Postgres (system) at localhost:$SYSTEM_PG_PORT"
+    echo "Using local Postgres (system) at localhost:$SYSTEM_PG_PORT, database $SYSTEM_DB_NAME"
   fi
 fi
 
@@ -519,6 +527,11 @@ if $DB_FOUND; then
   export DATABASE_URL="$LOCAL_DB_URL"
   export DIRECT_URL="$LOCAL_DB_URL"
   node "$SCRIPT_DIR/assert-prisma-client-current.mjs"
+  if [[ -n "${ENSURE_SYSTEM_DB_NAME:-}" ]] &&
+    ! ensure_workspace_system_db "$LOCAL_DB_PORT" "$ENSURE_SYSTEM_DB_NAME"; then
+    echo "❌ Could not create the test database $ENSURE_SYSTEM_DB_NAME on localhost:$LOCAL_DB_PORT." >&2
+    exit 1
+  fi
   # run-unit-tests.ts resolves `victoria-db-<basename>` on its own, which misses
   # a hash-suffixed worktree container and falls back to the shared :5432 DB
   # with a stale schema. Hand the unit tests the database synced below.

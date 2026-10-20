@@ -159,6 +159,7 @@ DB_CONTAINER="victoria-db-${WORKSPACE_HINT}"
 DB_FOUND=false
 STACK_DB_EXPECTED=false
 SELECTED_DB_URL=""
+ENSURE_SYSTEM_DB_NAME=""
 ISOLATED_DB_RESOLVED=false
 
 # Managed callers (for example, run-coverage.sh) may know the exact isolated
@@ -261,9 +262,17 @@ if ! $STACK_DB_EXPECTED && ! $DB_FOUND; then
   SYSTEM_PG_CANDIDATES+=(5432)
   for SYSTEM_PG_PORT in "${SYSTEM_PG_CANDIDATES[@]}"; do
     if pg_isready -h localhost -p "$SYSTEM_PG_PORT" -U postgres -q 2>/dev/null; then
+      # Never the shared `victoria`: this workspace's own database only.
+      if ! SYSTEM_DB_NAME="$(workspace_system_db_name "$WORKSPACE_HINT")"; then
+        echo "❌ Workspace name '$WORKSPACE_HINT' cannot name a test database (letters, digits, - and _ only)." >&2
+        exit 1
+      fi
+      # Created after the Prisma freshness check: stale deps touch no DB.
+      ENSURE_SYSTEM_DB_NAME="$SYSTEM_DB_NAME"
       LOCAL_DB_PORT="$SYSTEM_PG_PORT"
+      SELECTED_DB_URL="postgresql://postgres:postgres@localhost:$SYSTEM_PG_PORT/$SYSTEM_DB_NAME"
       DB_FOUND=true
-      echo "Using local Postgres (system) at localhost:$SYSTEM_PG_PORT"
+      echo "Using local Postgres (system) at localhost:$SYSTEM_PG_PORT, database $SYSTEM_DB_NAME"
       break
     fi
   done
@@ -289,6 +298,11 @@ if $DB_FOUND; then
     echo "Skipping local DB schema sync; existing backend caller prepared the test database."
   else
     node "$SCRIPT_DIR/assert-prisma-client-current.mjs"
+    if [[ -n "${ENSURE_SYSTEM_DB_NAME:-}" ]] &&
+      ! ensure_workspace_system_db "$LOCAL_DB_PORT" "$ENSURE_SYSTEM_DB_NAME"; then
+      echo "❌ Could not create the test database $ENSURE_SYSTEM_DB_NAME on localhost:$LOCAL_DB_PORT." >&2
+      exit 1
+    fi
     if command -v psql >/dev/null 2>&1; then
       psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
 DO $$
@@ -486,38 +500,62 @@ source "$SCRIPT_DIR/blackbox-auto-rca-env.sh"
 export FAST_MODE_ANTHROPIC_PROXY_URL="${BLACKBOX_FAST_MODE_ANTHROPIC_PROXY_URL:-}"
 export FAST_MODE_CODEX_PROXY_URL="${BLACKBOX_FAST_MODE_CODEX_PROXY_URL:-}"
 
-cat >"$MANIFEST_PATH" <<EOF
+launch_backend() {
+  cat >"$MANIFEST_PATH" <<EOF
 {"run_id":"$RUN_ID","mode":"isolated-blackbox-backend","base_url":"$TEST_BASE_URL","port":$PORT,"artifact_dir":"$ARTIFACT_DIR","backend_log":"$BACKEND_LOG","runner_log":"$RUNNER_LOG","disable_gmail_sync":true}
 EOF
 
-echo "Starting isolated backend for black-box tests on port $PORT"
-echo "Backend log: $BACKEND_LOG"
-echo "Artifacts: $ARTIFACT_DIR"
+  echo "Starting isolated backend for black-box tests on port $PORT"
+  echo "Backend log: $BACKEND_LOG"
+  echo "Artifacts: $ARTIFACT_DIR"
 
-# Defer cancellation only across the background-child ownership handoff.
-BACKEND_PENDING_SIGNAL=0
-trap 'BACKEND_PENDING_SIGNAL=130' INT
-trap 'BACKEND_PENDING_SIGNAL=143' TERM
+  # Defer cancellation only across the background-child ownership handoff.
+  BACKEND_PENDING_SIGNAL=0
+  trap 'BACKEND_PENDING_SIGNAL=130' INT
+  trap 'BACKEND_PENDING_SIGNAL=143' TERM
 
-PORT="$PORT" \
-DISABLE_GMAIL_SYNC=1 \
-npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
-BACKEND_PID=$!
-trap 'exit 130' INT
-trap 'exit 143' TERM
-if [[ "$BACKEND_PENDING_SIGNAL" != 0 ]]; then
-  exit "$BACKEND_PENDING_SIGNAL"
-fi
+  PORT="$PORT" \
+  DISABLE_GMAIL_SYNC=1 \
+  npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
+  BACKEND_PID=$!
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  if [[ "$BACKEND_PENDING_SIGNAL" != 0 ]]; then
+    exit "$BACKEND_PENDING_SIGNAL"
+  fi
+}
+launch_backend
 
 
 READY=0
+BIND_RETRIES=0
 for _ in $(seq 1 120); do
-  if curl -fsS -m 2 "$TEST_BASE_URL/health" >/dev/null 2>&1; then
+  # Port locks are per worktree, so another worktree's isolated backend can
+  # take the same port between the free-port probe and our bind. /health alone
+  # would then pass against THAT backend and every test would run against the
+  # wrong code. Ready means our own process logged that it serves this port.
+  if curl -fsS -m 2 "$TEST_BASE_URL/health" >/dev/null 2>&1 &&
+    grep -Eq "Server started.*port[\"=:]+ ?${PORT}([^0-9]|$)" "$BACKEND_LOG" 2>/dev/null; then
     READY=1
     break
   fi
 
   if ! kill -0 "$BACKEND_PID" >/dev/null 2>&1; then
+    # Another worktree's runner took this port between our free-port probe and
+    # the bind. Without an explicitly requested port, move to the next free one.
+    if [[ -z "${BLACKBOX_TEST_BACKEND_PORT:-${CONTRACT_TEST_BACKEND_PORT:-}}" ]] &&
+      [[ "$BIND_RETRIES" -lt 5 ]] && grep -q "EADDRINUSE" "$BACKEND_LOG" 2>/dev/null; then
+      BIND_RETRIES=$((BIND_RETRIES + 1))
+      echo "⚠️  Port $PORT was taken before the isolated backend bound it; retrying on the next free port"
+      wait "$BACKEND_PID" >/dev/null 2>&1 || true
+      BACKEND_PID=""
+      rmdir "$PORT_LOCK_DIR" >/dev/null 2>&1 || true
+      PORT_LOCK_DIR=""
+      reserve_port "$((PORT + 1))"
+      export TEST_BASE_URL="http://localhost:$PORT"
+      launch_backend
+      continue
+    fi
     echo "❌ Backend process exited before becoming ready"
     echo "Last backend log lines:"
     tail -n 80 "$BACKEND_LOG" || true

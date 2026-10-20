@@ -694,7 +694,9 @@ of truth; do not duplicate them into other files.
     do not need `.env`/data materialized.
 - **Database:** Docker is typically unavailable on the Cloud VM, so the stack uses
   **system PostgreSQL** at `localhost:5432` (`postgres`/`postgres`, db `victoria`);
-  `scripts/run.sh` and the blackbox runner auto-fall back to it. Start it with
+  `scripts/run.sh` falls back to it. The backend blackbox and coverage runners
+  use their own `victoria_<workspace>` database on that server (created on
+  demand), never the shared `victoria`. Start it with
   `sudo service postgresql start` if needed.
 - **Toolchain:** `agents/venv` uses Python 3.11 (the pinned version; system
   `python3` may be newer). A few suites also need `ruby` + `rsync` installed

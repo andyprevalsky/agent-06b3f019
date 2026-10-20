@@ -18,6 +18,20 @@ RUN sed -i 's|http://archive.ubuntu.com/ubuntu|http://ubuntu.mirror.constant.com
     && npm install -g @anthropic-ai/claude-code \
     && rm -rf /var/lib/apt/lists/*
 
+# rose-ui screenshot/record/perf/check (~/.rose/bin/rose-ui, installed per session):
+# headless Chromium through playwright-core, ffmpeg for MP4 recordings, and fonts
+# so screenshots render text and emoji. Browsers live outside $HOME for uid 1000.
+ARG PLAYWRIGHT_CORE_VERSION=1.64.0
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    fonts-noto-core \
+    fonts-noto-color-emoji \
+    && npm install -g "playwright-core@$PLAYWRIGHT_CORE_VERSION" \
+    && playwright-core install --with-deps chromium \
+    && chmod -R a+rX /ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
+
 # Create user directory (E2B uses uid 1000)
 RUN mkdir -p /home/user && chown 1000:1000 /home/user
 

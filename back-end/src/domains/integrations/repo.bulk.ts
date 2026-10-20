@@ -132,6 +132,40 @@ export async function deleteCookieBundlesForBrowserSnapshot(params: {
   });
 }
 
+/**
+ * Remove exactly one browser profile's cookies (the account-scoped delete for a
+ * cookie provider). Single indexed `deleteMany` scoped to
+ * (userId, browserSource, browserProfile) — never touches another profile.
+ */
+export async function deleteCookiesForProfile(params: {
+  userId: string;
+  browserSource: string;
+  browserProfile: string;
+}) {
+  return prisma.cookie.deleteMany({
+    where: {
+      userId: params.userId,
+      browserSource: params.browserSource,
+      browserProfile: params.browserProfile,
+    },
+  });
+}
+
+/** Remove that same profile's cookie bundles (the SSO-replay grouping rows). */
+export async function deleteCookieBundlesForProfile(params: {
+  userId: string;
+  browserSource: string;
+  browserProfile: string;
+}) {
+  return prisma.cookieBundle.deleteMany({
+    where: {
+      userId: params.userId,
+      browserSource: params.browserSource,
+      browserProfile: params.browserProfile,
+    },
+  });
+}
+
 export async function deleteCookieBundlesWithoutCookiesForProfile(params: {
   userId: string;
   browserSource: string;
