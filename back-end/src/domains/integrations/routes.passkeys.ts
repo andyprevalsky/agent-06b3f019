@@ -71,7 +71,6 @@ router.post(
     return res.json({
       message: result.passkeyCount > 0 ? 'Passkeys uploaded successfully' : 'No passkeys to upload',
       passkeyCount: result.passkeyCount,
-      accounts: result.accounts,
     });
   })
 );

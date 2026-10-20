@@ -696,22 +696,17 @@ model GithubRepoAccess {
 }
 
 model MessageRecord {
-  id                 String         @id @default(uuid())
-  personId           String
-  channel            MessageChannel
-  from               String
-  to                 String
-  timestamp          DateTime
-  message            String
-  externalId         String? // Platform-native message ID (Telegram msg.id, iMessage ROWID, WhatsApp key.id)
+  id         String         @id @default(uuid())
+  personId   String
+  channel    MessageChannel
+  from       String
+  to         String
+  timestamp  DateTime
+  message    String
+  externalId String? // Platform-native message ID (Telegram msg.id, iMessage ROWID, WhatsApp key.id)
   googleAccountEmail String? // Source Gmail account for account-scoped deletion
-  /// Provider-side account that synced this message (a Telegram user id, a
-  /// WhatsApp linked phone), for account-scoped deletion. Null = the
-  /// legacy/default account. Rows that carry it namespace `externalId` as
-  /// "<sourceAccountId>:<native id>" so two accounts cannot collide on the dedup key.
-  sourceAccountId    String?
-  createdAt          DateTime       @default(now())
-  person             Person         @relation(fields: [personId], references: [id], onDelete: Cascade)
+  createdAt  DateTime       @default(now())
+  person     Person         @relation(fields: [personId], references: [id], onDelete: Cascade)
 
   @@unique([personId, channel, externalId]) // Primary dedup: same message can't be inserted twice
   @@index([personId, channel])
@@ -770,7 +765,6 @@ model Person {
   skills                     Json?           @default("[]")
   totalOnlineReach           Int?
   messagesExchanged          Int             @default(0)
-  createdBySource            String? // `<provider>:<accountId>` of the multi-account sync that created this contact; null = legacy/other source
   messageRecords             MessageRecord[]
 
   @@unique([userId, phoneNumber])
@@ -1500,9 +1494,7 @@ model BrowserPassword {
   disabledAt        DateTime?
   disabledReason    String?
 
-  /// One saved login per browser source and profile: the same site+username
-  /// saved in Chrome and Safari, or in two Chrome profiles, are separate rows.
-  @@unique([userId, origin, username, browserSource, browserProfile])
+  @@unique([userId, origin, username])
   @@index([userId])
   @@index([userId, origin])
 }

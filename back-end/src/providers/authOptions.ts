@@ -11,7 +11,6 @@ import { benchmarkSavedBrowserAuthDisabled } from './benchmarkBrowserAuth';
 import { primitiveDomain, createMintedInbox, findMintedInbox } from './primitive';
 import { createAgentPhoneNumber, isAgentPhoneEmailFallbackSafe } from './agentPhone';
 import { createLogger } from './logger';
-import { passwordLastUsedMs } from './browserPasswords';
 import { MINTED_PASSWORD_BROWSER_SOURCE, mintedNewPasswordOption } from './mintedAccountPassword';
 import * as repo from './authOptionsStore';
 import type { AuthOptionsResponse } from './authOptionsTypes';
@@ -19,6 +18,9 @@ import type { AuthOptionsResponse } from './authOptionsTypes';
 const log = createLogger('AuthOptions');
 
 const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
+const CHROMIUM_UNIX_EPOCH_OFFSET_MS = 11644473600000n;
+const CHROMIUM_ONE_DAY_MICROSECONDS = 86400000000n;
+const UNIX_MS_VS_CHROMIUM_MICROSECONDS_BOUNDARY = 10000000000000n;
 
 function emailUsesCurrentMintedDomain(email: string): boolean {
   const currentDomain = primitiveDomain().toLowerCase();
@@ -27,6 +29,16 @@ function emailUsesCurrentMintedDomain(email: string): boolean {
 
 function serializeBigInt(value: bigint | null): number | null {
   return value === null ? null : Number(value);
+}
+
+function passwordLastUsedMs(value: bigint | null): number | null {
+  if (value === null || value <= CHROMIUM_ONE_DAY_MICROSECONDS) return null;
+
+  if (value > UNIX_MS_VS_CHROMIUM_MICROSECONDS_BOUNDARY) {
+    return Number(value / 1000n - CHROMIUM_UNIX_EPOCH_OFFSET_MS);
+  }
+
+  return Number(value);
 }
 
 function passwordWasUsedWithinOneYear(value: bigint | null, nowMs = Date.now()): boolean {

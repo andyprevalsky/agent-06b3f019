@@ -455,18 +455,11 @@ test('browser-state sync helpers use every schema identity instead of remote pri
     'expected permission identity selector'
   );
   const passwordWhere = captured.password.where as {
-    userId_origin_username_browserSource_browserProfile?: {
-      username?: string;
-      browserSource?: string;
-      browserProfile?: string;
-    };
+    userId_origin_username?: { userId?: string; origin?: string; username?: string };
   };
-  const passwordKey = passwordWhere.userId_origin_username_browserSource_browserProfile;
   assert(
-    passwordKey?.username === password.username &&
-      passwordKey.browserSource === password.browserSource &&
-      passwordKey.browserProfile === password.browserProfile,
-    'expected password identity selector to include the browser source and profile'
+    passwordWhere.userId_origin_username?.username === password.username,
+    'expected password identity selector'
   );
   for (const [name, args] of Object.entries(captured).filter(([name]) => name !== 'origin')) {
     const update = args.update as Record<string, unknown>;

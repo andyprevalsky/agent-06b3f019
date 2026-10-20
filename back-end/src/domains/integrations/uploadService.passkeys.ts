@@ -6,23 +6,13 @@
  * storage envelope (same as Apple passwords) so only agent workers holding
  * CLAUDE_CREDENTIAL_DECRYPTION_KEY can decrypt it, then upsert a
  * PasskeyCredential row keyed by (userId, rpId, credentialId).
- *
- * Each browserSource is the provider `<source>_passkeys` with one `default`
- * account (plan row I7); upload progress done/total = this batch's count.
  */
 
 import { canonicalAuthRealm, hostnameFromRealmInput } from '../../providers/authRealm';
 import { createLogger } from '../../providers/logger';
 import { encryptPasswordForStorage } from '../../providers/credentialEnvelope';
-import type { PasskeyPayload } from './types';
+import { IntegrationStatus, IntegrationType, type PasskeyPayload } from './types';
 import * as repo from './repo';
-import { passkeyIntegrationName } from './service.credentialAccounts';
-import {
-  trackCredentialUpload,
-  upsertCredentialAccountRow,
-  type CredentialUploadAccount,
-  type UploadedCredentialAccount,
-} from './uploadService.credentialAccounts';
 
 const log = createLogger('Integrations');
 
@@ -42,7 +32,7 @@ export async function processPasskeysUpload(userId: string, payload: PasskeyPayl
   log.info('Received passkeys', { count: payload.passkeys.length, userId });
 
   if (payload.passkeys.length === 0) {
-    return { passkeyCount: 0, accounts: [] as UploadedCredentialAccount[] };
+    return { passkeyCount: 0 };
   }
 
   const prepared = new Map<string, PreparedPasskey>();
@@ -75,39 +65,31 @@ export async function processPasskeysUpload(userId: string, payload: PasskeyPayl
 
   const passkeys = [...prepared.values()];
   if (passkeys.length === 0) {
-    return { passkeyCount: 0, accounts: [] as UploadedCredentialAccount[] };
+    return { passkeyCount: 0 };
   }
 
-  const bySource = new Map<string, CredentialUploadAccount & { browserSource: string }>();
-  for (const pk of passkeys) {
-    const account = bySource.get(pk.browserSource) ?? {
-      provider: passkeyIntegrationName(pk.browserSource),
-      accountId: '',
-      browserSource: pk.browserSource,
-      count: 0,
-    };
-    account.count += 1;
-    bySource.set(pk.browserSource, account);
-  }
-  const uploadedAt = new Date().toISOString();
-  const accounts = await trackCredentialUpload(
-    userId,
-    [...bySource.values()],
-    'passkeys',
-    async () => {
-      await bulkUpsertPreparedPasskeys(userId, passkeys);
-      log.info('Upserted passkeys', { count: passkeys.length, userId });
-      for (const account of bySource.values()) {
-        await upsertCredentialAccountRow(userId, account, {
-          browserSource: account.browserSource,
-          passkeyCount: account.count,
-          uploadedAt,
-        });
-      }
-    }
-  );
+  await bulkUpsertPreparedPasskeys(userId, passkeys);
+  log.info('Upserted passkeys', { count: passkeys.length, userId });
 
-  return { passkeyCount: passkeys.length, accounts };
+  const browserSources = new Set(passkeys.map((p) => p.browserSource));
+  for (const source of browserSources) {
+    await repo.upsertIntegration({
+      userId,
+      name: `${source}_passkeys`,
+      type: IntegrationType.DATA_SOURCE,
+      status: IntegrationStatus.CONNECTED,
+      isActive: true,
+      lastSyncAt: new Date(),
+      lastSuccessfulSyncAt: new Date(),
+      config: {
+        browserSource: source,
+        passkeyCount: passkeys.filter((p) => p.browserSource === source).length,
+        uploadedAt: new Date().toISOString(),
+      },
+    });
+  }
+
+  return { passkeyCount: passkeys.length };
 }
 
 async function bulkUpsertPreparedPasskeys(userId: string, passkeys: PreparedPasskey[]) {

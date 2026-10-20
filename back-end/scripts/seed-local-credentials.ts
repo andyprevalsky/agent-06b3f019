@@ -761,15 +761,7 @@ export async function syncBrowserPermissionCredentials(
 
 export type BrowserPasswordModel = SnapshotLookupModel<BrowserPassword> & {
   upsert(args: {
-    where: {
-      userId_origin_username_browserSource_browserProfile: {
-        userId: string;
-        origin: string;
-        username: string;
-        browserSource: string;
-        browserProfile: string;
-      };
-    };
+    where: { userId_origin_username: { userId: string; origin: string; username: string } };
     create: BrowserPassword;
     update: Omit<BrowserPassword, 'id'>;
   }): Promise<unknown>;
@@ -782,14 +774,7 @@ export async function syncBrowserPasswordCredentials(
   const passwordsToSync = await rowsNeedingContentSync(
     passwords,
     localPassword,
-    (password) =>
-      rowSignature([
-        password.userId,
-        password.origin,
-        password.username,
-        password.browserSource,
-        password.browserProfile,
-      ]),
+    (password) => rowSignature([password.userId, password.origin, password.username]),
     (remote, local) => browserPasswordContent(remote) === browserPasswordContent(local),
     (rows) => ({
       OR: rows.map((password) => ({
@@ -803,12 +788,10 @@ export async function syncBrowserPasswordCredentials(
     void remoteId;
     await localPassword.upsert({
       where: {
-        userId_origin_username_browserSource_browserProfile: {
+        userId_origin_username: {
           userId: password.userId,
           origin: password.origin,
           username: password.username,
-          browserSource: password.browserSource,
-          browserProfile: password.browserProfile,
         },
       },
       create: password,
