@@ -3110,6 +3110,9 @@ REMOTE_PY_FP=\$(cloudbench_manifest_fingerprint '$REMOTE_REPO' \"\${CLOUDBENCH_P
 echo \"::DEPS-REMOTE-REF::\$REMOTE_REF\"
 echo \"::DEPS-REMOTE-NODE::\$REMOTE_NODE_FP\"
 echo \"::DEPS-REMOTE-PY::\$REMOTE_PY_FP\"
+# The donor is stopped by signal and snapshotted next; write back the synced
+# checkout and dependency trees first (see the native WMH refresh flush).
+sync -f '$REMOTE_REPO' && sync
 echo '::DEPS-REFRESH-DONE::'"
     DEPS_LOG="$(mktemp)"
     ssh_exec "$mid" "$DEPS_CMD" 2>&1 | grep -av '^Connecting to' | tee "$DEPS_LOG" | sed 's/^/   /'
