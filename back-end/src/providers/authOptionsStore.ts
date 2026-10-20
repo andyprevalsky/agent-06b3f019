@@ -1,6 +1,7 @@
 import { prisma, runTransactionWithRetry } from './database';
 import { canonicalAuthRealm } from './authRealm';
 import { SSO_REALMS } from './browserCookies';
+import { preferredBrowserPasswords } from './browserPasswords';
 import { INVALIDATED_STEEL_PROFILE_SOURCE } from './browser/profileBinding';
 import { primitiveDomain } from './primitive';
 
@@ -32,10 +33,9 @@ export async function findCookieBundles(userId: string, authRealm: string) {
   });
 }
 
+/** One saved login per origin+username across browser sources and profiles. */
 export async function findBrowserPasswords(userId: string) {
-  return prisma.browserPassword.findMany({
-    where: { userId },
-  });
+  return preferredBrowserPasswords(await prisma.browserPassword.findMany({ where: { userId } }));
 }
 
 export async function findPasskeys(
@@ -178,21 +178,26 @@ export async function upsertSignupPassword(params: {
       data: { encryptedPassword: params.encryptedPassword, dateLastUsed: now },
     });
   if ((await updateOwnRow()).count > 0) return { saved: true };
-  const created = await prisma.browserPassword.createMany({
-    data: [
-      {
-        ...key,
-        encryptedPassword: params.encryptedPassword,
-        dateLastUsed: now,
-        dateCreated: now,
-        browserSource: params.browserSource,
-      },
-    ],
-    skipDuplicates: true,
-  });
-  if (created.count > 0) return { saved: true };
-  // The key was taken between the two statements: by a concurrent save of this
-  // same sign-up (update it) or by the user's own synced login (keep it).
+  // Saved logins are unique per browser source and profile, so the unique key
+  // alone no longer blocks this row beside the user's own synced login for the
+  // same site and username; the insert carries that condition itself. A sync
+  // committing concurrently can still land beside it, and readers then prefer
+  // the user-synced row (providers/browserPasswords).
+  const created = await prisma.$executeRaw`
+    INSERT INTO "BrowserPassword"
+      (id, "userId", origin, username, "encryptedPassword", "dateLastUsed", "dateCreated",
+       "browserSource", "browserProfile", "syncedAt")
+    SELECT gen_random_uuid(), ${key.userId}, ${key.origin}, ${key.username},
+      ${params.encryptedPassword}, ${now}, ${now}, ${params.browserSource}, '', NOW()
+    WHERE NOT EXISTS (
+      SELECT 1 FROM "BrowserPassword"
+      WHERE "userId" = ${key.userId} AND origin = ${key.origin} AND username = ${key.username}
+    )
+    ON CONFLICT ("userId", origin, username, "browserSource", "browserProfile") DO NOTHING
+  `;
+  if (created > 0) return { saved: true };
+  // The login was taken between the two statements: by a concurrent save of
+  // this same sign-up (update it) or by the user's own synced login (keep it).
   return { saved: (await updateOwnRow()).count > 0 };
 }
 

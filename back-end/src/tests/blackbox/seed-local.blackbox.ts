@@ -160,7 +160,7 @@ test('syncIntegrationCredentials keeps integration primary keys local', async ()
   const remote = {
     id: 'remote-gpt-id',
     userId: 'seed-user',
-    type: 'API' as const,
+    type: 'TOOL_SETUP' as const,
     name: 'gpt_code',
     status: 'CONNECTED' as const,
     isActive: true,
@@ -170,6 +170,7 @@ test('syncIntegrationCredentials keeps integration primary keys local', async ()
     failureReason: null,
     config: { encryptedCredentials: 'fresh-envelope' },
     poolingEnabled: false,
+    poolingEnabledOverride: null,
     rateLimitedUntil: null,
     lastUsedAt: null,
     accountId: '',
@@ -454,11 +455,18 @@ test('browser-state sync helpers use every schema identity instead of remote pri
     'expected permission identity selector'
   );
   const passwordWhere = captured.password.where as {
-    userId_origin_username?: { userId?: string; origin?: string; username?: string };
+    userId_origin_username_browserSource_browserProfile?: {
+      username?: string;
+      browserSource?: string;
+      browserProfile?: string;
+    };
   };
+  const passwordKey = passwordWhere.userId_origin_username_browserSource_browserProfile;
   assert(
-    passwordWhere.userId_origin_username?.username === password.username,
-    'expected password identity selector'
+    passwordKey?.username === password.username &&
+      passwordKey.browserSource === password.browserSource &&
+      passwordKey.browserProfile === password.browserProfile,
+    'expected password identity selector to include the browser source and profile'
   );
   for (const [name, args] of Object.entries(captured).filter(([name]) => name !== 'origin')) {
     const update = args.update as Record<string, unknown>;

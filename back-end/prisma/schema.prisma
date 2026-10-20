@@ -1417,7 +1417,9 @@ model BrowserPassword {
   disabledAt        DateTime?
   disabledReason    String?
 
-  @@unique([userId, origin, username])
+  /// One saved login per browser source and profile: the same site+username
+  /// saved in Chrome and Safari, or in two Chrome profiles, are separate rows.
+  @@unique([userId, origin, username, browserSource, browserProfile])
   @@index([userId])
   @@index([userId, origin])
 }

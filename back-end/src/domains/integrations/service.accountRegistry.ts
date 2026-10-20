@@ -19,6 +19,7 @@ import { findIntegrationAccount } from './repo.accounts';
 import { findPlaidItemForUser, PlaidItemStatus } from './repo.plaid';
 import { disconnectGmailAccount, GmailAccountNotFoundError } from './service';
 import { disconnectPlaidItem } from './service.plaid';
+import { deletePasskeyAccount, deletePasswordAccount } from './service.credentialAccounts';
 import { deleteLanternIntegration, LanternCredentialError } from './service.lantern';
 import { KNOWN_SOURCES as DOCUMENT_SOURCES } from './uploadService.documents';
 
@@ -141,10 +142,7 @@ const EXACT: Record<string, IntegrationAccountAdapter> = {
     list: 'row',
     cleanup: todo('L-INT-COOKIES', 'fingerprint rows are not keyed by browser profile'),
   },
-  apple_passwords: {
-    list: 'row',
-    cleanup: todo('L-INT-PASSWORDS', 'BrowserPassword is unique per origin+username, not source'),
-  },
+  apple_passwords: { list: 'row', cleanup: hook(deletePasswordAccount) },
   contacts: { list: 'row', cleanup: todo('unassigned', 'VCF contacts are not keyed by source') },
   email: { list: 'row', cleanup: todo('unassigned', 'archive-imported email is not keyed') },
   agentcard: {
@@ -160,12 +158,10 @@ function familyAdapter(provider: string): IntegrationAccountAdapter | null {
       cleanup: todo('L-INT-COOKIES', 'cookies are keyed by browserSource+browserProfile'),
     };
   }
-  if (provider.endsWith('_passwords') || provider.endsWith('_passkeys')) {
-    return {
-      list: 'row',
-      cleanup: todo('L-INT-PASSWORDS', 'passwords/passkeys are not keyed by source+profile'),
-    };
-  }
+  // Passwords: account = one browser profile of the source (I7). Passkeys:
+  // account = the source (`default`).
+  if (provider.endsWith('_passwords')) return { list: 'row', cleanup: hook(deletePasswordAccount) };
+  if (provider.endsWith('_passkeys')) return { list: 'row', cleanup: hook(deletePasskeyAccount) };
   if (DOCUMENT_SOURCES.has(provider)) {
     return { list: 'row', cleanup: todo('unassigned', 'documents are keyed by source only') };
   }

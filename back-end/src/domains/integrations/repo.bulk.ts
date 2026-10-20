@@ -215,12 +215,10 @@ export async function bulkUpsertPasswords(
     `
     INSERT INTO "BrowserPassword" (id, "userId", origin, username, "encryptedPassword", "dateLastUsed", "dateCreated", "browserSource", "browserProfile", "syncedAt", "disabledAt", "disabledReason")
     VALUES ${valuesClause}
-    ON CONFLICT ("userId", origin, username) DO UPDATE SET
+    ON CONFLICT ("userId", origin, username, "browserSource", "browserProfile") DO UPDATE SET
       "encryptedPassword" = EXCLUDED."encryptedPassword",
       "dateLastUsed" = EXCLUDED."dateLastUsed",
       "dateCreated" = EXCLUDED."dateCreated",
-      "browserSource" = EXCLUDED."browserSource",
-      "browserProfile" = EXCLUDED."browserProfile",
       "syncedAt" = NOW(),
       "disabledAt" = NULL,
       "disabledReason" = NULL

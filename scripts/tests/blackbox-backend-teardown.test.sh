@@ -14,6 +14,11 @@ ARTIFACT_DIR="$ARTIFACT_ROOT/$RUN_ID"
 TERM_RUN_ID="teardown-term-probe-$$-$RANDOM"
 TERM_ARTIFACT_DIR="$ARTIFACT_ROOT/$TERM_RUN_ID"
 TERM_OUTPUT="$(mktemp)"
+# Port locks are host-wide (one root for every worktree), resolved as the runner does.
+HOST_LOCK_ROOT="${BLACKBOX_TEST_PORT_LOCK_ROOT:-${CONTRACT_TEST_PORT_LOCK_ROOT:-/tmp/rose-blackbox-port-locks-$(id -u)}}"
+OTHER_ARTIFACT_ROOT="$(mktemp -d)"
+HELD_LOCK=""
+FOREIGN_PID=""
 PORT=""
 TERM_PORT=""
 RUNNER_PID=""
@@ -32,18 +37,22 @@ cleanup() {
       lsof -ti "tcp:$port" -sTCP:LISTEN 2>/dev/null | xargs kill -KILL 2>/dev/null || true
     fi
   done
-  rm -rf "$ARTIFACT_DIR" "$TERM_ARTIFACT_DIR" "$TERM_OUTPUT"
+  if [[ -n "$FOREIGN_PID" ]]; then kill "$FOREIGN_PID" 2>/dev/null || true; fi
+  if [[ -n "$HELD_LOCK" ]]; then rmdir "$HELD_LOCK" 2>/dev/null || true; fi
+  rm -rf "$ARTIFACT_DIR" "$TERM_ARTIFACT_DIR" "$TERM_OUTPUT" "$OTHER_ARTIFACT_ROOT"
 }
 trap cleanup EXIT
 
 assert_released() {
-  local manifest="$1" label="$2" port base_url
+  local manifest="$1" label="$2" port base_url lock_dir
   port=$(jq -er '.port' "$manifest")
   base_url=$(jq -er '.base_url' "$manifest")
   if curl -fsS -m 2 "$base_url/health" >/dev/null 2>&1; then
     fail "$label: the isolated backend is still serving $base_url after the runner exited"
   fi
-  if [[ -d "$ARTIFACT_ROOT/.port-locks/$port" ]]; then
+  lock_dir=$(jq -er '.port_lock_dir' "$manifest")
+  [[ "$lock_dir" == "$HOST_LOCK_ROOT/$port" ]] || fail "$label: lock $lock_dir is not host-wide"
+  if [[ -d "$lock_dir" ]]; then
     fail "$label: port lock $port outlived the run"
   fi
   echo "$port"
@@ -112,3 +121,81 @@ if grep -Eq "Backend ready at|Backend process exited before becoming ready" "$TE
 fi
 assert_released "$TERM_ARTIFACT_DIR/manifest.json" "SIGTERM" >/dev/null
 echo "PASS: SIGTERM stops the runner with 143 and releases backend and port lock $TERM_PORT"
+
+# A free local port for the cases below (bound, read, released).
+free_port() {
+  node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close();});'
+}
+
+# Another worktree's run holds a port lock: a run under a different artifact
+# root must honour that reservation and choose another port.
+HELD_PORT="$(free_port)"
+mkdir -p "$HOST_LOCK_ROOT"
+HELD_LOCK="$HOST_LOCK_ROOT/$HELD_PORT"
+mkdir "$HELD_LOCK"
+OTHER_RUN_ID="teardown-other-root-$$-$RANDOM"
+set +e
+OTHER_OUTPUT=$(
+  cd "$ROOT_DIR/back-end" && \
+    BLACKBOX_TEST_ARTIFACT_ROOT="$OTHER_ARTIFACT_ROOT" \
+    BLACKBOX_TEST_BACKEND_START_PORT="$HELD_PORT" \
+    BLACKBOX_TEST_RUN_ID="$OTHER_RUN_ID" \
+    bash scripts/run-blackbox-tests.sh __teardown_probe__ 2>&1
+)
+set -e
+OTHER_PORT=$(jq -er '.port' "$OTHER_ARTIFACT_ROOT/$OTHER_RUN_ID/manifest.json") || {
+  echo "$OTHER_OUTPUT" >&2
+  fail "the other-root run wrote no manifest"
+}
+[[ "$OTHER_PORT" != "$HELD_PORT" ]] ||
+  fail "a run under another artifact root reused port $HELD_PORT locked by a different worktree"
+rmdir "$HELD_LOCK"
+HELD_LOCK=""
+echo "PASS: a host-wide port lock held by another worktree is honoured ($HELD_PORT -> $OTHER_PORT)"
+
+# Something else already serves /health on the chosen port. The runner must not
+# run tests against it: its backend and database are not this run's.
+if ! command -v lsof >/dev/null 2>&1 && ! command -v ss >/dev/null 2>&1; then
+  echo "SKIP: no lsof/ss to attribute listeners; foreign-backend refusal not exercised"
+  exit 0
+fi
+FOREIGN_PORT_FILE="$(mktemp)"
+node -e '
+  const server = require("http").createServer((req, res) => {
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ status: "ok" }));
+  });
+  server.listen(0, "127.0.0.1", () => {
+    require("fs").writeFileSync(process.argv[1], String(server.address().port));
+  });
+  setTimeout(() => process.exit(0), 120000);
+' "$FOREIGN_PORT_FILE" &
+FOREIGN_PID=$!
+for _ in $(seq 1 100); do
+  [[ -s "$FOREIGN_PORT_FILE" ]] && break
+  sleep 0.05
+done
+FOREIGN_PORT="$(cat "$FOREIGN_PORT_FILE")"
+rm -f "$FOREIGN_PORT_FILE"
+[[ -n "$FOREIGN_PORT" ]] || fail "the foreign health server never reported its port"
+FOREIGN_RUN_ID="teardown-foreign-$$-$RANDOM"
+set +e
+FOREIGN_OUTPUT=$(
+  cd "$ROOT_DIR/back-end" && \
+    BLACKBOX_TEST_BACKEND_PORT="$FOREIGN_PORT" \
+    BLACKBOX_TEST_RUN_ID="$FOREIGN_RUN_ID" \
+    bash scripts/run-blackbox-tests.sh __teardown_probe__ 2>&1
+)
+FOREIGN_STATUS=$?
+set -e
+rm -rf "${ARTIFACT_ROOT:?}/$FOREIGN_RUN_ID"
+[[ "$FOREIGN_STATUS" -ne 0 ]] || fail "the runner accepted a backend it did not start"
+grep -Fq "not this run's backend" <<<"$FOREIGN_OUTPUT" || {
+  echo "$FOREIGN_OUTPUT" >&2
+  fail "the runner did not report the foreign listener"
+}
+if grep -Fq "Unknown domain(s)" <<<"$FOREIGN_OUTPUT"; then
+  fail "tests ran against a backend this run did not start"
+fi
+[[ ! -d "$HOST_LOCK_ROOT/$FOREIGN_PORT" ]] || fail "the refused run left its port lock behind"
+echo "PASS: a healthy port served by another process is refused before any test runs"

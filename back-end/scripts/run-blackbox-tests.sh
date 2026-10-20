@@ -56,7 +56,10 @@ export BLACKBOX_TEST_RUN_ID="$RUN_ID"
 export CONTRACT_TEST_RUN_ID="$RUN_ID"
 ARTIFACT_ROOT="${BLACKBOX_TEST_ARTIFACT_ROOT:-${CONTRACT_TEST_ARTIFACT_ROOT:-$ROOT_DIR/.context/test-runs}}"
 ARTIFACT_DIR="${BLACKBOX_TEST_ARTIFACT_DIR:-${CONTRACT_TEST_ARTIFACT_DIR:-$ARTIFACT_ROOT/$RUN_ID}}"
-PORT_LOCK_ROOT="$ARTIFACT_ROOT/.port-locks"
+# Ports are host-wide, so their locks are too. A lock root under each
+# worktree's .context let concurrent worktrees reserve the same free port before
+# either backend had bound it; the later run then tested the other's backend.
+PORT_LOCK_ROOT="${BLACKBOX_TEST_PORT_LOCK_ROOT:-${CONTRACT_TEST_PORT_LOCK_ROOT:-/tmp/rose-blackbox-port-locks-$(id -u)}}"
 mkdir -p "$ARTIFACT_DIR" "$PORT_LOCK_ROOT"
 export BLACKBOX_TEST_ARTIFACT_DIR="$ARTIFACT_DIR"
 export CONTRACT_TEST_ARTIFACT_DIR="$ARTIFACT_DIR"
@@ -487,7 +490,7 @@ export FAST_MODE_ANTHROPIC_PROXY_URL="${BLACKBOX_FAST_MODE_ANTHROPIC_PROXY_URL:-
 export FAST_MODE_CODEX_PROXY_URL="${BLACKBOX_FAST_MODE_CODEX_PROXY_URL:-}"
 
 cat >"$MANIFEST_PATH" <<EOF
-{"run_id":"$RUN_ID","mode":"isolated-blackbox-backend","base_url":"$TEST_BASE_URL","port":$PORT,"artifact_dir":"$ARTIFACT_DIR","backend_log":"$BACKEND_LOG","runner_log":"$RUNNER_LOG","disable_gmail_sync":true}
+{"run_id":"$RUN_ID","mode":"isolated-blackbox-backend","base_url":"$TEST_BASE_URL","port":$PORT,"port_lock_dir":"$PORT_LOCK_DIR","artifact_dir":"$ARTIFACT_DIR","backend_log":"$BACKEND_LOG","runner_log":"$RUNNER_LOG","disable_gmail_sync":true}
 EOF
 
 echo "Starting isolated backend for black-box tests on port $PORT"
@@ -532,6 +535,24 @@ if [[ "$READY" -ne 1 ]]; then
   echo "Last backend log lines:"
   tail -n 80 "$BACKEND_LOG" || true
   exit 1
+fi
+
+# A healthy port proves only that SOMETHING serves it. Run only against the
+# backend this script started: another process bound first means our backend
+# cannot, and its tests and database would be someone else's.
+LISTENER_PIDS="$(port_listener_pids "$PORT")"
+if [[ -n "$LISTENER_PIDS" ]]; then
+  OWNED_LISTENER=0
+  for listener_pid in $LISTENER_PIDS; do
+    if pid_descends_from "$listener_pid" "$BACKEND_PID"; then OWNED_LISTENER=1; fi
+  done
+  if [[ "$OWNED_LISTENER" -ne 1 ]]; then
+    echo "❌ $TEST_BASE_URL is served by PID(s) $(echo $LISTENER_PIDS), not this run's backend (PID $BACKEND_PID)" >&2
+    echo "   Refusing to run tests against another process's backend and database." >&2
+    exit 1
+  fi
+else
+  echo "⚠️  Could not attribute the listener on port $PORT (no lsof/ss); ownership unverified." >&2
 fi
 
 echo "Backend ready at $TEST_BASE_URL"

@@ -199,7 +199,6 @@ async function todoHooksRefuse(users: Users): Promise<void> {
   const { a } = users();
   for (const [provider, owner] of [
     ['imessage', 'L-INT-IMESSAGE'],
-    ['atlas_passwords', 'L-INT-PASSWORDS'],
     ['chrome', 'L-INT-COOKIES'],
   ]) {
     await postProgress(a.token, provider, 'acct', { runId: 'r', state: 'synced' });

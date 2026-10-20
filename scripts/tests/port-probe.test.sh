@@ -33,12 +33,24 @@ PORT="$(cat "$PORT_FILE")"
 
 # A PATH with the shell tools the probe needs but without lsof.
 NO_LSOF_BIN="$(mktemp -d)"
-for tool in bash ss; do
+for tool in bash ss grep cut sort ps tr; do
   if path="$(command -v "$tool")"; then ln -s "$path" "$NO_LSOF_BIN/$tool"; fi
 done
 
 PATH="$PATH" local_port_in_use "$PORT" || fail "default PATH: listener on $PORT reported free"
 PATH="$NO_LSOF_BIN" local_port_in_use "$PORT" || fail "no lsof (ss): listener on $PORT reported free"
+
+# The black-box runner accepts a healthy port only when its listener descends
+# from the backend it started; a foreign listener must be attributed, not missed.
+for probe_path in "$PATH" "$NO_LSOF_BIN"; do
+  listeners="$(PATH="$probe_path" port_listener_pids "$PORT")"
+  grep -qx "$LISTENER_PID" <<<"$listeners" ||
+    fail "PATH=$probe_path: listener $LISTENER_PID not attributed to port $PORT (got '$listeners')"
+done
+PATH="$NO_LSOF_BIN" pid_descends_from "$LISTENER_PID" "$$" || fail "listener does not descend from its launcher"
+if PATH="$NO_LSOF_BIN" pid_descends_from "$$" "$LISTENER_PID"; then
+  fail "the launcher was reported as a descendant of its child"
+fi
 rm -f "$NO_LSOF_BIN/ss"
 PATH="$NO_LSOF_BIN" local_port_in_use "$PORT" || fail "no lsof/ss (/dev/tcp): listener reported free"
 
