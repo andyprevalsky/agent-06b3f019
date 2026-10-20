@@ -1,9 +1,12 @@
 """Display domain handler - thin workflow-side entry point for the ``display`` tool.
 
     validate ─► display_media_activity ─┬─ inline ─► FINISHED "Displayed N item(s)"
-                                        └─ pinned ─► IN_PROGRESS (pin metadata from backend)
-                                                     wait receive_user_response(request_id)
-                                                     FINISHED with the answer
+                                        └─ pinned ─┬─ route user  ─► IN_PROGRESS (pin metadata from backend)
+                                                   │                 wait receive_user_response(request_id)
+                                                   │                 FINISHED with the answer
+                                                   └─ route agent ─► send_agent_graph_message_activity
+                                                                     (L-A2A) to the spawning agent;
+                                                                     FINISHED — its reply arrives as a message
 
 The pinned wait has no deadline (plan row C11); a deployment cutover closes the
 row like an approval wait does.
@@ -21,13 +24,20 @@ from domains.display.config import (
     DISPLAY_ACTIVITY_TIMEOUT_SECONDS,
     TOOL_NAME,
 )
-from domains.display.service import describe_answer, describe_error, describe_inline, validate_tool_call
+from domains.display.service import (
+    describe_answer,
+    describe_error,
+    describe_inline,
+    format_question_text,
+    validate_tool_call,
+)
 from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE, GenerationHandoffRequested
 from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 
 with workflow.unsafe.imports_passed_through():
-    from domains.display.repo import display_media_activity
+    from domains.display.service import display_media_activity
+    from helpers.agent_graph import AgentGraphSendRequest, a2a_message_id, send_agent_graph_message_activity
 
 logger = structlog.get_logger()
 
@@ -102,13 +112,48 @@ class DisplayManager(ToolManager):
             yield event
 
 
+async def _ask_spawning_agent(payload: Dict[str, Any], question: Dict[str, Any]) -> ToolEvent:
+    """Route "agent": the spawning agent answers through the agent graph (L-A2A)."""
+    to = str(question.get("agent_id") or "")
+    request = AgentGraphSendRequest(
+        agent_id=payload["agent_id"],
+        to=to,
+        text=format_question_text(payload["caption"], payload["options"], payload["allow_other"]),
+        message_id=a2a_message_id(payload["workflow_id"], payload["tool_call_id"]),
+    )
+    try:
+        await workflow.execute_activity(
+            send_agent_graph_message_activity,
+            args=[request],
+            start_to_close_timeout=timedelta(seconds=DISPLAY_ACTIVITY_TIMEOUT_SECONDS),
+            retry_policy=RetryPolicy(maximum_attempts=DISPLAY_ACTIVITY_MAX_ATTEMPTS),
+        )
+    except Exception as e:  # activity failure after retries → tool error
+        return ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="❌ Could not ask the agent that started you",
+            message=str(e),
+            status=MessageStatus.ERROR,
+        )
+    return ToolEvent(
+        type=EventType.POST_MESSAGE,
+        title="Asked the agent that started you",
+        message=f"Asked agent {to} (the agent that started you). Its answer will arrive as a message.",
+        status=MessageStatus.FINISHED,
+        metadata={"display": {"placement": "pinned", "kind": "question", "deliver_to": "agent", "routed_agent_id": to}},
+    )
+
+
 async def _pinned_question(
     workflow_instance: Any, payload: Dict[str, Any], body: Dict[str, Any]
 ) -> AsyncGenerator[ToolEvent, None]:
     question: Dict[str, Any] = dict(body.get("question") or {})
+    if question.get("deliver_to") == "agent":
+        yield await _ask_spawning_agent(payload, question)
+        return
     request_id = str(question.get("request_id") or "")
     metadata: Dict[str, Any] = dict(question.get("message_metadata") or {})
-    title = "Asking the user" if question.get("deliver_to") == "user" else "Asking the parent agent"
+    title = "Asking the user"
     yield ToolEvent(
         type=EventType.POST_MESSAGE,
         title=title,

@@ -36,6 +36,8 @@ export interface UserUiWorkspace {
   files: UserUiBundleFile[];
   /** Env injected into the session so `rose-ui publish` can reach the backend. */
   envs: Record<string, string>;
+  /** Overrides for a same-host (local fallback) session, e.g. loopback URLs. */
+  localEnvs?: Record<string, string>;
   source: { kind: 'active'; versionId: string } | { kind: 'seed' };
 }
 
@@ -108,11 +110,11 @@ export async function writeUserUiWorkspaceToDir(homeDir: string, workspace: User
     await mkdir(dirname(full), { recursive: true });
     await writeFile(full, file.content);
   }
-  for (const file of binFiles(workspace)) await chmod(join(root, file), 0o755);
+  for (const bin of cliBinPaths(workspace)) await chmod(join(root, bin), 0o755);
 }
 
-/** Every CLI under ~/.rose/bin (rose-ui plus any added by other features, e.g. the `rose` agent tools). */
-function binFiles(workspace: UserUiWorkspace): string[] {
+/** Every file installed under ~/.rose/bin (rose-ui, rose-agents, ...). */
+function cliBinPaths(workspace: UserUiWorkspace): string[] {
   return workspace.files
     .map((file) => file.path)
     .filter((path) => path.startsWith(`${USER_UI_CLI_BIN_DIR}/`));
@@ -142,7 +144,7 @@ export async function writeUserUiWorkspaceToSandbox(
       data: toArrayBuffer(file.content),
     }))
   );
-  const bins = binFiles(workspace).map((path) => `${home}/${path}`);
+  const bins = cliBinPaths(workspace).map((bin) => `${home}/${bin}`);
   if (bins.length === 0) return;
   await sandbox.commands.run(`chmod 755 ${bins.join(' ')}`, { timeoutMs: 10_000 });
 }
@@ -195,9 +197,7 @@ export async function materializeUserUiInLocalHome(
       binDir: join(homeDir, USER_UI_CLI_BIN_DIR),
       envs: {
         ROSE_UI_PUBLISH_URL: `http://127.0.0.1:${process.env.PORT || 3001}/api/user-ui/versions`,
-        // Agent tools (rose CLI) arrive already relocated to loopback by the
-        // local-session caller (providers/agentTools/workspace.ts).
-        ...(workspace.envs.ROSE_TOOLS_URL ? { ROSE_TOOLS_URL: workspace.envs.ROSE_TOOLS_URL } : {}),
+        ...workspace.localEnvs,
       },
     };
   } catch (err) {

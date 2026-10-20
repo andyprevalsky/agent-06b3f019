@@ -1,27 +1,26 @@
 /**
- * Pinned questions (`display(..., placement: "pinned")`).
+ * Pinned questions (`display(..., placement: "pinned")`), routed by spawner
+ * with the shared agent-graph decision (providers/agentGraph/questionRoute):
  *
  *   openQuestion(ctx)
- *     │ attention row, id = requestIdFor(agent, "question", request_key)  (retry → same row)
- *     ├─ route user,   code agent ─► TOOL row "<agent> asks" (pinned above the query box)
- *     ├─ route user,   Rose agent ─► metadata returned; the workflow posts its own
- *     │                              lifecycle row and waits on receive_user_response
- *     └─ route parent             ─► A2A USER message in the parent's trajectory +
- *                                    receive_user_response signal; the parent answers
- *                                    or escalates
+ *     ├─ route user ─► attention row, id = requestIdFor(agent, "question", request_key)
+ *     │                (retry → same row, same answer)
+ *     │                  code agent ─► TOOL row "<agent> asks" (pinned above the query box)
+ *     │                  Rose agent ─► pin metadata returned; the workflow posts its own
+ *     │                                lifecycle row and waits on receive_user_response
+ *     └─ route agent ─► nothing written here: the caller asks that agent through the
+ *                       L-A2A path (code agents: POST /api/agent-graph/questions; Rose
+ *                       agents: send_agent_graph_message_activity) and the answer
+ *                       arrives as its next message
  *
- *   answerQuestion: POST /api/agents/:id/questions/:questionId/answer (UI card or
- *   parent agent) → resolveAndSignal (CAS on userResponse, finishes the pin row,
- *   signals a waiting Rose agent; sandbox rows are long-polled instead).
+ *   answerQuestion: POST /api/agents/:id/questions/:questionId/answer (UI card)
+ *   → resolveAndSignal (CAS on userResponse, finishes the pin row, signals a
+ *   waiting Rose agent; sandbox rows are long-polled instead).
  */
-import {
-  deliverUserMessageToWorkflow,
-  resumePausedAgentForUserMessage,
-} from '../../providers/agentResume';
+import { resumePausedAgentForUserMessage } from '../../providers/agentResume';
 import { randomUUID } from '../../providers/crypto';
 import { resolveAndSignal } from '../../providers/gateResolution';
 import { createLogger } from '../../providers/logger';
-import { deterministicMessageId } from '../../providers/messageIdempotency';
 import { createMessage } from '../../providers/messages';
 import { REJECTED_RESPONSE } from './config';
 import * as repo from './repo';
@@ -38,76 +37,10 @@ import type { DisplayFilePointer, DisplayOption, DisplayResult, RequestState } f
 
 const log = createLogger('AgentToolsQuestions');
 
-function optionLines(options: DisplayOption[], allowOther: boolean): string[] {
-  const lines = options.map(
-    (option, index) =>
-      `${index + 1}. ${option.label}${option.recommended === true ? ' (recommended)' : ''}${
-        option.description !== undefined && option.description.length > 0
-          ? ` — ${option.description}`
-          : ''
-      }`
-  );
-  if (allowOther) lines.push(`${options.length + 1}. Other…`);
-  return lines;
-}
-
-/**
- * The parent learns about a child's question the way it learns about any
- * message. The row id is deterministic, so a retried call never posts twice.
- */
-async function deliverToParent(ctx: ToolContext, row: AttentionRow): Promise<string> {
-  const parent = await repo.findAgent(ctx.route.agent_id);
-  if (parent === null || parent.userId !== ctx.agent.userId || parent.deletedAt !== null) {
-    throw new AgentToolsError(
-      409,
-      'The parent agent that should answer this question no longer exists'
-    );
-  }
-  const idempotencyKey = `agent-question:${row.id}`;
-  const existing = await repo.findMessage(deterministicMessageId(parent.id, idempotencyKey));
-  if (existing !== null) return existing.id;
-  const { options, allowOther } = storedQuestion(row);
-  const text = [
-    `${ctx.requesting.label} asks: ${row.question}`,
-    ...optionLines(options, allowOther),
-    `(question id ${row.id}; answer it, or ask the user if you cannot decide)`,
-  ].join('\n');
-  const message = await createMessage({
-    agentId: parent.id,
-    text,
-    role: 'USER',
-    metadata: {
-      source: 'agent_question',
-      idempotencyKey,
-      // No attentionRequestId here: a USER row carrying it is read as the
-      // user's authored reply to that request (attentionUserMessages).
-      a2a: {
-        kind: 'question',
-        from: ctx.requesting,
-        from_agent_id: ctx.agent.id,
-        question_id: row.id,
-        question: row.question,
-        options,
-        allow_other: allowOther,
-      },
-    },
-  });
-  if (parent.temporalWorkflowId !== null) {
-    await deliverUserMessageToWorkflow(parent.id, parent.temporalWorkflowId, text);
-  }
-  log.info('Routed question to parent agent', {
-    agent_id: ctx.agent.id,
-    parent_agent_id: parent.id,
-    request_id: row.id,
-    message_id: message.id,
-  });
-  return message.id;
-}
-
 function pinnedMessageMetadata(ctx: ToolContext, row: AttentionRow): Record<string, unknown> {
   const { options, allowOther, items } = storedQuestion(row);
   return {
-    isUserAttentionMessage: ctx.route.deliver_to === 'user',
+    isUserAttentionMessage: true,
     attentionMessage: row.question,
     attentionRequestId: row.id,
     // UI contract (rose-user-ui): the pinned card above the query box.
@@ -152,6 +85,28 @@ async function postCodeAgentQuestionRow(
   return message.id;
 }
 
+type OpenedQuestion = NonNullable<DisplayResult['question']> & {
+  message_metadata: Record<string, unknown>;
+};
+
+/** Route "agent": nothing is stored; the caller asks its spawner via the agent graph. */
+function routedToAgent(ctx: ToolContext): OpenedQuestion {
+  log.info('Pinned question routed to the spawning agent', {
+    agent_id: ctx.agent.id,
+    routed_agent_id: ctx.route.agent_id,
+    via: ctx.requesting.kind,
+  });
+  return {
+    request_id: null,
+    status: 'route_to_agent',
+    deliver_to: 'agent',
+    agent_id: ctx.route.agent_id,
+    message_id: null,
+    response: null,
+    message_metadata: {},
+  };
+}
+
 export async function openQuestion(
   ctx: ToolContext,
   input: {
@@ -162,7 +117,8 @@ export async function openQuestion(
     requestKey?: string;
     workflowId?: string;
   }
-): Promise<NonNullable<DisplayResult['question']> & { message_metadata: Record<string, unknown> }> {
+): Promise<OpenedQuestion> {
+  if (ctx.route.deliver_to === 'agent') return routedToAgent(ctx);
   const workflowId = await workflowIdFor(ctx, input.workflowId);
   const id = requestIdFor(ctx.agent.id, 'question', input.requestKey ?? randomUUID());
   const agentTools: AgentToolsMarker = {
@@ -197,7 +153,6 @@ export async function openQuestion(
   const messageMetadata = pinnedMessageMetadata(ctx, row);
   let messageId: string | null = null;
   const pending = row.userResponse === null;
-  if (pending && ctx.route.deliver_to === 'parent') messageId = await deliverToParent(ctx, row);
   if (pending && ctx.caller.kind === 'code_agent') {
     messageId = await postCodeAgentQuestionRow(ctx, row, messageMetadata);
   }
@@ -222,10 +177,11 @@ export async function openQuestion(
 
 /**
  * POST /api/agents/:id/questions/:questionId/answer — the UI's pinned-card
- * answer (and a parent agent's answer to a routed question).
+ * answer.
  *
- *   :id is the agent showing the pin (row.agentId) or, for a parent-routed
- *   question, the parent (routedAgentId). Idempotent: an answered question
+ *   :id is the agent whose trajectory shows the pin (row.agentId) or the
+ *   agent it is routed to (the root, for a root-spawned sub-agent's question).
+ *   Idempotent: an answered question
  *   returns its stored answer; the first answer wins. A number 1–9 picks that
  *   option and is stored as its label. Resolution reuses resolveAndSignal, so
  *   the waiting Rose agent resumes through receive_user_response and a waiting

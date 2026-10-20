@@ -1,13 +1,25 @@
 """Display domain business logic: validate the tool call, describe results.
 
-Pure functions (no Temporal, no I/O) so the handler stays thin.
+Pure functions (no Temporal, no I/O) so the handler stays thin; the backend
+activity is re-exported from repo for the handler.
 """
 
 import re
 from typing import Any, Dict, List, Optional
 
 from domains.display.config import DISPLAY_MAX_ITEMS, DISPLAY_MAX_OPTIONS, PLACEMENTS, REJECTED_RESPONSE
+from domains.display.repo import display_media_activity
 from domains.display.types import DisplayOptionInput, DisplayValidation
+
+# The handler schedules the activity through this layer (handler → service → repo).
+__all__ = [
+    "describe_answer",
+    "describe_error",
+    "describe_inline",
+    "display_media_activity",
+    "format_question_text",
+    "validate_tool_call",
+]
 
 _URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 
@@ -122,9 +134,23 @@ def describe_inline(body: Dict[str, Any]) -> str:
     return "; ".join(parts) + "."
 
 
+def format_question_text(question: str, options: List[DisplayOptionInput], allow_other: bool) -> str:
+    """Numbered question text for the agent graph (mirrors back-end formatQuestionText)."""
+    if not options:
+        return question
+    lines = []
+    for index, option in enumerate(options, start=1):
+        recommended = " (recommended)" if option.get("recommended") else ""
+        description = f" — {option['description']}" if option.get("description") else ""
+        lines.append(f"{index}. {option['label']}{recommended}{description}")
+    if allow_other:
+        lines.append(f"{len(options) + 1}. Other (free text)")
+    return question + "\n\nOptions:\n" + "\n".join(lines)
+
+
 def describe_answer(response: str, question: Dict[str, Any], options: List[DisplayOptionInput]) -> str:
-    """The tool result the caller's model sees once the question is answered."""
-    who = "Your parent agent" if question.get("deliver_to") == "parent" else "The user"
+    """The tool result the caller's model sees once the user answers the pin."""
+    who = "The user"
     text = (response or "").strip()
     if text == REJECTED_RESPONSE:
         return f"{who} dismissed the question without choosing an option."

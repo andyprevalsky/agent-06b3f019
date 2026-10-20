@@ -26,7 +26,7 @@ export type AttentionRow = NonNullable<Awaited<ReturnType<typeof repo.findAttent
 
 export interface AgentToolsMarker {
   kind: 'approval' | 'question';
-  deliverTo: 'user' | 'parent';
+  deliverTo: 'user' | 'agent';
   routedAgentId: string;
 }
 
@@ -38,7 +38,7 @@ export function marker(row: AttentionRow): AgentToolsMarker | null {
   const { kind, deliverTo, routedAgentId } = value as Record<string, unknown>;
   if (
     (kind !== 'approval' && kind !== 'question') ||
-    (deliverTo !== 'user' && deliverTo !== 'parent')
+    (deliverTo !== 'user' && deliverTo !== 'agent')
   ) {
     return null;
   }

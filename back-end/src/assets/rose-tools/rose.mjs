@@ -14,7 +14,7 @@
 // deadline; each poll is the liveness heartbeat. Re-running the same blocking
 // command after an interruption resumes the same request instead of asking twice.
 import { createHash, randomUUID } from 'node:crypto';
-import { readFileSync, statSync } from 'node:fs';
+import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -231,11 +231,118 @@ async function displayTool(args, onBeat) {
   }
   const result = await call('POST', '/display', body);
   const question = result.question || {};
-  const target = question.deliver_to === 'parent' ? 'your parent agent' : 'the user';
-  process.stderr.write(`rose: waiting for ${target} to answer (request ${question.request_id})\n`);
-  const state = await waitFor(question.request_id, onBeat);
-  const answer = describeAnswer(state);
-  return answer;
+  if (question.deliver_to === 'agent') {
+    // Not root-spawned: the spawning agent answers (or escalates) through the
+    // agent graph; its reply arrives as this session's next message.
+    const sent = await askSpawningAgent({
+      caption,
+      options,
+      allowOther: args.allow_other !== false,
+      key: body.request_key,
+    });
+    return {
+      text: `Asked agent ${question.agent_id} (the agent that started you). Its answer will arrive as your next message (${sent.status || 'sent'}).`,
+      rejected: false,
+    };
+  }
+  process.stderr.write(`rose: waiting for the user to answer (request ${question.request_id})\n`);
+  return describeAnswer(await waitFor(question.request_id, onBeat));
+}
+
+// ── agent graph (L-A2A): questions for a non-root spawner ──
+
+const AGENTS_TOKEN_FILE = join(homedir(), '.rose', 'agents-token');
+const AGENTS_REFRESH_WINDOW_S = 30 * 60;
+
+function agentsConfig() {
+  let saved = {};
+  try {
+    saved = JSON.parse(
+      readFileSync(process.env.ROSE_TOOLS_CONFIG || join(homedir(), '.rose', 'tools.json'), 'utf8')
+    );
+  } catch {
+    // env only
+  }
+  let token = '';
+  try {
+    token = readFileSync(AGENTS_TOKEN_FILE, 'utf8').trim();
+  } catch {
+    // no refreshed token yet
+  }
+  token = token || process.env.ROSE_AGENTS_TOKEN || saved.agents_token || '';
+  const url = (process.env.ROSE_AGENTS_URL || saved.agents_url || '').replace(/\/+$/, '');
+  if (!url || !token) {
+    throw new ToolError(
+      'This question goes to the agent that started you, but the agent graph (ROSE_AGENTS_URL / ROSE_AGENTS_TOKEN) is not configured in this session.'
+    );
+  }
+  return { url, token };
+}
+
+async function agentsCall(method, route, body, token) {
+  const { url } = agentsConfig();
+  let res;
+  try {
+    res = await fetch(url + route, {
+      method,
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      data: { error: `could not reach Rose: ${err?.cause?.message || err.message}` },
+    };
+  }
+  const text = await res.text();
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { error: text.slice(0, 500) };
+  }
+  return { ok: res.ok, status: res.status, data };
+}
+
+/** Same refresh contract as rose-agents: renew near expiry into ~/.rose/agents-token (0600). */
+async function freshAgentsToken() {
+  const { token } = agentsConfig();
+  let exp = 0;
+  try {
+    exp =
+      Number(JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8')).exp) || 0;
+  } catch {
+    return token;
+  }
+  if (exp - Date.now() / 1000 > AGENTS_REFRESH_WINDOW_S) return token;
+  const refreshed = await agentsCall('POST', '/token', undefined, token);
+  const next = refreshed.ok ? refreshed.data.token : null;
+  if (typeof next !== 'string' || !next) return token;
+  mkdirSync(join(homedir(), '.rose'), { recursive: true });
+  writeFileSync(AGENTS_TOKEN_FILE, `${next}\n`, { mode: 0o600 });
+  return next;
+}
+
+async function askSpawningAgent({ caption, options, allowOther, key }) {
+  const token = await freshAgentsToken();
+  const body = {
+    question: caption,
+    options,
+    allow_other: allowOther,
+    // Stable per question, so a re-run never asks twice.
+    message_id: `q-${key.slice(0, 48)}`,
+  };
+  for (let attempt = 1; ; attempt += 1) {
+    const res = await agentsCall('POST', '/questions', body, token);
+    if (res.ok) return res.data;
+    if ((res.status !== 0 && res.status < 500 && res.status !== 429) || attempt >= SEND_ATTEMPTS) {
+      throw new ToolError(
+        `could not ask the spawning agent: ${res.data.error || `HTTP ${res.status}`}`
+      );
+    }
+    await sleep(Math.min(1000 * 2 ** attempt, 15_000));
+  }
 }
 
 async function messageTool(args) {
@@ -267,7 +374,7 @@ const MCP_TOOLS = [
   {
     name: 'display',
     description:
-      'Show images, videos or HTML pages to the user inline in Rose, or pin a question with numbered options above the user\'s query box (placement "pinned"). A pinned call blocks until answered and returns the answer.',
+      'Show images, videos or HTML pages to the user inline in Rose, or ask a question with numbered options (placement "pinned"): pinned above the user\'s query box when the root agent started you (blocks and returns the answer), otherwise sent to the agent that started you (its answer arrives as your next message).',
     inputSchema: {
       type: 'object',
       properties: {

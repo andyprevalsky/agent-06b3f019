@@ -39,6 +39,8 @@ from _test_utils import BlackboxResult, get_captured_requests, setup_mock_fn, te
 AGENTS_ROOT = Path(__file__).resolve().parents[2]
 ROSE_CLI = AGENTS_ROOT.parent / "back-end" / "src" / "assets" / "rose-tools" / "rose.mjs"
 TOKEN = "rtt.test-token"
+# A long-lived agent-graph token (exp far ahead → no refresh call).
+AGENTS_TOKEN = "rag." + base64.urlsafe_b64encode(json.dumps({"exp": 4102444800}).encode()).decode().rstrip("=") + ".sig"
 PNG = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) + b"pixels"
 
 # ── 1. display tool (root / sub-agents) ──
@@ -74,11 +76,36 @@ class _Backend:
         self.headers: List[Dict[str, str]] = []
         self.urls: List[str] = []
 
+        self.graph: List[Dict[str, Any]] = []
+
     def handler(self, request: httpx.Request) -> httpx.Response:
+        if "/api/agent-graph/" in str(request.url):
+            body = json.loads(request.content or b"{}")
+            self.graph.append({"url": str(request.url), "headers": dict(request.headers), "body": body})
+            return httpx.Response(200, json={"status": "delivered", "message_id": body.get("message_id")})
         self.urls.append(str(request.url))
         self.headers.append(dict(request.headers))
         self.bodies.append(json.loads(request.content or b"{}"))
         return self.responses.pop(0) if len(self.responses) > 1 else self.responses[0]
+
+
+def _agent_route_response() -> httpx.Response:
+    return httpx.Response(
+        201,
+        json={
+            "placement": "pinned",
+            "items": [],
+            "question": {
+                "request_id": None,
+                "status": "route_to_agent",
+                "deliver_to": "agent",
+                "agent_id": "agent-child",
+                "message_id": None,
+                "response": None,
+                "message_metadata": {},
+            },
+        },
+    )
 
 
 def _pinned_response(request_id: str, deliver_to: str, *, status: str = "pending", response: Optional[str] = None):
@@ -228,10 +255,11 @@ async def test_backend_type_errors_surface_as_tool_errors():
     assert len(backend.bodies) == 1, "a 4xx answer is never retried"
 
 
-async def _pinned_round_trip(deliver_to: str, answer: str) -> _FakeAgent:
-    backend = _Backend([_pinned_response("atq_layout", deliver_to)])
+async def test_pinned_question_from_root_spawned_caller_goes_to_user_and_resumes():
+    """Route user: IN_PROGRESS carries the UI pin metadata, blocks, resumes with the user's choice."""
+    backend = _Backend([_pinned_response("atq_layout", "user")])
     setup_mock_fn(backend.handler)
-    agent = _FakeAgent("agent-root" if deliver_to == "user" else "agent-grandchild", depth=0 if deliver_to == "user" else 2)
+    agent = _FakeAgent("agent-child", depth=1)
     call = {
         "tool": "display",
         "caption": "Which layout?",
@@ -249,14 +277,8 @@ async def _pinned_round_trip(deliver_to: str, answer: str) -> _FakeAgent:
     body = backend.bodies[0]
     assert body["request_key"] == "call-pinned" and body["workflow_id"] == "wf-root", body
     assert body["options"][0] == {"label": "Grid", "recommended": True}, body
-    agent._signal_responses["atq_layout"] = answer
+    agent._signal_responses["atq_layout"] = "List"
     await asyncio.wait_for(task, timeout=5)
-    return agent
-
-
-async def test_pinned_question_from_root_spawned_caller_goes_to_user_and_resumes():
-    """Route user: IN_PROGRESS carries the UI pin metadata, blocks, resumes with the user's choice."""
-    agent = await _pinned_round_trip("user", "List")
     opening, closing = agent.events
     pin = opening["metadata"]["display"]
     assert pin["placement"] == "pinned" and pin["kind"] == "question" and pin["question_id"] == "atq_layout", pin
@@ -264,15 +286,32 @@ async def test_pinned_question_from_root_spawned_caller_goes_to_user_and_resumes
     assert opening["title"] == "Asking the user"
     assert closing["status"] == "FINISHED", closing
     assert "The user chose option 2: List" in closing["message"], closing
+    assert backend.graph == [], "a user-routed question never goes through the agent graph"
 
 
-async def test_pinned_question_from_deeper_caller_goes_to_parent():
-    """Route parent: the question is the parent's to answer; the answer is attributed to it."""
-    agent = await _pinned_round_trip("parent", "1")
-    opening, closing = agent.events
-    assert opening["title"] == "Asking the parent agent", opening
-    assert opening["metadata"]["isUserAttentionMessage"] is False
-    assert "Your parent agent chose option 1: Grid" in closing["message"], closing
+async def test_pinned_question_from_deeper_caller_asks_spawning_agent():
+    """Route agent: the question goes to the spawner through L-A2A and the tool returns at once."""
+    backend = _Backend([_agent_route_response()])
+    setup_mock_fn(backend.handler)
+    agent = _FakeAgent("agent-grandchild", depth=2)
+    call = {
+        "tool": "display",
+        "caption": "Proceed with migration?",
+        "placement": "pinned",
+        "options": [{"label": "Yes", "recommended": True}, {"label": "No", "description": "Keep the old schema"}],
+    }
+    await asyncio.wait_for(_run_tool(agent, call, "call-ask"), timeout=5)
+    [event] = agent.events
+    assert event["status"] == "FINISHED" and "Asked agent agent-child" in event["message"], event
+    assert event["metadata"]["display"]["deliver_to"] == "agent", event
+    [sent] = backend.graph
+    assert sent["url"].endswith("/api/agent-graph/messages"), sent
+    assert sent["headers"].get("x-agent-id") == "agent-grandchild", sent["headers"]
+    assert sent["body"]["to"] == "agent-child", sent
+    assert sent["body"]["message_id"] == "wf-root:call-ask", sent
+    text = sent["body"]["text"]
+    assert text.startswith("Proceed with migration?") and "1. Yes (recommended)" in text, text
+    assert "2. No — Keep the old schema" in text and "3. Other (free text)" in text, text
 
 
 async def test_pinned_retry_after_answer_returns_stored_answer():
@@ -341,7 +380,7 @@ async def test_pinned_question_blocks_and_resumes_in_production_sandbox():
             events = await handle.result()
     assert [e["status"] for e in events] == ["IN_PROGRESS", "FINISHED"], events
     assert "option 1: Grid" in events[1]["message"], events
-    assert seen and seen[0]["request_key" if False else "tool_call_id"] == "call-pinned-1"
+    assert seen and seen[0]["tool_call_id"] == "call-pinned-1"
     assert seen[0]["placement"] == "pinned" and seen[0]["workflow_id"], seen
 
 
@@ -357,6 +396,7 @@ class FakeAgentTools:
         self.requests: Dict[str, Dict[str, Any]] = {}
         self.creations: Dict[str, int] = {}
         self.calls: List[Dict[str, Any]] = []
+        self.graph_questions: List[Dict[str, Any]] = []
         self.lock = threading.Lock()
         fake = self
 
@@ -366,14 +406,18 @@ class FakeAgentTools:
 
             def _send(self, status: int, payload: Dict[str, Any]) -> None:
                 data = json.dumps(payload).encode()
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
+                try:
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                except (BrokenPipeError, ConnectionResetError):
+                    # A CLI killed mid long-poll (the interrupt case) closed its socket.
+                    return
 
             def _authorized(self) -> bool:
-                if self.headers.get("Authorization") == f"Bearer {TOKEN}":
+                if self.headers.get("Authorization") in (f"Bearer {TOKEN}", f"Bearer {AGENTS_TOKEN}"):
                     return True
                 self._send(401, {"error": "Invalid agent tools token (signature)"})
                 return False
@@ -414,7 +458,20 @@ class FakeAgentTools:
     def url(self) -> str:
         return f"http://127.0.0.1:{self.server.server_address[1]}/api/agent-tools/agent-1"
 
+    @property
+    def agents_url(self) -> str:
+        return f"http://127.0.0.1:{self.server.server_address[1]}/api/agent-graph"
+
     def post(self, path: str, body: Dict[str, Any]) -> tuple[int, Dict[str, Any]]:
+        if path.endswith("/agent-graph/questions"):
+            self.graph_questions.append(body)
+            return 200, {"deliver_to": "agent", "agent_id": "agent-parent", "status": "delivered", "message_id": body["message_id"]}
+        if path.endswith("/display") and body.get("placement") == "pinned" and self.deliver_to == "agent":
+            return 201, {
+                "placement": "pinned",
+                "items": [],
+                "question": {"request_id": None, "status": "route_to_agent", "deliver_to": "agent", "agent_id": "agent-parent"},
+            }
         if path.endswith("/display") and body.get("placement") == "pinned":
             request_id = self._open("question", body["request_key"], body)
             return 201, {
@@ -469,7 +526,7 @@ class FakeAgentTools:
             "status": "rejected" if answer == "__REJECTED__" else "answered",
             "response": selected["label"] if selected else answer,
             "selected_option": selected,
-            "answered_by": self.deliver_to,
+            "answered_by": "user",
         }
 
     def __enter__(self) -> "FakeAgentTools":
@@ -538,7 +595,9 @@ async def _mcp_server(fake: FakeAgentTools, home: str):
         env.pop(key)
     rose_dir = Path(home) / ".rose"
     rose_dir.mkdir(parents=True, exist_ok=True)
-    (rose_dir / "tools.json").write_text(json.dumps({"url": fake.url, "token": TOKEN}))
+    (rose_dir / "tools.json").write_text(
+        json.dumps({"url": fake.url, "token": TOKEN, "agents_url": fake.agents_url, "agents_token": AGENTS_TOKEN})
+    )
     proc = await asyncio.create_subprocess_exec(
         shutil.which("node") or "node",
         str(ROSE_CLI),
@@ -605,8 +664,9 @@ async def test_mcp_approval_blocks_across_long_polls_then_resumes():
             assert len(progress) >= 2, f"each pending poll is a liveness heartbeat: {mcp.notifications}"
 
 
-async def test_mcp_pinned_question_routed_to_parent_returns_parent_answer():
-    with FakeAgentTools(deliver_to="parent") as fake, _home() as home:
+async def test_mcp_pinned_question_from_non_root_spawn_asks_spawning_agent():
+    """Route agent: the MCP tool asks via POST /api/agent-graph/questions and returns at once."""
+    with FakeAgentTools(deliver_to="agent") as fake, _home() as home:
         async with _mcp_server(fake, home) as mcp:
             call_id = await mcp.send(
                 "tools/call",
@@ -619,14 +679,15 @@ async def test_mcp_pinned_question_routed_to_parent_returns_parent_answer():
                     },
                 },
             )
-            await _wait_for(lambda: bool(fake.requests))
-            [request_id] = list(fake.requests)
-            body = fake.requests[request_id]["body"]
-            assert body["allow_other"] is True and body["options"][0]["recommended"] is True, body
-            fake.answer(request_id, "1")
             result = await mcp.response(call_id)
             text = result["result"]["content"][0]["text"]
-            assert "Your parent agent answered with option 1: Yes" in text, text
+            assert result["result"]["isError"] is False, result
+            assert "Asked agent agent-parent" in text and "next message" in text, text
+            [asked] = fake.graph_questions
+            assert asked["question"] == "Proceed with migration?" and asked["allow_other"] is True, asked
+            assert asked["options"][0] == {"label": "Yes", "recommended": True}, asked
+            assert asked["message_id"].startswith("q-"), asked
+            assert fake.requests == {}, "nothing pinned for the user"
 
 
 async def test_cli_display_dedupes_by_content_hash():
@@ -710,7 +771,8 @@ async def run_all_tests():
             test_pinned_question_from_root_spawned_caller_goes_to_user_and_resumes,
         )
         await r.record_async(
-            "pinned_question_from_deeper_caller_goes_to_parent", test_pinned_question_from_deeper_caller_goes_to_parent
+            "pinned_question_from_deeper_caller_asks_spawning_agent",
+            test_pinned_question_from_deeper_caller_asks_spawning_agent,
         )
         await r.record_async("pinned_retry_after_answer_returns_stored_answer", test_pinned_retry_after_answer_returns_stored_answer)
         await r.record_async(
@@ -722,8 +784,8 @@ async def run_all_tests():
             "mcp_approval_blocks_across_long_polls_then_resumes", test_mcp_approval_blocks_across_long_polls_then_resumes
         )
         await r.record_async(
-            "mcp_pinned_question_routed_to_parent_returns_parent_answer",
-            test_mcp_pinned_question_routed_to_parent_returns_parent_answer,
+            "mcp_pinned_question_from_non_root_spawn_asks_spawning_agent",
+            test_mcp_pinned_question_from_non_root_spawn_asks_spawning_agent,
         )
         await r.record_async("cli_display_dedupes_by_content_hash", test_cli_display_dedupes_by_content_hash)
         await r.record_async("cli_type_and_limit_errors", test_cli_type_and_limit_errors)

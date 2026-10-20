@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib
 import json
 import os
 import re
@@ -40,10 +41,20 @@ if _env_path.is_file():
         if key and key not in os.environ:
             os.environ[key] = value
 
-from providers.rose import RoseClient, gpt_auth_from_token  # noqa: E402
-from providers.rose.browser_use import build_browser_use_messages, normalize_browser_use_tool_call  # noqa: E402
-from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY, build_planner_system_prompt  # noqa: E402
-from utils.tool_schemas import PlannerResponse  # noqa: E402
+# Agent modules resolve only after the path and env setup above, so bind them
+# explicitly here instead of with module-level imports below executable code.
+_rose = importlib.import_module("providers.rose")
+_browser_use = importlib.import_module("providers.rose.browser_use")
+_prompts = importlib.import_module("utils.prompts")
+_tool_schemas = importlib.import_module("utils.tool_schemas")
+RoseClient = _rose.RoseClient
+RoseResponse = _rose.RoseResponse
+StructuredOutputAccumulator = _rose.StructuredOutputAccumulator
+gpt_auth_from_token = _rose.gpt_auth_from_token
+normalize_browser_use_tool_call = _browser_use.normalize_browser_use_tool_call
+SYSTEM_PROMPT_DYNAMIC_BOUNDARY = _prompts.SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+build_planner_system_prompt = _prompts.build_planner_system_prompt
+PlannerResponse = _tool_schemas.PlannerResponse
 
 
 LEGACY_BROWSER_DYNAMIC_RULE_RE = re.compile(
@@ -346,6 +357,70 @@ async def replay_browser_use(data: dict[str, Any], *, exact: bool) -> dict[str, 
     return result
 
 
+async def _collect_recorded_call(
+    data: dict[str, Any],
+    *,
+    messages: list[dict[str, Any]],
+    response_model: Any,
+    default_temperature: Optional[float],
+    default_max_tokens: int,
+    dump_extra: dict[str, Any],
+) -> RoseResponse:
+    """Replay a structured call on the transport and effort the dump recorded.
+
+    `collect()` cannot express reasoning effort and defaults to the pool's
+    racing order, so a planner dump served by gptAuth at effort=max was
+    replayed on a different model (e.g. a Foundry leg at default effort),
+    which cannot reproduce the original decision. Stream `complete()` with the
+    recorded gpt_auth / effort / provider_fast_mode and fold it the way
+    `collect()` does.
+    """
+    config = data.get("config") if isinstance(data.get("config"), dict) else {}
+    requested = config.get("requested_params") if isinstance(config.get("requested_params"), dict) else {}
+    kwargs: dict[str, Any] = {
+        "pool": _pool_from_dump(data),
+        "messages": messages,
+        "response_model": response_model,
+        "temperature": requested.get("temperature", default_temperature),
+        "max_tokens": requested.get("max_tokens") or default_max_tokens,
+        "agent_id": data.get("agent_id"),
+        "call_site": f"replicate_{data.get('call_site') or 'planner'}",
+        "dump_extra": dump_extra,
+        "skip_cache_write": True,
+    }
+    gpt_auth = gpt_auth_from_dump(data)
+    if gpt_auth is not None:
+        kwargs["gpt_auth"] = gpt_auth
+    effort = config.get("reasoning_effort") or requested.get("reasoning_effort")
+    if effort:
+        kwargs["effort"] = effort
+    if requested.get("provider_fast_mode") is not None:
+        kwargs["provider_fast_mode"] = bool(requested["provider_fast_mode"])
+
+    result = RoseResponse()
+    structured = StructuredOutputAccumulator()
+    async for chunk in RoseClient().complete(**kwargs):
+        if chunk.kind == "restart":
+            result = RoseResponse()
+            structured = StructuredOutputAccumulator()
+        elif chunk.kind == "metadata":
+            result.actual_model = chunk.data.get("actual_model", "") or result.actual_model
+            result.pool_name = chunk.data.get("pool_name", "") or result.pool_name
+            result.request_id = chunk.data.get("request_id", "") or result.request_id
+        elif chunk.kind == "content":
+            structured.add_chunk(chunk)
+        elif chunk.kind == "reasoning":
+            result.reasoning += chunk.data.get("text", "")
+        elif chunk.kind == "tool_call":
+            result.tool_calls.append(dict(chunk.data))
+        elif chunk.kind == "usage":
+            result.usage = dict(chunk.data)
+        elif chunk.kind == "done" and isinstance(chunk.data.get("timing"), dict):
+            result.timing = dict(chunk.data["timing"])
+    result.content = structured.current_text()
+    return result
+
+
 async def replay_planner(data: dict[str, Any], *, mode: str, assertions: list[str]) -> dict[str, Any]:
     if mode == "rebuild-system":
         messages = rebuild_planner_messages(data)
@@ -354,22 +429,16 @@ async def replay_planner(data: dict[str, Any], *, mode: str, assertions: list[st
         messages = data.get("messages") or []
         replication_mode = "exact"
 
-    config = data.get("config") if isinstance(data.get("config"), dict) else {}
-    requested = config.get("requested_params") if isinstance(config.get("requested_params"), dict) else {}
-    client = RoseClient()
-    response = await client.collect(
-        pool=_pool_from_dump(data),  # type: ignore[arg-type]
+    response = await _collect_recorded_call(
+        data,
         messages=messages,
         response_model=PlannerResponse,
-        temperature=requested.get("temperature", 0.2),
-        max_tokens=requested.get("max_tokens", 16384),
-        agent_id=data.get("agent_id"),
-        call_site=f"replicate_{data.get('call_site') or 'planner'}",
+        default_temperature=0.2,
+        default_max_tokens=16384,
         dump_extra={
             "replicated_from": data.get("call_site"),
             "replication_mode": replication_mode,
         },
-        skip_cache_write=True,
     )
 
     plan: dict[str, Any]
@@ -386,6 +455,7 @@ async def replay_planner(data: dict[str, Any], *, mode: str, assertions: list[st
         "call_site": data.get("call_site"),
         "replication_mode": replication_mode,
         "actual_model": response.actual_model,
+        "pool_name": response.pool_name,
         "usage": response.usage,
         "timing": response.timing,
         "request_id": response.request_id,
@@ -480,7 +550,9 @@ async def main_async(args: argparse.Namespace) -> int:
 
     if "browser_use" in call_site:
         result = await replay_browser_use(data, exact=args.mode == "exact")
-    elif call_site == "planner" or (isinstance(data.get("config"), dict) and data["config"].get("response_model") == "PlannerResponse"):
+    elif call_site == "planner" or (
+        isinstance(data.get("config"), dict) and data["config"].get("response_model") == "PlannerResponse"
+    ):
         result = await replay_planner(data, mode=args.mode, assertions=args.assert_ or [])
     else:
         if args.mode == "rebuild-system":

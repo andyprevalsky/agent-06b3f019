@@ -4,6 +4,7 @@ import express from 'express';
 import cors from 'cors';
 import { authenticate } from './providers/auth';
 import agentsRouter from './domains/agents/routes';
+import agentGraphRouter from './domains/agents/routes.graph';
 import agentQueuePointerRouter from './domains/agent-queue-pointer/routes';
 import workerProcessRuntimeRouter from './domains/worker-process-runtime/routes';
 import formatRouter from './domains/format/routes';
@@ -515,6 +516,7 @@ if (x402ReceivingWallet) {
 // Note: Each router handles its own auth per-route (hybridAuth for agents)
 app.use('/api/agents', agentQuestionsRouter); // pinned-question answers (agent-tools domain)
 app.use('/api/agents', agentsRouter);
+app.use('/api/agent-graph', agentGraphRouter);
 app.use('/api/agent-queue-pointer', agentQueuePointerRouter);
 app.use('/api/worker-process-runtime', workerProcessRuntimeRouter);
 app.use('/api/auth-options', authOptionsRouter);

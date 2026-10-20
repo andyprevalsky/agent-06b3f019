@@ -2,6 +2,7 @@
 
 import { Prisma, type Message } from '@prisma/client';
 import { broadcastMessageInsert } from './chat/supabaseBroadcast';
+import { idempotentMessageId } from './messageIdempotency';
 import { prisma, runTransactionWithRetry } from './database';
 import { createLogger } from './logger';
 import {
@@ -14,7 +15,6 @@ import {
 } from './toolLifecycleMessages';
 import { lockAgentWorkflowGeneration } from './workflowGeneration';
 import { scheduleMessageGmvCapture } from './messageGmvCapture';
-import { idempotentMessageId } from './messageIdempotency';
 
 const log = createLogger('Messages');
 

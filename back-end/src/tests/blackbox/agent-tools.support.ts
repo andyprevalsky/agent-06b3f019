@@ -30,7 +30,7 @@ export interface DisplayItem {
   file_pointer: { storage_path: string; mime_type: string; original_filename: string };
 }
 export interface Question {
-  request_id: string;
+  request_id: string | null;
   status: string;
   deliver_to: string;
   agent_id: string;

@@ -42,17 +42,21 @@ const fixtureDir = mkdtempSync(join(tmpdir(), 'claude-ws-cli-env-'));
 const fakeBinDir = join(fixtureDir, 'bin');
 mkdirSync(fakeBinDir, { recursive: true });
 
-// Fake CLI: drain the stdin prompt, record the env it was launched with, then
-// emit a successful stream-json result so ws-server finishes the run normally.
+// Fake CLI: read the stream-json prompt line (ws-server keeps stdin open until
+// the turn's result), record the env it was launched with, then emit a
+// successful result so ws-server closes stdin and the run finishes normally.
 const fakeClaudePath = join(fakeBinDir, 'claude');
 writeFileSync(
   fakeClaudePath,
   `#!${process.execPath}
 const { writeFileSync } = require('node:fs');
 let stdin = '';
+let answered = false;
 process.stdin.setEncoding('utf8');
-process.stdin.on('data', (chunk) => { stdin += chunk; });
-process.stdin.on('end', () => {
+process.stdin.on('data', (chunk) => {
+  stdin += chunk;
+  if (answered || !stdin.includes('\\n')) return;
+  answered = true;
   writeFileSync(process.env.FAKE_CLAUDE_CAPTURE_PATH, JSON.stringify({
     streamWatchdog: process.env.CLAUDE_ENABLE_STREAM_WATCHDOG ?? null,
     streamIdleTimeoutMs: process.env.CLAUDE_STREAM_IDLE_TIMEOUT_MS ?? null,
@@ -61,6 +65,7 @@ process.stdin.on('end', () => {
   }));
   process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result: 'ok' }) + '\\n');
 });
+process.stdin.on('end', () => process.exit(0));
 `
 );
 chmodSync(fakeClaudePath, 0o755);

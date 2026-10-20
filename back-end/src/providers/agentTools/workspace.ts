@@ -62,8 +62,18 @@ function mcpConfig(homeDir: string): string {
   );
 }
 
-function toolsConfig(url: string, token: string): string {
-  return JSON.stringify({ url, token });
+/**
+ * ~/.rose/tools.json: MCP servers may not inherit the session env (Codex passes
+ * only a fixed set), so the CLI falls back to this file. It also carries the
+ * agent-graph URL + token so an agent-routed question can use L-A2A's path.
+ */
+function toolsConfig(url: string, token: string, envs: Record<string, string> = {}): string {
+  return JSON.stringify({
+    url,
+    token,
+    ...(envs.ROSE_AGENTS_URL ? { agents_url: envs.ROSE_AGENTS_URL } : {}),
+    ...(envs.ROSE_AGENTS_TOKEN ? { agents_token: envs.ROSE_AGENTS_TOKEN } : {}),
+  });
 }
 
 /**
@@ -81,7 +91,10 @@ export function relocateAgentToolsWorkspace(
     ...workspace,
     files: workspace.files.map((file) => {
       if (file.path === AGENT_TOOLS_CONFIG_PATH) {
-        return { path: file.path, content: Buffer.from(toolsConfig(url, token), 'utf8') };
+        return {
+          path: file.path,
+          content: Buffer.from(toolsConfig(url, token, workspace.envs), 'utf8'),
+        };
       }
       if (file.path === AGENT_TOOLS_MCP_CONFIG_PATH) {
         return { path: file.path, content: Buffer.from(mcpConfig(homeDir), 'utf8') };
@@ -136,10 +149,14 @@ export function withAgentTools(
       files: [
         ...base.files.filter((file) => !owned.has(file.path)),
         { path: AGENT_TOOLS_CLI_PATH, content: agentToolsCliScript() },
-        { path: AGENT_TOOLS_CONFIG_PATH, content: Buffer.from(toolsConfig(url, token), 'utf8') },
+        {
+          path: AGENT_TOOLS_CONFIG_PATH,
+          content: Buffer.from(toolsConfig(url, token, base.envs), 'utf8'),
+        },
         { path: AGENT_TOOLS_MCP_CONFIG_PATH, content: Buffer.from(mcpConfig(homeDir), 'utf8') },
       ],
       envs: { ...base.envs, [AGENT_TOOLS_ENV_URL]: url, [AGENT_TOOLS_ENV_TOKEN]: token },
+      localEnvs: { ...base.localEnvs, [AGENT_TOOLS_ENV_URL]: localAgentToolsUrl(url) },
     };
   } catch (err) {
     log.error('Failed to add Rose agent tools', {

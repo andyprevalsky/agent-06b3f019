@@ -96,7 +96,7 @@ export const approvalRequestSchema = z.object({
   request_key: z.string().min(1).max(200).optional(),
 });
 
-/** POST /api/agents/:id/questions/:questionId/answer (UI pinned card, parent agents) */
+/** POST /api/agents/:id/questions/:questionId/answer (the UI's pinned card) */
 export const answerQuestionSchema = z
   .object({
     answer: z.string().max(4000).optional(),
@@ -157,11 +157,6 @@ export interface DisplayItemResult {
   file_pointer: DisplayFilePointer;
 }
 
-export interface QuestionRouteResult {
-  deliver_to: 'user' | 'parent';
-  agent_id: string;
-}
-
 export interface DisplayResult {
   agent_id: string;
   placement: 'inline' | 'pinned';
@@ -169,9 +164,10 @@ export interface DisplayResult {
   duplicate_count: number;
   items: DisplayItemResult[];
   question?: {
-    request_id: string;
-    status: 'pending' | 'answered' | 'rejected';
-    deliver_to: 'user' | 'parent';
+    /** null for route "agent": nothing is stored here, the caller asks via L-A2A. */
+    request_id: string | null;
+    status: 'pending' | 'answered' | 'rejected' | 'route_to_agent';
+    deliver_to: 'user' | 'agent';
     agent_id: string;
     message_id: string | null;
     /** The stored answer when the question was already answered (retried call). */
@@ -186,6 +182,6 @@ export interface RequestState {
   response: string | null;
   user_message: string | null;
   selected_option: { index: number; label: string } | null;
-  deliver_to: 'user' | 'parent';
-  answered_by: 'user' | 'parent' | null;
+  deliver_to: 'user' | 'agent';
+  answered_by: 'user' | 'agent' | null;
 }

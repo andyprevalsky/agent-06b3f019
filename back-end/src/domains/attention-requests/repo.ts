@@ -144,21 +144,6 @@ export async function findById(id: string) {
 }
 
 /**
- * Agent-tools questions routed to a parent agent (display pinned from a nested
- * agent) are the parent's to answer, not the user's: keep them out of the
- * user's inbox and badge count. They stay answerable by id.
- */
-function routedToParentAgent(metadata: unknown): boolean {
-  if (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata)) return false;
-  const agentTools = (metadata as { agentTools?: unknown }).agentTools;
-  return (
-    agentTools !== null &&
-    typeof agentTools === 'object' &&
-    (agentTools as { deliverTo?: unknown }).deliverTo === 'parent'
-  );
-}
-
-/**
  * List attention requests for a user, excluding rows whose agent is archived.
  * `AgentAttentionRequest.agentId` is a plain string (no FK), so soft-delete
  * paths that forget to `deleteMany` would otherwise keep prompting forever.
@@ -177,13 +162,13 @@ export async function findManyByUserId(userId: string) {
     select: { id: true },
   });
   const live = new Set(liveAgents.map((a) => a.id));
-  return requests.filter((r) => live.has(r.agentId) && !routedToParentAgent(r.metadata));
+  return requests.filter((r) => live.has(r.agentId));
 }
 
 export async function countUnanswered(userId: string) {
   const pending = await prisma.agentAttentionRequest.findMany({
     where: { userId, userResponse: null },
-    select: { agentId: true, metadata: true },
+    select: { agentId: true },
   });
   if (pending.length === 0) return 0;
 
@@ -193,7 +178,7 @@ export async function countUnanswered(userId: string) {
     select: { id: true },
   });
   const live = new Set(liveAgents.map((a) => a.id));
-  return pending.filter((r) => live.has(r.agentId) && !routedToParentAgent(r.metadata)).length;
+  return pending.filter((r) => live.has(r.agentId)).length;
 }
 
 export async function updateResponse(id: string, userResponse: string) {

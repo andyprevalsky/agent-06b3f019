@@ -2,24 +2,26 @@
 /**
  * Black-box tests for the blocking agent tools and the shipped `rose` CLI:
  *
- *   - pinned routing: root-spawned callers pin for the user (UI contract
- *     metadata.display {placement, kind, question, options, allow_other,
- *     question_id}); a deeper caller's question becomes an A2A message to its
- *     parent and stays out of the user's attention inbox; answers through
- *     POST /api/agents/:id/questions/:questionId/answer are idempotent (first
- *     answer wins), number → option, dismiss → rejected
+ *   - pinned routing (shared L-A2A decision): root-spawned callers pin for the
+ *     user (UI contract metadata.display {placement, kind, question, options,
+ *     allow_other, question_id}); a deeper caller gets route "agent" (its
+ *     spawner) and nothing is stored — it asks through the agent graph; answers
+ *     through POST /api/agents/:id/questions/:questionId/answer are idempotent
+ *     (first answer wins), number → option, dismiss → rejected
  *   - approval round trip: pending (long-poll holds, returns pending) → the user
  *     responds via the existing attention endpoint → a waiting long-poll resumes
  *     with the answer; retry reuses the request; reject → rejected; the
  *     ApprovalChip row (labelled with the requesting agent) finishes
- *   - sandbox send_message_to_user pins a published inline view; unknown view → 400
+ *   - sandbox send_message_to_user pins a published inline view; unknown view → 400;
+ *     a code session that publishes with rose-ui and runs `rose message
+ *     --inline-view` lands that row in its own trajectory (C12)
  *   - the shipped `rose` CLI: display posts once then reports already displayed;
  *     `rose approve` blocks across long-polls until the user answers, then exits 0
  *
  * Usage: bash scripts/run-blackbox-tests.sh agent-tools-requests
  */
 import { spawn } from 'child_process';
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { prisma } from '../../providers/database';
@@ -28,9 +30,11 @@ import {
   AGENT_TOOLS_CONFIG_PATH,
   AGENT_TOOLS_MCP_CONFIG_PATH,
   agentToolsCliScript,
+  agentToolsForLocalHome,
   relocateAgentToolsWorkspace,
   withAgentTools,
 } from '../../providers/agentTools/workspace';
+import { prepareCodeSessionWorkspace } from '../../providers/codeSessionWorkspace';
 import { materializeUserUiInLocalHome } from '../../providers/userUi/workspace';
 import {
   assert,
@@ -56,6 +60,7 @@ import {
   uiVersion,
   userA,
   userB,
+  agentB,
   type Auth,
   type BlackboxTest,
 } from './agent-tools.support';
@@ -80,6 +85,7 @@ const tests: BlackboxTest[] = [
       expectStatus(res, 201, 'pinned');
       const question = questionOf(res);
       assert(question.deliver_to === 'user' && question.agent_id === rootA, 'routed to the user');
+      assert(question.request_id !== null, 'stored');
       assert(question.status === 'pending', 'pending');
       const pins = await toolRows(rootA, `agent-tools:${question.request_id}`);
       assert(pins.length === 1, `one pin row, got ${pins.length}`);
@@ -163,7 +169,7 @@ const tests: BlackboxTest[] = [
     },
   },
   {
-    name: 'routing by spawner: root-spawned callers pin; deeper callers ask their parent (A2A)',
+    name: 'routing by spawner (shared L-A2A decision): root-spawned callers pin; deeper callers route to their spawner',
     fn: async () => {
       const ask = (agentId: string, auth: Auth, key: string) =>
         display(
@@ -171,105 +177,93 @@ const tests: BlackboxTest[] = [
           {
             caption: `Proceed? ${key}`,
             placement: 'pinned',
-            options: [{ label: 'Yes' }],
+            options: [{ label: 'Yes' }, { label: 'No' }],
             request_key: key,
           },
           auth
         );
       const root = await ask(rootA, { apiKeyUser: userA }, `root-${RUN}`);
       expectStatus(root, 201, 'root agent');
-      assert(questionOf(root).deliver_to === 'user', 'root → user');
+      assert(
+        questionOf(root).deliver_to === 'user' && questionOf(root).agent_id === rootA,
+        'root → user'
+      );
       const child = await ask(childA, { apiKeyUser: userA }, `child-${RUN}`);
       expectStatus(child, 201, 'depth-1 agent');
-      assert(questionOf(child).deliver_to === 'user', 'spawned by root → user');
-      assert(questionOf(child).agent_id === childA, "pin in the caller's own trajectory");
+      const childQ = questionOf(child);
+      assert(
+        childQ.deliver_to === 'user' && childQ.agent_id === rootA,
+        'spawned by root → user (root pins)'
+      );
+      assert(childQ.request_id !== null, 'a user-routed question is stored');
 
+      const before = await prisma.agentAttentionRequest.count({ where: { userId: userA } });
       const grandchild = await ask(grandchildA, { apiKeyUser: userA }, `gc-${RUN}`);
       expectStatus(grandchild, 201, 'depth-2 agent');
       const routed = questionOf(grandchild);
-      assert(routed.deliver_to === 'parent' && routed.agent_id === childA, 'depth 2 → parent');
-      const a2a = await prisma.message.findMany({
-        where: {
-          agentId: childA,
-          role: 'USER',
-          metadata: { path: ['a2a', 'question_id'], equals: routed.request_id },
-        },
-      });
-      assert(a2a.length === 1, `one A2A message in the parent, got ${a2a.length}`);
-      const a2aMeta = a2a[0].metadata as {
-        a2a: { kind: string; from_agent_id: string };
-        attentionRequestId?: string;
-      };
       assert(
-        a2aMeta.a2a.kind === 'question' && a2aMeta.a2a.from_agent_id === grandchildA,
-        'A2A metadata'
+        routed.deliver_to === 'agent' && routed.agent_id === childA && routed.request_id === null,
+        `depth 2 → its spawning agent: ${JSON.stringify(routed)}`
       );
-      assert(
-        a2aMeta.attentionRequestId === undefined,
-        'A2A row is never mistaken for an authored reply'
-      );
-      assert(a2a[0].text.includes('1. Yes') && a2a[0].text.includes('Other…'), 'numbered options');
-      expectStatus(await ask(grandchildA, { apiKeyUser: userA }, `gc-${RUN}`), 201, 'retry');
-      const a2aAfter = await prisma.message.count({
-        where: {
-          agentId: childA,
-          role: 'USER',
-          metadata: { path: ['a2a', 'question_id'], equals: routed.request_id },
-        },
-      });
-      assert(a2aAfter === 1, 'retry never re-sends the A2A message');
-
+      assert(routed.status === 'route_to_agent', 'the caller asks via the agent graph');
       const codeInChild = await ask(childA, { bearer: codeToken(childA) }, `code-child-${RUN}`);
       expectStatus(codeInChild, 201, 'code agent spawned by a non-root agent');
       const codeRoute = questionOf(codeInChild);
       assert(
-        codeRoute.deliver_to === 'parent' && codeRoute.agent_id === childA,
+        codeRoute.deliver_to === 'agent' && codeRoute.agent_id === childA,
         'code agent → spawner'
       );
-      const transcript = await toolRows(childA, `agent-tools:${codeRoute.request_id}`);
-      const transcriptMeta = transcript[0].metadata as Record<string, unknown>;
+      const codeInRoot = await ask(rootA, { bearer: codeToken(rootA) }, `code-root-${RUN}`);
+      assert(questionOf(codeInRoot).deliver_to === 'user', 'code agent spawned by root → user');
+      const after = await prisma.agentAttentionRequest.count({ where: { userId: userA } });
       assert(
-        transcriptMeta.isUserAttentionMessage === false,
-        'no user pin for a parent-routed question'
+        after === before + 1,
+        'agent-routed questions store nothing; the root-spawned code agent pins one'
       );
 
       const inbox = await call('GET', '/api/attention-requests', undefined, { apiKeyUser: userA });
       const ids = (inbox.data.requests as { id: string }[]).map((r) => r.id);
-      assert(ids.includes(questionOf(root).request_id), 'user-routed question in the inbox');
-      assert(
-        !ids.includes(routed.request_id),
-        'parent-routed question stays out of the user inbox'
-      );
+      assert(ids.includes(childQ.request_id ?? ''), 'user-routed question in the inbox');
 
-      expectStatus(
-        await call(
-          'POST',
-          `/api/agents/${childA}/questions/${routed.request_id}/answer`,
-          { answer: '1' },
-          {}
-        ),
-        200,
-        'parent agent answers by number (internal key)'
+      const viaRoot = await call(
+        'POST',
+        `/api/agents/${rootA}/questions/${childQ.request_id}/answer`,
+        { answer: '1' },
+        { apiKeyUser: userA }
       );
+      expectStatus(viaRoot, 200, 'the root view answers its sub-agent pin by number');
+      assert(
+        (viaRoot.data.selected_option as { label: string }).label === 'Yes',
+        'number → option'
+      );
+      assert(viaRoot.data.response === 'Yes', 'number stored as the option label');
+      assert(viaRoot.data.answered_by === 'user', 'answered by the user');
+      const rootQ = questionOf(root).request_id ?? '';
       const dismissed = await call(
         'POST',
-        `/api/agents/${childA}/questions/${questionOf(child).request_id}/answer`,
+        `/api/agents/${rootA}/questions/${rootQ}/answer`,
         { dismiss: true },
         { apiKeyUser: userA }
       );
       expectStatus(dismissed, 200, 'user dismisses');
       assert(dismissed.data.status === 'rejected', 'dismissed → rejected');
-      const state = await call(
-        'GET',
-        `/api/agent-tools/${grandchildA}/requests/${routed.request_id}`,
-        undefined,
+      const strict = await display(
+        rootA,
         {
-          apiKeyUser: userA,
-        }
+          caption: `Strict ${RUN}`,
+          placement: 'pinned',
+          options: [{ label: 'A' }],
+          allow_other: false,
+          request_key: `strict-${RUN}`,
+        },
+        { apiKeyUser: userA }
       );
-      assert(state.data.answered_by === 'parent', 'answered by the parent');
-      assert((state.data.selected_option as { label: string }).label === 'Yes', 'number → option');
-      assert(state.data.response === 'Yes', 'number stored as the option label');
+      const strictPath = `/api/agents/${rootA}/questions/${questionOf(strict).request_id}/answer`;
+      expectStatus(
+        await call('POST', strictPath, { answer: 'free text' }, { apiKeyUser: userA }),
+        400,
+        'free text refused without allow_other'
+      );
     },
   },
   {
@@ -431,6 +425,94 @@ const tests: BlackboxTest[] = [
         meta.inlineView.versionId === uiVersion && meta.inlineView.props.passed === 3,
         'pinned view'
       );
+    },
+  },
+  {
+    name: 'code session publishes an inline view with rose-ui and shows it with rose message (C12)',
+    fn: async () => {
+      // The UI-thread "Make me a game" failure: the view was published but never
+      // shown because nothing sent it. The code agent shows it itself; the row
+      // lands in its own trajectory whatever the root does next.
+      const home = mkdtempSync(join(tmpdir(), 'rose-tools-publish-'));
+      try {
+        const created = await prepareCodeSessionWorkspace(userB, agentB, 'task-game', 'claude');
+        assert(created !== null, 'code-session workspace');
+        const workspace = agentToolsForLocalHome(created, home);
+        assert(
+          (await materializeUserUiInLocalHome(home, workspace, agentB)) !== null,
+          'materialized'
+        );
+        const manifestPath = join(home, 'rose_user_ui', 'rose-ui.json');
+        const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+          inline?: Record<string, unknown>;
+        };
+        manifest.inline = {
+          ...(manifest.inline ?? {}),
+          'neon-game': { entry: 'inline/neon-game/index.html', summary: 'Neon game' },
+        };
+        writeFileSync(manifestPath, JSON.stringify(manifest));
+        mkdirSync(join(home, 'rose_user_ui', 'inline', 'neon-game'), { recursive: true });
+        writeFileSync(
+          join(home, 'rose_user_ui', 'inline', 'neon-game', 'index.html'),
+          '<!doctype html><canvas id="game"></canvas>'
+        );
+        const env: NodeJS.ProcessEnv = {
+          ...process.env,
+          HOME: home,
+          ROSE_UI_PUBLISH_URL: `${BASE_URL}/api/user-ui/versions`,
+          ROSE_UI_PUBLISH_TOKEN: created.envs.ROSE_UI_PUBLISH_TOKEN,
+          ROSE_TOOLS_URL: `${BASE_URL}/api/agent-tools/${agentB}`,
+          ROSE_TOOLS_TOKEN: created.envs.ROSE_TOOLS_TOKEN,
+        };
+        const published = await execFileAsync(
+          'node',
+          [join(home, '.rose/bin/rose-ui'), 'publish'],
+          {
+            env,
+          }
+        );
+        const version = /published version ([0-9a-f-]{36})/.exec(published.stdout)?.[1];
+        assert(version !== undefined, `rose-ui publish: ${published.stdout}`);
+        const sent = await execFileAsync(
+          'node',
+          [
+            join(home, AGENT_TOOLS_CLI_PATH),
+            'message',
+            'Your game is ready',
+            '--inline-view',
+            'neon-game',
+          ],
+          { env }
+        );
+        assert(sent.stdout.includes('sent (message '), `rose message: ${sent.stdout}`);
+        const rows = await prisma.message.findMany({
+          where: {
+            agentId: agentB,
+            role: 'TOOL',
+            metadata: { path: ['inlineView', 'view'], equals: 'neon-game' },
+          },
+        });
+        assert(rows.length === 1, `one inline-view message in the trajectory, got ${rows.length}`);
+        const meta = rows[0].metadata as {
+          toolName: string;
+          toolStatus: string;
+          inlineView: { versionId: string };
+          subAgentId: string;
+          isUserAttentionMessage: boolean;
+        };
+        assert(
+          meta.toolName === 'send_message_to_user' && meta.toolStatus === 'FINISHED',
+          'FYI row'
+        );
+        assert(meta.inlineView.versionId === version, 'pinned to the version just published');
+        assert(
+          meta.subAgentId === 'task-game' && meta.isUserAttentionMessage,
+          'grouped under the code agent'
+        );
+        assert(rows[0].text === 'Your game is ready', 'message text');
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
     },
   },
   {

@@ -24,7 +24,10 @@
  * poll and nothing while no request is pending.
  */
 import { createHash } from '../../providers/crypto';
-import { routeQuestion, type QuestionRoute } from '../../providers/agentTools/routing';
+import {
+  questionRouteBySpawner,
+  type QuestionRoute,
+} from '../../providers/agentGraph/questionRoute';
 import * as repo from './repo';
 import type { AgentToolsCaller, RequestingAgent } from './types';
 
@@ -89,11 +92,15 @@ export async function resolveContext(caller: AgentToolsCaller): Promise<ToolCont
         ? null
         : { id: parent.id, parentAgentId: parent.parentAgentId };
   }
+  // The root agent itself asks its own user; everyone else routes by spawner
+  // (the shared L-A2A decision: root-spawned → user, otherwise → that agent).
+  const route: QuestionRoute =
+    spawner === null ? { deliver_to: 'user', agent_id: agent.id } : questionRouteBySpawner(spawner);
   return {
     caller,
     agent,
     requesting: requestingAgentFor(caller, agent),
-    route: routeQuestion({ trajectoryAgentId: agent.id, spawner }),
+    route,
     workflowGeneration: agent.temporalWorkflowId ?? agent.id,
   };
 }

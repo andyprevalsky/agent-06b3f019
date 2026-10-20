@@ -18,6 +18,7 @@ import {
   type GptCodeCredentialEnvelopeResult,
 } from './gptCredentials';
 import { buildCodeAgentSystemPrompt, buildCodexHarnessSystemPrompt } from './codeAgentPrompt';
+import { withAgentGraphInstructions } from './agentGraph/cli';
 import { uploadAttachmentsToSandbox } from './e2bAttachments';
 import { overlayCodexRoseBridge } from './e2bCodexHarness';
 import { workDirForGithubRepo } from './e2bWorkDir';
@@ -34,12 +35,10 @@ import {
   resolveLocalSessionWorkDir,
 } from './claudeCodeLocalSession';
 import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
-import {
-  applyUserUiSandboxEnvs,
-  prepareUserUiWorkspaceSafe,
-  writeUserUiWorkspaceToSandboxSafe,
-} from './userUi/workspace';
-import { agentToolsForLocalHome, withAgentTools } from './agentTools/workspace';
+import { codeSessionTurnToken } from './codeSessionTurns';
+import { applyUserUiSandboxEnvs, writeUserUiWorkspaceToSandboxSafe } from './userUi/workspace';
+import { agentToolsForLocalHome } from './agentTools/workspace';
+import { prepareCodeSessionWorkspace } from './codeSessionWorkspace';
 import {
   isRefreshOnlyOauthEnvelope,
   resolveClaudeCodeAuthEnvs,
@@ -174,16 +173,23 @@ async function createClaudeCodeSessionUnlocked(
     `wrapper:${fileHash(findLocalClaudeCodeWsServer())}`,
     `env:${process.env.FAST_MODE_CODE_AGENT_ENV_FINGERPRINT ?? 'default'}`,
   ].join('|');
-  const systemPrompt = buildCodeAgentSystemPrompt({
-    githubRepoUrl,
-    workDir,
-  });
+  const systemPrompt = withAgentGraphInstructions(
+    buildCodeAgentSystemPrompt({
+      githubRepoUrl,
+      workDir,
+    })
+  );
 
   // Build environment variables for sandbox
   const envs: Record<string, string> = {
     CLAUDE_CODE_GOAL: goal,
     CLAUDE_CODE_MODEL: model,
     CODE_AGENT_SYSTEM_PROMPT: systemPrompt,
+    // Write capability for direct-chat user turns (codeSessionTurns.ts). The
+    // ws URL the browser reads stays read-only without it.
+    ...(process.env.BACKEND_API_KEY
+      ? { CODE_SESSION_TURN_TOKEN: codeSessionTurnToken(taskId) }
+      : {}),
   };
 
   // Try user's own credentials first, then rotate through the pool. The agent's
@@ -338,12 +344,7 @@ async function createClaudeCodeSessionUnlocked(
     log.info(`GitHub repo configured: ${githubRepoUrl}`);
   }
 
-  const userUiWorkspace = withAgentTools(await prepareUserUiWorkspaceSafe(userId), {
-    userId,
-    agentId,
-    taskId,
-    provider: 'claude',
-  });
+  const userUiWorkspace = await prepareCodeSessionWorkspace(userId, agentId, taskId, 'claude');
   applyUserUiSandboxEnvs(envs, userUiWorkspace);
 
   // Create sandbox first (before DB record) to avoid placeholder conflicts.
@@ -496,10 +497,12 @@ export async function createCodexCodeSession(
           roseUserId: userId,
           anchorAgentId: agentId,
         })
-      : buildCodeAgentSystemPrompt({
-          githubRepoUrl,
-          workDir,
-        });
+      : withAgentGraphInstructions(
+          buildCodeAgentSystemPrompt({
+            githubRepoUrl,
+            workDir,
+          })
+        );
 
   const credentialMeta: GptCodeCredentialEnvelopeResult | null =
     await fetchGptCodeCredentialsWithMeta(userId);
@@ -522,6 +525,11 @@ export async function createCodexCodeSession(
     CODEX_MODEL: model,
     CODE_AGENT_SYSTEM_PROMPT: systemPrompt,
     CODE_AGENT_HARNESS_MODE: harnessMode,
+    // Write capability for inbound turns (agent-graph messages, direct chat);
+    // same per-task token as the Claude Code session.
+    ...(process.env.BACKEND_API_KEY
+      ? { CODE_SESSION_TURN_TOKEN: codeSessionTurnToken(taskId) }
+      : {}),
   };
   if (harnessMode === 'rose' && roseApiBaseUrl) {
     const apiKey = process.env.BACKEND_API_KEY ?? '';
@@ -594,12 +602,7 @@ export async function createCodexCodeSession(
     log.info(`GitHub repo configured for Codex: ${githubRepoUrl}`);
   }
 
-  const userUiWorkspace = withAgentTools(await prepareUserUiWorkspaceSafe(userId), {
-    userId,
-    agentId,
-    taskId,
-    provider: 'codex',
-  });
+  const userUiWorkspace = await prepareCodeSessionWorkspace(userId, agentId, taskId, 'codex');
   applyUserUiSandboxEnvs(envs, userUiWorkspace);
 
   const sandbox = await createSandboxWithRetry(
