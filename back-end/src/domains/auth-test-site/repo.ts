@@ -1,5 +1,4 @@
 import { prisma, runTransactionWithRetry } from '../../providers/database';
-import { preferredBrowserPasswords } from '../../providers/browserPasswords';
 import { saveMintedPasswordlessLogin } from '../../providers/mintedAccountPassword';
 import {
   AUTH_TEST_SITE_BASE_PATH,
@@ -45,7 +44,7 @@ export async function connectInbox(userId: string, email: string): Promise<void>
 }
 
 /**
- * Upserts one saved browser password for the fixture origin and source. Rows are keyed by
+ * Upserts one saved browser password for the fixture origin. Rows are keyed by
  * the per-site origin, so a retried fixture call converges on the same rows
  * instead of duplicating them.
  */
@@ -59,12 +58,10 @@ export async function upsertSavedPassword(params: {
   const dateLastUsed = BigInt(params.dateLastUsedMs);
   const row = await prisma.browserPassword.upsert({
     where: {
-      userId_origin_username_browserSource_browserProfile: {
+      userId_origin_username: {
         userId: params.userId,
         origin: params.origin,
         username: params.username,
-        browserSource: SAVED_PASSWORD_BROWSER_SOURCE,
-        browserProfile: '',
       },
     },
     create: {
@@ -97,10 +94,12 @@ export async function recordMintedPasswordlessLogin(params: {
   await runTransactionWithRetry((tx) => saveMintedPasswordlessLogin(tx, params));
 }
 
-/** The saved login readers use for this site+username (one per login across sources). */
 export async function findSavedPasswordId(userId: string, origin: string, username: string) {
-  const rows = await prisma.browserPassword.findMany({ where: { userId, origin, username } });
-  return preferredBrowserPasswords(rows)[0]?.id ?? null;
+  const row = await prisma.browserPassword.findUnique({
+    where: { userId_origin_username: { userId, origin, username } },
+    select: { id: true },
+  });
+  return row?.id ?? null;
 }
 
 export async function findSavedPasswordStates(ids: string[]) {

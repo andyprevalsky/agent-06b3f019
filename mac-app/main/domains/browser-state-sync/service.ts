@@ -1,9 +1,7 @@
-import { randomUUID } from 'crypto';
 import { AuthService } from '../../services/auth';
 import { AtlasCredentialStore } from '../../services/atlasCredentialStore';
 import { BatchUploader } from '../../services/batchUploader';
 import { BrowserCookieReader, type BrowserType } from '../../services/browserCookieReader';
-import { IntegrationProgress } from '../../services/integrationProgress';
 import {
   BrowserPasswordReader,
   type BrowserType as PasswordBrowserType,
@@ -53,8 +51,7 @@ async function queueCookieUpload(
   browserName: string,
   keychainPassword: string | null,
   accessToken: string,
-  uploadPromises: UploadPromise[],
-  runId: string
+  uploadPromises: UploadPromise[]
 ): Promise<void> {
   try {
     const cookieConfig = keychainPassword !== null ? { keychainPassword } : undefined;
@@ -62,32 +59,7 @@ async function queueCookieUpload(
     console.log(`[BrowserStateSync] Read ${cookies.length} ${browserName} cookies`);
 
     if (cookies.length > 0) {
-      // Open each browser profile's progress chip at its known cookie total
-      // (done 0), then close it at done = total once the upload confirms. Both
-      // writes are best-effort and never block or fail the upload itself.
-      await IntegrationProgress.reportCookieProfilesSyncing(
-        browserType,
-        cookies,
-        accessToken,
-        runId
-      );
-      const uploadPromise = BatchUploader.uploadInBatches(
-        browserType,
-        cookies,
-        accessToken,
-        null
-      ).then(async (result) => {
-        if (result.success) {
-          await IntegrationProgress.reportCookieProfilesSynced(
-            browserType,
-            cookies,
-            accessToken,
-            runId
-          );
-        }
-        return result;
-      });
-      uploadPromises.push(uploadPromise);
+      uploadPromises.push(BatchUploader.uploadInBatches(browserType, cookies, accessToken, null));
     }
   } catch (error) {
     console.error(`[BrowserStateSync] Failed to read ${browserName} cookies:`, error);
@@ -186,7 +158,6 @@ export async function sync(): Promise<void> {
     );
 
     const uploadPromises: UploadPromise[] = [];
-    const runId = randomUUID();
 
     for (const browser of syncableBrowsers) {
       const keychainPassword =
@@ -196,8 +167,7 @@ export async function sync(): Promise<void> {
         browser.name,
         keychainPassword,
         session.access_token,
-        uploadPromises,
-        runId
+        uploadPromises
       );
     }
 
@@ -253,7 +223,6 @@ export async function syncBrowser(
   console.log(`[BrowserStateSync] Starting full sync for ${browserType}`);
 
   const uploadPromises: UploadPromise[] = [];
-  const runId = randomUUID();
   const keychainPassword =
     options?.keychainPassword !== undefined ? options.keychainPassword : null;
 
@@ -262,8 +231,7 @@ export async function syncBrowser(
     browserType,
     keychainPassword,
     session.access_token,
-    uploadPromises,
-    runId
+    uploadPromises
   );
 
   if (browserType === 'chrome') {

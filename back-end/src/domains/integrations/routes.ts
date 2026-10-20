@@ -1,7 +1,7 @@
 /**
  * Integrations domain routes — main router + CRUD + mounts sub-routers.
- * Sub-routers: routes.upload.ts, routes.whatsapp.ts, routes.browser.ts, routes.email.ts, routes.claude.ts,
- * routes.compute.ts, routes.plaid.ts, routes.accounts.ts (per-account progress + delete)
+ * Sub-routers: routes.upload.ts, routes.browser.ts, routes.email.ts, routes.claude.ts,
+ * routes.compute.ts, routes.plaid.ts, routes.accounts.ts (sync progress + delete alias)
  */
 
 import { type Response, Router } from 'express';
@@ -11,7 +11,6 @@ import * as service from './service';
 import * as accountService from './service.accounts';
 
 import uploadRoutes from './routes.upload';
-import whatsappRoutes from './routes.whatsapp';
 import browserRoutes from './routes.browser';
 import passkeyRoutes from './routes.passkeys';
 import emailRoutes from './routes.email';
@@ -27,7 +26,6 @@ const router = Router();
 
 // Mount sub-routers
 router.use(uploadRoutes);
-router.use(whatsappRoutes);
 router.use(browserRoutes);
 router.use(passkeyRoutes);
 router.use(emailRoutes);

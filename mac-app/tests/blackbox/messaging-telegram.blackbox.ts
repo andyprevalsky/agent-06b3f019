@@ -78,18 +78,11 @@ const SESSION_PATH = path.join(TELEGRAM_AUTH_DIR, 'session.txt');
  * string was passed in. Used by both TelegramAuth (disk persistence) and
  * TelegramClient (starting auth with a loaded session).
  */
-// A class (not an arrow mockImplementation) so `new StringSession()` is a valid
-// construct under every vitest major.
 vi.mock('telegram/sessions', () => ({
-  StringSession: class StringSession {
-    readonly _saveValue: string;
-    constructor(s?: string) {
-      this._saveValue = s ?? '';
-    }
-    save(): string {
-      return this._saveValue;
-    }
-  },
+  StringSession: vi.fn().mockImplementation((s: string) => ({
+    save: () => s ?? '',
+    _saveValue: s ?? '',
+  })),
 }));
 
 // GramClient is referenced but never constructed in tests that don't hit the

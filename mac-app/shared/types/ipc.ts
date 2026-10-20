@@ -194,19 +194,11 @@ export interface IPC {
   // WhatsApp
   whatsapp?: {
     hasCredentials: () => Promise<boolean>;
-    /** The first linked account's phone (pre-multi-account callers). */
     getLinkedPhoneNumber: () => Promise<string | null>;
-    /** Any account connected, or that one account (`accountId` = its E.164 phone). */
-    isConnected: (accountId?: string) => Promise<boolean>;
-    /** Every linked account, one Baileys auth dir + socket each (plan row I2). */
-    listAccounts?: () => Promise<Array<{ accountId: string; connected: boolean }>>;
-    /** Connect every linked account; pairs a new one (QR) when none is linked. */
+    isConnected: () => Promise<boolean>;
     connect: () => Promise<{ success: boolean; error?: string }>;
-    /** Pair one more account (QR via onWhatsAppQRCode); existing accounts keep syncing. */
-    addAccount?: () => Promise<{ success: boolean; error?: string }>;
     disconnect: () => Promise<{ success: boolean; error?: string }>;
-    /** Log out one account (others stay connected) or, with no id, every account. */
-    logout: (accountId?: string) => Promise<{ success: boolean; error?: string }>;
+    logout: () => Promise<{ success: boolean; error?: string }>;
   };
 
   // WhatsApp events
@@ -219,15 +211,9 @@ export interface IPC {
     isConnected: () => Promise<boolean>;
     connectWithExistingSession: () => Promise<{ success: boolean; error?: string }>;
     disconnect: () => Promise<{ success: boolean; error?: string }>;
-    /** Log out one account (Telegram user id), or every connected account when omitted. */
-    logout: (accountId?: string) => Promise<{ success: boolean; error?: string }>;
-    /** Saved Telegram accounts on this Mac with their connection state. */
-    listAccounts?: () => Promise<
-      Array<{ accountId: string; label: string | null; connected: boolean }>
-    >;
+    logout: () => Promise<{ success: boolean; error?: string }>;
     syncHistorical: (
-      messagesPerDialog?: number,
-      accountId?: string
+      messagesPerDialog?: number
     ) => Promise<{ success: boolean; count?: number; error?: string }>;
     // Auth flow methods
     startAuth: (phoneNumber: string) => Promise<{ success: boolean; error?: string }>;

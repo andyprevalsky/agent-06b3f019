@@ -4,40 +4,12 @@
  * Disk-backed StringSession persistence. Sole consumer of the userData
  * filesystem for Telegram authentication state.
  *
- *   telegram-auth/
- *     session.txt                      legacy single-account login (migrated on connect)
- *     accounts/<telegram user id>/
- *       session.txt                    that account's StringSession
- *       account.json                   { label, claimLegacy? }
- *
  * Imports: own config, own types, `fs`, `path`, GramJS `StringSession` type.
  */
 import fs from 'fs';
 import path from 'path';
 import { StringSession } from 'telegram/sessions';
-import {
-  ACCOUNT_ID_PATTERN,
-  ACCOUNTS_DIR,
-  PROFILE_FILE,
-  SESSION_FILE,
-  TELEGRAM_AUTH_DIR,
-} from './config';
-import type { TelegramAccountProfile } from './types';
-
-function readNonEmpty(file: string): string | null {
-  try {
-    if (!fs.existsSync(file)) return null;
-    const content = fs.readFileSync(file, 'utf-8').trim();
-    return content.length > 0 ? content : null;
-  } catch {
-    return null;
-  }
-}
-
-function writePrivate(file: string, content: string): void {
-  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(file, content, { encoding: 'utf-8', mode: 0o600 });
-}
+import { SESSION_FILE, TELEGRAM_AUTH_DIR } from './config';
 
 /**
  * Telegram authentication state management.
@@ -61,20 +33,29 @@ export class TelegramAuth {
   }
 
   /**
-   * Load the legacy single-account session string.
+   * Load existing session string.
    */
   static loadSession(): StringSession {
     this.ensureAuthDir();
-    const sessionString = readNonEmpty(path.join(TELEGRAM_AUTH_DIR, SESSION_FILE));
-    if (sessionString !== null) {
-      console.log('[TelegramAuth] Loaded existing session');
-      return new StringSession(sessionString);
+    const sessionPath = path.join(TELEGRAM_AUTH_DIR, SESSION_FILE);
+
+    try {
+      if (fs.existsSync(sessionPath)) {
+        const sessionString = fs.readFileSync(sessionPath, 'utf-8').trim();
+        if (sessionString.length > 0) {
+          console.log('[TelegramAuth] Loaded existing session');
+          return new StringSession(sessionString);
+        }
+      }
+    } catch (error) {
+      console.warn('[TelegramAuth] Failed to load session:', error);
     }
+
     return new StringSession('');
   }
 
   /**
-   * Save the legacy single-account session string to disk.
+   * Save session string to disk.
    */
   static saveSession(session: StringSession): void {
     this.ensureAuthDir();
@@ -89,20 +70,22 @@ export class TelegramAuth {
     }
   }
 
-  /** True when the legacy single-account session file holds a session. */
-  static hasLegacySession(): boolean {
-    return readNonEmpty(path.join(TELEGRAM_AUTH_DIR, SESSION_FILE)) !== null;
-  }
-
   /**
-   * Check if any session exists (legacy or per-account).
+   * Check if session exists.
    */
   static hasSession(): boolean {
-    return this.hasLegacySession() || this.listAccountIds().length > 0;
+    const sessionPath = path.join(TELEGRAM_AUTH_DIR, SESSION_FILE);
+    try {
+      if (!fs.existsSync(sessionPath)) return false;
+      const content = fs.readFileSync(sessionPath, 'utf-8').trim();
+      return content.length > 0;
+    } catch {
+      return false;
+    }
   }
 
   /**
-   * Clear every session (log out all accounts locally).
+   * Clear session (logout).
    */
   static clearSession(): void {
     try {
@@ -113,77 +96,5 @@ export class TelegramAuth {
     } catch (error) {
       console.error('[TelegramAuth] Failed to clear session:', error);
     }
-  }
-
-  /** Remove only the legacy single-account session file. */
-  static clearLegacySession(): void {
-    fs.rmSync(path.join(TELEGRAM_AUTH_DIR, SESSION_FILE), { force: true });
-  }
-
-  /** The account's directory. Throws for anything but a numeric Telegram user id. */
-  static accountDir(accountId: string): string {
-    if (!ACCOUNT_ID_PATTERN.test(accountId)) {
-      throw new Error(`Invalid Telegram account id: ${accountId}`);
-    }
-    return path.join(ACCOUNTS_DIR, accountId);
-  }
-
-  /** Account ids (Telegram user ids) that have a saved session, ascending. */
-  static listAccountIds(): string[] {
-    if (!fs.existsSync(ACCOUNTS_DIR)) return [];
-    return fs
-      .readdirSync(ACCOUNTS_DIR)
-      .filter((id) => ACCOUNT_ID_PATTERN.test(id))
-      .filter((id) => readNonEmpty(path.join(ACCOUNTS_DIR, id, SESSION_FILE)) !== null)
-      .sort((a, b) => a.length - b.length || a.localeCompare(b));
-  }
-
-  static loadAccountSession(accountId: string): StringSession {
-    const value = readNonEmpty(path.join(this.accountDir(accountId), SESSION_FILE));
-    return new StringSession(value ?? '');
-  }
-
-  static saveAccountSession(
-    accountId: string,
-    session: StringSession,
-    profile: TelegramAccountProfile
-  ): void {
-    const dir = this.accountDir(accountId);
-    writePrivate(path.join(dir, SESSION_FILE), session.save());
-    this.writeAccountProfile(accountId, profile);
-  }
-
-  static readAccountProfile(accountId: string): TelegramAccountProfile {
-    const raw = readNonEmpty(path.join(this.accountDir(accountId), PROFILE_FILE));
-    if (raw === null) return { label: null };
-    try {
-      const parsed = JSON.parse(raw) as Partial<TelegramAccountProfile>;
-      return {
-        label: typeof parsed.label === 'string' ? parsed.label : null,
-        ...(parsed.claimLegacy === true && { claimLegacy: true }),
-      };
-    } catch {
-      return { label: null };
-    }
-  }
-
-  static writeAccountProfile(accountId: string, profile: TelegramAccountProfile): void {
-    writePrivate(path.join(this.accountDir(accountId), PROFILE_FILE), JSON.stringify(profile));
-  }
-
-  /** Remove one account's session and profile; other accounts are untouched. */
-  static clearAccountSession(accountId: string): void {
-    fs.rmSync(this.accountDir(accountId), { recursive: true, force: true });
-  }
-
-  /**
-   * Move the legacy single-account session into its account directory, marked
-   * so the next registration claims the backend's legacy Telegram row.
-   */
-  static adoptLegacySession(accountId: string, label: string | null): void {
-    const legacy = readNonEmpty(path.join(TELEGRAM_AUTH_DIR, SESSION_FILE));
-    if (legacy === null) return;
-    this.saveAccountSession(accountId, new StringSession(legacy), { label, claimLegacy: true });
-    this.clearLegacySession();
   }
 }

@@ -42,15 +42,15 @@ const MACHINE_DATA_ROUTES: Record<string, string[]> = {
   ],
   'integrations/routes.upload.ts': [
     '/upload',
+    '/linkedin/upload',
     '/contacts/upload',
     '/email/upload',
     '/imessage/upload',
+    '/whatsapp/upload',
     '/telegram/upload',
     '/telegram/connect',
     '/passwords/apple/upload',
   ],
-  // One linked WhatsApp phone registering and uploading its history (I2).
-  'integrations/routes.whatsapp.ts': ['/whatsapp/upload', '/whatsapp/connect'],
   'integrations/routes.claude.ts': [
     '/claude-code/credentials/upload',
     '/gpt-code/credentials/upload',
@@ -58,8 +58,6 @@ const MACHINE_DATA_ROUTES: Record<string, string[]> = {
   'integrations/routes.passkeys.ts': ['/passkeys/upload'],
   'integrations/routes.lantern.ts': ['/lantern-people/credentials/upload'],
   'integrations/routes.documents.ts': ['/documents/upload'],
-  // The LinkedIn archive, and the export agent's report of the session account's sync.
-  'integrations/routes.linkedin.ts': ['/linkedin/upload', '/linkedin/sync/phase'],
   // The Mac app reports THIS machine's sync progress for an account.
   'integrations/routes.accounts.ts': ['/:provider/accounts/:accountId/progress'],
   'upload/routes.ts': ['/'],

@@ -18,16 +18,7 @@ import {
   toNormalizedMessage,
   toNormalizedMessages,
 } from './service';
-import {
-  countMessageRows,
-  loadSyncContacts,
-  readMessageBatch,
-  type MessageBatch,
-  type MessageBatchWindow,
-} from './service.batch';
-import type { ContactRecord, IMessageData, NormalizedMessage } from './types';
-
-export type { MessageBatch, MessageBatchWindow };
+import type { IMessageData, NormalizedMessage } from './types';
 
 /**
  * Reads and cleans messages from the local macOS iMessage database
@@ -67,23 +58,5 @@ export class IMessageReader {
   /** Max ROWID in the message table, or 0 when access is denied. */
   static getMaxRowId(): number {
     return getMaxRowId();
-  }
-
-  /** Message rows after `afterRowId` (the run total) and the current MAX(ROWID). */
-  static countMessageRows(afterRowId: number): { total: number; maxRowId: number } {
-    return countMessageRows(afterRowId);
-  }
-
-  /** Native contacts for enrichment, loaded once per batched sync run. */
-  static async loadSyncContacts(): Promise<Map<string, ContactRecord>> {
-    return loadSyncContacts();
-  }
-
-  /** One batch window of the device sync (ROWID order). */
-  static readMessageBatch(
-    window: MessageBatchWindow,
-    contactMap: Map<string, ContactRecord>
-  ): MessageBatch {
-    return readMessageBatch(window, contactMap);
   }
 }

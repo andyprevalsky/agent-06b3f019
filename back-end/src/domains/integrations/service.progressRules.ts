@@ -6,13 +6,17 @@
  *        │ no ──────────────────────────► write (new run, old id retired)
  *   same runId ── finished run? ────────► exact replay: duplicate, else stale(run_finished)
  *        │ seq lower / state rank lower ► stale(out_of_order)
- *        │ done lower in same phase ────► stale(regressed)
+ *        │ done lower in same phase ────► stale(regressed)      (non-terminal writes only)
+ *        │ pct lower than stored ───────► stale(regressed)      (non-terminal writes only)
  *        │ identical content ───────────► duplicate
  *        │ syncing→syncing within 1 s ──► coalesced
  *        └──────────────────────────────► write
  *
- * Monotonic per run: progress never moves backwards inside one run, so a late
- * or retried batch cannot rewind a chip. A writer restarts by using a new runId.
+ * Monotonic per run: done and pct never move backwards inside one run, so a late
+ * or retried batch cannot rewind a bar. A writer restarts by using a new runId.
+ * A terminal write (synced / failed / needs_reconnect) is a state transition: it
+ * is never coalesced and never rejected for its counts, so a finished run's last
+ * stored state is always terminal even when its last syncing write was coalesced.
  */
 
 import {
@@ -180,6 +184,7 @@ function sameRunOrder(
   if (STATE_RANK[input.state] < STATE_RANK[existing.state]) {
     return { kind: 'stale', detail: 'out_of_order' };
   }
+  if (isTerminalState(input.state)) return null;
   const phase = pick(input.phase, existing.phase);
   if (
     phase === existing.phase &&
@@ -217,6 +222,14 @@ export function decideProgressWrite(
 
   const fields = continueRun(existing, input, now);
   if (sameContent(existing, fields)) return { kind: 'duplicate' };
+  if (
+    !isTerminalState(fields.state) &&
+    fields.pct !== null &&
+    existing.pct !== null &&
+    fields.pct < existing.pct
+  ) {
+    return { kind: 'stale', detail: 'regressed' };
+  }
 
   const elapsedMs = now.getTime() - existing.updatedAt.getTime();
   if (

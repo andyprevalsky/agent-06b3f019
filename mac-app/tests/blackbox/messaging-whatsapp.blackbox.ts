@@ -94,7 +94,6 @@ vi.mock('../../main/services/messaging/platforms/whatsapp/WhatsAppClient', async
       this.connected = false;
     });
     isConnected = (): boolean => this.connected;
-    getSelfJid = (): string | null => null;
   }
   return { WhatsAppClient: FakeClient };
 });
@@ -305,6 +304,7 @@ describe('messaging-whatsapp > public barrel (platforms/whatsapp/index.ts)', () 
 
 const UPLOAD_PATH = '/api/integrations/whatsapp/upload';
 const CONNECT_PATH = '/api/integrations/whatsapp/connect';
+const PROGRESS_PATH = '/api/integrations/whatsapp/accounts/default/progress';
 const uploadCalls = () => fetchCaptures.filter((c) => c.url.includes(UPLOAD_PATH));
 
 describe('messaging-whatsapp > WhatsAppSync (coordinator + fetch boundary)', () => {
@@ -369,14 +369,11 @@ describe('messaging-whatsapp > WhatsAppSync (coordinator + fetch boundary)', () 
     const { WhatsAppSync } =
       await import('../../main/services/messaging/platforms/whatsapp/WhatsAppSync');
     await WhatsAppSync.connect();
-    // With no linked account, connect() pairs one session; dig its FakeClient out of the
-    // private per-account session map via a typed cast. Tests drive it via emit('sync', ...)
-    // exactly as the real Baileys-backed client does.
-    const sessions = (
-      WhatsAppSync as unknown as { sessions: Map<string, { client: EventEmitter | null }> }
-    ).sessions;
-    const client = [...sessions.values()][0]?.client;
-    if (!client) throw new Error('WhatsAppSync session client not set after connect()');
+    // The coordinator instantiates one FakeClient per connect(); dig it out by poking the
+    // private static field via a typed cast. Tests drive it via emit('sync', ...) exactly as
+    // the real Baileys-backed client does.
+    const client = (WhatsAppSync as unknown as { client: EventEmitter | null }).client;
+    if (!client) throw new Error('WhatsAppSync.client not set after connect()');
     return { WhatsAppSync, client };
   }
 
@@ -431,6 +428,46 @@ describe('messaging-whatsapp > WhatsAppSync (coordinator + fetch boundary)', () 
       (c: { contact_id: string }) => c.contact_id === '+15555551212'
     );
     expect(alice.messages.map((m: { text: string }) => m.text).sort()).toEqual(['hi', 'there']);
+  });
+
+  it('history sync progress: each batch posts messages received + Baileys percent; the last batch ends synced', async () => {
+    const { client } = await getSyncAndClient();
+    const progressCalls = () => fetchCaptures.filter((c) => c.url.includes(PROGRESS_PATH));
+
+    client.emit('sync', {
+      type: 'new_messages',
+      channel: 'WHATSAPP',
+      messages: [makeWhatsAppMessage({ id: 'h-1' }), makeWhatsAppMessage({ id: 'h-2' })],
+      history: { progress: 40, isLatest: false },
+    } satisfies SyncEvent);
+    await vi.waitFor(() => expect(progressCalls()).toHaveLength(1));
+    client.emit('sync', {
+      type: 'new_messages',
+      channel: 'WHATSAPP',
+      messages: [makeWhatsAppMessage({ id: 'h-3' })],
+      history: { progress: null, isLatest: true },
+    } satisfies SyncEvent);
+    await vi.waitFor(() => expect(progressCalls()).toHaveLength(2));
+
+    const [first, last] = progressCalls();
+    expect(first.url).toBe(`http://localhost:3001${PROGRESS_PATH}`);
+    expect(first.method).toBe('POST');
+    expect(first.headers['authorization']).toBe('Bearer test-access-token');
+    const opened = JSON.parse(first.body ?? '{}');
+    expect(opened).toMatchObject({
+      seq: 1,
+      state: 'syncing',
+      phase: 'history',
+      unit: 'messages',
+      done: 2,
+      total: null,
+      pct: 40,
+    });
+    const closed = JSON.parse(last.body ?? '{}');
+    expect(closed).toMatchObject({ seq: 2, state: 'synced', unit: 'messages', done: 3 });
+    expect(closed.runId).toBe(opened.runId);
+    // History messages still flow through the normal buffered upload.
+    expect(uploadCalls()).toHaveLength(0);
   });
 
   it('auth boundary: no session → flushBuffer skips upload, buffer preserved, no fetch issued', async () => {
@@ -757,6 +794,29 @@ describe('messaging-whatsapp > connection close (Baileys socket semantics)', () 
     emitClose(harness, STATUS_LOGGED_OUT);
 
     expect(fs.existsSync(harness.credsPath)).toBe(false);
+  });
+
+  it('emits a history batch with its progress even when it has no messages', async () => {
+    harness = await bootClient();
+    const events: SyncEvent[] = [];
+    harness.client.on('sync', (event: SyncEvent) => events.push(event));
+
+    harness.sock.ev.emit('messaging-history.set', {
+      chats: [],
+      contacts: [],
+      messages: [],
+      isLatest: true,
+      progress: 100,
+    });
+
+    expect(events).toEqual([
+      {
+        type: 'new_messages',
+        channel: 'WHATSAPP',
+        messages: [],
+        history: { progress: 100, isLatest: true },
+      },
+    ]);
   });
 
   it('does not resurrect the socket when disconnect() races a pending reconnect', async () => {

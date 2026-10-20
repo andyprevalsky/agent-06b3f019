@@ -6,7 +6,8 @@
  */
 export { IntegrationProgress } from '../domains/integration-progress/runtime';
 export type {
-  CookieProfileCount,
   ProgressPostResult,
+  ProgressRun,
+  ProgressRunWrite,
   ProgressWriteBody,
 } from '../domains/integration-progress/runtime';

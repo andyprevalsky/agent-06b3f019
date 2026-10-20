@@ -10,8 +10,17 @@ import { createLogger } from '../../providers/logger';
 import * as repo from './repo';
 import { parseVcfContent, importVcfContacts } from '../../services/integrations/vcfParser';
 import { parseEmailZip, importEmailsToDb } from '../../services/integrations/emailParser';
+import { importLinkedInData } from '../../services/integrations/linkedinParser';
+import { reportProgressBestEffort } from './service.progress';
+import { uploadRunProgress } from './service.uploadProgress';
+import type { ProgressWriteInput } from './syncAccountsContract';
 
 const log = createLogger('Integrations');
+
+/** Best-effort progress of the user's legacy (`''`) LinkedIn row. */
+function reportLinkedInProgress(userId: string, input: ProgressWriteInput): Promise<void> {
+  return reportProgressBestEffort({ userId, provider: 'linkedin', accountId: '', input });
+}
 
 /**
  * Process generic file upload integration.
@@ -67,6 +76,84 @@ export async function processGenericUpload(
 }
 
 /**
+ * Process LinkedIn ZIP upload.
+ */
+export async function processLinkedInUpload(userId: string, filePath: string, fileName: string) {
+  log.info('LinkedIn file uploaded', { fileName, userId });
+
+  const integration = await repo.upsertIntegrationForUpload({
+    userId,
+    name: 'linkedin',
+    config: { fileName, uploadedAt: new Date().toISOString() },
+  });
+
+  const jobId = integration.id;
+  // Sync progress: the archive bytes received (no total), then the parsed records.
+  const runId = `linkedin-upload:${jobId}:${Date.now()}`;
+  await reportLinkedInProgress(userId, {
+    runId,
+    state: 'syncing',
+    phase: 'uploaded',
+    unit: 'bytes',
+    done: fs.statSync(filePath).size,
+    total: null,
+  });
+
+  let parsedRecords: number | null = null;
+  try {
+    const result = await importLinkedInData(userId, filePath, jobId, (records) => {
+      parsedRecords = records;
+      return reportLinkedInProgress(userId, {
+        runId,
+        state: 'syncing',
+        phase: 'importing',
+        unit: 'records',
+        done: 0,
+        total: records,
+      });
+    });
+
+    await repo.updateIntegrationStatus(integration.id, IntegrationStatus.CONNECTED, {
+      isActive: true,
+      lastSyncAt: new Date(),
+      lastSuccessfulSyncAt: new Date(),
+    });
+    await reportLinkedInProgress(userId, {
+      runId,
+      state: 'synced',
+      ...(parsedRecords !== null && { done: parsedRecords }),
+    });
+
+    fs.unlinkSync(filePath);
+
+    return { jobId, contacts: result.contacts, messages: result.messages };
+  } catch (parseError: unknown) {
+    log.error('LinkedIn parse/import error', {
+      error: parseError instanceof Error ? parseError.message : String(parseError),
+    });
+
+    await repo.updateIntegrationStatus(integration.id, IntegrationStatus.SYNC_FAILED, {
+      lastSyncAt: new Date(),
+      lastFailedSyncAt: new Date(),
+      failureReason: parseError instanceof Error ? parseError.message : 'Unknown error',
+    });
+    await reportLinkedInProgress(userId, {
+      runId,
+      state: 'failed',
+      error: parseError instanceof Error ? parseError.message : 'Unknown error',
+    });
+
+    try {
+      fs.unlinkSync(filePath);
+    } catch {
+      // expected — file may already be removed
+    }
+
+    throw parseError;
+  }
+}
+
+/**
  * Process VCF contacts upload.
  */
 export async function processContactsUpload(userId: string, filePath: string, fileName: string) {
@@ -75,7 +162,15 @@ export async function processContactsUpload(userId: string, filePath: string, fi
 
   log.info('Parsed contacts from VCF', { count: contacts.length });
 
-  const result = await importVcfContacts(userId, contacts);
+  // Sync progress: the parsed contacts, imported in one pass (best-effort).
+  const progress = uploadRunProgress({
+    userId,
+    run: 'contacts-upload',
+    unit: 'contacts',
+    totals: new Map([['contacts', contacts.length]]),
+  });
+  await progress.start();
+  const result = await progress.step(() => importVcfContacts(userId, contacts));
 
   fs.unlinkSync(filePath);
 
@@ -93,6 +188,7 @@ export async function processContactsUpload(userId: string, filePath: string, fi
       contactsImported: result.created + result.updated,
     },
   });
+  await progress.finish();
 
   return { parsed: contacts.length, ...result };
 }

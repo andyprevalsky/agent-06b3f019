@@ -157,14 +157,9 @@ const Root = () => {
   const handlers = useMemo(
     () => ({
       ...electronHandlers,
-      whatsApp: {
-        isAvailable: whatsApp.isAvailable,
-        connect: whatsApp.connect,
-        addAccount: whatsApp.addAccount,
-        logout: whatsApp.logout,
-      },
+      whatsApp: { isAvailable: whatsApp.isAvailable, connect: whatsApp.connect },
     }),
-    [whatsApp.isAvailable, whatsApp.connect, whatsApp.addAccount, whatsApp.logout]
+    [whatsApp.isAvailable, whatsApp.connect]
   );
 
   return (

@@ -98,8 +98,7 @@ const sqliteState = vi.hoisted(() => ({
 
 vi.mock('better-sqlite3', () => {
   return {
-    // `function`, not an arrow: the reader constructs it with `new`.
-    default: vi.fn().mockImplementation(function () {
+    default: vi.fn().mockImplementation(() => {
       if (sqliteState.throwOnOpen) throw sqliteState.throwOnOpen;
       return {
         prepare: vi.fn((sql: string) => {

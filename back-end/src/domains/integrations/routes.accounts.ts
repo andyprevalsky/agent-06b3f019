@@ -1,22 +1,29 @@
 /**
- * Per-account integration routes (plan row I0).
+ * Sync-progress routes (one account per existing Integration row).
  *
  *   POST   /api/integrations/:provider/accounts/:accountId/progress  write one batch of progress
- *   DELETE /api/integrations/:provider/accounts/:accountId           remove ONE account + its data
- *   GET    /api/integrations/progress?since=<cursor>                 cheap chip poll
+ *   GET    /api/integrations/progress?since=<cursor>                 the bar poll
+ *   DELETE /api/integrations/:provider/accounts/:accountId           alias of DELETE /:name
  *
- * `accountId` is URL-encoded; `default` names the legacy single-account row.
- * Progress writes ingest the caller machine's sync state, so they share the
- * impersonation containment of every other machine-data upload.
+ * `accountId` is URL-encoded; `default` names the row's legacy `''` key. A
+ * non-default id must be an existing row's. Progress writes ingest the caller
+ * machine's sync state, so they share the impersonation containment of every
+ * other machine-data upload.
  */
 
 import { type Response, Router } from 'express';
 import { ZodError } from 'zod';
 import { type AuthRequest, authenticate, authenticateMachineUpload } from '../../providers/auth';
 import { asyncHandler } from '../../utils/asyncHandler';
+import { findIntegrationAccount } from './repo.accounts';
+import * as service from './service';
 import * as accounts from './service.accounts';
 import { ProgressAccountLimitError, reportIntegrationProgress } from './service.progress';
-import { InvalidAccountKeyError } from './syncAccountsContract';
+import {
+  assertProviderSlug,
+  InvalidAccountKeyError,
+  toStorageAccountId,
+} from './syncAccountsContract';
 
 const router = Router();
 
@@ -35,15 +42,15 @@ function sendKnownError(error: unknown, res: Response): boolean {
     res.status(400).json({ error: error.message });
   } else if (error instanceof ProgressAccountLimitError) {
     res.status(409).json({ error: 'ACCOUNT_LIMIT_EXCEEDED', message: error.message });
-  } else if (error instanceof accounts.IntegrationAccountNotFoundError) {
+  } else if (
+    error instanceof accounts.IntegrationAccountNotFoundError ||
+    error instanceof service.IntegrationNotFoundError
+  ) {
     res.status(404).json({ error: error.message });
-  } else if (error instanceof accounts.AccountCleanupNotImplementedError) {
-    res.status(501).json({
-      error: 'ACCOUNT_CLEANUP_NOT_IMPLEMENTED',
-      provider: error.provider,
-      owner: error.owner,
-      reason: error.reason,
-    });
+  } else if (error instanceof accounts.AccountDeleteUnsupportedError) {
+    res.status(400).json({ error: 'ACCOUNT_DELETE_UNSUPPORTED', message: error.message });
+  } else if (error instanceof service.LanternCredentialError) {
+    res.status(error.status).json({ error: error.code });
   } else {
     return false;
   }
@@ -81,10 +88,20 @@ router.post(
       return res.status(401).json({ error: 'User not authenticated' });
     }
     try {
+      const { provider } = req.params;
+      assertProviderSlug(provider);
+      const accountId = toStorageAccountId(req.params.accountId);
+      // No new accounts: a non-default id must already be one of this provider's rows.
+      if (
+        accountId !== '' &&
+        (await findIntegrationAccount(userId, provider, accountId)) === null
+      ) {
+        throw new accounts.IntegrationAccountNotFoundError(provider, req.params.accountId);
+      }
       const outcome = await reportIntegrationProgress({
         userId,
-        provider: req.params.provider,
-        accountId: req.params.accountId,
+        provider,
+        accountId,
         input: req.body,
       });
       if (outcome.applied) return res.json(outcome);
@@ -98,7 +115,7 @@ router.post(
   })
 );
 
-/** DELETE /api/integrations/:provider/accounts/:accountId */
+/** DELETE /api/integrations/:provider/accounts/:accountId (alias of DELETE /:name for `default`) */
 router.delete(
   '/:provider/accounts/:accountId',
   authenticate,

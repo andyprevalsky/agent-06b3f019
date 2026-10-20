@@ -1,19 +1,19 @@
 /**
- * Wire contract for per-account integration sync progress and multi-account
- * integrations (plan row I0).
+ * Wire contract for integration sync progress (the sync-progress bar).
  *
- *   writer (Mac app batch / backend job)
+ *   writer (Mac app batch / backend sync job, at its existing batch boundaries)
  *        │  POST /api/integrations/:provider/accounts/:accountId/progress
+ *        │  or reportIntegrationProgress() in-process
  *        ▼
- *   IntegrationSyncProgress  (one row per userId+provider+accountId)
+ *   IntegrationSyncProgress  (one row per existing Integration row:
+ *                             provider = Integration.name, accountId = its accountId)
  *        │
- *        ├── GET /api/integrations            → accountsByProvider + row.accounts
- *        ├── GET /api/integrations/progress   → cheap "changed since cursor" poll
- *        └── DELETE /api/integrations/:provider/accounts/:accountId
- *                 → provider cleanup hook (accountCleanupRegistry) + progress row
+ *        ├── GET /api/integrations            → row.accounts[] + accountsByProvider
+ *        └── GET /api/integrations/progress   → {cursor, changed, accountsByProvider}
  *
- * The storage key for a legacy single-account row is `accountId = ''`; on the
- * wire it is spelled {@link DEFAULT_ACCOUNT_ID} so it can live in a URL.
+ * There is no account concept beyond the existing Integration row: each row is
+ * exactly one account. The storage key of the legacy row is `accountId = ''`;
+ * on the wire it is spelled {@link DEFAULT_ACCOUNT_ID} so it can live in a URL.
  */
 
 import { z } from 'zod';
@@ -21,41 +21,77 @@ import { z } from 'zod';
 /** Wire spelling of the legacy/default account (storage `accountId = ''`). */
 export const DEFAULT_ACCOUNT_ID = 'default';
 
+/** States a progress WRITER reports for one run. */
 export const SYNC_STATES = ['idle', 'syncing', 'synced', 'failed', 'needs_reconnect'] as const;
 export type SyncState = (typeof SYNC_STATES)[number];
 export const TERMINAL_SYNC_STATES: readonly SyncState[] = ['synced', 'failed', 'needs_reconnect'];
 
+/**
+ * States an account READS as on the wire (the UI's sync bar / red dot).
+ * `sync_failed` is a failed run (or a SYNC_FAILED row); `EXPIRED` is a row whose
+ * legacy status is EXPIRED; `needs_reconnect` is a provider asking the user to
+ * reconnect (a Google credential, or a writer reporting it).
+ */
+export const ACCOUNT_STATES = [
+  'idle',
+  'syncing',
+  'synced',
+  'sync_failed',
+  'needs_reconnect',
+  'EXPIRED',
+] as const;
+export type AccountState = (typeof ACCOUNT_STATES)[number];
+
+/** Units a progress bar counts in. */
+export const PROGRESS_UNITS = [
+  'messages',
+  'chats',
+  'contacts',
+  'cookies',
+  'passwords',
+  'transactions',
+  'files',
+  'bytes',
+  'records',
+] as const;
+export type ProgressUnit = (typeof PROGRESS_UNITS)[number];
+
 /** Provider slug = Integration.name (gmail, imessage, chrome_passwords, …). */
 export const PROVIDER_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 export const MAX_ACCOUNT_ID_LENGTH = 320;
-/** Bound on progress rows one user may create (10k rule: rows scale with accounts). */
+/** Bound on progress rows one user may create (10k rule: rows scale with Integration rows). */
 export const MAX_PROGRESS_ACCOUNTS_PER_USER = 200;
 /** A syncing run is written at most once per this interval; transitions always write. */
 export const PROGRESS_MIN_WRITE_INTERVAL_MS = 1_000;
 /** How many superseded run ids are remembered to reject late writes. */
 export const RETIRED_RUN_ID_LIMIT = 8;
+/**
+ * A run still `syncing` with no write for this long lost its writer (a crashed
+ * job, a Mac that went offline before its terminal write). Its bar is not shown;
+ * the account reads its Integration row's state instead, so a bar never sticks.
+ */
+export const PROGRESS_STALE_AFTER_MS = 15 * 60_000;
 
-/** Progress numbers shown on a chip. Every field is null when unknown. */
+/** Progress numbers shown on a bar. Every field is null when unknown. */
 export interface IntegrationAccountProgress {
   /** 0-100 (one decimal). Derived from done/total; null while indeterminate. */
   pct: number | null;
   done: number | null;
   /** null = indeterminate: the writer does not know the total. Never guessed. */
   total: number | null;
-  unit: string | null;
+  unit: ProgressUnit | null;
   eta_sec: number | null;
   phase: string | null;
-  startedAt: string | null;
-  updatedAt: string | null;
 }
 
 export interface IntegrationAccount {
   provider: string;
-  /** Wire account id; {@link DEFAULT_ACCOUNT_ID} for legacy single-account rows. */
+  /** Wire account id of the Integration row; {@link DEFAULT_ACCOUNT_ID} for `''`. */
   accountId: string;
   label: string | null;
-  state: SyncState;
-  progress: IntegrationAccountProgress;
+  state: AccountState;
+  /** null when no live or finished run of this row is known. */
+  progress: IntegrationAccountProgress | null;
   lastSyncAt: string | null;
   lastError: string | null;
 }
@@ -65,9 +101,10 @@ export type AccountsByProvider = Record<string, IntegrationAccount[]>;
 export interface ProgressDeltaResponse {
   /** Pass back as `since` on the next poll. */
   cursor: string;
+  /** False when nothing an account is derived from changed after `since`. */
   changed: boolean;
-  /** Present only when `changed` is true. */
-  accountsByProvider?: AccountsByProvider;
+  /** Every account of the user (same shape as the list), always present. */
+  accountsByProvider: AccountsByProvider;
 }
 
 const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -87,7 +124,7 @@ export const progressWriteSchema = z
     total: count.nullable().optional(),
     /** Only honored while `total` is unknown (e.g. a provider that reports a percent). */
     pct: z.number().min(0).max(100).nullable().optional(),
-    unit: z.string().trim().min(1).max(32).nullable().optional(),
+    unit: z.enum(PROGRESS_UNITS).nullable().optional(),
     eta_sec: z.number().int().nonnegative().max(31_536_000).nullable().optional(),
     error: z.string().max(2_000).nullable().optional(),
   })
@@ -95,7 +132,7 @@ export const progressWriteSchema = z
 
 export type ProgressWriteInput = z.infer<typeof progressWriteSchema>;
 
-/** What a writer gets back: the account's stored progress after its write was judged. */
+/** What a writer gets back: the row's stored progress after its write was judged. */
 export interface ProgressSnapshot {
   provider: string;
   accountId: string;
@@ -125,7 +162,7 @@ export function assertProviderSlug(provider: string): void {
 
 /**
  * Wire (or storage) account id → storage key. `''` and {@link DEFAULT_ACCOUNT_ID}
- * both name the legacy/default account. Throws on oversized ids.
+ * both name the legacy/default row. Throws on oversized ids.
  */
 export function toStorageAccountId(accountId: string): string {
   const trimmed = accountId.trim();
@@ -137,29 +174,4 @@ export function toStorageAccountId(accountId: string): string {
 
 export function toWireAccountId(storageAccountId: string): string {
   return storageAccountId === '' ? DEFAULT_ACCOUNT_ID : storageAccountId;
-}
-
-/**
- * Browser-cookie accounts are one per (browserSource, browserProfile). The
- * provider slug is the browser; the account id spells the profile as
- * `<browser>:<profileDir>` so it is unambiguous and URL-safe. The legacy
- * empty profile (`''`, cookies synced before profile detection) has no profile
- * dir and maps to the `default` account (storage `''`), matching every other
- * provider's legacy row.
- *
- * `cookieAccountStorageId` / `cookieProfileFromAccountId` are the single
- * source of truth both the account view (derivation) and the cleanup hook
- * (deletion) use, so a listed account id always resolves back to the exact
- * cookie rows it was derived from.
- */
-export function cookieAccountStorageId(browser: string, profile: string): string {
-  return profile === '' ? '' : `${browser}:${profile}`;
-}
-
-export function cookieProfileFromAccountId(browser: string, storageAccountId: string): string {
-  if (storageAccountId === '') return '';
-  const prefix = `${browser}:`;
-  return storageAccountId.startsWith(prefix)
-    ? storageAccountId.slice(prefix.length)
-    : storageAccountId;
 }

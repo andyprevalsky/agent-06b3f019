@@ -93,9 +93,7 @@ export function stubElectron(): void {
         setIcon: vi.fn(),
       },
     },
-    BrowserWindow: vi.fn().mockImplementation(function () {
-      return makeBrowserWindowStub();
-    }),
+    BrowserWindow: vi.fn().mockImplementation(() => makeBrowserWindowStub()),
     ipcMain: {
       handle: vi.fn(),
       on: vi.fn(),
@@ -113,9 +111,7 @@ export function stubElectron(): void {
     },
     shell: { openExternal: vi.fn() },
     dialog: { showMessageBox: vi.fn(), showErrorBox: vi.fn() },
-    Notification: vi.fn().mockImplementation(function () {
-      return { show: vi.fn() };
-    }),
+    Notification: vi.fn().mockImplementation(() => ({ show: vi.fn() })),
     Menu: { setApplicationMenu: vi.fn(), buildFromTemplate: vi.fn(() => ({})) },
     Tray: vi.fn(),
     nativeImage: { createFromPath: vi.fn(() => ({})) },
@@ -142,9 +138,7 @@ export function stubElectron(): void {
 
 export function stubElectronStore(): void {
   vi.mock('electron-store', () => ({
-    // `function`, not an arrow: these are constructed with `new`, which vitest 4
-    // rejects for arrow implementations.
-    default: vi.fn().mockImplementation(function () {
+    default: vi.fn().mockImplementation(() => {
       // Each Store instance gets its own backing Map so different stores in the
       // same test (e.g. onboardingStore + shortcutStore in the IPC registry)
       // don't share keys.
@@ -175,18 +169,16 @@ export function stubElectronUpdater(): void {
 
 export function stubBetterSqlite3(): void {
   vi.mock('better-sqlite3', () => ({
-    default: vi.fn().mockImplementation(function () {
-      return {
-        prepare: vi.fn(() => ({
-          all: vi.fn(() => []),
-          get: vi.fn(() => undefined),
-          run: vi.fn(() => ({ changes: 0 })),
-        })),
-        exec: vi.fn(),
-        close: vi.fn(),
-        pragma: vi.fn(),
-      };
-    }),
+    default: vi.fn().mockImplementation(() => ({
+      prepare: vi.fn(() => ({
+        all: vi.fn(() => []),
+        get: vi.fn(() => undefined),
+        run: vi.fn(() => ({ changes: 0 })),
+      })),
+      exec: vi.fn(),
+      close: vi.fn(),
+      pragma: vi.fn(),
+    })),
   }));
 }
 

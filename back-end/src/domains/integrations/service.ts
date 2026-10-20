@@ -72,6 +72,7 @@ export { handleOAuthCallback } from './oauthService.callback';
 
 export {
   processGenericUpload,
+  processLinkedInUpload,
   processContactsUpload,
   processEmailZipUpload,
   processIMessageUpload,
@@ -473,15 +474,6 @@ export async function disconnectGmailAccount(userId: string, email: string) {
     .map((row) => row.email)
     .filter((value): value is string => value !== null && value !== undefined && value !== '');
 
-  // Drop the address's history cursor: its mail is being purged, so connecting
-  // it again must run a full sync rather than resume history from the old id.
-  const config = (credential.integration.config ?? {}) as {
-    historyIds?: Record<string, string>;
-    userEmail?: string;
-  };
-  const address = credential.email ?? email;
-  const historyIds = { ...(config.historyIds ?? {}) };
-  delete historyIds[address];
   await repo.updateIntegration(credential.integrationId, {
     status:
       connectedEmails.length > 0 ? IntegrationStatus.CONNECTED : IntegrationStatus.NOT_CONNECTED,
@@ -489,8 +481,6 @@ export async function disconnectGmailAccount(userId: string, email: string) {
     config: mergeJson(credential.integration.config ?? null, {
       connectedEmail: connectedEmails[0] ?? null,
       connectedEmails,
-      historyIds,
-      ...(config.userEmail === address && { historyId: null }),
     }),
   });
 
