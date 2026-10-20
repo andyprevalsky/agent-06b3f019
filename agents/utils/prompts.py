@@ -305,13 +305,16 @@ def _format_output_field_contract(field: Dict[str, Any]) -> str:
         parts.append("nullable")
     properties = field.get("properties")
     if isinstance(properties, list) and properties:
-        nested = ", ".join(
-            f"{item['name']}: {_format_output_field_contract(item)}"
-            for item in properties
-            if isinstance(item, dict) and item.get("name")
-        )
+        nested = "; ".join(_format_nested_output_field(item) for item in properties if isinstance(item, dict) and item.get("name"))
         parts.append(f"properties={{{nested}}}")
     return ", ".join(parts)
+
+
+def _format_nested_output_field(field: Dict[str, Any]) -> str:
+    requirement = "required" if field.get("required", True) else "optional"
+    rendered = f"{field['name']} ({_format_output_field_contract(field)}, {requirement})"
+    description = str(field.get("description") or "").strip()
+    return f"{rendered}: {description}" if description else rendered
 
 
 def format_required_output_schema_system_section(

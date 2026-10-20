@@ -130,6 +130,36 @@ def test_build_verifier_prompt_with_schema():
     assert "2 total" in result or "2" in result
 
 
+def test_schema_contracts_render_nested_field_descriptions():
+    """Every structured-output filler sees nested field requirements and descriptions."""
+    from domains.spawn_browser_agent_v3.service import format_required_output_schema_system_section
+    from utils.prompts import build_system_prompt, build_verifier_prompt
+
+    schema = {
+        "fields": [
+            {
+                "name": "rounds",
+                "type": "list[object]",
+                "required": True,
+                "minItems": 2,
+                "description": "One entry per funding round",
+                "properties": [
+                    {"name": "company", "type": "str", "required": True, "description": "Startup that raised the round"},
+                    {"name": "summary", "type": "str", "required": True, "description": "One-sentence summary of the round"},
+                    {"name": "lead", "type": "str", "required": False},
+                ],
+            }
+        ]
+    }
+    expected = (
+        "properties={company (str, required): Startup that raised the round; "
+        "summary (str, required): One-sentence summary of the round; lead (str, optional)}"
+    )
+    assert expected in build_verifier_prompt(schema)
+    assert expected in build_system_prompt(phase="EXECUTE", enabled_tools=[], response_schema=schema)
+    assert expected in format_required_output_schema_system_section(schema)
+
+
 async def run_all_tests():
     print("prompts blackbox tests:")
     r = BlackboxResult()
@@ -142,6 +172,10 @@ async def run_all_tests():
     r.record("build_system_prompt_with_user_context", test_build_system_prompt_with_user_context)
     r.record("build_verifier_prompt", test_build_verifier_prompt)
     r.record("build_verifier_prompt_with_schema", test_build_verifier_prompt_with_schema)
+    r.record(
+        "schema_contracts_render_nested_field_descriptions",
+        test_schema_contracts_render_nested_field_descriptions,
+    )
     teardown_mock()
     return r.all_passed
 
