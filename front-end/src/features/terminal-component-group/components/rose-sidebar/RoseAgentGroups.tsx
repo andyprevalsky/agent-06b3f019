@@ -18,7 +18,8 @@
  * of its tree (RoseCodeAgentRow), indented one level under it while expanded;
  * collapsed they stay inside the parent's group (no divider between them).
  * Every agent row reports its visibility (observeRoot) so only the trees on
- * screen are read.
+ * screen are read. A running code agent shows the thinking bubble unless it
+ * waits on the user (codeAgentsNeedingInput → amber alert instead).
  *
  * While a search query is active, project groups with no matching agent drop out.
  */
@@ -62,6 +63,8 @@ export interface RoseAgentGroupsProps {
   /** Code agents listed under an agent row (its tree's sessions). */
   codeAgentsFor: (agentId: string) => readonly CodeAgentListItem[];
   onOpenCodeAgent: (codeAgent: CodeAgentListItem) => void;
+  /** Code agents (task ids) with an unanswered question / approval for the user. */
+  codeAgentsNeedingInput: ReadonlySet<string>;
   /** Ref for each agent row; its visibility decides which code-agent pages are read. */
   observeRoot: (agentId: string) => (element: HTMLElement | null) => void;
 }
@@ -104,6 +107,7 @@ function AgentRows({
               codeAgent={codeAgent}
               isExpanded={props.isExpanded}
               parentIndented={indented}
+              needsInput={props.codeAgentsNeedingInput.has(codeAgent.code_agent_id)}
               onOpen={() => props.onOpenCodeAgent(codeAgent)}
             />
           ))}

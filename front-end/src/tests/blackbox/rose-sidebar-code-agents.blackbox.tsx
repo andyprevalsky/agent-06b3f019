@@ -13,14 +13,20 @@
  * on screen; only an on-screen running root re-reads (every 30s). The MSW mock
  * rejects >50 ids like the server. Rows are on screen per a controllable
  * IntersectionObserver (jsdom has none). Flag off reads nothing.
+ *
+ * A running code agent shows the existing thinking.svg as a small bubble on its
+ * icon's top-left, unless an unanswered attention request of its own (metadata
+ * .requestingAgent.task_id) puts the amber alert there instead.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 
+import thinkingIcon from '@/assets/thinking.svg';
 import AppSidebar from '@/features/terminal-component-group/components/AppSidebar';
-import type { Agent } from '@/lib/api';
+import { AttentionRequestsContext } from '@/features/terminal-component-group/components/attention-inbox/attentionRequestsContext';
+import type { Agent, AttentionRequest } from '@/lib/api';
 import type { CodeAgentListItem } from '@/lib/api/tree';
 
 import { defaultProps, makeAgent, mockSession } from './app-sidebar.fixtures';
@@ -167,13 +173,43 @@ function treeRequests() {
   return capturedRequests.filter((r) => new URL(r.url).pathname === '/api/agents/tree');
 }
 
-function renderBar(overrides: Parameters<typeof defaultProps>[0] = {}, { dark = false } = {}) {
+function renderBar(
+  overrides: Parameters<typeof defaultProps>[0] = {},
+  { dark = false, attention = [] as AttentionRequest[] } = {},
+) {
   const user = signedInUser();
   if (dark) localStorage.setItem(`rose-theme:${user.id}`, 'dark');
+  // The app-wide attention subscription, as TerminalContent provides it.
   return renderWithProviders(
-    <AppSidebar {...defaultProps({ agents: AGENTS, user, ...overrides })} />,
+    <AttentionRequestsContext.Provider value={{ requests: attention, refetch: async () => {} }}>
+      <AppSidebar {...defaultProps({ agents: AGENTS, user, ...overrides })} />
+    </AttentionRequestsContext.Provider>,
     { roseThemeUserId: user.id },
   );
+}
+
+/** The attention row agent-tools writes for a code agent's question (questionService). */
+function codeAgentQuestion(taskId: string, answered = false): AttentionRequest {
+  return {
+    id: `atq_${taskId}`,
+    agent_id: 'home-run',
+    workflow_id: 'wf-1',
+    question: 'Ship the 26px button?',
+    metadata: {
+      agentTools: { kind: 'question', deliverTo: 'user', routedAgentId: 'home-run' },
+      requestingAgent: {
+        kind: 'code_agent',
+        agent_id: 'home-run',
+        label: 'Claude Code',
+        provider: 'claude',
+        task_id: taskId,
+      },
+      sandboxTool: { provider: 'claude', taskId },
+    },
+    created_at: '2026-10-20T11:30:00.000Z',
+    updated_at: '2026-10-20T11:30:00.000Z',
+    answered,
+  };
 }
 
 function barRowOrder(): string[] {
@@ -420,5 +456,77 @@ describe('Rose left bar code agents (flag on)', () => {
     expect(screen.queryByTestId('rose-code-agent-row-cc-build')).toBeNull();
     expect(codeAgentRequests()).toHaveLength(0);
     expect(treeRequests()).toHaveLength(0);
+    expect(screen.queryByTestId('rose-code-agent-thinking')).toBeNull();
+  });
+});
+
+describe('running code agents show the thinking bubble (flag on)', () => {
+  const bubble = (id: string) =>
+    within(screen.getByTestId(`rose-code-agent-row-${id}`)).queryByTestId(
+      'rose-code-agent-thinking',
+    );
+
+  it('running: thinking.svg bubble on the icon top-left, no status glyph, collapsed and expanded', async () => {
+    renderBar();
+    await screen.findByTestId('rose-code-agent-row-cc-build');
+    const img = bubble('cc-build')!;
+    expect(img.tagName).toBe('IMG');
+    // The existing asset (Vite inlines it), not a new SVG.
+    expect(img.getAttribute('src')).toBe(thinkingIcon);
+    expect(img).toHaveAttribute('alt', '');
+    expect(img).toHaveAttribute('aria-hidden', 'true');
+    expect(img.className).toContain('absolute -left-1.5 -top-1');
+    expect(img.className).toContain('h-2.5 w-2.5');
+    // Identical in light and dark: no dark variant, no wrapper around it.
+    expect(img.className).not.toContain('dark:');
+    expect(img.parentElement).toBe(
+      within(screen.getByTestId('rose-code-agent-row-cc-build')).getByRole('img', {
+        name: 'Claude Code',
+      }).parentElement,
+    );
+    const row = screen.getByTestId('rose-code-agent-row-cc-build');
+    expect(
+      within(row).queryByRole('img', { name: /Needs your input|Completed|Failed/ }),
+    ).toBeNull();
+    expect(roseBar()).toHaveAttribute('data-expanded', 'false');
+    expandBar();
+    expect(bubble('cc-build')).not.toBeNull();
+  });
+
+  it('running + an open question from it: amber alert only, no bubble', async () => {
+    renderBar({}, { attention: [codeAgentQuestion('cc-build')] });
+    await screen.findByTestId('rose-code-agent-row-cc-build');
+    expect(bubble('cc-build')).toBeNull();
+    const row = screen.getByTestId('rose-code-agent-row-cc-build');
+    expect(within(row).getByRole('img', { name: 'Needs your input' })).toBeInTheDocument();
+  });
+
+  it('an answered question or another task’s question leaves the bubble', async () => {
+    renderBar(
+      {},
+      { attention: [codeAgentQuestion('cc-build', true), codeAgentQuestion('cc-other')] },
+    );
+    await screen.findByTestId('rose-code-agent-row-cc-build');
+    expect(bubble('cc-build')).not.toBeNull();
+  });
+
+  it('completed / closed (paused) / failed: no bubble, only their glyph', async () => {
+    renderBar({}, { dark: true });
+    await screen.findByTestId('rose-code-agent-row-cc-sub');
+    await screen.findByTestId('rose-code-agent-row-cc-fix');
+    expect(bubble('cc-sub')).toBeNull();
+    expect(bubble('cc-fix')).toBeNull();
+    expect(
+      within(screen.getByTestId('rose-code-agent-row-cc-sub')).getByRole('img', {
+        name: 'Completed',
+      }),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId('rose-code-agent-row-cc-fix')).getByRole('img', {
+        name: 'Failed',
+      }),
+    ).toBeInTheDocument();
+    // Dark mode keeps the running bubble identical.
+    expect(bubble('cc-build')!.className).not.toContain('dark:');
   });
 });
