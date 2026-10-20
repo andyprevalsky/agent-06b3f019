@@ -1274,5 +1274,5 @@ if (require.main === module) {
 module.exports = {
   CLI_VERSION, USERCONTENT_CSP, DEFAULT_BUDGETS, CURRENT_VIEWPORTS, CURRENT_ROUTES, LOCAL_ONLY_DIRS,
   parseArgs, parseViewport, routeSlug, isPublishablePath, listFiles, manifestEntries, lintTheme,
-  auditEntryFiles, frameStats, cumulativeLayoutShift, evaluateBudgets, decodePng, pngStats, diffFraction, startPreview, main,
+  auditEntryFiles, frameStats, cumulativeLayoutShift, evaluateBudgets, decodePng, pngStats, diffFraction, startPreview, launchBrowser, main,
 };

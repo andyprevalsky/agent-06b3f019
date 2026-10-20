@@ -10,15 +10,19 @@
  *   - idempotent per (agent, content hash): sequential, concurrent and in-call
  *     repeats never post twice; the same bytes in another agent post there once
  *   - caps: > 20 items → 400; type allowlist image/* video/* text/html (HTML only
- *     when declared .html; HTML renamed .png and SVG → 400); one bad item rejects
- *     the whole call; SSRF: non-public / non-http URLs refused before any fetch
+ *     when declared .html; HTML renamed .png and SVG → 400), PDF, 3D models and
+ *     bundles (agent-tools-display.cases.ts); one bad item rejects the whole
+ *     call; SSRF: non-public / non-http URLs refused before any fetch
+ *   - the full inline renderer: pages, multi-file bundles, model and PDF viewers
+ *     on usercontent with the permissive sandboxed display CSP, and a headless
+ *     Chromium render of a three.js CDN page and the model viewer
+ *     (agent-tools-display.cases.ts, agent-tools-render.cases.ts)
  *   - `file` resolves a pointer already in the agent's tree (child → root)
  *   - sandbox token scoped to the session's agent (other agent → 403), tampered /
  *     expired / wrong-scope / rose-ui publish token → 401, non-owner API key → 403,
  *     a user-style call without the internal key → refused
  * Usage: bash scripts/run-blackbox-tests.sh agent-tools
  */
-import { USERCONTENT_CSP } from '../../domains/user-ui/config';
 import { mintAgentToolsToken } from '../../providers/agentTools/token';
 import { mintUserUiPublishToken } from '../../providers/userUi/publishToken';
 import {
@@ -44,6 +48,8 @@ import {
   userB,
   type BlackboxTest,
 } from './agent-tools.support';
+import { assertDisplayCsp, displayRendererCases } from './agent-tools-display.cases';
+import { displayRenderCases } from './agent-tools-render.cases';
 
 const tests: BlackboxTest[] = [
   {
@@ -135,7 +141,7 @@ const tests: BlackboxTest[] = [
         { apiKeyUser: userA }
       );
       expectStatus(disguised, 400, 'html renamed png');
-      assert(JSON.stringify(disguised.data).includes('not an image, video or HTML'), 'type detail');
+      assert(JSON.stringify(disguised.data).includes('is not a displayable file'), 'type detail');
       const svg = await display(
         otherA,
         { items: [b64(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>'), 'a.svg')] },
@@ -179,7 +185,7 @@ const tests: BlackboxTest[] = [
         (page200.headers.get('content-type') ?? '').startsWith('text/html'),
         `served as html: ${page200.headers.get('content-type')}`
       );
-      assert(page200.headers.get('content-security-policy') === USERCONTENT_CSP, 'usercontent CSP');
+      assertDisplayCsp(page200.headers.get('content-security-policy'), 'display page');
       assert((await page200.text()) === page, 'exact html bytes');
       for (const path of [
         `/usercontent/display/${agentB}/${match[2]}.html`,
@@ -191,8 +197,9 @@ const tests: BlackboxTest[] = [
         assert(res.status === 404, `${path} must 404, got ${res.status}`);
       }
       const png1 = await display(otherA, { items: [b64(png())] }, { apiKeyUser: userA });
-      const pngPointer = items(png1)[0].file_pointer as { usercontent_url?: string };
+      const pngPointer = items(png1)[0].file_pointer as { usercontent_url?: string; kind?: string };
       assert(pngPointer.usercontent_url === undefined, 'images keep their storage pointer only');
+      assert(pngPointer.kind === 'image' && items(png1)[0].kind === 'image', 'image kind');
     },
   },
   {
@@ -303,6 +310,8 @@ const tests: BlackboxTest[] = [
       );
     },
   },
+  ...displayRendererCases(),
+  ...displayRenderCases(),
 ];
 
 runSuite(tests).catch((err) => {
