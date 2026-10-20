@@ -344,9 +344,11 @@ def finish_experiment(exp: dict) -> dict:
     exp["released"] = {"yes": sum(v is True for v in released), "of": len(released)} if released else None
     lifecycle = [r.get("lifecycle") for r in rows if started_terminal(r)]
     exp["lifecycle_verified"] = {"yes": sum(v is True for v in lifecycle), "of": len(lifecycle)} if lifecycle else None
-    exp["unknown_jobs"] = [r.get("task") or r.get("job_id") for r in rows if classify(r) == "UNKNOWN"][:6]
-    exp["unreleased_jobs"] = [r.get("task") or r.get("job_id") for r in rows
-                              if started_terminal(r) and r.get("released") is False][:6]
+    # Live-counter rows carry no task or job identity: count them, never invent a name.
+    unknown = [r for r in rows if classify(r) == "UNKNOWN"]
+    unreleased = [r for r in rows if started_terminal(r) and r.get("released") is False]
+    exp["unknown_count"], exp["unknown_jobs"] = len(unknown), job_names(unknown)
+    exp["unreleased_count"], exp["unreleased_jobs"] = len(unreleased), job_names(unreleased)
     return exp
 
 
@@ -784,6 +786,21 @@ def _history_row(exp: dict) -> dict:
     return {k: exp.get(k) for k in keys}
 
 
+def job_names(rows: list[dict], limit: int = 6) -> list[str]:
+    """Recorded task/job names of the given rows (first `limit`), skipping rows that carry none."""
+    names = [r.get("task") or r.get("job_id") for r in rows]
+    return [n for n in names if isinstance(n, str) and n][:limit]
+
+
+def counted_jobs(count: int, names: list[str]) -> str:
+    """'N job(s) (a, b, +k more)'; nameless rows say so instead of inventing identities."""
+    text = f"{count} job" + ("" if count == 1 else "s")
+    if not names:
+        return text + " (names unavailable from live counters)"
+    more = count - len(names)
+    return text + " (" + ", ".join(names) + (f", +{more} more" if more > 0 else "") + ")"
+
+
 def _issues(exp: dict) -> list[dict]:
     out = []
     if exp["infra_breached"]:
@@ -793,11 +810,13 @@ def _issues(exp: dict) -> list[dict]:
     elif exp.get("infra_jobs"):
         out.append({"severity": "amber", "text": f"{exp['infra_jobs']} infra-failed job(s) below the stop threshold.",
                     "owner": "parent", "action": "/RCA the first authentic failure now"})
-    if exp.get("unknown_jobs"):
-        out.append({"severity": "amber", "text": "No recorded task result: " + ", ".join(exp["unknown_jobs"]) + ".",
+    if exp.get("unknown_count"):
+        out.append({"severity": "amber", "text": "No recorded task result: "
+                    + counted_jobs(exp["unknown_count"], exp["unknown_jobs"]) + ".",
                     "owner": "parent", "action": "/RCA from the job log and controller receipts"})
-    if exp.get("unreleased_jobs") and not exp.get("native_audit"):
-        out.append({"severity": "amber", "text": "Release unverified: " + ", ".join(exp["unreleased_jobs"]) + ".",
+    if exp.get("unreleased_count") and not exp.get("native_audit"):
+        out.append({"severity": "amber", "text": "Release unverified: "
+                    + counted_jobs(exp["unreleased_count"], exp["unreleased_jobs"]) + ".",
                     "owner": "parent", "action": "native exact-owner audit before the next launch"})
     for item in exp["lifecycle"]:
         if item["state"] == "fail" and item.get("issue", True):
@@ -1059,7 +1078,7 @@ def render_html(card: dict) -> str:
 
 
 def _public(card):
-    exp = {k: v for k, v in card["experiment"].items() if k not in ("unknown_jobs", "unreleased_jobs")}
+    exp = {k: v for k, v in card["experiment"].items() if k not in ("unknown_jobs", "unreleased_jobs", "unknown_count", "unreleased_count")}
     return dict(card, experiment=exp)
 
 
