@@ -102,6 +102,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent
     from tools.call_phone_number import call_phone_number
     from tools.call_phone_number import get_manager as get_call_phone_manager
+    from tools.display import display
     from tools.gate import (
         GateRejectedError,
         build_subscription_gate,
@@ -216,6 +217,7 @@ TOOL_EXECUTORS = {
     "wait_for": wait_for,
     "send_message_to_user": send_message_to_user,
     "send_message_to_user_execute_phase": send_message_to_user,  # Same handler, forces is_question=False
+    "display": display,
     "web_search": web_search,
     "web_fetch": web_fetch,
     "message_person": message_person,
