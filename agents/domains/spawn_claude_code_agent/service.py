@@ -3031,8 +3031,9 @@ async def spawn_claude_code_activity(
                 await log_collector.stop()
             resets_at_iso = (marked or {}).get("resets_at")
             local_place = local_workspace_place(code_agent_meta)
-            # The parent reads the exact retry; the user reads a resumable pause.
-            # The user's connected accounts and what a respawn leases (stored state).
+            # The parent reads the error with every connected account and what a
+            # respawn leases (the backend's stored view); the user reads a
+            # resumable pause. The parent decides; nothing fails over here.
             accounts = (marked or {}).get("accounts")
             accounts = accounts if isinstance(accounts, list) else None
             next_lease = (marked or {}).get("next_lease")

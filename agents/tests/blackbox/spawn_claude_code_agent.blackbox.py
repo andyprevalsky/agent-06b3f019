@@ -2258,6 +2258,9 @@ async def test_run_agentic_loop_post_result_exit_grace_breaks():
         patch.object(service, "ClaudeCodeWsClient", ChattyAfterResult),
         patch.object(service, "SDK_POST_RESULT_EXIT_GRACE_S", 0.15),
         patch.object(service, "SILENCE_TIMEOUT_S", 0.01),
+        # The elapsed bound measures the grace, not the transcript write: a
+        # loaded host took 3s to open that HTTP client (run 3 of 5, 2026-10-20).
+        patch.object(service, "save_code_transcript_batch", AsyncMock(return_value=True)),
         patch("temporalio.activity.heartbeat"),
     ):
         t0 = aio.get_event_loop().time()
