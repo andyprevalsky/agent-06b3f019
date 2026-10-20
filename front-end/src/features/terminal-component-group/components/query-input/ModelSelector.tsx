@@ -22,8 +22,10 @@
  * dropdown; other models keep provider/name.
  *
  * roseDark (Rose Desktop dark mode): the chip is the mock's dark control —
- * #2f2f2c fill, 12% white border, #e4e4df text (same shape). Light and the
- * stock UI keep the exact stock chip classes.
+ * #2f2f2c fill, 12% white border, #e4e4df text (same shape), and the open
+ * dropdown list sits on the same #2f2f2c surface (#e4e4df names, #a3a39d
+ * descriptions; hover/selected rows use the dark accent token). Light and the
+ * stock UI keep the exact stock chip and list classes.
  */
 
 import { useState, useEffect } from 'react';
@@ -49,6 +51,10 @@ interface ModelSelectorProps {
 /** Rose dark chip (mock panels/dark.js: button[class*="border"]); hover only lifts slightly. */
 const ROSE_DARK_MODEL_CHIP_CLASS =
   'dark:border-white/[0.12] dark:bg-[#2f2f2c] dark:text-[#e4e4df] dark:hover:bg-[#383835]';
+/** Rose dark dropdown: the list matches the chip's surface. */
+const ROSE_DARK_MENU_CLASS = 'dark:border-white/[0.12] dark:bg-[#2f2f2c]';
+const ROSE_DARK_LIST_CLASS = 'dark:bg-[#2f2f2c] dark:text-[#e4e4df]';
+const ROSE_DARK_DESCRIPTION_CLASS = 'dark:text-[#a3a39d]';
 
 function shortRoseName(roseDesktop: boolean, modelId: string): string | undefined {
   return roseDesktop ? ROSE_MODEL_SHORT_NAMES[modelId] : undefined;
@@ -98,11 +104,15 @@ export function ModelSelector({
           </button>
         </PopoverTrigger>
         {showModelSelector && (
-          <PopoverContent className="w-[300px] p-0 z-50" align="start">
+          <PopoverContent
+            className={cn('w-[300px] p-0 z-50', roseDark && ROSE_DARK_MENU_CLASS)}
+            align="start"
+          >
             <ModelList
               availableModels={availableModels}
               selectedModel={selectedModel}
               roseDesktop={roseDesktop}
+              roseDark={roseDark}
               onPick={(id) => {
                 onModelChange?.(id);
                 setShowPicker(false);
@@ -120,12 +130,19 @@ interface ModelListProps {
   availableModels: Model[];
   selectedModel: string;
   roseDesktop: boolean;
+  roseDark: boolean;
   onPick: (modelId: string) => void;
 }
 
-function ModelList({ availableModels, selectedModel, roseDesktop, onPick }: ModelListProps) {
+function ModelList({
+  availableModels,
+  selectedModel,
+  roseDesktop,
+  roseDark,
+  onPick,
+}: ModelListProps) {
   return (
-    <Command className="bg-white">
+    <Command className={roseDark ? `bg-white ${ROSE_DARK_LIST_CLASS}` : 'bg-white'}>
       <CommandList>
         <CommandGroup>
           {availableModels.map((model) => (
@@ -135,7 +152,13 @@ function ModelList({ availableModels, selectedModel, roseDesktop, onPick }: Mode
                   <span className="font-medium">
                     {shortRoseName(roseDesktop, model.id) ?? model.name}
                   </span>
-                  <span className="text-xs text-gray-500">
+                  <span
+                    className={
+                      roseDark
+                        ? `text-xs text-gray-500 ${ROSE_DARK_DESCRIPTION_CLASS}`
+                        : 'text-xs text-gray-500'
+                    }
+                  >
                     {ROSE_MODEL_DESCRIPTIONS[model.id] ?? model.provider}
                   </span>
                 </div>
