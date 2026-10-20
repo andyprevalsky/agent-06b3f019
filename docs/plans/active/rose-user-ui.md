@@ -131,7 +131,16 @@ Status: `done` (merged + verified in a recording), `building`, `queued`,
 | 41 | Anything coding-based is routed to a code agent (root delegates; it doesn't code itself) | spec'd → coding thread (harness; approval at /deploy) |
 | 42 | **All of this ships behind one feature flag, on only for Andy's account** (user 1f85ff25-6e29-4c1b-8739-f917bd101a30, root devbox); everyone else sees today's UI | spec'd → coding thread |
 | 36 | Every right-bar tab opens a working panel flush to the bar (mock reference: `.context/rose-app-builder-mock/panels/*.js`) | mocks done (11 panels) |
-| 79 | Left bar: a **running code agent with no pending user request** (no amber alert) shows a small bubble of the existing `front-end/src/assets/thinking.svg` (~10px) on the **top-left corner of its provider icon** (status glyphs stay top-right); never together with the amber alert, check or x; same in light and dark | spec'd, live in nav.js; FE-11 |
+| 79 | (superseded 2026-10-20 by #81: no thinking bubble or status glyphs on code-agent rows) | superseded |
+| 80 | Clicking a **code-agent row** in the left bar enters that code agent: its own conversation view (provider icon, title, target/branch, state; full transcript) and the normal query box talks to it directly ("Message Codex…"); Escape/parent/Home returns | spec'd, live in nav.js; FE-16 |
+| 81 | Code-agent rows = provider icon + title only (no check, x, alert or thinking bubble); agent (robot) rows keep their status glyphs | spec'd, live in nav.js; FE-16 |
+| 82 | Left bar Home row reads just **Home** (no "· root project") | spec'd, live in nav.js; FE-16 |
+| 83 | **Left-bar Apps section removed** (Andy: "rm the weird apps shit"); the full-screen app view opens only from a code agent's live preview card | spec'd, live in nav.js; FE-15 |
+| 84 | Mobile/iPad header (flag on): hamburger + Rose pill + the four app icons (Browser, Phone, Integrations w/ red dot, Dark) — never just "Rose ≡" | spec'd, live in nav.js; FE-16 |
+| 85 | Integrations = one account per integration (single chip, × disconnects, no "+ Add account") + the gradient sync loader; icons keep their **stock app-icon backgrounds** (iMessage/WhatsApp tiles, DropdownIconFrame) visible in dark; backend loader contract sent to the coding thread | spec'd, live in panels/integrations.js; FE-17 + L-CULL-INTEG |
+| 86 | Phone app = floating iPhone with a calm **Coming soon** screen (phone harness built in its own devbox; no /api/phones) | spec'd, live in panels/phone.js; FE-17 |
+| 87 | Browser app is not auto-opened; opening it with an agent selected starts at that root tree's default_url | spec'd → FE-17 |
+| 88 | Dark mode dividers/hairlines are subtle (row separators ≈ rgba(255,255,255,.07), outer borders ≤ .10), never bright white | spec'd, live in nav.js; FE-13 |
 
 ### UI ledger owners (audit 2026-10-20)
 
