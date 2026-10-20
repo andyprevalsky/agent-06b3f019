@@ -9,7 +9,8 @@
  *
  * LAYOUT (top → bottom, rows 17/30/57/59/63):
  *   Home (root project) · New Super Agent (black) · Search
- *   agents grouped by project (RoseAgentGroups) · + New project
+ *   agents grouped by project (RoseAgentGroups), each followed by its tree's
+ *   code agents (useRoseCodeAgents, bounded tree reads) · + New project
  *   ── Feedback · [Biz health, admins] · Archived · [Browse] · account row.
  *      Feedback, Biz health and the account row (Settings) open in the
  *      right-panel slot (RoseAppsProvider); clicking again closes it.
@@ -22,6 +23,7 @@ import { Activity, Archive, Globe, Megaphone } from 'lucide-react';
 import { useState, type FocusEvent } from 'react';
 
 import { ScrollArea } from '@/components/ui/scroll-area';
+import type { CodeAgentNode } from '@/lib/api/tree';
 import { cn } from '@/lib/utils';
 
 import type { AppSidebarProps } from '../AppSidebar';
@@ -48,6 +50,7 @@ import {
   ROSE_BAR_WIDTH,
 } from './roseSidebarLayout';
 import { useNotYet, useRoseAgentMenuActions } from './useRoseAgentMenuActions';
+import { useRoseCodeAgents } from './useRoseCodeAgents';
 import { useRoseSidebarProjects } from './useRoseSidebarProjects';
 
 const NO_ATTENTION: ReadonlySet<string> = new Set<string>();
@@ -108,6 +111,13 @@ export default function RoseSidebar(props: AppSidebarProps) {
     onSelectAgent,
   });
   const actionsFor = useRoseAgentMenuActions(handlers, roseActions);
+  const codeAgentsFor = useRoseCodeAgents(
+    [...grouped.home, ...grouped.projects.flatMap((g) => g.agents)],
+    props.selectedAgentId,
+  );
+  const onOpenCodeAgent =
+    roseActions.onOpenCodeAgent ??
+    ((codeAgent: CodeAgentNode) => onSelectAgent(codeAgent.owner_agent_id));
   const goToView = (view: Parameters<typeof onViewChange>[0]) => {
     onViewChange(view);
     onSelectAgent(null);
@@ -151,6 +161,8 @@ export default function RoseSidebar(props: AppSidebarProps) {
             actionsFor={actionsFor}
             onMenuOpenChange={expansion.setMenuOpen}
             projectActions={projects.projectActions}
+            codeAgentsFor={codeAgentsFor}
+            onOpenCodeAgent={onOpenCodeAgent}
           />
         </ScrollArea>
         {isExpanded && props.userUi?.menuSlot}

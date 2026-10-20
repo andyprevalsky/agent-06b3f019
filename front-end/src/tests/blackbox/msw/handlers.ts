@@ -291,7 +291,7 @@ export const handlers = [
 
   // Tree state
   http.get(`${API_BASE}/agents/tree`, () => {
-    return HttpResponse.json({ agents: [] });
+    return HttpResponse.json({ agents: [], code_agents: [] });
   }),
 
   http.get(`${API_BASE}/agents/:agentId/ancestors`, () => {

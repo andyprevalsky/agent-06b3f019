@@ -13,6 +13,7 @@ import { useCallback } from 'react';
 
 import { useToast } from '@/hooks/use-toast';
 import type { Project } from '@/lib/api/projects';
+import type { CodeAgentNode } from '@/lib/api/tree';
 
 import type { AgentRowHandlers } from '../SidebarAgentList';
 import type { Agent } from '../../hooks';
@@ -27,6 +28,11 @@ export interface RoseSidebarActions {
   onDeleteAgent?: (agent: Agent) => void;
   onScheduleAgentPrompt?: (agent: Agent) => void;
   onCreateAgentInProject?: (project: Project) => void;
+  /**
+   * Open a code agent's conversation/transcript. Default: select the Rose agent
+   * that owns the session; its chat holds the code agent's chip and transcript.
+   */
+  onOpenCodeAgent?: (codeAgent: CodeAgentNode) => void;
 }
 
 export function useNotYet() {

@@ -14,16 +14,22 @@
  * COLLAPSED (64px rail): project rows and "+ New project" are hidden; the
  * non-empty groups of agent icons are separated by 18×3px neutral line pills.
  *
+ * CODE AGENTS: each agent row is followed by the Claude Code / Codex sessions
+ * of its tree (RoseCodeAgentRow), indented one level under it while expanded;
+ * collapsed they stay inside the parent's group (no divider between them).
+ *
  * While a search query is active, project groups with no matching agent drop out.
  */
 
 import { Fragment } from 'react';
 
 import type { Project } from '@/lib/api/projects';
+import type { CodeAgentNode } from '@/lib/api/tree';
 
 import type { Agent } from '../../hooks';
 import type { GroupedAgents } from './groupAgentsByProject';
 import RoseAgentRow from './RoseAgentRow';
+import RoseCodeAgentRow from './RoseCodeAgentRow';
 import type { RoseAgentMenuActions } from './RoseAgentRowMenu';
 import RoseProjectRow, { NewProjectRow } from './RoseProjectRow';
 
@@ -50,6 +56,9 @@ export interface RoseAgentGroupsProps {
   actionsFor: (agent: Agent) => RoseAgentMenuActions;
   onMenuOpenChange: (open: boolean) => void;
   projectActions: RoseProjectActions;
+  /** Code agents listed under an agent row (its tree's sessions). */
+  codeAgentsFor: (agentId: string) => readonly CodeAgentNode[];
+  onOpenCodeAgent: (codeAgent: CodeAgentNode) => void;
 }
 
 function GroupDivider() {
@@ -72,17 +81,27 @@ function AgentRows({
   return (
     <>
       {agents.map((agent) => (
-        <RoseAgentRow
-          key={agent.agent_id}
-          agent={agent}
-          isSelected={props.selectedAgentId === agent.agent_id}
-          isExpanded={props.isExpanded}
-          indented={indented}
-          hasAttentionRequest={props.attentionAgentIds.has(agent.agent_id)}
-          onClick={() => props.onSelectAgent(agent.agent_id)}
-          actions={props.actionsFor(agent)}
-          onMenuOpenChange={props.onMenuOpenChange}
-        />
+        <Fragment key={agent.agent_id}>
+          <RoseAgentRow
+            agent={agent}
+            isSelected={props.selectedAgentId === agent.agent_id}
+            isExpanded={props.isExpanded}
+            indented={indented}
+            hasAttentionRequest={props.attentionAgentIds.has(agent.agent_id)}
+            onClick={() => props.onSelectAgent(agent.agent_id)}
+            actions={props.actionsFor(agent)}
+            onMenuOpenChange={props.onMenuOpenChange}
+          />
+          {props.codeAgentsFor(agent.agent_id).map((codeAgent) => (
+            <RoseCodeAgentRow
+              key={codeAgent.code_agent_id}
+              codeAgent={codeAgent}
+              isExpanded={props.isExpanded}
+              parentIndented={indented}
+              onOpen={() => props.onOpenCodeAgent(codeAgent)}
+            />
+          ))}
+        </Fragment>
       ))}
     </>
   );
