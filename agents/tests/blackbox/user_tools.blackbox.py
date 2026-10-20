@@ -228,7 +228,6 @@ def _workflow_runtime(activity_calls: Optional[List[Any]] = None):
     with (
         patch.object(handler_mod.workflow, "now", new=_now),
         patch.object(handler_mod.workflow, "execute_activity", new=AsyncMock(side_effect=_execute_activity)),
-        patch.object(handler_mod.workflow, "logger"),
     ):
         yield
 

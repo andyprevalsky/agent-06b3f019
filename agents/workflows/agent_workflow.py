@@ -2232,6 +2232,7 @@ class AgentWorkflow:
         await pin_user_tools(
             self,
             is_root=not is_sub_agent and self.depth == 0 and self.world_model_mode == "real",
+            wf_api=workflow,
         )
         startup_execute_context: Optional[List[Dict[str, Any]]] = None
         # Chat re-escalation after a terminal run starts a new workflow with
@@ -3872,7 +3873,7 @@ class AgentWorkflow:
         if is_user_tool_name(tool_name):
             # Pinned user-authored tool: runs its own activity and posts its own
             # FINISHED/ERROR TOOL message (never raises).
-            return await run_user_tool(self, tool_name, tool_args, tool_call_id)
+            return await run_user_tool(self, tool_name, tool_args, tool_call_id, wf_api=workflow)
         if tool_name not in TOOL_EXECUTORS:
             error_msg = f"Unknown tool: {tool_name}"
             await self._handle_tool_event(

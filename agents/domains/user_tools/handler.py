@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any, Dict, List, Optional
 
+import structlog
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
@@ -32,6 +33,8 @@ from .service import (
     run_user_tool_activity,
 )
 
+logger = structlog.get_logger()
+
 
 def declared_user_tools(workflow_instance: Any) -> List[Dict[str, Any]]:
     """Pinned specs to declare to the LLM (sorted; empty for sub-agents)."""
@@ -39,13 +42,13 @@ def declared_user_tools(workflow_instance: Any) -> List[Dict[str, Any]]:
     return sorted_user_tool_specs(pinned.get("tools") if isinstance(pinned, dict) else None)
 
 
-async def pin_user_tools(workflow_instance: Any, *, is_root: bool) -> None:
+async def pin_user_tools(workflow_instance: Any, *, is_root: bool, wf_api: Any = workflow) -> None:
     """Resolve the user's published tools once per run (root agents only).
 
     Idempotent across continue_as_new: a restored pin (``user_tools_pinned``) is
     kept, so a version published mid-run never changes the declared set.
     A resolution failure leaves the agent without user tools rather than
-    failing the run.
+    failing the run. ``wf_api`` is the caller's ``temporalio.workflow`` binding.
     """
     if getattr(workflow_instance, "user_tools_pinned", False):
         return
@@ -54,7 +57,7 @@ async def pin_user_tools(workflow_instance: Any, *, is_root: bool) -> None:
         workflow_instance.user_tools_pinned = True
         return
     try:
-        pinned = await workflow.execute_activity(
+        pinned = await wf_api.execute_activity(
             resolve_user_tools_activity,
             args=[workflow_instance.agent_id, workflow_instance.user_id],
             start_to_close_timeout=timedelta(seconds=RESOLVE_ACTIVITY_TIMEOUT_SECONDS),
@@ -62,12 +65,12 @@ async def pin_user_tools(workflow_instance: Any, *, is_root: bool) -> None:
         )
     except ActivityError as exc:
         reason = extract_root_error(exc)
-        workflow.logger.warning(f"[UserTools] resolution failed; continuing without user tools: {reason[:200]}")
+        logger.warning("[UserTools] resolution failed; continuing without user tools", error=reason[:200])
         pinned = empty_pinned(f"resolution failed: {reason[:200]}")
     workflow_instance.user_tools = pinned if isinstance(pinned, dict) else empty_pinned()
     workflow_instance.user_tools_pinned = True
     names = [spec.get("name") for spec in declared_user_tools(workflow_instance)]
-    workflow.logger.info(f"[UserTools] pinned version={workflow_instance.user_tools.get('version_id')} tools={names}")
+    logger.info("[UserTools] pinned", version_id=workflow_instance.user_tools.get("version_id"), tools=names)
 
 
 def _visible_params(tool_args: Dict[str, Any]) -> Dict[str, Any]:
@@ -79,6 +82,8 @@ async def run_user_tool(
     tool_name: str,
     tool_args: Dict[str, Any],
     tool_call_id: str,
+    *,
+    wf_api: Any = workflow,
 ) -> Dict[str, Any]:
     """Execute a pinned user tool and post its TOOL message.
 
@@ -87,10 +92,10 @@ async def run_user_tool(
     pinned = getattr(workflow_instance, "user_tools", None) or {}
     spec: Optional[Dict[str, Any]] = find_user_tool_spec(pinned.get("tools"), tool_name)
     params = _visible_params(tool_args)
-    started = workflow.now()
+    started = wf_api.now()
 
     async def _emit_error(message: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        elapsed = (workflow.now() - started).total_seconds()
+        elapsed = (wf_api.now() - started).total_seconds()
         await workflow_instance._handle_tool_event(
             ToolEvent(
                 type=EventType.POST_MESSAGE,
@@ -121,7 +126,7 @@ async def run_user_tool(
         tool_name,
     )
     try:
-        outcome = await workflow.execute_activity(
+        outcome = await wf_api.execute_activity(
             run_user_tool_activity,
             args=[
                 workflow_instance.agent_id,
@@ -146,7 +151,7 @@ async def run_user_tool(
         )
 
     result = outcome.get("result") or {}
-    elapsed = (workflow.now() - started).total_seconds()
+    elapsed = (wf_api.now() - started).total_seconds()
     metadata: Dict[str, Any] = {"userTool": {"name": tool_name, "versionId": version_id}}
     inline_view = outcome.get("inline_view")
     if isinstance(inline_view, dict):
