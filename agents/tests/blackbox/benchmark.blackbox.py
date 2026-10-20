@@ -1238,6 +1238,22 @@ def test_successful_llm_evidence_is_in_permanent_gate():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_disposable_volume_ownership_is_in_permanent_gate():
+    """Disposable-volume backup ownership (exact mount, settled or restored
+    attachment, foreign-attachment refusal) is exercised on every deploy."""
+    repo_root = Path(__file__).resolve().parents[3]
+    for suite in ("cloudbench-disposable-volume.test.py", "cloudbench-disposable-volume-cli.test.py"):
+        result = subprocess.run(
+            [sys.executable, str(repo_root / "scripts/tests" / suite)],
+            cwd=repo_root,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
+        )
+        assert result.returncode == 0, suite + "\n" + result.stdout + result.stderr
+
+
 def test_cloudbench_codex_auth_is_in_permanent_gate():
     repo_root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
