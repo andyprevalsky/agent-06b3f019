@@ -85,11 +85,29 @@ function workflowTargets(request: ResolvableGateRequest): Map<string, string> {
   return targets;
 }
 
+/**
+ * Requests raised from a code-agent sandbox (`rose approve`, pinned `display`)
+ * are awaited by that sandbox's long-poll, not by a workflow. Their agent's
+ * workflow is busy running the code-agent tool; a signal would land in its
+ * inbox as unrelated user feedback.
+ */
+function awaitedBySandbox(request: ResolvableGateRequest): boolean {
+  const metadata = request.metadata;
+  return (
+    metadata !== null &&
+    typeof metadata === 'object' &&
+    'sandboxTool' in metadata &&
+    (metadata as { sandboxTool?: unknown }).sandboxTool !== null &&
+    (metadata as { sandboxTool?: unknown }).sandboxTool !== undefined
+  );
+}
+
 async function signalAllWaiters(
   request: ResolvableGateRequest,
   response: string,
   userMessage: string | null
 ): Promise<void> {
+  if (awaitedBySandbox(request)) return;
   for (const [workflowId, agentId] of workflowTargets(request)) {
     await signalWorkflow(workflowId, agentId, request.id, response, userMessage);
   }

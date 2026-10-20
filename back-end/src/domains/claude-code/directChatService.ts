@@ -1,10 +1,10 @@
 /**
  * Direct chat with a running code agent (Rose-builds-Rose C7).
  *
- *   FE query box (target = code session)
- *     │ POST /api/claude-code-session/:taskId/turns {client_message_id, text}
+ *   FE "Message <agent> directly" box
+ *     │ POST /api/agents/:id/code-agent/:taskId/messages {client_message_id, text}
  *     ▼
- *   sendDirectTurn ── owner check (session.agentId → Agent.userId)
+ *   sendDirectTurn ── owner check (session.agentId == :id, Agent.userId == caller)
  *     │ already persisted? → return it (idempotent per client_message_id)
  *     ├─► deliverUserTurnToCodeSession ──ws──► sandbox ws-server ──► CLI stdin
  *     │        (ws-server dedupes by id, so a retry never repeats the turn)
@@ -43,7 +43,11 @@ export class DirectChatError extends Error {
   }
 }
 
-async function requireOwnedLiveSession(taskId: string, userId: string | undefined) {
+async function requireOwnedLiveSession(
+  agentId: string | undefined,
+  taskId: string,
+  userId: string | undefined
+) {
   if (userId === undefined || userId === '') {
     throw new DirectChatError(
       400,
@@ -53,7 +57,10 @@ async function requireOwnedLiveSession(taskId: string, userId: string | undefine
   }
   const session = await repo.findSessionForDirectChat(taskId);
   // Not found and not yours look the same, so session ids cannot be probed.
-  const agent = session === null ? null : await repo.findAgentById(session.agentId);
+  const agent =
+    session === null || (agentId !== undefined && session.agentId !== agentId)
+      ? null
+      : await repo.findAgentById(session.agentId);
   if (session === null || agent === null || agent.userId !== userId) {
     throw new DirectChatError(404, 'CODE_SESSION_NOT_FOUND', 'Code session not found');
   }
@@ -98,9 +105,12 @@ export interface DirectTurnResult {
   message_id: string;
   task_id: string;
   agent_id: string;
+  code_provider: 'claude' | 'codex';
 }
 
 export async function sendDirectTurn(params: {
+  /** From `/api/agents/:id/code-agent/...`; absent on the claude-code-session route. */
+  agentId?: string;
   taskId: string;
   userId: string | undefined;
   clientMessageId: string;
@@ -108,21 +118,25 @@ export async function sendDirectTurn(params: {
   toolCallId?: string;
 }): Promise<DirectTurnResult> {
   const { taskId, userId, clientMessageId, text } = params;
-  const session = await requireOwnedLiveSession(taskId, userId);
+  const session = await requireOwnedLiveSession(params.agentId, taskId, userId);
+  // The chip row names the CLI (Claude Code or Codex share this table) and the
+  // spawn tool call the UI groups the code agent's rows under.
+  const chip = await repo.findCodeSessionChip(session.agentId, taskId);
+  const toolCallId = params.toolCallId ?? chip.toolCallId ?? undefined;
 
   const metadata: Record<string, unknown> = {
     toolName: 'spawn_claude_code_agent',
     title: 'You',
     task_id: taskId,
     action_type: 'user_direct_turn',
-    code_provider: 'claude',
+    code_provider: chip.provider,
     // Child-scoped like the chip's progress rows: visible in the code agent's
     // trajectory and tree grep, not replayed into the root planner mid-run.
     subAgentId: taskId,
     direct_turn_id: clientMessageId,
     isDirectCodeTurn: true,
     idempotencyKey: `code-turn:${taskId}:${clientMessageId}`,
-    ...(params.toolCallId !== undefined ? { toolCallId: params.toolCallId } : {}),
+    ...(toolCallId !== undefined ? { toolCallId } : {}),
   };
 
   const startedAt = Date.now();
@@ -163,14 +177,16 @@ export async function sendDirectTurn(params: {
     message_id: message.id,
     task_id: taskId,
     agent_id: session.agentId,
+    code_provider: chip.provider,
   };
 }
 
 export async function handBackDirectChat(params: {
+  agentId?: string;
   taskId: string;
   userId: string | undefined;
 }): Promise<{ status: 'released' | 'not_held' }> {
-  const session = await requireOwnedLiveSession(params.taskId, params.userId);
+  const session = await requireOwnedLiveSession(params.agentId, params.taskId, params.userId);
   const status = await handBackCodeSession({ wsUrl: session.streamUrl, taskId: params.taskId });
   if (status === 'unreachable') {
     throw new DirectChatError(502, 'CODE_SESSION_UNREACHABLE', 'Could not reach the code session');

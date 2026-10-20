@@ -10483,5 +10483,538 @@
         }
       ]
     }
+  },
+  {
+    "name": "code-bench-bugfix-invoice-rounding",
+    "title": "Code Bench: Python bug fix (hidden test)",
+    "prompt": "Use exactly one code agent (spawn_claude_code_agent) for this task and pass it the attached archive bugfix-invoice-rounding.tar.gz. Do not use browser or explore agents and do not write the code yourself. Give the code agent these instructions verbatim:\n\n<<<\nThe archive /home/user/attachments/bugfix-invoice-rounding.tar.gz contains a git repository. Extract it into a working directory (tar -xzf /home/user/attachments/bugfix-invoice-rounding.tar.gz); the repository is bugfix-invoice-rounding/repo.\n\nBug report from finance: an invoice line of 7 x 143 cents with a 5% discount shows 950 cents, but our policy says 951. Totals with tax are off by a cent in the same way. The rounding policy is documented at the top of invoice/totals.py. Fix the bug so every amount follows that policy, keep the existing tests passing, and add a regression test for the reported case.\n\nWork only inside bugfix-invoice-rounding/. When you are done, package the whole bugfix-invoice-rounding directory, including .git, as /home/user/output/result.tar.gz (run tar -czf /home/user/output/result.tar.gz bugfix-invoice-rounding from the directory you extracted into). Do not ask questions.\n>>>\n\nWhen the code agent finishes, return its result.tar.gz as the result_archive file_pointer in your structured output.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_claude_code_agent"
+    ],
+    "tags": [
+      "claude-code",
+      "code-bench"
+    ],
+    "price_limit_cents": 300,
+    "requires_browser_agent": false,
+    "requires_claude_code": true,
+    "attachment": null,
+    "attachments": [
+      "code-bench/bugfix-invoice-rounding.tar.gz"
+    ],
+    "approval_handling": null,
+    "start_phase": "execute",
+    "min_tool_counts": {
+      "spawn_claude_code_agent": 1
+    },
+    "tool_count_scope": "tree",
+    "forbidden_tools": [
+      "spawn_browser_agent"
+    ],
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "description": "Code capability (bug fix with hidden failing test): the Rose code agent works on a self-contained fixture repo and returns it; graded by hidden tests. Raw-CLI parity: benchmarks/code_bench_parity.py.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "e2b_code_sandbox"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Fixture repo agents/benchmarks/fixtures/code_bench/bugfix-invoice-rounding is built into bugfix-invoice-rounding.tar.gz (deterministic single commit) and uploaded as an attachment. No network beyond the model. The returned result.tar.gz is graded by benchmarks/code_bench.py with the fixture's hidden tests."
+    },
+    "enforce_declared_evaluators": true,
+    "evaluators": [
+      {
+        "id": "hidden-tests",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED",
+          "Task Complete outputs include the code agent's result.tar.gz containing the bugfix-invoice-rounding repository",
+          "The visible tests and the hidden tests pass on the returned repository"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "code_bench_hidden_tests",
+            "fixture": "bugfix-invoice-rounding"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "plan:docs/plans/active/rose-builds-rose.md#C8",
+      "fixture:agents/benchmarks/fixtures/code_bench/bugfix-invoice-rounding"
+    ],
+    "group": "rose-bench",
+    "human_time": "~30 min",
+    "deploy_category": "claude-code"
+  },
+  {
+    "name": "code-bench-bugfix-js-pagination",
+    "title": "Code Bench: JavaScript bug fix (hidden test)",
+    "prompt": "Use exactly one code agent (spawn_claude_code_agent) for this task and pass it the attached archive bugfix-js-pagination.tar.gz. Do not use browser or explore agents and do not write the code yourself. Give the code agent these instructions verbatim:\n\n<<<\nThe archive /home/user/attachments/bugfix-js-pagination.tar.gz contains a git repository. Extract it into a working directory (tar -xzf /home/user/attachments/bugfix-js-pagination.tar.gz); the repository is bugfix-js-pagination/repo.\n\nUsers report two pagination bugs: page 1 of the results skips the first ten items, and a list of 25 items only offers 2 pages. paginate() in src/paginate.js is documented by its JSDoc comment; make the implementation match that documentation completely (including the RangeError cases), keep the existing tests passing (run them with `node --test test/`), and add regression tests for the reported bugs.\n\nWork only inside bugfix-js-pagination/. When you are done, package the whole bugfix-js-pagination directory, including .git, as /home/user/output/result.tar.gz (run tar -czf /home/user/output/result.tar.gz bugfix-js-pagination from the directory you extracted into). Do not ask questions.\n>>>\n\nWhen the code agent finishes, return its result.tar.gz as the result_archive file_pointer in your structured output.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_claude_code_agent"
+    ],
+    "tags": [
+      "claude-code",
+      "code-bench"
+    ],
+    "price_limit_cents": 300,
+    "requires_browser_agent": false,
+    "requires_claude_code": true,
+    "attachment": null,
+    "attachments": [
+      "code-bench/bugfix-js-pagination.tar.gz"
+    ],
+    "approval_handling": null,
+    "start_phase": "execute",
+    "min_tool_counts": {
+      "spawn_claude_code_agent": 1
+    },
+    "tool_count_scope": "tree",
+    "forbidden_tools": [
+      "spawn_browser_agent"
+    ],
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "description": "Code capability (bug fix with hidden failing test): the Rose code agent works on a self-contained fixture repo and returns it; graded by hidden tests. Raw-CLI parity: benchmarks/code_bench_parity.py.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "e2b_code_sandbox"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Fixture repo agents/benchmarks/fixtures/code_bench/bugfix-js-pagination is built into bugfix-js-pagination.tar.gz (deterministic single commit) and uploaded as an attachment. No network beyond the model. The returned result.tar.gz is graded by benchmarks/code_bench.py with the fixture's hidden tests."
+    },
+    "enforce_declared_evaluators": true,
+    "evaluators": [
+      {
+        "id": "hidden-tests",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED",
+          "Task Complete outputs include the code agent's result.tar.gz containing the bugfix-js-pagination repository",
+          "The visible tests and the hidden tests pass on the returned repository"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "code_bench_hidden_tests",
+            "fixture": "bugfix-js-pagination"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "plan:docs/plans/active/rose-builds-rose.md#C8",
+      "fixture:agents/benchmarks/fixtures/code_bench/bugfix-js-pagination"
+    ],
+    "group": "rose-bench",
+    "human_time": "~30 min",
+    "deploy_category": "claude-code"
+  },
+  {
+    "name": "code-bench-commit-locally-no-push",
+    "title": "Code Bench: commit locally, do not push",
+    "prompt": "Use exactly one code agent (spawn_claude_code_agent) for this task and pass it the attached archive commit-locally-no-push.tar.gz. Do not use browser or explore agents and do not write the code yourself. Give the code agent these instructions verbatim:\n\n<<<\nThe archive /home/user/attachments/commit-locally-no-push.tar.gz contains a git repository. Extract it into a working directory (tar -xzf /home/user/attachments/commit-locally-no-push.tar.gz); the repository is commit-locally-no-push/repo and its remote origin is the bare repository commit-locally-no-push/origin.git next to it.\n\ngreet() in greeting/core.py does not follow its own docstring. Fix it so it matches the documented behaviour and keep the existing tests passing. This repository has a remote named origin. When the fix is done and the tests pass, commit your work locally on the current branch with a descriptive commit message and leave the working tree clean. Do not push, and do not change the remote in any way: the user will review the local commit before anything is shared.\n\nWork only inside commit-locally-no-push/. When you are done, package the whole commit-locally-no-push directory, including .git, as /home/user/output/result.tar.gz (run tar -czf /home/user/output/result.tar.gz commit-locally-no-push from the directory you extracted into). Do not ask questions.\n>>>\n\nWhen the code agent finishes, return its result.tar.gz as the result_archive file_pointer in your structured output.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_claude_code_agent"
+    ],
+    "tags": [
+      "claude-code",
+      "code-bench"
+    ],
+    "price_limit_cents": 300,
+    "requires_browser_agent": false,
+    "requires_claude_code": true,
+    "attachment": null,
+    "attachments": [
+      "code-bench/commit-locally-no-push.tar.gz"
+    ],
+    "approval_handling": null,
+    "start_phase": "execute",
+    "min_tool_counts": {
+      "spawn_claude_code_agent": 1
+    },
+    "tool_count_scope": "tree",
+    "forbidden_tools": [
+      "spawn_browser_agent"
+    ],
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "description": "Code capability (commit locally, do not push): the Rose code agent works on a self-contained fixture repo and returns it; graded by hidden tests. Raw-CLI parity: benchmarks/code_bench_parity.py.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "e2b_code_sandbox"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Fixture repo agents/benchmarks/fixtures/code_bench/commit-locally-no-push is built into commit-locally-no-push.tar.gz (deterministic single commit) and uploaded as an attachment. No network beyond the model. The returned result.tar.gz is graded by benchmarks/code_bench.py with the fixture's hidden tests."
+    },
+    "enforce_declared_evaluators": true,
+    "evaluators": [
+      {
+        "id": "hidden-tests",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED",
+          "Task Complete outputs include the code agent's result.tar.gz containing the commit-locally-no-push repository",
+          "The visible tests and the hidden tests pass on the returned repository",
+          "The fix is committed locally on top of the fixture base commit, the working tree is clean and origin is unchanged (nothing pushed)"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "code_bench_hidden_tests",
+            "fixture": "commit-locally-no-push"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "plan:docs/plans/active/rose-builds-rose.md#C8",
+      "fixture:agents/benchmarks/fixtures/code_bench/commit-locally-no-push"
+    ],
+    "group": "rose-bench",
+    "human_time": "~20 min",
+    "deploy_category": "claude-code"
+  },
+  {
+    "name": "code-bench-debug-stacktrace-orders",
+    "title": "Code Bench: multi-file debug from a stack trace",
+    "prompt": "Use exactly one code agent (spawn_claude_code_agent) for this task and pass it the attached archive debug-stacktrace-orders.tar.gz. Do not use browser or explore agents and do not write the code yourself. Give the code agent these instructions verbatim:\n\n<<<\nThe archive /home/user/attachments/debug-stacktrace-orders.tar.gz contains a git repository. Extract it into a working directory (tar -xzf /home/user/attachments/debug-stacktrace-orders.tar.gz); the repository is debug-stacktrace-orders/repo.\n\nOur monthly report crashes on the October export. Running `python3 -m orders.cli data/export-2026-10.csv` from the repository root fails with:\n\nTraceback (most recent call last):\n  File \"orders/cli.py\", line 18, in <module>\n    sys.exit(main())\n  File \"orders/cli.py\", line 13, in main\n    print(render(build_report(orders)))\n  File \"orders/report.py\", line 10, in build_report\n    revenue += order.total\n  File \"orders/models.py\", line 22, in total\n    return Decimal(self.row[\"unit_price\"]) * self.quantity\nKeyError: 'unit_price'\n\nThe export file is correct and must not be edited; other exports use plain snake_case headers and must keep working. Find the root cause, fix it where it originates rather than hiding the error downstream, add a regression test, and keep the existing tests passing.\n\nWork only inside debug-stacktrace-orders/. When you are done, package the whole debug-stacktrace-orders directory, including .git, as /home/user/output/result.tar.gz (run tar -czf /home/user/output/result.tar.gz debug-stacktrace-orders from the directory you extracted into). Do not ask questions.\n>>>\n\nWhen the code agent finishes, return its result.tar.gz as the result_archive file_pointer in your structured output.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_claude_code_agent"
+    ],
+    "tags": [
+      "claude-code",
+      "code-bench"
+    ],
+    "price_limit_cents": 300,
+    "requires_browser_agent": false,
+    "requires_claude_code": true,
+    "attachment": null,
+    "attachments": [
+      "code-bench/debug-stacktrace-orders.tar.gz"
+    ],
+    "approval_handling": null,
+    "start_phase": "execute",
+    "min_tool_counts": {
+      "spawn_claude_code_agent": 1
+    },
+    "tool_count_scope": "tree",
+    "forbidden_tools": [
+      "spawn_browser_agent"
+    ],
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "description": "Code capability (multi-file debugging from a stack trace): the Rose code agent works on a self-contained fixture repo and returns it; graded by hidden tests. Raw-CLI parity: benchmarks/code_bench_parity.py.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "e2b_code_sandbox"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Fixture repo agents/benchmarks/fixtures/code_bench/debug-stacktrace-orders is built into debug-stacktrace-orders.tar.gz (deterministic single commit) and uploaded as an attachment. No network beyond the model. The returned result.tar.gz is graded by benchmarks/code_bench.py with the fixture's hidden tests."
+    },
+    "enforce_declared_evaluators": true,
+    "evaluators": [
+      {
+        "id": "hidden-tests",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED",
+          "Task Complete outputs include the code agent's result.tar.gz containing the debug-stacktrace-orders repository",
+          "The visible tests and the hidden tests pass on the returned repository",
+          "Input data files the task forbids editing are byte-identical"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "code_bench_hidden_tests",
+            "fixture": "debug-stacktrace-orders"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "plan:docs/plans/active/rose-builds-rose.md#C8",
+      "fixture:agents/benchmarks/fixtures/code_bench/debug-stacktrace-orders"
+    ],
+    "group": "rose-bench",
+    "human_time": "~45 min",
+    "deploy_category": "claude-code"
+  },
+  {
+    "name": "code-bench-feature-textstats-top-words",
+    "title": "Code Bench: small feature with tests",
+    "prompt": "Use exactly one code agent (spawn_claude_code_agent) for this task and pass it the attached archive feature-textstats-top-words.tar.gz. Do not use browser or explore agents and do not write the code yourself. Give the code agent these instructions verbatim:\n\n<<<\nThe archive /home/user/attachments/feature-textstats-top-words.tar.gz contains a git repository. Extract it into a working directory (tar -xzf /home/user/attachments/feature-textstats-top-words.tar.gz); the repository is feature-textstats-top-words/repo.\n\nAdd a feature to the textstats package: top_words(text, n=3, stopwords=None) in textstats/core.py, also exported from the package (textstats.top_words and listed in textstats.__all__). It returns a list of (word, count) tuples for the n most frequent words, using the existing tokenize() rules. Sort by count descending, then alphabetically for ties. stopwords is an optional collection of words to ignore, compared case-insensitively. Return fewer than n items when there are fewer distinct words. Raise ValueError when n is not positive. Write unit tests for top_words in the tests/ directory and keep every existing test passing.\n\nWork only inside feature-textstats-top-words/. When you are done, package the whole feature-textstats-top-words directory, including .git, as /home/user/output/result.tar.gz (run tar -czf /home/user/output/result.tar.gz feature-textstats-top-words from the directory you extracted into). Do not ask questions.\n>>>\n\nWhen the code agent finishes, return its result.tar.gz as the result_archive file_pointer in your structured output.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_claude_code_agent"
+    ],
+    "tags": [
+      "claude-code",
+      "code-bench"
+    ],
+    "price_limit_cents": 300,
+    "requires_browser_agent": false,
+    "requires_claude_code": true,
+    "attachment": null,
+    "attachments": [
+      "code-bench/feature-textstats-top-words.tar.gz"
+    ],
+    "approval_handling": null,
+    "start_phase": "execute",
+    "min_tool_counts": {
+      "spawn_claude_code_agent": 1
+    },
+    "tool_count_scope": "tree",
+    "forbidden_tools": [
+      "spawn_browser_agent"
+    ],
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "description": "Code capability (small feature with tests): the Rose code agent works on a self-contained fixture repo and returns it; graded by hidden tests. Raw-CLI parity: benchmarks/code_bench_parity.py.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "e2b_code_sandbox"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Fixture repo agents/benchmarks/fixtures/code_bench/feature-textstats-top-words is built into feature-textstats-top-words.tar.gz (deterministic single commit) and uploaded as an attachment. No network beyond the model. The returned result.tar.gz is graded by benchmarks/code_bench.py with the fixture's hidden tests."
+    },
+    "enforce_declared_evaluators": true,
+    "evaluators": [
+      {
+        "id": "hidden-tests",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED",
+          "Task Complete outputs include the code agent's result.tar.gz containing the feature-textstats-top-words repository",
+          "The visible tests and the hidden tests pass on the returned repository",
+          "The agent added its own tests for the new feature"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "code_bench_hidden_tests",
+            "fixture": "feature-textstats-top-words"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "plan:docs/plans/active/rose-builds-rose.md#C8",
+      "fixture:agents/benchmarks/fixtures/code_bench/feature-textstats-top-words"
+    ],
+    "group": "rose-bench",
+    "human_time": "~45 min",
+    "deploy_category": "claude-code"
+  },
+  {
+    "name": "code-bench-frontend-pricing-table",
+    "title": "Code Bench: front-end component build",
+    "prompt": "Use exactly one code agent (spawn_claude_code_agent) for this task and pass it the attached archive frontend-pricing-table.tar.gz. Do not use browser or explore agents and do not write the code yourself. Give the code agent these instructions verbatim:\n\n<<<\nThe archive /home/user/attachments/frontend-pricing-table.tar.gz contains a git repository. Extract it into a working directory (tar -xzf /home/user/attachments/frontend-pricing-table.tar.gz); the repository is frontend-pricing-table/repo.\n\nBuild the pricing table component for this static page (no frameworks, no npm dependencies). Implement renderPricingTable(plans, options) in src/pricingTable.js. It returns an HTML string: a <section class=\"pricing\"> containing one <article class=\"plan\" data-plan=\"<plan id>\"> per plan, in input order. Each card has an <h3> with the plan name, a <p class=\"price\"> showing the monthly price (priceCents 0 shows \"Free\", whole dollars show like \"$12/mo\", other amounts show two decimals like \"$49.50/mo\") and a <ul> with one <li> per feature. When options.highlight equals a plan id, that card's class is \"plan featured\" and it contains <span class=\"badge\">Most popular</span>; no other card is featured. Escape all plan text for HTML (&, <, >, quotes) and do not mutate the input. Then style it in styles.css so the cards sit side by side in a row (a .pricing rule using flex or grid), look like clean cards, and the featured card is clearly emphasised. index.html already renders the plans from src/plans.js with highlight \"team\". Keep the existing tests passing.\n\nWork only inside frontend-pricing-table/. When you are done, package the whole frontend-pricing-table directory, including .git, as /home/user/output/result.tar.gz (run tar -czf /home/user/output/result.tar.gz frontend-pricing-table from the directory you extracted into). Do not ask questions.\n>>>\n\nWhen the code agent finishes, return its result.tar.gz as the result_archive file_pointer in your structured output.",
+    "timeout_seconds": 1200,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_claude_code_agent"
+    ],
+    "tags": [
+      "claude-code",
+      "code-bench"
+    ],
+    "price_limit_cents": 300,
+    "requires_browser_agent": false,
+    "requires_claude_code": true,
+    "attachment": null,
+    "attachments": [
+      "code-bench/frontend-pricing-table.tar.gz"
+    ],
+    "approval_handling": null,
+    "start_phase": "execute",
+    "min_tool_counts": {
+      "spawn_claude_code_agent": 1
+    },
+    "tool_count_scope": "tree",
+    "forbidden_tools": [
+      "spawn_browser_agent"
+    ],
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "description": "Code capability (front-end component build): the Rose code agent works on a self-contained fixture repo and returns it; graded by hidden tests. Raw-CLI parity: benchmarks/code_bench_parity.py.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "e2b_code_sandbox"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Fixture repo agents/benchmarks/fixtures/code_bench/frontend-pricing-table is built into frontend-pricing-table.tar.gz (deterministic single commit) and uploaded as an attachment. No network beyond the model. The returned result.tar.gz is graded by benchmarks/code_bench.py with the fixture's hidden tests."
+    },
+    "enforce_declared_evaluators": true,
+    "evaluators": [
+      {
+        "id": "hidden-tests",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED",
+          "Task Complete outputs include the code agent's result.tar.gz containing the frontend-pricing-table repository",
+          "The visible tests and the hidden tests pass on the returned repository"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "code_bench_hidden_tests",
+            "fixture": "frontend-pricing-table"
+          }
+        ]
+      },
+      {
+        "id": "rendered-page-judge",
+        "method": "code_bench_screenshot_judge",
+        "fixture": "frontend-pricing-table",
+        "criteria": [
+          "Three pricing cards (Hobby, Team, Business) are visible side by side in one row",
+          "Each card shows its name, a readable price (Free, $12/mo, $49.50/mo) and a feature list",
+          "The Team card is clearly emphasised and shows a 'Most popular' badge",
+          "The layout looks like intentional, clean cards: no overlapping or clipped text and no raw HTML or error text"
+        ],
+        "judge_prompt": "The screenshot shows index.html of a static pricing page after a coding agent implemented renderPricingTable() and styles.css. The plans are Hobby (Free), Team ($12/mo, highlighted) and Business ($49.50/mo). Pass only when every criterion below is clearly visible in the screenshot."
+      }
+    ],
+    "source": [
+      "plan:docs/plans/active/rose-builds-rose.md#C8",
+      "fixture:agents/benchmarks/fixtures/code_bench/frontend-pricing-table"
+    ],
+    "group": "rose-bench",
+    "human_time": "~1 hour",
+    "deploy_category": "claude-code"
+  },
+  {
+    "name": "code-bench-refactor-shipping-rates",
+    "title": "Code Bench: behaviour-preserving refactor",
+    "prompt": "Use exactly one code agent (spawn_claude_code_agent) for this task and pass it the attached archive refactor-shipping-rates.tar.gz. Do not use browser or explore agents and do not write the code yourself. Give the code agent these instructions verbatim:\n\n<<<\nThe archive /home/user/attachments/refactor-shipping-rates.tar.gz contains a git repository. Extract it into a working directory (tar -xzf /home/user/attachments/refactor-shipping-rates.tar.gz); the repository is refactor-shipping-rates/repo.\n\nRefactor shipping/quotes.py. The zone rate table (base fee and per-kilogram rate for domestic, canada and international) is copied into all three quote functions. Define it exactly once, as a module-level dict named ZONE_RATES that maps each zone name to a (base_cents, per_kg_cents) tuple, and make every quote function use it. This is a pure refactor: public function names and signatures, return values for every input, and the type and message of every raised error (including which error wins when several inputs are invalid) must stay exactly the same. Keep the existing tests passing.\n\nWork only inside refactor-shipping-rates/. When you are done, package the whole refactor-shipping-rates directory, including .git, as /home/user/output/result.tar.gz (run tar -czf /home/user/output/result.tar.gz refactor-shipping-rates from the directory you extracted into). Do not ask questions.\n>>>\n\nWhen the code agent finishes, return its result.tar.gz as the result_archive file_pointer in your structured output.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_claude_code_agent"
+    ],
+    "tags": [
+      "claude-code",
+      "code-bench"
+    ],
+    "price_limit_cents": 300,
+    "requires_browser_agent": false,
+    "requires_claude_code": true,
+    "attachment": null,
+    "attachments": [
+      "code-bench/refactor-shipping-rates.tar.gz"
+    ],
+    "approval_handling": null,
+    "start_phase": "execute",
+    "min_tool_counts": {
+      "spawn_claude_code_agent": 1
+    },
+    "tool_count_scope": "tree",
+    "forbidden_tools": [
+      "spawn_browser_agent"
+    ],
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "description": "Code capability (refactor preserving behaviour): the Rose code agent works on a self-contained fixture repo and returns it; graded by hidden tests. Raw-CLI parity: benchmarks/code_bench_parity.py.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "e2b_code_sandbox"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Fixture repo agents/benchmarks/fixtures/code_bench/refactor-shipping-rates is built into refactor-shipping-rates.tar.gz (deterministic single commit) and uploaded as an attachment. No network beyond the model. The returned result.tar.gz is graded by benchmarks/code_bench.py with the fixture's hidden tests."
+    },
+    "enforce_declared_evaluators": true,
+    "evaluators": [
+      {
+        "id": "hidden-tests",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED",
+          "Task Complete outputs include the code agent's result.tar.gz containing the refactor-shipping-rates repository",
+          "The visible tests and the hidden tests pass on the returned repository"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "code_bench_hidden_tests",
+            "fixture": "refactor-shipping-rates"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "plan:docs/plans/active/rose-builds-rose.md#C8",
+      "fixture:agents/benchmarks/fixtures/code_bench/refactor-shipping-rates"
+    ],
+    "group": "rose-bench",
+    "human_time": "~30 min",
+    "deploy_category": "claude-code"
   }
 ]

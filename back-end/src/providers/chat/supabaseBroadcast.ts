@@ -238,6 +238,23 @@ export async function broadcastAgentModeStarted(agentId: string): Promise<void> 
 }
 
 /**
+ * USER_UI_ACTIVE_CHANGED — a code agent published (and activated) a new
+ * rose_user_ui version. Sent on the publishing agent's channel and its root's
+ * so an open Rose tab refetches /api/user-ui/active without a reload.
+ */
+export async function broadcastUserUiActiveChanged(
+  agentIds: string[],
+  payload: { versionId: string; agentId: string }
+): Promise<void> {
+  log.info('[Broadcast] USER_UI_ACTIVE_CHANGED', { ...payload, channels: agentIds.length });
+  await Promise.all(
+    agentIds.map((id) =>
+      broadcast({ topic: `agent:${id}`, event: 'USER_UI_ACTIVE_CHANGED', payload })
+    )
+  );
+}
+
+/**
  * Broadcast agent UPDATE event - notifies frontend of agent state changes
  * Use this for tree_cost_cents, context_size, and other agent-level updates
  *

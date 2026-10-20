@@ -188,6 +188,17 @@ if [[ "${1:-}" == "list" || "${1:-}" == "--list" ]]; then
     exec "$PY" -u benchmarks/run_benchmark.py --list
 fi
 
+# Rose vs raw-CLI parity for the code-bench tasks (plan C8): runs the CLI directly
+# on the same fixture archives and compares pass rates with Rose run records.
+if [[ "${1:-}" == "code-parity" ]]; then
+    shift
+    if [[ "$PY" == venv/* ]]; then
+        PY="$ROOT_DIR/agents/$PY"
+    fi
+    cd "$CALLER_DIR"
+    PYTHONPATH="$ROOT_DIR/agents${PYTHONPATH:+:$PYTHONPATH}" exec "$PY" -u -m benchmarks.code_bench_parity "$@"
+fi
+
 if [[ "${1:-}" == "eval" || "${1:-}" == "eval-suite" ]]; then
     shift
     benchmark_agent_instructions
@@ -233,6 +244,7 @@ Usage: scripts/run-bench <slice-or-task...> [options]
        scripts/run-bench report-format
        scripts/run-bench scorecard <run-dir> [--html OUT] [--text] [--json] | --validate <card.html>
        scripts/run-bench monitor <exact-run-directory>
+       scripts/run-bench code-parity [--run-rose local | --rose-records RUN.json...] [-k K] [--cli claude|codex]
        scripts/run-bench image-build [--no-cache] [--builder native|depot]
        scripts/run-bench image-activate <exact-benchmark-image> [--ref <sha>] [--out-dir <private-directory>]
 

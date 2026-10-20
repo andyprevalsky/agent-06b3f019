@@ -116,6 +116,13 @@ vi.mock('../../main/services/IMessageQueueService', () => ({
   },
 }));
 
+vi.mock('../../main/services/phoneMirroring', () => ({
+  PhoneMirroring: {
+    start: vi.fn(() => true),
+    stop: vi.fn(),
+  },
+}));
+
 // ---------------------------------------------------------------------------
 // Imports — after all mocks. SyncManager + IntegrationCache are the public
 // entrypoints re-exported from main/services/sync/index.ts.
@@ -131,6 +138,7 @@ import { UserDataSync } from '../../main/services/userDataSync';
 import { TelegramSync } from '../../main/services/messaging/platforms/telegram/TelegramSync';
 import { WhatsAppSync } from '../../main/services/messaging/platforms/whatsapp/WhatsAppSync';
 import { IMessageQueueService } from '../../main/services/IMessageQueueService';
+import { PhoneMirroring } from '../../main/services/phoneMirroring';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -251,6 +259,8 @@ describe('sync-manager blackbox', () => {
       // Realtime watchers + queue poller start unconditionally.
       expect(vi.mocked(IMessageSync.startRealTimeSync)).toHaveBeenCalledTimes(1);
       expect(vi.mocked(IMessageQueueService.start)).toHaveBeenCalledTimes(1);
+      // The attached-iPhone presence loop follows the same lifecycle.
+      expect(vi.mocked(PhoneMirroring.start)).toHaveBeenCalledTimes(1);
 
       // Telegram + WhatsApp not connected, so no realtime connect call.
       expect(vi.mocked(TelegramSync.connectWithExistingSession)).not.toHaveBeenCalled();
@@ -511,6 +521,7 @@ describe('sync-manager blackbox', () => {
       expect(vi.mocked(TelegramSync.disconnect)).toHaveBeenCalledTimes(1);
       expect(vi.mocked(WhatsAppSync.disconnect)).toHaveBeenCalledTimes(1);
       expect(vi.mocked(IMessageQueueService.stop)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(PhoneMirroring.stop)).toHaveBeenCalledTimes(1);
       expect(SyncManager.isActive()).toBe(false);
     });
   });
@@ -657,6 +668,8 @@ describe('sync-manager refuses to sync while impersonating', () => {
 
     expect(IMessageSync.startRealTimeSync).not.toHaveBeenCalled();
     expect(IMessageQueueService.start).not.toHaveBeenCalled();
+    // An operator's Mac must not attach its iPhone to the viewed account.
+    expect(PhoneMirroring.start).not.toHaveBeenCalled();
     expect(SyncManager.isActive()).toBe(false);
   });
 
