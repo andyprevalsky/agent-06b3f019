@@ -3121,11 +3121,11 @@ PY
 # used to burn a full fleet launch and then die on a bare "BACKEND_API_KEY is
 # required" line that named neither the file it read nor the provisioning step.
 hub_key_guard="$(sed -n '/^require_in_app_hub_visibility()/,/^}/p' "$ROOT_DIR/scripts/run-bench-fleet")"
-printf '%s' "$hub_key_guard" | grep -q 'looked in:' ||
+grep -q 'looked in:' <<<"$hub_key_guard" ||
   fail "the in-app Hub key failure must name every source it searched"
-printf '%s' "$hub_key_guard" | grep -q 'back-end/.env does not exist' ||
+grep -q 'back-end/.env does not exist' <<<"$hub_key_guard" ||
   fail "the in-app Hub key failure must distinguish a missing .env from an empty key"
-printf '%s' "$hub_key_guard" | grep -q 'prepare-deploy-worktree.sh' ||
+grep -q 'prepare-deploy-worktree.sh' <<<"$hub_key_guard" ||
   fail "the in-app Hub key failure must name the provisioning command that fixes it"
 
 # ── Validated GitHub token for private-repo git-sync (descend I-01 + #1034) ──
