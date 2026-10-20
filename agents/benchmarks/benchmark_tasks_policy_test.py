@@ -383,7 +383,9 @@ def test_raise_5m_brex_long_horizon_runs_simulated_on_tamy_account_snapshot():
         "rose-labs-preseed/data-room-index.md",
         "rose-labs-preseed/safe-terms.md",
     ]
-    assert task.attachment == materials
+    # The catalog lists the materials under "attachment"; the runner uploads
+    # them through attachments (a list joined as one path failed on the cloud).
+    assert task.attachments == materials and task.attachment is None
     test_assets = Path(__file__).resolve().parents[2] / "front-end/public/test-assets"
     assert all((test_assets / name).is_file() for name in materials)
     assert task.tags == ["DEMO", "long-horizon"]

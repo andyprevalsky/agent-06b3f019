@@ -71,11 +71,14 @@ export async function getTestPrompts(): Promise<TestPrompt[]> {
   return (getTasks() as CatalogTaskShape[])
     .filter((task) => (task.runner ?? 'agent') === 'agent')
     .map((task) => {
+      // The catalog may also list several files under `attachment`.
       const attachments = Array.isArray(task.attachments)
         ? (task.attachments as string[])
-        : typeof task.attachment === 'string'
-          ? [task.attachment]
-          : [];
+        : Array.isArray(task.attachment)
+          ? (task.attachment as string[])
+          : typeof task.attachment === 'string'
+            ? [task.attachment]
+            : [];
       const title = typeof task.title === 'string' ? task.title : '';
       const name = typeof task.name === 'string' ? task.name : '';
       return {

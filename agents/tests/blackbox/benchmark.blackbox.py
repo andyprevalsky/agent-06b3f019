@@ -53,6 +53,25 @@ def anthropic_family(*, excluded: bool):
             os.environ[key] = previous
 
 
+def test_catalog_attachments_resolve_to_single_uploadable_paths():
+    """Every catalog attachment must reach the runner as one path per file.
+
+    raise-5m-rose-labs-brex lists its five pre-seed materials under
+    "attachment"; on the cloud the runner joined that list as one path and the
+    task errored after 39 s ("join() argument must be ... not 'list'")."""
+    from benchmarks.benchmark_tasks import all_tasks, get_task_by_name
+    from benchmarks.run_benchmark import TEST_ASSETS_DIR
+
+    for task in all_tasks():
+        assert task.attachment is None or isinstance(task.attachment, str), task.name
+        files = task.attachments or ([task.attachment] if task.attachment else [])
+        for name in files:
+            assert isinstance(name, str), (task.name, name)
+            assert os.path.exists(os.path.join(TEST_ASSETS_DIR, name)), (task.name, name)
+    fundraiser = get_task_by_name("raise-5m-rose-labs-brex")
+    assert len(fundraiser.attachments) == 5 and fundraiser.attachment is None
+
+
 def test_local_benchmark_rejects_disabled_trace_before_allocation():
     """A semantic capture override cannot launch a benchmark without its archive."""
     from benchmarks import local, local_worlds
@@ -25216,6 +25235,10 @@ async def run_all_tests():
     r.record(
         "code_agent_sdk_evidence_chips_count_as_grounded_steps",
         test_code_agent_sdk_evidence_chips_count_as_grounded_steps,
+    )
+    r.record(
+        "catalog_attachments_resolve_to_single_uploadable_paths",
+        test_catalog_attachments_resolve_to_single_uploadable_paths,
     )
 
     return r.all_passed
