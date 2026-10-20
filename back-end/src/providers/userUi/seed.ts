@@ -11,7 +11,7 @@ import type { UserUiBundleFile } from './manifest';
 export const USER_UI_DIR_NAME = 'rose_user_ui';
 export const USER_UI_CLI_NAME = 'rose-ui';
 /** Bumped whenever the README or CLI contract changes. */
-export const USER_UI_CLI_VERSION = '1';
+export const USER_UI_CLI_VERSION = '2';
 
 export const USER_UI_README = `# rose_user_ui — your user's Rose app
 
@@ -92,6 +92,15 @@ Inline views: an agent shows one in the chat with
 send_message_to_user(message, inline_view={ view: "<view-name>", props: {...} }).
 The message pins the published version, so later publishes never change old
 messages. Keep props small JSON.
+
+## Something for the user to see or play
+
+Build a game, app, chart or other visual the user asked to see as an inline
+view: write inline/<view-name>/index.html (scripts and data in the bundle; the
+CSP blocks external scripts and fetches), add it under "inline" in rose-ui.json
+with a one-line summary, run \`rose-ui publish\`, then name the view in your
+final response. If you cannot call send_message_to_user yourself, the agent
+that spawned you shows it.
 
 ## Tools for the user's agent
 

@@ -177,6 +177,7 @@ Open follow-ups with owners: C10 crash-between-create-and-start stuck agent (L-T
 - Harness: user tools in root toolset (W4); `display` tool with `placement` (A5); code-agent graph tools (C6); `code_session_id` tool param (C1); code-agent Rose tools + approval blocking (C12); removing code-agent Temporal/sandbox timeouts (C11); code-agent `target` param (C14); root routes coding work to code agents (UI ledger 41).
 - Prompt text: code-agent "never rely on the raw terminal" rule (C12).
 - Prompt text: code-agent template commit/merge guidance (C3); tool descriptions added by each lane.
+- Prompt text (L-ROUTING, UI ledger 41 + flows 2/3): spawn_agent `code` type description and planner `code:` line (coding and Rose-app changes go to code agents; viewable work ships as an inline view shown with `inline_view`); `INLINE_VIEW_DESCRIPTION`; code-agent "Rose app UI" instructions (`codeAgentPrompt.ts`); rose_user_ui README "Something for the user to see or play".
 - Schemas: `rose-ui.json` and `tool.json` validation; any new Zod schemas.
 - Env and prod: `USERCONTENT_BASE_URL` (separate origin), `USER_UI_TOKEN_SECRET`, E2B template rebuild; C10 `SLACK_AUTO_RCA_OWNER_USER_ID` (required — with `AUTO_RCA_ENABLED=1` already on Render every error card 503s until set), `SLACK_AUTO_RCA_FEEDBACK_USER_IDS`, optional `SLACK_AUTO_RCA_REPO_URL`/`SLACK_AUTO_RCA_SIGNATURE_WINDOW_MINUTES`; migration `20261020170000_slack_auto_rca_incidents`.
 - Prompt text: C10 RCA goal/occurrence/feedback text `back-end/src/domains/slack-auto-rca/rcaGoalService.ts` (78 lines).
