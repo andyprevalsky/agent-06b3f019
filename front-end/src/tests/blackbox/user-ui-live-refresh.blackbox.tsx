@@ -4,14 +4,18 @@
  * STATE MACHINE (under test):
  *   [ACTIVE v1] --open agent / its sub-agent: new message or status change-->
  *   [REFRESH PENDING] (one GET /api/user-ui/active per 750ms window, deduped)
- *   [REFRESH PENDING] --newer versionId--> [ACTIVE v2] (theme + background
- *   swap in place, no page reload)
+ *   [REFRESH PENDING] --newer versionId--> [ACTIVE v2] (applied in place, no
+ *   page reload, no remount)
  *   [REFRESH PENDING] --unmount--> cancelled (no request)
  *   `user_ui.published` event / refreshActiveUserUi() --> [REFRESH PENDING]
  *
- * Regression for the recorded run where a code agent published theme.json
- * with a background mid-session and nothing changed until a reload
+ * Regression for the recorded run where a code agent published mid-session and
+ * nothing changed until a reload
  * (.context/rose-real-recordings/run3/logs/flow2-evidence.txt).
+ *
+ * Whole-app theme/background/slots are removed (UI ledger row 89): the probe
+ * reads the applied versionId, and a refreshed manifest that still names a
+ * theme or slots never fetches theme.json or renders a background.
  *
  * Realtime transport is the chat's existing per-agent channel (and the
  * sub-agent tree's existing bus): the tests capture those handlers and assert
@@ -24,12 +28,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentProvider, useAgentContext } from '@/features/agent-context';
 import {
   USER_UI_PUBLISHED_EVENT,
-  UserUiAppBackdrop,
-  UserUiBackgroundLayer,
   UserUiProvider,
   handleUserUiPublishedEvent,
   refreshActiveUserUi,
   resetUserUiVersionCache,
+  useUserUi,
   type UserUiManifest,
 } from '@/features/user-ui';
 import type { AgentDetail } from '@/lib/api';
@@ -59,7 +62,16 @@ const REFRESH_WINDOW_MS = 750;
 type AgentHandlers = Parameters<typeof RealtimeMod.subscribeToAgent>[1];
 type BusHandlers = Parameters<typeof RealtimeMod.subscribeToBus>[1];
 
-const MANIFEST: UserUiManifest = { version: 1, theme: 'root/theme.json' };
+const MANIFEST: UserUiManifest = {
+  version: 1,
+  inline: { chart: { entry: 'inline/chart/index.html', summary: 'Chart' } },
+};
+/** A pre-removal publish: still names a theme and slots, which must be ignored. */
+const LEGACY_MANIFEST = {
+  ...MANIFEST,
+  theme: 'root/theme.json',
+  slots: { background: { entry: 'root/slots/background/index.html' } },
+} as UserUiManifest;
 
 function makeAgent(agentId: string): AgentDetail {
   return {
@@ -109,6 +121,12 @@ function mockSession() {
 interface PublishedState {
   versionId: 'v1' | 'v2';
   requests: number;
+  /** theme.json fetches (must stay 0: whole-app themes are removed). */
+  themeRequests: number;
+}
+
+function newState(versionId: PublishedState['versionId']): PublishedState {
+  return { versionId, requests: 0, themeRequests: 0 };
 }
 
 function servePublishedUi(state: PublishedState) {
@@ -117,20 +135,18 @@ function servePublishedUi(state: PublishedState) {
       state.requests += 1;
       return HttpResponse.json({
         versionId: state.versionId,
-        manifest: MANIFEST,
+        // v2 is a legacy publish that still carries a theme + background slot.
+        manifest: state.versionId === 'v1' ? MANIFEST : LEGACY_MANIFEST,
         baseUrl: state.versionId === 'v1' ? V1_BASE : V2_BASE,
       });
     }),
-    // v1: no background (the recorded "bg before []"); v2: the mountain photo.
-    http.get(`${V1_BASE}root/theme.json`, () =>
-      HttpResponse.json({ tokens: { '--rose-accent': 'tomato' } }),
-    ),
-    http.get(`${V2_BASE}root/theme.json`, () =>
-      HttpResponse.json({
+    http.get(`${USERCONTENT}/:version/root/theme.json`, () => {
+      state.themeRequests += 1;
+      return HttpResponse.json({
         tokens: { '--rose-accent': 'rebeccapurple' },
         background: { image: 'root/assets/matterhorn.jpg', fadeAfterFirstMessage: 0.2 },
-      }),
-    ),
+      });
+    }),
     // `/agents/tree` would otherwise match `/agents/:agentId` below.
     http.get(`${API_BASE}/agents/tree`, () => HttpResponse.json({ agents: [] })),
     http.get(`${API_BASE}/agents/:agentId`, ({ params }) =>
@@ -150,17 +166,17 @@ function servePublishedUi(state: PublishedState) {
   );
 }
 
-/** Mirrors TerminalBackdrop: background behind, app backdrop keyed to USER messages. */
-export function OpenAgentBackdrop() {
-  const { messages, agent } = useAgentContext();
-  const hasUserMessage = messages.some((message) => message.role === 'USER');
+/** The open agent plus the active version the provider applied (stock = none). */
+function OpenAgentProbe() {
+  const { agent } = useAgentContext();
+  const { active } = useUserUi();
   return (
     <>
       <output data-testid="open-agent">{agent?.agent_id ?? 'none'}</output>
-      <UserUiBackgroundLayer />
-      <UserUiAppBackdrop hasUserMessage={hasUserMessage} appBackgroundClassName="bg-background">
-        <svg data-testid="pattern" />
-      </UserUiAppBackdrop>
+      <output data-testid="active-version" data-base-url={active?.baseUrl ?? ''}>
+        {active?.versionId ?? 'stock'}
+      </output>
+      <svg data-testid="pattern" />
     </>
   );
 }
@@ -169,11 +185,26 @@ function renderOpenAgent(roseDesktop: boolean) {
   return renderWithProviders(
     <AgentProvider user={{ id: 'test-user' }} isAuthenticated realtimeReady onLoadAgents={vi.fn()}>
       <UserUiProvider userId="test-user">
-        <OpenAgentBackdrop />
+        <OpenAgentProbe />
       </UserUiProvider>
     </AgentProvider>,
     { roseDesktop },
   );
+}
+
+function expectActiveVersion(versionId: string, baseUrl: string) {
+  const probe = screen.getByTestId('active-version');
+  expect(probe).toHaveTextContent(versionId);
+  expect(probe).toHaveAttribute('data-base-url', baseUrl);
+}
+
+/** No whole-app setting reached the page: no tokens, no background, no slot frame. */
+function expectNoWholeAppSettings(state: PublishedState) {
+  expect(state.themeRequests).toBe(0);
+  expect(document.documentElement.style.getPropertyValue('--rose-accent')).toBe('');
+  expect(document.querySelector('[data-testid^="user-ui-background"]')).toBeNull();
+  expect(document.querySelector('[data-user-ui-slot]')).toBeNull();
+  expect(document.querySelector('iframe')).toBeNull();
 }
 
 function captureAgentHandlers(): Map<string, AgentHandlers> {
@@ -198,11 +229,8 @@ function insertMessage(handlers: AgentHandlers | undefined, id: string) {
 async function openAgentReady(state: PublishedState, handlers: Map<string, AgentHandlers>) {
   await waitFor(() => expect(screen.getByTestId('open-agent')).toHaveTextContent('agent-a'));
   await waitFor(() => expect(handlers.get('agent-a')).toBeDefined());
-  await waitFor(() =>
-    expect(document.documentElement.style.getPropertyValue('--rose-accent')).toBe('tomato'),
-  );
+  await waitFor(() => expect(screen.getByTestId('active-version')).toHaveTextContent('v1'));
   expect(state.requests).toBe(1);
-  expect(screen.queryByTestId('user-ui-background-image')).toBeNull();
 }
 
 function sleep(ms: number) {
@@ -229,14 +257,14 @@ afterEach(() => {
 
 describe('user UI live refresh (Rose Desktop)', () => {
   it('swaps in a version published mid-session when the open agent gets a message, without a reload', async () => {
-    const state: PublishedState = { versionId: 'v1', requests: 0 };
+    const state = newState('v1');
     servePublishedUi(state);
     const handlers = captureAgentHandlers();
     renderOpenAgent(true);
     await openAgentReady(state, handlers);
     const pattern = screen.getByTestId('pattern');
 
-    // The code agent publishes v2 (theme.json with a background)...
+    // The code agent publishes v2...
     state.versionId = 'v2';
     // ...and its progress arrives on the chat's existing agent:<id> channel.
     act(() => {
@@ -245,20 +273,9 @@ describe('user UI live refresh (Rose Desktop)', () => {
       handlers.get('agent-a')?.onUpdate?.({ status: 'COMPLETED' });
     });
 
-    const image = await screen.findByTestId('user-ui-background-image');
-    expect(image).toHaveAttribute('src', `${V2_BASE}root/assets/matterhorn.jpg`);
-    await waitFor(() =>
-      expect(document.documentElement.style.getPropertyValue('--rose-accent')).toBe(
-        'rebeccapurple',
-      ),
-    );
-    // In place: the app subtree was never remounted and the agent already has
-    // a USER message, so the backdrop fades over the new background.
+    await waitFor(() => expectActiveVersion('v2', V2_BASE));
+    // In place: the app subtree was never remounted.
     expect(screen.getByTestId('pattern')).toBe(pattern);
-    expect(screen.getByTestId('app-background-layer')).toHaveAttribute(
-      'data-backdrop-state',
-      'faded',
-    );
     // A burst of 7 realtime events → exactly one refetch in that window.
     expect(state.requests).toBe(2);
     await sleep(REFRESH_WINDOW_MS + 250);
@@ -268,59 +285,23 @@ describe('user UI live refresh (Rose Desktop)', () => {
     expect(RealtimeMod.subscribeToBus).not.toHaveBeenCalled();
   });
 
-  it('keeps the previous background on screen until the new theme has loaded', async () => {
-    const state: PublishedState = { versionId: 'v2', requests: 0 };
-    let releaseV3Theme!: () => void;
-    const v3ThemeGate = new Promise<void>((resolve) => {
-      releaseV3Theme = resolve;
-    });
-    const V3_BASE = `${USERCONTENT}/v3/`;
-    let serveV3 = false;
-    server.use(
-      http.get(`${API_BASE}/user-ui/active`, () => {
-        state.requests += 1;
-        return HttpResponse.json(
-          serveV3
-            ? { versionId: 'v3', manifest: MANIFEST, baseUrl: V3_BASE }
-            : { versionId: 'v2', manifest: MANIFEST, baseUrl: V2_BASE },
-        );
-      }),
-      http.get(`${V2_BASE}root/theme.json`, () =>
-        HttpResponse.json({ background: { image: 'root/assets/matterhorn.jpg' } }),
-      ),
-      http.get(`${V3_BASE}root/theme.json`, async () => {
-        await v3ThemeGate;
-        return HttpResponse.json({ background: { image: 'root/assets/eiger.jpg' } });
-      }),
-    );
-    servePublishedUiAgentOnly();
+  it('ignores the removed theme/background/slots of a refreshed legacy manifest (no theme.json, no layer)', async () => {
+    const state = newState('v1');
+    servePublishedUi(state);
     const handlers = captureAgentHandlers();
     renderOpenAgent(true);
-    const image = await screen.findByTestId('user-ui-background-image');
-    expect(image).toHaveAttribute('src', `${V2_BASE}root/assets/matterhorn.jpg`);
-    await waitFor(() => expect(handlers.get('agent-a')).toBeDefined());
+    await openAgentReady(state, handlers);
 
-    serveV3 = true;
-    act(() => insertMessage(handlers.get('agent-a'), 'publish-v3'));
-    await waitFor(() => expect(state.requests).toBe(2));
-    await sleep(50);
-    // While v3's theme.json is in flight the v2 image stays (no flash to stock).
-    expect(screen.getByTestId('user-ui-background-image')).toBe(image);
-    expect(image).toHaveAttribute('src', `${V2_BASE}root/assets/matterhorn.jpg`);
-
-    releaseV3Theme();
-    await waitFor(() =>
-      expect(screen.getByTestId('user-ui-background-image')).toHaveAttribute(
-        'src',
-        `${V3_BASE}root/assets/eiger.jpg`,
-      ),
-    );
-    // Swapped in place: same <img> element, new src.
-    expect(screen.getByTestId('user-ui-background-image')).toBe(image);
+    // v2 still names root/theme.json (with a background) and a background slot.
+    state.versionId = 'v2';
+    act(() => handlers.get('agent-a')?.onUserUiActiveChanged?.({ versionId: 'v2', agentId: 'c' }));
+    await waitFor(() => expectActiveVersion('v2', V2_BASE));
+    await sleep(100);
+    expectNoWholeAppSettings(state);
   });
 
   it('refreshes when a sub-agent shown in the open view changes status on its existing bus', async () => {
-    const state: PublishedState = { versionId: 'v1', requests: 0 };
+    const state = newState('v1');
     servePublishedUi(state);
     const handlers = captureAgentHandlers();
     const busHandlers = new Map<string, BusHandlers>();
@@ -347,8 +328,7 @@ describe('user UI live refresh (Rose Desktop)', () => {
       }),
     );
 
-    const image = await screen.findByTestId('user-ui-background-image');
-    expect(image).toHaveAttribute('src', `${V2_BASE}root/assets/matterhorn.jpg`);
+    await waitFor(() => expectActiveVersion('v2', V2_BASE));
     expect(state.requests).toBe(2);
     // Only the tree's own bus exists — the refresh opened nothing new.
     expect(RealtimeMod.subscribeToBus).toHaveBeenCalledTimes(1);
@@ -356,7 +336,7 @@ describe('user UI live refresh (Rose Desktop)', () => {
   });
 
   it('exposes refreshActiveUserUi() and a typed user_ui.published hook point', async () => {
-    const state: PublishedState = { versionId: 'v1', requests: 0 };
+    const state = newState('v1');
     servePublishedUi(state);
     const handlers = captureAgentHandlers();
     renderOpenAgent(true);
@@ -369,10 +349,7 @@ describe('user UI live refresh (Rose Desktop)', () => {
 
     state.versionId = 'v2';
     act(() => handleUserUiPublishedEvent({ type: USER_UI_PUBLISHED_EVENT, versionId: 'v2' }));
-    expect(await screen.findByTestId('user-ui-background-image')).toHaveAttribute(
-      'src',
-      `${V2_BASE}root/assets/matterhorn.jpg`,
-    );
+    await waitFor(() => expectActiveVersion('v2', V2_BASE));
     expect(state.requests).toBe(2);
 
     act(() => {
@@ -385,7 +362,7 @@ describe('user UI live refresh (Rose Desktop)', () => {
   });
 
   it('cancels a pending refresh on unmount (no request after the view closes)', async () => {
-    const state: PublishedState = { versionId: 'v1', requests: 0 };
+    const state = newState('v1');
     servePublishedUi(state);
     const handlers = captureAgentHandlers();
     const { unmount } = renderOpenAgent(true);
@@ -401,8 +378,8 @@ describe('user UI live refresh (Rose Desktop)', () => {
     expect(state.requests).toBe(1);
   });
 
-  it('USER_UI_ACTIVE_CHANGED on the root channel swaps the theme with one /active fetch; duplicates fire none', async () => {
-    const state: PublishedState = { versionId: 'v1', requests: 0 };
+  it('USER_UI_ACTIVE_CHANGED on the root channel applies the new version with one /active fetch; duplicates fire none', async () => {
+    const state = newState('v1');
     servePublishedUi(state);
     const handlers = captureAgentHandlers();
     renderOpenAgent(true);
@@ -416,15 +393,7 @@ describe('user UI live refresh (Rose Desktop)', () => {
       handlers.get('agent-a')?.onUserUiActiveChanged?.({ versionId: 'v2', agentId: 'code-1' });
       handlers.get('agent-a')?.onUserUiActiveChanged?.({ versionId: 'v2', agentId: 'code-1' });
     });
-    expect(await screen.findByTestId('user-ui-background-image')).toHaveAttribute(
-      'src',
-      `${V2_BASE}root/assets/matterhorn.jpg`,
-    );
-    await waitFor(() =>
-      expect(document.documentElement.style.getPropertyValue('--rose-accent')).toBe(
-        'rebeccapurple',
-      ),
-    );
+    await waitFor(() => expectActiveVersion('v2', V2_BASE));
     expect(screen.getByTestId('pattern')).toBe(pattern);
     expect(state.requests).toBe(2);
 
@@ -439,7 +408,7 @@ describe('user UI live refresh (Rose Desktop)', () => {
   });
 
   it('flag off: USER_UI_ACTIVE_CHANGED causes no /active fetch', async () => {
-    const state: PublishedState = { versionId: 'v1', requests: 0 };
+    const state = newState('v1');
     servePublishedUi(state);
     const handlers = captureAgentHandlers();
     renderOpenAgent(false);
@@ -450,10 +419,11 @@ describe('user UI live refresh (Rose Desktop)', () => {
     });
     await sleep(REFRESH_WINDOW_MS + 250);
     expect(state.requests).toBe(1);
+    expectActiveVersion('v1', V1_BASE);
   });
 
   it('flag off: realtime messages for the open agent cause no extra /active fetches', async () => {
-    const state: PublishedState = { versionId: 'v1', requests: 0 };
+    const state = newState('v1');
     servePublishedUi(state);
     const handlers = captureAgentHandlers();
     renderOpenAgent(false);
@@ -467,28 +437,7 @@ describe('user UI live refresh (Rose Desktop)', () => {
     });
     await sleep(REFRESH_WINDOW_MS + 400);
     expect(state.requests).toBe(1);
-    expect(screen.queryByTestId('user-ui-background-image')).toBeNull();
+    expectActiveVersion('v1', V1_BASE);
+    expectNoWholeAppSettings(state);
   });
 });
-
-/** Agent detail only (the test owns its /active + theme handlers). */
-function servePublishedUiAgentOnly() {
-  server.use(
-    // `/agents/tree` would otherwise match `/agents/:agentId` below.
-    http.get(`${API_BASE}/agents/tree`, () => HttpResponse.json({ agents: [] })),
-    http.get(`${API_BASE}/agents/:agentId`, ({ params }) =>
-      HttpResponse.json({
-        agent: makeAgent(String(params.agentId)),
-        messages: [
-          {
-            message_id: 'user-goal',
-            timestamp: '2026-01-01T00:00:00.000Z',
-            text: 'Change the background',
-            role: 'USER',
-          },
-        ],
-        pagination: { has_more: false, oldest_timestamp: null },
-      }),
-    ),
-  );
-}
