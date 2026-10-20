@@ -642,11 +642,12 @@ def test_parity_concurrent_raw_leg_keeps_run_order(tmp_path, monkeypatch):
 def test_parity_publishes_verified_rose_links(tmp_path, monkeypatch):
     task = "code-bench-bugfix-invoice-rounding"
     record = tmp_path / "rose.json"
-    record.write_text(json.dumps({"tasks": [{"name": task, "passed": True, "agent_id": "a1"}]}))
+    infra_row = {"name": task, "passed": False, "agent_id": "dead", "failure_reason": "Cloud cleanup failed: x"}
+    record.write_text(json.dumps({"tasks": [infra_row, {"name": task, "passed": True, "agent_id": "a1"}]}))
     seen: list[list[str]] = []
 
     def fake_run(argv, **kwargs):
-        seen.append(argv)
+        seen.append(argv)  # INFRA rows (dead stack) are not published
         out = "FE link: https://www.roselabs.ai/?agent-id=a1#benchmark-share=x — verified in fresh browser (22 msgs)\n"
         return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
 

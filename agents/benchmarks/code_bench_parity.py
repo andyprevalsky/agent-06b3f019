@@ -691,7 +691,7 @@ def publish_rose_evidence(records: list[Path], tasks: list[str]) -> dict[str, st
     for record in records:
         for row in json.loads(Path(record).read_text()).get("tasks") or []:
             agent_id = str(row.get("agent_id") or "")
-            if row.get("name") not in tasks or not agent_id or agent_id in links:
+            if row.get("name") not in tasks or not agent_id or agent_id in links or rose_row_is_infra(row):
                 continue
             proc = subprocess.run(
                 [

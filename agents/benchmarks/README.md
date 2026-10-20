@@ -86,6 +86,20 @@ the template variables (`CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY`,
 `CODEX_AUTH_JSON`/`OPENAI_API_KEY`) or the CLI's managed login. Each attempt
 records loaded host hooks/plugins/MCP servers; on boxes.dev devboxes the managed
 settings add a SessionStart hook and platform skills to the raw leg.
+Without a Claude credential the Rose sandbox routes Claude Code through
+OpenRouter's Anthropic gateway; pass `--openrouter-gateway` so the raw leg uses
+the same transport and served model (`--lease-claude-token` leases from the
+backend pool instead).
+
+INFRA is never a task verdict. A raw attempt whose CLI reports an API error
+status (for example 400 "Credit balance is too low") is rerun with
+`--raw-results <parity.json> --rerun-infra`. Rose rows that were interrupted or
+failed owned cleanup after the local backend died are excluded and rerun
+(`--rose-retry-infra`, default 2). On a shared 15 GB devbox the memory watchdog
+TERMs the largest workload process, often the local stack's ~2 GB backend; run
+the Rose leg in a bounded scope outside the workload slice, for example
+`sudo systemd-run --scope -p MemoryHigh=4G --uid=$USER --gid=$USER -- <script>`
+with HOME and PATH set in the script.
 
 ## Quick Start
 
