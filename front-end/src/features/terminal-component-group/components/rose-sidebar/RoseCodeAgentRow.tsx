@@ -9,7 +9,7 @@
  * state. Agent (robot) rows keep their own status glyphs.
  *   [IDLE]     muted text (hover darkens)
  *   [SELECTED] its code-agent conversation is open in the chat column:
- *              foreground color + semibold (aria-current="page"), no fill
+ *              foreground color + semibold (aria-current), no fill
  * EXPANDED: indented one level under its parent row, title faded in.
  * COLLAPSED: same 64px icon column as agent rows, part of the parent's group.
  *
@@ -45,7 +45,7 @@ export default function RoseCodeAgentRow({
       type="button"
       onClick={onOpen}
       aria-label={name}
-      aria-current={isSelected ? 'page' : undefined}
+      aria-current={isSelected ? 'true' : undefined}
       data-testid={`rose-code-agent-row-${codeAgent.code_agent_id}`}
       data-provider={provider}
       data-selected={isSelected}
