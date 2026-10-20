@@ -197,10 +197,7 @@ async function plaidItemsAreAccounts(users: Users): Promise<void> {
 
 async function todoHooksRefuse(users: Users): Promise<void> {
   const { a } = users();
-  for (const [provider, owner] of [
-    ['atlas_passwords', 'L-INT-PASSWORDS'],
-    ['whatsapp', 'L-INT-WHATSAPP'],
-  ]) {
+  for (const [provider, owner] of [['whatsapp', 'L-INT-WHATSAPP']]) {
     await postProgress(a.token, provider, 'acct', { runId: 'r', state: 'synced' });
     const res = await call(`/api/integrations/${provider}/accounts/acct`, {
       method: 'DELETE',

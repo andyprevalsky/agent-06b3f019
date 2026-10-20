@@ -23,6 +23,8 @@
  *   - container providers: Gmail addresses and Plaid items are accounts; needs_reconnect wins
  *   - providers without account-scoped cleanup answer 501 and keep their data
  *   - iMessage: one account per Mac device id; delete removes exactly that Mac's messages
+ *   - passwords/passkeys (I7): one row per source+profile, each a deletable account
+ *     with batch progress; credential readers prefer one login deterministically
  *   - validation 400s, per-user account cap, internal API-key writer path, auth 401
  *   - Plaid per-item sync progress (I5): indeterminate total while syncing, final counts,
  *     1 s coalescing, independent items, ITEM_LOGIN_REQUIRED, webhook re-sync reuses the row
@@ -41,6 +43,7 @@ import { reportIntegrationProgress } from '../../domains/integrations/service.pr
 import { MAX_PROGRESS_ACCOUNTS_PER_USER } from '../../domains/integrations/syncAccountsContract';
 import { cases as advancedCases } from './integration-accounts.cases';
 import { imessageCases } from './integration-accounts.imessage.cases';
+import { passwordCases } from './integration-accounts.passwords.cases';
 import { cases as plaidProgressCases } from './integration-accounts.plaid.cases';
 import { telegramCases } from './integration-accounts.telegram.cases';
 import { gmailSyncCases } from './integration-accounts.gmail-sync.cases';
@@ -381,6 +384,7 @@ async function main(): Promise<void> {
     ...coreCases,
     ...advancedCases(users),
     ...plaidProgressCases(),
+    ...passwordCases(),
     ...telegramCases(),
     ...gmailSyncCases(),
     ...imessageCases(users),

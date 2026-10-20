@@ -346,6 +346,7 @@ router.post(
       message:
         result.passwordCount > 0 ? 'Passwords uploaded successfully' : 'No passwords to upload',
       passwordCount: result.passwordCount,
+      accounts: result.accounts,
     });
   })
 );
