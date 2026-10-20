@@ -233,6 +233,27 @@ export async function readDisplayBundleFile(
   return content ? { content, contentType: displayContentType(path) } : null;
 }
 
+/**
+ * The files a stored bundle was built from (its generated viewer excluded), so
+ * displaying it again by name rebuilds the identical bundle (same hash).
+ */
+export async function readDisplayBundleSources(
+  ownerId: string,
+  hash: string
+): Promise<{ kind: DisplayBundleKind; source: string; files: Map<string, Buffer> } | null> {
+  if (!/^[0-9a-f]{64}$/.test(hash)) return null;
+  const manifest = await readManifest(ownerId, hash);
+  if (!manifest) return null;
+  const files = new Map<string, Buffer>();
+  for (const [path, file] of Object.entries(manifest.files)) {
+    if (manifest.kind !== 'bundle' && path === DISPLAY_VIEWER_ENTRY) continue;
+    const bytes = await getDisplayObject(displayBlobKey(ownerId, file.sha256));
+    if (!bytes) return null;
+    files.set(path, bytes);
+  }
+  return { kind: manifest.kind, source: manifest.source, files };
+}
+
 // ── relative references ──
 
 const SCANNABLE = new Set(['html', 'htm', 'css', 'js', 'mjs', 'gltf', 'obj', 'mtl']);

@@ -31,7 +31,8 @@ import {
   DISPLAY_MODEL_EXTENSIONS,
   buildDisplayBundle,
   collectDisplayBundleFiles,
-  displayBundleKey,
+  displayBlobKey,
+  readDisplayBundleSources,
   storeDisplayBundle,
   type BuiltDisplayBundle,
   type DisplayBundleKind,
@@ -128,11 +129,11 @@ async function resolveFile(
   agent: repo.ToolAgent,
   file: string,
   lookup: ReturnType<typeof repo.treeFilePointerResolver>
-): Promise<{ bytes: Buffer; mime: string }> {
+): Promise<{ bytes: Buffer; mime: string; pointer: Record<string, unknown> | null }> {
   // An exact storage path is accepted only inside the owner's prefix.
   if (file.startsWith(`${agent.userId}/`) && !file.includes('..')) {
     const bytes = await getDisplayObject(file);
-    if (bytes) return { bytes, mime: '' };
+    if (bytes) return { bytes, mime: '', pointer: null };
   }
   const pointer = await lookup(file);
   if (pointer === null || typeof pointer.storage_path !== 'string') {
@@ -140,7 +141,14 @@ async function resolveFile(
   }
   const found = await pointerBytes(agent, pointer);
   if (!found) throw new DisplayFetchError(`${file.slice(0, 200)} is no longer in storage`);
-  return found;
+  return { ...found, pointer };
+}
+
+/** A tree pointer posted by an earlier display of a bundle: its exact files. */
+async function earlierBundle(agent: repo.ToolAgent, pointer: Record<string, unknown> | null) {
+  const bundle = pointer?.bundle as { hash?: unknown } | undefined;
+  if (typeof bundle?.hash !== 'string') return null;
+  return readDisplayBundleSources(agent.userId, bundle.hash);
 }
 
 /**
@@ -200,7 +208,9 @@ async function resolveItem(
     };
   }
   const file = item.file ?? '';
-  const { bytes, mime } = await resolveFile(agent, file, lookup);
+  const { bytes, mime, pointer } = await resolveFile(agent, file, lookup);
+  const earlier = await earlierBundle(agent, pointer);
+  if (earlier) return { index, type: 'bundle', entry: earlier.source, files: earlier.files };
   const filename = basename(item.filename ?? file);
   if (isBundleRoot(filename)) {
     const files = await collectDisplayBundleFiles(
@@ -295,7 +305,8 @@ function prepareBundle(
     sizeBytes: built.totalBytes,
     filePointer: {
       ...pointerBase(agent, built.hash),
-      storage_path: displayBundleKey(agent.userId, built.hash),
+      // The displayed file itself (a name lookup in the tree finds real bytes).
+      storage_path: displayBlobKey(agent.userId, built.manifest.files[source].sha256),
       original_filename: source.split('/').pop() ?? source,
       mime_type: sourceType,
       size_bytes: built.totalBytes,

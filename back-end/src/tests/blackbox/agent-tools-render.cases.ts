@@ -4,11 +4,16 @@
  * launcher: SwiftShader software GL) loads the served display URLs inside an
  * embedder page that frames them exactly like the FE contract:
  *
- *   http://localhost:4999/host  (a Rose dev origin, fulfilled by a route)
+ *   http://127.0.0.1:<port>/host  (a Rose dev origin; local embedder server)
  *     └─ <iframe sandbox="allow-scripts allow-pointer-lock allow-popups" src=usercontent URL>
  *          three.js CDN page / .glb model viewer ─► WebGL pixels (PNG probe)
  *          probes: origin "null"; cookie, localStorage, parent.document refused
- *   http://rose-evil.test/host ─► frame-ancestors refuses the same URL
+ *   http://rose-evil.test:<port>/host (same server, host-resolver mapped)
+ *     └─ frame-ancestors refuses the same URL
+ *
+ * The embedder is a real loopback server, not a route fulfilment: Chromium's
+ * Local Network Access checks block a "public" (fulfilled) page from framing
+ * a loopback backend.
  *   top-level open of the URL ─► still an opaque origin (CSP sandbox)
  *
  * CDN modules (jsDelivr three@0.160.1) are fulfilled from the installed `three`
@@ -16,6 +21,8 @@
  * URL. DISPLAY_RENDER_LIVE_CDN=1 loads the real CDN instead.
  */
 import { existsSync, readFileSync } from 'fs';
+import { createServer } from 'http';
+import type { AddressInfo } from 'net';
 import { createRequire } from 'module';
 import { dirname, join, resolve, sep } from 'path';
 import { userUiAssetsDir } from '../../providers/userUi/seed';
@@ -41,7 +48,7 @@ interface Png {
 }
 interface Frame {
   url(): string;
-  evaluate<T>(fn: () => T): Promise<T>;
+  evaluate<T>(fn: (() => T) | string): Promise<T>;
   waitForFunction(fn: () => unknown, arg?: unknown, opts?: { timeout: number }): Promise<unknown>;
 }
 interface Page {
@@ -67,14 +74,13 @@ interface Browser {
 
 const localRequire = createRequire(__filename);
 const cli = localRequire(join(userUiAssetsDir(), 'bin', 'rose-ui.cjs')) as {
-  launchBrowser(opts?: { noWebgpu?: boolean }): Promise<Browser>;
+  launchBrowser(opts?: { noWebgpu?: boolean; args?: string[] }): Promise<Browser>;
   decodePng(buf: Buffer): Png;
 };
 const THREE_DIR = resolve(dirname(localRequire.resolve('three')), '..');
 const THREE_CDN = /^https:\/\/cdn\.jsdelivr\.net\/npm\/three@0\.160\.1\//;
 const SANDBOX = 'allow-scripts allow-pointer-lock allow-popups';
-const ROSE_HOST = 'http://localhost:4999/host';
-const FOREIGN_HOST = 'http://rose-evil.test/host';
+const FOREIGN_HOSTNAME = 'rose-evil.test';
 
 const hostHtml = (src: string) =>
   `<!doctype html><html><body style="margin:0;background:#fff">` +
@@ -87,14 +93,30 @@ const local = (url: string) => {
   return `${BASE_URL}${parsed.pathname}`;
 };
 
-async function withBrowser(fn: (context: Context, page: Page, logs: string[]) => Promise<void>) {
-  const browser = await cli.launchBrowser({ noWebgpu: true });
+interface Hosts {
+  rose: string;
+  foreign: string;
+}
+
+async function withBrowser(
+  fn: (page: Page, logs: string[], hosts: Hosts) => Promise<void>
+): Promise<void> {
+  const server = createServer((req, res) => {
+    const src = new URL(req.url ?? '/', 'http://x').searchParams.get('src') ?? '';
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(hostHtml(src));
+  });
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  const port = (server.address() as AddressInfo).port;
+  const hosts = {
+    rose: `http://127.0.0.1:${port}/host`,
+    foreign: `http://${FOREIGN_HOSTNAME}:${port}/host`,
+  };
+  const browser = await cli.launchBrowser({
+    noWebgpu: true,
+    args: [`--host-resolver-rules=MAP ${FOREIGN_HOSTNAME} 127.0.0.1`],
+  });
   try {
     const context = await browser.newContext({ viewport: { width: 800, height: 500 } });
-    await context.route(/^http:\/\/(localhost:4999|rose-evil\.test)\/host/, (route) => {
-      const src = new URL(route.request().url()).searchParams.get('src') ?? '';
-      return route.fulfill({ status: 200, body: hostHtml(src), headers: { 'content-type': 'text/html' } });
-    });
     if (process.env.DISPLAY_RENDER_LIVE_CDN !== '1') {
       await context.route(THREE_CDN, (route) => {
         const rel = new URL(route.request().url()).pathname.replace(/^\/npm\/three@0\.160\.1\//, '');
@@ -115,13 +137,14 @@ async function withBrowser(fn: (context: Context, page: Page, logs: string[]) =>
     const page = await context.newPage();
     const logs: string[] = [];
     page.on('console', (msg) => logs.push(msg.text()));
-    await fn(context, page, logs);
+    await fn(page, logs, hosts);
   } finally {
     await browser.close();
+    server.close();
   }
 }
 
-async function displayFrame(page: Page, url: string, host = ROSE_HOST): Promise<Frame> {
+async function displayFrame(page: Page, url: string, host: string): Promise<Frame> {
   await page.goto(`${host}?src=${encodeURIComponent(url)}`);
   for (let i = 0; i < 100; i += 1) {
     const frame = page.frames().find((f) => f !== page.mainFrame());
@@ -159,23 +182,24 @@ function fraction(png: Buffer, test: (r: number, g: number, b: number) => boolea
 
 const reddish = (r: number, g: number, b: number) => r > 110 && r > g * 1.8 && r > b * 1.8;
 
-async function isolationProbe(frame: Frame) {
-  return frame.evaluate(() => {
-    const attempt = (fn: () => unknown) => {
-      try {
-        fn();
-        return 'readable';
-      } catch (err) {
-        return (err as Error).name;
-      }
-    };
-    return {
-      origin: self.origin,
-      cookie: attempt(() => document.cookie),
-      storage: attempt(() => window.localStorage.length),
-      parent: attempt(() => window.parent.document.title),
-    };
-  });
+/**
+ * Runs inside the display frame. A string, not a function: tsx's keepNames
+ * helper (__name) does not exist in the page.
+ */
+const ISOLATION_PROBE = `(() => {
+  const attempt = (fn) => { try { fn(); return 'readable'; } catch (err) { return err.name; } };
+  return {
+    origin: self.origin,
+    cookie: attempt(() => document.cookie),
+    storage: attempt(() => window.localStorage.length),
+    parent: attempt(() => window.parent.document.title),
+  };
+})()`;
+
+function isolationProbe(frame: Frame) {
+  return frame.evaluate<{ origin: string; cookie: string; storage: string; parent: string }>(
+    ISOLATION_PROBE
+  );
 }
 
 export function displayRenderCases(): BlackboxTest[] {
@@ -186,8 +210,8 @@ export function displayRenderCases(): BlackboxTest[] {
         const res = await display(otherA, { items: [b64(Buffer.from(threeCdnPage(`render-${RUN}`)), 'cube.html')] }, { apiKeyUser: userA });
         assert(res.status === 201 || res.status === 200, `display page ${res.status}`);
         const url = local(items(res)[0].file_pointer.usercontent_url ?? '');
-        await withBrowser(async (_context, page, logs) => {
-          const frame = await displayFrame(page, url);
+        await withBrowser(async (page, logs, hosts) => {
+          const frame = await displayFrame(page, url, hosts.rose);
           await waitReady(frame, logs, 'three.js CDN page');
           await page.waitForTimeout(300);
           const red = fraction(await page.locator('#f').screenshot(), reddish);
@@ -207,8 +231,8 @@ export function displayRenderCases(): BlackboxTest[] {
         const res = await display(otherA, { items: [b64(cubeGlb([1, 0.05, 0.05, 1], `render-${RUN}`), 'red-cube.glb')] }, { apiKeyUser: userA });
         assert(res.status === 201 || res.status === 200, `display glb ${res.status}`);
         const url = local(items(res)[0].file_pointer.usercontent_url ?? '');
-        await withBrowser(async (_context, page, logs) => {
-          const frame = await displayFrame(page, url);
+        await withBrowser(async (page, logs, hosts) => {
+          const frame = await displayFrame(page, url, hosts.rose);
           await waitReady(frame, logs, 'model viewer');
           await page.waitForTimeout(400);
           const shot = await page.locator('#f').screenshot();
@@ -229,8 +253,8 @@ export function displayRenderCases(): BlackboxTest[] {
         const res = await display(otherA, { items: [b64(Buffer.from(threeCdnPage(`ancestors-${RUN}`)), 'cube.html')] }, { apiKeyUser: userA });
         assert(res.status === 201 || res.status === 200, `display page ${res.status}`);
         const url = local(items(res)[0].file_pointer.usercontent_url ?? '');
-        await withBrowser(async (_context, page) => {
-          const frame = await displayFrame(page, url, FOREIGN_HOST);
+        await withBrowser(async (page, _logs, hosts) => {
+          const frame = await displayFrame(page, url, hosts.foreign);
           await page.waitForTimeout(1500);
           const state = await frame.evaluate(() => document.documentElement.dataset.state ?? null).catch(() => null);
           assert(state !== 'ready' && state !== 'loading', `foreign embedder must not load the page (state ${state}, url ${frame.url()})`);
