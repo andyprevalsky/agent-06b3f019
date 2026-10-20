@@ -58,6 +58,7 @@ for (const provider of ['claude', 'codex'] as const) {
     page,
   }) => {
     const rec = attachRecorder(page);
+    page.on('pageerror', (error) => console.log('PAGEERROR', error.message));
     let completed = false;
     await page.addInitScript((id) => {
       const user = { id, is_anonymous: false };
@@ -183,6 +184,7 @@ for (const provider of ['claude', 'codex'] as const) {
     await page.goto(`${FRONTEND_URL}/?agent-id=${OWNER}&code-agent=${TASK}`, {
       waitUntil: 'domcontentloaded',
     });
+    await expect(page.locator('textarea').first()).toBeVisible({ timeout: 60_000 });
     const view = page.getByTestId('code-agent-view');
     const slot = view.getByTestId('code-work-slot');
     const history = slot.getByTestId('code-work-activities');

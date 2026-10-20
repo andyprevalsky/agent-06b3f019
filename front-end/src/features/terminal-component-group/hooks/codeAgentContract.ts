@@ -124,6 +124,7 @@ export interface CodeAgentMeta {
    * https://5173-<sandbox>.<domain>/). The chip shows a live preview card.
    */
   preview_url?: string;
+  /**
    * The backend's user-facing line for a pause: `failure_message` of a snapshot
    * the producer itself marked 'paused' (a corrected 'failed' row's text is the
    * parent's retry instruction, never shown).
