@@ -5,5 +5,6 @@ export {
   resumedPrivacy,
   isModelMedia,
   privateResult,
+  internalPhoneObservation,
 } from '../../providers/phoneInputPrivacy';
 export type { PhonePrivacy } from '../../providers/phoneInputPrivacy';

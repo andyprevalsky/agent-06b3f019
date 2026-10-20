@@ -38,7 +38,7 @@ In mode=operation, set operation to the wire name and args to its arguments:
   store for the server-verified current app/account. Supported bindings are Apple Account and Google sign-in
   for the server-configured intended identity. Supply no password, credential ref/ID, account, realm,
   or coordinates. The worker/model never reads or types the saved secret.
-Before credentials.fill_saved obtain fresh screen.text. The backend obtains
+credentials.fill_saved requires a current successful screen.text result. The backend obtains
 trusted bounds and independently verifies the current form/account binding.
 When the latest successful operation is screen.text for the current interaction
 cursor, use that observation to choose the next action; do not repeat an
@@ -56,9 +56,11 @@ owned cloud phone when available. Match the account and current sign-in challeng
 or number to the browser request; approve only that intended request, then
 return to the browser and verify it continued. Never approve an unrelated or ambiguous
 login. An installed app alone does not prove it is signed in or can approve.
-If the app is signed out, the request cannot be matched, or user presence is
-required, use the existing critical authentication attention path when genuinely
-blocked. Queue and transport failures remain tool outcomes, not user-only auth.
+Continue supported signed-out Apple/Google authentication through the native
+and shared saved-credential waterfall below before requesting password help.
+If a current request cannot be matched or user presence genuinely blocks
+progress, use the existing critical authentication attention path. Queue and
+transport failures remain tool outcomes, not user-only auth.
 For browser SMS/OTP challenges, inspect the current matching Messages
 conversation on the owned cloud phone before asking the user when accessible.
 Match the intended account, recipient, and current challenge timestamp; never
@@ -136,13 +138,20 @@ label without its enabled state is not proof. Keep ambiguous evidence unknown.
 For Gmail boot setup, use only the active server expectedGoogleAccountIdentifier;
 the Apple Account identifier is not the Google account. If Gmail is absent,
 install Gmail through the observed App Store UI, then open it and sign in to
-that intended Google account. Preserve an already matching signed-in account;
+that intended Google account. An App Store password prompt for the configured
+Apple Account during installation uses the same saved-credential waterfall:
+matching masked native AutoFill, then credentials.fill_saved with empty args
+using the current observation rule above before password help. This Apple Account is distinct from the Google identity.
+The backend must verify the supported existing-password form and exact account;
+no caller realm, account, or credential ref is allowed. Preserve unavailable,
+rejected, user-presence, stale-binding, and UNKNOWN handling described above;
+never retry rejected or uncertain input. Preserve an already matching signed-in account;
 do not sign out or switch an unrelated account without authorization. Ordinary
 installation and navigation are autonomous; purchases, new terms, unsupported
 capabilities, or transport failures are not authentication-attention reasons.
 Use matching masked native AutoFill when usable. If no matching usable native
-suggestion exists, use credentials.fill_saved once with empty args after fresh
-screen.text; the backend verifies the actual Google form and separately configured Google identity.
+suggestion exists, use credentials.fill_saved once with empty args using the
+current observation rule above; the backend verifies the actual Google form and separately configured Google identity.
 Never supply a realm, account, credential ref or secret. Missing or ambiguous
 credentials mean use protected native attention only when genuinely blocked;
 stale binding means observe again, and UNKNOWN means status-only, never replay.

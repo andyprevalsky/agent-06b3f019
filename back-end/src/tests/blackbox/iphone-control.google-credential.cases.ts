@@ -1,3 +1,4 @@
+import { identityBindingCases } from './iphone-control.identity-binding.cases';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
@@ -5,6 +6,7 @@ import { freshSetup, observe } from './iphone-control.setup-fixtures';
 import { useSavedPaymentFixture, encryptSavedFixture } from './iphone-control.saved-key-fixture';
 import type { Case } from './iphone-control.cases';
 export const googleCredentialCases: Case[] = [
+  ...identityBindingCases,
   [
     'dual configured accounts reject saved fill when semantic realm is absent',
     async (h) => {

@@ -2897,7 +2897,7 @@ async def test_native_autofill_preference_reaches_actual_enabled_request():
         return httpx.Response(200, text=_openai_sse([{"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "observe-only", "type": "function", "function": {"name": "phone", "arguments": '{"mode":"status"}'}}]}, "finish_reason": "tool_calls"}]}]), headers={"Content-Type": "text/event-stream"})
     set_mock_handler(provider)
     try:
-        for screen in ("Matching account AutoFill suggestion, password remains masked", "No matching credential available", "Face ID required to use saved credential", "Saved credential rejected by Apple Account"):
+        for screen in ("Matching account AutoFill suggestion, password remains masked", "No matching credential available", "Face ID required to use saved credential", "Saved credential rejected by Apple Account", "App Store requests the configured Apple Account existing password to install Gmail; no matching native suggestion is available"):
             state = {"enabled": True, "interaction": {"cursor": 2, "lastOperation": {"operation": "screen.text", "status": "SUCCEEDED", "result": [{"text": screen}]}}}
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}):
                 await h._call_browser_use_with_rotation(rose_client=RoseClient(openrouter_key="synthetic"), task="Continue my authorized Apple Account sign-in", dynamic_system_context="Original context", turn_messages=[], browser_state=_browser_state(), action_entries=[], config=SimpleNamespace(backend=SimpleNamespace(api_url="https://backend.test", api_key="synthetic")), user_id="enabled", agent_id="agent", iteration=1, token_state=ClaudeTokenState(), gpt_token=None, gpt_account_id=None, gpt_token_source=None, gpt_token_pool_id=None, browser_use_mode=None, browser_task_id="task", phone_observation=state)
@@ -2906,7 +2906,15 @@ async def test_native_autofill_preference_reaches_actual_enabled_request():
             assert "credentials.fill_saved" in prompt and "phone_credential_unavailable" in prompt
             assert "Never reveal, extract, copy, or transcribe" in prompt
             assert "Supply no password, credential ref/ID, account, realm," in prompt
-            assert "Before credentials.fill_saved obtain fresh screen.text." in prompt
+            assert "credentials.fill_saved requires a current successful screen.text result." in prompt
+            assert "Before credentials.fill_saved obtain fresh screen.text." not in prompt
+            assert "with empty args after fresh" not in prompt
+            assert "and fresh observations before password help" not in prompt
+            assert "current observation rule above" in prompt
+            assert "Continue supported signed-out Apple/Google authentication" in prompt
+            assert "App Store password prompt" in prompt and "same saved-credential waterfall" in prompt
+            assert "distinct from the Google identity" in prompt
+            assert "no caller realm, account, or credential ref" in prompt
             assert screen in prompt
     finally:
         teardown_mock()

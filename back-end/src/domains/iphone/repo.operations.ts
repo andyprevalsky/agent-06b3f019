@@ -5,7 +5,8 @@ import { setupGate } from './repo.setupGate';
 import { sealPhoneValue } from '../../providers/phoneHarnessCredentials';
 import * as leases from './repo';
 import { validateAttentionInput, taskBoundError, phoneIntent } from './repo.attention';
-import { privateResult } from './privacy';
+import { setupState } from '../../providers/phoneSetupState';
+import { privateResult, internalPhoneObservation } from './privacy';
 import { claimPrivacy } from './repo.privacy';
 import { LEASE_TIMEOUT_MS } from './config';
 import { IPhoneError, type Transaction } from './types';
@@ -138,7 +139,16 @@ export async function finishCommand(
     await rawLock(tx, claim.device.id);
     const device = await tx.iPhoneDevice.findUniqueOrThrow({ where: { id: claim.device.id } });
     const resultEncrypted = sealPhoneValue(
-      privateResult({ ...claim.command, state }, value, device.privateInputEncrypted)
+      claim.command.operation === 'screen.text' &&
+        claim.command.actor === 'agent' &&
+        state === 'SUCCEEDED'
+        ? internalPhoneObservation(
+            { ...claim.command, state },
+            value,
+            device.privateInputEncrypted,
+            setupState(device.setupEncrypted)
+          )
+        : privateResult({ ...claim.command, state }, value, device.privateInputEncrypted)
     );
     const now = await leases.databaseNow(tx);
     await tx.iPhoneOperation.updateMany({

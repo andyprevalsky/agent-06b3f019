@@ -1,7 +1,7 @@
 /** Owner-scoped shared credential selection; no caller secret/ref/realm. */
 import { openPhoneValue } from '../../providers/phoneHarnessCredentials';
 import { setupState } from '../../providers/phoneSetupState';
-import { privacyState, rememberPrivate, resumedPrivacy, privateResult } from './privacy';
+import { privacyState, rememberPrivate, resumedPrivacy, internalPhoneObservation } from './privacy';
 import { executionCustody } from './repo.executionCustody';
 import * as leases from './repo';
 import { IPhoneError } from './types';
@@ -64,10 +64,11 @@ export async function savedBinding(
         {
           operationId: read.requestKey,
           cursor: read.cursor,
-          result: privateResult(
+          result: internalPhoneObservation(
             read,
             openPhoneValue(read.resultEncrypted),
-            device.privateInputEncrypted
+            device.privateInputEncrypted,
+            state
           ),
         },
       ],

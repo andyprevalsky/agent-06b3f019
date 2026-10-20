@@ -1,5 +1,5 @@
 import { openPhoneValue, phoneCommandHash } from '../../providers/phoneHarnessCredentials';
-import { privateResult } from './privacy';
+import { internalPhoneObservation } from './privacy';
 import { IPhoneError, type Transaction, type IPhoneDevice, type IPhoneLease } from './types';
 import type { SetupState, SetupInput } from '../../providers/phoneSetupState';
 import type { SetupEvidence } from '../../providers/phoneSetupVerifier';
@@ -43,7 +43,17 @@ export async function setupEvidence(
     evidence.push({
       operationId: id,
       cursor: row.cursor,
-      result: privateResult(row, openPhoneValue(row.resultEncrypted), device.privateInputEncrypted),
+      result: internalPhoneObservation(
+        row,
+        openPhoneValue(row.resultEncrypted),
+        device.privateInputEncrypted,
+        {
+          expectedAppleIdentity: state.expectedAppleIdentity,
+          ...(input.verificationTarget === 'gmail'
+            ? { expectedGoogleIdentity: state.expectedGoogleIdentity }
+            : {}),
+        }
+      ),
     });
   }
   evidence.sort((a, b) => a.cursor - b.cursor);

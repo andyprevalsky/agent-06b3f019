@@ -58,7 +58,38 @@ export function privateResult(
   value: unknown,
   encrypted: string | null
 ): unknown {
+  return redactResult(command, value, privacyState(encrypted));
+}
+
+/** Internal screen-text evidence may retain only identifiers already supplied by trusted profile. */
+export function internalPhoneObservation(
+  command: Pick<IPhoneOperation, 'operation' | 'actor' | 'state'>,
+  value: unknown,
+  encrypted: string | null,
+  profile: { expectedAppleIdentity?: string; expectedGoogleIdentity?: string }
+): unknown {
   const privacy = privacyState(encrypted);
+  if (
+    command.operation !== 'screen.text' ||
+    command.actor !== 'agent' ||
+    command.state !== 'SUCCEEDED' ||
+    privacy.active
+  )
+    return redactResult(command, value, privacy);
+  const identifiers = [profile.expectedAppleIdentity, profile.expectedGoogleIdentity].filter(
+    (identity): identity is string =>
+      typeof identity === 'string' && identity.length > 0 && identity.length <= 512
+  );
+  return redactResult(command, value, {
+    ...privacy,
+    values: privacy.values.filter((secret) => !identifiers.includes(secret)),
+  });
+}
+function redactResult(
+  command: Pick<IPhoneOperation, 'operation' | 'actor' | 'state'>,
+  value: unknown,
+  privacy: PhonePrivacy
+): unknown {
   if (command.operation === 'credentials.fill_saved')
     return {
       success: command.state === 'SUCCEEDED',

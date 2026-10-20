@@ -1,3 +1,4 @@
+import './phone-identity-projection.cases';
 import './phone-message-verifier.cases';
 import './phone-settings-verification.cases';
 import './phone-saved-credential.cases';
