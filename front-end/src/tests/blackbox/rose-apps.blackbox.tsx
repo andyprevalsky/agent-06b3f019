@@ -4,7 +4,6 @@
  *  - right app bar with bare icons (no tiles/chips/rings around them)
  *  - Browser drawer replaces the fullscreen browser (opens on the agent tab,
  *    resizable with a clamped width)
- *  - Voice app selection + persona bound to the custom system prompt
  */
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -163,7 +162,7 @@ describe('query toolbar nub', () => {
 const WRAPPER_CLASS = /\b(border|bg-|rounded|ring|shadow)/;
 
 describe('right app bar', () => {
-  it('renders Browser and Voice as bare icons and colors the open app', async () => {
+  it('renders Browser as a bare icon, colors it when open, and has no Voice app', async () => {
     const user = userEvent.setup();
     renderWithProviders(<RoseAppBar />);
     const bar = screen.getByTestId('rose-app-bar');
@@ -171,14 +170,12 @@ describe('right app bar', () => {
     expect(bar.className).toContain('bg-white');
     expect(bar.className).toContain('border-l');
     const browser = screen.getByTestId('rose-app-browser');
-    const voice = screen.getByTestId('rose-app-voice');
-    for (const button of [browser, voice]) {
-      expect(button.className).not.toMatch(WRAPPER_CLASS);
-      expect(button.style.background).toBe('');
-      expect(button.style.border).toBe('');
-    }
-    expect(within(voice).getByTestId('rose-voice-orb')).toBeInTheDocument();
-    expect(within(voice).getByTestId('rose-voice-orb-mic')).toBeInTheDocument();
+    expect(browser.className).not.toMatch(WRAPPER_CLASS);
+    expect(browser.style.background).toBe('');
+    expect(browser.style.border).toBe('');
+    // UI ledger row 49: Voice was removed from the right-bar apps.
+    expect(screen.queryByTestId('rose-app-voice')).toBeNull();
+    expect(screen.queryByTestId('voice-app-drawer')).toBeNull();
 
     expect(browser).toHaveAttribute('aria-pressed', 'false');
     await user.click(browser);
@@ -187,10 +184,9 @@ describe('right app bar', () => {
     expect(screen.getByTestId('browser-app-drawer')).toHaveAttribute('data-state', 'open');
     expect(screen.getByTestId('root-browser-empty')).toHaveTextContent('Your browser');
 
-    await user.click(voice);
+    await user.click(browser);
+    expect(browser).toHaveAttribute('aria-pressed', 'false');
     expect(screen.getByTestId('browser-app-drawer')).toHaveAttribute('data-state', 'closed');
-    expect(screen.getByTestId('voice-app-drawer')).toHaveAttribute('data-state', 'open');
-    expect(within(voice).getByTestId('rose-voice-orb-mic')).toHaveStyle({ color: '#e8507f' });
   });
 });
 
@@ -292,54 +288,5 @@ describe('Browser drawer', () => {
     // Keyboard shrink is clamped too.
     fireEvent.keyDown(handle, { key: 'ArrowRight' });
     expect(drawer.style.width).toBe(`${DRAWER_MIN_WIDTH}px`);
-  });
-});
-
-// ─── Voice app ──────────────────────────────────────────────────────────────
-
-describe('Voice app', () => {
-  beforeEach(() => {
-    localStorage.clear();
-    mockSession();
-  });
-
-  it('selects a voice (bold dark label) and saves the persona to the custom system prompt', async () => {
-    const patches: unknown[] = [];
-    server.use(
-      http.get(`${API_BASE}/user-settings`, () =>
-        HttpResponse.json({ customSystemPrompt: 'Warm and direct.' }),
-      ),
-      http.patch(`${API_BASE}/user-settings`, async ({ request }) => {
-        patches.push(await request.json());
-        return HttpResponse.json({});
-      }),
-    );
-    const user = userEvent.setup();
-    renderWithProviders(<RoseAppBar />);
-    await user.click(screen.getByTestId('rose-app-voice'));
-    const drawer = screen.getByTestId('voice-app-drawer');
-
-    const rose = within(drawer).getByTestId('voice-option-rose');
-    const seraph = within(drawer).getByTestId('voice-option-seraph');
-    expect(rose).toHaveAttribute('aria-checked', 'true');
-    expect(rose).toHaveStyle({ fontWeight: '600' });
-    expect(within(drawer).getAllByTestId('rose-voice-orb-mic')).toHaveLength(3);
-
-    await user.click(seraph);
-    expect(seraph).toHaveAttribute('aria-checked', 'true');
-    expect(seraph).toHaveStyle({ fontWeight: '600' });
-    expect(rose).toHaveAttribute('aria-checked', 'false');
-    expect(rose).toHaveStyle({ fontWeight: '400' });
-    expect(localStorage.getItem('rose-voice')).toBe('seraph');
-    // The app-bar orb follows the selection (Seraph hue-rotate 190).
-    const barOrb = within(screen.getByTestId('rose-app-voice')).getByTestId('rose-voice-orb');
-    expect(barOrb.innerHTML).toContain('hue-rotate(190deg)');
-
-    const persona = within(drawer).getByTestId('voice-persona');
-    await waitFor(() => expect(persona).toHaveValue('Warm and direct.'));
-    await user.clear(persona);
-    await user.type(persona, 'Short and funny.');
-    fireEvent.blur(persona);
-    await waitFor(() => expect(patches).toEqual([{ customSystemPrompt: 'Short and funny.' }]));
   });
 });

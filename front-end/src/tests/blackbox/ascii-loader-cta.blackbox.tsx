@@ -5,7 +5,7 @@ import AsciiLoader from '@/features/terminal-component-group/components/AsciiLoa
 import { renderWithProviders } from './test-wrapper';
 
 describe('AsciiLoader CTA contrast', () => {
-  it('renders a dark label on a solid white waitlist button without dark layers', () => {
+  it('keeps the label shadow without darkening the whole waitlist button', () => {
     renderWithProviders(
       <AsciiLoader
         showWarmingUp={false}
@@ -23,8 +23,7 @@ describe('AsciiLoader CTA contrast', () => {
         child.style.background.replaceAll(' ', '').includes('rgba(0,0,0'),
     );
 
-    expect(label.style.textShadow).toBe('');
-    expect(button.className).toContain('bg-white');
+    expect(label.style.textShadow).toMatch(/rgba?\(0,\s*0,\s*0/);
     expect(darkBackgroundLayers).toHaveLength(0);
   });
 });

@@ -296,6 +296,46 @@ describe('CompletionSummaryCard inline mini-previews + right drawer', () => {
     expect(downloadTextMock).toHaveBeenCalled();
   });
 
+  it('runs generated HTML+JS for Rose Desktop accounts with every network load still blocked', async () => {
+    // Regression (2026-10-20 recording): a code agent's single-file game opened in
+    // the drawer but default-src 'none' blocked its inline script, so it never ran.
+    const user = userEvent.setup();
+    const file = makeFile({ original_filename: 'game.html', mime_type: 'text/html' });
+    const card = (
+      <CompletionSummaryCard
+        data={{ summary: 'Done', outputs: [{ key: 'doc', label: 'Game', value: file }] }}
+      />
+    );
+    const csp = (srcdoc: string) =>
+      /Content-Security-Policy" content="([^"]*)"/.exec(srcdoc)?.[1] ?? '';
+
+    const flagged = renderWithProviders(card, { roseDesktop: true });
+    await user.click(await screen.findByTestId('file-pointer-chip'));
+    const drawer = await screen.findByTestId('document-preview-drawer');
+    // Above the top-right account rail (z-[100]) so Download is never covered.
+    expect(drawer.className).toContain('z-[110]');
+    const policy = csp(
+      (await within(drawer).findByTestId('document-preview-html')).getAttribute('srcdoc') ?? '',
+    );
+    expect(policy).toContain("script-src 'unsafe-inline'");
+    expect(policy).toContain("default-src 'none'");
+    expect(policy).toContain('img-src data: blob:');
+    expect(policy).not.toMatch(/connect-src|https?:|\*/);
+    expect(within(drawer).getByTestId('document-preview-html').getAttribute('sandbox')).toBe(
+      'allow-scripts',
+    );
+    flagged.unmount();
+
+    renderWithProviders(card, { roseDesktop: false });
+    await user.click(await screen.findByTestId('file-pointer-chip'));
+    const stock = await screen.findByTestId('document-preview-drawer');
+    const stockPolicy = csp(
+      (await within(stock).findByTestId('document-preview-html')).getAttribute('srcdoc') ?? '',
+    );
+    expect(stockPolicy).toContain("default-src 'none'");
+    expect(stockPolicy).not.toContain('script-src');
+  });
+
   it('keeps an open document mounted when polling returns an equivalent file pointer', async () => {
     const user = userEvent.setup();
     const file = makeFile({ original_filename: 'report.html', mime_type: 'text/html' });
