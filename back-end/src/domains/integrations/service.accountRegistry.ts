@@ -21,6 +21,7 @@ import { disconnectGmailAccount, GmailAccountNotFoundError } from './service';
 import { disconnectPlaidItem } from './service.plaid';
 import { deleteLanternIntegration, LanternCredentialError } from './service.lantern';
 import { KNOWN_SOURCES as DOCUMENT_SOURCES } from './uploadService.documents';
+import { deleteTelegramAccountData } from './uploadService.telegram';
 
 /** Lanes that own a provider's account-scoped cleanup (plan rows I1–I8). */
 export type IntegrationLane =
@@ -129,10 +130,7 @@ const EXACT: Record<string, IntegrationAccountAdapter> = {
     list: 'row',
     cleanup: todo('L-INT-WHATSAPP', 'messages and auth state are not keyed by WhatsApp account'),
   },
-  telegram: {
-    list: 'row',
-    cleanup: todo('L-INT-TELEGRAM', 'messages and sessions are not keyed by Telegram account'),
-  },
+  telegram: { list: 'row', cleanup: hook(deleteTelegramAccountData) },
   linkedin: {
     list: 'row',
     cleanup: todo('L-INT-LINKEDIN', 'imported connections are not keyed by LinkedIn account'),

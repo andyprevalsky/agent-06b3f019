@@ -23,6 +23,8 @@
  *   - container providers: Gmail addresses and Plaid items are accounts; needs_reconnect wins
  *   - providers without account-scoped cleanup answer 501 and keep their data
  *   - validation 400s, per-user account cap, internal API-key writer path, auth 401
+ *   - Telegram (I8): two accounts listed separately, per-account attribution, delete one
+ *     account's messages only, legacy claim and default-account delete
  *
  * Usage: bash scripts/run-blackbox-tests.sh integration-accounts
  */
@@ -32,6 +34,7 @@ import { upsertIntegrationAccount } from '../../domains/integrations/repo.accoun
 import { reportIntegrationProgress } from '../../domains/integrations/service.progress';
 import { MAX_PROGRESS_ACCOUNTS_PER_USER } from '../../domains/integrations/syncAccountsContract';
 import { cases as advancedCases } from './integration-accounts.cases';
+import { telegramCases } from './integration-accounts.telegram.cases';
 import {
   accountsOf,
   anonymousSession,
@@ -360,7 +363,7 @@ async function cleanup(userIds: string[]): Promise<void> {
 async function main(): Promise<void> {
   sessions.a = await anonymousSession();
   sessions.b = await anonymousSession();
-  const tests = [...coreCases, ...advancedCases(() => ({ a: A(), b: B() }))];
+  const tests = [...coreCases, ...advancedCases(() => ({ a: A(), b: B() })), ...telegramCases()];
   let failed = 0;
   try {
     for (const test of tests) {

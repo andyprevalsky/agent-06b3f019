@@ -37,6 +37,12 @@ export interface UpsertIntegrationAccountParams {
   lastSyncAt?: Date;
   lastSuccessfulSyncAt?: Date;
   failureReason?: string | null;
+  /**
+   * Runs inside the claiming transaction, only when this call adopts the legacy
+   * row, so provider data stored under the legacy account moves atomically with
+   * it (Telegram re-attributes its unattributed messages).
+   */
+  adoptLegacyData?: (tx: Tx, accountId: string) => Promise<unknown>;
 }
 
 export async function findIntegrationAccount(userId: string, name: string, accountId: string) {
@@ -84,6 +90,8 @@ export async function upsertIntegrationAccount(params: UpsertIntegrationAccountP
     }),
     ...(params.failureReason !== undefined && { failureReason: params.failureReason }),
   };
+  // Room for a legacy-data adoption (indexed per-user UPDATEs) inside the claim.
+  const txOptions = params.adoptLegacyData === undefined ? undefined : { timeout: 30_000 };
   return runTransactionWithRetry(async (tx) => {
     await lockIntegrationName(tx, params.userId, params.name);
     const where = (id: string) => ({
@@ -96,6 +104,7 @@ export async function upsertIntegrationAccount(params: UpsertIntegrationAccountP
       params.legacy === 'claim' ? await tx.integration.findUnique({ where: where('') }) : null;
     if (legacy !== null) {
       await adoptLegacyProgress(tx, params.userId, params.name, accountId);
+      if (params.adoptLegacyData !== undefined) await params.adoptLegacyData(tx, accountId);
       return tx.integration.update({ where: { id: legacy.id }, data: { ...data, accountId } });
     }
     return tx.integration.create({
@@ -108,7 +117,7 @@ export async function upsertIntegrationAccount(params: UpsertIntegrationAccountP
         ...data,
       },
     });
-  });
+  }, txOptions);
 }
 
 /** Row fields an account chip is derived from (no secrets, no config). */
