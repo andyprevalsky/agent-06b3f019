@@ -6,7 +6,7 @@
 
 import { WebSocketServer } from "ws";
 import { execSync, spawn } from "child_process";
-import { appendFileSync, writeFileSync, mkdirSync } from "fs";
+import { appendFileSync, existsSync, writeFileSync, mkdirSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 
@@ -520,6 +520,14 @@ async function runClaudeCli() {
   }
   if (CODE_AGENT_SYSTEM_PROMPT) {
     args.push("--append-system-prompt", CODE_AGENT_SYSTEM_PROMPT);
+  }
+  // Rose agent tools (display / send_message_to_user / request_user_approval)
+  // as an MCP server. The backend writes ~/.rose/mcp.json at session create;
+  // MCP calls have no Bash 2-minute limit, so blocking approvals can wait.
+  const roseMcpConfig = join(home, ".rose", "mcp.json");
+  if (existsSync(roseMcpConfig)) {
+    args.push("--mcp-config", roseMcpConfig);
+    args[args.indexOf("--allowedTools") + 1] += ",mcp__rose";
   }
 
   // The prompt is delivered on stdin, NOT as a positional argument.

@@ -61,7 +61,7 @@ import fastCacheRouter from './domains/fast-cache/routes';
 import archiveRouter from './domains/archive/routes';
 import plannerMemoryRouter from './domains/planner-memory/routes';
 import userUiRouter, { usercontentRouter } from './domains/user-ui/routes';
-import displayRouter from './domains/display/routes';
+import agentToolsRouter, { agentQuestionsRouter } from './domains/agent-tools/routes';
 import worldModelsRouter from './domains/world-models/routes';
 import slackAutoRcaRouter from './domains/slack-auto-rca/routes';
 import downloadTelemetryRouter from './domains/download-telemetry/routes';
@@ -513,6 +513,7 @@ if (x402ReceivingWallet) {
 
 // Routes with authentication
 // Note: Each router handles its own auth per-route (hybridAuth for agents)
+app.use('/api/agents', agentQuestionsRouter); // pinned-question answers (agent-tools domain)
 app.use('/api/agents', agentsRouter);
 app.use('/api/agent-queue-pointer', agentQueuePointerRouter);
 app.use('/api/worker-process-runtime', workerProcessRuntimeRouter);
@@ -553,7 +554,7 @@ app.use('/api/fast-cache', fastCacheRouter); // Fast Mode aggressive cache get/s
 app.use('/api/archive', archiveRouter); // Encrypted trace archive + scoped DB fixtures
 app.use('/api/planner-memory', plannerMemoryRouter); // Planner memory history table (planner RAG)
 app.use('/api/user-ui', userUiRouter); // Per-user rose_user_ui versions (publish/activate/active)
-app.use('/api/display', displayRouter); // display tool / rose-display CLI: inline media per agent
+app.use('/api/agent-tools', agentToolsRouter); // display / messages / approvals for agents + code-agent sandboxes
 app.use('/api/world-models', worldModelsRouter); // WMH-compatible simulation runtime shim
 // Anthropic tee-proxy for the code agent. Mounted OUTSIDE /api so the injected
 // ANTHROPIC_BASE_URL = <backend>/anthropic-proxy/<goalHash> resolves to /v1/messages.

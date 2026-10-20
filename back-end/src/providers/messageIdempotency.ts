@@ -5,6 +5,7 @@
  *
  *   USER  + metadata.isResponseSchemaUpdate + idempotencyKey   (schema updates)
  *   ASSISTANT + metadata.source === 'display' + idempotencyKey (display media)
+ *   USER  + metadata.source === 'agent_question' + idempotencyKey (child question to parent)
  */
 import { createHash } from 'node:crypto';
 import { stringMetadataValue } from './toolLifecycleMessages';
@@ -22,7 +23,8 @@ export function idempotentMessageId(params: {
 }): string | null {
   const keyed =
     (params.role === 'ASSISTANT' && params.metadata?.source === 'display') ||
-    (params.role === 'USER' && params.metadata?.isResponseSchemaUpdate === true);
+    (params.role === 'USER' && params.metadata?.isResponseSchemaUpdate === true) ||
+    (params.role === 'USER' && params.metadata?.source === 'agent_question');
   if (!keyed) return null;
   const key = stringMetadataValue(params.metadata, 'idempotencyKey');
   return key === null ? null : deterministicMessageId(params.agentId, key);

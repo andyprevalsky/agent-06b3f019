@@ -2,13 +2,15 @@
  * Media helpers for the `display` tool: content-type sniffing, a bounded
  * SSRF-guarded URL fetch, and the object store the displayed bytes live in.
  *
- *   bytes ─► sniffDisplayMediaType ─► image/png | … | video/mp4 | null (rejected)
+ *   bytes ─► classifyDisplayMedia ─► image/* | video/* | text/html | null (rejected)
  *   url   ─► fetchDisplayMedia (http(s) only, public addresses only — checked
  *            again at connect time — ≤ maxBytes, ≤ 5 redirects, timeout)
  *
- * The content type is decided from the bytes, never from a filename or a
+ * Images and videos are decided from magic bytes, never from a filename or a
  * remote Content-Type header, so an HTML/SVG payload renamed to .png is
- * refused instead of being served from the attachments bucket.
+ * refused. text/html is accepted only when the caller declared HTML (a .html /
+ * .htm name or a text/html response) AND the bytes are UTF-8 markup; the UI
+ * renders it in a sandboxed frame on the separate user-content origin.
  *
  * Storage: Supabase Storage (providers/storage.ts) by default; with
  * DISPLAY_STORAGE_BACKEND=local (+ DISPLAY_STORAGE_LOCAL_DIR) objects go to
@@ -46,7 +48,39 @@ export function sniffDisplayMediaType(bytes: Buffer): string | null {
   return null;
 }
 
+const HTML_START =
+  /^\s*(<!--[\s\S]*?-->\s*)*<(!doctype\s+html|html|head|body|div|main|section|svg|canvas|script|style|meta|link|title|h[1-6]|p|table|img|video)\b/i;
+
+/** True when `bytes` are valid UTF-8 text that starts like an HTML document. */
+export function looksLikeHtml(bytes: Buffer): boolean {
+  if (sniffDisplayMediaType(bytes) !== null) return false;
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return false;
+  }
+  if (text.includes('\u0000')) return false;
+  return HTML_START.test(text.replace(/^\uFEFF/, '').slice(0, 4096));
+}
+
+/**
+ * Allowed type for one display item, or null. `hint` is the declared name or
+ * Content-Type; it can only ever unlock text/html, never relabel binary bytes.
+ */
+export function classifyDisplayMedia(
+  bytes: Buffer,
+  hint: { filename?: string; contentType?: string } = {}
+): string | null {
+  const sniffed = sniffDisplayMediaType(bytes);
+  if (sniffed !== null) return sniffed;
+  const declaredHtml =
+    /\.html?$/i.test(hint.filename ?? '') || /^text\/html\b/i.test(hint.contentType ?? '');
+  return declaredHtml && looksLikeHtml(bytes) ? 'text/html' : null;
+}
+
 export const DISPLAY_EXTENSIONS: Record<string, string> = {
+  'text/html': 'html',
   'image/png': 'png',
   'image/jpeg': 'jpg',
   'image/gif': 'gif',
@@ -142,7 +176,7 @@ async function readCapped(response: Response, maxBytes: number, label: string): 
 export async function fetchDisplayMedia(
   rawUrl: string,
   opts: { maxBytes: number; timeoutMs: number }
-): Promise<{ bytes: Buffer; finalUrl: string }> {
+): Promise<{ bytes: Buffer; finalUrl: string; contentType: string }> {
   let url = assertFetchableUrl(rawUrl);
   const signal = AbortSignal.timeout(opts.timeoutMs);
   for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
@@ -151,7 +185,10 @@ export async function fetchDisplayMedia(
       response = await fetch(url, {
         redirect: 'manual',
         signal,
-        headers: { Accept: 'image/*,video/*;q=0.9,*/*;q=0.1', 'User-Agent': 'RoseDisplay/1.0' },
+        headers: {
+          Accept: 'image/*,video/*;q=0.9,text/html;q=0.8,*/*;q=0.1',
+          'User-Agent': 'RoseDisplay/1.0',
+        },
         // Undici's Node fetch extension (not in the DOM RequestInit type).
         ...({ dispatcher: publicDispatcher } as Record<string, unknown>),
       });
@@ -174,6 +211,7 @@ export async function fetchDisplayMedia(
     return {
       bytes: await readCapped(response, opts.maxBytes, url.toString().slice(0, 200)),
       finalUrl: url.toString(),
+      contentType: response.headers.get('content-type') ?? '',
     };
   }
   throw new DisplayFetchError(`more than ${MAX_REDIRECTS} redirects`);

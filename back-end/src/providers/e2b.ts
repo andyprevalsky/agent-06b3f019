@@ -29,14 +29,17 @@ import {
   overlayClaudeCodeWsServer,
   overlayCodexCodeWsServer,
 } from './e2bWsServerOverlay';
-import { createLocalClaudeCodeSessionIfBillingBlocked } from './claudeCodeLocalSession';
+import {
+  createLocalClaudeCodeSessionIfBillingBlocked,
+  resolveLocalSessionWorkDir,
+} from './claudeCodeLocalSession';
 import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
 import {
   applyUserUiSandboxEnvs,
   prepareUserUiWorkspaceSafe,
   writeUserUiWorkspaceToSandboxSafe,
 } from './userUi/workspace';
-import { withDisplayCli } from './display/workspace';
+import { agentToolsForLocalHome, withAgentTools } from './agentTools/workspace';
 import {
   isRefreshOnlyOauthEnvelope,
   resolveClaudeCodeAuthEnvs,
@@ -335,7 +338,12 @@ async function createClaudeCodeSessionUnlocked(
     log.info(`GitHub repo configured: ${githubRepoUrl}`);
   }
 
-  const userUiWorkspace = withDisplayCli(await prepareUserUiWorkspaceSafe(userId), userId, agentId);
+  const userUiWorkspace = withAgentTools(await prepareUserUiWorkspaceSafe(userId), {
+    userId,
+    agentId,
+    taskId,
+    provider: 'claude',
+  });
   applyUserUiSandboxEnvs(envs, userUiWorkspace);
 
   // Create sandbox first (before DB record) to avoid placeholder conflicts.
@@ -359,7 +367,8 @@ async function createClaudeCodeSessionUnlocked(
       goal,
       envs,
       attachments,
-      userUiWorkspace,
+      // Same-host session: loopback tools URL, MCP path under the local HOME.
+      userUiWorkspace: agentToolsForLocalHome(userUiWorkspace, resolveLocalSessionWorkDir(taskId)),
       claudeTokenSource,
       claudeTokenIntegrationId:
         credentialMeta?.source === 'pool' ? (credentialMeta.poolTokenId ?? null) : null,
@@ -585,7 +594,12 @@ export async function createCodexCodeSession(
     log.info(`GitHub repo configured for Codex: ${githubRepoUrl}`);
   }
 
-  const userUiWorkspace = withDisplayCli(await prepareUserUiWorkspaceSafe(userId), userId, agentId);
+  const userUiWorkspace = withAgentTools(await prepareUserUiWorkspaceSafe(userId), {
+    userId,
+    agentId,
+    taskId,
+    provider: 'codex',
+  });
   applyUserUiSandboxEnvs(envs, userUiWorkspace);
 
   const sandbox = await createSandboxWithRetry(

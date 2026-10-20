@@ -1,4 +1,4 @@
-export const CODE_AGENT_INSTRUCTIONS_VERSION = '2026-07-08.code-agent-output-contract.v2';
+export const CODE_AGENT_INSTRUCTIONS_VERSION = '2026-10-20.code-agent-rose-tools.v3';
 export const CODEX_HARNESS_INSTRUCTIONS_VERSION = '2026-08-25.codex-rose-harness.v1';
 
 export const CODE_AGENT_ATTACHMENTS_DIR = '/home/user/attachments';
@@ -35,7 +35,10 @@ export function buildCodeAgentSystemPrompt(args: BuildCodeAgentPromptArgs = {}):
     '- When transforming a user attachment, create a new file in the output directory. Do not return the original attachment path as the transformed output.',
     '- In your final response, name the exact absolute paths of files you created for the user.',
     '- If no file output is requested, do not create placeholder files.',
-    '- To show the user an image or video inline (for example a screenshot or recording of what you built), run `rose-display <file|url>... [--caption "text"]`.',
+    '',
+    'Talking to the user:',
+    '- Never rely on the user reading your terminal. Messages, results, scorecards, visuals, questions and approvals go through the Rose tools (MCP server `rose`, or the `rose` CLI on PATH; run `rose --help`).',
+    '- `send_message_to_user` for updates and results; `display` for screenshots, recordings and HTML previews; `display` with placement "pinned" and options for a question; `request_user_approval` before risky or irreversible actions. Questions and approvals wait for the answer.',
     '',
     'Execution contract:',
     '- Prefer direct, verifiable commands over prose-only claims.',

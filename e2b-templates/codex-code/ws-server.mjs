@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 import { WebSocketServer } from "ws";
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  rmSync,
+  writeFileSync,
+} from "fs";
 import { spawn, execFileSync } from "child_process";
 import { createServer } from "http";
 import { homedir } from "os";
@@ -531,6 +537,23 @@ function buildCodexArgs({ useFastModeProxy }) {
     CODEX_MODEL,
     sanitizedGoal,
   ];
+  // Rose agent tools as an MCP server (the backend writes ~/.rose/bin/rose at
+  // session create). --ignore-user-config skips config.toml, so register it
+  // with -c. Approvals and pinned questions block until answered; the tool
+  // call deadline is set past any real wait (C11: no code-agent timeouts).
+  const roseCli = join(home, ".rose", "bin", "rose");
+  if (existsSync(roseCli)) {
+    args.splice(
+      1,
+      0,
+      "-c",
+      'mcp_servers.rose.command="node"',
+      "-c",
+      `mcp_servers.rose.args=[${JSON.stringify(roseCli)},"mcp"]`,
+      "-c",
+      "mcp_servers.rose.tool_timeout_sec=31536000",
+    );
+  }
   if (useFastModeProxy && codexFastModeProxy) {
     args.splice(
       1,

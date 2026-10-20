@@ -7,6 +7,13 @@ This is an isolated E2B sandbox environment for completing coding tasks.
 - **User attachments**: `/home/user/attachments/` - Files uploaded by the user are available here
 - **Output files**: `/home/user/output/` - Place any files the user needs in this directory (they will be automatically extracted and returned to the user)
 
+## Talking to the user
+
+The user never reads this terminal. Send messages, results, scorecards,
+visuals, questions and approvals through the Rose tools (MCP server `rose`, or
+the `rose` CLI on PATH): `send_message_to_user`, `display` (placement
+"pinned" with options for a question) and `request_user_approval`.
+
 ## Environment
 
 - **Working directory**: `/home/user`
