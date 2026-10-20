@@ -4,6 +4,7 @@
  *   spawned by the root agent  → deliver_to "user"  (the root pins it)
  *   spawned by any other agent → deliver_to "agent" (that Rose agent answers
  *                                from its context or escalates up the tree)
+ *   that agent already finished → 409 (it can never answer); deleted → 404
  *
  * `questionRouteForCodeSession` is the decision L-DISPLAY's pinned display
  * calls; `askQuestion` also performs the agent delivery via the A2A send path.
@@ -15,6 +16,7 @@ import {
 import * as graphRepo from './repoGraph';
 import { AgentGraphError, type GraphCaller } from './agentGraphService';
 import { sendGraphMessage, type SendResult } from './agentGraphSendService';
+import { TERMINAL_STATUSES } from './agentMessageService';
 import { markAwaitingParent } from '../../providers/codeSessions/spawn';
 
 export type { QuestionRoute };
@@ -74,8 +76,19 @@ export async function askQuestion(caller: GraphCaller, input: AskInput): Promise
   if (caller.self.kind !== 'code') {
     throw new AgentGraphError(400, 'Question routing is for code agents');
   }
-  const route = await questionRouteForSpawner(caller.self.ownerAgentId);
+  const spawner = await graphRepo.findGraphAgent(caller.self.ownerAgentId);
+  if (spawner === null) throw new AgentGraphError(404, 'Agent not found');
+  const route = questionRouteBySpawner(spawner);
   if (route.deliver_to === 'user') return { ...route, deliver_to: 'user', status: 'pin_for_user' };
+  // A finished spawner is not blocked in this spawn and would only wake in
+  // chat mode, whose reply goes to the user, never back to this code agent:
+  // refuse instead of leaving the code agent waiting for an answer.
+  if (TERMINAL_STATUSES.includes(spawner.status)) {
+    throw new AgentGraphError(
+      409,
+      `The agent that started you has finished (${spawner.status.toLowerCase().replace(/_/g, ' ')}) and cannot answer this question`
+    );
+  }
   const sent = await sendGraphMessage(
     caller,
     { to: route.agent_id, text: formatQuestionText(input), message_id: input.message_id },

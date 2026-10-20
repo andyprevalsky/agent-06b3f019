@@ -7,7 +7,8 @@
  *   answers              existing POST /api/attention-requests/:id/respond | /reject
  *                         (approvals) or questionService.answerQuestion (questions)
  *   waitForRequest       one PK read per REQUEST_WAIT_POLL_MS for ≤ `wait` seconds,
- *                         then `pending`; the caller loops with no overall deadline
+ *                         then `pending`; the caller loops with no overall deadline;
+ *                         the agent cancelled (archived) mid-wait → 410
  *
  * Code-agent rows carry metadata.sandboxTool, so resolveAndSignal never signals
  * a workflow for them: the sandbox long-polls instead.
@@ -17,7 +18,13 @@ import { createLogger } from '../../providers/logger';
 import { createMessage } from '../../providers/messages';
 import { REJECTED_RESPONSE, REQUEST_WAIT_POLL_MS } from './config';
 import * as repo from './repo';
-import { AgentToolsError, requestIdFor, sandboxRowMetadata, type ToolContext } from './service';
+import {
+  AgentToolsError,
+  agentCancelledError,
+  requestIdFor,
+  sandboxRowMetadata,
+  type ToolContext,
+} from './service';
 import type { DisplayFilePointer, DisplayOption, RequestState } from './types';
 
 const log = createLogger('AgentToolsRequests');
@@ -197,6 +204,25 @@ async function loadOwned(ctx: ToolContext, requestId: string): Promise<Attention
   return row;
 }
 
+/**
+ * Mid-wait read: cancelling (archiving) the agent deletes its requests, so a
+ * vanished row whose agent is now archived ends the wait as cancelled (410).
+ */
+async function loadOwnedUnlessCancelled(
+  ctx: ToolContext,
+  requestId: string
+): Promise<AttentionRow> {
+  try {
+    return await loadOwned(ctx, requestId);
+  } catch (err) {
+    if (err instanceof AgentToolsError && err.status === 404) {
+      const agent = await repo.findAgent(ctx.agent.id);
+      if (agent !== null && agent.deletedAt !== null) throw agentCancelledError();
+    }
+    throw err;
+  }
+}
+
 /** One poll interval of the bounded long-poll (a wait for an answer, not a retry). */
 function pause(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -213,7 +239,7 @@ export async function waitForRequest(
   let row = await loadOwned(ctx, requestId);
   while (row.userResponse === null && Date.now() < deadline && signal?.aborted !== true) {
     await pause(Math.min(REQUEST_WAIT_POLL_MS, deadline - Date.now()));
-    row = await loadOwned(ctx, requestId);
+    row = await loadOwnedUnlessCancelled(ctx, requestId);
   }
   const userMessage =
     row.userResponse === null ? null : await repo.findAuthoredReply(row.id, row.agentId);

@@ -6,8 +6,11 @@
  *     user (UI contract metadata.display {placement, kind, question, options,
  *     allow_other, question_id}); a deeper caller gets route "agent" (its
  *     spawner) and nothing is stored — it asks through the agent graph; answers
- *     through POST /api/agents/:id/questions/:questionId/answer are idempotent
- *     (first answer wins), number → option, dismiss → rejected
+ *     through POST /api/agents/:id/questions/:questionId/answer keep the first
+ *     answer (identical replay → 200, different late answer → 409), number →
+ *     option, dismiss → rejected
+ *   - adversarial (agent-tools-requests-adversarial.cases.ts): racing answers,
+ *     and a cancelled agent ends its code agent's in-flight wait (410)
  *   - approval round trip: pending (long-poll holds, returns pending) → the user
  *     responds via the existing attention endpoint → a waiting long-poll resumes
  *     with the answer; retry reuses the request; reject → rejected; the
@@ -64,6 +67,7 @@ import {
   type Auth,
   type BlackboxTest,
 } from './agent-tools.support';
+import { adversarialRequestTests } from './agent-tools-requests-adversarial.cases';
 
 const tests: BlackboxTest[] = [
   {
@@ -151,12 +155,14 @@ const tests: BlackboxTest[] = [
       );
       const answer = await call('POST', answerPath, { answer: 'List' }, { apiKeyUser: userA });
       expectStatus(answer, 200, 'user answers');
-      const again = await call('POST', answerPath, { answer: 'Grid' }, { apiKeyUser: userA });
-      expectStatus(again, 200, 'idempotent re-answer');
+      const again = await call('POST', answerPath, { answer: 'List' }, { apiKeyUser: userA });
+      expectStatus(again, 200, 'idempotent identical re-answer');
       assert(
         (again.data.selected_option as { label: string }).label === 'List',
-        'first answer wins'
+        'replay returns the stored answer'
       );
+      const late = await call('POST', answerPath, { answer: 'Grid' }, { apiKeyUser: userA });
+      expectStatus(late, 409, 'first answer wins; a different late answer conflicts');
       const answered = await call('GET', waitPath, undefined, { bearer: token });
       assert(answered.data.status === 'answered', `answered: ${JSON.stringify(answered.data)}`);
       const picked = answered.data.selected_option as { index: number; label: string };
@@ -611,7 +617,7 @@ const tests: BlackboxTest[] = [
   },
 ];
 
-runSuite(tests).catch((err) => {
+runSuite([...tests, ...adversarialRequestTests]).catch((err) => {
   console.error('\nCrashed:', err);
   process.exit(1);
 });
