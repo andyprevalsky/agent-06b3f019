@@ -150,6 +150,26 @@ export default router;
  */
 export const usercontentRouter = Router();
 
+/** HTML posted by the `display` tool, framed like an inline view. */
+usercontentRouter.get(
+  '/display/:agentId/:file',
+  asyncHandler(async (req: Request, res: Response) => {
+    const { agentId, file } = req.params as Record<string, string>;
+    const content = await service.readDisplayHtml(agentId ?? '', file ?? '');
+    res.setHeader('Content-Security-Policy', USERCONTENT_CSP);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    if (!content) {
+      res.status(404).type('text/plain').send('Not found');
+      return;
+    }
+    res.setHeader('Cache-Control', USERCONTENT_CACHE_CONTROL);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.status(200).send(content);
+  })
+);
+
 usercontentRouter.get(
   '/:versionId/*',
   asyncHandler(async (req: Request, res: Response) => {
