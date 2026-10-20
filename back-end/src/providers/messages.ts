@@ -2,6 +2,7 @@
 
 import { Prisma, type Message } from '@prisma/client';
 import { broadcastMessageInsert } from './chat/supabaseBroadcast';
+import { idempotentMessageId } from './messageIdempotency';
 import { prisma, runTransactionWithRetry } from './database';
 import { createLogger } from './logger';
 import {
@@ -14,7 +15,6 @@ import {
 } from './toolLifecycleMessages';
 import { lockAgentWorkflowGeneration } from './workflowGeneration';
 import { scheduleMessageGmvCapture } from './messageGmvCapture';
-import { agentGraphMessageRowId, deterministicMessageId } from './messageIds';
 
 const log = createLogger('Messages');
 
@@ -65,15 +65,6 @@ async function findDuplicateToolMessage(params: CreateMessageParams) {
   return (
     candidates.find((candidate) => metadataEquals(params.metadata, candidate.metadata)) ?? null
   );
-}
-
-function idempotentMessageId(params: CreateMessageParams): string | null {
-  const a2aKey = stringMetadataValue(params.metadata, 'a2aMessageId');
-  if (a2aKey !== null) return agentGraphMessageRowId(params.agentId, a2aKey);
-  if (params.role !== 'USER' || params.metadata?.isResponseSchemaUpdate !== true) return null;
-  const key = stringMetadataValue(params.metadata, 'idempotencyKey');
-  if (key === null) return null;
-  return deterministicMessageId(`${params.agentId}:${key}`);
 }
 
 async function findIdempotentMessage(params: CreateMessageParams) {

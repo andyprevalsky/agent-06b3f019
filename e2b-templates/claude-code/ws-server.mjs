@@ -6,6 +6,7 @@
 
 import { WebSocketServer } from "ws";
 import { execSync, spawn } from "child_process";
+import { timingSafeEqual } from "crypto";
 import { appendFileSync, writeFileSync, mkdirSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
@@ -67,36 +68,6 @@ let eventBuffer = [];
 // Track connected clients
 const clients = new Set();
 
-// Agent-to-agent inbox. A queued message starts as the CLI's next user turn
-// (`--resume <session_id>`) once the current turn's process exits cleanly.
-// Ids are deduped for the server's lifetime, so a retried send (backend or
-// activity retry) can never start a second turn.
-const inboxSeen = new Set();
-const inboxQueue = [];
-let inboxClosed = false;
-let claudeSessionId = null;
-
-function acceptInboundMessage(ws, msg) {
-  const id = typeof msg.id === "string" ? msg.id : "";
-  const text = typeof msg.text === "string" ? msg.text.replace(/\0/g, "") : "";
-  const ack = (status, reason) =>
-    ws.send(
-      JSON.stringify({
-        type: "user_message_ack",
-        id,
-        status,
-        ...(reason ? { reason } : {}),
-      }),
-    );
-  if (!id || !text.trim()) return ack("rejected", "id and text are required");
-  if (inboxSeen.has(id)) return ack("duplicate");
-  if (inboxClosed) return ack("rejected", "session has finished");
-  inboxSeen.add(id);
-  inboxQueue.push({ id, text });
-  log("info", "Queued inbound user message", { id, bytes: text.length });
-  return ack("queued");
-}
-
 // After the CLI exits the server keeps serving its final buffer so an agent
 // activity that detached for a deploy (or crashed and is retried after its 5m
 // heartbeat timeout) can reattach and read the result. Closing the session
@@ -138,11 +109,6 @@ wss.on("connection", (ws) => {
     try {
       const msg = JSON.parse(data.toString());
 
-      if (msg.type === "user_message") {
-        acceptInboundMessage(ws, msg);
-        return;
-      }
-
       if (msg.type === "stdin") {
         log("info", "Received stdin", { bytes: msg.data?.length || 0 });
 
@@ -156,12 +122,18 @@ wss.on("connection", (ws) => {
           return;
         }
 
+        // Raw stdin stays closed to callers: only authenticated, idempotent
+        // `user_turn` messages reach the CLI (see handleUserTurn).
         ws.send(
           JSON.stringify({
             type: "stdin_error",
-            error: "Claude Code CLI print session is non-interactive",
+            error: "Raw stdin is disabled; send an authenticated user_turn",
           }),
         );
+      } else if (msg.type === "user_turn") {
+        ws.send(JSON.stringify(handleUserTurn(msg)));
+      } else if (msg.type === "hand_back") {
+        ws.send(JSON.stringify(handleHandBack(msg)));
       }
     } catch (e) {
       log("error", "Failed to parse message", { error: e.message });
@@ -224,13 +196,6 @@ function announceExit(exitCode) {
   if (exitAnnounced) return;
   exitAnnounced = true;
   finalExitCode = exitCode;
-  inboxClosed = true;
-  if (inboxQueue.length > 0) {
-    appendEvent({
-      type: "user_message_undelivered",
-      message_ids: inboxQueue.map((turn) => turn.id),
-    });
-  }
   appendEvent({
     type: "final",
     status: exitCode === 0 ? "completed" : "failed",
@@ -445,9 +410,6 @@ function detailFromToolInput(input, paths) {
 
 function emitClaudeMessage(message) {
   if (message.type === "system" && message.subtype === "init") {
-    if (typeof message.session_id === "string" && message.session_id) {
-      claudeSessionId = message.session_id;
-    }
     appendEvent({
       type: "session",
       raw_type: "system.init",
@@ -532,38 +494,150 @@ function emitClaudeMessage(message) {
   });
 }
 
-/** Start the next queued inbound message as a resumed turn, if any. */
-function startNextInboundTurn() {
-  if (shuttingDown || inboxQueue.length === 0 || !claudeSessionId) return false;
-  const turn = inboxQueue.shift();
-  appendEvent({ type: "user_turn", message_id: turn.id, text: turn.text });
-  appendOutput("stdout", `[Rose] New user turn ${turn.id}\n`);
-  runClaudeCli(turn);
-  return true;
+// ---------------------------------------------------------------------------
+// Direct chat: user turns delivered to the running CLI
+// ---------------------------------------------------------------------------
+//
+//   backend route / agents helper ──user_turn{id,token,text}──► this server
+//       │                                   │ dedupe by id (delivered once)
+//       │                                   ▼
+//       │                     CLI stdin (stream-json user message)
+//       ◄──user_turn_ack{id,status}──       │ events broadcast to every client
+//                                           ▼ (FE live terminal + activity)
+//
+// The CLI reads stream-json input and keeps running while stdin is open. An
+// autonomous run ends stdin on its first `result`, exactly like the old
+// one-shot prompt. The first user turn puts the session on a "direct hold": stdin stays
+// open between turns until the user hands back (or the hold idles out), so
+// the user can keep talking to the same CLI conversation.
+const TURN_TOKEN = process.env.CODE_SESSION_TURN_TOKEN || "";
+const DIRECT_HOLD_IDLE_MS = (() => {
+  const raw = Number.parseInt(process.env.CODE_SESSION_DIRECT_HOLD_IDLE_MS || "", 10);
+  return Number.isInteger(raw) && raw > 0 ? raw : 10 * 60 * 1000;
+})();
+const MAX_TURN_TEXT_CHARS = 100_000;
+const MAX_TURN_ID_CHARS = 128;
+
+let cliChild = null;
+let cliStdinOpen = false;
+let turnActive = false;
+let directHold = false;
+let directHoldTimer = null;
+const deliveredTurnIds = new Set();
+
+function userMessageLine(text) {
+  return (
+    JSON.stringify({
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text }] },
+    }) + "\n"
+  );
 }
 
-function runClaudeCli(turn = null) {
-  const sanitizedGoal = GOAL.replace(/\0/g, "");
-  const prompt = turn ? turn.text : `Task:\n${sanitizedGoal}`;
+function tokenMatches(candidate) {
+  if (!TURN_TOKEN || typeof candidate !== "string") return false;
+  const expected = Buffer.from(TURN_TOKEN, "utf8");
+  const actual = Buffer.from(candidate, "utf8");
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
 
-  if (!turn) {
-    appendEvent({
-      type: "session",
-      status: "starting",
-      cwd: workDir,
-      prompt_version: promptVersion(),
-    });
+function endCliStdin(reason) {
+  if (!cliStdinOpen || !cliChild) return;
+  cliStdinOpen = false;
+  if (directHoldTimer) {
+    clearTimeout(directHoldTimer);
+    directHoldTimer = null;
   }
+  log("info", "Closing CLI stdin", { reason });
+  cliChild.stdin.end();
+}
+
+function releaseDirectHold(reason) {
+  if (!directHold) return;
+  directHold = false;
+  appendEvent({ type: "direct_chat", status: "released", reason });
+  if (!turnActive) endCliStdin(`direct hold released: ${reason}`);
+}
+
+function onCliTurnResult() {
+  turnActive = false;
+  if (!directHold) {
+    endCliStdin("autonomous turn finished");
+    return;
+  }
+  if (directHoldTimer) clearTimeout(directHoldTimer);
+  directHoldTimer = setTimeout(
+    () => releaseDirectHold("idle"),
+    DIRECT_HOLD_IDLE_MS,
+  );
+}
+
+function turnAck(id, status, reason) {
+  return { type: "user_turn_ack", id, status, ...(reason ? { reason } : {}) };
+}
+
+function handleUserTurn(msg) {
+  const id = typeof msg.id === "string" ? msg.id : "";
+  if (!tokenMatches(msg.token)) return turnAck(id, "rejected", "unauthorized");
+  if (!id || id.length > MAX_TURN_ID_CHARS) {
+    return turnAck(id, "rejected", "invalid_id");
+  }
+  if (deliveredTurnIds.has(id)) return turnAck(id, "duplicate");
+  const text = typeof msg.text === "string" ? msg.text.replace(/\0/g, "") : "";
+  if (!text.trim() || text.length > MAX_TURN_TEXT_CHARS) {
+    return turnAck(id, "rejected", "invalid_text");
+  }
+  if (exitAnnounced || !cliStdinOpen || !cliChild) {
+    return turnAck(id, "rejected", "session_ended");
+  }
+  const sender = msg.sender === "agent" ? "agent" : "user";
+  deliveredTurnIds.add(id);
+  if (directHoldTimer) {
+    clearTimeout(directHoldTimer);
+    directHoldTimer = null;
+  }
+  if (!directHold) {
+    directHold = true;
+    appendEvent({ type: "direct_chat", status: "held", sender });
+  }
+  appendEvent({ type: "user_turn", turn_id: id, sender, text });
+  appendOutput("stdout", `[${sender === "user" ? "You" : "Agent"}] ${text}\n`);
+  turnActive = true;
+  cliChild.stdin.write(userMessageLine(text));
+  log("info", "Delivered user turn", { id, sender, chars: text.length });
+  return turnAck(id, "delivered");
+}
+
+function handleHandBack(msg) {
+  if (!tokenMatches(msg.token)) {
+    return { type: "hand_back_ack", status: "rejected", reason: "unauthorized" };
+  }
+  const wasHeld = directHold;
+  releaseDirectHold("handed_back");
+  return { type: "hand_back_ack", status: wasHeld ? "released" : "not_held" };
+}
+
+async function runClaudeCli() {
+  const sanitizedGoal = GOAL.replace(/\0/g, "");
+  const prompt = userMessageLine(`Task:\n${sanitizedGoal}`);
+
+  appendEvent({
+    type: "session",
+    status: "starting",
+    cwd: workDir,
+    prompt_version: promptVersion(),
+  });
   log("info", "Starting Claude Code CLI", {
     model: CLAUDE_CODE_MODEL,
     workDir,
     goal: sanitizedGoal.slice(0, 100),
-    resumeTurn: turn ? turn.id : null,
   });
 
   const args = [
     "--print",
     "--verbose",
+    "--input-format",
+    "stream-json",
     "--output-format",
     "stream-json",
     "--model",
@@ -579,11 +653,10 @@ function runClaudeCli(turn = null) {
   if (CODE_AGENT_SYSTEM_PROMPT) {
     args.push("--append-system-prompt", CODE_AGENT_SYSTEM_PROMPT);
   }
-  if (turn) {
-    args.push("--resume", claudeSessionId);
-  }
 
-  // The prompt is delivered on stdin, NOT as a positional argument.
+  // The prompt is delivered on stdin, NOT as a positional argument. With
+  // `--input-format stream-json` it is one JSON user message; stdin stays open
+  // so direct-chat user turns can follow (closed by endCliStdin).
   // Claude Code CLI (>=2.x) ignores a positional prompt when
   // `--output-format stream-json` is set and reads the prompt from stdin
   // instead; passing it positionally makes the CLI exit 1 immediately with
@@ -618,8 +691,10 @@ function runClaudeCli(turn = null) {
       code: err?.code,
     });
   });
+  cliChild = child;
+  cliStdinOpen = true;
+  turnActive = true;
   child.stdin.write(prompt);
-  child.stdin.end();
 
   let stdoutRemainder = "";
   let sawResult = false;
@@ -637,6 +712,7 @@ function runClaudeCli(turn = null) {
           sawResult = true;
         }
         emitClaudeMessage(message);
+        if (message?.type === "result") onCliTurnResult();
       } catch (err) {
         appendOutput("stdout", line + "\n");
         appendEvent({ type: "stdout", text: line });
@@ -679,9 +755,10 @@ function runClaudeCli(turn = null) {
       }
     }
     processExited = true;
+    cliStdinOpen = false;
+    if (directHoldTimer) clearTimeout(directHoldTimer);
     const exitCode = Number.isInteger(code) ? code : 1;
     log("info", "Claude Code CLI exited", { exitCode, sawResult });
-    if (exitCode === 0 && startNextInboundTurn()) return;
     finishRun(exitCode);
   });
 }

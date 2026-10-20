@@ -33,6 +33,7 @@ import {
 } from './e2bWsServerOverlay';
 import { createLocalClaudeCodeSessionIfBillingBlocked } from './claudeCodeLocalSession';
 import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
+import { codeSessionTurnToken } from './codeSessionTurns';
 import {
   applyUserUiSandboxEnvs,
   prepareUserUiWorkspaceSafe,
@@ -184,6 +185,11 @@ async function createClaudeCodeSessionUnlocked(
     CLAUDE_CODE_GOAL: goal,
     CLAUDE_CODE_MODEL: model,
     CODE_AGENT_SYSTEM_PROMPT: systemPrompt,
+    // Write capability for direct-chat user turns (codeSessionTurns.ts). The
+    // ws URL the browser reads stays read-only without it.
+    ...(process.env.BACKEND_API_KEY
+      ? { CODE_SESSION_TURN_TOKEN: codeSessionTurnToken(taskId) }
+      : {}),
   };
 
   // Try user's own credentials first, then rotate through the pool. The agent's
