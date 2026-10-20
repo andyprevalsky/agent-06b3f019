@@ -77,6 +77,17 @@ binds the original and rerun log hashes and verifies only documentation
 changed between these source snapshots. Existing permanent test
 coverage is retained. No bounds, assertions, retries, source or schemas changed.
 
+Independent read-only review subsequently ran four unchanged bounded parameter
+trials: PASS 6.82s, 6.82s, 5.82s and 5.78s, all with three actual requests.
+A private trace of the final passing trial showed first/second/third sends at
++0.146s/+1.285s/+2.384s and budget exhaustion at +5.507s. This confirms the
+passing shared-budget path; it does not attribute the original missing send.
+The original provider call log lacks per-call timestamps and the failed
+assertion did not retain captured subprocess stderr. The independent report
+`A3-native-stop-independent-RCA-result.txt` and compact
+`A3-reviewer-native-stop-evidence.json` preserve these limits. No controller
+correctness defect or causal repair was established.
+
 ## Solution
 
 Unresolved. Retain the failure and exact ownership receipt; do not label a
