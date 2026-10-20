@@ -13,9 +13,10 @@
  * how a drawer closes (row 67). Hidden below md. Rendered only with the Rose
  * Desktop flag (stock website unchanged).
  *
- * RECONNECT DOT (row 68): GET /api/integrations; when any integration needs
- * reconnection the Integrations icon carries a 7px #ef4444 dot with a 2px
- * background-colored ring, and its tooltip names them.
+ * RECONNECT DOT (row 68): the Integrations page's status data
+ * (GET /api/integrations + /api/integrations/plaid/items); when any
+ * integration needs reconnection the Integrations icon carries a 7px #ef4444
+ * dot with a 2px background-colored ring, and its tooltip names them.
  */
 
 import { useQuery } from '@tanstack/react-query';
@@ -93,7 +94,7 @@ function useReconnectNeeded(): string[] {
     staleTime: 60_000,
     retry: false,
   });
-  return integrationsNeedingReconnect(query.data ?? []);
+  return query.data === undefined ? [] : integrationsNeedingReconnect(query.data);
 }
 
 export function RoseAppIcons() {

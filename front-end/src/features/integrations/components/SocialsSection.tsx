@@ -51,9 +51,10 @@ function SocialsIcon() {
 export function XIcon() {
   return (
     <svg className="w-6 h-6" viewBox="0 0 24 24">
-      <rect width="24" height="24" rx="5" fill="#000000" />
+      <rect width="24" height="24" rx="5" fill="#000000" className="dark:fill-[#d6d6d2]" />
       <path
         fill="white"
+        className="dark:fill-[#262624]"
         d="M13.3 10.75L18.18 5h-1.16l-4.23 4.99L9.26 5H5l5.11 7.55L5 19h1.16l4.47-5.27L14.74 19H19l-5.7-8.25zm-1.58 1.87l-.52-.75L6.68 5.92h1.77l3.32 4.83.52.75 4.33 6.29h-1.77l-3.53-5.17z"
         transform="scale(0.72) translate(4.7, 4.7)"
       />

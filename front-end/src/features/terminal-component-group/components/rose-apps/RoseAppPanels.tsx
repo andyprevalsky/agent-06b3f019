@@ -83,7 +83,7 @@ function SettingsBody({ onLogout }: { onLogout?: () => void }) {
 
 function PanelBody({ app }: { app: PanelApp }): ReactNode {
   const apps = useRoseApps();
-  if (app === 'integrations') return <IntegrationsPage />;
+  if (app === 'integrations') return <IntegrationsPage embedded />;
   if (app === 'benchmarks') return <BenchmarksPage onOpenAgent={apps?.openAgent} />;
   if (app === 'feedback') return <FeedbackAppPanel />;
   if (app === 'health') return <AdminHealthPage />;

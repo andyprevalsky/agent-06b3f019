@@ -2352,7 +2352,8 @@ describe('BrowserStatusBar (blackbox)', () => {
     expect(within(drawer).getByTestId('browser-agent-pane')).toBeInTheDocument();
     expect(within(drawer).getByText('Active')).toBeInTheDocument();
 
-    await user.click(within(drawer).getByRole('button', { name: 'Close browser' }));
+    // No close X on desktop (UI ledger row 67): Escape / the Browser icon close it.
+    await user.keyboard('{Escape}');
 
     await waitFor(() => expect(drawer).toHaveAttribute('data-state', 'closed'));
     expect(screen.queryByTestId('browser-agent-pane')).not.toBeInTheDocument();

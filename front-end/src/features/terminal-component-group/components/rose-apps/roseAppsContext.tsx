@@ -21,6 +21,9 @@
  *   unregister after switching agents --> tab kept (session still running)
  *   agent leaves the active set (completed/failed/archived) --> tab removed
  *
+ * RELOAD: the drawer's Reload button bumps browserReloadKey; the focused
+ * BrowserStatusBar keys its portaled live view on it, so the viewer remounts.
+ *
  * The drawer body for an agent tab is a DOM slot. The focused task's
  * BrowserStatusBar portals its live view into it, so take/hand-back control,
  * session binding and progress state stay owned by that status bar (React
@@ -93,7 +96,10 @@ function useAgentTabs(agents: Agent[], selectedAgentId: string | null) {
       const existing = prev.find((t) => t.agentId === tab.agentId);
       if (existing === undefined) return [...prev, tab];
       // Another browser of the same agent owns the tab; keep the focused task.
-      if (existing.taskId !== tab.taskId || existing.live === tab.live) return prev;
+      if (existing.taskId !== tab.taskId) return prev;
+      if (existing.live === tab.live && (existing.pageUrl ?? null) === (tab.pageUrl ?? null)) {
+        return prev;
+      }
       return prev.map((t) => (t.agentId === tab.agentId ? tab : t));
     });
   }, []);
@@ -151,6 +157,8 @@ export function RoseAppsProvider({
   const [browserTabAgentId, setBrowserTabAgentId] = useState<string | null>(null);
   const [slot, setSlot] = useState<HTMLElement | null>(null);
   const [isResizing, setIsResizing] = useState(false);
+  const [browserReloadKey, setBrowserReloadKey] = useState(0);
+  const reloadBrowser = useCallback(() => setBrowserReloadKey((k) => k + 1), []);
   const { drawerWidth, setDrawerWidth } = useDrawerWidthState();
   const { tabs, registerAgentBrowser, unregisterAgentBrowser, focusTask } = useAgentTabs(
     agents,
@@ -243,6 +251,8 @@ export function RoseAppsProvider({
       drawerWidth,
       isResizing,
       slot,
+      browserReloadKey,
+      reloadBrowser,
       toggleApp,
       closeApp,
       openAgentBrowser,
@@ -265,6 +275,8 @@ export function RoseAppsProvider({
       drawerWidth,
       isResizing,
       slot,
+      browserReloadKey,
+      reloadBrowser,
       toggleApp,
       closeApp,
       openAgentBrowser,

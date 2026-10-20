@@ -15,6 +15,7 @@ export const handlers = [
   http.get(`${API_BASE}/projects`, () => HttpResponse.json([])),
   // Rose Desktop Integrations icon reads integration health; nothing connected by default.
   http.get(`${API_BASE}/integrations`, () => HttpResponse.json({ integrations: [] })),
+  http.get(`${API_BASE}/integrations/plaid/items`, () => HttpResponse.json({ items: [] })),
   // No persisted binding by default: live views fall back to the transcript URL.
   http.get(`${API_BASE}/browser-session/task/:taskId/live-view`, () =>
     HttpResponse.json({ error: 'Session not found' }, { status: 404 }),

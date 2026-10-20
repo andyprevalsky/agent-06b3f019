@@ -19,6 +19,10 @@ import BrowserStatusBar from '@/features/terminal-component-group/components/Bro
 import { RoseAppIcons } from '@/features/terminal-component-group/components/rose-apps/RoseAppIcons';
 import { TOOLBAR_LEAVE_GRACE_MS } from '@/features/terminal-component-group/components/query-input/useToolbarReveal';
 import {
+  addressParts,
+  latestBrowserPageUrl,
+} from '@/features/terminal-component-group/components/rose-apps/browserPageUrl';
+import {
   DRAWER_MIN_WIDTH,
   clampDrawerWidth,
   drawerWidthFromPointer,
@@ -212,7 +216,15 @@ describe('top-right app icons', () => {
     expect(phone.style.top).toBe('50%');
     expect(phone.style.transform).toBe('translateY(-50%)');
     expect(phone.className).not.toMatch(WRAPPER_CLASS);
-    expect(within(phone).getByTestId('rose-phone-device').style.boxShadow).toContain('rgba(0,0,0,.35)');
+    // No background anywhere: not around the iPhone, not between it and its
+    // Take control button — only the device and the button over the page.
+    expect(phone.className).not.toMatch(/\bbg-|backdrop/);
+    expect(phone.style.background).toBe('');
+    expect(phone.style.backgroundColor).toBe('');
+    const device = within(phone).getByTestId('rose-phone-device');
+    const takeControl = within(phone).getByRole('button', { name: 'Take control' });
+    expect([...phone.children]).toEqual([device, takeControl]);
+    expect(device.style.boxShadow).toContain('rgba(0,0,0,.35)');
     expect(within(phone).getByRole('button', { name: 'Take control' })).toBeInTheDocument();
     expect(screen.getByTestId('rose-app-panel')).toHaveAttribute('data-state', 'closed');
     // One app at a time: opening Integrations hides the phone.
@@ -253,6 +265,43 @@ describe('top-right app icons', () => {
     expect(dot.className).toContain('bg-[#ef4444]');
     expect(dot.className).toContain('h-[7px]');
     expect(screen.queryByTestId('rose-app-browser-alert')).toBeNull();
+  });
+
+  it('a Plaid bank that needs sign-in also raises the dot, named in the tooltip', async () => {
+    server.use(
+      http.get(`${API_BASE}/integrations/plaid/items`, () =>
+        HttpResponse.json({ items: [{ institutionName: 'Chase', status: 'REQUIRES_REAUTH' }] }),
+      ),
+    );
+    mockSession();
+    const user = userEvent.setup();
+    renderWithProviders(<RoseAppIcons />);
+    expect(await screen.findByTestId('rose-app-integrations-alert')).toBeInTheDocument();
+    await user.hover(screen.getByTestId('rose-app-integrations'));
+    expect(
+      (await screen.findAllByText('Integrations · reconnect Plaid (Chase)')).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it('Integrations drawer reuses the page: Browser Cookies first, no summary line, dark-visible marks', async () => {
+    mockSession();
+    const user = userEvent.setup();
+    renderWithProviders(<RoseAppIcons />);
+    await user.click(screen.getByTestId('rose-app-integrations'));
+    const body = screen.getByTestId('rose-app-panel-integrations');
+    await waitFor(() => expect(within(body).getByText('Browser Cookies')).toBeInTheDocument());
+    const headings = within(body)
+      .getAllByRole('heading', { level: 3 })
+      .map((h) => h.textContent);
+    expect(headings[0]).toBe('Browser Cookies');
+    expect(body.textContent).not.toMatch(/\d+ of \d+ connected/i);
+    expect(body.textContent).not.toMatch(/Rose reads these/i);
+    // Embedded: the drawer has its own header, so the page drops its top inset.
+    expect(body.querySelector('.pt-20')).toBeNull();
+    // Dark glyphs lighten in dark mode (light unchanged).
+    const plaid = body.querySelector('svg[viewBox="0 0 47 48"]');
+    expect(plaid?.getAttribute('class')).toContain('text-[#111111]');
+    expect(plaid?.getAttribute('class')).toContain('dark:text-[#d6d6d2]');
   });
 
   it('a healthy account shows no reconnect dot', async () => {
@@ -337,6 +386,74 @@ describe('Browser drawer', () => {
     } finally {
       window.history.replaceState({}, '', '/');
     }
+  });
+
+  it('has browser chrome: Back / Forward dimmed, Reload remounts the live view, address bar shows the page', async () => {
+    const user = userEvent.setup();
+    const navigated: Message = {
+      ...ACTION,
+      message_id: 'm-2',
+      metadata: {
+        task_id: 'task-1',
+        action_type: 'navigate',
+        title: 'Opening tickets',
+        auxiliary: { current_url: 'https://www.palisadestahoe.com/lift-tickets/2026-27' },
+      },
+    };
+    renderWithProviders(
+      withAgent([ACTION, navigated], 'agent-a', <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />),
+    );
+    await user.click(screen.getByTitle('Preview').parentElement!);
+    const drawer = screen.getByTestId('browser-app-drawer');
+    await waitFor(() => expect(drawer).toHaveAttribute('data-state', 'open'));
+
+    const chrome = within(drawer).getByTestId('browser-chrome');
+    const labels = within(chrome)
+      .getAllByRole('button')
+      .map((b) => b.getAttribute('aria-label'));
+    expect(labels).toEqual(['Back', 'Forward', 'Reload']);
+    expect(within(chrome).getByRole('button', { name: 'Back' })).toBeDisabled();
+    expect(within(chrome).getByRole('button', { name: 'Forward' })).toBeDisabled();
+    const address = within(chrome).getByTestId('browser-address-bar');
+    expect(address.className).toContain('rounded-full');
+    expect(within(address).getByText('www.palisadestahoe.com').tagName).toBe('B');
+    expect(address).toHaveTextContent('www.palisadestahoe.com/lift-tickets/2026-27');
+
+    // Reload remounts the agent's live view (a fresh viewer connection).
+    const before = within(drawer).getByTestId('browser-agent-pane');
+    const reload = within(chrome).getByRole('button', { name: 'Reload' });
+    expect(reload).toBeEnabled();
+    await user.click(reload);
+    const after = within(drawer).getByTestId('browser-agent-pane');
+    expect(after).not.toBe(before);
+    expect(before.isConnected).toBe(false);
+
+    // Root: nothing to reload, no page.
+    await user.click(within(drawer).getByTestId('browser-tab-root'));
+    expect(within(chrome).getByRole('button', { name: 'Reload' })).toBeDisabled();
+    expect(within(chrome).getByTestId('browser-address-bar')).toHaveTextContent('Your browser');
+  });
+
+  it('reads the page URL from the latest browser step of that task only', () => {
+    const msg = (id: string, metadata: Record<string, unknown>): Message => ({
+      ...ACTION,
+      message_id: id,
+      metadata: metadata as Message['metadata'],
+    });
+    expect(latestBrowserPageUrl([], 'task-1')).toBeNull();
+    expect(
+      latestBrowserPageUrl(
+        [
+          msg('a', { task_id: 'task-1', current_url: 'https://first.example/a' }),
+          msg('b', { task_id: 'task-1', target_url: 'https://second.example/b?q=1' }),
+          msg('c', { task_id: 'task-2', url: 'https://other-task.example' }),
+          msg('d', { task_id: 'task-1', title: 'no url', url: 'about:blank' }),
+        ],
+        'task-1',
+      ),
+    ).toBe('https://second.example/b?q=1');
+    expect(addressParts('https://second.example/b?q=1')).toEqual({ host: 'second.example', rest: '/b?q=1' });
+    expect(addressParts('https://second.example/')).toEqual({ host: 'second.example', rest: '' });
   });
 
   it('clamps the panel width when resized', async () => {

@@ -26,6 +26,8 @@ export interface AgentBrowserTab {
   agentId: string;
   taskId: string;
   live: boolean;
+  /** Page the agent's browser is on (address bar, UI ledger row 74); null = unknown yet. */
+  pageUrl?: string | null;
 }
 
 export interface RoseAppsValue {
@@ -38,6 +40,9 @@ export interface RoseAppsValue {
   drawerWidth: number;
   isResizing: boolean;
   slot: HTMLElement | null;
+  /** Bumped by the Browser drawer's Reload button; the live view remounts on change. */
+  browserReloadKey: number;
+  reloadBrowser: () => void;
   toggleApp: (app: RoseApp) => void;
   closeApp: () => void;
   openAgentBrowser: (agentId: string, taskId: string) => void;

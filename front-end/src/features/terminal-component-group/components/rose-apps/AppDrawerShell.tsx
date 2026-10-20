@@ -14,9 +14,11 @@
  *                    paused while dragging).
  *   variant 'full':  Browser — full height from the left bar (64px) to the
  *                    right edge; not resizable.
- * Mobile (< md): a full-height bottom sheet sliding up.
+ * Mobile (< md): a full-height bottom sheet sliding up. The top-right icons
+ * are hidden there, so the sheet keeps its own close X (top-right).
  */
 
+import { X } from 'lucide-react';
 import { useCallback, useEffect, useRef, type ReactNode } from 'react';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { cn } from '@/lib/utils';
@@ -140,6 +142,16 @@ export function AppDrawerShell({
     >
       {!isMobile && variant === 'panel' && (
         <DrawerResizeHandle label={`Resize ${label.toLowerCase()}`} />
+      )}
+      {isMobile && (
+        <button
+          type="button"
+          aria-label={`Close ${label.toLowerCase()}`}
+          onClick={apps.closeApp}
+          className="absolute right-3 top-3 z-10 rounded p-1 text-[hsl(240_8%_45%)] dark:text-[#a3a39d]"
+        >
+          <X className="h-4 w-4" />
+        </button>
       )}
       {children}
     </section>
