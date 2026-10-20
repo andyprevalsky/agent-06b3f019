@@ -19,6 +19,7 @@ import {
 } from '../../providers/userUi/manifest';
 import { findLatestRosePreview } from '../../providers/codePreview/service';
 import { isRoseDevUser } from '../../utils/roseDevAccess';
+import { readDisplayBundleFile } from '../../providers/agentTools/displayBundle';
 import { getDisplayObject } from '../../providers/agentTools/media';
 import { broadcastUserUiActiveChanged } from '../../providers/chat/supabaseBroadcast';
 import { createLogger } from '../../providers/logger';
@@ -204,10 +205,32 @@ export async function readUsercontent(versionId: string, path: string) {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const DISPLAY_HTML_RE = /^[0-9a-f]{64}\.html$/;
+const DISPLAY_HASH_RE = /^[0-9a-f]{64}$/;
+
+const OWNER_CACHE_MAX = 10_000;
+const ownerCache = new Map<string, string>();
+
+/** An agent's owner never changes: cache hits (bounded), never misses. */
+async function displayOwnerId(agentId: string): Promise<string | null> {
+  const hit = ownerCache.get(agentId);
+  if (hit !== undefined) return hit;
+  const ownerId = await repo.findAgentOwnerId(agentId);
+  if (ownerId === null) return null;
+  if (ownerCache.size >= OWNER_CACHE_MAX) ownerCache.delete(ownerCache.keys().next().value as string);
+  ownerCache.set(agentId, ownerId);
+  return ownerId;
+}
 
 /** A `display` HTML page by (agent, content hash); null when not found. */
 export async function readDisplayHtml(agentId: string, file: string): Promise<Buffer | null> {
   if (!UUID_RE.test(agentId) || !DISPLAY_HTML_RE.test(file)) return null;
-  const ownerId = await repo.findAgentOwnerId(agentId);
+  const ownerId = await displayOwnerId(agentId);
   return ownerId === null ? null : getDisplayObject(`${ownerId}/display/${file}`);
+}
+
+/** One file of a displayed bundle (site, model or PDF viewer); null when not found. */
+export async function readDisplayBundle(agentId: string, hash: string, path: string) {
+  if (!UUID_RE.test(agentId) || !DISPLAY_HASH_RE.test(hash)) return null;
+  const ownerId = await displayOwnerId(agentId);
+  return ownerId === null ? null : readDisplayBundleFile(ownerId, hash, path);
 }

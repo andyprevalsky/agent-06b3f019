@@ -2,15 +2,18 @@
  * Media helpers for the `display` tool: content-type sniffing, a bounded
  * SSRF-guarded URL fetch, and the object store the displayed bytes live in.
  *
- *   bytes ─► classifyDisplayMedia ─► image/* | video/* | text/html | null (rejected)
+ *   bytes ─► classifyDisplayMedia ─► image/* | video/* | application/pdf | model/* |
+ *                                    text/html | null (rejected)
  *   url   ─► fetchDisplayMedia (http(s) only, public addresses only — checked
  *            again at connect time — ≤ maxBytes, ≤ 5 redirects, timeout)
  *
- * Images and videos are decided from magic bytes, never from a filename or a
- * remote Content-Type header, so an HTML/SVG payload renamed to .png is
- * refused. text/html is accepted only when the caller declared HTML (a .html /
- * .htm name or a text/html response) AND the bytes are UTF-8 markup; the UI
- * renders it in a sandboxed frame on the separate user-content origin.
+ * Images, videos, PDFs and GLB models are decided from magic bytes, never from
+ * a filename or a remote Content-Type header, so an HTML/SVG payload renamed
+ * to .png is refused. text/html is accepted only when the caller declared HTML
+ * (a .html / .htm name or a text/html response) AND the bytes are UTF-8
+ * markup; text model formats (.gltf JSON, .obj, ASCII .stl) and .usdz need
+ * their extension plus a structural check. HTML and models are only ever
+ * served from the sandboxed user-content origin (displayBundle.ts).
  *
  * Storage: Supabase Storage (providers/storage.ts) by default; with
  * DISPLAY_STORAGE_BACKEND=local (+ DISPLAY_STORAGE_LOCAL_DIR) objects go to
@@ -74,9 +77,53 @@ export function classifyDisplayMedia(
 ): string | null {
   const sniffed = sniffDisplayMediaType(bytes);
   if (sniffed !== null) return sniffed;
+  if (ascii(bytes, 0, '%PDF-')) return 'application/pdf';
+  if (ascii(bytes, 0, 'glTF')) return 'model/gltf-binary';
+  const model = declaredModelType(bytes, hint.filename ?? '');
+  if (model !== null) return model;
   const declaredHtml =
     /\.html?$/i.test(hint.filename ?? '') || /^text\/html\b/i.test(hint.contentType ?? '');
   return declaredHtml && looksLikeHtml(bytes) ? 'text/html' : null;
+}
+
+function utf8(bytes: Buffer): string | null {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+/** Text / zip model formats: the extension names the format, the bytes must match it. */
+function declaredModelType(bytes: Buffer, filename: string): string | null {
+  const ext = filename.slice(filename.lastIndexOf('.') + 1).toLowerCase();
+  if (ext === 'usdz') return sig(bytes, 0, 0x50, 0x4b, 0x03, 0x04) ? 'model/vnd.usdz+zip' : null;
+  if (ext === 'stl') {
+    const binary = bytes.length >= 84 && 84 + 50 * bytes.readUInt32LE(80) === bytes.length;
+    if (binary) return 'model/stl';
+    return /^\s*solid\b/.test(utf8(bytes.subarray(0, 512)) ?? '') ? 'model/stl' : null;
+  }
+  if (ext !== 'gltf' && ext !== 'obj') return null;
+  const text = utf8(bytes);
+  if (text === null || text.includes('\u0000')) return null;
+  if (ext === 'obj') return /^v\s+-?[\d.]/m.test(text) ? 'model/obj' : null;
+  try {
+    const json = JSON.parse(text) as { asset?: unknown };
+    return json !== null && typeof json.asset === 'object' ? 'model/gltf+json' : null;
+  } catch {
+    return null;
+  }
+}
+
+/** What the UI renders for a displayed type (the row's `kind`). */
+export type DisplayKind = 'page' | 'bundle' | 'model' | 'image' | 'video' | 'pdf';
+
+export function displayKindForType(mimeType: string): DisplayKind {
+  if (mimeType.startsWith('image/')) return 'image';
+  if (mimeType.startsWith('video/')) return 'video';
+  if (mimeType === 'application/pdf') return 'pdf';
+  if (mimeType.startsWith('model/')) return 'model';
+  return 'page';
 }
 
 export const DISPLAY_EXTENSIONS: Record<string, string> = {
@@ -91,6 +138,12 @@ export const DISPLAY_EXTENSIONS: Record<string, string> = {
   'video/webm': 'webm',
   'video/quicktime': 'mov',
   'video/mp4': 'mp4',
+  'application/pdf': 'pdf',
+  'model/gltf-binary': 'glb',
+  'model/gltf+json': 'gltf',
+  'model/obj': 'obj',
+  'model/stl': 'stl',
+  'model/vnd.usdz+zip': 'usdz',
 };
 
 export class DisplayFetchError extends Error {}
@@ -249,14 +302,27 @@ export async function putDisplayObject(key: string, body: Buffer, contentType: s
  * is the write-once `<owner>/display/<sha256>.html` of that agent's owner.
  */
 export function displayUsercontentUrl(agentId: string, sha256: string): string {
-  const configured = process.env.USERCONTENT_BASE_URL?.trim();
+  return `${displayUsercontentBase()}/usercontent/display/${agentId}/${sha256}.html`;
+}
+
+/**
+ * Entry URL of a displayed bundle (site, model viewer or PDF viewer): every
+ * file is under `/usercontent/display/<agentId>/<bundleHash>/`, so relative
+ * paths inside the bundle resolve against its own files.
+ */
+export function displayBundleUsercontentUrl(agentId: string, hash: string, entry: string): string {
+  const path = entry.split('/').map(encodeURIComponent).join('/');
+  return `${displayUsercontentBase()}/usercontent/display/${agentId}/${hash}/${path}`;
+}
+
+function displayUsercontentBase(): string {
   const base =
-    configured ||
+    process.env.USERCONTENT_BASE_URL?.trim() ||
     process.env.ROSE_UI_PUBLISH_BASE_URL?.trim() ||
     process.env.BACKEND_URL?.trim() ||
     process.env.RENDER_EXTERNAL_URL?.trim() ||
     `http://localhost:${process.env.PORT || 3001}`;
-  return `${base.replace(/\/+$/, '')}/usercontent/display/${agentId}/${sha256}.html`;
+  return base.replace(/\/+$/, '');
 }
 
 export async function getDisplayObject(key: string): Promise<Buffer | null> {
