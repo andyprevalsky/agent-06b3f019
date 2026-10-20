@@ -43,10 +43,7 @@ export function PopularGoalsCarousel({
   return (
     <div
       data-testid="popular-goals-row"
-      className={cn(
-        'relative z-10',
-        roseDesktop ? 'mx-auto mb-[30px] w-full max-w-4xl' : 'mb-4',
-      )}
+      className={cn('relative z-10', roseDesktop ? 'mx-auto mb-[30px] w-full max-w-4xl' : 'mb-4')}
     >
       <div className="flex items-center gap-3">
         <span className="hidden md:block text-sm text-muted-foreground whitespace-nowrap flex-shrink-0">

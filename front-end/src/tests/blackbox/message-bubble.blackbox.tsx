@@ -18,6 +18,7 @@ import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import MessageBubble from '@/features/terminal-component-group/components/MessageBubble';
+import { RoseDesktopContext } from '@/hooks/roseDesktopContext';
 import { server } from './msw/server';
 import { baseMessage, renderBubble, storeTestSession } from './message-bubble.fixtures';
 
@@ -393,7 +394,7 @@ describe('MessageBubble', () => {
     await waitFor(() => expect(container.textContent).toContain('streaming body'));
   });
 
-  it('renders USER message with image file_pointer inline (no chip) while it loads', async () => {
+  it('renders USER message with image file_pointer showing loading placeholder', async () => {
     const msg = baseMessage({
       role: 'USER',
       text: 'look',
@@ -407,6 +408,29 @@ describe('MessageBubble', () => {
       },
     });
     const { container } = renderBubble(<MessageBubble message={msg} agentId="agent-img" />);
+    // Image placeholder renders the filename while signed URL loads.
+    await waitFor(() => expect(screen.getByText('pic.png')).toBeInTheDocument());
+    expect(container.textContent).toContain('look');
+  });
+
+  it('Rose Desktop renders the USER image file_pointer inline (no chip) while it loads', async () => {
+    const msg = baseMessage({
+      role: 'USER',
+      text: 'look',
+      file_pointer: {
+        id: 'img1',
+        storage_path: 'uploads/pic.png',
+        original_filename: 'pic.png',
+        mime_type: 'image/png',
+        size_bytes: 2048,
+        created_at: new Date().toISOString(),
+      },
+    });
+    const { container } = renderBubble(
+      <RoseDesktopContext.Provider value>
+        <MessageBubble message={msg} agentId="agent-img" />
+      </RoseDesktopContext.Provider>,
+    );
     // Images render inline by default: a reserved-size media item, no chip.
     const item = await screen.findByTestId('inline-media-item');
     expect(item).toHaveAttribute('data-filename', 'pic.png');

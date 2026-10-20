@@ -1,14 +1,16 @@
 /**
  * Blackbox tests for rose-user-ui "Images and media inline by default"
- * (UI ledger #13, desktop web + mobile web/PWA):
+ * (UI ledger #13, desktop web + mobile web/PWA). Rose Desktop flag only
+ * (lib/roseDesktop.ts); the stock UI keeps thumbnails, the lightbox and chips:
  *  - an image attachment renders as an inline <img> without any click, on
  *    desktop and at a 390px mobile viewport (no click-to-reveal chip)
  *  - layout is reserved from metadata (no layout shift) and images lazy-load
  *  - several media files form a horizontal gallery strip; videos play inline,
  *    muted, with a poster frame (preload=metadata)
  *  - tap/click opens the existing DocumentPreviewDrawer
- *  - tool results / structured outputs use the same inline path; non-media
- *    files keep their chips
+ *  - tool results / structured outputs / completion summaries use the same
+ *    inline path; non-media files keep their chips
+ *  - flag off: stock thumbnail + ImageLightbox, chips, videos download-only
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
@@ -20,7 +22,12 @@ import type { FilePointer } from '@/lib/api';
 import { AttachmentDisplay } from '@/features/terminal-component-group/components/message-bubble/AttachmentDisplay';
 import { StructuredResponseDisplay } from '@/features/terminal-component-group/components/StructuredResponseDisplay';
 import { FilePointerDisplay } from '@/features/terminal-component-group/components/FilePointerDisplay';
-import { documentPreviewKind } from '@/features/terminal-component-group/components/documentPreview.utils';
+import { CompletionSummaryCard } from '@/features/terminal-component-group/components/CompletionSummaryCard';
+import { DocumentPreviewDrawer } from '@/features/terminal-component-group/components/DocumentPreviewDrawer';
+import {
+  documentPreviewKind,
+  documentTypeLabel,
+} from '@/features/terminal-component-group/components/documentPreview.utils';
 
 const API_BASE = 'http://localhost:3001/api';
 const createSignedUrl = vi.fn(async (path: string) => ({
@@ -41,11 +48,7 @@ vi.mock('@/features/terminal-component-group/api', async () => {
   return { ...actual, downloadAttachmentAsBlob: () => downloadBlobMock() };
 });
 
-function file(
-  name: string,
-  mime: string,
-  extra: Partial<FilePointer> = {},
-): FilePointer {
+function file(name: string, mime: string, extra: Partial<FilePointer> = {}): FilePointer {
   return {
     id: `fp-${name}`,
     storage_path: `user/${name}`,
@@ -198,13 +201,60 @@ describe('inline media by default', () => {
     expect(downloadBlobMock).not.toHaveBeenCalled();
   });
 
-  it('classifies video files as previewable video', () => {
-    expect(documentPreviewKind(file('x.mov', 'application/octet-stream'))).toBe('video');
-    expect(documentPreviewKind(file('x.bin', 'video/mp4'))).toBe('video');
+  it('classifies video files as previewable video only when opted in', () => {
+    const mov = file('x.mov', 'application/octet-stream');
+    const mp4 = file('x.bin', 'video/mp4');
+    expect(documentPreviewKind(mov, { video: true })).toBe('video');
+    expect(documentPreviewKind(mp4, { video: true })).toBe('video');
+    expect(documentTypeLabel(mp4, { video: true })).toBe('Video');
+    // Stock classification is unchanged: videos stay download-only.
+    expect(documentPreviewKind(mov)).toBe('download');
+    expect(documentPreviewKind(mp4)).toBe('download');
+    expect(documentTypeLabel(mp4)).not.toBe('Video');
+    // Images and documents classify the same either way.
+    expect(documentPreviewKind(file('a.png', 'image/png'), { video: true })).toBe('image');
+    expect(documentPreviewKind(file('a.pdf', 'application/pdf'), { video: true })).toBe('pdf');
+  });
+
+  it('marks a failed signature as unavailable and still opens the drawer on tap', async () => {
+    server.use(
+      http.get(`${API_BASE}/agents/:agentId/attachments/:fileId/url`, () =>
+        HttpResponse.json({ error: 'nope' }, { status: 500 }),
+      ),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(
+      <AttachmentDisplay attachments={[file('gone.png', 'image/png')]} agentId="agent-1" />,
+    );
+    const unavailable = await screen.findByTestId('inline-media-unavailable');
+    expect(unavailable).toHaveTextContent('gone.png');
+    await user.click(unavailable);
+    expect(await screen.findByTestId('document-preview-drawer')).toBeInTheDocument();
   });
 });
 
 describe('inline media in tool results and file outputs', () => {
+  it('renders completion-summary image outputs inline, documents keep the mini preview', async () => {
+    renderWithProviders(
+      <CompletionSummaryCard
+        data={{
+          summary: 'Done',
+          outputs: [
+            {
+              key: 'shots',
+              label: 'Screenshots',
+              value: [file('home.png', 'image/png'), file('about.png', 'image/png')],
+            },
+          ],
+        }}
+      />,
+    );
+    const strip = await screen.findByTestId('inline-media');
+    expect(strip).toHaveAttribute('data-layout', 'gallery');
+    expect(await within(strip).findAllByRole('img')).toHaveLength(2);
+    expect(screen.queryByTestId('file-pointer-chip')).not.toBeInTheDocument();
+  });
+
   it('renders an output image inline instead of a chip', async () => {
     renderWithProviders(<FilePointerDisplay file={file('chart.png', 'image/png')} />);
     const img = await screen.findByRole('img', { name: 'chart.png' });
@@ -223,7 +273,9 @@ describe('inline media in tool results and file outputs', () => {
           ],
         }}
         outputSchema={{
-          fields: [{ name: 'screenshots', type: 'list[file_pointer]', description: '' }],
+          fields: [
+            { name: 'screenshots', type: 'list[file_pointer]', description: '', required: true },
+          ],
         }}
       />,
     );
@@ -233,5 +285,74 @@ describe('inline media in tool results and file outputs', () => {
     expect(await within(strips[0]).findAllByRole('img')).toHaveLength(2);
     const chips = screen.getAllByTestId('file-pointer-chip');
     expect(chips.map((c) => c.getAttribute('data-filename'))).toEqual(['report.pdf']);
+  });
+});
+
+// ─── Flag off: the stock UI is unchanged ─────────────────────────────────────
+
+describe('stock UI (Rose Desktop flag off)', () => {
+  it('keeps the 240px thumbnail and the full-screen lightbox for image attachments', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <AttachmentDisplay attachments={[file('shot.png', 'image/png')]} agentId="agent-1" />,
+      { roseDesktop: false },
+    );
+    const img = await screen.findByRole('img', { name: 'shot.png' });
+    expect(img).toHaveClass('w-60', 'h-60', 'object-cover');
+    expect(screen.queryByTestId('inline-media')).not.toBeInTheDocument();
+    await user.click(img);
+    // ImageLightbox portals a second, full-size copy with close + download.
+    await waitFor(() => expect(screen.getAllByRole('img', { name: 'shot.png' })).toHaveLength(2));
+    expect(screen.queryByTestId('document-preview-drawer')).not.toBeInTheDocument();
+  });
+
+  it('keeps videos as download tiles in messages', () => {
+    renderWithProviders(
+      <AttachmentDisplay attachments={[file('clip.mp4', 'video/mp4')]} agentId="agent-1" />,
+      { roseDesktop: false },
+    );
+    expect(screen.getByText('clip.mp4')).toBeInTheDocument();
+    expect(screen.queryByTestId('inline-media')).not.toBeInTheDocument();
+    expect(document.querySelector('video')).toBeNull();
+  });
+
+  it('keeps output images and lists as chips', () => {
+    renderWithProviders(
+      <StructuredResponseDisplay
+        structuredResponse={{
+          screenshots: [file('one.png', 'image/png'), file('report.pdf', 'application/pdf')],
+        }}
+        outputSchema={{
+          fields: [
+            { name: 'screenshots', type: 'list[file_pointer]', description: '', required: true },
+          ],
+        }}
+      />,
+      { roseDesktop: false },
+    );
+    expect(screen.queryByTestId('inline-media')).not.toBeInTheDocument();
+    const chips = screen.getAllByTestId('file-pointer-chip');
+    expect(chips.map((c) => c.getAttribute('data-filename'))).toEqual(['one.png', 'report.pdf']);
+  });
+
+  it('keeps a single output image as a chip', () => {
+    renderWithProviders(<FilePointerDisplay file={file('chart.png', 'image/png')} />, {
+      roseDesktop: false,
+    });
+    expect(screen.getByTestId('file-pointer-chip')).toHaveAttribute('data-filename', 'chart.png');
+    expect(screen.queryByTestId('inline-media')).not.toBeInTheDocument();
+  });
+
+  it('keeps videos download-only in the preview drawer', async () => {
+    renderWithProviders(
+      <DocumentPreviewDrawer file={file('clip.mp4', 'video/mp4')} open onOpenChange={vi.fn()} />,
+      { roseDesktop: false },
+    );
+    const drawer = await screen.findByTestId('document-preview-drawer');
+    await waitFor(() =>
+      expect(within(drawer).queryByTestId('document-preview-loading')).not.toBeInTheDocument(),
+    );
+    expect(within(drawer).queryByTestId('document-preview-video')).not.toBeInTheDocument();
+    expect(within(drawer).getByTestId('document-preview-download')).toBeInTheDocument();
   });
 });

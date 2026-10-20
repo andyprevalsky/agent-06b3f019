@@ -38,7 +38,13 @@ export function FilePointerDisplay({
   return <FilePointerChip file={file} showMiniPreview={showMiniPreview} />;
 }
 
-function FilePointerChip({ file, showMiniPreview }: { file: FilePointer; showMiniPreview: boolean }) {
+function FilePointerChip({
+  file,
+  showMiniPreview,
+}: {
+  file: FilePointer;
+  showMiniPreview: boolean;
+}) {
   const [open, setOpen] = useState(false);
   const typeLabel = documentTypeLabel(file);
   const miniLoadState = useDocumentPreview(file, showMiniPreview);
