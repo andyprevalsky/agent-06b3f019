@@ -15,7 +15,9 @@ interface BuildCodeAgentPromptArgs {
 
 export function buildCodeAgentSystemPrompt(args: BuildCodeAgentPromptArgs = {}): string {
   const workDir = args.workDir ?? '/home/user';
-  const mergeTarget = args.mergeTarget ? `\`${args.mergeTarget}\`` : "the repository's default branch";
+  const mergeTarget = args.mergeTarget
+    ? `\`${args.mergeTarget}\``
+    : "the repository's default branch";
   const repoLines = args.githubRepoUrl
     ? [
         '',

@@ -20,7 +20,7 @@ import { asyncHandler } from '../../utils/asyncHandler';
 import { createSessionSchema, closeSessionSchema } from './types';
 import type { FilePointer } from '../../providers/storage';
 import * as service from './service';
-import { registerCodeSessionRoutes, sendCodeSessionError } from './codeSessionRoutes';
+import { registerCodeSessionRoutes, sendCodeSessionError } from './routes.codeSessions';
 import { AgentOwnerMismatchError, MissingUserIdError, GitHubAccessDeniedError } from './service';
 
 const log = createLogger('ClaudeCodeRoutes');

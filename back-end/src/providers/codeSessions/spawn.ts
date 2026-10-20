@@ -10,6 +10,7 @@ import { effectiveOwnerAgentId, planCodeSessionBranch } from './branch';
 import { checkpointCodeSession, retireCodeSession, sweepExpiredCodeSessions } from './lifecycle';
 import { e2bSandboxFs, localSandboxFs } from './sandboxFs';
 import {
+  CodeSessionBusyError,
   CodeSessionNotFoundError,
   extendLease,
   findOwnedCodeSession,
@@ -22,6 +23,22 @@ import { CODE_SANDBOX_IDLE_TIMEOUT_MS } from '../e2bCodeSessionSandbox';
 const log = createLogger('CodeSessionSpawn');
 
 export { CodeSessionBusyError, CodeSessionNotFoundError } from './store';
+
+/** HTTP status + body for a code-session error, or null when it is not one. */
+export function codeSessionHttpError(
+  error: unknown
+): { status: number; body: { error: string; code: string } } | null {
+  if (error instanceof CodeSessionNotFoundError) {
+    return {
+      status: 404,
+      body: { error: 'Code session not found', code: 'CODE_SESSION_NOT_FOUND' },
+    };
+  }
+  if (error instanceof CodeSessionBusyError) {
+    return { status: 409, body: { error: error.message, code: 'CODE_SESSION_BUSY' } };
+  }
+  return null;
+}
 
 export interface ResolveSpawnParams {
   agentId: string;

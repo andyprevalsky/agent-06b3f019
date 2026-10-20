@@ -540,7 +540,8 @@ function gitRun(args, cwd) {
     const stdout = execFileSync("git", args, {
       cwd,
       encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
+      input: "",
+      stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
     });
     return { ok: true, out: String(stdout).trim() };

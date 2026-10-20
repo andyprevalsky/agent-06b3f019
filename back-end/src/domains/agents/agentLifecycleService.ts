@@ -172,6 +172,24 @@ async function resolveSubAgentBenchmarkFlag(
   return !isBenchmark && parent?.isBenchmark === true ? true : isBenchmark;
 }
 
+/** "New agent in this branch" must name an agent the caller owns. */
+async function assertCodeSessionShareTarget(body: CreateAgentBody, userId: string): Promise<void> {
+  const target = body.share_code_session_with;
+  if (target !== undefined && (await repo.findAgent(target, userId)) === null) {
+    throw new CodeSessionShareTargetNotFoundError(target);
+  }
+}
+
+/** Recorded before the workflow starts so its first code spawn already shares. */
+async function recordCodeSessionShare(
+  body: CreateAgentBody,
+  userId: string,
+  agentId: string
+): Promise<void> {
+  if (body.share_code_session_with === undefined) return;
+  await shareCodeSession({ userId, agentId, sharedWithAgentId: body.share_code_session_with });
+}
+
 export async function createAgent(
   body: CreateAgentBody,
   userId: string,
@@ -188,12 +206,7 @@ export async function createAgent(
   applyMemoryDefault(body, benchmarkFlag);
   disableFastModeForWorldModel(body);
   assertWorldModelModeAccess(body, userId);
-  if (
-    body.share_code_session_with !== undefined &&
-    (await repo.findAgent(body.share_code_session_with, userId)) === null
-  ) {
-    throw new CodeSessionShareTargetNotFoundError(body.share_code_session_with);
-  }
+  await assertCodeSessionShareTarget(body, userId);
   const existingSubAgent = await resumeExistingSubAgent(body, userId, verifier);
   if (existingSubAgent !== null) return existingSubAgent;
   const { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo } =
@@ -238,14 +251,7 @@ export async function createAgent(
     workflowTaskQueue: body.task_queue,
   });
   const archiveStartFixture = !isSubAgent ? await prepareAgentStartArchive(agent.agent.id) : null;
-  if (body.share_code_session_with !== undefined) {
-    // Recorded before the workflow starts so its first code spawn already shares.
-    await shareCodeSession({
-      userId,
-      agentId: agent.agent.id,
-      sharedWithAgentId: body.share_code_session_with,
-    });
-  }
+  await recordCodeSessionShare(body, userId, agent.agent.id);
 
   const workflowId = await launchAgentWorkflow(body, agent, userId, isSubAgent, agentId, verifier);
 

@@ -41,7 +41,12 @@ export function branchSlug(text: string | null | undefined, maxLength = 32): str
 }
 
 function idSuffix(agentId: string, length: number): string {
-  return agentId.replace(/[^0-9a-f]/gi, '').slice(0, length).toLowerCase() || 'x';
+  return (
+    agentId
+      .replace(/[^0-9a-f]/gi, '')
+      .slice(0, length)
+      .toLowerCase() || 'x'
+  );
 }
 
 function agentLabel(agent: { title: string | null; goal: string }): string {

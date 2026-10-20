@@ -442,7 +442,7 @@ export interface ApplyCheckpointOptions {
 }
 
 /** refs/heads/*, refs/tags/* and refs/stash: no option-looking or traversal names. */
-const SAFE_REF = /^refs\/(?:heads\/|tags\/)?(?!-)(?!.*\.\.)[A-Za-z0-9._\/-]+$/;
+const SAFE_REF = /^refs\/(?:heads\/|tags\/)?(?!-)(?!.*\.\.)[A-Za-z0-9._/-]+$/;
 
 export async function applyCheckpoint(
   fs: CodeSessionFs,
@@ -473,7 +473,9 @@ export async function applyCheckpoint(
       if (bundle === null && repo.remoteUrl === null && refs.length === 0) continue;
       const dir = repo.path === '' ? home : `${home}/${repo.path}`;
       const remote =
-        repo.remoteUrl !== null ? (options.authRemoteUrl?.(repo.remoteUrl) ?? repo.remoteUrl) : null;
+        repo.remoteUrl !== null
+          ? (options.authRemoteUrl?.(repo.remoteUrl) ?? repo.remoteUrl)
+          : null;
       const setHead =
         repo.branch !== null
           ? `git symbolic-ref HEAD ${shellQuote(`refs/heads/${repo.branch}`)}`
@@ -497,7 +499,7 @@ export async function applyCheckpoint(
             ? [`git fetch -q ${shellQuote(`${tmp}/${bundle}`)} '+refs/*:refs/rose-restore/*'`]
             : []),
           ...refs.map(([ref, sha]) => `git update-ref ${shellQuote(ref)} ${shellQuote(sha)}`),
-          "git for-each-ref --format='%(refname)' refs/rose-restore | while read -r r; do git update-ref -d \"$r\"; done",
+          'git for-each-ref --format=\'%(refname)\' refs/rose-restore | while read -r r; do git update-ref -d "$r"; done',
           setHead,
           // Mixed reset: index matches HEAD, the restored working files stay.
           'git reset -q',

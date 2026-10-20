@@ -5,16 +5,33 @@ import { asyncHandler } from '../../utils/asyncHandler';
 import type { FilePointer } from '../../providers/storage';
 import { createSessionSchema, closeSessionSchema } from './types';
 import * as service from './service';
-import {
-  registerCodeSessionTaskRoutes,
-  sendCodeSessionError,
-} from '../claude-code/codeSessionRoutes';
+import { codeSessionHttpError, keepAliveCodeTask } from '../../providers/codeSessions/spawn';
 import { GitHubAccessDeniedError, MissingUserIdError } from './service';
 
 const log = createLogger('CodexCodeRoutes');
 const router = Router();
 
-registerCodeSessionTaskRoutes(router);
+const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+
+/**
+ * POST /api/codex-code-session/:taskId/keepalive - the attached activity extends
+ * the sandbox idle window and the code-session lease (internal only).
+ */
+router.post(
+  '/:taskId/keepalive',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    if (req.isInternal !== true) {
+      res.status(403).json({ error: 'Internal callers only' });
+      return;
+    }
+    if (!UUID.test(req.params.taskId)) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
+    res.json(await keepAliveCodeTask(req.params.taskId));
+  })
+);
 
 router.post(
   '/create',
@@ -61,7 +78,11 @@ router.post(
         res.status(403).json({ error: error.detail, code: 'GITHUB_ACCESS_DENIED' });
         return;
       }
-      if (sendCodeSessionError(res, error)) return;
+      const sessionError = codeSessionHttpError(error);
+      if (sessionError !== null) {
+        res.status(sessionError.status).json(sessionError.body);
+        return;
+      }
       log.error('Failed to create Codex Code session', {
         error: error instanceof Error ? error.message : String(error),
       });

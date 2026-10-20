@@ -141,8 +141,7 @@ export async function resolveMergeFacts(
       );
       const status = record(compare.body)?.status;
       // target...head is "behind"/"identical" exactly when head is already in target.
-      contains =
-        compare.status === 200 ? status === 'behind' || status === 'identical' : false;
+      contains = compare.status === 200 ? status === 'behind' || status === 'identical' : false;
     }
     return {
       ...base,

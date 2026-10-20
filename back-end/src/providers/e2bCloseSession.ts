@@ -90,7 +90,8 @@ async function closeFacts(
   checkpoint: { seq: number; cliSessionId: string | null; repo: RepoFacts | null } | null,
   state: string
 ): Promise<CodeSessionCloseFacts> {
-  const stored = (row.lastRepoFacts ?? null) as (RepoFacts & { merge?: CodeSessionMergeFacts }) | null;
+  const stored = (row.lastRepoFacts ?? null) as
+    (RepoFacts & { merge?: CodeSessionMergeFacts }) | null;
   const repo = checkpoint?.repo ?? stored ?? null;
   const merge = await resolveMergeFacts({
     repoUrl: row.repoUrl,

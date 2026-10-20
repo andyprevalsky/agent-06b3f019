@@ -14,8 +14,7 @@ import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { authenticate, type AuthRequest } from '../../providers/auth';
 import {
   checkpointRunningTask,
-  CodeSessionBusyError,
-  CodeSessionNotFoundError,
+  codeSessionHttpError,
   getOwnedCodeSessionView,
   keepAliveCodeTask,
   retireOwnedCodeSession,
@@ -28,15 +27,10 @@ const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 
 /** Map code-session errors to HTTP; returns true when a response was sent. */
 export function sendCodeSessionError(res: Response, error: unknown): boolean {
-  if (error instanceof CodeSessionNotFoundError) {
-    res.status(404).json({ error: 'Code session not found', code: 'CODE_SESSION_NOT_FOUND' });
-    return true;
-  }
-  if (error instanceof CodeSessionBusyError) {
-    res.status(409).json({ error: error.message, code: 'CODE_SESSION_BUSY' });
-    return true;
-  }
-  return false;
+  const mapped = codeSessionHttpError(error);
+  if (mapped === null) return false;
+  res.status(mapped.status).json(mapped.body);
+  return true;
 }
 
 function callerUserId(req: HybridAuthRequest): string | undefined {
