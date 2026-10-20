@@ -9,8 +9,8 @@
  *                (the ONLY animated state)
  *   [needs-help] static amber alert glyph (no motion — a stuck row sits still)
  *   [done]       static muted check, or a muted x when the run failed
- *                (Rose dark mode, html.dark: the check is green #22c55e; light
- *                keeps the muted gray check)
+ *                (useRoseTheme dark: the check adds a dark: green #22c55e
+ *                variant; light renders the stock gray check byte-for-byte)
  *
  * The three differ by silhouette AND color, not just motion — a 3x3 grid, a
  * ringed "!", and a check/x read apart instantly at 14px, and only needs-help is
@@ -31,6 +31,7 @@
 import { useSyncExternalStore } from 'react';
 import { AlertCircle, Check, X } from 'lucide-react';
 
+import { useRoseTheme } from '@/features/rose-theme';
 import { cn } from '@/lib/utils';
 
 import type { AgentRunStatus } from './agentRunState';
@@ -107,18 +108,24 @@ function NeedsHelpDot() {
   );
 }
 
+const STOCK_CHECK_CLASSES = 'h-3 w-3 text-gray-400';
+
 /**
  * Terminal: muted so finished rows recede behind whatever is still running.
- * Rose dark mode turns the check green (UI ledger row 71); the `dark:` token is
- * inert in light, which renders the same muted gray as before.
+ * Rose dark mode turns the check green (UI ledger row 71). The green variant is
+ * added only while dark, so light markup stays exactly the stock gray check.
  */
 function DoneGlyph({ failed }: { failed: boolean }) {
+  const { isDark } = useRoseTheme();
   return (
     <span className={cn(SLOT)}>
       {failed ? (
         <X className="h-3 w-3 text-red-400/80" strokeWidth={2.5} />
       ) : (
-        <Check className="h-3 w-3 text-gray-400 dark:text-[#22c55e]" strokeWidth={2.5} />
+        <Check
+          className={isDark ? `${STOCK_CHECK_CLASSES} dark:text-[#22c55e]` : STOCK_CHECK_CLASSES}
+          strokeWidth={2.5}
+        />
       )}
     </span>
   );

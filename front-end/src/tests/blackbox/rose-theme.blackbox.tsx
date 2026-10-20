@@ -425,13 +425,36 @@ describe('instant theme switch (row 72)', () => {
 
 describe('completed agent check (row 71)', () => {
   const done: AgentRunStatus = { state: 'done', label: 'Completed' };
+  /** lucide's own classes + the stock DoneGlyph classes, unchanged since before dark mode. */
+  const STOCK_CHECK_CLASSES = 'lucide lucide-check h-3 w-3 text-gray-400';
 
-  it('is green (#22c55e) only under html.dark; light keeps the muted gray check', () => {
-    const { container } = render(<AgentStatusIndicator status={done} />);
-    const check = container.querySelector('svg');
-    expect(check).toHaveClass('text-gray-400', 'dark:text-[#22c55e]');
-    // The green is a dark: variant only: no unconditional green class.
-    expect(check?.getAttribute('class')).not.toMatch(/(^|\s)text-(green|\[#22c55e\])/);
+  function checkClasses() {
+    return screen
+      .getByRole('img', { name: 'Completed' })
+      .querySelector('svg')
+      ?.getAttribute('class');
+  }
+
+  it('light (stock or Rose light) renders the stock gray check byte-for-byte', () => {
+    const stock = render(<AgentStatusIndicator status={done} />);
+    expect(checkClasses()).toBe(STOCK_CHECK_CLASSES);
+    stock.unmount();
+
+    renderWithProviders(themed(<AgentStatusIndicator status={done} />));
+    expect(htmlIsDark()).toBe(false);
+    expect(checkClasses()).toBe(STOCK_CHECK_CLASSES);
+  });
+
+  it('is green (#22c55e) under html.dark and back to the stock check in the commit that leaves dark', () => {
+    storeDark(ROSE_THEME_USER);
+    renderWithProviders(themed(<AgentStatusIndicator status={done} />));
+    expect(htmlIsDark()).toBe(true);
+    // A dark: variant only (scoped to html.dark), never an unconditional green class.
+    expect(checkClasses()).toBe(`${STOCK_CHECK_CLASSES} dark:text-[#22c55e]`);
+
+    toggleThemeInOneCommit();
+    expect(htmlIsDark()).toBe(false);
+    expect(checkClasses()).toBe(STOCK_CHECK_CLASSES);
   });
 
   it('a failed run keeps its muted red x in both themes', () => {
@@ -488,6 +511,22 @@ describe('dark scrollbars (row 62)', () => {
     expect(decls('html.dark ::-webkit-scrollbar-track').background).toBe('transparent');
     expect(decls('html.dark ::-webkit-scrollbar-corner').background).toBe('transparent');
     expect(decls('html.dark ::-webkit-scrollbar').background).toBe('transparent');
+  });
+
+  it('keeps the webkit hover thumb in Chromium: scrollbar-color only where ::-webkit-scrollbar is unsupported', () => {
+    // Chromium ignores every ::-webkit-scrollbar rule on an element with a
+    // non-auto scrollbar-color, which would drop the #5c5c57 hover thumb.
+    const colorRules = scrollbarRules.filter((rule) =>
+      rule.some((node) => node.type === 'decl' && node.prop === 'scrollbar-color'),
+    );
+    expect(colorRules.length).toBeGreaterThan(0);
+    for (const rule of colorRules) {
+      const parent = rule.parent;
+      expect(parent?.type).toBe('atrule');
+      expect(parent?.type === 'atrule' && `@${parent.name} ${parent.params}`).toBe(
+        '@supports not selector(::-webkit-scrollbar)',
+      );
+    }
   });
 
   it('paints the page solid navi black, scoped to html.dark', () => {

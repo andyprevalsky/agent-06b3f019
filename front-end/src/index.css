@@ -161,9 +161,14 @@
     background-color: #272725;
   }
 
-  html.dark,
-  html.dark * {
-    scrollbar-color: #4a4a46 transparent;
+  /* Standard scrollbar colours only where ::-webkit-scrollbar is unsupported
+     (Firefox): in Chromium a non-auto scrollbar-color disables the webkit rules
+     below, which would drop the #5c5c57 hover thumb. */
+  @supports not selector(::-webkit-scrollbar) {
+    html.dark,
+    html.dark * {
+      scrollbar-color: #4a4a46 transparent;
+    }
   }
 
   html.dark ::-webkit-scrollbar {

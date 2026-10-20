@@ -238,6 +238,10 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
   'features/integrations/components/BrowserCookiesSection.tsx': [
     'Cross-domain import: "@/features/integration-handlers-context"',
   ],
+  // Rose dark mode: the completed-agent check turns green only while dark (row 71).
+  'features/terminal-component-group/components/AgentStatusIndicator.tsx': [
+    'Cross-domain import: "@/features/rose-theme"',
+  ],
   // Terminal-component-group MessageList split (U03) — legacy violations to be cleaned up per-domain
   'features/terminal-component-group/components/ChatModeActions.tsx': [
     'components layer imports "../api"',
