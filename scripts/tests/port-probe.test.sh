@@ -48,6 +48,14 @@ for probe_path in "$PATH" "$NO_LSOF_BIN"; do
     fail "PATH=$probe_path: listener $LISTENER_PID not attributed to port $PORT (got '$listeners')"
 done
 PATH="$NO_LSOF_BIN" pid_descends_from "$LISTENER_PID" "$$" || fail "listener does not descend from its launcher"
+# Capture before matching: `producer | grep -q` under pipefail fails when grep
+# exits early and the producer takes SIGPIPE.
+descendants="$(descendant_pids "$$")"
+grep -qx "$LISTENER_PID" <<<"$descendants" || fail "descendant_pids missed the listener child"
+descendants="$(descendant_pids "$LISTENER_PID")"
+if grep -qx "$$" <<<"$descendants"; then
+  fail "descendant_pids listed the launcher below its child"
+fi
 if PATH="$NO_LSOF_BIN" pid_descends_from "$$" "$LISTENER_PID"; then
   fail "the launcher was reported as a descendant of its child"
 fi

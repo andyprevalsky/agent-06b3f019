@@ -549,6 +549,10 @@ if [[ -n "$LISTENER_PIDS" ]]; then
   if [[ "$OWNED_LISTENER" -ne 1 ]]; then
     echo "❌ $TEST_BASE_URL is served by PID(s) $(echo $LISTENER_PIDS), not this run's backend (PID $BACKEND_PID)" >&2
     echo "   Refusing to run tests against another process's backend and database." >&2
+    # This refusal can land while npx is still spawning sh -> tsx -> node below
+    # BACKEND_PID; teardown snapshots the descendants it stops, so let the tree
+    # stop changing first or the late children outlive the run.
+    wait_for_process_tree_to_settle "$BACKEND_PID" 20
     exit 1
   fi
 else

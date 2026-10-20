@@ -198,4 +198,25 @@ if grep -Fq "Unknown domain(s)" <<<"$FOREIGN_OUTPUT"; then
   fail "tests ran against a backend this run did not start"
 fi
 [[ ! -d "$HOST_LOCK_ROOT/$FOREIGN_PORT" ]] || fail "the refused run left its port lock behind"
+# The refusal lands while npx is still spawning the server; none of the run's
+# processes (they carry its run id in their environment) may outlive it.
+run_survivors() {
+  if [[ -d /proc/self ]]; then
+    grep -lsz "^BLACKBOX_TEST_RUN_ID=$1\$" /proc/[0-9]*/environ 2>/dev/null | cut -d/ -f3 || true
+  else
+    ps -Eww -A -o pid=,command= 2>/dev/null | grep -F "BLACKBOX_TEST_RUN_ID=$1" | grep -vF grep |
+      awk '{print $1}' || true
+  fi
+}
+SURVIVORS=""
+for _ in $(seq 1 12); do
+  SURVIVORS="$(run_survivors "$FOREIGN_RUN_ID" | tr '\n' ' ')"
+  [[ -n "${SURVIVORS// /}" ]] && break
+  sleep 0.25
+done
+if [[ -n "${SURVIVORS// /}" ]]; then
+  read -ra SURVIVOR_PIDS <<<"$SURVIVORS"
+  kill -TERM "${SURVIVOR_PIDS[@]}" 2>/dev/null || true
+  fail "the refused run left its backend processes running: $SURVIVORS"
+fi
 echo "PASS: a healthy port served by another process is refused before any test runs"

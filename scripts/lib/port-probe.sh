@@ -33,6 +33,45 @@ port_listener_pids() {
   fi
 }
 
+# descendant_pids ROOT — print every live descendant PID of ROOT, one per line.
+descendant_pids() {
+  local table pid ppid parent
+  local frontier=("$1") next=()
+  table="$(ps -A -o pid=,ppid= 2>/dev/null)" || return 0
+  while [[ "${#frontier[@]}" -gt 0 ]]; do
+    next=()
+    while read -r pid ppid; do
+      for parent in "${frontier[@]}"; do
+        if [[ "$ppid" == "$parent" ]]; then
+          echo "$pid"
+          next+=("$pid")
+        fi
+      done
+    done <<<"$table"
+    frontier=("${next[@]+"${next[@]}"}")
+  done
+}
+
+# wait_for_process_tree_to_settle ROOT TIMEOUT_SECONDS — return once ROOT has
+# exited, or its descendant set has stayed the same (and non-empty) for two
+# seconds. A launcher stopped while it is still spawning leaves late children
+# outside any snapshot of its tree.
+wait_for_process_tree_to_settle() {
+  local root="$1" timeout_seconds="$2" previous="" current stable=0 _
+  for _ in $(seq 1 $((timeout_seconds * 4))); do
+    kill -0 "$root" 2>/dev/null || return 0
+    current="$(descendant_pids "$root" | sort -n | tr '\n' ' ')"
+    if [[ -n "$current" && "$current" == "$previous" ]]; then
+      stable=$((stable + 1))
+      [[ "$stable" -ge 8 ]] && return 0
+    else
+      stable=0
+    fi
+    previous="$current"
+    sleep 0.25
+  done
+}
+
 # pid_descends_from PID ANCESTOR — exit 0 when PID is ANCESTOR or one of its
 # descendants (npm/tsx launch the server below the PID a runner started).
 pid_descends_from() {
