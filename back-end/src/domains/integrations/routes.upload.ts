@@ -195,38 +195,6 @@ router.post(
   })
 );
 
-/** POST /api/integrations/whatsapp/upload */
-router.post(
-  '/whatsapp/upload',
-  authenticateMachineUpload,
-  asyncHandler(async (req: AuthRequest, res: Response) => {
-    const userId = req.user!.id;
-    const { contacts, accessedAt } = req.body;
-
-    if (!Array.isArray(contacts) || contacts.length === 0) {
-      return res.status(400).json({ error: 'contacts array is required' });
-    }
-
-    const result = await service.processWhatsAppUpload(userId, contacts, accessedAt);
-    res.json({
-      message: 'WhatsApp payload received, processing in background',
-      integration: result.integration,
-      jobId: result.jobId,
-    });
-  })
-);
-
-/** POST /api/integrations/whatsapp/connect */
-router.post(
-  '/whatsapp/connect',
-  authenticateMachineUpload,
-  asyncHandler(async (req: AuthRequest, res: Response) => {
-    const userId = req.user!.id;
-    const integration = await service.processWhatsAppConnect(userId);
-    res.json({ message: 'WhatsApp connected successfully', integration });
-  })
-);
-
 /**
  * POST /api/integrations/telegram/connect
  * Body `{ accountId, label?, claimLegacy? }` connects ONE Telegram account

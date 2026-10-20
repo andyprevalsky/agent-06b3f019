@@ -69,26 +69,39 @@ export function postIMessagePayload(
   );
 }
 
-/** POST a WhatsApp contacts blob to the dedicated endpoint. */
+/**
+ * POST a WhatsApp contacts blob to the dedicated endpoint. `accountId` (the
+ * linked phone) attributes the messages to that account; null = legacy row.
+ */
 export function postWhatsAppContacts(
   contacts: unknown,
-  accessToken: string
+  accessToken: string,
+  accountId: string | null = null
 ): Promise<UploadHttpResult> {
-  return postContactsJson('whatsapp', contacts, accessToken);
+  return postContactsJson(
+    'whatsapp',
+    contacts,
+    accessToken,
+    accountId === null ? {} : { accountId }
+  );
 }
 
 /**
- * Mark the WhatsApp integration CONNECTED. Payload-free: called the moment the
- * Baileys socket pairs, so the first history-sync batch has a CONNECTED
- * integration to upload against.
+ * Mark a WhatsApp account CONNECTED. Called the moment its Baileys socket
+ * pairs, so the first history-sync batch has a CONNECTED integration to upload
+ * against. Without `account` the legacy single-account row is marked.
  */
-export async function postWhatsAppConnect(accessToken: string): Promise<UploadHttpResult> {
+export async function postWhatsAppConnect(
+  accessToken: string,
+  account: { accountId: string; label: string; claimLegacy?: boolean } | null = null
+): Promise<UploadHttpResult> {
   const response = await fetch(`${config.apiUrl}${WHATSAPP_CONNECT_ENDPOINT}`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${accessToken}`,
       'Content-Type': 'application/json',
     },
+    ...(account !== null && { body: JSON.stringify(account) }),
   });
   return toResult(response);
 }

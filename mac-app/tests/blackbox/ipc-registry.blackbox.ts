@@ -207,12 +207,16 @@ const waConnected = vi.fn(() => false);
 const waConnect = vi.fn(async () => undefined);
 const waDisconnect = vi.fn(async () => undefined);
 const waLogout = vi.fn(async () => undefined);
+const waList = vi.fn(() => [] as Array<{ accountId: string; connected: boolean }>);
+const waAdd = vi.fn(async () => undefined);
 vi.mock('../../main/services/messaging/platforms/whatsapp/WhatsAppSync', () => ({
   WhatsAppSync: {
     hasCredentials: (...a: unknown[]) => waHas(...a),
     getLinkedPhoneNumber: (...a: unknown[]) => waPhone(...a),
     isConnected: (...a: unknown[]) => waConnected(...a),
+    listAccounts: (...a: unknown[]) => waList(...a),
     connect: (...a: unknown[]) => waConnect(...a),
+    addAccount: (...a: unknown[]) => waAdd(...a),
     disconnect: (...a: unknown[]) => waDisconnect(...a),
     logout: (...a: unknown[]) => waLogout(...a),
   },
@@ -365,7 +369,9 @@ describe('ipc-registry: channel registration', () => {
       'whatsapp:hasCredentials',
       'whatsapp:getLinkedPhoneNumber',
       'whatsapp:isConnected',
+      'whatsapp:listAccounts',
       'whatsapp:connect',
+      'whatsapp:addAccount',
       'whatsapp:disconnect',
       'whatsapp:logout',
       'telegram:hasSession',
@@ -980,6 +986,43 @@ describe('ipc-registry: whatsapp channels', () => {
     waConnect.mockReset();
     waDisconnect.mockReset();
     waLogout.mockReset();
+    waList.mockReset();
+    waAdd.mockReset();
+  });
+
+  it('whatsapp:listAccounts returns every linked account', async () => {
+    const accounts = [
+      { accountId: '+15550001111', connected: true },
+      { accountId: '+15550002222', connected: false },
+    ];
+    waList.mockReturnValueOnce(accounts);
+    await expect(invoke('whatsapp:listAccounts')).resolves.toEqual(accounts);
+  });
+
+  it('whatsapp:addAccount pairs one more account, guarded by the machine session', async () => {
+    waAdd.mockResolvedValueOnce(undefined);
+    await expect(invoke('whatsapp:addAccount')).resolves.toEqual({ success: true });
+    expect(waAdd).toHaveBeenCalledWith({ onQRCode: expect.any(Function) });
+
+    authGetSession.mockReset();
+    authGetSession.mockResolvedValue(null);
+    const refused = await invoke<{ success: boolean }>('whatsapp:addAccount');
+    expect(refused.success).toBe(false);
+    expect(waAdd).toHaveBeenCalledTimes(1);
+  });
+
+  it('whatsapp:logout and isConnected scope to one account id; none means all/any', async () => {
+    waLogout.mockResolvedValue(undefined);
+    await invoke('whatsapp:logout', '+15550001111');
+    expect(waLogout).toHaveBeenLastCalledWith('+15550001111');
+    await invoke('whatsapp:logout');
+    expect(waLogout).toHaveBeenLastCalledWith(undefined);
+    await invoke('whatsapp:logout', 42);
+    expect(waLogout).toHaveBeenLastCalledWith(undefined);
+
+    waConnected.mockReturnValue(true);
+    await invoke('whatsapp:isConnected', '+15550002222');
+    expect(waConnected).toHaveBeenLastCalledWith('+15550002222');
   });
 
   it('whatsapp:hasCredentials returns the service boolean', async () => {

@@ -8,4 +8,5 @@ export { IntegrationProgress } from '../domains/integration-progress/runtime';
 export type {
   CookieProfileCount,
   ProgressPostResult,
+  ProgressWriteBody,
 } from '../domains/integration-progress/runtime';

@@ -18,7 +18,6 @@
 set -euo pipefail
 
 APPROVAL_RETRIEVED="false"
-DEFER_TO_EXACT_HEAD_REVIEW="false"
 BASE_REF="${AGENT_BEHAVIOR_APPROVAL_BASE_REF:-}"
 
 for arg in "$@"; do
@@ -29,15 +28,12 @@ for arg in "$@"; do
     mandatory-human-approval-retrieved=false|--mandatory-human-approval-retrieved=false)
       APPROVAL_RETRIEVED="false"
       ;;
-    defer-human-approval-to-exact-head-pr-review=true|--defer-human-approval-to-exact-head-pr-review=true)
-      DEFER_TO_EXACT_HEAD_REVIEW="true"
-      ;;
     --base-ref=*)
       BASE_REF="${arg#--base-ref=}"
       ;;
     *)
       echo "Unknown flag: $arg" >&2
-      echo "Usage: bash scripts/check-agent-behavior-approval.sh [mandatory-human-approval-retrieved=true|--defer-human-approval-to-exact-head-pr-review=true] [--base-ref=REF]" >&2
+      echo "Usage: bash scripts/check-agent-behavior-approval.sh [mandatory-human-approval-retrieved=true] [--base-ref=REF]" >&2
       exit 2
       ;;
   esac
@@ -171,20 +167,6 @@ FLAGGED="$(
 
 if [ -z "$FLAGGED" ]; then
   echo "Agent-behavior human-approval guard: no recovery/terminal-semantics changes in the agent control-flow layer."
-  exit 0
-fi
-
-if [ "$DEFER_TO_EXACT_HEAD_REVIEW" = "true" ]; then
-  [ "$APPROVAL_RETRIEVED" = "false" ] || {
-    echo "Agent-behavior approval cannot be both retrieved and deferred." >&2
-    exit 2
-  }
-  [ "${AUTO_RCA_EXACT_HEAD_APPROVAL_DEFERRED:-false}" = "true" ] || {
-    echo "Exact-head approval deferral is restricted to the trusted Auto RCA gate." >&2
-    exit 2
-  }
-  echo "Agent-behavior human-approval guard: deferred to a formal APPROVED review of the exact verified PR HEAD:"
-  printf '  - %s\n' "${FLAGGED//$'\n'/$'\n  - '}"
   exit 0
 fi
 

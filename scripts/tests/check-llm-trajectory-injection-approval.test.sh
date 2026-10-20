@@ -61,14 +61,15 @@ expect_flag_pass() {
   echo "PASS: $label"
 }
 
-expect_deferred_pass() {
-  local dir="$1" label="$2"
-  if ! (
+expect_retired_deferral_rejected() {
+  local dir="$1" label="$2" status=0
+  (
     cd "$dir" && AUTO_RCA_EXACT_HEAD_APPROVAL_DEFERRED=true \
       bash scripts/check-llm-trajectory-injection-approval.sh \
         --defer-human-approval-to-exact-head-pr-review=true >/tmp/trajectory-guard.out 2>&1
-  ); then
-    echo "FAIL: expected trusted exact-head deferral PASS: $label" >&2
+  ) || status=$?
+  if [ "$status" -ne 2 ] || ! grep -Fq 'Unknown flag: --defer-human-approval-to-exact-head-pr-review=true' /tmp/trajectory-guard.out; then
+    echo "FAIL: expected the retired exact-head deferral flag to be rejected (exit 2): $label" >&2
     cat /tmp/trajectory-guard.out >&2
     exit 1
   fi
@@ -83,14 +84,7 @@ PY
 git -C "$provider_exit_repo" add agents/domains/spawn_browser_agent_v3/handler.py
 expect_fail "$provider_exit_repo" "adding provider-exit trajectory injection requires approval"
 expect_flag_pass "$provider_exit_repo" "approval flag permits provider-exit injection change"
-if (cd "$provider_exit_repo" && env -u AUTO_RCA_EXACT_HEAD_APPROVAL_DEFERRED \
-  bash scripts/check-llm-trajectory-injection-approval.sh \
-  --defer-human-approval-to-exact-head-pr-review=true >/tmp/trajectory-guard.out 2>&1); then
-  echo "FAIL: untrusted caller deferred trajectory-injection approval" >&2
-  exit 1
-fi
-echo "PASS: trajectory exact-head deferral is restricted to trusted Auto RCA"
-expect_deferred_pass "$provider_exit_repo" "trusted Auto RCA may defer trajectory approval to exact-head review"
+expect_retired_deferral_rejected "$provider_exit_repo" "no caller can defer trajectory approval to an exact-head review"
 
 # 2. Classifier recovery constraint wording change.
 classifier_repo="$(new_repo classifier-injection)"

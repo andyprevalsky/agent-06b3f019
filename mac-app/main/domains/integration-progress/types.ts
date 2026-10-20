@@ -32,6 +32,8 @@ export interface ProgressPostResult {
   ok: boolean;
   /** HTTP status, or 0 when the request never reached the server. */
   status: number;
+  /** On a 202 (coalesced): how long the server asks the writer to wait before resending. */
+  retryAfterMs?: number;
 }
 
 /** One browser profile's cookie total, derived from the read snapshot. */

@@ -111,8 +111,20 @@ describe('integration-cookie-progress blackbox', () => {
       const bodies = progressBodies();
       const def = bodies.find((b) => b.total === 2);
       const p1 = bodies.find((b) => b.total === 1);
-      expect(def).toMatchObject({ runId: RUN, state: 'syncing', done: 0, total: 2, unit: 'cookies' });
-      expect(p1).toMatchObject({ runId: RUN, state: 'syncing', done: 0, total: 1, unit: 'cookies' });
+      expect(def).toMatchObject({
+        runId: RUN,
+        state: 'syncing',
+        done: 0,
+        total: 2,
+        unit: 'cookies',
+      });
+      expect(p1).toMatchObject({
+        runId: RUN,
+        state: 'syncing',
+        done: 0,
+        total: 1,
+        unit: 'cookies',
+      });
     });
   });
 
@@ -171,7 +183,8 @@ describe('integration-cookie-progress blackbox', () => {
         TOKEN,
         RUN
       );
-      expect(result).toEqual({ ok: true, status: 202 });
+      // The server's coalescing wait is surfaced so streaming writers can honour it.
+      expect(result).toEqual({ ok: true, status: 202, retryAfterMs: 600 });
     });
 
     it('treats a 409 stale write as not ok but never throws', async () => {

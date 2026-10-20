@@ -23,7 +23,7 @@ import {
   IMPERSONATED_MACHINE_DATA_MESSAGE,
 } from '../../base/impersonation';
 import { getErrorMessageOrFallback } from '../../../shared/utils/error';
-import { postIMessagePayload, postWhatsAppConnect } from './repo';
+import { postIMessagePayload, postWhatsAppConnect, postWhatsAppContacts } from './repo';
 import { buildIMessagePayload, dispatchUploadWithTransportRetry, resolveStrategy } from './service';
 import type {
   DeviceUploadResult,
@@ -53,9 +53,12 @@ export class Uploader {
    * and the integration row is otherwise only created by an upload — so the
    * first sync after pairing deadlocks without this call.
    */
-  static async registerWhatsAppConnected(accessToken: string): Promise<UploadResult> {
+  static async registerWhatsAppConnected(
+    accessToken: string,
+    account: { accountId: string; label: string; claimLegacy?: boolean } | null = null
+  ): Promise<UploadResult> {
     try {
-      const result = await postWhatsAppConnect(accessToken);
+      const result = await postWhatsAppConnect(accessToken, account);
       if (!result.ok) {
         throw new Error(`WhatsApp connect failed: ${result.statusText}`);
       }
@@ -65,6 +68,27 @@ export class Uploader {
         success: false,
         message: getErrorMessageOrFallback(error, 'WhatsApp connect failed'),
       };
+    }
+  }
+
+  /**
+   * Upload one WhatsApp account's contacts batch. `accountId` (the linked
+   * phone) attributes the messages; null keeps the legacy single-account row.
+   */
+  static async uploadWhatsAppContacts(
+    contacts: unknown,
+    accessToken: string,
+    accountId: string | null
+  ): Promise<UploadResult> {
+    if (accessTokenIsImpersonated(accessToken)) {
+      return { success: false, message: IMPERSONATED_MACHINE_DATA_MESSAGE };
+    }
+    try {
+      const result = await postWhatsAppContacts(contacts, accessToken, accountId);
+      if (!result.ok) throw new Error(`Upload failed: ${result.statusText}`);
+      return { success: true };
+    } catch (error) {
+      return { success: false, message: getErrorMessageOrFallback(error) };
     }
   }
 

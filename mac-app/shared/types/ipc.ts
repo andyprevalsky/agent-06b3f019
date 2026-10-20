@@ -194,11 +194,19 @@ export interface IPC {
   // WhatsApp
   whatsapp?: {
     hasCredentials: () => Promise<boolean>;
+    /** The first linked account's phone (pre-multi-account callers). */
     getLinkedPhoneNumber: () => Promise<string | null>;
-    isConnected: () => Promise<boolean>;
+    /** Any account connected, or that one account (`accountId` = its E.164 phone). */
+    isConnected: (accountId?: string) => Promise<boolean>;
+    /** Every linked account, one Baileys auth dir + socket each (plan row I2). */
+    listAccounts?: () => Promise<Array<{ accountId: string; connected: boolean }>>;
+    /** Connect every linked account; pairs a new one (QR) when none is linked. */
     connect: () => Promise<{ success: boolean; error?: string }>;
+    /** Pair one more account (QR via onWhatsAppQRCode); existing accounts keep syncing. */
+    addAccount?: () => Promise<{ success: boolean; error?: string }>;
     disconnect: () => Promise<{ success: boolean; error?: string }>;
-    logout: () => Promise<{ success: boolean; error?: string }>;
+    /** Log out one account (others stay connected) or, with no id, every account. */
+    logout: (accountId?: string) => Promise<{ success: boolean; error?: string }>;
   };
 
   // WhatsApp events

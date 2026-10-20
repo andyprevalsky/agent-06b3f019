@@ -208,9 +208,9 @@ export function registerLocalCodeHandlers(): void {
         title: 'Share a folder with Rose',
         properties: ['openDirectory', 'createDirectory'],
       });
-      if (picked.canceled || picked.filePaths.length === 0)
-        return { success: false, status: getStatus() };
-      folder = picked.filePaths[0];
+      const [first] = picked.filePaths;
+      if (picked.canceled || first === undefined) return { success: false, status: getStatus() };
+      folder = first;
     }
     try {
       const next = addGrant(repo.loadGrants(), folder, repo.folderFs, {

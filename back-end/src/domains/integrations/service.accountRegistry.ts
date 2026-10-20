@@ -24,6 +24,7 @@ import { deleteIMessageAccount } from './service.imessageAccounts';
 import { deletePasskeyAccount, deletePasswordAccount } from './service.credentialAccounts';
 import { deleteLanternIntegration, LanternCredentialError } from './service.lantern';
 import { deleteLinkedInAccountData } from './service.linkedinImport';
+import { deleteWhatsAppAccount } from './service.whatsappAccounts';
 import { KNOWN_SOURCES as DOCUMENT_SOURCES } from './uploadService.documents';
 import { cookieProfileFromAccountId } from './syncAccountsContract';
 import { deleteTelegramAccountData } from './uploadService.telegram';
@@ -160,10 +161,8 @@ const EXACT: Record<string, IntegrationAccountAdapter> = {
   },
   // One account per Mac device id; its messages carry sourceAccountId (I1).
   imessage: { list: 'row', cleanup: hook(deleteIMessageAccount) },
-  whatsapp: {
-    list: 'row',
-    cleanup: todo('L-INT-WHATSAPP', 'messages and auth state are not keyed by WhatsApp account'),
-  },
+  // One row per linked phone; messages/contacts are attributed to it (plan row I2).
+  whatsapp: { list: 'row', cleanup: hook(deleteWhatsAppAccount) },
   telegram: { list: 'row', cleanup: hook(deleteTelegramAccountData) },
   linkedin: { list: 'row', cleanup: hook(deleteLinkedInAccount) },
   // The fingerprint is one credential blob on the Integration row (not keyed by

@@ -99,6 +99,8 @@ export interface ContactToUpsert {
   title?: string;
   email?: string;
   emailAddresses?: string[];
+  /** `<provider>:<accountId>` recorded on a Person this contact creates (multi-account syncs). */
+  createdBySource?: string;
 
   // Messages (timestamps already normalized to Date)
   messages: Array<{
@@ -563,6 +565,7 @@ function buildPersonCreateData(userId: string, contact: ContactToUpsert) {
     ...(isLinkedin && { linkedinUrl: contact.identifier }),
     ...(contact.company && { company: contact.company }),
     ...(contact.title && { title: contact.title }),
+    ...(contact.createdBySource && { createdBySource: contact.createdBySource }),
   };
 }
 

@@ -15,7 +15,7 @@
 import { EventEmitter } from 'events';
 import { loadBaileys, silentBaileysLogger } from './client-loader';
 import { fetchHistoricalMessages, listChats } from './history';
-import { WhatsAppAuth } from './repo';
+import { legacyWhatsAppAuthStore, type WhatsAppAuthStore } from './repo';
 import {
   WHATSAPP_BROWSER,
   WHATSAPP_CONNECTION_TIMEOUT_MS,
@@ -31,6 +31,7 @@ import type {
   ConnectionState as AppConnectionState,
   WhatsAppAuthCallbacks,
   WhatsAppConnectionCloseError,
+  WhatsAppHistoryBatch,
 } from './types';
 
 // Baileys types — Baileys is loaded dynamically at runtime, so we can't statically
@@ -49,11 +50,15 @@ interface HistorySetPayload {
   messages: WAMessage[];
   isLatest?: boolean;
   progress?: number | null;
+  syncType?: number | null;
 }
 
 /**
- * WhatsApp client using Baileys for WhatsApp Web protocol.
- * Handles connection, authentication, real-time messages, and historical sync attempts.
+ * WhatsApp client using Baileys for WhatsApp Web protocol: ONE account, on
+ * its own auth dir and socket. Handles connection, authentication, real-time
+ * messages, and history sync. Emits `sync` (messages / connection changes),
+ * `history` (one {@link WhatsAppHistoryBatch} per `messaging-history.set`) and
+ * `logged_out` (WhatsApp revoked this linked device; its creds are cleared).
  */
 export class WhatsAppClient extends EventEmitter {
   private sock: WASocket | null = null;
@@ -66,8 +71,18 @@ export class WhatsAppClient extends EventEmitter {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly maxReconnectAttempts: number = WHATSAPP_MAX_RECONNECT_ATTEMPTS;
 
-  constructor() {
+  constructor(private readonly auth: WhatsAppAuthStore = legacyWhatsAppAuthStore()) {
     super();
+  }
+
+  /** The auth dir this client's socket runs on. */
+  getAuthDir(): string {
+    return this.auth.dir;
+  }
+
+  /** The account's own JID once the socket has opened (`<phone>:<device>@s.whatsapp.net`). */
+  getSelfJid(): string | null {
+    return this.selfJid;
   }
 
   /** Cancel a pending reconnect so an explicit disconnect can't be resurrected. */
@@ -114,11 +129,10 @@ export class WhatsAppClient extends EventEmitter {
         makeCacheableSignalKeyStore,
       } = await loadBaileys();
 
-      WhatsAppAuth.ensureAuthDir();
-      WhatsAppAuth.maybeRestoreFromBackup();
+      this.auth.ensureAuthDir();
+      this.auth.maybeRestoreFromBackup();
 
-      const authDir = WhatsAppAuth.getAuthDir();
-      const { state, saveCreds } = await useMultiFileAuthState(authDir);
+      const { state, saveCreds } = await useMultiFileAuthState(this.auth.dir);
       this.saveCreds = saveCreds;
 
       const { version } = await fetchLatestBaileysVersion();
@@ -166,7 +180,7 @@ export class WhatsAppClient extends EventEmitter {
   /** Logout and clear credentials. */
   async logout(): Promise<void> {
     await this.disconnect();
-    WhatsAppAuth.clearCredentials();
+    this.auth.clearCredentials();
     console.log('[WhatsAppClient] Logged out and cleared credentials');
   }
 
@@ -207,7 +221,7 @@ export class WhatsAppClient extends EventEmitter {
 
     this.sock.ev.on('creds.update', async () => {
       if (this.saveCreds !== null) {
-        WhatsAppAuth.backupCredentials();
+        this.auth.backupCredentials();
         await this.saveCreds();
       }
     });
@@ -282,7 +296,10 @@ export class WhatsAppClient extends EventEmitter {
       `[WhatsAppClient] Connection closed (status: ${statusCode}, clearCredentials: ${clearCredentials}, reconnect: ${reconnect})`
     );
 
-    if (clearCredentials) WhatsAppAuth.clearCredentials();
+    if (clearCredentials) {
+      this.auth.clearCredentials();
+      this.emit('logged_out');
+    }
 
     if (reconnect) {
       this.reconnectAttempts++;
@@ -320,17 +337,18 @@ export class WhatsAppClient extends EventEmitter {
    * when `syncFullHistory` is true.
    */
   private handleHistorySync(historySet: HistorySetPayload): void {
-    const { chats, contacts, messages, isLatest, progress } = historySet;
+    const { chats, contacts, messages, isLatest, progress, syncType } = historySet;
 
     console.log(
-      `[WhatsAppClient] 📜 History sync received: ${messages.length} messages, ${chats.length} chats, ${contacts.length} contacts`
+      `[WhatsAppClient] 📜 History sync received: ${messages.length} messages, ${chats.length} chats, ${contacts.length} contacts (type ${syncType ?? '?'}, progress ${progress ?? '?'}%, latest ${isLatest === true ? 'yes' : 'no'})`
     );
-    if (progress !== undefined && progress !== null) {
-      console.log(`[WhatsAppClient] History sync progress: ${Math.round(progress * 100)}%`);
-    }
-    if (isLatest === true) {
-      console.log('[WhatsAppClient] History sync complete (isLatest=true)');
-    }
+    // HistorySync.progress is a uint32 percent (0-100), not a fraction.
+    this.emit('history', {
+      syncType: typeof syncType === 'number' ? syncType : null,
+      progress: typeof progress === 'number' ? progress : null,
+      chats: chats.length,
+      messages: messages.length,
+    } satisfies WhatsAppHistoryBatch);
     if (messages.length === 0) return;
 
     this.normalizeAndEmit(messages, '📜 Normalized historical');

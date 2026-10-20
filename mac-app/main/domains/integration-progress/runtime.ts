@@ -6,15 +6,16 @@
  * delegates to the service layer, which owns grouping and the HTTP boundary.
  */
 
+import { postProgress } from './repo';
 import {
   cookieAccountId,
   countCookiesByProfile,
   reportCookieProfilesSynced,
   reportCookieProfilesSyncing,
 } from './service';
-import type { CookieProfileCount, ProgressPostResult } from './types';
+import type { CookieProfileCount, ProgressPostResult, ProgressWriteBody } from './types';
 
-export type { CookieProfileCount, ProgressPostResult };
+export type { CookieProfileCount, ProgressPostResult, ProgressWriteBody };
 
 /** Cookie shape the reader produces (only the profile tag is read here). */
 interface ProfiledCookie {
@@ -22,6 +23,19 @@ interface ProfiledCookie {
 }
 
 export class IntegrationProgress {
+  /**
+   * One best-effort progress write for any provider account (never throws).
+   * Callers that stream progress honour a 202's `retryAfterMs` before resending.
+   */
+  static post(
+    provider: string,
+    accountId: string,
+    body: ProgressWriteBody,
+    accessToken: string
+  ): Promise<ProgressPostResult> {
+    return postProgress(provider, accountId, body, accessToken);
+  }
+
   /** Wire account id for one (browser, profile): `<browser>:<profile>` / `default`. */
   static cookieAccountId(browser: string, profile: string): string {
     return cookieAccountId(browser, profile);

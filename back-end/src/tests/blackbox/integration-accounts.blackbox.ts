@@ -25,6 +25,8 @@
  *   - iMessage: one account per Mac device id; delete removes exactly that Mac's messages
  *   - passwords/passkeys (I7): one row per source+profile, each a deletable account
  *     with batch progress; credential readers prefer one login deterministically
+ *   - WhatsApp (I2): one account per linked phone; deleting one removes exactly its
+ *     messages and the contacts only WhatsApp created; legacy history follows its claim
  *   - validation 400s, per-user account cap, internal API-key writer path, auth 401
  *   - Plaid per-item sync progress (I5): indeterminate total while syncing, final counts,
  *     1 s coalescing, independent items, ITEM_LOGIN_REQUIRED, webhook re-sync reuses the row
@@ -47,6 +49,7 @@ import { passwordCases } from './integration-accounts.passwords.cases';
 import { cases as plaidProgressCases } from './integration-accounts.plaid.cases';
 import { telegramCases } from './integration-accounts.telegram.cases';
 import { gmailSyncCases } from './integration-accounts.gmail-sync.cases';
+import { whatsappCases } from './integration-accounts.whatsapp.cases';
 import {
   accountsOf,
   anonymousSession,
@@ -388,6 +391,7 @@ async function main(): Promise<void> {
     ...telegramCases(),
     ...gmailSyncCases(),
     ...imessageCases(users),
+    ...whatsappCases(),
   ];
   let failed = 0;
   try {
