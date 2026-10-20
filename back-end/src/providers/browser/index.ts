@@ -43,6 +43,7 @@ import {
 import type { KernelProxyType } from './kernelProxy';
 import type { RotationRecoveryAction, RotationStep } from './rotation';
 import { persistSignedInBrowserState } from './sessionAuthPersist';
+import { mergeSessionWorldState, type WorldStateMergeReceipt } from './worldState';
 import { releaseSupersededBrowser } from './sessionCleanup';
 import {
   storedBrowserProvider,
@@ -232,24 +233,35 @@ export async function createSessionWithContextUsingDependencies(
 export async function closeSession(
   sessionId: string,
   pause = false,
-  currentUrl?: string
-): Promise<void> {
+  currentUrl?: string,
+  worldState: { signedInSites?: string[] } = {}
+): Promise<{ worldState: WorldStateMergeReceipt | null }> {
   await persistSignedInBrowserState(sessionId, { currentUrl }).catch((error) => {
     log.warn('Failed to persist signed-in browser state before close', {
       sessionId,
       error: error instanceof Error ? error.message : String(error),
     });
   });
+  // Root world state (A6): merge the sites this task forked while its browser
+  // still exists. Best-effort and bounded; never blocks the provider release.
+  const merged = await mergeSessionWorldState(sessionId, {
+    signedInSites: worldState.signedInSites,
+  }).catch((error: unknown) => {
+    log.warn('Failed to merge browser world state before close', {
+      sessionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  });
   const provider = await providerForSession(sessionId);
   if (provider === 'kernel') {
     await closeKernelSession(sessionId, pause, currentUrl);
-    return;
-  }
-  if (provider === 'browser-use') {
+  } else if (provider === 'browser-use') {
     await closeBrowserUseSession(sessionId, pause, currentUrl);
-    return;
+  } else {
+    await closeSteelSession(sessionId, pause, currentUrl);
   }
-  await closeSteelSession(sessionId, pause, currentUrl);
+  return { worldState: merged };
 }
 
 export async function resumeSession(

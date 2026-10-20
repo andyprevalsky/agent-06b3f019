@@ -279,7 +279,16 @@ export async function injectUserData(
   sessionId: string,
   userId: string,
   startUrl: string,
-  options?: { browser?: import('playwright').Browser }
+  options?: {
+    browser?: import('playwright').Browser;
+    /**
+     * Runs on this same connection once the realm's cookies are in place, so a
+     * caller can snapshot the jar the session actually starts from (the Root
+     * world-state fork) without a second CDP handshake. Its failure is logged
+     * and never fails credential preparation.
+     */
+    onCookiesReady?: (context: import('playwright').BrowserContext) => Promise<void>;
+  }
 ): Promise<{
   cookies: {
     injected: boolean;
@@ -543,6 +552,17 @@ export async function injectUserData(
           ],
           'Browser credential injection failed'
         );
+      }
+    }
+
+    if (options?.onCookiesReady !== undefined) {
+      try {
+        await options.onCookiesReady(context);
+      } catch (error) {
+        log.warn('  [cookies] Post-injection snapshot failed; continuing', {
+          sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     }
 

@@ -47,6 +47,7 @@ ledger" in `rose-user-ui.md`). This file is the cross-cutting checklist, and
 | C14 | M | Local laptop control, about 90% shared code with cloud (UI ledger row 51). The code-agent tool takes `target: "cloud" \| "local"`, default cloud. Local means the Mac app runs the same `ws-server.mjs` as the E2B template inside a folder the user granted, and relays it to the worker; `claudeCodeLocalSession.ts` already proves this on localhost. Transcript, steering, questions, display, branch model and no timeouts all stay the same. Local also opens a local Terminal window on the Mac, attached to that session. It is offered only to agents started from the Mac app; agents created on the web or PWA get cloud only. If the Mac app is closed or disconnected, a local code agent fails immediately with a clear tool error: no waiting and no silent cloud fallback (this is a disconnect, not a timeout; C11 still applies). Exact error text, shown in the chip's red failure box and returned as the tool error: Mac app closed or disconnected → "Can't run locally: the Rose Mac app on <device name> is closed or disconnected. Open the Rose Mac app and retry, or run this agent in the cloud."; web/PWA-started agent asking for local → "Local runs need an agent started from the Rose Mac app. Start this agent from the Mac app, or run it in the cloud." Folder grants live in the Mac app (`MAC-APP-RELEASE` label). The chip header shows the target; Files and Terminal apps get a This Mac / Cloud switch | mac-app blackbox (grant, relay, local Terminal opens, disconnect → immediate tool error, web-created agent gets cloud only) + agents blackbox (target routing; cloud unchanged); mac-app tests run on macOS | L-LOCAL | **built + merged (4570ecefd)**: agents blackbox `code-agent-local-target` 17/17 (target routing, cloud args unchanged, disconnected/web exact text, create-race 409, folder metadata; 5/5 runs); backend blackbox `local-devices` 12/12 (origin recorded, register first-owner, owner-scoped control/tunnel, per-task HMAC relay channels, exact text at once, 409 no cloud fallback, Rose tools relocated; 5/5 runs); mac-app `local-code-runner` 20/20 under Linux vitest (grants + symlink escape, ws-server spawn args, Terminal osascript, session manager, tunnel mux; 5/5). Not run here: mac-app vitest under its own config/jsdom, Electron wiring and a real Mac end-to-end (macOS only) |
 | C12 | M | Code agents talk to the user only through Rose tools inside the sandbox (rows 45–47): `send_message_to_user` (text + `inline_view`, e.g. scorecards), `request_user_approval` (existing ApprovalChip above the query box, labelled with the agent; the answer returns to the CLI as the tool result and the agent blocks until answered), and `display(..., placement: "pinned", options: [{label, description, recommended?}], allow_other)` for questions: pinned above the query box ("<agent> asks", dismiss), answers listed vertically and numbered 1/2/3 (bold label + one-line description), then a numbered "Other…" input; click or press the number to pick, Enter sends Other; the query box is not hijacked. Routing by spawner: a code agent spawned by root pins for the user; one spawned by any other agent sends the question to its parent via A2A, which answers or escalates up the tree, and only root pins; the exchange shows in both transcripts. Prompt rule: never rely on the user reading the raw terminal. The chip's default tab is a parsed Transcript (Claude Code stream-json / Codex `exec --json`); Terminal is tab 2 | agents + FE blackbox; approval round trip blocks then resumes the CLI | L-DIRECT + L-DISPLAY + L-A2A | **done** (b10b038c1; agent-tools + agent-tools-requests ×5); "make me a game" outcome rerun pending |
 | C15 | M | **Usage-limit failover** (Andy, 2026-10-20). Detection uses structured signals only: Claude `rate_limit_event` status `rejected` with `resetsAt`; the Codex rate-limit snapshot. The session is checkpointed and paused, exactly that credential gets `rateLimitedUntil` = reset, and the parent gets a retryable error naming the exact retry (`spawn_agent(type='code', code_session_id=…)`). The retry leases the next token of the same provider; with none left it continues on the other provider from the checkpoint (same branch, commits and uncommitted files) with a transcript handoff. Never restarts from scratch | agents blackbox (a fake CLI emits the real limit event mid-task: retry error, credential reported, same-provider retry and provider switch, prior work present) + backend blackbox (token marked until reset, availability, provider switch keeps commit and branch), 5/5 | W5b | **built + merged** (f78bf8aa8; suites ×5, re-run on every merge); live E2B pause unverified; Codex rollout reader has no automated test yet |
+| C16 | M | **Adaptive sandbox size** (Andy, 2026-10-20). A code agent can change its own environment size through a `change-environment-size` skill (in-sandbox `rose` CLI/MCP tool plus skill instructions). The instructions say to use it when legitimate work needs more memory or CPU (repeated OOM kills, swap, sustained CPU saturation on builds/tests), and not for a runaway process or leak: kill or garbage-collect that instead. Sizes are E2B templates built per tier (CPU/RAM are fixed per template), so a resize checkpoints the session, starts the new-size sandbox, restores and resumes the same CLI conversation (W5b). The project setting gives the default size. Guardrails: tier cap, rate limit, no ping-pong; downsizing is allowed | backend + agents blackbox with fake E2B: resize request → checkpoint → new-tier sandbox → restore → same branch/files/conversation; runaway guard (the tool reports top memory consumers and refuses without a reason); cap and rate limit; project default size; skill text in prompt-invariants; 5/5 | L-ENVSIZE | running |
 
 ## Projects (replaces "folders"/Apps naming)
 
@@ -77,12 +78,12 @@ Andy: "sub agent for each". There is one lane per integration that syncs today, 
 
 | ID | Tier | Criterion | Eval (minimum) | Lane | Status |
 |----|------|-----------|----------------|------|--------|
-| A1 | M | Rose-in-Rose: a code session on the Rose repo runs vite HMR. Andy sees the edited Rose on screen about 1 s after a write. Publish opens a PR; ships only via `/deploy`; dev accounts only | e2e: agent write → preview DOM change ≤ 3 s; non-dev account 403 | L-APPS | blocked on W5 |
-| A2 | N | Lovable-style Apps: "Make me an app", "+ new app", Apps section on the left bar (Rose first). Full-screen app with the floating query box and Popular Goals hidden; live-preview card in the trajectory; History restore; per-user publish URL | FE blackbox + e2e (UI ledger) | L-APPS | blocked on W5 |
+| A1 | M | Rose-in-Rose: a code session on the Rose repo runs vite HMR. Andy sees the edited Rose on screen about 1 s after a write. Publish opens a PR; ships only via `/deploy`; dev accounts only | e2e: agent write → preview DOM change ≤ 3 s; non-dev account 403 | L-APPS | **built + merged** (7826a2a6b): `rose-preview` vite in the session, `code_agent.preview_url`, publish = push + PR (never merges), dev-only (403 otherwise); edit→HMR p50 224 ms / max 929 ms over 25 writes; code-preview 9/9 ×5. Live E2B HMR through the proxy untested |
+| A2 | N | Lovable-style Apps: "Make me an app", "+ new app", Apps section on the left bar (Rose first). Full-screen app with the floating query box and Popular Goals hidden; live-preview card in the trajectory; History restore; per-user publish URL | FE blackbox + e2e (UI ledger) | L-APPS | backend **built + merged** (7826a2a6b): `apps` in rose-ui.json, `GET /api/user-ui/apps` (Rose first for dev), usercontent publish URL, history via versions; user-ui 20/20 ×5. FE with the UI thread |
 | A3 | N | `rose_user_ui` per user: `root/` changes the whole app, `inline/` renders in the trajectory (version pinned), `tools/` adds root-agent tools whose results render inline; safe mode | W1/W2/W4 suites (passing) + recordings | merged | code merged; recordings pending |
 | A4 | N | Code agents get UI instructions, current screenshots and `rose-ui screenshot/record/perf/check` | E2B template test | L-APPS | **built** (43de031b5): rose-ui dev/screenshot/record/perf/check, screenshots/current/, six examples; unit + smoke + blackbox 5× green; live E2B check after template rebuild |
 | A5 | M | `display(paths\|urls, caption?)` tool for root, sub-agents and code agents; media posts inline in that agent's trajectory; idempotent per content hash | agents blackbox | L-DISPLAY | **done** (b10b038c1; display 14 cases ×5) — approval at deploy |
-| A6 | N | Root browser with world state split by website: agents fork Root's state; logins merge back; you can take over any tab | agents/browser blackbox | L-BROWSER | open |
+| A6 | N | Root browser with world state split by website: agents fork Root's state; logins merge back; you can take over any tab | agents/browser blackbox | L-BROWSER | **built + merged** (d0b6000ba): per-site Root state, fork on prepare-auth, guarded last-writer-wins merge on close, Root browser on the persistent profile, take over any tab; browser-world-state 8 cases ×5. Agents still load the shared profile (per-task profiles need a provider change + live Kernel check) |
 
 ## UI (specs live in the UI ledger, owned by the UI-agent thread)
 
@@ -155,14 +156,14 @@ Status: **done** = merged into `feat/rose-user-ui` with tests; **running** = a l
 | 6 | **Hyper-expressive, high-res, smooth, performant examples** (plan lists 6; only 2 seeded) | A4 | L-UIKIT | **done** (L-UIKIT 43de031b5); live E2B pending template rebuild |
 | 7 | `root/` alters the whole app (colors, gifs, dashboards, "a whole OS") | A3 | W2 runtime | done (87d1f3532); recordings pending |
 | 8 | `inline/` views in the trajectory | A3 | W1/W2 | done; game flow failing → #24 |
-| 9 | Write a tool for root and render its result any way | A3 | W4 | done (read-only v1). **Gap:** production executor (`USER_TOOLS_EXECUTOR=code_session`) and side-effect tools (needs an idempotency store) → queued L-TOOLS2 |
+| 9 | Write a tool for root and render its result any way | A3 | W4 | **done** (ed4069172): `code_session` executor in the user's own tools session + side-effecting tools at-most-once via `ToolSideEffect` |
 | 10 | "Change my background photo" goal; background fade (now 80%); query box + left bar opaque | U14 / row 34 | W2 + UI | backend README done (5accf4e82); front-end UI |
 | 11 | Nub, Join Waitlist white, no wrappers, mic, rose tint | U14 | W3 + UI | merged; Join Waitlist reverted to stock for signed-out visitors by the flag rule (UI thread to confirm) |
 | 12 | Browser app follows selected agent; drawer replaces fullscreen, smooth | U14 | W3 | done (legacy fullscreen kept for non-flag accounts) |
 | 13 | Root browser always available; agents splice by world state | A6 | L-BROWSER | queued |
 | 14 | **"Another app should be sent to the agent working on the demo video"** | — | parent | **gap: no demo-video thread found; asked UI thread to get Andy's answer** |
-| 15 | Rose in Rose: sync Rose repo, live HMR preview on screen, Publish = PR | A1 | L-APPS | queued (needs W5) |
-| 16 | Apps (Lovable-style), "Make me an app", "+ new app", Rose is one app | A2 | L-APPS + UI | queued (needs W5) |
+| 15 | Rose in Rose: sync Rose repo, live HMR preview on screen, Publish = PR | A1 | L-APPS | backend built (L-APPS); UI + live E2B run open |
+| 16 | Apps (Lovable-style), "Make me an app", "+ new app", Rose is one app | A2 | L-APPS + UI | backend built (L-APPS); UI open |
 | 17 | Recordings of it working | — | UI thread | flow 1 pass; flows 2–3 fail → #24 |
 | 18 | Codex tool to talk to other agents in the Rose graph | C6 | L-A2A | done (6d1b49779: rose-agents CLI list/send/grep, exactly-once delivery, spawner routing; 5/5); root-side tool pending A2A-thread merge |
 | 19 | Talking to the coding agent directly (is relaying clunky?) | C7 | L-DIRECT | running |
@@ -190,6 +191,7 @@ Status: **done** = merged into `feat/rose-user-ui` with tests; **running** = a l
 | 41 | One sub-agent per integration: real sync progress + multiple accounts (iMessage, WhatsApp, Gmail, LinkedIn, Plaid, cookies, passwords/passkeys, Telegram; Messenger/Instagram only if they sync) | I0–I8 | L-INTEG-CORE then one lane each | core running; per-integration queued |
 | 42 | Sub-agents keep going after interruptions | — | parent | done: all 8 lanes resumed after the 2026-10-20 usage-limit stop |
 | 43 | A code agent that breaks on a usage limit resumes on whichever coding agent comes next; the error tells the parent to retry; retries lease a token automatically and continue | C15 | W5b | running |
+| 44 | E2B box sizes auto-adapt to the coding agent's demand via a change-environment-size skill; use it when it needs more memory/CPU, not for runaways (garbage-collect instead) | C16 | L-ENVSIZE | running |
 
 Open follow-ups with owners: ~~C10 stuck agent on crash between create and start~~ **done (b33bfed97, fail→pass, 5/5)**; C6 root→code-agent messaging: L-A2A backend done (6d1b49779), root-side tool belongs to the A2A thread's `send_message_to_agent` — wire its address resolver to `send_agent_graph_message` after both branches merge (A2A thread agreed; contract `to, message`, idempotency `workflow_id:tool_call_id`); **flag the backend side of Rose Desktop** — `rose_user_ui` workspace materialization (W1 `workspace.ts`), the code-agent `rose_user_ui` instructions (`codeAgentPrompt.ts`) and the `code`/`spawn_agent` tool descriptions should apply only to Rose Desktop accounts, because a non-flag account can't see published UI (queued: L-FLAG-BE); code agents need a headless browser in the sandbox to actually play-test games (A4 template, L-UIKIT); bench-only `SpawnAgentToolNoGP` description unchanged; C10 crash-between-create-and-start stuck agent (L-TOOLS2 queue); retire `.github/workflows/auto-rca*.yml`; W1: live E2B check that `rose-ui` is on PATH (needs a real E2B sandbox; no deploy); W2 bridge `rose.*` capability calls + write confirmations (UI thread, plus a backend if one is needed).
 
@@ -204,6 +206,8 @@ Per the 2026-10-20 goal ("make intelligent guesses; keep critical ones for revie
 5. **Backend API default model stays `rose-1-ultra`**; rose-flash + ultrafast are the default *selections* in the front-end (UI thread), so other accounts' API calls and benchmarks don't change.
 6. **Join Waitlist for signed-out visitors stays stock** (only Andy's account changes; relayed by the UI thread).
 7. **User tools v1 are read-only and run on the worker**; side-effecting tools and the in-code-session executor are queued (L-TOOLS2).
+8. **Rose-in-Rose (L-APPS)**: dev accounts = the front-end Rose Desktop list (`utils/roseDevAccess.ts`, pinned by a structural test; `ROSE_DEV_USER_IDS_EXTRA` for test stacks). The preview talks to the backend through vite's `/api` proxy (`VITE_BACKEND_SAME_ORIGIN=true`), so no CORS change. Publish pushes from the session's own checkout and opens a PR against the merge target; it refuses to push the merge target itself.
+9. **Apps (L-APPS)** are static bundles in `rose_user_ui/apps/<slug>/`; the publish URL is the immutable usercontent version URL (changes per publish; a stable alias is a follow-up). A built vite app is copied in.
 
 ## Deploy approvals (collect at `/deploy`)
 
@@ -215,7 +219,7 @@ Per the 2026-10-20 goal ("make intelligent guesses; keep critical ones for revie
 - Schemas: `rose-ui.json` and `tool.json` validation; any new Zod schemas.
 - Env and prod: `USERCONTENT_BASE_URL` (separate origin), `USER_UI_TOKEN_SECRET`, E2B template rebuild; C10 `SLACK_AUTO_RCA_OWNER_USER_ID` (required — with `AUTO_RCA_ENABLED=1` already on Render every error card 503s until set), `SLACK_AUTO_RCA_FEEDBACK_USER_IDS`, optional `SLACK_AUTO_RCA_REPO_URL`/`SLACK_AUTO_RCA_SIGNATURE_WINDOW_MINUTES`; migration `20261020170000_slack_auto_rca_incidents`.
 - Prompt text: C10 RCA goal/occurrence/feedback text `back-end/src/domains/slack-auto-rca/rcaGoalService.ts` (78 lines).
-- C10 follow-ups: retire `.github/workflows/auto-rca*.yml` (dead `agent-rca-feedback` trigger); update `.claude/commands/rca.md` automated-alert section (prompt approval); stuck agent if the backend crashes between agent-row create and workflow start.
+- C10 follow-ups: ~~retire `.github/workflows/auto-rca*.yml`~~ **done (cfa7e12d4: 5 workflows, prompt file, `scripts/auto-rca-tool`, alert-context route and their tests removed; 60/60 structural gates)**; update `.claude/commands/rca.md` automated-alert section (prompt approval); stuck agent if the backend crashes between agent-row create and workflow start.
 - Prompt text (C10): the auto-RCA root goal, occurrence and reviewer-feedback messages, and the RCA response schema in `back-end/src/domains/slack-auto-rca/rcaGoalService.ts`.
 - Env and prod (C10, Render): `SLACK_AUTO_RCA_OWNER_USER_ID` (Andy's user id) must be set at deploy, because `AUTO_RCA_ENABLED=1` is already set and error cards then answer 503 until it is; `SLACK_AUTO_RCA_FEEDBACK_USER_IDS` (Slack user ids allowed to steer an RCA); optional `SLACK_AUTO_RCA_REPO_URL` (default `https://github.com/Rose-Ai-Labs/rose`) and `SLACK_AUTO_RCA_SIGNATURE_WINDOW_MINUTES` (default 60). `GITHUB_DISPATCH_TOKEN` is no longer read for auto-RCA. Fly worker cards must post with the same Slack app's bot token (`SLACK_BOT_TOKEN` + `SLACK_ERROR_CHANNEL_ID`); new tables ship in migration `20261020170000_slack_auto_rca_incidents`.
 - Projects (L-SYNC): Zod schemas in `domains/projects/types.ts`, `project_id` on agent create and code-session create; ws-server project mode and the startup note at the top of the CLI prompt (prompt text); code-agent transcript `project_startup` line; migration `20261020130000_projects`. No new env vars (reuses `CLAUDE_CREDENTIAL_DECRYPTION_KEY`, `GITHUB_TOKEN`).
@@ -266,6 +270,11 @@ Per the 2026-10-20 goal ("make intelligent guesses; keep critical ones for revie
   - Harness: removed `MAX_RUNTIME_S`, `SDK_IDLE_TIMEOUT_S`, `SDK_WAIT_TOOL_IDLE_TIMEOUT_S`, the 15-min ws-server linger and the rose-bridge 900 s default; activity `start_to_close` → `CODE_AGENT_ACTIVITY_NO_DEADLINE`; retries unlimited with a 5-attempt self-error cap; idle pause, keepalive, provider fall-over.
   - Zod: claude/codex create `code_session_id`, `lease_owner`, `base_branch`; close `reason`; `codeSessionCheckpointSchema`, `codeTaskUsageLimitSchema`, `credentialAvailabilityQuerySchema` (+`own_only`), `codeAgentsQuerySchema`; `createAgentSchema.share_code_session_with`.
   - Migration `20261020150000_code_sessions`: `CodeSession`, `CodeSessionShare` (RLS); `ClaudeCodeSession` + `codeSessionId`, `codeProvider`, `awaitingParent`; drops the unique constraint on `sandboxId`.
+- L-APPS (A1, A2; branch worktree-agent-a1dc54f70d0a4394c):
+  - Prompt text: dev-only "Live preview and apps" block in `codeAgentPrompt.ts` (`ROSE_IN_ROSE_INSTRUCTIONS_VERSION` `code-agent-rose-in-rose-apps.v1`; non-dev prompts byte-identical); rose_user_ui README "Apps" section and manifest example.
+  - Zod: `apps` in `userUiManifestSchema`; `codePublishSchema`.
+  - Harness (watched file, metadata only): `spawn_claude_code_agent/service.py` carries `preview_url` into `code_agent`.
+  - New dev-only routes `GET/POST /api/claude-code-session/:taskId/{preview,publish}` and `GET /api/user-ui/apps`; E2B dev sessions get `rose-preview` + `ROSE_PREVIEW_*` env and a detached autostart for the Rose repo. No migration, no prod env, no template rebuild.
 - I7 passwords (merged 0b5fb9db7):
   - Migration `20261020220000_browser_password_source_profile_key`: drop `BrowserPassword_userId_origin_username_key`, create unique on `(userId, origin, username, browserSource, browserProfile)`. The old instance's password upload returns 500 during the Render cutover until it drains; Mac retries are idempotent.
   - Agent-visible: credential readers return one login per origin+username (enabled → user-synced → most recently used → most recently synced).
@@ -278,3 +287,35 @@ Per the 2026-10-20 goal ("make intelligent guesses; keep critical ones for revie
   - Canonical seed re-publication under the new schema cache key (PG15, normal procedure).
   - Mac app release.
   - No Zod or prompt changes.
+- L-RCA-RETIRE (merged cfa7e12d4):
+  - CI deletion: `auto-rca*.yml` ×5 and `.github/auto-rca-prompt.txt`.
+  - Prompt files:
+    - `.claude/commands/rca.md`: the "Automated production-alert mode" section is rewritten for the Slack → Rose RCA agent path.
+    - `.claude/commands/deploy.md`: the auto-RCA gate is dropped from the registry text.
+  - Deleted tests: `agent-alert-context.blackbox.ts`, `auto-rca-lifecycle.blackbox.test.sh`, `auto-rca-workflow.test.sh`.
+  - `scripts/test.sh` loses `--auto-rca-changed-from`.
+
+## Operational follow-ups at deploy (for Andy)
+
+- Redeploy Render and Fly right after the merge. Prod `main` still dispatches `agent-failure` to GitHub; between the merge and both redeploys, failures get no card and no RCA.
+- Close or adopt the 77 open draft `auto-rca/*` PRs (#1232–#1561) and delete their branches.
+- Remove the GitHub secret `RCA_CLAUDE_CODE_OAUTH_TOKEN` (and revoke the token), and the env var `GITHUB_DISPATCH_REPO` on Render and Fly. Keep `GITHUB_DISPATCH_TOKEN`.
+- Set `SLACK_AUTO_RCA_OWNER_USER_ID` on Render (C10; error cards 503 until it is set).
+- E2B template rebuild (L-DISPLAY, L-UIKIT and W5b template changes).
+- Mac app release (L-PHONE, L-LOCAL, I1, I2, I6, I8) plus a real-Mac run of their suites, which have only run on the Linux electron-stub harness so far.
+- Canonical seed re-publication for the new schema cache key (PG15).
+- Set `USERCONTENT_BASE_URL` to a separate origin before any user UI goes live.
+- A6 root browser (merged d0b6000ba):
+  - Migration `20261020224000_browser_world_state`: `BrowserSiteState`, `BrowserSiteFork` (RLS).
+  - Zod: `signed_in_sites` on browser close; `openRootBrowserSchema`, `agentIdParamSchema`, `siteParamSchema`.
+  - Browser harness: sign-in evidence recorded and sent on close (not LLM-visible).
+  - Product behaviour: one extra read and upsert per prepare-auth; one CDP cookie read plus merge per close (6 s budget). Kill switch `BROWSER_WORLD_STATE=off`.
+- L-TOOLS2 (merged ed4069172):
+  - Zod: `userToolRunRecordSchema`, `userToolCallClaimSchema`, `userToolCallCompleteSchema`, `userToolCallReleaseSchema`, `userToolRunSchema`.
+  - Code-agent-facing README text on `side_effects` and `idempotency_key_field`.
+  - Harness: the workflow passes the idempotency key; side-effecting user tools are declared to the root agent.
+  - Prod env at deploy: Fly `USER_TOOLS_EXECUTOR=code_session`.
+- L-APPS (A1/A2, merged 7826a2a6b):
+  - Prompt: dev-only "Live preview and apps" block in `codeAgentPrompt.ts` (`code-agent-rose-in-rose-apps.v1`; non-dev prompts byte-identical); README "Apps" section and the manifest example.
+  - Zod: `apps` in the rose-ui.json schema; `codePublishSchema`.
+  - Harness (watched file, metadata only): `preview_url` copied into `code_agent`.

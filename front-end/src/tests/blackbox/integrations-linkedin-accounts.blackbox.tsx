@@ -64,20 +64,45 @@ describe('LinkedIn I4: accounts and export phases on Rose Desktop', () => {
   beforeEach(() => mockSession());
   afterEach(() => localStorage.clear());
 
-  it('one chip per account: the imported name, else the profile id', async () => {
+  it('one chip per account under its server label, verbatim (A6)', async () => {
     serveList(() =>
       linkedinList([
-        { id: 'default', wire: {}, config: { profile: { firstName: 'Andy', lastName: 'P' } } },
-        { id: 'jane-doe', wire: syncingAt('starting') },
+        {
+          id: 'default',
+          wire: { label: 'linkedin.com/in/andyp' },
+          config: { profile: { firstName: 'Andy', lastName: 'P' } },
+        },
+        { id: 'urn:li:member:42', wire: { label: 'LinkedIn member 42' } },
+        { id: 'jane-doe', wire: { label: 'linkedin.com/in/jane-doe', ...syncingAt('starting') } },
       ]),
     );
     renderIntegrations();
     await waitFor(() =>
-      expect(chipFor('linkedin', 'Andy P')).toHaveAttribute('data-tone', 'synced'),
+      expect(chipFor('linkedin', 'linkedin.com/in/andyp')).toHaveAttribute('data-tone', 'synced'),
     );
-    expect(chipFor('linkedin', 'jane-doe')).toHaveAttribute('data-tone', 'syncing');
-    expect(bar()).toHaveTextContent('jane-doe · Starting export · Syncing…');
+    expect(chipFor('linkedin', 'LinkedIn member 42')).toBeInTheDocument();
+    expect(chipFor('linkedin', 'linkedin.com/in/jane-doe')).toHaveAttribute('data-tone', 'syncing');
+    expect(bar()).toHaveTextContent('linkedin.com/in/jane-doe · Starting export · Syncing…');
+    // The client derives no names: not the imported profile, not the raw ids.
+    expect(screen.queryByText('Andy P')).toBeNull();
+    expect(screen.queryByText('urn:li:member:42')).toBeNull();
     expect(screen.queryByText('default')).toBeNull();
+    expect(
+      screen.getByRole('button', { name: 'Remove LinkedIn account linkedin.com/in/andyp' }),
+    ).toBeInTheDocument();
+  });
+
+  it('a missing server label shows the bare account id, never a blank chip', async () => {
+    serveList(() =>
+      linkedinList([
+        { id: 'default', wire: {}, config: { profile: { firstName: 'Andy', lastName: 'P' } } },
+        { id: 'jane-doe', wire: {} },
+      ]),
+    );
+    renderIntegrations();
+    await waitFor(() => expect(chipFor('linkedin', 'jane-doe')).not.toBeNull());
+    expect(chipFor('linkedin', 'default')).toBeInTheDocument();
+    expect(screen.queryByText('Andy P')).toBeNull();
   });
 
   it('waiting_for_export shows the ETA only when LinkedIn stated one', async () => {
@@ -182,7 +207,7 @@ describe('LinkedIn I4: accounts and export phases on Rose Desktop', () => {
   it('removes one account through DELETE /linkedin/accounts/:accountId', async () => {
     serveList(() =>
       linkedinList([
-        { id: 'default', wire: {} },
+        { id: 'default', wire: { label: 'linkedin.com/in/andyp' } },
         { id: 'jane-doe', wire: {} },
       ]),
     );
@@ -198,7 +223,9 @@ describe('LinkedIn I4: accounts and export phases on Rose Desktop', () => {
     const user = userEvent.setup();
     renderIntegrations();
     await user.click(
-      await screen.findByRole('button', { name: 'Remove LinkedIn account LinkedIn account' }),
+      await screen.findByRole('button', {
+        name: 'Remove LinkedIn account linkedin.com/in/andyp',
+      }),
     );
     await user.click(
       within(await screen.findByRole('dialog')).getByRole('button', { name: 'Remove' }),

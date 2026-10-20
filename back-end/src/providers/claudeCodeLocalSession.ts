@@ -36,6 +36,7 @@ import { allocatePort, waitForChildReadiness } from './claudeCodeLocalProcess';
 import { isSandboxCreateTimeoutOrAbortError } from './e2bSandboxCreate';
 import { materializeUserUiInLocalHome, type UserUiWorkspace } from './userUi/workspace';
 import { localCodeSessionRoot } from './codeSessions/lifecycle';
+import { stopLocalCodePreview } from './codePreview/sandbox';
 import type { ProjectRestoreReport, ProjectWorkspace } from './projects/types';
 import { restoreLocalProject, unregisterWorkspaceExecutor } from './projects/workspace';
 
@@ -644,6 +645,8 @@ async function runLocalClaudeCodeClose(
       process: live?.process ?? null,
       pid: ownership.pid,
     });
+    // A dev session's `rose-preview` dev server (A1) dies with the session.
+    stopLocalCodePreview(ownership.homeDir ?? ownership.workDir);
   }
 
   await prisma.claudeCodeSession.update({

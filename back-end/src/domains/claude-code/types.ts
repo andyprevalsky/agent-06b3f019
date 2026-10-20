@@ -88,6 +88,8 @@ export interface CreateSessionResult {
   provider_handoff: boolean;
   /** Restore summary when the session materialized a Project (PJ3). */
   project: ProjectRestoreReport | null;
+  /** Live dev-server preview URL (Rose dev accounts, A1); null otherwise. */
+  preview_url: string | null;
 }
 
 export interface CloseSessionParams {
@@ -115,6 +117,15 @@ export const codeTaskUsageLimitSchema = z.object({
   // Epoch seconds/ms or ISO time the provider reports the limit resets.
   resets_at: z.union([z.number().positive(), z.string().min(1).max(64)]).optional(),
 });
+
+/** POST /:taskId/publish — push the session's branch and open a PR (A1; never merges). */
+export const codePublishSchema = z
+  .object({
+    title: z.string().trim().min(1).max(256).optional(),
+    body: z.string().max(20_000).optional(),
+    draft: z.boolean().optional(),
+  })
+  .strict();
 
 /** GET /credential-availability — can a Claude / Codex credential be leased now. */
 export const credentialAvailabilityQuerySchema = z.object({

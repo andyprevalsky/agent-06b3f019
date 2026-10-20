@@ -46,6 +46,9 @@ import { waitForSandboxWsServer } from './e2bWsReady';
 import { codeSessionTurnToken } from './codeSessionTurns';
 import { applyUserUiSandboxEnvs, writeUserUiWorkspaceToSandboxSafe } from './userUi/workspace';
 import { prepareCodeSessionWorkspace } from './codeSessionWorkspace';
+import { applyPreviewUrlEnv, autostartRosePreview } from './codePreview/sandbox';
+import { isRoseRepoUrl } from './codePreview/preview';
+import { isRoseDevUser } from '../utils/roseDevAccess';
 import {
   isRefreshOnlyOauthEnvelope,
   resolveClaudeCodeAuthEnvs,
@@ -188,6 +191,8 @@ async function createClaudeCodeSessionUnlocked(
       workDir,
       branch: codeSession?.branch,
       mergeTarget: codeSession?.mergeTarget,
+      roseDev: isRoseDevUser(userId),
+      roseRepo: isRoseRepoUrl(projectWorkspace?.project.repoUrl ?? githubRepoUrl),
     })
   );
 
@@ -395,6 +400,9 @@ async function createClaudeCodeSessionUnlocked(
   // Get WebSocket URL for the frontend to connect to
   const wsHost = sandbox.getHost(WS_PORT);
   const wsUrl = `wss://${wsHost}`;
+  const previewUrl = applyPreviewUrlEnv(envs, wsUrl, sandbox.sandboxId);
+  const sessionEnvs = { ...envs, ...(project.envs ?? {}) };
+  const wsLaunchedAt = Date.now();
 
   // Start the WebSocket server (runs Claude Code internally)
   // timeoutMs: 0 = no timeout (default is 60s which was killing the process!)
@@ -403,7 +411,7 @@ async function createClaudeCodeSessionUnlocked(
     .run('node /home/user/ws-server.mjs', {
       background: true,
       timeoutMs: 0,
-      envs: { ...envs, ...(project.envs ?? {}) },
+      envs: sessionEnvs,
     })
     .catch((err) =>
       log.error('Failed to start WS server', {
@@ -424,6 +432,12 @@ async function createClaudeCodeSessionUnlocked(
     await releaseSandboxAfterFailedStart(sandbox, codeSession);
     throw new Error('Claude Code WebSocket server failed to become ready');
   }
+  // Rose-in-Rose (A1): a dev Rose-repo session serves its front-end with HMR.
+  await autostartRosePreview(sandbox, {
+    envs: sessionEnvs,
+    repoUrl: projectWorkspace?.project.repoUrl ?? githubRepoUrl,
+    launchedAt: wsLaunchedAt,
+  });
 
   // Create DB record with real values (no placeholders)
   await prisma.claudeCodeSession.create({
@@ -453,6 +467,7 @@ async function createClaudeCodeSessionUnlocked(
     resumedFrom,
     cliSessionId,
     projectRestore: project.report,
+    previewUrl,
   };
 }
 
@@ -503,6 +518,7 @@ export async function createCodexCodeSession(
             workDir,
             branch: codeSession?.branch,
             mergeTarget: codeSession?.mergeTarget,
+            roseDev: isRoseDevUser(userId),
           })
         );
 
@@ -627,6 +643,8 @@ export async function createCodexCodeSession(
 
   const wsHost = sandbox.getHost(WS_PORT);
   const wsUrl = `wss://${wsHost}`;
+  const previewUrl = applyPreviewUrlEnv(envs, wsUrl, sandbox.sandboxId);
+  const wsLaunchedAt = Date.now();
 
   sandbox.commands
     .run('node /home/user/ws-server.mjs', {
@@ -652,6 +670,7 @@ export async function createCodexCodeSession(
     await releaseSandboxAfterFailedStart(sandbox, codeSession);
     throw new Error('Codex WebSocket server failed to become ready');
   }
+  await autostartRosePreview(sandbox, { envs, repoUrl: githubRepoUrl, launchedAt: wsLaunchedAt });
 
   await prisma.claudeCodeSession.create({
     data: {
@@ -678,5 +697,6 @@ export async function createCodexCodeSession(
     uploadedFiles,
     resumedFrom,
     cliSessionId,
+    previewUrl,
   };
 }

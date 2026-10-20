@@ -387,6 +387,7 @@ model User {
   credits                     Credit[]
   subscriptions               Subscription?
   cookieBundles               CookieBundle[]
+  browserSiteStates           BrowserSiteState[]
   steelSessionAuths           SteelSessionAuth[]
   mintedAccounts              MintedAccount[]
   passkeyCredentials          PasskeyCredential[]
@@ -582,6 +583,7 @@ model BrowserSession {
   // and location specificity even if a more specific proxy becomes available.
   kernelProxySource      String?
   context                BrowserContext       @relation(fields: [contextId], references: [id], onDelete: Cascade)
+  siteForks              BrowserSiteFork[]
 
   @@index([contextId])
   @@index([agentId])
@@ -1520,6 +1522,53 @@ model CookieBundle {
 
   @@unique([userId, authRealm, browserSource, browserProfile])
   @@index([userId, authRealm])
+}
+
+// Root browser world state, split by website (A6). One head row per
+// (user, registrable domain). The site's cookies are ordinary Cookie rows
+// under browserSource "rose_root" with a matching CookieBundle, so agents fork
+// them through the existing injection path. `revision` only moves forward: a
+// browser session merges a new login only while the head is still at the
+// revision that session forked (domains/browser-world/service.merge.ts).
+model BrowserSiteState {
+  id                String   @id @default(uuid())
+  userId            String
+  site              String
+  revision          Int      @default(0)
+  authFingerprint   String   @default("")
+  cookieCount       Int      @default(0)
+  lastWriterTaskId  String?
+  lastWriterAgentId String?
+  lastWriterKind    String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  user              User     @relation(fields: [userId], references: [userId], onDelete: Cascade)
+
+  @@unique([userId, site])
+}
+
+// One row per (browser task, site) the task forked from Root: the head
+// revision it started from and the session's own auth fingerprint right after
+// injection. Merge compares against this base and records its outcome here,
+// so a retried close is idempotent.
+model BrowserSiteFork {
+  id               String         @id @default(uuid())
+  userId           String
+  browserSessionId String
+  agentId          String
+  site             String
+  baseRevision     Int
+  baseFingerprint  String
+  baseAuthKeys     String[]       @default([])
+  mergedRevision   Int?
+  lastOutcome      String?
+  forkedAt         DateTime       @default(now())
+  mergedAt         DateTime?
+  updatedAt        DateTime       @updatedAt
+  browserSession   BrowserSession @relation(fields: [browserSessionId], references: [id], onDelete: Cascade)
+
+  @@unique([browserSessionId, site])
+  @@index([userId, agentId])
 }
 
 model SteelSessionAuth {

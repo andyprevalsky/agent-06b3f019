@@ -2354,7 +2354,8 @@ def build_code_agent_metadata(
     ``summary.merged_into`` is set only when the merge was confirmed (C4).
     ``failure_message`` is the human-readable reason when state is failed.
     ``target_meta`` carries the run target ('cloud' | 'local'), device_name and
-    folder (owned by the local-target lane); cloud when omitted.
+    folder (owned by the local-target lane); cloud when omitted. It also carries
+    ``preview_url``: the session's live dev-server preview (Rose dev accounts, A1).
     """
     facts = facts or {}
     block: Dict[str, Any] = {
@@ -2628,6 +2629,8 @@ async def spawn_claude_code_activity(
         code_agent_meta["device_name"] = local_device_name
     if isinstance(attached, dict) and attached.get("folder"):
         code_agent_meta["folder"] = attached["folder"]
+    if isinstance(attached, dict) and attached.get("preview_url"):
+        code_agent_meta["preview_url"] = attached["preview_url"]
 
     logger.info(
         "[ClaudeCode] Using response schema from tool call",
@@ -2734,6 +2737,9 @@ async def spawn_claude_code_activity(
             if target == "local" and session_data.get("folder"):
                 # Display path of the folder the Mac granted (e.g. "~/Developer/rose").
                 code_agent_meta["folder"] = session_data["folder"]
+            if session_data.get("preview_url"):
+                # Live dev-server preview of this session (Rose dev accounts, A1).
+                code_agent_meta["preview_url"] = session_data["preview_url"]
 
             logger.info(
                 "[ClaudeCode] Session created",
@@ -2763,6 +2769,7 @@ async def spawn_claude_code_activity(
             "merge_target": (code_session_facts or {}).get("merge_target")
             or (attached or {}).get("merge_target"),
             "transcript_events": int((attached or {}).get("transcript_events") or 0),
+            "preview_url": code_agent_meta.get("preview_url"),
         }
         if code_session_facts is None and code_session_id:
             code_session_facts = {

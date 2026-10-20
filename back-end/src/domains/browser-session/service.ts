@@ -26,6 +26,7 @@ import {
   RotationSessionNotFoundError,
 } from '../../providers/browserSessionResume';
 import { canonicalAuthRealm } from '../../providers/authRealm';
+import { prepareWorldStateFork } from './service.world-fork';
 import { getAuthOptions } from '../../providers/authOptions';
 import * as repo from './repo';
 import { storedBrowserProvider } from '../../providers/browser/types';
@@ -127,12 +128,14 @@ export async function prepareSessionCredentials(
     throw new Error('Target URL must have an authentication realm');
   }
 
-  const [authOptions, storedPasswords, passkeys] = await Promise.all([
+  const [authOptions, storedPasswords, passkeys, onCookiesReady] = await Promise.all([
     getAuthOptions(userId, authRealm, {
       steelContextId: session.provider === 'steel' ? (session.providerProfileId ?? null) : null,
     }),
     repo.findPasswords(userId),
     repo.reservePasskeysForRealm(userId, authRealm),
+    // Root world-state fork (A6), read before injection selects cookies.
+    prepareWorldStateFork(session, userId, targetUrl),
   ]);
 
   const credentialPayload = buildSessionCredentialPayload(
@@ -142,7 +145,7 @@ export async function prepareSessionCredentials(
     passkeys
   );
   const injectionResult = await preserveSessionCredentialPayload(
-    () => injectUserData(sessionId, userId, targetUrl, options),
+    () => injectUserData(sessionId, userId, targetUrl, { ...options, onCookiesReady }),
     credentialPayload
   );
 
@@ -252,16 +255,7 @@ export async function initSession(userId: string, agentId: string, startUrl: str
 // Close
 // ---------------------------------------------------------------------------
 
-export async function closeBrowserSession(sessionId: string, pause: boolean, currentUrl?: string) {
-  log.info(`${pause ? 'Pausing' : 'Closing'} browser session`, {
-    sessionId,
-    currentUrl: currentUrl !== undefined && currentUrl !== '' ? currentUrl : 'NULL/EMPTY',
-  });
-
-  await closeSession(sessionId, pause, currentUrl);
-
-  return { status: pause ? ('PAUSED' as const) : ('CLOSED' as const) };
-}
+export { closeBrowserSession } from './service.close';
 
 // rotate_ip tool — swap the browser session's outbound IP (see
 // providers/browserSessionResume.ts and docs/plans/active/rotate-ip-tool.md).

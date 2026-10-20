@@ -1,18 +1,22 @@
 /**
- * Readable chip labels for password and passkey accounts (plan row I7).
+ * Password and passkey accounts on Rose Desktop (plan rows I7, A6).
  *
  * Pure functions, no state machine. Backend contract
- * (back-end/src/domains/integrations/service.credentialAccounts.ts):
+ * (back-end/src/domains/integrations/service.accountLabels.ts): every
+ * `<source>_passwords` / `<source>_passkeys` account carries a server `label`
+ * the chip shows verbatim; the FE derives no account names:
  *
- *   provider `<source>_passwords` (Apple import: `apple_passwords`)
- *     accountId `<source>:<profile>`, `default` = no profile (legacy row)
- *       chrome_passwords / chrome:Profile 1  → "Chrome · Profile 1"
- *       chrome_passwords / default           → "Chrome · Default profile"
- *       apple_passwords  / default           → "Apple Passwords" (no profiles)
- *   provider `<source>_passkeys`, one `default` account per source
- *       cdp_virtual_passkeys      → "Agent passkeys" (agents enrolled them; Rose
- *                                   holds the only copy, so removal warns)
- *       apple_passwords_passkeys  → "Apple passkeys"
+ *   chrome_passwords / chrome:Profile 1   label "Chrome · Profile 1"
+ *   chrome_passwords / chrome:Default     label "Chrome"
+ *   apple_passwords  / default            label "Apple Passwords"
+ *   cdp_virtual_passkeys / default        label "Rose agent" (Rose holds the only
+ *                                         copy of agent-enrolled passkeys, so
+ *                                         removal warns)
+ *   label missing                         the bare account id
+ *
+ * Row naming and order stay here: fixed rows (Chrome, Apple, Atlas), extra
+ * `<source>_passwords` rows named by credentialSourceName, one passkey row per
+ * provider.
  */
 
 import type { ConnectedIntegration, IntegrationAccount } from '../types';
@@ -62,25 +66,13 @@ export function passwordSource(provider: string): string | null {
   return source === '' ? null : source;
 }
 
-/** Chip label of one password account (see the table above). */
-export function passwordAccountLabel(provider: string, account: IntegrationAccount): string {
-  const source = passwordSource(provider) ?? provider;
-  if (source === 'apple') return 'Apple Passwords';
-  const prefix = `${source}:`;
-  let profile = account.accountId.startsWith(prefix)
-    ? account.accountId.slice(prefix.length)
-    : account.accountId;
-  if (!account.unlabeled) profile = account.label;
-  const readable = profile === 'default' || profile === '' ? 'Default profile' : profile;
-  return `${credentialSourceName(source)} · ${readable}`;
-}
-
-/** Chip label of a passkey store: "Agent passkeys", "Apple passkeys", "Chrome passkeys". */
-export function passkeyAccountLabel(provider: string): string {
-  const source = provider.endsWith(PASSKEYS_SUFFIX)
-    ? provider.slice(0, -PASSKEYS_SUFFIX.length)
-    : provider;
-  return `${credentialSourceName(source)} passkeys`;
+/**
+ * Chip label of one password or passkey account: the server's label verbatim
+ * (it already names its source); a missing label shows the bare account id
+ * (parseIntegrationAccounts) so a chip is never blank.
+ */
+export function credentialAccountLabel(account: IntegrationAccount): string {
+  return account.label;
 }
 
 /** First row of each distinct name matching `keep`, in list order. */

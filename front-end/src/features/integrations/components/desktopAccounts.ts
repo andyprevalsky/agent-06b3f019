@@ -13,7 +13,7 @@
  *                       contract only contributes sync tone and progress ids
  *   Gmail address     → idle = queued (quiet), phase `history` = light "checking
  *                       for new mail" (no bar), scanning / saving = the bar
- *   labelFor          → a source-qualified chip label (passwords / passkeys, see
+ *   labelFor          → the server's own chip label (passwords / passkeys, see
  *                       credentialAccountLabels) used unprefixed in the dialog
  *   removalWarning    → the confirm dialog states why removal cannot be undone
  */
