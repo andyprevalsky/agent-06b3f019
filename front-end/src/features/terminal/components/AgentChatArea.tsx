@@ -40,7 +40,12 @@ import { useRef, Suspense, type ComponentType, type ReactNode } from 'react';
 import * as analytics from '@/lib/analytics';
 import { isBenchmarkSharedView } from '@/lib/benchmarkShare';
 
-import { ApprovalChip, PinnedQuestionMount, QueryInput, useAppView } from '@/features/terminal-component-group';
+import {
+  ApprovalChip,
+  PinnedQuestionMount,
+  QueryInput,
+  useAppView,
+} from '@/features/terminal-component-group';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { cn } from '@/lib/utils';
 import { GateStack } from './GateStack';
