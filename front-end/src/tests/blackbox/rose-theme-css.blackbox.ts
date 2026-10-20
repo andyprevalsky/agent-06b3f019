@@ -245,3 +245,34 @@ describe('Rose Settings drawer dark stylesheet (mock .acp: flat rows, text tabs)
     expect(css.toLowerCase()).not.toMatch(/#0f172a|#020817|#1e293b|#111827|#1f2937|hsl\(22\d/);
   });
 });
+
+describe('Rose Desktop dark surfaces carry no navy utilities (sweep vs panels/dark.js)', () => {
+  const SRC = path.resolve(__dirname, '../..');
+  /** Swept Rose Desktop surfaces → a light class string that must stay as it was. */
+  const SWEPT: Record<string, string> = {
+    'features/terminal-component-group/components/query-input/AttachmentList.tsx':
+      'bg-gray-100 border-gray-200 text-gray-700',
+    'features/terminal-component-group/components/SubAgentToolBubble.tsx':
+      'border-gray-200 dark:border-white/[0.12] bg-gray-50',
+    'features/terminal/components/SubAgentBreadcrumb.tsx': 'border-gray-200/50',
+    'features/terminal-component-group/components/AgentSettingsDialog.tsx': 'border-gray-300',
+    'features/terminal-component-group/components/CostLimitModal.tsx': 'border-gray-300',
+    'features/terminal-component-group/components/subAgentTree/SummaryLines.tsx':
+      'hover:bg-gray-100',
+    'features/terminal-component-group/components/subAgentTree/NodeRowBody.tsx':
+      'hover:bg-gray-100',
+    'features/terminal-component-group/components/browser-status-bar/StepProgressBar.tsx':
+      'h-1 bg-gray-200',
+    'features/terminal/components/PopularGoalsCarousel.tsx': 'bg-secondary hover:bg-secondary/80',
+  };
+  const NAVY_DARK_SURFACE = /dark:(hover:)?(bg|border)-(gray|slate)-[6-9]\d\d/;
+
+  it.each(Object.entries(SWEPT))(
+    '%s: dark surfaces are neutral, light classes kept',
+    (file, light) => {
+      const source = fs.readFileSync(path.join(SRC, file), 'utf-8');
+      expect(source).not.toMatch(NAVY_DARK_SURFACE);
+      expect(source).toContain(light);
+    },
+  );
+});

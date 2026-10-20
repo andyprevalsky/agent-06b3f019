@@ -85,7 +85,7 @@ export default function CostLimitModal({
   return (
     <Dialog open={open} onOpenChange={onOpenChange} modal={false}>
       <DialogContent
-        className="sm:max-w-md p-0 border border-gray-300 dark:border-gray-700 shadow-lg [&>button]:hidden overflow-hidden"
+        className="sm:max-w-md p-0 border border-gray-300 dark:border-white/[0.12] shadow-lg [&>button]:hidden overflow-hidden"
         style={{
           backgroundColor: 'transparent',
           backdropFilter: 'blur(12px)',
