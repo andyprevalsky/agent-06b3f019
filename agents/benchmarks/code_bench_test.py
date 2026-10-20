@@ -625,7 +625,7 @@ def test_parity_concurrent_raw_leg_keeps_run_order(tmp_path, monkeypatch):
 
     calls: list[str] = []
 
-    async def fake_attempt(task, *, cli, model, judge, cli_bin, pass_env, evidence_dir):
+    async def fake_attempt(task, *, cli, model, judge, cli_bin, pass_env, source_env, evidence_dir):
         calls.append(evidence_dir.name)
         await asyncio.sleep(0.05 if evidence_dir.name == "run-1" else 0)
         return {"task": task, "passed": evidence_dir.name != "run-2", "reason": "", "finished": _time.monotonic()}
@@ -701,3 +701,117 @@ def test_parity_summarizes_claude_stream_json_usage_and_host_extensions():
         ),
     )
     assert codex == {"input_tokens": 5, "cached_input_tokens": 2, "output_tokens": 7, "num_turns": 1}
+
+
+_CREDIT_ERROR = json.dumps(
+    {
+        "type": "result",
+        "subtype": "success",
+        "is_error": True,
+        "num_turns": 1,
+        "api_error_status": 400,
+        "result": "Credit balance is too low",
+        "total_cost_usd": 0,
+        "usage": {},
+    }
+)
+
+
+def test_parity_provider_api_error_is_infra_not_a_task_failure(monkeypatch):
+    """Live 2026-10-20: the raw leg's credential ran out mid-run; those attempts are INFRA."""
+    monkeypatch.setattr(parity, "_run_cli", lambda argv, **kwargs: (1, _CREDIT_ERROR))
+    result = asyncio.run(
+        parity.run_raw_attempt("code-bench-bugfix-invoice-rounding", cli="claude", model="m", judge=False)
+    )
+    assert result["infra"] is True and result["passed"] is False
+    assert result["reason"].startswith("INFRA: provider API error 400: Credit balance is too low")
+    assert parity.attempt_outcome(result) is None
+    report = parity.build_report(["t"], {"t": [True]}, {"t": [parity.attempt_outcome(result)]}, k=1)
+    assert report["raw"]["infra_attempts"] == 1 and report["raw"]["complete"] is False
+    assert report["raw"]["task_passes"] == {"t": "0/0"} and report["parity_ok"] is False
+
+
+def test_parity_cli_env_ignores_credentials_loaded_after_startup(tmp_path, monkeypatch):
+    """The judge's agents/.env load put the shared ANTHROPIC_API_KEY into os.environ mid-run."""
+    caller = {"PATH": "/usr/bin", "HOME": str(tmp_path)}
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "loaded-later-from-agents-env")
+    env = parity.cli_env("claude", tmp_path, source_env=caller)
+    assert "ANTHROPIC_API_KEY" not in env and env["PATH"] == "/usr/bin"
+    args = parity._parse_args(["--skip-rose"])
+    assert args.source_env == parity._CALLER_ENV
+
+
+def test_parity_rerun_infra_replaces_only_infra_attempts(tmp_path, monkeypatch):
+    task = "code-bench-bugfix-invoice-rounding"
+    transcript = tmp_path / "cli-transcript.log"
+    transcript.write_text(_CREDIT_ERROR + "\n")
+    saved = {
+        "raw_attempts": {
+            task: [
+                {"task": task, "run": 1, "passed": True, "exit_code": 0, "reason": "ok"},
+                {"task": task, "run": 2, "passed": False, "exit_code": 1, "transcript": str(transcript), "reason": "x"},
+                {"task": task, "run": 3, "passed": False, "exit_code": 0, "reason": "genuine failure"},
+            ]
+        }
+    }
+    raw = tmp_path / "raw.json"
+    raw.write_text(json.dumps(saved))
+    reran: list[tuple[str, str]] = []
+
+    async def fake_attempt(name, *, evidence_dir, **kwargs):
+        reran.append((name, evidence_dir.name))
+        return {"task": name, "passed": True, "reason": "All 2 code-bench checks passed"}
+
+    monkeypatch.setattr(parity, "run_raw_attempt", fake_attempt)
+    out = tmp_path / "out"
+    parity.main(["--tasks", task, "--skip-rose", "--raw-results", str(raw), "--rerun-infra", "--out-dir", str(out)])
+    assert reran == [(task, "run-2")]
+    attempts = json.loads((out / "parity.json").read_text())["raw_attempts"][task]
+    assert [a["passed"] for a in attempts] == [True, True, False]
+    assert attempts[1]["superseded_infra_attempts"][0]["infra"] is True
+    assert attempts[2]["reason"] == "genuine failure"
+
+
+def test_parity_lease_runs_raw_claude_on_the_leased_token_only(tmp_path, monkeypatch):
+    seen: dict = {}
+    released: list = []
+
+    async def fake_lease(backend, user):
+        seen["lease"] = (backend, user)
+        return {"type": "claude", "accessToken": "leased-oauth", "lineageKey": "lk-1", "source": "pool"}
+
+    async def fake_release(lease):
+        released.append(lease["lineageKey"])
+
+    async def fake_attempt(name, *, source_env, **kwargs):
+        seen["env"] = dict(source_env)
+        return {"task": name, "passed": True, "reason": ""}
+
+    monkeypatch.setattr(parity, "lease_claude_token", fake_lease)
+    monkeypatch.setattr(parity, "release_lease", fake_release)
+    monkeypatch.setattr(parity, "run_raw_attempt", fake_attempt)
+    monkeypatch.setitem(parity._CALLER_ENV, "ANTHROPIC_API_KEY", "exhausted-shared-key")
+    task = "code-bench-bugfix-invoice-rounding"
+    parity.main(["--tasks", task, "-k", "1", "--skip-rose", "--lease-claude-token", "--out-dir", str(tmp_path)])
+    assert seen["lease"] == (parity.PROD_BACKEND_URL, parity.BENCH_USER_ID)
+    assert seen["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "leased-oauth" and "ANTHROPIC_API_KEY" not in seen["env"]
+    assert released == ["lk-1"]
+
+
+def test_parity_openrouter_gateway_matches_the_rose_sandbox_transport(tmp_path, monkeypatch):
+    """Without a Claude credential Rose routes Claude Code via OpenRouter's Anthropic base."""
+    caller = {"PATH": "/usr/bin", "OPENROUTER_API_KEY": "sk-or-test", "CLAUDE_CODE_OAUTH_TOKEN": "stale"}
+    env = parity.openrouter_gateway_env(caller)
+    assert env["ANTHROPIC_BASE_URL"] == "https://openrouter.ai/api" and env["ANTHROPIC_API_KEY"] == "sk-or-test"
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+    cli = parity.cli_env("claude", tmp_path, source_env=env)
+    assert parity.describe_transport(cli) == "api-key@https://openrouter.ai/api"
+    assert parity.describe_transport({"CLAUDE_CODE_OAUTH_TOKEN": "x"}) == "oauth-token"
+    assert parity.describe_transport({}) == "cli-managed-login"
+    sandbox_auth = (parity.REPO_ROOT / "back-end/src/providers/claudeCodeSandboxAuth.ts").read_text()
+    assert f"OPENROUTER_ANTHROPIC_COMPAT_BASE_URL = '{parity.OPENROUTER_ANTHROPIC_BASE_URL}'" in sandbox_auth
+    e2b = (parity.REPO_ROOT / "back-end/src/providers/e2b.ts").read_text()
+    assert f"process.env.CLAUDE_CODE_MODEL || '{parity.DEFAULT_MODELS['claude']}'" in e2b
+    assert f"process.env.CODEX_CODE_MODEL || '{parity.DEFAULT_MODELS['codex']}'" in e2b
+    with pytest.raises(SystemExit):
+        parity._parse_args(["--openrouter-gateway", "--lease-claude-token"])
