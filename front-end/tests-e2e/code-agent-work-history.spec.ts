@@ -165,7 +165,7 @@ for (const provider of ['claude', 'codex'] as const) {
             },
           ],
         };
-      else if (path === '/api/projects') body = [];
+      else if (path === '/api/projects') body = { projects: [] };
       else if (path === '/api/invite-codes/check') body = { needsInviteCode: false };
       else if (path === '/api/attention-requests') body = { requests: [] };
       else if (path.endsWith('/capabilities'))
@@ -187,7 +187,9 @@ for (const provider of ['claude', 'codex'] as const) {
     await page.goto(`${FRONTEND_URL}/?agent-id=${OWNER}&code-agent=${TASK}`, {
       waitUntil: 'domcontentloaded',
     });
-    await expect(page.locator('textarea').first()).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByTestId('code-agent-view-composer').locator('textarea')).toBeVisible({
+      timeout: 60_000,
+    });
     const view = page.getByTestId('code-agent-view');
     const slot = view.getByTestId('code-work-slot');
     const history = slot.getByTestId('code-work-activities');
