@@ -349,6 +349,21 @@ class Scorecard(unittest.TestCase):
         document = self.valid(data)
         self.assertIn("RUNNING", document)
 
+    def test_finished_shards_without_result_keep_terminal_clock_and_unknown_counts(self):
+        admission = self.f.sharded(result=False)
+        before = {str(p): p.read_bytes() for p in admission.rglob("*.json")}
+        exp = CARD["load_sharded"](admission, deep=False)
+        self.assertEqual(exp["state"], "INCOMPLETE")
+        self.assertEqual(exp["ended_at"], T0 + 2000)
+        self.assertEqual(exp["end_evidence"], "coordination.finished_at")
+        self.assertEqual(exp["rows_source"], "live shard-status counters")
+        self.assertEqual(exp["progress"]["in_progress"], 2)
+        self.assertEqual(exp["outcomes"]["INFRA"], 0)
+        self.assertIn("final result.json absent", exp["state_reason"])
+        exports = next(i for i in exp["lifecycle"] if i["label"] == "Evidence exports verified")
+        self.assertEqual(exports["state"], "ok")
+        self.assertEqual(before, {str(p): p.read_bytes() for p in admission.rglob("*.json")})
+
     def test_live_counter_unknown_outcome_renders_a_count_without_invented_names(self):
         # 2026-10-20 Polar batch 1 (adopted): a failed job with no verdict and unknown infra
         # (j0003) became a nameless counter row; --text crashed joining [None].

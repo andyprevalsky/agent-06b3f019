@@ -646,7 +646,9 @@ def load_sharded(run_dir: Path, deep: bool = True) -> dict:
                        "final group published" if published else "final group NOT published"
                        + (f": {str(reason)[:160]}" if reason else ""))
     else:
-        lifecycle_item(exp, "pending", "Results recorded", "result.json pending")
+        finished = coordination.get("finished_at")
+        lifecycle_item(exp, "warn" if finished else "pending", "Results recorded",
+                       "final result.json absent after runners joined" if finished else "result.json pending")
     finished = coordination.get("finished_at")
     exp["native_audit"] = bool(exp.pop("_audit_released", False))
     if abort or coordination.get("abort_reason") or coordination.get("terminate_reason"):
@@ -661,7 +663,9 @@ def load_sharded(run_dir: Path, deep: bool = True) -> dict:
         if result.get("missing_jobs"):
             exp["state"], exp["state_reason"] = "FAILED", f"{result['missing_jobs']} scheduled jobs without results"
     elif finished:
-        exp["state_reason"] = "runners joined; operator writing result.json"
+        exp["ended_at"], exp["end_evidence"] = finished, "coordination.finished_at"
+        exp["state"] = "INCOMPLETE"
+        exp["state_reason"] = "runners joined; final result.json absent; recorded outcomes may be incomplete"
     finish = finish_experiment(exp)
     if finish["infra_breached"] and finish["state"] in ("COMPLETE", "INCOMPLETE"):
         finish["state"], finish["state_reason"] = "FAILED", "infra stop threshold reached"

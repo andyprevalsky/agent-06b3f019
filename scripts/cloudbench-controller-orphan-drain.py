@@ -525,7 +525,9 @@ def saved_positive_plan(args, export):
         "cloudbench-original-volume-capture.py",
     }
     need(
-        set(operator["source_hashes"]) == expected_names,
+        # Historical saved plans embed the old guest and predate the shared
+        # pidfd source. Keep that exact old source set valid for observation.
+        set(operator["source_hashes"]) in (expected_names, expected_names - {"cloudbench-controller-export.py"}),
         "incomplete saved plan producer sources",
     )
     for name, expected in operator["source_hashes"].items():
