@@ -1,6 +1,10 @@
 /**
  * STATE MACHINE: AppSidebar
  *
+ * FLAG SWITCH: useRoseDesktop() true  → RoseSidebar (rose-sidebar/RoseSidebar.tsx:
+ *              hover-expanding 64→236px bar, agents grouped by project)
+ *              useRoseDesktop() false → the stock sidebar below, unchanged.
+ *
  * WIDTH STATE (owned by useSidebarWidth, persisted to localStorage):
  * [EXPANDED 220-480px] --drag right edge--> [EXPANDED, new width]
  *          |  ^                                   |
@@ -35,7 +39,10 @@
 
 import { useCallback, useMemo, useState, type CSSProperties, type ReactNode } from 'react';
 import type { User } from '@supabase/supabase-js';
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { cn } from '@/lib/utils';
+import RoseSidebar from './rose-sidebar/RoseSidebar';
+import type { RoseSidebarActions } from './rose-sidebar/useRoseAgentMenuActions';
 import {
   SidebarArchivedButton,
   SidebarCreateAgentButton,
@@ -53,7 +60,7 @@ import { SIDEBAR_WIDTH_COLLAPSED } from '../config';
 import type { Agent } from '../hooks';
 import type { SidebarDripStyles, SidebarView } from '../types';
 
-interface AppSidebarProps {
+export interface AppSidebarProps {
   currentView: SidebarView;
   onViewChange: (view: SidebarView) => void;
   showBrowse?: boolean;
@@ -83,6 +90,8 @@ interface AppSidebarProps {
   shadowIntensity?: number;
   /** Per-user UI hooks into the rail (see PER-USER UI above). */
   userUi?: SidebarUserUi;
+  /** Rose Desktop only: agent/project actions whose backends are not wired yet. */
+  roseActions?: RoseSidebarActions;
 }
 
 interface SidebarUserUi {
@@ -260,7 +269,12 @@ function useSidebarLocalState(agents: Agent[]) {
   return { isArchiveOpen, setIsArchiveOpen, searchQuery, setSearchQuery, search };
 }
 
-export default function AppSidebar({
+export default function AppSidebar(props: AppSidebarProps) {
+  const roseDesktop = useRoseDesktop();
+  return roseDesktop ? <RoseSidebar {...props} /> : <StockAppSidebar {...props} />;
+}
+
+function StockAppSidebar({
   currentView,
   onViewChange,
   showBrowse = false,

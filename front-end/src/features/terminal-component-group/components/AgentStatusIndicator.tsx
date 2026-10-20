@@ -8,9 +8,10 @@
  *                drawn in diagonal-by-diagonal from the top-left corner
  *                (the ONLY animated state)
  *   [needs-help] static amber alert glyph (no motion — a stuck row sits still)
- *   [done]       static muted check, or a muted x when the run failed
- *                (useRoseTheme dark: the check adds a dark: green #22c55e
- *                variant; light renders the stock gray check byte-for-byte)
+ *   [done]       static muted check (green #22c55e in dark mode), or a muted x
+ *                when the run failed (useRoseTheme dark: the check adds a
+ *                dark: green variant; light renders the stock gray check
+ *                byte-for-byte)
  *
  * The three differ by silhouette AND color, not just motion — a 3x3 grid, a
  * ringed "!", and a check/x read apart instantly at 14px, and only needs-help is

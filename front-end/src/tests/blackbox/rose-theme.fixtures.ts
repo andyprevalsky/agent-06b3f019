@@ -4,7 +4,9 @@
  * LIGHT_MARKUP_FIXTURES were captured from the stock components at
  * feat/rose-user-ui dccc2f63c, BEFORE any dark-mode code existed. Andy's hard
  * rule: dark-mode work must never change light mode in any way, so light mode
- * must keep rendering these exact bytes.
+ * must keep rendering these exact bytes. header-desktop.html was re-captured
+ * once for a non-dark-mode change: UI ledger row 66 removed the right app bar,
+ * so the stock pill centers at left-1/2 without the --rose-apps-inset calc.
  *
  * Plain .ts (createElement, no JSX) so the module exports helpers, not components.
  */

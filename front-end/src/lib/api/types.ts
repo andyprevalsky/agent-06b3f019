@@ -27,6 +27,8 @@ export interface Agent {
   pinned_at?: string | null;
   /** Non-null means archived (soft-deleted); only set on rows from the archive view. */
   archived_at?: string | null;
+  /** Owning project (Rose Desktop groups the sidebar by it); absent/null → Home (root project). */
+  project_id?: string | null;
   model: string;
   source: 'WEB' | 'MAC_APP';
   reasoning_effort: 'off' | 'low' | 'medium' | 'high';

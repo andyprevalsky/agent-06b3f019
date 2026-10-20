@@ -49,6 +49,8 @@ interface SettingsTabContentProps {
     copyToClipboard: (text: string) => void;
   };
   handleFieldChange: (field: keyof UserData, value: string) => void;
+  /** Optional Billing content below the Current Plan block. */
+  billingExtra?: React.ReactNode;
 }
 
 export default function SettingsTabContent({
@@ -58,6 +60,7 @@ export default function SettingsTabContent({
   billing,
   apiKeysHook,
   handleFieldChange,
+  billingExtra,
 }: SettingsTabContentProps) {
   return (
     <>
@@ -88,6 +91,7 @@ export default function SettingsTabContent({
           loadingBillingPortal={billing.loadingBillingPortal}
           onOpenBillingPortal={() => void billing.openBillingPortal()}
           subscribeUrl={billing.getSubscribeUrl()}
+          extra={billingExtra}
         />
       </TabsContent>
 

@@ -31,7 +31,9 @@
  * Orchestrator responsibilities:
  *   - Derives the view-model via useBrowserStatusBarState.
  *   - Owns UI flags + handlers via useBrowserStatusBarUi.
- *   - Registers this agent's browser as a drawer tab while mounted.
+ *   - Registers this agent's browser as a drawer tab while mounted, with the
+ *     page URL its latest step reported (drawer address bar); the drawer's
+ *     Reload remounts the portaled pane (key = browserReloadKey).
  *   - Dispatches to the presentational variants (Minimized / Expanded) and
  *     portals BrowserAgentPane into the drawer when this task is shown there.
  *
@@ -70,12 +72,13 @@
  * [AGENT]
  */
 
-import { memo, useEffect } from 'react';
+import { memo, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useAgentContext, type Message } from '../hooks';
 import { BrowserAgentPane } from './browser-status-bar/BrowserAgentPane';
 import { BrowserStatusBarExpanded } from './browser-status-bar/BrowserStatusBarExpanded';
 import { BrowserStatusBarMinimized } from './browser-status-bar/BrowserStatusBarMinimized';
+import { latestBrowserPageUrl } from './rose-apps/browserPageUrl';
 import { useRoseApps } from './rose-apps/roseAppsState';
 import { LegacyBrowserStatusBar } from './browser-status-bar/legacy/LegacyBrowserStatusBar';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
@@ -115,20 +118,26 @@ function controlActionFor(
 }
 
 /** Keep this agent's browser listed as a Browser-drawer tab while mounted. */
-function useDrawerTabRegistration(agentId: string | null, taskId: string, live: boolean) {
+function useDrawerTabRegistration(
+  agentId: string | null,
+  taskId: string,
+  live: boolean,
+  messages: Message[],
+) {
+  const pageUrl = useMemo(() => latestBrowserPageUrl(messages, taskId), [messages, taskId]);
   const apps = useRoseApps();
   const register = apps?.registerAgentBrowser;
   const unregister = apps?.unregisterAgentBrowser;
   const missing = agentId !== null && apps?.tabs.some((t) => t.agentId === agentId) !== true;
   useEffect(() => {
     if (agentId === null || !register) return;
-    register({ agentId, taskId, live });
-  }, [agentId, live, missing, register, taskId]);
+    register({ agentId, taskId, live, pageUrl });
+  }, [agentId, live, missing, pageUrl, register, taskId]);
   useEffect(() => {
     if (agentId === null || !unregister) return undefined;
     return () => unregister(agentId, taskId);
   }, [agentId, taskId, unregister]);
-  return apps?.slot ?? null;
+  return { slot: apps?.slot ?? null, reloadKey: apps?.browserReloadKey ?? 0 };
 }
 
 /** Session/control props the drawer pane needs beyond the shared view props. */
@@ -151,15 +160,20 @@ function drawerPaneState(
   };
 }
 
+/** Live view to hand the user during auth assistance (refreshed URL first). */
+function useHandoffBrowserUrl(vm: ReturnType<typeof useBrowserStatusBarState>): string | null {
+  const refreshedAuthUrl = useRefreshedAuthAssistanceUrl(
+    vm.readOnly ? null : vm.pendingAuthAssistance,
+  );
+  return refreshedAuthUrl ?? vm.pendingAuthAssistance?.liveViewUrl ?? null;
+}
+
 function BrowserStatusBarImpl(props: BrowserStatusBarProps) {
   const { taskId, browserUrl, forceMinimized = false } = props;
   const { agent, messages, selectedAgentId } = useAgentContext();
   const agentId = agent?.agent_id ?? selectedAgentId ?? null;
   const vm = useBrowserStatusBarState(taskId);
-  const refreshedAuthUrl = useRefreshedAuthAssistanceUrl(
-    vm.readOnly ? null : vm.pendingAuthAssistance,
-  );
-  const handoffBrowserUrl = refreshedAuthUrl ?? vm.pendingAuthAssistance?.liveViewUrl ?? null;
+  const handoffBrowserUrl = useHandoffBrowserUrl(vm);
   const ui = useBrowserStatusBarUi(
     taskId,
     forceMinimized,
@@ -184,12 +198,13 @@ function BrowserStatusBarImpl(props: BrowserStatusBarProps) {
   const handleControlAction = controlActionFor(ui, vm.pendingAuthAssistance, controlState, {
     isDisconnected,
   });
-  const drawerSlot = useDrawerTabRegistration(agentId, taskId, ui.isLive);
+  const drawer = useDrawerTabRegistration(agentId, taskId, ui.isLive, messages);
 
   const drawerPane =
-    ui.isInDrawer && drawerSlot !== null
+    ui.isInDrawer && drawer.slot !== null
       ? createPortal(
           <BrowserAgentPane
+            key={drawer.reloadKey}
             readOnly={vm.readOnly}
             agentId={agentId}
             taskId={taskId}
@@ -197,7 +212,7 @@ function BrowserStatusBarImpl(props: BrowserStatusBarProps) {
             {...drawerPaneState(vm, ui, messages, isDisconnected, isWaitingForAuthAssistance)}
             onResume={handleControlAction}
           />,
-          drawerSlot,
+          drawer.slot,
         )
       : null;
 

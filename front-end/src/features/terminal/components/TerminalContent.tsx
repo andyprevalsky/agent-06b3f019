@@ -20,11 +20,13 @@
  *   none / safe mode → stock layout; published shell → UserUiShell replaces chrome
  *   background image/slot → layer BEHIND the app; app bg + grid/canvas fade to
  *     fadeAfterFirstMessage once the selected agent has a USER message
- * RIGHT APP BAR (RoseAppsProvider): Browser + Voice drawers; the main column
- *   re-centers via --rose-apps-inset.
+ * ROSE DESKTOP APPS (RoseAppsProvider, flag on only): bare top-right icons
+ *   (Browser, Phone, Integrations, Dark mode) + the right-panel slot; panels
+ *   overlay the content (no right bar, no content inset). Flag off: no icons.
  * THEME (RoseThemeProvider, Rose Desktop accounts only): light (default) <->
- *   dark via useRoseTheme().toggle(); dark adds html.dark and the calm dark
- *   background. Stock accounts and shared views never leave light.
+ *   dark via useRoseTheme().toggle() — the top-right Dark mode icon calls it,
+ *   so RoseAppIcons renders inside the provider. Dark adds html.dark and the
+ *   calm dark background. Stock accounts and shared views never leave light.
  */
 
 import { useState, useMemo, lazy } from 'react';
@@ -33,7 +35,7 @@ import {
   AppSidebar,
   AttentionRequestsProvider,
   NetworkView,
-  RoseAppBar,
+  RoseAppIcons,
   RoseAppsProvider,
   SIDEBAR_WIDTH_COLLAPSED,
   unansweredAgentIds,
@@ -130,9 +132,10 @@ function TerminalLayout(props: TerminalLayoutProps) {
           selectedAgentId={props.agents.selectedAgentId}
           onSelectAgent={props.agents.handleSelectAgent}
           publishLayout={roseDesktop}
+          onLogout={() => void props.agents.handleLogout()}
         >
           <InteractiveTerminalLayout {...props} />
-          {roseDesktop && <RoseAppBar />}
+          {roseDesktop && <RoseAppIcons />}
         </RoseAppsProvider>
       </RoseThemeProvider>
     </RoseDesktopContext.Provider>

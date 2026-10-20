@@ -7,11 +7,10 @@
  *
  * PER-USER UI: agents view + selected agent + published agent.panel slot →
  * a sandboxed panel to the right of the chat column (lg+ viewports only).
- * RIGHT INSET: on md+ the column pads right by --rose-apps-inset (app bar +
- * any open app drawer) and, while a drawer is open, left by
- * --rose-apps-inset-left (the collapsed rail), so content re-centers in the
- * remaining width with the drawer's 520ms ease (paused while resizing). The
- * top-right nav links hide while a drawer is open (--rose-apps-nav-visibility).
+ * NO RIGHT INSET (UI ledger row 66): Rose Desktop has no right bar; its
+ * drawers overlay the content, so the column never pads for them. The
+ * website's top-right nav links give way to the app icons
+ * (--rose-apps-nav-visibility).
  * Rose Desktop accounts get no top-right nav links at all (UI ledger #14, #66:
  * no Research, Careers or Download — the app icons sit there instead); the
  * stock website keeps Research, Careers and Download.
@@ -70,12 +69,9 @@ export function MainContent(props: MainContentProps) {
       className={cn(
         'flex-1 flex justify-center h-screen overflow-hidden',
         fullWidthView && 'md:pl-[var(--browse-sidebar-offset)]',
-        'md:pr-[var(--rose-apps-inset,0px)]',
-        !fullWidthView && 'md:pl-[var(--rose-apps-inset-left,0px)]',
       )}
       style={{
         height: '100dvh',
-        transition: 'var(--rose-apps-inset-transition, none)',
         ...browseOffsetStyle,
       }}
     >

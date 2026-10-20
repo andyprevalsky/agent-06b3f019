@@ -1,26 +1,33 @@
 /**
  * STATE MACHINE: AppDrawerShell
  *
- *   [CLOSED] translated off-screen past the app bar, opacity 0, inert
+ *   [CLOSED] translated off-screen to the right, opacity 0, inert
  *   --open--> [OPEN] slides in (transform + opacity only, 520ms
  *             cubic-bezier(.22,1,.36,1))
- *   [OPEN] --drag left-edge handle / arrow keys on it--> [OPEN, new width]
- *             (clamped to >= 420px; transitions paused while dragging)
  *   [OPEN] --close--> [CLOSED]
  *
- * Desktop (md+): a floating panel docked left of the right app bar, default
- * 50vw wide. Mobile (< md): a full-height bottom sheet sliding up.
+ * Desktop (md+), UI ledger rows 22/66/67 — no right bar, gap or floating card:
+ *   variant 'panel': full height, flush against the window's right edge; the
+ *                    top-right app icons float over its top-right corner and
+ *                    toggle it (no close X of its own). Left-edge handle /
+ *                    arrow keys resize it (clamped >= 420px; transitions
+ *                    paused while dragging).
+ *   variant 'full':  Browser — full height from the left bar (64px) to the
+ *                    right edge; not resizable.
+ * Mobile (< md): a full-height bottom sheet sliding up. The top-right icons
+ * are hidden there, so the sheet keeps its own close X (top-right).
  */
 
+import { X } from 'lucide-react';
 import { useCallback, useEffect, useRef, type ReactNode } from 'react';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { cn } from '@/lib/utils';
 import { useRoseApps } from './roseAppsState';
 import {
-  APP_BAR_WIDTH,
+  APP_PANEL_TOP,
   DRAWER_DURATION_MS,
   DRAWER_EASE,
-  DRAWER_GAP,
+  LEFT_BAR_WIDTH,
   drawerWidthFromPointer,
 } from './roseAppsLayout';
 
@@ -76,15 +83,24 @@ function DrawerResizeHandle({ label }: { label: string }) {
   );
 }
 
+type DrawerVariant = 'panel' | 'full';
+
+function desktopGeometry(variant: DrawerVariant, width: number): React.CSSProperties {
+  const base = { top: APP_PANEL_TOP, bottom: 0, right: 0 };
+  return variant === 'full' ? { ...base, left: LEFT_BAR_WIDTH } : { ...base, width };
+}
+
 export function AppDrawerShell({
   open,
   label,
   testId,
+  variant = 'panel',
   children,
 }: {
   open: boolean;
   label: string;
   testId: string;
+  variant?: DrawerVariant;
   children?: ReactNode;
 }) {
   const apps = useRoseApps();
@@ -101,7 +117,7 @@ export function AppDrawerShell({
   const transition = apps.isResizing
     ? 'none'
     : `transform ${DRAWER_DURATION_MS}ms ${DRAWER_EASE}, opacity 250ms ease`;
-  const closedTransform = isMobile ? 'translateY(100%)' : 'translateX(calc(100% + 90px))';
+  const closedTransform = isMobile ? 'translateY(100%)' : 'translateX(calc(100% + 40px))';
   return (
     <section
       ref={shellRef}
@@ -109,28 +125,34 @@ export function AppDrawerShell({
       aria-hidden={!open}
       data-testid={testId}
       data-state={open ? 'open' : 'closed'}
+      data-variant={variant}
       className={cn(
-        'fixed z-[45] flex flex-col overflow-hidden bg-white text-[hsl(240_15%_8%)]',
-        'border border-gray-200/90 shadow-[0_20px_50px_rgba(20,20,40,0.18)]',
-        isMobile ? 'inset-x-0 bottom-0 top-0 rounded-t-[14px]' : 'rounded-[14px]',
+        'fixed z-[66] flex flex-col overflow-hidden bg-white text-[hsl(240_15%_8%)] dark:bg-[#262624] dark:text-[#ecece8]',
+        'border-l border-gray-200/95 shadow-[-12px_0_40px_rgba(20,20,40,0.08)] dark:border-white/[0.09]',
+        isMobile && 'inset-x-0 bottom-0 top-0 rounded-t-[14px]',
         !open && 'pointer-events-none',
       )}
       style={{
-        ...(isMobile
-          ? {}
-          : {
-              top: DRAWER_GAP,
-              bottom: DRAWER_GAP,
-              right: APP_BAR_WIDTH + DRAWER_GAP,
-              width: apps.drawerWidth,
-            }),
+        ...(isMobile ? {} : desktopGeometry(variant, apps.drawerWidth)),
         transform: open ? 'none' : closedTransform,
         opacity: open ? 1 : 0,
         transition,
         willChange: 'transform',
       }}
     >
-      {!isMobile && <DrawerResizeHandle label={`Resize ${label.toLowerCase()}`} />}
+      {!isMobile && variant === 'panel' && (
+        <DrawerResizeHandle label={`Resize ${label.toLowerCase()}`} />
+      )}
+      {isMobile && (
+        <button
+          type="button"
+          aria-label={`Close ${label.toLowerCase()}`}
+          onClick={apps.closeApp}
+          className="absolute right-3 top-3 z-10 rounded p-1 text-[hsl(240_8%_45%)] dark:text-[#a3a39d]"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      )}
       {children}
     </section>
   );

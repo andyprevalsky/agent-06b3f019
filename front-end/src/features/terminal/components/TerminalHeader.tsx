@@ -3,8 +3,6 @@
  *
  * LAYOUT (by viewport):
  * [DESKTOP >= md] --> floating blur PILL, centered: brand + AttentionInbox bell
- *                     (centered in the width left of the right app bar / open
- *                     app drawer via --rose-apps-inset, 520ms ease)
  * [MOBILE  <  md] --> full-width FLUSH bar at y=0:
  *                        left   = brand (logo + Rose)
  *                        center = Research (stock only; Rose Desktop accounts have
@@ -18,7 +16,8 @@
  * [SIGNED_OUT] -- tap Login ------> parent PhoneAuthModal opens
  *
  * THEME (useRoseTheme; Rose Desktop dark mode):
- * [LIGHT] --> stock pill classes, byte-identical to before dark mode
+ * [LIGHT] --> stock pill classes (left-1/2, no right-bar inset since UI
+ *             ledger row 66), unchanged by dark mode
  * [DARK]  --> desktop pill adds dark: classes: dark glass rgba(32,32,30,.78)
  *             with light text (overriding the inline drip colours); the
  *             whitish marble layer is hidden
@@ -182,7 +181,7 @@ function HeaderAuthAction({
 }
 
 const STOCK_PILL_CLASSES =
-  'absolute top-4 left-[calc(50%_-_var(--rose-apps-inset,0px)/2_+_var(--rose-apps-inset-left,0px)/2)] -translate-x-1/2 z-50 transition-[left] duration-[520ms] ease-[cubic-bezier(.22,1,.36,1)] flex items-center justify-between p-2 rounded-2xl border border-border/50 dark:border-navi-light-black/50 shadow-lg';
+  'absolute top-4 left-1/2 -translate-x-1/2 z-50 flex items-center justify-between p-2 rounded-2xl border border-border/50 dark:border-navi-light-black/50 shadow-lg';
 
 /** Rose dark mode only; `!` beats the inline drip background/border/shadow. */
 const ROSE_DARK_PILL_CLASSES =

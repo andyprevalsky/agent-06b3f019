@@ -9,6 +9,15 @@ import { vi } from 'vitest';
 import { act, fireEvent, screen } from '@testing-library/react';
 import type AppSidebar from '@/features/terminal-component-group/components/AppSidebar';
 import type { Agent } from '@/lib/api';
+import { renderWithProviders } from './test-wrapper';
+
+/**
+ * Render the STOCK left bar (Rose Desktop flag off). The flag defaults on in
+ * renderWithProviders; these suites pin the stock UI, which must stay unchanged.
+ */
+export function renderStockSidebar(ui: React.ReactElement): ReturnType<typeof renderWithProviders> {
+  return renderWithProviders(ui, { roseDesktop: false });
+}
 
 /** Current rendered width of the rail, read off its inline style. */
 export function sidebarWidth(): number {

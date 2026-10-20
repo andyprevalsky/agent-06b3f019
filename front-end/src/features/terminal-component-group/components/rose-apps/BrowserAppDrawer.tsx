@@ -11,13 +11,25 @@
  *               Until it mounts (agent just selected) a connecting state shows.
  *   click tab --> selectBrowserTab(agentId | null) (agent tabs also select the agent)
  *
- *   Header: globe + "Browser" + LIVE badge while the shown agent session is live.
+ *   BROWSER CHROME (UI ledger row 74), below the tabs:
+ *   [Back] [Forward] [Reload] ( address bar ) [LIVE]
+ *     Back / Forward: dimmed + disabled — the agent's remote browser exposes
+ *       no history navigation to the app yet (Root is a placeholder).
+ *     Reload: agent tab --> reloadBrowser() (the live view remounts);
+ *       dimmed on Root.
+ *     Address bar: the agent tab's page URL (host bold, rest muted) from its
+ *       latest browser step; "Connecting…" until one is known; empty on Root.
+ *     LIVE: while the shown agent session is live.
+ *
+ *   Header: globe + "Browser". No close X on desktop: the top-right Browser
+ *   icon (floating over this corner) and Escape close it (UI ledger row 67).
  */
 
-import { Globe, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Globe, RotateCw, type LucideIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { Agent } from '../../hooks';
 import { AppDrawerShell } from './AppDrawerShell';
+import { addressParts } from './browserPageUrl';
 import { useRoseApps, type AgentBrowserTab } from './roseAppsState';
 
 function agentTitle(agents: Agent[], agentId: string): string {
@@ -45,10 +57,10 @@ function DrawerTab({
       data-testid={testId}
       onClick={onClick}
       className={cn(
-        'flex max-w-[220px] items-center gap-1.5 rounded-t-lg border border-b-0 border-gray-200/90 px-3 py-1.5 text-xs',
+        '-mb-px flex max-w-[220px] flex-none items-center gap-[7px] whitespace-nowrap border-b-2 pb-2.5 pt-[9px] text-[13px]',
         selected
-          ? 'bg-white font-semibold text-[hsl(240_15%_8%)] shadow-[inset_0_-2px_0_#f7799f]'
-          : 'bg-[hsl(240_10%_97%)] text-[hsl(240_8%_40%)]',
+          ? 'border-[#272725] font-semibold text-[hsl(240_15%_8%)] dark:border-[#ecece8] dark:text-[#ecece8]'
+          : 'border-transparent text-[hsl(240_8%_45%)] hover:text-[hsl(240_15%_8%)] dark:text-[#a3a39d] dark:hover:text-[#ecece8]',
       )}
     >
       {children}
@@ -63,11 +75,74 @@ function AgentTabLabel({ tab, title }: { tab: AgentBrowserTab; title: string }) 
         aria-hidden="true"
         className={cn(
           'block h-[7px] w-[7px] flex-none rounded-full',
-          tab.live ? 'bg-green-500' : 'bg-gray-300',
+          tab.live ? 'bg-green-500' : 'bg-gray-300 dark:bg-white/[0.25]',
         )}
       />
       <span className="truncate">{title}</span>
     </>
+  );
+}
+
+function NavButton({
+  icon: Icon,
+  label,
+  onClick,
+}: {
+  icon: LucideIcon;
+  label: string;
+  onClick?: () => void;
+}) {
+  const enabled = onClick !== undefined;
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      disabled={!enabled}
+      onClick={onClick}
+      className={cn(
+        'grid h-7 w-7 place-items-center rounded-[7px]',
+        enabled
+          ? 'text-[hsl(240_8%_30%)] hover:bg-[hsl(240_5%_95%)] dark:text-[#ecece8] dark:hover:bg-white/[0.06]'
+          : 'cursor-default text-[hsl(240_6%_72%)] dark:text-white/[0.25]',
+      )}
+    >
+      <Icon className="h-4 w-4" strokeWidth={2} />
+    </button>
+  );
+}
+
+function AddressBar({ url, isRoot }: { url: string | null; isRoot: boolean }) {
+  const parts = url === null ? null : addressParts(url);
+  return (
+    <div
+      data-testid="browser-address-bar"
+      title={url ?? undefined}
+      className="min-w-0 flex-1 truncate whitespace-nowrap rounded-full bg-[hsl(240_5%_96%)] px-3 py-1.5 text-[12.5px] text-[hsl(240_8%_45%)] dark:bg-[#2f2f2c] dark:text-[#a3a39d]"
+    >
+      {parts !== null ? (
+        <>
+          <b className="font-medium text-[hsl(240_15%_8%)] dark:text-[#ecece8]">{parts.host}</b>
+          {parts.rest}
+        </>
+      ) : isRoot ? (
+        <span>Your browser</span>
+      ) : (
+        <span>Connecting…</span>
+      )}
+    </div>
+  );
+}
+
+function LiveBadge() {
+  return (
+    <span
+      data-testid="browser-drawer-live"
+      className="flex flex-none items-center gap-[5px] text-[11px] font-bold tracking-[.06em] text-[#e5484d]"
+    >
+      <i aria-hidden="true" className="block h-1.5 w-1.5 animate-pulse rounded-full bg-[#e5484d]" />
+      LIVE
+    </span>
   );
 }
 
@@ -77,9 +152,9 @@ function RootBrowserEmptyState() {
       data-testid="root-browser-empty"
       className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-center"
     >
-      <Globe className="h-8 w-8 text-[hsl(240_8%_45%)]" strokeWidth={1.5} />
+      <Globe className="h-8 w-8 text-[hsl(240_8%_45%)] dark:text-[#a3a39d]" strokeWidth={1.5} />
       <div className="text-sm font-semibold">Your browser</div>
-      <p className="max-w-xs text-xs text-[hsl(240_8%_45%)]">
+      <p className="max-w-xs text-xs text-[hsl(240_8%_45%)] dark:text-[#a3a39d]">
         Sign in to sites here and every agent can use those logins. Coming soon.
       </p>
     </div>
@@ -92,41 +167,25 @@ export function BrowserAppDrawer() {
   const open = apps.openApp === 'browser';
   const activeAgentId = apps.browserTabAgentId;
   const activeTab = apps.tabs.find((t) => t.agentId === activeAgentId) ?? null;
-  const showLive = activeTab?.live === true;
+  const isRoot = activeAgentId === null;
   const waitingForPane =
     activeAgentId !== null &&
     apps.selectedAgentId !== null &&
     activeAgentId !== apps.selectedAgentId;
   return (
-    <AppDrawerShell open={open} label="Browser drawer" testId="browser-app-drawer">
-      <div className="flex items-center gap-2.5 border-b border-gray-200/90 px-3.5 py-3 text-[13px]">
+    <AppDrawerShell open={open} label="Browser drawer" testId="browser-app-drawer" variant="full">
+      <div className="flex flex-none items-center gap-2.5 px-[18px] pb-3 pt-4 text-[15px] font-semibold">
         <Globe className="h-[18px] w-[18px] flex-none" strokeWidth={1.7} />
-        <b className="font-semibold">Browser</b>
-        {showLive && (
-          <span
-            data-testid="browser-drawer-live"
-            className="rounded-full bg-red-500 px-2 py-0.5 text-[11px] font-semibold text-white"
-          >
-            LIVE
-          </span>
-        )}
-        <button
-          type="button"
-          aria-label="Close browser"
-          onClick={apps.closeApp}
-          className="ml-auto rounded p-1 text-[hsl(240_8%_45%)] transition-colors hover:bg-muted"
-        >
-          <X className="h-4 w-4" />
-        </button>
+        Browser
       </div>
       <div
         role="tablist"
         aria-label="Browser tabs"
-        className="flex gap-1.5 overflow-x-auto px-3.5 pt-2.5"
+        className="flex flex-none gap-5 overflow-x-auto border-b border-gray-200/90 px-[18px] dark:border-white/[0.09]"
       >
         <DrawerTab
           testId="browser-tab-root"
-          selected={activeAgentId === null}
+          selected={isRoot}
           onClick={() => apps.selectBrowserTab(null)}
         >
           Root
@@ -142,17 +201,33 @@ export function BrowserAppDrawer() {
           </DrawerTab>
         ))}
       </div>
-      <div className="flex min-h-0 flex-1 flex-col border-t border-gray-200/90">
-        {activeAgentId === null && <RootBrowserEmptyState />}
+      <div
+        data-testid="browser-chrome"
+        className="flex flex-none items-center gap-2 px-[18px] pb-1 pt-3.5"
+      >
+        <span className="inline-flex flex-none gap-0.5">
+          <NavButton icon={ArrowLeft} label="Back" />
+          <NavButton icon={ArrowRight} label="Forward" />
+          <NavButton
+            icon={RotateCw}
+            label="Reload"
+            onClick={isRoot ? undefined : apps.reloadBrowser}
+          />
+        </span>
+        <AddressBar url={activeTab?.pageUrl ?? null} isRoot={isRoot} />
+        {activeTab?.live === true && <LiveBadge />}
+      </div>
+      <div className="flex min-h-0 flex-1 flex-col">
+        {isRoot && <RootBrowserEmptyState />}
         {waitingForPane && (
-          <div className="flex flex-1 items-center justify-center text-xs text-[hsl(240_8%_45%)]">
+          <div className="flex flex-1 items-center justify-center text-xs text-[hsl(240_8%_45%)] dark:text-[#a3a39d]">
             Opening agent…
           </div>
         )}
         <div
           ref={apps.setSlot}
           data-testid="browser-drawer-slot"
-          className={cn('min-h-0 flex-1 flex-col', activeAgentId === null ? 'hidden' : 'flex')}
+          className={cn('min-h-0 flex-1 flex-col', isRoot ? 'hidden' : 'flex')}
         />
       </div>
     </AppDrawerShell>

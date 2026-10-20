@@ -34,6 +34,7 @@ import Terminal from '@/pages/Terminal';
 
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
+import { renderStockSidebar } from './app-sidebar.fixtures';
 import { BackdropHarness } from './user-ui-backdrop-harness';
 
 const API_BASE = 'http://localhost:3001/api';
@@ -240,7 +241,7 @@ describe('opaque chrome over a user background', () => {
       onLogout: () => {},
       onLoginClick: () => {},
     };
-    const { rerender } = renderWithProviders(<AppSidebar {...props} />);
+    const { rerender } = renderStockSidebar(<AppSidebar {...props} />);
     const rail = screen.getByRole('complementary', { hidden: true });
     expect(rail).toHaveAttribute('data-surface', 'translucent');
     expect(rail).toHaveClass('bg-white/95');
@@ -278,7 +279,9 @@ describe('opaque chrome over a user background', () => {
     // home.dashboard slot mounts above the popular goals on the landing page.
     const dashboard = await screen.findByTestId('user-ui-slot-home.dashboard');
     expect(dashboard.querySelector('iframe')).toHaveAttribute('sandbox', 'allow-scripts');
-    expect(screen.getByTestId('rose-app-bar')).toBeInTheDocument();
+    // Rose Desktop chrome: bare top-right app icons, no right bar (UI ledger row 66).
+    expect(screen.getByTestId('rose-app-icons')).toBeInTheDocument();
+    expect(screen.queryByTestId('rose-app-bar')).toBeNull();
   });
 
   it('keeps the stock UI for accounts without the Rose Desktop flag, even with a published UI', async () => {

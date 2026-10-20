@@ -24,7 +24,7 @@ export {
 } from './attention-inbox/attentionRequestsContext';
 export { unansweredCount, useAttentionRequests } from './attention-inbox/useAttentionRequests';
 export { RoseAppsProvider } from './rose-apps/roseAppsContext';
-export { RoseAppBar } from './rose-apps/RoseAppBar';
+export { RoseAppIcons } from './rose-apps/RoseAppIcons';
 export { useRoseApps } from './rose-apps/roseAppsState';
 export * from './agentRunState';
 export * from './formatElapsed';

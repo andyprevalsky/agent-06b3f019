@@ -1,13 +1,24 @@
 /**
  * STATE MACHINE: RoseAppDrawers
  *
- * The drawer shell stays mounted (portaled to <body>) so it can slide in/out:
- *   openApp === 'browser' -> BrowserAppDrawer open
- *   openApp === null      -> closed
+ * Everything in the right-panel slot stays mounted (portaled to <body>) so it
+ * can slide in/out; exactly one is open at a time (RoseAppsProvider.openApp):
+ *   'browser'                                   -> BrowserAppDrawer (full width)
+ *   'integrations' | 'benchmarks' | 'feedback' | 'settings' -> RoseAppPanelDrawer
+ *   'phone'                                     -> PhoneApp (floating device)
+ *   null                                        -> all closed
  */
 
 import { BrowserAppDrawer } from './BrowserAppDrawer';
+import { PhoneApp } from './PhoneApp';
+import { RoseAppPanelDrawer } from './RoseAppPanels';
 
 export function RoseAppDrawers() {
-  return <BrowserAppDrawer />;
+  return (
+    <>
+      <BrowserAppDrawer />
+      <RoseAppPanelDrawer />
+      <PhoneApp />
+    </>
+  );
 }
