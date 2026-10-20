@@ -877,3 +877,43 @@ def test_parity_rose_infra_rows_are_rerun_not_failures(tmp_path):
     assert agents[task] == ["a4"]
     infra = parity.rose_infra_rows(paths, [task, other])
     assert [(r["task"], r["agent_id"]) for r in infra] == [(task, "a2x"), (other, ""), (task, "a3x")]
+
+
+def test_parity_finds_the_record_when_the_hub_upload_failed(tmp_path):
+    """save() writes runs/*.json before the Hub upload, so a dead backend leaves no "Results saved:" line."""
+    run_id = "b327bac1-7f3c-40e6-af79-a48947282252"
+    record = tmp_path / f"20261020_114243_{run_id}_code-bench-x.json"
+    record.write_text("{}")
+    output = f"[report-card] run={run_id} elapsed=0.0s mode=real\nHubVisibilityError: upload failed\n"
+    assert parity.record_for_output(output, tmp_path) == record
+    saved = tmp_path / "other.json"
+    saved.write_text("{}")
+    assert parity.record_for_output(f"  Results saved: {saved}\n", tmp_path) == saved
+    assert parity.record_for_output("no markers", tmp_path) is None
+
+
+def test_parity_rose_leg_reruns_only_tasks_short_of_k_verdicts(tmp_path):
+    a, b = "code-bench-bugfix-invoice-rounding", "code-bench-debug-stacktrace-orders"
+    cleanup = {"passed": False, "status": "COMPLETED", "failure_reason": "Cloud cleanup failed: provider: x"}
+    scripted = [
+        [{"name": a, "passed": True}, {"name": b, "passed": True}],
+        [{"name": a, "passed": True}, {"name": b, **cleanup}],
+        None,  # the run died before saving any record
+        [{"name": b, "passed": True}],
+    ]
+    calls: list[list[str]] = []
+
+    def runner(names, log_path):
+        calls.append(list(names))
+        rows = scripted[len(calls) - 1]
+        if rows is None:
+            return None
+        path = tmp_path / f"run{len(calls)}.json"
+        path.write_text(json.dumps({"tasks": rows}))
+        return path
+
+    records = parity.run_rose_local([a, b], 2, tmp_path, retry_infra=2, runner=runner)
+    assert calls == [[a, b], [a, b], [b], [b]]
+    outcomes, _ = parity.rose_outcomes_from_records(records, [a, b])
+    assert outcomes == {a: [True, True], b: [True, True]}
+    assert parity._parse_args(["--run-rose", "local"]).rose_retry_infra == 2

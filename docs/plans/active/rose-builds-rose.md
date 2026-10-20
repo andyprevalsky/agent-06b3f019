@@ -130,3 +130,4 @@ ledger" in `rose-user-ui.md`). This file is the cross-cutting checklist, and
 - Prompt text: code-agent template commit/merge guidance (C3); tool descriptions added by each lane.
 - Schemas: `rose-ui.json` and `tool.json` validation; any new Zod schemas.
 - Env and prod: `USERCONTENT_BASE_URL` (separate origin), `USER_UI_TOKEN_SECRET`, E2B template rebuild.
+- Benchmarks (C8): seven new `code-bench-*` task definitions in `tasks.json` (prompts, hidden-test `static_check`s, 900/1200 s timeouts); the `code_bench_screenshot_judge` method and its judge prompt (`SCREENSHOT_JUDGE_SYSTEM` in `agents/benchmarks/code_bench.py`); the test-only Zod enum value `code_bench_screenshot_judge` in `back-end/src/tests/blackbox/benchmarks.blackbox.ts`. No agent-harness or product prompt changes.

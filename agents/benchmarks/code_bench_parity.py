@@ -37,6 +37,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import statistics
@@ -47,7 +48,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 
 from benchmarks import code_bench as cb
 
@@ -448,31 +449,78 @@ def _extract_results_path(output: str) -> Optional[Path]:
     return None
 
 
-def run_rose_local(task_names: list[str], k: int, log_dir: Path) -> list[Path]:
-    """K sequential ``scripts/run-bench --local`` runs (one isolated stack at a time)."""
+RUNS_DIR = AGENTS_DIR / "benchmarks" / "runs"
+_REPORT_RUN_ID = re.compile(r"\[report-card\] run=([0-9a-f-]{36})")
+
+
+def record_for_output(output: str, runs_dir: Path = RUNS_DIR) -> Optional[Path]:
+    """The run record a ``--local`` run wrote.
+
+    ``BenchmarkRun.save`` writes the JSON before its Hub upload, so a run whose
+    upload failed (dead local backend) prints no "Results saved:" line but still
+    left its record; find it by the report-card run id.
+    """
+    path = _extract_results_path(output)
+    if path is not None and path.is_file():
+        return path
+    match = _REPORT_RUN_ID.search(output)
+    if match:
+        found = sorted(runs_dir.glob(f"*_{match.group(1)}_*.json"))
+        if found:
+            return found[-1]
+    return None
+
+
+def _run_local(task_names: list[str], log_path: Path) -> Optional[Path]:
+    with open(log_path, "w") as log:
+        proc = subprocess.Popen(
+            [str(REPO_ROOT / "scripts" / "run-bench"), "--local", *task_names],
+            cwd=REPO_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        assert proc.stdout is not None
+        captured = []
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            log.write(line)
+            captured.append(line)
+        code = proc.wait()
+    record = record_for_output("".join(captured))
+    if record is None:
+        print(f"[code-parity] Rose run (exit {code}) wrote no run record; INFRA for every task; see {log_path}")
+    return record
+
+
+def run_rose_local(
+    task_names: list[str],
+    k: int,
+    log_dir: Path,
+    *,
+    retry_infra: int = 2,
+    runner: Callable[[list[str], Path], Optional[Path]] = _run_local,
+) -> list[Path]:
+    """K sequential ``scripts/run-bench --local`` runs (one isolated stack at a time).
+
+    Rows without a verdict (INFRA: interrupted runs, unverified cleanup) are
+    rerun for just the short tasks, at most ``retry_infra`` extra runs.
+    """
     records: list[Path] = []
     for index in range(k):
-        log_path = log_dir / f"rose-local-run-{index + 1}.log"
         print(f"\n[code-parity] Rose leg run {index + 1}/{k}: scripts/run-bench --local {' '.join(task_names)}")
-        with open(log_path, "w") as log:
-            proc = subprocess.Popen(
-                [str(REPO_ROOT / "scripts" / "run-bench"), "--local", *task_names],
-                cwd=REPO_ROOT,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-            assert proc.stdout is not None
-            captured = []
-            for line in proc.stdout:
-                sys.stdout.write(line)
-                log.write(line)
-                captured.append(line)
-            code = proc.wait()
-        path = _extract_results_path("".join(captured))
-        if path is None or not path.is_file():
-            raise RuntimeError(f"Rose leg run {index + 1} (exit {code}) wrote no run record; see {log_path}")
-        records.append(path)
+        record = runner(task_names, log_dir / f"rose-local-run-{index + 1}.log")
+        if record is not None:
+            records.append(record)
+    for attempt in range(retry_infra):
+        outcomes, _ = rose_outcomes_from_records(records, task_names)
+        short = [t for t in task_names if len(outcomes.get(t, [])) < k]
+        if not short:
+            break
+        print(f"\n[code-parity] Rose INFRA retry {attempt + 1}/{retry_infra}: {' '.join(short)}")
+        record = runner(short, log_dir / f"rose-local-infra-retry-{attempt + 1}.log")
+        if record is not None:
+            records.append(record)
     return records
 
 
@@ -582,6 +630,12 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     rose = parser.add_mutually_exclusive_group()
     rose.add_argument("--rose-records", nargs="+", type=Path, help="Existing Rose run records (runs/*.json)")
     rose.add_argument("--run-rose", choices=("local",), help="Run the Rose leg now: K sequential --local runs")
+    parser.add_argument(
+        "--rose-retry-infra",
+        type=int,
+        default=2,
+        help="With --run-rose local: extra --local runs for tasks whose rows were INFRA (default 2)",
+    )
     rose.add_argument("--skip-rose", action="store_true", help="Raw leg only")
     parser.add_argument("--raw-results", type=Path, help="Reuse a previous raw-leg results JSON instead of rerunning")
     parser.add_argument("--no-judge", action="store_true", help="Skip the screenshot judge on the raw leg")
@@ -812,7 +866,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.rose_records:
         rose_records = list(args.rose_records)
     elif args.run_rose == "local":
-        rose_records = run_rose_local(tasks, args.runs, out_dir)
+        rose_records = run_rose_local(tasks, args.runs, out_dir, retry_infra=args.rose_retry_infra)
     rose_outcomes, rose_agents = rose_outcomes_from_records(rose_records, tasks)
     verified_links = publish_rose_evidence(rose_records, tasks) if args.publish_evidence else {}
 
