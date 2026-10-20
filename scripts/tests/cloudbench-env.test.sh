@@ -187,6 +187,13 @@ class WorldModelLaunch(unittest.TestCase):
         self.assertNotIn("$REMOTE_WMH/", outside)
         self.assertNotIn("$REMOTE_WMH.", outside)
         self.assertIn("create_volume_snapshot_exact", refresh[refresh.index('BUILD_CMD="$NATIVE_REFRESH_CMD"'):])
+        # The restored tree is flushed after the swap and before the donor stops
+        # for its snapshot (2026-10-20 an unflushed blob tail was snapshotted
+        # truncated and every SIM guest failed the native artifact digest).
+        swap = fragment.index("mv '$REMOTE_WMH_NATIVE.incoming' '$REMOTE_WMH_NATIVE'")
+        flush = fragment.index("sync -f '$REMOTE_WMH_NATIVE' && sync")
+        self.assertLess(swap, flush)
+        self.assertLess(flush, fragment.index("echo '::WMH-REFRESH-DONE::'"))
         # Fleets rehydrate the donor proof from Machine metadata (observed
         # 2026-10-19: a refreshed WMH snapshot was never forked because only the
         # local state file named it). Publication must name the new snapshot

@@ -3340,6 +3340,9 @@ chown -R rose:rose '$REMOTE_WMH_NATIVE.incoming'
 if [ -e '$REMOTE_WMH_NATIVE' ]; then mv '$REMOTE_WMH_NATIVE' '$REMOTE_WMH_NATIVE.previous'; fi
 mv '$REMOTE_WMH_NATIVE.incoming' '$REMOTE_WMH_NATIVE'
 rm -rf '$REMOTE_WMH_NATIVE.previous'
+# The donor is stopped and snapshotted right after this; flush every restored
+# byte first (2026-10-20 an unflushed blob tail was snapshotted truncated).
+sync -f '$REMOTE_WMH_NATIVE' && sync
 echo '::WMH-REFRESH-DONE::'
 ls -la '$REMOTE_WMH/models' '$REMOTE_WMH_NATIVE/models' 2>/dev/null || true
 df -h /data 2>/dev/null || true"
