@@ -113,3 +113,59 @@ test('code-agent prompt: commit locally per unit of work, merge into the merge t
   assert.doesNotMatch(template, /git push origin main/);
   assert.match(template, /Commit locally whenever a unit of work is complete/);
 });
+
+test('code-agent prompt: Rose app UI, pinned questions and inline views only for Rose Desktop accounts', () => {
+  // Rose Desktop gate (utils/roseDesktop): every other account keeps the
+  // stock prompt, byte-stable, with none of the new-UI instructions.
+  const args = {
+    githubRepoUrl: 'https://github.com/rose-test/app',
+    workDir: '/home/user/workspace',
+  };
+  const stock = buildCodeAgentSystemPrompt(args);
+  assert.equal(
+    stock,
+    buildCodeAgentSystemPrompt({ ...args, roseDesktop: false }),
+    'default is stock'
+  );
+  for (const term of [
+    'Rose app UI',
+    'rose_user_ui',
+    'rose-ui',
+    'pinned',
+    'inline_view',
+    'questions',
+  ]) {
+    assert.ok(!stock.includes(term), `stock code-agent prompt mentions ${term}`);
+  }
+  assert.match(
+    stock,
+    /`send_message_to_user` for updates and results; `display` for screenshots, recordings and HTML previews; `request_user_approval` before risky or irreversible actions\. Approvals wait for the answer\./
+  );
+
+  const flagged = buildCodeAgentSystemPrompt({ ...args, roseDesktop: true });
+  assert.match(flagged, /~\/rose_user_ui is the Rose app UI of the user you work for/);
+  assert.match(flagged, /`rose-ui check` must pass before `rose-ui publish`/);
+  assert.match(flagged, /`display` with placement "pinned" and options for a question/);
+  assert.match(flagged, /`send_message_to_user` with `inline_view`/);
+  // Every other line is shared: only the new-UI sections and lines differ
+  // (the Live preview and apps block is Rose Desktop too, A1/A2).
+  const stockLines = new Set(stock.split('\n'));
+  const flaggedOnly = flagged.split('\n').filter((line) => !stockLines.has(line));
+  assert.ok(
+    flaggedOnly.every((line) =>
+      /rose_user_ui|rose-ui|Rose app UI|inline view|inline_view|pinned|questions|rose-preview|Live preview and apps/.test(
+        line
+      )
+    ),
+    `unexpected Rose Desktop-only lines: ${JSON.stringify(flaggedOnly)}`
+  );
+
+  // The template CLAUDE.md ships in every account's image, so it stays generic.
+  const template = readFileSync(
+    join(process.cwd(), '..', 'e2b-templates', 'claude-code', 'CLAUDE.md'),
+    'utf8'
+  );
+  for (const term of ['pinned', 'inline_view', 'rose-ui']) {
+    assert.ok(!template.includes(term), `template CLAUDE.md mentions ${term}`);
+  }
+});

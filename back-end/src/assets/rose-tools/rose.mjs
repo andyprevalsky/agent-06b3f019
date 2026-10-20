@@ -8,6 +8,10 @@
 //   rose wait <request-id>
 //   rose mcp                      (stdio MCP server: display, send_message_to_user, request_user_approval)
 //
+// Pinned questions (--pinned) and inline views (--inline-view) exist only in Rose
+// Desktop sessions ($ROSE_TOOLS_ROSE_DESKTOP=1 or tools.json "rose_desktop": true);
+// elsewhere the tool list, usage and request bodies are the stock ones.
+//
 // Every call goes to $ROSE_TOOLS_URL with $ROSE_TOOLS_TOKEN (or ~/.rose/tools.json),
 // a token scoped to this session's agent. Pinned questions and approvals block
 // until answered: the wait is a loop of bounded long-polls with no overall
@@ -30,18 +34,41 @@ class ToolError extends Error {}
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 
+function savedConfig() {
+  const file = process.env.ROSE_TOOLS_CONFIG || join(homedir(), '.rose', 'tools.json');
+  try {
+    return JSON.parse(readFileSync(file, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Rose Desktop accounts (back-end utils/roseDesktop.ts) also get pinned
+ * questions and inline views. Every other session sees and sends the stock
+ * tools only: inline media, messages and approvals.
+ */
+function roseDesktop() {
+  if (process.env.ROSE_TOOLS_ROSE_DESKTOP !== undefined)
+    return process.env.ROSE_TOOLS_ROSE_DESKTOP === '1';
+  return savedConfig().rose_desktop === true;
+}
+
+/** Drop the Rose Desktop-only arguments for a stock session (same as its schema). */
+function stockArgs(args, keys) {
+  if (roseDesktop()) return args;
+  const kept = { ...args };
+  for (const key of keys) delete kept[key];
+  return kept;
+}
+
 function config() {
   let url = process.env.ROSE_TOOLS_URL || '';
   let token = process.env.ROSE_TOOLS_TOKEN || '';
   if (!url || !token) {
-    const file = process.env.ROSE_TOOLS_CONFIG || join(homedir(), '.rose', 'tools.json');
-    try {
-      const saved = JSON.parse(readFileSync(file, 'utf8'));
-      url = url || saved.url || '';
-      token = token || saved.token || '';
-    } catch {
-      // fall through to the error below
-    }
+    const saved = savedConfig();
+    url = url || saved.url || '';
+    token = token || saved.token || '';
   }
   if (!url || !token) {
     throw new ToolError(
@@ -181,7 +208,8 @@ function describeAnswer(state) {
 
 // ── tools (shared by CLI and MCP) ──
 
-async function displayTool(args, onBeat) {
+async function displayTool(rawArgs, onBeat) {
+  const args = stockArgs(rawArgs, ['placement', 'options', 'allow_other']);
   const placement = args.placement === 'pinned' ? 'pinned' : 'inline';
   const items = buildItems(args.paths, args.urls);
   const caption = typeof args.caption === 'string' ? args.caption.trim() : '';
@@ -345,7 +373,8 @@ async function askSpawningAgent({ caption, options, allowOther, key }) {
   }
 }
 
-async function messageTool(args) {
+async function messageTool(rawArgs) {
+  const args = stockArgs(rawArgs, ['inline_view']);
   const message = typeof args.message === 'string' ? args.message.trim() : '';
   if (!message) throw new ToolError('message must be non-empty');
   const result = await call('POST', '/messages', {
@@ -370,7 +399,51 @@ async function approvalTool(args, onBeat) {
 
 // ── MCP stdio server ──
 
-const MCP_TOOLS = [
+const APPROVAL_MCP_TOOL = {
+  name: 'request_user_approval',
+  description:
+    "Ask the user to approve an action through Rose's approval prompt. Blocks until the user answers and returns approved or rejected with their reply.",
+  inputSchema: {
+    type: 'object',
+    properties: { question: { type: 'string', description: 'What you want to do and why.' } },
+    required: ['question'],
+  },
+};
+
+const STOCK_MCP_TOOLS = [
+  {
+    name: 'display',
+    description: 'Show images, videos or HTML pages to the user inline in Rose.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        paths: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Local files (image/*, video/*, .html).',
+        },
+        urls: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Public http(s) URLs, fetched by Rose.',
+        },
+        caption: { type: 'string', description: 'Caption shown with the media.' },
+      },
+    },
+  },
+  {
+    name: 'send_message_to_user',
+    description: 'Send the user a message in Rose: progress, results, scorecards.',
+    inputSchema: {
+      type: 'object',
+      properties: { message: { type: 'string' } },
+      required: ['message'],
+    },
+  },
+  APPROVAL_MCP_TOOL,
+];
+
+const ROSE_DESKTOP_MCP_TOOLS = [
   {
     name: 'display',
     description:
@@ -426,17 +499,10 @@ const MCP_TOOLS = [
       required: ['message'],
     },
   },
-  {
-    name: 'request_user_approval',
-    description:
-      "Ask the user to approve an action through Rose's approval prompt. Blocks until the user answers and returns approved or rejected with their reply.",
-    inputSchema: {
-      type: 'object',
-      properties: { question: { type: 'string', description: 'What you want to do and why.' } },
-      required: ['question'],
-    },
-  },
+  APPROVAL_MCP_TOOL,
 ];
+
+const mcpTools = () => (roseDesktop() ? ROSE_DESKTOP_MCP_TOOLS : STOCK_MCP_TOOLS);
 
 const MCP_HANDLERS = {
   display: displayTool,
@@ -460,7 +526,7 @@ function serveMcp() {
       });
     }
     if (method === 'ping') return reply(id, {});
-    if (method === 'tools/list') return reply(id, { tools: MCP_TOOLS });
+    if (method === 'tools/list') return reply(id, { tools: mcpTools() });
     if (method === 'tools/call') {
       const handler = MCP_HANDLERS[params.name];
       if (!handler) return fail(id, -32602, `unknown tool ${params.name}`);
@@ -502,13 +568,22 @@ function serveMcp() {
 
 // ── CLI ──
 
-const USAGE = `usage:
+const STOCK_USAGE = `usage:
+  rose display <file|url>... [--caption TEXT]
+  rose message <text>
+  rose approve <question>
+  rose wait <request-id>
+  rose mcp`;
+
+const ROSE_DESKTOP_USAGE = `usage:
   rose display <file|url>... [--caption TEXT]
   rose display [<file|url>...] --pinned --caption QUESTION --option "Label | one-line description"... [--recommended N] [--no-other]
   rose message <text> [--inline-view NAME] [--props JSON]
   rose approve <question>
   rose wait <request-id>
   rose mcp`;
+
+const usage = () => (roseDesktop() ? ROSE_DESKTOP_USAGE : STOCK_USAGE);
 
 function parseFlags(argv, valueFlags) {
   const positional = [];
@@ -534,7 +609,7 @@ function parseFlags(argv, valueFlags) {
 async function main(argv) {
   const [command, ...rest] = argv;
   if (!command || command === '--help' || command === '-h') {
-    console.log(USAGE);
+    console.log(usage());
     return 0;
   }
   if (command === '--version') {
@@ -587,7 +662,7 @@ async function main(argv) {
     if (!rest[0]) throw new ToolError('rose wait needs a request id');
     result = describeAnswer(await waitFor(rest[0]));
   } else {
-    throw new ToolError(`unknown command ${command}\n${USAGE}`);
+    throw new ToolError(`unknown command ${command}\n${usage()}`);
   }
   console.log(result.text);
   return result.rejected ? 2 : 0;

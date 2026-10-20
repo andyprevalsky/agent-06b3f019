@@ -4,9 +4,11 @@
  *   prepareUserUiWorkspaceSafe(userId, agentId)  rose_user_ui/ + rose-ui CLI (W1)
  *     └─ withAgentGraphWorkspace(...)       rose-agents CLI + graph token   (L-A2A)
  *          └─ withAgentTools(...)           rose CLI / MCP + tools token    (L-DISPLAY)
- *               └─ withCodePreview(...)     rose-preview CLI + env, Rose dev accounts only (A1)
+ *               └─ withCodePreview(...)     rose-preview CLI + env, Rose Desktop accounts only (A1)
  *
  * Each step is best-effort (never throws); a failed step leaves the others.
+ * The rose_user_ui step and the Rose Desktop tool set apply to Rose Desktop
+ * accounts only (utils/roseDesktop); `roseDesktop` defaults to that flag.
  */
 import { withAgentGraphWorkspace } from './agentGraph/workspace';
 import { withAgentTools } from './agentTools/workspace';
@@ -22,16 +24,20 @@ import {
   userUiPublishBaseUrl,
   type UserUiWorkspace,
 } from './userUi/workspace';
-import { isRoseDevUser } from '../utils/roseDevAccess';
+import { isRoseDesktopUser } from '../utils/roseDesktop';
 
 const log = createLogger('CodeSessionWorkspace');
 
-/** Add the live-preview CLI and its env for Rose dev accounts (Rose-in-Rose, A1). */
+/**
+ * Add the live-preview CLI and its env for Rose Desktop accounts (Rose-in-Rose, A1).
+ * `roseDesktop` defaults to the account's flag (utils/roseDesktop).
+ */
 export function withCodePreview(
   workspace: UserUiWorkspace | null,
-  userId: string | undefined
+  userId: string | undefined,
+  roseDesktop: boolean = isRoseDesktopUser(userId)
 ): UserUiWorkspace | null {
-  if (!isRoseDevUser(userId)) return workspace;
+  if (!roseDesktop) return workspace;
   try {
     const base: UserUiWorkspace = workspace ?? { files: [], envs: {}, source: { kind: 'seed' } };
     return {
@@ -55,13 +61,21 @@ export async function prepareCodeSessionWorkspace(
   userId: string | undefined,
   agentId: string,
   taskId: string,
-  provider: 'claude' | 'codex'
+  provider: 'claude' | 'codex',
+  roseDesktop: boolean = isRoseDesktopUser(userId)
 ): Promise<UserUiWorkspace | null> {
-  const graph = await withAgentGraphWorkspace(await prepareUserUiWorkspaceSafe(userId, agentId), {
+  const graph = await withAgentGraphWorkspace(
+    await prepareUserUiWorkspaceSafe(userId, agentId, roseDesktop),
+    {
+      userId,
+      ownerAgentId: agentId,
+      sessionId: taskId,
+      provider,
+    }
+  );
+  return withCodePreview(
+    withAgentTools(graph, { userId, agentId, taskId, provider, roseDesktop }),
     userId,
-    ownerAgentId: agentId,
-    sessionId: taskId,
-    provider,
-  });
-  return withCodePreview(withAgentTools(graph, { userId, agentId, taskId, provider }), userId);
+    roseDesktop
+  );
 }

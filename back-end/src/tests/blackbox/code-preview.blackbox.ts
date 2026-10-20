@@ -253,7 +253,7 @@ test('dev sessions get the rose-preview CLI and env; other accounts get neither'
 test('code-agent prompt: Rose-in-Rose preview + publish lines only for dev Rose sessions', () => {
   const rose = buildCodeAgentSystemPrompt({
     githubRepoUrl: 'https://github.com/Rose-Ai-Labs/rose',
-    roseDev: true,
+    roseDesktop: true,
   });
   assert.match(rose, /rose-preview start/);
   assert.match(rose, /opening a pull request/i);
@@ -266,11 +266,11 @@ test('code-agent prompt: Rose-in-Rose preview + publish lines only for dev Rose 
   assert.doesNotMatch(plain, /rose-preview/, 'non-dev accounts: prompt unchanged');
   const devOtherRepo = buildCodeAgentSystemPrompt({
     githubRepoUrl: 'https://github.com/someone/app',
-    roseDev: true,
+    roseDesktop: true,
   });
   assert.match(devOtherRepo, /rose-preview start/);
   assert.doesNotMatch(devOtherRepo, /is Rose itself/);
-  const project = buildCodeAgentSystemPrompt({ roseDev: true, roseRepo: true });
+  const project = buildCodeAgentSystemPrompt({ roseDesktop: true, roseRepo: true });
   assert.match(project, /is Rose itself/, 'a Rose project session (no github url) gets the lines');
 });
 

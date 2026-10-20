@@ -62,7 +62,8 @@ from utils.llm_timeouts import (
     STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS,
     VERIFIER_ACTIVITY_TIMEOUT_SECONDS,
 )
-from utils.tool_schemas import PLAN_TOOL_MODELS, create_agent_action_model, get_tool_models
+from utils.rose_desktop import is_rose_desktop_user
+from utils.tool_schemas import create_agent_action_model, get_tool_models
 from utils.user_tool_models import build_user_tool_registry, llm_declarations
 
 logger = structlog.get_logger()
@@ -369,20 +370,20 @@ async def run_agent(
 
     # Create dynamic action model for structured output. Custom response_model
     # wins (e.g., browser agent). During PLAN we narrow spawn_agent to the
-    # explore-only variant via PLAN_TOOL_MODELS so the LLM can't pick an
+    # explore-only variant (get_tool_models(phase="plan")) so the LLM can't pick an
     # invalid `type` — runtime validation was burning 4 retries per error.
+    # Rose Desktop accounts get their tool schemas (utils.rose_desktop); every
+    # other account the stock ones.
+    base_registry = get_tool_models(phase="plan" if is_plan_loop else None, rose_desktop=is_rose_desktop_user(user_id))
     user_tool_decls = llm_declarations(user_tools) if not response_model else []
     if user_tool_decls:
-        base_registry = dict(PLAN_TOOL_MODELS) if is_plan_loop else get_tool_models()
         AgentAction = create_agent_action_model(
             [*tools, *(decl["name"] for decl in user_tool_decls)],
             tool_registry={**base_registry, **build_user_tool_registry(user_tool_decls)},
         )
     else:
         AgentAction = (
-            response_model
-            if response_model
-            else create_agent_action_model(tools, tool_registry=PLAN_TOOL_MODELS if is_plan_loop else None)
+            response_model if response_model else create_agent_action_model(tools, tool_registry=base_registry)
         )
 
     def _remember_successful_compute_token(token: Optional[Dict[str, Any]]) -> None:

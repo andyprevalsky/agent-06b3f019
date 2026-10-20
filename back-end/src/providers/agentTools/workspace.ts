@@ -15,6 +15,7 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { createLogger } from '../logger';
+import { isRoseDesktopUser } from '../../utils/roseDesktop';
 import {
   USER_UI_CLI_BIN_DIR,
   userUiPublishBaseUrl,
@@ -30,6 +31,8 @@ export const AGENT_TOOLS_CONFIG_PATH = '.rose/tools.json';
 export const AGENT_TOOLS_MCP_CONFIG_PATH = '.rose/mcp.json';
 export const AGENT_TOOLS_ENV_URL = 'ROSE_TOOLS_URL';
 export const AGENT_TOOLS_ENV_TOKEN = 'ROSE_TOOLS_TOKEN';
+/** '1' for Rose Desktop accounts: the CLI/MCP then offers pinned questions and inline views. */
+export const AGENT_TOOLS_ENV_ROSE_DESKTOP = 'ROSE_TOOLS_ROSE_DESKTOP';
 
 const SCRIPT_PATH = join(__dirname, '../../assets/rose-tools/rose.mjs');
 let cachedScript: Buffer | null = null;
@@ -73,6 +76,7 @@ function toolsConfig(url: string, token: string, envs: Record<string, string> = 
     token,
     ...(envs.ROSE_AGENTS_URL ? { agents_url: envs.ROSE_AGENTS_URL } : {}),
     ...(envs.ROSE_AGENTS_TOKEN ? { agents_token: envs.ROSE_AGENTS_TOKEN } : {}),
+    ...(envs[AGENT_TOOLS_ENV_ROSE_DESKTOP] === '1' ? { rose_desktop: true } : {}),
   });
 }
 
@@ -128,6 +132,8 @@ export function withAgentTools(
     taskId: string;
     provider: AgentToolsProvider;
     homeDir?: string;
+    /** Rose Desktop tools (pinned questions, inline views); defaults to the account's flag. */
+    roseDesktop?: boolean;
   }
 ): UserUiWorkspace | null {
   if (!session.userId) return workspace;
@@ -139,6 +145,13 @@ export function withAgentTools(
     const url = `${userUiPublishBaseUrl()}${agentToolsBasePath(session.agentId)}`;
     const homeDir = session.homeDir ?? '/home/user';
     const base: UserUiWorkspace = workspace ?? { files: [], envs: {}, source: { kind: 'seed' } };
+    // Pinned questions and inline views need the Rose Desktop UI; stock
+    // sessions get the stock tool list (rose.mjs reads this flag).
+    const featureEnvs: Record<string, string> =
+      (session.roseDesktop ?? isRoseDesktopUser(session.userId))
+        ? { [AGENT_TOOLS_ENV_ROSE_DESKTOP]: '1' }
+        : {};
+    const envs = { ...base.envs, ...featureEnvs };
     const owned = new Set([
       AGENT_TOOLS_CLI_PATH,
       AGENT_TOOLS_CONFIG_PATH,
@@ -151,11 +164,11 @@ export function withAgentTools(
         { path: AGENT_TOOLS_CLI_PATH, content: agentToolsCliScript() },
         {
           path: AGENT_TOOLS_CONFIG_PATH,
-          content: Buffer.from(toolsConfig(url, token, base.envs), 'utf8'),
+          content: Buffer.from(toolsConfig(url, token, envs), 'utf8'),
         },
         { path: AGENT_TOOLS_MCP_CONFIG_PATH, content: Buffer.from(mcpConfig(homeDir), 'utf8') },
       ],
-      envs: { ...base.envs, [AGENT_TOOLS_ENV_URL]: url, [AGENT_TOOLS_ENV_TOKEN]: token },
+      envs: { ...envs, [AGENT_TOOLS_ENV_URL]: url, [AGENT_TOOLS_ENV_TOKEN]: token },
       localEnvs: { ...base.localEnvs, [AGENT_TOOLS_ENV_URL]: localAgentToolsUrl(url) },
     };
   } catch (err) {

@@ -20,6 +20,7 @@
 import { chmod, mkdir, writeFile } from 'fs/promises';
 import { dirname, join, resolve, sep } from 'path';
 import { createLogger } from '../logger';
+import { isRoseDesktopUser } from '../../utils/roseDesktop';
 import type { UserUiBundleFile } from './manifest';
 import { mintUserUiPublishToken } from './publishToken';
 import {
@@ -98,12 +99,18 @@ export async function prepareUserUiWorkspace(
   };
 }
 
-/** Best-effort wrapper: a UI-folder failure must never block a code session. */
+/**
+ * Best-effort wrapper: a UI-folder failure must never block a code session.
+ * rose_user_ui is the Rose Desktop app UI (utils/roseDesktop): every other
+ * account gets no folder, no `rose-ui` CLI and no publish token. `roseDesktop`
+ * defaults to the account's flag; tests pass it to exercise either group.
+ */
 export async function prepareUserUiWorkspaceSafe(
   userId: string | undefined,
-  agentId?: string
+  agentId?: string,
+  roseDesktop: boolean = isRoseDesktopUser(userId)
 ): Promise<UserUiWorkspace | null> {
-  if (!userId) return null;
+  if (!userId || !roseDesktop) return null;
   try {
     const workspace = await prepareUserUiWorkspace(userId, agentId);
     log.info('Prepared rose_user_ui workspace', {
@@ -228,8 +235,12 @@ export async function materializeUserUiInLocalHome(
   try {
     await writeUserUiWorkspaceToDir(homeDir, workspace);
     const loopback = `http://127.0.0.1:${process.env.PORT || 3001}`;
+    // A tools-only workspace (no rose_user_ui: not a Rose Desktop account) gets no rose-ui env.
+    const hasUserUi = workspace.files.some(
+      (file) => file.path === `${USER_UI_CLI_BIN_DIR}/${USER_UI_CLI_NAME}`
+    );
     const envs: Record<string, string> = {
-      ROSE_UI_PUBLISH_URL: `${loopback}/api/user-ui/versions`,
+      ...(hasUserUi ? { ROSE_UI_PUBLISH_URL: `${loopback}/api/user-ui/versions` } : {}),
       ...workspace.localEnvs,
     };
     if (workspace.source.kind === 'active') {

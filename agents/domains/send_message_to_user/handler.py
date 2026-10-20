@@ -14,7 +14,6 @@ When is_question=True:
 
 from __future__ import annotations
 
-from helpers.wmh_activity_policy import wmh_activity_timeout_options
 from datetime import timedelta
 from typing import Any, AsyncGenerator, Dict, Optional
 
@@ -35,8 +34,10 @@ from helpers.generation_handoff import (
     GenerationHandoffRequested,
 )
 from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
+from helpers.wmh_activity_policy import wmh_activity_timeout_options
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 from utils.llm_timeouts import SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS
+from utils.rose_desktop import is_rose_desktop_user
 
 # Import activities (executed via workflow.execute_activity)
 with workflow.unsafe.imports_passed_through():
@@ -256,7 +257,13 @@ class SendMessageToUserManager(ToolManager):
 async def _resolve_inline_view(
     workflow_instance: Any, raw: Any
 ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Validate `inline_view` and pin it to the user's active published version."""
+    """Validate `inline_view` and pin it to the user's active published version.
+
+    Inline views are a Rose Desktop feature (utils.rose_desktop): for every other
+    account the argument is ignored, exactly as the stock schema's parse drops it.
+    """
+    if not is_rose_desktop_user(getattr(workflow_instance, "user_id", None)):
+        return None, None
     normalized, error = validate_inline_view(raw)
     if error is not None or normalized is None:
         return None, error
