@@ -4629,7 +4629,12 @@ async def _call_llm_verifier(
         response_schema,
         messages,
     )
-    parsed = response_model.model_validate(parsed_json).model_dump(exclude_unset=True)
+    verdict_model = (
+        response_model
+        if _verifier_verdict_claims_completion(parsed_json)
+        else _build_verifier_response_model(response_schema, completion_verdict=False)
+    )
+    parsed = verdict_model.model_validate(parsed_json).model_dump(exclude_unset=True)
 
     usage = {
         "prompt_tokens": prompt_toks,
@@ -4684,6 +4689,20 @@ async def _call_llm_verifier(
             logger.warning("fast_cache.set_error", key=deferred_fast_cache_key, error=str(exc))
 
     return parsed, usage
+
+
+def _verifier_verdict_claims_completion(parsed_json: Any) -> bool:
+    """True unless the verdict reports a numeric score below 1.0.
+
+    Unscored or malformed verdicts are checked against the full completion
+    contract, so their validation errors are unchanged.
+    """
+    if not isinstance(parsed_json, dict):
+        return True
+    score = parsed_json.get("score")
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        return True
+    return score >= 1.0
 
 
 def _iter_verifier_message_text_parts(message: Dict[str, Any]) -> List[str]:
@@ -5301,8 +5320,17 @@ def _completed_child_task_structured_response(
 
 def _build_verifier_response_model(
     response_schema: Optional[Dict[str, Any]] = None,
+    *,
+    completion_verdict: bool = True,
 ) -> Type[BaseModel]:
-    """Build the verifier's Pydantic contract for RoseClient.complete."""
+    """Build the verifier's Pydantic contract for RoseClient.complete.
+
+    The default model is the request contract: a completion verdict carries
+    every schema-required output key. The rubric defines a score below 1.0 as a
+    verdict in which some required field is not grounded and forbids inventing
+    it, so those verdicts are parsed with ``completion_verdict=False``: required
+    keys may be omitted while present values keep their types and bounds.
+    """
     fields: Dict[str, Any] = {}
     openai_strict = True
 
@@ -5315,11 +5343,11 @@ def _build_verifier_response_model(
                 or (field.get("type") in ("object", "list[object]") and not _nested_fields_for_object_field(field))
             ):
                 openai_strict = False
-            annotation = _verifier_field_annotation_for_field(field)
+            annotation = _verifier_field_annotation_for_field(field, completion_verdict=completion_verdict)
             output_fields[field["name"]] = (
                 annotation,
                 Field(
-                    ... if field.get("required", True) else None,
+                    ... if field.get("required", True) and completion_verdict else None,
                     description=field.get("description", ""),
                     **_pydantic_field_bounds(field),
                 ),
@@ -5348,13 +5376,19 @@ def _build_verifier_response_model(
     return model
 
 
-def _verifier_field_annotation_for_field(field: Dict[str, Any]) -> Any:
+def _verifier_field_annotation_for_field(field: Dict[str, Any], *, completion_verdict: bool = True) -> Any:
     field_type = field.get("type")
     nested_fields = _nested_fields_for_object_field(field)
     if field_type == "object" and nested_fields:
-        annotation = _build_nested_verifier_model(field.get("name") or "object", nested_fields)
+        annotation = _build_nested_verifier_model(
+            field.get("name") or "object", nested_fields, completion_verdict=completion_verdict
+        )
     elif field_type == "list[object]" and nested_fields:
-        annotation = List[_build_nested_verifier_model(field.get("name") or "item", nested_fields)]
+        annotation = List[
+            _build_nested_verifier_model(
+                field.get("name") or "item", nested_fields, completion_verdict=completion_verdict
+            )
+        ]
     else:
         annotation = _verifier_field_annotation(field_type)
     return Optional[annotation] if field.get("nullable") is True else annotation
@@ -5370,7 +5404,12 @@ def _pydantic_field_bounds(field: Dict[str, Any]) -> Dict[str, int]:
     return {pydantic_key: field[key] for key, pydantic_key in keys if isinstance(field.get(key), int)}
 
 
-def _build_nested_verifier_model(name: str, nested_fields: List[Dict[str, Any]]) -> Type[BaseModel]:
+def _build_nested_verifier_model(
+    name: str,
+    nested_fields: List[Dict[str, Any]],
+    *,
+    completion_verdict: bool = True,
+) -> Type[BaseModel]:
     safe_name = re.sub(r"[^A-Za-z0-9_]+", "_", name).strip("_") or "Object"
     model_fields: Dict[str, Any] = {}
     for nested in nested_fields:
@@ -5378,9 +5417,9 @@ def _build_nested_verifier_model(name: str, nested_fields: List[Dict[str, Any]])
         if not isinstance(nested_name, str) or not nested_name:
             continue
         model_fields[nested_name] = (
-            _verifier_field_annotation_for_field(nested),
+            _verifier_field_annotation_for_field(nested, completion_verdict=completion_verdict),
             Field(
-                ... if nested.get("required", True) else None,
+                ... if nested.get("required", True) and completion_verdict else None,
                 description=nested.get("description", ""),
                 **_pydantic_field_bounds(nested),
             ),
