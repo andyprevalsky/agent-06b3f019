@@ -430,6 +430,56 @@ async def keepalive_e2b_session(task_id: str, code_provider: str = "claude") -> 
         return None
 
 
+async def report_code_usage_limit(
+    task_id: str, code_provider: str, resets_at: Optional[Any]
+) -> Optional[dict[str, Any]]:
+    """Rate-limit the credential this task ran on until the provider's reset (C15)."""
+    config = load_config()
+    body: dict[str, Any] = {}
+    if isinstance(resets_at, (int, float, str)) and resets_at:
+        body["resets_at"] = resets_at
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{config.backend.api_url}{_session_base_path(code_provider)}/{task_id}/usage-limit",
+                headers={"x-api-key": config.backend.api_key or ""},
+                json=body,
+            )
+            if response.status_code != 200:
+                logger.warning("[ClaudeCode] Usage-limit report failed", task_id=task_id, status=response.status_code)
+                return None
+            result = response.json()
+            return result if isinstance(result, dict) else None
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
+    except Exception as e:
+        logger.warning("[ClaudeCode] Usage-limit report failed", task_id=task_id, error=extract_error_message(e))
+        return None
+
+
+async def fetch_code_credential_availability(user_id: str) -> Optional[dict[str, bool]]:
+    """Whether a Claude / Codex credential can be leased right now (no lease taken)."""
+    config = load_config()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{config.backend.api_url}/api/claude-code-session/credential-availability",
+                headers={"x-api-key": config.backend.api_key or ""},
+                params={"user_id": user_id},
+            )
+            if response.status_code != 200:
+                return None
+            body = response.json()
+            if not isinstance(body, dict):
+                return None
+            return {provider: body.get(provider) is True for provider in ("claude", "codex")}
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
+    except Exception as e:
+        logger.warning("[ClaudeCode] Credential availability lookup failed", error=extract_error_message(e))
+        return None
+
+
 async def check_sandbox_health(
     sandbox_id: str,
     agent_id: str,

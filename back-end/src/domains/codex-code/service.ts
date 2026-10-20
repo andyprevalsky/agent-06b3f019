@@ -110,10 +110,10 @@ export async function createSession(params: CreateSessionParams) {
       leaseOwner: params.lease_owner,
       baseBranch: params.base_branch ?? null,
     },
-    (codeSession) =>
+    (codeSession, handoff) =>
       createCodexCodeSession(
         agent_id,
-        goal,
+        handoff !== null ? `${handoff}\n\n${goal}` : goal,
         attachments,
         normalizedRepoUrl,
         effectiveUserId,

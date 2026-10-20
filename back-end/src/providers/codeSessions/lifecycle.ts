@@ -197,7 +197,10 @@ export async function restoreLatestCheckpoint(
     const { cliSessionId } = await applyCheckpoint(fs, verified, {
       authRemoteUrl: githubAuthRemoteUrl,
     });
-    return { seq, cliSessionId };
+    // A checkpoint written by the other provider's CLI (a usage-limit handoff,
+    // C15) restores the files and history but not that CLI's conversation.
+    const sameProvider = verified.manifest.codeProvider === session.codeProvider;
+    return { seq, cliSessionId: sameProvider ? cliSessionId : null };
   }
   return null;
 }

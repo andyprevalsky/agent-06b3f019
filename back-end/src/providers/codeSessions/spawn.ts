@@ -19,6 +19,7 @@ import {
   type CodeSessionRow,
 } from './store';
 import { CODE_SANDBOX_IDLE_TIMEOUT_MS } from '../e2bCodeSessionSandbox';
+import { switchCodeSessionProvider } from './usageLimit';
 
 const log = createLogger('CodeSessionSpawn');
 
@@ -107,12 +108,23 @@ export async function createWithCodeSession<
   T extends { resumedFrom?: string; cliSessionId?: string | null },
 >(
   params: ResolveSpawnParams,
-  create: (codeSession: CodeSessionRow | null) => Promise<T>
+  create: (codeSession: CodeSessionRow | null, handoff: string | null) => Promise<T>
 ): Promise<{ session: T; fields: CodeSessionSpawnFields }> {
-  const codeSession = await resolveSpawnCodeSession(params);
+  let codeSession = await resolveSpawnCodeSession(params);
+  // C15: a retry after a usage limit may run on the other provider. It keeps
+  // the session (branch, commits, files via the checkpoint) and gets a
+  // handoff summary instead of the other CLI's conversation.
+  let handoff: string | null = null;
+  if (codeSession !== null && codeSession.codeProvider !== params.codeProvider) {
+    const switched = await switchCodeSessionProvider(codeSession, params.codeProvider, (id) =>
+      Sandbox.kill(id, { apiKey: process.env.E2B_API_KEY }).then(() => undefined)
+    );
+    codeSession = switched.session;
+    handoff = switched.handoff;
+  }
   let session: T;
   try {
-    session = await create(codeSession);
+    session = await create(codeSession, handoff);
   } catch (error) {
     if (codeSession !== null) await markPaused(codeSession.id);
     throw error;
@@ -127,6 +139,8 @@ export async function createWithCodeSession<
       base_branch: codeSession?.baseBranch ?? null,
       merge_target: codeSession?.mergeTarget ?? null,
       parent_code_session_id: codeSession?.parentCodeSessionId ?? null,
+      code_provider: codeSession?.codeProvider ?? params.codeProvider,
+      provider_handoff: handoff !== null,
     },
   };
 }
@@ -143,6 +157,10 @@ export interface CodeSessionSpawnFields {
   /** Where the branch merges; null = the repo's default branch. */
   merge_target: string | null;
   parent_code_session_id: string | null;
+  /** Provider this spawn runs on (a usage-limit retry may switch it, C15). */
+  code_provider: string;
+  /** True when this spawn took the session over from the other provider. */
+  provider_handoff: boolean;
 }
 
 export interface CodeSessionView {

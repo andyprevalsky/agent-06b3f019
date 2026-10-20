@@ -4,7 +4,10 @@ import {
   appendFileSync,
   existsSync,
   mkdirSync,
+  readFileSync,
+  readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "fs";
 import { spawn, execFileSync } from "child_process";
@@ -113,6 +116,68 @@ function classifyOAuthFallbackReason(message) {
   }
   return null;
 }
+// C15: Codex's own rate-limit snapshot (the rollout's latest `token_count`
+// event: rate_limits.{primary,secondary}.used_percent / resets_at and
+// rate_limit_reached_type) says whether a failed turn hit a usage limit. A
+// structured signal, so the code-agent activity never classifies prose.
+function newestCodexRollout() {
+  const root = join(homedir(), ".codex", "sessions");
+  let newest = null;
+  const walk = (dir, depth) => {
+    if (depth > 4) return;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) walk(path, depth + 1);
+      else if (entry.name.startsWith("rollout-") && entry.name.endsWith(".jsonl")) {
+        const mtime = statSync(path).mtimeMs;
+        if (!newest || mtime > newest.mtime) newest = { path, mtime };
+      }
+    }
+  };
+  walk(root, 0);
+  return newest?.path ?? null;
+}
+
+function codexUsageLimit() {
+  const rollout = newestCodexRollout();
+  if (!rollout) return null;
+  let limits = null;
+  try {
+    const text = readFileSync(rollout, "utf8").slice(-512 * 1024);
+    for (const line of text.split("\n").reverse()) {
+      if (!line.includes('"token_count"')) continue;
+      try {
+        const entry = JSON.parse(line);
+        if (entry?.type === "event_msg" && entry.payload?.type === "token_count") {
+          limits = entry.payload.rate_limits ?? null;
+          if (limits) break;
+        }
+      } catch {
+        // a torn line while Codex is writing
+      }
+    }
+  } catch {
+    return null;
+  }
+  if (!limits) return null;
+  const windows = [limits.primary, limits.secondary].filter(Boolean);
+  const exhausted = windows.filter((window) => Number(window.used_percent) >= 100);
+  if (!limits.rate_limit_reached_type && exhausted.length === 0) return null;
+  const resets = (exhausted.length > 0 ? exhausted : windows)
+    .map((window) => window.resets_at)
+    .filter((value) => typeof value === "number");
+  return {
+    reached_type: limits.rate_limit_reached_type ?? null,
+    resets_at: resets.length > 0 ? Math.max(...resets) : null,
+  };
+}
+
 const wss = new WebSocketServer({ port: PORT });
 
 function broadcast(type, data) {
@@ -187,11 +252,13 @@ function renderCodexJsonLine(line) {
   if (event.type === "turn.failed") {
     const message = event.error?.message || event.message || "unknown error";
     oauthFallbackReason ??= classifyOAuthFallbackReason(message);
+    const usageLimit = codexUsageLimit();
     appendEvent({
       type: "error",
       raw_type: event.type,
       message,
       error: event.error || null,
+      ...(usageLimit ? { usage_limit: usageLimit } : {}),
     });
     return `[Codex] Turn failed: ${message}\n`;
   }
@@ -199,11 +266,13 @@ function renderCodexJsonLine(line) {
     const message =
       event.message || event.error?.message || JSON.stringify(event);
     oauthFallbackReason ??= classifyOAuthFallbackReason(message);
+    const usageLimit = codexUsageLimit();
     appendEvent({
       type: "error",
       raw_type: event.type,
       message,
       error: event.error || null,
+      ...(usageLimit ? { usage_limit: usageLimit } : {}),
     });
     return `[Codex] Error: ${message}\n`;
   }

@@ -46,3 +46,9 @@ export interface CloseSessionParams {
   additional_paths?: string[];
   reason?: string;
 }
+
+/** POST /:taskId/usage-limit — Codex stopped on a provider usage limit (C15). */
+export const codeTaskUsageLimitSchema = z.object({
+  // Epoch seconds/ms or ISO time the provider reports the limit resets.
+  resets_at: z.union([z.number().positive(), z.string().min(1).max(64)]).optional(),
+});

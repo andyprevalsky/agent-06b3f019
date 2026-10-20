@@ -66,6 +66,11 @@ CODE_AGENT_ERROR_RETRY_LIMIT: Final[int] = 5
 # Tool result status for an idle session that was paused (resumable).
 CODE_AGENT_PAUSED_STATUS: Final[str] = "paused"
 
+# C15: the CLI stopped on a provider usage limit (structured signal). The
+# session is saved; the parent retries with the same code_session_id and the
+# retry leases another token, or the other provider when none is left.
+CODE_AGENT_USAGE_LIMIT_STATUS: Final[str] = "usage_limit"
+
 # Structured transcript rows (utils/code_transcript.py) are persisted in batches at most
 # this often while new events arrive, plus once when monitoring ends. Live
 # token streaming reaches viewers over the sandbox ws (`code_agent_delta`);

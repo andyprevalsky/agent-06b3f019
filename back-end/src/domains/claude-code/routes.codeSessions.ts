@@ -5,6 +5,8 @@
  * DELETE /code-sessions/:id  - retire it: kill sandbox, delete checkpoints
  * POST   /checkpoint         - checkpoint a running task (worker drain) without pausing
  * POST   /:taskId/keepalive  - extend an attached task's sandbox idle window + lease
+ * POST   /:taskId/usage-limit - the CLI stopped on a usage limit: rate-limit its credential (C15)
+ * GET    /credential-availability?user_id - can a Claude / Codex credential be leased now
  *
  * Every read/write is scoped to the authenticated user; a foreign id is
  * indistinguishable from an unknown one.
@@ -20,7 +22,16 @@ import {
   retireOwnedCodeSession,
 } from '../../providers/codeSessions/spawn';
 import { asyncHandler } from '../../utils/asyncHandler';
-import { codeSessionCheckpointSchema } from './types';
+import {
+  codeSessionCheckpointSchema,
+  codeTaskUsageLimitSchema,
+  credentialAvailabilityQuerySchema,
+} from './types';
+import {
+  codeCredentialAvailability,
+  markCodeTaskUsageLimited,
+  parseResetsAt,
+} from '../../providers/codeSessions/usageLimit';
 
 const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
 const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
@@ -83,6 +94,19 @@ export function registerCodeSessionRoutes(router: Router): void {
     })
   );
 
+  router.get(
+    '/credential-availability',
+    authenticate,
+    asyncHandler(async (req: AuthRequest, res: Response) => {
+      if (req.isInternal !== true) {
+        res.status(403).json({ error: 'Internal callers only' });
+        return;
+      }
+      const { user_id } = credentialAvailabilityQuerySchema.parse(req.query);
+      res.json(await codeCredentialAvailability(user_id));
+    })
+  );
+
   router.post(
     '/checkpoint',
     authenticate,
@@ -119,6 +143,25 @@ export function registerCodeSessionTaskRoutes(router: Router): void {
         return;
       }
       res.json(await keepAliveCodeTask(req.params.taskId));
+    })
+  );
+
+  router.post(
+    '/:taskId/usage-limit',
+    authenticate,
+    asyncHandler(async (req: AuthRequest, res: Response) => {
+      if (req.isInternal !== true) {
+        res.status(403).json({ error: 'Internal callers only' });
+        return;
+      }
+      if (!UUID.test(req.params.taskId)) {
+        res.status(404).json({ error: 'Session not found' });
+        return;
+      }
+      const { resets_at } = codeTaskUsageLimitSchema.parse(req.body ?? {});
+      const resetsAt = parseResetsAt(resets_at);
+      const result = await markCodeTaskUsageLimited(req.params.taskId, 'claude', resetsAt);
+      res.json({ ...result, resets_at: resetsAt?.toISOString() ?? null });
     })
   );
 }

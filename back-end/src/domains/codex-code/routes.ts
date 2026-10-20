@@ -3,9 +3,10 @@ import { type AuthRequest, authenticate } from '../../providers/auth';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import type { FilePointer } from '../../providers/storage';
-import { createSessionSchema, closeSessionSchema } from './types';
+import { createSessionSchema, closeSessionSchema, codeTaskUsageLimitSchema } from './types';
 import * as service from './service';
 import { codeSessionHttpError, keepAliveCodeTask } from '../../providers/codeSessions/spawn';
+import { markCodeTaskUsageLimited, parseResetsAt } from '../../providers/codeSessions/usageLimit';
 import { GitHubAccessDeniedError, MissingUserIdError } from './service';
 
 const log = createLogger('CodexCodeRoutes');
@@ -30,6 +31,29 @@ router.post(
       return;
     }
     res.json(await keepAliveCodeTask(req.params.taskId));
+  })
+);
+
+/**
+ * POST /api/codex-code-session/:taskId/usage-limit - Codex stopped on a usage
+ * limit (structured codex_error_info): rate-limit its credential (C15).
+ */
+router.post(
+  '/:taskId/usage-limit',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    if (req.isInternal !== true) {
+      res.status(403).json({ error: 'Internal callers only' });
+      return;
+    }
+    if (!UUID.test(req.params.taskId)) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
+    const { resets_at } = codeTaskUsageLimitSchema.parse(req.body ?? {});
+    const resetsAt = parseResetsAt(resets_at);
+    const result = await markCodeTaskUsageLimited(req.params.taskId, 'codex', resetsAt);
+    res.json({ ...result, resets_at: resetsAt?.toISOString() ?? null });
   })
 );
 

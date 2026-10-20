@@ -69,7 +69,14 @@ with (project / f"{session_id}.jsonl").open("a") as transcript:
 emit({"type": "system", "subtype": "init", "session_id": session_id, "cwd": str(cwd), "model": "stub",
       "tools": ["Bash"], "permissionMode": "bypassPermissions"})
 notes = home / "notes.txt"
-if resume is None and os.environ.get("STUB_MODE") != "finish":
+if resume is None and os.environ.get("STUB_MODE") == "rate_limit":
+    notes.write_text("uncommitted work\n")
+    emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "half done"}]}})
+    emit({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "rateLimitType": "five_hour",
+          "resetsAt": 1790988600, "utilization": 1.0}})
+    while True:  # the CLI would now fail its turn; the activity must act on the event
+        time.sleep(0.1)
+if resume is None and os.environ.get("STUB_MODE") not in ("finish", "rate_limit"):
     notes.write_text("uncommitted work\n")
     emit({"type": "assistant", "message": {"content": [
         {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "sleep 99999"}}]}})
@@ -187,6 +194,9 @@ class _Backend:
         # Keepalive number after which the backend reports a question the code
         # agent asked its (blocked) spawning agent.
         self.question_after = question_after
+        self.usage_reports: list[tuple] = []
+        # Credential availability the backend reports to each spawn (C15).
+        self.availability: list[dict] = []
 
     async def create_session(self, **kwargs):
         self.created.append(kwargs)
@@ -239,6 +249,13 @@ class _Backend:
             awaiting = {"message_id": "q-1", "question": "Which database should I use?", "at": "2026-10-20T00:00:00Z"}
         return {"alive": True, "code_session_id": "6c1d6f1e-0000-4000-8000-00000000c0de", "awaiting_parent": awaiting}
 
+    async def report_usage(self, task_id, code_provider, resets_at):
+        self.usage_reports.append((task_id, code_provider, resets_at))
+        return {"marked": f"{code_provider}_pool:tok-1", "resets_at": "2026-10-03T00:50:00.000Z"}
+
+    async def credential_availability(self, user_id):
+        return self.availability.pop(0) if self.availability else {"claude": True, "codex": True}
+
     async def verifier(self, **kwargs):
         self.verified_events.append([dict(event) for event in kwargs["code_events"]])
         return (1.0, "answer recorded", {"answer": "42"}, 0, 0)
@@ -255,6 +272,8 @@ class _Backend:
             patch.object(service, "save_claude_code_message", side_effect=self.save_message),
             patch.object(service, "persist_terminal_output", side_effect=self.persist_output),
             patch.object(service, "keepalive_e2b_session", side_effect=self.keepalive),
+            patch.object(service, "report_code_usage_limit", side_effect=self.report_usage),
+            patch.object(service, "fetch_code_credential_availability", side_effect=self.credential_availability),
             patch.object(service, "_run_verifier", side_effect=self.verifier),
             patch.object(service, "_log_code_agent_event", lambda event, **kw: None),
             patch.object(service, "REATTACH_PROBE_BACKOFF_S", 0.05),
@@ -386,6 +405,97 @@ async def test_question_to_blocked_spawner_pauses_session_and_returns_it():
         assert backend.keepalives >= 3, backend.keepalives
     finally:
         session_home.cleanup()
+
+
+async def _usage_limit_then_retry(availability_on_retry: dict) -> tuple[dict, dict, _Backend, _SessionHome]:
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    session_home = _SessionHome(extra_env={"STUB_MODE": "rate_limit"})
+    backend = _Backend(session_home)
+    backend.availability = [{"claude": True, "codex": True}, availability_on_retry]
+    with backend.patched():
+        first = await asyncio.wait_for(
+            ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args()), timeout=30
+        )
+        retry_id = (first.get("retry") or {}).get("code_session_id")
+        retry = await asyncio.wait_for(
+            ActivityEnvironment().run(
+                service.spawn_claude_code_activity,
+                *_activity_args(code_session_request={"code_session_id": retry_id}, tool_call_id="tc-retry"),
+            ),
+            timeout=30,
+        )
+    return first, retry, backend, session_home
+
+
+async def test_usage_limit_saves_session_and_retry_leases_next_credential():
+    """C15: a structured usage limit mid-task → saved session + exact retry; the retry resumes it.
+
+    (a) the parent gets a structured, retryable error naming the retry call;
+    (b) the exhausted credential is reported for rate-limiting with its reset;
+    (c) the retry keeps the provider while it still has a credential;
+    (d) the resumed session sees the work from before the limit.
+    """
+    first, retry, backend, session_home = await _usage_limit_then_retry({"claude": True, "codex": True})
+    try:
+        assert first["status"] == "usage_limit" and first["success"] is False, first
+        assert first["failure_kind"] == "usage_limit" and first["retryable"] is True, first
+        session_id = "6c1d6f1e-0000-4000-8000-00000000c0de"
+        assert first["retry"] == {"tool": "spawn_agent", "type": "code", "code_session_id": session_id}, first
+        assert f"code_session_id='{session_id}'" in first["message"], first["message"]
+        assert "Claude Code usage limit was reached" in first["message"], first["message"]
+        assert "Its work is saved on branch rose/write-answer-0a1b2c3d" in first["message"], first["message"]
+        assert first["usage_limit"]["resets_at"] == "2026-10-03T00:50:00.000Z", first["usage_limit"]
+        assert backend.usage_reports == [("task-1", "claude", 1790988600)], backend.usage_reports
+        assert [call.get("reason") for call in backend.closed][0] == "usage_limit", backend.closed
+        assert first["code_agent"]["state"] == "failed" and first["code_agent"]["failure_message"], first
+        assert any(m.get("action_type") == "usage_limit" for m in backend.messages), backend.messages
+
+        assert backend.created[1]["code_session_id"] == session_id, backend.created[1]
+        assert backend.created[1]["code_provider"] == "claude", backend.created[1]
+        assert retry["status"] == "completed" and retry["success"] is True, retry
+        texts = [e.get("text") for e in backend.verified_events[-1] if e.get("type") == "agent_message"]
+        assert "notes: uncommitted work" in texts, texts
+    finally:
+        session_home.cleanup()
+
+
+async def test_usage_limit_retry_switches_provider_when_pool_is_exhausted():
+    """C15 (c): no Claude credential left → the retry continues the same session on Codex."""
+    first, retry, backend, session_home = await _usage_limit_then_retry({"claude": False, "codex": True})
+    try:
+        assert first["status"] == "usage_limit", first
+        assert backend.created[1]["code_provider"] == "codex", backend.created[1]
+        assert backend.created[1]["code_session_id"] == first["retry"]["code_session_id"], backend.created
+        assert retry["code_provider"] == "codex" and retry["status"] == "completed", retry
+        texts = [e.get("text") for e in backend.verified_events[-1] if e.get("type") == "agent_message"]
+        assert "notes: uncommitted work" in texts, texts
+    finally:
+        session_home.cleanup()
+
+
+def test_usage_limit_detection_reads_structured_events_only():
+    """Only the CLIs' structured limit signals count; printed limit text never does (rule 25b)."""
+    from domains.spawn_claude_code_agent.service import usage_limit_from_event
+
+    rejected = {"type": "cli_message", "raw_type": "rate_limit_event",
+                "cli_message": {"type": "rate_limit_event",
+                                "rate_limit_info": {"status": "rejected", "resetsAt": 5, "rateLimitType": "five_hour"}}}
+    assert usage_limit_from_event(rejected) == {"provider": "claude", "resets_at": 5, "limit_type": "five_hour"}
+    warning = json.loads(json.dumps(rejected))
+    warning["cli_message"]["rate_limit_info"]["status"] = "allowed_warning"
+    assert usage_limit_from_event(warning) is None
+    codex = {"provider": "codex", "type": "error", "message": "x",
+             "usage_limit": {"reached_type": "rate_limit_reached", "resets_at": 9}}
+    assert usage_limit_from_event(codex) == {"provider": "codex", "resets_at": 9, "limit_type": "rate_limit_reached"}
+    for prose in (
+        {"type": "agent_message", "text": "You've hit your limit · resets 5pm (UTC)"},
+        {"type": "error", "message": "You've hit your usage limit."},
+        {"type": "stdout", "text": "usage_limit_reached"},
+    ):
+        assert usage_limit_from_event(prose) is None, prose
 
 
 async def test_failed_attempt_retry_keeps_state_and_code_session_id():
@@ -570,6 +680,15 @@ async def _run_all_tests():
         test_question_to_blocked_spawner_pauses_session_and_returns_it,
     )
     await r.record_async("failed_attempt_retry_keeps_state", test_failed_attempt_retry_keeps_state_and_code_session_id)
+    await r.record_async(
+        "usage_limit_saves_session_and_retry_leases_next",
+        test_usage_limit_saves_session_and_retry_leases_next_credential,
+    )
+    await r.record_async(
+        "usage_limit_retry_switches_provider",
+        test_usage_limit_retry_switches_provider_when_pool_is_exhausted,
+    )
+    r.record("usage_limit_detection_structured_only", test_usage_limit_detection_reads_structured_events_only)
     await r.record_async("tool_result_reports_branch_and_merge", test_tool_result_reports_branch_and_merged_only_when_confirmed)
     await r.record_async("ws_server_checks_out_session_branch", test_ws_server_checks_out_the_code_session_branch)
     teardown_mock()

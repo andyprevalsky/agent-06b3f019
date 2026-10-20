@@ -22,6 +22,7 @@ from domains.spawn_claude_code_agent.config import (
     CODE_AGENT_ACTIVITY_NO_DEADLINE,
     CODE_AGENT_DRAIN_YIELD_STATUS,
     CODE_AGENT_PAUSED_STATUS,
+    CODE_AGENT_USAGE_LIMIT_STATUS,
     CODE_SESSION_HEARTBEAT_KEY,
 )
 from domains.spawn_claude_code_agent.service import (
@@ -577,10 +578,23 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 completed_metadata["code_agent"] = result["code_agent"]
             if paused:
                 completed_metadata["session_paused"] = True
+            usage_limited = result.get("status") == CODE_AGENT_USAGE_LIMIT_STATUS
+            if usage_limited:
+                # C15: structured, retryable error; the message has the exact retry.
+                completed_metadata["failure_kind"] = "usage_limit"
+                completed_metadata["retryable"] = True
+                completed_metadata["usage_limit"] = result.get("usage_limit")
+                completed_metadata["retry"] = result.get("retry")
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 # An idle session is paused and resumable, never a failure (C11).
-                title="Code session paused" if paused else ("✓ Task Completed" if success else "Task Incomplete"),
+                title=(
+                    "Code agent hit a usage limit"
+                    if usage_limited
+                    else "Code session paused"
+                    if paused
+                    else ("✓ Task Completed" if success else "Task Incomplete")
+                ),
                 message=result.get("message", ""),
                 status=MessageStatus.FINISHED,
                 metadata=completed_metadata,

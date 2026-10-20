@@ -81,6 +81,8 @@ export interface CreateSessionResult {
   base_branch: string | null;
   merge_target: string | null;
   parent_code_session_id: string | null;
+  code_provider: string;
+  provider_handoff: boolean;
   /** Restore summary when the session materialized a Project (PJ3). */
   project: ProjectRestoreReport | null;
 }
@@ -103,4 +105,15 @@ export const directTurnSchema = z.object({
   text: z.string().trim().min(1).max(100_000),
   tool_call_id: z.string().min(1).max(256).optional(),
   user_id: z.string().uuid().optional(), // internal callers only (API key)
+});
+
+/** POST /:taskId/usage-limit — the code agent stopped on a provider usage limit (C15). */
+export const codeTaskUsageLimitSchema = z.object({
+  // Epoch seconds/ms or ISO time the provider reports the limit resets.
+  resets_at: z.union([z.number().positive(), z.string().min(1).max(64)]).optional(),
+});
+
+/** GET /credential-availability — can a Claude / Codex credential be leased now. */
+export const credentialAvailabilityQuerySchema = z.object({
+  user_id: z.string().min(1).max(200),
 });

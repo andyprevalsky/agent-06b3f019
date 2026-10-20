@@ -22,6 +22,7 @@ from domains.spawn_claude_code_agent.config import (
     CODE_AGENT_DRAIN_YIELD_STATUS,
     CODE_AGENT_ERROR_RETRY_LIMIT,
     CODE_AGENT_PAUSED_STATUS,
+    CODE_AGENT_USAGE_LIMIT_STATUS,
     CODE_SESSION_HEARTBEAT_KEY,
     CODE_SESSION_IDLE_PAUSE_S,
     CODE_SESSION_KEEPALIVE_INTERVAL_S,
@@ -41,8 +42,10 @@ from domains.spawn_claude_code_agent.repo import (
     check_sandbox_health,
     close_e2b_session,
     create_e2b_session,
+    fetch_code_credential_availability,
     keepalive_e2b_session,
     persist_terminal_output,
+    report_code_usage_limit,
     save_claude_code_message,
     save_code_transcript_batch,
 )
@@ -982,6 +985,9 @@ async def _run_agentic_loop(
         nonlocal direct_chat_active, user_turns_seen, sdk_results_seen
         last_output_time = safe_time()
         code_events.append(event)
+        usage_limit = usage_limit_from_event(event)
+        if usage_limit is not None and loop_outcome is not None and "usage_limit" not in loop_outcome:
+            loop_outcome["usage_limit"] = usage_limit
         event_index = len(code_events) - 1
         for record in transcript.feed(event, event_index):
             if event_index >= transcript_flushed:
@@ -1122,6 +1128,18 @@ async def _run_agentic_loop(
                         elapsed_s=int(elapsed),
                     )
                     raise CodeSessionDrained(drain_reason)
+
+            # C15: a provider usage limit ends this run; the session is saved
+            # and the parent retries on the next available credential.
+            if loop_outcome is not None and loop_outcome.get("usage_limit"):
+                logger.warning(
+                    "[ClaudeCode] Provider usage limit reached; saving the session",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    usage_limit=loop_outcome["usage_limit"],
+                )
+                action_summary.append("Provider usage limit reached; session saved for a retry")
+                break
 
             # No runtime limit (C11). While attached, keep the sandbox's idle
             # window open; once keepalives stop it pauses on its own.
@@ -2359,6 +2377,48 @@ def build_code_agent_metadata(
     return block
 
 
+def usage_limit_from_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """A provider usage limit from structured CLI events only (C15; no prose matching).
+
+    Claude Code: ``rate_limit_event`` whose ``rate_limit_info.status`` is
+    ``rejected``. Codex: an error event carrying the ws-server's ``usage_limit``
+    (Codex's own rate-limit snapshot reports the window exhausted).
+    """
+    if event.get("type") == "cli_message" and event.get("raw_type") == "rate_limit_event":
+        message = event.get("cli_message") if isinstance(event.get("cli_message"), dict) else {}
+        info = message.get("rate_limit_info") if isinstance(message.get("rate_limit_info"), dict) else {}
+        if info.get("status") == "rejected":
+            return {"provider": "claude", "resets_at": info.get("resetsAt"), "limit_type": info.get("rateLimitType")}
+    if event.get("type") == "error" and isinstance(event.get("usage_limit"), dict):
+        usage = event["usage_limit"]
+        return {"provider": "codex", "resets_at": usage.get("resets_at"), "limit_type": usage.get("reached_type")}
+    return None
+
+
+def _provider_label(code_provider: str) -> str:
+    return "Codex" if code_provider == "codex" else "Claude Code"
+
+
+def format_usage_limit_message(
+    *, code_provider: str, resets_at_iso: Optional[str], facts: Optional[Dict[str, Any]]
+) -> str:
+    """Short, factual retry instructions for the parent (C15)."""
+    facts = facts or {}
+    other = "claude" if code_provider == "codex" else "codex"
+    saved = "Its work is saved"
+    if facts.get("branch"):
+        saved += f" on branch {facts['branch']}"
+    if facts.get("checkpoint_seq"):
+        saved += f" (checkpoint {facts['checkpoint_seq']})"
+    resets = f" (resets {resets_at_iso})" if resets_at_iso else ""
+    return (
+        f"Code agent stopped: the {_provider_label(code_provider)} usage limit was reached{resets}. "
+        f"{saved}. Retry now with spawn_agent(type='code', code_session_id='{facts.get('code_session_id')}', "
+        "goal=<the same goal>): the retry leases another token of the same provider, or continues on "
+        f"{_provider_label(other)} when none is available, from the saved session."
+    )
+
+
 def format_code_session_summary(facts: Optional[Dict[str, Any]]) -> str:
     """One factual block for the tool result: session, branch, commits, PR, merged."""
     if not facts or not facts.get("code_session_id"):
@@ -2573,6 +2633,22 @@ async def spawn_claude_code_activity(
             )
             action_summary.append(f"Reattached to E2B sandbox: {sandbox_id}")
 
+        if attached is None:
+            # C15: continue on the other provider when this one has no
+            # leasable credential left (the session itself is provider-neutral).
+            available = await fetch_code_credential_availability(user_id)
+            other_provider = "codex" if code_provider == "claude" else "claude"
+            if available is not None and not available.get(code_provider) and available.get(other_provider):
+                logger.warning(
+                    "[ClaudeCode] No leasable credential for provider; continuing on the other one",
+                    agent_id=agent_id,
+                    from_provider=code_provider,
+                    to_provider=other_provider,
+                    code_session_id=code_session_id,
+                )
+                action_summary.append(f"No {code_provider} credential available; continuing on {other_provider}")
+                code_provider = other_provider
+
         claude_token = await _resolve_claude_token_for_activity(user_id, code_provider)
 
         if attached is None:
@@ -2773,6 +2849,78 @@ async def spawn_claude_code_activity(
                 agent_id=agent_id,
                 task_id=task_id,
             )
+
+        usage_limit = loop_outcome.get("usage_limit")
+        if isinstance(usage_limit, dict):
+            # C15: save the session (checkpoint + pause), rate-limit the token,
+            # and hand the parent the exact retry. Never a Temporal retry: the
+            # same exhausted credential would fail again.
+            close_data = await close_e2b_session(
+                task_id=task_id,
+                user_id=user_id,
+                agent_id=agent_id,
+                additional_paths=[],
+                code_provider=code_provider,
+                reason="usage_limit",
+            )
+            code_session_facts = _merge_close_code_session_facts(code_session_facts, close_data)
+            marked = await report_code_usage_limit(task_id, code_provider, usage_limit.get("resets_at"))
+            session_heartbeats.close()
+            if log_collector:
+                await log_collector.stop()
+            resets_at_iso = (marked or {}).get("resets_at")
+            message = format_usage_limit_message(
+                code_provider=code_provider, resets_at_iso=resets_at_iso, facts=code_session_facts
+            )
+            code_agent = build_code_agent_metadata(
+                task_id=task_id,
+                provider=code_provider,
+                state="failed",
+                started_at=start_time,
+                ended_at=safe_time(),
+                facts=code_session_facts,
+                failure_message=message,
+            )
+            await save_claude_code_message(
+                agent_id=agent_id,
+                title="Code agent hit a usage limit",
+                task_id=task_id,
+                message=message,
+                status=MessageStatus.FINISHED,
+                action_type="usage_limit",
+                tool_call_id=tool_call_id,
+                code_provider=code_provider,
+                code_session=code_session_facts,
+                code_agent=code_agent,
+            )
+            return {
+                "status": CODE_AGENT_USAGE_LIMIT_STATUS,
+                "success": False,
+                "failure_kind": "usage_limit",
+                "retryable": True,
+                "message": message,
+                "usage_limit": {
+                    "provider": code_provider,
+                    "resets_at": resets_at_iso,
+                    "limit_type": usage_limit.get("limit_type"),
+                    "credential_marked": (marked or {}).get("marked"),
+                },
+                "retry": {
+                    "tool": "spawn_agent",
+                    "type": "code",
+                    "code_session_id": (code_session_facts or {}).get("code_session_id"),
+                },
+                "task_id": task_id,
+                "ws_url": ws_url,
+                "execution_time_ms": (safe_time() - start_time) * 1000,
+                "usage_items": [],
+                "structured_response": None,
+                "output_files": close_data.get("output_files", []),
+                "code_provider": code_provider,
+                "code_session": code_session_facts,
+                "code_agent": code_agent,
+                "completed_turns": codex_completed_turn_count(code_events) if code_provider == "codex" else None,
+            }
 
         # A fast CLI failure can set ``exit_code`` before the one-second silence
         # window in ``_run_agentic_loop`` gets a chance to inspect the terminal.

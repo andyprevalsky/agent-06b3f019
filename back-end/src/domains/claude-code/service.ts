@@ -182,10 +182,10 @@ export async function createSession(params: CreateSessionParams): Promise<Create
       leaseOwner: params.lease_owner,
       baseBranch: params.base_branch ?? projectWorkspace?.project.defaultBranch ?? null,
     },
-    (codeSession) =>
+    (codeSession, handoff) =>
       createClaudeCodeSession(
         agent_id,
-        goal,
+        handoff !== null ? `${handoff}\n\n${goal}` : goal,
         attachments,
         normalizedRepoUrl,
         effectiveUserId,
