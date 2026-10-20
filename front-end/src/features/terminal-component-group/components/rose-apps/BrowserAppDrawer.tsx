@@ -6,9 +6,14 @@
  *   on a Rose Desktop account (10k-agent rule: no polling, shown agent only).
  *
  *   TABS (while OPEN), Root first:
- *   [ROOT]  the user's Root browser (RootBrowserPane), mounted only while OPEN:
- *           GET /browser-world/root; null --> quiet "Open browser"
- *           (POST /root/open); open --> its live view with take over / hand
+ *   [ROOT]  the user's Root browser (RootBrowserPane), mounted only while OPEN.
+ *           It is never opened on its own (no auto-open on load or on agent
+ *           activity). GET /browser-world/root?agent_id=<selected agent>:
+ *             root null + an agent selected + default_url --> opens once at
+ *               that tree's URL (POST /root/open {start_url: default_url})
+ *             root null + no agent (or no default_url) --> quiet "Open browser"
+ *               (POST /root/open {start_url: default_url} when known, else {})
+ *           open --> its live view with take over / hand
  *           back (existing .../control) and "Close browser" (POST /root/close
  *           --> merge receipt such as "Saved logins for github.com", shown
  *           briefly).
@@ -39,7 +44,7 @@
  *   icon (floating over this corner) and Escape close it (UI ledger row 67).
  */
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, Globe, RotateCw, type LucideIcon } from 'lucide-react';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { cn } from '@/lib/utils';
@@ -246,10 +251,23 @@ function BrowserTabs({ apps, isRoot }: { apps: RoseAppsValue; isRoot: boolean })
   );
 }
 
-/** Mounted only while the drawer is open on Root: closing it drops the live view. */
-function RootTab({ reloadKey }: { reloadKey: number }) {
-  const state = useRootBrowserState(true);
+/**
+ * Mounted only while the drawer is open on Root: closing it drops the live view.
+ * With an agent selected, a closed Root opens once at that tree's default_url;
+ * with none (or no default_url yet) it stays on the quiet "Open browser".
+ */
+function RootTab({ reloadKey, agentId }: { reloadKey: number; agentId: string | null }) {
+  const state = useRootBrowserState(true, agentId);
   const actions = useRootBrowserActions();
+  const defaultUrl = agentId === null ? null : (state.data?.default_url ?? null);
+  const startedRef = useRef(false);
+  const { mutate: openRoot } = actions.open;
+  const rootClosed = state.data !== undefined && state.data.root === null;
+  useEffect(() => {
+    if (startedRef.current || !rootClosed || defaultUrl === null) return;
+    startedRef.current = true;
+    openRoot(defaultUrl);
+  }, [rootClosed, defaultUrl, openRoot]);
   let error: string | null = null;
   // The user's latest action speaks first: a failed open outranks the read.
   if (actions.open.isError) error = 'Couldn’t open your browser. Try again.';
@@ -263,7 +281,7 @@ function RootTab({ reloadKey }: { reloadKey: number }) {
       opening={actions.open.isPending}
       closing={actions.close.isPending}
       reloadKey={reloadKey}
-      onOpen={() => actions.open.mutate()}
+      onOpen={() => actions.open.mutate(defaultUrl ?? undefined)}
       onClose={() => actions.close.mutate()}
     />
   );
@@ -281,7 +299,7 @@ function BrowserChrome({
   sitesToggle: React.ReactNode;
 }) {
   // Reads the cached Root state only (enabled false): never fetches by itself.
-  const rootOpen = (useRootBrowserState(false).data?.root ?? null) !== null;
+  const rootOpen = (useRootBrowserState(false, apps.selectedAgentId).data?.root ?? null) !== null;
   const canReload = !isRoot || rootOpen;
   return (
     <div
@@ -338,7 +356,9 @@ export function BrowserAppDrawer() {
         <BrowserSitesPanel agentTitle={(agentId) => knownAgentTitle(apps.agents, agentId)} />
       )}
       <div className="flex min-h-0 flex-1 flex-col">
-        {isRoot && active && <RootTab reloadKey={apps.browserReloadKey} />}
+        {isRoot && active && (
+          <RootTab reloadKey={apps.browserReloadKey} agentId={apps.selectedAgentId} />
+        )}
         {waitingForPane && (
           <div className={`flex flex-1 items-center justify-center text-xs ${MUTED}`}>
             Opening agent…

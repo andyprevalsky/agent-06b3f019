@@ -6,11 +6,12 @@
  * window-focus refetch; reads happen on open, on a shown-agent / shown-task
  * change, and after the user's own open / close / forget actions.
  *
- *   useRootBrowserState  GET /browser-world/root            (drawer open on Root)
+ *   useRootBrowserState  GET /browser-world/root?agent_id=<selected root agent>
+ *                        (drawer open on Root) → {root, sites, default_url}
  *   useRootSites         GET /browser-world/sites           (Sites list shown)
  *   useAgentBrowserWorld GET /browser-world/agents/:agentId (shown agent only)
  *   useRootBrowserActions
- *     open  --POST /root/open-->  cache {root}
+ *     open(startUrl?) --POST /root/open {start_url?}-->  cache {root}
  *     close --POST /root/close--> cache {root: null}; receipt text for 6 s;
  *            Root and sites re-read (the close merged sites into Root)
  *   useForgetRootSite  DELETE /sites/:site --> the site leaves both caches
@@ -37,10 +38,11 @@ export const RECEIPT_VISIBLE_MS = 6_000;
 
 const READ_OPTIONS = { refetchOnWindowFocus: false, retry: false } as const;
 
-export function useRootBrowserState(enabled: boolean) {
+/** Root's state; `agentId` (the selected root agent) adds that tree's `default_url`. */
+export function useRootBrowserState(enabled: boolean, agentId: string | null) {
   return useQuery({
-    queryKey: ROOT_BROWSER_KEY,
-    queryFn: readRootBrowser,
+    queryKey: [...ROOT_BROWSER_KEY, agentId],
+    queryFn: () => readRootBrowser(agentId),
     enabled,
     ...READ_OPTIONS,
   });
@@ -73,15 +75,17 @@ function useTransientText(): [string | null, (text: string) => void] {
 export function useRootBrowserActions() {
   const queryClient = useQueryClient();
   const [receipt, showReceipt] = useTransientText();
+  // Root is one browser whichever agent is selected: update every cached read of it.
   const setRoot = (root: RootBrowserState['root']) =>
-    queryClient.setQueryData<RootBrowserState>(ROOT_BROWSER_KEY, (prev) => ({
+    queryClient.setQueriesData<RootBrowserState>({ queryKey: ROOT_BROWSER_KEY }, (prev) => ({
+      ...prev,
       root,
       sites: prev?.sites ?? [],
     }));
   const refreshWorld = () => queryClient.invalidateQueries({ queryKey: [WORLD_KEY] });
 
   const open = useMutation({
-    mutationFn: () => openRootBrowser(),
+    mutationFn: (startUrl?: string) => openRootBrowser(startUrl),
     onSuccess: (root) => setRoot(root),
   });
   const close = useMutation({
@@ -106,7 +110,7 @@ export function useForgetRootSite() {
       queryClient.setQueryData<RootSiteView[]>(ROOT_SITES_KEY, (prev) =>
         prev === undefined ? prev : without(prev),
       );
-      queryClient.setQueryData<RootBrowserState>(ROOT_BROWSER_KEY, (prev) =>
+      queryClient.setQueriesData<RootBrowserState>({ queryKey: ROOT_BROWSER_KEY }, (prev) =>
         prev === undefined ? prev : { ...prev, sites: without(prev.sites) },
       );
     },
