@@ -16,16 +16,19 @@
  * heartbeats every cycle, and going offline is reported once.
  */
 
-import crypto from 'crypto';
 import { sessionForLocalMachineData } from '../../base/impersonation';
 import { logConsole } from '../../base/logger';
 import { AuthService } from '../../services/auth';
+import {
+  macDeviceId,
+  macDeviceName,
+  resetDeviceIdentityForTests,
+} from '../../services/deviceIdentity';
 import { getErrorMessage } from '../../../shared/utils/error';
 import {
   DEFAULT_PHONE_NAME,
   JPEG_QUALITY_CEILING,
   LOG_COMPONENT,
-  MAC_DEVICE_ID_SALT,
   MAX_FPS_CEILING,
   MAX_WIDTH_CEILING,
   MIN_DARWIN_MAJOR,
@@ -47,7 +50,6 @@ import type {
  * not connected, so an idle Mac does not heartbeat an offline phone forever.
  */
 let lastReportedOnline: boolean | null = null;
-let cachedMacDeviceId: string | null = null;
 
 /** Forget what was reported (new session / runtime stop). */
 export function resetPresenceState(): void {
@@ -56,7 +58,7 @@ export function resetPresenceState(): void {
 
 export function resetPhoneMirroringStateForTests(): void {
   lastReportedOnline = null;
-  cachedMacDeviceId = null;
+  resetDeviceIdentityForTests();
 }
 
 /**
@@ -94,20 +96,11 @@ export async function detectMirroring(): Promise<MirroringStatus> {
   };
 }
 
-/** Stable per-Mac id: a salted hash of the hardware UUID (never the UUID). */
-export function macDeviceId(): string {
-  if (cachedMacDeviceId !== null) return cachedMacDeviceId;
-  const basis = repo.readHardwareUuid() ?? `host:${repo.readComputerName()}`;
-  cachedMacDeviceId = crypto
-    .createHash('sha256')
-    .update(`${MAC_DEVICE_ID_SALT}\0${basis}`)
-    .digest('hex')
-    .slice(0, 32);
-  return cachedMacDeviceId;
-}
+/** Stable per-Mac id shared with local code devices and per-Mac integrations. */
+export { macDeviceId };
 
 export function buildRegistration(status: MirroringStatus): PhoneRegistration {
-  const computer = repo.readComputerName().trim();
+  const computer = macDeviceName().trim();
   const name = computer === '' ? DEFAULT_PHONE_NAME : `${DEFAULT_PHONE_NAME} on ${computer}`;
   return {
     macDeviceId: macDeviceId(),

@@ -19,6 +19,7 @@ import { config } from '../../base/config';
 import { getAugmentedEnv } from '../../base/shellEnv';
 import { logConsole, logConsoleError, logIpc } from '../../base/logger';
 import { getErrorMessage } from '../../../shared/utils/error';
+import { macDeviceId, macDeviceName } from '../../services/deviceIdentity';
 import { CONTROL_PATH, DEVICE_ID_HEADER, LOG_TAG } from './config';
 import * as repo from './repo';
 import {
@@ -237,7 +238,8 @@ export function registerLocalCodeHandlers(): void {
 
 export function startLocalCodeRunner(): void {
   if (identity !== null) return;
-  identity = { deviceId: repo.loadDeviceId(), name: repo.readComputerName() };
+  // One identity per Mac, shared with attached phones and per-Mac integrations.
+  identity = { deviceId: macDeviceId(), name: macDeviceName() };
   manager = buildManager(identity.deviceId);
   stampDeviceHeader(identity.deviceId);
   registerLocalCodeHandlers();

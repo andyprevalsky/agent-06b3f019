@@ -2,11 +2,9 @@
  * local-code-runner — repo layer (I/O only: store, filesystem, processes,
  * sockets, backend HTTP). No business logic.
  */
-import { execFile, execFileSync, spawn } from 'child_process';
-import { randomUUID } from 'crypto';
+import { execFile, spawn } from 'child_process';
 import fs from 'fs';
 import { createServer } from 'net';
-import os from 'os';
 import path from 'path';
 import Store from 'electron-store';
 import WebSocket from 'ws';
@@ -35,7 +33,6 @@ import type {
 } from './types';
 
 interface RunnerStoreSchema {
-  deviceId: string;
   grants: FolderGrant[];
 }
 
@@ -45,14 +42,6 @@ const store = new Store<RunnerStoreSchema>({
   clearInvalidConfig: true,
 });
 
-export function loadDeviceId(): string {
-  const existing = store.get('deviceId', '');
-  if (typeof existing === 'string' && existing !== '') return existing;
-  const minted = randomUUID();
-  store.set('deviceId', minted);
-  return minted;
-}
-
 export function loadGrants(): FolderGrant[] {
   const grants = store.get('grants', []);
   return Array.isArray(grants) ? grants : [];
@@ -60,20 +49,6 @@ export function loadGrants(): FolderGrant[] {
 
 export function saveGrants(grants: FolderGrant[]): void {
   store.set('grants', grants);
-}
-
-/** The Mac's user-facing name ("Andy's MacBook Pro"), not its DNS hostname. */
-export function readComputerName(): string {
-  try {
-    const name = execFileSync('scutil', ['--get', 'ComputerName'], {
-      encoding: 'utf8',
-      timeout: 2_000,
-    }).trim();
-    if (name !== '') return name;
-  } catch {
-    // not macOS or scutil unavailable
-  }
-  return os.hostname().replace(/\.local$/, '');
 }
 
 export const folderFs = {
