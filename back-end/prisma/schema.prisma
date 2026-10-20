@@ -733,6 +733,52 @@ model Integration {
   @@index([poolingEnabled, rateLimitedUntil])
 }
 
+/// Live sync progress for ONE connected account of an integration.
+///
+/// Keyed like Integration: `provider` is the Integration `name` slug and
+/// `accountId` the provider-side account ("" = the legacy/default account; the
+/// API spells it "default"). Exactly one row per account, overwritten in place
+/// by each batch, so a 1M-item sync costs O(batches) writes and this table
+/// grows with accounts, never with items. Writes are serialized per account and
+/// coalesced to at most one per second while a run is syncing.
+///
+/// `total` is null when the writer does not know it (indeterminate progress);
+/// `pct` is derived from done/total on the server and is never computed from a
+/// guessed total.
+model IntegrationSyncProgress {
+  id            String    @id @default(uuid())
+  userId        String
+  provider      String
+  accountId     String    @default("")
+  /// Writer-chosen id of the sync run this row describes. A new id starts a new run.
+  runId         String
+  /// Recently superseded run ids (newest first, capped). Late writes for these are stale.
+  retiredRunIds String[]  @default([])
+  /// Optional writer sequence within the run; lower or equal values are stale or replays.
+  seq           Int       @default(0)
+  /// "idle" | "syncing" | "synced" | "failed" | "needs_reconnect"
+  state         String    @default("idle")
+  /// Optional writer phase label (for example "uploading", "parsing"); counts reset per phase.
+  phase         String?
+  done          BigInt?
+  total         BigInt?
+  /// 0-100, one decimal. Derived from done/total; writer-supplied only while total is unknown.
+  pct           Float?
+  unit          String?
+  etaSec        Int?
+  lastError     String?
+  startedAt     DateTime  @default(now())
+  /// When the current run reached a terminal state; null while it is running.
+  finishedAt    DateTime?
+  /// Last time any run of this account finished "synced".
+  lastSyncedAt  DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@unique([userId, provider, accountId])
+  @@index([userId, updatedAt])
+}
+
 model ComputeTokenLineageLease {
   lineageKey    String    @id
   tokenType     String
