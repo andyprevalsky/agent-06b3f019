@@ -3514,20 +3514,6 @@ class AgentWorkflow:
     def _active_gpt_pool_id(self) -> Optional[str]:
         return self.gpt_code_token_pool_id if self.compute_token_provider == "gpt" else None
 
-    def _compute_token_identity_matches(self, identity: Dict[str, Any]) -> bool:
-        """True when a usage lease identity names the workflow's cached token."""
-        token_type = identity.get("type")
-        if token_type != self.compute_token_provider:
-            return False
-        if token_type == "claude":
-            cached = (self.claude_max_token, self.claude_max_token_source, self.claude_max_token_pool_id)
-        else:
-            cached = (self.gpt_code_token, self.gpt_code_token_source, self.gpt_code_token_pool_id)
-        source = identity.get("source")
-        pool_id = identity.get("poolTokenId") if source == "pool" else None
-        cached_pool_id = cached[2] if cached[1] == "pool" else None
-        return bool(cached[0]) and (cached[1], cached_pool_id) == (source, pool_id)
-
     def _active_compute_token_payload(self) -> Optional[Dict[str, Any]]:
         if self.compute_token_provider == "claude" and self.claude_max_token:
             return {
@@ -4787,13 +4773,11 @@ class AgentWorkflow:
                 or (token_used_type == "gpt" and actual_model.endswith("-gpt"))
             ):
                 # Usage carries only the lease identity, never the credential.
-                # When RoseClient served the call from a different (rotated)
-                # lease, re-read the lineage-bound lease from the backend.
-                if self.user_id and (
-                    claude_token_rotated
-                    or gpt_token_rotated
-                    or not self._compute_token_identity_matches(compute_token_used)
-                ):
+                # When RoseClient rotated to another lease inside the call,
+                # re-read the lineage-bound lease from the backend. Without a
+                # rotation the call used a credential this workflow supplied,
+                # so the cached token stays as it is.
+                if self.user_id and (claude_token_rotated or gpt_token_rotated):
                     await self._refresh_compute_token(self.user_id, force=True, token_type=token_used_type)
                     workflow.logger.info(
                         f"🔑 Workflow cached compute token re-read after in-call rotation "

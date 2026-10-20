@@ -1644,6 +1644,204 @@ async def test_run_agent_reuses_rotated_compute_token_next_iteration():
     ]
 
 
+async def test_run_agent_drops_rotated_out_credential_when_lease_reread_fails():
+    """If the rotated lease cannot be re-read, never reuse the credential RoseClient rotated away from."""
+    from loop.run_agent import run_agent
+
+    llm_kwargs = []
+    posted_messages = []
+
+    async def system_prompt():
+        return "System prompt"
+
+    async def verifier_prompt():
+        return "Verifier prompt"
+
+    async def post_message(text, role, metadata=None):
+        posted_messages.append({"text": text, "role": role, "metadata": metadata})
+
+    async def execute_tool(tool_name, tool_args, tool_call_id):
+        posted_messages.append(
+            {
+                "text": f"{tool_name} complete",
+                "role": "TOOL",
+                "metadata": {
+                    "toolCallId": tool_call_id,
+                    "toolName": tool_name,
+                    "toolStatus": "FINISHED",
+                },
+            }
+        )
+        return {"message": f"{tool_name} complete"}
+
+    async def mock_call_llm_structured_streaming(**kwargs):
+        llm_kwargs.append(kwargs)
+        if len(llm_kwargs) == 1:
+            return (
+                _DummyLLMResult("", [{"tool": "web_search", "query": "first"}]),
+                {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                    "actual_model": "claude-sonnet-4-6-claude",
+                    "gpt_token_error": "stall",
+                    "compute_token_used": {
+                        "type": "claude",
+                        "source": "pool",
+                        "poolTokenId": "pool-1",
+                        "lineageKey": "agent:agent-test",
+                    },
+                    "compute_token_rotated": True,
+                },
+                [("web_search", "tc-web-search-1", 1.0)],
+            )
+        return (
+            _DummyLLMResult("", []),
+            {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            [],
+        )
+
+    lease_fetches = []
+
+    async def mock_fetch_compute_token(user_id, **kwargs):
+        lease_fetches.append((user_id, kwargs))
+        return None
+
+    with (
+        patch(
+            "loop.run_agent.call_llm_structured_streaming",
+            new=AsyncMock(side_effect=mock_call_llm_structured_streaming),
+        ),
+        patch("loop.run_agent.fetch_compute_token_activity", new=mock_fetch_compute_token),
+    ):
+        await run_agent(
+            agent_id="agent-test",
+            user_id="user-test",
+            system_prompt=system_prompt,
+            verifier_prompt_generator=verifier_prompt,
+            model="rose-labs/rose-1-flash",
+            tools=["web_search", "attempt_completion"],
+            initial_context=[{"role": "USER", "text": "Find updates", "timestamp": "2024-01-01T00:00:00Z"}],
+            is_inside_temporal_activity=True,
+            post_message=post_message,
+            execute_tool=execute_tool,
+            build_messages=lambda context, prompt: [{"role": "system", "content": prompt}],
+            max_iterations=2,
+            skip_verification=True,
+            skip_status_updates=True,
+            gpt_token="stale-gpt-token",
+            gpt_account_id="acct-1",
+            get_gpt_token_source=lambda: "user",
+        )
+
+    assert len(llm_kwargs) == 2
+    assert llm_kwargs[0]["gpt_token"] == "stale-gpt-token"
+    assert llm_kwargs[1]["claude_token"] is None
+    assert llm_kwargs[1]["gpt_token"] is None
+    assert len(lease_fetches) == 1
+
+
+async def test_run_agent_records_served_lease_identity_without_rotation():
+    """An unrotated call keeps its credential and records the served lease identity."""
+    from loop.run_agent import run_agent
+
+    llm_kwargs = []
+    posted_messages = []
+
+    async def system_prompt():
+        return "System prompt"
+
+    async def verifier_prompt():
+        return "Verifier prompt"
+
+    async def post_message(text, role, metadata=None):
+        posted_messages.append({"text": text, "role": role, "metadata": metadata})
+
+    async def execute_tool(tool_name, tool_args, tool_call_id):
+        posted_messages.append(
+            {
+                "text": f"{tool_name} complete",
+                "role": "TOOL",
+                "metadata": {
+                    "toolCallId": tool_call_id,
+                    "toolName": tool_name,
+                    "toolStatus": "FINISHED",
+                },
+            }
+        )
+        return {"message": f"{tool_name} complete"}
+
+    async def mock_call_llm_structured_streaming(**kwargs):
+        llm_kwargs.append(kwargs)
+        if len(llm_kwargs) == 1:
+            return (
+                _DummyLLMResult("", [{"tool": "web_search", "query": "first"}]),
+                {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                    "actual_model": "gpt-6-sol-gpt",
+                    "compute_token_used": {
+                        "type": "gpt",
+                        "source": "pool",
+                        "poolTokenId": "pool-gpt-1",
+                        "lineageKey": "agent:agent-test",
+                    },
+                    "compute_token_rotated": False,
+                },
+                [("web_search", "tc-web-search-1", 1.0)],
+            )
+        return (
+            _DummyLLMResult("", []),
+            {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            [],
+        )
+
+    lease_fetches = []
+
+    async def mock_fetch_compute_token(user_id, **kwargs):
+        lease_fetches.append((user_id, kwargs))
+        return {
+            "type": "claude",
+            "accessToken": "rotated-claude-token",
+            "source": "pool",
+            "poolTokenId": "pool-1",
+            "lineageKey": "agent:agent-test",
+        }
+
+    with (
+        patch(
+            "loop.run_agent.call_llm_structured_streaming",
+            new=AsyncMock(side_effect=mock_call_llm_structured_streaming),
+        ),
+        patch("loop.run_agent.fetch_compute_token_activity", new=mock_fetch_compute_token),
+    ):
+        await run_agent(
+            agent_id="agent-test",
+            user_id="user-test",
+            system_prompt=system_prompt,
+            verifier_prompt_generator=verifier_prompt,
+            model="rose-labs/rose-1-flash",
+            tools=["web_search", "attempt_completion"],
+            initial_context=[{"role": "USER", "text": "Find updates", "timestamp": "2024-01-01T00:00:00Z"}],
+            is_inside_temporal_activity=True,
+            post_message=post_message,
+            execute_tool=execute_tool,
+            build_messages=lambda context, prompt: [{"role": "system", "content": prompt}],
+            max_iterations=2,
+            skip_verification=True,
+            skip_status_updates=True,
+            gpt_token="stale-gpt-token",
+            gpt_account_id="acct-1",
+        )
+
+    assert len(llm_kwargs) == 2
+    assert llm_kwargs[1]["gpt_token"] == "stale-gpt-token"
+    assert llm_kwargs[1]["gpt_token_source"] == "pool"
+    assert llm_kwargs[1]["gpt_token_pool_id"] == "pool-gpt-1"
+    assert lease_fetches == []
+
+
 async def test_fast_cache_position_retries_same_step_after_llm_failure():
     """A failed LLM attempt must not consume the next fast-cache position."""
     from loop.run_agent import run_agent
@@ -3256,6 +3454,14 @@ async def run_all_tests():
     await r.record_async(
         "run_agent_reuses_rotated_compute_token_next_iteration",
         test_run_agent_reuses_rotated_compute_token_next_iteration,
+    )
+    await r.record_async(
+        "run_agent_drops_rotated_out_credential_when_lease_reread_fails",
+        test_run_agent_drops_rotated_out_credential_when_lease_reread_fails,
+    )
+    await r.record_async(
+        "run_agent_records_served_lease_identity_without_rotation",
+        test_run_agent_records_served_lease_identity_without_rotation,
     )
     await r.record_async(
         "fast_cache_position_retries_same_step_after_llm_failure",

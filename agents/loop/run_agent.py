@@ -398,16 +398,40 @@ async def run_agent(
             or attempt_usage.get("claude_token_rotated")
             or attempt_usage.get("gpt_token_rotated")
         )
-        if not rotated or not is_inside_temporal_activity or not user_id:
+        if not is_inside_temporal_activity:
             return
-        lease = await fetch_compute_token_activity(
-            user_id,
-            lineage_key=identity.get("lineageKey") or compute_token_lineage_key,
-            agent_id=agent_id,
-            fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
-            token_type=identity.get("type"),
+        if not rotated:
+            # The call used the credential passed to this loop; record its
+            # lease identity so a semantic retry keeps lease attribution.
+            if identity.get("type") == "claude" and remembered_claude_token:
+                remembered_claude_token_source = identity.get("source")
+                remembered_claude_token_pool_id = identity.get("poolTokenId")
+            elif identity.get("type") == "gpt" and remembered_gpt_token:
+                remembered_gpt_token_source = identity.get("source")
+                remembered_gpt_token_pool_id = identity.get("poolTokenId")
+            return
+        lease = (
+            await fetch_compute_token_activity(
+                user_id,
+                lineage_key=identity.get("lineageKey") or compute_token_lineage_key,
+                agent_id=agent_id,
+                fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                token_type=identity.get("type"),
+            )
+            if user_id
+            else None
         )
         if not lease or lease.get("type") != identity.get("type") or not lease.get("accessToken"):
+            # RoseClient already marked the original credential unavailable
+            # before rotating; never retry with it.
+            remembered_claude_token = None
+            remembered_claude_token_source = None
+            remembered_claude_token_pool_id = None
+            remembered_gpt_token = None
+            remembered_gpt_account_id = None
+            remembered_gpt_token_source = None
+            remembered_gpt_token_pool_id = None
+            logger.warning("run_agent rotated compute lease could not be re-read", agent_id=agent_id)
             return
         if lease.get("type") == "claude":
             remembered_claude_token = lease.get("accessToken")

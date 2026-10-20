@@ -75,13 +75,16 @@ Repro (pre-fix): `env -u FLY_APP_NAME agents/venv/bin/python .context/rca-token/
 Usage now names only the lease: `{type, source, poolTokenId, lineageKey}`.
 Consumers re-read the credential by reference:
 
-- Workflow `_on_tokens`: when the served lease identity differs from the cached
-  token or a rotation occurred, `_refresh_compute_token(force=True,
-  token_type=...)` re-reads the lineage-bound lease (no release). An unchanged
-  identity schedules no activity.
+- Workflow `_on_tokens`: only after an in-call rotation (`claude_token_rotated`
+  / `gpt_token_rotated`) it calls `_refresh_compute_token(force=True,
+  token_type=...)`, which re-reads the lineage-bound lease (no release); a
+  failed re-read clears the rotated-out token. Without a rotation the call used
+  a credential the workflow supplied, so nothing is scheduled or cleared.
 - `run_agent` inside an activity re-reads the same lineage lease via
-  `fetch_compute_token_activity` only after a rotation; in workflow mode the
-  getters already observe the refreshed token, so semantic retries use them.
+  `fetch_compute_token_activity` after a rotation and drops every remembered
+  credential if that fails; an unrotated call records the served lease
+  source/pool id so semantic retries keep lease attribution. In workflow mode
+  the getters already observe the refreshed token, so retries use them.
 - `scripts/replicate_llm_dump.py` leases a fresh GPT token through the
   supported path instead of reusing a credential stored in the dump.
 

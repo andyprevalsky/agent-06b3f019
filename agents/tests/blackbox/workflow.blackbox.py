@@ -10808,7 +10808,7 @@ async def test_workflow_on_tokens_successful_rotation_rereads_lineage_lease():
 
 
 async def test_workflow_on_tokens_unchanged_lease_identity_schedules_no_activity():
-    """The common case (call served by the cached lease) must not add any activity."""
+    """Calls without an in-call rotation must not add any compute-token activity."""
     wf = _bare_workflow_instance()
     wf.agent_id = "a1"
     wf.user_id = "user-1"
@@ -10828,6 +10828,15 @@ async def test_workflow_on_tokens_unchanged_lease_identity_schedules_no_activity
             actual_model="claude-opus-4-8-claude",
             call_site="test",
             compute_token_used={"type": "claude", "source": "pool", "poolTokenId": "pool-1", "lineageKey": "agent:a1"},
+        )
+        # A late result from a call issued with an older workflow token
+        # (no in-call rotation) must not refetch or clear the cache either.
+        await wf._on_tokens(
+            tokens_in_delta=5,
+            tokens_out_delta=2,
+            actual_model="claude-opus-4-8-claude",
+            call_site="test",
+            compute_token_used={"type": "claude", "source": "pool", "poolTokenId": "pool-0", "lineageKey": "agent:a1"},
         )
         assert wf.claude_max_token == "cached-token"
         assert [c[0] for c in fake.activity_calls if "compute_token" in c[0]] == []
