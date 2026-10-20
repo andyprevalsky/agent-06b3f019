@@ -70,6 +70,27 @@ export async function getOwnedTaskPreview(
   );
 }
 
+/**
+ * Where the caller's task preview is served, without probing it (no HTTP, and a
+ * paused sandbox is never woken). Null when the task is not the caller's.
+ */
+export async function findOwnedTaskPreviewTarget(
+  userId: string,
+  taskId: string
+): Promise<CodePreviewView | null> {
+  const owned = await loadOwnedCodeTask(userId, taskId);
+  if (owned === null) return null;
+  return resolveTaskPreview(
+    {
+      taskId: owned.task.id,
+      sandboxId: owned.task.sandboxId,
+      streamUrl: owned.task.streamUrl,
+      codeSession: owned.codeSession,
+    },
+    { probe: false }
+  );
+}
+
 /** Sessions scanned for the user's Rose app (newest first; one indexed query). */
 const ROSE_SESSION_SCAN_LIMIT = 20;
 

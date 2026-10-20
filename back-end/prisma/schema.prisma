@@ -403,8 +403,8 @@ model User {
   activeUiVersionId           String?
   uiVersions                  UserUiVersion[]
   localDevices                LocalDevice[]
-  phoneDevices                PhoneDevice[]
   projects                    Project[]
+  previewHandoffCodes         PreviewHandoffCode[]
 
   @@index([userId])
   @@index([inviteCode])
@@ -1899,15 +1899,41 @@ model PlannerMemoryEmbedding {
 /// storage under `user-ui/<userId>/<id>/<path>`; `manifest` is the validated
 /// `rose-ui.json`. `User.activeUiVersionId` points at the version the app renders.
 model UserUiVersion {
-  id         String   @id @default(uuid())
-  userId     String
-  manifest   Json
-  fileCount  Int
-  totalBytes Int
-  createdAt  DateTime @default(now())
-  user       User     @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  id                 String   @id @default(uuid())
+  userId             String
+  manifest           Json
+  fileCount          Int
+  totalBytes         Int
+  createdAt          DateTime @default(now())
+  /// Code agent whose session published this version (publish token `agt`);
+  /// null for user/API-key publishes and rows from before L-APPS2.
+  publishedByAgentId String?
+  /// ClaudeCodeSession.id of that publish (publish token `tsk`); the Apps list
+  /// resolves its code session from this task. Null like publishedByAgentId.
+  publishedByTaskId  String?
+  user               User     @relation(fields: [userId], references: [userId], onDelete: Cascade)
 
   @@index([userId, createdAt])
+}
+
+/// One-time sign-in code for a Rose dev account's own code-agent preview
+/// (Rose-in-Rose A1 follow-up, L-APPS2). Only the SHA-256 of the code is
+/// stored. The first presentation burns it (redeemedAt), whatever the outcome;
+/// expiry and the bound preview origin are checked after that. Backend-only
+/// (service role); no client policy.
+model PreviewHandoffCode {
+  id         String    @id @default(uuid())
+  codeHash   String    @unique
+  userId     String
+  taskId     String
+  /// Preview origin resolved server-side from the task (scheme://host[:port]).
+  origin     String
+  expiresAt  DateTime
+  redeemedAt DateTime?
+  createdAt  DateTime  @default(now())
+  user       User      @relation(fields: [userId], references: [userId], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
 }
 
 /// A Rose Mac app install that can run local code agents (C14). `id` is minted
@@ -1927,41 +1953,6 @@ model LocalDevice {
   user       User     @relation(fields: [userId], references: [userId], onDelete: Cascade)
 
   @@index([userId])
-}
-
-/// A phone attached to one of the user's Macs (Phase 1: an iPhone shown
-/// through macOS iPhone Mirroring and operated by the Rose Mac app). One row
-/// per (user, Mac); the Mac app upserts it as its presence heartbeat.
-///
-/// Exclusive control: at most one holder at a time (an agent or the user),
-/// recorded on this row and changed only by compare-and-set updates on
-/// `leaseId`. Holders keep the lease alive by heartbeat (no wall-clock run
-/// limit); a lapsed lease reads as free, so a dead holder never strands it.
-model PhoneDevice {
-  id             String    @id @default(uuid())
-  userId         String
-  /// Per-install hash of the Mac's hardware id (never the raw UUID).
-  macDeviceId    String
-  name           String
-  model          String?
-  /// 'iphone_mirroring' (the only Phase 1 kind).
-  kind           String    @default("iphone_mirroring")
-  /// Mac-reported: iPhone Mirroring is connected and showing the phone.
-  online         Boolean   @default(false)
-  lastSeenAt     DateTime
-  /// 'agent' | 'user' | null (free).
-  holderKind     String?
-  holderAgentId  String?
-  /// New on every change of holder; operations under a stale lease fail.
-  leaseId        String?
-  leaseExpiresAt DateTime?
-  /// Agent whose control the user took; it may reacquire after release.
-  resumeAgentId  String?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
-  user           User      @relation(fields: [userId], references: [userId], onDelete: Cascade)
-
-  @@unique([userId, macDeviceId])
 }
 
 /// Slack #errors incident owned by one Rose RCA root agent. One row per error

@@ -1,8 +1,7 @@
 /**
  * One identity per Mac, shared by every feature that names "this Mac" to the
  * backend: local code-agent devices (`LocalDevice.device_id`, the
- * `X-Rose-Device-Id` header), attached phones (`PhoneDevice.macDeviceId`) and
- * per-Mac integration accounts such as iMessage.
+ * `X-Rose-Device-Id` header) and per-Mac integration accounts such as iMessage.
  *
  *   macDeviceId()   salted sha256 of IOPlatformUUID (never the UUID itself);
  *                   survives app reinstall. Falls back to the Mac's name.

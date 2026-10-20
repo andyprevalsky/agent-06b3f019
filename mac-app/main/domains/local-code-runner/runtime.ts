@@ -238,7 +238,7 @@ export function registerLocalCodeHandlers(): void {
 
 export function startLocalCodeRunner(): void {
   if (identity !== null) return;
-  // One identity per Mac, shared with attached phones and per-Mac integrations.
+  // One identity per Mac, shared with per-Mac integrations (iMessage).
   identity = { deviceId: macDeviceId(), name: macDeviceName() };
   manager = buildManager(identity.deviceId);
   stampDeviceHeader(identity.deviceId);

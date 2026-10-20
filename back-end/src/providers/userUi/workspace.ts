@@ -8,7 +8,7 @@
  *          or seed (README + manifest +    ├─► files under ~/rose_user_ui/
  *          theme + examples)               ┘   README.md always regenerated
  *          rose-ui CLI + preview host ───────► ~/.rose/bin/rose-ui, ~/.rose/lib/rose-ui/
- *          fresh publish token ──────────────► ROSE_UI_PUBLISH_URL / _TOKEN env
+ *          fresh publish token (agt + tsk) ──► ROSE_UI_PUBLISH_URL / _TOKEN env
  *          active version usercontent URL ──► ROSE_UI_PUBLISHED_BASE_URL / _VERSION_ID env
  *     └─ (sandbox) background `rose-ui screenshot --current`
  *          → ~/rose_user_ui/screenshots/current/*.png of the published UI
@@ -68,7 +68,8 @@ export function userUiPublishBaseUrl(): string {
 
 export async function prepareUserUiWorkspace(
   userId: string,
-  agentId?: string
+  agentId?: string,
+  taskId?: string
 ): Promise<UserUiWorkspace> {
   const active = await findActiveUserUiVersion(userId);
   const bundle = active ? await readUserUiVersionFiles(userId, active.id) : userUiSeedFiles();
@@ -76,7 +77,7 @@ export async function prepareUserUiWorkspace(
     ...bundle.filter((file) => file.path !== 'README.md'),
     { path: 'README.md', content: Buffer.from(userUiReadme(), 'utf8') },
   ];
-  const { token } = mintUserUiPublishToken(userId, { agentId });
+  const { token } = mintUserUiPublishToken(userId, { agentId, taskId });
   const envs: Record<string, string> = {
     ROSE_UI_PUBLISH_URL: `${userUiPublishBaseUrl()}/api/user-ui/versions`,
     ROSE_UI_PUBLISH_TOKEN: token,
@@ -101,11 +102,12 @@ export async function prepareUserUiWorkspace(
 /** Best-effort wrapper: a UI-folder failure must never block a code session. */
 export async function prepareUserUiWorkspaceSafe(
   userId: string | undefined,
-  agentId?: string
+  agentId?: string,
+  taskId?: string
 ): Promise<UserUiWorkspace | null> {
   if (!userId) return null;
   try {
-    const workspace = await prepareUserUiWorkspace(userId, agentId);
+    const workspace = await prepareUserUiWorkspace(userId, agentId, taskId);
     log.info('Prepared rose_user_ui workspace', {
       userId,
       source: workspace.source.kind,

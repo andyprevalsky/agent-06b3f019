@@ -62,6 +62,7 @@ function publishAuth(req: HybridAuthRequest, res: Response, next: NextFunction):
   req.userId = check.userId;
   req.isInternal = false;
   res.locals.userUiPublisherAgentId = check.agentId;
+  res.locals.userUiPublisherTaskId = check.taskId;
   next();
 }
 
@@ -85,11 +86,13 @@ router.post(
     }
     try {
       const publisherAgentId = res.locals.userUiPublisherAgentId as string | null | undefined;
-      res
-        .status(201)
-        .json(
-          await service.publishVersion(userId, parsed.data, { agentId: publisherAgentId ?? null })
-        );
+      const publisherTaskId = res.locals.userUiPublisherTaskId as string | null | undefined;
+      res.status(201).json(
+        await service.publishVersion(userId, parsed.data, {
+          agentId: publisherAgentId ?? null,
+          taskId: publisherTaskId ?? null,
+        })
+      );
     } catch (err) {
       handleError(res, err);
     }
