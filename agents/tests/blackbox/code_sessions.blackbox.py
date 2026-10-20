@@ -432,6 +432,105 @@ async def test_question_to_blocked_spawner_pauses_session_and_returns_it():
         session_home.cleanup()
 
 
+async def test_question_while_cli_waits_for_its_answer_is_handed_over_before_idle():
+    """L-A2A-ADV 1: the code agent asked and went quiet waiting for its answer.
+
+    Its spawning agent is blocked inside this very spawn, so both would wait.
+    The next keepalive (well before the idle pause) must pause the session for
+    the question exactly once and hand it to the spawner; resuming the session
+    then runs normally with no stale question.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+    from domains.spawn_claude_code_agent.config import (
+        CODE_SESSION_IDLE_PAUSE_S,
+        CODE_SESSION_KEEPALIVE_INTERVAL_S,
+    )
+
+    scale = 200.0
+    session_home = _SessionHome()
+    backend = _Backend(session_home)
+    try:
+        with backend.patched(clock=_virtual_clock(scale)):
+            spawn = asyncio.create_task(
+                ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args())
+            )
+            await _wait_until(lambda: session_home.runs(), "the CLI to start")
+            session_home.release("tool_done")  # the tool ends; the CLI now waits for the answer
+            await asyncio.sleep(0.3)
+            assert not spawn.done(), "the session is still attached before the question"
+            asked_at = time.monotonic()
+            backend.question_after = backend.keepalives + 1  # the CLI asked its blocked spawner
+            outcome = await asyncio.wait_for(spawn, timeout=30)
+            handoff_virtual_s = (time.monotonic() - asked_at) * scale
+        assert outcome["status"] == "paused" and outcome["success"] is False, outcome
+        assert "Which database should I use?" in outcome["message"], outcome["message"]
+        assert [call.get("reason") for call in backend.closed] == ["awaiting_parent"], backend.closed
+        assert handoff_virtual_s <= 2 * CODE_SESSION_KEEPALIVE_INTERVAL_S < CODE_SESSION_IDLE_PAUSE_S, (
+            f"handed over after {handoff_virtual_s:.0f}s, not by the idle pause"
+        )
+        paused_rows = [m for m in backend.messages if m.get("action_type") == "session_paused"]
+        assert len(paused_rows) == 1, paused_rows
+        code_session_id = outcome["code_session"]["code_session_id"]
+
+        # The spawner answers by resuming the session; the new task has no question.
+        backend.question_after = None
+        with backend.patched():
+            resumed = await asyncio.wait_for(
+                ActivityEnvironment().run(
+                    service.spawn_claude_code_activity,
+                    *_activity_args(code_session_request={"code_session_id": code_session_id}, tool_call_id="tc-answer"),
+                ),
+                timeout=30,
+            )
+        assert resumed["status"] == "completed" and resumed["success"] is True, resumed
+        assert backend.created[-1]["code_session_id"] == code_session_id, backend.created
+        assert [call.get("reason") for call in backend.closed] == ["awaiting_parent", "close"], backend.closed
+    finally:
+        session_home.cleanup()
+
+
+async def test_cancelled_spawner_unblocks_a_child_waiting_for_its_answer():
+    """L-A2A-ADV 10: the spawner is cancelled while its code agent waits for an answer.
+
+    The child asked and is idle; before the keepalive hands the question over,
+    the user cancels the spawning agent (the workflow cancels the activity).
+    The spawn returns a cancelled outcome promptly, the session is closed once,
+    and nothing keeps polling for it afterwards.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    session_home = _SessionHome()
+    backend = _Backend(session_home)
+    try:
+        with backend.patched(clock=_virtual_clock(200.0)):
+            env = ActivityEnvironment()
+            spawn = asyncio.create_task(env.run(service.spawn_claude_code_activity, *_activity_args()))
+            await _wait_until(lambda: session_home.runs(), "the CLI to start")
+            session_home.release("tool_done")
+            await asyncio.sleep(0.3)
+            assert not spawn.done(), "still attached while the child waits"
+            cancelled_at = time.monotonic()
+            env.cancel()
+            outcome = await asyncio.wait_for(spawn, timeout=15)
+            latency = time.monotonic() - cancelled_at
+            keepalives_at_return = backend.keepalives
+            await asyncio.sleep(0.5)
+            keepalives_later = backend.keepalives
+        assert outcome["status"] == "cancelled", outcome
+        assert latency < 10, f"cancel took {latency:.1f}s"
+        assert [call.get("reason") for call in backend.closed] == ["cancel"], backend.closed
+        assert keepalives_later == keepalives_at_return, "nothing polls the session after the cancel"
+        assert session_home.process is None, "the CLI and its ws-server are stopped"
+        cancelled_rows = [m for m in backend.messages if m.get("title") == "Session Cancelled"]
+        assert len(cancelled_rows) == 1, backend.messages
+    finally:
+        session_home.cleanup()
+
+
 async def _usage_limit_then_retry(availability_on_retry: dict) -> tuple[dict, dict, _Backend, _SessionHome]:
     from temporalio.testing import ActivityEnvironment
 
@@ -821,6 +920,14 @@ async def _run_all_tests():
     await r.record_async(
         "question_to_blocked_spawner_pauses_session",
         test_question_to_blocked_spawner_pauses_session_and_returns_it,
+    )
+    await r.record_async(
+        "question_while_cli_waits_handed_over_before_idle",
+        test_question_while_cli_waits_for_its_answer_is_handed_over_before_idle,
+    )
+    await r.record_async(
+        "cancelled_spawner_unblocks_waiting_child",
+        test_cancelled_spawner_unblocks_a_child_waiting_for_its_answer,
     )
     await r.record_async("failed_attempt_retry_keeps_state", test_failed_attempt_retry_keeps_state_and_code_session_id)
     await r.record_async(
