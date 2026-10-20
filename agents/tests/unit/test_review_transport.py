@@ -153,9 +153,14 @@ def test_workflow_resolution_preserves_failure_but_honors_empty_success(monkeypa
 def test_activity_exposes_lookup_success_even_for_empty_goal(monkeypatch, resolved, expected):
     from providers.fast_cache import client
     from helpers.fast_cache_goal import resolve_fast_cache_context_activity
-    async def lookup(_): return resolved
+    calls = []
+    async def lookup(agent_id, *, refresh=False):
+        calls.append(refresh)
+        return resolved
     monkeypatch.setattr(client, 'resolve_agent_fast_mode', lookup)
     value=asyncio.run(resolve_fast_cache_context_activity('agent'))
+    # Each run start re-reads the goal (a woken agent's goal changes between runs).
+    assert calls == [True]
     assert value['resolved'] is expected
     assert value['goal'] == resolved[1]
 
