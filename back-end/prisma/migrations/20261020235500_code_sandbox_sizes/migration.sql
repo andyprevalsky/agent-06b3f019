@@ -1,11 +1,13 @@
 -- AlterTable
-ALTER TABLE "CodeSession" ADD COLUMN     "sandboxTier" TEXT;
+ALTER TABLE "CodeSession" ADD COLUMN     "sandboxCpu" INTEGER,
+ADD COLUMN     "sandboxMemoryGb" INTEGER;
 
 -- AlterTable
-ALTER TABLE "Project" ADD COLUMN     "sandboxSize" TEXT;
+ALTER TABLE "Project" ADD COLUMN     "sandboxSize" JSONB;
 
 -- AlterTable
-ALTER TABLE "User" ADD COLUMN     "codeSandboxMaxTier" TEXT;
+ALTER TABLE "User" ADD COLUMN     "codeSandboxMaxCpu" INTEGER,
+ADD COLUMN     "codeSandboxMaxMemoryGb" INTEGER;
 
 -- CreateTable
 CREATE TABLE "CodeSessionResize" (
@@ -14,8 +16,10 @@ CREATE TABLE "CodeSessionResize" (
     "userId" TEXT NOT NULL,
     "agentId" TEXT NOT NULL,
     "taskId" TEXT,
-    "fromTier" TEXT NOT NULL,
-    "toTier" TEXT NOT NULL,
+    "fromCpu" INTEGER NOT NULL,
+    "fromMemoryGb" INTEGER NOT NULL,
+    "toCpu" INTEGER NOT NULL,
+    "toMemoryGb" INTEGER NOT NULL,
     "reason" TEXT NOT NULL,
     "status" TEXT NOT NULL DEFAULT 'PENDING',
     "newTaskId" TEXT,

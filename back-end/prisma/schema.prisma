@@ -374,9 +374,10 @@ model User {
   isAnonymous                 Boolean                     @default(false)
   onboardingCompletedAt       DateTime?
   imessageBridgeLastSeenAt    DateTime?
-  /// Largest code-agent sandbox tier (small | medium | large) this user's code
-  /// agents may resize to; null = the deployment default (C16).
-  codeSandboxMaxTier          String?
+  /// Largest code-agent sandbox CPU count / memory (GB) this user's code agents
+  /// may resize to; null = the deployment default (C16).
+  codeSandboxMaxCpu           Int?
+  codeSandboxMaxMemoryGb      Int?
   // Per-number WhatsApp deliverability for mirrored lifecycle notifications.
   // null = unknown (try once, learn); true = reachable (received an inbound WA
   // message or a send succeeded); false = not on WhatsApp / undeliverable (skip
@@ -667,9 +668,10 @@ model CodeSession {
   mergeTarget         String?
   /// The parent agent's session this branch was cut from (sub-agents).
   parentCodeSessionId String?
-  /// Size tier (small | medium | large) of the sandbox the session holds; null =
-  /// created before sized sandboxes (the default tier). C16.
-  sandboxTier         String?
+  /// vCPUs / memory (GB) of the sandbox the session holds; null = created
+  /// before sized sandboxes (the default size). C16.
+  sandboxCpu          Int?
+  sandboxMemoryGb     Int?
   lastActiveAt        DateTime  @default(now())
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
@@ -687,8 +689,10 @@ model CodeSessionResize {
   agentId       String
   /// Task (ClaudeCodeSession) whose CLI asked for the resize.
   taskId        String?
-  fromTier      String
-  toTier        String
+  fromCpu       Int
+  fromMemoryGb  Int
+  toCpu         Int
+  toMemoryGb    Int
   reason        String
   /// PENDING (recorded) | RUNNING (being applied) | DONE | FAILED
   status        String    @default("PENDING")
@@ -2042,8 +2046,8 @@ model Project {
   startupScript   String?
   startupTimeoutS Int                  @default(120)
   autoWake        Boolean              @default(false)
-  /// Default sandbox size tier for new code sessions (small | medium | large); null = deployment default.
-  sandboxSize     String?
+  /// Default sandbox size for new code sessions: {cpu, memoryGb}; null = deployment default.
+  sandboxSize     Json?
   /// Per-project salt for content fingerprints (incremental re-sync).
   syncSalt        String
   /// Monotonic snapshot revision; bumped by every accepted sync.
