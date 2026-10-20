@@ -7,6 +7,7 @@ export {
   deleteProject,
   findEnvFile,
   findEnvFileById,
+  findGithubConnectedRepoUrls,
   findProject,
   findProjectByName,
   findSyncSnapshot,

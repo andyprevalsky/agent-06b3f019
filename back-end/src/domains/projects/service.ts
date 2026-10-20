@@ -31,6 +31,8 @@ export interface ProjectDto {
   id: string;
   name: string;
   repoUrl: string | null;
+  /** Rose has verified clone access to repoUrl for this user (GithubRepoAccess grant). */
+  githubConnected: boolean;
   defaultBranch: string;
   startupScript: string | null;
   startupTimeoutS: number;
@@ -56,11 +58,16 @@ export interface EnvFileDto {
   matches?: string[];
 }
 
-export function toProjectDto(project: repo.ProjectRecord, envFileCount: number): ProjectDto {
+export function toProjectDto(
+  project: repo.ProjectRecord,
+  envFileCount: number,
+  githubConnected: boolean
+): ProjectDto {
   return {
     id: project.id,
     name: project.name,
     repoUrl: project.repoUrl,
+    githubConnected,
     defaultBranch: project.defaultBranch,
     startupScript: project.startupScript,
     startupTimeoutS: project.startupTimeoutS,
@@ -149,19 +156,39 @@ function isUniqueViolation(err: unknown): boolean {
 
 export async function listProjects(userId: string): Promise<{ projects: ProjectDto[] }> {
   const rows = await repo.listProjects(userId);
-  return { projects: rows.map((row) => toProjectDto(row, row._count.envFiles)) };
+  const connected = await repo.findGithubConnectedRepoUrls(
+    userId,
+    rows.map((row) => row.repoUrl)
+  );
+  return {
+    projects: rows.map((row) =>
+      toProjectDto(row, row._count.envFiles, row.repoUrl !== null && connected.has(row.repoUrl))
+    ),
+  };
+}
+
+/** One project's DTO: env-file count + GitHub access in parallel. */
+export async function projectDto(userId: string, project: repo.ProjectRecord): Promise<ProjectDto> {
+  const [envFileCount, connected] = await Promise.all([
+    repo.countEnvFiles(project.id),
+    repo.findGithubConnectedRepoUrls(userId, [project.repoUrl]),
+  ]);
+  return toProjectDto(
+    project,
+    envFileCount,
+    project.repoUrl !== null && connected.has(project.repoUrl)
+  );
 }
 
 export async function getProject(userId: string, id: string): Promise<ProjectDto> {
-  const project = await requireProject(userId, id);
-  return toProjectDto(project, await repo.countEnvFiles(project.id));
+  return projectDto(userId, await requireProject(userId, id));
 }
 
 export async function createProject(userId: string, body: CreateProjectBody): Promise<ProjectDto> {
   await requireUser(userId);
   try {
     const project = await repo.createProject({ userId, ...settingsData(body), name: body.name });
-    return toProjectDto(project, 0);
+    return await projectDto(userId, project);
   } catch (err) {
     if (isUniqueViolation(err)) throw new ProjectError(409, 'A project with this name exists');
     throw err;
@@ -176,10 +203,7 @@ export async function upsertProjectByName(
   const existing = await repo.findProjectByName(userId, body.name);
   if (!existing) return { project: await createProject(userId, body), created: true };
   const updated = await repo.updateProject(existing.id, settingsData(body));
-  return {
-    project: toProjectDto(updated, await repo.countEnvFiles(existing.id)),
-    created: false,
-  };
+  return { project: await projectDto(userId, updated), created: false };
 }
 
 export async function updateProject(
@@ -190,7 +214,7 @@ export async function updateProject(
   const project = await requireProject(userId, id);
   try {
     const updated = await repo.updateProject(project.id, settingsData(body));
-    return toProjectDto(updated, await repo.countEnvFiles(project.id));
+    return await projectDto(userId, updated);
   } catch (err) {
     if (isUniqueViolation(err)) throw new ProjectError(409, 'A project with this name exists');
     throw err;

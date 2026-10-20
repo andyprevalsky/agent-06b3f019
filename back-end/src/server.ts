@@ -65,6 +65,7 @@ import fastCacheRouter from './domains/fast-cache/routes';
 import archiveRouter from './domains/archive/routes';
 import plannerMemoryRouter from './domains/planner-memory/routes';
 import userUiRouter, { usercontentRouter } from './domains/user-ui/routes';
+import phonesRouter from './domains/phones/routes';
 import agentToolsRouter, { agentQuestionsRouter } from './domains/agent-tools/routes';
 import projectsRouter from './domains/projects/routes';
 import worldModelsRouter from './domains/world-models/routes';
@@ -563,6 +564,7 @@ app.use('/api/fast-cache', fastCacheRouter); // Fast Mode aggressive cache get/s
 app.use('/api/archive', archiveRouter); // Encrypted trace archive + scoped DB fixtures
 app.use('/api/planner-memory', plannerMemoryRouter); // Planner memory history table (planner RAG)
 app.use('/api/user-ui', userUiRouter); // Per-user rose_user_ui versions (publish/activate/active)
+app.use('/api/phones', phonesRouter); // Attached phones (iPhone Mirroring): presence, exclusive control, screen relay
 app.use('/api/agent-tools', agentToolsRouter); // display / messages / approvals for agents + code-agent sandboxes
 app.use('/api/projects', projectsRouter); // Owner-scoped Projects: settings, env files, codebase sync
 app.use('/api/world-models', worldModelsRouter); // WMH-compatible simulation runtime shim

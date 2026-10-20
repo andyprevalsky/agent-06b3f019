@@ -261,8 +261,14 @@ async function testCodeAgentMessagesRoseAgentOnce(): Promise<void> {
     userRow.text.includes('Codex') && userRow.text.includes(`build finished ${RUN}`),
     'framed'
   );
-  const meta = userRow.metadata as { a2a?: { from?: { id?: string; kind?: string } } };
+  const meta = userRow.metadata as {
+    a2a?: { from?: { id?: string; kind?: string }; text?: string };
+  };
   assert(meta.a2a?.from?.id === ids.S1 && meta.a2a.from.kind === 'code', 'a2a sender metadata');
+  assert(
+    meta.a2a.text === `build finished ${RUN}`,
+    `a2a.text is the sender's raw text without the LLM framing: ${JSON.stringify(meta.a2a.text)}`
+  );
   assert((await countRows(ids.R, key)) === 1, 'exactly one USER row on R after retry');
 
   const sent = await prisma.message.findMany({
