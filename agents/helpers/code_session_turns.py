@@ -6,22 +6,35 @@ an E2B or local sandbox) while it runs. The user's direct chat (backend route
 ``back-end/src/providers/codeSessionTurns.ts``) and agent-to-code-agent
 messaging both speak the same ws-server protocol::
 
-    caller ──ws──► ws-server.mjs  {type:"user_turn", id, token, text, sender}
-           ◄──────                {type:"user_turn_ack", id, status, reason?}
+    caller ──ws (?replay=0)──► ws-server.mjs  {type:"user_turn", id, token, text, sender}
+           ◄─────────────────                  {type:"user_turn_ack", id, status, reason?}
 
 ``status`` is ``delivered`` (written to the CLI's stream-json stdin),
 ``duplicate`` (this ``id`` was already delivered: retries never repeat a
-turn) or ``rejected`` with a ``reason`` (``unauthorized``, ``session_ended``,
-``provider_unsupported``, ``invalid_text`` / ``invalid_id``). The ws-server
-dedupes by ``id`` for the life of the session, so a Temporal activity that
-retries after delivering is safe (CLAUDE.md rule 20).
+turn) or ``rejected`` with a ``reason``:
+
+* ``relay_paused`` – the user is chatting with this session directly; an
+  ``agent`` turn must wait until the user hands back (retry later with the
+  same id). User turns are never paused.
+* ``session_ended`` – the CLI finished (or its stdin closed); ask the parent to
+  continue in a new session instead.
+* ``provider_unsupported`` – the provider cannot take mid-run turns (Codex).
+* ``unauthorized`` / ``invalid_text`` / ``invalid_id``.
+
+The ws-server dedupes by ``id`` for the life of the session, so a Temporal
+activity that retries after delivering is safe (CLAUDE.md rule 20). Callers
+derive ``turn_id`` deterministically (for example from the A2A message id) so a
+retry reuses it.
 
 ``token`` is derived per task from ``BACKEND_API_KEY`` and injected into the
 sandbox at creation, so only the backend and our workers can write turns,
 even though the read-only output stream URL is shared with the browser.
-"""
 
-from __future__ import annotations
+No ``from __future__ import annotations`` here: ``TurnDelivery`` may be
+returned by an activity, and Temporal resolves payload annotations inside the
+workflow sandbox (structural guard
+``test_activity_payload_types_need_no_module_globals``).
+"""
 
 import asyncio
 import hashlib
@@ -30,6 +43,7 @@ import json
 import os
 from dataclasses import dataclass
 from typing import Literal, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import aiohttp
 import structlog
@@ -41,6 +55,7 @@ DEFAULT_TIMEOUT_S = 10.0
 DEFAULT_ATTEMPTS = 3
 
 TurnStatus = Literal["delivered", "duplicate", "rejected", "unreachable"]
+TurnSender = Literal["user", "agent"]
 
 
 @dataclass(frozen=True)
@@ -70,14 +85,22 @@ def code_session_turn_token(task_id: str, secret: Optional[str] = None) -> str:
     ).hexdigest()
 
 
+def control_ws_url(ws_url: str) -> str:
+    """The session URL with history replay disabled (``replay=0``)."""
+    parts = urlsplit(ws_url)
+    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != "replay"]
+    query.append(("replay", "0"))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
 async def _send_once(
     session: aiohttp.ClientSession,
     ws_url: str,
     payload: dict[str, str],
     ack_type: str,
     timeout_s: float,
-) -> dict:
-    async with session.ws_connect(ws_url, heartbeat=15.0) as ws:
+) -> dict[str, str]:
+    async with session.ws_connect(control_ws_url(ws_url), heartbeat=15.0) as ws:
         await ws.send_str(json.dumps(payload))
         deadline = asyncio.get_running_loop().time() + timeout_s
         while True:
@@ -94,6 +117,8 @@ async def _send_once(
                 data = json.loads(msg.data)
             except ValueError:
                 continue
+            if not isinstance(data, dict):
+                continue
             if data.get("type") == "exit":
                 return {"status": "rejected", "reason": "session_ended"}
             if data.get("type") != ack_type:
@@ -109,7 +134,7 @@ async def deliver_user_turn_to_code_session(
     task_id: str,
     text: str,
     turn_id: str,
-    sender: Literal["user", "agent"] = "user",
+    sender: TurnSender = "user",
     token: Optional[str] = None,
     timeout_s: float = DEFAULT_TIMEOUT_S,
     attempts: int = DEFAULT_ATTEMPTS,
@@ -119,6 +144,8 @@ async def deliver_user_turn_to_code_session(
     Safe to call again with the same ``turn_id``: the ws-server answers
     ``duplicate`` instead of writing a second turn. Transport failures retry
     with the same id; a definite ``rejected`` ack is returned immediately.
+    ``sender="agent"`` marks a turn written by a Rose agent; it is rejected
+    with ``relay_paused`` while the user is chatting with the session.
     """
     payload = {
         "type": "user_turn",
@@ -128,8 +155,9 @@ async def deliver_user_turn_to_code_session(
         "sender": sender,
     }
     last_error = ""
+    max_attempts = max(1, attempts)
     async with aiohttp.ClientSession() as session:
-        for attempt in range(1, max(1, attempts) + 1):
+        for attempt in range(1, max_attempts + 1):
             try:
                 ack = await _send_once(session, ws_url, payload, "user_turn_ack", timeout_s)
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
@@ -141,23 +169,27 @@ async def deliver_user_turn_to_code_session(
                     attempt=attempt,
                     error=last_error[:200],
                 )
-                if attempt < attempts:
+                if attempt < max_attempts:
                     await asyncio.sleep(min(0.25 * attempt, 1.0))
                 continue
-            status = ack.get("status")
-            if status not in ("delivered", "duplicate", "rejected"):
-                status = "rejected"
+            raw_status = ack.get("status")
+            status: TurnStatus = "rejected"
+            if raw_status == "delivered":
+                status = "delivered"
+            elif raw_status == "duplicate":
+                status = "duplicate"
+            reason = ack.get("reason")
             logger.info(
                 "[CodeSessionTurns] Turn acknowledged",
                 task_id=task_id,
                 turn_id=turn_id,
                 sender=sender,
                 status=status,
-                reason=ack.get("reason"),
+                reason=reason,
                 attempt=attempt,
             )
-            return TurnDelivery(status=status, turn_id=turn_id, reason=ack.get("reason"), attempts=attempt)
-    return TurnDelivery(status="unreachable", turn_id=turn_id, reason=last_error or None, attempts=attempts)
+            return TurnDelivery(status=status, turn_id=turn_id, reason=reason, attempts=attempt)
+    return TurnDelivery(status="unreachable", turn_id=turn_id, reason=last_error or None, attempts=max_attempts)
 
 
 async def hand_back_code_session(

@@ -1,6 +1,6 @@
 import { USER_UI_DIR_NAME } from './userUi/seed';
 
-export const CODE_AGENT_INSTRUCTIONS_VERSION = '2026-10-20.code-agent-rose-ui.v3';
+export const CODE_AGENT_INSTRUCTIONS_VERSION = '2026-10-20.code-agent-rose-ui-tools.v4';
 export const CODEX_HARNESS_INSTRUCTIONS_VERSION = '2026-08-25.codex-rose-harness.v1';
 
 export const CODE_AGENT_ATTACHMENTS_DIR = '/home/user/attachments';
@@ -44,6 +44,11 @@ export function buildCodeAgentSystemPrompt(args: BuildCodeAgentPromptArgs = {}):
     `- ${CODE_AGENT_USER_UI_DIR} is the Rose app UI of the user you work for. Its README.md explains the layout and \`rose-ui publish\`.`,
     '- To change how Rose looks or behaves for the user, edit that folder and run `rose-ui publish` so the user sees the change.',
     '- When asked for something the user should look at or play (a game, app, chart or other visual), build it as an inline view there, publish it, and name the view in your final response so it can be shown in the chat. Still put any requested files in the output directory.',
+    '',
+    'Talking to the user:',
+    '- Never rely on the user reading your terminal. Messages, results, scorecards, visuals, questions and approvals go through the Rose tools (MCP server `rose`, or the `rose` CLI on PATH; run `rose --help`).',
+    '- `send_message_to_user` for updates and results; `display` for screenshots, recordings and HTML previews; `display` with placement "pinned" and options for a question; `request_user_approval` before risky or irreversible actions. Questions and approvals wait for the answer.',
+    '- After `rose-ui publish` of something the user should see, show it yourself: `send_message_to_user` with `inline_view` (`rose message "<text>" --inline-view <view>`). Naming it in your final response is not enough.',
     '',
     'Execution contract:',
     '- Prefer direct, verifiable commands over prose-only claims.',

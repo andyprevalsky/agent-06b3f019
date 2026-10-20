@@ -90,6 +90,7 @@ from domains.spawn_sub_agents.service import (
     spawn_sub_agents_batch_activity,
 )
 from domains.user_tools.repo import resolve_user_tools_activity, run_user_tool_activity
+from domains.display.repo import display_media_activity
 from domains.wait_for.service import evaluate_condition_activity
 from domains.web_fetch.handler import web_fetch_activity, web_fetch_download_activity
 from health_server import (
@@ -1643,6 +1644,7 @@ async def main():
         send_direct_sms_activity,
         notify_sms_event_activity,
         resolve_user_ui_inline_view_activity,
+        display_media_activity,
         populate_tool_params_activity,
         execute_reasoning_activity,
         query_parent_state_activity,

@@ -63,6 +63,12 @@ SDK_POST_RESULT_STRETCH_TOOL_NAMES: Final[frozenset[str]] = frozenset(
 # the *first* SDK result regardless of stretch/idle.
 SDK_POST_RESULT_EXIT_GRACE_S: Final[float] = 180.0
 
+# Structured transcript rows (utils/code_transcript.py) are persisted in batches at most
+# this often while new events arrive, plus once when monitoring ends. Live
+# token streaming reaches viewers over the sandbox ws (`code_agent_delta`);
+# the batches are the durable record, so ≤0.5 writes/s per active code agent.
+TRANSCRIPT_FLUSH_INTERVAL_S: Final[float] = 2.0
+
 # Maximum runtime before timeout.
 # Keep this well below long rose-bench task budgets (e.g. cuda-kernel 4200s).
 # A 60m cap let hung Claude Code sessions burn the whole bench with no parent

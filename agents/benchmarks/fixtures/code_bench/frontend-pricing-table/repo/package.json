@@ -1,0 +1,10 @@
+{
+  "name": "pricing-page",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Static pricing page. No dependencies; open index.html through any static file server.",
+  "scripts": {
+    "test": "node --test test/"
+  }
+}
