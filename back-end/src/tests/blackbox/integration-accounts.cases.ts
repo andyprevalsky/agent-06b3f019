@@ -198,7 +198,6 @@ async function plaidItemsAreAccounts(users: Users): Promise<void> {
 async function todoHooksRefuse(users: Users): Promise<void> {
   const { a } = users();
   for (const [provider, owner] of [
-    ['imessage', 'L-INT-IMESSAGE'],
     ['atlas_passwords', 'L-INT-PASSWORDS'],
     ['whatsapp', 'L-INT-WHATSAPP'],
   ]) {
@@ -298,7 +297,10 @@ async function cookieProfilesAreAccounts(users: Users): Promise<void> {
   let edge = await accountsOf(a.token, 'edge');
   const byId = new Map(edge.map((x) => [x.accountId, x]));
   assert(edge.length === 2, `two Edge profiles listed separately, got ${edge.length}`);
-  assert(byId.has('edge:Default') && byId.has('edge:Profile 1'), 'accountId is <browser>:<profile>');
+  assert(
+    byId.has('edge:Default') && byId.has('edge:Profile 1'),
+    'accountId is <browser>:<profile>'
+  );
   assert(byId.get('edge:Default')?.label === 'Default', 'profile dir is the label');
   assert(byId.get('edge:Default')?.state === 'synced', 'a synced profile reads synced');
   assert(byId.get('edge:Profile 1')?.label === 'Profile 1', 'second profile label');
@@ -437,8 +439,14 @@ export function cases(users: Users): Array<{ name: string; fn: () => Promise<voi
       name: 'cookie profiles are separate accounts; delete one keeps the other',
       fn: () => cookieProfilesAreAccounts(users),
     },
-    { name: "legacy empty-profile cookies are the default account", fn: () => legacyCookieProfileIsDefault(users) },
-    { name: 'browser_fingerprint delete removes its row', fn: () => fingerprintDeleteRemovesRow(users) },
+    {
+      name: 'legacy empty-profile cookies are the default account',
+      fn: () => legacyCookieProfileIsDefault(users),
+    },
+    {
+      name: 'browser_fingerprint delete removes its row',
+      fn: () => fingerprintDeleteRemovesRow(users),
+    },
     { name: 'delta poll: changed flag, cursor, identical view', fn: () => deltaPoll(users) },
     {
       name: 'LinkedIn read-time settle: list and delta agree',

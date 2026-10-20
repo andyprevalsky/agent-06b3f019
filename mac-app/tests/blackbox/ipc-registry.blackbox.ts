@@ -69,7 +69,7 @@ vi.mock('electron', () => ({
 //    when both come from different `vi.mock` call sites in this file.
 // ---------------------------------------------------------------------------
 vi.mock('electron-store', () => ({
-  default: vi.fn().mockImplementation(() => {
+  default: vi.fn().mockImplementation(function () {
     const storage = new Map<string, unknown>();
     return {
       get: vi.fn((key: string, fallback?: unknown) =>
@@ -130,9 +130,11 @@ vi.mock('../../main/services/iMessageSender', () => ({
 }));
 
 const imsgSyncRun = vi.fn(async () => undefined);
+const imsgSyncConnect = vi.fn(async () => ({ success: true }));
 vi.mock('../../main/services/iMessageSync', () => ({
   IMessageSync: {
     sync: (...a: unknown[]) => imsgSyncRun(...a),
+    connect: (...a: unknown[]) => imsgSyncConnect(...a),
   },
 }));
 
@@ -499,6 +501,7 @@ describe('ipc-registry: local machine uploads while impersonating', () => {
     authGetSession.mockReset();
     authGetSession.mockResolvedValue(impersonatedSession);
     batchUpload.mockClear();
+    imsgSyncConnect.mockClear();
     imsgCheckAccess.mockReturnValue(true);
     imsgReadMessages.mockResolvedValue([]);
   });
@@ -520,6 +523,7 @@ describe('ipc-registry: local machine uploads while impersonating', () => {
         message: 'Unavailable while viewing another account',
       });
       expect(batchUpload).not.toHaveBeenCalled();
+      expect(imsgSyncConnect).not.toHaveBeenCalled();
     }
   );
 });
@@ -531,6 +535,7 @@ describe('ipc-registry: iMessage channels', () => {
     imsgSenderSend.mockReset();
     authGetSession.mockReset();
     batchUpload.mockReset();
+    imsgSyncConnect.mockClear();
   });
 
   it('imessage:checkAccess returns the reader boolean', async () => {
@@ -553,23 +558,25 @@ describe('ipc-registry: iMessage channels', () => {
     expect(result).toEqual({ success: false, message: 'Not authenticated' });
   });
 
-  it('imessage:startUpload happy path forwards messages to the batch uploader', async () => {
+  it('imessage:startUpload connects this Mac as its own account with live progress', async () => {
     imsgCheckAccess.mockReturnValueOnce(true);
     authGetSession.mockResolvedValueOnce(fakeSession);
-    imsgReadMessages.mockResolvedValueOnce([
-      { id: 1, contact_id: 'a' },
-      { id: 2, contact_id: 'a' },
-      { id: 3, contact_id: 'b' },
-    ]);
-    batchUpload.mockResolvedValueOnce({ success: true });
+    imsgSyncConnect.mockResolvedValueOnce({ success: true });
     const result = await invoke('imessage:startUpload');
-    expect(batchUpload).toHaveBeenCalledWith(
-      'imessage',
-      expect.any(Array),
-      fakeSession.access_token,
-      null
-    );
+    // The device sync reads chat.db in batches itself; the IPC path no longer
+    // reads every message up front or posts one device-less payload.
+    expect(imsgSyncConnect).toHaveBeenCalledTimes(1);
+    expect(imsgReadMessages).not.toHaveBeenCalled();
+    expect(batchUpload).not.toHaveBeenCalled();
     expect(result).toEqual({ success: true });
+  });
+
+  it('imessage:startUpload returns the device sync failure', async () => {
+    imsgCheckAccess.mockReturnValueOnce(true);
+    authGetSession.mockResolvedValueOnce(fakeSession);
+    imsgSyncConnect.mockResolvedValueOnce({ success: false, message: 'Upload failed: 500' });
+    const result = await invoke('imessage:startUpload');
+    expect(result).toEqual({ success: false, message: 'Upload failed: 500' });
   });
 
   it('imessage:sendDirect returns success when sender resolves', async () => {

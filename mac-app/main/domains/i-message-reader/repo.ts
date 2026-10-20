@@ -182,6 +182,89 @@ export function queryMessagesSinceRowId(
 }
 
 /**
+ * Number of message rows with afterRowId < ROWID <= upToRowId: the `total`
+ * a batched sync reports. Counts every row (group chats, reactions and
+ * attachment-only rows included) because the batch cursor scans every row.
+ */
+export function queryMessageRowCount(
+  db: Database.Database,
+  afterRowId: number,
+  upToRowId: number
+): number {
+  const result = db
+    .prepare('SELECT COUNT(*) AS total FROM message WHERE ROWID > ? AND ROWID <= ?')
+    .get(afterRowId, upToRowId) as { total: number | null } | undefined;
+  return result?.total ?? 0;
+}
+
+/**
+ * The next batch window: up to `limit` message rows after `afterRowId` (ROWID
+ * order, bounded by `upToRowId`). Returns how many rows it spans and its last
+ * ROWID, so the cursor advances over rows the content filter drops too.
+ */
+export function queryRowIdWindow(
+  db: Database.Database,
+  afterRowId: number,
+  upToRowId: number,
+  limit: number
+): { scanned: number; lastRowId: number | null } {
+  const result = db
+    .prepare(
+      `SELECT COUNT(*) AS scanned, MAX(id) AS lastRowId FROM (
+         SELECT ROWID AS id FROM message
+         WHERE ROWID > ? AND ROWID <= ?
+         ORDER BY ROWID ASC
+         LIMIT ?
+       )`
+    )
+    .get(afterRowId, upToRowId, limit) as
+    { scanned: number | null; lastRowId: number | null } | undefined;
+  return { scanned: result?.scanned ?? 0, lastRowId: result?.lastRowId ?? null };
+}
+
+/**
+ * Content rows of one batch window (afterRowId < ROWID <= lastRowId), with the
+ * same projection and content/group-chat filters as the other readers.
+ */
+export function queryMessagesInRowRange(
+  db: Database.Database,
+  columns: MessageColumnPresence,
+  afterRowId: number,
+  lastRowId: number
+): RawMessageRow[] {
+  const contentWhereClause = buildContentWhereClause(columns);
+  const optionalProjection = buildOptionalColumnProjection(columns);
+
+  return db
+    .prepare(
+      `
+        SELECT
+          m.ROWID as id,
+          m.text,
+          m.date,
+          m.is_from_me,
+          ${optionalProjection},
+          h.id as handle_id,
+          c.chat_identifier,
+          COALESCE(c.display_name, h.id, c.chat_identifier) as contact_name
+        FROM message m
+        LEFT JOIN handle h ON m.handle_id = h.ROWID
+        LEFT JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+        LEFT JOIN chat c ON cmj.chat_id = c.ROWID
+        WHERE
+          m.ROWID > ? AND m.ROWID <= ?
+          AND ${contentWhereClause}
+          AND (
+            c.chat_identifier IS NULL
+            OR c.chat_identifier NOT LIKE 'chat%'
+          )
+        ORDER BY m.ROWID ASC
+      `
+    )
+    .all(afterRowId, lastRowId) as RawMessageRow[];
+}
+
+/**
  * Max ROWID currently in the message table (used by the real-time watcher
  * to seed its high-water mark).
  */

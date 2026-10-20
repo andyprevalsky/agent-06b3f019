@@ -13,6 +13,7 @@ import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { UPLOAD_LIMITS } from './config';
 import * as service from './service';
+import { sendIMessageDeviceUpload } from './routes.imessageDevice';
 import {
   connectTelegramAccount,
   telegramAccountIdSchema,
@@ -219,11 +220,14 @@ router.post(
   authenticateMachineUpload,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;
-    const { contacts, accessedAt } = req.body;
+    const { contacts, accessedAt, account } = req.body;
 
     if (!Array.isArray(contacts) || contacts.length === 0) {
       return res.status(400).json({ error: 'contacts array is required' });
     }
+
+    // One account per Mac (I1): stored synchronously, 410 for a removed Mac.
+    if (account !== undefined) return sendIMessageDeviceUpload(res, userId, contacts, account);
 
     const result = await service.processIMessageUpload(userId, contacts, accessedAt);
     res.json({
