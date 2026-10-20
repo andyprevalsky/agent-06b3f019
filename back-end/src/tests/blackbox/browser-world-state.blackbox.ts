@@ -397,11 +397,17 @@ async function retriedMergeIsIdempotent(): Promise<void> {
   const first = await mergeSessionWorldState(task.sessionId, { browser });
   // Temporal retries the close: the browser is still up the first time...
   const second = await mergeSessionWorldState(task.sessionId, { browser });
-  // ...and already released the next time.
+  // ...unreachable the next (no CDP endpoint we may dial)...
+  const unreachable = await mergeSessionWorldState(task.sessionId);
+  // ...and already released the last time.
   await prisma.browserSession.update({ where: { id: task.id }, data: { status: 'CLOSED' } });
   const third = await mergeSessionWorldState(task.sessionId);
 
   assert(outcomeOf(first, 'example.com')?.merged_revision === 8, JSON.stringify(first));
+  assert(
+    outcomeOf(unreachable, 'example.com')?.merged_revision === 8,
+    `unreachable retry lost the receipt: ${JSON.stringify(unreachable)}`
+  );
   for (const receipt of [second, third]) {
     const entry = outcomeOf(receipt, 'example.com');
     assert(
@@ -526,6 +532,26 @@ async function rootBrowserOpensFromRootAndMergesWhatTheUserChanged(): Promise<vo
   assert(afterClose.body.root === null, 'closed Root browser still reported open');
 }
 
+async function rootRoutesValidateBeforeTouchingAProvider(): Promise<void> {
+  const userId = await createUser('routes');
+  const post = (path: string, body: unknown) =>
+    api(path, userId, { method: 'POST', body: JSON.stringify(body) });
+  const badUrl = await post('/api/browser-world/root/open', { start_url: 'not a url' });
+  assert(badUrl.status === 400, `bad start_url returned ${badUrl.status}`);
+  const unknownField = await post('/api/browser-world/root/open', { profile: 'other-user' });
+  assert(unknownField.status === 400, `unknown field returned ${unknownField.status}`);
+  const notOpen = await post('/api/browser-world/root/close', {});
+  assert(notOpen.status === 404, `closing an unopened Root returned ${notOpen.status}`);
+  const none = await api('/api/browser-world/root', userId);
+  assert(none.status === 200 && none.body.root === null, JSON.stringify(none.body));
+  const badAgent = await api('/api/browser-world/agents/not-a-uuid', userId);
+  assert(badAgent.status === 400, `bad agent id returned ${badAgent.status}`);
+  const badSite = await api('/api/browser-world/sites/bad%20site', userId, { method: 'DELETE' });
+  assert(badSite.status === 400, `bad site returned ${badSite.status}`);
+  const anonymousOpen = await fetch(`${BASE_URL}/api/browser-world/root/open`, { method: 'POST' });
+  assert(anonymousOpen.status === 401, `unauthenticated open returned ${anonymousOpen.status}`);
+}
+
 async function main(): Promise<void> {
   process.stdout.write('Browser World State Black-box Tests\n');
   const cases: Array<[string, () => Promise<void>]> = [
@@ -538,6 +564,7 @@ async function main(): Promise<void> {
     ['a stale agent cannot overwrite a newer Root login', staleAgentCannotOverwriteNewerRootLogin],
     ['every read and write is owner scoped', everyReadAndWriteIsOwnerScoped],
     ['a retried merge is idempotent', retriedMergeIsIdempotent],
+    ['Root routes validate before touching a provider', rootRoutesValidateBeforeTouchingAProvider],
     [
       'Root browser opens from Root and merges what the user changed',
       rootBrowserOpensFromRootAndMergesWhatTheUserChanged,
