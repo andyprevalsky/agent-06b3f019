@@ -152,7 +152,7 @@ Status: **done** = merged into `feat/rose-user-ui` with tests; **running** = a l
 | 21 | Codebase sync like boxes.dev (secrets, symlinks) | C9 | L-SYNC | running |
 | 22 | Bug detection runs on Rose infra | C10 | L-RCA | done (b437add6b); live smoke after deploy |
 | 23 | Must-have / nice-to-have split | — | parent | done (this file) |
-| 24 | Route coding / look-and-feel asks to a code agent (flows 2–3 fixes) | row 41 / C12 | L-ROUTING | running |
+| 24 | Route coding / look-and-feel asks to a code agent (flows 2–3 fixes) | row 41 / C12 | L-ROUTING | routing done (8d3dd5e28; real replays: flow 2 7/7 code agent vs 2/2 browser before; flow 3 3/3 inline view vs 0/3); end-to-end re-recording pending (UI thread) |
 | 25 | Code agents talk to the user only via Rose tools (messages, approvals, scorecards, pinned questions); routing by spawner | C12 | L-DISPLAY + L-A2A | running |
 | 26 | Code-agent chips: Transcript / Terminal tabs, direct box, completed summary | rows 44–45 | L-DIRECT (backend) + UI | running + UI |
 | 27 | No timeouts for code agents (heartbeat only, pause when idle) | C11 | W5 | running |
@@ -170,7 +170,7 @@ Status: **done** = merged into `feat/rose-user-ui` with tests; **running** = a l
 | 39 | Each criterion analysed by its own sub-agent with an eval/judge suite; iterate until met | all rows | lane owners + Auditor | lanes running; **Auditor queued** (re-checks every row against evidence before any deploy) |
 | 40 | Recording blockers: decode hang, account pill overlaps | — | parent | done (ac42c75f4, ab8f1bcf8, a151a214c) |
 
-Open follow-ups with owners: C10 crash-between-create-and-start stuck agent (L-TOOLS2 queue); retire `.github/workflows/auto-rca*.yml`; W1: live E2B check that `rose-ui` is on PATH (needs a real E2B sandbox; no deploy); W2 bridge `rose.*` capability calls + write confirmations (UI thread, plus a backend if one is needed).
+Open follow-ups with owners: **flag the backend side of Rose Desktop** — `rose_user_ui` workspace materialization (W1 `workspace.ts`), the code-agent `rose_user_ui` instructions (`codeAgentPrompt.ts`) and the `code`/`spawn_agent` tool descriptions should apply only to Rose Desktop accounts, because a non-flag account can't see published UI (queued: L-FLAG-BE); code agents need a headless browser in the sandbox to actually play-test games (A4 template, L-UIKIT); bench-only `SpawnAgentToolNoGP` description unchanged; C10 crash-between-create-and-start stuck agent (L-TOOLS2 queue); retire `.github/workflows/auto-rca*.yml`; W1: live E2B check that `rose-ui` is on PATH (needs a real E2B sandbox; no deploy); W2 bridge `rose.*` capability calls + write confirmations (UI thread, plus a backend if one is needed).
 
 ## Deploy approvals (collect at `/deploy`)
 
