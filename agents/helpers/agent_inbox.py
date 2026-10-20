@@ -13,6 +13,8 @@ No step pays an extra request to read it:
                (fire-and-forget; delivered at the next step = one step late)
                no post answered for INBOX_FALLBACK_POLL_SECONDS ──▶ one
                GET /api/agents/<owner>/agent-inbox?task_id=&since= (poll)
+               attempt_completion_with_result ──▶ one GET (unread_before_finish);
+               unread messages defer the completion to the next step
 
     every source ──▶ dedupe by id, advance ``since`` ──▶ inter-agent message in
     model context (Codex body, helpers/background_agents.py)
@@ -187,6 +189,16 @@ class AgentInbox:
             return
         self._last_read_at = time.monotonic()
         self._stashed.extend(self.accept(message for message in messages if isinstance(message, dict)))
+
+    async def unread_before_finish(self) -> bool:
+        """One read at completion: is a message waiting that the agent has not seen?
+
+        A progress post's read is delivered one step late, so a message stored
+        during the final LLM call would otherwise never be read. New messages
+        stay stashed for the next step's ``next_step_messages``.
+        """
+        self._stashed.extend(await self.poll())
+        return bool(self._stashed)
 
     async def next_step_messages(self) -> List[Dict[str, Any]]:
         """Stashed messages, plus one GET when no read answered for the fallback window."""

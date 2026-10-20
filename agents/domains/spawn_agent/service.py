@@ -16,6 +16,7 @@ import structlog.contextvars
 from temporalio import activity
 
 from domains.spawn_agent.config import (
+    EXPLORE_COMPLETION_DEFERRED_FOR_MESSAGE,
     EXPLORE_MESSAGE_TRUNCATE_LEN,
     EXPLORE_WINDDOWN_WINDOW,
     explore_limits_for_depth,
@@ -901,6 +902,8 @@ async def spawn_explore_agent_activity(
                         f"Call {evidence_tools} successfully before completing."
                     ),
                 }
+            if agent_inbox is not None and await agent_inbox.unread_before_finish():
+                return {"error": True, "message": EXPLORE_COMPLETION_DEFERRED_FOR_MESSAGE}
             return {"success": True, "message": "Completion accepted"}
         else:
             return {"error": True, "message": f"Unknown tool: {tool_name}"}

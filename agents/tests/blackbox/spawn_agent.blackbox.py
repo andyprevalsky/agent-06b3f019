@@ -4077,6 +4077,65 @@ async def test_explore_inbox_rides_the_progress_post_and_gets_only_as_fallback()
     assert [c.args for c in fetch.await_args_list] == [("parent-1", "tc-1", m2["created_at"])]
 
 
+async def test_explore_reads_a_message_stored_before_its_final_answer():
+    """A message stored while the final LLM call runs is read before the answer is accepted.
+
+    Regression for explore-agent-mid-run-message 7166707a: the root stored
+    "include who led the round" 4s into the explore's final call; the
+    progress-post read would only deliver it at the next step, so the explore
+    finished without it and the root could no longer reach the task. Completion
+    now does one inbox read (once per completion, not per step); unread
+    messages defer it and arrive at the next step, exactly once.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    late = {
+        "id": "m-late",
+        "text": "Also say who led each round.",
+        "from_agent_id": "root-1",
+        "from_agent_path": "/root",
+        "created_at": "2026-10-20T02:18:31.952Z",
+    }
+    fetch = AsyncMock(side_effect=[[late], []])
+    fake_ws = MagicMock()
+    fake_ws.execute_tool = AsyncMock(return_value={"result": "Ringg AI raised $5.5M (Jan 23, 2026)."})
+    steps: dict = {}
+
+    async def fake_run_agent(**kwargs):
+        execute_tool = kwargs["execute_tool"]
+        await execute_tool("web_search", {"query": "AI agent funding rounds"}, "tc-search")
+        steps["first"] = await execute_tool("attempt_completion_with_result", {"result": "8 rounds"}, "tc-done-1")
+        steps["delivered"] = [row["text"] for row in await kwargs["poll_inbox"]()]
+        steps["second"] = await execute_tool("attempt_completion_with_result", {"result": "8 led"}, "tc-done-2")
+        steps["after"] = [row["text"] for row in await kwargs["poll_inbox"]()]
+        return {"status": "completed", "final_response": "8 led"}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("tools.web_search.WebSearchManager", return_value=fake_ws),
+        patch("domains.spawn_agent.service.save_explore_message", new=AsyncMock(return_value=None)),
+        patch("helpers.agent_inbox.fetch_agent_inbox", new=fetch),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="root-1",
+            user_id="u",
+            goal="Compile 8 funding rounds",
+            model="m",
+            task_id="task-1",
+            inbox_address="call_bg",
+        )
+
+    assert result["status"] != "failed", result
+    assert steps["first"].get("error") is True, "a final answer must not be accepted over an unread message"
+    assert steps["delivered"] == ["Also say who led each round."], steps
+    assert steps["second"] == {"success": True, "message": "Completion accepted"}, steps
+    assert steps["after"] == [], "the message is delivered exactly once"
+    assert fetch.await_count == 2, "one inbox read per completion attempt, none per step"
+
+
 async def test_explore_without_inbox_address_has_no_inbox_hook():
     from unittest.mock import patch
 
@@ -5987,6 +6046,10 @@ async def run_all_tests():
     await r.record_async(
         "explore_inbox_rides_progress_post_get_only_fallback",
         test_explore_inbox_rides_the_progress_post_and_gets_only_as_fallback,
+    )
+    await r.record_async(
+        "explore_reads_message_stored_before_final_answer",
+        test_explore_reads_a_message_stored_before_its_final_answer,
     )
     await r.record_async(
         "explore_without_inbox_address_has_no_inbox_hook", test_explore_without_inbox_address_has_no_inbox_hook
