@@ -19,8 +19,15 @@ export function parseClaudeEnvelope(credentialsJson: string): ClaudeEnvelope | n
     const accessToken = typeof oauth?.accessToken === 'string' ? oauth.accessToken : '';
     if (accessToken.length === 0) return null;
     const refreshToken = typeof oauth?.refreshToken === 'string' ? oauth.refreshToken : '';
+    const rawExpiresAt = oauth?.expiresAt;
+    // Omitted -> unknown (null). Present but not a positive finite epoch is not
+    // a usable expiry, so it is treated as already expired (0).
     const expiresAt =
-      typeof oauth?.expiresAt === 'number' && oauth.expiresAt > 0 ? oauth.expiresAt : null;
+      rawExpiresAt === undefined || rawExpiresAt === null
+        ? null
+        : typeof rawExpiresAt === 'number' && Number.isFinite(rawExpiresAt) && rawExpiresAt > 0
+          ? rawExpiresAt
+          : 0;
     const scopes = Array.isArray(oauth?.scopes) ? oauth.scopes : [];
     return {
       accessToken,
