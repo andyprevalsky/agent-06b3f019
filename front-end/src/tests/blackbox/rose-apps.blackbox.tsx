@@ -1,9 +1,11 @@
 /**
  * Blackbox tests for the Rose desktop chrome approved in rose-user-ui:
- *  - query-box toolbar hidden behind the rose nub (hover / focus / tap)
- *  - right app bar with bare icons (no tiles/chips/rings around them)
+ *  - query-box toolbar on the rose tab behind the box (hover / focus / tap);
+ *    geometry, tooltips and items: rose-desktop-flag.blackbox.tsx
+ *  - top-right app icons (no right bar): bare icons, no tiles/chips/rings
  *  - Browser drawer replaces the fullscreen browser (opens on the agent tab,
- *    resizable with a clamped width)
+ *    full height from the left bar to the right edge)
+ *  - flush, full-height right panels, resizable with a clamped width
  */
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -15,8 +17,12 @@ import { renderWithProviders } from './test-wrapper';
 
 import QueryInput from '@/features/terminal-component-group/components/QueryInput';
 import BrowserStatusBar from '@/features/terminal-component-group/components/BrowserStatusBar';
-import { RoseAppBar } from '@/features/terminal-component-group/components/rose-apps/RoseAppBar';
+import { RoseAppIcons } from '@/features/terminal-component-group/components/rose-apps/RoseAppIcons';
 import { TOOLBAR_LEAVE_GRACE_MS } from '@/features/terminal-component-group/components/query-input/useToolbarReveal';
+import {
+  addressParts,
+  latestBrowserPageUrl,
+} from '@/features/terminal-component-group/components/rose-apps/browserPageUrl';
 import {
   DRAWER_MIN_WIDTH,
   clampDrawerWidth,
@@ -102,47 +108,45 @@ describe('query toolbar nub', () => {
     };
   }
 
-  it('hides the toolbar behind the rose nub by default', () => {
+  it('keeps the strip hidden (but mounted) in the closed 4px tab by default', () => {
     const { nub, region } = renderQueryInput();
+    expect(nub).toHaveAttribute('data-state', 'closed');
     expect(region).toHaveAttribute('data-state', 'closed');
-    expect(region.style.maxHeight).toMatch(/^0(px)?$/);
-    expect(region.style.opacity).toBe('0');
-    expect(nub).toHaveAttribute('aria-expanded', 'false');
-    expect(nub).toHaveAttribute('aria-controls', region.id);
+    expect(region).toHaveStyle({ opacity: '0', pointerEvents: 'none' });
+    expect(nub.style.top).toBe('-4px');
     expect(nub.style.background).toContain('linear-gradient');
-    expect(nub.className).toContain('w-[30px]');
-    expect(nub.className).toContain('h-[9px]');
-    expect(nub.className).toContain('top-[7px]');
-    expect(nub.className).toContain('left-[7px]');
-    // The toolbar stays mounted (Safe Writes etc.) while collapsed.
-    expect(within(region).getByText(/Safe Writes|Write/i)).toBeInTheDocument();
+    expect(region.id).not.toBe('');
+    // The strip stays mounted (lock etc.) while the tab is closed.
+    expect(within(region).getByTestId('nub-write-lock')).toBeInTheDocument();
   });
 
-  it('expands on nub hover, stays open over the toolbar, collapses after leaving', () => {
+  it('opens on hover, survives the leave grace when re-entered, closes after leaving', () => {
     vi.useFakeTimers();
     const { nub, region } = renderQueryInput();
     fireEvent.pointerEnter(nub, { pointerType: 'mouse' });
     expect(region).toHaveAttribute('data-state', 'open');
-    expect(region).toHaveStyle({ maxHeight: '60px', opacity: '1' });
-    expect(nub).toHaveAttribute('aria-expanded', 'true');
+    expect(region).toHaveStyle({ opacity: '1', pointerEvents: 'auto' });
 
-    // Moving from the nub onto the toolbar keeps it open.
+    // Brushing off the tab and straight back keeps it open past the grace.
     fireEvent.pointerLeave(nub, { pointerType: 'mouse' });
-    fireEvent.pointerEnter(region, { pointerType: 'mouse' });
+    fireEvent.pointerEnter(nub, { pointerType: 'mouse' });
     act(() => vi.advanceTimersByTime(TOOLBAR_LEAVE_GRACE_MS + 50));
     expect(region).toHaveAttribute('data-state', 'open');
 
-    fireEvent.pointerLeave(region, { pointerType: 'mouse' });
-    act(() => vi.advanceTimersByTime(TOOLBAR_LEAVE_GRACE_MS + 50));
+    fireEvent.pointerLeave(nub, { pointerType: 'mouse' });
+    act(() => vi.advanceTimersByTime(TOOLBAR_LEAVE_GRACE_MS - 50));
+    expect(region).toHaveAttribute('data-state', 'open');
+    act(() => vi.advanceTimersByTime(100));
     expect(region).toHaveAttribute('data-state', 'closed');
   });
 
-  it('opens on keyboard focus and closes when focus leaves', () => {
+  it('opens on keyboard focus of an item and closes when focus leaves the tab', () => {
     const { nub, region } = renderQueryInput();
-    act(() => nub.focus());
+    const lock = within(nub).getByTestId('nub-write-lock');
+    act(() => lock.focus());
     expect(region).toHaveAttribute('data-state', 'open');
-    expect(nub.tagName).toBe('BUTTON');
-    act(() => nub.blur());
+    expect(lock.tagName).toBe('BUTTON');
+    act(() => lock.blur());
     expect(region).toHaveAttribute('data-state', 'closed');
   });
 
@@ -157,36 +161,164 @@ describe('query toolbar nub', () => {
   });
 });
 
-// ─── Right app bar ──────────────────────────────────────────────────────────
+// ─── Top-right app icons (no right bar) ─────────────────────────────────────
 
 const WRAPPER_CLASS = /\b(border|bg-|rounded|ring|shadow)/;
 
-describe('right app bar', () => {
-  it('renders Browser as a bare icon, colors it when open, and has no Voice app', async () => {
+describe('top-right app icons', () => {
+  it('renders Browser, Phone, Integrations and Dark mode bare; no right bar or removed apps', async () => {
     const user = userEvent.setup();
-    renderWithProviders(<RoseAppBar />);
-    const bar = screen.getByTestId('rose-app-bar');
-    expect(bar.className).toContain('right-0');
-    expect(bar.className).toContain('bg-white');
-    expect(bar.className).toContain('border-l');
+    renderWithProviders(<RoseAppIcons />);
+    const row = screen.getByTestId('rose-app-icons');
+    expect(row.className).toContain('fixed');
+    expect(row.className).not.toMatch(WRAPPER_CLASS);
+    expect(row.style.right).toBe('16px');
+    expect(screen.queryByTestId('rose-app-bar')).toBeNull();
+    const labels = within(row)
+      .getAllByRole('button')
+      .map((b) => b.getAttribute('aria-label'));
+    expect(labels).toEqual(['Browser', 'Phone', 'Integrations', 'Dark mode']);
+    for (const removed of ['voice', 'files', 'terminal', 'network', 'payments', 'benchmarks']) {
+      expect(screen.queryByTestId(`rose-app-${removed}`)).toBeNull();
+    }
     const browser = screen.getByTestId('rose-app-browser');
     expect(browser.className).not.toMatch(WRAPPER_CLASS);
-    expect(browser.style.background).toBe('');
-    expect(browser.style.border).toBe('');
-    // UI ledger row 49: Voice was removed from the right-bar apps.
-    expect(screen.queryByTestId('rose-app-voice')).toBeNull();
-    expect(screen.queryByTestId('voice-app-drawer')).toBeNull();
+    expect(browser.style.width).toBe('34px');
 
     expect(browser).toHaveAttribute('aria-pressed', 'false');
     await user.click(browser);
     expect(browser).toHaveAttribute('aria-pressed', 'true');
     expect(browser).toHaveStyle({ color: '#e8507f' });
-    expect(screen.getByTestId('browser-app-drawer')).toHaveAttribute('data-state', 'open');
+    const drawer = screen.getByTestId('browser-app-drawer');
+    expect(drawer).toHaveAttribute('data-state', 'open');
+    // Full height, from the left bar to the window's right edge; no close X.
+    expect(drawer).toHaveAttribute('data-variant', 'full');
+    expect(drawer.style.left).toBe('64px');
+    expect(drawer.style.right).toBe('0px');
+    expect(drawer.style.top).toBe('0px');
+    expect(within(drawer).queryByRole('button', { name: /close/i })).toBeNull();
+    // The icon row floats over the drawer's top-right corner (it stacks above it).
+    expect(row.className).toContain('z-[90]');
+    expect(drawer.className).toContain('z-[66]');
     expect(screen.getByTestId('root-browser-empty')).toHaveTextContent('Your browser');
 
+    // Clicking the active icon is how the drawer closes.
     await user.click(browser);
     expect(browser).toHaveAttribute('aria-pressed', 'false');
     expect(screen.getByTestId('browser-app-drawer')).toHaveAttribute('data-state', 'closed');
+  });
+
+  it('Phone shows only the floating Coming soon device, 24px off the right edge', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<RoseAppIcons />);
+    expect(screen.queryByTestId('rose-phone')).toBeNull();
+    await user.click(screen.getByTestId('rose-app-phone'));
+    const phone = screen.getByTestId('rose-phone');
+    expect(phone.style.right).toBe('24px');
+    expect(phone.style.top).toBe('50%');
+    expect(phone.style.transform).toBe('translateY(-50%)');
+    expect(phone.className).not.toMatch(WRAPPER_CLASS);
+    // No background anywhere: only the device over the page.
+    expect(phone.className).not.toMatch(/\bbg-|backdrop/);
+    expect(phone.style.background).toBe('');
+    expect(phone.style.backgroundColor).toBe('');
+    const device = within(phone).getByTestId('rose-phone-device');
+    expect([...phone.children]).toEqual([device]);
+    expect(device.style.boxShadow).toContain('rgba(0,0,0,.35)');
+    expect(device).toHaveTextContent('Coming soon');
+    expect(within(phone).queryAllByRole('button')).toHaveLength(0);
+    expect(screen.getByTestId('rose-app-panel')).toHaveAttribute('data-state', 'closed');
+    // One app at a time: opening Integrations hides the phone.
+    await user.click(screen.getByTestId('rose-app-integrations'));
+    expect(screen.queryByTestId('rose-phone')).toBeNull();
+    expect(screen.getByTestId('rose-app-panel')).toHaveAttribute('data-state', 'open');
+  });
+
+  it('Dark mode is a toggle (moon → sun, label swaps) that drives RoseThemeProvider and opens no panel', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<RoseAppIcons />, { roseThemeUserId: 'theme-user' });
+    try {
+      await user.click(screen.getByTestId('rose-app-dark-mode'));
+      expect(screen.getByTestId('rose-app-dark-mode')).toHaveAttribute('aria-label', 'Light mode');
+      expect(document.documentElement.classList.contains('dark')).toBe(true);
+      // One source of truth: the icon toggles features/rose-theme, which persists per user.
+      expect(localStorage.getItem('rose-theme:theme-user')).toBe('dark');
+      expect(screen.getByTestId('rose-app-panel')).toHaveAttribute('data-state', 'closed');
+      await user.click(screen.getByTestId('rose-app-dark-mode'));
+      expect(screen.getByTestId('rose-app-dark-mode')).toHaveAttribute('aria-label', 'Dark mode');
+      expect(document.documentElement.classList.contains('dark')).toBe(false);
+      expect(localStorage.getItem('rose-theme:theme-user')).toBe('light');
+    } finally {
+      localStorage.removeItem('rose-theme:theme-user');
+      document.documentElement.classList.remove('dark');
+    }
+  });
+
+  it('Dark mode is a no-op outside a signed-in Rose Desktop theme (stock stays light)', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<RoseAppIcons />);
+    await user.click(screen.getByTestId('rose-app-dark-mode'));
+    expect(screen.getByTestId('rose-app-dark-mode')).toHaveAttribute('aria-label', 'Dark mode');
+    expect(document.documentElement.classList.contains('dark')).toBe(false);
+  });
+
+  it('Integrations shows a red reconnect dot when an integration needs reconnection', async () => {
+    server.use(
+      http.get(`${API_BASE}/integrations`, () =>
+        HttpResponse.json({
+          integrations: [
+            {
+              name: 'gmail',
+              status: 'CONNECTED',
+              emailCredentials: [{ email: 'a@b.c', state: 'needs_reconnect' }],
+            },
+            { name: 'whatsapp', status: 'CONNECTED' },
+          ],
+        }),
+      ),
+    );
+    mockSession();
+    renderWithProviders(<RoseAppIcons />);
+    const dot = await screen.findByTestId('rose-app-integrations-alert');
+    expect(dot.className).toContain('bg-[#ef4444]');
+    expect(dot.className).toContain('h-[7px]');
+    expect(screen.queryByTestId('rose-app-browser-alert')).toBeNull();
+  });
+
+  it('a Plaid bank that needs sign-in also raises the dot, named in the tooltip', async () => {
+    server.use(
+      http.get(`${API_BASE}/integrations/plaid/items`, () =>
+        HttpResponse.json({ items: [{ institutionName: 'Chase', status: 'REQUIRES_REAUTH' }] }),
+      ),
+    );
+    mockSession();
+    const user = userEvent.setup();
+    renderWithProviders(<RoseAppIcons />);
+    expect(await screen.findByTestId('rose-app-integrations-alert')).toBeInTheDocument();
+    await user.hover(screen.getByTestId('rose-app-integrations'));
+    expect(
+      (await screen.findAllByText('Integrations · reconnect Plaid (Chase)')).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it('Integrations drawer mounts the existing Integrations page', async () => {
+    mockSession();
+    const user = userEvent.setup();
+    renderWithProviders(<RoseAppIcons />);
+    await user.click(screen.getByTestId('rose-app-integrations'));
+    const body = screen.getByTestId('rose-app-panel-integrations');
+    // Rose Desktop integrations: section headings (a row may repeat the same name).
+    await waitFor(() =>
+      expect(within(body).getByRole('heading', { name: 'Browser Cookies' })).toBeInTheDocument(),
+    );
+    expect(within(body).getByRole('heading', { name: 'Passwords' })).toBeInTheDocument();
+  });
+
+  it('a healthy account shows no reconnect dot', async () => {
+    mockSession();
+    renderWithProviders(<RoseAppIcons />);
+    await waitFor(() => expect(screen.getByTestId('rose-app-integrations')).toBeInTheDocument());
+    expect(screen.queryByTestId('rose-app-integrations-alert')).toBeNull();
   });
 });
 
@@ -266,18 +398,100 @@ describe('Browser drawer', () => {
     }
   });
 
-  it('clamps the drawer width when resized', async () => {
+  it('has browser chrome: Back / Forward dimmed, Reload remounts the live view, address bar shows the page', async () => {
+    const user = userEvent.setup();
+    const navigated: Message = {
+      ...ACTION,
+      message_id: 'm-2',
+      metadata: {
+        task_id: 'task-1',
+        action_type: 'navigate',
+        title: 'Opening tickets',
+        auxiliary: { current_url: 'https://www.palisadestahoe.com/lift-tickets/2026-27' },
+      },
+    };
+    renderWithProviders(
+      withAgent(
+        [ACTION, navigated],
+        'agent-a',
+        <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />,
+      ),
+    );
+    await user.click(screen.getByTitle('Preview').parentElement!);
+    const drawer = screen.getByTestId('browser-app-drawer');
+    await waitFor(() => expect(drawer).toHaveAttribute('data-state', 'open'));
+
+    const chrome = within(drawer).getByTestId('browser-chrome');
+    const labels = within(chrome)
+      .getAllByRole('button')
+      .map((b) => b.getAttribute('aria-label') ?? b.textContent);
+    // Sites: the Root sites list (rose-apps-root-browser.blackbox.tsx).
+    expect(labels).toEqual(['Back', 'Forward', 'Reload', 'Sites']);
+    expect(within(chrome).getByRole('button', { name: 'Back' })).toBeDisabled();
+    expect(within(chrome).getByRole('button', { name: 'Forward' })).toBeDisabled();
+    const address = within(chrome).getByTestId('browser-address-bar');
+    expect(address.className).toContain('rounded-full');
+    expect(within(address).getByText('www.palisadestahoe.com').tagName).toBe('B');
+    expect(address).toHaveTextContent('www.palisadestahoe.com/lift-tickets/2026-27');
+
+    // Reload remounts the agent's live view (a fresh viewer connection).
+    const before = within(drawer).getByTestId('browser-agent-pane');
+    const reload = within(chrome).getByRole('button', { name: 'Reload' });
+    expect(reload).toBeEnabled();
+    await user.click(reload);
+    const after = within(drawer).getByTestId('browser-agent-pane');
+    expect(after).not.toBe(before);
+    expect(before.isConnected).toBe(false);
+
+    // Root: nothing to reload, no page.
+    await user.click(within(drawer).getByTestId('browser-tab-root'));
+    expect(within(chrome).getByRole('button', { name: 'Reload' })).toBeDisabled();
+    expect(within(chrome).getByTestId('browser-address-bar')).toHaveTextContent('Your browser');
+  });
+
+  it('reads the page URL from the latest browser step of that task only', () => {
+    const msg = (id: string, metadata: Record<string, unknown>): Message => ({
+      ...ACTION,
+      message_id: id,
+      metadata: metadata as Message['metadata'],
+    });
+    expect(latestBrowserPageUrl([], 'task-1')).toBeNull();
+    expect(
+      latestBrowserPageUrl(
+        [
+          msg('a', { task_id: 'task-1', current_url: 'https://first.example/a' }),
+          msg('b', { task_id: 'task-1', target_url: 'https://second.example/b?q=1' }),
+          msg('c', { task_id: 'task-2', url: 'https://other-task.example' }),
+          msg('d', { task_id: 'task-1', title: 'no url', url: 'about:blank' }),
+        ],
+        'task-1',
+      ),
+    ).toBe('https://second.example/b?q=1');
+    expect(addressParts('https://second.example/b?q=1')).toEqual({
+      host: 'second.example',
+      rest: '/b?q=1',
+    });
+    expect(addressParts('https://second.example/')).toEqual({ host: 'second.example', rest: '' });
+  });
+
+  it('clamps the panel width when resized', async () => {
     expect(clampDrawerWidth(100, 1440)).toBe(DRAWER_MIN_WIDTH);
-    expect(clampDrawerWidth(5000, 1440)).toBe(1440 - 64 - 24 - 320);
+    expect(clampDrawerWidth(5000, 1440)).toBe(1440 - 64 - 320);
     expect(clampDrawerWidth(700, 1440)).toBe(700);
     // On a narrow viewport the minimum still wins.
     expect(clampDrawerWidth(5000, 600)).toBe(DRAWER_MIN_WIDTH);
-    expect(drawerWidthFromPointer(1440 - 64 - 12 - 600, 1440)).toBe(600);
+    expect(drawerWidthFromPointer(1440 - 600, 1440)).toBe(600);
 
     const user = userEvent.setup();
-    renderWithProviders(<RoseAppBar />);
-    await user.click(screen.getByTestId('rose-app-browser'));
-    const drawer = screen.getByTestId('browser-app-drawer');
+    renderWithProviders(<RoseAppIcons />);
+    await user.click(screen.getByTestId('rose-app-integrations'));
+    const drawer = screen.getByTestId('rose-app-panel');
+    // Flush against the right edge, full height, no floating card or close X.
+    expect(drawer.style.right).toBe('0px');
+    expect(drawer.style.top).toBe('0px');
+    expect(drawer.style.bottom).toBe('0px');
+    expect(drawer.className).not.toMatch(/rounded-\[14px\]/);
+    expect(within(drawer).queryByRole('button', { name: /close/i })).toBeNull();
     const handle = within(drawer).getByTestId('app-drawer-resize-handle');
     // Drag far right: clamps to the minimum width.
     fireEvent.pointerDown(handle, { clientX: 500 });

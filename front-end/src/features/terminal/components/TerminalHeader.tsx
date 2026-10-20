@@ -3,18 +3,35 @@
  *
  * LAYOUT (by viewport):
  * [DESKTOP >= md] --> floating blur PILL, centered: brand + AttentionInbox bell
- *                     (centered in the width left of the right app bar / open
- *                     app drawer via --rose-apps-inset, 520ms ease)
- * [MOBILE  <  md] --> full-width FLUSH bar at y=0:
+ *                     (iPad portrait 768-834 / landscape 1024-1194 included; the
+ *                     app icons float top-right, the left rail is 64px)
+ * [MOBILE  <  md] stock --> full-width FLUSH bar at y=0:
  *                        left   = brand (logo + Rose)
- *                        center = Research
+ *                        center = Research (stock only; Rose Desktop accounts have
+ *                                 no Research/Careers links — UI ledger #14)
  *                        right  = hamburger drawer (signed in) OR Login (signed out)
+ * [MOBILE  <  md] Rose Desktop --> transparent row at y=0 (safe-area aware):
+ *                        left   = hamburger (40px; opens the agents drawer from
+ *                                 the LEFT, the left bar's place)
+ *                        center = the Rose PILL (brand + bell), centered in the
+ *                                 space between hamburger and icons
+ *                        right  = the four app icons (RoseAppIcons placement
+ *                                 'header': Browser, Phone, Integrations + red
+ *                                 reconnect dot, Dark mode; 40px targets)
+ *                        fits 375-430px without overlap; light + dark
  *
  * MOBILE RIGHT ACTION:
  * [SIGNED_IN]  -- tap hamburger --> MobileAgentDrawer (opens from RIGHT; Agents +
  *                                   Notifications tabs; unanswered-notif badge
  *                                   trails on the hamburger AND the tab)
  * [SIGNED_OUT] -- tap Login ------> parent PhoneAuthModal opens
+ *
+ * THEME (useRoseTheme; Rose Desktop dark mode):
+ * [LIGHT] --> stock pill classes (left-1/2, no right-bar inset since UI
+ *             ledger row 66), unchanged by dark mode
+ * [DARK]  --> desktop pill adds dark: classes: dark glass rgba(32,32,30,.78)
+ *             with light text (overriding the inline drip colours); the
+ *             whitish marble layer is hidden
  *
  * Notifications live in the desktop AttentionInbox bell OR the mobile drawer's
  * Notifications tab — never both mount (viewport-branched), so a single
@@ -28,9 +45,15 @@
 import { useNavigate } from 'react-router-dom';
 import type { CSSProperties } from 'react';
 
-import { AttentionInbox, MobileAgentDrawer } from '@/features/terminal-component-group';
+import {
+  AttentionInbox,
+  MobileAgentDrawer,
+  RoseAppIcons,
+} from '@/features/terminal-component-group';
 import type { Agent } from '@/features/terminal-component-group';
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { useIsMobile } from '@/hooks/use-mobile';
+import { useRoseTheme } from '@/features/rose-theme';
 import { cn } from '@/lib/utils';
 
 import type { DripStyles } from '../types';
@@ -82,15 +105,18 @@ function buildHeaderStyle({
   };
 }
 
+const STOCK_MARBLE_CLASSES = 'absolute inset-0 pointer-events-none';
+
 function MarbleBackground({
   backgroundColors,
   dripStyles,
-}: Pick<TerminalHeaderProps, 'backgroundColors' | 'dripStyles'>) {
+  isDark,
+}: Pick<TerminalHeaderProps, 'backgroundColors' | 'dripStyles'> & { isDark: boolean }) {
   if (backgroundColors <= 0) return null;
 
   return (
     <div
-      className="absolute inset-0 pointer-events-none"
+      className={isDark ? `${STOCK_MARBLE_CLASSES} dark:hidden` : STOCK_MARBLE_CLASSES}
       style={{
         background: `radial-gradient(circle at 10% 20%, rgba(255, 248, 245, ${0.7 * dripStyles.backgroundColorsScalar}) 0%, transparent 40%),
                      radial-gradient(circle at 90% 80%, rgba(248, 245, 255, ${0.6 * dripStyles.backgroundColorsScalar}) 0%, transparent 40%),
@@ -125,7 +151,8 @@ function BrandButton({ onCreateNewAgent }: Pick<TerminalHeaderProps, 'onCreateNe
 
 function SiteNavButtons({ clientSource }: Pick<TerminalHeaderProps, 'clientSource'>) {
   const navigate = useNavigate();
-  if (clientSource !== 'WEB') return null;
+  const roseDesktop = useRoseDesktop();
+  if (clientSource !== 'WEB' || roseDesktop) return null;
 
   return (
     <nav className="flex items-center gap-3 whitespace-nowrap">
@@ -168,16 +195,28 @@ function HeaderAuthAction({
   );
 }
 
+const STOCK_PILL_CLASSES =
+  'absolute top-4 left-1/2 -translate-x-1/2 z-50 flex items-center justify-between p-2 rounded-2xl border border-border/50 dark:border-navi-light-black/50 shadow-lg';
+
+/** Rose dark mode only; `!` beats the inline drip background/border/shadow. */
+const ROSE_DARK_PILL_CLASSES =
+  'dark:!border-white/[0.08] dark:!bg-[rgba(32,32,30,0.78)] dark:!shadow-[0_6px_20px_rgba(0,0,0,0.35)] dark:text-[#ececea]';
+
 /** Desktop (>= md): the original floating blur pill — brand + AttentionInbox bell. */
 function DesktopHeaderPill(props: TerminalHeaderProps) {
   const { onCreateNewAgent, onSelectAgent, onLoginClick, isSignedIn } = props;
   const { dripStyles, blur, backgroundColors, borderColor, shadowIntensity } = props;
+  const { isDark } = useRoseTheme();
   return (
     <header
-      className="absolute top-4 left-[calc(50%_-_var(--rose-apps-inset,0px)/2_+_var(--rose-apps-inset-left,0px)/2)] -translate-x-1/2 z-50 transition-[left] duration-[520ms] ease-[cubic-bezier(.22,1,.36,1)] flex items-center justify-between p-2 rounded-2xl border border-border/50 dark:border-navi-light-black/50 shadow-lg"
+      className={isDark ? `${STOCK_PILL_CLASSES} ${ROSE_DARK_PILL_CLASSES}` : STOCK_PILL_CLASSES}
       style={buildHeaderStyle({ dripStyles, blur, backgroundColors, borderColor, shadowIntensity })}
     >
-      <MarbleBackground backgroundColors={backgroundColors} dripStyles={dripStyles} />
+      <MarbleBackground
+        backgroundColors={backgroundColors}
+        dripStyles={dripStyles}
+        isDark={isDark}
+      />
       <BrandButton onCreateNewAgent={onCreateNewAgent} />
       <HeaderAuthAction
         isSignedIn={isSignedIn}
@@ -190,7 +229,7 @@ function DesktopHeaderPill(props: TerminalHeaderProps) {
 
 /**
  * Mobile (< md): full-width flush bar at y=0.
- * left = brand · center = Research · right = hamburger drawer (agents +
+ * left = brand · center = Research (stock only) · right = hamburger drawer (agents +
  * notifications + login/logout), driving all mobile navigation.
  */
 function MobileHeaderBar(props: TerminalHeaderProps) {
@@ -231,7 +270,59 @@ function MobileHeaderBar(props: TerminalHeaderProps) {
   );
 }
 
+/** Rose dark mode only for the mobile pill (light keeps its translucent white). */
+const ROSE_MOBILE_PILL_CLASSES =
+  'flex h-11 min-w-0 items-center gap-1 rounded-2xl border border-border/50 bg-white/85 pl-2 pr-0.5 shadow-sm backdrop-blur-md dark:border-white/[0.08] dark:bg-[rgba(32,32,30,0.78)] dark:text-[#ececea]';
+
+/**
+ * Rose Desktop mobile (< md): hamburger left · Rose pill (brand + bell) centered
+ * between · the four app icons right. The row itself is transparent and lets
+ * taps through between its controls.
+ */
+function RoseMobileHeaderBar(props: TerminalHeaderProps) {
+  const { onCreateNewAgent, onSelectAgent, onLoginClick, isSignedIn } = props;
+  return (
+    <header
+      data-testid="rose-mobile-header"
+      className="pointer-events-none fixed inset-x-0 top-0 z-50 flex h-[var(--mobile-terminal-header-height)] items-center gap-1 px-1.5 pt-[var(--safe-area-inset-top)]"
+    >
+      <div className="pointer-events-auto flex-none">
+        <MobileAgentDrawer
+          roseHeader
+          agents={props.agents}
+          isLoadingAgents={props.isLoadingAgents}
+          selectedAgentId={props.selectedAgentId}
+          onSelectAgent={onSelectAgent}
+          onCreateAgent={onCreateNewAgent}
+          onRefreshAgents={props.onRefreshAgents}
+          isSignedIn={isSignedIn}
+          onLoginClick={onLoginClick}
+          onLogout={props.onLogout}
+        />
+      </div>
+      <div className="flex min-w-0 flex-1 justify-center">
+        <div
+          data-testid="rose-mobile-pill"
+          className={`pointer-events-auto ${ROSE_MOBILE_PILL_CLASSES}`}
+        >
+          <BrandButton onCreateNewAgent={onCreateNewAgent} />
+          <HeaderAuthAction
+            isSignedIn={isSignedIn}
+            onLoginClick={onLoginClick}
+            onSelectAgent={onSelectAgent}
+          />
+        </div>
+      </div>
+      <div className="pointer-events-auto flex-none">
+        <RoseAppIcons placement="header" />
+      </div>
+    </header>
+  );
+}
+
 export function TerminalHeader(props: TerminalHeaderProps) {
   const isMobile = useIsMobile();
-  return isMobile ? <MobileHeaderBar {...props} /> : <DesktopHeaderPill {...props} />;
+  const roseDesktop = useRoseDesktop();
+  if (!isMobile) return <DesktopHeaderPill {...props} />;
+  return roseDesktop ? <RoseMobileHeaderBar {...props} /> : <MobileHeaderBar {...props} />;
 }

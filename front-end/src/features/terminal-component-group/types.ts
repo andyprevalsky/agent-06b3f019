@@ -123,8 +123,11 @@ export type WsMessage =
   | { type: 'exit'; code: number }
   | { type: 'error'; data: string };
 
-/** Visible lifecycle state for a ClaudeCodeChip. */
-export type ChipState = 'spinning_up' | 'live' | 'verifying' | 'completed' | 'failed';
+/**
+ * Visible lifecycle state for a ClaudeCodeChip. 'paused' comes only from a Rose
+ * Desktop `code_agent` snapshot (resumable session); the stock chip never derives it.
+ */
+export type ChipState = 'spinning_up' | 'live' | 'verifying' | 'completed' | 'failed' | 'paused';
 export type CodeProvider = 'claude' | 'codex';
 
 export interface ClaudeCodeChipProps {
@@ -133,6 +136,8 @@ export interface ClaudeCodeChipProps {
   codeProvider?: CodeProvider;
   /** Always show terminal regardless of state. */
   forceShow?: boolean;
+  /** The spawn tool call (finds rows written before a task id exists, e.g. a local-target failure). */
+  toolCallId?: string;
 }
 
 // ─── Completion Summary Card ──────────────────────────────────────────────

@@ -74,6 +74,8 @@ export interface PendingApproval {
   question: string;
   imageUrl: string | null;
   requestPaymentCard?: RequestPaymentCardPayload;
+  /** Raw `metadata.requestingAgent` of the requesting agent (parsed by ApprovalChip). */
+  requestingAgent?: unknown;
 }
 
 export interface PendingGate {
@@ -97,6 +99,8 @@ export interface TerminalAgentActions {
   handleLogout: () => Promise<void>;
   handleLoginClick: () => void;
   handleCreateNewAgent: () => void;
+  /** Rose Desktop project "+": the next goal creates the agent in that project. */
+  handleCreateNewAgentInProject: (project: { id: string }) => void;
   handleSubmitFeedback: (feedback: BlueprintFeedback) => Promise<void>;
   refreshAgentDetail: (agentId: string) => Promise<void>;
   cleanupAgentState: () => void;

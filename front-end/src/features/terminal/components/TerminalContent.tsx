@@ -16,12 +16,24 @@
  *   open-agent deep link           → force 'agents' even from browse/settings
  *   agents + inspectionContext     → compact read-only pill in global control rail
  *
- * PER-USER UI (features/user-ui; signed-in non-archive users):
+ * PER-USER UI (features/user-ui; Rose Desktop, signed-in non-archive users):
  *   none / safe mode → stock layout; published shell → UserUiShell replaces chrome
- *   background image/slot → layer BEHIND the app; app bg + grid/canvas fade to
- *     fadeAfterFirstMessage once the selected agent has a USER message
- * RIGHT APP BAR (RoseAppsProvider): Browser + Voice drawers; the main column
- *   re-centers via --rose-apps-inset.
+ *   whole-app theme, background + fade and slots are removed (UI ledger row 89):
+ *     the stock background, sidebar and query box always render
+ * ROSE DESKTOP APPS (RoseAppsProvider, flag on only): bare top-right icons
+ *   (Browser, Phone, Integrations, Dark mode) + the right-panel slot; panels
+ *   overlay the content (no right bar, no content inset). Flag off: no icons.
+ * APP VIEW (AppViewProvider): a code-agent chip's live preview card opens the
+ *   code session's preview full screen in place of the chat column (Rose
+ *   Desktop only; AgentChatArea). It holds no list and reads nothing itself.
+ * CODE AGENT VIEW (CodeAgentViewProvider, flag on only): a left-bar code-agent
+ *   row (or ?agent-id=<owner>&code-agent=<task id>) opens that Claude Code /
+ *   Codex session as its own conversation in the chat column; the sidebar marks
+ *   its row and AgentChatArea renders it. Flag off: never opens.
+ * THEME (RoseThemeProvider, Rose Desktop accounts only): light (default) <->
+ *   dark via useRoseTheme().toggle() — the top-right Dark mode icon calls it,
+ *   so RoseAppIcons renders inside the provider. Dark adds html.dark and the
+ *   calm dark background. Stock accounts and shared views never leave light.
  */
 
 import { useState, useMemo, lazy } from 'react';
@@ -29,10 +41,12 @@ import { useState, useMemo, lazy } from 'react';
 import {
   AppSidebar,
   AttentionRequestsProvider,
+  CodeAgentViewProvider,
   NetworkView,
-  RoseAppBar,
+  RoseAppIcons,
   RoseAppsProvider,
   SIDEBAR_WIDTH_COLLAPSED,
+  AppViewProvider,
   unansweredAgentIds,
   useAttentionRequests,
 } from '@/features/terminal-component-group';
@@ -41,14 +55,10 @@ import { IS_DEV_MODE } from '@/features/terminal-component-group/config';
 import { isAdminOperator } from '@/lib/adminAccounts';
 import { isRoseDesktopUser } from '@/lib/roseDesktop';
 import { RoseDesktopContext } from '@/hooks/roseDesktopContext';
+import { RoseThemeProvider } from '@/features/rose-theme';
 import { isBenchmarkSharedView } from '@/lib/benchmarkShare';
 import { isBenchmarkArchiveMode } from '@/lib/benchmarkArchive';
-import {
-  UserUiProvider,
-  UserUiShell,
-  UserUiSlot,
-  useUserUiOpaqueSurfaces,
-} from '@/features/user-ui';
+import { UserUiProvider, UserUiShell } from '@/features/user-ui';
 
 import { useTerminalAgents } from '../hooks/useTerminalAgents';
 import { useTerminalDerivedState, type TerminalLayoutProps } from './terminalLayoutState';
@@ -59,9 +69,9 @@ import { resolveInitialTerminalView } from '../hooks/resolveInitialTerminalView'
 import type { TerminalView } from '../types';
 import { BROWSER_REVIEW_TEST_PHONE } from '../config';
 
+import { BackgroundPattern } from './BackgroundPattern';
 import { InspectionAccountBadge } from './InspectionAccountBadge';
 import { TerminalHeader } from './TerminalHeader';
-import { TerminalBackdrop } from './TerminalBackdrop';
 import { MainContent } from './TerminalMainContent';
 import { TerminalModals } from './TerminalModals';
 
@@ -120,15 +130,26 @@ function TerminalLayout(props: TerminalLayoutProps) {
   const roseDesktop = isRoseDesktopAccount(props.agents);
   return (
     <RoseDesktopContext.Provider value={roseDesktop}>
-      <RoseAppsProvider
-        agents={props.agents.agents}
-        selectedAgentId={props.agents.selectedAgentId}
-        onSelectAgent={props.agents.handleSelectAgent}
-        publishLayout={roseDesktop}
-      >
-        <InteractiveTerminalLayout {...props} />
-        {roseDesktop && <RoseAppBar />}
-      </RoseAppsProvider>
+      <RoseThemeProvider userId={props.agents.user?.id ?? null}>
+        <RoseAppsProvider
+          agents={props.agents.agents}
+          selectedAgentId={props.agents.selectedAgentId}
+          onSelectAgent={props.agents.handleSelectAgent}
+          publishLayout={roseDesktop}
+          onLogout={() => void props.agents.handleLogout()}
+        >
+          <AppViewProvider userId={props.agents.user?.id ?? null}>
+            <CodeAgentViewProvider
+              enabled={roseDesktop}
+              selectedAgentId={props.agents.selectedAgentId}
+              onSelectAgent={props.agents.handleSelectAgent}
+            >
+              <InteractiveTerminalLayout {...props} />
+            </CodeAgentViewProvider>
+          </AppViewProvider>
+          {roseDesktop && <RoseAppIcons />}
+        </RoseAppsProvider>
+      </RoseThemeProvider>
     </RoseDesktopContext.Provider>
   );
 }
@@ -159,8 +180,7 @@ function InteractiveTerminalChrome(props: TerminalLayoutProps) {
         className="h-screen w-screen flex flex-col bg-background dark:bg-navi-black relative overflow-hidden"
         style={{ height: '100dvh' }}
       >
-        <TerminalBackdrop
-          hasUserMessage={derived.hasUserMessage}
+        <BackgroundPattern
           patternOffset={props.patternOffset}
           tileColors={props.tileColors}
           colorPalette={props.colorPalette}
@@ -287,14 +307,8 @@ function SidebarSection({
   showBenchmarks: boolean;
   showAdminHealth: boolean;
 }) {
-  const opaqueSurface = useUserUiOpaqueSurfaces();
   return (
     <AppSidebar
-      userUi={{
-        opaqueSurface,
-        headerSlot: <UserUiSlot name="sidebar.header" autoHeight className="px-3 pb-2" />,
-        menuSlot: <UserUiSlot name="menu" autoHeight className="px-3 py-2" />,
-      }}
       currentView={currentView}
       onViewChange={setCurrentView}
       showBrowse={showBrowse}
@@ -304,6 +318,10 @@ function SidebarSection({
       selectedAgentId={agents.selectedAgentId}
       onSelectAgent={agents.handleSelectAgent}
       onCreateAgent={agents.handleCreateNewAgent}
+      roseActions={{
+        onCreateAgentInProject: agents.handleCreateNewAgentInProject,
+        onNewAgentInBranch: agents.handleCreateNewAgentInBranch,
+      }}
       onRefreshAgents={agents.loadAgents}
       onRefreshAttention={onRefreshAttention}
       attentionAgentIds={attentionAgentIds}

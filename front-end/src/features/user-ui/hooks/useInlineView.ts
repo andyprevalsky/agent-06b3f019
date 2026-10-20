@@ -23,7 +23,7 @@ const refetchedForMissing = new Set<string>();
 function loadVersions(): Promise<Map<string, UserUiManifest>> {
   if (versionCache === null) {
     versionCache = fetchUserUiVersions()
-      .then((versions) => new Map(versions.map((version) => [version.id, version.manifest])))
+      .then((versions) => new Map(versions.map((version) => [version.versionId, version.manifest])))
       .catch((error: unknown) => {
         versionCache = null;
         throw error;

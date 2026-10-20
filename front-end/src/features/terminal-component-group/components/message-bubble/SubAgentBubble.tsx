@@ -24,7 +24,7 @@ import SubAgentTree from '../SubAgentTree';
 import SubAgentToolBubble from '../SubAgentToolBubble';
 
 /** Parent for_each / spawn tree that lists the currently viewed child. */
-export function isParentFanoutTree(args: {
+function isParentFanoutTree(args: {
   selectedAgentId: string | null;
   busId: string | undefined;
   subAgentIds: string[] | undefined;

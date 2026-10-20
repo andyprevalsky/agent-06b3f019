@@ -10,6 +10,14 @@
  *   v
  * [RENDER_ACTIVE_THEME_FLOWS] --> draws one SVG tree with theme-aware gradients
  *
+ * THEME:
+ * [STOCK]  --> opacity prop absent: no group opacity / canvas alpha (unchanged)
+ * [DIMMED] --> opacity prop set (Rose dark mode): SVG group opacity attribute,
+ *              canvas globalAlpha for the mobile renderer
+ * A theme switch repaints in the same commit: the SVG attribute updates with
+ * the render and the mobile canvas paints one frame synchronously in a layout
+ * effect (after html.dark has flipped), not on its next animation tick.
+ *
  * MOTION:
  * [FLOWING] --> SVG animateTransform moves each pill along a grid line
  *   |
@@ -26,7 +34,7 @@
  * WebKit's SVG animation bottleneck.
  */
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef } from 'react';
 
 const GRID_SIZE = 143;
 const HORIZONTAL_PILL_HEIGHT = 5;
@@ -45,11 +53,15 @@ interface GridEnergyPillsProps {
   idPrefix: string;
   patternOffset: { x: number; y: number };
   maskId?: string;
+  /** Dims every pill streak (Rose dark mode); omit for the stock layer. */
+  opacity?: number;
 }
 
 interface MobileGridEnergyPillsCanvasProps {
   patternOffset: { x: number; y: number };
   selectedAgentId: string | null;
+  /** Dims every pill streak (Rose dark mode); omit for the stock layer. */
+  opacity?: number;
 }
 
 type Flow = {
@@ -118,7 +130,12 @@ const gridLinesForExtent = (offset: number, extent: number): number[] => {
   return Array.from({ length: lineCount }, (_, index) => firstLine + index * GRID_SIZE);
 };
 
-export function GridEnergyPills({ idPrefix, patternOffset, maskId }: GridEnergyPillsProps) {
+export function GridEnergyPills({
+  idPrefix,
+  patternOffset,
+  maskId,
+  opacity,
+}: GridEnergyPillsProps) {
   const { width, height } = viewportSize();
   const isMobileViewport = width <= MOBILE_VIEWPORT_MAX_WIDTH;
   const flows = isMobileViewport ? MOBILE_FLOWS : FLOWS;
@@ -131,7 +148,12 @@ export function GridEnergyPills({ idPrefix, patternOffset, maskId }: GridEnergyP
   const maskProps = maskId === undefined ? {} : { mask: `url(#${maskId})` };
 
   return (
-    <g className="grid-energy-pill-flow" data-flow-count={flows.length} {...maskProps}>
+    <g
+      className="grid-energy-pill-flow"
+      data-flow-count={flows.length}
+      {...maskProps}
+      opacity={opacity}
+    >
       <style>
         {`
           @media (prefers-reduced-motion: reduce) {
@@ -228,10 +250,20 @@ export function GridEnergyPills({ idPrefix, patternOffset, maskId }: GridEnergyP
 export function MobileGridEnergyPillsCanvas({
   patternOffset,
   selectedAgentId,
+  opacity,
 }: MobileGridEnergyPillsCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const patternOffsetRef = useRef(patternOffset);
   const selectedAgentIdRef = useRef(selectedAgentId);
+  const opacityRef = useRef(opacity);
+  const paintRef = useRef<((now: number) => void) | null>(null);
+
+  // Theme switch: repaint now, on the frame html.dark flips (no-op on mount).
+  useLayoutEffect(() => {
+    if (opacityRef.current === opacity) return;
+    opacityRef.current = opacity;
+    paintRef.current?.(performance.now());
+  }, [opacity]);
 
   useEffect(() => {
     patternOffsetRef.current = patternOffset;
@@ -259,12 +291,13 @@ export function MobileGridEnergyPillsCanvas({
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     };
 
-    const draw = (now: number) => {
+    const paint = (now: number) => {
       const width = window.innerWidth;
       const height = window.innerHeight;
       ctx.clearRect(0, 0, width, height);
       ctx.save();
       applyMobileEnergyMask(ctx, width, height, selectedAgentIdRef.current);
+      if (opacityRef.current !== undefined) ctx.globalAlpha = opacityRef.current;
 
       const darkMode = document.documentElement.classList.contains('dark');
       const softStop = darkMode ? 0.42 : 0.34;
@@ -297,14 +330,20 @@ export function MobileGridEnergyPillsCanvas({
       }
 
       ctx.restore();
+    };
+
+    const draw = (now: number) => {
+      paint(now);
       animationFrame = window.requestAnimationFrame(draw);
     };
 
     resize();
     window.addEventListener('resize', resize);
+    paintRef.current = paint;
     animationFrame = window.requestAnimationFrame(draw);
 
     return () => {
+      paintRef.current = null;
       window.cancelAnimationFrame(animationFrame);
       window.removeEventListener('resize', resize);
     };

@@ -1,6 +1,6 @@
 /**
  * useToolbarReveal — owns the query-box toolbar reveal flags (see the state
- * machine in ToolbarNub.tsx): open = hovered || focused || pinned.
+ * machine in ToolbarNub.tsx, NubTab): open = hovered || focused || pinned.
  */
 
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
@@ -10,7 +10,7 @@ export const TOOLBAR_LEAVE_GRACE_MS = 150;
 export interface ToolbarReveal {
   open: boolean;
   toolbarId: string;
-  nubRef: React.RefObject<HTMLButtonElement | null>;
+  nubRef: React.RefObject<HTMLDivElement | null>;
   toolbarRef: React.RefObject<HTMLDivElement | null>;
   regionHandlers: {
     onPointerEnter: (e: React.PointerEvent) => void;
@@ -33,7 +33,7 @@ export function useToolbarReveal(): ToolbarReveal {
   const [focused, setFocused] = useState(false);
   const [pinned, setPinned] = useState(false);
   const toolbarId = useId();
-  const nubRef = useRef<HTMLButtonElement | null>(null);
+  const nubRef = useRef<HTMLDivElement | null>(null);
   const toolbarRef = useRef<HTMLDivElement | null>(null);
   const leaveTimer = useRef<number | undefined>(undefined);
   const lastPointerType = useRef<string>('');
@@ -82,7 +82,7 @@ export function useToolbarReveal(): ToolbarReveal {
   }, []);
 
   const onNubClick = useCallback(() => {
-    // Mouse hover already opened it; only taps and keyboard activation pin.
+    // Mouse hover already opened it; only taps (and keyboard-synthesized clicks) pin.
     if (lastPointerType.current === 'mouse' || lastPointerType.current === 'pen') return;
     setPinned((prev) => !prev);
   }, []);

@@ -1,9 +1,12 @@
 /**
- * STATE MACHINE: RoseAppsProvider (right app bar + app drawers)
+ * STATE MACHINE: RoseAppsProvider (top-right app icons + the right-panel slot)
  *
- * OPEN APP:
+ * OPEN APP (one at a time — opening any app or Settings closes the other):
  *   [CLOSED] --click Browser icon | openAgentBrowser(agent, task)--> [BROWSER]
- *   [BROWSER] --click its icon | close button | Escape--> [CLOSED]
+ *   [CLOSED] --Phone icon--> [PHONE]   --Integrations icon--> [INTEGRATIONS]
+ *   [CLOSED] --left bar Feedback / Benchmarks / account row--> [FEEDBACK|BENCHMARKS|SETTINGS]
+ *   [ANY] --click its trigger again | close button | Escape--> [CLOSED]
+ *   [ANY] --another trigger--> that app
  *
  * BROWSER TAB (only meaningful while [BROWSER]):
  *   [ROOT] --click agent tab | openAgentBrowser--> [AGENT(id)]
@@ -18,16 +21,21 @@
  *   unregister after switching agents --> tab kept (session still running)
  *   agent leaves the active set (completed/failed/archived) --> tab removed
  *
+ * RELOAD: the drawer's Reload button bumps browserReloadKey; the focused
+ * BrowserStatusBar keys its portaled live view on it, so the viewer remounts.
+ *
  * The drawer body for an agent tab is a DOM slot. The focused task's
  * BrowserStatusBar portals its live view into it, so take/hand-back control,
  * session binding and progress state stay owned by that status bar (React
  * context flows through the portal).
  *
- * LAYOUT: with `publishLayout` (the real terminal layout), publishes
- * --rose-apps-inset on <html> (px reserved on the right on md+: app bar + open
- * drawer) so the chat column and header re-center in the remaining width.
- * Drawers portal to <body>; they mount on first open (lazy) and stay mounted
- * afterwards so they can slide out.
+ * LAYOUT: with `publishLayout` (the real terminal layout, Rose Desktop only)
+ * publishes on <html>: --rose-apps-nav-visibility: hidden (the website's
+ * Research/Careers/Download links give way to the app icons) and
+ * --rose-app-icons-inset (px the top-right icon row occupies, so the account
+ * rail sits left of it). Panels overlay the content: there is no right bar and
+ * no content inset (UI ledger row 66). Panels portal to <body>; they mount on
+ * first open (lazy) and stay mounted afterwards so they can slide out.
  */
 
 import {
@@ -40,16 +48,9 @@ import {
   type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
-import { useIsMobile } from '@/hooks/use-mobile';
 import type { Agent } from '../../hooks';
-import {
-  APP_BAR_WIDTH,
-  DRAWER_GAP,
-  defaultDrawerWidth,
-  clampDrawerWidth,
-  DRAWER_EASE,
-  DRAWER_DURATION_MS,
-} from './roseAppsLayout';
+import { appIconsInset, clampDrawerWidth, defaultDrawerWidth } from './roseAppsLayout';
+import { ROSE_APP_ICON_COUNT } from './roseAppCatalog';
 import { RoseAppDrawers } from './RoseAppDrawers';
 import {
   RoseAppsContext,
@@ -65,37 +66,24 @@ interface ProviderProps {
   agents?: Agent[];
   selectedAgentId?: string | null;
   onSelectAgent?: (agentId: string) => void;
-  /** Publish --rose-apps-inset on <html> (only the app's terminal layout does). */
+  /** Publish the layout CSS variables on <html> (only the app's terminal layout does). */
   publishLayout?: boolean;
+  /** Sign out, offered at the bottom of the Settings panel. */
+  onLogout?: () => void;
 }
 
-/** Publish the right inset as CSS vars on <html> while mounted. */
-function usePublishedInset(
-  enabled: boolean,
-  inset: number,
-  insetLeft: number,
-  isResizing: boolean,
-) {
+/** Publish the Rose Desktop layout variables on <html> while mounted. */
+function usePublishedLayout(enabled: boolean) {
   useLayoutEffect(() => {
     if (!enabled) return undefined;
     const root = document.documentElement.style;
-    root.setProperty('--rose-apps-inset', `${inset}px`);
-    // While a drawer is open the column also clears the collapsed left rail,
-    // so the narrower centered column never slides under it.
-    root.setProperty('--rose-apps-inset-left', `${insetLeft}px`);
-    // The top-right nav links would collide with the re-centered header pill.
-    root.setProperty('--rose-apps-nav-visibility', insetLeft > 0 ? 'hidden' : 'visible');
-    root.setProperty(
-      '--rose-apps-inset-transition',
-      isResizing ? 'none' : `padding ${DRAWER_DURATION_MS}ms ${DRAWER_EASE}`,
-    );
+    root.setProperty('--rose-apps-nav-visibility', 'hidden');
+    root.setProperty('--rose-app-icons-inset', `${appIconsInset(ROSE_APP_ICON_COUNT)}px`);
     return () => {
-      root.removeProperty('--rose-apps-inset');
-      root.removeProperty('--rose-apps-inset-left');
       root.removeProperty('--rose-apps-nav-visibility');
-      root.removeProperty('--rose-apps-inset-transition');
+      root.removeProperty('--rose-app-icons-inset');
     };
-  }, [enabled, inset, insetLeft, isResizing]);
+  }, [enabled]);
 }
 
 function useAgentTabs(agents: Agent[], selectedAgentId: string | null) {
@@ -108,7 +96,10 @@ function useAgentTabs(agents: Agent[], selectedAgentId: string | null) {
       const existing = prev.find((t) => t.agentId === tab.agentId);
       if (existing === undefined) return [...prev, tab];
       // Another browser of the same agent owns the tab; keep the focused task.
-      if (existing.taskId !== tab.taskId || existing.live === tab.live) return prev;
+      if (existing.taskId !== tab.taskId) return prev;
+      if (existing.live === tab.live && (existing.pageUrl ?? null) === (tab.pageUrl ?? null)) {
+        return prev;
+      }
       return prev.map((t) => (t.agentId === tab.agentId ? tab : t));
     });
   }, []);
@@ -160,17 +151,19 @@ export function RoseAppsProvider({
   selectedAgentId = null,
   onSelectAgent,
   publishLayout = false,
+  onLogout,
 }: ProviderProps) {
   const [openApp, setOpenApp] = useState<RoseApp | null>(null);
   const [browserTabAgentId, setBrowserTabAgentId] = useState<string | null>(null);
   const [slot, setSlot] = useState<HTMLElement | null>(null);
   const [isResizing, setIsResizing] = useState(false);
+  const [browserReloadKey, setBrowserReloadKey] = useState(0);
+  const reloadBrowser = useCallback(() => setBrowserReloadKey((k) => k + 1), []);
   const { drawerWidth, setDrawerWidth } = useDrawerWidthState();
   const { tabs, registerAgentBrowser, unregisterAgentBrowser, focusTask } = useAgentTabs(
     agents,
     selectedAgentId,
   );
-  const isMobile = useIsMobile();
 
   // Selecting an agent in the agent list switches to its tab. Its status bar
   // may register after the selection, so a pending switch completes on register.
@@ -228,6 +221,8 @@ export function RoseAppsProvider({
     [onSelectAgent, selectedAgentId],
   );
 
+  const openAgent = useCallback((agentId: string) => onSelectAgent?.(agentId), [onSelectAgent]);
+
   useEffect(() => {
     if (openApp === null) return undefined;
     const onKey = (e: KeyboardEvent) => {
@@ -256,10 +251,14 @@ export function RoseAppsProvider({
       drawerWidth,
       isResizing,
       slot,
+      browserReloadKey,
+      reloadBrowser,
       toggleApp,
       closeApp,
       openAgentBrowser,
       selectBrowserTab,
+      openAgent,
+      onLogout,
       setSlot,
       setDrawerWidth,
       setIsResizing,
@@ -276,10 +275,14 @@ export function RoseAppsProvider({
       drawerWidth,
       isResizing,
       slot,
+      browserReloadKey,
+      reloadBrowser,
       toggleApp,
       closeApp,
       openAgentBrowser,
       selectBrowserTab,
+      openAgent,
+      onLogout,
       setDrawerWidth,
       registerAndSwitch,
       unregisterAgentBrowser,
@@ -287,11 +290,7 @@ export function RoseAppsProvider({
     ],
   );
 
-  const inset = isMobile
-    ? 0
-    : APP_BAR_WIDTH + (openApp !== null ? drawerWidth + DRAWER_GAP * 2 : 0);
-  const insetLeft = !isMobile && openApp !== null ? APP_BAR_WIDTH : 0;
-  usePublishedInset(publishLayout, inset, insetLeft, isResizing);
+  usePublishedLayout(publishLayout);
 
   return (
     <RoseAppsContext.Provider value={value}>

@@ -4,7 +4,7 @@
  * heavy child mocks the other chip components require.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { screen, fireEvent } from '@testing-library/react';
+import { screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './test-wrapper';
 import { FeedbackBanner } from '@/features/terminal-component-group/components/FeedbackBanner';
@@ -43,15 +43,15 @@ describe('FeedbackBanner', () => {
     expect(screen.getByText('Submit')).toBeInTheDocument();
   });
 
-  it.skip('Cancel resets selected rating and collapses panel', async () => {
+  it('Cancel resets selected rating and collapses panel', async () => {
     const user = userEvent.setup();
     renderWithProviders(<FeedbackBanner onSubmit={vi.fn()} />);
     const stars = screen.getAllByRole('button').filter((b) => b.querySelector('.lucide-star'));
     await user.click(stars[1]);
     expect(screen.getByText('Submit')).toBeInTheDocument();
     await user.click(screen.getByText('Cancel'));
-    // Panel collapsed → Submit button gone
-    expect(screen.queryByText('Submit')).not.toBeInTheDocument();
+    // Panel collapses through framer-motion's exit animation; wait for it to unmount.
+    await waitFor(() => expect(screen.queryByText('Submit')).not.toBeInTheDocument());
   });
 
   it('Submit: calls onSubmit with rating and shows thank-you state on success', async () => {

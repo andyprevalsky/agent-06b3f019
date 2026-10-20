@@ -6,7 +6,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { renderWithProviders } from './test-wrapper';
 import AppSidebar from '@/features/terminal-component-group/components/AppSidebar';
 import {
   SIDEBAR_COLLAPSE_SNAP_WIDTH,
@@ -20,6 +19,7 @@ import {
   dragHandleTo,
   makeAgent,
   mockSession,
+  renderStockSidebar,
   sidebarWidth,
 } from './app-sidebar.fixtures';
 
@@ -35,12 +35,12 @@ describe('AppSidebar', () => {
   });
 
   it('hides the Benchmarks nav item unless showBenchmarks is set (team gate)', () => {
-    renderWithProviders(<AppSidebar {...defaultProps()} />);
+    renderStockSidebar(<AppSidebar {...defaultProps()} />);
     expect(screen.queryByLabelText('Benchmarks')).not.toBeInTheDocument();
   });
 
   it('shows Benchmarks between Feedback and Integrations for the team', async () => {
-    renderWithProviders(<AppSidebar {...defaultProps({ showBenchmarks: true })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ showBenchmarks: true })} />);
     expect(screen.getByLabelText('Benchmarks')).toBeInTheDocument();
     const labels = ['Feedback', 'Benchmarks', 'Integrations'].map(
       (text) => screen.getByText(text).getBoundingClientRect,
@@ -50,7 +50,7 @@ describe('AppSidebar', () => {
 
   it('renders a minimized icon rail by default with a drag handle', () => {
     localStorage.removeItem(SIDEBAR_WIDTH_STORAGE_KEY);
-    renderWithProviders(<AppSidebar {...defaultProps()} />);
+    renderStockSidebar(<AppSidebar {...defaultProps()} />);
     // The one-click chevron is gone; width is driven by the drag handle.
     expect(screen.queryByLabelText('Expand sidebar')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Collapse sidebar')).not.toBeInTheDocument();
@@ -63,7 +63,7 @@ describe('AppSidebar', () => {
   });
 
   it('renders New Agent below visible desktop headroom, above the flat Search row', () => {
-    const { container } = renderWithProviders(<AppSidebar {...defaultProps()} />);
+    const { container } = renderStockSidebar(<AppSidebar {...defaultProps()} />);
 
     const create = screen.getByRole('button', { name: 'New Agent' });
     const search = screen.getByRole('searchbox', { name: 'Search agents' });
@@ -81,14 +81,14 @@ describe('AppSidebar', () => {
     'restores an explicitly saved width of %i',
     (width) => {
       localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(width));
-      renderWithProviders(<AppSidebar {...defaultProps()} />);
+      renderStockSidebar(<AppSidebar {...defaultProps()} />);
       expect(sidebarWidth()).toBe(width);
     },
   );
 
   it.each(['', 'invalid', 'NaN'])('minimizes when the saved width is invalid (%s)', (stored) => {
     localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, stored);
-    renderWithProviders(<AppSidebar {...defaultProps()} />);
+    renderStockSidebar(<AppSidebar {...defaultProps()} />);
     expect(sidebarWidth()).toBe(SIDEBAR_WIDTH_COLLAPSED);
   });
 
@@ -101,7 +101,7 @@ describe('AppSidebar', () => {
     vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
       throw new Error('Storage unavailable');
     });
-    renderWithProviders(<AppSidebar {...defaultProps()} />);
+    renderStockSidebar(<AppSidebar {...defaultProps()} />);
     expect(sidebarWidth()).toBe(SIDEBAR_WIDTH_COLLAPSED);
 
     dragHandleTo(360);
@@ -111,18 +111,18 @@ describe('AppSidebar', () => {
 
   it('clamps a stored width above the max and snaps a tiny one to the rail', () => {
     localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, '9999');
-    const { unmount } = renderWithProviders(<AppSidebar {...defaultProps()} />);
+    const { unmount } = renderStockSidebar(<AppSidebar {...defaultProps()} />);
     expect(sidebarWidth()).toBe(SIDEBAR_WIDTH_MAX);
     unmount();
 
     localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, '40');
-    renderWithProviders(<AppSidebar {...defaultProps()} />);
+    renderStockSidebar(<AppSidebar {...defaultProps()} />);
     expect(sidebarWidth()).toBe(SIDEBAR_WIDTH_COLLAPSED);
   });
 
   it('expands the minimized rail by dragging and restores that preference on reload', async () => {
     localStorage.removeItem(SIDEBAR_WIDTH_STORAGE_KEY);
-    const { unmount } = renderWithProviders(<AppSidebar {...defaultProps()} />);
+    const { unmount } = renderStockSidebar(<AppSidebar {...defaultProps()} />);
     expect(sidebarWidth()).toBe(SIDEBAR_WIDTH_COLLAPSED);
 
     dragHandleTo(360);
@@ -130,12 +130,12 @@ describe('AppSidebar', () => {
     await waitFor(() => expect(sidebarWidth()).toBe(360));
     expect(localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY)).toBe('360');
     unmount();
-    renderWithProviders(<AppSidebar {...defaultProps()} />);
+    renderStockSidebar(<AppSidebar {...defaultProps()} />);
     expect(sidebarWidth()).toBe(360);
   });
 
   it('collapses to the rail when dragged below the snap threshold', async () => {
-    renderWithProviders(<AppSidebar {...defaultProps({ agents: [makeAgent()] })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents: [makeAgent()] })} />);
 
     dragHandleTo(20);
 
@@ -145,7 +145,7 @@ describe('AppSidebar', () => {
   });
 
   it('uses an agent icon instead of animated letters in the collapsed rail', async () => {
-    const { container } = renderWithProviders(
+    const { container } = renderStockSidebar(
       <AppSidebar
         {...defaultProps({
           agents: [makeAgent({ agent_id: 'active', goal: 'Active agent', status: 'ACTIVE' })],
@@ -161,7 +161,7 @@ describe('AppSidebar', () => {
   });
 
   it('renders the expanded nav labels', () => {
-    renderWithProviders(<AppSidebar {...defaultProps()} />);
+    renderStockSidebar(<AppSidebar {...defaultProps()} />);
     expect(screen.getByText('New Agent')).toBeInTheDocument();
     expect(screen.getByText('Feedback')).toBeInTheDocument();
     expect(screen.queryByText('Browse')).not.toBeInTheDocument();
@@ -174,18 +174,18 @@ describe('AppSidebar', () => {
   it('calls onCreateAgent when the New Agent button is clicked', async () => {
     const u = userEvent.setup();
     const onCreateAgent = vi.fn();
-    renderWithProviders(<AppSidebar {...defaultProps({ onCreateAgent })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ onCreateAgent })} />);
     await u.click(screen.getByText('New Agent'));
     expect(onCreateAgent).toHaveBeenCalledTimes(1);
   });
 
   it('renders "No agents yet" placeholder when expanded and empty', async () => {
-    renderWithProviders(<AppSidebar {...defaultProps({ agents: [] })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents: [] })} />);
     expect(screen.getByText('No agents yet')).toBeInTheDocument();
   });
 
   it('renders loading spinner when isLoadingAgents and no agents', () => {
-    renderWithProviders(<AppSidebar {...defaultProps({ isLoadingAgents: true, agents: [] })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ isLoadingAgents: true, agents: [] })} />);
     expect(document.querySelector('.animate-spin')).not.toBeNull();
   });
 
@@ -196,7 +196,7 @@ describe('AppSidebar', () => {
       makeAgent({ agent_id: 'a1', goal: 'First goal' }),
       makeAgent({ agent_id: 'a2', goal: 'Second goal' }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents, onSelectAgent })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents, onSelectAgent })} />);
 
     const first = await screen.findByText('First goal');
     await u.click(first);
@@ -228,7 +228,7 @@ describe('AppSidebar', () => {
         created_at: '2023-01-01T00:00:00Z',
       }),
     ];
-    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     const nodes = await screen.findAllByRole('heading', { level: 3 });
     const texts = nodes.map((n) => n.textContent);
@@ -241,7 +241,7 @@ describe('AppSidebar', () => {
     const u = userEvent.setup();
     const onViewChange = vi.fn();
     const onSelectAgent = vi.fn();
-    renderWithProviders(<AppSidebar {...defaultProps({ onViewChange, onSelectAgent })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ onViewChange, onSelectAgent })} />);
 
     await u.click(screen.getByText('Integrations'));
     expect(onViewChange).toHaveBeenCalledWith('integrations');
@@ -258,7 +258,7 @@ describe('AppSidebar', () => {
     const u = userEvent.setup();
     const onViewChange = vi.fn();
     const onSelectAgent = vi.fn();
-    renderWithProviders(
+    renderStockSidebar(
       <AppSidebar {...defaultProps({ onViewChange, onSelectAgent, showBrowse: true })} />,
     );
 
@@ -272,7 +272,7 @@ describe('AppSidebar', () => {
     const u = userEvent.setup();
     const onViewChange = vi.fn();
     const onSelectAgent = vi.fn();
-    const { rerender } = renderWithProviders(
+    const { rerender } = renderStockSidebar(
       <AppSidebar {...defaultProps({ onViewChange, onSelectAgent, showAdminHealth: true })} />,
     );
 
@@ -293,7 +293,7 @@ describe('AppSidebar', () => {
   it('renders Login when user is null, calls onLoginClick on click', async () => {
     const u = userEvent.setup();
     const onLoginClick = vi.fn();
-    renderWithProviders(<AppSidebar {...defaultProps({ user: null, onLoginClick })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ user: null, onLoginClick })} />);
     expect(screen.getByText('Login')).toBeInTheDocument();
     expect(screen.queryByText('Logout')).not.toBeInTheDocument();
     await u.click(screen.getByText('Login'));
@@ -303,14 +303,14 @@ describe('AppSidebar', () => {
   it('calls onLogout when Logout button clicked', async () => {
     const u = userEvent.setup();
     const onLogout = vi.fn();
-    renderWithProviders(<AppSidebar {...defaultProps({ onLogout })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ onLogout })} />);
     await u.click(screen.getByText('Logout'));
     expect(onLogout).toHaveBeenCalled();
   });
 
   it('opens the Feedback popover and closes with Escape', async () => {
     const u = userEvent.setup();
-    renderWithProviders(<AppSidebar {...defaultProps()} />);
+    renderStockSidebar(<AppSidebar {...defaultProps()} />);
     await u.click(screen.getByText('Feedback'));
 
     const input = await screen.findByPlaceholderText('Share your thoughts...');
@@ -326,7 +326,7 @@ describe('AppSidebar', () => {
   });
 
   it('marks current view as active', async () => {
-    renderWithProviders(<AppSidebar {...defaultProps({ currentView: 'settings' })} />);
+    renderStockSidebar(<AppSidebar {...defaultProps({ currentView: 'settings' })} />);
     const settingsButton = screen.getByText('Settings').closest('button')!;
     expect(settingsButton.className).toMatch(/font-medium/);
   });

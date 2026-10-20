@@ -78,6 +78,12 @@ export const ROSE_MODEL_IDS = {
   ultra: 'rose-labs/rose-1-ultra',
 } as const;
 
+/** Rose Desktop model selector: only the short pool name (UI ledger row 77). */
+export const ROSE_MODEL_SHORT_NAMES: Record<string, string> = {
+  [ROSE_MODEL_IDS.flash]: 'rose-flash',
+  [ROSE_MODEL_IDS.ultra]: 'rose-ultra',
+};
+
 /** Static descriptions for the built-in Rose models in the model picker. */
 export const ROSE_MODEL_DESCRIPTIONS: Record<string, string> = {
   [ROSE_MODEL_IDS.flash]: 'Cerebras Qwen 3.8 27B for execute and browser; planner stays Ultra',

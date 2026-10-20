@@ -1,35 +1,47 @@
 /**
- * Layout constants + pure helpers for the right app bar and its drawers.
- * Kept pure so resize clamping is unit-testable without a DOM.
+ * Layout constants + pure helpers for the Rose Desktop app icons and panels
+ * (UI ledger rows 22/58/66/67). There is no right bar: the app icons sit bare
+ * in the window's top-right corner and float over full-height drawers that
+ * open flush against the right edge. Kept pure so width clamping is testable.
  */
 
-/** Right app bar width; mirrors the collapsed left sidebar rail. */
-export const APP_BAR_WIDTH = 64;
-/** Gap between the drawer and the app bar / viewport edges. */
-export const DRAWER_GAP = 12;
-/** Narrowest the drawer may be dragged. */
+/** Rose left bar resting width (the only bar). */
+export const LEFT_BAR_WIDTH = 64;
+/** Drawers are full height (row 67): the icon row floats over their top-right corner. */
+export const APP_PANEL_TOP = 0;
+/** The phone floats this far from the window's right edge. */
+export const PHONE_EDGE_GAP = 24;
+/** Icon hit target in the top-right row. */
+export const APP_ICON_SIZE = 34;
+export const APP_ICON_GAP = 4;
+export const APP_ICON_EDGE = 16;
+/** Narrowest a panel may be dragged. */
 export const DRAWER_MIN_WIDTH = 420;
-/** Width always left for the chat column beside the drawer. */
+/** Default panel width (mock `.rp`). */
+export const DRAWER_DEFAULT_WIDTH = 560;
+/** Width always left for the chat column beside a panel. */
 export const CHAT_MIN_WIDTH = 320;
 
 export const DRAWER_EASE = 'cubic-bezier(.22,1,.36,1)';
 export const DRAWER_DURATION_MS = 520;
 
-/** Default drawer width: half the viewport. */
-export function defaultDrawerWidth(viewportWidth: number): number {
-  return Math.round(viewportWidth * 0.5);
+/** Width of the top-right icon row incl. its edge margin (other top-right UI sits left of it). */
+export function appIconsInset(count: number): number {
+  return count * APP_ICON_SIZE + Math.max(0, count - 1) * APP_ICON_GAP + APP_ICON_EDGE;
 }
 
-/** Clamp a requested drawer width to [min, viewport - app bar - chat room]. */
+/** Default panel width: 560px, never wider than the space right of the left bar. */
+export function defaultDrawerWidth(viewportWidth: number): number {
+  return Math.min(DRAWER_DEFAULT_WIDTH, viewportWidth - LEFT_BAR_WIDTH);
+}
+
+/** Clamp a requested panel width to [min, viewport - left bar - chat room]. */
 export function clampDrawerWidth(width: number, viewportWidth: number): number {
-  const max = Math.max(
-    DRAWER_MIN_WIDTH,
-    viewportWidth - APP_BAR_WIDTH - DRAWER_GAP * 2 - CHAT_MIN_WIDTH,
-  );
+  const max = Math.max(DRAWER_MIN_WIDTH, viewportWidth - LEFT_BAR_WIDTH - CHAT_MIN_WIDTH);
   return Math.round(Math.min(max, Math.max(DRAWER_MIN_WIDTH, width)));
 }
 
-/** Drawer width for a drag handle at clientX (drawer's left edge follows the pointer). */
+/** Panel width for a drag handle at clientX (the panel's left edge follows the pointer). */
 export function drawerWidthFromPointer(clientX: number, viewportWidth: number): number {
-  return clampDrawerWidth(viewportWidth - APP_BAR_WIDTH - DRAWER_GAP - clientX, viewportWidth);
+  return clampDrawerWidth(viewportWidth - clientX, viewportWidth);
 }

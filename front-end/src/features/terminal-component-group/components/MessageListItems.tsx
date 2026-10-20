@@ -16,10 +16,22 @@
  *
  * With a web-search grouping, a turn's searches render as one row at the first
  * search's position (WebSearchGroupItem); the other searches render nothing.
+ *
+ * ROSE DESKTOP (flag on; stock rendering otherwise):
+ *   send_message_to_user from a code agent (requestingAgent) → "<agent> · via
+ *     send_message_to_user" above it; its inlineView {view, versionId} renders as above
+ *   display media rows (ASSISTANT + file_pointer + display.kind 'media') → consecutive
+ *     rows of one requester form ONE DisplayMediaGroup at the first row (gallery +
+ *     sandboxed HTML frames); the other rows render nothing
+ *   pinned question (display.placement 'pinned') → not inline; PinnedQuestionMount shows it
+ *   metadata.a2a (USER or TOOL agent_message row) → AgentToAgentRow, never a user bubble
  */
+import { useEffect, useMemo } from 'react';
 import { InlineUserView, parseInlineViewMetadata } from '@/features/user-ui';
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 
 import MessageBubble from './MessageBubble';
+import { dedupeCodeDisplays } from '../hooks/codeDisplayIdentity';
 import type { Message } from '../hooks';
 import type { ExploreStep, FeedbackData, WaitForCheck } from '../types';
 import {
@@ -27,6 +39,18 @@ import {
   type SubAgentStreamingMetrics,
 } from './useMessageFiltering';
 import { WebSearchGroupItem } from './WebSearchGroupItem';
+import {
+  isSendMessageToUserRow,
+  messageRequester,
+  parseAgentToAgentMessage,
+  type AgentToAgentMessage,
+  type DisplayMediaItem,
+  parsePinnedQuestion,
+} from '../hooks/codeAgentContract';
+import { AgentToAgentRow } from './AgentToAgentRow';
+import { CodeAgentAttribution } from './CodeAgentAttribution';
+import { DisplayMediaGroup } from './inline-media/DisplayMediaGroup';
+import { EMPTY_DISPLAY_MEDIA_GROUPING, groupDisplayMedia } from './inline-media/displayMediaGroups';
 import { EMPTY_WEB_SEARCH_GROUPING, type WebSearchTurnGrouping } from './webSearchTurnGroups';
 
 interface MessageListItemsProps {
@@ -86,7 +110,65 @@ function getMessageRenderKey(message: Message): string {
   return message.message_id;
 }
 
-function MessageListItem({
+/** One display call's media at its first row; completes the typing chain like other bubbles. */
+function DisplayMediaListItem({
+  message,
+  items,
+  agentId,
+  shouldType,
+  onTypingComplete,
+}: {
+  message: Message;
+  items: DisplayMediaItem[];
+  agentId?: string;
+  shouldType: boolean;
+  onTypingComplete: () => void;
+}) {
+  useEffect(() => {
+    if (shouldType) onTypingComplete();
+  }, [shouldType, onTypingComplete]);
+  return (
+    <div
+      data-message-id={message.message_id}
+      data-message-role={message.role}
+      data-message-kind="display-media"
+      className="min-w-0 max-w-full"
+    >
+      <DisplayMediaGroup items={items} agentId={agentId} />
+    </div>
+  );
+}
+
+/** Agent-to-agent row in the trajectory; completes the typing chain like other bubbles. */
+function AgentToAgentListItem({
+  message,
+  a2a,
+  shouldType,
+  onTypingComplete,
+}: {
+  message: Message;
+  a2a: AgentToAgentMessage;
+  shouldType: boolean;
+  onTypingComplete: () => void;
+}) {
+  useEffect(() => {
+    if (shouldType) onTypingComplete();
+  }, [shouldType, onTypingComplete]);
+  return (
+    <div
+      data-message-id={message.message_id}
+      data-message-role={message.role}
+      data-message-kind="agent-to-agent"
+      className="min-w-0 max-w-full"
+    >
+      <AgentToAgentRow a2a={a2a} />
+    </div>
+  );
+}
+
+/** Stock message row (plus the Rose Desktop code-agent attribution). */
+function StockMessageListItem({
+  roseDesktop,
   message,
   currentAnimatingId,
   onAnimationComplete,
@@ -100,7 +182,7 @@ function MessageListItem({
   streamingPlanCharCount,
   streamingPlanStartedAtMs,
   streamingMetricsBySubAgentId,
-}: MessageListItemProps) {
+}: MessageListItemProps & { roseDesktop: boolean }) {
   const planCharCount = resolvePlanCharCount(message, streamingPlanCharCount);
   const thinkingMetrics = resolveMessageThinkingMetrics(message, streamingMetricsBySubAgentId);
   const isFinalAnswer = message.metadata?.isUserAttentionMessage === true;
@@ -117,6 +199,9 @@ function MessageListItem({
       ? rawAgentStartPhase
       : undefined;
   const inlineView = parseInlineViewMetadata(message.metadata?.inlineView);
+  const requester = roseDesktop ? messageRequester(message.metadata) : null;
+  const attribution =
+    requester?.kind === 'code_agent' && isSendMessageToUserRow(message.metadata) ? requester : null;
 
   return (
     <div
@@ -130,6 +215,7 @@ function MessageListItem({
       data-agent-start-phase={agentStartPhase}
       className="min-w-0 max-w-full"
     >
+      {attribution && <CodeAgentAttribution requester={attribution} />}
       <MessageBubble
         message={message}
         shouldType={message.message_id === currentAnimatingId}
@@ -152,15 +238,60 @@ function MessageListItem({
   );
 }
 
+/**
+ * Rose Desktop routes a pinned question (shown above the query box instead) and
+ * agent-to-agent rows away from the stock bubble; everything else is stock.
+ */
+function MessageListItem(props: MessageListItemProps) {
+  const roseDesktop = useRoseDesktop();
+  const { message } = props;
+  if (roseDesktop && parsePinnedQuestion(message.metadata)) return null;
+  const a2a = roseDesktop ? parseAgentToAgentMessage(message) : null;
+  if (a2a) {
+    return (
+      <AgentToAgentListItem
+        message={message}
+        a2a={a2a}
+        shouldType={message.message_id === props.currentAnimatingId}
+        onTypingComplete={props.onAnimationComplete}
+      />
+    );
+  }
+  return <StockMessageListItem {...props} roseDesktop={roseDesktop} />;
+}
+
 export function MessageListItems({
   filteredMessages,
   webSearchGrouping = EMPTY_WEB_SEARCH_GROUPING,
   ...itemProps
 }: MessageListItemsProps) {
+  const roseDesktop = useRoseDesktop();
+  const visibleMessages = useMemo(
+    () => (roseDesktop ? dedupeCodeDisplays(filteredMessages) : filteredMessages),
+    [filteredMessages, roseDesktop],
+  );
+  const displayGrouping = useMemo(
+    () => (roseDesktop ? groupDisplayMedia(visibleMessages) : EMPTY_DISPLAY_MEDIA_GROUPING),
+    [visibleMessages, roseDesktop],
+  );
   return (
     <>
-      {filteredMessages.map((message) => {
+      {visibleMessages.map((message) => {
         if (webSearchGrouping.hiddenMessageIds.has(message.message_id)) return null;
+        if (displayGrouping.hiddenMessageIds.has(message.message_id)) return null;
+        const displayItems = displayGrouping.groupsByLeadId.get(message.message_id);
+        if (displayItems) {
+          return (
+            <DisplayMediaListItem
+              key={message.message_id}
+              message={message}
+              items={displayItems}
+              agentId={itemProps.selectedAgentId || undefined}
+              shouldType={message.message_id === itemProps.currentAnimatingId}
+              onTypingComplete={itemProps.onAnimationComplete}
+            />
+          );
+        }
         const group = webSearchGrouping.groupsByLeadId.get(message.message_id);
         if (group) {
           return (

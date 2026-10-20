@@ -55,6 +55,8 @@ export default tseslint.config(
       'react-refresh': reactRefresh,
       react,
     },
+    // eslint-plugin-react otherwise warns "React version not specified" on every run.
+    settings: { react: { version: 'detect' } },
     rules: {
       ...reactHooks.configs.recommended.rules,
       'react-refresh/only-export-components': ['warn', { allowConstantExport: true }],

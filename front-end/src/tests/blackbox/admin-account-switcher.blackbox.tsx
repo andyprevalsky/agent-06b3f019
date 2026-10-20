@@ -12,14 +12,17 @@
  *     token, not the target's — otherwise the admin is stranded
  *   - returning restores the admin session and drops both stash keys
  *   - signing out clears the stash, so admin authority can't be resurrected
+ *   - Rose Desktop: the flagged account's switcher lives in Settings (inline);
+ *     the floating pill only remains as the exit while impersonating
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 
 import { AdminAccountSwitcher } from '@/features/admin-account-switcher';
+import { AdminSwitcherMount } from '@/features/app-wiring/components/AdminSwitcherMount';
 import { clearSession } from '@/lib/supabase';
 
 import { server } from './msw/server';
@@ -251,5 +254,141 @@ describe('AdminAccountSwitcher', () => {
 
     expect(localStorage.getItem('rose-admin-session')).toBeNull();
     expect(localStorage.getItem('rose-impersonation')).toBeNull();
+  });
+});
+
+/**
+ * Rose Desktop (lib/roseDesktop.ts): the flagged account's switcher lives in the
+ * Settings panel, so the top-right corner holds only the 4 bare app icons
+ * (FE-13 visual pass). Stock accounts keep the floating pill unchanged, and an
+ * impersonating viewer always keeps the floating exit.
+ */
+describe('AdminSwitcherMount placement (Rose Desktop moves the switcher into Settings)', () => {
+  let originalLocation: PropertyDescriptor | undefined;
+
+  beforeEach(() => {
+    originalLocation = Object.getOwnPropertyDescriptor(window, 'location');
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    if (originalLocation) Object.defineProperty(window, 'location', originalLocation);
+    localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  function signIn(userId: string, phone: string) {
+    localStorage.setItem(
+      'rose-session',
+      JSON.stringify({ ...session(`${userId}-token`, userId), user: { id: userId, phone } }),
+    );
+  }
+
+  function renderBothPlacements() {
+    return renderWithProviders(
+      <>
+        <div data-testid="top-right">
+          <AdminSwitcherMount />
+        </div>
+        <div data-testid="settings">
+          <AdminSwitcherMount placement="settings" />
+        </div>
+      </>,
+    );
+  }
+
+  it('flagged Andy: no floating pill on his own account; Settings has the inline switcher', async () => {
+    signIn(ANDY_ID, '+19729777432');
+    renderBothPlacements();
+    const inline = await within(screen.getByTestId('settings')).findByTestId(
+      'admin-account-switcher',
+    );
+    expect(inline).toHaveAttribute('data-variant', 'inline');
+    expect(
+      within(screen.getByTestId('top-right')).queryByTestId('admin-account-switcher'),
+    ).toBeNull();
+    // Flat, in-flow section: no floating shadow/blur, the panel never positions absolutely.
+    const pill = within(inline).getByTestId('admin-account-pill');
+    expect(pill).toHaveTextContent('+19729777432');
+    expect(pill.className).not.toMatch(/shadow-lg|backdrop-blur-md/);
+    expect(pill).toHaveClass('bg-white', 'dark:bg-[#2f2f2c]', 'dark:border-white/[0.09]');
+    expect(inline.className).not.toMatch(/(^|\s)(fixed|items-end)(\s|$)/);
+  });
+
+  it('the inline switcher is fully functional: quick-switch chips, search and switch', async () => {
+    const replace = stubReload();
+    server.use(
+      http.get(`${API_BASE}/admin-health/users`, () =>
+        HttpResponse.json({
+          people: [directoryPerson()],
+          total: 1,
+          page: 1,
+          pageSize: 20,
+          totalPages: 1,
+          search: 'grace',
+        }),
+      ),
+      http.post(`${API_BASE}/admin-health/impersonate`, async ({ request }) => {
+        const body = (await request.json()) as { userId: string };
+        return HttpResponse.json({
+          session: session('target-token', body.userId),
+          user: {
+            userId: body.userId,
+            name: 'Grace Hopper',
+            email: null,
+            phone: null,
+            isAdmin: false,
+          },
+        });
+      }),
+    );
+    signIn(ANDY_ID, '+19729777432');
+    const user = userEvent.setup();
+    renderWithProviders(<AdminSwitcherMount placement="settings" />);
+    await user.click(await screen.findByRole('button', { name: 'Switch account' }));
+    const dialog = screen.getByRole('dialog', { name: 'Account switcher' });
+    expect(dialog.className).not.toMatch(/(^|\s)absolute(\s|$)/);
+    expect(within(dialog).getByRole('button', { name: /Andy/ })).toBeVisible();
+    expect(within(dialog).getByRole('button', { name: /Tamy/ })).toBeVisible();
+    await user.type(within(dialog).getByRole('searchbox', { name: 'Search accounts' }), 'grace');
+    await user.click(await within(dialog).findByText('Grace Hopper'));
+
+    await waitFor(() => expect(replace).toHaveBeenCalled());
+    expect(JSON.parse(localStorage.getItem('rose-admin-session') ?? 'null').access_token).toBe(
+      `${ANDY_ID}-token`,
+    );
+    expect(JSON.parse(localStorage.getItem('rose-session') ?? 'null').access_token).toBe(
+      'target-token',
+    );
+  });
+
+  it('stock admin (Tamy, flag off): the floating pill keeps its exact classes', async () => {
+    signIn(TAMY_ID, '+12028803603');
+    renderBothPlacements();
+    const floating = await within(screen.getByTestId('top-right')).findByTestId(
+      'admin-account-switcher',
+    );
+    expect(floating).toHaveAttribute('data-variant', 'pill');
+    expect(floating.className).toBe('relative flex max-w-full min-w-0 flex-col items-end');
+    expect(within(floating).getByTestId('admin-account-pill').className).toBe(
+      'flex max-w-full min-w-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium shadow-lg backdrop-blur-md transition-colors border-border/60 bg-background/90 text-foreground',
+    );
+  });
+
+  it('a flagged account that is being impersonated keeps the floating exit', async () => {
+    localStorage.setItem('rose-admin-session', JSON.stringify(session('admin-token', TAMY_ID)));
+    signIn(ANDY_ID, '+19729777432');
+    localStorage.setItem(
+      'rose-impersonation',
+      JSON.stringify({ userId: ANDY_ID, name: 'Andy', email: null, phone: null, isAdmin: true }),
+    );
+    renderBothPlacements();
+    const floating = await within(screen.getByTestId('top-right')).findByTestId(
+      'admin-impersonation-badge',
+    );
+    expect(floating).toHaveTextContent('Viewing as Andy');
+    expect(
+      within(screen.getByTestId('settings')).getByTestId('admin-impersonation-badge'),
+    ).toBeVisible();
   });
 });

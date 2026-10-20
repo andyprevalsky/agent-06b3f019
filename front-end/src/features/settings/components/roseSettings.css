@@ -1,0 +1,63 @@
+/*
+ * Rose Desktop Settings drawer, dark mode only (mock rose-app-builder-mock
+ * nav.js .acp + panels/dark.js). Every selector starts with
+ * `html.dark .rose-settings`: the class is only on the embedded Settings (the
+ * Rose Desktop drawer) and html.dark only exists for Rose Desktop accounts, so
+ * light mode keeps its segmented tabs and cards and the stock page is untouched.
+ */
+
+/* Text tabs with a rose underline on the active tab (mock .acp .ac-tabs). */
+html.dark .rose-settings [role='tablist'] {
+  height: auto;
+  gap: 18px;
+  justify-content: flex-start;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+html.dark .rose-settings [role='tab'] {
+  flex: none;
+  padding: 8px 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: #a3a39d;
+  font-weight: 400;
+}
+
+html.dark .rose-settings [role='tab'][data-state='active'] {
+  background: transparent;
+  color: #f2f2ef;
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 #e8507f;
+}
+
+/* Flat rows: no cards, sections read as plain headings (mock .pj h3 / .m). */
+html.dark .rose-settings .bg-card {
+  border-color: transparent;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+html.dark .rose-settings .bg-card > div {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+html.dark .rose-settings .bg-card h3 {
+  font-size: 13px;
+  font-weight: 600;
+  color: #f2f2ef;
+}
+
+/* Fields on the dark control surface (mock html.rose-dark .rp textarea). */
+html.dark .rose-settings textarea,
+html.dark .rose-settings select,
+html.dark .rose-settings input:not([type='checkbox']):not([type='radio']):not([type='file']) {
+  border-color: rgba(255, 255, 255, 0.09);
+  background-color: #2f2f2c;
+  color: #f2f2ef;
+}

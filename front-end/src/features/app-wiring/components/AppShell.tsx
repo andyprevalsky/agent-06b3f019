@@ -25,6 +25,8 @@
  * TopRightControls overlays every route and owns the layout of the inspection
  * and admin account pills. AdminSwitcherMount stays reachable from every route,
  * while an inspected run can add its read-only identity without overlapping it.
+ * Rose Desktop accounts keep the switcher in Settings instead; their pill only
+ * appears here while impersonating (the exit).
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';

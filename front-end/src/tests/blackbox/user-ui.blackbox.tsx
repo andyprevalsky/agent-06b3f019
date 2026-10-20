@@ -2,13 +2,13 @@
  * Blackbox tests for the per-user UI runtime (features/user-ui).
  *
  * Covers the security + behavior contract of rose_user_ui on the app origin:
- *   - theme tokens are data: invalid names / url() / expression / ; / } rejected
- *   - background backdrop fades only after the agent's first USER message
- *   - sidebar + query box render opaque while a user background is showing
+ *   - whole-app settings are removed (UI ledger row 89): a manifest that still
+ *     names a theme, background or slots renders the stock UI — no theme.json
+ *     request, no CSS tokens, no background layer or fade, no slot frames
  *   - every user frame is sandbox="allow-scripts" on the usercontent origin
  *   - inline views render the version their message pins, not the active one
  *   - no more than 4 inline frames are live in a long trajectory
- *   - safe mode (query, shortcut, corner control) disables everything
+ *   - safe mode (query, shortcut, corner control) disables shell + live frames
  *   - the postMessage bridge ignores messages from the wrong source / origin
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -17,24 +17,20 @@ import { http, HttpResponse } from 'msw';
 
 import {
   InlineUserView,
-  UserUiAppBackdrop,
-  UserUiBackgroundLayer,
   UserUiFrame,
   UserUiProvider,
   UserUiShell,
-  UserUiSlot,
-  applyThemeTokens,
   resetUserUiVersionCache,
-  validateThemeTokens,
   type UserUiManifest,
 } from '@/features/user-ui';
 import { ROSE_DESKTOP_USER_IDS } from '@/lib/roseDesktop';
 import AppSidebar from '@/features/terminal-component-group/components/AppSidebar';
 import Terminal from '@/pages/Terminal';
 
+import { capturedRequests } from './msw/capture';
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
-import { BackdropHarness } from './user-ui-backdrop-harness';
+import { renderStockSidebar } from './app-sidebar.fixtures';
 
 const API_BASE = 'http://localhost:3001/api';
 const USERCONTENT = 'https://u-test.usercontent.roselabs.test';
@@ -58,21 +54,67 @@ function mockSession(userId = 'test-user') {
 
 const FULL_MANIFEST: UserUiManifest = {
   version: 1,
-  theme: 'root/theme.json',
-  slots: {
-    background: { entry: 'root/slots/background/index.html' },
-    'home.dashboard': { entry: 'root/slots/dashboard/index.html' },
-  },
   inline: { chart: { entry: 'inline/chart/v2.html', summary: 'Chart v2' } },
 };
 
-function serveActive(manifest: UserUiManifest, theme: unknown = {}) {
+/**
+ * A version published before the whole-app settings were removed: it still
+ * names a theme (with tokens + a background image) and every removed slot,
+ * plus fields this client has never heard of. All of it must be ignored.
+ */
+const LEGACY_MANIFEST = {
+  ...FULL_MANIFEST,
+  theme: 'root/theme.json',
+  slots: {
+    background: { entry: 'root/slots/background/index.html' },
+    'sidebar.header': { entry: 'root/slots/header/index.html' },
+    menu: { entry: 'root/slots/menu/index.html' },
+    'home.dashboard': { entry: 'root/slots/dashboard/index.html' },
+    'agent.panel': { entry: 'root/slots/panel/index.html' },
+  },
+  tools: { weather: { manifest: 'tools/weather/tool.json' } },
+  futureField: { anything: true },
+} as UserUiManifest;
+
+const LEGACY_THEME = {
+  tokens: { '--rose-accent': 'rebeccapurple', '--background': '0 0% 0%' },
+  background: { image: 'root/assets/wallpaper.jpg', fadeAfterFirstMessage: 0.2 },
+};
+
+/** Serve the active version; returns a counter of theme.json fetches (must stay 0). */
+function serveActive(manifest: UserUiManifest) {
+  const themeRequests = { count: 0 };
   server.use(
     http.get(`${API_BASE}/user-ui/active`, () =>
       HttpResponse.json({ versionId: 'v2', manifest, baseUrl: ACTIVE_BASE }),
     ),
-    http.get(`${ACTIVE_BASE}root/theme.json`, () => HttpResponse.json(theme)),
+    http.get(`${ACTIVE_BASE}root/theme.json`, () => {
+      themeRequests.count += 1;
+      return HttpResponse.json(LEGACY_THEME);
+    }),
   );
+  return themeRequests;
+}
+
+/** GET /api/user-ui/active requests captured so far in this test. */
+function activeRequestCount(): number {
+  return capturedRequests.filter((request) => request.url.endsWith('/user-ui/active')).length;
+}
+
+/** Nothing from the removed whole-app settings reached the page. */
+function expectNoWholeAppSettings(themeRequests: { count: number }) {
+  expect(themeRequests.count).toBe(0);
+  const rootStyle = document.documentElement.style;
+  expect(rootStyle.getPropertyValue('--rose-accent')).toBe('');
+  expect(rootStyle.getPropertyValue('--background')).toBe('');
+  expect(document.querySelector('[data-testid^="user-ui-background"]')).toBeNull();
+  expect(document.querySelector('[data-testid="app-background-layer"]')).toBeNull();
+  expect(document.querySelector('[data-user-ui-slot]')).toBeNull();
+  expect(document.querySelector('[data-testid^="user-ui-slot-"]')).toBeNull();
+  expect(document.querySelector('img[src*="wallpaper"]')).toBeNull();
+  for (const frame of document.querySelectorAll('iframe')) {
+    expect(frame.getAttribute('src') ?? '').not.toContain('/root/slots/');
+  }
 }
 
 /** IntersectionObserver that reports every observed element as on screen. */
@@ -113,55 +155,7 @@ afterEach(() => {
   window.history.replaceState({}, '', '/');
 });
 
-describe('theme tokens', () => {
-  it('accepts CSS custom properties and rejects bad names and code-like values', () => {
-    const { accepted, rejected } = validateThemeTokens({
-      '--rose-accent': '#7c3aed',
-      '--radius': '12px',
-      '--font-body': '"Inter", sans-serif',
-      '--bg': 'url(https://evil.test/x.png)',
-      '--bg-escaped': 'u\\72l(https://evil.test)',
-      '--ie': 'expression(alert(1))',
-      '--break': 'red; background: blue',
-      '--close': 'red } body { color: red',
-      '--Upper': 'red',
-      color: 'red',
-      '--number': 4,
-    });
-    expect(accepted).toEqual({
-      '--rose-accent': '#7c3aed',
-      '--radius': '12px',
-      '--font-body': '"Inter", sans-serif',
-    });
-    expect(rejected.sort()).toEqual(
-      ['--bg', '--bg-escaped', '--ie', '--break', '--close', '--Upper', 'color', '--number'].sort(),
-    );
-  });
-
-  it('applies only valid tokens to <html> and removes them on cleanup', () => {
-    const cleanup = applyThemeTokens({ '--rose-accent': 'tomato', '--evil': 'url(x)' });
-    const style = document.documentElement.style;
-    expect(style.getPropertyValue('--rose-accent')).toBe('tomato');
-    expect(style.getPropertyValue('--evil')).toBe('');
-    cleanup();
-    expect(style.getPropertyValue('--rose-accent')).toBe('');
-  });
-
-  it('loads theme.json for the active version and applies its validated tokens', async () => {
-    serveActive(FULL_MANIFEST, { tokens: { '--rose-accent': 'rebeccapurple', '--x': 'url(a)' } });
-    render(
-      <UserUiProvider userId="test-user">
-        <div />
-      </UserUiProvider>,
-    );
-    await waitFor(() =>
-      expect(document.documentElement.style.getPropertyValue('--rose-accent')).toBe(
-        'rebeccapurple',
-      ),
-    );
-    expect(document.documentElement.style.getPropertyValue('--x')).toBe('');
-  });
-
+describe('provider', () => {
   it('makes no request for a logged-out user', async () => {
     const seen = vi.fn();
     server.use(
@@ -181,144 +175,154 @@ describe('theme tokens', () => {
   });
 });
 
-describe('background backdrop', () => {
-  it('keeps the app backdrop opaque until the first user message, then fades it', async () => {
-    serveActive(FULL_MANIFEST, {
-      background: { image: 'root/assets/wallpaper.jpg', fadeAfterFirstMessage: 0.2 },
-    });
-    const { rerender } = render(<BackdropHarness hasUserMessage={false} />);
-    const image = await screen.findByTestId('user-ui-background-image');
-    expect(image).toHaveAttribute('src', `${ACTIVE_BASE}root/assets/wallpaper.jpg`);
-
-    const backdrop = screen.getByTestId('app-background-layer');
-    expect(backdrop).toHaveAttribute('data-backdrop-state', 'opaque');
-    expect(backdrop.style.opacity).toBe('1');
-    expect(backdrop).toHaveClass('bg-background');
-    expect(backdrop.style.transition).toContain('opacity 600ms');
-    expect(screen.getByTestId('pattern').parentElement).toBe(backdrop);
-
-    rerender(<BackdropHarness hasUserMessage />);
-    expect(backdrop).toHaveAttribute('data-backdrop-state', 'faded');
-    expect(backdrop.style.opacity).toBe('0.2');
-  });
-
-  it('defaults the fade to 0.2 and leaves the stock backdrop untouched without a background', async () => {
-    serveActive({ version: 1 });
-    render(<BackdropHarness hasUserMessage />);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    const backdrop = screen.getByTestId('app-background-layer');
-    expect(backdrop).toHaveAttribute('data-backdrop-state', 'stock');
-    expect(backdrop.getAttribute('style')).toBeNull();
-    expect(screen.queryByTestId('user-ui-background-layer')).toBeNull();
-  });
-});
-
-describe('opaque chrome over a user background', () => {
-  it('renders the sidebar rail opaque only while a background shows', () => {
-    const props = {
-      currentView: 'agents' as const,
-      onViewChange: () => {},
-      agents: [],
-      isLoadingAgents: false,
-      selectedAgentId: null,
-      onSelectAgent: () => {},
-      onCreateAgent: () => {},
-      onRefreshAgents: () => {},
-      user: null,
-      onLogout: () => {},
-      onLoginClick: () => {},
-    };
-    const { rerender } = renderWithProviders(<AppSidebar {...props} />);
-    const rail = screen.getByRole('complementary', { hidden: true });
-    expect(rail).toHaveAttribute('data-surface', 'translucent');
-    expect(rail).toHaveClass('bg-white/95');
-
-    rerender(<AppSidebar {...props} userUi={{ opaqueSurface: true }} />);
-    expect(rail).toHaveAttribute('data-surface', 'opaque');
-    expect(rail).toHaveClass('bg-white');
-    expect(rail).not.toHaveClass('bg-white/95');
-    expect(rail.style.backgroundColor).toBe('rgb(255, 255, 255)');
-  });
-
-  it('wires the terminal: background layer behind, opaque sidebar and query box', async () => {
-    mockSession(ROSE_DESKTOP_USER);
-    serveActive(FULL_MANIFEST, { background: { image: 'root/assets/wallpaper.jpg' } });
-    renderWithProviders(<Terminal />);
-    await screen.findByTestId('user-ui-background-image');
-    await waitFor(() =>
-      expect(screen.getByTestId('query-input-surface')).toHaveAttribute('data-surface', 'opaque'),
+describe('removed whole-app settings (theme, background + fade, slots)', () => {
+  it('ignores a legacy manifest’s theme, background and slots without errors; inline views still render', async () => {
+    useVisibleIntersection();
+    const errors = vi.spyOn(console, 'error');
+    const warnings = vi.spyOn(console, 'warn');
+    const themeRequests = serveActive(LEGACY_MANIFEST);
+    render(
+      <UserUiProvider userId="test-user">
+        <UserUiShell>
+          <p>stock app</p>
+          <InlineUserView inlineView={{ view: 'chart', versionId: 'v2' }} messageId="m1" />
+        </UserUiShell>
+      </UserUiProvider>,
     );
-    expect(screen.getByTestId('query-input-surface').style.backgroundColor).toBe('');
-    expect(screen.getByRole('complementary', { hidden: true })).toHaveAttribute(
-      'data-surface',
-      'opaque',
+    // The legacy version is active: its inline view resolves from the active manifest.
+    const frame = await screen.findByTestId('user-ui-inline-frame');
+    expect(frame).toHaveAttribute(
+      'src',
+      'http://localhost:3001/usercontent/v2/inline/chart/v2.html',
     );
-    // Landing page: no agent selected → no user message → backdrop opaque.
-    expect(screen.getByTestId('app-background-layer')).toHaveAttribute(
-      'data-backdrop-state',
-      'opaque',
-    );
-    expect(
-      screen
-        .getByTestId('terminal-grid-background-layer')
-        .closest('[data-testid="app-background-layer"]'),
-    ).not.toBeNull();
-    // home.dashboard slot mounts above the popular goals on the landing page.
-    const dashboard = await screen.findByTestId('user-ui-slot-home.dashboard');
-    expect(dashboard.querySelector('iframe')).toHaveAttribute('sandbox', 'allow-scripts');
-    expect(screen.getByTestId('rose-app-bar')).toBeInTheDocument();
+    expect(frame).toHaveAttribute('sandbox', 'allow-scripts');
+    expect(screen.getByText('stock app')).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expectNoWholeAppSettings(themeRequests);
+    expect(document.querySelectorAll('iframe')).toHaveLength(1);
+    // No shell published → nothing to escape, so no safe-mode control either.
+    expect(screen.queryByTestId('user-ui-safe-mode-control')).toBeNull();
+    expect(errors).not.toHaveBeenCalled();
+    expect(warnings).not.toHaveBeenCalled();
+    errors.mockRestore();
+    warnings.mockRestore();
   });
 
-  it('keeps the stock UI for accounts without the Rose Desktop flag, even with a published UI', async () => {
-    let activeRequests = 0;
-    serveActive(FULL_MANIFEST, { background: { image: 'root/assets/wallpaper.jpg' } });
+  it('resolves pinned inline views from legacy /versions manifests (version history keeps working)', async () => {
+    useVisibleIntersection();
+    const themeRequests = serveActive(FULL_MANIFEST);
     server.use(
-      http.get(`${API_BASE}/user-ui/active`, () => {
-        activeRequests += 1;
-        return HttpResponse.json({
-          versionId: 'v2',
-          manifest: FULL_MANIFEST,
-          baseUrl: ACTIVE_BASE,
-        });
-      }),
+      http.get(`${API_BASE}/user-ui/versions`, () =>
+        HttpResponse.json({
+          activeVersionId: 'v2',
+          versions: [
+            { versionId: 'v2', manifest: FULL_MANIFEST, active: true },
+            {
+              versionId: 'v1',
+              manifest: {
+                ...LEGACY_MANIFEST,
+                inline: { chart: { entry: 'inline/chart/v1.html', summary: 'Chart v1' } },
+              },
+              active: false,
+            },
+          ],
+        }),
+      ),
     );
+    render(
+      <UserUiProvider userId="test-user">
+        <InlineUserView inlineView={{ view: 'chart', versionId: 'v1' }} messageId="old" />
+      </UserUiProvider>,
+    );
+    const frame = await screen.findByTestId('user-ui-inline-frame');
+    expect(frame).toHaveAttribute(
+      'src',
+      'http://localhost:3001/usercontent/v1/inline/chart/v1.html',
+    );
+    expect(frame).toHaveAttribute('title', 'Chart v1');
+    expectNoWholeAppSettings(themeRequests);
+  });
+
+  it('Rose Desktop terminal: a legacy manifest leaves the stock background, sidebar and query box', async () => {
+    mockSession(ROSE_DESKTOP_USER);
+    const themeRequests = serveActive(LEGACY_MANIFEST);
+    renderWithProviders(<Terminal />);
+    const surface = await screen.findByTestId('query-input-surface');
+    await waitFor(() => expect(activeRequestCount()).toBeGreaterThan(0));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Stock translucent drip surface (never the removed opaque variant).
+    expect(surface).toHaveAttribute('data-surface', 'translucent');
+    expect(surface).not.toHaveClass('bg-white');
+    // The grid renders directly in the terminal root: no fading backdrop wrapper.
+    const grid = screen.getByTestId('terminal-grid-background-layer');
+    expect(grid.parentElement).toHaveClass('h-screen', 'w-screen', 'relative');
+    expect(grid.parentElement?.style.opacity).toBe('');
+    // Rose Desktop chrome is unchanged: solid left bar, bare top-right app icons.
+    expect(screen.getByTestId('rose-sidebar')).toHaveAttribute('data-surface', 'opaque');
+    expect(screen.getByTestId('rose-app-icons')).toBeInTheDocument();
+    expectNoWholeAppSettings(themeRequests);
+    expect(document.querySelector('iframe')).toBeNull();
+  });
+
+  it('flag off: accounts without Rose Desktop never request the user UI and keep the stock chrome', async () => {
+    const themeRequests = serveActive(LEGACY_MANIFEST);
     renderWithProviders(<Terminal />);
     const surface = await screen.findByTestId('query-input-surface');
     expect(surface).toHaveAttribute('data-surface', 'translucent');
-    expect(screen.queryByTestId('user-ui-background-image')).toBeNull();
-    expect(screen.queryByTestId('user-ui-slot-home.dashboard')).toBeNull();
-    expect(screen.queryByTestId('rose-app-bar')).toBeNull();
-    expect(activeRequests).toBe(0);
+    expect(screen.queryByTestId('rose-sidebar')).toBeNull();
+    expect(screen.queryByTestId('rose-app-icons')).toBeNull();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(activeRequestCount()).toBe(0);
+    expectNoWholeAppSettings(themeRequests);
+  });
+
+  it('flag off: the stock sidebar rail keeps its translucent surface', () => {
+    renderStockSidebar(
+      <AppSidebar
+        currentView="agents"
+        onViewChange={() => {}}
+        agents={[]}
+        isLoadingAgents={false}
+        selectedAgentId={null}
+        onSelectAgent={() => {}}
+        onCreateAgent={() => {}}
+        onRefreshAgents={() => {}}
+        user={null}
+        onLogout={() => {}}
+        onLoginClick={() => {}}
+      />,
+    );
+    const rail = screen.getByRole('complementary', { hidden: true });
+    expect(rail).toHaveClass('bg-white/95');
+    expect(rail).not.toHaveClass('bg-white');
+    expect(rail.style.backgroundColor).toBe('');
   });
 
   it('keeps the stock translucent chrome when nothing is published', async () => {
+    mockSession(ROSE_DESKTOP_USER);
     renderWithProviders(<Terminal />);
     const surface = await screen.findByTestId('query-input-surface');
     expect(surface).toHaveAttribute('data-surface', 'translucent');
-    expect(screen.queryByTestId('user-ui-background-layer')).toBeNull();
+    expect(screen.queryByTestId('user-ui-shell')).toBeNull();
+    expect(screen.queryByTestId('user-ui-safe-mode-control')).toBeNull();
   });
 });
 
 describe('sandboxed frames', () => {
-  it('mounts slots as sandbox="allow-scripts" frames on the usercontent origin', async () => {
-    serveActive(FULL_MANIFEST);
+  it('mounts the shell as a sandbox="allow-scripts" frame on the usercontent origin', async () => {
+    serveActive({ ...FULL_MANIFEST, shell: { entry: 'root/shell/index.html' } });
     render(
       <UserUiProvider userId="test-user">
-        <UserUiBackgroundLayer />
-        <UserUiSlot name="home.dashboard" autoHeight />
+        <UserUiShell>
+          <p>stock app</p>
+        </UserUiShell>
       </UserUiProvider>,
     );
-    const dashboard = await screen.findByTestId('user-ui-slot-home.dashboard');
-    const frames = [
-      dashboard.querySelector('iframe'),
-      screen.getByTestId('user-ui-slot-background'),
-    ] as HTMLIFrameElement[];
-    for (const frame of frames) {
-      expect(frame.getAttribute('sandbox')).toBe('allow-scripts');
-      expect(new URL(frame.getAttribute('src') ?? '').origin).toBe(USERCONTENT);
-      expect(frame.hasAttribute('srcdoc')).toBe(false);
-    }
-    expect(frames[0].getAttribute('src')).toBe(`${ACTIVE_BASE}root/slots/dashboard/index.html`);
+    const frame = await screen.findByTestId('user-ui-shell-frame');
+    expect(frame.getAttribute('sandbox')).toBe('allow-scripts');
+    expect(new URL(frame.getAttribute('src') ?? '').origin).toBe(USERCONTENT);
+    expect(frame.hasAttribute('srcdoc')).toBe(false);
+    expect(frame.getAttribute('src')).toBe(`${ACTIVE_BASE}root/shell/index.html`);
   });
 
   it('refuses app-origin, blob:, data: and javascript: sources', () => {
@@ -339,18 +343,21 @@ describe('sandboxed frames', () => {
       http.get(`${API_BASE}/user-ui/active`, () =>
         HttpResponse.json({
           versionId: 'v2',
-          manifest: FULL_MANIFEST,
+          manifest: { ...FULL_MANIFEST, shell: { entry: 'root/shell/index.html' } },
           baseUrl: `${window.location.origin}/`,
         }),
       ),
     );
     render(
       <UserUiProvider userId="test-user">
-        <UserUiSlot name="home.dashboard" />
+        <UserUiShell>
+          <p>stock app</p>
+        </UserUiShell>
       </UserUiProvider>,
     );
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(document.querySelector('iframe')).toBeNull();
+    expect(screen.getByText('stock app')).toBeInTheDocument();
   });
 });
 
@@ -444,6 +451,52 @@ describe('inline trajectory views', () => {
     }
   });
 
+  it('renders a view pinned to a non-active version from the real GET /versions shape (versionId)', async () => {
+    useVisibleIntersection();
+    serveActive(FULL_MANIFEST);
+    // Mirrors back-end/src/domains/user-ui/service.ts listVersions().
+    server.use(
+      http.get(`${API_BASE}/user-ui/versions`, () =>
+        HttpResponse.json({
+          activeVersionId: 'v2',
+          versions: [
+            {
+              versionId: 'v2',
+              manifest: FULL_MANIFEST,
+              fileCount: 4,
+              totalBytes: 2048,
+              createdAt: '2026-10-20T18:00:00.000Z',
+              active: true,
+            },
+            {
+              versionId: 'v1',
+              manifest: {
+                version: 1,
+                inline: { chart: { entry: 'inline/chart/v1.html', summary: 'Chart v1' } },
+              },
+              fileCount: 2,
+              totalBytes: 1024,
+              createdAt: '2026-10-19T18:00:00.000Z',
+              active: false,
+            },
+          ],
+        }),
+      ),
+    );
+    render(
+      <UserUiProvider userId="test-user">
+        <InlineUserView inlineView={{ view: 'chart', versionId: 'v1' }} messageId="pinned" />
+      </UserUiProvider>,
+    );
+    const frame = await screen.findByTestId('user-ui-inline-frame');
+    expect(frame).toHaveAttribute(
+      'src',
+      'http://localhost:3001/usercontent/v1/inline/chart/v1.html',
+    );
+    expect(frame).toHaveAttribute('title', 'Chart v1');
+    expect(screen.getByTestId('user-ui-inline-view')).toHaveAttribute('data-inline-state', 'live');
+  });
+
   it('keeps at most 4 frames live in a long trajectory; the rest show posters', async () => {
     useVisibleIntersection();
     serveActive({
@@ -484,18 +537,16 @@ describe('inline trajectory views', () => {
 });
 
 describe('safe mode', () => {
-  it('?rose_safe=1 disables theme, background, slots, shell and live inline frames', async () => {
+  it('?rose_safe=1 disables the shell and live inline frames', async () => {
     window.history.replaceState({}, '', '/?rose_safe=1');
     useVisibleIntersection();
-    serveActive(
-      { ...FULL_MANIFEST, shell: { entry: 'root/shell/index.html' } },
-      { tokens: { '--rose-accent': 'red' }, background: { image: 'root/bg.jpg' } },
-    );
+    const themeRequests = serveActive({
+      ...LEGACY_MANIFEST,
+      shell: { entry: 'root/shell/index.html' },
+    });
     render(
       <UserUiProvider userId="test-user">
         <UserUiShell>
-          <UserUiBackgroundLayer />
-          <UserUiSlot name="home.dashboard" />
           <p>stock app</p>
           <InlineUserView inlineView={{ view: 'chart', versionId: 'v2' }} messageId="m1" />
         </UserUiShell>
@@ -504,8 +555,7 @@ describe('safe mode', () => {
     expect(await screen.findByText('Chart v2')).toBeInTheDocument();
     expect(screen.getByText('stock app')).toBeInTheDocument();
     expect(document.querySelector('iframe')).toBeNull();
-    expect(screen.queryByTestId('user-ui-background-layer')).toBeNull();
-    expect(document.documentElement.style.getPropertyValue('--rose-accent')).toBe('');
+    expectNoWholeAppSettings(themeRequests);
     expect(sessionStorage.getItem('rose_safe_mode')).toBe('1');
     expect(screen.getByTestId('user-ui-safe-mode-control')).toHaveTextContent('Exit safe mode');
   });

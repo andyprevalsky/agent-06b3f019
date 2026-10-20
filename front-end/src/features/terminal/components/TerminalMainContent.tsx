@@ -5,21 +5,21 @@
  * Each view is selected by TerminalContent's currentView state.
  * benchmarks is team-gated (admin allowlist or dev mode) and full-width.
  *
- * PER-USER UI: agents view + selected agent + published agent.panel slot →
- * a sandboxed panel to the right of the chat column (lg+ viewports only).
- * RIGHT INSET: on md+ the column pads right by --rose-apps-inset (app bar +
- * any open app drawer) and, while a drawer is open, left by
- * --rose-apps-inset-left (the collapsed rail), so content re-centers in the
- * remaining width with the drawer's 520ms ease (paused while resizing). The
- * top-right nav links hide while a drawer is open (--rose-apps-nav-visibility).
+ * NO RIGHT INSET (UI ledger row 66): Rose Desktop has no right bar; its
+ * drawers overlay the content, so the column never pads for them. The
+ * website's top-right nav links give way to the app icons
+ * (--rose-apps-nav-visibility).
+ * Rose Desktop accounts get no top-right nav links at all (UI ledger #14, #66:
+ * no Research, Careers or Download — the app icons sit there instead); the
+ * stock website keeps Research, Careers and Download.
  */
 
 import { useNavigate } from 'react-router-dom';
 
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { BenchmarksView } from '@/features/benchmarks';
-import { UserUiSlot } from '@/features/user-ui';
 import { useAppData } from '@/hooks/appDataContext';
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { cn } from '@/lib/utils';
 import AdminHealth from '@/pages/AdminHealth';
 import Browse from '@/pages/Browse';
@@ -66,12 +66,9 @@ export function MainContent(props: MainContentProps) {
       className={cn(
         'flex-1 flex justify-center h-screen overflow-hidden',
         fullWidthView && 'md:pl-[var(--browse-sidebar-offset)]',
-        'md:pr-[var(--rose-apps-inset,0px)]',
-        !fullWidthView && 'md:pl-[var(--rose-apps-inset-left,0px)]',
       )}
       style={{
         height: '100dvh',
-        transition: 'var(--rose-apps-inset-transition, none)',
         ...browseOffsetStyle,
       }}
     >
@@ -85,12 +82,6 @@ export function MainContent(props: MainContentProps) {
         {props.agents.clientSource === 'WEB' && <DesktopNavLinks />}
         <TerminalViewContent {...props} />
       </div>
-      {props.currentView === 'agents' && props.agents.selectedAgentId && (
-        <UserUiSlot
-          name="agent.panel"
-          className="relative z-10 hidden h-full w-80 shrink-0 pb-6 pr-4 pt-16 lg:block xl:w-96"
-        />
-      )}
     </main>
   );
 }
@@ -156,6 +147,8 @@ function TerminalViewContent(props: MainContentProps) {
 
 function DesktopNavLinks() {
   const navigate = useNavigate();
+  const roseDesktop = useRoseDesktop();
+  if (roseDesktop) return null;
   return (
     <div
       className="hidden md:flex items-center gap-2 absolute top-5 right-2 z-50"

@@ -12,6 +12,7 @@ import {
 } from '@/lib/realtime';
 import type { AgentDetail, Message } from '@/lib/api';
 import { publishBrowserSessionBinding } from '@/lib/browserSessionBindings';
+import { notifyOpenAgentActivity, userUiActiveChangedHandler } from '@/lib/openAgentActivity';
 
 import type { StreamingBubble, StreamingPlan, StreamingAttention, StreamingTool } from '../types';
 import { createReconnectScheduler } from './agentReconnectScheduler';
@@ -104,10 +105,14 @@ function createRealtimeHandlers(
       if (data.agentId === scope.agentId && data.metadata?.toolName === 'spawn_browser_agent') {
         onBrowserMessage(data);
       }
+      notifyOpenAgentActivity({ agentId: scope.agentId, kind: 'message' });
     },
     onUpdate: (updated: UpdateAgentPayload) => {
       if (!active()) return;
       handleUpdateAgent(updated, setAgent, setIsChatMode, deps.onLoadAgents);
+      if (updated.status !== undefined) {
+        notifyOpenAgentActivity({ agentId: scope.agentId, kind: 'status' });
+      }
     },
     onAssistantStream: (chunk: AssistantStreamPayload) => {
       if (!active()) return;
@@ -132,6 +137,7 @@ function createRealtimeHandlers(
     onAgentModeStarted: (data) => {
       if (active() && data.agentId === scope.agentId) setIsChatMode(false);
     },
+    onUserUiActiveChanged: userUiActiveChangedHandler(active, scope.agentId),
     // Live views follow the backend binding, not the lagging transcript URL.
     onBrowserSession: (binding) => {
       if (active()) publishBrowserSessionBinding(binding);

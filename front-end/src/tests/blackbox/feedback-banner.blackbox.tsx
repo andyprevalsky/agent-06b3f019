@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, screen } from '@testing-library/react';
+import { fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { FeedbackBanner } from '@/features/terminal-component-group/components/FeedbackBanner';
 import { renderWithProviders } from './test-wrapper';
@@ -36,12 +36,13 @@ describe('FeedbackBanner', () => {
     expect(screen.getByText('Submit')).toBeInTheDocument();
   });
 
-  it.skip('Cancel resets selected rating and collapses panel', async () => {
+  it('Cancel resets selected rating and collapses panel', async () => {
     const user = userEvent.setup();
     renderWithProviders(<FeedbackBanner onSubmit={vi.fn()} />);
     await user.click(starButtons()[1]);
     await user.click(screen.getByText('Cancel'));
-    expect(screen.queryByText('Submit')).not.toBeInTheDocument();
+    // The details panel collapses through framer-motion's exit animation; wait for it to unmount.
+    await waitFor(() => expect(screen.queryByText('Submit')).not.toBeInTheDocument());
   });
 
   it('submits the rating and shows the thank-you state', async () => {

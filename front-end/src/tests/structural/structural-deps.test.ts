@@ -163,34 +163,40 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
   ],
   'features/terminal/components/AgentChatArea.tsx': [
     'Cross-domain import: "@/features/terminal-component-group"',
-    // Per-user UI runtime: home.dashboard slot + opaque query box over a user background.
-    'Cross-domain import: "@/features/user-ui"',
+  ],
+  // Rose Desktop app view: the normal query box over AppViewScreen (AgentChatArea host).
+  'features/terminal/components/AppScreenHost.tsx': [
+    'Cross-domain import: "@/features/terminal-component-group"',
   ],
   'features/terminal/components/ChatScrollArea.tsx': [
     'Cross-domain import: "@/features/terminal-component-group"',
   ],
   'features/terminal/components/BackgroundPattern.tsx': [
     'Cross-domain import: "@/features/terminal-component-group"',
+    // Rose dark mode: the background layers read useRoseTheme().
+    'Cross-domain import: "@/features/rose-theme"',
   ],
   'features/terminal/components/TerminalContent.tsx': [
     'Cross-domain import: "@/features/terminal-component-group"',
     'Cross-domain import: "@/features/terminal-component-group/',
-    // Per-user UI runtime: provider, shell and sidebar slots mount in the
-    // terminal layout (the one place the session user is known).
+    // Per-user UI runtime: provider and shell mount in the terminal layout
+    // (the one place the session user is known).
     'Cross-domain import: "@/features/user-ui"',
-  ],
-  // Per-user UI runtime: user background layer + fading app backdrop.
-  'features/terminal/components/TerminalBackdrop.tsx': [
-    'Cross-domain import: "@/features/user-ui"',
+    // Rose dark mode: RoseThemeProvider mounts where the session user is known.
+    'Cross-domain import: "@/features/rose-theme"',
   ],
   'features/terminal/components/TerminalMainContent.tsx': [
     // View router: the team-gated Benchmarks tab renders the benchmarks feature.
     'Cross-domain import: "@/features/benchmarks"',
-    // Per-user UI runtime: agent.panel slot beside the chat column.
-    'Cross-domain import: "@/features/user-ui"',
+  ],
+  // Rose dark mode: the Popular Goals pills switch to the mock's dark controls.
+  'features/terminal/components/PopularGoalsCarousel.tsx': [
+    'Cross-domain import: "@/features/rose-theme"',
   ],
   'features/terminal/components/TerminalHeader.tsx': [
     'Cross-domain import: "@/features/terminal-component-group"',
+    // Rose dark mode: the desktop header pill reads useRoseTheme().
+    'Cross-domain import: "@/features/rose-theme"',
   ],
   // blog is a shared component/data library consumed by research-blog and research-blog-post
   'features/research-blog/types.ts': ['Cross-domain import: "@/features/blog"'],
@@ -232,6 +238,18 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
   'features/integrations/components/BrowserCookiesSection.tsx': [
     'Cross-domain import: "@/features/integration-handlers-context"',
   ],
+  // Rose dark mode: the completed-agent check turns green only while dark (row 71).
+  'features/terminal-component-group/components/AgentStatusIndicator.tsx': [
+    'Cross-domain import: "@/features/rose-theme"',
+  ],
+  // Rose dark mode: the top-right Dark mode icon toggles useRoseTheme().
+  'features/terminal-component-group/components/rose-apps/RoseAppIcons.tsx': [
+    'Cross-domain import: "@/features/rose-theme"',
+  ],
+  // Rose dark mode: the query box swaps its drip for the solid dark surface.
+  'features/terminal-component-group/components/QueryInput.tsx': [
+    'Cross-domain import: "@/features/rose-theme"',
+  ],
   // Terminal-component-group MessageList split (U03) — legacy violations to be cleaned up per-domain
   'features/terminal-component-group/components/ChatModeActions.tsx': [
     'components layer imports "../api"',
@@ -242,6 +260,11 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
   'features/terminal-component-group/components/MessageListItems.tsx': [
     'components layer imports "../api"',
     // Per-user UI runtime: inline trajectory views render beneath their message.
+    'Cross-domain import: "@/features/user-ui"',
+  ],
+  // Per-user UI runtime: displayed text/html reuses UserUiFrame's cross-origin,
+  // allow-scripts-only sandbox instead of a second copy of those security rules.
+  'features/terminal-component-group/components/inline-media/DisplayMediaGroup.tsx': [
     'Cross-domain import: "@/features/user-ui"',
   ],
   'features/terminal-component-group/components/MessageListView.tsx': [
@@ -284,6 +307,11 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
   // /mobile-preview is a dev-only composition harness that intentionally
   // renders the production terminal components together for visual QA.
   'features/mobile-preview/components/MobilePreview.tsx': [
+    'Cross-domain import: "@/features/terminal-component-group',
+  ],
+  // Same harness: its mock agent data, split out of MobilePreview.tsx so the
+  // component module only exports components (react-refresh rule).
+  'features/mobile-preview/components/mobilePreviewMocks.ts': [
     'Cross-domain import: "@/features/terminal-component-group',
   ],
 };

@@ -9,6 +9,9 @@ export interface FilePointer {
   mime_type: string;
   size_bytes: number;
   created_at: string;
+  /** Optional intrinsic pixel size (images/videos); reserves inline layout. */
+  width?: number;
+  height?: number;
 }
 
 // Size thresholds for file handling
@@ -24,6 +27,8 @@ export interface Agent {
   pinned_at?: string | null;
   /** Non-null means archived (soft-deleted); only set on rows from the archive view. */
   archived_at?: string | null;
+  /** Owning project (Rose Desktop groups the sidebar by it); absent/null → Home (root project). */
+  project_id?: string | null;
   model: string;
   source: 'WEB' | 'MAC_APP';
   reasoning_effort: 'off' | 'low' | 'medium' | 'high';
@@ -176,6 +181,9 @@ export interface CreateAgentPayload {
   start_phase?: 'plan' | 'execute'; // Skip chat routing: start the cloud agent workflow directly
   fast_mode_cache_enabled?: boolean; // Fast Mode button → LLM provider speed (DEMO cache is prompt-matched)
   world_model_mode?: 'real' | 'simulate' | 'shadow'; // Per-agent provider/environment execution mode
+  project_id?: string; // Rose Desktop: create the agent inside this project (omitted = Home)
+  // Rose Desktop "New agent in this branch": work in that agent's code session (same branch).
+  share_code_session_with?: string;
 }
 
 // Sub-agent Tree Types

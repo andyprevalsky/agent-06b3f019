@@ -4,7 +4,7 @@
  *   no active user UI, not in safe mode → hidden
  *   shell active (not safe)             → "Safe mode" button (enters safe mode)
  *   safe mode with a published UI       → "Exit safe mode" button
- *   other customizations (not safe)     → hidden (Cmd/Ctrl+Shift+. still works)
+ *   inline views only (not safe)        → hidden (Cmd/Ctrl+Shift+. still works)
  *
  * Host DOM at the maximum z-index, outside every sandboxed frame: a shell
  * covering the viewport cannot draw over it or swallow its clicks.

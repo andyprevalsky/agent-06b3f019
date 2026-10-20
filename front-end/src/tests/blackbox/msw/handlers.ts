@@ -11,6 +11,17 @@ export const handlers = [
   // Per-user UI: stock UI (nothing published) unless a test overrides it.
   http.get(`${API_BASE}/user-ui/active`, () => HttpResponse.json({ versionId: null })),
   http.get(`${API_BASE}/user-ui/versions`, () => HttpResponse.json({ versions: [] })),
+  // Rose Desktop left bar groups agents by project; none unless a test overrides.
+  http.get(`${API_BASE}/projects`, () => HttpResponse.json({ projects: [] })),
+  // Rose profile (left-bar account row name, Settings): no name unless a test overrides.
+  http.get(`${API_BASE}/user-settings`, () => HttpResponse.json({})),
+  // Rose Desktop Integrations icon reads integration health; nothing connected by default.
+  http.get(`${API_BASE}/integrations`, () => HttpResponse.json({ integrations: [] })),
+  http.get(`${API_BASE}/integrations/plaid/items`, () => HttpResponse.json({ items: [] })),
+  // L-INTEG-CORE cheap progress poll: nothing changed unless a test overrides.
+  http.get(`${API_BASE}/integrations/progress`, () =>
+    HttpResponse.json({ cursor: '2026-10-20T00:00:00.000Z', changed: false }),
+  ),
   // No persisted binding by default: live views fall back to the transcript URL.
   http.get(`${API_BASE}/browser-session/task/:taskId/live-view`, () =>
     HttpResponse.json({ error: 'Session not found' }, { status: 404 }),
@@ -25,6 +36,12 @@ export const handlers = [
       agentPaused: false,
     });
   }),
+  // Browser world (A6): Root browser closed, no Root sites, no agent forks by default.
+  http.get(`${API_BASE}/browser-world/root`, () => HttpResponse.json({ root: null, sites: [] })),
+  http.get(`${API_BASE}/browser-world/sites`, () => HttpResponse.json({ sites: [] })),
+  http.get(`${API_BASE}/browser-world/agents/:agentId`, ({ params }) =>
+    HttpResponse.json({ agent_id: params.agentId, tasks: [] }),
+  ),
   // Auth endpoints
   http.post(`${API_BASE}/auth/anonymous`, () => {
     return HttpResponse.json({
@@ -133,6 +150,11 @@ export const handlers = [
   // with their already-loaded list so title/goal matches remain instantaneous.
   http.get(`${API_BASE}/agents/search`, () => {
     return HttpResponse.json({ agents: [] });
+  }),
+
+  // Rose left bar: batched code agents of the listed trees (before /agents/:agentId).
+  http.get(`${API_BASE}/agents/code-agents`, () => {
+    return HttpResponse.json({ code_agents: [] });
   }),
 
   http.get(`${API_BASE}/agents/:agentId`, ({ params }) => {
@@ -247,6 +269,22 @@ export const handlers = [
     return HttpResponse.json({ requests: [] });
   }),
 
+  // Pinned question answer (agent-tools questionService.answerQuestion RequestState)
+  http.post(
+    `${API_BASE}/agents/:agentId/questions/:questionId/answer`,
+    async ({ params, request }) => {
+      const body = (await request.json()) as { answer?: string; dismiss?: boolean };
+      return HttpResponse.json({
+        id: String(params.questionId),
+        kind: 'question',
+        status: body.dismiss === true ? 'rejected' : 'answered',
+        response: body.dismiss === true ? null : (body.answer ?? null),
+        selected_option: null,
+        answered_by: 'user',
+      });
+    },
+  ),
+
   http.post(`${API_BASE}/attention-requests/:requestId/respond`, () => {
     return HttpResponse.json({ success: true });
   }),
@@ -286,7 +324,7 @@ export const handlers = [
 
   // Tree state
   http.get(`${API_BASE}/agents/tree`, () => {
-    return HttpResponse.json({ agents: [] });
+    return HttpResponse.json({ agents: [], code_agents: [] });
   }),
 
   http.get(`${API_BASE}/agents/:agentId/ancestors`, () => {

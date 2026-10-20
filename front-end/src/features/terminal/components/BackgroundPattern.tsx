@@ -17,14 +17,34 @@
  *   DESKTOP → render decorative square/dot animation canvas
  *   MOBILE  → do not mount the square/dot animation canvas
  *
+ * THEME (useRoseTheme; Rose Desktop dark mode):
+ *   LIGHT → STOCK_GRID_TONE: the original markup, byte-identical (asserted by
+ *           rose-theme.blackbox against markup frozen before dark mode); the
+ *           grid svg is keyed by theme so a dark -> light switch remounts it
+ *   DARK  → calm background: no intro tile overlay, small tile animation + dot
+ *           canvas hidden (same render), cleared and not drawn, spawning
+ *           stopped; un-hiding repaints the light dots in that commit; grid lines + main
+ *           tile border + sparkle circles + small diamonds one neutral silver
+ *           (never blue) at the same low opacity, energy pills dimmed
+ *   SWITCH → instant: every layer changes in the commit that flips html.dark
+ *            (no CSS fades; canvases repaint synchronously, not on the next tick)
+ *
  * LAYER CONTRACT:
  * [CANVAS_ANIMATION z-2] -> [GRID_BACKGROUND z-3] -> [ENERGY_PILLS z-4]
  * -> [PAGE_CONTENT z-4, later sibling] -> [CHROME z-50]
  */
 
 import { SmallTileAnimationCanvas } from '@/features/terminal-component-group';
+import { useRoseTheme } from '@/features/rose-theme';
 
+import {
+  ROSE_DARK_ENERGY_OPACITY,
+  ROSE_DARK_GRID_TONE,
+  STOCK_GRID_TONE,
+  type GridTone,
+} from './backgroundGridTone';
 import { GridEnergyPills, MobileGridEnergyPillsCanvas } from './GridEnergyPills';
+import { LargeTileBorder, LargeTileCorners } from './LargeTileDecorations';
 
 const QUERY_INPUT_CLEARANCE = {
   desktop: 220,
@@ -56,26 +76,33 @@ export function BackgroundPattern({
   selectedAgentId,
 }: BackgroundPatternProps) {
   const isMobileViewport = typeof window !== 'undefined' && window.innerWidth < 768;
+  const { isDark } = useRoseTheme();
+  const tone = isDark ? ROSE_DARK_GRID_TONE : STOCK_GRID_TONE;
+  const energyOpacity = isDark ? ROSE_DARK_ENERGY_OPACITY : undefined;
 
   return (
     <>
+      {/* Keyed by theme: switching remounts the grid, so light is rebuilt fresh
+          (identical attributes in identical order) instead of patched. */}
       <svg
+        key={isDark ? 'rose-dark' : 'stock'}
         data-testid="terminal-grid-background-layer"
         className="absolute inset-0 w-full h-full pointer-events-none z-[3]"
         xmlns="http://www.w3.org/2000/svg"
         style={{ left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }}
       >
-        <PatternDefs patternOffset={patternOffset} />
-        <AnimatedTilesOverlay tileColors={tileColors} colorPalette={colorPalette} />
-        <SmallTilesBackground />
-        <LargeTileBorder />
-        <LargeTileCorners />
+        <PatternDefs patternOffset={patternOffset} tone={tone} />
+        {!isDark && <AnimatedTilesOverlay tileColors={tileColors} colorPalette={colorPalette} />}
+        <SmallTilesBackground tone={tone} />
+        <LargeTileBorder tone={tone} />
+        <LargeTileCorners tone={tone} />
       </svg>
 
       {isMobileViewport ? (
         <MobileGridEnergyPillsCanvas
           patternOffset={patternOffset}
           selectedAgentId={selectedAgentId}
+          opacity={energyOpacity}
         />
       ) : (
         <svg
@@ -89,6 +116,7 @@ export function BackgroundPattern({
             idPrefix="terminal-grid-energy"
             patternOffset={patternOffset}
             maskId="terminal-energy-large-tile-mask"
+            opacity={energyOpacity}
           />
         </svg>
       )}
@@ -97,6 +125,7 @@ export function BackgroundPattern({
         <SmallTileAnimationCanvas
           key={animationResetKey}
           enabled={true}
+          hidden={isDark || undefined}
           tileAnimationComplete={animationComplete}
           currentFrame={currentFrame}
           tileColors={tileColors}
@@ -143,7 +172,13 @@ function TerminalEnergyMask({ selectedAgentId }: { selectedAgentId: string | nul
 
 // ── SVG <defs> (gradient, pattern, mask) ────────────────────────────────
 
-function PatternDefs({ patternOffset }: { patternOffset: { x: number; y: number } }) {
+function PatternDefs({
+  patternOffset,
+  tone,
+}: {
+  patternOffset: { x: number; y: number };
+  tone: GridTone;
+}) {
   return (
     <defs>
       <linearGradient id="rose-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -169,29 +204,29 @@ function PatternDefs({ patternOffset }: { patternOffset: { x: number; y: number 
           width="143"
           height="143"
           fill="transparent"
-          stroke="rgb(229, 231, 235)"
+          stroke={tone.color}
           strokeWidth="1"
-          className="dark:stroke-gray-800"
+          className={tone.strokeClassName}
         />
         <path
           d="M 0,-11 Q 0,0 11,0 Q 0,0 0,11 Q 0,0 -11,0 Q 0,0 0,-11 Z"
-          fill="rgb(229, 231, 235)"
-          className="dark:fill-gray-800"
+          fill={tone.color}
+          className={tone.fillClassName}
         />
         <path
           d="M 143,-11 Q 143,0 154,0 Q 143,0 143,11 Q 143,0 132,0 Q 143,0 143,-11 Z"
-          fill="rgb(229, 231, 235)"
-          className="dark:fill-gray-800"
+          fill={tone.color}
+          className={tone.fillClassName}
         />
         <path
           d="M 0,132 Q 0,143 11,143 Q 0,143 0,154 Q 0,143 -11,143 Q 0,143 0,132 Z"
-          fill="rgb(229, 231, 235)"
-          className="dark:fill-gray-800"
+          fill={tone.color}
+          className={tone.fillClassName}
         />
         <path
           d="M 143,132 Q 143,143 154,143 Q 143,143 143,154 Q 143,143 132,143 Q 143,143 143,132 Z"
-          fill="rgb(229, 231, 235)"
-          className="dark:fill-gray-800"
+          fill={tone.color}
+          className={tone.fillClassName}
         />
       </pattern>
 
@@ -253,9 +288,9 @@ function AnimatedTilesOverlay({
   );
 }
 
-// ── Full-size grid + large tile border ──────────────────────────────────
+// ── Full-size grid ──────────────────────────────────────────────────────
 
-function SmallTilesBackground() {
+function SmallTilesBackground({ tone }: { tone: GridTone }) {
   return (
     <rect
       x="-5000"
@@ -264,77 +299,7 @@ function SmallTilesBackground() {
       height="10000"
       fill="url(#grid-pattern)"
       mask="url(#large-tile-mask)"
+      opacity={tone.opacity}
     />
-  );
-}
-
-function LargeTileBorder() {
-  return (
-    <rect
-      x="50%"
-      y="40%"
-      width="429"
-      height="429"
-      style={{ transform: 'translate(-214.5px, -214.5px)' }}
-      fill="none"
-      stroke="rgb(229, 231, 235)"
-      strokeWidth="1"
-      className="dark:stroke-gray-800"
-    />
-  );
-}
-
-// ── Corner diamonds + circles ───────────────────────────────────────────
-
-const DIAMOND_PATH =
-  'M 0.5,-12 L 0.5,-6 C 0.5,-4 2,-2 4,-1 L 6,-0.5 L 12,-0.5 L 12,0.5 L 6,0.5 L 4,1 C 2,2 0.5,4 0.5,6 L 0.5,12 L -0.5,12 L -0.5,6 C -0.5,4 -2,2 -4,1 L -6,0.5 L -12,0.5 L -12,-0.5 L -6,-0.5 L -4,-1 C -2,-2 -0.5,-4 -0.5,-6 L -0.5,-12 Z';
-const SMALL_DIAMOND_PATH = 'M 0,-11 Q 0,0 11,0 Q 0,0 0,11 Q 0,0 -11,0 Q 0,0 0,-11 Z';
-
-function LargeTileCorners() {
-  return (
-    <>
-      <circle
-        cx="0"
-        cy="0"
-        r="25"
-        fill="none"
-        stroke="rgb(229, 231, 235)"
-        strokeWidth="1"
-        className="dark:stroke-gray-800"
-        style={{ transform: 'translate(calc(50% - 214.5px), calc(40% - 214.5px))' }}
-      />
-      <path
-        d={DIAMOND_PATH}
-        fill="url(#rose-gradient)"
-        style={{ transform: 'translate(calc(50% - 214.5px), calc(40% - 214.5px))' }}
-      />
-      <circle
-        cx="0"
-        cy="0"
-        r="25"
-        fill="none"
-        stroke="rgb(229, 231, 235)"
-        strokeWidth="1"
-        className="dark:stroke-gray-800"
-        style={{ transform: 'translate(calc(50% + 214.5px), calc(40% - 214.5px))' }}
-      />
-      <path
-        d={DIAMOND_PATH}
-        fill="url(#rose-gradient)"
-        style={{ transform: 'translate(calc(50% + 214.5px), calc(40% - 214.5px))' }}
-      />
-      <path
-        d={SMALL_DIAMOND_PATH}
-        fill="rgb(229, 231, 235)"
-        className="dark:fill-gray-800"
-        style={{ transform: 'translate(calc(50% - 214.5px), calc(40% + 214.5px))' }}
-      />
-      <path
-        d={SMALL_DIAMOND_PATH}
-        fill="rgb(229, 231, 235)"
-        className="dark:fill-gray-800"
-        style={{ transform: 'translate(calc(50% + 214.5px), calc(40% + 214.5px))' }}
-      />
-    </>
   );
 }

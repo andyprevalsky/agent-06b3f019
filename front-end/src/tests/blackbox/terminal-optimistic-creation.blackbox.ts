@@ -112,4 +112,46 @@ describe('optimistic terminal agent creation', () => {
     await act(async () => departed.result.current.handleSendMessage());
     expect(departed.result.current.messageInput).toBe('');
   });
+
+  it('a new agent started from a project sends project_id once; Home goals omit it', async () => {
+    const bodies: Record<string, unknown>[] = [];
+    server.use(
+      http.post(`${API_BASE}/agents`, async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        bodies.push(body);
+        return HttpResponse.json({ agent_id: body.agent_id });
+      }),
+    );
+    const args = makeArgs();
+    const { result } = renderHook(() => useMessageSending(args));
+    expect(result.current.newAgentProjectId).toBeNull();
+
+    act(() => result.current.setNewAgentProjectId('p-rose'));
+    act(() => result.current.setMessageInput('in a project'));
+    await act(async () => result.current.handleSendMessage());
+    expect(bodies[0]).toEqual(
+      expect.objectContaining({ goal: 'in a project', project_id: 'p-rose' }),
+    );
+    // Consumed by the created agent: the next new agent goes to Home.
+    expect(result.current.newAgentProjectId).toBeNull();
+
+    act(() => result.current.setMessageInput('at home'));
+    await act(async () => result.current.handleSendMessage());
+    expect(bodies[1]).toEqual(expect.objectContaining({ goal: 'at home' }));
+    expect(bodies[1]).not.toHaveProperty('project_id');
+  });
+
+  it('a failed project create keeps the project for the retry', async () => {
+    server.use(
+      http.post(`${API_BASE}/agents`, () =>
+        HttpResponse.json({ error: 'creation failed' }, { status: 500 }),
+      ),
+    );
+    const args = makeArgs();
+    const { result } = renderHook(() => useMessageSending(args));
+    act(() => result.current.setNewAgentProjectId('p-rose'));
+    act(() => result.current.setMessageInput('retry in project'));
+    await act(async () => result.current.handleSendMessage());
+    expect(result.current.newAgentProjectId).toBe('p-rose');
+  });
 });

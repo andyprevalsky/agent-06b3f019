@@ -18,7 +18,7 @@ export function IntermediaryLine({ count, allTerminal, onShowAll }: Intermediary
 
   return (
     <div
-      className="flex items-center gap-1 py-0.5 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-500"
+      className="flex items-center gap-1 py-0.5 cursor-pointer hover:bg-gray-100 dark:hover:bg-[#2f2f2c] rounded text-gray-500"
       onClick={onShowAll}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
@@ -52,7 +52,7 @@ export function CompletedLine({ count, onShowAll }: CompletedLineProps) {
 
   return (
     <div
-      className="flex items-center gap-1 py-0.5 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-500"
+      className="flex items-center gap-1 py-0.5 cursor-pointer hover:bg-gray-100 dark:hover:bg-[#2f2f2c] rounded text-gray-500"
       onClick={onShowAll}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}

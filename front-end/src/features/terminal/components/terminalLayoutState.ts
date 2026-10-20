@@ -38,8 +38,6 @@ export function useTerminalDerivedState(agents: ReturnType<typeof useTerminalAge
     browserStatusProps,
     systemMessages: agents.messages.filter((message) => message.role === 'SYSTEM'),
     showAdminHealth: isAdminOperator(agents.user),
-    hasUserMessage:
-      agents.selectedAgentId !== null && agents.messages.some((message) => message.role === 'USER'),
   };
 }
 

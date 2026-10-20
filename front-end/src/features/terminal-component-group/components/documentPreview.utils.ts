@@ -8,6 +8,7 @@ import type { FilePointer } from '@/lib/api/types';
 export type DocumentPreviewKind =
   | 'html'
   | 'image'
+  | 'video'
   | 'markdown'
   | 'text'
   | 'csv'
@@ -22,6 +23,7 @@ export type DocumentPreviewKind =
 export const PREVIEWABLE_DOCUMENT_KINDS: DocumentPreviewKind[] = [
   'html',
   'image',
+  'video',
   'markdown',
   'text',
   'csv',
@@ -49,6 +51,21 @@ const TEXT_MIME_TYPES = new Set([
   'application/x-yaml',
   'text/yaml',
 ]);
+
+const VIDEO_EXT = /\.(mp4|m4v|mov|webm|ogv)$/i;
+
+function isVideo(mime: string, name: string): boolean {
+  return mime.startsWith('video/') || VIDEO_EXT.test(name);
+}
+
+/**
+ * Video is a previewable kind for Rose Desktop accounts only (lib/roseDesktop.ts):
+ * inline media + in-drawer playback. The stock UI keeps classifying videos as
+ * download-only, so callers opt in with `{ video: true }`.
+ */
+export interface DocumentKindOptions {
+  video?: boolean;
+}
 
 const TYPE_LABELS: Array<{ test: (mime: string, name: string) => boolean; label: string }> = [
   {
@@ -160,12 +177,16 @@ export function hardenHtmlPreview(
 }
 
 /** Classify how a FilePointer should render inside the document preview drawer. */
-export function documentPreviewKind(file: FilePointer): DocumentPreviewKind {
+export function documentPreviewKind(
+  file: FilePointer,
+  options: DocumentKindOptions = {},
+): DocumentPreviewKind {
   const mime = (file.mime_type || '').toLowerCase();
   const name = (file.original_filename || '').toLowerCase();
 
   if (mime.includes('html') || name.endsWith('.html') || name.endsWith('.htm')) return 'html';
   if (mime.startsWith('image/') || /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(name)) return 'image';
+  if (options.video === true && isVideo(mime, name)) return 'video';
   if (MARKDOWN_MIME_TYPES.has(mime) || MARKDOWN_EXTENSIONS.some((ext) => name.endsWith(ext))) {
     return 'markdown';
   }
@@ -186,9 +207,10 @@ export function documentPreviewKind(file: FilePointer): DocumentPreviewKind {
 }
 
 /** Short human label for the file type chip in the drawer header. */
-export function documentTypeLabel(file: FilePointer): string {
+export function documentTypeLabel(file: FilePointer, options: DocumentKindOptions = {}): string {
   const mime = (file.mime_type || '').toLowerCase();
   const name = (file.original_filename || '').toLowerCase();
+  if (options.video === true && !mime.startsWith('image/') && isVideo(mime, name)) return 'Video';
   for (const entry of TYPE_LABELS) {
     if (entry.test(mime, name)) return entry.label;
   }

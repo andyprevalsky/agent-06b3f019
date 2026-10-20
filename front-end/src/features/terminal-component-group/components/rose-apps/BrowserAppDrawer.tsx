@@ -2,28 +2,75 @@
  * STATE MACHINE: BrowserAppDrawer
  *
  *   [CLOSED] <--> [OPEN]  (owned by RoseAppsProvider.openApp === 'browser')
+ *   CLOSED makes no browser-world request; the reads below run only while OPEN
+ *   on a Rose Desktop account (10k-agent rule: no polling, shown agent only).
  *
- *   TABS (while OPEN):
- *   [ROOT]  "Your browser" placeholder (the per-user root browser is future work)
+ *   TABS (while OPEN), Root first:
+ *   [ROOT]  the user's Root browser (RootBrowserPane), mounted only while OPEN.
+ *           It is never opened on its own (no auto-open on load or on agent
+ *           activity). GET /browser-world/root?agent_id=<selected agent>:
+ *             root null + an agent selected + default_url --> opens once at
+ *               that tree's URL (POST /root/open {start_url: default_url})
+ *             root null + no agent (or no default_url) --> quiet "Open browser"
+ *               (POST /root/open {start_url: default_url} when known, else {})
+ *           open --> its live view with take over / hand
+ *           back (existing .../control) and "Close browser" (POST /root/close
+ *           --> merge receipt such as "Saved logins for github.com", shown
+ *           briefly).
  *   [AGENT(id)] body = drawer slot; the agent's focused BrowserStatusBar portals
  *               its live view (letterboxed 1280x800, task progress, take
  *               over / hand back, waiting + disconnected overlays) into it.
  *               Until it mounts (agent just selected) a connecting state shows.
+ *               Under the tabs: that agent's per-site world state for the
+ *               shown task (GET /browser-world/agents/:id), plain text:
+ *               "forked github.com", "merged login for github.com", muted
+ *               "github.com stale" / "signed out of …" / "no login on …".
  *   click tab --> selectBrowserTab(agentId | null) (agent tabs also select the agent)
  *
- *   Header: globe + "Browser" + LIVE badge while the shown agent session is live.
+ *   BROWSER CHROME (UI ledger row 74), below the tabs:
+ *   [Back] [Forward] [Reload] ( address bar ) [LIVE] [Sites]
+ *     Back / Forward: dimmed + disabled — neither an agent's remote browser
+ *       nor Root exposes history navigation to the app yet.
+ *     Reload: agent tab or open Root --> reloadBrowser() (the live view
+ *       remounts); dimmed while Root is closed.
+ *     Address bar: the agent tab's page URL (host bold, rest muted) from its
+ *       latest browser step; "Connecting…" until one is known; "Your browser"
+ *       on Root.
+ *     LIVE: while the shown agent session is live.
+ *     Sites: toggles the Root sites list (BrowserSitesPanel: GET /sites; forget
+ *       a site with an inline confirm --> DELETE /sites/:site).
+ *
+ *   Header: globe + "Browser". No close X on desktop: the top-right Browser
+ *   icon (floating over this corner) and Escape close it (UI ledger row 67).
  */
 
-import { Globe, X } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { ArrowLeft, ArrowRight, Globe, RotateCw, type LucideIcon } from 'lucide-react';
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { cn } from '@/lib/utils';
 import type { Agent } from '../../hooks';
 import { AppDrawerShell } from './AppDrawerShell';
-import { useRoseApps, type AgentBrowserTab } from './roseAppsState';
+import { BrowserSitesPanel } from './BrowserSitesPanel';
+import { addressParts } from './browserPageUrl';
+import { agentSiteLines } from './browserWorldView';
+import { RootBrowserPane } from './RootBrowserPane';
+import { useRoseApps, type AgentBrowserTab, type RoseAppsValue } from './roseAppsState';
+import {
+  useAgentBrowserWorld,
+  useRootBrowserActions,
+  useRootBrowserState,
+} from './useBrowserWorld';
+
+const MUTED = 'text-[hsl(240_8%_45%)] dark:text-[#a3a39d]';
+
+function knownAgentTitle(agents: Agent[], agentId: string): string | null {
+  const agent = agents.find((a) => a.agent_id === agentId);
+  const title = (agent?.title ?? agent?.goal ?? '').trim();
+  return title === '' ? null : title;
+}
 
 function agentTitle(agents: Agent[], agentId: string): string {
-  const agent = agents.find((a) => a.agent_id === agentId);
-  const title = agent?.title ?? agent?.goal ?? '';
-  return title.trim() === '' ? 'Agent' : title;
+  return knownAgentTitle(agents, agentId) ?? 'Agent';
 }
 
 function DrawerTab({
@@ -45,10 +92,10 @@ function DrawerTab({
       data-testid={testId}
       onClick={onClick}
       className={cn(
-        'flex max-w-[220px] items-center gap-1.5 rounded-t-lg border border-b-0 border-gray-200/90 px-3 py-1.5 text-xs',
+        '-mb-px flex max-w-[220px] flex-none items-center gap-[7px] whitespace-nowrap border-b-2 pb-2.5 pt-[9px] text-[13px]',
         selected
-          ? 'bg-white font-semibold text-[hsl(240_15%_8%)] shadow-[inset_0_-2px_0_#f7799f]'
-          : 'bg-[hsl(240_10%_97%)] text-[hsl(240_8%_40%)]',
+          ? 'border-[#272725] font-semibold text-[hsl(240_15%_8%)] dark:border-[#ecece8] dark:text-[#ecece8]'
+          : 'border-transparent text-[hsl(240_8%_45%)] hover:text-[hsl(240_15%_8%)] dark:text-[#a3a39d] dark:hover:text-[#ecece8]',
       )}
     >
       {children}
@@ -63,7 +110,7 @@ function AgentTabLabel({ tab, title }: { tab: AgentBrowserTab; title: string }) 
         aria-hidden="true"
         className={cn(
           'block h-[7px] w-[7px] flex-none rounded-full',
-          tab.live ? 'bg-green-500' : 'bg-gray-300',
+          tab.live ? 'bg-green-500' : 'bg-gray-300 dark:bg-white/[0.25]',
         )}
       />
       <span className="truncate">{title}</span>
@@ -71,88 +118,256 @@ function AgentTabLabel({ tab, title }: { tab: AgentBrowserTab; title: string }) 
   );
 }
 
-function RootBrowserEmptyState() {
+function NavButton({
+  icon: Icon,
+  label,
+  onClick,
+}: {
+  icon: LucideIcon;
+  label: string;
+  onClick?: () => void;
+}) {
+  const enabled = onClick !== undefined;
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      disabled={!enabled}
+      onClick={onClick}
+      className={cn(
+        'grid h-7 w-7 place-items-center rounded-[7px]',
+        enabled
+          ? 'text-[hsl(240_8%_30%)] hover:bg-[hsl(240_5%_95%)] dark:text-[#ecece8] dark:hover:bg-white/[0.06]'
+          : 'cursor-default text-[hsl(240_6%_72%)] dark:text-white/[0.25]',
+      )}
+    >
+      <Icon className="h-4 w-4" strokeWidth={2} />
+    </button>
+  );
+}
+
+function AddressBar({ url, isRoot }: { url: string | null; isRoot: boolean }) {
+  const parts = url === null ? null : addressParts(url);
   return (
     <div
-      data-testid="root-browser-empty"
-      className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-center"
+      data-testid="browser-address-bar"
+      title={url ?? undefined}
+      className="min-w-0 flex-1 truncate whitespace-nowrap rounded-full bg-[hsl(240_5%_96%)] px-3 py-1.5 text-[12.5px] text-[hsl(240_8%_45%)] dark:bg-[#2f2f2c] dark:text-[#a3a39d]"
     >
-      <Globe className="h-8 w-8 text-[hsl(240_8%_45%)]" strokeWidth={1.5} />
-      <div className="text-sm font-semibold">Your browser</div>
-      <p className="max-w-xs text-xs text-[hsl(240_8%_45%)]">
-        Sign in to sites here and every agent can use those logins. Coming soon.
-      </p>
+      {parts !== null ? (
+        <>
+          <b className="font-medium text-[hsl(240_15%_8%)] dark:text-[#ecece8]">{parts.host}</b>
+          {parts.rest}
+        </>
+      ) : isRoot ? (
+        <span>Your browser</span>
+      ) : (
+        <span>Connecting…</span>
+      )}
+    </div>
+  );
+}
+
+function LiveBadge() {
+  return (
+    <span
+      data-testid="browser-drawer-live"
+      className="flex flex-none items-center gap-[5px] text-[11px] font-bold tracking-[.06em] text-[#e5484d]"
+    >
+      <i aria-hidden="true" className="block h-1.5 w-1.5 animate-pulse rounded-full bg-[#e5484d]" />
+      LIVE
+    </span>
+  );
+}
+
+function SitesToggle({ pressed, onClick }: { pressed: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={pressed}
+      title="Sites your browser is signed in to"
+      onClick={onClick}
+      className={cn(
+        'flex-none text-[12.5px] font-medium',
+        pressed
+          ? 'text-[hsl(240_15%_8%)] dark:text-[#ecece8]'
+          : 'text-[hsl(240_8%_45%)] hover:text-[hsl(240_15%_8%)] dark:text-[#a3a39d] dark:hover:text-[#ecece8]',
+      )}
+    >
+      Sites
+    </button>
+  );
+}
+
+/** "forked github.com  merged login for google.com" under the shown agent's tab. */
+function AgentSiteStates({ tab, enabled }: { tab: AgentBrowserTab; enabled: boolean }) {
+  const world = useAgentBrowserWorld(tab.agentId, `${tab.taskId}:${String(tab.live)}`, enabled);
+  const lines = agentSiteLines(world.data ?? [], tab.taskId);
+  if (!enabled || lines.length === 0) return null;
+  return (
+    <div
+      data-testid="browser-agent-sites"
+      className="flex flex-none flex-wrap gap-x-3 gap-y-0.5 px-[18px] pt-2 text-[12px]"
+    >
+      {lines.map((line) => (
+        <span
+          key={line.site}
+          data-muted={line.muted}
+          className={line.muted ? MUTED : 'text-[hsl(240_15%_8%)] dark:text-[#ecece8]'}
+        >
+          {line.text}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function BrowserTabs({ apps, isRoot }: { apps: RoseAppsValue; isRoot: boolean }) {
+  return (
+    <div
+      role="tablist"
+      aria-label="Browser tabs"
+      className="flex flex-none gap-5 overflow-x-auto border-b border-gray-200/90 px-[18px] dark:border-white/[0.07]"
+    >
+      <DrawerTab
+        testId="browser-tab-root"
+        selected={isRoot}
+        onClick={() => apps.selectBrowserTab(null)}
+      >
+        Root
+      </DrawerTab>
+      {apps.tabs.map((tab) => (
+        <DrawerTab
+          key={tab.agentId}
+          testId={`browser-tab-${tab.agentId}`}
+          selected={apps.browserTabAgentId === tab.agentId}
+          onClick={() => apps.selectBrowserTab(tab.agentId)}
+        >
+          <AgentTabLabel tab={tab} title={agentTitle(apps.agents, tab.agentId)} />
+        </DrawerTab>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Mounted only while the drawer is open on Root: closing it drops the live view.
+ * With an agent selected, a closed Root opens once at that tree's default_url;
+ * with none (or no default_url yet) it stays on the quiet "Open browser".
+ */
+function RootTab({ reloadKey, agentId }: { reloadKey: number; agentId: string | null }) {
+  const state = useRootBrowserState(true, agentId);
+  const actions = useRootBrowserActions();
+  const defaultUrl = agentId === null ? null : (state.data?.default_url ?? null);
+  const startedRef = useRef(false);
+  const { mutate: openRoot } = actions.open;
+  const rootClosed = state.data !== undefined && state.data.root === null;
+  useEffect(() => {
+    if (startedRef.current || !rootClosed || defaultUrl === null) return;
+    startedRef.current = true;
+    openRoot(defaultUrl);
+  }, [rootClosed, defaultUrl, openRoot]);
+  let error: string | null = null;
+  // The user's latest action speaks first: a failed open outranks the read.
+  if (actions.open.isError) error = 'Couldn’t open your browser. Try again.';
+  else if (state.isError) error = 'Couldn’t reach your browser.';
+  return (
+    <RootBrowserPane
+      loading={state.isPending}
+      root={state.data?.root ?? null}
+      error={error}
+      receipt={actions.receipt}
+      opening={actions.open.isPending}
+      closing={actions.close.isPending}
+      reloadKey={reloadKey}
+      onOpen={() => actions.open.mutate(defaultUrl ?? undefined)}
+      onClose={() => actions.close.mutate()}
+    />
+  );
+}
+
+function BrowserChrome({
+  apps,
+  activeTab,
+  isRoot,
+  sitesToggle,
+}: {
+  apps: RoseAppsValue;
+  activeTab: AgentBrowserTab | null;
+  isRoot: boolean;
+  sitesToggle: React.ReactNode;
+}) {
+  // Reads the cached Root state only (enabled false): never fetches by itself.
+  const rootOpen = (useRootBrowserState(false, apps.selectedAgentId).data?.root ?? null) !== null;
+  const canReload = !isRoot || rootOpen;
+  return (
+    <div
+      data-testid="browser-chrome"
+      className="flex flex-none items-center gap-2 px-[18px] pb-1 pt-3.5"
+    >
+      <span className="inline-flex flex-none gap-0.5">
+        <NavButton icon={ArrowLeft} label="Back" />
+        <NavButton icon={ArrowRight} label="Forward" />
+        <NavButton
+          icon={RotateCw}
+          label="Reload"
+          onClick={canReload ? apps.reloadBrowser : undefined}
+        />
+      </span>
+      <AddressBar url={activeTab?.pageUrl ?? null} isRoot={isRoot} />
+      {activeTab?.live === true && <LiveBadge />}
+      {sitesToggle}
     </div>
   );
 }
 
 export function BrowserAppDrawer() {
   const apps = useRoseApps();
+  const roseDesktop = useRoseDesktop();
+  const [sitesOpen, setSitesOpen] = useState(false);
   if (apps === null) return null;
   const open = apps.openApp === 'browser';
+  const active = open && roseDesktop;
   const activeAgentId = apps.browserTabAgentId;
   const activeTab = apps.tabs.find((t) => t.agentId === activeAgentId) ?? null;
-  const showLive = activeTab?.live === true;
+  const isRoot = activeAgentId === null;
   const waitingForPane =
     activeAgentId !== null &&
     apps.selectedAgentId !== null &&
     activeAgentId !== apps.selectedAgentId;
   return (
-    <AppDrawerShell open={open} label="Browser drawer" testId="browser-app-drawer">
-      <div className="flex items-center gap-2.5 border-b border-gray-200/90 px-3.5 py-3 text-[13px]">
+    <AppDrawerShell open={open} label="Browser drawer" testId="browser-app-drawer" variant="full">
+      <div className="flex flex-none items-center gap-2.5 px-[18px] pb-3 pt-4 text-[15px] font-semibold">
         <Globe className="h-[18px] w-[18px] flex-none" strokeWidth={1.7} />
-        <b className="font-semibold">Browser</b>
-        {showLive && (
-          <span
-            data-testid="browser-drawer-live"
-            className="rounded-full bg-red-500 px-2 py-0.5 text-[11px] font-semibold text-white"
-          >
-            LIVE
-          </span>
+        Browser
+      </div>
+      <BrowserTabs apps={apps} isRoot={isRoot} />
+      {activeTab !== null && <AgentSiteStates tab={activeTab} enabled={active} />}
+      <BrowserChrome
+        apps={apps}
+        activeTab={activeTab}
+        isRoot={isRoot}
+        sitesToggle={
+          roseDesktop && <SitesToggle pressed={sitesOpen} onClick={() => setSitesOpen((v) => !v)} />
+        }
+      />
+      {active && sitesOpen && (
+        <BrowserSitesPanel agentTitle={(agentId) => knownAgentTitle(apps.agents, agentId)} />
+      )}
+      <div className="flex min-h-0 flex-1 flex-col">
+        {isRoot && active && (
+          <RootTab reloadKey={apps.browserReloadKey} agentId={apps.selectedAgentId} />
         )}
-        <button
-          type="button"
-          aria-label="Close browser"
-          onClick={apps.closeApp}
-          className="ml-auto rounded p-1 text-[hsl(240_8%_45%)] transition-colors hover:bg-muted"
-        >
-          <X className="h-4 w-4" />
-        </button>
-      </div>
-      <div
-        role="tablist"
-        aria-label="Browser tabs"
-        className="flex gap-1.5 overflow-x-auto px-3.5 pt-2.5"
-      >
-        <DrawerTab
-          testId="browser-tab-root"
-          selected={activeAgentId === null}
-          onClick={() => apps.selectBrowserTab(null)}
-        >
-          Root
-        </DrawerTab>
-        {apps.tabs.map((tab) => (
-          <DrawerTab
-            key={tab.agentId}
-            testId={`browser-tab-${tab.agentId}`}
-            selected={activeAgentId === tab.agentId}
-            onClick={() => apps.selectBrowserTab(tab.agentId)}
-          >
-            <AgentTabLabel tab={tab} title={agentTitle(apps.agents, tab.agentId)} />
-          </DrawerTab>
-        ))}
-      </div>
-      <div className="flex min-h-0 flex-1 flex-col border-t border-gray-200/90">
-        {activeAgentId === null && <RootBrowserEmptyState />}
         {waitingForPane && (
-          <div className="flex flex-1 items-center justify-center text-xs text-[hsl(240_8%_45%)]">
+          <div className={`flex flex-1 items-center justify-center text-xs ${MUTED}`}>
             Opening agent…
           </div>
         )}
         <div
           ref={apps.setSlot}
           data-testid="browser-drawer-slot"
-          className={cn('min-h-0 flex-1 flex-col', activeAgentId === null ? 'hidden' : 'flex')}
+          className={cn('min-h-0 flex-1 flex-col', isRoot ? 'hidden' : 'flex')}
         />
       </div>
     </AppDrawerShell>
