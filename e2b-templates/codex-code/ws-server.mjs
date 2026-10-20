@@ -281,6 +281,16 @@ wss.on("connection", (ws) => {
             error: "Codex exec is non-interactive",
           }),
         );
+      } else if (msg.type === "user_turn") {
+        // Direct chat is Claude-only for now: `codex exec` reads one prompt.
+        ws.send(
+          JSON.stringify({
+            type: "user_turn_ack",
+            id: typeof msg.id === "string" ? msg.id : "",
+            status: "rejected",
+            reason: "provider_unsupported",
+          }),
+        );
       }
     } catch (err) {
       log("error", "Failed to parse message", { error: err.message });
