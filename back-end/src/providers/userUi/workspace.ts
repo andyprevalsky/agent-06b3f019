@@ -108,7 +108,14 @@ export async function writeUserUiWorkspaceToDir(homeDir: string, workspace: User
     await mkdir(dirname(full), { recursive: true });
     await writeFile(full, file.content);
   }
-  await chmod(join(root, USER_UI_CLI_BIN_DIR, USER_UI_CLI_NAME), 0o755);
+  for (const file of binFiles(workspace)) await chmod(join(root, file), 0o755);
+}
+
+/** Every CLI under ~/.rose/bin (rose-ui plus any added by other features, e.g. rose-display). */
+function binFiles(workspace: UserUiWorkspace): string[] {
+  return workspace.files
+    .map((file) => file.path)
+    .filter((path) => path.startsWith(`${USER_UI_CLI_BIN_DIR}/`));
 }
 
 interface SandboxFiles {
@@ -135,9 +142,9 @@ export async function writeUserUiWorkspaceToSandbox(
       data: toArrayBuffer(file.content),
     }))
   );
-  await sandbox.commands.run(`chmod 755 ${home}/${USER_UI_CLI_BIN_DIR}/${USER_UI_CLI_NAME}`, {
-    timeoutMs: 10_000,
-  });
+  const bins = binFiles(workspace).map((path) => `${home}/${path}`);
+  if (bins.length === 0) return;
+  await sandbox.commands.run(`chmod 755 ${bins.join(' ')}`, { timeoutMs: 10_000 });
 }
 
 const SANDBOX_HOME = '/home/user';
@@ -171,6 +178,12 @@ export async function writeUserUiWorkspaceToSandboxSafe(
   }
 }
 
+/** Same-host session: keep the display path, swap the public origin for loopback. */
+function localDisplayUrl(publicUrl: string): string {
+  const { pathname } = new URL(publicUrl);
+  return `http://127.0.0.1:${process.env.PORT || 3001}${pathname}`;
+}
+
 /**
  * Best-effort local-fallback write under the session HOME. Returns the CLI bin
  * dir for PATH and env overrides: a same-host session publishes to this
@@ -188,6 +201,9 @@ export async function materializeUserUiInLocalHome(
       binDir: join(homeDir, USER_UI_CLI_BIN_DIR),
       envs: {
         ROSE_UI_PUBLISH_URL: `http://127.0.0.1:${process.env.PORT || 3001}/api/user-ui/versions`,
+        ...(workspace.envs.ROSE_DISPLAY_URL
+          ? { ROSE_DISPLAY_URL: localDisplayUrl(workspace.envs.ROSE_DISPLAY_URL) }
+          : {}),
       },
     };
   } catch (err) {

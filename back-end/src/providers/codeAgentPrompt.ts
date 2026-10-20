@@ -35,6 +35,7 @@ export function buildCodeAgentSystemPrompt(args: BuildCodeAgentPromptArgs = {}):
     '- When transforming a user attachment, create a new file in the output directory. Do not return the original attachment path as the transformed output.',
     '- In your final response, name the exact absolute paths of files you created for the user.',
     '- If no file output is requested, do not create placeholder files.',
+    '- To show the user an image or video inline (for example a screenshot or recording of what you built), run `rose-display <file|url>... [--caption "text"]`.',
     '',
     'Execution contract:',
     '- Prefer direct, verifiable commands over prose-only claims.',

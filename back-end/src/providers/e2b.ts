@@ -36,6 +36,7 @@ import {
   prepareUserUiWorkspaceSafe,
   writeUserUiWorkspaceToSandboxSafe,
 } from './userUi/workspace';
+import { withDisplayCli } from './display/workspace';
 import {
   isRefreshOnlyOauthEnvelope,
   resolveClaudeCodeAuthEnvs,
@@ -334,7 +335,7 @@ async function createClaudeCodeSessionUnlocked(
     log.info(`GitHub repo configured: ${githubRepoUrl}`);
   }
 
-  const userUiWorkspace = await prepareUserUiWorkspaceSafe(userId);
+  const userUiWorkspace = withDisplayCli(await prepareUserUiWorkspaceSafe(userId), userId, agentId);
   applyUserUiSandboxEnvs(envs, userUiWorkspace);
 
   // Create sandbox first (before DB record) to avoid placeholder conflicts.
@@ -584,7 +585,7 @@ export async function createCodexCodeSession(
     log.info(`GitHub repo configured for Codex: ${githubRepoUrl}`);
   }
 
-  const userUiWorkspace = await prepareUserUiWorkspaceSafe(userId);
+  const userUiWorkspace = withDisplayCli(await prepareUserUiWorkspaceSafe(userId), userId, agentId);
   applyUserUiSandboxEnvs(envs, userUiWorkspace);
 
   const sandbox = await createSandboxWithRetry(
