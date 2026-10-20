@@ -517,7 +517,10 @@ function emitClaudeMessage(message) {
 // message that arrives mid-run is answered before the CLI exits.
 const TURN_TOKEN = process.env.CODE_SESSION_TURN_TOKEN || "";
 const DIRECT_HOLD_IDLE_MS = (() => {
-  const raw = Number.parseInt(process.env.CODE_SESSION_DIRECT_HOLD_IDLE_MS || "", 10);
+  const raw = Number.parseInt(
+    process.env.CODE_SESSION_DIRECT_HOLD_IDLE_MS || "",
+    10,
+  );
   return Number.isInteger(raw) && raw > 0 ? raw : 10 * 60 * 1000;
 })();
 const MAX_TURN_TEXT_CHARS = 100_000;
@@ -618,7 +621,11 @@ function handleUserTurn(msg) {
 
 function handleHandBack(msg) {
   if (!tokenMatches(msg.token)) {
-    return { type: "hand_back_ack", status: "rejected", reason: "unauthorized" };
+    return {
+      type: "hand_back_ack",
+      status: "rejected",
+      reason: "unauthorized",
+    };
   }
   const wasHeld = directHold;
   releaseDirectHold("handed_back");
