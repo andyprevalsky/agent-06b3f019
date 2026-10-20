@@ -128,11 +128,10 @@ describe('CompletionSummaryCard', () => {
     expect(screen.queryByText(/\[object Object\]/)).not.toBeInTheDocument();
   });
 
-  it.skip('renders outputs with various value types and copy button', async () => {
+  it('renders outputs with various value types and copy button', async () => {
     const user = userEvent.setup();
-    // Mock clipboard
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.assign(navigator, { clipboard: { writeText } });
+    // userEvent.setup() installs a clipboard stub on navigator (a getter); spy on it instead of reassigning.
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText');
 
     renderWithProviders(
       <CompletionSummaryCard
@@ -150,8 +149,16 @@ describe('CompletionSummaryCard', () => {
 
     expect(screen.getByText('Output')).toBeInTheDocument();
     expect(screen.getByText('Alice')).toBeInTheDocument();
-    expect(screen.getByText('a, b, c')).toBeInTheDocument();
-    expect(screen.getByText('{"foo":"bar"}')).toBeInTheDocument();
+    // Readable report formatting (47c9a09c2): array items render one per paragraph, records as "Key: value".
+    expect(screen.getByText('a b c')).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        (_, el) =>
+          el?.textContent === 'Foo: bar' &&
+          ![...el.children].some((child) => child.textContent === 'Foo: bar'),
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/\{"foo"/)).not.toBeInTheDocument();
     expect(screen.getByText('42')).toBeInTheDocument();
 
     // Copy button on first output
