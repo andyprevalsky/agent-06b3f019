@@ -51,6 +51,14 @@ SDK_POST_RESULT_EXIT_GRACE_S: Final[float] = 180.0
 # (blocked inside this spawn), so the session pauses and returns the question.
 # 10k attached sessions = ~83 keepalives/s, each O(1) indexed reads.
 CODE_SESSION_KEEPALIVE_INTERVAL_S: Final[float] = 120.0
+# C16: applying a size change = checkpoint + new sandbox + restore + ws-server
+# start on the backend; one call may take minutes. A concurrent apply (409) is
+# waited out with linear backoff.
+CODE_SESSION_RESIZE_TIMEOUT_S: Final[float] = 900.0
+CODE_SESSION_RESIZE_ATTEMPTS: Final[int] = 5
+CODE_SESSION_RESIZE_RETRY_BACKOFF_S: Final[float] = 5.0
+CODE_SESSION_RESIZE_HEARTBEAT_S: Final[float] = 15.0
+CODE_AGENT_RESIZE_YIELD_REASON: Final[str] = "environment_resize"
 
 # Temporal requires a start_to_close or schedule_to_close timeout on every
 # activity. The code-agent activity passes this effectively-infinite value so
