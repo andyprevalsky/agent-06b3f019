@@ -575,6 +575,50 @@ async def test_invalid_tool_json_is_skipped_not_declared():
     assert sorted(item["name"] for item in pinned["skipped"]) == ["escape", "noview", "reserved"]
 
 
+async def test_pinned_tools_decode_in_production_sandbox():
+    """A real resolve result decodes inside the production workflow sandbox.
+
+    AgentWorkflow imports domains.user_tools.handler via imports_passed_through(),
+    exactly like _user_tools_sandbox_wf. Regression: string annotations on the
+    payload TypedDicts made Temporal's decode raise NameError ('Optional'), so
+    every root agent hung at "Preparing Cloud Agent" (2026-10-20).
+    """
+    import uuid
+
+    from _user_tools_sandbox_wf import UserToolsPinRepro
+    from temporalio import activity
+    from temporalio.testing import WorkflowEnvironment
+    from temporalio.worker import Worker
+
+    from helpers.workflow_sandbox import production_workflow_runner
+
+    with _local_executor():
+        _weather_backend()
+        pinned = await _resolve(USER_A)
+    assert pinned["tools"], "fixture must pin at least one tool"
+
+    @activity.defn(name="resolve_user_tools_activity")
+    async def resolve_fixture(agent_id: str, user_id: str) -> Dict[str, Any]:
+        return pinned
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue="user-tools-sandbox",
+            workflows=[UserToolsPinRepro],
+            activities=[resolve_fixture],
+            workflow_runner=production_workflow_runner(),
+        ):
+            handle = await env.client.start_workflow(
+                UserToolsPinRepro.run,
+                args=["agent-1", USER_A],
+                id=f"user-tools-sandbox-{uuid.uuid4()}",
+                task_queue="user-tools-sandbox",
+                execution_timeout=timedelta(seconds=30),
+            )
+            assert await handle.result() == len(pinned["tools"])
+
+
 async def run_all_tests():
     print("user-tools blackbox tests:")
     r = BlackboxResult()
@@ -599,6 +643,7 @@ async def run_all_tests():
         await r.record_async("handler_env_has_no_secrets", test_handler_env_has_no_secrets)
         await r.record_async("side_effect_tools_rejected_in_v1", test_side_effect_tools_rejected_in_v1)
         await r.record_async("invalid_tool_json_is_skipped_not_declared", test_invalid_tool_json_is_skipped_not_declared)
+        await r.record_async("pinned_tools_decode_in_production_sandbox", test_pinned_tools_decode_in_production_sandbox)
     finally:
         teardown_mock()
     return r.all_passed

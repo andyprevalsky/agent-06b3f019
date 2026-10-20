@@ -560,6 +560,69 @@ def test_every_scheduled_activity_is_registered():
     )
 
 
+def _registered_activity_functions() -> list:
+    """Import every worker-registered activity function from its defining module."""
+    import importlib
+
+    registered = _worker_registered_activities()
+    found: dict = {}
+    for dirname in _ACTIVITY_SCAN_DIRS:
+        for path in sorted((AGENTS_ROOT / dirname).rglob("*.py")):
+            if "test" in path.parts or "tests" in path.parts:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in tree.body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in registered:
+                    module = ".".join(path.relative_to(AGENTS_ROOT).with_suffix("").parts)
+                    found.setdefault(node.name, module)
+    if str(AGENTS_ROOT) not in sys.path:
+        sys.path.insert(0, str(AGENTS_ROOT))
+    return [getattr(importlib.import_module(module), name) for name, module in sorted(found.items())]
+
+
+def _string_annotated_payload_classes(hint, seen: set) -> list[str]:
+    """Payload classes reachable from ``hint`` whose own annotations are unevaluated strings."""
+    import dataclasses
+    import typing
+
+    if id(hint) in seen:
+        return []
+    seen.add(id(hint))
+    found: list[str] = []
+    for arg in typing.get_args(hint):
+        found += _string_annotated_payload_classes(arg, seen)
+    if isinstance(hint, type) and (typing.is_typeddict(hint) or dataclasses.is_dataclass(hint)):
+        raw = getattr(hint, "__annotations__", {})
+        lazy = [field for field, value in raw.items() if isinstance(value, (str, typing.ForwardRef))]
+        if lazy:
+            found.append(f"{hint.__module__}.{hint.__qualname__} ({', '.join(sorted(lazy))})")
+        for value in typing.get_type_hints(hint).values():
+            found += _string_annotated_payload_classes(value, seen)
+    return found
+
+
+def test_activity_payload_types_need_no_module_globals():
+    """Activity argument/result TypedDicts and dataclasses carry real (non-string) annotations.
+
+    Temporal decodes an activity result inside the workflow sandbox with
+    get_type_hints(), resolving string annotations against the sandbox's
+    sys.modules. A payload class imported via imports_passed_through() is not
+    in that map, so `from __future__ import annotations` in its module makes
+    every result decode fail with NameError and the workflow task retries
+    forever (root agents hung at "Preparing Cloud Agent", 2026-10-20).
+    """
+    import typing
+
+    violations: list[str] = []
+    for fn in _registered_activity_functions():
+        for hint in typing.get_type_hints(fn).values():
+            violations += [f"{fn.__name__}: {cls}" for cls in _string_annotated_payload_classes(hint, set())]
+    assert not violations, (
+        "Activity payload classes with string annotations (remove `from __future__ import annotations` "
+        "from their module):\n" + "\n".join(sorted(set(violations)))
+    )
+
+
 _WORKFLOW_SANDBOX_MODULE = AGENTS_ROOT / "helpers" / "workflow_sandbox.py"
 _SANDBOX_CONFIG_NAMES = frozenset({"SandboxRestrictions", "SandboxedWorkflowRunner", "UnsandboxedWorkflowRunner"})
 
@@ -601,6 +664,7 @@ async def run_all_tests():
     r.record("every_workflow_park_is_cutover_classified", test_every_workflow_park_is_cutover_classified)
     r.record("every_scheduled_activity_is_registered", test_every_scheduled_activity_is_registered)
     r.record("workflow_sandbox_is_production_only", test_workflow_sandbox_is_production_only)
+    r.record("activity_payload_types_need_no_module_globals", test_activity_payload_types_need_no_module_globals)
     return r.all_passed
 
 
