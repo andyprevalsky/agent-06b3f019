@@ -86,7 +86,9 @@ links. A file pointer never substitutes for the diff.
 
 # Rose Labs
 
-AI agent platform.
+**Rose is an RWLH: a Real World Long Horizon computer.** It is a computer that
+works in the real world over long horizons on the user's behalf. Judge every
+design, UI and harness decision by whether it makes Rose a better RWLH.
 
 - Production: https://roselabs.ai
 - Backend API: https://navi-j9a9.onrender.com
