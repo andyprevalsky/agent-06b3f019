@@ -50,6 +50,8 @@ const BASE_SECONDS = Math.floor(Date.now() / 1000);
 const ORIGIN_TS = `${BASE_SECONDS}.000100`;
 const REPEAT_TS = `${BASE_SECONDS}.000200`;
 const REPLY_TS = `${BASE_SECONDS}.000300`;
+const ABANDON_TS = `${BASE_SECONDS}.000500`;
+const ABANDON_MESSAGE = `Webhook handoff stalled before workflow start ${RUN_TAG}`;
 
 interface Capture {
   url: string;
@@ -510,7 +512,63 @@ const tests: Array<[string, () => Promise<void>]> = [
   ['other apps’ cards and RCA-agent failures are ignored', testCardsThatMustNotStartAnRca],
   ['reviewer thread feedback reaches the RCA agent once', testReviewerFeedbackReachesAgent],
   ['RCA outcome posts summary, PR and FE link to the thread', testOutcomePostsBackToThread],
+  [
+    'redelivery restarts an RCA whose workflow never started',
+    testAbandonedStartIsRestartedOnRedelivery,
+  ],
 ];
+
+/**
+ * Regression (L-RCA gap, 2026-10-20): the backend can die after createAgent
+ * wrote the agent row but before its workflow started. Slack then redelivers
+ * the origin card; it must restart the RCA on a fresh agent instead of
+ * treating the stuck row as done. A young row is left alone so a concurrent
+ * first attempt still in flight is not raced.
+ */
+async function testAbandonedStartIsRestartedOnRedelivery(): Promise<void> {
+  const token = `rca-abandoned-${RUN_TAG}`;
+  const card = cardEvent({ id: eventId('ABANDON'), ts: ABANDON_TS, message: ABANDON_MESSAGE });
+  const first = await postSlack(card, token);
+  assert(
+    first.status === 200 && first.body.action === 'created',
+    `first delivery: ${JSON.stringify(first.body)}`
+  );
+  const stuckId = first.body.agentId ?? '';
+  const incidentId = first.body.incidentId ?? '';
+  // Crash between the agent row and the workflow start: no workflow recorded.
+  await prisma.agent.update({
+    where: { id: stuckId },
+    data: { status: 'STARTING_UP', temporalWorkflowId: null, temporalFirstExecutionRunId: null },
+  });
+
+  const young = await postSlack(card, token);
+  assert(young.status === 200, `young redelivery: ${young.status}`);
+  const stillSame = await prisma.slackAutoRcaIncident.findUnique({ where: { id: incidentId } });
+  assert(
+    stillSame?.agentId === stuckId,
+    'a just-created agent must not be replaced (in-flight start)'
+  );
+
+  await prisma.agent.update({
+    where: { id: stuckId },
+    data: { createdAt: new Date(Date.now() - 10 * 60 * 1000) },
+  });
+  const redelivered = await postSlack(card, token);
+  assert(
+    redelivered.status === 200,
+    `stale redelivery: ${redelivered.status} ${JSON.stringify(redelivered.body)}`
+  );
+  const incident = await prisma.slackAutoRcaIncident.findUnique({ where: { id: incidentId } });
+  const freshId = incident?.agentId ?? '';
+  assert(
+    freshId !== '' && freshId !== stuckId,
+    'abandoned start was not moved to a fresh RCA agent'
+  );
+  const fresh = await prisma.agent.findUnique({ where: { id: freshId } });
+  assert(fresh?.temporalWorkflowId === freshId, 'fresh RCA agent did not start its workflow');
+  const stuck = await prisma.agent.findUnique({ where: { id: stuckId } });
+  assert(stuck?.status === 'FAILED', `abandoned agent should be FAILED, got ${stuck?.status}`);
+}
 
 async function main(): Promise<void> {
   for (const [name, value] of [
