@@ -17,7 +17,8 @@
  *   [CLOSED]
  *
  * open = hovered || focused || pinned (owned by useToolbarReveal). Clicks on
- * a strip item ([data-nub-item]) never toggle the pin. The strip stays mounted
+ * a strip item ([data-nub-item]) or inside its portaled popover/dialog never
+ * toggle the pin. The strip stays mounted
  * while closed so its children keep their state (e.g. auto-loaded prompts).
  */
 
@@ -32,7 +33,6 @@ const CLOSED_WIDTH = 34;
 const BOX_RADIUS = 12;
 
 const ROSE_GRADIENT = 'linear-gradient(120deg,#ffb36b 0%,#ff5f8f 42%,#e43f9a 62%,#9b4dff 100%)';
-
 
 function useStripWidth(stripRef: React.RefObject<HTMLDivElement | null>): number {
   const [width, setWidth] = useState(0);
@@ -62,7 +62,11 @@ export function NubTab({ reveal, children }: { reveal: ToolbarReveal; children: 
       data-state={reveal.open ? 'open' : 'closed'}
       {...reveal.regionHandlers}
       onClick={(e) => {
-        if (e.target instanceof Element && e.target.closest('[data-nub-item]')) return;
+        // Portaled popovers/dialogs bubble clicks here through the React tree;
+        // only clicks on the tab itself (not on an item) toggle the pin.
+        const target = e.target;
+        if (!(target instanceof Node) || !e.currentTarget.contains(target)) return;
+        if (target instanceof Element && target.closest('[data-nub-item]')) return;
         reveal.onNubClick();
       }}
       // rose-nub-tab (roseQueryBox.css) = the mask: everything above the box's

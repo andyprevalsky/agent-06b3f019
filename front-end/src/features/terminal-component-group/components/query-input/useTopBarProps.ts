@@ -8,7 +8,11 @@ import { canUseFastMode } from '@/lib/fastModeAccounts';
 import { SIMULATOR_USER_IDS } from '@/lib/simulatorAccounts';
 import { isAdminOperator } from '@/lib/adminAccounts';
 import { useAuth } from '../../hooks';
-import { IS_DEV_MODE, DEFAULT_RESTART_THRESHOLD, DEFAULT_PENDING_PRICE_LIMIT_CENTS } from '../../config';
+import {
+  IS_DEV_MODE,
+  DEFAULT_RESTART_THRESHOLD,
+  DEFAULT_PENDING_PRICE_LIMIT_CENTS,
+} from '../../config';
 import type { QueryInputProps } from './types';
 import type { TopBarProps } from './TopBar';
 import type { UsePriceLimitResult } from './usePriceLimit';

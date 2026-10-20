@@ -34,7 +34,7 @@
  * query-box tab) = bare white gear with the instant "Agent settings" tooltip.
  */
 
-import { useRef, useState } from 'react';
+import { useRef, useState, type RefObject } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -55,6 +55,33 @@ import { usePriceLimitEdit } from './agent-settings-dialog/usePriceLimitEdit';
 import { useModalPosition } from './agent-settings-dialog/useModalPosition';
 import { useReportBug } from './agent-settings-dialog/useReportBug';
 import { NUB_ITEM_CLASS, NubTip } from './query-input/NubTip';
+
+/** Stock muted gear, or the bare white nub gear with its instant tooltip. */
+function SettingsTrigger({
+  nub,
+  triggerRef,
+}: {
+  nub: boolean;
+  triggerRef: RefObject<HTMLButtonElement | null>;
+}) {
+  const trigger = (
+    <DialogTrigger asChild>
+      <button
+        ref={triggerRef}
+        aria-label={nub ? 'Agent settings' : undefined}
+        data-nub-item={nub ? '' : undefined}
+        className={
+          nub
+            ? NUB_ITEM_CLASS
+            : 'p-1.5 rounded-md hover:bg-muted/50 transition-colors text-muted-foreground hover:text-foreground'
+        }
+      >
+        <Settings className="h-4 w-4" strokeWidth={nub ? 2.2 : 2} />
+      </button>
+    </DialogTrigger>
+  );
+  return nub ? <NubTip label="Agent settings">{trigger}</NubTip> : trigger;
+}
 
 export default function AgentSettingsDialog({
   agent,
@@ -84,27 +111,9 @@ export default function AgentSettingsDialog({
 
   const reportBug = useReportBug({ agent, open });
 
-  const nub = variant === 'nub';
-  const trigger = (
-    <DialogTrigger asChild>
-      <button
-        ref={triggerRef}
-        aria-label={nub ? 'Agent settings' : undefined}
-        data-nub-item={nub ? '' : undefined}
-        className={
-          nub
-            ? NUB_ITEM_CLASS
-            : 'p-1.5 rounded-md hover:bg-muted/50 transition-colors text-muted-foreground hover:text-foreground'
-        }
-      >
-        <Settings className="h-4 w-4" strokeWidth={nub ? 2.2 : 2} />
-      </button>
-    </DialogTrigger>
-  );
-
   return (
     <Dialog open={open} onOpenChange={setOpen} modal={false}>
-      {nub ? <NubTip label="Agent settings">{trigger}</NubTip> : trigger}
+      <SettingsTrigger nub={variant === 'nub'} triggerRef={triggerRef} />
       <DialogContent
         className="p-0 border border-gray-300 dark:border-gray-700 shadow-lg [&>button]:hidden overflow-hidden"
         style={{

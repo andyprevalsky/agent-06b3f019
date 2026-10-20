@@ -9,6 +9,8 @@
  *  - #43 every tab item has an instant tooltip with the ledger's exact text;
  *        the info item opens About / Privacy / Terms
  *  - #53 dark-only glass send button; its CSS is scoped to html.dark
+ *  - #32 bottom row: bare paperclip at the model selector's 26px height
+ *        (speed toggle states live in fast-mode-toggle.blackbox.tsx)
  *  - #23 new agents default to rose-flash for flagged accounts
  */
 import { createRef } from 'react';
@@ -158,6 +160,13 @@ describe('Rose Desktop query box: nub tab (#31)', () => {
     expect(within(nub).getByTestId('nub-context')).toHaveTextContent('0%');
     expect(within(nub).getByLabelText('Agent settings')).toBeInTheDocument();
     expect(within(nub).getByTestId('query-info-trigger')).toBeInTheDocument();
+    // White 12px icons and 10px mono numbers, bare (no pill/chip wrappers).
+    expect(screen.getByTestId('query-toolbar-region')).toHaveClass('text-white', 'h-[18px]');
+    for (const item of within(nub).getAllByRole('button')) {
+      expect(item).toHaveClass('[&_svg]:h-3', '[&_svg]:w-3', 'bg-transparent', 'border-0');
+    }
+    expect(within(nub).getByTestId('nub-budget')).toHaveClass('text-[10px]', 'font-mono');
+    expect(within(nub).getByTestId('nub-context')).toHaveClass('text-[10px]', 'font-mono');
   });
 
   it('hover grows it to 18px and slides it sideways; leaving closes it', async () => {
@@ -197,6 +206,52 @@ describe('Rose Desktop query box: nub tab (#31)', () => {
     renderFlagged();
     fireEvent.focus(screen.getByTestId('nub-write-lock'));
     expect(tab()).toHaveAttribute('data-state', 'open');
+  });
+  it('a tap inside a portaled item menu never unpins the tab', async () => {
+    renderFlagged();
+    fireEvent.pointerDown(tab(), { pointerType: 'touch' });
+    fireEvent.click(tab());
+    const info = screen.getByTestId('query-info-trigger');
+    fireEvent.pointerDown(info, { pointerType: 'touch' });
+    fireEvent.click(info);
+    const menu = await screen.findByTestId('query-info-menu');
+    const nav = within(menu).getByRole('navigation');
+    // The menu is portaled outside the tab's DOM; its clicks still bubble to the
+    // tab through the React tree and must not toggle the pin.
+    expect(tab().contains(nav)).toBe(false);
+    fireEvent.pointerDown(nav, { pointerType: 'touch' });
+    fireEvent.click(nav);
+    expect(tab()).toHaveAttribute('data-state', 'open');
+  });
+});
+
+describe('Rose Desktop query box: bottom row (#32)', () => {
+  function paperclip() {
+    return document.querySelector('svg.lucide-paperclip')!.closest('button')!;
+  }
+
+  it('attach is a bare paperclip at the model selector height; the stock box keeps the chip', () => {
+    const { unmount } = renderFlagged();
+    const bare = paperclip();
+    expect(bare).toHaveAccessibleName('Attach files');
+    expect(bare).toHaveAttribute('data-bare', 'true');
+    expect(bare.className).toContain('bg-transparent');
+    expect(bare.className).toContain('h-[26px]');
+    expect(bare.className).toContain('w-[26px]');
+    expect(bare.className).not.toMatch(/(^|\s)(border|rounded-lg|bg-gray-100|shadow\S*)(\s|$)/);
+    // The model chip is 26px tall: text-xs line (16px) + py-1 (8px) + 1px border x2.
+    const model = screen.getByText('rose-labs/rose-fast').closest('button')!;
+    expect(model.className).toMatch(/(^|\s)text-xs(\s|$)/);
+    expect(model.className).toMatch(/(^|\s)py-1(\s|$)/);
+    expect(model.className).toMatch(/(^|\s)border(\s|$)/);
+    unmount();
+
+    renderWithProviders(<QueryInput {...queryProps} />, { roseDesktop: false });
+    const stock = paperclip();
+    expect(stock).not.toHaveAttribute('data-bare');
+    expect(stock.className).toContain('border-gray-300');
+    expect(stock.className).toContain('bg-gray-100');
+    expect(stock.className).toContain('w-8');
   });
 });
 

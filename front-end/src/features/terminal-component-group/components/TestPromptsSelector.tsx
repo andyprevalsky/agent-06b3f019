@@ -109,7 +109,10 @@ interface TestPromptTriggerButtonProps extends ComponentPropsWithoutRef<'button'
 }
 
 const TestPromptTriggerButton = forwardRef<HTMLButtonElement, TestPromptTriggerButtonProps>(
-  ({ onOpen, onClose, onMouseEnter, onMouseLeave, type = 'button', nub = false, ...props }, ref) => {
+  (
+    { onOpen, onClose, onMouseEnter, onMouseLeave, type = 'button', nub = false, ...props },
+    ref,
+  ) => {
     const handleMouseEnter = (event: MouseEvent<HTMLButtonElement>): void => {
       onMouseEnter?.(event);
       onOpen();
@@ -140,6 +143,26 @@ const TestPromptTriggerButton = forwardRef<HTMLButtonElement, TestPromptTriggerB
   },
 );
 TestPromptTriggerButton.displayName = 'TestPromptTriggerButton';
+
+/** Stock chip trigger, or the bare white nub icon with its instant tooltip. */
+function TestPromptTrigger({
+  nub,
+  setIsOpen,
+}: {
+  nub: boolean;
+  setIsOpen: (open: boolean) => void;
+}) {
+  const trigger = (
+    <PopoverTrigger asChild>
+      <TestPromptTriggerButton
+        nub={nub}
+        onOpen={() => setIsOpen(true)}
+        onClose={() => setIsOpen(false)}
+      />
+    </PopoverTrigger>
+  );
+  return nub ? <NubTip label="Context files">{trigger}</NubTip> : trigger;
+}
 
 export default function TestPromptsSelector({
   onSelectPrompt,
@@ -192,20 +215,9 @@ export default function TestPromptsSelector({
     }
   };
 
-  const nub = variant === 'nub';
-  const trigger = (
-    <PopoverTrigger asChild>
-      <TestPromptTriggerButton
-        nub={nub}
-        onOpen={() => setIsOpen(true)}
-        onClose={() => setIsOpen(false)}
-      />
-    </PopoverTrigger>
-  );
-
   return (
     <Popover open={isOpen} onOpenChange={setIsOpen}>
-      {nub ? <NubTip label="Context files">{trigger}</NubTip> : trigger}
+      <TestPromptTrigger nub={variant === 'nub'} setIsOpen={setIsOpen} />
       <PopoverContent
         className="w-[min(400px,calc(100vw-32px))] max-h-[400px] overflow-y-auto p-4 z-50"
         align="start"

@@ -121,7 +121,10 @@ export function SpeedToggle({ fastMode, onFastModeChange }: SpeedToggleProps) {
           data-testid="speed-toggle"
           className="rose-speed inline-flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-lg border transition-all duration-200"
         >
-          <Zap className="h-[10.4px] w-[10.4px]" fill={level === 'normal' ? 'none' : 'currentColor'} />
+          <Zap
+            className="h-[10.4px] w-[10.4px]"
+            fill={level === 'normal' ? 'none' : 'currentColor'}
+          />
         </button>
       </TooltipTrigger>
       <TooltipContent side="top" className="z-[100]">

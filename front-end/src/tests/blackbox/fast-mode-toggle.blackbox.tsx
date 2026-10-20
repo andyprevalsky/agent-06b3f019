@@ -6,9 +6,17 @@
  *        (admin id, verified admin phone, or live impersonation)
  *  - #4  default on for allowlisted accounts (controlled value; toggling flips it)
  *  - #3  the toggle drives the boolean threaded into the create-agent payload
+ *
+ * Rose Desktop (UI ledger #32, #23): the speed square next to the model
+ * selector cycles Normal -> Fast -> Ultrafast (default), Zap icon only at the
+ * selector's 26px height; dark colors are toned down and scoped to html.dark.
  */
 import React from 'react';
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { MemoryRouter } from 'react-router-dom';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { Globe } from 'lucide-react';
 import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
 import { TooltipProvider } from '@/components/ui/tooltip';
@@ -23,6 +31,8 @@ import { canUseFastMode, FAST_MODE_USER_IDS } from '@/lib/fastModeAccounts';
 import { resetFastModeSessionOverride } from '@/lib/fastModeSession';
 import { SIMULATOR_USER_IDS } from '@/lib/simulatorAccounts';
 import { TOOL_ICONS } from '@/lib/toolIcons';
+import { RoseDesktopContext } from '@/hooks/roseDesktopContext';
+import { resetSpeedLevelSession } from '@/features/terminal-component-group/components/query-input/speedLevel';
 
 const CURRENT_ANDY_ID = ADMIN_ACCOUNTS[0]!.userId;
 const CURRENT_TAMY_ID = ADMIN_ACCOUNTS[1]!.userId;
@@ -111,6 +121,7 @@ afterEach(() => {
   setViewportWidth(originalInnerWidth);
   hookMocks.authUserPhone = '';
   resetFastModeSessionOverride();
+  resetSpeedLevelSession();
 });
 
 describe('Fast Mode account gating', () => {
@@ -479,5 +490,140 @@ describe('RoseToolSetChip contents', () => {
     expect(TOOL_ICONS.browser_agent).not.toBe(TOOL_ICONS.default);
     expect(TOOL_ICONS.browser_agent).toBe(Globe);
     expect(TOOL_ICONS.spawn_browser_agent).toBe(Globe);
+  });
+});
+
+// ─── Rose Desktop speed toggle (#32, #23) ───────────────────────────────────
+
+/** Controlled query box: the test re-renders with the value the toggle sent. */
+function speedQueryBox(roseDesktop: boolean, fastMode: boolean, onFastModeChange = vi.fn()) {
+  return (
+    <MemoryRouter>
+      <TooltipProvider>
+        <RoseDesktopContext.Provider value={roseDesktop}>
+          <QueryInput
+            value=""
+            onChange={vi.fn()}
+            onSubmit={vi.fn()}
+            selectedModel="rose-labs/rose-1-flash"
+            fastMode={fastMode}
+            onFastModeChange={onFastModeChange}
+          />
+        </RoseDesktopContext.Provider>
+      </TooltipProvider>
+    </MemoryRouter>
+  );
+}
+
+const ROSE_QUERY_BOX_CSS = readFileSync(
+  join(
+    dirname(fileURLToPath(import.meta.url)),
+    '../../features/terminal-component-group/components/query-input/roseQueryBox.css',
+  ),
+  'utf8',
+);
+
+function cssRules(css: string, needle: string): { selector: string; body: string }[] {
+  return css
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('}')
+    .map((block) => {
+      const [selector = '', body = ''] = block.split('{');
+      return { selector: selector.trim(), body: body.trim() };
+    })
+    .filter((rule) => rule.selector.includes(needle));
+}
+
+describe('Rose Desktop speed toggle (#32, #23)', () => {
+  beforeEach(() => {
+    hookMocks.authUserId = CURRENT_ANDY_ID;
+  });
+
+  it('is a Zap-only 26px square right after the model selector, Ultrafast by default', () => {
+    render(speedQueryBox(true, true));
+    const speed = screen.getByTestId('speed-toggle');
+    expect(speed).toHaveAttribute('data-state', 'ultra');
+    expect(speed).toHaveAccessibleName('Ultrafast');
+    expect(speed.textContent).toBe('');
+    expect(speed).toHaveClass('rose-speed', 'h-[26px]', 'w-[26px]', 'rounded-lg', 'border');
+    const zap = speed.querySelector('svg.lucide-zap')!;
+    expect(zap).toHaveClass('h-[10.4px]', 'w-[10.4px]');
+    expect(zap.getAttribute('fill')).toBe('currentColor');
+    // Bottom row: model selector, then speed (the info button is gone).
+    const model = screen.getByText('rose-labs/rose-1-flash').closest('button')!;
+    expect(model.nextElementSibling).toBe(speed);
+    expect(within(screen.getByTestId('query-input-surface')).getByTestId('speed-toggle')).toBe(
+      speed,
+    );
+    // Not a second toggle on the tab.
+    expect(screen.queryByTestId('fast-mode-toggle')).toBeNull();
+    expect(
+      within(screen.getByTestId('query-toolbar-nub')).queryByTestId('speed-toggle'),
+    ).toBeNull();
+  });
+
+  it('cycles Ultrafast -> Normal -> Fast -> Ultrafast; Fast and Ultrafast send fast mode', () => {
+    const onFastModeChange = vi.fn();
+    const view = render(speedQueryBox(true, true, onFastModeChange));
+    const speed = screen.getByTestId('speed-toggle');
+    const clickAndApply = () => {
+      fireEvent.click(speed);
+      view.rerender(speedQueryBox(true, onFastModeChange.mock.lastCall![0], onFastModeChange));
+    };
+
+    clickAndApply();
+    expect(onFastModeChange).toHaveBeenLastCalledWith(false);
+    expect(speed).toHaveAttribute('data-state', 'normal');
+    expect(speed).toHaveAccessibleName('Normal speed');
+    expect(speed.querySelector('svg')!.getAttribute('fill')).toBe('none');
+
+    clickAndApply();
+    expect(onFastModeChange).toHaveBeenLastCalledWith(true);
+    expect(speed).toHaveAttribute('data-state', 'fast');
+    expect(speed).toHaveAccessibleName('Fast');
+
+    clickAndApply();
+    expect(onFastModeChange).toHaveBeenLastCalledWith(true);
+    expect(speed).toHaveAttribute('data-state', 'ultra');
+    expect(onFastModeChange).toHaveBeenCalledTimes(3);
+  });
+
+  it('shows Normal when Fast Mode is off and is hidden for accounts without Fast Mode', () => {
+    const { unmount } = render(speedQueryBox(true, false));
+    expect(screen.getByTestId('speed-toggle')).toHaveAttribute('data-state', 'normal');
+    unmount();
+
+    hookMocks.authUserId = 'not-an-allowlisted-admin-id';
+    hookMocks.authUserPhone = '+15555550100';
+    render(speedQueryBox(true, false));
+    expect(screen.queryByTestId('speed-toggle')).toBeNull();
+  });
+
+  it('stock UI keeps the two-state Fast Mode toggle in the top row and no speed square', () => {
+    render(speedQueryBox(false, true));
+    expect(screen.queryByTestId('speed-toggle')).toBeNull();
+    expect(screen.getByTestId('fast-mode-toggle')).toHaveAccessibleName('Fast Mode On');
+  });
+
+  it('colors follow the mock; every dark rule is toned down and scoped to html.dark', () => {
+    const rules = cssRules(ROSE_QUERY_BOX_CSS, 'rose-speed');
+    const body = (selector: string) => rules.find((r) => r.selector === selector)?.body ?? '';
+    // Light: icy rose-blue (fast) and very icy with a glow (ultra).
+    expect(body(".rose-speed[data-state='fast']")).toContain('color: #3a8fdc');
+    expect(body(".rose-speed[data-state='ultra']")).toContain('color: #1f8ff0');
+    expect(body(".rose-speed[data-state='ultra']")).toContain('0 0 14px rgba(125, 205, 255, 0.85)');
+    // Dark: per the mock's dark.js, no glare.
+    expect(body("html.dark .rose-speed[data-state='fast']")).toContain('color: #7fb8e6');
+    expect(body("html.dark .rose-speed[data-state='ultra']")).toContain('color: #8fcfff');
+    expect(body("html.dark .rose-speed[data-state='ultra'] svg")).toContain('filter: none');
+    for (const { selector } of rules) {
+      for (const part of selector.split(',')) {
+        // Light rules key on the flag-only class; dark rules are html.dark-scoped.
+        expect(part.trim()).toMatch(
+          /^(html\.dark )?\.rose-speed\[data-state='(normal|fast|ultra)'\]/,
+        );
+      }
+    }
+    expect(rules.filter((r) => r.selector.startsWith('html.dark ')).length).toBe(4);
   });
 });

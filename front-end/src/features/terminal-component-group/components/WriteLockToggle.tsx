@@ -50,7 +50,9 @@ function NubWriteLock({
   onToggle: () => void;
 }) {
   return (
-    <NubTip label={isLocked ? 'Safe writes on · click to unlock' : 'Writes unlocked · click to lock'}>
+    <NubTip
+      label={isLocked ? 'Safe writes on · click to unlock' : 'Writes unlocked · click to lock'}
+    >
       <button
         type="button"
         data-nub-item

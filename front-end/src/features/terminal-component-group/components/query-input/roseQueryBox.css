@@ -77,10 +77,13 @@ html.dark .rose-speed[data-state='ultra'] svg {
 
 /* ── Send / pause button: dark-only black glass (LiquidWhiteButton) ─────── */
 /* Light mode keeps the stock LiquidWhiteButton untouched. In dark mode the
- * liquid-metal shader shows only as a ~3px outer ring and the face becomes
- * black glass: dark radial tint, backdrop refraction through the SVG filter
- * rendered next to the button, a minimal inset top highlight, a soft top
- * specular, no rainbow. Inline layer styles need !important to override. */
+ * liquid-metal shader shows only as a ~3px outer ring (chrome ring removed)
+ * and the face becomes black glass: dark radial tint, backdrop refraction
+ * through the SVG filter rendered next to the button (turbulence masked to the
+ * rim, no chromatic split), the launcher's inset top highlight, a soft top
+ * specular, no rainbow; white icon. Values follow the mock's _liquidglass.js
+ * (light .8, depth 8, frost 1px, splay .4). Inline layer styles need
+ * !important to override. */
 
 html.dark .rose-dark-glass canvas {
   -webkit-mask-image: radial-gradient(
@@ -93,11 +96,6 @@ html.dark .rose-dark-glass canvas {
     transparent calc(100% - 3.5px),
     #000 calc(100% - 3px)
   );
-  opacity: 0.7;
-}
-
-html.dark .rose-dark-glass .liquid-white-shader {
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35) !important;
 }
 
 html.dark .rose-dark-glass .liquid-white-chrome {
@@ -115,21 +113,22 @@ html.dark .rose-dark-glass .liquid-white-face {
   -webkit-backdrop-filter: url(#rose-dark-glass-refraction) saturate(1.4);
   backdrop-filter: url(#rose-dark-glass-refraction) saturate(1.4);
   box-shadow:
-    inset 0 1px 1px rgba(255, 255, 255, 0.28),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.1),
-    inset 0 -8px 12px rgba(0, 0, 0, 0.5) !important;
+    inset 0 1px 2px rgba(255, 255, 255, 0.8),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.16),
+    inset 0 -8px 12px rgba(0, 0, 0, 0.5),
+    inset 0 -1px 2px rgba(255, 255, 255, 0.12) !important;
 }
 
 html.dark .rose-dark-glass .liquid-white-face::before {
   content: '';
   position: absolute;
-  left: 18%;
-  right: 18%;
-  top: 6%;
-  height: 38%;
+  left: 14%;
+  right: 14%;
+  top: 5%;
+  height: 42%;
   border-radius: 50% / 60% 60% 40% 40%;
   pointer-events: none;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.02));
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.42), rgba(255, 255, 255, 0.04));
 }
 
 html.dark .rose-dark-glass .liquid-white-icon {
