@@ -2,6 +2,7 @@ import { prisma, runTransactionWithRetry } from './database';
 import { canonicalAuthRealm } from './authRealm';
 import { SSO_REALMS } from './browserCookies';
 import { INVALIDATED_STEEL_PROFILE_SOURCE } from './browser/profileBinding';
+import { primitiveDomain } from './primitive';
 
 export async function findSteelSessionAuth(
   userId: string,
@@ -90,27 +91,60 @@ export async function upsertAgentIdentityEmail(userId: string, email: string) {
  * same credentials the one-time-code poller fetches from. A code emailed to
  * any of these reaches the agent.
  */
-export async function findReadableInboxEmails(userId: string): Promise<string[]> {
-  const rows = await prisma.emailIntegrationCredential.findMany({
-    where: {
-      userId,
-      provider: 'GMAIL',
-      state: { not: 'needs_reconnect' },
-      integration: { name: 'gmail', status: 'CONNECTED' },
-    },
-    select: { email: true, accessToken: true, refreshToken: true },
-    orderBy: { updatedAt: 'desc' },
-  });
-  const readable = rows.filter(
+/**
+ * Every inbox the one-time-code poller reads for this user, with the
+ * credentials it reads them with. The poller and every list of readable
+ * inboxes come from here, so neither can name an inbox the other does not.
+ *
+ *   connected Gmail (valid tokens) ──► read through Gmail
+ *   minted inbox / connected inbox on our mail domain ──► read through Primitive
+ */
+export async function findReadableInboxes(userId: string) {
+  const [credentials, mintedAccounts] = await Promise.all([
+    prisma.emailIntegrationCredential.findMany({
+      where: {
+        userId,
+        provider: 'GMAIL',
+        state: { not: 'needs_reconnect' },
+        integration: { name: 'gmail', status: 'CONNECTED' },
+      },
+      orderBy: { updatedAt: 'desc' },
+    }),
+    prisma.mintedAccount.findMany({
+      where: { userId, disabledAt: null, accountLabel: { contains: '@' } },
+      select: { accountLabel: true },
+    }),
+  ]);
+  const withTokens = credentials.filter(
     (row) =>
-      row.email !== null &&
-      row.email !== '' &&
       row.accessToken !== null &&
       row.accessToken !== '' &&
       row.refreshToken !== null &&
       row.refreshToken !== ''
   );
-  return [...new Set(readable.map((row) => (row.email as string).toLowerCase()))];
+  // An inbox on our own mail domain has no Google token to read with; the
+  // mail provider that hosts it is read instead.
+  const ownDomain = `@${primitiveDomain().toLowerCase()}`;
+  const isOwnDomain = (email: string | null) => (email ?? '').toLowerCase().endsWith(ownDomain);
+  const unique = (emails: Array<string | null>) => [
+    ...new Set(emails.map((email) => (email ?? '').toLowerCase()).filter((email) => email !== '')),
+  ];
+  const gmailCredentials = withTokens.filter((row) => !isOwnDomain(row.email));
+  /** The user's own connected inboxes, whatever mail provider hosts them. */
+  const userInboxEmails = unique(withTokens.map((row) => row.email));
+  /** The agent's minted inboxes. */
+  const mintedInboxEmails = unique(mintedAccounts.map((row) => row.accountLabel));
+  /** Inboxes read through Primitive rather than Gmail. */
+  const primitiveInboxEmails = unique([
+    ...mintedInboxEmails,
+    ...userInboxEmails.filter((email) => isOwnDomain(email)),
+  ]);
+  return { gmailCredentials, primitiveInboxEmails, userInboxEmails, mintedInboxEmails };
+}
+
+/** Full addresses of the user's own inboxes whose one-time codes reach the agent. */
+export async function findReadableInboxEmails(userId: string): Promise<string[]> {
+  return (await findReadableInboxes(userId)).userInboxEmails;
 }
 
 /**
@@ -122,7 +156,6 @@ export async function createAgentIdentityEmailIfAbsent(userId: string, email: st
   return prisma.agentIdentity.findUniqueOrThrow({ where: { userId } });
 }
 
-/** The login a sign-up created, saved the way a synced browser password is. */
 /**
  * Saves the password the agent created an account with. A login the user's
  * browser synced for the same site and username is theirs and is never

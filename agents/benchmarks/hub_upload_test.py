@@ -816,6 +816,26 @@ def test_live_response_preserves_phase_and_startup_label_for_terminal_startup(
         server.server_close()
 
 
+def test_hub_transport_projects_every_owned_root_without_changing_evidence():
+    import copy
+    message = {"role": "TOOL", "message": "complete untrusted page evidence", "metadata": {"step": 32}}
+    stage_logs = {"messages": [message], "tree": {"root": {"parent_agent_id": None, "goal": "unchanged", "status": "COMPLETED", "messages": [message]}}, "worker_logs": ["duplicated private process output"], "backend_logs": ["duplicated backend output"], "realtime_logs": ["duplicated realtime output"], "cloud_cleanup_evidence": {"root_agent_id": "root", "sealed": True}, "archive_manifest_ref": "r2://owned/root"}
+    records = [{"root_agent_id": "root", "role": "fixture_first_run", "stage_outcome": "completed", "creation": {"source": "create_agent_return", "root_agent_id": "root"}, "logs": copy.deepcopy(stage_logs)}, {"root_agent_id": "graded", "role": "graded", "stage_outcome": "FAILED", "logs": copy.deepcopy(stage_logs)}]
+    bundle = {"run_id": "same-run", "tasks": [{"name": "same-task", "agent_id": "graded", "passed": False, "status": "FAILED", "logs": copy.deepcopy(stage_logs), "owned_roots": records}]}
+    before = copy.deepcopy(bundle)
+    projected = prepare_run_bundle_for_upload(bundle, required=True)
+    for owner, original in zip([projected["tasks"][0], *projected["tasks"][0]["owned_roots"]], [before["tasks"][0], *before["tasks"][0]["owned_roots"]]):
+        for key in ("worker_logs", "backend_logs", "realtime_logs"):
+            assert key not in owner["logs"], "nested owned-root diagnostics bypass Hub transport projection"
+        assert owner["logs"]["messages"] == original["logs"]["messages"]
+        assert owner["logs"]["tree"] == original["logs"]["tree"]
+        for key in ("cloud_cleanup_evidence", "archive_manifest_ref"):
+            assert owner["logs"][key] == original["logs"][key]
+        assert {k:v for k,v in owner.items() if k not in {"logs", "owned_roots"}} == {k:v for k,v in original.items() if k not in {"logs", "owned_roots"}}
+    assert bundle == before
+    assert projected["tasks"][0]["passed"] is False
+
+
 @pytest.mark.parametrize('boundary', ['success', 'open_timeout', 'read_timeout', 'bad_ack', 'bad_echo'])
 def test_live_upload_attempt_has_source_bound_request_join(tmp_path, monkeypatch, boundary):
     import hashlib

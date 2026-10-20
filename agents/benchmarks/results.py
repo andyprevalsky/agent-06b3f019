@@ -55,6 +55,8 @@ class TaskResult:
     duration_seconds: float
     cost_cents: float
     message_count: int
+    owned_roots: list[dict] = field(default_factory=list)
+    graded_root_creation_outcome: Optional[str] = None
     failure_reason: Optional[str] = None
     approvals_triggered: int = 0
     approvals_resolved: int = 0
@@ -220,16 +222,22 @@ class BenchmarkRun:
         one task's failure must not prevent subsequent tasks from being
         recorded.
         """
+        def emit_history_diagnostic(message):
+            try:
+                print(message)
+            except BrokenPipeError:
+                pass  # Diagnostic delivery must not interrupt best-effort ledger writes.
+
         try:
             from benchmarks.timeout_history import record_attempt, record_pass
         except Exception as e:
-            print(f"⚠️  _record_history import failed (non-fatal): {e}")
+            emit_history_diagnostic(f"⚠️  _record_history import failed (non-fatal): {e}")
             return
         try:
             from benchmarks.agent_latency import record_span_history_from_logs
         except Exception as e:
             record_span_history_from_logs = None
-            print(f"⚠️  span-history import failed (non-fatal): {e}")
+            emit_history_diagnostic(f"⚠️  span-history import failed (non-fatal): {e}")
 
         environment = "local" if "localhost" in self.base_url or "127.0.0.1" in self.base_url else "prod"
         for r in self.task_results:
@@ -253,11 +261,11 @@ class BenchmarkRun:
                     suite=os.environ.get("BENCHMARK_ATTEMPT_SUITE") or self.suite,
                 )
             except Exception as e:
-                print(f"⚠️  record_attempt failed for {r.name} (non-fatal): {e}")
+                emit_history_diagnostic(f"⚠️  record_attempt failed for {r.name} (non-fatal): {e}")
             if not r.passed:
                 continue
             if r.fast_mode_cache_enabled:
-                print(f"    Timeout history skipped for {r.name}: fast mode cache was enabled")
+                emit_history_diagnostic(f"    Timeout history skipped for {r.name}: fast mode cache was enabled")
             else:
                 try:
                     record_pass(
@@ -268,7 +276,7 @@ class BenchmarkRun:
                         timestamp=self.timestamp,
                     )
                 except Exception as e:
-                    print(f"⚠️  _record_history failed for {r.name} ({r.agent_id}) (non-fatal): {e}")
+                    emit_history_diagnostic(f"⚠️  _record_history failed for {r.name} ({r.agent_id}) (non-fatal): {e}")
             try:
                 if record_span_history_from_logs and r.logs:
                     count = record_span_history_from_logs(
@@ -280,9 +288,9 @@ class BenchmarkRun:
                         run_status="passed",
                     )
                     if count:
-                        print(f"    Span history recorded: {count} spans for {r.name}")
+                        emit_history_diagnostic(f"    Span history recorded: {count} spans for {r.name}")
             except Exception as e:
-                print(f"⚠️  span-history recording failed for {r.name} ({r.agent_id}) (non-fatal): {e}")
+                emit_history_diagnostic(f"⚠️  span-history recording failed for {r.name} ({r.agent_id}) (non-fatal): {e}")
 
     @staticmethod
     def load(path: str) -> "BenchmarkRun":

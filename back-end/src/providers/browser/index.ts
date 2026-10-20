@@ -291,14 +291,13 @@ export async function resumeSession(
 
   const replacement = await resumeSteelSession(taskId, options);
   const { previousSessionId, previousProvider, previousSessionReleased, ...session } = replacement;
-  if (!previousSessionReleased) {
+  if (!previousSessionReleased)
     await releaseSupersededBrowser({
       taskId,
       previousProvider,
       previousSessionId,
       operation: 'resume',
     });
-  }
   return {
     ...(session.validationBrowser ? { validationBrowser: session.validationBrowser } : {}),
     provider: session.sessionId.startsWith('local-') ? 'local' : 'steel',
@@ -367,14 +366,13 @@ export async function rotateProxy(
 
   const replacement = await rotateSteelSession(taskId, options);
   const { previousSessionId, previousProvider, previousSessionReleased, ...session } = replacement;
-  if (!previousSessionReleased) {
+  if (!previousSessionReleased)
     await releaseSupersededBrowser({
       taskId,
       previousProvider,
       previousSessionId,
       operation: 'rotation',
     });
-  }
 
   return {
     ...(session.validationBrowser ? { validationBrowser: session.validationBrowser } : {}),

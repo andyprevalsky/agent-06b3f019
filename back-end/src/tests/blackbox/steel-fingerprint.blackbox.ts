@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-
 /**
  * Black-box tests for Steel fingerprint injection script generation.
  *
@@ -23,6 +22,8 @@ import {
   testSavedUrlNavigationAlwaysClosesBrowser,
   testConnectionErrorRetriesOnReplacement,
   testRawCdpFailureClassification,
+  withReleasedFixtureLifecycleClaim,
+  fixtureCandidateCleanup,
 } from './steel-fingerprint.connection-retry.behavior';
 import {
   testSavedSteelProfileIsReadOnlyDuringBenchmarkIsolation,
@@ -178,9 +179,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
     delete process.env.STEEL_PROXY_SERVER;
     process.env.BROWSER_AGENT_STEEL_PROXY_ENABLED = 'true';
     (
-      prisma.browserSession as unknown as {
-        findUnique: typeof prisma.browserSession.findUnique;
-      }
+      prisma.browserSession as unknown as { findUnique: typeof prisma.browserSession.findUnique }
     ).findUnique = (async () => ({
       id: 'replacement-city-retry-task',
       sessionId: 'kernel-old',
@@ -192,12 +191,8 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
       context: { userId: 'replacement-city-retry-user' },
     })) as typeof prisma.browserSession.findUnique;
     (
-      prisma.browserSession as unknown as {
-        updateMany: typeof prisma.browserSession.updateMany;
-      }
-    ).updateMany = (async () => ({
-      count: 1,
-    })) as typeof prisma.browserSession.updateMany;
+      prisma.browserSession as unknown as { updateMany: typeof prisma.browserSession.updateMany }
+    ).updateMany = (async () => ({ count: 1 })) as typeof prisma.browserSession.updateMany;
     (prisma.agent as unknown as { findUnique: typeof prisma.agent.findUnique }).findUnique =
       (async () => ({
         proxyCountry: 'US',
@@ -205,9 +200,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
         proxyCity: 'RCA TEST CITY',
       })) as typeof prisma.agent.findUnique;
     (
-      prisma.integration as unknown as {
-        findUnique: typeof prisma.integration.findUnique;
-      }
+      prisma.integration as unknown as { findUnique: typeof prisma.integration.findUnique }
     ).findUnique = (async () => null) as typeof prisma.integration.findUnique;
     (
       prisma.browserProviderProfile as unknown as {
@@ -215,19 +208,18 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
       }
     ).findUnique = (async () => null) as typeof prisma.browserProviderProfile.findUnique;
     (
-      prisma.browserContext as unknown as {
-        findUnique: typeof prisma.browserContext.findUnique;
-      }
-    ).findUnique = (async () => ({
-      contextId: null,
-    })) as typeof prisma.browserContext.findUnique;
+      prisma.browserContext as unknown as { findUnique: typeof prisma.browserContext.findUnique }
+    ).findUnique = (async () => ({ contextId: null })) as typeof prisma.browserContext.findUnique;
 
-    // A resume keeps the user's city (a rotation deliberately moves state and
-    // drops it), so the rejected-city retry is exercised on the resume path.
+    // Resume retains the city, so this exercises rejection and retry.
     const result = await recreateSession(
       'replacement-city-retry-task',
       { forceManagedRotation: false },
       {
+        withLifecycleClaim: withReleasedFixtureLifecycleClaim,
+        inspectSession: async (id) => ({ id, status: 'released' }),
+        releaseSession: async () => {},
+        ...fixtureCandidateCleanup,
         createSession: async (input) => {
           createInputs.push(input as unknown as Record<string, unknown>);
           if (createInputs.length === 1) {
@@ -238,7 +230,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
             throw error;
           }
           return {
-            id: 'steel-after-city-fallback',
+            id: input.sessionId!,
             debugUrl: 'https://steel.example/debug',
             profileId: null,
             proxySource: 'steel',
@@ -248,7 +240,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
       }
     );
 
-    assert(result.sessionId === 'steel-after-city-fallback', 'replacement retry did not succeed');
+    assert(result.sessionId === createInputs[1]?.sessionId, 'replacement retry did not succeed');
     assert(
       createInputs.length === 2,
       `expected two Steel create attempts, got ${createInputs.length}`
@@ -264,9 +256,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
     assert(secondGeo?.country === 'US', 'replacement retry dropped country with city');
 
     (
-      prisma.browserSession as unknown as {
-        findUnique: typeof prisma.browserSession.findUnique;
-      }
+      prisma.browserSession as unknown as { findUnique: typeof prisma.browserSession.findUnique }
     ).findUnique = (async () => ({
       id: 'replacement-city-retry-task',
       sessionId: 'steel-read-only-old',
@@ -282,9 +272,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
     })) as typeof prisma.browserSession.findUnique;
     const replacementWrites: Array<Record<string, unknown>> = [];
     (
-      prisma.browserSession as unknown as {
-        updateMany: typeof prisma.browserSession.updateMany;
-      }
+      prisma.browserSession as unknown as { updateMany: typeof prisma.browserSession.updateMany }
     ).updateMany = (async (args: { data: Record<string, unknown> }) => {
       replacementWrites.push(args.data);
       return { count: 1 };
@@ -294,10 +282,14 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
       'replacement-city-retry-task',
       { forceManagedRotation: true },
       {
+        withLifecycleClaim: withReleasedFixtureLifecycleClaim,
+        inspectSession: async (id) => ({ id, status: 'released' }),
+        releaseSession: async () => {},
+        ...fixtureCandidateCleanup,
         createSession: async (input) => {
           readOnlyCreateInput = input as unknown as Record<string, unknown>;
           return {
-            id: 'steel-read-only-new',
+            id: input.sessionId!,
             debugUrl: 'https://steel.example/debug',
             profileId: 'steel-auth-profile',
           };
@@ -328,10 +320,14 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
         'replacement-city-retry-task',
         { forceManagedRotation: false, forceFreshProfile: true },
         {
+          withLifecycleClaim: withReleasedFixtureLifecycleClaim,
+          inspectSession: async (id) => ({ id, status: 'released' }),
+          releaseSession: async () => {},
+          ...fixtureCandidateCleanup,
           createSession: async (input) => {
             forceFreshCreateInput = input as unknown as Record<string, unknown>;
             return {
-              id: 'steel-force-fresh-new',
+              id: input.sessionId!,
               debugUrl: 'https://steel.example/debug',
               profileId: 'steel-force-fresh-profile',
             };
@@ -370,6 +366,9 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
         'replacement-city-retry-task',
         { forceManagedRotation: false },
         {
+          withLifecycleClaim: withReleasedFixtureLifecycleClaim,
+          inspectSession: async (id) => ({ id, status: 'released' }),
+          ...fixtureCandidateCleanup,
           createSession: async (input) => {
             mismatchCreateAttempts += 1;
             assert(
@@ -377,7 +376,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
               'mismatch retry changed the bound profile contract'
             );
             return {
-              id: `steel-profile-mismatch-${mismatchCreateAttempts}`,
+              id: input.sessionId!,
               debugUrl: 'https://steel.example/debug',
               profileId: 'wrong-profile',
             };
@@ -410,14 +409,13 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
         'replacement-city-retry-task',
         { forceManagedRotation: true },
         {
-          createSession: async () => {
-            const id = `steel-cdp-unreachable-${createdDuringOutage.length + 1}`;
+          withLifecycleClaim: withReleasedFixtureLifecycleClaim,
+          inspectSession: async (id) => ({ id, status: 'released' }),
+          ...fixtureCandidateCleanup,
+          createSession: async (input) => {
+            const id = input.sessionId!;
             createdDuringOutage.push(id);
-            return {
-              id,
-              debugUrl: 'https://steel.example/debug',
-              profileId: 'steel-auth-profile',
-            };
+            return { id, debugUrl: 'https://steel.example/debug', profileId: 'steel-auth-profile' };
           },
           validateConnection: async () => {
             throw new Error('Steel CDP connection timeout');
@@ -452,14 +450,13 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
       'replacement-city-retry-task',
       { forceManagedRotation: true },
       {
-        createSession: async () => {
-          const id = `steel-cdp-timeout-reported-${reportedOutageSessions.length + 1}`;
+        withLifecycleClaim: withReleasedFixtureLifecycleClaim,
+        inspectSession: async (id) => ({ id, status: 'released' }),
+        ...fixtureCandidateCleanup,
+        createSession: async (input) => {
+          const id = input.sessionId!;
           reportedOutageSessions.push(id);
-          return {
-            id,
-            debugUrl: 'https://steel.example/debug',
-            profileId: 'steel-auth-profile',
-          };
+          return { id, debugUrl: 'https://steel.example/debug', profileId: 'steel-auth-profile' };
         },
         validateConnection: async () => STEEL_CDP_TIMEOUT_MESSAGE,
         releaseSession: async () => {},
@@ -477,10 +474,13 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
         'replacement-city-retry-task',
         { forceManagedRotation: true },
         {
-          createSession: async () => {
+          withLifecycleClaim: withReleasedFixtureLifecycleClaim,
+          inspectSession: async (id) => ({ id, status: 'released' }),
+          ...fixtureCandidateCleanup,
+          createSession: async (input) => {
             cleanupCreateAttempts += 1;
             return {
-              id: 'steel-invalid-and-unreleasable',
+              id: input.sessionId!,
               debugUrl: 'https://steel.example/debug',
               profileId: null,
             };
@@ -504,21 +504,15 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
     );
   } finally {
     (
-      prisma.browserSession as unknown as {
-        findUnique: typeof prisma.browserSession.findUnique;
-      }
+      prisma.browserSession as unknown as { findUnique: typeof prisma.browserSession.findUnique }
     ).findUnique = browserSessionFindUnique;
     (
-      prisma.browserSession as unknown as {
-        updateMany: typeof prisma.browserSession.updateMany;
-      }
+      prisma.browserSession as unknown as { updateMany: typeof prisma.browserSession.updateMany }
     ).updateMany = browserSessionUpdateMany;
     (prisma.agent as unknown as { findUnique: typeof prisma.agent.findUnique }).findUnique =
       agentFindUnique;
     (
-      prisma.integration as unknown as {
-        findUnique: typeof prisma.integration.findUnique;
-      }
+      prisma.integration as unknown as { findUnique: typeof prisma.integration.findUnique }
     ).findUnique = integrationFindUnique;
     (
       prisma.browserProviderProfile as unknown as {
@@ -526,9 +520,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
       }
     ).findUnique = profileFindUnique;
     (
-      prisma.browserContext as unknown as {
-        findUnique: typeof prisma.browserContext.findUnique;
-      }
+      prisma.browserContext as unknown as { findUnique: typeof prisma.browserContext.findUnique }
     ).findUnique = contextFindUnique;
     if (previousProxyServer === undefined) delete process.env.STEEL_PROXY_SERVER;
     else process.env.STEEL_PROXY_SERVER = previousProxyServer;
@@ -604,12 +596,12 @@ async function main(): Promise<void> {
       fn: testConnectionErrorRetriesOnReplacement,
     },
     {
-      name: 'raw Steel CDP failures retain timeout and authentication categories',
-      fn: testRawCdpFailureClassification,
-    },
-    {
       name: 'Steel writable profile handoff keeps durable custody across failure and recovery',
       fn: testWritableSteelProfileHandoffRetainsRecoveryCustody,
+    },
+    {
+      name: 'raw Steel CDP failures retain timeout and authentication categories',
+      fn: testRawCdpFailureClassification,
     },
     {
       name: 'saved URL navigation closes its browser after failure',

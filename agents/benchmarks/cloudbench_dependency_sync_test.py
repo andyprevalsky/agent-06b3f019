@@ -1,3 +1,4 @@
+from benchmarks.fleet_aggregate_fixture import one_aggregate_tick
 import ast
 import base64
 import copy
@@ -2642,13 +2643,13 @@ async def fake_main_async(_args):
         return None
 
     async def create_agent(*_args, **_kwargs):
-        return "root-agent"
+        return "00000000-0000-4000-8000-000000000031"
 
     async def subscribe(*_args, **_kwargs):
         return "fixture"
 
     async def get_tree(*_args, **_kwargs):
-        return [{{"agent_id": "root-agent"}}]
+        return [{{"agent_id": "00000000-0000-4000-8000-000000000031"}}]
 
     async def poll_forever(*_args, **_kwargs):
         await asyncio.Event().wait()
@@ -2666,7 +2667,7 @@ async def fake_main_async(_args):
         return True
 
     def exact_sessions(_url, aid, *, require_deleted=False):
-        assert aid == "root-agent"
+        assert aid == "00000000-0000-4000-8000-000000000031"
         if require_deleted:
             assert Path(os.environ["CLOUDBENCH_TEST_DELETE_MARKER"]).read_text() == "204\\n"
         return {{"root_user_id": "00000000-0000-4000-8000-000000000001", "tree_agent_ids": [aid], "browser_sessions": [], "purchase_cleanup": []}}
@@ -2849,10 +2850,10 @@ cloudbench_env_value() { return 0; }
             except (OSError, urllib.error.URLError):
                 driver_health = 0
             log_text = bench_log.read_text() if bench_log.exists() else ""
-            if driver_health == 204 and "Agent created: root-agent" in log_text:
+            if driver_health == 204 and "Agent created: 00000000-000" in log_text:
                 break
             time.sleep(0.05)
-        assert driver_health == 204 and "Agent created: root-agent" in log_text, (
+        assert driver_health == 204 and "Agent created: 00000000-000" in log_text, (
             f"actual boot/driver runner did not become active; boot={boot.poll()} "
             f"log={bench_log.read_text() if bench_log.exists() else '<missing>'}"
         )
@@ -31579,8 +31580,7 @@ def test_fleet_publishes_evaluation_before_teardown(tmp_path: Path) -> None:
         )
     source = fleet_source_text().split("# ── ONE aggregated batch dashboard", 1)[1]
     aggregate = source.split("<<'PY'", 1)[1].split("\n", 1)[1].split("\nPY\n", 1)[0]
-    # Exercise one real publication tick; the controller owns the persistent loop.
-    aggregate = aggregate.split("\nwhile True:\n", 1)[0] + "\naggregate_tick()\n"
+    aggregate = one_aggregate_tick(aggregate)
     assert fleet_source_text().index("# ── ONE aggregated batch dashboard") < fleet_source_text().index(
         "# ── Phase 1: provision"
     ), "live publisher begins after allocation"

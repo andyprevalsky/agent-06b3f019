@@ -577,6 +577,21 @@ def _release_port_range(base: int | None) -> None:
         handle.close()
 
 
+def workspace_preferred_base(conductor_port: str | None) -> int | None:
+    """Prefer the workspace-adjacent range unless the kernel can hand it out.
+
+    An explicit --base-port is the caller's own range. This derived preference
+    is not, so it obeys the same ephemeral-range exclusion as automatic ranges.
+    """
+    if not conductor_port or not conductor_port.isdigit():
+        return None
+    base = int(conductor_port) + 200
+    ephemeral_range = _linux_ephemeral_port_range()
+    if ephemeral_range is not None and _overlaps_port_range(base, ephemeral_range):
+        return None
+    return base
+
+
 def allocate_port_range(preferred_base: int | None = None) -> int:
     docker_ports = _docker_ports_snapshot()
     candidates: list[int] = []
@@ -640,9 +655,7 @@ def build_service_stack(args: argparse.Namespace) -> ServiceStack:
     workspace_name = isolated_workspace_name(base_name, run_id)
     preferred_base = args.base_port
     if preferred_base is None:
-        env_base = os.environ.get("CONDUCTOR_PORT")
-        if env_base and env_base.isdigit():
-            preferred_base = int(env_base) + 200
+        preferred_base = workspace_preferred_base(os.environ.get("CONDUCTOR_PORT"))
     return ServiceStack(
         run_id=run_id,
         context_dir=context_dir,

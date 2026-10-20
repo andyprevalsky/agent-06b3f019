@@ -1,0 +1,25 @@
+{
+  "old_box_id": "1ed69a70-e33f-402d-b101-217cc36e4cb2",
+  "old_thread_id": "ph76b0rxy1a8ed810xb8nn38v58g8p9m",
+  "new_box_id": "75ad1c7a-4e51-424b-b271-4d06695fe5c7",
+  "new_box_id_source": "managed daemon config.controlAuth.instanceId",
+  "new_thread_id": "thr_8ecc60522a644b6fb3bba00c85eefe81",
+  "thread_url": "https://boxes.dev/thread/thr_8ecc60522a644b6fb3bba00c85eefe81",
+  "harness": "claude",
+  "checkpoint_sha": "0bcf17f80885a1e0c0a60bf64c088d735672e8db",
+  "handoff_path": "docs/handoffs/swap-harness-1ed69a70-e33f-402d-b101-217cc36e4cb2.md",
+  "utc_time": "2026-10-18T03:39:52Z",
+  "checkout_verification": {
+    "head_matched_checkpoint_at_checkout": true,
+    "unexpected_dirty_state": false,
+    "handoff_read_completely": true
+  },
+  "private_archive_verification": {
+    "parts_sha256_verified": 3,
+    "members_verified": 108,
+    "members_failed": 0,
+    "extracted_outside_git": true
+  },
+  "first_continuation_action": "Fetched and checked out the checkpoint on the PR branch, read CLAUDE.md/AGENTS.md and the handoff, confirmed env files, swap-harness skill and agents/venv Python 3.11.9 present; then verified the private archive parts and every member checksum.",
+  "first_continuation_result": "ok; next: SMS-OTP failure RCA repro"
+}

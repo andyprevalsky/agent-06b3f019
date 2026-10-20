@@ -130,6 +130,10 @@ GATES = (
     Gate("seed-memory-ratchet", ("bash", "scripts/tests/seed-memory-ratchet.test.sh")),
     Gate("semantic-deploy", ("bash", "scripts/tests/semantic-deploy-gate.test.sh")),
     Gate(
+        "prompt-human-approval",
+        ("bash", "scripts/tests/check-prompt-human-approval.test.sh"),
+    ),
+    Gate(
         "agent-behavior-approval",
         ("bash", "scripts/tests/check-agent-behavior-approval.test.sh"),
     ),

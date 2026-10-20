@@ -20,6 +20,8 @@ AGENTS = Path(os.environ.get("FIXTURE_AGENTS_PATH", str(Path(__file__).resolve()
 REPO = AGENTS.parent
 SOURCE = Path(sys.argv[1])
 MODE = sys.argv[2]
+ARCHIVE_WORKERS = int(sys.argv[3]) if len(sys.argv) > 3 else 4
+assert ARCHIVE_WORKERS in (4, 5), "fixture worker controls are four or five"
 sys.path.insert(0, str(REPO / "agents"))
 from tests.env_defaults import apply_test_env_defaults  # noqa: E402
 
@@ -49,6 +51,7 @@ async def main():
         allow = threading.Event()
         active = 0
         peak_active = 0
+        server_active = 0
         request_count = 0
         four_started = threading.Event()
         lock = threading.Lock()
@@ -60,13 +63,12 @@ async def main():
                 pass
 
             def do_POST(self):
-                nonlocal active, peak_active, request_count
+                nonlocal server_active, request_count
                 with lock:
-                    active += 1
+                    server_active += 1
                     request_count += 1
                     ordinal = request_count
-                    peak_active = max(peak_active, active)
-                    if active == 4:
+                    if server_active == ARCHIVE_WORKERS:
                         four_started.set()
                 try:
                     assert self.path in ["/api/archive/artifacts", "/api/archive/artifact"]
@@ -87,7 +89,7 @@ async def main():
                     if MODE == "backlog" and ordinal == 1:
                         assert allow_first.wait(60)
                     else:
-                        if MODE == "backlog" and ordinal > 4:
+                        if MODE == "backlog" and ordinal > ARCHIVE_WORKERS:
                             next_request.put(self.path)
                         assert allow.wait(60)
                     if MODE == "failed_ack" and sum(calls.values()) == 1:
@@ -115,7 +117,7 @@ async def main():
                     self.end_headers()
                 finally:
                     with lock:
-                        active -= 1
+                        server_active -= 1
 
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -125,7 +127,7 @@ async def main():
                 "TRACE_ARCHIVE_ENABLED": "1",
                 "TRACE_ARCHIVE_BACKEND": "r2",
                 "TRACE_ARCHIVE_ASYNC_WRITES": "1",
-                "TRACE_ARCHIVE_WORKERS": "4",
+                "TRACE_ARCHIVE_WORKERS": str(ARCHIVE_WORKERS),
                 "TRACE_ARCHIVE_MAX_IN_FLIGHT": "64",
                 "TRACE_ARCHIVE_ENCRYPTION_KEY_B64": base64.b64encode(b"x" * 32).decode(),
                 "TRACE_ARCHIVE_LOCAL_ROOT": str(root / "trace"),
@@ -133,6 +135,25 @@ async def main():
                 "BACKEND_API_KEY": "offline-fixture-key",
             }
         )
+        # A complete response lets a client worker proceed before the server
+        # handler retires. Count the actual nonstreaming request lifetime,
+        # rather than that asynchronously retiring handler's lifetime.
+        import httpx
+        native_send = httpx.Client.send
+
+        def observed_send(client, request, *args, **kwargs):
+            nonlocal active, peak_active
+            assert not kwargs.get("stream", False), "fixture measures full response consumption"
+            with lock:
+                active += 1
+                peak_active = max(peak_active, active)
+            try:
+                return native_send(client, request, *args, **kwargs)
+            finally:
+                with lock:
+                    active -= 1
+
+        httpx.Client.send = observed_send
         archive = load("helpers.trace_archive", SOURCE / "agents/helpers/trace_archive.py")
         recording = load(
             "domains.spawn_browser_agent_v3.recording", SOURCE / "agents/domains/spawn_browser_agent_v3/recording.py"
@@ -310,6 +331,12 @@ async def main():
                     "all eight original source files and five original publishers retain exact publication"
                 )
             if MODE in ("backlog"):
+                assert sum(calls.values()) == 71, "backlog must not duplicate accepted artifacts"
+                print(
+                    "CONCURRENCY_CONTROL "
+                    + json.dumps({"distinct_paths": len(calls), "attempts": sum(calls.values()), "client_peak": peak_active}),
+                    flush=True,
+                )
                 assert len(calls) == 71 and peak_active <= 4, (
                     "unchanged4workers must retain all70 files and original publisher"
                 )

@@ -375,7 +375,7 @@ class BootstrapRecoveryTest(unittest.TestCase):
 
     def configure_bound_source(self):
         self.config["env"]["REF"] = REF
-        self.source = {p: digest(git_blob(p)) for p in recovery.recipe_paths(git_blob)}
+        self.source = {p: digest(git_blob(p)) for p in recovery.recipe_paths(git_blob, REPO, REF)}
         with (self.registry / "meta").open("a") as stream:
             stream.write("workspace_root=" + str(REPO) + "\n")
         # Bind the same private, complete dependency copy used by the controller.
@@ -891,6 +891,7 @@ class BootstrapRecoveryTest(unittest.TestCase):
             "scripts/lib/run-process-cleanup.sh",
             "scripts/run.sh",
             "scripts/process-identity.py",
+            "scripts/ensure-playwright-browsers.py",
         ):
             with self.subTest(path=path):
                 config = self.config
@@ -959,6 +960,34 @@ class BootstrapRecoveryTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "trusted independent review"):
                     recovery.require_independent_source_review(changed)
                 self.assertFalse((self.out / "guest-bootstrap.confirmed").exists())
+
+    def test_optional_executable_capture_hash_is_mandatory(self):
+        helper = "scripts/ensure-playwright-browsers.py"
+        self.assertIn(helper, recovery.recipe_paths(git_blob, REPO, REF))
+        self.provenance["source_file_sha256"].pop(helper)
+        self.write_provenance()
+        with self.assertRaisesRegex(ValueError, "captured checkout differs"):
+            self.verify()
+        self.provenance["source_file_sha256"][helper] = "e" * 64
+        self.write_provenance()
+        with self.assertRaisesRegex(ValueError, "captured checkout differs"):
+            self.verify()
+
+    def test_optional_executable_legacy_absence_and_foreign_types(self):
+        original = subprocess.run
+        lookup = ["git", "-C", str(REPO), "ls-tree", "-z", REF, "--", "scripts/ensure-playwright-browsers.py"]
+        for output, accepted in [(b"", True), (b"120000 blob " + b"a"*40 + b"\tscripts/ensure-playwright-browsers.py\0", False)]:
+            with self.subTest(output=output):
+                def capture(argv, *args, **kwargs):
+                    if argv == lookup:
+                        return subprocess.CompletedProcess(argv, 0, output, b"")
+                    return original(argv, *args, **kwargs)
+                with patch.object(recovery.subprocess, "run", side_effect=capture):
+                    if accepted:
+                        self.assertEqual(recovery.recipe_paths(git_blob, REPO, REF), recovery.recipe_paths(git_blob))
+                    else:
+                        with self.assertRaisesRegex(ValueError, "regular committed blob"):
+                            recovery.recipe_paths(git_blob, REPO, REF)
 
     def test_capture_local_review_cannot_authorize_unreviewed_executable_source(self):
         out, receipt = self.verify()

@@ -2263,6 +2263,42 @@ _owned_cleanup_user_id: contextvars.ContextVar[str | None] = contextvars.Context
 )
 
 
+_task_root_custody: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar("benchmark_task_root_custody", default=None)
+
+
+def _register_task_root(task_name: str, root_id: str, role: str) -> Optional[dict]:
+    custody = _task_root_custody.get()
+    if custody is None:
+        return None
+    if custody["task_name"] != task_name or role not in {"fixture_first_run", "graded"}:
+        raise RuntimeError("foreign task root custody")
+    try:
+        valid = isinstance(root_id, str) and str(uuid.UUID(root_id)) == root_id
+    except ValueError:
+        valid = False
+    if not valid or any(row["root_agent_id"] == root_id for row in custody["roots"]):
+        raise RuntimeError("unknown or duplicate task root allocation")
+    row = {"root_agent_id": root_id, "task_name": task_name, "role": role,
+           "creation": {"source": "create_agent_return", "root_agent_id": root_id},
+           "stage_outcome": "created", "logs": {}}
+    custody["roots"].append(row)
+    if role == "graded":
+        custody["graded_creation"] = "allocated"
+    if custody["callback"]:
+        custody["callback"](task_name, root_id)
+    return row
+
+
+def _bind_task_root_custody(result: TaskResult, custody: dict) -> TaskResult:
+    for root in custody["roots"]:
+        if root["role"] == "graded" and root["root_agent_id"] == result.agent_id:
+            root["stage_outcome"] = result.benchmark_status or result.status
+            root["logs"] = result.logs if isinstance(result.logs, dict) else {}
+    result.owned_roots = custody["roots"]
+    result.graded_root_creation_outcome = custody["graded_creation"]
+    return result
+
+
 def _current_benchmark_user_id() -> str:
     return (
         _owned_cleanup_user_id.get()
@@ -3795,6 +3831,18 @@ async def _respond_as_user_to_auth_assistance(base_url: str, agent_id: str, req:
             await auth_test_site.mark_run(base_url, headers, site_id, "user-declined")
         print(f"    🙅 Declined sign-in-help request {req_id}")
         return
+    if user_response == "approve_app":
+        if _attention_request_kind(req) != "auth_assistance":
+            raise RuntimeError("app approval requires an auth-assistance request")
+        app_approval = (auth_test_site.active_manifest() or {}).get("appApprovalUser")
+        if not isinstance(app_approval, dict):
+            raise RuntimeError("the site manifest carries no approval app for the user")
+        task_id = await _browser_task_for_auth_assistance(base_url, agent_id, req)
+        await auth_assistance_user.approve_app_as_user(base_url, headers, req, task_id, app_approval)
+        print(f"    🙋 Approved sign-in in the user's app for sign-in-help request {req_id}")
+        return
+    if user_response != "sign_in":
+        raise RuntimeError(f"unsupported sign-in-help user response: {user_response}")
     credentials = (auth_test_site.active_manifest() or {}).get("userSignIn")
     if not isinstance(credentials, dict):
         raise RuntimeError("the site manifest carries no password for the user to type")
@@ -4720,7 +4768,7 @@ async def _poll_agent(
     stall, context validation error, dynamic timeout). The caller overrides
     pass→fail based on this.
     """
-    start = time.time()
+    start = time.monotonic()
     last_activity_time = start  # tracks ANY activity across the entire tree
     last_cost_change_time = start  # tree LLM cost growth (CC in-place progress)
     last_world_model_activity_time = start  # in-flight WMH predictions (simulated tools)
@@ -4758,7 +4806,7 @@ async def _poll_agent(
     step_budget = polar_browser_step_budget(task)
 
     while True:
-        elapsed = time.time() - start
+        elapsed = time.monotonic() - start
         if not wall_clock_disabled and resolved_timeout and elapsed > resolved_timeout:
             reason = (
                 f"Timeout after {elapsed:.0f}s (task timeout={resolved_timeout}s)"
@@ -4824,6 +4872,12 @@ async def _poll_agent(
             "approvals_resolved": approvals_resolved,
             "attention_requests_seen": list(attention_requests_seen),
         }
+        from benchmarks.parked_browser_page import measurement_required, parked_page_observation
+        if measurement_required(task):
+            data["_benchmark"]["pending_attention_requests"] = [
+                {**_attention_request_evidence(req), "agent_id": req.get("agentId") or req.get("agent_id")}
+                for req in _pending_attention if _attention_request_is_open(req)
+            ]
         if subscription_checkout_evidence:
             data["_benchmark"]["subscription_checkout"] = subscription_checkout_evidence
         if timeout_snapshot is not None:
@@ -4836,6 +4890,10 @@ async def _poll_agent(
                 data["_benchmark"]["expected_attention_kind_any_of"] = list(task.expected_attention_kind_any_of)
             if task.expected_attention_kinds:
                 data["_benchmark"]["expected_attention_kinds_seen"] = list(seen_attention_kinds)
+        if (task.approval_handling == "ignore" and measurement_required(task)
+                and seen_attention_kinds and parked_page_observation(
+                    data, auth_test_site.active_manifest(), _current_benchmark_user_id())):
+            return data, approvals_triggered, approvals_resolved, None
         if validated_payment_receipt_request_id:
             data["_benchmark"]["expected_payment_receipt_seen"] = True
             data["_benchmark"]["expected_payment_receipt_request_id"] = validated_payment_receipt_request_id
@@ -4903,7 +4961,7 @@ async def _poll_agent(
                 for message in messages
             )
         ):
-            remaining_task_budget = None if wall_clock_disabled else max(0, resolved_timeout - (time.time() - start))
+            remaining_task_budget = None if wall_clock_disabled else max(0, resolved_timeout - (time.monotonic() - start))
             if remaining_task_budget is not None and remaining_task_budget <= 0:
                 raise RuntimeError(f"Payment reconciliation started after the task timeout ({resolved_timeout}s)")
             try:
@@ -4916,7 +4974,7 @@ async def _poll_agent(
                     if timeout_snapshot is not None:
                         timeout_snapshot.update(data)
                     remaining_task_budget = (
-                        None if wall_clock_disabled else max(0, resolved_timeout - (time.time() - start))
+                        None if wall_clock_disabled else max(0, resolved_timeout - (time.monotonic() - start))
                     )
                     if remaining_task_budget is not None and remaining_task_budget <= 0:
                         raise TimeoutError("Payment abandonment response arrived after the task deadline")
@@ -4933,7 +4991,7 @@ async def _poll_agent(
                 raise RuntimeError(
                     f"Payment reconciliation exceeded the task timeout ({resolved_timeout}s)"
                 ) from timeout_error
-            if not wall_clock_disabled and time.time() - start >= resolved_timeout:
+            if not wall_clock_disabled and time.monotonic() - start >= resolved_timeout:
                 raise RuntimeError(
                     f"Payment reconciliation response arrived after the task timeout ({resolved_timeout}s)"
                 )
@@ -5006,8 +5064,8 @@ async def _poll_agent(
                 if status in TERMINAL_STATUSES:
                     return data, approvals_triggered, approvals_resolved, None
                 if chat_assistant_seen_at is None:
-                    chat_assistant_seen_at = time.time()
-                if time.time() - chat_assistant_seen_at >= 10:
+                    chat_assistant_seen_at = time.monotonic()
+                if time.monotonic() - chat_assistant_seen_at >= 10:
                     return data, approvals_triggered, approvals_resolved, None
 
         if task.success_on_browser_auth_evidence:
@@ -5051,7 +5109,7 @@ async def _poll_agent(
 
         # ── Tree-level stall detection ──────────────────────────────
         # Periodically fetch tree stats (every TREE_POLL_INTERVAL seconds)
-        now = time.time()
+        now = time.monotonic()
         live_phone_call = has_in_progress_phone_call(messages)
         if live_phone_call:
             last_activity_time = now
@@ -5495,6 +5553,9 @@ async def _poll_agent(
                                 approvals_resolved += 1
                                 continue
                             if task.approval_handling == "ignore":
+                                if measurement_required(task) and not parked_page_observation(
+                                        data, auth_test_site.active_manifest(), _current_benchmark_user_id()):
+                                    continue  # Attention publication precedes the native parked receipt.
                                 kind_label = (
                                     f" ({observed_kind})"
                                     if (
@@ -6694,7 +6755,7 @@ async def _wait_for_owned_root_seal(
         raise RuntimeError("exact owned tree did not seal before the cleanup deadline") from error
 
 
-async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: dict[str, list[str]]) -> None:
+async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: dict[str, list[str]], *, never_admitted_results: tuple = ()) -> None:
     """Finalize each owned root after all tasks, while workers can still persist cleanup."""
     # A missing create response cannot prove that no root was allocated.
     failures = []
@@ -6702,6 +6763,27 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
     stage_logs = {}
     primary_ids = set()
     for result in results:
+        explicit_roots = getattr(result, "owned_roots", None) or []
+        for record in explicit_roots:
+            aid = record.get("root_agent_id")
+            valid = (record.get("task_name") == result.name and record.get("role") in {"fixture_first_run", "graded"}
+                     and record.get("creation") == {"source": "create_agent_return", "root_agent_id": aid}
+                     and isinstance(record.get("logs"), dict))
+            try:
+                valid = valid and isinstance(aid, str) and str(uuid.UUID(aid)) == aid
+            except ValueError:
+                valid = False
+            snapshot = (record.get("logs") or {}).get("fixture_snapshot") if isinstance(record.get("logs"), dict) else None
+            if isinstance(snapshot, dict) and (snapshot.get("agent") or {}).get("id") not in {None, aid}:
+                valid = False
+            if not valid or aid in by_id:
+                failures.append(f"{result.name}: invalid or duplicate exact root custody")
+                continue
+            if record["role"] == "graded" and aid != result.agent_id:
+                failures.append(f"{result.name}: graded root custody mismatch")
+                continue
+            by_id[aid] = result
+            stage_logs[aid] = record["logs"]
         if not result.agent_id:
             continue
         root_ids = result.agent_id.split(",")
@@ -6748,6 +6830,9 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                 if (set(root_ids) - {aid}) & (set(tree) | observed):
                     failures.append(f"{result.name}: composite stage contains a foreign root")
         for aid, logs in bindings:
+            if aid in by_id and explicit_roots and by_id[aid] is result and any(row.get("root_agent_id") == aid and row.get("role") == "graded" for row in explicit_roots):
+                stage_logs[aid] = logs if isinstance(logs, dict) else {}
+                continue
             if aid in by_id:
                 failures.append(f"{result.name}: duplicate exact root {aid}")
                 continue
@@ -6768,10 +6853,22 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
         and r.stop_metadata.get("runner") == "sms"
         and r.stop_metadata.get("owned_cleanup_verified") is True
     ]
-    if any(not r.agent_id and r.status != "SKIPPED" and r not in rootless_sms for r in results):
+    rootless_queued = [r for r in results if any(r is proof for proof in never_admitted_results)
+        and not r.agent_id and not getattr(r, "owned_roots", None) and not getattr(r, "logs", None)
+        and r.status == r.benchmark_status == "CANCELLED" and r.passed is False
+        and getattr(r, "graded_root_creation_outcome", None) == "not_started"
+        and isinstance(meta := getattr(r, "stop_metadata", None), dict)
+        and meta == {"runner": "benchmark_coordinator", "admission": "not_started", "occurrence_index": meta.get("occurrence_index")}
+        and type(meta.get("occurrence_index")) is int and meta["occurrence_index"] >= 0]
+    if len(rootless_queued) != len(never_admitted_results):
+        failures.append("invalid coordinator nonadmission proof")
+    if any(not r.agent_id and r.status != "SKIPPED" and r not in rootless_sms and not any(r is proof for proof in rootless_queued)
+           and not (getattr(r, "graded_root_creation_outcome", None) == "not_started"
+                    and getattr(r, "owned_roots", None)) for r in results) or any(
+                        getattr(r, "graded_root_creation_outcome", None) == "unknown" for r in results):
         failures.append("owned cloud execution has an unknown root creation outcome")
     if not owned:
-        if failures or not rootless_sms:
+        if failures or not (rootless_sms or rootless_queued):
             raise RuntimeError("; ".join(failures) or "owned cloud execution has no proven root allocation")
         return
     snapshots = {}
@@ -6814,6 +6911,12 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
             logs = stage_logs.get(aid, {})
             evidence = {"root_agent_id": aid, "errors": [], "warnings": preparation_warnings.get(aid, [])}
             logs["cloud_cleanup_evidence"] = evidence
+            def emit_cleanup_diagnostic(message):
+                # Output delivery cannot invalidate canonical resource evidence.
+                try:
+                    print(message)
+                except BrokenPipeError:
+                    evidence["warnings"].append("diagnostic output: BrokenPipeError")
             if result is None:
                 detail = "owned cloud root did not produce a task result"
                 evidence["errors"].append(f"execution: {detail}")
@@ -6844,16 +6947,24 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                     raise RuntimeError("owned cloud root did not produce a task result")
                 if aid in primary_ids and "," not in result.agent_id:
                     result.message_count = len(data.get("messages") or [])
-                archive_ref, world_model_fidelity = await finalize_archive_and_score_world_model(
-                    base_url,
-                    aid,
-                    result.name,
-                    force=True,
-                    owned_batch_final=True,
-                    benchmark_passed=result.passed,
-                    benchmark_status=result.benchmark_status,
-                    failure_reason=result.failure_reason,
+                fixture_root = any(
+                    root.get("root_agent_id") == aid and root.get("role") == "fixture_first_run"
+                    for root in (getattr(result, "owned_roots", None) or [])
                 )
+                if fixture_root:
+                    archive_ref = await archive_agent_finalize(base_url, aid, result.name, force=True)
+                    world_model_fidelity = None
+                else:
+                    archive_ref, world_model_fidelity = await finalize_archive_and_score_world_model(
+                        base_url,
+                        aid,
+                        result.name,
+                        force=True,
+                        owned_batch_final=True,
+                        benchmark_passed=result.passed,
+                        benchmark_status=result.benchmark_status,
+                        failure_reason=result.failure_reason,
+                    )
                 logs["cloud_archive_manifest_ref"] = archive_ref
                 logs["cloud_world_model_fidelity"] = world_model_fidelity
                 if aid in primary_ids:
@@ -6870,7 +6981,7 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                 # Archive/publication is diagnostic. Preserve the evaluator's
                 # terminal outcome while still requiring exact resource release.
                 evidence["warnings"].append(f"archive: {detail}")
-                print(f"    Cloud archive warning: {aid}: {detail}")
+                emit_cleanup_diagnostic(f"    Cloud archive warning: {aid}: {detail}")
             finally:
                 # Even failed evidence must release its exact resources. A DELETE
                 # response alone is insufficient because backend cleanup is best effort.
@@ -6893,7 +7004,7 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                         evidence=evidence,
                     )
                     logs["cloud_provider_cleanup"] = receipt
-                    print(f"    Verified cloud root provider cleanup: {aid}")
+                    emit_cleanup_diagnostic(f"    Verified cloud root provider cleanup: {aid}")
                 except Exception as error:
                     detail = str(error) or type(error).__name__
                     evidence["errors"].append(f"provider: {detail}")
@@ -6948,7 +7059,7 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                             evidence["worker_logs_observed_at"] = datetime.now(timezone.utc).isoformat()
                         except Exception as capture_error:
                             evidence["worker_logs_capture_error"] = str(capture_error) or type(capture_error).__name__
-                    if "," not in result.agent_id:
+                    if aid in primary_ids and "," not in result.agent_id:
                         result.logs = logs
         finally:
             if identity is not None:
@@ -6970,6 +7081,7 @@ async def _finalize_owned_batch_and_save_run(
     *,
     owned_batch_cleanup: bool,
     retrieval_audit: Callable[[], Any],
+    never_admitted_results: tuple = (),
 ) -> None:
     """Finalize owned cloud roots, then persist the run record exactly once."""
     # All selected execution has finished. Keep workers and backend available
@@ -6977,7 +7089,8 @@ async def _finalize_owned_batch_and_save_run(
     batch_cleanup_error: BaseException | None = None
     if owned_batch_cleanup:
         try:
-            await _finalize_owned_cloud_batch(base_url, run.task_results, live_ids)
+            await _finalize_owned_cloud_batch(base_url, run.task_results, live_ids,
+                                              never_admitted_results=never_admitted_results)
             _complete_interrupt_cleanup()
         except BaseException as error:
             # An interrupt here arrives after every outcome was evaluated. Save
@@ -9253,10 +9366,27 @@ async def _run_auth_test_site_first_run(
         evaluators=[],
     )
     first_agent_id = await create_agent(base_url, first_task)
+    owned = _register_task_root(task.name, first_agent_id, "fixture_first_run")
     manifest["firstRunAgentId"] = first_agent_id
     print(f"    ① First run agent created: {first_agent_id[:12]}...")
-    data, _triggered, _resolved, early_fail = await poll_agent(base_url, first_agent_id, first_task)
+    try:
+        data, _triggered, _resolved, early_fail = await poll_agent(base_url, first_agent_id, first_task)
+    except BaseException as error:
+        if owned is not None:
+            owned["stage_outcome"] = "cancelled" if isinstance(error, asyncio.CancelledError) else "error"
+            owned["logs"]["fixture_error_type"] = type(error).__name__
+        raise
+    observed_id = (data.get("agent") or {}).get("id")
+    if observed_id is not None and observed_id != first_agent_id:
+        if owned is not None:
+            owned["stage_outcome"] = "error"
+            owned["logs"]["fixture_error_type"] = "foreign_snapshot"
+        raise auth_test_site.AuthTestSiteFixtureError("first run snapshot has a foreign root identity")
     status = (data.get("agent") or {}).get("status")
+    if owned is not None:
+        owned["stage_outcome"] = "completed" if status == "COMPLETED" and not early_fail else "failed"
+        owned["logs"]["fixture_snapshot"] = data
+        owned["logs"]["fixture_early_failure"] = early_fail
     if early_fail or status != "COMPLETED":
         raise auth_test_site.AuthTestSiteFixtureError(
             f"first run did not complete (status={status}, reason={early_fail}); agent {first_agent_id}"
@@ -9283,7 +9413,9 @@ async def _release_auth_test_site(base_url: str, manifest: Optional[dict]) -> No
         print(f"    ⚠ Failed to delete Rose Shop site {manifest.get('siteId')}: {exc}")
 
 
-async def _hydrate_auth_test_site_evidence(data: dict, base_url: Optional[str]) -> None:
+async def _hydrate_auth_test_site_evidence(
+    data: dict, base_url: Optional[str], *, task: Optional[BenchmarkTask] = None
+) -> None:
     manifest = auth_test_site.active_manifest()
     evidence: dict = {"manifest": manifest, "report": None, "report_error": None}
     if not manifest:
@@ -9297,6 +9429,11 @@ async def _hydrate_auth_test_site_evidence(data: dict, base_url: Optional[str]) 
             )
         except Exception as exc:
             evidence["report_error"] = str(exc)
+    from benchmarks.parked_browser_page import measurement_required, parked_page_observation
+    if task is not None and measurement_required(task):
+        evidence["browser_page_observation"] = parked_page_observation(
+            data, manifest, _current_benchmark_user_id()
+        )
     data.setdefault("_benchmark", {})["auth_test_site"] = evidence
 
 
@@ -13973,7 +14110,7 @@ async def _run_declared_evaluators(
         await _hydrate_completion_sms_events(data)
 
     if _task_declares_static_check(task, auth_test_site.AUTH_TEST_SITE_OUTCOME_CHECK):
-        await _hydrate_auth_test_site_evidence(data, base_url)
+        await _hydrate_auth_test_site_evidence(data, base_url, task=task)
 
     from benchmarks.semantic_evaluator_evidence import messages_have_code_agent_grounding
 
@@ -14120,24 +14257,36 @@ async def run_single_task(
     if task.requires_claude_code and not await _check_claude_code_credentials(base_url):
         print(f"  ⚠ Claude Code credentials unavailable at task dispatch — skipping: {task.name}")
         return _claude_code_credential_skip_result(task)
-    with _benchmark_run_user_scope(_run_user_id_override_for_task(task, base_url)):
-        try:
-            return await _run_single_task_as_run_user(
-                base_url,
-                task,
-                keep_failed_agents,
-                checkpoint_source_index,
-                checkpoint_source_boundary,
-                checkpoint_source_out,
-                checkpoint_tree_out,
-                on_agent_created,
-                on_task_evaluated,
-            )
-        finally:
-            # An already reported failed join must not replace its original
-            # execution error or abandon the independently owned cleanup path.
-            if getattr(task, "_wmh_retirement_error", None) is None:
-                await _retire_owned_native_world(task)
+    custody = {"task_name": task.name, "roots": [], "callback": on_agent_created, "graded_creation": "not_started"}
+    token = _task_root_custody.set(custody)
+    async def evaluated_with_custody(result):
+        _bind_task_root_custody(result, custody)
+        if on_task_evaluated:
+            value = on_task_evaluated(result)
+            if inspect.isawaitable(value):
+                await value
+    try:
+        with _benchmark_run_user_scope(_run_user_id_override_for_task(task, base_url)):
+            try:
+                result = await _run_single_task_as_run_user(
+                    base_url,
+                    task,
+                    keep_failed_agents,
+                    checkpoint_source_index,
+                    checkpoint_source_boundary,
+                    checkpoint_source_out,
+                    checkpoint_tree_out,
+                    on_agent_created,
+                    evaluated_with_custody,
+                )
+            finally:
+                # An already reported failed join must not replace its original
+                # execution error or abandon the independently owned cleanup path.
+                if getattr(task, "_wmh_retirement_error", None) is None:
+                    await _retire_owned_native_world(task)
+        return _bind_task_root_custody(result, custody)
+    finally:
+        _task_root_custody.reset(token)
 
 
 def _run_user_id_override_for_task(task: BenchmarkTask, base_url: str) -> Optional[str]:
@@ -14435,13 +14584,17 @@ async def _run_single_task_as_run_user(
                 fast_mode_cache_enabled=fast_mode_cache,
             )
 
+        custody = _task_root_custody.get()
+        if custody is not None:
+            custody["graded_creation"] = "unknown"
         agent_id = await create_agent(base_url, task)
+        _register_task_root(task.name, agent_id, "graded")
         execution_started_at = asyncio.get_running_loop().time()
 
         async def execute_agent(snapshot: dict):
             nonlocal grep_fixture_manifest, last_snapshot
             last_snapshot = snapshot
-            if on_agent_created:
+            if on_agent_created and _task_root_custody.get() is None:
                 on_agent_created(task.name, agent_id)
             print(f"    Agent created: {agent_id[:12]}...")
             if not all_attachments and task.name == GREP_EXPLORE_STRESS_TASK_NAME:
@@ -14878,7 +15031,7 @@ async def _run_single_task_as_run_user(
         if not auth_test_site_evidence and auth_test_site.active_manifest():
             # A run that failed before its evaluators still needs the site's own
             # record: it is the only account of what the agent actually tried.
-            await _hydrate_auth_test_site_evidence(data, base_url)
+            await _hydrate_auth_test_site_evidence(data, base_url, task=task)
             auth_test_site_evidence = (data.get("_benchmark") or {}).get("auth_test_site")
         if auth_test_site_evidence:
             logs["auth_test_site"] = auth_test_site_evidence
@@ -16573,11 +16726,15 @@ async def main_async(args):
     # until the very end. Admission state keeps repeated task occurrences
     # distinct without treating pending scheduler waiters as active executors.
 
+    _entered_task_futures: set[asyncio.Task] = set()
+    _never_admitted_results: list[TaskResult] = []
+
     async def _run_reported_task(task: BenchmarkTask, **kwargs) -> TaskResult:
         # The owning task preserves repeated names and retains the evaluated
         # row until the coordinator replaces it with the final cleanup result.
         token = asyncio.current_task()
         assert token is not None
+        _entered_task_futures.add(token)
         _admitted_tasks[token] = task
         registered_roots: set[str] = set()
 
@@ -16587,6 +16744,9 @@ async def main_async(args):
             _remember_live_agent(task_name, agent_id)
             if agent_id:
                 registered_roots.add(agent_id)
+            custody = _task_root_custody.get()
+            role = next((root["role"] for root in (custody or {}).get("roots", []) if root["root_agent_id"] == agent_id), None)
+            if agent_id and role != "fixture_first_run":
                 _admitted_agent_ids.setdefault(token, agent_id)
 
         def retire_verified_sms_roots(receipt: dict | None) -> None:
@@ -16760,8 +16920,7 @@ async def main_async(args):
                     if isinstance(result, TaskResult):
                         run.task_results.append(result)
                     else:
-                        run.task_results.append(
-                            TaskResult(
+                        cancelled_result = TaskResult(
                                 name=task.name,
                                 passed=False,
                                 agent_id="",
@@ -16772,8 +16931,12 @@ async def main_async(args):
                                 cost_cents=0,
                                 message_count=0,
                                 failure_reason=f"Benchmark interrupted before task produced logs: {result}",
-                            )
                         )
+                        if task_future not in _entered_task_futures:
+                            cancelled_result.graded_root_creation_outcome = "not_started"
+                            cancelled_result.stop_metadata = {"runner": "benchmark_coordinator", "admission": "not_started", "occurrence_index": list(pending_results).index(task_future)}
+                            _never_admitted_results.append(cancelled_result)
+                        run.task_results.append(cancelled_result)
                 raise
         else:
             for task in tasks:
@@ -16825,6 +16988,7 @@ async def main_async(args):
             _live_task_agent_ids,
             owned_batch_cleanup=owned_batch_cleanup,
             retrieval_audit=_wmh_evidence.finalize,
+            never_admitted_results=tuple(_never_admitted_results),
         )
 
     # Print summary

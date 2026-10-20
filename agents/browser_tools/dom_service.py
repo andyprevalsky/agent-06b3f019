@@ -550,7 +550,12 @@ class ActionHistory:
             if key in entry:
                 # Their outer keys are tool protocol. Nested evaluate result
                 # keys still belong to the page and remain subject to masking.
-                safe_entry[key] = self._dom_service.model_visible_value(entry[key])
+                value = entry[key]
+                if key == "result" and entry.get("action") == "read_browser_state" and isinstance(value, dict) and isinstance(value.get("formatted_state"), str):
+                    safe_entry[key] = self._dom_service.model_visible_value({k: v for k, v in value.items() if k != "formatted_state"})
+                    safe_entry[key]["formatted_state"] = self._dom_service.model_visible_value(value["formatted_state"])
+                else:
+                    safe_entry[key] = self._dom_service.model_visible_value(value)
         if not self._dom_service.secret_values_used and entry.get("screenshot"):
             safe_entry["screenshot"] = entry["screenshot"]
         # These are harness-owned mechanics, rather than page echoes. A CVV
@@ -665,6 +670,28 @@ class ActionHistory:
         logger.debug(f"Recorded action {step}: {action} (index={index}, coords={coords_dict})")
 
         return entry
+
+    def last_action_step(self) -> Optional[int]:
+        """Return the latest recorded receipt ID without copying DOM history."""
+        return self._entries[-1].step if self._entries else None
+
+    def attach_observed_result(self, step: int, result: Dict[str, Any]) -> None:
+        """Keep the delivered page observation on its exact action receipt."""
+        if not self._entries or self._entries[-1].step != step:
+            raise ValueError("Observed result does not belong to the latest action")
+        for key in ("url", "current_url", "title"):
+            value = result.get(key)
+            if isinstance(value, str) and value:
+                self._entries[-1].result[key] = value
+
+        # Retain only the normalized observation actually delivered by the
+        # native state reader. A failed coherence check withdraws its snapshot.
+        if self._entries[-1].action == "read_browser_state":
+            state = result.get("formatted_state")
+            if result.get("success", True) and isinstance(state, str) and state:
+                self._entries[-1].result["formatted_state"] = self.model_visible_value(state)
+            else:
+                self._entries[-1].result.pop("formatted_state", None)
 
     def get_entries(self) -> List[Dict[str, Any]]:
         """Get all entries as dicts for Rose API request."""
@@ -2214,6 +2241,17 @@ class DOMService:
     def runtime_current_url(self, *, fallback: str = "") -> str:
         """Return private browser identity for navigation/auth mechanics only."""
         return self._runtime_current_url or fallback
+
+    def get_parked_page_identity(self) -> Dict[str, Any]:
+        """One event-loop snapshot of the native selected target, not page text."""
+        session = self._session
+        if session is None or not session.agent_focus_target_id:
+            raise RuntimeError("No focused browser target")
+        target_id = session.agent_focus_target_id
+        target = session.session_manager.get_target(target_id)
+        if target is None or target.target_id != target_id or target.target_type != "page":
+            raise RuntimeError("Focused browser target is unavailable")
+        return {"url": str(target.url), "target_id": str(target_id)}
 
     async def get_page_identity(self) -> Dict[str, Any]:
         """Return ``{url, title}`` of the focused tab without touching the renderer.

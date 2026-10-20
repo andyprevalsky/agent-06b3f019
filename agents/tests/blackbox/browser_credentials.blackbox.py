@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from _test_utils import BlackboxResult, assert_captured_call, setup_mock
+from browser_tools.dom_service import ActionHistory
 
 
 async def test_evaluate_card_field_names_remain_selectors_and_explicit_refs_resolve() -> None:
@@ -407,7 +408,7 @@ async def test_navigation_and_state_results_bind_auth_to_observed_destination() 
             patch("domains.spawn_browser_agent_v3.service_actions._execute_inspection_action", AsyncMock(return_value=action_result)),
         ):
             result = await execute_action(
-                dom, SimpleNamespace(record_action=AsyncMock()), {"action": action, "params": {}},
+                dom, ActionHistory(), {"action": action, "params": {}},
                 auth_context_for_url=auth,
             )
         auth.assert_awaited_once_with(destination)
@@ -446,7 +447,7 @@ async def test_navigation_and_state_results_bind_auth_to_observed_destination() 
             "success": True, "url": public_url, "formatted_state": "Sign-in",
         })):
             result = await execute_action(
-                dom, SimpleNamespace(record_action=AsyncMock()),
+                dom, ActionHistory(),
                 {"action": "read_browser_state", "params": {}},
                 auth_context_for_url=auth, secret_refs=refs,
             )
@@ -469,7 +470,7 @@ async def test_unchanged_interactions_reuse_observed_inventory() -> None:
                           get_page_identity=AsyncMock(return_value={"url": url}))
     auth = AsyncMock()
     with patch("domains.spawn_browser_agent_v3.service_actions._execute_interaction_action", AsyncMock(return_value={"success": True})):
-        result = await execute_action(dom, SimpleNamespace(), {"action": "input_text", "params": {}},
+        result = await execute_action(dom, ActionHistory(), {"action": "input_text", "params": {}},
                                       current_url=url, auth_context_for_url=auth)
     auth.assert_not_awaited()
     assert result == {"success": True}, "unchanged interactions duplicated the whole auth inventory"
@@ -498,7 +499,7 @@ async def test_auth_binding_reobserves_redirects_and_preserves_action_failures()
             patch("domains.spawn_browser_agent_v3.service_actions._execute_navigation_action", AsyncMock(return_value=original)),
             patch("domains.spawn_browser_agent_v3.service_actions._execute_inspection_action", AsyncMock(return_value=original)),
         ):
-            result = await execute_action(dom, SimpleNamespace(record_action=AsyncMock()),
+            result = await execute_action(dom, ActionHistory(),
                                           {"action": "read_browser_state" if read else "goto", "params": {}},
                                           auth_context_for_url=auth)
         assert [call.args[0] for call in auth.await_args_list] == [first, final]
@@ -514,13 +515,13 @@ async def test_auth_binding_reobserves_redirects_and_preserves_action_failures()
                           get_page_identity=AsyncMock(return_value={"url": final}))
     auth = AsyncMock(return_value={"auth_realm": "accounts.google.com", "inventory_status": "unknown"})
     with patch("domains.spawn_browser_agent_v3.service_actions._execute_navigation_action", AsyncMock(side_effect=RuntimeError("navigation partially failed"))):
-        result = await execute_action(dom, SimpleNamespace(record_action=AsyncMock()), {"action": "goto", "params": {}}, auth_context_for_url=auth)
+        result = await execute_action(dom, ActionHistory(), {"action": "goto", "params": {}}, auth_context_for_url=auth)
     assert result["success"] is False and result["error"] == "navigation partially failed"
     assert result["current_url"] == final and result["auth_context"]["auth_realm"] == "accounts.google.com"
 
     dom.get_page_identity = AsyncMock(side_effect=[{"url": first}, {"url": final}, {"url": "https://example.org"}])
     with patch("domains.spawn_browser_agent_v3.service_actions._execute_navigation_action", AsyncMock(return_value={"success": True})):
-        result = await execute_action(dom, SimpleNamespace(record_action=AsyncMock()), {"action": "goto", "params": {}}, auth_context_for_url=auth)
+        result = await execute_action(dom, ActionHistory(), {"action": "goto", "params": {}}, auth_context_for_url=auth)
     assert result["current_url"] == "https://example.org"
     assert result["auth_context"]["auth_realm"] == "example.org" and result["auth_context"]["inventory_status"] == "unknown"
     assert "auth_options" not in result["auth_context"] and result["auth_context"]["observation_error"]
@@ -1552,7 +1553,7 @@ async def test_ceremony_capable_actions_arm_the_live_target_before_running() -> 
     try:
         await execute_action(
             dom_service=dom_service,
-            action_history=SimpleNamespace(),
+            action_history=ActionHistory(),
             action={"action": "press_key", "params": {"key": "Escape"}},
         )
     except Exception:
