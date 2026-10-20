@@ -7,6 +7,9 @@ interface LiquidWhiteButtonProps extends React.ButtonHTMLAttributes<HTMLButtonEl
   size?: 'sm' | 'md' | 'lg';
 }
 
+// Layer class names (liquid-white-shader/-chrome/-face/-icon) carry no styles of
+// their own; opt-in themes (e.g. the Rose Desktop dark glass) target them.
+
 // CSS variables for white/light version
 const CSS_VARS = {
   lightColor: '#e8e8e8',
@@ -117,6 +120,7 @@ const LiquidWhiteButton = forwardRef<HTMLButtonElement, LiquidWhiteButtonProps>(
         >
           {/* Chrome ring - beveled metallic ring between shader and button face */}
           <div
+            className="liquid-white-chrome"
             style={{
               position: 'absolute',
               top: '50%',
@@ -133,6 +137,7 @@ const LiquidWhiteButton = forwardRef<HTMLButtonElement, LiquidWhiteButtonProps>(
 
           {/* Inner circle - light gradient button face */}
           <div
+            className="liquid-white-face"
             style={{
               position: 'absolute',
               top: '50%',
@@ -150,6 +155,7 @@ const LiquidWhiteButton = forwardRef<HTMLButtonElement, LiquidWhiteButtonProps>(
 
           {/* Icon container */}
           <div
+            className="liquid-white-icon"
             style={{
               position: 'absolute',
               top: '50%',

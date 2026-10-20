@@ -22,12 +22,29 @@
  * phone, or live impersonation — see fastModeAccounts.ts).
  * The value is threaded into the create-agent payload as fast_mode_cache_enabled
  * (historical field name; server maps it to provider_fast_mode / LLM speed).
+ *
+ * SpeedToggle (Rose Desktop flag only, bottom row next to the model selector):
+ * the same Zap-only square at the model selector's height (26px) with a
+ * 10.4px Zap (20% smaller than the 13px mock), three states
+ *
+ *   [NORMAL] --click--> [FAST] --click--> [ULTRA] (default) --click--> [NORMAL]
+ *
+ * NORMAL = muted outline; FAST = icy rose-blue; ULTRA = very icy with a glow.
+ * fast/ultra send fast mode on; the fast-vs-ultra choice lives in speedLevel.ts.
+ * Dark mode tones both down (roseQueryBox.css, html.dark only).
  */
 
 import { Zap } from 'lucide-react';
 import { useCallback } from 'react';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
+import {
+  SPEED_LABELS,
+  nextSpeedLevel,
+  setUltraPreferred,
+  speedLevelOf,
+  useUltraPreferred,
+} from './query-input/speedLevel';
 
 interface FastModeToggleProps {
   enabled: boolean;
@@ -73,6 +90,45 @@ export default function FastModeToggle({ enabled, onChange }: FastModeToggleProp
             and does not use this button.
           </p>
         </div>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+interface SpeedToggleProps {
+  fastMode: boolean;
+  onFastModeChange: (enabled: boolean) => void;
+}
+
+/** Rose Desktop 3-state speed square (normal → fast → ultra), Zap icon only. */
+export function SpeedToggle({ fastMode, onFastModeChange }: SpeedToggleProps) {
+  const level = speedLevelOf(fastMode, useUltraPreferred());
+  const label = SPEED_LABELS[level];
+  const handleClick = useCallback(() => {
+    const next = nextSpeedLevel(level);
+    if (next !== 'normal') setUltraPreferred(next === 'ultra');
+    onFastModeChange(next !== 'normal');
+  }, [level, onFastModeChange]);
+
+  return (
+    <Tooltip delayDuration={0}>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          onClick={handleClick}
+          aria-label={label}
+          data-state={level}
+          data-testid="speed-toggle"
+          className="rose-speed inline-flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-lg border transition-all duration-200"
+        >
+          <Zap
+            className="h-[10.4px] w-[10.4px]"
+            fill={level === 'normal' ? 'none' : 'currentColor'}
+          />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="top" className="z-[100]">
+        <p className="text-xs">{label}</p>
       </TooltipContent>
     </Tooltip>
   );

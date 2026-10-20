@@ -1,21 +1,30 @@
 /**
  * STATE MACHINE: QueryInput (top-level orchestrator)
  *
- * Composition:
- *   ToolbarNub (rose pill at the shell's top-left corner)
- *   TopBar (WriteLock, ToolSet, TestPrompts, CostIndicator, ContextMeter, Settings)
- *     (TopBar wraps itself in ToolbarRevealRegion: hidden until the nub is
- *     hovered/focused/tapped)
+ * Composition (stock UI):
+ *   TopBar (WriteLock, ToolSet, TestPrompts, FastMode, CostIndicator, ContextMeter, Settings)
  *   AttachmentList (chips)
  *   InputContainer (textarea + paperclip + model picker + submit/stop button)
+ *
+ * Composition (Rose Desktop flag, useRoseDesktop()):
+ *   NubTab (Rose-gradient tab on the BACK of the box, flush with its left
+ *     edge; see ToolbarNub.tsx) holding NubToolbar (lock, context files,
+ *     budget, context %, settings, info).
+ *   PinnedTools (top-left inside the box, always visible, stock styling that
+ *     never changes in dark mode): RoseToolSetChip + SimulatorToggle (admin)
+ *   AttachmentList
+ *   InputContainer with: bare paperclip, model selector (short rose-flash /
+ *     rose-ultra names, no info button), 3-state SpeedToggle at the
+ *     selector's height, dark-only glass send.
+ *   The host gets 14px top margin: 30px from the Popular Goals row (mb-4).
  *
  * Sub-state lives in hooks:
  *   - useAttachments     : attachment lifecycle + paste/drag
  *   - usePriceLimit      : edit/save/cancel cost-limit flow
+ *   - useTopBarProps     : account/viewport gating shared by TopBar + NubToolbar
  *
- * TOOLBAR REVEAL (Rose Desktop flag only; stock UI = always visible, no nub):
- *                      owned by `useToolbarReveal` (see ToolbarNub.tsx)
- *   [COLLAPSED] --hover/focus/tap nub--> [EXPANDED] --leave nub+toolbar--> [COLLAPSED]
+ * TAB REVEAL (Rose Desktop only): owned by `useToolbarReveal` (ToolbarNub.tsx)
+ *   [CLOSED 4px lip] --hover/focus/tap--> [OPEN 18px strip] --leave/tap--> [CLOSED]
  *
  * INPUT STATE:
  *   [EMPTY] -> (type) -> [HAS_TEXT] -> (submit/clear) -> [EMPTY]
@@ -26,7 +35,8 @@
  * FAST MODE:           shown for admin operators (id, verified phone, impersonation)
  *                      in create + chat query boxes; Zap icon only (aria-label
  *                      + tooltip carry "Fast Mode"); controls LLM provider speed,
- *                      not DEMO cache replay
+ *                      not DEMO cache replay. Rose Desktop: SpeedToggle
+ *                      [NORMAL] -> [FAST] -> [ULTRA (default)] -> [NORMAL]
  * SIMULATOR:           shown for admin users; session-only and default off
  * TEST PROMPTS:        shown only on desktop for dev/admin users; never mounted on mobile
  * SUBMISSION:          canSubmit prop decides send-vs-stop button
@@ -36,37 +46,29 @@
  */
 
 import { useRef } from 'react';
-import { useIsMobile } from '@/hooks/use-mobile';
-import { canUseFastMode } from '@/lib/fastModeAccounts';
-import { SIMULATOR_USER_IDS } from '@/lib/simulatorAccounts';
-import { isAdminOperator } from '@/lib/adminAccounts';
 import { cn } from '@/lib/utils';
-import { useAuth, useToast } from '../hooks';
-import {
-  IS_DEV_MODE,
-  DEFAULT_RESTART_THRESHOLD,
-  DEFAULT_PENDING_PRICE_LIMIT_CENTS,
-} from '../config';
+import { useToast } from '../hooks';
 import { type QueryInputProps, DEFAULT_DRIP_STYLES } from './query-input/types';
 import { useAttachments } from './query-input/useAttachments';
-import { usePriceLimit, type UsePriceLimitResult } from './query-input/usePriceLimit';
+import { usePriceLimit } from './query-input/usePriceLimit';
 import { AttachmentList } from './query-input/AttachmentList';
 import { InputContainer } from './query-input/InputContainer';
-import { TopBar } from './query-input/TopBar';
-import { ToolbarNub } from './query-input/ToolbarNub';
-import { useToolbarReveal, type ToolbarReveal } from './query-input/useToolbarReveal';
+import { TopBar, type TopBarProps } from './query-input/TopBar';
+import { NubTab } from './query-input/ToolbarNub';
+import { NubToolbar } from './query-input/NubToolbar';
+import { PinnedTools } from './query-input/PinnedTools';
+import { useToolbarReveal } from './query-input/useToolbarReveal';
+import { useTopBarProps } from './query-input/useTopBarProps';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { buildDripContainerStyle, buildMarbleBackgroundStyle } from './query-input/dripStyles';
+import { DEFAULT_PENDING_PRICE_LIMIT_CENTS } from '../config';
+import './query-input/roseQueryBox.css';
 
 export type { QueryInputProps };
 export type { DripStyles, PendingAttachment } from './query-input/types';
 
 export default function QueryInput(props: QueryInputProps) {
-  const {
-    dripStyles = DEFAULT_DRIP_STYLES,
-    drippiness = 0,
-    restartThreshold = DEFAULT_RESTART_THRESHOLD,
-  } = props;
+  const { dripStyles = DEFAULT_DRIP_STYLES, drippiness = 0 } = props;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const attachments = useAttachments({ textareaRef });
   const priceLimit = usePriceLimit({
@@ -76,29 +78,36 @@ export default function QueryInput(props: QueryInputProps) {
     onAgentUpdate: props.onAgentUpdate,
   });
   const handleSubmit = useSubmitHandler(attachments, props.onSubmit);
+  const topBarProps = useTopBarProps(props, attachments, priceLimit, textareaRef);
   const reveal = useToolbarReveal();
-  // Rose Desktop only: the toolbar hides behind the nub; stock UI keeps it visible.
-  const toolbarReveal = useRoseDesktop() ? reveal : undefined;
+  const roseDesktop = useRoseDesktop();
 
   return (
     <div className="w-full md:px-0">
-      <div className="max-w-4xl mx-auto">
+      <div
+        data-testid="query-input-host"
+        className={cn('max-w-4xl mx-auto', roseDesktop && 'relative mt-[14px]')}
+      >
+        {roseDesktop && (
+          <NubTab reveal={reveal}>
+            <NubToolbar {...topBarProps} />
+          </NubTab>
+        )}
         <QueryInputShell
           dripStyles={dripStyles}
           drippiness={drippiness}
           isDragOver={attachments.isDragOver}
           dragHandlers={attachments.dragHandlers}
           opaqueSurface={props.opaqueSurface === true}
-          toolbarReveal={toolbarReveal}
+          aboveTab={roseDesktop}
         >
           <QueryInputBody
             {...props}
-            restartThreshold={restartThreshold}
             attachments={attachments}
-            priceLimit={priceLimit}
             textareaRef={textareaRef}
             handleSubmit={handleSubmit}
-            toolbarReveal={toolbarReveal}
+            topBarProps={topBarProps}
+            roseDesktop={roseDesktop}
           />
         </QueryInputShell>
       </div>
@@ -129,21 +138,13 @@ function useSubmitHandler(
   };
 }
 
-function getQueryInputVisibility(isMobile: boolean, user: { id?: string; phone?: string } | null) {
-  const userId = user?.id;
-  return {
-    showTestPrompts: !isMobile && (IS_DEV_MODE || isAdminOperator(user)),
-    showFastMode: canUseFastMode(user),
-    showSimulator: userId != null && userId !== '' && SIMULATOR_USER_IDS.includes(userId),
-  };
-}
-
 interface QueryInputBodyProps extends QueryInputProps {
   attachments: ReturnType<typeof useAttachments>;
-  priceLimit: UsePriceLimitResult;
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
   handleSubmit: () => void;
-  toolbarReveal?: ToolbarReveal;
+  topBarProps: TopBarProps;
+  /** Rose Desktop: the tab carries the toolbar; speed moves to the bottom row. */
+  roseDesktop: boolean;
 }
 
 function QueryInputBody(props: QueryInputBodyProps) {
@@ -154,56 +155,27 @@ function QueryInputBody(props: QueryInputBodyProps) {
     placeholder = 'Type your message...',
     selectedModel = 'rose-labs/rose-1-ultra',
     onModelChange,
-    fastMode = false,
-    onFastModeChange,
-    simulatorMode = false,
-    onSimulatorModeChange,
     availableModels = [],
-    contextPercentage = 0,
-    contextSize = 0,
-    restartThreshold = DEFAULT_RESTART_THRESHOLD,
     showModelSelector = true,
     agentDetail = null,
-    onAgentUpdate,
-    onAgentDelete,
     canSubmit = true,
     onPause,
     isPausing = false,
-    pendingPriceLimitCents = DEFAULT_PENDING_PRICE_LIMIT_CENTS,
     attachments,
-    priceLimit,
     textareaRef,
     handleSubmit,
+    topBarProps,
+    roseDesktop,
   } = props;
-  const { user: authUser } = useAuth();
-  const visibility = getQueryInputVisibility(useIsMobile(), authUser);
   const agentCompleted = agentDetail?.status === 'COMPLETED' || agentDetail?.status === 'FAILED';
+  const speed =
+    roseDesktop && topBarProps.showFastMode
+      ? { fastMode: topBarProps.fastMode ?? false, onFastModeChange: topBarProps.onFastModeChange }
+      : undefined;
 
   return (
     <>
-      <TopBar
-        reveal={props.toolbarReveal}
-        agentDetail={agentDetail}
-        onAgentUpdate={onAgentUpdate}
-        onAgentDelete={onAgentDelete}
-        showTestPrompts={visibility.showTestPrompts}
-        showFastMode={visibility.showFastMode}
-        fastMode={fastMode}
-        onFastModeChange={onFastModeChange}
-        showSimulator={visibility.showSimulator}
-        simulatorMode={simulatorMode}
-        onSimulatorModeChange={onSimulatorModeChange}
-        onSelectPrompt={(prompt, files) => {
-          onChange(prompt);
-          if (files && files.length > 0) void attachments.processFiles(files);
-        }}
-        shouldAutoLoadDefaultPrompt={() => (textareaRef.current?.value ?? '').trim() === ''}
-        pendingPriceLimitCents={pendingPriceLimitCents}
-        priceLimit={priceLimit}
-        contextPercentage={contextPercentage}
-        contextSize={contextSize}
-        restartThreshold={restartThreshold}
-      />
+      {roseDesktop ? <PinnedTools {...topBarProps} /> : <TopBar {...topBarProps} />}
       <AttachmentList attachments={attachments.attachments} onRemove={attachments.remove} />
       <DragOverlay visible={attachments.isDragOver} />
       <InputContainer
@@ -223,6 +195,8 @@ function QueryInputBody(props: QueryInputBodyProps) {
         availableModels={availableModels}
         showModelSelector={showModelSelector}
         textareaRef={textareaRef}
+        roseDesktop={roseDesktop}
+        speed={speed}
       />
     </>
   );
@@ -247,7 +221,8 @@ interface QueryInputShellProps {
     onDrop: (e: React.DragEvent) => void;
   };
   opaqueSurface: boolean;
-  toolbarReveal?: ToolbarReveal;
+  /** Rose Desktop: stack the box above the tab so the tab sits behind it. */
+  aboveTab: boolean;
   children: React.ReactNode;
 }
 
@@ -257,7 +232,7 @@ function QueryInputShell({
   isDragOver,
   dragHandlers,
   opaqueSurface,
-  toolbarReveal,
+  aboveTab,
   children,
 }: QueryInputShellProps) {
   const dripStyle = buildDripContainerStyle(dripStyles, drippiness, isDragOver);
@@ -267,6 +242,7 @@ function QueryInputShell({
       data-surface={opaqueSurface ? 'opaque' : 'translucent'}
       className={cn(
         'relative rounded-xl p-3 shadow-lg border overflow-hidden transition-colors',
+        aboveTab && 'z-[1]',
         isDragOver ? 'border-primary border-2 bg-primary/5' : 'border-border',
         opaqueSurface && 'bg-white dark:bg-navi-black',
       )}
@@ -281,7 +257,6 @@ function QueryInputShell({
           style={buildMarbleBackgroundStyle(dripStyles)}
         />
       )}
-      {toolbarReveal && <ToolbarNub reveal={toolbarReveal} />}
       <div className="relative z-10">{children}</div>
     </div>
   );

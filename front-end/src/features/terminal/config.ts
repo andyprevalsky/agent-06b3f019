@@ -90,6 +90,9 @@ export const DEFAULT_BORDER = 23;
 
 export const DEFAULT_MODEL = 'rose-labs/rose-1-ultra';
 
+/** Rose Desktop accounts (lib/roseDesktop.ts) start new agents on rose-flash. */
+export const ROSE_DESKTOP_DEFAULT_MODEL = 'rose-labs/rose-1-flash';
+
 // ── Browser review account ────────────────────────────────────────────────
 
 /** Phone number for the entitlement-review account; it lands on Browse after auth. */

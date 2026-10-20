@@ -16,6 +16,10 @@
  *     | (hover desktop / tap mobile info icon)
  *     v
  * [TOOLTIP_SHOWN] <-- showInfoTooltip: true
+ *
+ * roseDesktop (Rose Desktop query box): no info button, and Rose models read
+ * as their short pool name (rose-flash / rose-ultra) on the chip and in the
+ * dropdown; other models keep provider/name.
  */
 
 import { useState, useEffect } from 'react';
@@ -24,7 +28,7 @@ import { cn } from '@/lib/utils';
 import { Command, CommandGroup, CommandItem, CommandList } from '@/components/ui/command';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { ROSE_MODEL_IDS, ROSE_MODEL_DESCRIPTIONS } from '../../config';
+import { ROSE_MODEL_IDS, ROSE_MODEL_DESCRIPTIONS, ROSE_MODEL_SHORT_NAMES } from '../../config';
 import type { Model } from '../../hooks';
 
 interface ModelSelectorProps {
@@ -32,6 +36,12 @@ interface ModelSelectorProps {
   onModelChange?: (model: string) => void;
   availableModels: Model[];
   showModelSelector: boolean;
+  /** Rose Desktop: no info button; Rose models show their short pool name. */
+  roseDesktop?: boolean;
+}
+
+function shortRoseName(roseDesktop: boolean, modelId: string): string | undefined {
+  return roseDesktop ? ROSE_MODEL_SHORT_NAMES[modelId] : undefined;
 }
 
 export function ModelSelector({
@@ -39,12 +49,13 @@ export function ModelSelector({
   onModelChange,
   availableModels,
   showModelSelector,
+  roseDesktop = false,
 }: ModelSelectorProps) {
   const [showPicker, setShowPicker] = useState(false);
   const selectedInfo = availableModels.find((m) => m.id === selectedModel);
-  const selectedName = selectedInfo
-    ? `${selectedInfo.provider}/${selectedInfo.name}`
-    : selectedModel;
+  const selectedName =
+    shortRoseName(roseDesktop, selectedModel) ??
+    (selectedInfo ? `${selectedInfo.provider}/${selectedInfo.name}` : selectedModel);
   const isRoseModel =
     selectedModel === ROSE_MODEL_IDS.flash || selectedModel === ROSE_MODEL_IDS.ultra;
 
@@ -79,6 +90,7 @@ export function ModelSelector({
             <ModelList
               availableModels={availableModels}
               selectedModel={selectedModel}
+              roseDesktop={roseDesktop}
               onPick={(id) => {
                 onModelChange?.(id);
                 setShowPicker(false);
@@ -87,7 +99,7 @@ export function ModelSelector({
           </PopoverContent>
         )}
       </Popover>
-      {isRoseModel && <RoseModelTooltip selectedModel={selectedModel} />}
+      {!roseDesktop && isRoseModel && <RoseModelTooltip selectedModel={selectedModel} />}
     </>
   );
 }
@@ -95,10 +107,11 @@ export function ModelSelector({
 interface ModelListProps {
   availableModels: Model[];
   selectedModel: string;
+  roseDesktop: boolean;
   onPick: (modelId: string) => void;
 }
 
-function ModelList({ availableModels, selectedModel, onPick }: ModelListProps) {
+function ModelList({ availableModels, selectedModel, roseDesktop, onPick }: ModelListProps) {
   return (
     <Command className="bg-white">
       <CommandList>
@@ -107,7 +120,9 @@ function ModelList({ availableModels, selectedModel, onPick }: ModelListProps) {
             <CommandItem key={model.id} onSelect={() => onPick(model.id)}>
               <div className="flex items-center justify-between w-full">
                 <div className="flex flex-col gap-0.5">
-                  <span className="font-medium">{model.name}</span>
+                  <span className="font-medium">
+                    {shortRoseName(roseDesktop, model.id) ?? model.name}
+                  </span>
                   <span className="text-xs text-gray-500">
                     {ROSE_MODEL_DESCRIPTIONS[model.id] ?? model.provider}
                   </span>
