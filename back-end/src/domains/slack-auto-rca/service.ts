@@ -1,28 +1,25 @@
-import { createHmac, timingSafeEqual } from '../../providers/crypto';
-import { createLogger } from '../../providers/logger';
-import { retryWithBackoff } from '../../providers/retry';
-import {
-  GITHUB_DISPATCH_REPO,
-  GITHUB_DISPATCH_TOKEN,
-  SLACK_ERROR_CHANNEL_ID,
-  SLACK_SIGNING_SECRET,
-} from './config';
-import type { ParsedSlackAutoRcaEvent, SlackAutoRcaFeedback } from './types';
+/**
+ * Slack Events API boundary for auto-RCA: signature verification and event
+ * parsing. Incident handling lives in incidentService.ts.
+ *
+ *   #errors top-level card posted by this Slack app     ──► error_alert
+ *   human reply inside an alert thread                  ──► feedback
+ *   url_verification                                     ──► challenge
+ *   anything else (edits, bot replies, other channels)  ──► ignored
+ */
+import { createHash, createHmac, timingSafeEqual } from '../../providers/crypto';
+import { MAX_ERROR_REPORT_CHARS, SLACK_ERROR_CHANNEL_ID, SLACK_SIGNING_SECRET } from './config';
+import type { ParsedSlackAutoRcaEvent, SlackAutoRcaErrorAlert } from './types';
 
-const log = createLogger('SlackAutoRca');
 const MAX_REQUEST_AGE_SECONDS = 5 * 60;
 const MAX_FEEDBACK_LENGTH = 8000;
 const SLACK_TS = /^[0-9]{10,}\.[0-9]{6}$/;
 const SLACK_USER_ID = /^[UW][A-Z0-9]{8,32}$/;
+const SLACK_BOT_ID = /^B[A-Z0-9]{8,32}$/;
+const SLACK_APP_ID = /^A[A-Z0-9]{8,32}$/;
 const SLACK_EVENT_ID = /^Ev[A-Za-z0-9]{8,64}$/;
-
-class GitHubDispatchConfigurationError extends Error {}
-
-class GitHubDispatchHttpError extends Error {
-  constructor(readonly status: number) {
-    super(`GitHub feedback dispatch failed with ${status}`);
-  }
-}
+const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+const MAX_MENTIONED_AGENTS = 10;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -57,17 +54,108 @@ export function verifySlackRequest(
   return timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
 }
 
-function parseFeedback(payload: Record<string, unknown>): ParsedSlackAutoRcaEvent {
-  const event = payload.event;
-  if (!isRecord(event) || event.type !== 'message') return { kind: 'ignored' };
-  if (event.subtype !== undefined || event.bot_id !== undefined) return { kind: 'ignored' };
+function textOf(value: unknown): string | null {
+  if (!isRecord(value)) return null;
+  return typeof value.text === 'string' ? value.text : null;
+}
 
-  const channel = event.channel;
-  const threadTs = event.thread_ts;
-  const messageTs = event.ts;
-  const userId = event.user;
+/** Flatten Slack Block Kit text (header, section text + fields, context). */
+export function flattenSlackBlocks(blocks: unknown): string {
+  if (!Array.isArray(blocks)) return '';
+  const lines: string[] = [];
+  for (const block of blocks) {
+    if (!isRecord(block)) continue;
+    const own = textOf(block.text);
+    if (own !== null) lines.push(own);
+    for (const list of [block.fields, block.elements]) {
+      if (!Array.isArray(list)) continue;
+      for (const item of list) {
+        const text = textOf(item);
+        if (text !== null) lines.push(text);
+      }
+    }
+  }
+  return lines.join('\n');
+}
+
+function buildReport(text: string, blocks: unknown): string {
+  const flattened = flattenSlackBlocks(blocks);
+  const report = flattened.trim() === '' ? text : flattened;
+  // The report is embedded between <error_report> tags; never let it close them.
+  return report.replace(/<\/?error_report/gi, '[error_report').slice(0, MAX_ERROR_REPORT_CHARS);
+}
+
+/**
+ * Stable incident signature: the alert's plain-text fallback with ids, hex and
+ * numbers stripped, so the same failure on different agents maps to one RCA.
+ */
+export function errorSignature(text: string): string {
+  const normalized = text
+    .toLowerCase()
+    .replace(UUID, '<uuid>')
+    .replace(/0x[0-9a-f]+/g, '<hex>')
+    .replace(/\d+/g, '<n>')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 300);
+  return createHash('sha256').update(normalized).digest('hex');
+}
+
+/** Agent ids the card mentions (bounded), used to skip failures of RCA agents. */
+export function mentionedAgentIds(report: string): string[] {
+  const ids = new Set<string>();
+  for (const match of report.matchAll(UUID)) {
+    ids.add(match[0].toLowerCase());
+    if (ids.size >= MAX_MENTIONED_AGENTS) break;
+  }
+  return [...ids];
+}
+
+/**
+ * Only cards our own Slack app posted are error alerts: `api_app_id` is the app
+ * the signed delivery belongs to and `app_id` is the app that posted the
+ * message. The backend and the worker post alerts with that app's bot token, so
+ * another integration's bot in the channel can never start an RCA.
+ */
+function parseErrorAlert(
+  payload: Record<string, unknown>,
+  event: Record<string, unknown>
+): ParsedSlackAutoRcaEvent {
+  const { channel, ts, bot_id: botId, app_id: appId, text } = event;
   const eventId = payload.event_id;
-  const text = event.text;
+  if (
+    channel !== SLACK_ERROR_CHANNEL_ID ||
+    typeof ts !== 'string' ||
+    !SLACK_TS.test(ts) ||
+    typeof botId !== 'string' ||
+    !SLACK_BOT_ID.test(botId) ||
+    typeof appId !== 'string' ||
+    !SLACK_APP_ID.test(appId) ||
+    appId !== payload.api_app_id ||
+    typeof eventId !== 'string' ||
+    !SLACK_EVENT_ID.test(eventId) ||
+    typeof text !== 'string' ||
+    text.trim() === ''
+  ) {
+    return { kind: 'ignored' };
+  }
+  const alert: SlackAutoRcaErrorAlert = {
+    channel,
+    messageTs: ts,
+    botId,
+    eventId,
+    text: text.trim(),
+    report: buildReport(text, event.blocks),
+  };
+  return { kind: 'error_alert', alert };
+}
+
+function parseFeedback(
+  payload: Record<string, unknown>,
+  event: Record<string, unknown>
+): ParsedSlackAutoRcaEvent {
+  const { channel, thread_ts: threadTs, ts: messageTs, user: userId, text } = event;
+  const eventId = payload.event_id;
   if (
     typeof channel !== 'string' ||
     channel !== SLACK_ERROR_CHANNEL_ID ||
@@ -94,67 +182,25 @@ function parseFeedback(payload: Record<string, unknown>): ParsedSlackAutoRcaEven
   };
 }
 
+function parseMessage(payload: Record<string, unknown>): ParsedSlackAutoRcaEvent {
+  const event = payload.event;
+  if (!isRecord(event) || event.type !== 'message') return { kind: 'ignored' };
+  const topLevel = event.thread_ts === undefined || event.thread_ts === event.ts;
+  if (event.bot_id !== undefined) {
+    // Bot replies (including our own post-backs) never trigger anything; only a
+    // bot's top-level card is an alert. `bot_message` is an incoming-webhook post.
+    const plainPost = event.subtype === undefined || event.subtype === 'bot_message';
+    return topLevel && plainPost ? parseErrorAlert(payload, event) : { kind: 'ignored' };
+  }
+  if (event.subtype !== undefined || topLevel) return { kind: 'ignored' };
+  return parseFeedback(payload, event);
+}
+
 export function parseSlackAutoRcaEvent(payload: unknown): ParsedSlackAutoRcaEvent {
   if (!isRecord(payload)) return { kind: 'ignored' };
   if (payload.type === 'url_verification' && typeof payload.challenge === 'string') {
     return { kind: 'challenge', challenge: payload.challenge };
   }
   if (payload.type !== 'event_callback') return { kind: 'ignored' };
-  return parseFeedback(payload);
-}
-
-async function dispatchFeedback(feedback: SlackAutoRcaFeedback): Promise<void> {
-  if (GITHUB_DISPATCH_TOKEN === '') {
-    throw new GitHubDispatchConfigurationError('GITHUB_DISPATCH_TOKEN is not configured');
-  }
-  const response = await fetch(`https://api.github.com/repos/${GITHUB_DISPATCH_REPO}/dispatches`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${GITHUB_DISPATCH_TOKEN}`,
-      Accept: 'application/vnd.github+json',
-      'Content-Type': 'application/json',
-      'User-Agent': 'rose-auto-rca-slack',
-    },
-    body: JSON.stringify({
-      event_type: 'agent-rca-feedback',
-      client_payload: {
-        slack_channel: feedback.channel,
-        slack_thread_ts: feedback.threadTs,
-        slack_message_ts: feedback.messageTs,
-        slack_user_id: feedback.userId,
-        slack_event_id: feedback.eventId,
-        feedback: feedback.text,
-      },
-    }),
-    // Keep all three attempts inside Slack's ~3 second Events API ACK window.
-    // A non-2xx response then asks Slack to redeliver the same deduped event.
-    signal: AbortSignal.timeout(700),
-  });
-  if (!response.ok) throw new GitHubDispatchHttpError(response.status);
-}
-
-function isRetryableDispatchError(error: unknown): boolean {
-  if (error instanceof GitHubDispatchConfigurationError) return false;
-  if (error instanceof GitHubDispatchHttpError) {
-    return error.status === 408 || error.status === 429 || error.status >= 500;
-  }
-  // fetch throws for timeouts, DNS errors, connection resets, and other
-  // transport failures that can succeed inside Slack's bounded retry window.
-  return true;
-}
-
-export async function queueSlackAutoRcaFeedback(feedback: SlackAutoRcaFeedback): Promise<void> {
-  await retryWithBackoff(() => dispatchFeedback(feedback), {
-    maxRetries: 3,
-    fixedDelays: [100, 200],
-    isRetryable: isRetryableDispatchError,
-    component: 'SlackAutoRcaDispatch',
-  });
-  log.info('Durably queued Slack RCA feedback', {
-    event_id: feedback.eventId,
-    channel: feedback.channel,
-    thread_ts: feedback.threadTs,
-    message_ts: feedback.messageTs,
-    user_id: feedback.userId,
-  });
+  return parseMessage(payload);
 }
