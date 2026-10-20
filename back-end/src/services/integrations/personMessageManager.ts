@@ -18,7 +18,7 @@ export class MessageAccountRemovedError extends Error {
 
 /**
  * Attribution for messages synced by ONE provider-side account (a Telegram
- * user id). Rows carry `sourceAccountId`; inserts stop once `integrationId`
+ * user id, an iMessage Mac device id). Rows carry `sourceAccountId`; inserts stop once `integrationId`
  * (that account's Integration row) is deleted.
  */
 export interface MessageAccountScope {

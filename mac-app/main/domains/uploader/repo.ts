@@ -11,7 +11,7 @@
 
 import { config } from '../../base/config';
 import { UPLOAD_ENDPOINTS, WHATSAPP_CONNECT_ENDPOINT } from './config';
-import type { IMessageUploadPayload, UploadStrategy } from './types';
+import type { IMessageDeviceAccount, IMessageUploadPayload, UploadStrategy } from './types';
 
 /** Result of a single upload HTTP call — unwrapped for the service layer. */
 export interface UploadHttpResult {
@@ -19,6 +19,8 @@ export interface UploadHttpResult {
   ok: boolean;
   /** HTTP status text, useful for error messages. */
   statusText: string;
+  /** HTTP status code. */
+  status: number;
 }
 
 /** Build the absolute URL for a given upload strategy. */
@@ -28,7 +30,7 @@ function urlFor(strategy: UploadStrategy): string {
 
 /** Normalize a fetch Response into an UploadHttpResult. */
 function toResult(response: Response): UploadHttpResult {
-  return { ok: response.ok, statusText: response.statusText };
+  return { ok: response.ok, statusText: response.statusText, status: response.status };
 }
 
 /**
@@ -39,7 +41,7 @@ async function postContactsJson(
   strategy: Extract<UploadStrategy, 'imessage' | 'whatsapp' | 'telegram'>,
   contacts: unknown,
   accessToken: string,
-  extra: Record<string, string> = {}
+  extra: Record<string, unknown> = {}
 ): Promise<UploadHttpResult> {
   const body = { ...extra, contacts, accessedAt: new Date().toISOString() };
   const response = await fetch(urlFor(strategy), {
@@ -53,12 +55,18 @@ async function postContactsJson(
   return toResult(response);
 }
 
-/** POST an iMessage payload (already grouped into contacts). */
+/** POST an iMessage payload (already grouped into contacts), optionally device-scoped. */
 export function postIMessagePayload(
   payload: IMessageUploadPayload,
-  accessToken: string
+  accessToken: string,
+  account?: IMessageDeviceAccount
 ): Promise<UploadHttpResult> {
-  return postContactsJson('imessage', payload.contacts, accessToken);
+  return postContactsJson(
+    'imessage',
+    payload.contacts,
+    accessToken,
+    account !== undefined ? { account } : {}
+  );
 }
 
 /** POST a WhatsApp contacts blob to the dedicated endpoint. */
