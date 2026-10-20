@@ -106,6 +106,37 @@ The actual-handler contract test again failed 8/9 and passed 9/9 unchanged (`pho
 
 The separate executed privacy-projection regression covers the live finding that a protected manually entered configured email could become hidden from the internal saved-password verifier. That repair preserves full public masking and does not clear the vault. It is documented in its owning privacy-boundary case rather than treating this guidance change as a fix for hidden evidence.
 
+### Native SMS continuation followup
+
+The user explicitly requires an accessible matching SMS code to be used during
+phone-app boot as well as browser sign-in. The previous enabled guidance named
+browser SMS challenges only. The actual-handler request regression was extended
+to require native-phone coverage and the explicit startup order: after Apple
+authentication, configure iCloud Messages, iMessage and the receive address
+before Gmail sign-in. Full archive download is not required, and configuration
+alone cannot certify receipt.
+
+On the live cloud phone, a newly requested Google verification SMS appeared in
+Messages. The parent entered that code once through the protected USER broker
+for the same pending Google challenge, and Google advanced to the configured
+account. Gmail then displayed an organization policy requiring a device
+passcode. No device passcode or organization policy was changed, and this is not
+proof of a completed autonomous browser login or usable Gmail inbox. The safe
+result is recorded in `gmail-boot-live-result.json`; the code is not reproduced
+in this document.
+
+The extended existing actual-handler test failed 8/9 before the native-SMS
+instruction change and passed 9/9 afterward, including the six unchanged
+disabled-path golden contracts. Three canonical synthetic decision controls
+passed: use the current native-app SMS code, reject stale/unrelated code, and
+request device-passcode assistance. The normal Rose suite passed 114/114 in
+6.6 seconds. Logs are `native-sms-guidance-approved-red.log`,
+`native-sms-guidance-green.log`, `native-sms-model-controls.log`, and
+`native-sms-full-rose.log`. These model decisions supplement the live
+operator-assisted acceptance; they do not establish unattended end-to-end boot
+or removal of the device-policy blocker. No runtime classifier, API/schema
+change, automatic cross-task code consumption, or new paid default test was added.
+
 ## Human feedback
 
 The user requires default-off isolation of main trajectories and consistent first-use phone settings configuration, including Portrait Orientation Lock when absent. No claim that message counts prove completed history sync is authorized. Parent technical review is not additional human feedback.

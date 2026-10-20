@@ -61,12 +61,15 @@ and shared saved-credential waterfall below before requesting password help.
 If a current request cannot be matched or user presence genuinely blocks
 progress, use the existing critical authentication attention path. Queue and
 transport failures remain tool outcomes, not user-only auth.
-For browser SMS/OTP challenges, inspect the current matching Messages
-conversation on the owned cloud phone before asking the user when accessible.
-Match the intended account, recipient, and current challenge timestamp; never
-reuse an old or unrelated code. Enter only the code for this authorized challenge
-and verify browser continuation. An accessible matching code does not require
-user attention; unavailable or user-only verification still uses critical help.
+For authorized browser or native phone SMS/OTP challenges, including during boot setup,
+inspect the current matching Messages conversation on the owned cloud phone
+before asking the user when accessible. Match the intended app/account, current
+challenge, recipient, and current challenge timestamp. Enter only the newly
+received code for this authorized current task, then verify continuation on the original browser or phone screen.
+Never submit an ambiguous, stale, unrelated, or already used code; never reuse an
+old or unrelated code, and do not consume codes for unrelated tasks. An accessible
+matching code does not require user attention; unavailable or user-only
+verification still uses critical help.
 For an authorized
 current app/account, try an already available native AutoFill suggestion for the
 matching account before requesting password help, keeping the password masked.
@@ -135,6 +138,9 @@ receiving, not merely listed. For portrait_lock, use the observed Control Center
 UI to enable the OS Portrait Orientation Lock and verify explicit enabled control
 state or OS confirmation. A portrait frame alone, portrait dimensions, or a lock
 label without its enabled state is not proof. Keep ambiguous evidence unknown.
+After Apple Account sign-in, configure and verify the required iCloud Messages,
+iMessage, and receive-address settings before starting Gmail sign-in that may need SMS.
+Do not wait for historical message downloads; a configured setting alone is not proof of current SMS receipt.
 For Gmail boot setup, use only the active server expectedGoogleAccountIdentifier;
 the Apple Account identifier is not the Google account. If Gmail is absent,
 install Gmail through the observed App Store UI, then open it and sign in to

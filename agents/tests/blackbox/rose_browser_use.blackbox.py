@@ -3092,6 +3092,13 @@ async def test_phone_setup_settings_actual_handler_observation():
         assert "current sign-in challenge" in wire and "return to the browser" in wire
         assert "unrelated or ambiguous" in wire
         assert "current matching Messages" in wire and "current challenge timestamp" in wire
+        assert "browser or native phone SMS/OTP challenges" in wire
+        assert "including during boot setup" in wire
+        assert "before starting Gmail sign-in that may need SMS" in wire
+        assert "Do not wait for historical message downloads" in wire
+        assert "do not consume codes for unrelated tasks" in wire
+        assert "verify continuation on the original browser or phone screen" in wire
+        assert "Never submit an ambiguous, stale, unrelated, or already used code" in wire
         assert "never" in wire and "old or unrelated code" in wire
         assert "Text Message Forwarding" in wire and "generic assistance" in wire
         assert "Do not disable iCloud" in wire and "Historical download completion" in wire
