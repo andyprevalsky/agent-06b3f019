@@ -113,12 +113,12 @@ Andy: "sub agent for each". There is one lane per integration that syncs today, 
 
 | ID | Criterion | Eval |
 |----|-----------|------|
-| P1 | iPhone web app is fast: cold load LCP ≤ 2.5 s and TTI ≤ 3.5 s on simulated 4G, mid-tier iPhone CPU (4x throttle); warm load ≤ 1 s | Lighthouse mobile + WebKit Playwright iPhone 15 emulation (no device rig exists; results labelled "emulation") |
-| P2 | Interactions: INP ≤ 200 ms on send, open agent, open drawer and switch tab | Playwright performance traces |
-| P3 | Smooth: ≥ 55 fps for drawer, nub and fade animations and for scrolling a 1,000-message trajectory; no long task > 50 ms during scroll | trace frame timing |
-| P4 | Realtime: agent message to on-screen p95 ≤ 500 ms | instrumented e2e |
-| P5 | Memory: the mobile tab stays ≤ 300 MB JS heap after 30 min with 4 live inline views; no leak across 50 agent switches | heap snapshots |
-| P6 | Bundle: main JS ≤ current baseline + 10%; user-ui, apps and drawers code-split | build size check in CI |
+| P1 | iPhone web app is fast: cold load LCP ≤ 2.5 s and TTI ≤ 3.5 s on simulated 4G, mid-tier iPhone CPU (4x throttle); warm load ≤ 1 s | Lighthouse mobile + WebKit Playwright iPhone 15 emulation (no device rig exists; results labelled "emulation") — **dropped (Andy 2026-10-20)** |
+| P2 | Interactions: INP ≤ 200 ms on send, open agent, open drawer and switch tab | Playwright performance traces — **dropped (Andy 2026-10-20)** |
+| P3 | Smooth: ≥ 55 fps for drawer, nub and fade animations and for scrolling a 1,000-message trajectory; no long task > 50 ms during scroll | trace frame timing — **dropped (Andy 2026-10-20)** |
+| P4 | Realtime: agent message to on-screen p95 ≤ 500 ms | instrumented e2e — **dropped (Andy 2026-10-20)** |
+| P5 | Memory: the mobile tab stays ≤ 300 MB JS heap after 30 min with 4 live inline views; no leak across 50 agent switches | heap snapshots — **dropped (Andy 2026-10-20)** |
+| P6 | Bundle: main JS ≤ current baseline + 10%; user-ui, apps and drawers code-split | build size check in CI — **dropped (Andy 2026-10-20)** |
 | P7 | Code agent latency: resume ≤ 5 s (paused) / ≤ 30 s (from checkpoint); HMR preview ≤ 3 s after a write | blackbox timings |
 | P8 | 10k-agent rule: no per-user firehose; per-agent channels only; O(1) queries per message for every feature above | review + structural checks |
 
@@ -205,6 +205,14 @@ Open follow-ups with owners: ~~C10 stuck agent on crash between create and start
 - One browser template per user (all credentials percolate in, keeping the best); the home browser opens on the root agent's URL.
 - Sandbox CPU and memory adapt independently.
 - Flag = Andy's account only (confirmed).
+- Display = a full inline renderer (CSS/JS/WebGL/WebGPU/wasm/CDNs), callable with just a file pointer; site bundles and 3D models (L-DISPLAY3).
+- Whole-app settings (theme, background, slots) are removed. Apps stay; inline views stay for now.
+- Explore inspects a code agent's workspace by spinning up a short read-only code agent on its latest checkpoint, not a search index (L-EXPLORE-CODE).
+- Adversarial agent-to-agent scenarios added (L-A2A-ADV).
+- Browser template keeps multiple accounts per site (reusing the existing account model); keep-best applies per account.
+- Usage-limit error: report what is known (rate-limited until); no remaining-usage estimates.
+- iPhone performance pass (P1–P6) dropped. Routing (L-ROUTING) is considered fine. The demo-video item is dropped.
+- Prompt/skill text is reviewed at deploy.
 
 ## Decisions made without asking (for Andy's review at the end)
 
