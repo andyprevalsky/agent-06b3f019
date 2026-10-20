@@ -16,7 +16,8 @@
  *   [SEND] <-- canSubmit; [STOP] <-- !canSubmit; [PAUSING] <-- isPausing
  *
  * ROSE DESKTOP (roseDesktop): bare paperclip (no background/border) at the
- * model selector's 26px height, no model info button, the 3-state SpeedToggle
+ * model selector's 26px height, no model info button, short Rose model names
+ * (rose-flash / rose-ultra), the 3-state SpeedToggle
  * right of the model selector (when `speed` is passed: Fast Mode operators),
  * and the dark-only glass send/stop button.
  *
@@ -106,7 +107,7 @@ export function InputContainer(props: InputContainerProps) {
             onModelChange={onModelChange}
             availableModels={availableModels}
             showModelSelector={showModelSelector}
-            showInfo={!roseDesktop}
+            roseDesktop={roseDesktop}
           />
           {speed && (
             <SpeedToggle

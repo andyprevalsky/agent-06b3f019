@@ -11,6 +11,9 @@
  *  - #53 dark-only glass send button; its CSS is scoped to html.dark
  *  - #32 bottom row: bare paperclip at the model selector's 26px height
  *        (speed toggle states live in fast-mode-toggle.blackbox.tsx)
+ *  - #75 the Rose toolset chip stays pinned top-left inside the box, stock
+ *        styling, identical in light and dark (simulator: fast-mode-toggle suite)
+ *  - #77 the model selector shows only rose-flash / rose-ultra
  *  - #23 new agents default to rose-flash for flagged accounts
  */
 import { createRef } from 'react';
@@ -147,15 +150,28 @@ describe('Rose Desktop query box: nub tab (#31)', () => {
     expect(screen.getByTestId('query-input-host').className).toContain('mt-[14px]');
   });
 
-  it('removes the old in-box toolbar row: every item is on the tab', () => {
+  it('removes the old in-box toolbar row: the toolset stays in the box, the rest is on the tab', () => {
     renderFlagged();
     const surface = screen.getByTestId('query-input-surface');
     expect(within(surface).queryByText('Safe Writes')).toBeNull();
-    expect(within(surface).queryByLabelText('View Rose system tools')).toBeNull();
+    expect(within(surface).getByLabelText('View Rose system tools')).toBeInTheDocument();
     const nub = tab();
+    // Exactly: lock, context files, budget, context %, settings, info (no Tools).
+    expect(within(nub).queryByLabelText('View Rose system tools')).toBeNull();
+    expect(within(nub).queryByTestId('simulator-toggle')).toBeNull();
+    expect(
+      within(nub)
+        .getAllByRole('button')
+        .map((b) => b.getAttribute('aria-label')),
+    ).toEqual([
+      'Safe writes on',
+      'Select a test prompt',
+      null, // budget: its text is the name
+      'Agent settings',
+      'About, Privacy and Terms',
+    ]);
     expect(within(nub).getByTestId('nub-write-lock')).toBeInTheDocument();
     expect(within(nub).getByLabelText('Select a test prompt')).toBeInTheDocument();
-    expect(within(nub).getByLabelText('View Rose system tools')).toBeInTheDocument();
     expect(within(nub).getByTestId('nub-budget')).toHaveTextContent('$0.00 / 10.00');
     expect(within(nub).getByTestId('nub-context')).toHaveTextContent('0%');
     expect(within(nub).getByLabelText('Agent settings')).toBeInTheDocument();
@@ -240,7 +256,7 @@ describe('Rose Desktop query box: bottom row (#32)', () => {
     expect(bare.className).toContain('w-[26px]');
     expect(bare.className).not.toMatch(/(^|\s)(border|rounded-lg|bg-gray-100|shadow\S*)(\s|$)/);
     // The model chip is 26px tall: text-xs line (16px) + py-1 (8px) + 1px border x2.
-    const model = screen.getByText('rose-labs/rose-fast').closest('button')!;
+    const model = screen.getByText('rose-flash').closest('button')!;
     expect(model.className).toMatch(/(^|\s)text-xs(\s|$)/);
     expect(model.className).toMatch(/(^|\s)py-1(\s|$)/);
     expect(model.className).toMatch(/(^|\s)border(\s|$)/);
@@ -291,7 +307,6 @@ describe('Rose Desktop query box: write lock (#40) and tooltips (#43)', () => {
     await user.unhover(lock);
     await expectTip(user, lock, 'Writes unlocked · click to lock');
     await expectTip(user, within(nub).getByLabelText('Select a test prompt'), 'Context files');
-    await expectTip(user, within(nub).getByLabelText('View Rose system tools'), 'Tools');
     await expectTip(user, within(nub).getByTestId('nub-budget'), 'Budget used · $0.00 of $2.50');
     await expectTip(user, within(nub).getByTestId('nub-context'), 'Context window used');
     await expectTip(user, within(nub).getByLabelText('Agent settings'), 'Agent settings');
@@ -319,6 +334,94 @@ describe('Rose Desktop query box: write lock (#40) and tooltips (#43)', () => {
     ]);
     // Using the menu keeps the tab open (portaled events bubble through React).
     expect(tab()).toHaveAttribute('data-state', 'open');
+  });
+});
+
+// ─── Pinned toolset (#75) and short model names (#77) ───────────────────────
+
+/** Tokens whose color comes from a theme variable or a dark: variant. */
+const THEME_DEPENDENT =
+  /(^|\s)(dark:\S+|\S*-(border|background|foreground|muted|input|card|popover|primary|secondary|accent|ring)(\/\d+)?)(?=\s|$)/;
+
+function withDarkMode<T>(fn: () => T): T {
+  document.documentElement.classList.add('dark');
+  try {
+    return fn();
+  } finally {
+    document.documentElement.classList.remove('dark');
+  }
+}
+
+describe('Rose Desktop query box: pinned Rose toolset (#75)', () => {
+  it('pins the wrench chip top-left inside the box, always visible, stock styling', () => {
+    renderFlagged();
+    const surface = screen.getByTestId('query-input-surface');
+    const row = screen.getByTestId('query-pinned-tools');
+    expect(surface.contains(row)).toBe(true);
+    expect(tab().contains(row)).toBe(false);
+    // First thing in the box body (above the attachments and the textarea).
+    expect(row.parentElement!.firstElementChild).toBe(row);
+    expect(row).toHaveClass('flex', 'justify-start', 'px-3');
+    const chip = within(row).getByTestId('pinned-toolset-chip');
+    expect(row.firstElementChild).toBe(chip);
+    expect(chip).toHaveAccessibleName('View Rose system tools');
+    expect(chip.querySelector('svg.lucide-wrench')).not.toBeNull();
+    // Exact stock chip: gradient, pink icon, 28px; light border fixed to rgb(222,222,227).
+    expect(chip).toHaveClass(
+      'h-7',
+      'w-7',
+      'rounded-md',
+      'border',
+      'border-[rgb(222,222,227)]',
+      'bg-gradient-to-br',
+      'from-[#FE7503]/5',
+      'via-[#E062CC]/5',
+      'to-[#7A6BEC]/5',
+      'text-[#E062CC]',
+    );
+    // Not hidden behind the tab: no reveal state, never transparent.
+    expect(row.style.opacity).toBe('');
+    expect(row).not.toHaveAttribute('data-state');
+    // The test account is not a simulator admin.
+    expect(within(row).queryByTestId('simulator-toggle')).toBeNull();
+  });
+
+  it('looks identical in dark mode: same classes, no theme-variable or dark: colors', () => {
+    const { unmount } = renderFlagged();
+    const light = screen.getByTestId('pinned-toolset-chip').className;
+    unmount();
+    const dark = withDarkMode(() => {
+      const view = renderFlagged();
+      const className = screen.getByTestId('pinned-toolset-chip').className;
+      view.unmount();
+      return className;
+    });
+    expect(dark).toBe(light);
+    expect(light).not.toMatch(THEME_DEPENDENT);
+    // The query box's own dark stylesheet never targets it.
+    expect(ROSE_QUERY_BOX_CSS).not.toMatch(/wrench|toolset|pinned|simulator/i);
+  });
+
+  it('the stock row keeps its theme border (flag off)', () => {
+    renderWithProviders(<QueryInput {...queryProps} />, { roseDesktop: false });
+    expect(screen.queryByTestId('query-pinned-tools')).toBeNull();
+    expect(screen.getByLabelText('View Rose system tools')).toHaveClass('border-border');
+  });
+});
+
+describe('Rose Desktop model selector: short pool names (#77)', () => {
+  it('shows rose-flash / rose-ultra; the stock box keeps provider/name', () => {
+    const { unmount } = renderFlagged({ selectedModel: 'rose-labs/rose-1-ultra' });
+    expect(screen.getByText('rose-ultra')).toBeInTheDocument();
+    unmount();
+    const flash = renderFlagged();
+    expect(screen.getByText('rose-flash')).toBeInTheDocument();
+    expect(screen.queryByText('rose-labs/rose-fast')).toBeNull();
+    flash.unmount();
+
+    renderWithProviders(<QueryInput {...queryProps} />, { roseDesktop: false });
+    expect(screen.getByText('rose-labs/rose-fast')).toBeInTheDocument();
+    expect(screen.queryByText('rose-flash')).toBeNull();
   });
 });
 

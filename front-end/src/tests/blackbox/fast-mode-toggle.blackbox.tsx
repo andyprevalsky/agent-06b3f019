@@ -10,6 +10,7 @@
  * Rose Desktop (UI ledger #32, #23): the speed square next to the model
  * selector cycles Normal -> Fast -> Ultrafast (default), Zap icon only at the
  * selector's 26px height; dark colors are toned down and scoped to html.dark.
+ * The pinned simulator (#75) lives in rose-desktop-pinned-tools.blackbox.tsx.
  */
 import React from 'react';
 import { readFileSync } from 'node:fs';
@@ -550,7 +551,7 @@ describe('Rose Desktop speed toggle (#32, #23)', () => {
     expect(zap).toHaveClass('h-[10.4px]', 'w-[10.4px]');
     expect(zap.getAttribute('fill')).toBe('currentColor');
     // Bottom row: model selector, then speed (the info button is gone).
-    const model = screen.getByText('rose-labs/rose-1-flash').closest('button')!;
+    const model = screen.getByText('rose-flash').closest('button')!;
     expect(model.nextElementSibling).toBe(speed);
     expect(within(screen.getByTestId('query-input-surface')).getByTestId('speed-toggle')).toBe(
       speed,

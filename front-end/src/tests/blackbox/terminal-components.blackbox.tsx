@@ -209,7 +209,9 @@ describe('QueryInput (blackbox)', () => {
     renderWithProviders(<QueryInput {...defaultProps} placeholder="Enter any goal" />);
 
     expect(screen.getByPlaceholderText('Enter any goal')).toBeInTheDocument();
-    expect(screen.getByText('rose-labs/rose-fast')).toBeInTheDocument();
+    // Rose Desktop (#77): only the short pool name.
+    expect(screen.getByText('rose-flash')).toBeInTheDocument();
+    expect(screen.queryByText('rose-labs/rose-fast')).toBeNull();
   });
 
   it('typing updates value via onChange (controlled)', async () => {
@@ -343,8 +345,15 @@ describe('QueryInput (blackbox)', () => {
     expect(screen.getByText('42%')).toBeInTheDocument();
   });
 
-  it('shows "rose-labs/rose-1-ultra" in the model-selector when selectedModel switches', () => {
-    renderWithProviders(<QueryInput {...defaultProps} selectedModel="rose-labs/rose-1-ultra" />);
+  it('shows the switched model in the model-selector (Rose Desktop: rose-ultra)', () => {
+    const { unmount } = renderWithProviders(
+      <QueryInput {...defaultProps} selectedModel="rose-labs/rose-1-ultra" />,
+    );
+    expect(screen.getByText('rose-ultra')).toBeInTheDocument();
+    unmount();
+    renderWithProviders(<QueryInput {...defaultProps} selectedModel="rose-labs/rose-1-ultra" />, {
+      roseDesktop: false,
+    });
     expect(screen.getByText('rose-labs/rose-1-ultra')).toBeInTheDocument();
   });
 
@@ -368,7 +377,7 @@ describe('QueryInput (blackbox)', () => {
     );
 
     // Click the model chip button to open the popover
-    const chip = screen.getByText('rose-labs/rose-fast').closest('button')!;
+    const chip = screen.getByText('rose-flash').closest('button')!;
     await user.click(chip);
 
     // Model picker shows both model options with their descriptions
@@ -378,6 +387,20 @@ describe('QueryInput (blackbox)', () => {
       ).toBeInTheDocument();
     });
     expect(screen.getByText('Most capable for complex reasoning')).toBeInTheDocument();
+    // Rose Desktop (#77): the options read rose-flash / rose-ultra too.
+    const options = screen.getAllByRole('option').map((o) => o.querySelector('.font-medium'));
+    expect(options.map((o) => o?.textContent)).toEqual(['rose-flash', 'rose-ultra']);
+  });
+
+  it('stock model picker keeps provider/name on the chip and model names in the options', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<QueryInput {...defaultProps} showModelSelector />, {
+      roseDesktop: false,
+    });
+    await user.click(screen.getByText('rose-labs/rose-fast').closest('button')!);
+    await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(2));
+    const options = screen.getAllByRole('option').map((o) => o.querySelector('.font-medium'));
+    expect(options.map((o) => o?.textContent)).toEqual(['rose-fast', 'rose-1-ultra']);
   });
 
   it('selecting an unknown-provider model fallbacks to provider description', async () => {
@@ -396,12 +419,14 @@ describe('QueryInput (blackbox)', () => {
       />,
     );
 
-    const chip = screen.getByText('rose-labs/rose-fast').closest('button')!;
+    const chip = screen.getByText('rose-flash').closest('button')!;
     await user.click(chip);
 
     await waitFor(() => {
       expect(screen.getByText('other-provider')).toBeInTheDocument();
     });
+    // Non-Rose models keep their own name.
+    expect(screen.getByText('alpha')).toBeInTheDocument();
   });
 
   it('renders attachment paperclip button and it is enabled for running agent', () => {
@@ -439,13 +464,14 @@ describe('QueryInput (blackbox)', () => {
     const { unmount } = renderWithProviders(
       <QueryInput {...defaultProps} selectedModel="rose-labs/rose-1-flash" />,
     );
-    expect(screen.getByText('rose-labs/rose-fast')).toBeInTheDocument();
+    expect(screen.getByText('rose-flash')).toBeInTheDocument();
     expect(document.querySelector(infoSelector)).toBeNull();
     unmount();
 
     renderWithProviders(<QueryInput {...defaultProps} selectedModel="rose-labs/rose-1-flash" />, {
       roseDesktop: false,
     });
+    expect(screen.getByText('rose-labs/rose-fast')).toBeInTheDocument();
     expect(document.querySelector(infoSelector)).not.toBeNull();
   });
 

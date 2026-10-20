@@ -14,7 +14,9 @@
  * State:
  * - isOpen: boolean (popover open state)
  * - trigger is icon-only; text remains in title/aria-label for accessibility
- * - variant 'nub' (Rose Desktop tab): bare white wrench, instant "Tools" tooltip
+ * - variant 'pinned' (Rose Desktop: pinned top-left inside the query box) =
+ *   the same chip with the light border fixed to rgb(222,222,227), so it
+ *   looks identical in light and dark mode (no dark: variants, no theme vars)
  */
 
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
@@ -22,7 +24,6 @@ import { TOOL_ICONS } from '@/lib/toolIcons';
 import { Wrench } from 'lucide-react';
 import { useState } from 'react';
 import ClaudeIcon from '@/assets/claude-color.svg';
-import { NUB_ITEM_CLASS, NubTip } from './query-input/NubTip';
 import CodexIcon from '@/assets/codex-color.svg';
 
 interface RoseTool {
@@ -136,32 +137,30 @@ function ToolRow({ tool }: { tool: RoseTool }) {
   );
 }
 
-export default function RoseToolSetChip({ variant = 'chip' }: { variant?: 'chip' | 'nub' }) {
+const CHIP_CLASS =
+  'inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-gradient-to-br from-[#FE7503]/5 via-[#E062CC]/5 to-[#7A6BEC]/5 text-[#E062CC] hover:from-[#FE7503]/10 hover:via-[#E062CC]/10 hover:to-[#7A6BEC]/10 transition-colors';
+
+/** Same chip with the light `--border` (hsl(240 8% 88%)) fixed, so dark mode cannot restyle it. */
+const PINNED_CHIP_CLASS =
+  'inline-flex h-7 w-7 items-center justify-center rounded-md border border-[rgb(222,222,227)] bg-gradient-to-br from-[#FE7503]/5 via-[#E062CC]/5 to-[#7A6BEC]/5 text-[#E062CC] hover:from-[#FE7503]/10 hover:via-[#E062CC]/10 hover:to-[#7A6BEC]/10 transition-colors';
+
+export default function RoseToolSetChip({ variant = 'chip' }: { variant?: 'chip' | 'pinned' }) {
   const [isOpen, setIsOpen] = useState(false);
-  const nub = variant === 'nub';
-  const trigger = (
-    <PopoverTrigger asChild>
-      <button
-        type="button"
-        data-nub-item={nub ? '' : undefined}
-        className={
-          nub
-            ? NUB_ITEM_CLASS
-            : 'inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-gradient-to-br from-[#FE7503]/5 via-[#E062CC]/5 to-[#7A6BEC]/5 text-[#E062CC] hover:from-[#FE7503]/10 hover:via-[#E062CC]/10 hover:to-[#7A6BEC]/10 transition-colors'
-        }
-        title={nub ? undefined : 'View Rose system tools'}
-        aria-label="View Rose system tools"
-        onMouseEnter={() => setIsOpen(true)}
-        onMouseLeave={() => setIsOpen(false)}
-      >
-        <Wrench className="h-3.5 w-3.5" strokeWidth={nub ? 2.2 : 2} />
-      </button>
-    </PopoverTrigger>
-  );
 
   return (
     <Popover open={isOpen} onOpenChange={setIsOpen}>
-      {nub ? <NubTip label="Tools">{trigger}</NubTip> : trigger}
+      <PopoverTrigger asChild>
+        <button
+          className={variant === 'pinned' ? PINNED_CHIP_CLASS : CHIP_CLASS}
+          data-testid={variant === 'pinned' ? 'pinned-toolset-chip' : undefined}
+          title="View Rose system tools"
+          aria-label="View Rose system tools"
+          onMouseEnter={() => setIsOpen(true)}
+          onMouseLeave={() => setIsOpen(false)}
+        >
+          <Wrench className="h-3.5 w-3.5" />
+        </button>
+      </PopoverTrigger>
       <PopoverContent
         className="w-[min(400px,calc(100vw-32px))] max-h-[500px] overflow-y-auto p-4 z-50"
         align="start"

@@ -9,8 +9,9 @@
  *      |  pointer enters tab | focus inside | tap/click tab
  *      v
  *   [OPEN]   grows to 18px tall (220ms) and slides sideways to the strip's
- *            width (300ms): lock, context files, tools, budget, context %,
+ *            width (300ms): lock, context files, budget, context %,
  *            settings, info — white 12px icons / 10px text, instant tooltips
+ *            (no Tools item: the toolset chip is pinned inside the box)
  *      |  pointer leaves (TOOLBAR_LEAVE_GRACE_MS) and focus left and not
  *      |  pinned | tap/click tab again | touch outside
  *      v

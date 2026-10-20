@@ -1,6 +1,7 @@
 /**
  * Blackbox tests for the Rose desktop chrome approved in rose-user-ui:
- *  - query-box toolbar hidden behind the rose nub (hover / focus / tap)
+ *  - query-box toolbar on the rose tab behind the box (hover / focus / tap);
+ *    geometry, tooltips and items: rose-desktop-flag.blackbox.tsx
  *  - right app bar with bare icons (no tiles/chips/rings around them)
  *  - Browser drawer replaces the fullscreen browser (opens on the agent tab,
  *    resizable with a clamped width)
@@ -102,47 +103,45 @@ describe('query toolbar nub', () => {
     };
   }
 
-  it('hides the toolbar behind the rose nub by default', () => {
+  it('keeps the strip hidden (but mounted) in the closed 4px tab by default', () => {
     const { nub, region } = renderQueryInput();
+    expect(nub).toHaveAttribute('data-state', 'closed');
     expect(region).toHaveAttribute('data-state', 'closed');
-    expect(region.style.maxHeight).toMatch(/^0(px)?$/);
-    expect(region.style.opacity).toBe('0');
-    expect(nub).toHaveAttribute('aria-expanded', 'false');
-    expect(nub).toHaveAttribute('aria-controls', region.id);
+    expect(region).toHaveStyle({ opacity: '0', pointerEvents: 'none' });
+    expect(nub.style.top).toBe('-4px');
     expect(nub.style.background).toContain('linear-gradient');
-    expect(nub.className).toContain('w-[30px]');
-    expect(nub.className).toContain('h-[9px]');
-    expect(nub.className).toContain('top-[7px]');
-    expect(nub.className).toContain('left-[7px]');
-    // The toolbar stays mounted (Safe Writes etc.) while collapsed.
-    expect(within(region).getByText(/Safe Writes|Write/i)).toBeInTheDocument();
+    expect(region.id).not.toBe('');
+    // The strip stays mounted (lock etc.) while the tab is closed.
+    expect(within(region).getByTestId('nub-write-lock')).toBeInTheDocument();
   });
 
-  it('expands on nub hover, stays open over the toolbar, collapses after leaving', () => {
+  it('opens on hover, survives the leave grace when re-entered, closes after leaving', () => {
     vi.useFakeTimers();
     const { nub, region } = renderQueryInput();
     fireEvent.pointerEnter(nub, { pointerType: 'mouse' });
     expect(region).toHaveAttribute('data-state', 'open');
-    expect(region).toHaveStyle({ maxHeight: '60px', opacity: '1' });
-    expect(nub).toHaveAttribute('aria-expanded', 'true');
+    expect(region).toHaveStyle({ opacity: '1', pointerEvents: 'auto' });
 
-    // Moving from the nub onto the toolbar keeps it open.
+    // Brushing off the tab and straight back keeps it open past the grace.
     fireEvent.pointerLeave(nub, { pointerType: 'mouse' });
-    fireEvent.pointerEnter(region, { pointerType: 'mouse' });
+    fireEvent.pointerEnter(nub, { pointerType: 'mouse' });
     act(() => vi.advanceTimersByTime(TOOLBAR_LEAVE_GRACE_MS + 50));
     expect(region).toHaveAttribute('data-state', 'open');
 
-    fireEvent.pointerLeave(region, { pointerType: 'mouse' });
-    act(() => vi.advanceTimersByTime(TOOLBAR_LEAVE_GRACE_MS + 50));
+    fireEvent.pointerLeave(nub, { pointerType: 'mouse' });
+    act(() => vi.advanceTimersByTime(TOOLBAR_LEAVE_GRACE_MS - 50));
+    expect(region).toHaveAttribute('data-state', 'open');
+    act(() => vi.advanceTimersByTime(100));
     expect(region).toHaveAttribute('data-state', 'closed');
   });
 
-  it('opens on keyboard focus and closes when focus leaves', () => {
+  it('opens on keyboard focus of an item and closes when focus leaves the tab', () => {
     const { nub, region } = renderQueryInput();
-    act(() => nub.focus());
+    const lock = within(nub).getByTestId('nub-write-lock');
+    act(() => lock.focus());
     expect(region).toHaveAttribute('data-state', 'open');
-    expect(nub.tagName).toBe('BUTTON');
-    act(() => nub.blur());
+    expect(lock.tagName).toBe('BUTTON');
+    act(() => lock.blur());
     expect(region).toHaveAttribute('data-state', 'closed');
   });
 

@@ -9,10 +9,13 @@
  * Composition (Rose Desktop flag, useRoseDesktop()):
  *   NubTab (Rose-gradient tab on the BACK of the box, flush with its left
  *     edge; see ToolbarNub.tsx) holding NubToolbar (lock, context files,
- *     tools, budget, context %, settings, info). No in-box toolbar row.
+ *     budget, context %, settings, info).
+ *   PinnedTools (top-left inside the box, always visible, stock styling that
+ *     never changes in dark mode): RoseToolSetChip + SimulatorToggle (admin)
  *   AttachmentList
- *   InputContainer with: bare paperclip, model selector (no info button),
- *     3-state SpeedToggle at the selector's height, dark-only glass send.
+ *   InputContainer with: bare paperclip, model selector (short rose-flash /
+ *     rose-ultra names, no info button), 3-state SpeedToggle at the
+ *     selector's height, dark-only glass send.
  *   The host gets 14px top margin: 30px from the Popular Goals row (mb-4).
  *
  * Sub-state lives in hooks:
@@ -53,6 +56,7 @@ import { InputContainer } from './query-input/InputContainer';
 import { TopBar, type TopBarProps } from './query-input/TopBar';
 import { NubTab } from './query-input/ToolbarNub';
 import { NubToolbar } from './query-input/NubToolbar';
+import { PinnedTools } from './query-input/PinnedTools';
 import { useToolbarReveal } from './query-input/useToolbarReveal';
 import { useTopBarProps } from './query-input/useTopBarProps';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
@@ -171,7 +175,7 @@ function QueryInputBody(props: QueryInputBodyProps) {
 
   return (
     <>
-      {!roseDesktop && <TopBar {...topBarProps} />}
+      {roseDesktop ? <PinnedTools {...topBarProps} /> : <TopBar {...topBarProps} />}
       <AttachmentList attachments={attachments.attachments} onRemove={attachments.remove} />
       <DragOverlay visible={attachments.isDragOver} />
       <InputContainer
