@@ -8,7 +8,7 @@
 
 import { randomUUID } from 'node:crypto';
 
-type GmailFetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+type GmailFetcher = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 const GOOGLE_HOSTS = new Set([
   'gmail.googleapis.com',
@@ -150,7 +150,7 @@ export class FakeGmail {
   /** Route Google API calls to this fake until the returned restore() runs. */
   install(): () => void {
     const original = globalThis.fetch;
-    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(input instanceof Request ? input.url : String(input));
       return GOOGLE_HOSTS.has(url.hostname) ? this.fetcher(input, init) : original(input, init);
     }) as typeof fetch;

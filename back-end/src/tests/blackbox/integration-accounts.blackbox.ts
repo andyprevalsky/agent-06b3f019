@@ -35,7 +35,6 @@ import { cases as advancedCases } from './integration-accounts.cases';
 import { cases as plaidProgressCases } from './integration-accounts.plaid.cases';
 import { cases as pipelineCases } from './integration-accounts.pipelines.cases';
 import {
-  accountsOf,
   anonymousSession,
   assert,
   call,
@@ -161,7 +160,7 @@ const coreCases: Array<{ name: string; fn: () => Promise<void> }> = [
     fn: async () => {
       const t0 = new Date();
       const at = (ms: number) => new Date(t0.getTime() + ms);
-      const write = (input: Record<string, unknown>, ms: number) =>
+      const write = (input: { state: 'syncing' | 'synced'; done: number }, ms: number) =>
         reportIntegrationProgress({
           userId: A().userId,
           provider: 'linkedin_coalesce',
