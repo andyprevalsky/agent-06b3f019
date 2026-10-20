@@ -300,6 +300,11 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
   'features/mobile-preview/components/MobilePreview.tsx': [
     'Cross-domain import: "@/features/terminal-component-group',
   ],
+  // Same harness: its mock agent data, split out of MobilePreview.tsx so the
+  // component module only exports components (react-refresh rule).
+  'features/mobile-preview/components/mobilePreviewMocks.ts': [
+    'Cross-domain import: "@/features/terminal-component-group',
+  ],
 };
 
 // ─── Test ──────────────────────────────────────────────────────────────────
