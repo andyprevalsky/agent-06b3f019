@@ -1,60 +1,45 @@
 #!/usr/bin/env tsx
 /**
- * Black-box tests for per-account integration sync progress + multi-account
- * integrations (plan row I0).
+ * Black-box tests for integration sync progress (the sync-progress bar): one
+ * account per existing Integration row.
  *
  * Domain surface:
  *   POST   /api/integrations/:provider/accounts/:accountId/progress
- *   DELETE /api/integrations/:provider/accounts/:accountId
  *   GET    /api/integrations/progress?since=
- *   GET    /api/integrations            (additive: row.accounts + accountsByProvider)
- *   DELETE /api/integrations/:name      (legacy whole-row delete keeps working)
+ *   GET    /api/integrations            (additive: row.accounts[1] + accountsByProvider)
+ *   DELETE /api/integrations/:provider/accounts/default   (alias of DELETE /:name)
+ *   DELETE /api/integrations/:name      (whole-row delete, clears its progress)
  *
  * Invariants covered:
  *   - progress round trip; pct derived from done/total; indeterminate total stays null
- *   - monotonic per run: seq / state / done regressions are stale (409), replays are
- *     duplicates, a finished run is sticky, a new runId resets and retires the old one
- *   - coalescing: a syncing write inside 1 s of the last one is not written (202)
- *   - concurrent first writes create exactly one row (per-account lock)
- *   - two accounts per provider; deleting one keeps the other; repeat delete is 404
- *   - owner scoping: another user's account is 404 and never listed
- *   - legacy accountId '' is the `default` account (progress, delete, legacy DELETE)
- *   - claiming a legacy row moves its progress to the real account id
- *   - container providers: Gmail addresses and Plaid items are accounts; needs_reconnect wins
- *   - providers without account-scoped cleanup answer 501 and keep their data
- *   - iMessage: one account per Mac device id; delete removes exactly that Mac's messages
- *   - passwords/passkeys (I7): one row per source+profile, each a deletable account
- *     with batch progress; credential readers prefer one login deterministically
- *   - WhatsApp (I2): one account per linked phone; deleting one removes exactly its
- *     messages and the contacts only WhatsApp created; legacy history follows its claim
- *   - validation 400s, per-user account cap, internal API-key writer path, auth 401
- *   - Plaid per-item sync progress (I5): indeterminate total while syncing, final counts,
- *     1 s coalescing, independent items, ITEM_LOGIN_REQUIRED, webhook re-sync reuses the row
- *   - Telegram (I8): two accounts listed separately, per-account attribution, delete one
- *     account's messages only, legacy claim and default-account delete
- *   - Gmail sync (plan row I3, integration-accounts.gmail-sync.cases.ts): per-address
- *     progress with total = messagesTotal, per-batch save, resume from cursor without
- *     duplicates, independent addresses, unknown total stays null
+ *   - monotonic per run: seq / state / done / pct regressions are stale (409), replays
+ *     are duplicates, a finished run is sticky, a new runId resets and retires the old one
+ *   - coalescing: a syncing write inside 1 s of the last one is not written (202); the
+ *     terminal write always lands, even right after a coalesced write or with lower counts
+ *   - concurrent first writes create exactly one row (per-row lock)
+ *   - every Integration row is exactly one account; no new account ids are accepted
+ *   - owner scoping, the delete alias, validation 400s, unit enum, per-user cap, auth 401
+ *   - row states on the wire (sync_failed, EXPIRED, needs_reconnect, idle), stale runs,
+ *     progress-only first syncs, the delta poll and the LinkedIn settle
+ *     (integration-accounts.cases.ts)
+ *   - every pipeline's progress writes at its existing boundaries
+ *     (integration-accounts.pipelines.cases.ts, integration-accounts.plaid.cases.ts)
  *
  * Usage: bash scripts/run-blackbox-tests.sh integration-accounts
  */
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
-import { upsertIntegrationAccount } from '../../domains/integrations/repo.accounts';
 import { reportIntegrationProgress } from '../../domains/integrations/service.progress';
 import { MAX_PROGRESS_ACCOUNTS_PER_USER } from '../../domains/integrations/syncAccountsContract';
 import { cases as advancedCases } from './integration-accounts.cases';
-import { imessageCases } from './integration-accounts.imessage.cases';
-import { passwordCases } from './integration-accounts.passwords.cases';
 import { cases as plaidProgressCases } from './integration-accounts.plaid.cases';
-import { telegramCases } from './integration-accounts.telegram.cases';
-import { gmailSyncCases } from './integration-accounts.gmail-sync.cases';
-import { whatsappCases } from './integration-accounts.whatsapp.cases';
+import { cases as pipelineCases } from './integration-accounts.pipelines.cases';
 import {
   accountsOf,
   anonymousSession,
   assert,
   call,
+  defaultAccountOf,
   expectStatus,
   ListResponse,
   postProgress,
@@ -70,7 +55,7 @@ const coreCases: Array<{ name: string; fn: () => Promise<void> }> = [
   {
     name: 'progress round trip: counts, unit and eta come back on the account',
     fn: async () => {
-      const res = await postProgress(A().token, 'imessage', 'mac-1', {
+      const res = await postProgress(A().token, 'imessage', 'default', {
         runId: 'r1',
         state: 'syncing',
         done: 10,
@@ -80,22 +65,20 @@ const coreCases: Array<{ name: string; fn: () => Promise<void> }> = [
       });
       expectStatus(res, 200, 'first write');
       assert(res.data.applied === true, 'first write is applied');
-      const account = (await accountsOf(A().token, 'imessage')).find(
-        (x) => x.accountId === 'mac-1'
-      );
-      assert(account !== undefined, 'progress-only account is listed before its row exists');
+      const account = await defaultAccountOf(A().token, 'imessage');
+      assert(account !== undefined, 'a live first sync is listed before its row exists');
       assert(account.state === 'syncing', `state syncing, got ${account.state}`);
-      assert(account.progress.pct === 10, `pct 10, got ${account.progress.pct}`);
+      assert(account.progress?.pct === 10, `pct 10, got ${account.progress?.pct}`);
       assert(account.progress.done === 10 && account.progress.total === 100, 'counts round trip');
       assert(account.progress.unit === 'messages' && account.progress.eta_sec === 30, 'unit/eta');
-      assert(account.label === null, 'no label is invented for a progress-only account');
+      assert(account.label === null, 'no label is invented for a row-less run');
     },
   },
   {
     name: 'indeterminate total stays null; writer pct only while total is unknown',
     fn: async () => {
       const token = A().token;
-      let res = await postProgress(token, 'whatsapp', 'wa-1', {
+      let res = await postProgress(token, 'whatsapp', 'default', {
         runId: 'r1',
         state: 'syncing',
         done: 500,
@@ -111,35 +94,41 @@ const coreCases: Array<{ name: string; fn: () => Promise<void> }> = [
       const write = (input: Record<string, unknown>, at: Date) =>
         reportIntegrationProgress({
           userId: A().userId,
-          provider: 'whatsapp',
-          accountId: 'wa-2',
+          provider: 'whatsapp_writer',
+          accountId: '',
           input: { runId: 'r1', state: 'syncing', ...input },
           now: at,
         });
       let outcome = await write({ pct: 40 }, now);
       assert(outcome.snapshot.progress.pct === 40, 'writer pct is used while total is unknown');
-      outcome = await write({ done: 25, total: 100, pct: 99 }, later(2_000));
-      assert(outcome.snapshot.progress.pct === 25, 'a known total wins over a writer pct');
-      outcome = await write({ done: 1, total: 3 }, later(4_000));
+      outcome = await write({ pct: 30 }, later(2_000));
+      assert(outcome.applied === false && outcome.reason === 'stale', 'a lower pct is stale');
+      outcome = await write({ done: 50, total: 100, pct: 99 }, later(4_000));
+      assert(outcome.snapshot.progress.pct === 50, 'a known total wins over a writer pct');
+      outcome = await write({ done: 1, total: 3 }, later(6_000));
       assert(outcome.applied === false && outcome.reason === 'stale', 'done regression is stale');
-      outcome = await write({ done: 1, total: 3, phase: 'parsing' }, later(6_000));
-      assert(outcome.applied, 'a new phase may restart its counts');
+      outcome = await write({ done: 2, total: 3, phase: 'parsing' }, later(8_000));
+      assert(outcome.applied, 'a new phase may restart its counts when pct does not drop');
       assert(
-        outcome.snapshot.progress.pct === 33.3,
-        `pct 33.3, got ${outcome.snapshot.progress.pct}`
+        outcome.snapshot.progress.pct === 66.6,
+        `pct 66.6, got ${outcome.snapshot.progress.pct}`
       );
-      res = await postProgress(token, 'whatsapp', 'wa-2', { runId: 'r1', state: 'synced' });
+      res = await postProgress(token, 'whatsapp', 'default', { runId: 'r1', state: 'synced' });
       expectStatus(res, 200, 'synced write');
-      const synced = (await accountsOf(token, 'whatsapp')).find((x) => x.accountId === 'wa-2');
-      assert(synced?.state === 'synced' && synced.progress.pct === 100, 'synced reads 100%');
-      assert(synced.lastSyncAt !== null, 'synced sets lastSyncAt');
+      const synced = await defaultAccountOf(token, 'whatsapp');
+      assert(synced === undefined, 'a finished run without a row is not listed');
+      const row = await prisma.integrationSyncProgress.findFirstOrThrow({
+        where: { userId: A().userId, provider: 'whatsapp' },
+      });
+      assert(row.state === 'synced' && row.lastSyncedAt !== null, 'synced sets lastSyncedAt');
     },
   },
   {
     name: 'monotonic per run: stale, duplicate, sticky finish, new run retires old',
     fn: async () => {
       const token = A().token;
-      const post = (body: Record<string, unknown>) => postProgress(token, 'telegram', 'tg-1', body);
+      const post = (body: Record<string, unknown>) =>
+        postProgress(token, 'telegram', 'default', body);
       expectStatus(await post({ runId: 'r1', seq: 3, state: 'syncing', done: 30 }), 200, 'seq 3');
       let res = await post({ runId: 'r1', seq: 2, state: 'syncing', done: 40 });
       expectStatus(res, 409, 'lower seq');
@@ -162,39 +151,44 @@ const coreCases: Array<{ name: string; fn: () => Promise<void> }> = [
       expectStatus(res, 409, 'late write from retired run');
       assert(res.data.detail === 'retired_run', 'retired run ids are rejected');
       const rows = await prisma.integrationSyncProgress.count({
-        where: { userId: A().userId, provider: 'telegram', accountId: 'tg-1' },
+        where: { userId: A().userId, provider: 'telegram' },
       });
-      assert(rows === 1, `one row per account, got ${rows}`);
+      assert(rows === 1, `one row per Integration row, got ${rows}`);
     },
   },
   {
-    name: 'coalescing: syncing writes inside 1 s are not written; transitions always are',
+    name: 'coalescing: syncing writes inside 1 s are dropped; the terminal write always lands',
     fn: async () => {
       const t0 = new Date();
       const at = (ms: number) => new Date(t0.getTime() + ms);
-      const write = (done: number, ms: number, state: 'syncing' | 'synced' = 'syncing') =>
+      const write = (input: Record<string, unknown>, ms: number) =>
         reportIntegrationProgress({
           userId: A().userId,
-          provider: 'linkedin',
-          accountId: 'li-1',
-          input: { runId: 'r1', state, done, total: 1_000_000 },
+          provider: 'linkedin_coalesce',
+          accountId: '',
+          input: { runId: 'r1', total: 1_000_000, ...input },
           now: at(ms),
         });
-      assert((await write(1_000, 0)).applied, 'first batch written');
-      const coalesced = await write(2_000, 400);
+      assert((await write({ state: 'syncing', done: 1_000 }, 0)).applied, 'first batch written');
+      const coalesced = await write({ state: 'syncing', done: 2_000 }, 400);
       assert(coalesced.applied === false && coalesced.reason === 'coalesced', 'coalesced');
       assert(coalesced.retryAfterMs === 600, `retryAfterMs 600, got ${coalesced.retryAfterMs}`);
       assert(coalesced.snapshot.progress.done === 1_000, 'stored progress unchanged');
-      assert((await write(3_000, 1_100)).applied, 'written once the window passed');
-      assert((await write(4_000, 1_200, 'synced')).applied, 'a transition is never coalesced');
+      // The terminal write lands right after a coalesced one, even with lower counts.
+      const finished = await write({ state: 'synced', done: 500 }, 450);
+      assert(finished.applied, 'a terminal write is never coalesced or rejected for counts');
+      assert(
+        finished.snapshot.state === 'synced' && finished.snapshot.progress.pct === 100,
+        `the run ends synced at 100%, got ${JSON.stringify(finished.snapshot)}`
+      );
     },
   },
   {
-    name: 'concurrent first writes for one account create exactly one row',
+    name: 'concurrent first writes for one row create exactly one progress row',
     fn: async () => {
       const results = await Promise.all(
         Array.from({ length: 12 }, (_, i) =>
-          postProgress(A().token, 'imessage', 'mac-race', {
+          postProgress(A().token, 'race_provider', 'default', {
             runId: 'race',
             seq: i + 1,
             state: 'syncing',
@@ -205,81 +199,112 @@ const coreCases: Array<{ name: string; fn: () => Promise<void> }> = [
       const unexpected = results.filter((r) => ![200, 202, 409].includes(r.status));
       assert(unexpected.length === 0, `no 5xx under a race: ${unexpected.map((r) => r.status)}`);
       const rows = await prisma.integrationSyncProgress.count({
-        where: { userId: A().userId, provider: 'imessage', accountId: 'mac-race' },
+        where: { userId: A().userId, provider: 'race_provider' },
       });
       assert(rows === 1, `exactly one row, got ${rows}`);
     },
   },
   {
-    name: 'two accounts per provider; delete one keeps the other; repeat delete is 404',
+    name: 'one account per Integration row; unknown account ids are refused',
     fn: async () => {
       const userId = A().userId;
       for (const [accountId, email] of [
         ['acct-1', 'work@example.com'],
         ['acct-2', 'home@example.com'],
       ]) {
-        await upsertIntegrationAccount({
-          userId,
-          name: 'claude_code',
-          accountId,
-          type: 'TOOL_SETUP',
-          legacy: 'separate',
-          accountEmail: email,
-          status: 'CONNECTED',
-          isActive: true,
+        await prisma.integration.create({
+          data: {
+            userId,
+            name: 'claude_code',
+            accountId,
+            type: 'TOOL_SETUP',
+            accountEmail: email,
+            status: 'CONNECTED',
+            isActive: true,
+          },
         });
       }
-      await postProgress(A().token, 'claude_code', 'acct-1', { runId: 'r', state: 'synced' });
-      let list = await accountsOf(A().token, 'claude_code');
-      assert(list.length === 2, `two accounts, got ${list.length}`);
-      assert(
-        list.some((x) => x.accountId === 'acct-2' && x.label === 'home@example.com'),
-        'each account carries its own label'
+      let res = await postProgress(A().token, 'claude_code', 'acct-1', {
+        runId: 'r',
+        state: 'syncing',
+        done: 1,
+        total: 4,
+        unit: 'files',
+      });
+      expectStatus(res, 200, "progress for an existing row's account id");
+      res = await postProgress(A().token, 'claude_code', 'acct-3', { runId: 'r', state: 'idle' });
+      expectStatus(res, 404, 'an account id with no Integration row');
+      const listed = ListResponse.parse(
+        (await call('/api/integrations', { auth: A().token })).data
       );
-      const res = await call('/api/integrations/claude_code/accounts/acct-1', {
-        method: 'DELETE',
-        auth: A().token,
-      });
-      expectStatus(res, 200, 'delete acct-1');
-      list = await accountsOf(A().token, 'claude_code');
-      assert(list.length === 1 && list[0].accountId === 'acct-2', 'acct-2 survives');
-      const progress = await prisma.integrationSyncProgress.count({
-        where: { userId, provider: 'claude_code', accountId: 'acct-1' },
-      });
-      assert(progress === 0, 'the deleted account progress row is gone');
-      const again = await call('/api/integrations/claude_code/accounts/acct-1', {
-        method: 'DELETE',
-        auth: A().token,
-      });
-      expectStatus(again, 404, 'repeat delete');
+      const rows = listed.integrations.filter((row) => row.name === 'claude_code');
+      assert(rows.length === 2, `two claude_code rows, got ${rows.length}`);
+      for (const row of rows) {
+        assert(
+          row.accounts.length === 1 && row.accounts[0].accountId === row.accountId,
+          `row ${row.accountId} carries exactly its own account`
+        );
+      }
+      const byId = new Map(listed.accountsByProvider.claude_code.map((x) => [x.accountId, x]));
+      assert(byId.size === 2, 'accountsByProvider lists each row once');
+      assert(byId.get('acct-1')?.progress?.pct === 25, 'the bar is on the written row');
+      assert(byId.get('acct-2')?.label === 'home@example.com', 'label from accountEmail');
+      assert(byId.get('acct-2')?.progress === null, 'a row without a run has no bar');
     },
   },
   {
-    name: 'owner scoping: another user cannot see or delete my accounts',
+    name: 'delete alias: default deletes the row and its progress; others are refused',
     fn: async () => {
-      const res = await call('/api/integrations/claude_code/accounts/acct-2', {
+      const { token, userId } = A();
+      let res = await call('/api/integrations', {
+        method: 'POST',
+        auth: token,
+        body: JSON.stringify({ name: 'gpt_code', type: 'TOOL_SETUP' }),
+      });
+      expectStatus(res, 200, 'create the legacy gpt_code row');
+      await postProgress(token, 'gpt_code', 'default', { runId: 'r', state: 'synced' });
+      res = await call('/api/integrations/claude_code/accounts/acct-2', {
+        method: 'DELETE',
+        auth: token,
+      });
+      expectStatus(res, 400, 'a non-default row has no whole-row delete to alias');
+      assert(res.data.error === 'ACCOUNT_DELETE_UNSUPPORTED', 'typed refusal');
+      res = await call('/api/integrations/gpt_code/accounts/default', {
         method: 'DELETE',
         auth: B().token,
       });
-      expectStatus(res, 404, "B deleting A's account");
-      const mine = await accountsOf(A().token, 'claude_code');
-      assert(
-        mine.some((x) => x.accountId === 'acct-2'),
-        "A's account is untouched"
-      );
-      const theirs = await call('/api/integrations', { auth: B().token });
-      const parsed = ListResponse.parse(theirs.data);
-      assert(
-        Object.keys(parsed.accountsByProvider).length === 0,
-        "B's list contains none of A's accounts"
-      );
+      expectStatus(res, 404, "another user cannot delete A's row");
+      res = await call('/api/integrations/gpt_code/accounts/default', {
+        method: 'DELETE',
+        auth: token,
+      });
+      expectStatus(res, 200, 'delete the default account');
+      const left = await prisma.integration.count({ where: { userId, name: 'gpt_code' } });
+      const progress = await prisma.integrationSyncProgress.count({
+        where: { userId, provider: 'gpt_code' },
+      });
+      assert(left === 0 && progress === 0, 'the row and its progress are gone');
+      res = await call('/api/integrations/gpt_code/accounts/default', {
+        method: 'DELETE',
+        auth: token,
+      });
+      expectStatus(res, 404, 'repeat delete');
+    },
+  },
+  {
+    name: 'owner scoping: another user never sees or moves my progress',
+    fn: async () => {
       expectStatus(
-        await postProgress(B().token, 'imessage', 'mac-1', { runId: 'b', state: 'idle' }),
+        await postProgress(B().token, 'imessage', 'default', { runId: 'b', state: 'idle' }),
         200,
         'B writes its own row for the same key'
       );
-      const aMac = (await accountsOf(A().token, 'imessage')).find((x) => x.accountId === 'mac-1');
+      const aMac = await defaultAccountOf(A().token, 'imessage');
       assert(aMac?.state === 'syncing', "B's write did not touch A's progress");
+      const theirs = ListResponse.parse(
+        (await call('/api/integrations', { auth: B().token })).data
+      );
+      assert(theirs.accountsByProvider.claude_code === undefined, "B lists none of A's rows");
     },
   },
   {
@@ -289,46 +314,33 @@ const coreCases: Array<{ name: string; fn: () => Promise<void> }> = [
       expectStatus(res, 200, 'GET /api/integrations');
       const parsed = ListResponse.parse(res.data);
       assert(parsed.count === parsed.integrations.length, 'count unchanged');
-      const claude = parsed.integrations.find((row) => row.name === 'claude_code');
-      assert(claude !== undefined, 'claude_code row listed');
-      assert(
-        JSON.stringify(claude.accounts) === JSON.stringify(parsed.accountsByProvider.claude_code),
-        "every row carries its provider's full account list"
-      );
-      assert(claude.accounts.length === 1, 'only the surviving Claude account is listed');
+      for (const row of parsed.integrations) {
+        const listed = parsed.accountsByProvider[row.name] ?? [];
+        assert(
+          listed.some((x) => JSON.stringify(x) === JSON.stringify(row.accounts[0])),
+          `row ${row.name}/${row.accountId} account is in accountsByProvider`
+        );
+      }
       assert(Array.isArray(parsed.authenticatedDomains), 'authenticatedDomains kept');
     },
   },
   {
-    name: 'auth + validation: 401 without a token, 400 on a bad body or provider',
+    name: 'auth + validation: 401 without a token, 400 on a bad body, provider or unit',
     fn: async () => {
-      const anon = await call('/api/integrations/imessage/accounts/x/progress', {
+      const anon = await call('/api/integrations/imessage/accounts/default/progress', {
         method: 'POST',
         body: JSON.stringify({ runId: 'r', state: 'syncing' }),
       });
       expectStatus(anon, 401, 'no auth');
       const token = A().token;
-      expectStatus(await postProgress(token, 'imessage', 'x', { state: 'syncing' }), 400, 'runId');
-      expectStatus(
-        await postProgress(token, 'imessage', 'x', { runId: 'r', state: 'syncing', extra: 1 }),
-        400,
-        'unknown field'
-      );
-      expectStatus(
-        await postProgress(token, 'imessage', 'x', { runId: 'r', state: 'done' }),
-        400,
-        'unknown state'
-      );
-      expectStatus(
-        await postProgress(token, 'Bad%20Name', 'x', { runId: 'r', state: 'syncing' }),
-        400,
-        'provider slug'
-      );
-      expectStatus(
-        await postProgress(token, 'imessage', 'x', { runId: 'r', state: 'syncing', done: -1 }),
-        400,
-        'negative count'
-      );
+      const bad = (body: Record<string, unknown>, label: string, provider = 'imessage') =>
+        postProgress(token, provider, 'default', body).then((r) => expectStatus(r, 400, label));
+      await bad({ state: 'syncing' }, 'runId');
+      await bad({ runId: 'r', state: 'syncing', extra: 1 }, 'unknown field');
+      await bad({ runId: 'r', state: 'done' }, 'unknown state');
+      await bad({ runId: 'r', state: 'syncing' }, 'provider slug', 'Bad%20Name');
+      await bad({ runId: 'r', state: 'syncing', done: -1 }, 'negative count');
+      await bad({ runId: 'r', state: 'syncing', unit: 'widgets' }, 'unit outside the enum');
       expectStatus(
         await call('/api/integrations/progress?since=nope', { auth: token }),
         400,
@@ -337,28 +349,28 @@ const coreCases: Array<{ name: string; fn: () => Promise<void> }> = [
     },
   },
   {
-    name: 'per-user account cap answers 409 instead of growing without bound',
+    name: 'per-user progress-row cap answers 409 instead of growing without bound',
     fn: async () => {
       const capped = await anonymousSession();
       await prisma.integrationSyncProgress.createMany({
         data: Array.from({ length: MAX_PROGRESS_ACCOUNTS_PER_USER }, (_, i) => ({
           userId: capped.userId,
-          provider: 'imessage',
-          accountId: `cap-${i}`,
+          provider: `cap_${i}`,
+          accountId: '',
           runId: 'seed',
         })),
       });
-      const res = await postProgress(capped.token, 'imessage', 'one-more', {
+      const res = await postProgress(capped.token, 'one_more', 'default', {
         runId: 'r',
         state: 'syncing',
       });
       expectStatus(res, 409, 'over the cap');
       assert(res.data.error === 'ACCOUNT_LIMIT_EXCEEDED', 'typed cap error');
-      const existing = await postProgress(capped.token, 'imessage', 'cap-0', {
+      const existing = await postProgress(capped.token, 'cap_0', 'default', {
         runId: 'r2',
         state: 'syncing',
       });
-      expectStatus(existing, 200, 'existing accounts still write');
+      expectStatus(existing, 200, 'existing rows still write');
       await prisma.integrationSyncProgress.deleteMany({ where: { userId: capped.userId } });
     },
   },
@@ -371,6 +383,7 @@ async function cleanup(userIds: string[]): Promise<void> {
   await prisma.integrationSyncProgress.deleteMany({ where });
   await prisma.cookie.deleteMany({ where });
   await prisma.cookieBundle.deleteMany({ where });
+  await prisma.browserPassword.deleteMany({ where });
   await prisma.plaidTransaction.deleteMany({ where });
   await prisma.plaidAccount.deleteMany({ where });
   await prisma.plaidItem.deleteMany({ where });
@@ -383,15 +396,12 @@ async function main(): Promise<void> {
   sessions.a = await anonymousSession();
   sessions.b = await anonymousSession();
   const users = () => ({ a: A(), b: B() });
+  const pipelineUser = await anonymousSession();
   const tests = [
     ...coreCases,
     ...advancedCases(users),
     ...plaidProgressCases(),
-    ...passwordCases(),
-    ...telegramCases(),
-    ...gmailSyncCases(),
-    ...imessageCases(users),
-    ...whatsappCases(),
+    ...pipelineCases(() => pipelineUser),
   ];
   let failed = 0;
   try {
@@ -406,7 +416,7 @@ async function main(): Promise<void> {
       }
     }
   } finally {
-    await cleanup([A().userId, B().userId]);
+    await cleanup([A().userId, B().userId, pipelineUser.userId]);
     await prisma.$disconnect();
   }
   console.log(

@@ -1,4 +1,4 @@
-/** HTTP helpers + wire schemas for the integration-accounts blackbox domain. */
+/** HTTP helpers + wire schemas for the integration-accounts (sync progress) blackbox domain. */
 import { config } from 'dotenv';
 import { z } from 'zod';
 config();
@@ -77,19 +77,30 @@ export const AccountSchema = z
     provider: z.string(),
     accountId: z.string().min(1),
     label: z.string().nullable(),
-    state: z.enum(['idle', 'syncing', 'synced', 'failed', 'needs_reconnect']),
+    state: z.enum(['idle', 'syncing', 'synced', 'sync_failed', 'needs_reconnect', 'EXPIRED']),
     progress: z
       .object({
         pct: nullableNumber,
         done: nullableNumber,
         total: nullableNumber,
-        unit: z.string().nullable(),
+        unit: z
+          .enum([
+            'messages',
+            'chats',
+            'contacts',
+            'cookies',
+            'passwords',
+            'transactions',
+            'files',
+            'bytes',
+            'records',
+          ])
+          .nullable(),
         eta_sec: nullableNumber,
         phase: z.string().nullable(),
-        startedAt: z.string().nullable(),
-        updatedAt: z.string().nullable(),
       })
-      .strict(),
+      .strict()
+      .nullable(),
     lastSyncAt: z.string().nullable(),
     lastError: z.string().nullable(),
   })
@@ -105,7 +116,7 @@ export const ListResponse = z.object({
         name: z.string(),
         accountId: z.string(),
         status: z.string(),
-        accounts: z.array(AccountSchema),
+        accounts: z.array(AccountSchema).length(1),
       })
       .passthrough()
   ),
@@ -118,7 +129,7 @@ export const DeltaResponse = z
   .object({
     cursor: z.string(),
     changed: z.boolean(),
-    accountsByProvider: z.record(z.array(AccountSchema)).optional(),
+    accountsByProvider: z.record(z.array(AccountSchema)),
   })
   .strict();
 
@@ -127,4 +138,12 @@ export async function accountsOf(token: string, provider: string): Promise<Accou
   const res = await call('/api/integrations', { auth: token });
   expectStatus(res, 200, 'GET /api/integrations');
   return ListResponse.parse(res.data).accountsByProvider[provider] ?? [];
+}
+
+/** The one account of a provider's legacy (`''`) row, or undefined when not listed. */
+export async function defaultAccountOf(
+  token: string,
+  provider: string
+): Promise<Account | undefined> {
+  return (await accountsOf(token, provider)).find((x) => x.accountId === 'default');
 }

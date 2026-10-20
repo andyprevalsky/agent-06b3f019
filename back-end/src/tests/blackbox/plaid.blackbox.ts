@@ -27,10 +27,9 @@
  *   - 404 isolation: DELETE for someone else's item returns 404 (not 403)
  *   - error surface: link-token without configured credentials returns 502
  *     with a typed Plaid error body (skipped in this run since creds are set)
- *   - per-item sync progress (plan row I5): each real sandbox Item is a `plaid`
- *     account whose exchange sync ends `synced` in `transactions`; a webhook
- *     re-sync reuses its row; /sandbox/item/reset_login makes only that Item
- *     `needs_reconnect` (deterministic page-level cases: integration-accounts)
+ *   - sync progress: the user's `plaid` row reads `synced` in `transactions`
+ *     after the exchange-time sync, and a webhook re-sync is a new run on that
+ *     same row counting what it saved (deterministic cases: integration-accounts)
  *
  * Usage:
  *   npx tsx src/tests/blackbox/plaid.blackbox.ts
@@ -654,7 +653,6 @@ async function runAll(): Promise<void> {
     { name: 'disconnect: idempotent on second DELETE', fn: testDisconnect_idempotent },
     ...syncProgressCases({
       baseUrl: BASE_URL,
-      sandboxClient,
       request,
       authHeaders,
       createAnonSession,

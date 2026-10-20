@@ -1,11 +1,20 @@
 /**
- * Gmail faked at the fetch boundary for the per-address sync cases: one mailbox
- * per access token, with knobs for the failures a real sync meets (profile
- * outage, list error, a batch that fails mid-sync) and a log of what was asked.
+ * Gmail faked at the global fetch boundary for the Gmail sync-progress case:
+ * one mailbox per access token, with knobs for the failures a real sync meets
+ * (profile outage, list error, a batch that fails mid-sync) and a log of what
+ * was asked. `install()` routes only Google API hosts here; every other request
+ * (the backend under test) goes to the real fetch.
  */
 
 import { randomUUID } from 'node:crypto';
-import type { GmailFetcher } from '../../services/integrations/gmailParser';
+
+type GmailFetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+const GOOGLE_HOSTS = new Set([
+  'gmail.googleapis.com',
+  'www.googleapis.com',
+  'oauth2.googleapis.com',
+]);
 
 export interface FakeMessage {
   id: string;
@@ -138,8 +147,23 @@ export class FakeGmail {
     return box;
   }
 
+  /** Route Google API calls to this fake until the returned restore() runs. */
+  install(): () => void {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      return GOOGLE_HOSTS.has(url.hostname) ? this.fetcher(input, init) : original(input, init);
+    }) as typeof fetch;
+    return () => {
+      globalThis.fetch = original;
+    };
+  }
+
   fetcher: GmailFetcher = async (input, init) => {
     const url = new URL(String(input));
+    if (url.hostname === 'oauth2.googleapis.com') {
+      return json({ error: 'invalid_grant' }, 400);
+    }
     const token = new Headers(init?.headers).get('authorization')?.replace(/^Bearer /, '') ?? '';
     const box = this.boxes.get(token);
     if (box === undefined) return json({ error: { code: 401 } }, 401);
