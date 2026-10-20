@@ -97,7 +97,7 @@ describe('Rose left bar (flag on)', () => {
   beforeEach(() => {
     localStorage.clear();
     mockSession();
-    mockProjectsApi([makeProject(), makeProject({ id: 'p-habits', name: 'Habits', envFiles: [] })]);
+    mockProjectsApi([makeProject(), makeProject({ id: 'p-habits', name: 'Habits' })]);
   });
   afterEach(() => {
     localStorage.clear();
@@ -392,7 +392,7 @@ describe('Rose left bar code agents (flag on)', () => {
     localStorage.clear();
     mockSession();
     clearCaptures();
-    mockProjectsApi([makeProject(), makeProject({ id: 'p-habits', name: 'Habits', envFiles: [] })]);
+    mockProjectsApi([makeProject(), makeProject({ id: 'p-habits', name: 'Habits' })]);
     mockCodeAgentTrees({
       'home-run': [
         codeAgent({

@@ -2,46 +2,69 @@
  * STATE MACHINE: useProjectSettingsForm
  *
  *   [PRISTINE] --edit any field--> [DIRTY] --save--> [SAVING]
- *   [SAVING] --PATCH ok--> [PRISTINE] (draft re-seeded from the saved project)
- *   [SAVING] --PATCH fails--> [DIRTY] + error message
+ *   [DIRTY] with startup timeout outside 1..3600 --> [INVALID] (save disabled)
+ *   [SAVING] --PUT ok--> [PRISTINE] (draft re-seeded from the saved project)
+ *   [SAVING] --PUT fails--> [DIRTY] + error message
  *   project prop changes (another project opened) --> [PRISTINE] for that project
  *
- * Holds a local draft of the editable Project fields; `save()` PATCHes only
- * the fields that differ from the loaded project.
+ * Holds a local draft of the editable Project fields; `save()` PUTs only the
+ * fields that differ from the loaded project (the server is strict: no unknown
+ * or unchanged fields). A cleared startup script is sent as '' (clears it).
+ * Environment files are a separate resource (ProjectEnvFilesSection) and are
+ * not part of this draft.
  */
 
 import { useCallback, useMemo, useState } from 'react';
 
-import type { Project, ProjectEnvFile, ProjectUpdate } from '@/lib/api/projects';
+import {
+  MAX_STARTUP_TIMEOUT_S,
+  MIN_STARTUP_TIMEOUT_S,
+  type Project,
+  type ProjectUpdate,
+} from '@/lib/api/projects';
 
 import { useUpdateProject } from './useProjects';
 
-export type ProjectDraft = Required<ProjectUpdate>;
+export interface ProjectDraft {
+  name: string;
+  repoUrl: string | null;
+  defaultBranch: string;
+  startupScript: string;
+  startupTimeoutS: number;
+  autoWake: boolean;
+}
 
 function draftOf(project: Project): ProjectDraft {
   return {
     name: project.name,
-    repoUrl: project.repoUrl ?? null,
+    repoUrl: project.repoUrl,
     defaultBranch: project.defaultBranch,
-    startupScript: project.startupScript,
-    startupTimeoutSec: project.startupTimeoutSec,
-    envFiles: project.envFiles.map((f) => ({ ...f })),
-    autoWake: project.autoWake,
+    startupScript: project.startupScript ?? '',
+    startupTimeoutS: project.startupTimeoutS,
+    autoWake: project.lifecycle.autoWake,
   };
 }
 
 function diff(project: Project, draft: ProjectDraft): ProjectUpdate {
   const updates: ProjectUpdate = {};
   if (draft.name !== project.name) updates.name = draft.name;
-  if (draft.repoUrl !== (project.repoUrl ?? null)) updates.repoUrl = draft.repoUrl;
+  if (draft.repoUrl !== project.repoUrl) updates.repoUrl = draft.repoUrl;
   if (draft.defaultBranch !== project.defaultBranch) updates.defaultBranch = draft.defaultBranch;
-  if (draft.startupScript !== project.startupScript) updates.startupScript = draft.startupScript;
-  if (draft.startupTimeoutSec !== project.startupTimeoutSec)
-    updates.startupTimeoutSec = draft.startupTimeoutSec;
-  if (draft.autoWake !== project.autoWake) updates.autoWake = draft.autoWake;
-  if (JSON.stringify(draft.envFiles) !== JSON.stringify(project.envFiles))
-    updates.envFiles = draft.envFiles;
+  if (draft.startupScript !== (project.startupScript ?? ''))
+    updates.startupScript = draft.startupScript;
+  if (draft.startupTimeoutS !== project.startupTimeoutS)
+    updates.startupTimeoutS = draft.startupTimeoutS;
+  if (draft.autoWake !== project.lifecycle.autoWake)
+    updates.lifecycle = { autoWake: draft.autoWake };
   return updates;
+}
+
+export function isValidStartupTimeout(seconds: number): boolean {
+  return (
+    Number.isInteger(seconds) &&
+    seconds >= MIN_STARTUP_TIMEOUT_S &&
+    seconds <= MAX_STARTUP_TIMEOUT_S
+  );
 }
 
 export function useProjectSettingsForm(project: Project) {
@@ -60,17 +83,14 @@ export function useProjectSettingsForm(project: Project) {
 
   const updates = useMemo(() => diff(project, draft), [project, draft]);
   const isDirty = Object.keys(updates).length > 0;
+  const isTimeoutValid = isValidStartupTimeout(draft.startupTimeoutS);
 
   const setField = useCallback(<K extends keyof ProjectDraft>(key: K, value: ProjectDraft[K]) => {
     setDraft((prev) => ({ ...prev, [key]: value }));
   }, []);
 
-  const setEnvFiles = useCallback((next: (files: ProjectEnvFile[]) => ProjectEnvFile[]) => {
-    setDraft((prev) => ({ ...prev, envFiles: next(prev.envFiles) }));
-  }, []);
-
   const save = useCallback(async () => {
-    if (!isDirty) return;
+    if (!isDirty || !isTimeoutValid) return;
     setError(null);
     try {
       const saved = await mutation.mutateAsync({ id: project.id, updates });
@@ -78,7 +98,16 @@ export function useProjectSettingsForm(project: Project) {
     } catch {
       setError('Could not save project settings');
     }
-  }, [isDirty, mutation, project.id, updates]);
+  }, [isDirty, isTimeoutValid, mutation, project.id, updates]);
 
-  return { draft, setField, setEnvFiles, isDirty, isSaving: mutation.isPending, error, save };
+  return {
+    draft,
+    setField,
+    isDirty,
+    isTimeoutValid,
+    canSave: isDirty && isTimeoutValid && !mutation.isPending,
+    isSaving: mutation.isPending,
+    error,
+    save,
+  };
 }

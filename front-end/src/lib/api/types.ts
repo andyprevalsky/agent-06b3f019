@@ -181,6 +181,7 @@ export interface CreateAgentPayload {
   start_phase?: 'plan' | 'execute'; // Skip chat routing: start the cloud agent workflow directly
   fast_mode_cache_enabled?: boolean; // Fast Mode button → LLM provider speed (DEMO cache is prompt-matched)
   world_model_mode?: 'real' | 'simulate' | 'shadow'; // Per-agent provider/environment execution mode
+  project_id?: string; // Rose Desktop: create the agent inside this project (omitted = Home)
 }
 
 // Sub-agent Tree Types

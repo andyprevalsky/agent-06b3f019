@@ -201,11 +201,16 @@ function buildAuthModalHandlers(modals: ReturnType<typeof useTerminalModals>) {
 
 function buildReturn(a: BuildArgs) {
   const { handleLoginClick, handleJoinWaitlist } = buildAuthModalHandlers(a.modals);
-  const handleCreateNewAgent = () => {
+  const openNewAgent = (projectId: string | null) => {
     a.cleanupAgentState();
     a.resetAnimationState();
     a.setCurrentView('agents');
+    a.messaging.setNewAgentProjectId(projectId);
   };
+  /** New Super Agent: the next goal creates a Home agent. */
+  const handleCreateNewAgent = () => openNewAgent(null);
+  /** A project's "+" (Rose Desktop): the next goal creates the agent in that project. */
+  const handleCreateNewAgentInProject = (project: { id: string }) => openNewAgent(project.id);
   return {
     user: a.auth.isFullySignedIn ? a.auth.user : null,
     authUser: a.auth.user,
@@ -269,6 +274,8 @@ function buildReturn(a: BuildArgs) {
     handleLoginClick,
     handleJoinWaitlist,
     handleCreateNewAgent,
+    handleCreateNewAgentInProject,
+    newAgentProjectId: a.messaging.newAgentProjectId,
     handleSubmitFeedback: a.actions.handleSubmitFeedback,
     resetAnimationState: a.resetAnimationState,
   };
