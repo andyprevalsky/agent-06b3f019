@@ -35,6 +35,7 @@ from domains.spawn_claude_code_agent.config import (
     SDK_WAIT_TOOL_IDLE_TIMEOUT_S,
     SDK_WAIT_TOOL_NAMES,
     SILENCE_TIMEOUT_S,
+    TRANSCRIPT_FLUSH_INTERVAL_S,
     code_agent_verifier_disabled,
 )
 from domains.spawn_claude_code_agent.repo import (
@@ -43,6 +44,7 @@ from domains.spawn_claude_code_agent.repo import (
     create_e2b_session,
     persist_terminal_output,
     save_claude_code_message,
+    save_code_transcript_batch,
 )
 from domains.spawn_claude_code_agent.types import ClaudeCodeParentResponse
 from helpers.activity_generation_drain import activity_drain_reason
@@ -52,6 +54,12 @@ from helpers.e2b_log_collector import SandboxLogCollector
 from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
 from helpers.tracing import traced
 from tools.base import MessageStatus
+from utils.code_transcript import (
+    CodeTranscriptBuilder,
+    TranscriptRecord,
+    render_transcript_text,
+    to_ui_record,
+)
 from utils.error_utils import extract_error_message
 from utils.llm_timeouts import VERIFIER_ACTIVITY_TIMEOUT_SECONDS
 from utils.response_schema_constraints import explicitly_allows_empty_value, value_satisfies_output_field_constraints
@@ -297,7 +305,7 @@ def format_code_events_transcript(
         if event_type == "user_turn":
             # Direct chat: the user (or another agent) typed to this CLI.
             text = event.get("text")
-            who = "Agent" if event.get("sender") == "agent" else "User"
+            who = "Rose" if event.get("sender") == "agent" else "User"
             if isinstance(text, str) and text.strip():
                 lines.append(f"[{who} → {provider}] {text.strip()}")
             continue
@@ -732,6 +740,8 @@ _CODE_SESSION_FIELDS = (
     # Sandbox events already logged by an earlier attachment; the reattached
     # attempt logs only the ones that arrived while nobody was attached.
     "logged_events",
+    # Sandbox events whose transcript records are already persisted.
+    "transcript_events",
 )
 
 
@@ -862,6 +872,13 @@ async def _run_agentic_loop(
     # end the session on post-result grace / SDK idle, and never writes to
     # stdin, so no parent instruction competes with the user.
     direct_chat_active = False
+    # Structured transcript (utils/code_transcript.py): records derive from the sandbox's
+    # append-only event history, so `transcript_events` (events already
+    # persisted) survives reattaches the same way `logged_events` does.
+    transcript = CodeTranscriptBuilder(code_provider, goal=goal)
+    transcript_flushed = int((code_session or {}).get("transcript_events") or 0)
+    transcript_pending: dict[str, TranscriptRecord] = {}
+    last_transcript_flush = 0.0
 
     def _mark_terminal_output_persisted() -> None:
         if terminal_output_persisted is not None:
@@ -907,9 +924,11 @@ async def _run_agentic_loop(
         # The ws-server resends its whole history on every (re)connect, so it
         # replaces everything seen so far instead of appending to it.
         nonlocal completed_codex_turns, effective_idle_timeout_s, wait_tool_armed, in_flight_tool_count
-        nonlocal direct_chat_active
+        nonlocal direct_chat_active, transcript
         code_events.clear()
         direct_chat_active = False
+        transcript = CodeTranscriptBuilder(code_provider, goal=goal)
+        transcript_pending.clear()
         completed_codex_turn_keys.clear()
         completed_codex_turns = 0
         in_flight_tool_count = 0
@@ -927,6 +946,10 @@ async def _run_agentic_loop(
         nonlocal direct_chat_active
         last_output_time = safe_time()
         code_events.append(event)
+        event_index = len(code_events) - 1
+        for record in transcript.feed(event, event_index):
+            if event_index >= transcript_flushed:
+                transcript_pending[record["id"]] = record
         if event.get("type") == "direct_chat":
             direct_chat_active = event.get("status") == "held"
             if not direct_chat_active and sdk_result_at is not None:
@@ -1041,6 +1064,39 @@ async def _run_agentic_loop(
             event_type=event_type,
             provider=event.get("provider"),
         )
+
+    async def flush_transcript(force: bool = False) -> None:
+        nonlocal transcript_flushed, last_transcript_flush
+        if not transcript_pending:
+            return
+        if not force and safe_time() - last_transcript_flush < TRANSCRIPT_FLUSH_INTERVAL_S:
+            return
+        batch = dict(transcript_pending)
+        events_to = len(code_events)
+        records = sorted(batch.values(), key=lambda record: (record["seq"], record["rev"]))
+        last_transcript_flush = safe_time()
+        saved = await save_code_transcript_batch(
+            agent_id=agent_id,
+            task_id=task_id,
+            tool_call_id=tool_call_id,
+            code_provider=code_provider,
+            records=[to_ui_record(record) for record in records],
+            events_from=transcript_flushed,
+            events_to=events_to,
+            text=render_transcript_text(records),
+        )
+        if not saved:
+            return  # keep the batch; the next flush retries it
+        for record_id, record in batch.items():
+            # A newer revision that arrived during the save stays pending.
+            if transcript_pending.get(record_id) is record:
+                del transcript_pending[record_id]
+        transcript_flushed = events_to
+        if code_session is not None:
+            code_session["transcript_events"] = events_to
+            # Carry the new mark in a heartbeat so a retry after a drain or a
+            # crash does not re-persist this range.
+            safe_heartbeat("Code transcript persisted")
 
     ws_client = ClaudeCodeWsClient(
         ws_url=ws_url,
@@ -1299,6 +1355,8 @@ async def _run_agentic_loop(
                             code_provider=code_provider,
                         )
 
+            await flush_transcript()
+
             if safe_time() - last_status_update >= 30:
                 elapsed_int = int(elapsed)
                 await save_claude_code_message(
@@ -1325,6 +1383,15 @@ async def _run_agentic_loop(
         # and would otherwise keep buffering broadcasts for a dead reader.
         with contextlib.suppress(Exception):
             await ws_client.disconnect()
+        try:
+            await flush_transcript(force=True)
+        except Exception as flush_err:  # never mask the loop's own outcome
+            logger.warning(
+                "[ClaudeCode] Final transcript flush failed",
+                agent_id=agent_id,
+                task_id=task_id,
+                error=str(flush_err)[:200],
+            )
 
     logger.info(
         "[ClaudeCode] Agentic loop finished",
@@ -2393,6 +2460,7 @@ async def spawn_claude_code_activity(
             "started_at": start_time,
             "loop_started_at": loop_started_at,
             "logged_events": int((attached or {}).get("logged_events") or 0),
+            "transcript_events": int((attached or {}).get("transcript_events") or 0),
         }
         # An attempt's first heartbeat goes out at once and later ones only every
         # throttle interval, so nothing may heartbeat before the session rides

@@ -7,17 +7,13 @@
  * GET  /api/claude-code-session/agent/:agentId - Get all sessions for an agent
  * POST /api/claude-code-session/:taskId/output - Persist terminal output
  * GET  /api/claude-code-session/:sandboxId/health - Health check sandbox
- * POST /api/claude-code-session/:taskId/turns - Owner types a turn to the CLI
- * POST /api/claude-code-session/:taskId/hand-back - Owner hands the CLI back to Rose
  */
 
 import { type Response, Router } from 'express';
 import { type AuthRequest, authenticate } from '../../providers/auth';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
-import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
-import { createSessionSchema, closeSessionSchema, directTurnSchema } from './types';
-import { DirectChatError, handBackDirectChat, sendDirectTurn } from './directChatService';
+import { createSessionSchema, closeSessionSchema } from './types';
 import type { FilePointer } from '../../providers/storage';
 import * as service from './service';
 import { AgentOwnerMismatchError, MissingUserIdError, GitHubAccessDeniedError } from './service';
@@ -213,63 +209,6 @@ router.get(
     const result = await service.checkSandboxHealth(sandboxId);
 
     res.json(result);
-  })
-);
-
-function sendDirectChatError(res: Response, error: unknown, action: string): void {
-  if (error instanceof DirectChatError) {
-    res.status(error.httpStatus).json({ error: error.message, code: error.code });
-    return;
-  }
-  log.error(`Failed to ${action}`, {
-    error: error instanceof Error ? error.message : String(error),
-  });
-  res.status(500).json({ error: `Failed to ${action}` });
-}
-
-/**
- * POST /api/claude-code-session/:taskId/turns
- * Deliver a user-typed turn to the running code session's CLI. Owner only;
- * idempotent per `client_message_id` (a retry returns status "duplicate").
- */
-router.post(
-  '/:taskId/turns',
-  asyncHandler<HybridAuthRequest>(hybridAuth),
-  asyncHandler(async (req: HybridAuthRequest, res: Response) => {
-    const parsed = directTurnSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: 'Invalid direct turn', code: 'INVALID_DIRECT_TURN' });
-      return;
-    }
-    try {
-      const result = await sendDirectTurn({
-        taskId: req.params.taskId,
-        userId: req.userId,
-        clientMessageId: parsed.data.client_message_id,
-        text: parsed.data.text,
-        toolCallId: parsed.data.tool_call_id,
-      });
-      res.json(result);
-    } catch (error) {
-      sendDirectChatError(res, error, 'deliver direct turn');
-    }
-  })
-);
-
-/**
- * POST /api/claude-code-session/:taskId/hand-back
- * End the owner's direct-chat hold so the code agent can finish and report
- * back to its parent. Idempotent.
- */
-router.post(
-  '/:taskId/hand-back',
-  asyncHandler<HybridAuthRequest>(hybridAuth),
-  asyncHandler(async (req: HybridAuthRequest, res: Response) => {
-    try {
-      res.json(await handBackDirectChat({ taskId: req.params.taskId, userId: req.userId }));
-    } catch (error) {
-      sendDirectChatError(res, error, 'hand back code session');
-    }
   })
 );
 

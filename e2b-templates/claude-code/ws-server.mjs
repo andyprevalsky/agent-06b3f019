@@ -86,12 +86,28 @@ wss.on("listening", () => {
   });
 });
 
-wss.on("connection", (ws) => {
+// A control connection that only sends a turn (`?replay=0`) skips the history
+// replay: a long session's buffer is megabytes, and the turn ack would queue
+// behind it on every typed message.
+function wantsReplay(req) {
+  try {
+    return (
+      new URL(req?.url || "/", "http://localhost").searchParams.get(
+        "replay",
+      ) !== "0"
+    );
+  } catch {
+    return true;
+  }
+}
+
+wss.on("connection", (ws, req) => {
   // Send full buffer to new client
-  if (outputBuffer.length > 0) {
+  const replay = wantsReplay(req);
+  if (replay && outputBuffer.length > 0) {
     ws.send(JSON.stringify({ type: "buffer", data: outputBuffer }));
   }
-  if (eventBuffer.length > 0) {
+  if (replay && eventBuffer.length > 0) {
     ws.send(JSON.stringify({ type: "code_agent_events", data: eventBuffer }));
   }
   if (exitAnnounced) {
@@ -408,6 +424,42 @@ function detailFromToolInput(input, paths) {
   return "";
 }
 
+// `--include-partial-messages` streams the model's output token by token. The
+// deltas are broadcast live (first-token latency for direct chat and the
+// Transcript tab) but never buffered: the complete `assistant` message that
+// follows is the durable record, and replaying every delta on reconnect would
+// multiply the history size.
+function emitStreamDelta(event) {
+  if (!event || typeof event !== "object") return;
+  const delta = { version: 1, provider: "claude" };
+  if (event.type === "message_start") {
+    delta.kind = "message_start";
+  } else if (event.type === "content_block_start") {
+    delta.kind = "block_start";
+    delta.index = event.index ?? null;
+    delta.block_type = event.content_block?.type || null;
+    if (event.content_block?.type === "tool_use") {
+      delta.tool = event.content_block.name || null;
+      delta.tool_use_id = event.content_block.id || null;
+    }
+  } else if (event.type === "content_block_delta") {
+    const d = event.delta || {};
+    if (d.type === "text_delta" && typeof d.text === "string") {
+      delta.kind = "text";
+      delta.text = d.text;
+    } else if (d.type === "thinking_delta" && typeof d.thinking === "string") {
+      delta.kind = "thinking";
+      delta.text = d.thinking;
+    } else {
+      return; // tool input JSON / signatures: the full message carries them
+    }
+    delta.index = event.index ?? null;
+  } else {
+    return;
+  }
+  broadcast("code_agent_delta", delta);
+}
+
 function emitClaudeMessage(message) {
   if (message.type === "system" && message.subtype === "init") {
     appendEvent({
@@ -424,7 +476,25 @@ function emitClaudeMessage(message) {
     return;
   }
 
+  if (message.type === "stream_event") {
+    emitStreamDelta(message.event);
+    return;
+  }
+
   if (message.type === "assistant") {
+    for (const part of message.message?.content || []) {
+      if (part?.type === "thinking" || part?.type === "redacted_thinking") {
+        // Claude Code may omit the thinking text (empty string); the block
+        // still marks where the model thought, for the transcript.
+        const thinking = typeof part.thinking === "string" ? part.thinking : "";
+        appendEvent({
+          type: "thinking",
+          raw_type: `assistant.${part.type}`,
+          text: thinking,
+          redacted: part.type === "redacted_thinking" || !thinking,
+        });
+      }
+    }
     const text = textFromContent(message.message?.content);
     if (text) {
       appendEvent({
@@ -457,10 +527,20 @@ function emitClaudeMessage(message) {
   }
 
   if (message.type === "user" && message.tool_use_result !== undefined) {
+    const resultPart = (
+      Array.isArray(message.message?.content) ? message.message.content : []
+    ).find((part) => part?.type === "tool_result");
     appendEvent({
       type: "tool_result",
       raw_type: "user.tool_result",
       tool_use_result: message.tool_use_result,
+      // Pair the result with its tool_use (transcript rows) and keep the
+      // CLI's error flag: a failed Bash reports `is_error` + "Exit code N".
+      tool_use_id:
+        typeof resultPart?.tool_use_id === "string"
+          ? resultPart.tool_use_id
+          : null,
+      is_error: resultPart?.is_error === true,
     });
     return;
   }
@@ -495,24 +575,34 @@ function emitClaudeMessage(message) {
 }
 
 // ---------------------------------------------------------------------------
-// Direct chat: user turns delivered to the running CLI
+// Direct chat: turns delivered to the running CLI
 // ---------------------------------------------------------------------------
 //
-//   backend route / agents helper ──user_turn{id,token,text}──► this server
+//   backend route / agents helper ──user_turn{id,token,text,sender}──► here
 //       │                                   │ dedupe by id (delivered once)
 //       │                                   ▼
 //       │                     CLI stdin (stream-json user message)
-//       ◄──user_turn_ack{id,status}──       │ events broadcast to every client
+//       ◄──user_turn_ack{id,status,reason?}─│ events broadcast to every client
 //                                           ▼ (FE live terminal + activity)
 //
 // The CLI reads stream-json input and keeps running while stdin is open. An
 // autonomous run ends stdin on its first `result`, exactly like the old
-// one-shot prompt. The first user turn puts the session on a "direct hold": stdin stays
-// open between turns until the user hands back (or the hold idles out), so
-// the user can keep talking to the same CLI conversation.
+// one-shot prompt. A turn written while a turn runs is merged into that turn
+// by the CLI (one `result` covers both), so "turn active" is tracked per
+// result, not per message.
+//
+// The first *user* turn puts the session on a direct hold: stdin stays open
+// between turns until the user hands back (or the hold idles out), so the
+// user keeps talking to the same CLI conversation. While the user holds the
+// session, `sender: "agent"` turns (Rose relaying instructions) are rejected
+// with `relay_paused` so nothing competes with the user; the caller retries
+// after the hand back. Agent turns never create a hold.
 const TURN_TOKEN = process.env.CODE_SESSION_TURN_TOKEN || "";
 const DIRECT_HOLD_IDLE_MS = (() => {
-  const raw = Number.parseInt(process.env.CODE_SESSION_DIRECT_HOLD_IDLE_MS || "", 10);
+  const raw = Number.parseInt(
+    process.env.CODE_SESSION_DIRECT_HOLD_IDLE_MS || "",
+    10,
+  );
   return Number.isInteger(raw) && raw > 0 ? raw : 10 * 60 * 1000;
 })();
 const MAX_TURN_TEXT_CHARS = 100_000;
@@ -541,13 +631,17 @@ function tokenMatches(candidate) {
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
-function endCliStdin(reason) {
-  if (!cliStdinOpen || !cliChild) return;
-  cliStdinOpen = false;
+function clearDirectHoldTimer() {
   if (directHoldTimer) {
     clearTimeout(directHoldTimer);
     directHoldTimer = null;
   }
+}
+
+function endCliStdin(reason) {
+  if (!cliStdinOpen || !cliChild) return;
+  cliStdinOpen = false;
+  clearDirectHoldTimer();
   log("info", "Closing CLI stdin", { reason });
   cliChild.stdin.end();
 }
@@ -555,6 +649,7 @@ function endCliStdin(reason) {
 function releaseDirectHold(reason) {
   if (!directHold) return;
   directHold = false;
+  clearDirectHoldTimer();
   appendEvent({ type: "direct_chat", status: "released", reason });
   if (!turnActive) endCliStdin(`direct hold released: ${reason}`);
 }
@@ -565,7 +660,7 @@ function onCliTurnResult() {
     endCliStdin("autonomous turn finished");
     return;
   }
-  if (directHoldTimer) clearTimeout(directHoldTimer);
+  clearDirectHoldTimer();
   directHoldTimer = setTimeout(
     () => releaseDirectHold("idle"),
     DIRECT_HOLD_IDLE_MS,
@@ -591,17 +686,19 @@ function handleUserTurn(msg) {
     return turnAck(id, "rejected", "session_ended");
   }
   const sender = msg.sender === "agent" ? "agent" : "user";
-  deliveredTurnIds.add(id);
-  if (directHoldTimer) {
-    clearTimeout(directHoldTimer);
-    directHoldTimer = null;
+  if (sender === "agent" && directHold) {
+    return turnAck(id, "rejected", "relay_paused");
   }
-  if (!directHold) {
-    directHold = true;
-    appendEvent({ type: "direct_chat", status: "held", sender });
+  deliveredTurnIds.add(id);
+  if (sender === "user") {
+    clearDirectHoldTimer();
+    if (!directHold) {
+      directHold = true;
+      appendEvent({ type: "direct_chat", status: "held", sender });
+    }
   }
   appendEvent({ type: "user_turn", turn_id: id, sender, text });
-  appendOutput("stdout", `[${sender === "user" ? "You" : "Agent"}] ${text}\n`);
+  appendOutput("stdout", `[${sender === "user" ? "You" : "Rose"}] ${text}\n`);
   turnActive = true;
   cliChild.stdin.write(userMessageLine(text));
   log("info", "Delivered user turn", { id, sender, chars: text.length });
@@ -610,7 +707,11 @@ function handleUserTurn(msg) {
 
 function handleHandBack(msg) {
   if (!tokenMatches(msg.token)) {
-    return { type: "hand_back_ack", status: "rejected", reason: "unauthorized" };
+    return {
+      type: "hand_back_ack",
+      status: "rejected",
+      reason: "unauthorized",
+    };
   }
   const wasHeld = directHold;
   releaseDirectHold("handed_back");
@@ -640,6 +741,7 @@ async function runClaudeCli() {
     "stream-json",
     "--output-format",
     "stream-json",
+    "--include-partial-messages",
     "--model",
     CLAUDE_CODE_MODEL,
     "--permission-mode",

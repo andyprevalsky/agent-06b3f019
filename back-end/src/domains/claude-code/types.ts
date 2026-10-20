@@ -38,7 +38,7 @@ export const closeSessionSchema = z.object({
     .transform((v) => v ?? undefined), // Additional file paths to extract (e.g., from verifier)
 });
 
-/** POST /api/claude-code-session/:taskId/turns — a user turn typed to the CLI. */
+/** POST /api/agents/:id/code-agent/:taskId/messages — a user turn typed to the CLI. */
 export const directTurnSchema = z.object({
   client_message_id: z
     .string()

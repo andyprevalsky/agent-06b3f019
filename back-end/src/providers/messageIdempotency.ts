@@ -7,6 +7,8 @@
  *   - USER response-schema updates (`isResponseSchemaUpdate`)
  *   - direct-chat turns typed to a code session (`isDirectCodeTurn`,
  *     claude-code domain `sendDirectTurn`)
+ *   - structured transcript batches of a code session (`isCodeTranscript`,
+ *     agents `save_code_transcript_batch`, keyed by task + event range)
  */
 import { createHash } from 'node:crypto';
 import type { CreateMessageParams } from './messages';
@@ -14,7 +16,8 @@ import { stringMetadataValue } from './toolLifecycleMessages';
 
 function hasIdempotentKind(params: CreateMessageParams): boolean {
   if (params.role === 'USER') return params.metadata?.isResponseSchemaUpdate === true;
-  return params.role === 'TOOL' && params.metadata?.isDirectCodeTurn === true;
+  if (params.role !== 'TOOL') return false;
+  return params.metadata?.isDirectCodeTurn === true || params.metadata?.isCodeTranscript === true;
 }
 
 export function idempotentMessageId(params: CreateMessageParams): string | null {
