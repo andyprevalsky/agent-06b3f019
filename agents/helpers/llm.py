@@ -5385,7 +5385,9 @@ def _verifier_field_annotation_for_field(field: Dict[str, Any], *, completion_ve
         )
     elif field_type == "list[object]" and nested_fields:
         annotation = List[
-            _build_nested_verifier_model(field.get("name") or "item", nested_fields, completion_verdict=completion_verdict)
+            _build_nested_verifier_model(
+                field.get("name") or "item", nested_fields, completion_verdict=completion_verdict
+            )
         ]
     else:
         annotation = _verifier_field_annotation(field_type)
