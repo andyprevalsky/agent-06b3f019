@@ -1883,7 +1883,8 @@ def test_tool_prompts_open_with_declarative_sentence():
 # of public web tools or generic unfiltered searches.
 _TOOL_PROMPT_CHAR_CAP_OVERRIDES = {
     "grep": 1600,
-    "spawn_agent": 3600,
+    # +50: explore's one-line code-inspection hint (a code_session_id → inspect_code).
+    "spawn_agent": 3650,
 }
 _TOOL_PROMPT_CHAR_CAP_DEFAULT = 1500
 _TOOL_PROMPT_CHAR_FLOOR = 100

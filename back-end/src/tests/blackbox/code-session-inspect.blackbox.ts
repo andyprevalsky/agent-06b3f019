@@ -248,12 +248,31 @@ function installFakeFactory(): void {
   });
 }
 
-function cliRuns(): Array<Record<string, any>> {
+/** What one scripted CLI run saw (written by FAKE_CLI). */
+interface CliRun {
+  cli: string;
+  argv: string[];
+  cwd: string;
+  prompt: string;
+  mode: string;
+  path0: string;
+  anthropic_key: string;
+  openai_key: boolean;
+  github_token: boolean;
+  env_file_left: boolean;
+  home_claude_md: boolean;
+  attempts?: Record<string, { cmd: string; rc: number; out: string; err: string }>;
+  head_before?: string;
+  head_after?: string;
+  remote?: string;
+}
+
+function cliRuns(): CliRun[] {
   if (!existsSync(cliLog)) return [];
   return readFileSync(cliLog, 'utf8')
     .split('\n')
     .filter(Boolean)
-    .map((line) => JSON.parse(line) as Record<string, any>);
+    .map((line) => JSON.parse(line) as CliRun);
 }
 
 function setMode(mode: string): void {
@@ -382,7 +401,7 @@ test('an inspection restores the latest checkpoint into its own sandbox and answ
     String(run.path0).endsWith('/.rose-inspect/bin'),
     'the guard wrappers come first on PATH'
   );
-  const argv = run.argv as string[];
+  const argv = run.argv;
   assert.ok(argv.includes('--strict-mcp-config'), 'no MCP servers (Rose user-facing tools)');
   for (const denied of [
     'Write',
@@ -447,7 +466,8 @@ test('commit, push, merge and gh are blocked inside the inspection; reads still 
   });
   assert.equal(result.status, 'answered', JSON.stringify(result));
   const run = cliRuns()[runsBefore];
-  const attempts = run.attempts as Record<string, { rc: number; out: string; err: string }>;
+  const attempts = run.attempts;
+  assert.ok(attempts, 'the scripted CLI recorded its attempts');
   assert.equal(attempts.read.rc, 0, 'read-only git still works');
   assert.equal(attempts.read.out, 'local commit');
   for (const name of ['commit', 'push', 'merge', 'direct_commit', 'gh']) {
@@ -573,10 +593,7 @@ test('C15: a Claude usage limit backs that credential off and the inspection ans
       runs.map((run) => run.cli),
       ['claude', 'codex']
     );
-    assert.ok(
-      (runs[1].argv as string[]).includes('--ignore-user-config'),
-      'codex loads no MCP config'
-    );
+    assert.ok(runs[1].argv.includes('--ignore-user-config'), 'codex loads no MCP config');
     assert.equal(runs[1].openai_key, true);
     assert.deepEqual(
       sandboxes.slice(before).map((sandbox) => [sandbox.provider, sandbox.kills]),

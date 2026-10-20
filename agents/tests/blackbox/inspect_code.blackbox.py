@@ -146,7 +146,9 @@ async def test_explore_runs_inspect_code_against_the_backend():
     assert body["question"] == "What does feature.txt say?"
 
     assert result["status"] == "completed", result
-    assert any(text.startswith("[inspect_code]") and "committed locally" in text for text in result["tool_call_results"])
+    assert any(
+        text.startswith("[inspect_code]") and "committed locally" in text for text in result["tool_call_results"]
+    )
 
 
 async def test_refusals_and_failures_are_tool_errors():
@@ -157,8 +159,18 @@ async def test_refusals_and_failures_are_tool_errors():
     cases = [
         (httpx.Response(404, json={"error": "Code session not found", "code": "CODE_SESSION_NOT_FOUND"}), "not found"),
         (httpx.Response(409, json={"error": "This code session has no checkpoint yet"}), "no checkpoint"),
-        (httpx.Response(200, json={**ANSWERED, "status": "usage_limited", "answer": None, "resets_at": "2026-10-21T01:00:00Z"}), "usage limit until 2026-10-21T01:00:00Z"),
-        (httpx.Response(200, json={**ANSWERED, "status": "failed", "answer": None, "error": "the inspection CLI timed out"}), "timed out"),
+        (
+            httpx.Response(
+                200, json={**ANSWERED, "status": "usage_limited", "answer": None, "resets_at": "2026-10-21T01:00:00Z"}
+            ),
+            "usage limit until 2026-10-21T01:00:00Z",
+        ),
+        (
+            httpx.Response(
+                200, json={**ANSWERED, "status": "failed", "answer": None, "error": "the inspection CLI timed out"}
+            ),
+            "timed out",
+        ),
     ]
     with patch.dict("os.environ", {"BACKEND_API_URL": BACKEND}):
         for response, expected in cases:
@@ -215,7 +227,9 @@ async def run_all_tests():
     print("inspect-code blackbox tests:")
     r = BlackboxResult()
     await r.record_async("inspect_code_is_an_explore_tool_only", test_inspect_code_is_an_explore_tool_only)
-    await r.record_async("explore_runs_inspect_code_against_the_backend", test_explore_runs_inspect_code_against_the_backend)
+    await r.record_async(
+        "explore_runs_inspect_code_against_the_backend", test_explore_runs_inspect_code_against_the_backend
+    )
     teardown_mock()
     await r.record_async("refusals_and_failures_are_tool_errors", test_refusals_and_failures_are_tool_errors)
     teardown_mock()

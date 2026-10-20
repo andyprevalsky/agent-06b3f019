@@ -69,7 +69,9 @@ async def inspect_code_activity(
         status=response.status_code,
         duration_ms=duration_ms,
         inspect_status=payload.get("status"),
-        startup_ms=(payload.get("timings") or {}).get("startup_ms") if isinstance(payload.get("timings"), dict) else None,
+        startup_ms=(payload.get("timings") or {}).get("startup_ms")
+        if isinstance(payload.get("timings"), dict)
+        else None,
     )
     if response.status_code >= 400:
         return {
