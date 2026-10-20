@@ -139,7 +139,6 @@ export async function createSession(params: CreateSessionParams): Promise<Create
   // repo-less agents can still consume their user's stored OAuth credential.
   const resolved = await resolveAgentContext(agent_id, effectiveUserId);
   effectiveUserId = resolved.userId;
-
   const projectWorkspace = await resolveSessionProject(
     effectiveUserId,
     params.project_id ?? resolved.projectId
