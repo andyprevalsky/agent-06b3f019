@@ -2,12 +2,71 @@
  * Provider-typed compute token routes.
  */
 
-import { type Response, Router } from 'express';
+import { type NextFunction, type Response, Router } from 'express';
 import { type AuthRequest, authenticate } from '../../providers/auth';
+import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
+import { computeTokenAuthority } from './config';
 import * as service from './service';
 
 const router = Router({ mergeParams: true });
+const log = createLogger('ComputeTokenAuthority');
+
+// ── Optional shared compute-token authority ────────────────────────────────
+//
+// Compute-token state (lineage leases, provider cooldowns, funded-key
+// cooldowns) is only correct when every consumer of a credential shares ONE
+// store. Production has one database. An isolated benchmark guest restores its
+// own database and copies the same real credentials into it, so without an
+// authority every guest runs its own semaphore and cooldown on one token
+// (RCA 2026-10-20-bench-guests-ran-independent-compute-token-semaphores).
+// When COMPUTE_TOKEN_AUTHORITY_URL is set, internal compute-code requests are
+// answered by that backend instead of the local database. Unset (production),
+// this middleware is a no-op.
+const FORWARDED_HEADERS = ['x-user-id', 'x-force-pool', 'x-exclude-pool-tokens'] as const;
+const AUTHORITY_TIMEOUT_MS = 30_000;
+
+async function delegateToAuthority(
+  authority: { url: string; apiKey: string },
+  req: AuthRequest,
+  res: Response
+): Promise<void> {
+  const headers: Record<string, string> = { 'X-API-Key': authority.apiKey };
+  for (const name of FORWARDED_HEADERS) {
+    const value = req.headers[name];
+    if (typeof value === 'string') headers[name] = value;
+  }
+  const hasBody = req.method !== 'GET' && req.method !== 'HEAD';
+  if (hasBody) headers['Content-Type'] = 'application/json';
+  const started = Date.now();
+  const response = await fetch(`${authority.url}${req.originalUrl}`, {
+    method: req.method,
+    headers,
+    body: hasBody ? JSON.stringify(req.body ?? {}) : undefined,
+    signal: AbortSignal.timeout(AUTHORITY_TIMEOUT_MS),
+  });
+  const text = await response.text();
+  log.info('Delegated compute-token request', {
+    method: req.method,
+    path: req.path,
+    status: response.status,
+    durationMs: Date.now() - started,
+  });
+  res.status(response.status);
+  const contentType = response.headers.get('content-type');
+  if (contentType !== null) res.type(contentType);
+  res.send(text);
+}
+
+router.use('/compute-code', (req: AuthRequest, res: Response, next: NextFunction) => {
+  const authority = computeTokenAuthority();
+  if (authority === null) return next();
+  return authenticate(req, res, () => {
+    // User-session requests keep the local view; workers and the runner are internal.
+    if (req.isInternal !== true) return next();
+    delegateToAuthority(authority, req, res).catch(next);
+  });
+});
 
 function internalOrAuthUserId(req: AuthRequest): string | undefined {
   const internalHeaderUserId = req.headers['x-user-id'];
