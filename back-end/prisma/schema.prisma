@@ -393,6 +393,7 @@ model User {
   /// Active published rose_user_ui version (UserUiVersion.id); null = stock UI.
   activeUiVersionId           String?
   uiVersions                  UserUiVersion[]
+  projects                    Project[]
 
   @@index([userId])
   @@index([inviteCode])
@@ -1722,4 +1723,74 @@ model UserUiVersion {
   user       User     @relation(fields: [userId], references: [userId], onDelete: Cascade)
 
   @@index([userId, createdAt])
+}
+
+/// A user's codebase ("Project"): the settings a code session needs to run it
+/// plus its latest codebase-sync snapshot (rose-sync CLI / mac app). Secret-
+/// bearing content (env files, linked config, git artifacts) is stored only as
+/// credential envelopes (RSA-OAEP + AES-256-GCM, CLAUDE_CREDENTIAL_DECRYPTION_KEY).
+model Project {
+  id              String                @id @default(uuid())
+  userId          String
+  name            String
+  repoUrl         String?
+  defaultBranch   String                @default("main")
+  startupScript   String?
+  startupTimeoutS Int                   @default(120)
+  autoWake        Boolean               @default(false)
+  /// Per-project salt for content fingerprints (incremental re-sync).
+  syncSalt        String
+  /// Monotonic snapshot revision; bumped by every accepted sync.
+  syncRevision    Int                   @default(0)
+  lastSyncedAt    DateTime?
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+  user            User                  @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  envFiles        ProjectEnvFile[]
+  syncSnapshot    ProjectSyncSnapshot?
+
+  @@unique([userId, name])
+  @@index([userId, updatedAt])
+}
+
+/// One secret-bearing file materialized into a project checkout with 0600
+/// permissions. `variables` holds names/descriptions only (searchable); values
+/// exist only inside `encryptedContent`.
+model ProjectEnvFile {
+  id               String   @id @default(uuid())
+  projectId        String
+  /// Repo-relative destination path.
+  path             String
+  description      String?
+  /// "env" (dotenv) | "config" (other linked or secret config file)
+  kind             String   @default("env")
+  /// "managed" (project settings) | "sync" (codebase sync) | "declared" (awaiting sync)
+  source           String   @default("managed")
+  variables        Json     @default("[]")
+  encryptedContent String?
+  fingerprint      String?
+  /// Original symlink target recorded by codebase sync (link structure only).
+  linkTarget       String?
+  sizeBytes        Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  project          Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, path])
+}
+
+/// Latest codebase-sync snapshot of a project: non-secret manifest plus
+/// encrypted git artifacts. One row per project, replaced by each revision.
+model ProjectSyncSnapshot {
+  projectId                 String   @id
+  revision                  Int
+  /// Non-secret: git remote/branch/head, symlinks, toolchain, setup hints, source.
+  manifest                  Json
+  encryptedGitBundle        String?
+  gitBundleFingerprint      String?
+  encryptedUncommittedPatch String?
+  patchFingerprint          String?
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+  project                   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
 }
