@@ -349,6 +349,29 @@ class Scorecard(unittest.TestCase):
         document = self.valid(data)
         self.assertIn("RUNNING", document)
 
+    def test_live_counter_unknown_outcome_renders_a_count_without_invented_names(self):
+        # 2026-10-20 Polar batch 1 (adopted): a failed job with no verdict and unknown infra
+        # (j0003) became a nameless counter row; --text crashed joining [None].
+        admission = self.f.sharded(live=True)
+        status = admission / "shard-01/run/shard-status.json"
+        value = json.loads(status.read_text())
+        value["infra"]["progress"]["combos"] = [["passed", "PASSED", False, 1], ["failed", None, None, 1]]
+        status.write_text(json.dumps(value))
+        data = render(admission, self.f)
+        exp = data["experiment"]
+        self.assertEqual((exp["unknown_count"], exp["unknown_jobs"]), (1, []), "no invented job names")
+        text = CARD["render_text"](data)
+        self.assertIn("No recorded task result: 1 job (names unavailable from live counters).", text)
+        self.assertNotIn("None", text)
+        document = self.valid(data)
+        self.assertIn("No recorded task result: 1 job", document)
+        named = CARD["finish_experiment"](dict(CARD["empty_experiment"]("campaign", self.tmp), scheduled_total=8, rows=[
+            {"status": "failed", "task_status": None, "infra_failure": None, "task": f"t{i}"} for i in range(7)]
+            + [{"status": "failed", "task_status": None, "infra_failure": None}]))
+        self.assertEqual((named["unknown_count"], named["unknown_jobs"]), (8, ["t0", "t1", "t2", "t3", "t4", "t5"]))
+        self.assertIn({"severity": "amber", "text": "No recorded task result: 8 jobs (t0, t1, t2, t3, t4, t5, +2 more).",
+                       "owner": "parent", "action": "/RCA from the job log and controller receipts"}, CARD["_issues"](named))
+
     def test_missing_data_renders_explicit_states(self):
         empty = self.tmp / "empty"
         empty.mkdir()
