@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 import socket
 from types import SimpleNamespace
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from unittest.mock import patch
 
 
@@ -40,7 +40,7 @@ async def assert_browser_cleanup_failure_boundaries():
                 raise OSError("owned offline transport failure")
             return SimpleNamespace(status_code=mode)
 
-    namespace = dict(Any=Any, Dict=Dict, Optional=Optional, httpx=SimpleNamespace(AsyncClient=Client),
+    namespace = dict(Any=Any, Dict=Dict, List=List, Optional=Optional, httpx=SimpleNamespace(AsyncClient=Client),
                      WorkflowGenerationSealed=Sealed, logger=SimpleNamespace(warning=lambda *args: None))
     exec(compile(ast.fix_missing_locations(ast.Module(body=selected, type_ignores=[])), "exact-close-helper", "exec"), namespace)
     config = SimpleNamespace(backend=SimpleNamespace(api_url="http://offline.invalid", api_key="offline"))

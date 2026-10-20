@@ -72,7 +72,9 @@ function browserSessionReleaseDependencies(): BrowserSessionReleaseDependencies 
         },
         select: { sessionId: true },
       }),
-    closeSession,
+    closeSession: async (sessionId, pause) => {
+      await closeSession(sessionId, pause);
+    },
   };
 }
 
