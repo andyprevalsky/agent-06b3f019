@@ -194,6 +194,49 @@ caches on the first v4 run; do not copy or rekey older entries.
 
 ## 6. Run
 
+**Get the native model without a cold rebuild.** The build directory is cached,
+encrypted, in R2 and is not tied to any devbox. On a fresh box, restore it, then
+let the normal build refresh only new bundles:
+
+```bash
+cd agents && source venv/bin/activate && set -a && source .env && set +a
+python -m benchmarks.wmh_build_cache status                       # what is published
+python -m benchmarks.wmh_build_cache pull --build-dir ../.context/world-model-native
+WMH_BUILD_DIR="$PWD/../.context/world-model-native" ...  # the native rebuild recipe in WMH_HANDOFF.md
+python -m benchmarks.wmh_build_cache push --build-dir ../.context/world-model-native
+```
+
+Rebuild (and push) only when the user asks for an updated model. `pull`
+refuses a non-empty directory unless `--force` is given; `push` publishes the
+manifest last, so a reader never sees a partial upload.
+
+**Cloud SIM (fleet) runs serve the same native model.** Guests default to
+`WMH_ENGINE=experiential`, `WMH_MODEL_NAME=rose-archive`,
+`WMH_ROSE_POOL=rose-wmh-gpt61` and
+`WMH_EXECUTION_POLICY=rose-outcome-distribution-v4`; exported values override
+them, and `WMH_ENGINE=legacy` selects the old model. To publish a new model:
+
+1. `bash scripts/run-bench-cloud --build-wmh` forks the donor's proven snapshot
+   onto an owned, ledgered `performance-8x`/64 GB machine with an 80 GB volume
+   (`WMH_BUILD_VM_SIZE`, `WMH_BUILD_VM_MEMORY_MB`, `WMH_BUILD_VOLUME_GB`), pulls
+   the full cache `WMH_FULL_CACHE_NAME` (default `rose-archive-native`) so only
+   new bundles export, builds, pushes the serving-only cache `WMH_CACHE_NAME`
+   (only `experiential/`, `models/`, `build.manifest.json`, `conformance*.json`,
+   `prediction*.json`) and the full cache, then destroys the machine and volume
+   (ledger under `.context/wmh-build/`). `WMH_EXPORT_CACHE_NAME=<cache>` runs
+   only the native step on that pulled export. `WMH_BUILD_TIMEOUT_SECONDS`
+   (default 14400) bounds the detached on-box job.
+2. Never build on the 2 GB donor; `--build-wmh` never starts or changes it.
+3. `bash scripts/run-bench-cloud --refresh-wmh` restores that cache onto the
+   donor's `/data/world-model`, creates the native venv (with uv and its Python
+   on the volume), checks `models/rose-archive/experiential.json`, then
+   snapshots the volume for fleet clones. `WMH_CACHE_NAME` selects another cache.
+4. `scripts/run-bench <task> --sim-on <task>`.
+
+Guests never build or install: they stop with a clear error if the native
+pointer is missing or the venv does not match `agents/requirements-world-model.txt`.
+
+
 ```bash
 .claude/skills/instantiate-whm/scripts/run-trajectory.sh --task <task> --timeout 3600 \
   --wmh-root <native model root> --state-file run-state.json --out <evidence dir>

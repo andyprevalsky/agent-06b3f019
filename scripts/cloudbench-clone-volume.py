@@ -172,7 +172,9 @@ def create(args: argparse.Namespace) -> int:
         volume_id = volume.get("id")
     except (ValueError, AttributeError):
         volume_id = None
-    if (status not in (200, 201) or not isinstance(volume_id, str) or VOLUME_ID.fullmatch(volume_id) is None
+    # 202 Accepted is how Fly answers a create that restores a large snapshot
+    # (the volume is "restoring"); it is a created volume once its body verifies.
+    if (status not in (200, 201, 202) or not isinstance(volume_id, str) or VOLUME_ID.fullmatch(volume_id) is None
             or volume.get("name") != body["name"] or volume.get("region") != body["region"]):
         return emit("ambiguous", reason="unverified create response status=%s" % status)
     return emit("created", id=volume_id, name=body["name"], region=body["region"])

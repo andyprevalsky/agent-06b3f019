@@ -70,7 +70,7 @@ def save(path,value):
     try:os.fsync(fd)
     finally:os.close(fd)
 
-def configure(registry,owner,app,name,mid,vid,protected,command,*,audit,run):
+def configure(registry,owner,app,name,mid,vid,protected,command,*,audit,run,snapshot_restored=False):
     registry=Path(registry).absolute()
     with bounded(60):
         need(registry.resolve(strict=True)==registry and registry.name==owner,'wrong registry')
@@ -104,7 +104,10 @@ def configure(registry,owner,app,name,mid,vid,protected,command,*,audit,run):
                 attached=value.get('attached_machine_id')
                 need(attached in (None,mid),'Volume attached to a different Machine')
                 need(fields(registry/'clones'/name)==row,'ownership changed during read')
-                if attached==mid:return value
+                # A volume restored from a large snapshot keeps reporting
+                # attached_machine_id=null while the owned Machine runs with exactly
+                # this mount (checked above). Accept that only for an explicit restore.
+                if attached==mid or (snapshot_restored and attached is None):return value
                 if settle<SETTLE_READS:pause(min(settle,2))
             raise ValueError('Volume not attached to the exact owned Machine')
         before=inspect()
@@ -138,6 +141,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     for key in ('registry','owner','app','name','machine','volume','audit','run'):parser.add_argument('--'+key,required=True)
     parser.add_argument('--protected',action='append',default=[])
+    parser.add_argument('--snapshot-restored',action='store_true')
     args=parser.parse_args()
     with bounded(60):
         helper=runpy.run_path(str(Path(__file__).resolve().with_name('cloudbench-original-volume-capture.py')))
@@ -158,5 +162,5 @@ def main():
                 # 142 is the bounded child's deadline: that request may still be in flight.
                 raise (ValueError if status==142 else Rejected)('Volume configuration CLI failed (exit '+str(status)+'; private receipt '+str(result)+')')
             value=json.loads(out);need(isinstance(value,dict),'invalid native JSON');return value
-        configure(args.registry,args.owner,args.app,args.name,args.machine,args.volume,args.protected,command,audit=args.audit,run=args.run)
+        configure(args.registry,args.owner,args.app,args.name,args.machine,args.volume,args.protected,command,audit=args.audit,run=args.run,snapshot_restored=args.snapshot_restored)
 if __name__=='__main__':main()

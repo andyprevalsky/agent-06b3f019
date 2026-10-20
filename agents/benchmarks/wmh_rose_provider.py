@@ -32,6 +32,7 @@ import json
 import os
 import re
 import threading
+from collections import OrderedDict
 from contextlib import aclosing
 from copy import deepcopy
 from dataclasses import dataclass
@@ -161,14 +162,74 @@ def _fold_stream_evidence(messages: list) -> list:
     if final_index is None:
         return messages
     try:
-        evidence = fold_stream(units, _prompt_text(messages[final_index]["content"]))
-    except (KeyError, TypeError, ValueError):
+        final = _prompt_text(messages[final_index]["content"])
+    except (KeyError, TypeError):
         return messages
+    key = hashlib.sha256()
+    for text in (*units, final):
+        encoded = text.encode()
+        key.update(len(encoded).to_bytes(8, "big"))
+        key.update(encoded)
+    key = key.hexdigest()
+    folded = _FOLDED_EVIDENCE.get(key)
+    if folded is None:
+        try:
+            evidence = fold_stream(units, final)
+        except (KeyError, TypeError, ValueError):
+            return messages
+        folded = json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))
+        _FOLDED_EVIDENCE.put(key, folded)
     return [
         {**messages[0], "content": content[: -len(STREAM_GUIDE)]},
-        {"role": "user", "content": json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))},
+        {"role": "user", "content": folded},
         *messages[final_index + 1 :],
     ]
+
+
+class _FoldedEvidenceCache:
+    """Bounded memo of folded stream evidence, keyed by the exact stream text.
+
+    One prediction's wire request is folded back to its canonical evidence by
+    every reader (call ids, base state, DEMO key, both validation boundaries).
+    Each fold decodes the whole world stream on the provider's single event
+    loop, so a wide fan-out serialized behind repeated folds (SIM run 7: 90
+    concurrent steps). The fold is a pure function of the text, so a hit is
+    byte-identical. Bounded by characters and entries, independent of agents.
+    """
+
+    def __init__(self, *, maximum_chars: int = 256 * 1024 * 1024, maximum_entries: int = 512) -> None:
+        self._entries: OrderedDict[str, str] = OrderedDict()
+        self._chars = 0
+        self._maximum_chars = maximum_chars
+        self._maximum_entries = maximum_entries
+        self._lock = threading.Lock()
+        self.hits = self.misses = 0
+
+    def get(self, key: str) -> str | None:
+        with self._lock:
+            value = self._entries.get(key)
+            if value is None:
+                self.misses += 1
+                return None
+            self.hits += 1
+            self._entries.move_to_end(key)
+            return value
+
+    def put(self, key: str, value: str) -> None:
+        if len(value) > self._maximum_chars:
+            return
+        with self._lock:
+            previous = self._entries.pop(key, None)
+            if previous is not None:
+                self._chars -= len(previous)
+            self._entries[key] = value
+            self._chars += len(value)
+            while self._chars > self._maximum_chars or len(self._entries) > self._maximum_entries:
+                _, evicted = self._entries.popitem(last=False)
+                self._chars -= len(evicted)
+
+
+_FOLDED_EVIDENCE = _FoldedEvidenceCache()
 
 
 def _fold_system_evidence(messages: list) -> list:

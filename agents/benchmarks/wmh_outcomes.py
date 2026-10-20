@@ -406,6 +406,20 @@ def apply_state_patch(base_state: dict, patch: list) -> dict:
     if not isinstance(base_state, dict) or not isinstance(patch, list):
         raise ValueError("State patch requires an object snapshot and an array of operations")
     state = deepcopy(base_state)
+    apply_state_patch_in_place(state, patch)
+    json.dumps(state, allow_nan=False)
+    return state
+
+
+def apply_state_patch_in_place(state: dict, patch: list) -> bool:
+    """Apply ``patch`` to ``state`` itself; True when every written value is finite JSON.
+
+    Callers that already proved ``state`` finite can then skip re-encoding the
+    whole state: its values are either unchanged or one of the written values.
+    """
+    if not isinstance(state, dict) or not isinstance(patch, list):
+        raise ValueError("State patch requires an object snapshot and an array of operations")
+    written_finite = True
     for operation in patch:
         if not isinstance(operation, dict) or operation.get("op") not in {"add", "replace", "remove"}:
             raise ValueError("Unsupported state patch operation")
@@ -423,6 +437,11 @@ def apply_state_patch(base_state: dict, patch: list) -> dict:
             else:
                 raise ValueError("State patch parent does not exist")
         key = parts[-1]
+        if op != "remove" and written_finite:
+            try:
+                json.dumps(operation["value"], allow_nan=False)
+            except (TypeError, ValueError):
+                written_finite = False
         if isinstance(parent, dict):
             if op != "add" and key not in parent:
                 raise ValueError("State patch target does not exist")
@@ -440,8 +459,7 @@ def apply_state_patch(base_state: dict, patch: list) -> dict:
                 parent[index] = deepcopy(operation["value"])
         else:
             raise ValueError("State patch parent is not a container")
-    json.dumps(state, allow_nan=False)
-    return state
+    return written_finite
 
 
 def parse_distribution(
