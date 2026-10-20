@@ -618,6 +618,10 @@ model ClaudeCodeSession {
   awaitingParent           Json?
   /// Project restored into this session (runProjectStartup reads it on resume).
   projectId                String?
+  /// Why the task was closed: close | failure | cancel | idle | awaiting_parent |
+  /// usage_limit (null for legacy rows and cleanup closes). The code-agents list
+  /// reports the latest task of a live session as PAUSED for the resumable ones.
+  closeReason              String?
 
   @@index([agentId])
   @@index([sandboxId])

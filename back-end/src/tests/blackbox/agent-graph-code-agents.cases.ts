@@ -95,3 +95,83 @@ export async function testCodeAgentProviderInTreeAndBatchedList(
     await prisma.claudeCodeSession.deleteMany({ where: { id: withProvider } });
   }
 }
+
+/**
+ * A busy tree never pushes its newest code agents (or another root's) off the
+ * list: newest first, at most 50 per root. The list was oldest-first with one
+ * 500-row cap across every requested root, so the newest sessions of a busy
+ * page were the ones dropped.
+ */
+export async function testCodeAgentListIsNewestFirstPerRoot(
+  ctx: CodeAgentListContext
+): Promise<void> {
+  const quiet = randomUUID();
+  await prisma.agent.create({
+    data: { id: quiet, userId: ctx.userA, busId: quiet, goal: 'quiet root', status: 'ACTIVE' },
+  });
+  const base = Date.now() - 24 * 60 * 60 * 1000;
+  const busy = Array.from({ length: 55 }, (_, index) => ({
+    id: randomUUID(),
+    agentId: index % 2 === 0 ? ctx.ids.R : ctx.ids.C,
+    sandboxId: `sb-busy-${index}`,
+    goal: `busy ${index}`,
+    status: 'CLOSED' as const,
+    createdAt: new Date(base + (index + 10) * 60_000),
+  }));
+  const quietRows = [0, 1].map((index) => ({
+    id: randomUUID(),
+    agentId: quiet,
+    sandboxId: `sb-quiet-${index}`,
+    goal: `quiet ${index}`,
+    status: 'CLOSED' as const,
+    createdAt: new Date(base + index * 60_000),
+  }));
+  await prisma.claudeCodeSession.createMany({ data: [...busy, ...quietRows] });
+  try {
+    const list = await get(
+      ctx,
+      `/api/agents/code-agents?root_ids=${ctx.ids.R},${quiet}`,
+      ctx.userA
+    );
+    assert(list.status === 200, `list: ${JSON.stringify(list.data)}`);
+    const items = list.data.code_agents as CodeAgentItem[];
+    const created = items.map((item) => Date.parse(String(item.created_at)));
+    assert(
+      created.every((value, index) => index === 0 || created[index - 1] >= value),
+      'newest first'
+    );
+    const fromR = items.filter((item) => item.root_agent_id === ctx.ids.R);
+    assert(fromR.length === 50, `at most 50 per root: ${fromR.length}`);
+    const newest = await prisma.claudeCodeSession.findMany({
+      where: { agentId: { in: [ctx.ids.R, ctx.ids.C] } },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: 50,
+      select: { id: true },
+    });
+    assert(
+      JSON.stringify(fromR.map((item) => item.code_agent_id)) ===
+        JSON.stringify(newest.map((row) => row.id)),
+      'the busy root keeps exactly its newest 50 code agents'
+    );
+    assert(
+      !fromR.some((item) => item.code_agent_id === busy[0].id),
+      'the oldest busy agent is the one left out'
+    );
+    const quietListed = items.filter((item) => item.root_agent_id === quiet);
+    assert(quietListed.length === 2, "a busy root never crowds out another root's agents");
+    const seeded = new Set([...busy, ...quietRows].map((row) => row.id));
+    const seededItems = items.filter((item) => seeded.has(String(item.code_agent_id)));
+    assert(
+      seededItems.every(
+        (item) =>
+          item.awaiting_parent === null && item.code_session_id === null && item.status === 'CLOSED'
+      ),
+      `rows without a code session report no session, no question and stay CLOSED: ${JSON.stringify(seededItems[0])}`
+    );
+  } finally {
+    await prisma.claudeCodeSession.deleteMany({
+      where: { id: { in: [...busy, ...quietRows].map((row) => row.id) } },
+    });
+    await prisma.agent.deleteMany({ where: { id: quiet } });
+  }
+}

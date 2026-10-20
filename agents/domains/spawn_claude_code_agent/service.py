@@ -2330,7 +2330,8 @@ def _merge_close_code_session_facts(
     return merged
 
 
-def _iso_utc(epoch_s: Optional[float]) -> Optional[str]:
+def iso_utc(epoch_s: Optional[float]) -> Optional[str]:
+    """``2026-10-20T16:50:00Z`` for an epoch (the ``code_agent`` timestamp format)."""
     if epoch_s is None:
         return None
     return datetime.fromtimestamp(epoch_s, tz=timezone.utc).isoformat().replace("+00:00", "Z")
@@ -2350,9 +2351,10 @@ def build_code_agent_metadata(
     """The ``code_agent`` message metadata block the UI thread renders.
 
     ``state`` is spinning_up | live | completed | failed | paused (paused =
-    idle or user-paused session, resumable; an addition to the UI contract).
-    ``summary.merged_into`` is set only when the merge was confirmed (C4).
-    ``failure_message`` is the human-readable reason when state is failed.
+    idle, user-paused, waiting on its parent or stopped by a usage limit;
+    resumable, never failed). ``summary.merged_into`` is set only when the
+    merge was confirmed (C4). ``failure_message`` is the human-readable reason
+    for the user when state is failed or paused (e.g. the usage-limit reset).
     ``target_meta`` carries the run target ('cloud' | 'local'), device_name and
     folder (owned by the local-target lane); cloud when omitted. It also carries
     ``preview_url``: the session's live dev-server preview (Rose dev accounts, A1).
@@ -2368,11 +2370,11 @@ def build_code_agent_metadata(
         # the project/repo default branch for new agents (C13).
         "base_branch": facts.get("merge_target") or facts.get("base_branch"),
         "state": state,
-        "started_at": _iso_utc(started_at),
+        "started_at": iso_utc(started_at),
     }
     if ended_at is not None:
-        block["ended_at"] = _iso_utc(ended_at)
-    if state == "failed" and failure_message:
+        block["ended_at"] = iso_utc(ended_at)
+    if state in ("failed", "paused") and failure_message:
         block["failure_message"] = failure_message
     if facts.get("head"):
         summary: Dict[str, Any] = {
@@ -2416,27 +2418,73 @@ def local_workspace_place(target_meta: Optional[Dict[str, Any]]) -> Optional[str
     return f"{folder} on {target_meta.get('device_name') or 'the Mac'}"
 
 
+def _account_line(account: Dict[str, Any]) -> str:
+    """``- Claude Code me@example.com: limited until <reset> (this run)``."""
+    if account.get("status") == "limited":
+        state = f"limited until {account.get('limited_until')}"
+    elif account.get("status") == "reconnect":
+        state = "disconnected (the user must reconnect it)"
+    else:
+        state = "available"
+    this_run = " (this run)" if account.get("this_run") else ""
+    return f"- {_provider_label(str(account.get('provider')))} {account.get('label')}: {state}{this_run}"
+
+
+def _usage_accounts_block(accounts: Optional[List[Dict[str, Any]]]) -> str:
+    """The user's connected accounts as stored (the backend's usage-limit answer)."""
+    if accounts is None:
+        return ""
+    if not accounts:
+        return "\nConnected accounts: none."
+    return "\nConnected accounts:\n" + "\n".join(_account_line(account) for account in accounts)
+
+
+def _respawn_clause(next_lease: Optional[Dict[str, Any]], *, local: bool) -> str:
+    """What a respawn leases: an account that is not rate-limited, else the earliest reset."""
+    then = "continues from the files in that folder" if local else "resumes from the latest checkpoint"
+    free = "one of your own logins" if local else "an account"
+    verb = "uses" if local else "leases"
+    if not isinstance(next_lease, dict) or not next_lease.get("provider"):
+        return f"the respawn {verb} {free} that is not rate-limited and {then}."
+    provider = _provider_label(str(next_lease["provider"]))
+    label = next_lease.get("label")
+    if next_lease.get("available_now"):
+        now = f"now {provider} {label}" if label else f"now a shared {provider} account"
+        return f"the respawn {verb} {free} that is not rate-limited ({now}) and {then}."
+    return (
+        f"no {'login' if local else 'account'} is free until {next_lease.get('available_at')} "
+        f"(the earliest reset: {provider} {label}); a respawn after that {verb} it and {then}."
+    )
+
+
 def format_usage_limit_message(
     *,
     code_provider: str,
     resets_at_iso: Optional[str],
     facts: Optional[Dict[str, Any]],
     local_place: Optional[str] = None,
+    accounts: Optional[List[Dict[str, Any]]] = None,
+    next_lease: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Short, factual retry instructions for the parent (C15).
+    """The parent's tool error for a usage limit (C15): what stopped, every account, the respawn.
 
+    The activity never fails over on its own: the parent decides. ``accounts``
+    and ``next_lease`` are the backend's stored view (no provider calls), so a
+    respawn leases an account that is not rate-limited, else the earliest reset.
     ``local_place`` (a Mac run): the work stays in that folder and the run used
-    the user's own CLI login, so the retry targets the Mac again.
+    the user's own CLI login, so the respawn targets the Mac again.
     """
     facts = facts or {}
-    other = "claude" if code_provider == "codex" else "codex"
     resets = f" (resets {resets_at_iso})" if resets_at_iso else ""
+    limited = next((a for a in accounts or [] if a.get("this_run")), None)
+    on_account = f" {limited.get('label')}" if limited else ""
+    block = _usage_accounts_block(accounts)
     if local_place:
         return (
-            f"Code agent stopped: the usage limit of your own {_provider_label(code_provider)} login was "
-            f"reached{resets}. Its files and commits stay in {local_place}. Retry with "
-            "spawn_agent(type='code', target='local', goal=<the same goal>): it continues there on your "
-            f"{_provider_label(other)} login when one is connected, otherwise after the reset."
+            f"Code agent stopped: the usage limit of your own {_provider_label(code_provider)} login"
+            f"{on_account} was reached{resets}. Its files and commits stay in {local_place}.{block}\n"
+            "Respawn with spawn_agent(type='code', target='local', goal=<the same goal>) to continue there: "
+            + _respawn_clause(next_lease, local=True)
         )
     saved = "Its work is saved"
     if facts.get("branch"):
@@ -2444,11 +2492,46 @@ def format_usage_limit_message(
     if facts.get("checkpoint_seq"):
         saved += f" (checkpoint {facts['checkpoint_seq']})"
     return (
-        f"Code agent stopped: the {_provider_label(code_provider)} usage limit was reached{resets}. "
-        f"{saved}. Retry now with spawn_agent(type='code', code_session_id='{facts.get('code_session_id')}', "
-        "goal=<the same goal>): the retry leases another token of the same provider, or continues on "
-        f"{_provider_label(other)} when none is available, from the saved session."
+        f"Code agent stopped: the {_provider_label(code_provider)} usage limit was reached"
+        f"{' on' + on_account if on_account else ''}{resets}. {saved}.{block}\n"
+        f"Respawn with spawn_agent(type='code', code_session_id='{facts.get('code_session_id')}', "
+        "goal=<the same goal>) to continue: " + _respawn_clause(next_lease, local=False)
     )
+
+
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _reset_label(resets_at_iso: Optional[str], now: float) -> Optional[str]:
+    """``4:50 PM UTC`` within 24 h of ``now``, otherwise ``Oct 3, 12:50 AM UTC``."""
+    if not resets_at_iso:
+        return None
+    try:
+        reset = datetime.fromisoformat(resets_at_iso.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
+    clock = f"{reset.hour % 12 or 12}:{reset.minute:02d} {'AM' if reset.hour < 12 else 'PM'} UTC"
+    if 0 <= reset.timestamp() - now < 24 * 3600:
+        return clock
+    return f"{_MONTHS[reset.month - 1]} {reset.day}, {clock}"
+
+
+def format_usage_limit_user_message(
+    *,
+    code_provider: str,
+    resets_at_iso: Optional[str],
+    local_place: Optional[str] = None,
+    now: Optional[float] = None,
+) -> str:
+    """The user's one line for a usage-limit pause (``code_agent.failure_message``).
+
+    The parent gets ``format_usage_limit_message`` (the exact retry) instead.
+    """
+    reset = _reset_label(resets_at_iso, safe_time() if now is None else now)
+    provider = "Codex" if code_provider == "codex" else "Claude"
+    resets = f" (resets {reset})" if reset else ""
+    saved = f"Work stays in {local_place}." if local_place else "Work is saved."
+    return f"Paused: {provider} usage limit reached{resets}. {saved}"
 
 
 def format_code_session_summary(facts: Optional[Dict[str, Any]]) -> str:
@@ -2948,27 +3031,41 @@ async def spawn_claude_code_activity(
                 await log_collector.stop()
             resets_at_iso = (marked or {}).get("resets_at")
             local_place = local_workspace_place(code_agent_meta)
+            # The parent reads the error with every connected account and what a
+            # respawn leases (the backend's stored view); the user reads a
+            # resumable pause. The parent decides; nothing fails over here.
+            accounts = (marked or {}).get("accounts")
+            accounts = accounts if isinstance(accounts, list) else None
+            next_lease = (marked or {}).get("next_lease")
+            next_lease = next_lease if isinstance(next_lease, dict) else None
             message = format_usage_limit_message(
                 code_provider=code_provider,
                 resets_at_iso=resets_at_iso,
                 facts=code_session_facts,
+                local_place=local_place,
+                accounts=accounts,
+                next_lease=next_lease,
+            )
+            user_message = format_usage_limit_user_message(
+                code_provider=code_provider,
+                resets_at_iso=resets_at_iso,
                 local_place=local_place,
             )
             code_agent = build_code_agent_metadata(
                 target_meta=code_agent_meta,
                 task_id=task_id,
                 provider=code_provider,
-                state="failed",
+                state="paused",
                 started_at=start_time,
                 ended_at=safe_time(),
                 facts=code_session_facts,
-                failure_message=message,
+                failure_message=user_message,
             )
             await save_claude_code_message(
                 agent_id=agent_id,
                 title="Code agent hit a usage limit",
                 task_id=task_id,
-                message=message,
+                message=user_message,
                 status=MessageStatus.FINISHED,
                 action_type="usage_limit",
                 tool_call_id=tool_call_id,
@@ -2987,6 +3084,8 @@ async def spawn_claude_code_activity(
                     "resets_at": resets_at_iso,
                     "limit_type": usage_limit.get("limit_type"),
                     "credential_marked": (marked or {}).get("marked"),
+                    "accounts": accounts,
+                    "next_lease": next_lease,
                 },
                 # A Mac run has no code session: its retry targets the same Mac folder.
                 "retry": (
@@ -3282,6 +3381,16 @@ async def spawn_claude_code_activity(
                     )
             raise
 
+        # A user pause is resumable: the chip ends paused, never failed.
+        paused_code_agent = build_code_agent_metadata(
+            target_meta=code_agent_meta,
+            task_id=task_id,
+            provider=code_provider,
+            state="paused",
+            started_at=start_time,
+            ended_at=safe_time(),
+            facts=code_session_facts,
+        )
         if task_id:
             try:
                 # Persist terminal output before closing (skip if already written)
@@ -3317,15 +3426,7 @@ async def spawn_claude_code_activity(
                     action_type="task_complete",
                     tool_call_id=tool_call_id,
                     code_provider=code_provider,
-                    code_agent=build_code_agent_metadata(
-                        target_meta=code_agent_meta,
-                        task_id=task_id,
-                        provider=code_provider,
-                        state="paused",
-                        started_at=start_time,
-                        ended_at=safe_time(),
-                        facts=code_session_facts,
-                    ),
+                    code_agent=paused_code_agent,
                 )
 
                 await close_e2b_session(task_id=task_id, code_provider=code_provider, reason="cancel")
@@ -3343,6 +3444,7 @@ async def spawn_claude_code_activity(
             "message": "Claude Code agent cancelled by user",
             "code_provider": code_provider,
             "code_session": code_session_facts,
+            "code_agent": paused_code_agent,
         }
 
     except Exception as e:

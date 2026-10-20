@@ -374,6 +374,8 @@ async function detectAndMarkExhaustion(taskId: string, output: string): Promise<
         rateLimitedUntil: resetUntil,
         cooldownMs,
         failureReason: revokedOauth ? 'claude_code_auth_error' : undefined,
+        // Only the account this task ran on; the user's other accounts stay leasable.
+        ...(integrationId !== '' ? { integrationId } : {}),
       });
     }
   } else if (tokenSource === 'anthropic') {

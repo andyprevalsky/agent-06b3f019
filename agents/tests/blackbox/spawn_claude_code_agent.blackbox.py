@@ -2258,6 +2258,9 @@ async def test_run_agentic_loop_post_result_exit_grace_breaks():
         patch.object(service, "ClaudeCodeWsClient", ChattyAfterResult),
         patch.object(service, "SDK_POST_RESULT_EXIT_GRACE_S", 0.15),
         patch.object(service, "SILENCE_TIMEOUT_S", 0.01),
+        # The elapsed bound measures the grace, not the transcript write: a
+        # loaded host took 3s to open that HTTP client (run 3 of 5, 2026-10-20).
+        patch.object(service, "save_code_transcript_batch", AsyncMock(return_value=True)),
         patch("temporalio.activity.heartbeat"),
     ):
         t0 = aio.get_event_loop().time()
@@ -2931,6 +2934,9 @@ async def test_spawn_activity_cancelled_cleanup():
         )
     assert result["status"] == "cancelled"
     assert result["task_id"] == "t"
+    # The workflow's chip row reuses this block: a user pause is resumable.
+    assert (result["code_agent"]["task_id"], result["code_agent"]["state"]) == ("t", "paused"), result
+    assert result["code_agent"]["ended_at"], result["code_agent"]
     close_session.assert_awaited_once()
     fake_collector.stop.assert_awaited()
 
@@ -3228,15 +3234,30 @@ async def test_cc_execute_tool_emits_assistant_events_for_files():
     assert finished_index < first_assistant_index
 
 
-async def test_cc_execute_tool_cancelled_status_yields_error():
-    """Activity status='cancelled' yields chip-terminal task_complete with task_id.
+def _paused_row(events):
+    """The single user-pause row: FINISHED, resumable, never an ERROR (W5b contract)."""
+    from tools.base import MessageStatus
+
+    assert not any(getattr(e, "status", None) == MessageStatus.ERROR for e in events), _cc_titles(events)
+    rows = [e for e in events if getattr(e, "title", None) == "Code session paused"]
+    assert len(rows) == 1, _cc_titles(events)
+    row = rows[0]
+    assert row.status == MessageStatus.FINISHED, row.status
+    assert row.metadata.get("session_paused") is True, row.metadata
+    assert row.metadata["code_agent"]["state"] == "paused", row.metadata["code_agent"]
+    assert row.metadata["code_agent"]["ended_at"], row.metadata["code_agent"]
+    return row
+
+
+async def test_cc_execute_tool_cancelled_status_yields_paused_row():
+    """Activity status='cancelled' yields a chip-terminal paused task_complete with task_id.
 
     ClaudeCodeChip only leaves spinning_up when a task-scoped message has
     action_type=task_complete. Pause/cancel must emit task_complete (not
-    session_cancelled) and include task_id so the chip can match it.
+    session_cancelled) and include task_id so the chip can match it. A user
+    pause is resumable, so the row is FINISHED with code_agent.state 'paused'.
     """
     from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
-    from tools.base import MessageStatus
 
     handle = _FakeActivityHandle(
         result={
@@ -3260,20 +3281,20 @@ async def test_cc_execute_tool_cancelled_status_yields_error():
     finally:
         restore()
 
-    error = next(e for e in events if getattr(e, "status", None) == MessageStatus.ERROR)
-    assert "Cancelled" in error.title or "cancelled" in error.title.lower()
-    assert error.metadata.get("action_type") == "task_complete"
-    assert error.metadata.get("task_id") == "task-cancel-1"
-    assert error.metadata.get("success") is False
-    assert error.metadata.get("toolName") == "spawn_claude_code_agent"
+    row = _paused_row(events)
+    assert row.metadata.get("action_type") == "task_complete"
+    assert row.metadata.get("task_id") == "task-cancel-1"
+    assert row.metadata.get("success") is False
+    assert row.metadata.get("toolName") == "spawn_claude_code_agent"
+    assert row.metadata["code_agent"]["task_id"] == "task-cancel-1", row.metadata["code_agent"]
+    assert row.metadata["code_agent"]["provider"] == "claude", row.metadata["code_agent"]
 
 
 async def test_cc_execute_tool_cancelled_error_path():
-    """CancelledError on activity_handle await yields Cancelled Session ERROR."""
+    """CancelledError on activity_handle await yields the paused task_complete row."""
     import asyncio as asyncio_mod
 
     from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
-    from tools.base import MessageStatus
 
     handle = _FakeActivityHandle(raise_exc=asyncio_mod.CancelledError())
     fake = _FakeCCWorkflow(handle)
@@ -3290,12 +3311,11 @@ async def test_cc_execute_tool_cancelled_error_path():
     finally:
         restore()
 
-    error = next(e for e in events if getattr(e, "status", None) == MessageStatus.ERROR)
-    assert "Cancelled" in error.title
+    row = _paused_row(events)
     # Await raised before activity returned task_id — still emit task_complete so
     # MessageBubble keeps routing through ClaudeCodeChip (session_cancelled does not).
-    assert error.metadata.get("action_type") == "task_complete"
-    assert error.metadata.get("success") is False
+    assert row.metadata.get("action_type") == "task_complete"
+    assert row.metadata.get("success") is False
 
 
 async def test_cc_execute_tool_generic_exception_yields_error():
@@ -3549,9 +3569,8 @@ def test_code_agent_activity_has_no_deadline_and_no_attempt_cap():
 
 
 async def test_cc_execute_tool_paused_cancels_activity():
-    """is_paused=True triggers activity_handle.cancel() and chip-terminal cancel."""
+    """is_paused=True triggers activity_handle.cancel() and a chip-terminal paused row."""
     from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
-    from tools.base import MessageStatus
 
     class _PausedHandle(_FakeActivityHandle):
         def done(self):
@@ -3577,12 +3596,12 @@ async def test_cc_execute_tool_paused_cancels_activity():
         restore()
 
     assert handle._cancelled is True
-    error = next(e for e in events if getattr(e, "status", None) == MessageStatus.ERROR)
-    assert "Cancelled" in error.title
-    assert error.metadata.get("action_type") == "task_complete"
-    assert error.metadata.get("task_id") == "task-pause-1"
-    assert error.metadata.get("code_provider") == "codex"
-    assert error.metadata.get("success") is False
+    row = _paused_row(events)
+    assert row.metadata.get("action_type") == "task_complete"
+    assert row.metadata.get("task_id") == "task-pause-1"
+    assert row.metadata.get("code_provider") == "codex"
+    assert row.metadata.get("success") is False
+    assert row.metadata["code_agent"]["provider"] == "codex", row.metadata["code_agent"]
 
 
 async def _run_all_tests():
@@ -3807,7 +3826,7 @@ async def _run_all_tests():
     )
     await r.record_async("cc_exec_incomplete", test_cc_execute_tool_non_boolean_success_is_incomplete)
     await r.record_async("cc_exec_files", test_cc_execute_tool_emits_assistant_events_for_files)
-    await r.record_async("cc_exec_cancel_status", test_cc_execute_tool_cancelled_status_yields_error)
+    await r.record_async("cc_exec_cancel_status", test_cc_execute_tool_cancelled_status_yields_paused_row)
     await r.record_async("cc_exec_cancel_error", test_cc_execute_tool_cancelled_error_path)
     await r.record_async("cc_exec_generic_exc", test_cc_execute_tool_generic_exception_yields_error)
     await r.record_async(
@@ -3918,6 +3937,14 @@ async def _run_all_tests():
     await r.record_async(
         "cc_manager_closes_sandbox_when_last_attempt_times_out",
         test_cc_manager_closes_the_sandbox_when_the_last_attempt_times_out,
+    )
+    await r.record_async(
+        "cc_manager_user_pause_row_carries_activity_code_agent",
+        test_cc_manager_user_pause_row_carries_activity_code_agent,
+    )
+    await r.record_async(
+        "cc_manager_usage_limit_row_is_paused_with_user_text",
+        test_cc_manager_usage_limit_row_is_paused_with_user_text,
     )
     teardown_mock()
     return r.all_passed
@@ -5011,7 +5038,7 @@ async def test_cc_manager_reattaches_after_worker_drain_on_same_queue():
     titles = _cc_titles(events)
     assert titles.count("Starting Claude Code sandbox") == 1, titles
     assert titles.count("\u2713 Task Completed") == 1, titles
-    assert "Claude Code Session Cancelled" not in titles, titles
+    assert "Code session paused" not in titles, titles
 
 
 async def test_cc_manager_parks_code_session_for_generation_handoff():
@@ -5098,7 +5125,7 @@ def _cancelled_before_start():
 
 
 def _cancel_chip(events):
-    return next(e for e in events if getattr(e, "title", None) == "Claude Code Session Cancelled")
+    return _paused_row(events)
 
 
 async def test_cc_manager_pause_after_drain_closes_the_detached_sandbox():
@@ -5124,6 +5151,14 @@ async def test_cc_manager_pause_after_drain_closes_the_detached_sandbox():
     assert fake.closed_sessions == [_DRAINED_SESSION], fake.closed_sessions
     chip = _cancel_chip(events)
     assert chip.metadata["task_id"] == "cc-task-1" and chip.metadata["action_type"] == "task_complete", chip.metadata
+    # No activity returned a block: the detached session supplies the identity.
+    code_agent = chip.metadata["code_agent"]
+    assert (code_agent["task_id"], code_agent["provider"], code_agent["started_at"]) == (
+        "cc-task-1",
+        "claude",
+        "1970-01-01T00:01:40Z",
+    ), code_agent
+    assert code_agent["ended_at"] == "2026-10-20T00:00:00Z", code_agent
     assert "\u2713 Task Completed" not in _cc_titles(events), _cc_titles(events)
 
 
@@ -5165,6 +5200,113 @@ async def test_cc_manager_leaves_cleanup_to_an_activity_that_held_the_sandbox():
 
     assert fake.closed_sessions == [], fake.closed_sessions
     assert _cancel_chip(events).metadata["task_id"] == "cc-task-1", _cancel_chip(events).metadata
+
+
+async def test_cc_manager_user_pause_row_carries_activity_code_agent():
+    """A user pause ends the chip paused with the activity's own code_agent block.
+
+    The row was an ERROR "Claude Code Session Cancelled" whose code_agent held
+    only the target, so the UI rendered a resumable pause as a failure with no
+    task id, branch or start time.
+    """
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+
+    activity_block = {
+        "task_id": "cc-task-1",
+        "provider": "codex",
+        "target": "cloud",
+        "branch": "rose/fix-header-0a1b2c3d",
+        "base_branch": "main",
+        "state": "paused",
+        "started_at": "2026-10-19T23:00:00Z",
+        "ended_at": "2026-10-19T23:30:00Z",
+    }
+    cancelled = {
+        "status": "cancelled",
+        "task_id": "cc-task-1",
+        "message": "Claude Code agent cancelled by user",
+        "code_provider": "codex",
+        "code_agent": dict(activity_block),
+    }
+    fake = _SequencedCCWorkflow(cancelled)
+    wf = _HandoffCCWorkflowInstance()
+    wf.is_paused = True
+    restore = _patch_cc_workflow(fake)
+    try:
+        events = await _collect_cc_events(SpawnClaudeCodeAgentManager().execute_tool(wf, {"goal": "g"}, "tc-up"))
+    finally:
+        restore()
+
+    row = _paused_row(events)
+    assert row.metadata["code_agent"] == activity_block, row.metadata["code_agent"]
+    assert row.metadata["task_id"] == "cc-task-1" and row.metadata["action_type"] == "task_complete", row.metadata
+    assert row.metadata["success"] is False and row.metadata["code_provider"] == "codex", row.metadata
+    assert row.message == "User paused the agent", row.message
+
+
+async def test_cc_manager_usage_limit_row_is_paused_with_user_text():
+    """The usage-limit row is a resumable pause: user text for the UI, the retry for the parent.
+
+    The row carried code_agent.state 'failed' with the parent's retry
+    instruction as failure_message, and no session_paused flag.
+    """
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+    from tools.base import MessageStatus
+
+    user_text = "Paused: Claude usage limit reached (resets 4:50 PM UTC). Work is saved."
+    instruction = (
+        "Code agent stopped: the Claude Code usage limit was reached (resets 2026-10-20T16:50:00.000Z). "
+        "Its work is saved on branch rose/a-1.\nRespawn with spawn_agent(type='code', code_session_id='cs-1', "
+        "goal=<the same goal>) to continue: ..."
+    )
+    usage_limit = {"provider": "claude", "resets_at": "2026-10-20T16:50:00.000Z", "limit_type": "five_hour"}
+    retry = {"tool": "spawn_agent", "type": "code", "code_session_id": "cs-1"}
+    limited = {
+        "status": "usage_limit",
+        "success": False,
+        "failure_kind": "usage_limit",
+        "retryable": True,
+        "message": instruction,
+        "usage_limit": usage_limit,
+        "retry": retry,
+        "task_id": "cc-task-1",
+        "output_files": [],
+        "code_provider": "claude",
+        "code_agent": {
+            "task_id": "cc-task-1",
+            "provider": "claude",
+            "target": "cloud",
+            "branch": "rose/a-1",
+            "base_branch": "main",
+            "state": "paused",
+            "started_at": "2026-10-20T12:00:00Z",
+            "ended_at": "2026-10-20T12:30:00Z",
+            "failure_message": user_text,
+        },
+    }
+    fake = _SequencedCCWorkflow(limited)
+    restore = _patch_cc_workflow(fake)
+    try:
+        events = await _collect_cc_events(
+            SpawnClaudeCodeAgentManager().execute_tool(_HandoffCCWorkflowInstance(), {"goal": "g"}, "tc-ul")
+        )
+    finally:
+        restore()
+
+    assert not any(getattr(e, "status", None) == MessageStatus.ERROR for e in events), _cc_titles(events)
+    row = next(e for e in events if getattr(e, "title", None) == "Code agent hit a usage limit")
+    assert row.status == MessageStatus.FINISHED, row.status
+    assert row.message == instruction, "the parent still reads the exact retry"
+    meta = row.metadata
+    assert meta["session_paused"] is True, meta
+    assert (meta["failure_kind"], meta["retryable"], meta["usage_limit"], meta["retry"]) == (
+        "usage_limit",
+        True,
+        usage_limit,
+        retry,
+    ), meta
+    assert meta["code_agent"]["state"] == "paused", meta["code_agent"]
+    assert meta["code_agent"]["failure_message"] == user_text, meta["code_agent"]
 
 
 def _timed_out_on_last_attempt(*heartbeat_details):

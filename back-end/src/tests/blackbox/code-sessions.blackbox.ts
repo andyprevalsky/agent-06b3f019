@@ -52,6 +52,7 @@ import {
 import { markPaused } from '../../providers/codeSessions/store';
 import { closeClaudeCodeSession } from '../../providers/e2bCloseSession';
 import { acquireCodeSessionSandbox } from '../../providers/e2bCodeSessionSandbox';
+import { testResumableCloseListsPaused } from './code-sessions-list.cases';
 
 config();
 
@@ -400,6 +401,17 @@ test('close checkpoints and pauses the sandbox, never kills it; a dead sandbox f
     patchConnect(originalConnect);
   }
 });
+
+test('the code-agents list reports a resumable close as PAUSED with its question; a newer task, a normal close or retirement do not', () =>
+  testResumableCloseListsPaused({
+    userA,
+    fixtureDir,
+    http,
+    seedWorkspace,
+    fakeSandbox,
+    patchConnect,
+    restoreConnect: () => patchConnect(originalConnect),
+  }));
 
 test('sessions are owner-scoped: user B cannot read, retire or resume user A’s session', async () => {
   const session = await newSessionRow();

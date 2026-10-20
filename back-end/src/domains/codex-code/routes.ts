@@ -6,7 +6,7 @@ import type { FilePointer } from '../../providers/storage';
 import { createSessionSchema, closeSessionSchema, codeTaskUsageLimitSchema } from './types';
 import * as service from './service';
 import { codeSessionHttpError, keepAliveCodeTask } from '../../providers/codeSessions/spawn';
-import { markCodeTaskUsageLimited, parseResetsAt } from '../../providers/codeSessions/usageLimit';
+import { parseResetsAt, reportCodeTaskUsageLimit } from '../../providers/codeSessions/usageLimit';
 import { GitHubAccessDeniedError, MissingUserIdError } from './service';
 import {
   LocalTargetUnavailableError,
@@ -59,9 +59,7 @@ router.post(
       return;
     }
     const { resets_at } = codeTaskUsageLimitSchema.parse(req.body ?? {});
-    const resetsAt = parseResetsAt(resets_at);
-    const result = await markCodeTaskUsageLimited(req.params.taskId, 'codex', resetsAt);
-    res.json({ ...result, resets_at: resetsAt?.toISOString() ?? null });
+    res.json(await reportCodeTaskUsageLimit(req.params.taskId, 'codex', parseResetsAt(resets_at)));
   })
 );
 

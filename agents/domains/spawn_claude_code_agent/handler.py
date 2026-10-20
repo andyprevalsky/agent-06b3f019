@@ -30,6 +30,7 @@ from domains.spawn_claude_code_agent.config import (
 from domains.spawn_claude_code_agent.service import (
     close_detached_code_session_activity,
     code_session_record,
+    iso_utc,
     resolve_code_agent_provider_activity,
     spawn_claude_code_activity,
 )
@@ -226,6 +227,40 @@ def _local_target_unavailable(error: BaseException) -> Optional[ApplicationError
 def _failed_code_agent(target_info: Optional[Dict[str, Any]], message: str) -> Dict[str, Any]:
     """``metadata.code_agent`` for a run that failed before or outside the activity result."""
     return {**code_agent_metadata(target_info), "state": "failed", "failure_message": message}
+
+
+def _paused_code_agent(
+    target_info: Optional[Dict[str, Any]],
+    result: Optional[Dict[str, Any]],
+    code_session: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """``metadata.code_agent`` for a user pause: resumable, never failed.
+
+    The activity's own block when it returned one; otherwise (cancelled while
+    detached, or before an attempt took over) the detached session's identity.
+    """
+    block: Dict[str, Any] = dict(code_agent_metadata(target_info))
+    activity_block = (result or {}).get("code_agent")
+    if isinstance(activity_block, dict):
+        block.update(activity_block)
+    else:
+        session = code_session or {}
+        provider = (result or {}).get("code_provider") or session.get("code_provider")
+        started_at = session.get("started_at")
+        block.update(
+            {
+                "task_id": (result or {}).get("task_id") or session.get("task_id"),
+                "provider": "codex" if provider == "codex" else "claude",
+                "branch": session.get("branch"),
+                "base_branch": session.get("merge_target"),
+                "started_at": iso_utc(started_at) if isinstance(started_at, (int, float)) else None,
+            }
+        )
+    block["state"] = "paused"
+    if not block.get("ended_at"):
+        # workflow.now() keeps the timestamp deterministic on replay.
+        block["ended_at"] = iso_utc(workflow.now().timestamp())
+    return block
 
 
 def _resumed_target(code_session: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -619,11 +654,13 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 # Chip terminality requires action_type=task_complete + task_id.
                 # session_cancelled without task_id leaves ClaudeCodeChip stuck on
                 # "Spinning up..." after pause (hub agent 182cf2ab / task 45ce853d).
+                # A user pause is resumable (W5b contract): FINISHED + paused.
                 cancel_metadata = {
                     "toolName": "spawn_claude_code_agent",
                     "action_type": "task_complete",
                     "success": False,
-                    "code_agent": code_agent_metadata(target_info),
+                    "session_paused": True,
+                    "code_agent": _paused_code_agent(target_info, result, code_session),
                 }
                 if result:
                     if result.get("task_id"):
@@ -639,9 +676,9 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     )
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
-                    title="Claude Code Session Cancelled",
+                    title="Code session paused",
                     message="User paused the agent",
-                    status=MessageStatus.ERROR,
+                    status=MessageStatus.FINISHED,
                     metadata=cancel_metadata,
                 )
                 return
@@ -691,6 +728,8 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             usage_limited = result.get("status") == CODE_AGENT_USAGE_LIMIT_STATUS
             if usage_limited:
                 # C15: structured, retryable error; the message has the exact retry.
+                # The session is saved and paused, so the chip reads resumable.
+                completed_metadata["session_paused"] = True
                 completed_metadata["failure_kind"] = "usage_limit"
                 completed_metadata["retryable"] = True
                 completed_metadata["usage_limit"] = result.get("usage_limit")

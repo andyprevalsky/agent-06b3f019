@@ -1001,6 +1001,10 @@ async def mock_spawn_claude_code_activity(
     gpt_token_pool_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     resume_session: Optional[Dict[str, Any]] = None,
+    code_session_request: Optional[Dict[str, Any]] = None,
+    target: str = "cloud",
+    local_device_id: Optional[str] = None,
+    local_device_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Claude Code run that a deploy drains once mid-run, then finishes in the same sandbox.
 
@@ -1785,6 +1789,7 @@ async def _run_parked_tool_cutover_tests() -> List[tuple]:
             workflow_id = _next_wf_id("cutover-code")
             handle = None
             try:
+                _assert_code_mock_mirrors_activity()
                 _opt_in_cutover_agent(
                     agent_id, workflow_id, {"new_queue": CUTOVER_NEW_QUEUE}, tool_call=CUTOVER_CODE_TOOL_CALL
                 )
@@ -1799,6 +1804,18 @@ async def _run_parked_tool_cutover_tests() -> List[tuple]:
                 results.append((name, e))
 
     return results
+
+
+def _assert_code_mock_mirrors_activity() -> None:
+    import inspect
+
+    from domains.spawn_claude_code_agent.service import spawn_claude_code_activity
+
+    # A drifted mock signature raises TypeError on every attempt, and the
+    # unlimited spawn retry policy retries it until the test's wait expires.
+    assert list(inspect.signature(mock_spawn_claude_code_activity).parameters) == list(
+        inspect.signature(spawn_claude_code_activity).parameters
+    ), "mock_spawn_claude_code_activity must mirror the real activity signature"
 
 
 def _assert_code_agent_reattached_on_new_generation(agent_id: str) -> None:

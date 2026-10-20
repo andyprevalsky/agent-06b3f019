@@ -98,15 +98,24 @@ const codeSessionSelect = {
 
 /** Most root ids one code-agents list request may name. */
 export const CODE_AGENT_LIST_MAX_ROOTS = 50;
-const CODE_AGENT_LIST_MAX_ROWS = 500;
+/** Newest code agents listed per requested root (so at most 50 x 50 rows). */
+export const CODE_AGENT_LIST_PER_ROOT = 50;
 
 export interface RootCodeAgentRow extends GraphCodeSessionRow {
   rootAgentId: string;
+  codeSessionId: string | null;
+  /** close | failure | cancel | idle | awaiting_parent | usage_limit; null for legacy rows. */
+  closeReason: string | null;
+  awaitingParent: unknown;
+  /** The task is the newest of a code session that is not retired. */
+  latestOfLiveSession: boolean;
 }
 
 /**
- * Code agents of the caller's trees, one indexed join for every requested
- * root (Agent.busId = the root for every agent in a tree, the root included).
+ * Code agents of the caller's trees, newest first, at most
+ * CODE_AGENT_LIST_PER_ROOT per root: one query for every requested root
+ * (Agent.busId = the root for every agent in a tree, the root included), so a
+ * busy tree never pushes its newest agents, or another root's, off the list.
  */
 export async function listCodeAgentsForRoots(
   userId: string,
@@ -114,13 +123,24 @@ export async function listCodeAgentsForRoots(
 ): Promise<RootCodeAgentRow[]> {
   if (rootIds.length === 0) return [];
   return prisma.$queryRaw<RootCodeAgentRow[]>`
-    SELECT c.id, c."agentId", c.status::text AS status, c.goal, c."streamUrl", c."createdAt",
-           c."codeProvider", a."busId" AS "rootAgentId"
-    FROM "ClaudeCodeSession" c
-    JOIN "Agent" a ON a.id = c."agentId"
-    WHERE a."userId" = ${userId} AND a."busId" = ANY(${rootIds}::text[])
-    ORDER BY c."createdAt" ASC
-    LIMIT ${CODE_AGENT_LIST_MAX_ROWS}
+    SELECT r.id, r."agentId", r.status, r.goal, r."streamUrl", r."createdAt", r."codeProvider",
+           r."rootAgentId", r."codeSessionId", r."closeReason", r."awaitingParent",
+           (cs.id IS NOT NULL AND cs.state <> 'RETIRED' AND NOT EXISTS (
+             SELECT 1 FROM "ClaudeCodeSession" n
+             WHERE n."codeSessionId" = r."codeSessionId" AND n."createdAt" > r."createdAt"
+           )) AS "latestOfLiveSession"
+    FROM (
+      SELECT c.id, c."agentId", c.status::text AS status, c.goal, c."streamUrl", c."createdAt",
+             c."codeProvider", c."codeSessionId", c."closeReason", c."awaitingParent",
+             a."busId" AS "rootAgentId",
+             ROW_NUMBER() OVER (PARTITION BY a."busId" ORDER BY c."createdAt" DESC, c.id DESC) AS rank
+      FROM "ClaudeCodeSession" c
+      JOIN "Agent" a ON a.id = c."agentId"
+      WHERE a."userId" = ${userId} AND a."busId" = ANY(${rootIds}::text[])
+    ) r
+    LEFT JOIN "CodeSession" cs ON cs.id = r."codeSessionId"
+    WHERE r.rank <= ${CODE_AGENT_LIST_PER_ROOT}
+    ORDER BY r."createdAt" DESC, r.id DESC
   `;
 }
 

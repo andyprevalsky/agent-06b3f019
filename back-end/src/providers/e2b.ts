@@ -50,6 +50,7 @@ import { applyPreviewUrlEnv, autostartRosePreview } from './codePreview/sandbox'
 import { isRoseRepoUrl } from './codePreview/preview';
 import { isRoseDevUser } from '../utils/roseDevAccess';
 import {
+  claudeTaskIntegrationId,
   isRefreshOnlyOauthEnvelope,
   resolveClaudeCodeAuthEnvs,
   resolveClaudeCodeSandboxApiKey,
@@ -381,8 +382,7 @@ async function createClaudeCodeSessionUnlocked(
       userUiWorkspace,
       projectWorkspace,
       claudeTokenSource,
-      claudeTokenIntegrationId:
-        credentialMeta?.source === 'pool' ? (credentialMeta.poolTokenId ?? null) : null,
+      claudeTokenIntegrationId: claudeTaskIntegrationId(credentialMeta),
     });
     if (local) return local;
     throw err;
@@ -449,8 +449,7 @@ async function createClaudeCodeSessionUnlocked(
       goal,
       status: 'ACTIVE',
       claudeTokenSource,
-      claudeTokenIntegrationId:
-        credentialMeta?.source === 'pool' ? (credentialMeta.poolTokenId ?? null) : null,
+      claudeTokenIntegrationId: claudeTaskIntegrationId(credentialMeta),
       ...codeSessionTaskFields(codeSession, 'claude'),
       projectId: projectWorkspace?.project.id ?? null,
     },

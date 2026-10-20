@@ -45,7 +45,10 @@ import { prisma } from '../../providers/database';
 import { mintAgentGraphToken } from '../../providers/agentGraph/token';
 import { codeSessionTurnToken } from '../../providers/codeSessionTurns';
 import { deterministicMessageId } from '../../providers/messageIdempotency';
-import { testCodeAgentProviderInTreeAndBatchedList } from './agent-graph-code-agents.cases';
+import {
+  testCodeAgentListIsNewestFirstPerRoot,
+  testCodeAgentProviderInTreeAndBatchedList,
+} from './agent-graph-code-agents.cases';
 
 config();
 
@@ -625,6 +628,17 @@ const cases: Array<[string, () => Promise<void>]> = [
     'code agents report their provider in the tree and the batched list',
     () =>
       testCodeAgentProviderInTreeAndBatchedList({
+        baseUrl: BASE_URL,
+        apiKey: API_KEY,
+        userA,
+        userB,
+        ids,
+      }),
+  ],
+  [
+    'the batched code-agent list is newest first, at most 50 per root',
+    () =>
+      testCodeAgentListIsNewestFirstPerRoot({
         baseUrl: BASE_URL,
         apiKey: API_KEY,
         userA,
