@@ -290,7 +290,8 @@ class WorldModelLaunch(unittest.TestCase):
         # 2026-10-20 re-refreshing a donor that already held a ~16 GB native tree
         # failed its headroom check (7.1 GB free, 20.5 GB needed), so a corrupt
         # native model could never be replaced. The previous tree is dropped only
-        # when the staged pull would not otherwise fit.
+        # when the staged pull would not otherwise fit, and only after proving the
+        # drop frees enough: a refresh that cannot fit keeps the previous tree.
         fragment = re.search(r'^    NATIVE_REFRESH_CMD="set -e\n.*?^ {4}# Legacy', source, re.M | re.S).group(0)
         fragment = fragment[:fragment.rfind("    # Legacy")]
         fake_python = (
@@ -327,7 +328,9 @@ class WorldModelLaunch(unittest.TestCase):
                 (native / "models/rose-archive/experiential.json").write_text("corrupt-previous")
                 calls = scratch / "calls.jsonl"
                 result = run(
-                    "gosu() { shift; \"$@\"; }; chown() { :; }; rsync() { return 1; }; sync() { :; };\n" + DF_FAKE + fragment
+                    "gosu() { shift; \"$@\"; }; chown() { :; }; rsync() { return 1; }; sync() { :; };\n"
+                    # The previous tree occupies exactly what dropping it frees.
+                    "du() { printf '%s\\t%s\\n' \"$((DF_AVAIL_FREED - DF_AVAIL))\" \"${@: -1}\"; };\n" + DF_FAKE + fragment
                     + '\neval "$NATIVE_REFRESH_CMD"',
                     {"REMOTE_REPO": str(repo), "REMOTE_WMH": str(world), "REMOTE_WMH_NATIVE": str(native),
                      "WMH_MODEL_NAME": "rose-archive", "WMH_CACHE_NAME": "rose-archive-serving",
@@ -340,8 +343,9 @@ class WorldModelLaunch(unittest.TestCase):
                 self.assertEqual("::WMH-REFRESH-DONE::" in result.stdout, ok)
                 pulls = [json.loads(line) for line in calls.read_text().splitlines() if '"pull"' in line]
                 self.assertEqual(len(pulls), 1 if ok else 0)
-                if ok:
-                    self.assertEqual((native / "models/rose-archive/experiential.json").read_text(), "fresh")
+                self.assertEqual((native / "models/rose-archive/experiential.json").read_text(),
+                                 "fresh" if ok else "corrupt-previous")
+                self.assertEqual("dropping the previous native WMH tree" in result.stdout, ok)
                 self.assertEqual((world / "models/rose-r2-archive-anthropic/model.json").read_text(), "donor-legacy")
 
     def test_native_refresh_restores_a_lost_legacy_model_beside_the_native_one(self):

@@ -3305,10 +3305,15 @@ gosu rose env HOME=/home/rose UV_PYTHON_INSTALL_DIR='$REMOTE_UV_PYTHON' UV_CACHE
 cd agents
 # A streaming pull stages beside its target and needs the cache's full size free
 # there (the previous tree stays until the swap): fail before pulling otherwise.
+# An optional third path counts as free: the caller would delete it first.
 wmh_require_room() {
-    local need avail
+    local need avail reclaim=0
     need=\$(PYTHONDONTWRITEBYTECODE=1 venv/bin/python -u -m benchmarks.wmh_build_cache status --name \"\$1\" | venv/bin/python -c 'import json, sys; print(int(json.load(sys.stdin)[\"plaintext_bytes\"]))') || { echo \"cannot read the published size of WMH cache \$1\" >&2; return 1; }
     avail=\$(df -PB1 \"\$(dirname \"\$2\")\" | awk 'NR == 2 { print \$4 }')
+    if [ -n \"\${3:-}\" ]; then
+        reclaim=\$(du -sB1 \"\$3\" | awk 'NR == 1 { print \$1 }') && [ -n \"\$reclaim\" ] || { echo \"cannot measure \$3\" >&2; return 1; }
+        avail=\$((\${avail:-0} + reclaim))
+    fi
     if ! [ \"\$avail\" -ge \$((need + 1073741824)) ] 2>/dev/null; then
         echo \"insufficient donor disk for WMH cache \$1: needs \$need bytes + 1 GiB margin beside \$2, \${avail:-unknown} bytes free\" >&2
         return 1
@@ -3335,9 +3340,11 @@ rm -rf '$REMOTE_WMH_NATIVE.incoming' '$REMOTE_WMH_NATIVE.incoming'.replaced-* '$
 # A previous native tree (~16 GB) and its staged replacement do not both fit a
 # 40 GB donor volume. This maintenance donor serves nothing and its snapshot is
 # published only on success (fleets keep forking the previous snapshot until
-# then), so drop the previous tree when the staged pull would not fit.
+# then), so drop the previous tree when the staged pull would not fit. Prove the
+# drop frees enough first: a refresh that cannot fit keeps the previous tree.
 if ! wmh_require_room '$WMH_CACHE_NAME' '$REMOTE_WMH_NATIVE.incoming'; then
     [ -e '$REMOTE_WMH_NATIVE' ] || exit 1
+    wmh_require_room '$WMH_CACHE_NAME' '$REMOTE_WMH_NATIVE.incoming' '$REMOTE_WMH_NATIVE'
     echo 'dropping the previous native WMH tree at $REMOTE_WMH_NATIVE to make room for its replacement'
     rm -rf '$REMOTE_WMH_NATIVE'
     wmh_require_room '$WMH_CACHE_NAME' '$REMOTE_WMH_NATIVE.incoming'
