@@ -398,6 +398,7 @@ model User {
   /// Active published rose_user_ui version (UserUiVersion.id); null = stock UI.
   activeUiVersionId           String?
   uiVersions                  UserUiVersion[]
+  phoneDevices                PhoneDevice[]
   projects                    Project[]
 
   @@index([userId])
@@ -739,6 +740,52 @@ model Integration {
   @@index([type])
   @@index([status])
   @@index([poolingEnabled, rateLimitedUntil])
+}
+
+/// Live sync progress for ONE connected account of an integration.
+///
+/// Keyed like Integration: `provider` is the Integration `name` slug and
+/// `accountId` the provider-side account ("" = the legacy/default account; the
+/// API spells it "default"). Exactly one row per account, overwritten in place
+/// by each batch, so a 1M-item sync costs O(batches) writes and this table
+/// grows with accounts, never with items. Writes are serialized per account and
+/// coalesced to at most one per second while a run is syncing.
+///
+/// `total` is null when the writer does not know it (indeterminate progress);
+/// `pct` is derived from done/total on the server and is never computed from a
+/// guessed total.
+model IntegrationSyncProgress {
+  id            String    @id @default(uuid())
+  userId        String
+  provider      String
+  accountId     String    @default("")
+  /// Writer-chosen id of the sync run this row describes. A new id starts a new run.
+  runId         String
+  /// Recently superseded run ids (newest first, capped). Late writes for these are stale.
+  retiredRunIds String[]  @default([])
+  /// Optional writer sequence within the run; lower or equal values are stale or replays.
+  seq           Int       @default(0)
+  /// "idle" | "syncing" | "synced" | "failed" | "needs_reconnect"
+  state         String    @default("idle")
+  /// Optional writer phase label (for example "uploading", "parsing"); counts reset per phase.
+  phase         String?
+  done          BigInt?
+  total         BigInt?
+  /// 0-100, one decimal. Derived from done/total; writer-supplied only while total is unknown.
+  pct           Float?
+  unit          String?
+  etaSec        Int?
+  lastError     String?
+  startedAt     DateTime  @default(now())
+  /// When the current run reached a terminal state; null while it is running.
+  finishedAt    DateTime?
+  /// Last time any run of this account finished "synced".
+  lastSyncedAt  DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@unique([userId, provider, accountId])
+  @@index([userId, updatedAt])
 }
 
 model ComputeTokenLineageLease {
@@ -1730,6 +1777,41 @@ model UserUiVersion {
   user       User     @relation(fields: [userId], references: [userId], onDelete: Cascade)
 
   @@index([userId, createdAt])
+}
+
+/// A phone attached to one of the user's Macs (Phase 1: an iPhone shown
+/// through macOS iPhone Mirroring and operated by the Rose Mac app). One row
+/// per (user, Mac); the Mac app upserts it as its presence heartbeat.
+///
+/// Exclusive control: at most one holder at a time (an agent or the user),
+/// recorded on this row and changed only by compare-and-set updates on
+/// `leaseId`. Holders keep the lease alive by heartbeat (no wall-clock run
+/// limit); a lapsed lease reads as free, so a dead holder never strands it.
+model PhoneDevice {
+  id             String    @id @default(uuid())
+  userId         String
+  /// Per-install hash of the Mac's hardware id (never the raw UUID).
+  macDeviceId    String
+  name           String
+  model          String?
+  /// 'iphone_mirroring' (the only Phase 1 kind).
+  kind           String    @default("iphone_mirroring")
+  /// Mac-reported: iPhone Mirroring is connected and showing the phone.
+  online         Boolean   @default(false)
+  lastSeenAt     DateTime
+  /// 'agent' | 'user' | null (free).
+  holderKind     String?
+  holderAgentId  String?
+  /// New on every change of holder; operations under a stale lease fail.
+  leaseId        String?
+  leaseExpiresAt DateTime?
+  /// Agent whose control the user took; it may reacquire after release.
+  resumeAgentId  String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  user           User      @relation(fields: [userId], references: [userId], onDelete: Cascade)
+
+  @@unique([userId, macDeviceId])
 }
 
 /// Slack #errors incident owned by one Rose RCA root agent. One row per error

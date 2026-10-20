@@ -1,0 +1,13 @@
+{
+  "id": "bugfix-js-pagination",
+  "kind": "bug fix with hidden failing test",
+  "language": "javascript",
+  "task": "Users report two pagination bugs: page 1 of the results skips the first ten items, and a list of 25 items only offers 2 pages. paginate() in src/paginate.js is documented by its JSDoc comment; make the implementation match that documentation completely (including the RangeError cases), keep the existing tests passing (run them with `node --test test/`), and add regression tests for the reported bugs.",
+  "hidden_tests": {
+    "dir": "hidden",
+    "commands": [
+      ["node", "--test", "test/paginate.test.js"],
+      ["node", "--test", "_hidden_tests/paginate.hidden.test.js"]
+    ]
+  }
+}

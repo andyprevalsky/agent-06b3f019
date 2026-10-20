@@ -3,7 +3,10 @@
  * publish its user's rose_user_ui bundle without holding a user session or the
  * backend API key.
  *
- *   ruip.<base64url(JSON {sub, scope, iat, exp})>.<base64url(HMAC-SHA256)>
+ *   ruip.<base64url(JSON {sub, scope, iat, exp, agt?})>.<base64url(HMAC-SHA256)>
+ *
+ * `agt` is the code agent whose session holds the token, so a publish can be
+ * announced on that agent's realtime channel (and its root's).
  *
  * The HMAC secret is USER_UI_TOKEN_SECRET, else a labelled derivation of
  * SUPABASE_JWT_SECRET (never BACKEND_API_KEY, and never the raw JWT secret, so
@@ -20,6 +23,7 @@ export interface UserUiPublishClaims {
   scope: string;
   iat: number;
   exp: number;
+  agt?: string;
 }
 
 function tokenSecret(): Buffer {
@@ -44,7 +48,7 @@ export function isUserUiPublishToken(token: string): boolean {
 /** Mint a token. `scope`/`ttlSeconds`/`nowSeconds` exist for tests of rejection paths. */
 export function mintUserUiPublishToken(
   userId: string,
-  options: { scope?: string; ttlSeconds?: number; nowSeconds?: number } = {}
+  options: { agentId?: string; scope?: string; ttlSeconds?: number; nowSeconds?: number } = {}
 ): { token: string; expiresAt: string } {
   const iat = options.nowSeconds ?? Math.floor(Date.now() / 1000);
   const exp = iat + (options.ttlSeconds ?? USER_UI_PUBLISH_TOKEN_TTL_SECONDS);
@@ -53,6 +57,7 @@ export function mintUserUiPublishToken(
     scope: options.scope ?? USER_UI_PUBLISH_SCOPE,
     iat,
     exp,
+    ...(options.agentId ? { agt: options.agentId } : {}),
   };
   const payload = Buffer.from(JSON.stringify(claims), 'utf8').toString('base64url');
   return {
@@ -62,7 +67,7 @@ export function mintUserUiPublishToken(
 }
 
 export type UserUiPublishTokenCheck =
-  | { ok: true; userId: string }
+  | { ok: true; userId: string; agentId: string | null }
   | { ok: false; reason: 'malformed' | 'signature' | 'scope' | 'expired' };
 
 export function verifyUserUiPublishToken(token: string): UserUiPublishTokenCheck {
@@ -87,5 +92,6 @@ export function verifyUserUiPublishToken(token: string): UserUiPublishTokenCheck
   }
   if (claims.scope !== USER_UI_PUBLISH_SCOPE) return { ok: false, reason: 'scope' };
   if (claims.exp <= Math.floor(Date.now() / 1000)) return { ok: false, reason: 'expired' };
-  return { ok: true, userId: claims.sub };
+  const agentId = typeof claims.agt === 'string' && claims.agt.length > 0 ? claims.agt : null;
+  return { ok: true, userId: claims.sub, agentId };
 }

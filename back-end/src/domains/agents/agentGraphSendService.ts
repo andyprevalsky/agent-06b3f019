@@ -142,6 +142,13 @@ function deliveryError(delivery: TurnDelivery): AgentGraphError {
   if (delivery.reason === 'session_ended') {
     return new AgentGraphError(409, 'Code agent session has finished');
   }
+  if (delivery.reason === 'relay_paused') {
+    // The user holds the session in direct chat; agent turns wait for the hand back.
+    return new AgentGraphError(
+      409,
+      'The user is talking to this code agent directly; send again after they hand it back'
+    );
+  }
   return new AgentGraphError(
     502,
     `Code agent rejected the message (${delivery.reason ?? 'unknown'})`

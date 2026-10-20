@@ -5,5 +5,6 @@ export {
   listUserUiVersions,
   readUserUiFile,
   userExists,
+  userUiAnnounceAgentIds,
   type UserUiVersionRecord,
 } from '../../providers/userUi/store';

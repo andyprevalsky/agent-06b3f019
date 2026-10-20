@@ -126,4 +126,6 @@ export const KNOWN_TAGS = [
   'om2w2',
   'gaia',
   'browsecomp',
+  // Code-capability fixtures with hidden tests (agents/benchmarks/code_bench.py, plan C8).
+  'code-bench',
 ];
