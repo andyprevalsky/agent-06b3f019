@@ -47,6 +47,7 @@ from domains.spawn_browser_agent_v3.service_crypto import (
     auth_realm_matches_url,
     has_payment_card_secret_refs,
 )
+from utils.browser_result_limits import EVALUATE_RESULT_MAX_CHARS, cap_browser_result_text
 from utils.error_utils import extract_error_message
 from utils.purchase_approval import validate_image_url_for_page, validate_product_url_for_pages
 
@@ -1592,6 +1593,10 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
         from .service_crypto import mask_secret_values
 
         value = mask_secret_values(result.get("result", {}).get("value"), context.secret_refs)
+        # Keep native small values; large structured values become bounded JSON text.
+        value_text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        if len(value_text) > EVALUATE_RESULT_MAX_CHARS:
+            value = cap_browser_result_text(value_text, EVALUATE_RESULT_MAX_CHARS)
         # CDP returns exceptionDetails when the expression throws; surface that
         # instead of a silent null/empty value (async fetch failures used to look
         # like successful empty objects).
@@ -1634,7 +1639,7 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
             params={"code": code, "timeout": timeout_s},
             result={"success": True, "value": value},
         )
-        return {"success": True, "message": f"Executed JS, result: {value}", "value": value}
+        return {"success": True, "message": "Executed JS.", "value": value}
     if context.action_name == "extract":
         return {"success": False, "error": "extract is disabled. Use evaluate to read DOM/page content directly."}
     if context.action_name == "screenshot":

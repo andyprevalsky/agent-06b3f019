@@ -12979,8 +12979,10 @@ async def test_delivered_observation_reaches_verifier_through_owned_receipt():
     from domains.spawn_browser_agent_v3.service import build_browser_verifier_context
     from helpers.llm import build_verifier_context_messages
     for private in (False, True):
-        dom=DOMService('ws://unused-observed-receipt');dom._session=_fake_session_with_event_bus()
-        if private: dom.register_secret_refs({'private':'synthetic-private-value','cvv':'1','meta':'metadata','field':'structured_response','native-step-key':'step','observation-key':'formatted_state'})
+        dom=DOMService('ws://unused-observed-receipt')
+        dom._session=_fake_session_with_event_bus()
+        if private:
+            dom.register_secret_refs({'private':'synthetic-private-value','cvv':'1','meta':'metadata','field':'structured_response','native-step-key':'step','observation-key':'formatted_state'})
         url='https://owned.example/result'
         state=dom.model_visible_value({'url':url,'title':'Result','timestamp':'2026-10-16T00:00:00Z',
               'dom_tree':'Observed outcome: operation was not applied. synthetic-private-value'})
@@ -13008,23 +13010,29 @@ async def test_delivered_observation_reaches_verifier_through_owned_receipt():
         assert type(observations[0]['metadata']['structured_response']['step']) is int
         history_text=next(m['text'] for m in context if m.get('metadata',{}).get('toolName')=='action_history')
         assert 'formatted_state' not in history_text and 'Observed outcome:' not in history_text, 'observation duplicated inside compact history'
-        if private: assert 'synthetic-private-value' not in wire and '{{secret:private}}' in wire
+        if private:
+            assert 'synthetic-private-value' not in wire and '{{secret:private}}' in wire
         # A stale owner cannot attach a foreign page to another native step.
         await history.record_action(dom,action='wait',result={'success':True})
         before=history.get_entries()
-        try: history.attach_observed_result(1,{'formatted_state':'Foreign observation','current_url':'https://foreign.example'})
-        except ValueError: pass
-        else: raise AssertionError('stale observation receipt was accepted')
+        try:
+            history.attach_observed_result(1,{'formatted_state':'Foreign observation','current_url':'https://foreign.example'})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('stale observation receipt was accepted')
         assert history.get_entries()==before
         assert 'formatted_state' not in history.get_entries()[-1]['result']
         # Failed coherence must not retain a snapshot which was not delivered.
-        failed=ActionHistory();dom.get_page_identity=AsyncMock(return_value={'url':'https://foreign.example'})
+        failed=ActionHistory()
+        dom.get_page_identity=AsyncMock(return_value={'url':'https://foreign.example'})
         outcome=await execute_action(dom,failed,{'action':'read_browser_state','params':{}},current_url=url,
             auth_context_for_url=AsyncMock(return_value={}))
         assert outcome['success'] is False
         assert 'formatted_state' not in failed.get_entries()[-1]['result']
         # Standalone reads also use the same actual observation owner.
-        standalone=ActionHistory();delivered=await execute_action(dom,standalone,{'action':'read_browser_state','params':{}})
+        standalone=ActionHistory()
+        delivered=await execute_action(dom,standalone,{'action':'read_browser_state','params':{}})
         assert standalone.get_entries()[-1]['result']['formatted_state']==delivered['formatted_state']
         # Page/model-produced dictionaries are not native read observations.
         cdp=SimpleNamespace(session_id="offline-cdp",cdp_client=SimpleNamespace(send=SimpleNamespace(Runtime=SimpleNamespace(
@@ -13039,14 +13047,16 @@ async def test_delivered_observation_reaches_verifier_through_owned_receipt():
         model_context,_=await build(evaluated)
         assert not any(msg.get('metadata',{}).get('toolName')=='read_browser_state' for msg in model_context)
         # Same existing 30-receipt window and admission budgets, no new cap.
-        large=ActionHistory();large.bind_dom_service(dom)
+        large=ActionHistory()
+        large.bind_dom_service(dom)
         large.restore_entries([{'step':i,'action':'read_browser_state','result':{'success':True,'formatted_state':f'Observation-{i} '+('x'*2000)}} for i in range(1,32)])
         large_context,large_messages=await build(large)
         observed=[m for m in large_context if m.get('metadata',{}).get('toolName')=='read_browser_state']
         assert len(observed)==31 and any(m['metadata']['structured_response']['step']==1 for m in observed)
         assert 'Observation-16' in json.dumps(large_messages)
 
-        saturated=ActionHistory();saturated.bind_dom_service(dom)
+        saturated=ActionHistory()
+        saturated.bind_dom_service(dom)
         saturated.restore_entries([{'step':i,'action':'read_browser_state','result':{'success':True,'formatted_state':f'Observed-unit-{i} '+('z'*20000)}} for i in range(1,101)])
         _, saturated_messages=await build(saturated)
         saturated_wire=json.dumps(saturated_messages)
@@ -13056,8 +13066,10 @@ async def test_delivered_observation_reaches_verifier_through_owned_receipt():
         texts=[]
         for message in saturated_messages:
             content=message.get('content')
-            if isinstance(content,str): texts.append(content)
-            elif isinstance(content,list): texts.extend(block['text'] for block in content if isinstance(block,dict) and block.get('type')=='text')
+            if isinstance(content,str):
+                texts.append(content)
+            elif isinstance(content,list):
+                texts.extend(block['text'] for block in content if isinstance(block,dict) and block.get('type')=='text')
         tool_lines=[line for text in texts for line in text.splitlines() if line.startswith('TOOL_RESULT ')]
         assert sum(map(len,tool_lines))<=VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS
         assert all(len(line)<=VERIFIER_MAX_TOOL_RESULT_CHARS for line in tool_lines)
@@ -13253,6 +13265,86 @@ async def test_execute_action_select_dropdown_with_element():
             {"action": "select_dropdown", "index": 1, "params": {"value": "red"}},
         )
     assert out == {"success": True, "message": ""}
+
+async def test_evaluate_result_is_bounded_once_in_model_context():
+    """CP2 repro: large script leaves flow through action, history, and prompt."""
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+    from domains.spawn_browser_agent_v3.handler import _append_browser_turn_messages
+    from providers.rose.browser_use import build_browser_use_messages
+
+    blob = '{"price":"$129.00","sku":"' + "x" * 63_000 + '"}'
+    large = {"url": "https://example.test/hotel", "prices": [blob] * 30}
+    values = [large, "😀" * 20_001, "z" * 20_000, "short result", {"price": 129}, [1, 2], 42, False, None]
+    for value in values:
+        dom, history, _, evaluate = _private_secret_action_fixture(
+            AsyncMock(return_value={"result": {"value": value}}),
+        )
+        action = {"action": "evaluate", "params": {"code": "(() => 1)()"}}
+        result = await execute_action(dom, history, action)
+        turns = []
+        _append_browser_turn_messages(turns, unified_action=action, result=result, tool_call_id="cp2-eval")
+        messages = build_browser_use_messages(
+            task="Read hotel prices", browser_state={}, action_history=[],
+            available_actions=["evaluate"], turn_messages=turns,
+        )
+        tool = next(message for message in messages if message.get("role") == "tool")
+        payload = json.loads(tool["content"])
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        print(f"CP2 evaluate: source_chars={len(text)} tool_chars={len(tool['content'])}")
+        assert payload["success"] is True
+        assert "value" in payload
+        assert "message" not in payload or payload["message"] == "Executed JS."
+        if len(text) > 20_000:
+            assert isinstance(payload["value"], str)
+            assert len(payload["value"]) == 20_000
+            assert payload["value"].endswith("[Truncated after 20000 characters]")
+            assert text.startswith(payload["value"].split("\n... [Truncated")[0])
+            assert len(tool["content"]) < 40_000
+        else:
+            assert payload["value"] == value
+            assert type(payload["value"]) is type(value)
+        assert history.record_action.await_args.kwargs["result"]["value"] == payload["value"]
+        if value == "short result":
+            assert tool["content"].count("short result") == 1
+        evaluate.assert_awaited_once()
+
+
+async def test_read_browser_state_text_is_bounded_in_model_context():
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+    from domains.spawn_browser_agent_v3.handler import _append_browser_turn_messages
+    from providers.rose.browser_use import build_browser_use_messages, format_browser_state_for_tool
+
+    state = {"url": "https://example.test/hotel", "title": "Hotel", "timestamp": "2026-10-20T00:00:00Z",
+             "dom_tree": "[1]<button>Reserve</button>"}
+    small = format_browser_state_for_tool(state)
+    assert small.endswith(state["dom_tree"])
+    # Exercise the exact boundary as well as a large DOM and oversized metadata.
+    padding = 40_000 - len(small)
+    for extra_dom, title in [("x" * padding, "Hotel"), ("x" * (padding + 1), "Hotel"),
+                             ("😀" * 100_000, "Hotel"), ("", "T" * 60_000)]:
+        current = {**state, "dom_tree": state["dom_tree"] + extra_dom, "title": title}
+        dom, history, _, _ = _private_secret_action_fixture()
+        dom.get_browser_state = AsyncMock(return_value=current)
+        action = {"action": "read_browser_state", "params": {}}
+        result = await execute_action(dom, history, action)
+        turns = []
+        _append_browser_turn_messages(turns, unified_action=action, result=result, tool_call_id="cp2-state")
+        messages = build_browser_use_messages(
+            task="Read hotel prices", browser_state={}, action_history=[],
+            available_actions=["read_browser_state"], turn_messages=turns,
+        )
+        payload = json.loads(next(message for message in messages if message.get("role") == "tool")["content"])
+        formatted = payload["formatted_state"]
+        print(f"CP2 state: formatted_chars={len(formatted)}")
+        assert len(formatted) == 40_000
+        assert formatted.startswith("# Current Browser State\n")
+        assert "dom_tree" not in payload and "title" not in payload
+        if title == "Hotel" and len(extra_dom) == padding:
+            assert formatted == small + extra_dom
+        else:
+            assert formatted.endswith("[Truncated after 40000 characters]")
+        assert current["dom_tree"] == state["dom_tree"] + extra_dom
+
 
 async def test_execute_action_evaluate():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
@@ -22323,7 +22415,8 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
         stream = BrowserThinkingStream(**kwargs)
         stream_instances.append(stream)
         return stream
-    import asyncio, copy
+    import asyncio
+    import copy
     from domains.spawn_browser_agent_v3 import service_crypto
     from datetime import datetime, timezone, timedelta
     from domains.spawn_browser_agent_v3.handler import _drain_otp_poll as real_drain, _fetch_and_append_recent_otp_user_messages as real_poll
@@ -30264,6 +30357,8 @@ async def run_all_tests():
         "execute_action_select_dropdown_with_el",
         test_execute_action_select_dropdown_with_element,
     )
+    await r.record_async("evaluate_result_bounded_once", test_evaluate_result_is_bounded_once_in_model_context)
+    await r.record_async("read_browser_state_text_bounded", test_read_browser_state_text_is_bounded_in_model_context)
     await r.record_async("execute_action_evaluate", test_execute_action_evaluate)
     r.record(
         "secret_ref_recursive_values_preserve_protocol_and_original_arguments",
