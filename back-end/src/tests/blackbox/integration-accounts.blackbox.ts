@@ -352,6 +352,8 @@ const coreCases: Array<{ name: string; fn: () => Promise<void> }> = [
 async function cleanup(userIds: string[]): Promise<void> {
   const where = { userId: { in: userIds } };
   await prisma.integrationSyncProgress.deleteMany({ where });
+  await prisma.cookie.deleteMany({ where });
+  await prisma.cookieBundle.deleteMany({ where });
   await prisma.plaidTransaction.deleteMany({ where });
   await prisma.plaidAccount.deleteMany({ where });
   await prisma.plaidItem.deleteMany({ where });
