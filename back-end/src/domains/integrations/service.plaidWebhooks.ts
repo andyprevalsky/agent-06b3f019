@@ -11,7 +11,6 @@ import { createLogger } from '../../providers/logger';
 import { getWebhookVerificationKey } from '../../providers/plaid';
 import { PLAID_SKIP_WEBHOOK_VERIFICATION } from './config';
 import { findPlaidItemByPlaidItemId, markPlaidItemSyncFailed } from './repo.plaid';
-import { reportPlaidItemNeedsReconnect } from './service.plaidSyncProgress';
 import { syncPlaidTransactionsByPlaidItemId } from './service.plaidTransactions';
 
 const log = createLogger('PlaidWebhooks');
@@ -82,22 +81,15 @@ export async function verifyPlaidWebhook(
   }
 }
 
-/**
- * ITEM ERROR / PENDING_EXPIRATION / PENDING_DISCONNECT: only Link update mode
- * fixes the Item, so its account chip reads needs_reconnect (a progress row is
- * authoritative over the Item status, so an earlier "synced" run must not mask it).
- */
 async function markItemNeedsUpdateMode(payload: PlaidWebhookPayload): Promise<void> {
   if (payload.item_id === undefined || payload.item_id === '') return;
   const item = await findPlaidItemByPlaidItemId(payload.item_id);
   if (!item) return;
-  const message = payload.error?.error_message ?? 'Plaid Item requires user update mode';
   await markPlaidItemSyncFailed(
     item.id,
     payload.error?.error_code ?? payload.webhook_code ?? 'ITEM_REQUIRES_UPDATE',
-    message
+    payload.error?.error_message ?? 'Plaid Item requires user update mode'
   );
-  await reportPlaidItemNeedsReconnect({ userId: item.userId, itemRowId: item.id, message });
 }
 
 export async function handlePlaidWebhook(payload: PlaidWebhookPayload): Promise<{ ok: true }> {
