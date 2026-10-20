@@ -5953,6 +5953,11 @@ case "$BENCH_LOG_TERMINAL_WAIT_SECONDS" in ''|*[!0-9]*|0) BENCH_LOG_TERMINAL_WAI
 [ "$BENCH_LOG_TERMINAL_WAIT_SECONDS" -le 30 ] || BENCH_LOG_TERMINAL_WAIT_SECONDS=30
 driver_absent=0
 DRIVER_DIED="0"
+# Set when the poll loop declares infrastructure failure while the driver may
+# still be running (lost or unusable data plane, or a Machine that is gone).
+# No guest will seal runtime evidence unprompted, so the post-loop collector
+# must not wait the whole wall-clock backstop for that seal.
+PRETERMINAL_INFRA_FAILURE="0"
 # The detached on-box driver occasionally dies at launch (an early kill/crash
 # before its first STEP — seen at fleet width when the Fly API is rate-limited).
 # It then never writes the DONE marker, so a poll loop that only watches for DONE
@@ -6000,12 +6005,12 @@ while :; do
             "$RUN_LOG_TOKEN" "$WATCHDOG_TASK" "$WATCHDOG_BUDGET" \
             "$BENCH_LOG_RESET" 2>/dev/null)"; then
             echo "❌ validated bench.log delta could not update bounded progress state -- infrastructure failure" >&2
-            DRIVER_DIED="1"; BENCH_EXIT="1"
+            DRIVER_DIED="1"; PRETERMINAL_INFRA_FAILURE="1"; BENCH_EXIT="1"
             break
         fi
         if ! cloudbench_apply_progress_update "$progress_update" "$now"; then
             echo "❌ bounded progress state returned an invalid update -- infrastructure failure" >&2
-            DRIVER_DIED="1"; BENCH_EXIT="1"
+            DRIVER_DIED="1"; PRETERMINAL_INFRA_FAILURE="1"; BENCH_EXIT="1"
             break
         fi
     fi
@@ -6049,7 +6054,7 @@ while :; do
         backlog_chunks=$((backlog_chunks + BENCH_LOG_CHUNKS_READ))
         if [ "$backlog_chunks" -ge "$BENCH_LOG_BACKLOG_MAX_CHUNKS" ]; then
             echo "❌ bench.log backlog exceeded ${BENCH_LOG_BACKLOG_MAX_CHUNKS} bounded chunks before EOF -- infrastructure failure" >&2
-            DRIVER_DIED="1"; BENCH_EXIT="1"
+            DRIVER_DIED="1"; PRETERMINAL_INFRA_FAILURE="1"; BENCH_EXIT="1"
             break
         fi
         if [ "$log_refresh_ok" = "1" ]; then
@@ -6058,7 +6063,7 @@ while :; do
         backlog_failures=$((backlog_failures + 1))
         if [ "$backlog_failures" -ge "$BENCH_LOG_BACKLOG_MAX_FAILURES" ]; then
             echo "❌ bench.log backlog could not advance after ${BENCH_LOG_BACKLOG_MAX_FAILURES} bounded retries -- infrastructure failure" >&2
-            DRIVER_DIED="1"; BENCH_EXIT="1"
+            DRIVER_DIED="1"; PRETERMINAL_INFRA_FAILURE="1"; BENCH_EXIT="1"
             break
         fi
         sleep 1
@@ -6081,12 +6086,12 @@ while :; do
             ;;
         20)
             echo "❌ bench.log could not be read after ${BENCH_LOG_READ_MAX_FAILURES} bounded retries -- infrastructure failure" >&2
-            DRIVER_DIED="1"; BENCH_EXIT="1"
+            DRIVER_DIED="1"; PRETERMINAL_INFRA_FAILURE="1"; BENCH_EXIT="1"
             break
             ;;
         *)
             echo "❌ invalid bench.log read-gate state -- infrastructure failure" >&2
-            DRIVER_DIED="1"; BENCH_EXIT="1"
+            DRIVER_DIED="1"; PRETERMINAL_INFRA_FAILURE="1"; BENCH_EXIT="1"
             break
             ;;
     esac
@@ -6193,7 +6198,7 @@ while :; do
             probe_machine_liveness; machine_rc=$?
             if [ "$machine_rc" = "10" ]; then
                 echo "❌ Fly machine is explicitly no longer running after ${DRIVER_STALL_SECONDS}s without progress -- infrastructure failure; stopping this box so the fleet can abort promptly."
-                DRIVER_DIED="1"; BENCH_EXIT="1"
+                DRIVER_DIED="1"; PRETERMINAL_INFRA_FAILURE="1"; BENCH_EXIT="1"
                 break
             fi
         fi
@@ -6217,11 +6222,15 @@ done
 # cleanup window before extracting artifacts, then drain the sealed log once.
 # Keep TIMED_OUT set: a recovered cancellation record is still infrastructure
 # failure. The EXIT trap reuses this result instead of granting another window.
-if [ "$TIMED_OUT" = "1" ] && [ -n "${FLEET_MACHINE_ID:-}" ]; then
+# A pre-terminal infrastructure failure is the same situation: the driver may
+# still be running, so request the bounded authenticated shutdown before
+# waiting for a seal. Its verdict stays infrastructure failure either way.
+if { [ "$TIMED_OUT" = "1" ] || [ "$PRETERMINAL_INFRA_FAILURE" = "1" ]; } \
+    && [ -n "${FLEET_MACHINE_ID:-}" ]; then
     GUEST_SHUTDOWN_RESULT=1
     if confirm_guest_shutdown; then
         GUEST_SHUTDOWN_RESULT=0
-        if cloudbench_collect_terminal_log; then
+        if [ "$TIMED_OUT" = "1" ] && cloudbench_collect_terminal_log; then
             FINISHED=1
             BENCH_EXIT="$CURRENT_TERMINAL_EXIT"
         fi
@@ -6232,6 +6241,13 @@ cp -f "$SSH_LOG" "$OUT_DIR/remote-logs/cloudbench-driver.log" 2>/dev/null || tru
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ] && ! cloudbench_skip_held_driver_teardown_race; then
     if [ "$TIMED_OUT" = "1" ] && [ "${GUEST_SHUTDOWN_RESULT:-1}" != "0" ]; then
         echo "❌ timed-out guest shutdown unconfirmed; retaining runtime evidence owner -- infrastructure failure" >&2
+        exit 70
+    fi
+    # Without a delivered shutdown nothing will seal the runtime evidence; do
+    # not hold the job "running" for the wall-clock backstop. The EXIT trap
+    # reuses GUEST_SHUTDOWN_RESULT and the fleet natively stops the guest.
+    if [ "$PRETERMINAL_INFRA_FAILURE" = "1" ] && [ "${GUEST_SHUTDOWN_RESULT:-1}" != "0" ]; then
+        echo "❌ guest shutdown unconfirmed after a pre-terminal infrastructure failure; retaining runtime evidence owner -- infrastructure failure" >&2
         exit 70
     fi
     # The driver waits for run.sh's stopped/clean receipt before ACK; the boot
