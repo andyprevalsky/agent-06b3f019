@@ -117,6 +117,8 @@ describe('Integrations page - LinkedIn export flow', () => {
           <Integrations />
           <Toaster />
         </IntegrationHandlersProvider>,
+        // Stock accordion UI; the Rose Desktop list is covered by integrations-rose-desktop.
+        { roseDesktop: false },
       );
     }
 
