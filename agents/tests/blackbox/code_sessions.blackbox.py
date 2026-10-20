@@ -467,9 +467,9 @@ async def test_question_while_cli_waits_for_its_answer_is_handed_over_before_idl
         assert outcome["status"] == "paused" and outcome["success"] is False, outcome
         assert "Which database should I use?" in outcome["message"], outcome["message"]
         assert [call.get("reason") for call in backend.closed] == ["awaiting_parent"], backend.closed
-        assert handoff_virtual_s <= 2 * CODE_SESSION_KEEPALIVE_INTERVAL_S < CODE_SESSION_IDLE_PAUSE_S, (
-            f"handed over after {handoff_virtual_s:.0f}s, not by the idle pause"
-        )
+        handoff_bound_s = 2 * CODE_SESSION_KEEPALIVE_INTERVAL_S
+        assert handoff_bound_s < CODE_SESSION_IDLE_PAUSE_S, (handoff_bound_s, CODE_SESSION_IDLE_PAUSE_S)
+        assert handoff_virtual_s <= handoff_bound_s, f"handed over after {handoff_virtual_s:.0f}s, not by a keepalive"
         paused_rows = [m for m in backend.messages if m.get("action_type") == "session_paused"]
         assert len(paused_rows) == 1, paused_rows
         code_session_id = outcome["code_session"]["code_session_id"]
@@ -480,7 +480,9 @@ async def test_question_while_cli_waits_for_its_answer_is_handed_over_before_idl
             resumed = await asyncio.wait_for(
                 ActivityEnvironment().run(
                     service.spawn_claude_code_activity,
-                    *_activity_args(code_session_request={"code_session_id": code_session_id}, tool_call_id="tc-answer"),
+                    *_activity_args(
+                        code_session_request={"code_session_id": code_session_id}, tool_call_id="tc-answer"
+                    ),
                 ),
                 timeout=30,
             )

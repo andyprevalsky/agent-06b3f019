@@ -263,13 +263,21 @@ function agentsConfig() {
   } catch {
     // env only
   }
-  let token = '';
+  let refreshed = '';
   try {
-    token = readFileSync(AGENTS_TOKEN_FILE, 'utf8').trim();
+    refreshed = readFileSync(AGENTS_TOKEN_FILE, 'utf8').trim();
   } catch {
     // no refreshed token yet
   }
-  token = token || process.env.ROSE_AGENTS_TOKEN || saved.agents_token || '';
+  // The newest token wins: a resumed session starts with a freshly minted
+  // token, which must beat a refreshed copy an earlier task left on disk.
+  const candidates = [refreshed, process.env.ROSE_AGENTS_TOKEN, saved.agents_token].filter(
+    (candidate) => typeof candidate === 'string' && candidate !== ''
+  );
+  const token = candidates.reduce(
+    (best, next) => (agentsTokenExpiry(next) > agentsTokenExpiry(best) ? next : best),
+    candidates[0] || ''
+  );
   const url = (process.env.ROSE_AGENTS_URL || saved.agents_url || '').replace(/\/+$/, '');
   if (!url || !token) {
     throw new ToolError(
@@ -305,16 +313,22 @@ async function agentsCall(method, route, body, token) {
   return { ok: res.ok, status: res.status, data };
 }
 
+/** A `rag.` token's expiry (epoch seconds); 0 when it cannot be read. */
+function agentsTokenExpiry(token) {
+  try {
+    return (
+      Number(JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8')).exp) || 0
+    );
+  } catch {
+    return 0;
+  }
+}
+
 /** Same refresh contract as rose-agents: renew near expiry into ~/.rose/agents-token (0600). */
 async function freshAgentsToken() {
   const { token } = agentsConfig();
-  let exp = 0;
-  try {
-    exp =
-      Number(JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8')).exp) || 0;
-  } catch {
-    return token;
-  }
+  const exp = agentsTokenExpiry(token);
+  if (exp === 0) return token;
   if (exp - Date.now() / 1000 > AGENTS_REFRESH_WINDOW_S) return token;
   const refreshed = await agentsCall('POST', '/token', undefined, token);
   const next = refreshed.ok ? refreshed.data.token : null;

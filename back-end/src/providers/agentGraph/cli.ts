@@ -13,7 +13,7 @@
  */
 
 export const AGENT_GRAPH_CLI_NAME = 'rose-agents';
-export const AGENT_GRAPH_CLI_VERSION = '2';
+export const AGENT_GRAPH_CLI_VERSION = '3';
 
 /** Static (no ids) so the system prompt stays cache-stable across sessions. */
 export const AGENT_GRAPH_PROMPT_SECTION = [
@@ -64,19 +64,22 @@ function parse(argv) {
   return { positional, flags };
 }
 
-// The session token is short-lived; a refreshed one is kept here (0600) and
-// preferred over the env value once it exists.
+// The session token is short-lived; a refreshed one is kept here (0600). The
+// newer of it and the env token wins: a resumed session starts with a freshly
+// minted env token, which must beat a refreshed copy an earlier task left.
 const TOKEN_FILE = path.join(os.homedir(), '.rose', 'agents-token');
 const REFRESH_WINDOW_S = 30 * 60;
 
 function storedToken() {
+  let refreshed = '';
   try {
-    const token = fs.readFileSync(TOKEN_FILE, 'utf8').trim();
-    if (token) return token;
+    refreshed = fs.readFileSync(TOKEN_FILE, 'utf8').trim();
   } catch (err) {
     // no refreshed token yet
   }
-  return process.env.ROSE_AGENTS_TOKEN || '';
+  const minted = process.env.ROSE_AGENTS_TOKEN || '';
+  if (!refreshed || !minted) return refreshed || minted;
+  return tokenExpiry(refreshed) > tokenExpiry(minted) ? refreshed : minted;
 }
 
 function tokenExpiry(token) {

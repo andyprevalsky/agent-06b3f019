@@ -177,9 +177,20 @@ export async function createUserMessageInTransaction(
 
 /** Create, deduplicate, fence, persist, and broadcast one message. */
 export async function createMessage(params: CreateMessageParams): Promise<Message> {
+  return (await createMessageOnce(params)).message;
+}
+
+/**
+ * createMessage, also reporting whether THIS call wrote the row. A retried or
+ * racing idempotent write gets the winner's row with `created: false`, so a
+ * caller can run its side effect (e.g. a workflow signal) exactly once.
+ */
+export async function createMessageOnce(
+  params: CreateMessageParams
+): Promise<{ message: Message; created: boolean }> {
   const idempotentId = idempotentMessageId(params);
   const idempotentDuplicate = await findIdempotentMessage(params);
-  if (idempotentDuplicate !== null) return idempotentDuplicate;
+  if (idempotentDuplicate !== null) return { message: idempotentDuplicate, created: false };
 
   const lifecycle = toolLifecycleIdentity(params);
   const result =
@@ -188,13 +199,13 @@ export async function createMessage(params: CreateMessageParams): Promise<Messag
       : await persistToolLifecycleMessage(params, lifecycle);
   if (!result.created) {
     logUncreatedMessageWrite(params, result.message);
-    return result.message;
+    return { message: result.message, created: false };
   }
   if (params.skipBroadcast !== true) broadcastCreatedMessage(params, result.message);
   // Browser (and other tool) completions carry structured_response on the FINISHED
   // TOOL row — harvest paid-order GMV when amount + confirmation id are both present.
   scheduleMessageGmvCapture(params);
-  return result.message;
+  return { message: result.message, created: true };
 }
 
 export interface WorkflowMessageGroupResult {

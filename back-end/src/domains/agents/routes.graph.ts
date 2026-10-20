@@ -3,7 +3,9 @@
  *
  *   GET  /agents          list root + every agent / code agent in the caller's tree
  *   POST /messages        { to, text, message_id }  send to one of them (idempotent;
- *                         `to` may be an id, "parent" or "root")
+ *                         `to` may be an id, "parent" or "root"; a sender over its
+ *                         budget gets 429 + Retry-After, a retry of a delivered
+ *                         message never does)
  *   POST /grep            { pattern, agent_id?, role?, head_limit?, case_insensitive? }
  *   GET  /question-route  code agents: { deliver_to: "user" | "agent", agent_id }
  *   POST /questions       code agents: route a question by spawner (UI ledger 47b)
@@ -80,6 +82,7 @@ function bearer(req: Request): string {
 
 function sendError(res: Response, err: unknown): void {
   if (err instanceof graphService.AgentGraphError) {
+    if (err.retryAfterSeconds !== undefined) res.setHeader('Retry-After', err.retryAfterSeconds);
     res.status(err.status).json({ error: err.message });
     return;
   }

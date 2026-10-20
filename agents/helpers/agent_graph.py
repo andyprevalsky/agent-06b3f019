@@ -34,6 +34,7 @@ annotations``): Temporal decodes them inside the workflow sandbox.
 import hashlib
 import re
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any, Dict, List, Literal, Optional, TypedDict
 
 import httpx
@@ -121,6 +122,17 @@ def _headers(agent_id: str, code_session_id: Optional[str], code_provider: Optio
     return headers
 
 
+def _retry_after(response: httpx.Response) -> Optional[timedelta]:
+    """A 429 from the per-sender send budget: retry no sooner than its Retry-After."""
+    if response.status_code != 429:
+        return None
+    try:
+        seconds = int(response.headers.get("retry-after", ""))
+    except ValueError:
+        return None
+    return timedelta(seconds=seconds) if seconds > 0 else None
+
+
 async def _post(path: str, headers: Dict[str, str], body: Dict[str, Any]) -> Dict[str, Any]:
     config = load_config()
     url = f"{config.backend.api_url}{AGENT_GRAPH_ROUTE_PREFIX}{path}"
@@ -135,6 +147,7 @@ async def _post(path: str, headers: Dict[str, str], body: Dict[str, Any]) -> Dic
             f"agent graph {path} failed: HTTP {response.status_code} {error[:200]}",
             type="AgentGraphError",
             non_retryable=response.status_code in _NON_RETRYABLE_STATUSES,
+            next_retry_delay=_retry_after(response),
         )
     data = response.json()
     return data if isinstance(data, dict) else {"result": data}

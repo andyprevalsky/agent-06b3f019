@@ -28,6 +28,13 @@ import { promisify } from 'util';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import { AGENT_GRAPH_CLI_SCRIPT } from '../../providers/agentGraph/cli';
+import {
+  MAX_TRACKED_SENDERS,
+  SEND_BURST,
+  SEND_REFILL_PER_SECOND,
+  takeSendBudget,
+  trackedSenders,
+} from '../../providers/agentGraph/sendBudget';
 import { mintAgentGraphToken } from '../../providers/agentGraph/token';
 import { prepareAgentGraphWorkspace } from '../../providers/agentGraph/workspace';
 import { mintAgentToolsToken } from '../../providers/agentTools/token';
@@ -703,8 +710,6 @@ async function testFloodingSenderIsCappedWithoutStarvingOthers(
     `only 200 or 429: ${JSON.stringify(results.map((res) => res.status))}`
   );
   assert(limited.length > 0, `a flooding sender is capped (${delivered.length}/${total} delivered)`);
-  const { SEND_BURST, SEND_REFILL_PER_SECOND, MAX_TRACKED_SENDERS, takeSendBudget, trackedSenders } =
-    await import('../../providers/agentGraph/sendBudget');
   assert(
     delivered.length <= SEND_BURST + Math.ceil(elapsedS * SEND_REFILL_PER_SECOND) + 1,
     `delivered ${delivered.length} in ${elapsedS}s exceeds the cap`
