@@ -252,7 +252,7 @@ const tests: BlackboxTest[] = [
       const token = codeToken(childA);
       const ok = await display(childA, { items: [b64(png())] }, { bearer: token });
       expectStatus(ok, 201, 'token on its agent');
-      const row = (await displayMessages(childA)).pop();
+      const row = (await displayMessages(childA)).find((r) => r.id === items(ok)[0].message_id);
       const metadata = row?.metadata as Record<string, unknown>;
       assert(
         metadata.subAgentId === `task-${childA.slice(0, 8)}`,

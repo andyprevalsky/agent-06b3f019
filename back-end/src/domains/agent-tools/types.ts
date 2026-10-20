@@ -14,9 +14,7 @@ export const displayBundleInputSchema = z
   .object({
     entry: z.string().min(1).max(512),
     files: z
-      .array(
-        z.object({ path: z.string().min(1).max(512), content_base64: z.string() }).strict()
-      )
+      .array(z.object({ path: z.string().min(1).max(512), content_base64: z.string() }).strict())
       .min(1)
       .max(MAX_BUNDLE_FILES),
   })
@@ -41,9 +39,8 @@ export const displayItemSchema = z
   })
   .refine(
     (item) =>
-      [item.url, item.file, item.content_base64, item.bundle].filter(
-        (value) => value !== undefined
-      ).length === 1,
+      [item.url, item.file, item.content_base64, item.bundle].filter((value) => value !== undefined)
+        .length === 1,
     { message: 'each item needs exactly one of url, file, content_base64 or bundle' }
   );
 
@@ -190,6 +187,14 @@ export interface DisplayItemResult {
   mime_type: string;
   kind: DisplayKind;
   file_pointer: DisplayFilePointer;
+  /**
+   * One id per displayed item, shared by every row that shows it: a code
+   * agent's own row and the mirrored row in its owning agent's conversation.
+   * dsp_ + first 32 hex chars of sha256("agent:<owningAgentId>:<contentSha>").
+   */
+  canonical_id?: string;
+  /** Code agents: the mirrored row in the owning Rose agent's conversation. */
+  parent_message_id?: string;
 }
 
 export interface DisplayResult {

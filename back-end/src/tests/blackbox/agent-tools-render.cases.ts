@@ -61,7 +61,11 @@ interface Page {
 }
 interface Route {
   request(): { url(): string };
-  fulfill(response: { status: number; body?: string | Buffer; headers?: Record<string, string> }): Promise<void>;
+  fulfill(response: {
+    status: number;
+    body?: string | Buffer;
+    headers?: Record<string, string>;
+  }): Promise<void>;
 }
 interface Context {
   route(url: RegExp, handler: (route: Route) => Promise<void> | void): Promise<void>;
@@ -119,7 +123,10 @@ async function withBrowser(
     const context = await browser.newContext({ viewport: { width: 800, height: 500 } });
     if (process.env.DISPLAY_RENDER_LIVE_CDN !== '1') {
       await context.route(THREE_CDN, (route) => {
-        const rel = new URL(route.request().url()).pathname.replace(/^\/npm\/three@0\.160\.1\//, '');
+        const rel = new URL(route.request().url()).pathname.replace(
+          /^\/npm\/three@0\.160\.1\//,
+          ''
+        );
         const file = resolve(THREE_DIR, rel);
         if (!file.startsWith(THREE_DIR + sep) || !existsSync(file)) {
           return route.fulfill({ status: 404, body: 'not found' });
@@ -166,7 +173,10 @@ async function waitReady(frame: Frame, logs: string[], label: string) {
     state: document.documentElement.dataset.state ?? null,
     status: document.getElementById('status')?.textContent ?? null,
   }));
-  assert(state.state === 'ready', `${label}: ${JSON.stringify(state)} logs=${logs.slice(-5).join(' | ')}`);
+  assert(
+    state.state === 'ready',
+    `${label}: ${JSON.stringify(state)} logs=${logs.slice(-5).join(' | ')}`
+  );
 }
 
 /** Fraction of pixels matching `test` in a PNG screenshot. */
@@ -207,12 +217,22 @@ export function displayRenderCases(): BlackboxTest[] {
     {
       name: 'render: a three.js CDN page draws WebGL pixels in the sandboxed frame, isolated from Rose',
       fn: async () => {
-        const res = await display(otherA, { items: [b64(Buffer.from(threeCdnPage(`render-${RUN}`)), 'cube.html')] }, { apiKeyUser: userA });
+        const res = await display(
+          otherA,
+          { items: [b64(Buffer.from(threeCdnPage(`render-${RUN}`)), 'cube.html')] },
+          { apiKeyUser: userA }
+        );
         assert(res.status === 201 || res.status === 200, `display page ${res.status}`);
         const url = local(items(res)[0].file_pointer.usercontent_url ?? '');
         await withBrowser(async (page, logs, hosts) => {
           const frame = await displayFrame(page, url, hosts.rose);
           await waitReady(frame, logs, 'three.js CDN page');
+          const features = await frame.evaluate(() => ({
+            wasm: document.documentElement.dataset.wasm,
+            margin: getComputedStyle(document.body).margin,
+          }));
+          assert(features.wasm === 'ready', 'sandbox permits WebAssembly compilation');
+          assert(features.margin === '0px', 'inline CSS is applied');
           await page.waitForTimeout(300);
           const red = fraction(await page.locator('#f').screenshot(), reddish);
           assert(red > 0.04, `WebGL cube pixels: ${(red * 100).toFixed(2)}% red`);
@@ -228,7 +248,11 @@ export function displayRenderCases(): BlackboxTest[] {
     {
       name: 'render: the .glb model viewer renders the model (orbit controls, auto-framed)',
       fn: async () => {
-        const res = await display(otherA, { items: [b64(cubeGlb([1, 0.05, 0.05, 1], `render-${RUN}`), 'red-cube.glb')] }, { apiKeyUser: userA });
+        const res = await display(
+          otherA,
+          { items: [b64(cubeGlb([1, 0.05, 0.05, 1], `render-${RUN}`), 'red-cube.glb')] },
+          { apiKeyUser: userA }
+        );
         assert(res.status === 201 || res.status === 200, `display glb ${res.status}`);
         const url = local(items(res)[0].file_pointer.usercontent_url ?? '');
         await withBrowser(async (page, logs, hosts) => {
@@ -239,10 +263,18 @@ export function displayRenderCases(): BlackboxTest[] {
           const red = fraction(shot, reddish);
           assert(red > 0.03, `model pixels: ${(red * 100).toFixed(2)}% red`);
           const model = await frame.evaluate(
-            () => (window as unknown as { __roseModel?: { triangles: number; format: string } }).__roseModel ?? null
+            () =>
+              (window as unknown as { __roseModel?: { triangles: number; format: string } })
+                .__roseModel ?? null
           );
-          assert(model?.format === 'glb' && model.triangles === 12, `viewer stats ${JSON.stringify(model)}`);
-          assert((await isolationProbe(frame)).origin === 'null', 'viewer runs in an opaque origin');
+          assert(
+            model?.format === 'glb' && model.triangles === 12,
+            `viewer stats ${JSON.stringify(model)}`
+          );
+          assert(
+            (await isolationProbe(frame)).origin === 'null',
+            'viewer runs in an opaque origin'
+          );
           process.stdout.write(`    glb viewer: ${(red * 100).toFixed(1)}% red pixels\n`);
         });
       },
@@ -250,14 +282,23 @@ export function displayRenderCases(): BlackboxTest[] {
     {
       name: 'render: frame-ancestors refuses a non-Rose embedder; a top-level open is still opaque',
       fn: async () => {
-        const res = await display(otherA, { items: [b64(Buffer.from(threeCdnPage(`ancestors-${RUN}`)), 'cube.html')] }, { apiKeyUser: userA });
+        const res = await display(
+          otherA,
+          { items: [b64(Buffer.from(threeCdnPage(`ancestors-${RUN}`)), 'cube.html')] },
+          { apiKeyUser: userA }
+        );
         assert(res.status === 201 || res.status === 200, `display page ${res.status}`);
         const url = local(items(res)[0].file_pointer.usercontent_url ?? '');
         await withBrowser(async (page, _logs, hosts) => {
           const frame = await displayFrame(page, url, hosts.foreign);
           await page.waitForTimeout(1500);
-          const state = await frame.evaluate(() => document.documentElement.dataset.state ?? null).catch(() => null);
-          assert(state !== 'ready' && state !== 'loading', `foreign embedder must not load the page (state ${state}, url ${frame.url()})`);
+          const state = await frame
+            .evaluate(() => document.documentElement.dataset.state ?? null)
+            .catch(() => null);
+          assert(
+            state !== 'ready' && state !== 'loading',
+            `foreign embedder must not load the page (state ${state}, url ${frame.url()})`
+          );
           await page.goto(url);
           const origin = await page.mainFrame().evaluate(() => self.origin);
           assert(origin === 'null', `top-level display document is sandboxed: ${origin}`);
