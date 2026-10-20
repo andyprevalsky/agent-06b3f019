@@ -1,4 +1,7 @@
-/** Local Claude Code ws-server process helpers: port allocation + readiness. */
+/**
+ * Process helpers for the local Claude Code ws-server fallback: allocate a
+ * loopback port and wait for the child's authenticated readiness record.
+ */
 import type { ChildProcess } from 'child_process';
 import { createServer } from 'net';
 

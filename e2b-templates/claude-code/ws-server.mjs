@@ -13,6 +13,7 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
+  readFileSync,
   writeFileSync,
 } from "fs";
 import { homedir } from "os";
@@ -53,6 +54,14 @@ const CLAUDE_CODE_MODEL = process.env.CLAUDE_CODE_MODEL || "claude-sonnet-5";
 const CODE_AGENT_SYSTEM_PROMPT = process.env.CODE_AGENT_SYSTEM_PROMPT || "";
 const GITHUB_REPO_URL = process.env.GITHUB_REPO_URL;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+// Project sessions (backend restoreWorkspace): the checkout is already in
+// ~/workspace with its env files; run the project's startup script before the
+// CLI on every boot (create and resume) and tell the CLI how it went.
+const PROJECT_WORKDIR = process.env.ROSE_PROJECT_WORKDIR || "";
+const PROJECT_STARTUP = process.env.ROSE_PROJECT_STARTUP || "";
+const PROJECT_STARTUP_CONFIG = process.env.ROSE_PROJECT_STARTUP_CONFIG || "";
+const PROJECT_NAME = process.env.ROSE_PROJECT_NAME || "";
+const PROJECT_STARTUP_REPORT_PREFIX = "ROSE_PROJECT_STARTUP_REPORT ";
 
 // Validate required env vars
 if (
@@ -309,6 +318,7 @@ log("info", "Configuration written");
 // Clone GitHub repo if specified
 let workDir = home;
 const REPO_WORKDIR = join(home, "workspace");
+const projectMode = Boolean(PROJECT_WORKDIR) && existsSync(PROJECT_WORKDIR);
 
 // A resumed persistent code session (paused sandbox or restored checkpoint)
 // already has the repo with its local branches/commits/uncommitted edits:
@@ -316,7 +326,20 @@ const REPO_WORKDIR = join(home, "workspace");
 const RESUMING_REPO =
   Boolean(GITHUB_REPO_URL) && existsSync(join(REPO_WORKDIR, ".git"));
 
-if (RESUMING_REPO) {
+if (projectMode) {
+  workDir = PROJECT_WORKDIR;
+  projects[workDir] = { allowedTools: ["*"], hasTrustDialogAccepted: true };
+  writeFileSync(
+    join(home, ".claude", "projects.json"),
+    JSON.stringify(projects),
+  );
+  settings.allowedDirectories.push(workDir);
+  writeFileSync(settingsPath, JSON.stringify(settings));
+  log("info", "Using restored project workspace", {
+    workDir,
+    project: PROJECT_NAME,
+  });
+} else if (RESUMING_REPO) {
   workDir = REPO_WORKDIR;
   try {
     const authUrl = GITHUB_TOKEN
@@ -393,7 +416,9 @@ if (RESUMING_REPO) {
   }
 }
 
-if (!GITHUB_REPO_URL && CODE_AGENT_SYSTEM_PROMPT) {
+// A project's own CLAUDE.md is never overwritten; the code-agent prompt is
+// already passed with --append-system-prompt.
+if (!GITHUB_REPO_URL && !projectMode && CODE_AGENT_SYSTEM_PROMPT) {
   writeFileSync(join(workDir, "CLAUDE.md"), CODE_AGENT_SYSTEM_PROMPT);
 }
 
@@ -481,9 +506,10 @@ function prepareCodeSessionBranch(repoDir) {
   return result;
 }
 
+// A restored project workspace gets the same branch model as a cloned repo.
 const codeSessionBranch =
-  GITHUB_REPO_URL && workDir === REPO_WORKDIR
-    ? prepareCodeSessionBranch(REPO_WORKDIR)
+  (GITHUB_REPO_URL && workDir === REPO_WORKDIR) || projectMode
+    ? prepareCodeSessionBranch(workDir)
     : null;
 if (codeSessionBranch) {
   appendEvent({
@@ -812,9 +838,122 @@ function handleHandBack(msg) {
   return { type: "hand_back_ack", status: wasHeld ? "released" : "not_held" };
 }
 
-async function runClaudeCli() {
+function startupBudgetMs() {
+  try {
+    const cfg = JSON.parse(readFileSync(PROJECT_STARTUP_CONFIG, "utf8"));
+    const timeoutS = Number(cfg.timeoutS);
+    return ((Number.isFinite(timeoutS) ? timeoutS : 120) + 30) * 1000;
+  } catch {
+    return 150 * 1000;
+  }
+}
+
+/** Run the project's startup script (bounded); resolves its report or null. */
+function runProjectStartup() {
+  if (!projectMode || !PROJECT_STARTUP || !existsSync(PROJECT_STARTUP)) {
+    return Promise.resolve(null);
+  }
+  appendEvent({
+    type: "project_startup",
+    status: "running",
+    project: PROJECT_NAME,
+  });
+  appendOutput(
+    "stdout",
+    `[Project] Running startup script for ${PROJECT_NAME}\n`,
+  );
+  return new Promise((resolve) => {
+    let stdout = "";
+    let settled = false;
+    let guard = null;
+    const done = (report) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(guard);
+      appendEvent({
+        type: "project_startup",
+        project: PROJECT_NAME,
+        ...report,
+      });
+      log("info", "Project startup finished", {
+        status: report.status,
+        exitCode: report.exitCode,
+        durationMs: report.durationMs,
+      });
+      resolve(report);
+    };
+    const fallback = (status, detail) => ({
+      status,
+      exitCode: null,
+      durationMs: 0,
+      timeoutS: null,
+      outputTail: detail,
+      logPath: null,
+    });
+    const child = spawn(
+      process.execPath,
+      [PROJECT_STARTUP, PROJECT_STARTUP_CONFIG].filter(Boolean),
+      {
+        cwd: workDir,
+        env: { ...process.env, HOME: home },
+        // A piped stdin closed at once: the startup script gets EOF, and the
+        // stdin structural guard (no "ignore") still holds for every spawn.
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    child.stdin.end();
+    child.stdout.on("data", (chunk) => {
+      const text = chunk.toString("utf8");
+      stdout = (stdout + text).slice(-64 * 1024);
+      appendOutput("stdout", text);
+    });
+    child.stderr.on("data", (chunk) =>
+      appendOutput("stderr", chunk.toString("utf8")),
+    );
+    guard = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // already exited
+      }
+      done(fallback("timeout", "startup runner did not finish"));
+    }, startupBudgetMs());
+    child.on("error", (err) => done(fallback("failed", err.message)));
+    child.on("exit", () => {
+      const line = stdout
+        .split("\n")
+        .reverse()
+        .find((l) => l.startsWith(PROJECT_STARTUP_REPORT_PREFIX));
+      try {
+        done(JSON.parse(line.slice(PROJECT_STARTUP_REPORT_PREFIX.length)));
+      } catch {
+        done(fallback("failed", "startup runner produced no report"));
+      }
+    });
+  });
+}
+
+/** One factual paragraph for the CLI about the project startup outcome. */
+function projectStartupNote(report) {
+  if (!report || report.status === "skipped") return "";
+  const name = PROJECT_NAME ? ` for project ${PROJECT_NAME}` : "";
+  const secs = ((report.durationMs || 0) / 1000).toFixed(1);
+  const logRef = report.logPath ? ` Log: ${report.logPath}.` : "";
+  if (report.status === "ok") {
+    return `Project startup${name} finished OK in ${secs}s.${logRef}\n\n`;
+  }
+  const tail = String(report.outputTail || "").slice(-1500);
+  const what =
+    report.status === "timeout"
+      ? `TIMED OUT after ${report.timeoutS ?? "?"}s and was stopped; services it starts may not be running.`
+      : `FAILED (exit ${report.exitCode ?? "?"}) after ${secs}s.`;
+  return `Project startup${name} ${what}${logRef}\nLast output:\n${tail}\n\n`;
+}
+
+async function runClaudeCli(startupReport = null) {
   const sanitizedGoal = GOAL.replace(/\0/g, "");
-  const prompt = userMessageLine(`Task:\n${sanitizedGoal}`);
+  // Direct-chat stream-json user message; the project startup note leads the task.
+  const prompt = userMessageLine(`${projectStartupNote(startupReport)}Task:\n${sanitizedGoal}`);
 
   appendEvent({
     type: "session",
@@ -962,4 +1101,4 @@ async function runClaudeCli() {
   });
 }
 
-runClaudeCli();
+runProjectStartup().then((report) => runClaudeCli(report));

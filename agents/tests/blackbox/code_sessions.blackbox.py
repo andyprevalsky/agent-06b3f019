@@ -459,6 +459,7 @@ async def test_tool_result_reports_branch_and_merged_only_when_confirmed():
     assert "PR: #7 open" in text and "Merged: no" in text, text
     meta = service.build_code_agent_metadata(task_id="t", provider="claude", state="completed", started_at=0, facts=facts)
     assert meta["branch"] == "rose/a--b-123456" and "merged_into" not in meta["summary"], meta
+    assert meta["base_branch"] == "rose/a", meta
 
     merged = json.loads(json.dumps(open_pr))
     merged["code_session"]["merge"].update(

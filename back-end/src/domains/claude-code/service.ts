@@ -9,6 +9,7 @@ import {
   getClaudeCodeSession,
 } from '../../providers/e2b';
 import { checkGithubRepoAccess } from '../../providers/github';
+import { resolveSessionProject } from '../../providers/projects/session';
 import { createLogger } from '../../providers/logger';
 import {
   markPoolTokenRateLimited,
@@ -66,11 +67,16 @@ import type { CloseSessionParams, CreateSessionParams, CreateSessionResult } fro
 export async function resolveAgentContext(
   agentId: string,
   userId: string | undefined
-): Promise<{ repoUrl: string | undefined; userId: string | undefined }> {
+): Promise<{
+  repoUrl: string | undefined;
+  userId: string | undefined;
+  projectId?: string | undefined;
+}> {
   try {
     const agent = await repo.findAgentGithubInfo(agentId);
     let storedOwnerId = agent?.userId ?? undefined;
     let repoUrl = agent?.githubRepoUrl ?? undefined;
+    let projectId = agent?.projectId ?? undefined;
 
     if (
       repoUrl === undefined &&
@@ -82,6 +88,7 @@ export async function resolveAgentContext(
       const rootAgent = await repo.findRootAgentGithubInfo(agent.busId);
       repoUrl = rootAgent?.githubRepoUrl ?? undefined;
       storedOwnerId ??= rootAgent?.userId;
+      projectId ??= rootAgent?.projectId ?? undefined;
     }
 
     const callerUserId = userId !== undefined && userId !== '' ? userId : undefined;
@@ -94,13 +101,7 @@ export async function resolveAgentContext(
     }
     const resolvedUserId = storedOwnerId ?? callerUserId;
 
-    if (agent?.githubRepoUrl !== undefined && agent.githubRepoUrl !== null) {
-      return {
-        repoUrl,
-        userId: resolvedUserId,
-      };
-    }
-    return { repoUrl, userId: resolvedUserId };
+    return { repoUrl, userId: resolvedUserId, projectId };
   } catch (err) {
     log.error('Failed to look up agent owner and GitHub repo', {
       error: err instanceof Error ? err.message : String(err),
@@ -120,6 +121,15 @@ export async function createSession(params: CreateSessionParams): Promise<Create
   // repo-less agents can still consume their user's stored OAuth credential.
   const resolved = await resolveAgentContext(agent_id, effectiveUserId);
   effectiveUserId = resolved.userId;
+  const projectWorkspace = await resolveSessionProject(
+    effectiveUserId,
+    params.project_id ?? resolved.projectId
+  );
+  if (projectWorkspace !== null) {
+    // The project restore owns the checkout; never also clone github_repo_url.
+    effectiveGithubRepoUrl = undefined;
+    resolved.repoUrl = undefined;
+  }
 
   // Auto-inject GitHub repo URL from the agent tree if not explicitly provided.
   if (effectiveGithubRepoUrl === undefined || effectiveGithubRepoUrl === '') {
@@ -156,15 +166,21 @@ export async function createSession(params: CreateSessionParams): Promise<Create
   // Code-agent Anthropic/Codex proxy is DEMO cache replay — not the Fast Mode button.
   const fastModeCacheEnabled = fastMode.enabled;
 
+  // A project session is scoped (and branched) by its project; its repo is the
+  // project's repo, cut from the project's default branch.
+  const sessionRepoUrl =
+    projectWorkspace !== null
+      ? (projectWorkspace.project.repoUrl ?? `rose-project:${projectWorkspace.project.id}`)
+      : (normalizedRepoUrl ?? null);
   const { session, fields } = await createWithCodeSession(
     {
       agentId: agent_id,
       userId: effectiveUserId,
-      repoUrl: normalizedRepoUrl ?? null,
+      repoUrl: sessionRepoUrl,
       codeProvider: 'claude',
       codeSessionId: params.code_session_id,
       leaseOwner: params.lease_owner,
-      baseBranch: params.base_branch ?? null,
+      baseBranch: params.base_branch ?? projectWorkspace?.project.defaultBranch ?? null,
     },
     (codeSession) =>
       createClaudeCodeSession(
@@ -174,7 +190,7 @@ export async function createSession(params: CreateSessionParams): Promise<Create
         normalizedRepoUrl,
         effectiveUserId,
         fastModeCacheEnabled,
-        codeSession
+        { projectWorkspace, codeSession }
       )
   );
 
@@ -185,6 +201,7 @@ export async function createSession(params: CreateSessionParams): Promise<Create
     uploaded_files: session.uploadedFiles,
     github_repo_url: normalizedRepoUrl ?? null,
     ...fields,
+    project: session.projectRestore ?? null,
   };
 }
 

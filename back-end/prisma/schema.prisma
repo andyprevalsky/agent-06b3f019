@@ -71,6 +71,10 @@ model Agent {
   memoryEnabled                    Boolean                   @default(true)
   isBenchmark                      Boolean                   @default(false)
   githubRepoUrl                    String?
+  /// Owning Project (left-bar grouping, code-session workspace). Null = Home.
+  /// Set on create (owner-validated) or inherited from the parent agent.
+  projectId                        String?
+  project                          Project?                  @relation(fields: [projectId], references: [id], onDelete: SetNull)
   parent                           Agent?                    @relation("AgentHierarchy", fields: [parentAgentId], references: [id])
   children                         Agent[]                   @relation("AgentHierarchy")
   tools                            AgentTool[]
@@ -91,6 +95,7 @@ model Agent {
   @@index([parentAgentId, createdAt])
   @@index([parentAgentId, worldModelMode, createdAt])
   @@index([busId])
+  @@index([projectId])
 }
 
 model TemporalWorkflowCleanup {
@@ -393,6 +398,7 @@ model User {
   /// Active published rose_user_ui version (UserUiVersion.id); null = stock UI.
   activeUiVersionId           String?
   uiVersions                  UserUiVersion[]
+  projects                    Project[]
 
   @@index([userId])
   @@index([inviteCode])
@@ -600,6 +606,8 @@ model ClaudeCodeSession {
   /// Question this code agent asked its spawning Rose agent ({message_id, question, at}).
   /// The spawn blocked on this task pauses the session and returns the question.
   awaitingParent           Json?
+  /// Project restored into this session (runProjectStartup reads it on resume).
+  projectId                String?
 
   @@index([agentId])
   @@index([sandboxId])
@@ -678,17 +686,17 @@ model GithubRepoAccess {
 }
 
 model MessageRecord {
-  id         String         @id @default(uuid())
-  personId   String
-  channel    MessageChannel
-  from       String
-  to         String
-  timestamp  DateTime
-  message    String
-  externalId String? // Platform-native message ID (Telegram msg.id, iMessage ROWID, WhatsApp key.id)
+  id                 String         @id @default(uuid())
+  personId           String
+  channel            MessageChannel
+  from               String
+  to                 String
+  timestamp          DateTime
+  message            String
+  externalId         String? // Platform-native message ID (Telegram msg.id, iMessage ROWID, WhatsApp key.id)
   googleAccountEmail String? // Source Gmail account for account-scoped deletion
-  createdAt  DateTime       @default(now())
-  person     Person         @relation(fields: [personId], references: [id], onDelete: Cascade)
+  createdAt          DateTime       @default(now())
+  person             Person         @relation(fields: [personId], references: [id], onDelete: Cascade)
 
   @@unique([personId, channel, externalId]) // Primary dedup: same message can't be inserted twice
   @@index([personId, channel])
@@ -699,15 +707,15 @@ model MessageRecord {
 }
 
 model GoogleDataPurge {
-  id          String    @id @default(uuid())
-  userId      String
-  email       String?
+  id              String    @id @default(uuid())
+  userId          String
+  email           String?
   /// Encrypted token kept only until Google confirms revocation.
   revocationToken String?
-  requestedAt DateTime  @default(now())
-  claimedUntil DateTime?
-  processedAt DateTime?
-  createdAt   DateTime  @default(now())
+  requestedAt     DateTime  @default(now())
+  claimedUntil    DateTime?
+  processedAt     DateTime?
+  createdAt       DateTime  @default(now())
 
   @@index([processedAt, claimedUntil, requestedAt])
   @@index([userId, email])
@@ -925,23 +933,23 @@ model ComputeGrant {
 }
 
 model UserDataDocument {
-  id              String                 @id @default(uuid())
-  userId          String
-  source          String
+  id                 String                 @id @default(uuid())
+  userId             String
+  source             String
   googleAccountEmail String?
-  externalId      String
-  title           String
-  content         String
-  url             String?
-  metadata        Json?                  @default("{}")
-  contentHash     String
-  sourceUpdatedAt DateTime?
-  lastSeenAt      DateTime               @default(now())
-  deletedAt       DateTime?
-  createdAt       DateTime               @default(now())
-  updatedAt       DateTime               @updatedAt
-  user            User                   @relation(fields: [userId], references: [userId], onDelete: Cascade)
-  snapshotUpdates UserSnapshotRevision[]
+  externalId         String
+  title              String
+  content            String
+  url                String?
+  metadata           Json?                  @default("{}")
+  contentHash        String
+  sourceUpdatedAt    DateTime?
+  lastSeenAt         DateTime               @default(now())
+  deletedAt          DateTime?
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+  user               User                   @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  snapshotUpdates    UserSnapshotRevision[]
 
   @@unique([userId, source, externalId])
   @@index([userId, source])
@@ -985,21 +993,21 @@ model UserSnapshot {
 }
 
 model UserSnapshotRevision {
-  id         String            @id @default(uuid())
-  userId     String
-  snapshotId String
-  documentId String?
-  source     String
+  id                 String            @id @default(uuid())
+  userId             String
+  snapshotId         String
+  documentId         String?
+  source             String
   googleAccountEmail String?
-  before     Json              @default("{}")
-  after      Json              @default("{}")
-  changes    Json?             @default("{}")
-  model      String?
-  promptKey  String?
-  createdAt  DateTime          @default(now())
-  user       User              @relation(fields: [userId], references: [userId], onDelete: Cascade)
-  snapshot   UserSnapshot      @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
-  document   UserDataDocument? @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  before             Json              @default("{}")
+  after              Json              @default("{}")
+  changes            Json?             @default("{}")
+  model              String?
+  promptKey          String?
+  createdAt          DateTime          @default(now())
+  user               User              @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  snapshot           UserSnapshot      @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  document           UserDataDocument? @relation(fields: [documentId], references: [id], onDelete: SetNull)
 
   @@index([userId, createdAt])
   @@index([snapshotId])
@@ -1825,4 +1833,75 @@ model SlackAutoRcaEvent {
 
   @@index([slackChannel, slackTs])
   @@index([incidentId])
+}
+
+/// A user's codebase ("Project"): the settings a code session needs to run it
+/// plus its latest codebase-sync snapshot (rose-sync CLI / mac app). Secret-
+/// bearing content (env files, linked config, git artifacts) is stored only as
+/// credential envelopes (RSA-OAEP + AES-256-GCM, CLAUDE_CREDENTIAL_DECRYPTION_KEY).
+model Project {
+  id              String               @id @default(uuid())
+  userId          String
+  name            String
+  repoUrl         String?
+  defaultBranch   String               @default("main")
+  startupScript   String?
+  startupTimeoutS Int                  @default(120)
+  autoWake        Boolean              @default(false)
+  /// Per-project salt for content fingerprints (incremental re-sync).
+  syncSalt        String
+  /// Monotonic snapshot revision; bumped by every accepted sync.
+  syncRevision    Int                  @default(0)
+  lastSyncedAt    DateTime?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  user            User                 @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  envFiles        ProjectEnvFile[]
+  syncSnapshot    ProjectSyncSnapshot?
+  agents          Agent[]
+
+  @@unique([userId, name])
+  @@index([userId, updatedAt])
+}
+
+/// One secret-bearing file materialized into a project checkout with 0600
+/// permissions. `variables` holds names/descriptions only (searchable); values
+/// exist only inside `encryptedContent`.
+model ProjectEnvFile {
+  id               String   @id @default(uuid())
+  projectId        String
+  /// Repo-relative destination path.
+  path             String
+  description      String?
+  /// "env" (dotenv) | "config" (other linked or secret config file)
+  kind             String   @default("env")
+  /// "managed" (project settings) | "sync" (codebase sync) | "declared" (awaiting sync)
+  source           String   @default("managed")
+  variables        Json     @default("[]")
+  encryptedContent String?
+  fingerprint      String?
+  /// Original symlink target recorded by codebase sync (link structure only).
+  linkTarget       String?
+  sizeBytes        Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  project          Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, path])
+}
+
+/// Latest codebase-sync snapshot of a project: non-secret manifest plus
+/// encrypted git artifacts. One row per project, replaced by each revision.
+model ProjectSyncSnapshot {
+  projectId                 String   @id
+  revision                  Int
+  /// Non-secret: git remote/branch/head, symlinks, toolchain, setup hints, source.
+  manifest                  Json
+  encryptedGitBundle        String?
+  gitBundleFingerprint      String?
+  encryptedUncommittedPatch String?
+  patchFingerprint          String?
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+  project                   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
 }

@@ -10,6 +10,7 @@ import {
   isLocalClaudeCodeFallbackEligible,
 } from './claudeCodeLocalSession';
 import type { UserUiWorkspace } from './userUi/workspace';
+import type { ProjectRestoreReport, ProjectWorkspace } from './projects/types';
 import {
   connectPausedSandbox,
   prepareLocalCodeSessionHome,
@@ -17,6 +18,7 @@ import {
   type ResumedFrom,
 } from './codeSessions/lifecycle';
 import { e2bSandboxFs } from './codeSessions/sandboxFs';
+import { createSandboxWithRetry } from './e2bSandboxCreate';
 import {
   linkClaudeCodeSession,
   markPaused,
@@ -44,6 +46,8 @@ export interface CodeAgentSessionResult {
   resumedFrom?: ResumedFrom;
   /** CLI conversation the session resumed (`claude --resume` / `codex resume`). */
   cliSessionId?: string | null;
+  /** Restore summary when the session materialized a Project (PJ3). */
+  projectRestore?: ProjectRestoreReport | null;
 }
 
 /**
@@ -74,6 +78,31 @@ export async function acquireCodeSessionSandbox(
     }
   }
   return { sandbox, resumedFrom: 'new', cliSessionId: null };
+}
+
+/**
+ * Acquire the sandbox for a spawn: resume the session's paused sandbox, else
+ * create one from `templateId` (restoring the latest checkpoint). The
+ * timeout is the idle window every keepalive extends, not a runtime cap.
+ */
+export async function acquireCodeSandbox(
+  codeSession: CodeSessionRow | null,
+  templateId: string,
+  envs: Record<string, string>,
+  label: string
+): Promise<{ sandbox: Sandbox; resumedFrom: ResumedFrom; cliSessionId: string | null }> {
+  return acquireCodeSessionSandbox(codeSession, () =>
+    createSandboxWithRetry(
+      templateId,
+      {
+        apiKey: process.env.E2B_API_KEY,
+        timeoutMs: SANDBOX_TIMEOUT_MS,
+        envs,
+        ...codeSessionCreateOptions(codeSession),
+      },
+      label
+    )
+  );
 }
 
 /** A resumed sandbox still runs the previous (lingering) ws-server on WS_PORT. */
@@ -152,6 +181,7 @@ export async function createLocalCodeSessionFallback(
     envs: Record<string, string>;
     attachments?: FilePointer[];
     userUiWorkspace?: UserUiWorkspace | null;
+    projectWorkspace?: ProjectWorkspace | null;
     claudeTokenSource: string | null;
     claudeTokenIntegrationId: string | null;
   }

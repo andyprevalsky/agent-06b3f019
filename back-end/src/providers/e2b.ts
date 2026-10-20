@@ -23,7 +23,6 @@ import { withAgentGraphWorkspace } from './agentGraph/workspace';
 import { uploadAttachmentsToSandbox } from './e2bAttachments';
 import { overlayCodexRoseBridge } from './e2bCodexHarness';
 import { workDirForGithubRepo } from './e2bWorkDir';
-import { createSandboxWithRetry } from './e2bSandboxCreate';
 import {
   fileHash,
   findLocalClaudeCodeWsServer,
@@ -32,16 +31,16 @@ import {
   overlayCodexCodeWsServer,
 } from './e2bWsServerOverlay';
 import {
-  acquireCodeSessionSandbox,
-  CODE_SANDBOX_IDLE_TIMEOUT_MS,
+  acquireCodeSandbox,
   codeSessionBranchEnvs,
   type CodeAgentSessionResult,
-  codeSessionCreateOptions,
   createLocalCodeSessionFallback,
   recordE2bCodeSessionSandbox,
   releaseSandboxAfterFailedStart,
 } from './e2bCodeSessionSandbox';
 import { type CodeSessionRow } from './codeSessions/store';
+import type { ProjectWorkspace } from './projects/types';
+import { restoreSandboxProject } from './projects/workspace';
 import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
 import { waitForSandboxWsServer } from './e2bWsReady';
 import { codeSessionTurnToken } from './codeSessionTurns';
@@ -103,8 +102,6 @@ if (!process.env.E2B_CLAUDE_CODE_TEMPLATE_ID) {
 }
 
 const WS_PORT = 3000;
-// An idle window, not a runtime cap: every keepalive extends it (see the constant).
-const SANDBOX_TIMEOUT_MS = CODE_SANDBOX_IDLE_TIMEOUT_MS;
 const WS_READY_TIMEOUT_MS = 10000;
 const CODEX_WS_READY_TIMEOUT_MS = 30000;
 const WS_READY_POLL_INTERVAL_MS = 100;
@@ -119,6 +116,13 @@ const DEFAULT_CODEX_CODE_TEMPLATE_ID = 'codex-code';
  * @param githubRepoUrl - Optional GitHub repo URL to clone before starting Claude
  * @returns Session info including WebSocket URL for terminal streaming
  */
+export interface ClaudeCodeSessionOptions {
+  /** Project restored into `~/workspace` before the CLI starts (PJ3 / C9). */
+  projectWorkspace?: ProjectWorkspace | null;
+  /** Persistent code session to resume or start (C1, C13). */
+  codeSession?: CodeSessionRow | null;
+}
+
 export async function createClaudeCodeSession(
   agentId: string,
   goal: string,
@@ -126,7 +130,7 @@ export async function createClaudeCodeSession(
   githubRepoUrl?: string,
   userId?: string,
   fastModeCacheEnabled?: boolean,
-  codeSession?: CodeSessionRow | null
+  options: ClaudeCodeSessionOptions = {}
 ): Promise<CodeAgentSessionResult> {
   // Serialize creates — concurrent reserve-script calls stampede E2B redis.
   return withClaudeCodeCreateSlot(() =>
@@ -137,7 +141,7 @@ export async function createClaudeCodeSession(
       githubRepoUrl,
       userId,
       fastModeCacheEnabled,
-      codeSession ?? null
+      options
     )
   );
 }
@@ -149,8 +153,10 @@ async function createClaudeCodeSessionUnlocked(
   githubRepoUrl: string | undefined,
   userId: string | undefined,
   fastModeCacheEnabled: boolean | undefined,
-  codeSession: CodeSessionRow | null
+  options: ClaudeCodeSessionOptions
 ): Promise<CodeAgentSessionResult> {
+  const projectWorkspace = options.projectWorkspace ?? null;
+  const codeSession = options.codeSession ?? null;
   log.info(`Creating Claude Code session for agent ${agentId}`);
 
   if (!process.env.E2B_API_KEY || !process.env.E2B_CLAUDE_CODE_TEMPLATE_ID) {
@@ -367,18 +373,7 @@ async function createClaudeCodeSessionUnlocked(
   const templateIdForCreate = process.env.E2B_CLAUDE_CODE_TEMPLATE_ID;
   let acquired;
   try {
-    acquired = await acquireCodeSessionSandbox(codeSession, () =>
-      createSandboxWithRetry(
-        templateIdForCreate,
-        {
-          apiKey: process.env.E2B_API_KEY,
-          timeoutMs: SANDBOX_TIMEOUT_MS,
-          envs,
-          ...codeSessionCreateOptions(codeSession),
-        },
-        'Claude Code'
-      )
-    );
+    acquired = await acquireCodeSandbox(codeSession, templateIdForCreate, envs, 'Claude Code');
   } catch (err) {
     const local = await createLocalCodeSessionFallback(err, codeSession, {
       taskId,
@@ -387,6 +382,7 @@ async function createClaudeCodeSessionUnlocked(
       envs,
       attachments,
       userUiWorkspace,
+      projectWorkspace,
       claudeTokenSource,
       claudeTokenIntegrationId:
         credentialMeta?.source === 'pool' ? (credentialMeta.poolTokenId ?? null) : null,
@@ -400,6 +396,7 @@ async function createClaudeCodeSessionUnlocked(
   log.info(`Using sandbox: ${sandbox.sandboxId} (${resumedFrom})`);
   await overlayClaudeCodeWsServer(sandbox);
   await writeUserUiWorkspaceToSandboxSafe(sandbox, userUiWorkspace, agentId);
+  const project = await restoreSandboxProject(taskId, sandbox, projectWorkspace);
 
   const uploadedFiles = await uploadAttachmentsToSandbox(sandbox, attachments, 'Claude Code');
 
@@ -414,7 +411,7 @@ async function createClaudeCodeSessionUnlocked(
     .run('node /home/user/ws-server.mjs', {
       background: true,
       timeoutMs: 0,
-      envs,
+      envs: { ...envs, ...(project.envs ?? {}) },
     })
     .catch((err) =>
       log.error('Failed to start WS server', {
@@ -449,6 +446,7 @@ async function createClaudeCodeSessionUnlocked(
       claudeTokenIntegrationId:
         credentialMeta?.source === 'pool' ? (credentialMeta.poolTokenId ?? null) : null,
       codeSessionId: codeSession?.id ?? null,
+      projectId: projectWorkspace?.project.id ?? null,
     },
   });
   await recordE2bCodeSessionSandbox(codeSession, sandbox.sandboxId);
@@ -462,6 +460,7 @@ async function createClaudeCodeSessionUnlocked(
     uploadedFiles,
     resumedFrom,
     cliSessionId,
+    projectRestore: project.report,
   };
 }
 
@@ -622,17 +621,11 @@ export async function createCodexCodeSession(
   });
   applyUserUiSandboxEnvs(envs, userUiWorkspace);
 
-  const { sandbox, resumedFrom, cliSessionId } = await acquireCodeSessionSandbox(codeSession, () =>
-    createSandboxWithRetry(
-      templateId,
-      {
-        apiKey: process.env.E2B_API_KEY,
-        timeoutMs: SANDBOX_TIMEOUT_MS,
-        envs,
-        ...codeSessionCreateOptions(codeSession),
-      },
-      'Codex Code'
-    )
+  const { sandbox, resumedFrom, cliSessionId } = await acquireCodeSandbox(
+    codeSession,
+    templateId,
+    envs,
+    'Codex Code'
   );
   if (cliSessionId !== null) envs.CODEX_RESUME_SESSION_ID = cliSessionId;
 

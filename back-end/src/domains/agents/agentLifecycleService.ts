@@ -2,6 +2,7 @@
  * Agent lifecycle service — create and delete agents.
  */
 
+import { resolveAgentProjectId } from './agentProject';
 import { randomUUID } from '../../providers/crypto';
 import { startAgentWorkflowExecution } from '../../providers/temporal';
 import { bindStartedRunIdentity } from '../../providers/workflowGeneration';
@@ -10,10 +11,7 @@ import { handleChatMessage, broadcastAgentModeStarted } from '../../providers/ch
 import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailure';
 import { deleteAgentRecursive as killAgentRecursive } from '../../providers/agentKill';
 import { createGithubRepo } from '../../providers/github';
-import {
-  CodeSessionShareTargetNotFoundError,
-  shareCodeSession,
-} from '../../providers/codeSessions/branch';
+import { assertCodeSessionShareTarget, recordCodeSessionShare } from './agentCodeSessionShare';
 import { createLogger } from '../../providers/logger';
 import { resolvePriceLimitCents } from '../../providers/priceLimitDefaults';
 import type { CreateAgentBody } from './types';
@@ -172,28 +170,22 @@ async function resolveSubAgentBenchmarkFlag(
   return !isBenchmark && parent?.isBenchmark === true ? true : isBenchmark;
 }
 
-/** "New agent in this branch" must name an agent the caller owns. */
-async function assertCodeSessionShareTarget(body: CreateAgentBody, userId: string): Promise<void> {
-  const target = body.share_code_session_with;
-  if (target !== undefined && (await repo.findAgent(target, userId)) === null) {
-    throw new CodeSessionShareTargetNotFoundError(target);
-  }
-}
-
-/** Recorded before the workflow starts so its first code spawn already shares. */
-async function recordCodeSessionShare(
-  body: CreateAgentBody,
-  userId: string,
-  agentId: string
-): Promise<void> {
-  if (body.share_code_session_with === undefined) return;
-  await shareCodeSession({ userId, agentId, sharedWithAgentId: body.share_code_session_with });
-}
-
 /** Server-side create options that are not part of the public request body. */
 export interface CreateAgentOptions {
   /** Root repository for code sessions, persisted in the create transaction. */
   githubRepoUrl?: string;
+}
+
+/** Defaults and access checks every create body passes before any row is written. */
+async function applyCreateBodyRules(
+  body: CreateAgentBody,
+  userId: string,
+  benchmarkFlag: boolean
+): Promise<void> {
+  applyMemoryDefault(body, benchmarkFlag);
+  disableFastModeForWorldModel(body);
+  assertWorldModelModeAccess(body, userId);
+  await assertCodeSessionShareTarget(body, userId);
 }
 
 export async function createAgent(
@@ -210,12 +202,10 @@ export async function createAgent(
   applyFastModeDefault(body, userId);
 
   const benchmarkFlag = await resolveSubAgentBenchmarkFlag(body, userId, isBenchmark);
-  applyMemoryDefault(body, benchmarkFlag);
-  disableFastModeForWorldModel(body);
-  assertWorldModelModeAccess(body, userId);
-  await assertCodeSessionShareTarget(body, userId);
+  await applyCreateBodyRules(body, userId, benchmarkFlag);
   const existingSubAgent = await resumeExistingSubAgent(body, userId, verifier);
   if (existingSubAgent !== null) return existingSubAgent;
+  const projectId = await resolveAgentProjectId(body, userId);
   const { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo } =
     await resolveCreateMetadata(body.model, clientIP, body.parent_agent_id ?? null, userId);
   const agentId = body.agent_id ?? randomUUID();
@@ -257,6 +247,7 @@ export async function createAgent(
     workflowStartPhase: body.start_phase,
     workflowTaskQueue: body.task_queue,
     ...(options.githubRepoUrl !== undefined ? { githubRepoUrl: options.githubRepoUrl } : {}),
+    projectId,
   });
   const archiveStartFixture = !isSubAgent ? await prepareAgentStartArchive(agent.agent.id) : null;
   await recordCodeSessionShare(body, userId, agent.agent.id);
@@ -279,6 +270,7 @@ export async function createAgent(
     fast_mode_cache_enabled: agent.agent.fastModeCacheEnabled,
     memory_enabled: agent.agent.memoryEnabled,
     world_model_mode: agent.agent.worldModelMode,
+    project_id: agent.agent.projectId,
     created_at: agent.agent.createdAt,
     updated_at: agent.agent.updatedAt,
     available_endpoints: getX402Endpoints(agent.agent.id),

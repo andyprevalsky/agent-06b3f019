@@ -4,6 +4,7 @@
 
 import { z } from 'zod';
 import type { FilePointer } from '../../providers/storage';
+import type { ProjectRestoreReport } from '../../providers/projects/types';
 
 // ---------------------------------------------------------------------------
 // Zod schemas
@@ -32,6 +33,8 @@ export const createSessionSchema = z.object({
   lease_owner: z.string().min(1).max(200).optional(),
   // Project default branch a new root session's branch is cut from (default: the repo's).
   base_branch: z.string().min(1).max(255).optional(),
+  /** Project to restore; defaults to the agent's own (or its root's) project. */
+  project_id: z.string().uuid().optional(),
 });
 
 export const closeSessionSchema = z.object({
@@ -61,6 +64,8 @@ export interface CreateSessionParams {
   code_session_id?: string;
   lease_owner?: string;
   base_branch?: string;
+  /** Explicit Project; defaults to the agent's (or its root's) project. */
+  project_id?: string;
 }
 
 export interface CreateSessionResult {
@@ -76,6 +81,8 @@ export interface CreateSessionResult {
   base_branch: string | null;
   merge_target: string | null;
   parent_code_session_id: string | null;
+  /** Restore summary when the session materialized a Project (PJ3). */
+  project: ProjectRestoreReport | null;
 }
 
 export interface CloseSessionParams {

@@ -26,6 +26,7 @@ import type { FilePointer } from '../../providers/storage';
 import * as service from './service';
 import { registerCodeSessionRoutes, sendCodeSessionError } from './routes.codeSessions';
 import { AgentOwnerMismatchError, MissingUserIdError, GitHubAccessDeniedError } from './service';
+import { ProjectNotFoundForSessionError } from '../../providers/projects/session';
 
 const log = createLogger('ClaudeCodeRoutes');
 const router = Router();
@@ -52,6 +53,7 @@ router.post(
         code_session_id,
         lease_owner,
         base_branch,
+        project_id,
       } = createSessionSchema.parse(req.body);
 
       const result = await service.createSession({
@@ -63,6 +65,7 @@ router.post(
         code_session_id,
         lease_owner,
         base_branch,
+        project_id,
       });
 
       res.json({
@@ -82,6 +85,10 @@ router.post(
           error: error.detail,
           code: 'GITHUB_ACCESS_DENIED',
         });
+        return;
+      }
+      if (error instanceof ProjectNotFoundForSessionError) {
+        res.status(404).json({ error: error.message, code: 'PROJECT_NOT_FOUND' });
         return;
       }
       if (error instanceof AgentOwnerMismatchError) {

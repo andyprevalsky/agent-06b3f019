@@ -1,3 +1,4 @@
+import { unregisterWorkspaceExecutor } from './projects/workspaceExecutor';
 import { Sandbox } from 'e2b';
 import { Prisma } from '@prisma/client';
 import mime from 'mime-types';
@@ -372,6 +373,8 @@ export async function closeClaudeCodeSession(
       }
     }
 
+    // The project workspace executor belongs to this task either way.
+    unregisterWorkspaceExecutor(taskId);
     if (codeSession !== null && ownsSandbox) {
       // Persistent session: checkpoint, then pause (fs + memory survive).
       const checkpoint = await checkpointCodeSession({
