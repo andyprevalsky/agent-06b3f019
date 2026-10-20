@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -74,9 +75,19 @@ def test_pull_streams_extraction_without_staging_the_whole_archive(tmp_path: Pat
 
     def observing_get(*, Bucket: str, Key: str) -> dict:
         if Key == last_key:
-            staging = list((tmp_path / "dst").glob(".wmh-cache-*"))
+            # Hold the last part back and give the extractor a bounded window: a
+            # streaming pull writes files from the earlier parts meanwhile, while a
+            # staging pull cannot extract anything until this part arrives. A single
+            # instantaneous sample raced the extractor thread on a loaded host.
+            deadline = time.monotonic() + 10
+            while True:
+                staging = list((tmp_path / "dst").glob(".wmh-cache-*"))
+                count = sum(1 for root in staging for p in root.rglob("*") if p.is_file() and p.suffix != ".tar")
+                if count or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.05)
             staged_tars.extend(path for root in staging for path in root.rglob("*.tar"))
-            extracted_before_last.append(sum(1 for root in staging for p in root.rglob("*") if p.is_file()))
+            extracted_before_last.append(count)
         return original_get(Bucket=Bucket, Key=Key)
 
     bucket.get_object = observing_get
