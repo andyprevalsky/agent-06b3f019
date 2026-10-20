@@ -1,12 +1,13 @@
 /**
- * Pure wire views of one IntegrationSyncProgress row.
+ * Pure IntegrationSyncProgress row → wire mappers, shared by the write path
+ * (service.progress) and the account view (service.accountsView).
  *
- *   ProgressRow ──► progressOf ──► IntegrationAccountProgress (chip numbers)
+ *   ProgressRow ──► progressOf ──► IntegrationAccountProgress
  *               └─► snapshotOf ──► ProgressSnapshot (what a writer gets back)
  *
- * Kept free of the account registry so the progress write path
- * (service.progress) can be called from upload services without an import
- * cycle through service.accountsView → service.accountRegistry → service.
+ * Kept free of the provider registry so backend sync jobs that report progress
+ * (for example the Plaid sync) do not import the account adapters, whose
+ * cleanup hooks import those same jobs.
  */
 
 import type { ProgressRow } from './repo.progress';

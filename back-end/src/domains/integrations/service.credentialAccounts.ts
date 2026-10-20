@@ -3,7 +3,9 @@
  *
  *   browserSource ──passwordIntegrationName──► provider `<source>_passwords`
  *                                               (Apple import: `apple_passwords`)
- *   browserProfile ─────────────────────────► accountId (wire `default` = no profile)
+ *   browserProfile ──cookieAccountStorageId──► accountId `<source>:<profile>`
+ *                                               (`''` / wire `default` = no profile),
+ *                                               the same spelling as cookie accounts
  *
  *   browserSource ──passkeyIntegrationName───► provider `<source>_passkeys`,
  *                                               one `default` account per source
@@ -13,6 +15,7 @@
  */
 
 import * as repo from './repo.credentialAccounts';
+import { cookieProfileFromAccountId } from './syncAccountsContract';
 
 const PASSWORDS_SUFFIX = '_passwords';
 const PASSKEYS_SUFFIX = '_passkeys';
@@ -21,7 +24,7 @@ const APPLE_PASSWORDS = 'apple_passwords';
 interface CredentialAccountKey {
   userId: string;
   provider: string;
-  /** Storage account id: the browser profile, `''` for none. */
+  /** Storage account id: `<source>:<profile>`, `''` for none. */
   accountId: string;
 }
 
@@ -49,6 +52,14 @@ export function passkeySourceForProvider(provider: string): string | null {
   return source === '' ? null : source;
 }
 
+/** The profile an account id names (`chrome:Profile 1` → `Profile 1`). */
+function passwordProfileFromAccountId(browserSources: string[], accountId: string): string {
+  for (const source of browserSources) {
+    if (accountId.startsWith(`${source}:`)) return cookieProfileFromAccountId(source, accountId);
+  }
+  return accountId;
+}
+
 /** Account = one browser profile of one source: its saved logins and its row. */
 export async function deletePasswordAccount(key: CredentialAccountKey): Promise<boolean> {
   const browserSources = passwordSourcesForProvider(key.provider);
@@ -56,8 +67,9 @@ export async function deletePasswordAccount(key: CredentialAccountKey): Promise<
   const removed = await repo.deletePasswordAccountRows({
     userId: key.userId,
     provider: key.provider,
+    accountId: key.accountId,
     browserSources,
-    browserProfile: key.accountId,
+    browserProfile: passwordProfileFromAccountId(browserSources, key.accountId),
   });
   return removed.credentials > 0 || removed.integrationRows > 0;
 }

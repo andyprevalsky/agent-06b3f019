@@ -165,12 +165,17 @@ router.post(
         return;
       }
       const clientIP = getClientIP(req);
+      // The Rose Mac app's main process stamps its device id on renderer
+      // requests; it is recorded as the agent's origin (C14 local code agents).
+      const originDeviceHeader =
+        req.isInternal === true ? undefined : req.header('x-rose-device-id');
       const result = await lifecycleService.createAgent(
         body,
         userId,
         req.isInternal === true,
         clientIP,
-        routeGuards.isBenchmarkRequest(req)
+        routeGuards.isBenchmarkRequest(req),
+        originDeviceHeader !== undefined ? { originDeviceHeader } : {}
       );
       res.status(201).json(result);
     } catch (error) {

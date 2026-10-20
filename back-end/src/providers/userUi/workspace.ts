@@ -7,8 +7,12 @@
  *          active version files (storage) ─┐
  *          or seed (README + manifest +    ├─► files under ~/rose_user_ui/
  *          theme + examples)               ┘   README.md always regenerated
- *          rose-ui CLI ──────────────────────► ~/.rose/bin/rose-ui
+ *          rose-ui CLI + preview host ───────► ~/.rose/bin/rose-ui, ~/.rose/lib/rose-ui/
  *          fresh publish token ──────────────► ROSE_UI_PUBLISH_URL / _TOKEN env
+ *          active version usercontent URL ──► ROSE_UI_PUBLISHED_BASE_URL / _VERSION_ID env
+ *     └─ (sandbox) background `rose-ui screenshot --current`
+ *          → ~/rose_user_ui/screenshots/current/*.png of the published UI
+ *          (the CLI also captures lazily on its first browser command)
  *
  * The folder lives in the session HOME (not the repo workDir) so a GitHub clone
  * into the workDir never collides with it.
@@ -19,26 +23,37 @@ import { createLogger } from '../logger';
 import type { UserUiBundleFile } from './manifest';
 import { mintUserUiPublishToken } from './publishToken';
 import {
+  USER_UI_CLI_BIN_DIR,
   USER_UI_CLI_NAME,
-  USER_UI_CLI_SCRIPT,
   USER_UI_DIR_NAME,
-  USER_UI_README,
+  userUiReadme,
   userUiSeedFiles,
+  userUiToolFiles,
 } from './seed';
 import { findActiveUserUiVersion, readUserUiVersionFiles } from './store';
 
 const log = createLogger('UserUiWorkspace');
 
-export const USER_UI_CLI_BIN_DIR = '.rose/bin';
+export { USER_UI_CLI_BIN_DIR };
 
 export interface UserUiWorkspace {
-  /** Files relative to the session HOME (rose_user_ui/... and .rose/bin/rose-ui). */
+  /** Files relative to the session HOME (rose_user_ui/..., .rose/bin/rose-ui, .rose/lib/...). */
   files: UserUiBundleFile[];
-  /** Env injected into the session so `rose-ui publish` can reach the backend. */
+  /** Env injected into the session for `rose-ui publish` and published-UI screenshots. */
   envs: Record<string, string>;
   /** Overrides for a same-host (local fallback) session, e.g. loopback URLs. */
   localEnvs?: Record<string, string>;
   source: { kind: 'active'; versionId: string } | { kind: 'seed' };
+}
+
+/**
+ * Where a published version's files are served. Mirrors the user-ui domain:
+ * USERCONTENT_BASE_URL (separate origin) in production, else this backend.
+ */
+export function userUiPublishedBaseUrl(versionId: string, backendBaseUrl: string): string {
+  const configured = process.env.USERCONTENT_BASE_URL?.trim();
+  const origin = configured ? configured.replace(/\/+$/, '') : backendBaseUrl;
+  return `${origin}/usercontent/${versionId}/`;
 }
 
 /** Public base URL a sandbox uses to reach this backend. */
@@ -51,40 +66,46 @@ export function userUiPublishBaseUrl(): string {
   return `http://localhost:${process.env.PORT || 3001}`;
 }
 
-export async function prepareUserUiWorkspace(userId: string): Promise<UserUiWorkspace> {
+export async function prepareUserUiWorkspace(
+  userId: string,
+  agentId?: string
+): Promise<UserUiWorkspace> {
   const active = await findActiveUserUiVersion(userId);
   const bundle = active ? await readUserUiVersionFiles(userId, active.id) : userUiSeedFiles();
   const withReadme = [
     ...bundle.filter((file) => file.path !== 'README.md'),
-    { path: 'README.md', content: Buffer.from(USER_UI_README, 'utf8') },
+    { path: 'README.md', content: Buffer.from(userUiReadme(), 'utf8') },
   ];
-  const { token } = mintUserUiPublishToken(userId);
+  const { token } = mintUserUiPublishToken(userId, { agentId });
+  const envs: Record<string, string> = {
+    ROSE_UI_PUBLISH_URL: `${userUiPublishBaseUrl()}/api/user-ui/versions`,
+    ROSE_UI_PUBLISH_TOKEN: token,
+  };
+  if (active) {
+    envs.ROSE_UI_PUBLISHED_VERSION_ID = active.id;
+    envs.ROSE_UI_PUBLISHED_BASE_URL = userUiPublishedBaseUrl(active.id, userUiPublishBaseUrl());
+  }
   return {
     files: [
       ...withReadme.map((file) => ({
         path: `${USER_UI_DIR_NAME}/${file.path}`,
         content: file.content,
       })),
-      {
-        path: `${USER_UI_CLI_BIN_DIR}/${USER_UI_CLI_NAME}`,
-        content: Buffer.from(USER_UI_CLI_SCRIPT, 'utf8'),
-      },
+      ...userUiToolFiles(),
     ],
-    envs: {
-      ROSE_UI_PUBLISH_URL: `${userUiPublishBaseUrl()}/api/user-ui/versions`,
-      ROSE_UI_PUBLISH_TOKEN: token,
-    },
+    envs,
     source: active ? { kind: 'active', versionId: active.id } : { kind: 'seed' },
   };
 }
 
 /** Best-effort wrapper: a UI-folder failure must never block a code session. */
 export async function prepareUserUiWorkspaceSafe(
-  userId: string | undefined
+  userId: string | undefined,
+  agentId?: string
 ): Promise<UserUiWorkspace | null> {
   if (!userId) return null;
   try {
-    const workspace = await prepareUserUiWorkspace(userId);
+    const workspace = await prepareUserUiWorkspace(userId, agentId);
     log.info('Prepared rose_user_ui workspace', {
       userId,
       source: workspace.source.kind,
@@ -147,6 +168,19 @@ export async function writeUserUiWorkspaceToSandbox(
   const bins = cliBinPaths(workspace).map((bin) => `${home}/${bin}`);
   if (bins.length === 0) return;
   await sandbox.commands.run(`chmod 755 ${bins.join(' ')}`, { timeoutMs: 10_000 });
+  if (workspace.source.kind === 'active') {
+    await sandbox.commands.run(currentScreenshotsCommand(home), { timeoutMs: 10_000 });
+  }
+}
+
+/**
+ * Detached session-start capture of the published UI. It needs Playwright +
+ * Chromium in the template; when they are missing it fails into its log and
+ * `rose-ui` retries lazily on the agent's first browser command.
+ */
+export function currentScreenshotsCommand(home: string): string {
+  const cli = `${home}/${USER_UI_CLI_BIN_DIR}/${USER_UI_CLI_NAME}`;
+  return `nohup ${cli} screenshot --current --quiet > ${home}/.rose/current-screenshots.log 2>&1 &`;
 }
 
 const SANDBOX_HOME = '/home/user';
@@ -193,13 +227,18 @@ export async function materializeUserUiInLocalHome(
   if (!workspace) return null;
   try {
     await writeUserUiWorkspaceToDir(homeDir, workspace);
-    return {
-      binDir: join(homeDir, USER_UI_CLI_BIN_DIR),
-      envs: {
-        ROSE_UI_PUBLISH_URL: `http://127.0.0.1:${process.env.PORT || 3001}/api/user-ui/versions`,
-        ...workspace.localEnvs,
-      },
+    const loopback = `http://127.0.0.1:${process.env.PORT || 3001}`;
+    const envs: Record<string, string> = {
+      ROSE_UI_PUBLISH_URL: `${loopback}/api/user-ui/versions`,
+      ...workspace.localEnvs,
     };
+    if (workspace.source.kind === 'active') {
+      envs.ROSE_UI_PUBLISHED_BASE_URL = userUiPublishedBaseUrl(
+        workspace.source.versionId,
+        loopback
+      );
+    }
+    return { binDir: join(homeDir, USER_UI_CLI_BIN_DIR), envs };
   } catch (err) {
     log.error('Failed to materialize local rose_user_ui', {
       agentId,

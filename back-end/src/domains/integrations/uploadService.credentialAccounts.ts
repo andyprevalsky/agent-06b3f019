@@ -26,7 +26,7 @@ const log = createLogger('Integrations');
 
 export interface CredentialUploadAccount {
   provider: string;
-  /** Storage account id: browser profile, `''` for none. */
+  /** Storage account id: `<source>:<profile>` for passwords, `''` for none. */
   accountId: string;
   count: number;
 }

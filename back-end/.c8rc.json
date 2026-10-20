@@ -61,6 +61,7 @@
     "src/domains/whatsapp-webhook/types.ts",
     "src/domains/world-models/types.ts",
     "src/providers/agentcard/types.ts",
+    "src/assets/user-ui/seed/**",
     "src/providers/authOptionsTypes.ts",
     "src/providers/card-provider/types.ts",
     "src/domains/browser-session/config.ts",

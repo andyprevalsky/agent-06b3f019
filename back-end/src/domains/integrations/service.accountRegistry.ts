@@ -16,12 +16,14 @@
 import { VALID_BROWSERS } from './config';
 import * as repo from './repo.integration';
 import { findIntegrationAccount } from './repo.accounts';
+import { deleteCookiesForProfile, deleteCookieBundlesForProfile } from './repo.bulk';
 import { findPlaidItemForUser, PlaidItemStatus } from './repo.plaid';
 import { disconnectGmailAccount, GmailAccountNotFoundError } from './service';
 import { disconnectPlaidItem } from './service.plaid';
 import { deletePasskeyAccount, deletePasswordAccount } from './service.credentialAccounts';
 import { deleteLanternIntegration, LanternCredentialError } from './service.lantern';
 import { KNOWN_SOURCES as DOCUMENT_SOURCES } from './uploadService.documents';
+import { cookieProfileFromAccountId } from './syncAccountsContract';
 
 /** Lanes that own a provider's account-scoped cleanup (plan rows I1–I8). */
 export type IntegrationLane =
@@ -54,7 +56,7 @@ export type AccountCleanupHook =
  * `row`: each Integration row is one account. `email_credentials` / `plaid_items`:
  * one container row fans out to per-address / per-item accounts.
  */
-export type AccountListKind = 'row' | 'email_credentials' | 'plaid_items';
+export type AccountListKind = 'row' | 'email_credentials' | 'plaid_items' | 'browser_cookies';
 
 export interface IntegrationAccountAdapter {
   list: AccountListKind;
@@ -88,6 +90,27 @@ async function deletePlaidAccount(ctx: AccountCleanupContext): Promise<boolean> 
   if (item === null || item.status === PlaidItemStatus.DISCONNECTED) return false;
   await disconnectPlaidItem(ctx.userId, ctx.accountId);
   return true;
+}
+
+/**
+ * Cookie account = one browser profile. The account id spells the profile as
+ * `<browser>:<profile>` (legacy empty profile = `default`/storage `''`), so the
+ * deletion resolves back to the exact rows the account view derived. Removes
+ * that profile's cookies AND its SSO cookie bundles, nothing else.
+ */
+async function deleteCookieProfileAccount(ctx: AccountCleanupContext): Promise<boolean> {
+  const browserProfile = cookieProfileFromAccountId(ctx.provider, ctx.accountId);
+  const cookies = await deleteCookiesForProfile({
+    userId: ctx.userId,
+    browserSource: ctx.provider,
+    browserProfile,
+  });
+  const bundles = await deleteCookieBundlesForProfile({
+    userId: ctx.userId,
+    browserSource: ctx.provider,
+    browserProfile,
+  });
+  return cookies.count > 0 || bundles.count > 0;
 }
 
 async function deleteLanternAccount(ctx: AccountCleanupContext): Promise<boolean> {
@@ -138,10 +161,9 @@ const EXACT: Record<string, IntegrationAccountAdapter> = {
     list: 'row',
     cleanup: todo('L-INT-LINKEDIN', 'imported connections are not keyed by LinkedIn account'),
   },
-  browser_fingerprint: {
-    list: 'row',
-    cleanup: todo('L-INT-COOKIES', 'fingerprint rows are not keyed by browser profile'),
-  },
+  // The fingerprint is one credential blob on the Integration row (not keyed by
+  // profile), so its single `default` account is removed by dropping the row.
+  browser_fingerprint: ROW_ONLY,
   apple_passwords: { list: 'row', cleanup: hook(deletePasswordAccount) },
   contacts: { list: 'row', cleanup: todo('unassigned', 'VCF contacts are not keyed by source') },
   email: { list: 'row', cleanup: todo('unassigned', 'archive-imported email is not keyed') },
@@ -153,10 +175,7 @@ const EXACT: Record<string, IntegrationAccountAdapter> = {
 
 function familyAdapter(provider: string): IntegrationAccountAdapter | null {
   if (VALID_BROWSERS.includes(provider)) {
-    return {
-      list: 'row',
-      cleanup: todo('L-INT-COOKIES', 'cookies are keyed by browserSource+browserProfile'),
-    };
+    return { list: 'browser_cookies', cleanup: hook(deleteCookieProfileAccount) };
   }
   // Passwords: account = one browser profile of the source (I7). Passkeys:
   // account = the source (`default`).

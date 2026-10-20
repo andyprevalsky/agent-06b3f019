@@ -25,6 +25,8 @@
  *   - passwords/passkeys (I7): one row per source+profile, each a deletable account
  *     with batch progress; credential readers prefer one login deterministically
  *   - validation 400s, per-user account cap, internal API-key writer path, auth 401
+ *   - Plaid per-item sync progress (I5): indeterminate total while syncing, final counts,
+ *     1 s coalescing, independent items, ITEM_LOGIN_REQUIRED, webhook re-sync reuses the row
  *
  * Usage: bash scripts/run-blackbox-tests.sh integration-accounts
  */
@@ -35,6 +37,7 @@ import { reportIntegrationProgress } from '../../domains/integrations/service.pr
 import { MAX_PROGRESS_ACCOUNTS_PER_USER } from '../../domains/integrations/syncAccountsContract';
 import { cases as advancedCases } from './integration-accounts.cases';
 import { passwordCases } from './integration-accounts.passwords.cases';
+import { cases as plaidProgressCases } from './integration-accounts.plaid.cases';
 import {
   accountsOf,
   anonymousSession,
@@ -352,6 +355,8 @@ const coreCases: Array<{ name: string; fn: () => Promise<void> }> = [
 async function cleanup(userIds: string[]): Promise<void> {
   const where = { userId: { in: userIds } };
   await prisma.integrationSyncProgress.deleteMany({ where });
+  await prisma.cookie.deleteMany({ where });
+  await prisma.cookieBundle.deleteMany({ where });
   await prisma.plaidTransaction.deleteMany({ where });
   await prisma.plaidAccount.deleteMany({ where });
   await prisma.plaidItem.deleteMany({ where });
@@ -363,7 +368,12 @@ async function cleanup(userIds: string[]): Promise<void> {
 async function main(): Promise<void> {
   sessions.a = await anonymousSession();
   sessions.b = await anonymousSession();
-  const tests = [...coreCases, ...advancedCases(() => ({ a: A(), b: B() })), ...passwordCases()];
+  const tests = [
+    ...coreCases,
+    ...advancedCases(() => ({ a: A(), b: B() })),
+    ...plaidProgressCases(),
+    ...passwordCases(),
+  ];
   let failed = 0;
   try {
     for (const test of tests) {

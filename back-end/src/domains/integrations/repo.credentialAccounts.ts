@@ -1,7 +1,7 @@
 /**
  * Saved-login and passkey rows addressed as integration accounts (plan row I7).
  *
- *   `<source>_passwords` / accountId = browserProfile ('' = no profile)
+ *   `<source>_passwords` / accountId `<source>:<profile>` ('' = no profile)
  *        → BrowserPassword rows (userId, browserSource ∈ sources, browserProfile)
  *   `<source>_passkeys`  / accountId '' (one account per source)
  *        → PasskeyCredential rows (userId, browserSource)
@@ -31,6 +31,8 @@ export async function countPasswordsForProfile(
 export async function deletePasswordAccountRows(params: {
   userId: string;
   provider: string;
+  /** Integration row account id (`<source>:<profile>`, `''` for none). */
+  accountId: string;
   browserSources: string[];
   browserProfile: string;
 }): Promise<CredentialAccountDeletion> {
@@ -43,7 +45,7 @@ export async function deletePasswordAccountRows(params: {
       },
     });
     const rows = await tx.integration.deleteMany({
-      where: { userId: params.userId, name: params.provider, accountId: params.browserProfile },
+      where: { userId: params.userId, name: params.provider, accountId: params.accountId },
     });
     return { credentials: credentials.count, integrationRows: rows.count };
   });

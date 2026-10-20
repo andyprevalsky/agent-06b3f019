@@ -8,8 +8,9 @@
  *   PasskeyCredential  browserSource = account
  *        │
  *        ├── GET /api/integrations      provider `<source>_passwords`, one account per profile
- *        │                              (`default` = no profile), progress done/total = batch
- *        ├── DELETE /api/integrations/<provider>/accounts/<profile|default>
+ *        │                              `<source>:<profile>` (`default` = no profile),
+ *        │                              progress done/total = batch
+ *        ├── DELETE /api/integrations/<provider>/accounts/<source:profile|default>
  *        │                              removes only that source+profile's rows
  *        └── readers (auth options, browser session passwords) see ONE login per
  *            origin+username: enabled > user-synced > newest use > newest sync
@@ -228,13 +229,13 @@ async function eachSourceProfileIsAnAccount(): Promise<void> {
     expectStatus(res, 200, 'multi-account upload');
     const chrome = await accountsOf(token, 'chrome_passwords');
     assert(
-      JSON.stringify(accountIds(chrome)) === JSON.stringify(['Default', 'Profile 1']),
+      JSON.stringify(accountIds(chrome)) === JSON.stringify(['chrome:Default', 'chrome:Profile 1']),
       `each Chrome profile is an account (legacy row claimed), got ${JSON.stringify(accountIds(chrome))}`
     );
     const byId = new Map(chrome.map((account) => [account.accountId, account]));
     for (const [accountId, total] of [
-      ['Default', 3],
-      ['Profile 1', 2],
+      ['chrome:Default', 3],
+      ['chrome:Profile 1', 2],
     ] as const) {
       const account = byId.get(accountId)!;
       assert(account.state === 'synced', `${accountId} synced, got ${account.state}`);
@@ -249,8 +250,8 @@ async function eachSourceProfileIsAnAccount(): Promise<void> {
     }
     const stored = await prisma.integration.findUniqueOrThrow({ where: { id: legacy.id } });
     assert(
-      stored.accountId === 'Default',
-      `the legacy row became Default, got '${stored.accountId}'`
+      stored.accountId === 'chrome:Default',
+      `the legacy row became chrome:Default, got '${stored.accountId}'`
     );
     const safari = await accountsOf(token, 'safari_passwords');
     assert(
@@ -279,17 +280,20 @@ async function deleteRemovesOnlyThatAccount(): Promise<void> {
     );
     const other = await anonymousSession();
     try {
-      const foreign = await call('/api/integrations/chrome_passwords/accounts/Profile%201', {
-        method: 'DELETE',
-        auth: other.token,
-      });
+      const foreign = await call(
+        '/api/integrations/chrome_passwords/accounts/chrome%3AProfile%201',
+        {
+          method: 'DELETE',
+          auth: other.token,
+        }
+      );
       expectStatus(foreign, 404, "another user deleting this user's profile");
       assert((await storedPasswords(userId)).length === 4, 'a foreign delete removes nothing');
     } finally {
       await cleanupUser(other.userId);
     }
 
-    const res = await call('/api/integrations/chrome_passwords/accounts/Profile%201', {
+    const res = await call('/api/integrations/chrome_passwords/accounts/chrome%3AProfile%201', {
       method: 'DELETE',
       auth: token,
     });
@@ -301,15 +305,15 @@ async function deleteRemovesOnlyThatAccount(): Promise<void> {
     );
     const chrome = await accountsOf(token, 'chrome_passwords');
     assert(
-      JSON.stringify(accountIds(chrome)) === JSON.stringify(['Default']),
+      JSON.stringify(accountIds(chrome)) === JSON.stringify(['chrome:Default']),
       `Profile 1 is no longer listed, got ${JSON.stringify(accountIds(chrome))}`
     );
     const progress = await prisma.integrationSyncProgress.count({
-      where: { userId, provider: 'chrome_passwords', accountId: 'Profile 1' },
+      where: { userId, provider: 'chrome_passwords', accountId: 'chrome:Profile 1' },
     });
     assert(progress === 0, 'the deleted account progress row is gone');
     expectStatus(
-      await call('/api/integrations/chrome_passwords/accounts/Profile%201', {
+      await call('/api/integrations/chrome_passwords/accounts/chrome%3AProfile%201', {
         method: 'DELETE',
         auth: token,
       }),

@@ -1,0 +1,7 @@
+{
+  "agents": [
+    { "id": "a1", "name": "Plan a weekend in Big Sur", "status": "running", "progress": 0.4, "detail": "Comparing 3 inns near Pfeiffer" },
+    { "id": "a2", "name": "Reply to the Lisbon thread", "status": "waiting", "progress": 0.6, "detail": "Needs your OK on the draft" },
+    { "id": "a3", "name": "Renew passport", "status": "done", "progress": 1, "detail": "Appointment Nov 3" }
+  ]
+}

@@ -5,7 +5,8 @@
  * Passwords (plan row I7): one BrowserPassword row per
  * (origin, username, browserSource, browserProfile). Each source is the
  * provider `<source>_passwords` and each of its profiles one account
- * (`default` = no profile), with upload progress done/total = the batch.
+ * `<source>:<profile>` (`default` = no profile), with upload progress
+ * done/total = the batch.
  */
 
 import { type CacheStoragePayload, type PasswordPayload, type ApplePasswordEntry } from './types';
@@ -13,6 +14,7 @@ import { createLogger } from '../../providers/logger';
 import { encryptPasswordForStorage } from '../../providers/credentialEnvelope';
 import * as repo from './repo';
 import { passwordIntegrationName } from './service.credentialAccounts';
+import { cookieAccountStorageId } from './syncAccountsContract';
 import {
   trackCredentialUpload,
   upsertCredentialAccountRow,
@@ -98,6 +100,7 @@ function deduplicatePasswordsByStoredKey(passwords: PasswordRow[]): PasswordRow[
 
 interface PasswordUploadAccount extends CredentialUploadAccount {
   browserSource: string;
+  browserProfile: string;
 }
 
 function passwordAccounts(passwords: PasswordRow[]): PasswordUploadAccount[] {
@@ -106,8 +109,10 @@ function passwordAccounts(passwords: PasswordRow[]): PasswordUploadAccount[] {
     const key = accountKey(pwd);
     const account = accounts.get(key) ?? {
       provider: passwordIntegrationName(pwd.browserSource),
-      accountId: pwd.browserProfile,
+      // Same `<source>:<profile>` spelling as browser-cookie accounts (I6).
+      accountId: cookieAccountStorageId(pwd.browserSource, pwd.browserProfile),
       browserSource: pwd.browserSource,
+      browserProfile: pwd.browserProfile,
       count: 0,
     };
     account.count += 1;
@@ -163,7 +168,7 @@ export async function processPasswordsUpload(userId: string, passwordData: Passw
   const uploadedAt = new Date().toISOString();
   const accounts = await storePasswordUpload(userId, deduplicatedPasswords, (account) => ({
     browserSource: account.browserSource,
-    browserProfile: account.accountId,
+    browserProfile: account.browserProfile,
     passwordCount: account.count,
     uploadedAt,
   }));

@@ -1,6 +1,6 @@
 import { USER_UI_DIR_NAME } from './userUi/seed';
 
-export const CODE_AGENT_INSTRUCTIONS_VERSION = '2026-10-20.code-agent-rose-ui-tools.v4';
+export const CODE_AGENT_INSTRUCTIONS_VERSION = '2026-10-20.code-agent-rose-ui-kit.v5';
 export const CODEX_HARNESS_INSTRUCTIONS_VERSION = '2026-08-25.codex-rose-harness.v1';
 
 export const CODE_AGENT_ATTACHMENTS_DIR = '/home/user/attachments';
@@ -43,6 +43,7 @@ export function buildCodeAgentSystemPrompt(args: BuildCodeAgentPromptArgs = {}):
     'Rose app UI:',
     `- ${CODE_AGENT_USER_UI_DIR} is the Rose app UI of the user you work for. Its README.md explains the layout and \`rose-ui publish\`.`,
     '- To change how Rose looks or behaves for the user, edit that folder and run `rose-ui publish` so the user sees the change.',
+    `- ${CODE_AGENT_USER_UI_DIR}/screenshots/current/ shows what the user sees now. \`rose-ui screenshot\` renders your local changes; \`rose-ui check\` must pass before \`rose-ui publish\`.`,
     '- When asked for something the user should look at or play (a game, app, chart or other visual), build it as an inline view there, publish it, and name the view in your final response so it can be shown in the chat. Still put any requested files in the output directory.',
     '',
     'Talking to the user:',
@@ -97,5 +98,29 @@ export function buildCodexHarnessSystemPrompt(args: BuildCodexHarnessPromptArgs)
     '- Rose agents use cloud browser infrastructure with injected saved auth and compute token rotation automatically.',
     '- Do not stop at an empty cart or a single-item cart when the goal requires a full grocery manifest.',
     '- Checkout/write-lock approvals are expected terminal states for ecommerce benchmarks.',
+  ].join('\n');
+}
+
+/**
+ * Instructions for a code agent running on the user's own Mac (C14): the same
+ * contract as the sandbox prompt, but the work lives in the shared folder.
+ */
+export function buildLocalCodeAgentSystemPrompt(): string {
+  return [
+    `Rose Labs code-agent instructions (${CODE_AGENT_INSTRUCTIONS_VERSION}.local-mac)`,
+    '',
+    "You are running on the user's own Mac, in a folder they shared with Rose. That folder is your working directory.",
+    'Complete the requested coding or file task autonomously.',
+    '',
+    'File contract:',
+    '- Work only inside the working directory. Do not read or change files outside it.',
+    '- Leave results in the folder. In your final response, name the exact paths of files you created or changed.',
+    '- If no file output is requested, do not create placeholder files.',
+    '',
+    'Execution contract:',
+    '- Prefer direct, verifiable commands over prose-only claims.',
+    '- Finish only after the requested work exists and has been checked.',
+    '- Surface real configuration or credential failures directly.',
+    '- If task text says to use Claude Code or a code agent, treat that as this current Rose Labs code-agent session. Do not launch a separate claude/Claude Code CLI, run claude login, or start any interactive authentication flow.',
   ].join('\n');
 }

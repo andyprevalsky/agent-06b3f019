@@ -63,6 +63,8 @@ const MACHINE_DATA_ROUTES: Record<string, string[]> = {
   'upload/routes.ts': ['/'],
   'download-telemetry/routes.ts': ['/'],
   'imessage/routes.ts': ['/queue/pop', '/queue/:id/result'],
+  // The Mac registering its attached iPhone, and its mirrored screen frames.
+  'phones/routes.ts': ['/register', '/:id/frame/upload'],
 };
 
 /**
