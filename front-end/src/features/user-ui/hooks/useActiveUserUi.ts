@@ -9,6 +9,8 @@
  *     open agent message/status, sub-agent tree change (existing channels),
  *     refreshActiveUserUi(), `user_ui.published` → coalesced refetch: at most
  *     one GET per 750ms window, never two in flight, cancelled on unmount
+ *     USER_UI_ACTIVE_CHANGED {versionId} on the open agent's channel → same
+ *     coalesced refetch, skipped when that versionId is already applied
  *
  * Only a change of versionId replaces state, so refetches never re-render
  * mounted frames. A baseUrl on the app origin is refused (stock UI). Responses
@@ -55,7 +57,13 @@ function startLiveRefresh(
 ): () => void {
   const coalescer = createRefreshCoalescer(load);
   const unregister = registerUserUiRefresher({ request: coalescer.request, currentVersionId });
-  const unlisten = onOpenAgentActivity(coalescer.request);
+  const unlisten = onOpenAgentActivity((activity) => {
+    // USER_UI_ACTIVE_CHANGED names the new version: skip it when already applied.
+    if (activity.kind === 'user-ui-active-changed' && activity.versionId === currentVersionId()) {
+      return;
+    }
+    coalescer.request();
+  });
   return () => {
     unlisten();
     unregister();

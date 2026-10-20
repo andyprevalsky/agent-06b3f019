@@ -88,6 +88,7 @@ import {
   type AgentStateChangedPayload,
   type AgentModeStartedPayload,
   type BrowserSessionBindingPayload,
+  type UserUiActiveChangedPayload,
   extractInsertPayload,
   extractUpdatePayload,
   extractDeletePayload,
@@ -98,6 +99,7 @@ import {
   extractAgentStateChangedPayload,
   extractAgentModeStartedPayload,
   extractBrowserSessionBindingPayload,
+  extractUserUiActiveChangedPayload,
 } from './realtime-types';
 
 // Legacy type aliases for backward compatibility
@@ -225,6 +227,8 @@ export interface AgentHandlers {
   onToolStream?: (payload: ToolStreamPayload) => void;
   onAgentModeStarted?: (payload: AgentModeStartedPayload) => void;
   onBrowserSession?: (payload: BrowserSessionBindingPayload) => void;
+  /** A code agent in this tree activated a new Rose UI version (rose-ui publish). */
+  onUserUiActiveChanged?: (payload: UserUiActiveChangedPayload) => void;
   onDisconnect?: () => void;
 }
 
@@ -298,6 +302,12 @@ export async function subscribeToAgent(
     eventHandlers['BROWSER_SESSION'] = (wrapper: unknown) => {
       const record = extractBrowserSessionBindingPayload(wrapper);
       if (record) handlers.onBrowserSession!(record);
+    };
+  }
+  if (handlers.onUserUiActiveChanged) {
+    eventHandlers['USER_UI_ACTIVE_CHANGED'] = (wrapper: unknown) => {
+      const record = extractUserUiActiveChangedPayload(wrapper);
+      if (record) handlers.onUserUiActiveChanged!(record);
     };
   }
 

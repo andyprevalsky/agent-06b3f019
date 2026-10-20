@@ -15,6 +15,7 @@
  * [SAVED REPLY] + late matching stream -> canonical remains authoritative
  */
 import { useMemo } from 'react';
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { userFacingMessageText } from '@/lib/userFacingMessage';
 import {
   deduplicateToolMessages,
@@ -28,6 +29,7 @@ import type { ExploreStep, WaitForCheck } from '../types';
 
 import { isDirectSpawnChildProgress } from './useSubAgentTreeMerge';
 import { normalizeWMHCodeMessage } from './wmhCodeMessage';
+import { isCodeAgentUserFacingRow } from '../hooks/codeAgentContract';
 
 // ─── Filter messages by subAgentId ───────────────────────────────────────
 
@@ -55,10 +57,15 @@ function sanitizeTrajectoryMessage(message: Message): Message {
   return { ...message, text };
 }
 
-/** Exported for blackbox coverage of the Claude Code root-visibility rule. */
+/**
+ * Exported for blackbox coverage of the Claude Code root-visibility rule.
+ * Rose Desktop also keeps a code agent's user-facing rows (send_message_to_user,
+ * inline display media) in the root trajectory; flag off they stay nested.
+ */
 export function filterMessagesForSubAgent(
   messages: Message[],
   subAgentId: string | undefined,
+  roseDesktop = false,
 ): Message[] {
   const target = subAgentId ?? null;
   return messages.filter((m) => {
@@ -68,6 +75,7 @@ export function filterMessagesForSubAgent(
       if (isDirectSpawnChildProgress(m)) return true;
       if (m.metadata?.agentType === 'explore') return true;
       if (isClaudeCodeChipAnchor(m)) return true;
+      if (roseDesktop && isCodeAgentUserFacingRow(m)) return true;
       return false;
     }
     return msgSub === target;
@@ -84,8 +92,13 @@ export function useFilteredMessages(
   messages: Message[],
   subAgentId: string | undefined,
 ): FilteredMessages {
+  const roseDesktop = useRoseDesktop();
   return useMemo(() => {
-    const filtered = filterMessagesForSubAgent(messages.map(normalizeWMHCodeMessage), subAgentId);
+    const filtered = filterMessagesForSubAgent(
+      messages.map(normalizeWMHCodeMessage),
+      subAgentId,
+      roseDesktop,
+    );
     const withoutSystem = filtered.filter((m) => m.role !== 'SYSTEM');
     const withoutHidden = withoutSystem
       .filter((m) => !m.metadata?.hidden)
@@ -93,7 +106,7 @@ export function useFilteredMessages(
     const [filteredMessagesRaw, exploreStepMap, waitForCheckMap] =
       deduplicateToolMessages(withoutHidden);
     return { filteredMessagesRaw, exploreStepMap, waitForCheckMap };
-  }, [messages, subAgentId]);
+  }, [messages, roseDesktop, subAgentId]);
 }
 
 // ─── Streaming state filtering + derived metrics ─────────────────────────

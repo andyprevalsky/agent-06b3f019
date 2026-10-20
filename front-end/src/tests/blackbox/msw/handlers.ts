@@ -252,6 +252,22 @@ export const handlers = [
     return HttpResponse.json({ requests: [] });
   }),
 
+  // Pinned question answer (agent-tools questionService.answerQuestion RequestState)
+  http.post(
+    `${API_BASE}/agents/:agentId/questions/:questionId/answer`,
+    async ({ params, request }) => {
+      const body = (await request.json()) as { answer?: string; dismiss?: boolean };
+      return HttpResponse.json({
+        id: String(params.questionId),
+        kind: 'question',
+        status: body.dismiss === true ? 'rejected' : 'answered',
+        response: body.dismiss === true ? null : (body.answer ?? null),
+        selected_option: null,
+        answered_by: 'user',
+      });
+    },
+  ),
+
   http.post(`${API_BASE}/attention-requests/:requestId/respond`, () => {
     return HttpResponse.json({ success: true });
   }),

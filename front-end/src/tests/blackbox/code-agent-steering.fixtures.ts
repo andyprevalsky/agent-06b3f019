@@ -26,6 +26,7 @@ export function msg(
     text: overrides.text ?? '',
     role: overrides.role ?? 'TOOL',
     metadata,
+    ...(overrides.file_pointer ? { file_pointer: overrides.file_pointer } : {}),
   };
 }
 
@@ -120,6 +121,12 @@ export const LIVE_EVENTS = [
   },
 ];
 
+/** `requestingAgent` the backend stamps on code-agent rows (agent-tools/service.ts). */
+export function codexRequester(taskId = 'task-1') {
+  return { kind: 'code_agent', agent_id: ROOT_AGENT_ID, label: 'Codex', provider: 'codex', task_id: taskId };
+}
+
+/** `display` metadata of a pinned question (agent-tools/questionService.ts, L-DISPLAY b10b038c1). */
 export const QUESTION_DISPLAY = {
   placement: 'pinned',
   kind: 'question',
@@ -140,17 +147,38 @@ export const QUESTION_DISPLAY = {
   ],
   allow_other: true,
   question_id: 'q-1',
+  items: [],
+  deliver_to: 'user',
+  routed_agent_id: ROOT_AGENT_ID,
 };
 
-export function questionMessage(display: Record<string, unknown> = {}) {
+/**
+ * A code agent's pinned question exactly as the backend writes it: a TOOL row
+ * `display` (IN_PROGRESS → FINISHED when answered) in the session agent's
+ * trajectory, grouped under the code task.
+ */
+export function questionMessage(
+  display: Record<string, unknown> = {},
+  extra: Record<string, unknown> = {},
+) {
+  const merged = { ...QUESTION_DISPLAY, ...display };
   return msg(
     {
+      toolCallId: `agent-tools:${merged.question_id as string}`,
       toolName: 'display',
       toolStatus: 'IN_PROGRESS',
-      display: { ...QUESTION_DISPLAY, ...display },
-      from_code_agent: { provider: 'codex', task_id: 'task-1' },
+      title: 'Codex asks',
+      isUserAttentionMessage: true,
+      attentionMessage: merged.question,
+      attentionRequestId: merged.question_id,
+      display: merged,
+      requestingAgent: codexRequester(),
+      excludeFromModel: true,
+      subAgentId: 'task-1',
+      task_id: 'task-1',
+      ...extra,
     },
-    { text: QUESTION_DISPLAY.question },
+    { text: merged.question as string },
   );
 }
 

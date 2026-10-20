@@ -9,6 +9,7 @@ import {
   extractAttentionStreamPayload,
   extractAgentStateChangedPayload,
   extractAgentModeStartedPayload,
+  extractUserUiActiveChangedPayload,
   extractRecord,
 } from '@/lib/realtime-types';
 
@@ -475,6 +476,24 @@ describe('extractAgentModeStartedPayload', () => {
 
   it('returns null when record is not an object', () => {
     expect(extractAgentModeStartedPayload(wrap('record'))).toBeNull();
+    expect(errSpy).toHaveBeenCalled();
+  });
+});
+
+// ===========================================================================
+// extractUserUiActiveChangedPayload (backend broadcastUserUiActiveChanged)
+// ===========================================================================
+
+describe('extractUserUiActiveChangedPayload', () => {
+  it('returns {versionId, agentId} from the wrapped record', () => {
+    expect(
+      extractUserUiActiveChangedPayload(wrap({ versionId: 'ver-2', agentId: 'code-1' })),
+    ).toEqual({ versionId: 'ver-2', agentId: 'code-1' });
+  });
+
+  it('returns null when versionId or agentId is missing', () => {
+    expect(extractUserUiActiveChangedPayload(wrap({ agentId: 'code-1' }))).toBeNull();
+    expect(extractUserUiActiveChangedPayload(wrap({ versionId: 'ver-2' }))).toBeNull();
     expect(errSpy).toHaveBeenCalled();
   });
 

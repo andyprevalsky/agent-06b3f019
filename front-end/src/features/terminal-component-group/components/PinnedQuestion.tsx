@@ -1,20 +1,24 @@
 /**
- * STATE MACHINE: PinnedQuestion (Rose Desktop, UI ledger row 47)
+ * STATE MACHINE: PinnedQuestion (Rose Desktop, UI ledger row 47; L-DISPLAY contract)
  *
- * A code agent's `display(..., placement: "pinned")` question, rendered fixed
+ * An agent's `display(..., placement: "pinned")` question, rendered fixed
  * directly above the query box (never inline in the trajectory).
  *
- * SELECTION (PinnedQuestionMount, derived from agent messages):
- *   [NONE]   <-- flag off, no pinned question, or every one answered/dismissed
- *   [PINNED] <-- oldest question with no `question_answer` and not closed locally
+ * SELECTION (PinnedQuestionMount):
+ *   [NONE]   <-- flag off, no open pin, or every one answered/dismissed
+ *   [PINNED] <-- 1. oldest pin row of the open agent still IN_PROGRESS
+ *                2. else the oldest unanswered pin a DESCENDANT agent routed to
+ *                   this agent (existing attention-request subscription)
  *
  * CARD:
  *   [IDLE] --(click option | press its number)--> [ANSWERING]
- *   [IDLE] --(press Other's number)--> focus Other input
+ *   [IDLE] --(press Other's number, allow_other)--> focus Other input
  *   [IDLE] --(Enter in Other, non-empty)--> [ANSWERING]
- *   [ANSWERING] --ok--> answer echoed into the code agent's transcript → [UNPINNED]
- *   [ANSWERING] --error--> [IDLE] + error line (question stays pinned)
- *   [IDLE] --(✕)--> [UNPINNED] (dismissed for this session; not answered)
+ *   [IDLE] --(✕)--> [ANSWERING] with {dismiss: true}
+ *   [ANSWERING] --2xx--> answer echoed into the code agent's transcript → [UNPINNED]
+ *                        (first answer wins; the row's FINISHED update also unpins)
+ *   [ANSWERING] --404--> [UNPINNED] (the question no longer exists)
+ *   [ANSWERING] --403 | 400 | other--> [IDLE] + the server's error line (stays pinned)
  *
  * Number keys are ignored while focus is in any text field (the query box keeps them).
  */
@@ -23,14 +27,16 @@ import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 're
 import { Loader2, X } from 'lucide-react';
 
 import {
+  PinnedQuestionAnswerError,
   answerPinnedQuestion,
-  codeAgentLabel,
-  type CodeAgentSender,
   type PinnedQuestionDisplay,
+  type PinnedQuestionReply,
+  type RequestingAgent,
 } from '../hooks/codeAgentContract';
 import { addLocalEcho, closeQuestion } from '../hooks/codeAgentLocalState';
 import { usePendingQuestion } from '../hooks/codeAgentSteering';
 import { ProviderIcon } from './claudeCodeChip.shared';
+import { InlineMediaGallery } from './inline-media/InlineMediaGallery';
 
 const MUTED = 'text-muted-foreground dark:text-[#a3a39d]';
 
@@ -47,24 +53,28 @@ function isTextField(element: Element | null): boolean {
 
 export interface PinnedQuestionCardProps {
   question: PinnedQuestionDisplay;
-  sender: CodeAgentSender | null;
+  requester: RequestingAgent | null;
   onAnswer: (answer: string) => void;
   onDismiss: () => void;
   answering?: boolean;
   error?: string | null;
+  /** Agent that owns the question's media items (signs their URLs). */
+  mediaAgentId?: string;
 }
 
 export function PinnedQuestionCard({
   question,
-  sender,
+  requester,
   onAnswer,
   onDismiss,
   answering = false,
   error = null,
+  mediaAgentId,
 }: PinnedQuestionCardProps) {
   const [other, setOther] = useState('');
   const otherRef = useRef<HTMLInputElement>(null);
-  const label = sender ? codeAgentLabel(sender.provider) : 'Agent';
+  const label = requester?.label ?? 'Agent';
+  const provider = requester?.provider;
   const otherNumber = question.options.length + 1;
 
   useEffect(() => {
@@ -102,21 +112,25 @@ export function PinnedQuestionCard({
           className="rounded-xl border border-border bg-white/90 px-4 py-3.5 text-sm text-foreground shadow-[0_6px_20px_rgba(20,20,40,.10)] backdrop-blur-md dark:border-white/[.09] dark:bg-[#262624] dark:text-[#ecece8] dark:shadow-[0_6px_20px_rgba(0,0,0,.35)]"
         >
           <div className="mb-2 flex items-center gap-2 font-medium">
-            {sender ? (
-              <ProviderIcon codeProvider={sender.provider} className="h-4 w-4 flex-shrink-0" />
+            {provider ? (
+              <ProviderIcon codeProvider={provider} className="h-4 w-4 flex-shrink-0" />
             ) : null}
             <span>{label} asks</span>
             {answering && <Loader2 className={`h-3.5 w-3.5 animate-spin ${MUTED}`} />}
             <button
               type="button"
               aria-label="Dismiss question"
+              disabled={answering}
               onClick={onDismiss}
-              className={`ml-auto rounded p-0.5 hover:text-foreground dark:hover:text-[#ecece8] ${MUTED}`}
+              className={`ml-auto rounded p-0.5 hover:text-foreground disabled:opacity-60 dark:hover:text-[#ecece8] ${MUTED}`}
             >
               <X className="h-4 w-4" />
             </button>
           </div>
           <div className="whitespace-pre-wrap">{question.question}</div>
+          {question.items.length > 0 && (
+            <InlineMediaGallery files={question.items} agentId={mediaAgentId} className="mt-2" />
+          )}
           <ol className="mt-2.5 flex flex-col gap-0.5" aria-label="Answers">
             {question.options.map((option, index) => (
               <li key={`${index}-${option.label}`}>
@@ -173,36 +187,45 @@ export function PinnedQuestionCard({
 }
 
 /**
- * Mount point above the query box: renders the oldest pending pinned question
- * of the selected agent (Rose Desktop only) and owns the answer request.
+ * Mount point above the query box: renders the oldest open pinned question of
+ * the selected agent or one of its descendants (Rose Desktop only) and owns the
+ * answer / dismiss request.
  */
 export function PinnedQuestionMount() {
-  const { pending, agentId } = usePendingQuestion();
+  const { pending, agentId, refetchAttention } = usePendingQuestion();
   const [answering, setAnswering] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const questionId = pending?.question.question_id;
-  const taskId = pending?.sender?.task_id;
+  // The endpoint accepts the pin's own agent or the agent it is routed to.
+  const targetAgentId = pending?.question.routed_agent_id ?? agentId;
+  const taskId = pending?.requester?.task_id;
 
   useEffect(() => {
     setError(null);
   }, [questionId]);
 
-  const onAnswer = useCallback(
-    async (answer: string) => {
-      if (!questionId || !agentId) return;
+  const send = useCallback(
+    async (reply: PinnedQuestionReply) => {
+      if (!questionId || !targetAgentId) return;
       setAnswering(true);
       setError(null);
       try {
-        await answerPinnedQuestion(agentId, questionId, answer);
-        if (taskId) addLocalEcho(taskId, answer);
+        await answerPinnedQuestion(targetAgentId, questionId, reply);
+        if (taskId && 'answer' in reply) addLocalEcho(taskId, reply.answer);
         closeQuestion(questionId);
+        refetchAttention();
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to send answer');
+        if (err instanceof PinnedQuestionAnswerError && err.status === 404) {
+          closeQuestion(questionId);
+          refetchAttention();
+        } else {
+          setError(err instanceof Error ? err.message : 'Failed to send answer');
+        }
       } finally {
         setAnswering(false);
       }
     },
-    [agentId, questionId, taskId],
+    [questionId, refetchAttention, targetAgentId, taskId],
   );
 
   if (!pending) return null;
@@ -210,11 +233,12 @@ export function PinnedQuestionMount() {
     <PinnedQuestionCard
       key={pending.question.question_id}
       question={pending.question}
-      sender={pending.sender}
+      requester={pending.requester}
       answering={answering}
       error={error}
-      onAnswer={(answer) => void onAnswer(answer)}
-      onDismiss={() => closeQuestion(pending.question.question_id)}
+      mediaAgentId={pending.ownerAgentId ?? undefined}
+      onAnswer={(answer) => void send({ answer })}
+      onDismiss={() => void send({ dismiss: true })}
     />
   );
 }

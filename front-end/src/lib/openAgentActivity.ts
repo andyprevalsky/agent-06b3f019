@@ -6,16 +6,20 @@
  *   agent:<openAgentId> UPDATE (status change) --+--> listeners (in-tab Set)
  *   bus:<rootId> AGENT_STATE_CHANGED -------------+     e.g. user-ui live refresh
  *     (sub-agent tree the open view already holds)
+ *   agent:<openAgentId> USER_UI_ACTIVE_CHANGED ---+  (kind 'user-ui-active-changed',
+ *                                                     carries the new versionId)
  *
  * Each realtime event costs one call over the (normally 0–1) listeners; the
  * listener is responsible for coalescing/debouncing any follow-up work.
  */
 
-export type OpenAgentActivityKind = 'message' | 'status' | 'sub-agent';
+export type OpenAgentActivityKind = 'message' | 'status' | 'sub-agent' | 'user-ui-active-changed';
 
 export interface OpenAgentActivity {
   agentId: string;
   kind: OpenAgentActivityKind;
+  /** The newly active Rose UI version (kind 'user-ui-active-changed' only). */
+  versionId?: string;
 }
 
 type Listener = (activity: OpenAgentActivity) => void;

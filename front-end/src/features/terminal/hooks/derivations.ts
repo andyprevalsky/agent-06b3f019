@@ -107,6 +107,14 @@ export { computeActiveBrowserPanels } from '@/lib/browserPanelLifecycle';
 
 // ── Approval derivation ──────────────────────────────────────────────────
 
+/** `requestingAgent` of an approval row (top level, else the approval payload's copy). */
+function requestingAgentOf(message: Message): { requestingAgent?: unknown } {
+  const metadata = message.metadata;
+  const nested: unknown = metadata?.requestUserApproval?.requestingAgent;
+  const requestingAgent = metadata?.requestingAgent ?? nested;
+  return requestingAgent !== undefined ? { requestingAgent } : {};
+}
+
 export function derivePendingApproval(messages: Message[]): PendingApproval | null {
   const attentionByToolCallId = new Map<string, Message>();
 
@@ -139,9 +147,7 @@ export function derivePendingApproval(messages: Message[]): PendingApproval | nu
     question: activeApproval.text || '',
     imageUrl: activeApproval.metadata?.imageUrl || null,
     requestPaymentCard: activeApproval.metadata?.requestUserApproval?.requestPaymentCard,
-    ...(activeApproval.metadata?.from_code_agent !== undefined
-      ? { fromCodeAgent: activeApproval.metadata.from_code_agent }
-      : {}),
+    ...requestingAgentOf(activeApproval),
   };
 }
 
