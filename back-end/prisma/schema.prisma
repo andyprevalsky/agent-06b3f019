@@ -1524,39 +1524,53 @@ model CookieBundle {
   @@index([userId, authRealm])
 }
 
-// Root browser world state, split by website (A6). One head row per
-// (user, registrable domain). The site's cookies are ordinary Cookie rows
-// under browserSource "rose_root" with a matching CookieBundle, so agents fork
-// them through the existing injection path. `revision` only moves forward: a
-// browser session merges a new login only while the head is still at the
-// revision that session forked (domains/browser-world/service.merge.ts).
+// The user's one browser template (A6), split by website and account. One
+// head row per (user, registrable domain, account). `account` is the template
+// CookieBundle's browserProfile under browserSource "rose_root": every account
+// is an ordinary CookieBundle + Cookie rows that agents fork through the
+// existing injection path, the same way each synced Chrome profile is its own
+// account. Two states of the SAME account resolve by keep-best
+// (providers/browser/worldStateKeepBest.ts); different accounts never compete.
+// `revision` only moves forward, one step per accepted write.
 model BrowserSiteState {
-  id                String   @id @default(uuid())
-  userId            String
-  site              String
-  revision          Int      @default(0)
-  authFingerprint   String   @default("")
-  cookieCount       Int      @default(0)
-  lastWriterTaskId  String?
-  lastWriterAgentId String?
-  lastWriterKind    String?
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
-  user              User     @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  id                     String    @id @default(uuid())
+  userId                 String
+  site                   String
+  account                String    @default("")
+  revision               Int       @default(0)
+  authFingerprint        String    @default("")
+  // Latest finite expiry among the head's live auth cookies (null: session only).
+  authExpiresAt          DateTime?
+  // When this exact login was last validated (agent sign-in evidence or a
+  // completed live-view sign-in); null when never validated.
+  validatedAt            DateTime?
+  // Age of the head's login, for "ties go to the newer".
+  observedAt             DateTime?
+  // Logins this account already replaced or the user forgot, newest first and
+  // bounded: an unchanged stale copy of one never wins again.
+  supersededFingerprints String[]  @default([])
+  cookieCount            Int       @default(0)
+  lastWriterTaskId       String?
+  lastWriterAgentId      String?
+  lastWriterKind         String?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+  user                   User      @relation(fields: [userId], references: [userId], onDelete: Cascade)
 
-  @@unique([userId, site])
+  @@unique([userId, site, account])
 }
 
-// One row per (browser task, site) the task forked from Root: the head
+// One row per (browser task, site) the task forked from the template, or whose
+// login it merged into it: the template account its state belongs to, the head
 // revision it started from and the session's own auth fingerprint right after
-// injection. Merge compares against this base and records its outcome here,
-// so a retried close is idempotent.
+// injection. Merge records its outcome here, so a retried close is idempotent.
 model BrowserSiteFork {
   id               String         @id @default(uuid())
   userId           String
   browserSessionId String
   agentId          String
   site             String
+  account          String         @default("")
   baseRevision     Int
   baseFingerprint  String
   baseAuthKeys     String[]       @default([])
