@@ -159,6 +159,9 @@ class _Backend:
                 return httpx.Response(200, json={"agent": {"id": agent_id}, "messages": rows})
         if request.method == "GET" and path.startswith("/api/browser-session/task/") and path.endswith("/control"):
             return httpx.Response(200, json={"state": "agent"})
+        if request.method == "GET" and path == "/api/claude-code-session/credential-availability":
+            # C15: a fresh code-agent spawn asks which provider has a leasable credential.
+            return httpx.Response(200, json={"claude": True, "codex": True})
         if request.method == "POST" and path == "/realtime/v1/api/broadcast":
             return httpx.Response(202, json={})
         self.unexpected.append(f"{request.method} {request.url}")
