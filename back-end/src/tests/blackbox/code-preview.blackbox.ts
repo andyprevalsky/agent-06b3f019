@@ -27,6 +27,7 @@ import { after, before, test } from 'node:test';
 import { config } from 'dotenv';
 import { chromium, type Browser } from 'playwright';
 import { prisma } from '../../providers/database';
+import { retryWithBackoff } from '../../providers/retry';
 import { localCodeSessionHome } from '../../providers/codeSessions/lifecycle';
 import { localSandboxFs } from '../../providers/codeSessions/sandboxFs';
 import { buildCodeAgentSystemPrompt } from '../../providers/codeAgentPrompt';
@@ -373,7 +374,17 @@ test('Rose-in-Rose HMR: an agent write to the Rose front-end reaches the preview
   );
   let browser: Browser | null = null;
   try {
-    const view = await http('GET', `/api/claude-code-session/${taskId}/preview`, DEV_USER);
+    // The status probe has a 2.5 s budget; vite's first response on a loaded host can
+    // take longer, so read the status until the preview answers (bounded).
+    const view = await retryWithBackoff(
+      () => http('GET', `/api/claude-code-session/${taskId}/preview`, DEV_USER),
+      {
+        maxRetries: 41,
+        fixedDelays: Array<number>(40).fill(500),
+        shouldRetryResult: (status) => status.status === 200 && status.data.status !== 'running',
+        component: 'RosePreviewStartupFixture',
+      }
+    );
     assert.equal(view.status, 200, JSON.stringify(view.data));
     assert.equal(view.data.status, 'running');
     assert.equal(view.data.target, 'local');
