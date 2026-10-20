@@ -56,6 +56,13 @@ fly_bounded() {
   local deadline=$((SECONDS + $1 + 1)) pid rc=0; shift
   flyctl "$@" &
   pid=$!; FLY_CHILD_PID=$pid
+  if [ "$BASH_SUBSHELL" -gt 0 ]; then
+    # In a command substitution or pipeline the parent's EXIT cleanup cannot see
+    # FLY_CHILD_PID and its traps are not inherited, while the background flyctl
+    # ignores SIGINT. This subshell stops its own exact child on any exit.
+    trap 'if [ -n "$FLY_CHILD_PID" ]; then fly_stop_exact "$FLY_CHILD_PID"; fi' EXIT
+    trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+  fi
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$SECONDS" -ge "$deadline" ]; then
       echo "⚠️  flyctl $1 exceeded its bound; stopped exact pid $pid" >&2
@@ -352,9 +359,15 @@ GATE_EXPORT_HELPER=""; GATE_EXPORT_CALLER=""
 GATE_EXPORT_FILES=()
 GATE_SCRIPT="$(mktemp -t cloudbench-gate.XXXXXX)"
 MACHINE_ID=""
+RUN_LOG=""
 cleanup() {
   if [ -n "$FLY_CHILD_PID" ]; then fly_stop_exact "$FLY_CHILD_PID"; fi
-  rm -f "$GATE_SCRIPT" "${GATE_TOKEN_FILE:-}" "${CLOUDBENCH_GATE_SELF_COPY:-}" "${GATE_EXPORT_HELPER:-}"
+  # Interrupted inside the post-ID window: the Machine exists and its ID is only
+  # in RUN_LOG. Recover it so the Machine is destroyed or reported retained.
+  if [ -z "$MACHINE_ID" ] && [ -n "$RUN_LOG" ] && [ -f "$RUN_LOG" ]; then
+    MACHINE_ID="$(grep -oiE 'Machine ID: [0-9a-f]+' "$RUN_LOG" | tail -1 | awk '{print $3}' || true)"
+  fi
+  rm -f "$GATE_SCRIPT" "$RUN_LOG" "${GATE_TOKEN_FILE:-}" "${CLOUDBENCH_GATE_SELF_COPY:-}" "${GATE_EXPORT_HELPER:-}"
   if [ -n "$WORKSPACE_VOLUME_INTENT" ]; then
     echo "GATE_WORKSPACE_VOLUME_RETAINED id=${WORKSPACE_VOLUME_ID:-unresolved} intent=$WORKSPACE_VOLUME_INTENT" >&2
   fi

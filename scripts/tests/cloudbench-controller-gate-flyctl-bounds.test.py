@@ -14,6 +14,7 @@ GATE = Path(os.environ.get('CLOUDBENCH_TEST_GATE_SOURCE', str(ROOT / 'scripts/ru
 FAKE = r'''#!/usr/bin/env bash
 printf '%s\n' "$$" >> "$FAKE_PID_LOG"
 printf '%s\n' "$*" >> "$FAKE_ARGS_LOG"
+[ "$1 $2" = "machine destroy" ] && exit 0
 case "$FAKE_MODE" in
   started-block|id-block|exit-ok)
     echo "Success! A Machine has been successfully launched in app fixture"
@@ -44,6 +45,15 @@ def gate_parts():
     start = next(i for i, line in enumerate(lines) if line.startswith('RUN_LOG="$(mktemp -t cloudbench-gate-run.'))
     end = next(i for i, line in enumerate(lines) if i > start and line.startswith('MACHINE_ID="$(grep -oiE'))
     return '\n'.join(helpers), '\n'.join(lines[start:end + 1])
+
+
+def gate_cleanup():
+    """The gate's EXIT cleanup with the MACHINE_ID/RUN_LOG state it reads."""
+    lines = GATE.read_text().splitlines()
+    start = next(i for i, line in enumerate(lines) if line == 'MACHINE_ID=""')
+    begin = next(i for i, line in enumerate(lines) if i > start and line == 'cleanup() {')
+    end = next(i for i, line in enumerate(lines) if i > begin and line == '}')
+    return '\n'.join(lines[start:end + 1])
 
 
 PRELUDE = '''set -euo pipefail
@@ -83,7 +93,7 @@ class GateFlyctlBounds(unittest.TestCase):
     def start_decoy(self):
         # A same-named flyctl this gate did not start must survive every stop.
         other = self.root / 'other'
-        other.mkdir()
+        other.mkdir(exist_ok=True)
         (other / 'flyctl').write_text(FAKE)
         (other / 'flyctl').chmod(0o700)
         self.decoy = subprocess.Popen([str(other / 'flyctl')], env=dict(
@@ -195,6 +205,70 @@ class GateFlyctlBounds(unittest.TestCase):
             self.fail('TERM did not end the launch promptly')
         self.assertEqual(child.returncode, 143)
         self.assert_fake_gone()
+
+    def interrupt(self, body, sig, group, wait_for=None, **extra):
+        helpers, _ = gate_parts()
+        env = dict(os.environ, PATH=f'{self.bin}:/usr/bin:/bin', TMPDIR=str(self.root),
+                   FAKE_PID_LOG=str(self.pids), FAKE_ARGS_LOG=str(self.args), **extra)
+        child = subprocess.Popen(['bash', '-c', PRELUDE + helpers + '\n' + body], env=env, text=True,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not (self.fake_pids() and (wait_for is None or wait_for())):
+            time.sleep(0.1)
+        self.assertTrue(self.fake_pids(), 'fake flyctl never started')
+        time.sleep(0.3)
+        (os.killpg if group else os.kill)(child.pid, sig)
+        try:
+            out, err = child.communicate(timeout=20)
+        except subprocess.TimeoutExpired:
+            os.killpg(child.pid, signal.SIGKILL)
+            out, err = child.communicate()
+            self.fail(f'signal did not end the gate promptly\n{out}\n{err}')
+        return child.returncode, out, err
+
+    def test_group_interrupt_inside_a_subshell_stops_the_exact_child(self):
+        # fly_bounded runs inside $(...) and pipelines, where the parent's EXIT
+        # cleanup cannot see FLY_CHILD_PID and the background flyctl ignores SIGINT.
+        for body in ('x="$(fly_bounded 600 machines list -a fixture-app)"; echo "X=$x"',
+                     'fly_bounded 600 machines list -a fixture-app | cat'):
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                with self.subTest(body=body, sig=sig.name):
+                    self.pids.unlink(missing_ok=True)
+                    self.start_decoy()
+                    self.interrupt(body, sig, group=True, FAKE_MODE='block')
+                    self.assert_fake_gone()
+                    self.assertIsNone(self.decoy.poll(), 'unrelated flyctl was signalled')
+                    self.decoy.kill(); self.decoy.wait(); self.decoy = None
+
+    def test_subshell_bound_keeps_flyctl_status(self):
+        rc, out, err, _ = self.run_bash(
+            'rc=0; x="$(fly_bounded 30 machines list)" || rc=$?; echo "RC=$rc"', 'fail')
+        self.assertIn('RC=7', out, err)
+
+    def test_term_after_machine_id_destroys_or_retains_the_logged_machine(self):
+        # Interrupted inside the post-ID window: MACHINE_ID is still unset, but the
+        # Machine exists. Cleanup recovers its ID from the run log.
+        _, block = gate_parts()
+        def id_logged():
+            return any('Machine ID:' in f.read_text() for f in self.root.glob('cloudbench-gate-run.*'))
+        for retain in ('0', '1'):
+            with self.subTest(retain=retain):
+                self.pids.unlink(missing_ok=True)
+                self.args.unlink(missing_ok=True)
+                body = ('GATE_SCRIPT="$TMPDIR/gate.sh" GATE_TOKEN_FILE="$TMPDIR/token"; : > "$GATE_SCRIPT"\n'
+                        f'WORKSPACE_VOLUME_INTENT="" GATE_EXPORT_HELPER="" RETAIN_HOST={retain}\n'
+                        + gate_cleanup() + "\ntrap cleanup EXIT\ntrap 'exit 143' TERM\n" + block)
+                rc, out, err = self.interrupt(body, signal.SIGTERM, group=False, wait_for=id_logged,
+                                              FAKE_MODE='id-block', CLOUDBENCH_GATE_RUN_AFTER_ID_S='60')
+                self.assertEqual(rc, 143, err)
+                self.assert_fake_gone()
+                args = self.args.read_text()
+                if retain == '1':
+                    self.assertIn('GATE_HOST_RETAINED machine=8d99dd7be69478', err)
+                    self.assertNotIn('machine destroy', args)
+                else:
+                    self.assertIn('machine destroy 8d99dd7be69478 -a fixture-app --force', args)
+                self.assertEqual(list(self.root.glob('cloudbench-gate-run.*')), [], 'run log left behind')
 
     def test_no_unbounded_flyctl_call_remains_in_the_gate(self):
         for number, line in enumerate(GATE.read_text().splitlines(), 1):

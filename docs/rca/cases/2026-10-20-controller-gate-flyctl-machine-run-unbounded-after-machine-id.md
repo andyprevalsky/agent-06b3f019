@@ -82,6 +82,16 @@ On the fix it returns within about 2 s with the Machine ID.
   It is registered in the `/deploy` structural gate registry (and in
   `scripts/test.sh`). It also checks that no unbounded flyctl call is left in
   the gate.
+- Review follow-ups (combined deploy of #1550 and #1551). `fly_bounded` also
+  runs inside `$(...)` and pipelines. There the parent's cleanup cannot see
+  `FLY_CHILD_PID`, and the background flyctl ignores SIGINT. A Ctrl-C to the
+  process group therefore left that flyctl running with no bound. Inside a
+  subshell, `fly_bounded` now traps EXIT, INT, TERM and HUP and stops its own
+  exact child. Separately, a signal during the post-ID window used to stop
+  flyctl while `MACHINE_ID` was still empty, so the logged Machine was neither
+  destroyed nor reported retained. Cleanup now recovers the ID from the run
+  log. Both cases fail on the pre-fix gate (4 subtests) and pass in the same
+  regression file.
 - 10k-agent behavior: there is one gate per controller. The change adds a
   0.2 s local poll while a flyctl call is running, and no per-agent work.
 
