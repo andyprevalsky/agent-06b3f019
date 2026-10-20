@@ -27,6 +27,7 @@ import localDevicesRouter from './domains/local-devices/routes';
 import { attachLocalDeviceServer } from './domains/local-devices/service';
 import voicesRouter from './domains/voices/routes';
 import browserSessionRouter from './domains/browser-session/routes';
+import browserWorldRouter from './domains/browser-world/routes';
 import peopleRouter from './domains/people/routes';
 import integrationsRouter from './domains/integrations/routes';
 import authRouter from './domains/auth/routes';
@@ -543,6 +544,7 @@ app.use('/api/imessage', imessageRouter);
 app.use('/api/vapi', vapiRouter);
 app.use('/api/voices', voicesRouter); // public — exposes ElevenLabs preview MP3 URLs
 app.use('/api/browser-session', browserSessionRouter);
+app.use('/api/browser-world', browserWorldRouter);
 app.use('/api/claude-code-session', codeSessionDirectChatRouter);
 app.use('/api/claude-code-session', claudeCodeRouter);
 app.use('/api/local-devices', localDevicesRouter);

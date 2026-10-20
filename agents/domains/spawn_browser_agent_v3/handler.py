@@ -205,6 +205,7 @@ from .service_crypto import (
     has_payment_card_secret_refs,
     is_usable_email_otp,
     mask_secret_values,
+    signed_in_realm_for_secret_refs,
 )
 from .state_prefetch import BrowserStatePrefetch
 from .step_timing import StepPhaseTimer
@@ -7418,6 +7419,9 @@ async def _spawn_browser_agent_activity_v3_real(
         for credential_id in (write_lock_resume_state or {}).get("recorded_passkey_credential_ids", [])
         if isinstance(credential_id, str) and credential_id
     }
+    # Sites where this task typed a saved password or asserted a passkey: the
+    # sign-in evidence the backend's Root world-state merge needs (plan A6).
+    credential_signin_realms: set[str] = set()
 
     async def record_passkey_usage_once() -> None:
         if dom_service is None:
@@ -7431,6 +7435,7 @@ async def _spawn_browser_agent_activity_v3_real(
         # before the return write_lock. Pre-action
         # ensure_browser_overlays_suppressed() already re-arms before
         # ceremony-capable clicks/typing; usage readback must not race that.
+        asserted_before = len(recorded_passkey_credential_ids)
         await record_used_passkey_credentials(
             dom_service=dom_service,
             passkey_ref_by_credential_id=passkey_ref_by_credential_id,
@@ -7439,6 +7444,9 @@ async def _spawn_browser_agent_activity_v3_real(
             task_id=task_id,
             browser_url=browser_url or "",
         )
+        passkey_realm = auth_realm_from_url(browser_url or "")
+        if len(recorded_passkey_credential_ids) > asserted_before and passkey_realm:
+            credential_signin_realms.add(passkey_realm)
 
     async def sync_passkeys_onto_target(
         new_passkeys: Optional[List[Dict[str, Any]]] = None,
@@ -7496,10 +7504,24 @@ async def _spawn_browser_agent_activity_v3_real(
     ) -> None:
         nonlocal cleanup_failure
         try:
-            options = {"pause": pause}
+            options: Dict[str, Any] = {"pause": pause}
             if current_url:
                 options["current_url"] = current_url
-            await close_browser_session(config, exact_session_id, **options)
+            if credential_signin_realms:
+                options["signed_in_sites"] = sorted(credential_signin_realms)
+            world_state = await close_browser_session(config, exact_session_id, **options)
+            receipt_sites = world_state.get("sites") if isinstance(world_state, dict) else None
+            if isinstance(receipt_sites, list) and receipt_sites:
+                logger.info(
+                    "Browser world state merge receipt",
+                    task_id=task_id,
+                    session_id=exact_session_id,
+                    sites={
+                        str(entry.get("site")): entry.get("outcome")
+                        for entry in receipt_sites
+                        if isinstance(entry, dict)
+                    },
+                )
         except BrowserSessionCloseError as cleanup_error:
             cleanup_failure = cleanup_error.receipt()
         except asyncio.CancelledError:
@@ -8814,6 +8836,9 @@ async def _spawn_browser_agent_activity_v3_real(
                 result = await execute_action(*args, **kwargs)
                 if len(action_history) > before_actions:
                     result["action_step"] = action_history.last_action_step()
+                signed_in_realm = signed_in_realm_for_secret_refs(successful_secret_refs, credential_url or "")
+                if signed_in_realm:
+                    credential_signin_realms.add(signed_in_realm)
                 if MINTED_NEW_PASSWORD_REF in successful_secret_refs and credential_url:
                     try:
                         await save_minted_account_password(config, user_id, credential_url)

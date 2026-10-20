@@ -917,11 +917,25 @@ class BrowserSessionCloseError(RuntimeError):
         }
 
 
-async def close_browser_session(config: Any, session_id: str, pause: bool = False, current_url: str = "") -> None:
-    """Close only the named browser; propagate an unacknowledged cleanup request."""
+async def close_browser_session(
+    config: Any,
+    session_id: str,
+    pause: bool = False,
+    current_url: str = "",
+    signed_in_sites: Optional[List[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Close only the named browser; propagate an unacknowledged cleanup request.
+
+    ``signed_in_sites`` are the sites where this task typed a saved password: the
+    sign-in evidence the backend's Root world-state merge needs before a site the
+    task started signed out of can merge into Root. Returns the backend's merge
+    receipt (``world_state``), which a retried close repeats without writing.
+    """
     payload: Dict[str, Any] = {"session_id": session_id, "pause": pause}
     if current_url:
         payload["current_url"] = current_url
+    if signed_in_sites:
+        payload["signed_in_sites"] = sorted(set(signed_in_sites))
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
@@ -935,6 +949,14 @@ async def close_browser_session(config: Any, session_id: str, pause: bool = Fals
         raise
     except Exception as e:
         raise BrowserSessionCloseError(session_id, pause) from e
+    # The receipt is observability only: an acknowledged close stays a success
+    # even when its body is empty or unreadable.
+    try:
+        body = response.json()
+    except Exception:
+        return None
+    world_state = body.get("world_state") if isinstance(body, dict) else None
+    return world_state if isinstance(world_state, dict) else None
 
 
 async def inject_local_storage(config: Any, session_id: str, origin: str) -> Optional[Dict[str, Any]]:
