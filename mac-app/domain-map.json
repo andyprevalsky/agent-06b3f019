@@ -8,6 +8,7 @@
         "main/base/config.ts",
         "main/base/credentialEncryption.ts",
         "main/base/crypto.ts",
+        "main/base/impersonation.ts",
         "main/base/logger.ts",
         "main/base/shellEnv.ts",
         "main/domains/atlas-credential-store/config.ts",
@@ -15,7 +16,6 @@
         "main/domains/atlas-credential-store/runtime.ts",
         "main/domains/atlas-credential-store/service.ts",
         "main/domains/auth/config.ts",
-        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -134,6 +134,10 @@
         "main/domains/permission-reader/repo.ts",
         "main/domains/permission-reader/runtime.ts",
         "main/domains/permission-reader/service.ts",
+        "main/domains/phone-mirroring/config.ts",
+        "main/domains/phone-mirroring/repo.ts",
+        "main/domains/phone-mirroring/runtime.ts",
+        "main/domains/phone-mirroring/service.ts",
         "main/domains/sync-manager/config.ts",
         "main/domains/sync-manager/repo.ts",
         "main/domains/sync-manager/runtime.ts",
@@ -188,6 +192,7 @@
         "main/services/messaging/types.ts",
         "main/services/passkeyEnroll.ts",
         "main/services/permissionReader.ts",
+        "main/services/phoneMirroring.ts",
         "main/services/sync/IntegrationCache.ts",
         "main/services/sync/SyncManager.ts",
         "main/services/uploader.ts",
@@ -196,7 +201,7 @@
         "shared/utils/error.ts"
       ],
       "testFile": "tests/blackbox/ipc-registry.blackbox.ts",
-      "fileCount": 189
+      "fileCount": 194
     },
     {
       "domain": "i-message-queue-service",
@@ -204,9 +209,9 @@
       "entryFile": "main/services/IMessageQueueService.ts",
       "files": [
         "main/base/config.ts",
+        "main/base/impersonation.ts",
         "main/base/logger.ts",
         "main/domains/auth/config.ts",
-        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -247,8 +252,8 @@
       "entryFile": "main/services/auth.ts",
       "files": [
         "main/base/config.ts",
+        "main/base/impersonation.ts",
         "main/domains/auth/config.ts",
-        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -263,8 +268,8 @@
       "entryFile": "main/services/autoUpdater.ts",
       "files": [
         "main/base/config.ts",
+        "main/base/impersonation.ts",
         "main/domains/auth/config.ts",
-        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -287,7 +292,7 @@
       "files": [
         "main/base/config.ts",
         "main/base/crypto.ts",
-        "main/domains/auth/impersonation.ts",
+        "main/base/impersonation.ts",
         "main/domains/batch-uploader/repo.ts",
         "main/domains/batch-uploader/runtime.ts",
         "main/domains/batch-uploader/service.ts",
@@ -370,6 +375,7 @@
         "main/base/config.ts",
         "main/base/credentialEncryption.ts",
         "main/base/crypto.ts",
+        "main/base/impersonation.ts",
         "main/base/logger.ts",
         "main/base/shellEnv.ts",
         "main/domains/atlas-credential-store/config.ts",
@@ -377,7 +383,6 @@
         "main/domains/atlas-credential-store/runtime.ts",
         "main/domains/atlas-credential-store/service.ts",
         "main/domains/auth/config.ts",
-        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -562,6 +567,7 @@
         "main/base/config.ts",
         "main/base/credentialEncryption.ts",
         "main/base/crypto.ts",
+        "main/base/impersonation.ts",
         "main/base/logger.ts",
         "main/base/shellEnv.ts",
         "main/domains/atlas-credential-store/config.ts",
@@ -569,7 +575,6 @@
         "main/domains/atlas-credential-store/runtime.ts",
         "main/domains/atlas-credential-store/service.ts",
         "main/domains/auth/config.ts",
-        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -769,6 +774,7 @@
         "main/base/config.ts",
         "main/base/credentialEncryption.ts",
         "main/base/crypto.ts",
+        "main/base/impersonation.ts",
         "main/base/logger.ts",
         "main/base/shellEnv.ts",
         "main/domains/atlas-credential-store/config.ts",
@@ -776,7 +782,6 @@
         "main/domains/atlas-credential-store/runtime.ts",
         "main/domains/atlas-credential-store/service.ts",
         "main/domains/auth/config.ts",
-        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -963,6 +968,7 @@
         "main/base/config.ts",
         "main/base/credentialEncryption.ts",
         "main/base/crypto.ts",
+        "main/base/impersonation.ts",
         "main/base/logger.ts",
         "main/base/shellEnv.ts",
         "main/domains/atlas-credential-store/config.ts",
@@ -970,7 +976,6 @@
         "main/domains/atlas-credential-store/runtime.ts",
         "main/domains/atlas-credential-store/service.ts",
         "main/domains/auth/config.ts",
-        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -1194,13 +1199,36 @@
       "fileCount": 10
     },
     {
+      "domain": "phone-mirroring",
+      "type": "main-service",
+      "entryFile": "main/services/phoneMirroring.ts",
+      "files": [
+        "main/base/config.ts",
+        "main/base/impersonation.ts",
+        "main/base/logger.ts",
+        "main/domains/auth/config.ts",
+        "main/domains/auth/repo.ts",
+        "main/domains/auth/runtime.ts",
+        "main/domains/auth/service.ts",
+        "main/domains/phone-mirroring/config.ts",
+        "main/domains/phone-mirroring/repo.ts",
+        "main/domains/phone-mirroring/runtime.ts",
+        "main/domains/phone-mirroring/service.ts",
+        "main/services/auth.ts",
+        "main/services/phoneMirroring.ts",
+        "shared/utils/error.ts"
+      ],
+      "testFile": "tests/blackbox/phone-mirroring.blackbox.ts",
+      "fileCount": 14
+    },
+    {
       "domain": "uploader",
       "type": "main-service",
       "entryFile": "main/services/uploader.ts",
       "files": [
         "main/base/config.ts",
         "main/base/crypto.ts",
-        "main/domains/auth/impersonation.ts",
+        "main/base/impersonation.ts",
         "main/domains/uploader/config.ts",
         "main/domains/uploader/repo.ts",
         "main/domains/uploader/runtime.ts",
@@ -1219,8 +1247,8 @@
       "entryFile": "main/services/userDataSync.ts",
       "files": [
         "main/base/config.ts",
+        "main/base/impersonation.ts",
         "main/domains/auth/config.ts",
-        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -1259,6 +1287,7 @@
         "main/base/config.ts",
         "main/base/credentialEncryption.ts",
         "main/base/crypto.ts",
+        "main/base/impersonation.ts",
         "main/base/logger.ts",
         "main/base/shellEnv.ts",
         "main/domains/atlas-credential-store/config.ts",
@@ -1266,7 +1295,6 @@
         "main/domains/atlas-credential-store/runtime.ts",
         "main/domains/atlas-credential-store/service.ts",
         "main/domains/auth/config.ts",
-        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -1421,6 +1449,7 @@
         "main/base/config.ts",
         "main/base/credentialEncryption.ts",
         "main/base/crypto.ts",
+        "main/base/impersonation.ts",
         "main/base/logger.ts",
         "main/base/shellEnv.ts",
         "main/domains/atlas-credential-store/config.ts",
@@ -1428,7 +1457,6 @@
         "main/domains/atlas-credential-store/runtime.ts",
         "main/domains/atlas-credential-store/service.ts",
         "main/domains/auth/config.ts",
-        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -1582,6 +1610,7 @@
         "main/base/config.ts",
         "main/base/credentialEncryption.ts",
         "main/base/crypto.ts",
+        "main/base/impersonation.ts",
         "main/base/logger.ts",
         "main/base/shellEnv.ts",
         "main/domains/atlas-credential-store/config.ts",
@@ -1589,7 +1618,6 @@
         "main/domains/atlas-credential-store/runtime.ts",
         "main/domains/atlas-credential-store/service.ts",
         "main/domains/auth/config.ts",
-        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -1750,6 +1778,7 @@
         "main/base/config.ts",
         "main/base/credentialEncryption.ts",
         "main/base/crypto.ts",
+        "main/base/impersonation.ts",
         "main/base/logger.ts",
         "main/base/shellEnv.ts",
         "main/domains/atlas-credential-store/config.ts",
@@ -1757,7 +1786,6 @@
         "main/domains/atlas-credential-store/runtime.ts",
         "main/domains/atlas-credential-store/service.ts",
         "main/domains/auth/config.ts",
-        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -1864,6 +1892,10 @@
         "main/domains/permission-reader/repo.ts",
         "main/domains/permission-reader/runtime.ts",
         "main/domains/permission-reader/service.ts",
+        "main/domains/phone-mirroring/config.ts",
+        "main/domains/phone-mirroring/repo.ts",
+        "main/domains/phone-mirroring/runtime.ts",
+        "main/domains/phone-mirroring/service.ts",
         "main/domains/sync-manager/config.ts",
         "main/domains/sync-manager/repo.ts",
         "main/domains/sync-manager/runtime.ts",
@@ -1903,6 +1935,7 @@
         "main/services/messaging/platforms/whatsapp/WhatsAppSync.ts",
         "main/services/messaging/types.ts",
         "main/services/permissionReader.ts",
+        "main/services/phoneMirroring.ts",
         "main/services/sync/IntegrationCache.ts",
         "main/services/sync/SyncManager.ts",
         "main/services/sync/index.ts",
@@ -1913,7 +1946,7 @@
         "shared/utils/error.ts"
       ],
       "testFile": "tests/blackbox/sync-manager.blackbox.ts",
-      "fileCount": 164
+      "fileCount": 169
     },
     {
       "domain": "electron-main",
@@ -1927,11 +1960,13 @@
         "main/app/quickQuery.ts",
         "main/app/quickQueryFocus.ts",
         "main/app/quickQueryGeometry.ts",
+        "main/app/quickQueryHeldSubmits.ts",
         "main/app/quickQueryPayload.ts",
         "main/app/windowState.ts",
         "main/base/config.ts",
         "main/base/credentialEncryption.ts",
         "main/base/crypto.ts",
+        "main/base/impersonation.ts",
         "main/base/logger.ts",
         "main/base/shellEnv.ts",
         "main/domains/atlas-credential-store/config.ts",
@@ -1939,7 +1974,6 @@
         "main/domains/atlas-credential-store/runtime.ts",
         "main/domains/atlas-credential-store/service.ts",
         "main/domains/auth/config.ts",
-        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -2063,6 +2097,10 @@
         "main/domains/permission-reader/repo.ts",
         "main/domains/permission-reader/runtime.ts",
         "main/domains/permission-reader/service.ts",
+        "main/domains/phone-mirroring/config.ts",
+        "main/domains/phone-mirroring/repo.ts",
+        "main/domains/phone-mirroring/runtime.ts",
+        "main/domains/phone-mirroring/service.ts",
         "main/domains/sync-manager/config.ts",
         "main/domains/sync-manager/repo.ts",
         "main/domains/sync-manager/runtime.ts",
@@ -2119,6 +2157,7 @@
         "main/services/messaging/types.ts",
         "main/services/passkeyEnroll.ts",
         "main/services/permissionReader.ts",
+        "main/services/phoneMirroring.ts",
         "main/services/sync/IntegrationCache.ts",
         "main/services/sync/SyncManager.ts",
         "main/services/uploader.ts",
@@ -2127,7 +2166,7 @@
         "shared/utils/error.ts"
       ],
       "testFile": "tests/blackbox/electron-main.blackbox.ts",
-      "fileCount": 205
+      "fileCount": 211
     },
     {
       "domain": "electron-preload",
@@ -2142,6 +2181,23 @@
       ],
       "testFile": "tests/blackbox/electron-preload.blackbox.ts",
       "fileCount": 5
+    },
+    {
+      "domain": "connectivity-indicator",
+      "type": "renderer-entry",
+      "entryFile": "ui/ConnectivityIndicator.tsx",
+      "files": [
+        "ui/ConnectivityIndicator.tsx",
+        "ui/features/connectivity-indicator/api.ts",
+        "ui/features/connectivity-indicator/components/ConnectivityIndicator.tsx",
+        "ui/features/connectivity-indicator/components/WifiOffIcon.tsx",
+        "ui/features/connectivity-indicator/hooks.ts",
+        "ui/features/connectivity-indicator/index.ts",
+        "ui/shared/bottom-left-chips/config.ts",
+        "ui/shared/bottom-left-chips/hooks.ts"
+      ],
+      "testFile": "tests/blackbox/connectivity-indicator.blackbox.tsx",
+      "fileCount": 8
     },
     {
       "domain": "electron-app",
@@ -2226,10 +2282,12 @@
         "ui/features/update-indicator/config.ts",
         "ui/features/update-indicator/hooks.ts",
         "ui/features/update-indicator/index.ts",
-        "ui/lib/electron-api.ts"
+        "ui/lib/electron-api.ts",
+        "ui/shared/bottom-left-chips/config.ts",
+        "ui/shared/bottom-left-chips/hooks.ts"
       ],
       "testFile": "tests/blackbox/update-indicator.blackbox.tsx",
-      "fileCount": 8
+      "fileCount": 10
     },
     {
       "domain": "onboarding",
@@ -2409,6 +2467,11 @@
         "ui/features/atlas-password-modal/config.ts",
         "ui/features/atlas-password-modal/hooks.ts",
         "ui/features/atlas-password-modal/index.ts",
+        "ui/features/connectivity-indicator/api.ts",
+        "ui/features/connectivity-indicator/components/ConnectivityIndicator.tsx",
+        "ui/features/connectivity-indicator/components/WifiOffIcon.tsx",
+        "ui/features/connectivity-indicator/hooks.ts",
+        "ui/features/connectivity-indicator/index.ts",
         "ui/features/electron-app/api.ts",
         "ui/features/electron-app/components/AppLoadingScreen.tsx",
         "ui/features/electron-app/components/AppRoutes.tsx",
@@ -2463,12 +2526,15 @@
         "ui/features/whats-app-qr-modal/config.ts",
         "ui/features/whats-app-qr-modal/index.ts",
         "ui/lib/electron-api.ts",
+        "ui/lib/useWhatsAppConnect.ts",
         "ui/lib/viewport-scale.ts",
         "ui/main.tsx",
-        "ui/onboarding/Onboarding.tsx"
+        "ui/onboarding/Onboarding.tsx",
+        "ui/shared/bottom-left-chips/config.ts",
+        "ui/shared/bottom-left-chips/hooks.ts"
       ],
       "testFile": "tests/blackbox/renderer-main.blackbox.tsx",
-      "fileCount": 71
+      "fileCount": 79
     }
   ],
   "classification": {
@@ -2476,7 +2542,7 @@
       {
         "file": "main/base/config.ts",
         "category": "main/base (provider)",
-        "usedByCount": 18,
+        "usedByCount": 19,
         "testFile": null
       },
       {
@@ -2492,9 +2558,15 @@
         "testFile": null
       },
       {
+        "file": "main/base/impersonation.ts",
+        "category": "main/base (util)",
+        "usedByCount": 17,
+        "testFile": null
+      },
+      {
         "file": "main/base/logger.ts",
         "category": "main/base (provider)",
-        "usedByCount": 11,
+        "usedByCount": 12,
         "testFile": null
       },
       {
@@ -2518,7 +2590,7 @@
       {
         "file": "shared/utils/error.ts",
         "category": "shared/other",
-        "usedByCount": 27,
+        "usedByCount": 28,
         "testFile": null
       }
     ],
@@ -2531,6 +2603,7 @@
       "main/app/quickQuery.ts": "electron-main",
       "main/app/quickQueryFocus.ts": "electron-main",
       "main/app/quickQueryGeometry.ts": "electron-main",
+      "main/app/quickQueryHeldSubmits.ts": "electron-main",
       "main/app/quickQueryPayload.ts": "electron-main",
       "main/app/windowState.ts": "electron-main",
       "main/domains/electron-preload/config.ts": "electron-preload",
@@ -2541,6 +2614,7 @@
       "main/services/messaging/index.ts": "messaging-core",
       "main/services/sync/index.ts": "sync-manager",
       "main/services/sync/types.ts": "sync-manager",
+      "ui/ConnectivityIndicator.tsx": "connectivity-indicator",
       "ui/ElectronApp.tsx": "electron-app",
       "ui/UpdateIndicator.tsx": "update-indicator",
       "ui/components/ApplePasswordsModal.tsx": "apple-passwords-modal",
@@ -2569,6 +2643,7 @@
       "ui/features/launcher/useLauncherAttachments.ts": "launcher",
       "ui/features/quick-query-listener.tsx": "renderer-main",
       "ui/launcher/main.tsx": "launcher",
+      "ui/lib/useWhatsAppConnect.ts": "renderer-main",
       "ui/onboarding/OnboardingAuth.tsx": "onboarding"
     },
     "orphaned": [
@@ -2609,9 +2684,11 @@
       "main/domains/passkey-permission/runtime.ts",
       "main/domains/passkey-permission/types.ts",
       "main/domains/permission-reader/types.ts",
+      "main/domains/phone-mirroring/types.ts",
       "main/domains/user-data-sync/types.ts",
       "ui/features/apple-passwords-modal/types.ts",
       "ui/features/atlas-password-modal/types.ts",
+      "ui/features/connectivity-indicator/types.ts",
       "ui/features/electron-app/types.ts",
       "ui/features/launcher/types.ts",
       "ui/features/onboarding/types.ts",
@@ -2620,7 +2697,8 @@
       "ui/features/whats-app-qr-modal/api.ts",
       "ui/features/whats-app-qr-modal/hooks.ts",
       "ui/features/whats-app-qr-modal/types.ts",
-      "ui/global.d.ts"
+      "ui/global.d.ts",
+      "ui/shared/bottom-left-chips/index.ts"
     ]
   }
 }
