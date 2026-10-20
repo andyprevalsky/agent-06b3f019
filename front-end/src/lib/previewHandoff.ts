@@ -32,7 +32,6 @@ interface RedeemResponse {
   refresh_token: string;
   expires_at: number;
   expires_in?: number;
-  token_type?: string;
   user?: { id?: string; phone?: string | null };
 }
 
@@ -62,7 +61,7 @@ function toSession(data: RedeemResponse): Session | null {
     refresh_token: data.refresh_token,
     expires_in: data.expires_in ?? Math.max(0, data.expires_at - Math.floor(Date.now() / 1000)),
     expires_at: data.expires_at,
-    token_type: data.token_type || 'bearer',
+    token_type: 'bearer',
     user: {
       id: userId,
       phone: data.user?.phone ?? undefined,
