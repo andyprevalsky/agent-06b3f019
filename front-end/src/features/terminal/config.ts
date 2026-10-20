@@ -20,6 +20,16 @@ export const OPENING_MESSAGES: OpeningMessage[] = [
 
 // ── Popular goals carousel ────────────────────────────────────────────────
 
+/**
+ * Pinned goal fixed at the left of the Popular Goals row (Chrome cleanup).
+ * TODO(rose-user-ui plan, "Apps (Lovable-style builder; Rose is one app)"):
+ * selecting it should start the real import-repo flow (code session clones
+ * the repo, which then shows up as an app). Until Apps lands it prefills this
+ * goal through the same path as every other popular goal.
+ */
+export const PINNED_IMPORT_REPO_LABEL = 'Import Code Repo';
+export const PINNED_IMPORT_REPO_GOAL = 'Import a code repo';
+
 export const POPULAR_GOALS: string[] = [
   'Change my background photo',
   'Make me a game',

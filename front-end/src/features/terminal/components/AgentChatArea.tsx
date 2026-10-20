@@ -21,7 +21,12 @@
  *   per-user background showing              → query box renders opaque
  *
  * LEGAL LINKS:
- *   About, Privacy, and Terms remain available while chatting.
+ *   No footer. About, Privacy and Terms live behind the info icon at the end
+ *   of the query box toolbar the rose nub reveals (QueryInfoMenu).
+ *
+ * MOBILE BOTTOM:
+ *   the input area pads by --mobile-querybox-gap only; the query box itself
+ *   absorbs the safe-area inset so it hugs the display curve.
  */
 
 import { useRef, Suspense, type ComponentType, type ReactNode } from 'react';
@@ -51,7 +56,6 @@ import { SubAgentBreadcrumb } from './SubAgentBreadcrumb';
 import { SystemMessagesPanel } from './SystemMessagesPanel';
 import { PopularGoalsCarousel } from './PopularGoalsCarousel';
 import { composerCanSubmit } from './composerCanSubmit';
-import { TerminalLegalFooter } from './TerminalLegalFooter';
 
 interface AgentChatAreaProps {
   agents: AgentSlice;
@@ -142,8 +146,6 @@ export function AgentChatArea({
           tickerRef={tickerRef}
         />
       )}
-
-      <TerminalLegalFooter />
     </>
   );
 }
@@ -185,7 +187,7 @@ function InputArea({
     <div
       data-testid="terminal-input-area"
       data-chat-mode={a.isChatMode ? 'true' : 'false'}
-      className="relative shrink-0 pb-[calc(0.25rem+var(--safe-area-inset-bottom))] transition-opacity duration-300 ease-in-out md:pb-6"
+      className="relative shrink-0 pb-[var(--mobile-querybox-gap)] transition-opacity duration-300 ease-in-out md:pb-6"
       style={{
         // A pending gate is actionable (the agent is waiting on the user), so
         // keep it crisp even if the agent row shows FAILED — only dim a truly

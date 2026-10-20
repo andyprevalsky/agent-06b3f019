@@ -29,6 +29,9 @@
  * SIMULATOR:           shown for admin users; session-only and default off
  * TEST PROMPTS:        shown only on desktop for dev/admin users; never mounted on mobile
  * SUBMISSION:          canSubmit prop decides send-vs-stop button
+ * MOBILE (< md):       shell carries `rose-mobile-querybox`: bottom corners
+ *                      concentric with the display corner, inner bottom
+ *                      padding from env(safe-area-inset-bottom)
  * SURFACE:             opaqueSurface → solid white/black container (a per-user
  *                      background image shows through the app behind it);
  *                      otherwise the translucent drip surface
@@ -262,7 +265,9 @@ function QueryInputShell({
       data-testid="query-input-surface"
       data-surface={opaqueSurface ? 'opaque' : 'translucent'}
       className={cn(
-        'relative rounded-xl p-3 shadow-lg border overflow-hidden transition-colors',
+        // rose-mobile-querybox (index.css): below md the box hugs the display
+        // curve — safe-area padding + concentric bottom corner radius.
+        'rose-mobile-querybox relative rounded-xl p-3 shadow-lg border overflow-hidden transition-colors',
         isDragOver ? 'border-primary border-2 bg-primary/5' : 'border-border',
         opaqueSurface && 'bg-white dark:bg-navi-black',
       )}

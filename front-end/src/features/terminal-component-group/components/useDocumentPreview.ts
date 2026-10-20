@@ -36,10 +36,11 @@ export function documentPreviewFileKey(file: FilePointer | null | undefined): st
 export function useDocumentPreview(
   file: FilePointer | null | undefined,
   enabled: boolean,
-  options?: { activeSheet?: string },
+  options?: { activeSheet?: string; signedUrl?: string },
 ): DocumentPreviewLoadState {
   const [loadState, setLoadState] = useState<DocumentPreviewLoadState>({ status: 'idle' });
   const activeSheet = options?.activeSheet;
+  const signedUrl = options?.signedUrl;
   const fileRef = useRef(file);
   fileRef.current = file;
   const loadKey = documentPreviewFileKey(file);
@@ -60,6 +61,7 @@ export function useDocumentPreview(
         const result = await loadDocumentPreview(fileSnapshot, {
           activeSheet,
           signal: controller.signal,
+          signedUrl,
         });
         if (controller.signal.aborted) {
           result.objectUrls.forEach((url) => URL.revokeObjectURL(url));
@@ -83,7 +85,7 @@ export function useDocumentPreview(
       controller.abort();
       objectUrls.forEach((url) => URL.revokeObjectURL(url));
     };
-  }, [enabled, loadKey, activeSheet]);
+  }, [enabled, loadKey, activeSheet, signedUrl]);
 
   return loadState;
 }

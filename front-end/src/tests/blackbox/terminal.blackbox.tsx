@@ -204,38 +204,49 @@ describe('Terminal page', () => {
       expect(Number(inputAreaMask.getAttribute('height'))).toBe(landingControlsClearance + 5000);
     });
 
-    it('renders About, Privacy, and Terms links', async () => {
+    it('moves About, Privacy, and Terms from the footer into the nub info menu', async () => {
+      const user = userEvent.setup();
       renderWithProviders(<Terminal />);
-      const legalLinks = await screen.findByTestId('terminal-legal-links');
-      expect(within(legalLinks).getByRole('link', { name: 'About' })).toHaveAttribute(
-        'href',
-        '/about',
+
+      await screen.findByPlaceholderText('Enter any goal');
+      expect(screen.queryByTestId('terminal-legal-links')).not.toBeInTheDocument();
+      expect(screen.queryByRole('contentinfo')).not.toBeInTheDocument();
+
+      fireEvent.pointerEnter(screen.getByTestId('query-toolbar-nub'), { pointerType: 'mouse' });
+      const region = screen.getByTestId('query-toolbar-region');
+      expect(region).toHaveAttribute('data-state', 'open');
+      const trigger = within(region).getByTestId('query-info-trigger');
+      await user.click(trigger);
+      const menu = await screen.findByTestId('query-info-menu');
+      expect(within(menu).getByRole('link', { name: 'About' })).toHaveAttribute('href', '/about');
+      expect(within(menu).getByRole('link', { name: 'About' })).toHaveAttribute(
+        'title',
+        ROSE_APP_DESCRIPTION,
       );
-      expect(within(legalLinks).getByRole('link', { name: 'Privacy' })).toHaveAttribute(
+      expect(within(menu).getByRole('link', { name: 'Privacy' })).toHaveAttribute(
         'href',
         '/privacy',
       );
-      expect(within(legalLinks).getByRole('link', { name: 'Terms' })).toHaveAttribute(
-        'href',
-        '/terms',
-      );
+      expect(within(menu).getByRole('link', { name: 'Terms' })).toHaveAttribute('href', '/terms');
     });
 
-    it('keeps legal links in the visible mobile layout', async () => {
+    it('keeps legal links reachable on mobile through a nub tap', async () => {
       setViewport(390, 844);
       const user = userEvent.setup();
 
       renderWithProviders(<Terminal />);
 
-      const legalLinks = await screen.findByTestId('terminal-legal-links');
-      expect(within(legalLinks).getByRole('link', { name: 'Privacy' })).toBeInTheDocument();
-      expect(legalLinks).not.toHaveClass('absolute');
-      expect(legalLinks).toHaveClass('shrink-0');
-      await user.click(within(legalLinks).getByRole('button', { name: 'About' }));
-      expect(await screen.findByText(ROSE_APP_DESCRIPTION)).toBeInTheDocument();
-      expect(screen.getByRole('link', { name: 'Full About page' })).toHaveAttribute(
+      await screen.findByPlaceholderText('Enter any goal');
+      expect(screen.queryByTestId('terminal-legal-links')).not.toBeInTheDocument();
+      const nub = screen.getByTestId('query-toolbar-nub');
+      fireEvent.pointerDown(nub, { pointerType: 'touch' });
+      fireEvent.click(nub);
+      expect(screen.getByTestId('query-toolbar-region')).toHaveAttribute('data-state', 'open');
+      await user.click(screen.getByTestId('query-info-trigger'));
+      const menu = await screen.findByTestId('query-info-menu');
+      expect(within(menu).getByRole('link', { name: 'Privacy' })).toHaveAttribute(
         'href',
-        '/about',
+        '/privacy',
       );
     });
 
@@ -284,8 +295,11 @@ describe('Terminal page', () => {
       renderWithProviders(<Terminal />);
 
       const inputArea = await screen.findByTestId('terminal-input-area');
-      expect(inputArea).toHaveClass('pb-[calc(0.25rem+var(--safe-area-inset-bottom))]');
+      // The input area pads by one gap only; the query box itself absorbs the
+      // safe-area inset so it hugs the display curve (see rose-chrome-cleanup).
+      expect(inputArea).toHaveClass('pb-[var(--mobile-querybox-gap)]');
       expect(inputArea).toHaveClass('md:pb-6');
+      expect(screen.getByTestId('query-input-surface')).toHaveClass('rose-mobile-querybox');
     });
 
     it.each(['Accept', 'Reject'])('restores the query box after %s succeeds', async (action) => {
@@ -341,15 +355,7 @@ describe('Terminal page', () => {
       await user.click(await screen.findByText('Test agent'));
 
       expect(await screen.findByText('Approval Required')).toBeInTheDocument();
-      const legalLinks = screen.getByTestId('terminal-legal-links');
-      expect(within(legalLinks).getByRole('link', { name: 'Privacy' })).toHaveAttribute(
-        'href',
-        '/privacy',
-      );
-      expect(within(legalLinks).getByRole('link', { name: 'Terms' })).toHaveAttribute(
-        'href',
-        '/terms',
-      );
+      expect(screen.queryByTestId('terminal-legal-links')).not.toBeInTheDocument();
       expect(screen.queryByPlaceholderText('Type your message...')).not.toBeInTheDocument();
       expect(screen.getByPlaceholderText('Add context (optional)...')).toBeInTheDocument();
 

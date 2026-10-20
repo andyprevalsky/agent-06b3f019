@@ -11,10 +11,10 @@
  * any open app drawer) and, while a drawer is open, left by
  * --rose-apps-inset-left (the collapsed rail), so content re-centers in the
  * remaining width with the drawer's 520ms ease (paused while resizing). The
- * top-right nav links hide while a drawer is open (--rose-apps-nav-visibility).
+ * top-right Download link hides while a drawer is open (--rose-apps-nav-visibility).
+ * No Research/Careers links (Chrome cleanup); legal links live in the query
+ * box info menu.
  */
-
-import { useNavigate } from 'react-router-dom';
 
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { BenchmarksView } from '@/features/benchmarks';
@@ -155,7 +155,6 @@ function TerminalViewContent(props: MainContentProps) {
 }
 
 function DesktopNavLinks() {
-  const navigate = useNavigate();
   return (
     <div
       className="hidden md:flex items-center gap-2 absolute top-5 right-2 z-50"
@@ -163,18 +162,6 @@ function DesktopNavLinks() {
         visibility: 'var(--rose-apps-nav-visibility, visible)' as React.CSSProperties['visibility'],
       }}
     >
-      <button
-        onClick={() => navigate('/research')}
-        className="px-3 py-1.5 bg-navi-white text-navi-black text-xs font-medium rounded-full border border-border hover:bg-navi-white/80 transition-colors shadow-sm"
-      >
-        Research
-      </button>
-      <button
-        onClick={() => navigate('/careers')}
-        className="px-3 py-1.5 bg-navi-white text-navi-black text-xs font-medium rounded-full border border-border hover:bg-navi-white/80 transition-colors shadow-sm"
-      >
-        Careers
-      </button>
       <a
         href="/download"
         target="_blank"

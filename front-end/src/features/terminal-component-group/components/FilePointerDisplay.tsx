@@ -2,7 +2,8 @@
  * FilePointerDisplay — summary/output file control; optional inline mini-preview.
  *
  * STATE MACHINE:
- * [MOUNT] --> (showMiniPreview ? [LOADING_PREVIEW] --> [PREVIEW_READY|PREVIEW_ERROR] : [CHIP])
+ * [MOUNT] --image/video--> [INLINE MEDIA] (InlineMediaGallery; no chip, no click needed)
+ * [MOUNT] --other--> (showMiniPreview ? [LOADING_PREVIEW] --> [PREVIEW_READY|PREVIEW_ERROR] : [CHIP])
  * [any] --click--> opens DocumentPreviewDrawer (RIGHT Sheet)
  *
  * Mini-previews are for CompletionSummaryCard only. Elsewhere this stays a compact chip.
@@ -18,6 +19,8 @@ import { DocumentMiniPreview } from './DocumentMiniPreview';
 import { DocumentPreviewDrawer } from './DocumentPreviewDrawer';
 import { documentTypeLabel } from './documentPreview.utils';
 import { useDocumentPreview } from './useDocumentPreview';
+import { InlineMediaGallery } from './inline-media/InlineMediaGallery';
+import { isInlineMedia } from './inline-media/inlineMedia.utils';
 
 export function FilePointerDisplay({
   file,
@@ -27,6 +30,11 @@ export function FilePointerDisplay({
   /** Inline mini-preview — used in completion summary cards only. */
   showMiniPreview?: boolean;
 }) {
+  if (isInlineMedia(file)) return <InlineMediaGallery files={[file]} />;
+  return <FilePointerChip file={file} showMiniPreview={showMiniPreview} />;
+}
+
+function FilePointerChip({ file, showMiniPreview }: { file: FilePointer; showMiniPreview: boolean }) {
   const [open, setOpen] = useState(false);
   const typeLabel = documentTypeLabel(file);
   const miniLoadState = useDocumentPreview(file, showMiniPreview);

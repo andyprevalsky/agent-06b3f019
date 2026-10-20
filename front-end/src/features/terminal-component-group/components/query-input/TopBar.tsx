@@ -12,6 +12,9 @@
  *     |
  *     +--> [SIMULATOR_VISIBLE] when parent says the account is simulator-allow-listed
  *
+ * INFO MENU: the bar always ENDS with QueryInfoMenu (bare Info icon ->
+ * About / Privacy / Terms), replacing the old terminal footer links.
+ *
  * REVEAL: the whole bar sits in ToolbarRevealRegion — [COLLAPSED] until the
  * rose nub (ToolbarNub) is hovered, focused or tapped, then [EXPANDED].
  *
@@ -26,6 +29,7 @@ import TestPromptsSelector from '../TestPromptsSelector';
 import AgentSettingsDialog from '../AgentSettingsDialog';
 import { CostIndicator } from './CostIndicator';
 import { ContextMeter } from './ContextMeter';
+import { QueryInfoMenu } from './QueryInfoMenu';
 import type { AgentDetail } from '../../hooks';
 import type { UsePriceLimitResult } from './usePriceLimit';
 import { ToolbarRevealRegion } from './ToolbarNub';
@@ -117,6 +121,7 @@ export function TopBar({
             onUpdate={onAgentUpdate}
             onDelete={onAgentDelete}
           />
+          <QueryInfoMenu />
         </div>
       </div>
     </ToolbarRevealRegion>

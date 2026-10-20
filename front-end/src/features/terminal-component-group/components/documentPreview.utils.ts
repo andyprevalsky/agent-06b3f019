@@ -8,6 +8,7 @@ import type { FilePointer } from '@/lib/api/types';
 export type DocumentPreviewKind =
   | 'html'
   | 'image'
+  | 'video'
   | 'markdown'
   | 'text'
   | 'csv'
@@ -22,6 +23,7 @@ export type DocumentPreviewKind =
 export const PREVIEWABLE_DOCUMENT_KINDS: DocumentPreviewKind[] = [
   'html',
   'image',
+  'video',
   'markdown',
   'text',
   'csv',
@@ -50,12 +52,15 @@ const TEXT_MIME_TYPES = new Set([
   'text/yaml',
 ]);
 
+const VIDEO_EXT = /\.(mp4|m4v|mov|webm|ogv)$/i;
+
 const TYPE_LABELS: Array<{ test: (mime: string, name: string) => boolean; label: string }> = [
   {
     test: (m, n) => m.includes('html') || n.endsWith('.html') || n.endsWith('.htm'),
     label: 'HTML',
   },
   { test: (m) => m.startsWith('image/'), label: 'Image' },
+  { test: (m, n) => m.startsWith('video/') || VIDEO_EXT.test(n), label: 'Video' },
   { test: (m, n) => m === 'application/pdf' || n.endsWith('.pdf'), label: 'PDF' },
   {
     test: (m, n) =>
@@ -159,6 +164,7 @@ export function documentPreviewKind(file: FilePointer): DocumentPreviewKind {
 
   if (mime.includes('html') || name.endsWith('.html') || name.endsWith('.htm')) return 'html';
   if (mime.startsWith('image/') || /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(name)) return 'image';
+  if (mime.startsWith('video/') || VIDEO_EXT.test(name)) return 'video';
   if (MARKDOWN_MIME_TYPES.has(mime) || MARKDOWN_EXTENSIONS.some((ext) => name.endsWith(ext))) {
     return 'markdown';
   }

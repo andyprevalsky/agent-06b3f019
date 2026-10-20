@@ -7,8 +7,9 @@
  *                     app drawer via --rose-apps-inset, 520ms ease)
  * [MOBILE  <  md] --> full-width FLUSH bar at y=0:
  *                        left   = brand (logo + Rose)
- *                        center = Research
  *                        right  = hamburger drawer (signed in) OR Login (signed out)
+ *                     (no Research/Careers links — removed per Chrome cleanup;
+ *                      About/Privacy/Terms live in the query box info menu)
  *
  * MOBILE RIGHT ACTION:
  * [SIGNED_IN]  -- tap hamburger --> MobileAgentDrawer (opens from RIGHT; Agents +
@@ -25,7 +26,6 @@
  * -> TerminalModals.loginModalOpen -> PhoneAuthModal -> useAuth.refreshAuthState
  */
 
-import { useNavigate } from 'react-router-dom';
 import type { CSSProperties } from 'react';
 
 import { AttentionInbox, MobileAgentDrawer } from '@/features/terminal-component-group';
@@ -123,28 +123,6 @@ function BrandButton({ onCreateNewAgent }: Pick<TerminalHeaderProps, 'onCreateNe
   );
 }
 
-function SiteNavButtons({ clientSource }: Pick<TerminalHeaderProps, 'clientSource'>) {
-  const navigate = useNavigate();
-  if (clientSource !== 'WEB') return null;
-
-  return (
-    <nav className="flex items-center gap-3 whitespace-nowrap">
-      <button
-        onClick={() => navigate('/research')}
-        className="text-xs sm:text-sm text-muted-foreground transition-colors hover:text-foreground"
-      >
-        Research
-      </button>
-      <button
-        onClick={() => navigate('/careers')}
-        className="text-xs sm:text-sm text-muted-foreground transition-colors hover:text-foreground"
-      >
-        Careers
-      </button>
-    </nav>
-  );
-}
-
 function HeaderAuthAction({
   isSignedIn,
   onLoginClick,
@@ -190,7 +168,7 @@ function DesktopHeaderPill(props: TerminalHeaderProps) {
 
 /**
  * Mobile (< md): full-width flush bar at y=0.
- * left = brand · center = Research · right = hamburger drawer (agents +
+ * left = brand · right = hamburger drawer (agents +
  * notifications + login/logout), driving all mobile navigation.
  */
 function MobileHeaderBar(props: TerminalHeaderProps) {
@@ -200,21 +178,15 @@ function MobileHeaderBar(props: TerminalHeaderProps) {
     onLoginClick,
     onLogout,
     isSignedIn,
-    clientSource,
     agents,
     isLoadingAgents,
     selectedAgentId,
     onRefreshAgents,
   } = props;
   return (
-    <header className="fixed inset-x-0 top-0 z-50 grid h-[var(--mobile-terminal-header-height)] grid-cols-3 items-center border-b border-border/60 bg-background/85 px-4 pt-[var(--safe-area-inset-top)] backdrop-blur-md">
-      <div className="justify-self-start">
-        <BrandButton onCreateNewAgent={onCreateNewAgent} />
-      </div>
-      <div className="justify-self-center">
-        <SiteNavButtons clientSource={clientSource} />
-      </div>
-      <div className="flex items-center justify-self-end">
+    <header className="fixed inset-x-0 top-0 z-50 flex h-[var(--mobile-terminal-header-height)] items-center justify-between border-b border-border/60 bg-background/85 px-4 pt-[var(--safe-area-inset-top)] backdrop-blur-md">
+      <BrandButton onCreateNewAgent={onCreateNewAgent} />
+      <div className="flex items-center">
         <MobileAgentDrawer
           agents={agents}
           isLoadingAgents={isLoadingAgents}

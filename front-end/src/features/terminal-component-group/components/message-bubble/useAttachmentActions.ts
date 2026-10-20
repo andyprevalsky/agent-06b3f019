@@ -1,7 +1,8 @@
 /**
- * Handlers for downloading attachments and opening them in the lightbox.
- * Extracted from AttachmentDisplay so the component stays under the strict
- * max-lines-per-function cap.
+ * Download handler for non-media message attachments. Extracted from
+ * AttachmentDisplay so the component stays under the strict
+ * max-lines-per-function cap. (Images/videos render inline via
+ * InlineMediaGallery and open in DocumentPreviewDrawer instead.)
  */
 import { useCallback } from 'react';
 import type { FilePointer } from '../../hooks';
@@ -9,34 +10,16 @@ import { downloadAttachmentAsBlob, getAttachmentUrl, useToast } from '../../hook
 
 interface UseAttachmentActionsArgs {
   agentId: string | undefined;
-  imageUrls: Record<string, string>;
-  setImageUrlFor: (id: string, url: string) => void;
-  setLightboxImage: (img: { src: string; alt: string } | null) => void;
 }
 
-export function useAttachmentActions({
-  agentId,
-  imageUrls,
-  setImageUrlFor,
-  setLightboxImage,
-}: UseAttachmentActionsArgs) {
+export function useAttachmentActions({ agentId }: UseAttachmentActionsArgs) {
   const { toast } = useToast();
-
-  const resolveDownloadUrl = useCallback(
-    async (fp: FilePointer): Promise<string> => {
-      if (imageUrls[fp.id]) return imageUrls[fp.id];
-      if (fp.storage_path && agentId) {
-        return getAttachmentUrl(agentId, fp.id, fp.storage_path);
-      }
-      throw new Error('Cannot download file');
-    },
-    [agentId, imageUrls],
-  );
 
   const handleDownload = useCallback(
     async (fp: FilePointer) => {
       try {
-        const url = await resolveDownloadUrl(fp);
+        if (!fp.storage_path || !agentId) throw new Error('Cannot download file');
+        const url = await getAttachmentUrl(agentId, fp.id, fp.storage_path);
         const blob = await downloadAttachmentAsBlob(url);
         const blobUrl = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -54,25 +37,8 @@ export function useAttachmentActions({
         });
       }
     },
-    [resolveDownloadUrl, toast],
+    [agentId, toast],
   );
 
-  const openLightbox = useCallback(
-    async (fp: FilePointer) => {
-      let src = imageUrls[fp.id] || '';
-      if (!src && fp.storage_path && agentId) {
-        try {
-          src = await getAttachmentUrl(agentId, fp.id, fp.storage_path);
-          setImageUrlFor(fp.id, src);
-        } catch {
-          toast({ title: 'Failed to load image', variant: 'destructive' });
-          return;
-        }
-      }
-      setLightboxImage({ src, alt: fp.original_filename });
-    },
-    [agentId, imageUrls, setImageUrlFor, setLightboxImage, toast],
-  );
-
-  return { handleDownload, openLightbox };
+  return { handleDownload };
 }

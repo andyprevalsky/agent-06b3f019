@@ -2,7 +2,8 @@
  * StructuredResponseDisplay — renders the extracted output of a completed Claude Code task.
  *
  * Stateless: receives a structured response object and an optional schema, then
- * renders each field's value via type-aware formatters (FilePointer → chip,
+ * renders each field's value via type-aware formatters (FilePointer → chip, or
+ * inline media for images/videos; several media files → one gallery strip,
  * primitive arrays → comma-joined, structured values → JSON,
  * null/undefined → em-dash).
  *
@@ -11,6 +12,7 @@
 
 import { type ResponseSchemaField } from '../hooks';
 import { FilePointerDisplay } from './FilePointerDisplay';
+import { FilePointerGroup } from './inline-media/FilePointerGroup';
 import { formatFieldType, humanizeFieldKey, isFilePointer } from './claudeCodeChip.utils';
 
 function formatPrimitive(value: unknown): string {
@@ -32,15 +34,7 @@ function FieldValue({
 
   if (fieldType === 'list[file_pointer]' && Array.isArray(value)) {
     const filePointers = value.filter(isFilePointer);
-    if (filePointers.length > 0) {
-      return (
-        <div className="flex w-full flex-col gap-2">
-          {filePointers.map((fp) => (
-            <FilePointerDisplay key={fp.id} file={fp} />
-          ))}
-        </div>
-      );
-    }
+    if (filePointers.length > 0) return <FilePointerGroup files={filePointers} />;
   }
 
   // Auto-detect FilePointer even if field type isn't specified
