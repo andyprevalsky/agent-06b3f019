@@ -619,6 +619,69 @@ async def test_unpinned_sol_pool_uses_any_sol_deployment_and_pinned_pool_does_no
 
 
 @pytest.mark.asyncio
+async def test_truncation_exclusion_removes_only_the_excluded_sol_model(monkeypatch):
+    """A Sol model cut off at its output limit is never retried; the other Sol model still serves."""
+    requests = _install_regions(monkeypatch, lambda *_: _ok(), regions=(_R1, _R2))
+    monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS_2", "gpt-6.1-sol")
+    ultra = get_pool("rose-1-ultra")
+    assert foundry.foundry_candidates(ultra, frozenset({"gpt61sol"})) == ("gpt-6-sol",)
+    assert foundry.foundry_candidates(ultra, frozenset({"gpt6sol"})) == ("gpt-6.1-sol",)
+    assert foundry.foundry_candidates(ultra, frozenset({"gpt6sol", "gpt61sol"})) == ()
+    assert foundry.foundry_candidates(get_pool("rose-wmh-gpt61"), frozenset({"gpt6sol"})) == ("gpt-6.1-sol",)
+
+    for excluded, served in (("gpt61sol", (_R1, "gpt-6-sol")), ("gpt6sol", (_R2, "gpt-6.1-sol"))):
+        for i in range(20):
+            requests.clear()
+            chunks = [
+                chunk
+                async for chunk in foundry.foundry_complete(
+                    pool_spec=ultra,
+                    messages=[{"role": "user", "content": "Say hi"}],
+                    response_format=None,
+                    tools=None,
+                    context_tools=None,
+                    tool_choice=None,
+                    temperature=None,
+                    effort="high",
+                    provider_fast_mode=True,
+                    request_id=f"trunc-{excluded}-{i}",
+                    route_key=f"agent-{i}",
+                    agent_id=None,
+                    call_site="test",
+                    cache_namespace=None,
+                    ttft_timeout_s=2,
+                    idle_timeout_s=2,
+                    skip_models=frozenset({excluded}),
+                )
+            ]
+            assert requests == [served]
+            assert chunks[0].data["actual_model"] == f"{served[1]}-foundry"
+    with pytest.raises(RoseServerError):
+        [
+            chunk
+            async for chunk in foundry.foundry_complete(
+                pool_spec=ultra,
+                messages=[{"role": "user", "content": "Say hi"}],
+                response_format=None,
+                tools=None,
+                context_tools=None,
+                tool_choice=None,
+                temperature=None,
+                effort="high",
+                provider_fast_mode=True,
+                request_id="trunc-all",
+                route_key="agent-1",
+                agent_id=None,
+                call_site="test",
+                cache_namespace=None,
+                ttft_timeout_s=2,
+                idle_timeout_s=2,
+                skip_models=frozenset({"gpt6sol", "gpt61sol"}),
+            )
+        ]
+
+
+@pytest.mark.asyncio
 async def test_non_https_optional_region_is_skipped_and_primary_still_rejects(monkeypatch):
     """A typo in one optional slot must not stop the healthy regions (mirrors foundry.ts)."""
     monkeypatch.setattr(foundry, "_warned_insecure_regions", set())

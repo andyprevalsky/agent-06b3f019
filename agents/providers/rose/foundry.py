@@ -21,7 +21,7 @@ import os
 import ssl
 import time
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, FrozenSet, List, Optional
 from urllib.parse import urlsplit
 
 import httpx
@@ -31,6 +31,7 @@ from providers.rose.errors import RoseAuthError, RoseError, RoseInvalidRequest, 
 from providers.rose.gpt_auth import build_codex_responses_body
 from providers.rose.pools import PoolSpec, foundry_model, foundry_models
 from providers.rose.streaming import parse_responses_sse
+from providers.rose.truncation import model_key
 from providers.rose.types import StreamChunk
 
 logger = structlog.get_logger()
@@ -131,6 +132,11 @@ def foundry_configured(pool_spec: PoolSpec) -> bool:
 # Non-reasoning Foundry models (the open-weights pool's DeepSeek) reject
 # reasoning.effort and reasoning includes with HTTP 400; omit both for them.
 _NO_REASONING_MODELS = frozenset({"DeepSeek-V3.2"})
+
+
+def foundry_candidates(pool_spec: PoolSpec, skip_models: FrozenSet[str] = frozenset()) -> tuple[str, ...]:
+    """The pool's Foundry models minus any excluded (by ``model_key``) after a truncation."""
+    return tuple(model for model in foundry_models(pool_spec) if model_key(model) not in skip_models)
 
 
 def _as_models(models: str | tuple[str, ...]) -> tuple[str, ...]:
@@ -241,8 +247,13 @@ async def foundry_complete(
     ttft_timeout_s: float,
     idle_timeout_s: Optional[float],
     max_tokens: Optional[int] = None,
+    skip_models: FrozenSet[str] = frozenset(),
 ) -> AsyncIterator[StreamChunk]:
     model = foundry_model(pool_spec)
+    # A model cut off at its output limit is excluded from every route serving it.
+    candidates = foundry_candidates(pool_spec, skip_models)
+    if not candidates:
+        raise RoseServerError("Every Foundry model for this pool is excluded")
     regions = _routable_regions()
     last_error: Optional[RoseError] = None
     skipped_cooling = False
@@ -251,7 +262,7 @@ async def foundry_complete(
     route_key = route_key or agent_id or request_id
 
     async with httpx.AsyncClient(timeout=timeout) as client:
-        for region, deployment in _route_plan(regions, foundry_models(pool_spec), route_key):
+        for region, deployment in _route_plan(regions, candidates, route_key):
             now = time.monotonic()
             if now < _auth_cooldown_until.get(region.endpoint, 0.0):
                 continue
@@ -305,7 +316,7 @@ async def foundry_complete(
                     try:
                         async for chunk in parse_responses_sse(
                             response,
-                            actual_model=f"{_served_model(deployment, foundry_models(pool_spec))}-foundry",
+                            actual_model=f"{_served_model(deployment, candidates)}-foundry",
                             pool_name="foundry",
                             request_id=request_id,
                             idle_timeout_s=idle_timeout_s,
