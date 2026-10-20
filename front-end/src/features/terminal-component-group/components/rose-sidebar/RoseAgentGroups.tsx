@@ -72,7 +72,7 @@ export interface RoseAgentGroupsProps {
 function GroupDivider() {
   return (
     <div data-testid="rose-group-divider" aria-hidden="true" className="flex justify-center py-2">
-      <i className="block h-[3px] w-[18px] rounded-[3px] bg-[hsl(240_6%_86%)] dark:bg-white/[0.14]" />
+      <i className="block h-[3px] w-[18px] rounded-[3px] bg-[hsl(240_6%_86%)] dark:bg-white/[0.07]" />
     </div>
   );
 }

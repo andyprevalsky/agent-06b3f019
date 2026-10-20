@@ -193,6 +193,10 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
     // Per-user UI runtime: agent.panel slot beside the chat column.
     'Cross-domain import: "@/features/user-ui"',
   ],
+  // Rose dark mode: the Popular Goals pills switch to the mock's dark controls.
+  'features/terminal/components/PopularGoalsCarousel.tsx': [
+    'Cross-domain import: "@/features/rose-theme"',
+  ],
   'features/terminal/components/TerminalHeader.tsx': [
     'Cross-domain import: "@/features/terminal-component-group"',
     // Rose dark mode: the desktop header pill reads useRoseTheme().

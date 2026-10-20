@@ -90,7 +90,7 @@ export function BrowserSitesPanel({ agentTitle }: { agentTitle: AgentTitle }) {
     <section
       aria-label="Sites"
       data-testid="browser-sites-panel"
-      className="max-h-[40%] flex-none overflow-y-auto border-b border-gray-200/90 px-[18px] py-2 text-[12.5px] dark:border-white/[0.09]"
+      className="max-h-[40%] flex-none overflow-y-auto border-b border-gray-200/90 px-[18px] py-2 text-[12.5px] dark:border-white/[0.07]"
     >
       {body}
     </section>

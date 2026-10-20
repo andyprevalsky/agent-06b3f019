@@ -115,7 +115,7 @@ export default function AgentSettingsDialog({
     <Dialog open={open} onOpenChange={setOpen} modal={false}>
       <SettingsTrigger nub={variant === 'nub'} triggerRef={triggerRef} />
       <DialogContent
-        className="p-0 border border-gray-300 dark:border-gray-700 shadow-lg [&>button]:hidden overflow-hidden"
+        className="p-0 border border-gray-300 dark:border-white/[0.09] shadow-lg [&>button]:hidden overflow-hidden"
         style={{
           position: 'fixed',
           bottom: `${modalPosition.bottom}px`,

@@ -13,7 +13,9 @@
  *   code agents (useRoseCodeAgents: one batched read per on-screen page of
  *   ≤50 roots; running ones show a thinking bubble unless an attention request
  *   of theirs is open, useCodeAgentAttention) · + New project
- *   ── Feedback · [Biz health, admins] · Archived · [Browse] · account row.
+ *   ── Feedback · [Biz health, admins] · Archived · [Browse] · account row
+ *      (name + cursive initial from the Rose profile, useAccountProfileName;
+ *      member icon while it loads).
  *      Feedback, Biz health and the account row (Settings) open in the
  *      right-panel slot (RoseAppsProvider); clicking again closes it.
  *
@@ -60,6 +62,7 @@ import { useCodeAgentAttention } from './useCodeAgentAttention';
 import { useNotYet, useRoseAgentMenuActions } from './useRoseAgentMenuActions';
 import { useRoseCodeAgents } from './useRoseCodeAgents';
 import { useRoseSidebarProjects } from './useRoseSidebarProjects';
+import { useAccountProfileName } from './useAccountProfileName';
 
 const NO_ATTENTION: ReadonlySet<string> = new Set<string>();
 
@@ -143,6 +146,7 @@ function RoseSidebarBar(props: AppSidebarProps) {
     else if (app === 'settings') goToView('settings');
   };
   const { isExpanded } = expansion;
+  const profile = useAccountProfileName(props.user);
   return (
     <>
       <aside
@@ -218,6 +222,8 @@ function RoseSidebarBar(props: AppSidebarProps) {
           )}
           <RoseAccountRow
             user={props.user}
+            profileName={profile.name}
+            profileLoading={profile.loading}
             isExpanded={isExpanded}
             isActive={apps?.openApp === 'settings'}
             onOpenSettings={() => openPanel('settings')}

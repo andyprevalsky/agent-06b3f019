@@ -423,6 +423,49 @@ describe('Rose Desktop model selector: short pool names (#77)', () => {
     expect(screen.getByText('rose-labs/rose-fast')).toBeInTheDocument();
     expect(screen.queryByText('rose-flash')).toBeNull();
   });
+
+  /** Open the model dropdown under the Rose theme provider (dark = stored choice). */
+  async function openModelMenu(dark: boolean) {
+    // cmdk scrolls the active item into view; jsdom has no scrollIntoView.
+    Element.prototype.scrollIntoView ??= () => {};
+    localStorage.clear();
+    if (dark) localStorage.setItem(`rose-theme:${ANDY}`, 'dark');
+    const user = userEvent.setup();
+    const view = renderWithProviders(<QueryInput {...queryProps} />, {
+      roseDesktop: true,
+      roseThemeUserId: ANDY,
+    });
+    await user.click(screen.getByText('rose-flash').closest('button')!);
+    const list = await waitFor(() => {
+      const root = document.querySelector<HTMLElement>('[cmdk-root]');
+      expect(root).not.toBeNull();
+      return root!;
+    });
+    const menu = list.closest<HTMLElement>('[role="dialog"]')!;
+    const description = within(list).getByText(/./, { selector: 'span.text-xs' });
+    return { view, list, menu, description };
+  }
+
+  it('dark: the dropdown list sits on the chip surface (#2f2f2c, #e4e4df, #a3a39d)', async () => {
+    try {
+      const { list, menu, description } = await openModelMenu(true);
+      expect(document.documentElement).toHaveClass('dark');
+      expect(menu).toHaveClass('dark:bg-[#2f2f2c]', 'dark:border-white/[0.09]');
+      expect(list).toHaveClass('bg-white', 'dark:bg-[#2f2f2c]', 'dark:text-[#e4e4df]');
+      expect(description).toHaveClass('text-gray-500', 'dark:text-[#a3a39d]');
+    } finally {
+      localStorage.clear();
+    }
+  });
+
+  it('light control: the dropdown keeps the stock white list classes', async () => {
+    const { list, menu, description } = await openModelMenu(false);
+    expect(document.documentElement).not.toHaveClass('dark');
+    expect(menu.className).not.toMatch(/#2f2f2c|white\/\[0\.09\]/);
+    expect(list.className).toMatch(/(^|\s)bg-white(\s|$)/);
+    expect(list.className).not.toMatch(/#2f2f2c|#e4e4df/);
+    expect(description.className).toBe('text-xs text-gray-500');
+  });
 });
 
 // ─── Send button (#53) and new-agent model default (#23) ────────────────────

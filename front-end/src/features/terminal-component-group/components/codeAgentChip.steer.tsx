@@ -73,7 +73,7 @@ function ThinkingRow({ text, seconds }: { text: string; seconds?: number }) {
         <ChevronRight className={`h-3 w-3 transition-transform ${open ? 'rotate-90' : ''}`} />
       </button>
       {open && (
-        <div className="mt-1 border-l-2 border-border pl-2.5 dark:border-white/[.09]">{text}</div>
+        <div className="mt-1 border-l-2 border-border pl-2.5 dark:border-white/[0.07]">{text}</div>
       )}
     </div>
   );
@@ -170,7 +170,7 @@ export function ChipTabs({ tab, onChange }: { tab: ChipTab; onChange: (tab: Chip
   return (
     <div
       role="tablist"
-      className="flex gap-4 border-t border-border px-3.5 text-[12.5px] dark:border-white/[.09]"
+      className="flex gap-4 border-t border-border px-3.5 text-[12.5px] dark:border-white/[0.07]"
     >
       {tabs.map((t) => (
         <button

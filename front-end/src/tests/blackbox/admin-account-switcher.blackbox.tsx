@@ -311,7 +311,7 @@ describe('AdminSwitcherMount placement (Rose Desktop moves the switcher into Set
     const pill = within(inline).getByTestId('admin-account-pill');
     expect(pill).toHaveTextContent('+19729777432');
     expect(pill.className).not.toMatch(/shadow-lg|backdrop-blur-md/);
-    expect(pill).toHaveClass('bg-white', 'dark:bg-[#2f2f2c]', 'dark:border-white/[0.12]');
+    expect(pill).toHaveClass('bg-white', 'dark:bg-[#2f2f2c]', 'dark:border-white/[0.09]');
     expect(inline.className).not.toMatch(/(^|\s)(fixed|items-end)(\s|$)/);
   });
 

@@ -154,7 +154,7 @@ export function CompactHeader({
   onMaximize,
 }: HeaderProps) {
   return (
-    <div className="flex min-w-0 items-center justify-between gap-2 border-b border-black/10 bg-white/70 px-2.5 py-2 backdrop-blur dark:border-white/10 dark:bg-white/5">
+    <div className="flex min-w-0 items-center justify-between gap-2 border-b border-black/10 bg-white/70 px-2.5 py-2 backdrop-blur dark:border-white/[0.07] dark:bg-white/5">
       <div className="flex min-w-0 items-center gap-2">
         <ProviderIcon codeProvider={codeProvider} className="h-4 w-4 flex-shrink-0" />
         <StatusDisplay state={state} codeProvider={codeProvider} />

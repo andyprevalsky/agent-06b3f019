@@ -36,6 +36,12 @@
  * Props: embedded (Rose Desktop Settings drawer, which has its own header:
  * no page padding and no title card) and billingExtra (rendered under Current Plan in the Billing tab).
  * The stock page passes neither, so it renders unchanged.
+ *
+ * THEME (embedded only, via the `rose-settings` class + roseSettings.css):
+ *   light → the stock segmented tabs and cards (unchanged)
+ *   html.dark (Rose Desktop dark mode) → the mock's flat Settings: text tabs
+ *     with a #e8507f underline on the active tab, no card surfaces, fields on
+ *     the #2f2f2c control surface
  */
 
 import { useState, useCallback } from 'react';
@@ -53,6 +59,7 @@ import {
 
 import SettingsTabContent from './SettingsTabContent';
 import SubscriptionModal from './SubscriptionModal';
+import './roseSettings.css';
 
 interface SettingsProps {
   /** Rendered inside the Rose Desktop Settings drawer: no page padding or title card. */
@@ -86,7 +93,7 @@ export default function Settings({ embedded = false, billingExtra }: SettingsPro
   }
 
   return (
-    <div className={embedded ? 'h-full' : 'h-full overflow-y-auto pt-20'}>
+    <div className={embedded ? 'rose-settings h-full' : 'h-full overflow-y-auto pt-20'}>
       <div className={embedded ? 'space-y-6' : 'container max-w-3xl mx-auto py-12 px-4 space-y-6'}>
         {!embedded && (
           <div className="mb-8 backdrop-blur-md bg-background/80 p-6 rounded-xl border border-border/50 dark:border-navi-light-light-black/50">

@@ -110,7 +110,7 @@ export function RoseAppPanelDrawer() {
     <AppDrawerShell open={open} label={`${meta?.title ?? 'App'} panel`} testId="rose-app-panel">
       {shown !== null && meta !== null && (
         <>
-          <div className="flex flex-none items-center gap-2.5 border-b border-gray-200/90 px-3.5 py-3 text-[13px] dark:border-white/[0.09]">
+          <div className="flex flex-none items-center gap-2.5 border-b border-gray-200/90 px-3.5 py-3 text-[13px] dark:border-white/[0.07]">
             <meta.icon className="h-[18px] w-[18px] flex-none" strokeWidth={1.7} />
             <b className="font-semibold">{meta.title}</b>
           </div>

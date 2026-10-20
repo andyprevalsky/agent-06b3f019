@@ -52,7 +52,7 @@
 
 /* Dark: toned down, no glare. */
 html.dark .rose-speed[data-state='normal'] {
-  border-color: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.09);
   background: rgba(255, 255, 255, 0.04);
   color: rgba(236, 236, 234, 0.6);
 }

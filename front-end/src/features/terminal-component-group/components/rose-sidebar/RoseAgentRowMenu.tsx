@@ -90,7 +90,7 @@ function Row({
 }
 
 function Divider() {
-  return <ContextMenuSeparator className="mx-1.5 my-1 bg-gray-200/95 dark:bg-white/[0.09]" />;
+  return <ContextMenuSeparator className="mx-1.5 my-1 bg-gray-200/95 dark:bg-white/[0.07]" />;
 }
 
 function CopySubmenu({
