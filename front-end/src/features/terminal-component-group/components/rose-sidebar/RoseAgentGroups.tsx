@@ -17,6 +17,9 @@
  * CODE AGENTS: each agent row is followed by the Claude Code / Codex sessions
  * of its tree (RoseCodeAgentRow), indented one level under it while expanded;
  * collapsed they stay inside the parent's group (no divider between them).
+ * Every agent row reports its visibility (observeRoot) so only the trees on
+ * screen are read. A running code agent shows the thinking bubble unless it
+ * waits on the user (codeAgentsNeedingInput → amber alert instead).
  *
  * While a search query is active, project groups with no matching agent drop out.
  */
@@ -24,7 +27,7 @@
 import { Fragment } from 'react';
 
 import type { Project } from '@/lib/api/projects';
-import type { CodeAgentNode } from '@/lib/api/tree';
+import type { CodeAgentListItem } from '@/lib/api/tree';
 
 import type { Agent } from '../../hooks';
 import type { GroupedAgents } from './groupAgentsByProject';
@@ -58,8 +61,12 @@ export interface RoseAgentGroupsProps {
   onMenuOpenChange: (open: boolean) => void;
   projectActions: RoseProjectActions;
   /** Code agents listed under an agent row (its tree's sessions). */
-  codeAgentsFor: (agentId: string) => readonly CodeAgentNode[];
-  onOpenCodeAgent: (codeAgent: CodeAgentNode) => void;
+  codeAgentsFor: (agentId: string) => readonly CodeAgentListItem[];
+  onOpenCodeAgent: (codeAgent: CodeAgentListItem) => void;
+  /** Code agents (task ids) with an unanswered question / approval for the user. */
+  codeAgentsNeedingInput: ReadonlySet<string>;
+  /** Ref for each agent row; its visibility decides which code-agent pages are read. */
+  observeRoot: (agentId: string) => (element: HTMLElement | null) => void;
 }
 
 function GroupDivider() {
@@ -92,6 +99,7 @@ function AgentRows({
             onClick={() => props.onSelectAgent(agent.agent_id)}
             actions={props.actionsFor(agent)}
             onMenuOpenChange={props.onMenuOpenChange}
+            rowRef={props.observeRoot(agent.agent_id)}
           />
           {props.codeAgentsFor(agent.agent_id).map((codeAgent) => (
             <RoseCodeAgentRow
@@ -99,6 +107,7 @@ function AgentRows({
               codeAgent={codeAgent}
               isExpanded={props.isExpanded}
               parentIndented={indented}
+              needsInput={props.codeAgentsNeedingInput.has(codeAgent.code_agent_id)}
               onOpen={() => props.onOpenCodeAgent(codeAgent)}
             />
           ))}

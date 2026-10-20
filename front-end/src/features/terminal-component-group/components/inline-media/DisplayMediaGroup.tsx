@@ -5,24 +5,27 @@
  *   requester is a code agent → "<agent> · via display" attribution line
  *   caption (first item only)  → text above the media
  *   images / videos            → ONE InlineMediaGallery (single or strip)
- *   text/html                  → DisplayHtmlFrame each:
- *       [SIGNING] --signed URL--> [FRAME] sandbox="allow-scripts", cross-origin
- *                 --failed-----> [UNAVAILABLE] filename notice
+ *   text/html with file_pointer.usercontent_url (cross-origin http(s)):
+ *       [FRAME] sandbox="allow-scripts" on the usercontent origin
  *       [FRAME] --rose:resize--> height clamped 200..900px
+ *   text/html without one (older rows) or a same-origin/invalid one → DisplayHtmlLink:
+ *       [SIGNING] --signed URL--> [LINK] plain open/download link (never framed)
+ *                 --failed-----> [UNAVAILABLE] filename notice
  *
  * SYSTEM CONTEXT:
  *   MessageListItems (groupDisplayMedia) → DisplayMediaGroup
  *     → InlineMediaGallery → DocumentPreviewDrawer
  *     → UserUiFrame (features/user-ui: never same-origin, no allow-same-origin)
  *
- * HTML loads from the attachment's signed storage URL, a separate origin from
- * the app; UserUiFrame refuses any same-origin URL, and the opaque sandbox keeps
- * the page away from app cookies, storage and the session.
+ * HTML is framed ONLY from the backend's usercontent URL (a separate origin
+ * that serves display HTML for exactly this frame); UserUiFrame refuses any
+ * same-origin URL, and the opaque sandbox keeps the page away from app
+ * cookies, storage and the session. The storage URL is a download, not a page.
  */
 
 import { useState } from 'react';
 
-import { UserUiFrame } from '@/features/user-ui';
+import { isAllowedUserContentUrl, UserUiFrame } from '@/features/user-ui';
 import { isHtmlDisplayMedia, type DisplayMediaItem } from '../../hooks/codeAgentContract';
 import { CodeAgentAttribution } from '../CodeAgentAttribution';
 import { InlineMediaGallery } from './InlineMediaGallery';
@@ -37,30 +40,48 @@ function clampHeight(height: number): number {
   return Math.min(HTML_FRAME_MAX_HEIGHT, Math.max(HTML_FRAME_MIN_HEIGHT, Math.round(height)));
 }
 
-function DisplayHtmlFrame({ item, agentId }: { item: DisplayMediaItem; agentId?: string }) {
+/** Older display rows (no usercontent URL): a plain link to the stored file. */
+function DisplayHtmlLink({ item, agentId }: { item: DisplayMediaItem; agentId?: string }) {
   const urls = useInlineMediaUrls([item.file], agentId);
   const url = urls[item.file.id];
-  const [height, setHeight] = useState(HTML_FRAME_DEFAULT_HEIGHT);
+  const filename = item.file.original_filename;
   if (url === null) {
     return (
       <p data-testid="display-html-unavailable" className="text-xs text-muted-foreground">
-        {item.file.original_filename} — preview unavailable
+        {filename} — preview unavailable
       </p>
     );
   }
   if (url === undefined) {
     return (
-      <div
-        data-testid="display-html-pending"
-        aria-label={`Loading ${item.file.original_filename}`}
-        className="w-full animate-pulse rounded-lg bg-muted/50"
-        style={{ height }}
-      />
+      <p data-testid="display-html-pending" className="text-sm text-muted-foreground">
+        {filename}
+      </p>
     );
   }
   return (
+    <a
+      data-testid="display-html-link"
+      href={url}
+      download={filename}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-sm font-medium text-foreground underline underline-offset-2"
+    >
+      Open {filename}
+    </a>
+  );
+}
+
+function DisplayHtmlFrame({ item, agentId }: { item: DisplayMediaItem; agentId?: string }) {
+  const [height, setHeight] = useState(HTML_FRAME_DEFAULT_HEIGHT);
+  const src = item.usercontent_url;
+  if (!src || !isAllowedUserContentUrl(src)) {
+    return <DisplayHtmlLink item={item} agentId={agentId} />;
+  }
+  return (
     <UserUiFrame
-      src={url}
+      src={src}
       title={item.file.original_filename}
       testId="display-html-frame"
       onResize={(next) => setHeight(clampHeight(next))}

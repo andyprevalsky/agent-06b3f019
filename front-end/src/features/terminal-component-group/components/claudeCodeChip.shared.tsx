@@ -1,12 +1,14 @@
 /**
  * STATE MACHINE: Claude code chip shared surfaces
- * [spinning_up|live|verifying|completed|failed] -> provider status treatment
+ * [spinning_up|live|verifying|completed|failed|paused] -> provider status treatment
+ *   (paused: Rose Desktop snapshot only; muted pause glyph, never red)
  * [terminal] -> stable terminal mount surface
  */
 
 import { type ReactNode, type RefObject } from 'react';
 import {
   CheckCircle2,
+  CirclePause,
   ExternalLink,
   Loader2,
   Maximize2,
@@ -43,6 +45,10 @@ const STATUS_CONFIG: Record<ChipState, { indicator: ReactNode; text: (label: str
       indicator: <XCircle className="h-4 w-4 text-red-500" />,
       text: (label) => `${label} Failed`,
     },
+    paused: {
+      indicator: <CirclePause className="h-4 w-4 text-muted-foreground dark:text-[#a3a39d]" />,
+      text: (label) => `${label} Paused`,
+    },
   };
 
 function providerLabel(codeProvider: CodeProvider): string {
@@ -65,16 +71,19 @@ export function ProviderIcon({
 export function StatusDisplay({
   state,
   codeProvider,
+  text,
 }: {
   state: ChipState;
   codeProvider: CodeProvider;
+  /** Replaces the state's default text (e.g. the usage-limit pause). */
+  text?: string;
 }) {
   const config = STATUS_CONFIG[state];
   return (
     <>
       {config.indicator}
       <span className="truncate text-sm font-medium">
-        {config.text(providerLabel(codeProvider))}
+        {text ?? config.text(providerLabel(codeProvider))}
       </span>
     </>
   );

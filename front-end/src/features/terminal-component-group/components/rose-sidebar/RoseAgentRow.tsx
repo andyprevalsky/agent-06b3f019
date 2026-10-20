@@ -36,6 +36,8 @@ interface RoseAgentRowProps {
   onClick: () => void;
   actions: RoseAgentMenuActions;
   onMenuOpenChange: (open: boolean) => void;
+  /** Visibility ref (the bar reads code agents only for rows on screen). */
+  rowRef?: (element: HTMLElement | null) => void;
 }
 
 export default function RoseAgentRow({
@@ -47,6 +49,7 @@ export default function RoseAgentRow({
   onClick,
   actions,
   onMenuOpenChange,
+  rowRef,
 }: RoseAgentRowProps) {
   const runStatus = agentRunStatus(agent, { hasAttentionRequest });
   const name = agentDisplayName(agent);
@@ -55,6 +58,7 @@ export default function RoseAgentRow({
     <ContextMenu onOpenChange={onMenuOpenChange}>
       <ContextMenuTrigger asChild>
         <button
+          ref={rowRef}
           type="button"
           onClick={onClick}
           aria-label={name}

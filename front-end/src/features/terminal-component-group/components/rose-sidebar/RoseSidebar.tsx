@@ -10,7 +10,9 @@
  * LAYOUT (top → bottom, rows 17/30/57/59/63):
  *   Home (root project) · New Super Agent (black) · Search
  *   agents grouped by project (RoseAgentGroups), each followed by its tree's
- *   code agents (useRoseCodeAgents, bounded tree reads) · + New project
+ *   code agents (useRoseCodeAgents: one batched read per on-screen page of
+ *   ≤50 roots; running ones show a thinking bubble unless an attention request
+ *   of theirs is open, useCodeAgentAttention) · + New project
  *   ── Feedback · [Biz health, admins] · Archived · [Browse] · account row.
  *      Feedback, Biz health and the account row (Settings) open in the
  *      right-panel slot (RoseAppsProvider); clicking again closes it.
@@ -28,7 +30,7 @@ import { useState, type FocusEvent } from 'react';
 
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useIsMobile } from '@/hooks/use-mobile';
-import type { CodeAgentNode } from '@/lib/api/tree';
+import type { CodeAgentListItem } from '@/lib/api/tree';
 import { cn } from '@/lib/utils';
 
 import type { AppSidebarProps } from '../AppSidebar';
@@ -54,6 +56,7 @@ import {
   ROSE_BAR_EXPANDED_WIDTH,
   ROSE_BAR_WIDTH,
 } from './roseSidebarLayout';
+import { useCodeAgentAttention } from './useCodeAgentAttention';
 import { useNotYet, useRoseAgentMenuActions } from './useRoseAgentMenuActions';
 import { useRoseCodeAgents } from './useRoseCodeAgents';
 import { useRoseSidebarProjects } from './useRoseSidebarProjects';
@@ -122,13 +125,14 @@ function RoseSidebarBar(props: AppSidebarProps) {
     onSelectAgent,
   });
   const actionsFor = useRoseAgentMenuActions(handlers, roseActions);
-  const codeAgentsFor = useRoseCodeAgents(
+  const codeAgentsNeedingInput = useCodeAgentAttention();
+  const { codeAgentsFor, observeRoot } = useRoseCodeAgents(
     [...grouped.home, ...grouped.projects.flatMap((g) => g.agents)],
     props.selectedAgentId,
   );
   const onOpenCodeAgent =
     roseActions.onOpenCodeAgent ??
-    ((codeAgent: CodeAgentNode) => onSelectAgent(codeAgent.owner_agent_id));
+    ((codeAgent: CodeAgentListItem) => onSelectAgent(codeAgent.owner_agent_id));
   const goToView = (view: Parameters<typeof onViewChange>[0]) => {
     onViewChange(view);
     onSelectAgent(null);
@@ -175,6 +179,8 @@ function RoseSidebarBar(props: AppSidebarProps) {
             projectActions={projects.projectActions}
             codeAgentsFor={codeAgentsFor}
             onOpenCodeAgent={onOpenCodeAgent}
+            observeRoot={observeRoot}
+            codeAgentsNeedingInput={codeAgentsNeedingInput}
           />
         </ScrollArea>
         {isExpanded && props.userUi?.menuSlot}

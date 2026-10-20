@@ -49,8 +49,18 @@ export function useNow(running: boolean): number {
   return now;
 }
 
-/** Lifecycle shown by the desktop chip: a terminal task message outranks a stale snapshot. */
+/**
+ * Lifecycle shown by the desktop chip. A terminal snapshot state (the
+ * producer's completed / failed / paused, already folded over the task's rows)
+ * wins: a paused session ends its spawn with an unsuccessful task_complete row
+ * yet is resumable, and an explicit completed row is never re-read as failed.
+ * While the snapshot still says running, the stock terminal reading (task row
+ * or WS exit) wins over it.
+ */
 export function desktopChipState(meta: CodeAgentMeta, vmState: ChipState): ChipState {
+  if (meta.state === 'completed' || meta.state === 'failed' || meta.state === 'paused') {
+    return meta.state;
+  }
   if (vmState === 'completed' || vmState === 'failed') return vmState;
   if (meta.state === 'live' && vmState === 'verifying') return 'verifying';
   return meta.state;
