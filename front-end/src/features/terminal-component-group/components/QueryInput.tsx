@@ -13,7 +13,8 @@
  *   - useAttachments     : attachment lifecycle + paste/drag
  *   - usePriceLimit      : edit/save/cancel cost-limit flow
  *
- * TOOLBAR REVEAL:      owned by `useToolbarReveal` (see ToolbarNub.tsx)
+ * TOOLBAR REVEAL (Rose Desktop flag only; stock UI = always visible, no nub):
+ *                      owned by `useToolbarReveal` (see ToolbarNub.tsx)
  *   [COLLAPSED] --hover/focus/tap nub--> [EXPANDED] --leave nub+toolbar--> [COLLAPSED]
  *
  * INPUT STATE:
@@ -54,6 +55,7 @@ import { InputContainer } from './query-input/InputContainer';
 import { TopBar } from './query-input/TopBar';
 import { ToolbarNub } from './query-input/ToolbarNub';
 import { useToolbarReveal, type ToolbarReveal } from './query-input/useToolbarReveal';
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { buildDripContainerStyle, buildMarbleBackgroundStyle } from './query-input/dripStyles';
 
 export type { QueryInputProps };
@@ -74,7 +76,9 @@ export default function QueryInput(props: QueryInputProps) {
     onAgentUpdate: props.onAgentUpdate,
   });
   const handleSubmit = useSubmitHandler(attachments, props.onSubmit);
-  const toolbarReveal = useToolbarReveal();
+  const reveal = useToolbarReveal();
+  // Rose Desktop only: the toolbar hides behind the nub; stock UI keeps it visible.
+  const toolbarReveal = useRoseDesktop() ? reveal : undefined;
 
   return (
     <div className="w-full md:px-0">
@@ -139,7 +143,7 @@ interface QueryInputBodyProps extends QueryInputProps {
   priceLimit: UsePriceLimitResult;
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
   handleSubmit: () => void;
-  toolbarReveal: ToolbarReveal;
+  toolbarReveal?: ToolbarReveal;
 }
 
 function QueryInputBody(props: QueryInputBodyProps) {
@@ -243,7 +247,7 @@ interface QueryInputShellProps {
     onDrop: (e: React.DragEvent) => void;
   };
   opaqueSurface: boolean;
-  toolbarReveal: ToolbarReveal;
+  toolbarReveal?: ToolbarReveal;
   children: React.ReactNode;
 }
 
@@ -277,7 +281,7 @@ function QueryInputShell({
           style={buildMarbleBackgroundStyle(dripStyles)}
         />
       )}
-      <ToolbarNub reveal={toolbarReveal} />
+      {toolbarReveal && <ToolbarNub reveal={toolbarReveal} />}
       <div className="relative z-10">{children}</div>
     </div>
   );
