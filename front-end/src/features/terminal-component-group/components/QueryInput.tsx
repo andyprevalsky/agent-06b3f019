@@ -23,6 +23,9 @@
  * SIMULATOR:           shown for admin users; session-only and default off
  * TEST PROMPTS:        shown only on desktop for dev/admin users; never mounted on mobile
  * SUBMISSION:          canSubmit prop decides send-vs-stop button
+ * SURFACE:             opaqueSurface → solid white/black container (a per-user
+ *                      background image shows through the app behind it);
+ *                      otherwise the translucent drip surface
  */
 
 import { useRef } from 'react';
@@ -72,6 +75,7 @@ export default function QueryInput(props: QueryInputProps) {
           drippiness={drippiness}
           isDragOver={attachments.isDragOver}
           dragHandlers={attachments.dragHandlers}
+          opaqueSurface={props.opaqueSurface === true}
         >
           <QueryInputBody
             {...props}
@@ -226,6 +230,7 @@ interface QueryInputShellProps {
     onDragLeave: (e: React.DragEvent) => void;
     onDrop: (e: React.DragEvent) => void;
   };
+  opaqueSurface: boolean;
   children: React.ReactNode;
 }
 
@@ -234,15 +239,20 @@ function QueryInputShell({
   drippiness,
   isDragOver,
   dragHandlers,
+  opaqueSurface,
   children,
 }: QueryInputShellProps) {
+  const dripStyle = buildDripContainerStyle(dripStyles, drippiness, isDragOver);
   return (
     <div
+      data-testid="query-input-surface"
+      data-surface={opaqueSurface ? 'opaque' : 'translucent'}
       className={cn(
         'relative rounded-xl p-3 shadow-lg border overflow-hidden transition-colors',
         isDragOver ? 'border-primary border-2 bg-primary/5' : 'border-border',
+        opaqueSurface && 'bg-white dark:bg-navi-black',
       )}
-      style={buildDripContainerStyle(dripStyles, drippiness, isDragOver)}
+      style={opaqueSurface ? { ...dripStyle, backgroundColor: undefined } : dripStyle}
       onDragOver={dragHandlers.onDragOver}
       onDragLeave={dragHandlers.onDragLeave}
       onDrop={dragHandlers.onDrop}

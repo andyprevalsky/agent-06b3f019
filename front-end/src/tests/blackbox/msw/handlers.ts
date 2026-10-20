@@ -8,6 +8,9 @@ import { http, HttpResponse } from 'msw';
 const API_BASE = 'http://localhost:3001/api';
 
 export const handlers = [
+  // Per-user UI: stock UI (nothing published) unless a test overrides it.
+  http.get(`${API_BASE}/user-ui/active`, () => HttpResponse.json({ versionId: null })),
+  http.get(`${API_BASE}/user-ui/versions`, () => HttpResponse.json({ versions: [] })),
   // No persisted binding by default: live views fall back to the transcript URL.
   http.get(`${API_BASE}/browser-session/task/:taskId/live-view`, () =>
     HttpResponse.json({ error: 'Session not found' }, { status: 404 }),

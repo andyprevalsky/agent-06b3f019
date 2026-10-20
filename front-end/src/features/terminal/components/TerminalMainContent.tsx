@@ -4,12 +4,16 @@
  * [VIEW] -> browse | settings | integrations | usage | admin-health | benchmarks | network | agents
  * Each view is selected by TerminalContent's currentView state.
  * benchmarks is team-gated (admin allowlist or dev mode) and full-width.
+ *
+ * PER-USER UI: agents view + selected agent + published agent.panel slot →
+ * a sandboxed panel to the right of the chat column (lg+ viewports only).
  */
 
 import { useNavigate } from 'react-router-dom';
 
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { BenchmarksView } from '@/features/benchmarks';
+import { UserUiSlot } from '@/features/user-ui';
 import { useAppData } from '@/hooks/appDataContext';
 import { cn } from '@/lib/utils';
 import AdminHealth from '@/pages/AdminHealth';
@@ -70,6 +74,12 @@ export function MainContent(props: MainContentProps) {
         {props.agents.clientSource === 'WEB' && <DesktopNavLinks />}
         <TerminalViewContent {...props} />
       </div>
+      {props.currentView === 'agents' && props.agents.selectedAgentId && (
+        <UserUiSlot
+          name="agent.panel"
+          className="relative z-10 hidden h-full w-80 shrink-0 pb-6 pr-4 pt-16 lg:block xl:w-96"
+        />
+      )}
     </main>
   );
 }
