@@ -135,7 +135,15 @@ describe('Rose left bar (flag on)', () => {
     const top = within(bar).getAllByRole('button').slice(0, 2);
     expect(top.map((b) => b.getAttribute('aria-label'))).toEqual(['Home', 'New Super Agent']);
     const create = within(bar).getByRole('button', { name: 'New Super Agent' });
-    expect(create.className).toContain('bg-gray-950');
+    // Light: raw black with white label/plus (unchanged). Dark inverts it like
+    // the mock (.nb: #f2f2ef fill, #1f1f1d label/plus) instead of black on the dark bar.
+    expect(create).toHaveClass('bg-gray-950', 'text-white', 'hover:bg-gray-800');
+    expect(create).toHaveClass(
+      'dark:bg-[#f2f2ef]',
+      'dark:text-[#1f1f1d]',
+      'dark:hover:bg-[#e4e4df]',
+    );
+    expect(create.className).not.toMatch(/(^|\s)(bg|text)-\[#(f2f2ef|1f1f1d)\]/);
     expect(create).not.toHaveTextContent('New Super Agent');
     expect(within(bar).getByRole('searchbox', { name: 'Search agents' })).toBeInTheDocument();
 
@@ -311,6 +319,48 @@ describe('Rose left bar (flag on)', () => {
     expect(panel).toHaveAttribute('data-state', 'closed');
   });
 
+  it('account row Settings hosts the admin account switcher (admins only; FE-13)', async () => {
+    const user = userEvent.setup();
+    // Andy: an admin on the Rose Desktop flag. His switcher moved off the top-right
+    // corner (4 bare app icons only) into Settings, above the existing tabs.
+    localStorage.setItem(
+      'rose-session',
+      JSON.stringify({
+        access_token: 'andy-token',
+        refresh_token: 'andy-refresh',
+        expires_in: 3600,
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        token_type: 'bearer',
+        user: { id: '1f85ff25-6e29-4c1b-8739-f917bd101a30', phone: '+19729777432' },
+      }),
+    );
+    renderBar();
+    await user.click(within(roseBar()).getByRole('button', { name: 'Andy Prevalsky' }));
+    const body = screen.getByTestId('rose-app-panel-settings');
+    const switcher = await within(body).findByTestId('admin-account-switcher');
+    expect(switcher).toHaveAttribute('data-variant', 'inline');
+    expect(within(switcher).getByTestId('admin-account-pill')).toHaveTextContent('+19729777432');
+    const tabs = await within(body).findAllByRole('tab');
+    expect(
+      switcher.compareDocumentPosition(tabs[0]!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // Fully functional in place: the panel opens in flow inside Settings.
+    await user.click(within(switcher).getByRole('button', { name: 'Switch account' }));
+    const dialog = within(switcher).getByRole('dialog', { name: 'Account switcher' });
+    expect(dialog.className).not.toMatch(/(^|\s)(absolute|fixed)(\s|$)/);
+    expect(within(dialog).getByRole('button', { name: /Tamy/ })).toBeVisible();
+    expect(within(dialog).getByRole('searchbox', { name: 'Search accounts' })).toBeVisible();
+  });
+
+  it('account row Settings shows no switcher for a non-admin', async () => {
+    const user = userEvent.setup();
+    renderBar();
+    await user.click(within(roseBar()).getByRole('button', { name: 'Andy Prevalsky' }));
+    const body = screen.getByTestId('rose-app-panel-settings');
+    await within(body).findAllByRole('tab');
+    expect(within(body).queryByTestId('admin-account-switcher')).toBeNull();
+  });
+
   it('account row: anonymous = member icon (opens Settings); no session = Sign in', async () => {
     const user = userEvent.setup();
     const { unmount } = renderBar({ user: anonymousUser() });
@@ -340,6 +390,9 @@ describe('Rose left bar (flag on)', () => {
     );
     expect(within(bar).getByRole('button', { name: 'Archived' }).className).toContain(
       'dark:text-[#a3a39d]',
+    );
+    expect(within(bar).getByRole('button', { name: 'New Super Agent' }).className).toContain(
+      'dark:bg-[#f2f2ef]',
     );
     const bot = screen
       .getByTestId('rose-agent-row-home-run')

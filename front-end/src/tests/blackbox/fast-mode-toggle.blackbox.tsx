@@ -546,7 +546,10 @@ describe('Rose Desktop speed toggle (#32, #23)', () => {
     expect(speed).toHaveAttribute('data-state', 'ultra');
     expect(speed).toHaveAccessibleName('Ultrafast');
     expect(speed.textContent).toBe('');
-    expect(speed).toHaveClass('rose-speed', 'h-[26px]', 'w-[26px]', 'rounded-lg', 'border');
+    expect(speed).toHaveClass('rose-speed', 'h-[26px]', 'w-[26px]', 'rounded-[8px]', 'border');
+    // A rounded square (the mock's .mk-spd 8px corners), never the near-circle
+    // rounded-lg (12px --radius) produced on a 26px box.
+    expect(speed.className).not.toMatch(/(^|\s)rounded-(lg|xl|full|md)(\s|$)/);
     const zap = speed.querySelector('svg.lucide-zap')!;
     expect(zap).toHaveClass('h-[10.4px]', 'w-[10.4px]');
     expect(zap.getAttribute('fill')).toBe('currentColor');
@@ -626,5 +629,7 @@ describe('Rose Desktop speed toggle (#32, #23)', () => {
       }
     }
     expect(rules.filter((r) => r.selector.startsWith('html.dark ')).length).toBe(4);
+    // Shape is identical in both modes: no stylesheet rule changes the corners.
+    for (const { body } of rules) expect(body).not.toMatch(/radius/);
   });
 });

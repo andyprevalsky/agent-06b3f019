@@ -20,6 +20,10 @@
  * roseDesktop (Rose Desktop query box): no info button, and Rose models read
  * as their short pool name (rose-flash / rose-ultra) on the chip and in the
  * dropdown; other models keep provider/name.
+ *
+ * roseDark (Rose Desktop dark mode): the chip is the mock's dark control —
+ * #2f2f2c fill, 12% white border, #e4e4df text (same shape). Light and the
+ * stock UI keep the exact stock chip classes.
  */
 
 import { useState, useEffect } from 'react';
@@ -38,7 +42,13 @@ interface ModelSelectorProps {
   showModelSelector: boolean;
   /** Rose Desktop: no info button; Rose models show their short pool name. */
   roseDesktop?: boolean;
+  /** Rose Desktop dark mode: the mock's dark chip colors. */
+  roseDark?: boolean;
 }
+
+/** Rose dark chip (mock panels/dark.js: button[class*="border"]); hover only lifts slightly. */
+const ROSE_DARK_MODEL_CHIP_CLASS =
+  'dark:border-white/[0.12] dark:bg-[#2f2f2c] dark:text-[#e4e4df] dark:hover:bg-[#383835]';
 
 function shortRoseName(roseDesktop: boolean, modelId: string): string | undefined {
   return roseDesktop ? ROSE_MODEL_SHORT_NAMES[modelId] : undefined;
@@ -50,6 +60,7 @@ export function ModelSelector({
   availableModels,
   showModelSelector,
   roseDesktop = false,
+  roseDark = false,
 }: ModelSelectorProps) {
   const [showPicker, setShowPicker] = useState(false);
   const selectedInfo = availableModels.find((m) => m.id === selectedModel);
@@ -72,6 +83,7 @@ export function ModelSelector({
               showModelSelector
                 ? 'border border-gray-300 bg-gray-100 text-gray-700 hover:bg-gray-200 cursor-pointer dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'
                 : 'border border-gray-300 bg-gray-100 text-gray-700 cursor-default dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300',
+              roseDark && ROSE_DARK_MODEL_CHIP_CLASS,
             )}
             onClick={(e) => {
               if (!showModelSelector) {

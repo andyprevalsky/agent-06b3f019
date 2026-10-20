@@ -7,6 +7,9 @@
  * must keep rendering these exact bytes. header-desktop.html was re-captured
  * once for a non-dark-mode change: UI ledger row 66 removed the right app bar,
  * so the stock pill centers at left-1/2 without the --rose-apps-inset calc.
+ * query-box-desktop.html is the flagged (Rose Desktop) query box surface in
+ * light mode, captured at ui-integration 511197ab0 just before the dark query
+ * box surface / textarea / model chip (FE-13 visual pass) were added.
  *
  * Plain .ts (createElement, no JSX) so the module exports helpers, not components.
  */
@@ -16,6 +19,7 @@ import { Fragment, createElement, useLayoutEffect, type ReactNode } from 'react'
 
 import { BackgroundPattern } from '@/features/terminal/components/BackgroundPattern';
 import { TerminalHeader } from '@/features/terminal/components/TerminalHeader';
+import QueryInput from '@/features/terminal-component-group/components/QueryInput';
 import type { DripStyles } from '@/features/terminal/types';
 import { RoseThemeProvider, useRoseTheme } from '@/features/rose-theme';
 
@@ -27,6 +31,7 @@ export const LIGHT_MARKUP_FIXTURES = {
   backgroundDesktop: 'background-desktop.html',
   backgroundMobile: 'background-mobile.html',
   headerDesktop: 'header-desktop.html',
+  queryBoxDesktop: 'query-box-desktop.html',
 } as const;
 
 export type LightMarkupFixture = keyof typeof LIGHT_MARKUP_FIXTURES;
@@ -96,6 +101,33 @@ export function headerElement() {
     borderColor: 10,
     shadowIntensity: 10,
   });
+}
+
+/** The flagged query box with the translucent drip (drippiness > 0, marble on). */
+export function queryBoxElement() {
+  return createElement(QueryInput, {
+    value: '',
+    onChange: noop,
+    onSubmit: noop,
+    selectedModel: 'rose-labs/rose-1-flash',
+    availableModels: [
+      {
+        id: 'rose-labs/rose-1-flash',
+        name: 'rose-fast',
+        provider: 'rose-labs',
+        description: 'fast',
+      },
+    ],
+    dripStyles: DRIP_STYLES,
+    drippiness: 10,
+  });
+}
+
+/** The query box surface markup with render-order ids (Radix / useId) normalized. */
+export function queryBoxMarkup(container: HTMLElement): string {
+  const surface = container.querySelector('[data-testid="query-input-surface"]');
+  if (surface === null) throw new Error('query box not rendered');
+  return `${surface.outerHTML.replace(/radix-[^"\s]+/g, 'radix-ID').replace(/:r[0-9a-z]+:/g, ':rID:')}\n`;
 }
 
 /** The desktop header pill: the header element (shallow) plus its marble layer. */
