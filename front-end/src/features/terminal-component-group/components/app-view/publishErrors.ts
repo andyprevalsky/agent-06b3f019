@@ -2,7 +2,7 @@
  * Plain one-line messages for the publish route's failure codes
  * (back-end providers/codePreview/publish.ts + service.ts, route 404).
  */
-import { UserAppsApiError } from '@/lib/api/userApps';
+import { CodePreviewApiError } from '@/lib/api/codePreview';
 
 export const PUBLISH_ERROR_TEXT: Record<string, string> = {
   NOT_A_GITHUB_REPO: "This code session isn't a GitHub repo.",
@@ -19,6 +19,6 @@ export const PUBLISH_ERROR_TEXT: Record<string, string> = {
 };
 
 export function publishErrorText(error: unknown): string {
-  const code = error instanceof UserAppsApiError ? error.code : null;
+  const code = error instanceof CodePreviewApiError ? error.code : null;
   return (code !== null ? PUBLISH_ERROR_TEXT[code] : undefined) ?? "Couldn't publish. Try again.";
 }

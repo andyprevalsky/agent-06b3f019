@@ -1,17 +1,14 @@
 /**
- * Frame rules for app views (pure, testable without rendering).
+ * Frame rules for code-session previews (pure, testable without rendering).
  *
- *   published user app (usercontent origin) → sandbox "allow-scripts" only, like
- *     every rose_user_ui frame: opaque origin, no app cookies/storage/session
- *   code-session preview (Rose / a task: https://5173-<sandbox>…) → its own
- *     origin (allow-same-origin keeps the preview's OWN storage so it can hold
- *     its own Supabase sign-in); it must never be the app origin
+ * A preview (https://5173-<sandbox>…) runs on its own origin; allow-same-origin
+ * keeps the preview's OWN storage so it can hold its own Supabase sign-in. It is
+ * never framed when it would be the app origin.
  *
  * Sign-in for the preview origin uses the backend's single-use handoff code in
  * the URL fragment (L-APPS2); no token is ever put in a URL or postMessage.
  */
 
-export const USER_APP_FRAME_SANDBOX = 'allow-scripts';
 export const PREVIEW_FRAME_SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-popups';
 export const PREVIEW_HANDOFF_PARAM = 'rose_preview_handoff';
 

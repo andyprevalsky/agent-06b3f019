@@ -13,8 +13,6 @@
  *   code agents (useRoseCodeAgents: one batched read per on-screen page of
  *   ≤50 roots; running ones show a thinking bubble unless an attention request
  *   of theirs is open, useCodeAgentAttention) · + New project
- *   ── Apps (UserAppsSection: Rose first for dev accounts, then published apps,
- *      + New app; row 10) — a row opens the full-screen app view
  *   ── Feedback · [Biz health, admins] · Archived · [Browse] · account row.
  *      Feedback, Biz health and the account row (Settings) open in the
  *      right-panel slot (RoseAppsProvider); clicking again closes it.
@@ -26,8 +24,8 @@
  * PANELS: project settings beside the bar (useRoseSidebarProjects); archive dialog;
  * rename dialog (useAgentRowActions); delete-project confirm dialog.
  *
- * APP VIEW (UserAppsProvider): an app row opens it (view → agents); an agent
- * or code-agent row, Home, New Super Agent and + New app close it first.
+ * APP VIEW (AppViewProvider; opened from a code-agent chip's preview card): an
+ * agent or code-agent row, Home and New Super Agent close it first.
  */
 
 import { Activity, Archive, Globe, Megaphone } from 'lucide-react';
@@ -42,8 +40,7 @@ import type { AppSidebarProps } from '../AppSidebar';
 import ArchivedAgentsDialog from '../ArchivedAgentsDialog';
 import { matchesQuery, sortAgents } from '../agentListOrdering';
 import { useRoseApps } from '../rose-apps/roseAppsState';
-import { UserAppsSection } from '../user-apps/UserAppsSection';
-import { useUserApps } from '../user-apps/userAppsState';
+import { useAppView } from '../app-view/appViewState';
 import { useAgentRowActions } from '../useAgentRowActions';
 import { useSidebarSearch } from '../useSidebarSearch';
 import { DeleteProjectDialog } from './DeleteProjectDialog';
@@ -111,9 +108,8 @@ export default function RoseSidebar(props: AppSidebarProps) {
 
 /** Agent selection and new-agent entry points leave the full-screen app view first. */
 function useAppViewExits(props: AppSidebarProps) {
-  const userApps = useUserApps();
-  const close = () => userApps?.closeApp();
-  const roseActions = props.roseActions ?? {};
+  const appView = useAppView();
+  const close = () => appView?.closeApp();
   return {
     close,
     onSelectAgent: (agentId: string | null) => {
@@ -123,14 +119,6 @@ function useAppViewExits(props: AppSidebarProps) {
     onCreateAgent: () => {
       close();
       props.onCreateAgent();
-    },
-    onOpenApp: (appId: string) => {
-      props.onViewChange('agents');
-      userApps?.openApp({ kind: 'app', appId });
-    },
-    onNewApp: () => {
-      close();
-      (roseActions.onNewApp ?? props.onCreateAgent)();
     },
   };
 }
@@ -220,11 +208,6 @@ function RoseSidebarBar(props: AppSidebarProps) {
             onOpenCodeAgent={onOpenCodeAgent}
             observeRoot={observeRoot}
             codeAgentsNeedingInput={codeAgentsNeedingInput}
-          />
-          <UserAppsSection
-            isExpanded={isExpanded}
-            onOpenApp={exits.onOpenApp}
-            onNewApp={exits.onNewApp}
           />
         </ScrollArea>
         {isExpanded && props.userUi?.menuSlot}

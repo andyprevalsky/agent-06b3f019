@@ -3,18 +3,18 @@
  * UI ledger rows 10/39: "trajectory shows the app")
  *
  * Shown when the chip's code_agent carries preview_url (dev cloud sessions) and
- * an Apps provider is mounted (Rose Desktop terminal).
+ * an AppViewProvider is mounted (Rose Desktop terminal).
  *   [OFF SCREEN] → empty card, no frame and no reads
  *   [ON SCREEN]  → POST …/preview/handoff (fresh single-use code) → scaled live
  *                  frame of the 1280×800 preview (pointer-events off, lazy)
  *   [ON SCREEN] --scrolled away--> [OFF SCREEN] (frame unmounted)
- *   click → open the full-screen app view for this task (Rose when the task is
- *           Rose's newest session)
+ *   click → open the full-screen app view for this code session
  *
  * 10k agents: frames exist only for cards on screen; one observer per card.
  */
 import { useRef } from 'react';
 
+import type { CodeAgentProvider } from '../../hooks/codeAgentContract';
 import {
   isCrossOriginHttpUrl,
   PREVIEW_CARD_SCALE,
@@ -22,29 +22,30 @@ import {
   PREVIEW_CARD_WIDTH,
   PREVIEW_FRAME_SANDBOX,
 } from './appFrame';
-import { useUserApps } from './userAppsState';
+import { useAppView } from './appViewState';
 import { useOnScreen, usePreviewFrameSrc } from './useAppPreview';
 
 export function CodeAgentPreviewCard({
   taskId,
   previewUrl,
   title,
+  provider,
 }: {
   taskId: string;
   previewUrl: string;
   title: string | null;
+  provider: CodeAgentProvider;
 }) {
-  const userApps = useUserApps();
+  const appView = useAppView();
   const cardRef = useRef<HTMLDivElement>(null);
   const onScreen = useOnScreen(cardRef);
   const valid = isCrossOriginHttpUrl(previewUrl);
   const src = usePreviewFrameSrc({
     taskId,
     previewUrl: valid ? previewUrl : null,
-    enabled: onScreen && userApps !== null,
-    reloadKey: 0,
+    enabled: onScreen && appView !== null,
   });
-  if (userApps === null || !valid) return null;
+  if (appView === null || !valid) return null;
   const height = Math.round(PREVIEW_CARD_VIEWPORT.height * PREVIEW_CARD_SCALE);
   return (
     <div className="px-3.5 pb-3">
@@ -75,7 +76,7 @@ export function CodeAgentPreviewCard({
         <button
           type="button"
           aria-label={`Open ${title ?? 'app'} preview`}
-          onClick={() => userApps.openApp({ kind: 'task', taskId, previewUrl, title })}
+          onClick={() => appView.openApp({ taskId, previewUrl, title, provider })}
           className="absolute inset-0 h-full w-full cursor-pointer"
         />
       </div>

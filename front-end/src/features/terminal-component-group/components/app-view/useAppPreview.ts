@@ -1,7 +1,7 @@
 /**
- * Preview reads for the open app / an on-screen preview card.
+ * Preview reads for the open app view / an on-screen preview card.
  *
- * useCodePreviewStatus (open app only; one GET per open or reload, no polling):
+ * useCodePreviewStatus (open view only; one GET per open, no polling):
  *   [LOADING] --GET /claude-code-session/:taskId/preview--> [READY(view)]
  *   [LOADING] --403 ROSE_DEV_ONLY--> [HIDDEN] (render nothing)
  *   [LOADING] --other failure--> [ERROR]
@@ -10,7 +10,7 @@
  *   disabled / no URL → null
  *   [HANDOFF] --POST …/preview/handoff ok--> preview_url#rose_preview_handoff=<code>
  *   [HANDOFF] --fails (e.g. 404 before L-APPS2 ships)--> preview_url (no fragment)
- *   reloadKey / URL / task change → a new handoff
+ *   URL / task / enabled change → a new handoff
  *
  * useOnScreen: one IntersectionObserver per card; the card's frame only lives
  * while it is on screen.
@@ -18,12 +18,12 @@
 import { useEffect, useState, type RefObject } from 'react';
 
 import {
+  CodePreviewApiError,
   createPreviewHandoff,
   fetchCodePreview,
   ROSE_DEV_ONLY,
-  UserAppsApiError,
   type CodePreviewView,
-} from '@/lib/api/userApps';
+} from '@/lib/api/codePreview';
 
 import { withPreviewHandoff } from './appFrame';
 
@@ -34,13 +34,12 @@ export type CodePreviewState =
   | { kind: 'error' };
 
 function isDevOnly(error: unknown): boolean {
-  return error instanceof UserAppsApiError && error.code === ROSE_DEV_ONLY;
+  return error instanceof CodePreviewApiError && error.code === ROSE_DEV_ONLY;
 }
 
-export function useCodePreviewStatus(taskId: string | null, reloadKey: number): CodePreviewState {
+export function useCodePreviewStatus(taskId: string): CodePreviewState {
   const [state, setState] = useState<CodePreviewState>({ kind: 'loading' });
   useEffect(() => {
-    if (taskId === null) return;
     let cancelled = false;
     setState({ kind: 'loading' });
     fetchCodePreview(taskId).then(
@@ -54,7 +53,7 @@ export function useCodePreviewStatus(taskId: string | null, reloadKey: number): 
     return () => {
       cancelled = true;
     };
-  }, [taskId, reloadKey]);
+  }, [taskId]);
   return state;
 }
 
@@ -62,21 +61,15 @@ export function usePreviewFrameSrc({
   taskId,
   previewUrl,
   enabled,
-  reloadKey,
 }: {
-  taskId: string | null;
+  taskId: string;
   previewUrl: string | null;
   enabled: boolean;
-  reloadKey: number;
 }): string | null {
   const [src, setSrc] = useState<string | null>(null);
   useEffect(() => {
     setSrc(null);
     if (!enabled || previewUrl === null) return;
-    if (taskId === null) {
-      setSrc(previewUrl);
-      return;
-    }
     let cancelled = false;
     createPreviewHandoff(taskId).then(
       ({ code }) => {
@@ -89,7 +82,7 @@ export function usePreviewFrameSrc({
     return () => {
       cancelled = true;
     };
-  }, [taskId, previewUrl, enabled, reloadKey]);
+  }, [taskId, previewUrl, enabled]);
   return src;
 }
 

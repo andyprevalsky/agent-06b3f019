@@ -23,11 +23,9 @@
  * ROSE DESKTOP APPS (RoseAppsProvider, flag on only): bare top-right icons
  *   (Browser, Phone, Integrations, Dark mode) + the right-panel slot; panels
  *   overlay the content (no right bar, no content inset). Flag off: no icons.
- * LEFT-BAR APPS (UserAppsProvider, signed-in Rose Desktop users only): the
- *   Apps section (GET /api/user-ui/apps, refetched once per
- *   USER_UI_ACTIVE_CHANGED) and the full-screen app view the chat column
- *   swaps to; "+ New app" = New Super Agent with the composer prefilled
- *   "Make me an app" (not sent). Flag off / anonymous: no request, no section.
+ * APP VIEW (AppViewProvider): a code-agent chip's live preview card opens the
+ *   code session's preview full screen in place of the chat column (Rose
+ *   Desktop only; AgentChatArea). It holds no list and reads nothing itself.
  * THEME (RoseThemeProvider, Rose Desktop accounts only): light (default) <->
  *   dark via useRoseTheme().toggle() — the top-right Dark mode icon calls it,
  *   so RoseAppIcons renders inside the provider. Dark adds html.dark and the
@@ -43,7 +41,7 @@ import {
   RoseAppIcons,
   RoseAppsProvider,
   SIDEBAR_WIDTH_COLLAPSED,
-  UserAppsProvider,
+  AppViewProvider,
   unansweredAgentIds,
   useAttentionRequests,
 } from '@/features/terminal-component-group';
@@ -69,7 +67,7 @@ import { useTileAnimation } from '../hooks/useTileAnimation';
 import { usePatternOffset } from '../hooks/usePatternOffset';
 import { resolveInitialTerminalView } from '../hooks/resolveInitialTerminalView';
 import type { TerminalView } from '../types';
-import { BROWSER_REVIEW_TEST_PHONE, NEW_APP_GOAL } from '../config';
+import { BROWSER_REVIEW_TEST_PHONE } from '../config';
 
 import { InspectionAccountBadge } from './InspectionAccountBadge';
 import { TerminalHeader } from './TerminalHeader';
@@ -140,9 +138,9 @@ function TerminalLayout(props: TerminalLayoutProps) {
           publishLayout={roseDesktop}
           onLogout={() => void props.agents.handleLogout()}
         >
-          <UserAppsProvider userId={resolveUserUiUserId(props.agents)}>
+          <AppViewProvider userId={props.agents.user?.id ?? null}>
             <InteractiveTerminalLayout {...props} />
-          </UserAppsProvider>
+          </AppViewProvider>
           {roseDesktop && <RoseAppIcons />}
         </RoseAppsProvider>
       </RoseThemeProvider>
@@ -324,10 +322,6 @@ function SidebarSection({
       roseActions={{
         onCreateAgentInProject: agents.handleCreateNewAgentInProject,
         onNewAgentInBranch: agents.handleCreateNewAgentInBranch,
-        onNewApp: () => {
-          agents.handleCreateNewAgent();
-          agents.setMessageInput(NEW_APP_GOAL);
-        },
       }}
       onRefreshAgents={agents.loadAgents}
       onRefreshAttention={onRefreshAttention}

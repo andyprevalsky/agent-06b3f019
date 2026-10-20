@@ -54,7 +54,7 @@ import {
   CodeAgentTranscript,
   type ChipTab,
 } from './codeAgentChip.steer';
-import { CodeAgentPreviewCard } from './user-apps/CodeAgentPreviewCard';
+import { CodeAgentPreviewCard } from './app-view/CodeAgentPreviewCard';
 
 const MUTED = 'text-muted-foreground dark:text-[#a3a39d]';
 const CODE = 'font-mono text-[12.5px] text-[#e8507f]';
@@ -269,6 +269,7 @@ export function DesktopCodeAgentChip({ meta, vm, events, toolCallId }: DesktopCo
           taskId={meta.task_id}
           previewUrl={meta.preview_url}
           title={meta.title ?? null}
+          provider={meta.provider}
         />
       )}
 

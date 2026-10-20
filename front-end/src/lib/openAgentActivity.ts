@@ -8,7 +8,6 @@
  *     (sub-agent tree the open view already holds)
  *   agent:<openAgentId> USER_UI_ACTIVE_CHANGED ---+  (kind 'user-ui-active-changed',
  *                                                     carries the new versionId)
- *   app view History restore (this tab) ----------+  (same kind, agentId '')
  *
  * Each realtime event costs one call over the (normally 0–1) listeners; the
  * listener is responsible for coalescing/debouncing any follow-up work.
@@ -37,15 +36,6 @@ export function notifyOpenAgentActivity(activity: OpenAgentActivity): void {
  */
 export function notifyUserUiActiveChanged(agentId: string, versionId: string): void {
   notifyOpenAgentActivity({ agentId, kind: 'user-ui-active-changed', versionId });
-}
-
-/**
- * This tab activated `versionId` itself (the app view's History restore): the
- * same in-tab signal as the channel event, so the active UI and the Apps list
- * each refetch once. Opens no channel.
- */
-export function notifyLocalUserUiActivated(versionId: string): void {
-  notifyOpenAgentActivity({ agentId: '', kind: 'user-ui-active-changed', versionId });
 }
 
 /** Channel handler for that event, gated on the subscription still being current. */

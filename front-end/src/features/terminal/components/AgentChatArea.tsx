@@ -27,12 +27,11 @@
  *   Rose Desktop  → no footer (UI ledger #14); the links live behind the
  *                   info item of the query box's rose nub.
  *
- * APP VIEW (Rose Desktop only, UI ledger rows 10/39; UserAppsProvider):
- *   an open app (left-bar Apps row or a trajectory preview card) replaces the
- *   whole chat column with UserAppScreen: the app full screen, the normal
- *   query box floating over it with Popular Goals hidden. The box steers the
- *   app's code session, or (no session) starts a normal new agent via
- *   handleCreateAgent while the app stays open. Escape / an agent row closes it.
+ * APP VIEW (Rose Desktop only, UI ledger rows 10/39; AppViewProvider):
+ *   a code-agent chip's live preview card opens that code session's preview,
+ *   which replaces the whole chat column (AppScreenHost): the app full screen,
+ *   the normal query box floating over it (Popular Goals hidden) steering that
+ *   session. Escape / an agent row / Home / New Super Agent close it.
  *
  * MOBILE BOTTOM (Rose Desktop only, UI ledger #11):
  *   the input area pads by --mobile-querybox-gap only and carries
@@ -49,8 +48,7 @@ import {
   ApprovalChip,
   PinnedQuestionMount,
   QueryInput,
-  resolveAppView,
-  useUserApps,
+  useAppView,
 } from '@/features/terminal-component-group';
 import { UserUiSlot, useUserUiOpaqueSurfaces } from '@/features/user-ui';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
@@ -76,7 +74,6 @@ import { SubAgentBreadcrumb } from './SubAgentBreadcrumb';
 import { SystemMessagesPanel } from './SystemMessagesPanel';
 import { PopularGoalsCarousel } from './PopularGoalsCarousel';
 import { composerCanSubmit } from './composerCanSubmit';
-import { queryBoxModels } from './queryBoxModels';
 import { TerminalLegalFooter } from './TerminalLegalFooter';
 
 interface AgentChatAreaProps {
@@ -92,23 +89,18 @@ interface AgentChatAreaProps {
   BrowserStatusBarCarousel: ComponentType<{ browsers: BrowserPanelData[] }>;
 }
 
-/** Rose Desktop: an open app (UserAppsProvider) replaces the whole chat column. */
+/** Rose Desktop: an open app view (AppViewProvider) replaces the whole chat column. */
 export function AgentChatArea(props: AgentChatAreaProps) {
   const roseDesktop = useRoseDesktop();
-  const userApps = useUserApps();
-  const appView =
-    roseDesktop && userApps !== null && !isBenchmarkSharedView()
-      ? resolveAppView(userApps.target, userApps.apps)
-      : null;
-  if (appView === null || userApps === null) return <ChatColumn {...props} />;
+  const appView = useAppView();
+  const target = roseDesktop && !isBenchmarkSharedView() ? (appView?.target ?? null) : null;
+  if (target === null || appView === null) return <ChatColumn {...props} />;
   return (
     <AppScreenHost
-      view={appView}
-      onClose={userApps.closeApp}
+      target={target}
+      onClose={appView.closeApp}
       agents={props.agents}
       drip={props.drip}
-      models={props.models}
-      modelsLoading={props.modelsLoading}
     />
   );
 }
@@ -330,7 +322,13 @@ function ChatQueryInputBox({
         onFastModeChange={a.setFastMode}
         simulatorMode={a.simulatorMode}
         onSimulatorModeChange={a.setSimulatorMode}
-        availableModels={queryBoxModels(models)}
+        availableModels={models.filter(
+          (m) =>
+            m.id === 'rose-labs/rose-1-flash' ||
+            m.id === 'rose-labs/rose-fast' ||
+            m.id === 'rose-labs/rose-1-lite' ||
+            m.id === 'rose-labs/rose-1-ultra',
+        )}
         modelsLoading={modelsLoading}
         contextPercentage={a.agentDetail ? getContextPercentage(a.agentDetail, models) : 0}
         contextSize={a.agentDetail?.context_size || 0}
