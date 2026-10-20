@@ -9842,6 +9842,35 @@ def test_verifier_sees_notifications_as_evidence_but_not_agent_messages():
     assert all(m["role"] in ("system", "user") for m in messages), messages
 
 
+def test_verifier_keeps_a_childs_whole_final_answer():
+    """A child's FINAL_ANSWER is the delegating agent's deliverable, not a 12k tool snippet.
+
+    Regression for explore-agent-mid-run-message aef74160 (and 4cf417f1): the
+    13.4k explore notification was head+tailed at the generic 12k tool cap, the
+    verifier lost the eighth round's announcement date ("the notification is
+    truncated across the Lovable entry") and rejected the root's completion.
+    """
+    from helpers.llm import build_verifier_context_messages
+
+    rounds = "\n\n".join(
+        f"{i}) COMPANY-{i} - $40M Series B - Announced 2026-0{i}-12. " + "Evidence quote. " * 100 for i in range(1, 9)
+    )
+    notification = "Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/rounds\nPayload:\n" + rounds
+    assert len(notification) > 12_000
+    context = [
+        {"role": "USER", "text": "Compile 8 rounds.", "timestamp": "2026-10-20T02:32:33Z"},
+        {
+            "role": "USER",
+            "text": notification,
+            "timestamp": "2026-10-20T02:33:56Z",
+            "metadata": {"agentNotification": True, "toolName": "agent_notification", "status": "completed"},
+        },
+    ]
+    evidence = "\n".join(str(m["content"]) for m in build_verifier_context_messages(context, "VERIFIER"))
+    assert "verifier truncated" not in evidence, "the child's final answer was cut"
+    assert all(f"Announced 2026-0{i}-12" in evidence for i in range(1, 9))
+
+
 async def run_all_tests():
     print("llm blackbox tests:")
     r = BlackboxResult()
@@ -10556,6 +10585,7 @@ async def run_all_tests():
         "verifier_notifications_evidence_not_agent_messages",
         test_verifier_sees_notifications_as_evidence_but_not_agent_messages,
     )
+    r.record("verifier_keeps_a_childs_whole_final_answer", test_verifier_keeps_a_childs_whole_final_answer)
 
     return r.summary()
 

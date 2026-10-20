@@ -1194,8 +1194,11 @@ VERIFIER_MAX_TOOL_RESULT_CHARS = 12_000
 # head+tailed cuda-kernel top100 completion cards during verifier_execute.
 VERIFIER_MAX_DELIVERABLE_TOOL_RESULT_CHARS = 100_000
 VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS = 160_000
+# A background child's FINAL_ANSWER notification is the parent's deliverable
+# evidence (its own tool rows are scoped out), so it gets the deliverable cap.
 _VERIFIER_DELIVERABLE_TOOL_NAMES = frozenset(
     {
+        "agent_notification",
         "attempt_completion",
         "artifact_file",
         "write_file",
