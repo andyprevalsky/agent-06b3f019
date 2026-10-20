@@ -12,7 +12,7 @@ const log = createLogger('Integrations');
 
 const MAX_DOCUMENTS_PER_UPLOAD = 500;
 const MAX_CONTENT_CHARS = 250_000;
-export const KNOWN_SOURCES: ReadonlySet<string> = new Set([
+const KNOWN_SOURCES = new Set([
   'chatgpt',
   'claude',
   'apple_notes',
