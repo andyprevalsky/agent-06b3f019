@@ -23,6 +23,8 @@ interface TestWrapperOptions {
    * the theme stays stock light and the top-right Dark mode toggle is a no-op.
    */
   roseThemeUserId?: string;
+  /** Agent selected in the RoseApps provider (mirrors TerminalLayout's selectedAgentId). */
+  selectedAgentId?: string | null;
 }
 
 function createTestWrapper(options: TestWrapperOptions = {}) {
@@ -49,7 +51,9 @@ function createTestWrapper(options: TestWrapperOptions = {}) {
                     fullscreen browser) is mounted by the RoseApps provider. */}
                 <RoseDesktopContext.Provider value={options.roseDesktop ?? true}>
                   <RoseThemeProvider userId={options.roseThemeUserId ?? null}>
-                    <RoseAppsProvider>{children}</RoseAppsProvider>
+                    <RoseAppsProvider selectedAgentId={options.selectedAgentId ?? null}>
+                      {children}
+                    </RoseAppsProvider>
                   </RoseThemeProvider>
                 </RoseDesktopContext.Provider>
               </MemoryRouter>
@@ -65,9 +69,16 @@ export function renderWithProviders(
   ui: React.ReactElement,
   options?: TestWrapperOptions & Omit<RenderOptions, 'wrapper'>,
 ) {
-  const { route, routerProps, roseDesktop, roseThemeUserId, ...renderOptions } = options ?? {};
+  const { route, routerProps, roseDesktop, roseThemeUserId, selectedAgentId, ...renderOptions } =
+    options ?? {};
   return render(ui, {
-    wrapper: createTestWrapper({ route, routerProps, roseDesktop, roseThemeUserId }),
+    wrapper: createTestWrapper({
+      route,
+      routerProps,
+      roseDesktop,
+      roseThemeUserId,
+      selectedAgentId,
+    }),
     ...renderOptions,
   });
 }
