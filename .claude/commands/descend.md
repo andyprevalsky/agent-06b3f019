@@ -768,6 +768,33 @@ status, timeout, website, or issue class. A symptom says where a failure
 surfaced, not what to fix, and many unrelated root causes end as the same
 timeout.
 
+After symptom-level triage, run a **choke-point pass** across the whole batch,
+passes included. For each upstream mechanism observed in any failure (a
+sub-agent activity killed at StartToClose, a retry or failover, a false pause,
+lost work being redone), count its runtime occurrences in every FAIL and every
+PASS. A mechanism that appears in most failures across several symptom groups,
+and rarely in passes, is a candidate shared first-bad boundary. Example: in
+Polar batch 1 (2026-10-20), the 30-minute browser activity kill appeared in 36
+of 47 FAILs, spread over the timeout, role-alternation, min-steps and rubric
+groups, but in only 3 of 10 PASSes. Give that mechanism its own cluster. Keep
+each downstream cluster as its own row, record its dependency on the upstream
+cluster, and preserve both memberships. Prevalence ranks hypotheses; the
+per-run observed mechanism, not the count, grants membership.
+
+- Count members from runtime evidence across every run in the batch, not
+  from the sample one RCA inspected.
+- A wall-clock timeout is a symptom: decompose the lost time (upstream kills
+  and redone work, per-step latency buckets, idle gaps) before assigning it a
+  cluster.
+- Before attributing a FAIL to the agent, check the evaluator contract. Did
+  the judge see what the product shows the user (for example a final answer
+  stored in message metadata)? Does any gate inherit a repository default
+  that the benchmark's reference does not have (for example a per-agent step
+  minimum)? Prove evaluator clusters with judge-only replays on the saved
+  trajectories, with no agent rerun, and report how many verdicts change.
+- Rank clusters by priority, then by affected-run count, as "X of N", and
+  state which clusters overlap.
+
 Give every cluster a stable row ID, a kebab-case name for its boundary and
 mechanism, its member tasks, and one **exemplar**: the member with `observed`
 evidence and the cheapest owning-boundary repro. Membership is a hypothesis
