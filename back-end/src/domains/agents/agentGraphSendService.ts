@@ -279,6 +279,8 @@ export async function sendGraphMessage(
     message_id: input.message_id,
     from: { ...senderMetadata(caller), label: fromLabel },
     to: { id: target.id, kind: target.kind, label: toLabel },
+    // The sender's words without the LLM framing, for UI rendering.
+    text: input.text,
   };
   const text = formatInboundAgentMessage({
     senderLabel: fromLabel,
