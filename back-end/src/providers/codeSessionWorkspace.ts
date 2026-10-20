@@ -57,7 +57,8 @@ export async function prepareCodeSessionWorkspace(
   taskId: string,
   provider: 'claude' | 'codex'
 ): Promise<UserUiWorkspace | null> {
-  const graph = await withAgentGraphWorkspace(await prepareUserUiWorkspaceSafe(userId, agentId), {
+  const userUi = await prepareUserUiWorkspaceSafe(userId, agentId, taskId);
+  const graph = await withAgentGraphWorkspace(userUi, {
     userId,
     ownerAgentId: agentId,
     sessionId: taskId,

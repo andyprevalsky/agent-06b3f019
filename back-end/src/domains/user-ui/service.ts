@@ -3,6 +3,7 @@
  * version, move the user's active pointer, and serve published files.
  *
  *   POST /versions ─► decode ─► validateUserUiBundle ─► store files ─► row (+activate)
+ *                     (a code agent's publish token stamps publishedByAgentId/TaskId)
  *   GET  /active   ─► User.activeUiVersionId ─► { versionId, manifest, baseUrl }
  *   GET  /usercontent/:versionId/<path> ─► storage bytes (no auth; uuid id)
  *
@@ -70,7 +71,7 @@ async function announceActiveChanged(userId: string, agentId: string, versionId:
 export async function publishVersion(
   userId: string,
   body: PublishUserUiVersionBody,
-  publisher: { agentId: string | null } = { agentId: null }
+  publisher: { agentId: string | null; taskId?: string | null } = { agentId: null }
 ) {
   const files = decodeFiles(body);
   const validation = validateUserUiBundle(files);
@@ -82,6 +83,8 @@ export async function publishVersion(
     manifest: validation.manifest,
     totalBytes: validation.totalBytes,
     activate: body.activate !== false,
+    publishedByAgentId: publisher.agentId,
+    publishedByTaskId: publisher.taskId ?? null,
   });
   if (body.activate !== false && publisher.agentId !== null) {
     await announceActiveChanged(userId, publisher.agentId, version.id);
@@ -148,6 +151,10 @@ export type UserAppEntry =
       url: string;
       icon_url: string | null;
       version_id: string;
+      /** Code-agent task that published this version; null for user/legacy publishes. */
+      task_id: string | null;
+      /** That task's persistent code session (open/resume the agent that built it). */
+      code_session_id: string | null;
       /** Publish is `rose-ui publish` (a new version); restore = activate an older one. */
       publish: 'usercontent';
     };
@@ -175,6 +182,7 @@ export async function listApps(userId: string, requestOrigin: string) {
   const active = await repo.findActiveUserUiVersion(userId);
   if (active) {
     const base = usercontentBaseUrl(requestOrigin, active.id);
+    const codeSessionId = await repo.findTaskCodeSessionId(active.publishedByTaskId);
     for (const [slug, app] of Object.entries(active.manifest.apps ?? {})) {
       apps.push({
         id: slug,
@@ -183,6 +191,8 @@ export async function listApps(userId: string, requestOrigin: string) {
         url: `${base}${app.entry}`,
         icon_url: app.icon !== undefined && app.icon !== '' ? `${base}${app.icon}` : null,
         version_id: active.id,
+        task_id: active.publishedByTaskId,
+        code_session_id: codeSessionId,
         publish: 'usercontent',
       });
     }
