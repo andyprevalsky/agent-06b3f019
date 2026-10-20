@@ -39,6 +39,7 @@ from helpers.llm import (
     call_llm_activity,
     call_llm_structured_streaming,
     check_progress,
+    fetch_compute_token_activity,
 )
 from helpers.messages import CoalescingStreamBroadcaster, schedule_background_broadcast
 from helpers.summarize import ESTIMATE_SAFETY_MULTIPLIER as SUMMARIZE_ESTIMATE_SAFETY_MULTIPLIER
@@ -289,7 +290,7 @@ async def run_agent(
     # activity (explore/browser-style agents). Those callers pass token values
     # as static activity args, so workflow-level token rotation cannot mutate
     # them between loop iterations. When Rose rotates and succeeds, its usage
-    # payload includes the compute token that actually worked; remember it here
+    # names the lease that worked (never the credential); re-read that lease
     # so the next iteration starts from the successful provider/token.
     remembered_claude_token = claude_token
     remembered_claude_token_source: Optional[str] = None
@@ -373,7 +374,14 @@ async def run_agent(
         else create_agent_action_model(tools, tool_registry=PLAN_TOOL_MODELS if is_plan_loop else None)
     )
 
-    def _remember_successful_compute_token(token: Optional[Dict[str, Any]]) -> None:
+    async def _adopt_served_compute_lease(attempt_usage: Dict[str, Any]) -> None:
+        """Adopt the lease RoseClient rotated to inside a successful call.
+
+        Usage carries only the lease identity (never the credential). Inside a
+        workflow, ``on_tokens`` re-reads the lineage lease and the token
+        getters observe it. Activity-hosted loops have static token args, so
+        they re-read the same lineage-bound lease from the backend here.
+        """
         nonlocal remembered_claude_token
         nonlocal remembered_claude_token_source
         nonlocal remembered_claude_token_pool_id
@@ -382,30 +390,47 @@ async def run_agent(
         nonlocal remembered_gpt_token_source
         nonlocal remembered_gpt_token_pool_id
 
-        if not token or token.get("type") not in ("claude", "gpt") or not token.get("accessToken"):
+        identity = attempt_usage.get("compute_token_used")
+        if not isinstance(identity, dict) or identity.get("type") not in ("claude", "gpt"):
             return
-        if token.get("type") == "claude":
-            remembered_claude_token = token.get("accessToken")
-            remembered_claude_token_source = token.get("source")
-            remembered_claude_token_pool_id = token.get("poolTokenId")
+        rotated = bool(
+            attempt_usage.get("compute_token_rotated")
+            or attempt_usage.get("claude_token_rotated")
+            or attempt_usage.get("gpt_token_rotated")
+        )
+        if not rotated or not is_inside_temporal_activity or not user_id:
+            return
+        lease = await fetch_compute_token_activity(
+            user_id,
+            lineage_key=identity.get("lineageKey") or compute_token_lineage_key,
+            agent_id=agent_id,
+            fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+            token_type=identity.get("type"),
+        )
+        if not lease or lease.get("type") != identity.get("type") or not lease.get("accessToken"):
+            return
+        if lease.get("type") == "claude":
+            remembered_claude_token = lease.get("accessToken")
+            remembered_claude_token_source = lease.get("source")
+            remembered_claude_token_pool_id = lease.get("poolTokenId")
             remembered_gpt_token = None
             remembered_gpt_account_id = None
             remembered_gpt_token_source = None
             remembered_gpt_token_pool_id = None
         else:
-            remembered_gpt_token = token.get("accessToken")
-            remembered_gpt_account_id = token.get("accountId")
-            remembered_gpt_token_source = token.get("source")
-            remembered_gpt_token_pool_id = token.get("poolTokenId")
+            remembered_gpt_token = lease.get("accessToken")
+            remembered_gpt_account_id = lease.get("accountId")
+            remembered_gpt_token_source = lease.get("source")
+            remembered_gpt_token_pool_id = lease.get("poolTokenId")
             remembered_claude_token = None
             remembered_claude_token_source = None
             remembered_claude_token_pool_id = None
         logger.info(
-            "run_agent remembered successful compute token",
+            "run_agent adopted rotated compute lease",
             agent_id=agent_id,
-            type=token.get("type"),
-            source=token.get("source"),
-            pool_token_id=token.get("poolTokenId"),
+            type=lease.get("type"),
+            source=lease.get("source"),
+            pool_token_id=lease.get("poolTokenId"),
         )
 
     def _resolve_current_compute_credentials(*, prefer_remembered: bool = False):
@@ -476,7 +501,7 @@ async def run_agent(
 
         iter_cache_read = attempt_usage.get("cache_read_input_tokens", 0)
         iter_cache_write = attempt_usage.get("cache_creation_input_tokens", 0)
-        _remember_successful_compute_token(attempt_usage.get("compute_token_used"))
+        await _adopt_served_compute_lease(attempt_usage)
         context_size = llm_tokens_in + iter_cache_read + iter_cache_write
         cache_read_total += iter_cache_read
         cache_write_total += iter_cache_write
@@ -1382,7 +1407,9 @@ async def run_agent(
                                         current_gpt_token_pool_id,
                                     ) = _resolve_current_compute_credentials(
                                         prefer_remembered=bool(
-                                            attempt_usage and attempt_usage.get("compute_token_used")
+                                            is_inside_temporal_activity
+                                            and attempt_usage
+                                            and attempt_usage.get("compute_token_used")
                                         )
                                     )
                                 # Keep sequence monotonic because this retry reuses

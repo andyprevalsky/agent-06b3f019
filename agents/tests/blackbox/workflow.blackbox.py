@@ -10754,7 +10754,8 @@ async def test_workflow_on_tokens_transient_error_keeps_claude_token():
         _restore_workflow(original)
 
 
-async def test_workflow_on_tokens_successful_rotation_uses_returned_compute_token():
+async def test_workflow_on_tokens_successful_rotation_rereads_lineage_lease():
+    """An in-call rotation reports only the lease identity; the workflow re-reads the lease."""
     wf = _bare_workflow_instance()
     wf.agent_id = "a1"
     wf.user_id = "user-1"
@@ -10763,9 +10764,18 @@ async def test_workflow_on_tokens_successful_rotation_uses_returned_compute_toke
     wf.claude_max_token_source = "pool"
     wf.claude_max_token_pool_id = "pool-old"
     wf.claude_max_token_fetched_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.compute_token_lineage_key = "agent:a1"
     wf.input_cents_per_1k = 0.0
     wf.output_cents_per_1k = 0.0
     fake = _FakeWorkflowModule()
+    fake.activity_returns["fetch_compute_token_activity"] = {
+        "type": "gpt",
+        "accessToken": "fresh-gpt-token",
+        "accountId": "acct-fresh",
+        "source": "pool",
+        "poolTokenId": "pool-gpt-fresh",
+        "lineageKey": "agent:a1",
+    }
     original = _patch_workflow(fake)
     try:
         await wf._on_tokens(
@@ -10776,10 +10786,9 @@ async def test_workflow_on_tokens_successful_rotation_uses_returned_compute_toke
             gpt_token_rotated=True,
             compute_token_used={
                 "type": "gpt",
-                "accessToken": "fresh-gpt-token",
-                "accountId": "acct-fresh",
                 "source": "pool",
                 "poolTokenId": "pool-gpt-fresh",
+                "lineageKey": "agent:a1",
             },
         )
         assert wf.compute_token_provider == "gpt"
@@ -10787,9 +10796,41 @@ async def test_workflow_on_tokens_successful_rotation_uses_returned_compute_toke
         assert wf.gpt_code_account_id == "acct-fresh"
         assert wf.gpt_code_token_source == "pool"
         assert wf.gpt_code_token_pool_id == "pool-gpt-fresh"
+        fetches = [c for c in fake.activity_calls if c[0] == "fetch_compute_token_activity"]
+        assert len(fetches) == 1
+        assert fetches[0][1][1] == "agent:a1"
+        assert fetches[0][1][5] == "gpt"
         activity_names = [c[0] for c in fake.activity_calls]
-        assert "fetch_compute_token_activity" not in activity_names
+        assert "release_compute_token_lineage_activity" not in activity_names
         assert "mark_compute_token_rate_limited_activity" not in activity_names
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_on_tokens_unchanged_lease_identity_schedules_no_activity():
+    """The common case (call served by the cached lease) must not add any activity."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a1"
+    wf.user_id = "user-1"
+    wf.compute_token_provider = "claude"
+    wf.claude_max_token = "cached-token"
+    wf.claude_max_token_source = "pool"
+    wf.claude_max_token_pool_id = "pool-1"
+    wf.compute_token_lineage_key = "agent:a1"
+    wf.input_cents_per_1k = 0.0
+    wf.output_cents_per_1k = 0.0
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._on_tokens(
+            tokens_in_delta=5,
+            tokens_out_delta=2,
+            actual_model="claude-opus-4-8-claude",
+            call_site="test",
+            compute_token_used={"type": "claude", "source": "pool", "poolTokenId": "pool-1", "lineageKey": "agent:a1"},
+        )
+        assert wf.claude_max_token == "cached-token"
+        assert [c[0] for c in fake.activity_calls if "compute_token" in c[0]] == []
     finally:
         _restore_workflow(original)
 
@@ -11650,7 +11691,11 @@ async def run_all_tests():
     )
     await r.record_async(
         "wf_on_tokens_successful_claude_rotation",
-        test_workflow_on_tokens_successful_rotation_uses_returned_compute_token,
+        test_workflow_on_tokens_successful_rotation_rereads_lineage_lease,
+    )
+    await r.record_async(
+        "wf_on_tokens_unchanged_lease_no_activity",
+        test_workflow_on_tokens_unchanged_lease_identity_schedules_no_activity,
     )
     await r.record_async("wf_on_tokens_rotates_gpt", test_workflow_on_tokens_rotates_gpt_token_on_auth_error)
     await r.record_async("wf_on_tokens_transient_keeps_gpt", test_workflow_on_tokens_transient_error_keeps_gpt_token)

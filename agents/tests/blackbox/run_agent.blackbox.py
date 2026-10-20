@@ -1571,9 +1571,9 @@ async def test_run_agent_reuses_rotated_compute_token_next_iteration():
                     "gpt_token_error": "stall",
                     "compute_token_used": {
                         "type": "claude",
-                        "accessToken": "rotated-claude-token",
                         "source": "pool",
                         "poolTokenId": "pool-1",
+                        "lineageKey": "agent:agent-test",
                     },
                     "compute_token_rotated": True,
                 },
@@ -1585,9 +1585,24 @@ async def test_run_agent_reuses_rotated_compute_token_next_iteration():
             [],
         )
 
-    with patch(
-        "loop.run_agent.call_llm_structured_streaming",
-        new=AsyncMock(side_effect=mock_call_llm_structured_streaming),
+    lease_fetches = []
+
+    async def mock_fetch_compute_token(user_id, **kwargs):
+        lease_fetches.append((user_id, kwargs))
+        return {
+            "type": "claude",
+            "accessToken": "rotated-claude-token",
+            "source": "pool",
+            "poolTokenId": "pool-1",
+            "lineageKey": "agent:agent-test",
+        }
+
+    with (
+        patch(
+            "loop.run_agent.call_llm_structured_streaming",
+            new=AsyncMock(side_effect=mock_call_llm_structured_streaming),
+        ),
+        patch("loop.run_agent.fetch_compute_token_activity", new=mock_fetch_compute_token),
     ):
         await run_agent(
             agent_id="agent-test",
@@ -1616,6 +1631,17 @@ async def test_run_agent_reuses_rotated_compute_token_next_iteration():
     assert llm_kwargs[1]["claude_token_source"] == "pool"
     assert llm_kwargs[1]["claude_token_pool_id"] == "pool-1"
     assert llm_kwargs[1]["gpt_token"] is None
+    assert lease_fetches == [
+        (
+            "user-test",
+            {
+                "lineage_key": "agent:agent-test",
+                "agent_id": "agent-test",
+                "fast_cache_affinity_key": None,
+                "token_type": "claude",
+            },
+        )
+    ]
 
 
 async def test_fast_cache_position_retries_same_step_after_llm_failure():
@@ -2821,10 +2847,9 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
                     "gpt_token_rotated": True,
                     "compute_token_used": {
                         "type": "gpt",
-                        "accessToken": "rotated-gpt-token",
-                        "accountId": "rotated-gpt-account",
                         "source": "pool",
                         "poolTokenId": "pool-token-2",
+                        "lineageKey": "agent:agent-test",
                     },
                 },
                 {
