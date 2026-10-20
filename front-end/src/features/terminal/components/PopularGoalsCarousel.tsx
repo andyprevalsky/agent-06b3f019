@@ -6,7 +6,8 @@
  *   stock         → POPULAR_GOALS; row spans the input column (unchanged).
  *   Rose Desktop  → ROSE_DESKTOP_POPULAR_GOALS first ("Import Code Repo" is a
  *                   plain pill, first in the rotation, never pinned — UI
- *                   ledger #15, #24), then POPULAR_GOALS. The row is exactly as
+ *                   ledger #15, #24), then POPULAR_GOALS minus
+ *                   ROSE_DESKTOP_HIDDEN_POPULAR_GOALS. The row is exactly as
  *                   wide as the query box (same max-w-4xl + mx-auto as
  *                   QueryInput, ledger #55), so its left edge and the pills'
  *                   right-hand cutoff line up with the box's edges; 30px gap
@@ -20,8 +21,17 @@ import type { RefObject } from 'react';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { cn } from '@/lib/utils';
 
-import { POPULAR_GOALS, ROSE_DESKTOP_POPULAR_GOALS } from '../config';
+import {
+  POPULAR_GOALS,
+  ROSE_DESKTOP_HIDDEN_POPULAR_GOALS,
+  ROSE_DESKTOP_POPULAR_GOALS,
+} from '../config';
 import type { DripStyles } from '../types';
+
+const ROSE_DESKTOP_GOALS = [
+  ...ROSE_DESKTOP_POPULAR_GOALS,
+  ...POPULAR_GOALS.filter((goal) => !ROSE_DESKTOP_HIDDEN_POPULAR_GOALS.includes(goal)),
+];
 
 interface PopularGoalsCarouselProps {
   tickerOffset: number;
@@ -39,7 +49,7 @@ export function PopularGoalsCarousel({
   borderColor,
 }: PopularGoalsCarouselProps) {
   const roseDesktop = useRoseDesktop();
-  const goals = roseDesktop ? [...ROSE_DESKTOP_POPULAR_GOALS, ...POPULAR_GOALS] : POPULAR_GOALS;
+  const goals = roseDesktop ? ROSE_DESKTOP_GOALS : POPULAR_GOALS;
   return (
     <div
       data-testid="popular-goals-row"

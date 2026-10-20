@@ -1,14 +1,15 @@
 /**
  * Blackbox tests for rose-user-ui "Chrome cleanup", mobile query box and
- * Popular Goals (UI ledger #11, #14, #15, #24, #55). Every change is behind the
+ * Popular Goals (UI ledger #11, #14, #15, #24, #55, #66). Every change is behind the
  * Rose Desktop flag (lib/roseDesktop.ts): each block checks the flagged account
  * AND that the stock UI is unchanged.
  *  - #11 the mobile query box hugs the iPhone bottom display curve (safe-area
  *    padding, concentric bottom radius, viewport-fit=cover)
- *  - #14 Research / Careers and the legal footer are gone (the legal links
- *    move into the query box nub, owned by the query-box worker)
+ *  - #14/#66 no top-right nav links (Research, Careers, Download) and no legal
+ *    footer (the legal links move into the query box nub, owned by the
+ *    query-box worker); the stock website keeps all of them
  *  - #15/#24 "Import Code Repo" is a plain goal pill, first in the rotation,
- *    followed by the new goals in order, then the stock goals
+ *    followed by the new goals in order, then the stock goals minus four
  *  - #55 the Popular Goals row is exactly as wide as the query box
  */
 import { readFileSync } from 'node:fs';
@@ -22,7 +23,11 @@ import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
 import Terminal from '@/pages/Terminal';
 import { PopularGoalsCarousel } from '@/features/terminal/components/PopularGoalsCarousel';
-import { POPULAR_GOALS, ROSE_DESKTOP_POPULAR_GOALS } from '@/features/terminal/config';
+import {
+  POPULAR_GOALS,
+  ROSE_DESKTOP_HIDDEN_POPULAR_GOALS,
+  ROSE_DESKTOP_POPULAR_GOALS,
+} from '@/features/terminal/config';
 import type { DripStyles } from '@/features/terminal/types';
 import { ROSE_DESKTOP_USER_IDS } from '@/lib/roseDesktop';
 
@@ -142,18 +147,19 @@ describe('mobile query box safe area (#11)', () => {
 
 // ─── #14 Research / Careers and the legal footer ────────────────────────────
 
-describe('top nav chrome and legal footer (#14)', () => {
+describe('top nav chrome and legal footer (#14, #66)', () => {
   it.each([
     ['desktop', 1280, 800],
     ['390px mobile', 390, 844],
-  ])('Rose Desktop renders no Research, Careers or legal footer on %s', async (_l, w, h) => {
+  ])('Rose Desktop renders no top nav links or legal footer on %s', async (_l, w, h) => {
     setViewport(w, h);
     await renderTerminal(true);
-    for (const name of ['Research', 'Careers']) {
+    for (const name of ['Research', 'Careers', 'Download']) {
       expect(screen.queryByRole('button', { name })).not.toBeInTheDocument();
       expect(screen.queryByRole('link', { name })).not.toBeInTheDocument();
     }
-    expect(screen.getByRole('banner')).not.toHaveTextContent(/Research|Careers/);
+    expect(screen.getByRole('banner')).not.toHaveTextContent(/Research|Careers|Download/);
+    expect(document.querySelector('a[href="/download"]')).toBeNull();
     expect(screen.queryByTestId('terminal-legal-links')).not.toBeInTheDocument();
     expect(screen.queryByRole('contentinfo')).not.toBeInTheDocument();
   });
@@ -176,14 +182,10 @@ describe('top nav chrome and legal footer (#14)', () => {
     expect(within(footer).getByRole('link', { name: 'Terms' })).toHaveAttribute('href', '/terms');
   });
 
-  it('keeps the desktop Download link for both', async () => {
+  it('stock keeps the desktop Download link', async () => {
     setViewport(1280, 800);
-    for (const roseDesktop of [true, false]) {
-      const { unmount } = await renderTerminal(roseDesktop);
-      expect(screen.getByRole('link', { name: 'Download' })).toHaveAttribute('href', '/download');
-      unmount();
-      localStorage.clear();
-    }
+    await renderTerminal(false);
+    expect(screen.getByRole('link', { name: 'Download' })).toHaveAttribute('href', '/download');
   });
 });
 
@@ -193,12 +195,19 @@ describe('Popular Goals (#15, #24, #55)', () => {
   const dripStyles = { borderRgb: 'rgb(0,0,0)' } as unknown as DripStyles;
   const ROSE_DESKTOP_ORDER = [
     'Import Code Repo',
+    'Make me an app',
     'Make me a website',
+    'Change my background photo',
+    'Make me a game',
     'Go to youtube.com',
     'Go to instagram.com',
     'Go to linkedin.com',
-    'Change my background photo',
-    'Make me a game',
+  ];
+  const HIDDEN_FOR_ROSE_DESKTOP = [
+    'Get me into Stanford',
+    'Make me happy',
+    'Make sure my parents are taken care of',
+    'Save children in Gaza',
   ];
 
   function renderCarousel(roseDesktop: boolean, tickerOffset = 0, onGoalClick = vi.fn()) {
@@ -222,14 +231,20 @@ describe('Popular Goals (#15, #24, #55)', () => {
       .map((b) => b.textContent ?? '');
   }
 
-  it('Rose Desktop rotation starts with the spec order, then the stock goals', () => {
+  it('Rose Desktop rotation: spec order, then the stock goals minus the hidden four', () => {
     renderCarousel(true);
     expect(ROSE_DESKTOP_POPULAR_GOALS).toEqual(ROSE_DESKTOP_ORDER);
-    const goals = trackGoals();
-    expect(goals.slice(0, ROSE_DESKTOP_ORDER.length)).toEqual(ROSE_DESKTOP_ORDER);
-    expect(goals.slice(ROSE_DESKTOP_ORDER.length, ROSE_DESKTOP_ORDER.length + 3)).toEqual(
-      POPULAR_GOALS.slice(0, 3),
+    expect([...ROSE_DESKTOP_HIDDEN_POPULAR_GOALS].sort()).toEqual(
+      [...HIDDEN_FOR_ROSE_DESKTOP].sort(),
     );
+    const goals = trackGoals();
+    const expectedStockTail = POPULAR_GOALS.filter((g) => !HIDDEN_FOR_ROSE_DESKTOP.includes(g));
+    expect(expectedStockTail).toHaveLength(POPULAR_GOALS.length - HIDDEN_FOR_ROSE_DESKTOP.length);
+    // One full rotation = new goals in order, then the remaining stock goals in order.
+    const oneCopy = [...ROSE_DESKTOP_ORDER, ...expectedStockTail];
+    expect(goals.slice(0, oneCopy.length)).toEqual(oneCopy);
+    expect(goals).toHaveLength(oneCopy.length * 3);
+    for (const hidden of HIDDEN_FOR_ROSE_DESKTOP) expect(goals).not.toContain(hidden);
     // Every goal appears in each of the three ticker copies, never pinned twice.
     expect(goals.filter((g) => g === 'Import Code Repo')).toHaveLength(3);
   });
@@ -238,10 +253,10 @@ describe('Popular Goals (#15, #24, #55)', () => {
     const { rerenderAt } = renderCarousel(true);
     expect(screen.queryByTestId('pinned-import-repo-goal')).not.toBeInTheDocument();
     const track = screen.getByTestId('popular-goals-track');
-    const [importRepo, website] = within(track).getAllByRole('button');
+    const [importRepo, nextGoal] = within(track).getAllByRole('button');
     expect(importRepo).toHaveTextContent(/^Import Code Repo$/);
     // Same pill as every other goal: identical classes, no icon, no special colors.
-    expect(importRepo.className).toBe(website.className);
+    expect(importRepo.className).toBe(nextGoal.className);
     expect(importRepo.querySelector('svg')).toBeNull();
     expect(importRepo.className).not.toMatch(/navi-black|text-white/);
     // It scrolls with the ticker like the rest.
@@ -250,10 +265,12 @@ describe('Popular Goals (#15, #24, #55)', () => {
     expect(track.contains(importRepo)).toBe(true);
   });
 
-  it('stock shows only the stock goals', () => {
+  it('stock shows only the stock goals, unchanged (including the four hidden for Rose Desktop)', () => {
     renderCarousel(false);
     const goals = trackGoals();
     expect(goals.slice(0, POPULAR_GOALS.length)).toEqual(POPULAR_GOALS);
+    expect(goals).toHaveLength(POPULAR_GOALS.length * 3);
+    for (const hidden of HIDDEN_FOR_ROSE_DESKTOP) expect(goals).toContain(hidden);
     for (const goal of ROSE_DESKTOP_ORDER) expect(goals).not.toContain(goal);
   });
 
