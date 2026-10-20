@@ -4,11 +4,10 @@
  * live in ./codeAgentContract.ts.
  */
 
-import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { useAgentContext, type Message } from '../hooks';
 import type { ChipState } from '../types';
-import { AttentionRequestsContext } from '../components/attention-inbox/attentionRequestsContext';
 import {
   answeredQuestionIds,
   codeAgentLabel,
@@ -126,22 +125,22 @@ export function findDescendantQuestion(
   return null;
 }
 
-/** The attention list when the app-wide provider is mounted (absent in shared views). */
-function useAttentionRequestList(): readonly AttentionRequestLike[] {
-  return useContext(AttentionRequestsContext)?.requests ?? NO_REQUESTS;
-}
-
 const NO_REQUESTS: readonly AttentionRequestLike[] = [];
 
-export function usePendingQuestion(): {
+/** The app-wide attention subscription, when mounted (absent in shared views). */
+export interface AttentionSource {
+  requests: readonly AttentionRequestLike[];
+  refetch: () => Promise<void>;
+}
+
+export function usePendingQuestion(attention: AttentionSource | null): {
   pending: PendingQuestion | null;
   agentId: string | null;
   refetchAttention: () => void;
 } {
   const roseDesktop = useRoseDesktop();
   const { messages, selectedAgentId, agent } = useAgentContext();
-  const attention = useContext(AttentionRequestsContext);
-  const requests = useAttentionRequestList();
+  const requests = attention?.requests ?? NO_REQUESTS;
   const closed = useClosedQuestions();
   const agentId = selectedAgentId ?? agent?.agent_id ?? null;
   const pending = useMemo(() => {

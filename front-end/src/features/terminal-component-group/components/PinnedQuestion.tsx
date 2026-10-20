@@ -23,7 +23,7 @@
  * Number keys are ignored while focus is in any text field (the query box keeps them).
  */
 
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useCallback, useContext, useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { Loader2, X } from 'lucide-react';
 
 import {
@@ -35,6 +35,7 @@ import {
 } from '../hooks/codeAgentContract';
 import { addLocalEcho, closeQuestion } from '../hooks/codeAgentLocalState';
 import { usePendingQuestion } from '../hooks/codeAgentSteering';
+import { AttentionRequestsContext } from './attention-inbox/attentionRequestsContext';
 import { ProviderIcon } from './claudeCodeChip.shared';
 import { InlineMediaGallery } from './inline-media/InlineMediaGallery';
 
@@ -192,7 +193,8 @@ export function PinnedQuestionCard({
  * answer / dismiss request.
  */
 export function PinnedQuestionMount() {
-  const { pending, agentId, refetchAttention } = usePendingQuestion();
+  const attention = useContext(AttentionRequestsContext);
+  const { pending, agentId, refetchAttention } = usePendingQuestion(attention);
   const [answering, setAnswering] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const questionId = pending?.question.question_id;

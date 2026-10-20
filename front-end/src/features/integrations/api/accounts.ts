@@ -9,9 +9,9 @@
  * Wire shapes live in ../types (AccountsByProvider, IntegrationsProgressDelta).
  */
 
-import { API_BASE_WITH_PATH } from './config';
-import { getAuthHeaders } from './api';
-import type { AccountsByProvider, ConnectedIntegration, IntegrationsProgressDelta } from './types';
+import { API_BASE_WITH_PATH } from '../config';
+import { getAuthHeaders } from '../api';
+import type { AccountsByProvider, ConnectedIntegration, IntegrationsProgressDelta } from '../types';
 
 export interface IntegrationsList {
   integrations: ConnectedIntegration[];

@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 
 import type { BrowserType } from '@/features/integration-handlers-context';
 
-import { fetchIntegrationsListApi } from '../accountsApi';
+import { fetchIntegrationsListApi } from '../api/accounts';
 import { VALID_BROWSER_TYPES } from '../config';
 import type { AccountsByProvider, ConnectedIntegration, EmailCredentialState } from '../types';
 

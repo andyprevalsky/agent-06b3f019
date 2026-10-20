@@ -25,7 +25,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 
-import { fetchIntegrationsProgressApi } from '../accountsApi';
+import { fetchIntegrationsProgressApi } from '../api/accounts';
 import type { AccountsByProvider, ConnectedIntegration, SyncProgress } from '../types';
 import { findIntegrationAccount } from './integrationAccounts';
 

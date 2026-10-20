@@ -20,7 +20,7 @@
 
 import { useCallback, useState } from 'react';
 
-import { AccountCleanupNotImplementedError, deleteIntegrationAccountApi } from '../accountsApi';
+import { AccountCleanupNotImplementedError, deleteIntegrationAccountApi } from '../api/accounts';
 
 export interface PendingRemoval {
   /** Integration row name, e.g. `chrome`, `chrome_passwords`, `imessage`. */

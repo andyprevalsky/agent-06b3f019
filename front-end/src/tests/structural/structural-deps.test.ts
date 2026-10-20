@@ -258,6 +258,11 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
     // Per-user UI runtime: inline trajectory views render beneath their message.
     'Cross-domain import: "@/features/user-ui"',
   ],
+  // Per-user UI runtime: displayed text/html reuses UserUiFrame's cross-origin,
+  // allow-scripts-only sandbox instead of a second copy of those security rules.
+  'features/terminal-component-group/components/inline-media/DisplayMediaGroup.tsx': [
+    'Cross-domain import: "@/features/user-ui"',
+  ],
   'features/terminal-component-group/components/MessageListView.tsx': [
     'components layer imports "../api"',
   ],
@@ -298,6 +303,10 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
   // /mobile-preview is a dev-only composition harness that intentionally
   // renders the production terminal components together for visual QA.
   'features/mobile-preview/components/MobilePreview.tsx': [
+    'Cross-domain import: "@/features/terminal-component-group',
+  ],
+  // Its mock fixtures, split out of MobilePreview.tsx for react-refresh (53959c886).
+  'features/mobile-preview/components/mobilePreviewMocks.ts': [
     'Cross-domain import: "@/features/terminal-component-group',
   ],
 };
