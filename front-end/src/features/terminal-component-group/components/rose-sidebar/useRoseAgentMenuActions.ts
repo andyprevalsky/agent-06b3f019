@@ -67,7 +67,11 @@ export function useRoseAgentMenuActions(
           .writeText(agent.agent_id)
           .then(() => toast({ title: 'Agent ID copied' }))
           .catch(() =>
-            toast({ title: 'Error', description: 'Failed to copy agent ID', variant: 'destructive' }),
+            toast({
+              title: 'Error',
+              description: 'Failed to copy agent ID',
+              variant: 'destructive',
+            }),
           );
       },
     }),

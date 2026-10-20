@@ -15,7 +15,8 @@ import type { ReactNode } from 'react';
 
 import { cn } from '@/lib/utils';
 
-import { AccountGlyph, accountDisplayName } from './accountIdentity';
+import { accountDisplayName } from './accountDisplayName';
+import { AccountGlyph } from './accountIdentity';
 import { ROSE_ACTIVE_COLOR } from './roseSidebarLayout';
 
 const ROW =
@@ -44,7 +45,10 @@ export function RoseHomeRow({ isExpanded, onClick }: { isExpanded: boolean; onCl
     >
       <Home className="h-[21px] w-[21px] flex-none" strokeWidth={1.7} />
       <Label isExpanded={isExpanded}>
-        Home <span className="font-normal text-[hsl(240_6%_58%)] dark:text-[#a3a39d]">· root project</span>
+        Home{' '}
+        <span className="font-normal text-[hsl(240_6%_58%)] dark:text-[#a3a39d]">
+          · root project
+        </span>
       </Label>
     </button>
   );
@@ -124,7 +128,9 @@ export function RoseNavRow({
       onClick={onClick}
       className={cn(
         ROW,
-        isActive ? 'font-semibold' : 'text-[hsl(240_8%_40%)] dark:text-[#a3a39d] hover:text-[hsl(240_15%_8%)] dark:hover:text-[#ecece8]',
+        isActive
+          ? 'font-semibold'
+          : 'text-[hsl(240_8%_40%)] dark:text-[#a3a39d] hover:text-[hsl(240_15%_8%)] dark:hover:text-[#ecece8]',
       )}
       style={isActive ? { color: ROSE_ACTIVE_COLOR } : undefined}
     >

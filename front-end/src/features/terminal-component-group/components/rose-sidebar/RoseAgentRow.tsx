@@ -71,7 +71,10 @@ export default function RoseAgentRow({
           )}
         >
           {isExpanded ? (
-            <span data-testid="rose-agent-status" className="inline-grid w-5 flex-none place-items-center">
+            <span
+              data-testid="rose-agent-status"
+              className="inline-grid w-5 flex-none place-items-center"
+            >
               <AgentStatusIndicator status={runStatus} seed={agent.agent_id} />
             </span>
           ) : (
@@ -80,7 +83,9 @@ export default function RoseAgentRow({
                 data-sidebar-agent-icon
                 className={cn(
                   'h-5 w-5',
-                  isSelected ? 'text-gray-800 dark:text-[#ecece8]' : 'text-gray-500 dark:text-[#a3a39d]',
+                  isSelected
+                    ? 'text-gray-800 dark:text-[#ecece8]'
+                    : 'text-gray-500 dark:text-[#a3a39d]',
                 )}
               />
               {runStatus.state !== 'active' && (

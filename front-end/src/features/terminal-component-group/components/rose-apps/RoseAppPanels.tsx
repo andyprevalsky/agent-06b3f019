@@ -37,7 +37,10 @@ const BenchmarksPage = lazy(() => import('@/pages/Benchmarks'));
 const SettingsPage = lazy(() => import('@/pages/Settings'));
 const AdminHealthPage = lazy(() => import('@/pages/AdminHealth'));
 
-type PanelApp = Extract<RoseApp, 'integrations' | 'benchmarks' | 'feedback' | 'health' | 'settings'>;
+type PanelApp = Extract<
+  RoseApp,
+  'integrations' | 'benchmarks' | 'feedback' | 'health' | 'settings'
+>;
 
 const PANELS: Record<PanelApp, { title: string; icon: LucideIcon }> = {
   integrations: { title: 'Integrations', icon: Plug },

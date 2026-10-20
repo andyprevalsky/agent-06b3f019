@@ -1,13 +1,13 @@
 /**
- * Layout constants shared by the Rose Desktop left and right bars (UI ledger
- * rows 21/22): both rest at 64px and expand to full titles on hover.
+ * Layout constants for the Rose Desktop left bar (UI ledger rows 21/22/66):
+ * it rests at 64px and hover-expands to full titles. There is no right bar.
  */
 
-/** Resting width of either bar (matches the stock collapsed rail). */
+/** Resting width of the bar (matches the stock collapsed rail). */
 export const ROSE_BAR_WIDTH = 64;
-/** Width while a bar is hover-expanded (full titles). */
+/** Width while the bar is hover-expanded (full titles). */
 export const ROSE_BAR_EXPANDED_WIDTH = 236;
-/** Shared easing for bar width and the panels that slide with it. */
+/** Easing for the bar width and the panels beside it that slide with it. */
 export const ROSE_BAR_EASE = 'cubic-bezier(.2,.8,.2,1)';
 export const ROSE_BAR_DURATION_MS = 280;
 /** Active item color (no tiles/rings: active is color + weight only). */

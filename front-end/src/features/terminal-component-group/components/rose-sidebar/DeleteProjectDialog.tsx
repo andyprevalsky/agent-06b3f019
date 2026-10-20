@@ -41,10 +41,7 @@ export function DeleteProjectDialog({
           <Button variant="outline" onClick={onCancel}>
             Cancel
           </Button>
-          <Button
-            onClick={onConfirm}
-            className="bg-[#e5484d] text-white hover:bg-[#d13d42]"
-          >
+          <Button onClick={onConfirm} className="bg-[#e5484d] text-white hover:bg-[#d13d42]">
             Delete project
           </Button>
         </DialogFooter>

@@ -208,7 +208,11 @@ export function BrowserAppDrawer() {
         <span className="inline-flex flex-none gap-0.5">
           <NavButton icon={ArrowLeft} label="Back" />
           <NavButton icon={ArrowRight} label="Forward" />
-          <NavButton icon={RotateCw} label="Reload" onClick={isRoot ? undefined : apps.reloadBrowser} />
+          <NavButton
+            icon={RotateCw}
+            label="Reload"
+            onClick={isRoot ? undefined : apps.reloadBrowser}
+          />
         </span>
         <AddressBar url={activeTab?.pageUrl ?? null} isRoot={isRoot} />
         {activeTab?.live === true && <LiveBadge />}

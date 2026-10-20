@@ -32,8 +32,18 @@ const API_BASE = 'http://localhost:3001/api';
 function renderBar(overrides: Parameters<typeof defaultProps>[0] = {}) {
   const props = defaultProps({
     agents: [
-      makeAgent({ agent_id: 'a-home', goal: 'Plan Tahoe trip', status: 'ACTIVE', temporal_workflow_id: 'wf' }),
-      makeAgent({ agent_id: 'a-rose', goal: 'Rose UI polish', project_id: 'p-rose', status: 'COMPLETED' }),
+      makeAgent({
+        agent_id: 'a-home',
+        goal: 'Plan Tahoe trip',
+        status: 'ACTIVE',
+        temporal_workflow_id: 'wf',
+      }),
+      makeAgent({
+        agent_id: 'a-rose',
+        goal: 'Rose UI polish',
+        project_id: 'p-rose',
+        status: 'COMPLETED',
+      }),
     ],
     user: signedInUser(),
     ...overrides,
@@ -49,7 +59,9 @@ function renderBar(overrides: Parameters<typeof defaultProps>[0] = {}) {
 }
 
 function requests(method: string, path: string) {
-  return capturedRequests.filter((r) => r.method === method && new URL(r.url).pathname === `/api${path}`);
+  return capturedRequests.filter(
+    (r) => r.method === method && new URL(r.url).pathname === `/api${path}`,
+  );
 }
 
 describe('Rose projects in the left bar', () => {
@@ -88,7 +100,11 @@ describe('Rose projects in the left bar', () => {
     const row = await screen.findByTestId('rose-project-row-p-rose');
     const menu = await openContextMenu(row, 'rose-project-menu');
     const items = within(menu).getAllByRole('menuitem');
-    expect(items.map((i) => i.textContent)).toEqual(['Rename project', 'Project settings', 'Delete project']);
+    expect(items.map((i) => i.textContent)).toEqual([
+      'Rename project',
+      'Project settings',
+      'Delete project',
+    ]);
     expect(items[2].className).toContain('text-[#e5484d]');
 
     await user.click(items[0]);
@@ -98,14 +114,18 @@ describe('Rose projects in the left bar', () => {
     await user.type(rename, 'Rose Labs{Enter}');
     await waitFor(() => expect(requests('PATCH', '/projects/p-rose')).toHaveLength(1));
     expect(requests('PATCH', '/projects/p-rose')[0].body).toEqual({ name: 'Rose Labs' });
-    await waitFor(() => expect(screen.getByTestId('rose-project-row-p-rose')).toHaveTextContent('Rose Labs'));
+    await waitFor(() =>
+      expect(screen.getByTestId('rose-project-row-p-rose')).toHaveTextContent('Rose Labs'),
+    );
   });
 
   it('Delete project asks to confirm, then deletes; its agents fall back to Home', async () => {
     const user = userEvent.setup();
     renderBar();
     const row = await screen.findByTestId('rose-project-row-p-rose');
-    expect(within(screen.getByTestId('rose-group-p-rose')).getByTestId('rose-agent-row-a-rose')).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId('rose-group-p-rose')).getByTestId('rose-agent-row-a-rose'),
+    ).toBeInTheDocument();
     const menu = await openContextMenu(row, 'rose-project-menu');
     await user.click(within(menu).getByRole('menuitem', { name: 'Delete project' }));
 
@@ -114,19 +134,29 @@ describe('Rose projects in the left bar', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     expect(requests('DELETE', '/projects/p-rose')).toHaveLength(0);
 
-    await user.click(within(await openContextMenu(row, 'rose-project-menu')).getByRole('menuitem', { name: 'Delete project' }));
-    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete project' }));
+    await user.click(
+      within(await openContextMenu(row, 'rose-project-menu')).getByRole('menuitem', {
+        name: 'Delete project',
+      }),
+    );
+    await user.click(
+      within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete project' }),
+    );
     await waitFor(() => expect(requests('DELETE', '/projects/p-rose')).toHaveLength(1));
     await waitFor(() => expect(screen.queryByTestId('rose-project-row-p-rose')).toBeNull());
     expect(projects).toHaveLength(0);
-    expect(within(screen.getByTestId('rose-group-home')).getByTestId('rose-agent-row-a-rose')).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId('rose-group-home')).getByTestId('rose-agent-row-a-rose'),
+    ).toBeInTheDocument();
   });
 
   it('project + shows a not-yet toast until a handler is wired', async () => {
     const user = userEvent.setup();
     renderBar();
     await user.click(await screen.findByRole('button', { name: 'New agent in Rose' }));
-    expect(await screen.findByText('New agent in a project is not available yet')).toBeInTheDocument();
+    expect(
+      await screen.findByText('New agent in a project is not available yet'),
+    ).toBeInTheDocument();
   });
 
   it('project + calls the provided handler with that project', async () => {
@@ -156,21 +186,31 @@ describe('Rose projects in the left bar', () => {
     expect(within(panel).getByRole('textbox', { name: 'Startup script' })).toHaveValue(
       'sudo service postgresql start || true',
     );
-    expect(within(panel).getByRole('spinbutton', { name: 'Startup timeout (seconds)' })).toHaveValue(120);
+    expect(
+      within(panel).getByRole('spinbutton', { name: 'Startup timeout (seconds)' }),
+    ).toHaveValue(120);
 
     const env = within(panel).getByRole('region', { name: 'Environment files' });
     expect(env).toHaveTextContent('Environment files · 2');
     expect(within(env).getAllByTestId('project-env-file')).toHaveLength(2);
-    await user.type(within(env).getByRole('searchbox', { name: 'Search environment files' }), 'backend');
+    await user.type(
+      within(env).getByRole('searchbox', { name: 'Search environment files' }),
+      'backend',
+    );
     expect(within(env).getAllByTestId('project-env-file')).toHaveLength(1);
     await user.clear(within(env).getByRole('searchbox', { name: 'Search environment files' }));
     await user.click(within(env).getByRole('button', { name: 'Expand agents/.env' }));
-    expect(within(env).getByRole('textbox', { name: 'Description of agents/.env' })).toHaveValue('Agent worker secrets');
+    expect(within(env).getByRole('textbox', { name: 'Description of agents/.env' })).toHaveValue(
+      'Agent worker secrets',
+    );
     expect(within(env).getByRole('button', { name: 'Remove agents/.env' })).toBeInTheDocument();
     expect(within(env).getByRole('button', { name: '+ Add a file' })).toBeInTheDocument();
 
     const lifecycle = within(panel).getByRole('region', { name: 'Lifecycle' });
-    expect(within(lifecycle).getByRole('button', { name: 'Auto-wake' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(lifecycle).getByRole('button', { name: 'Auto-wake' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
     expect(lifecycle).toHaveTextContent('Startup script');
     expect(lifecycle).toHaveTextContent('set');
 
@@ -193,7 +233,10 @@ describe('Rose projects in the left bar', () => {
     await user.type(timeout, '300');
     await user.click(within(panel).getByRole('button', { name: 'Remove back-end/.env' }));
     await user.click(within(panel).getByRole('button', { name: '+ Add a file' }));
-    await user.type(within(panel).getByRole('textbox', { name: 'Path of file 2' }), 'front-end/.env');
+    await user.type(
+      within(panel).getByRole('textbox', { name: 'Path of file 2' }),
+      'front-end/.env',
+    );
     await user.click(within(panel).getByRole('button', { name: 'Auto-wake' }));
     await user.click(within(panel).getByRole('button', { name: 'Change' }));
     const url = within(panel).getByRole('textbox', { name: 'Repository URL' });
@@ -215,7 +258,9 @@ describe('Rose projects in the left bar', () => {
   });
 
   it('flag off: the stock bar never calls the Projects API', async () => {
-    const { unmount } = renderWithProviders(<AppSidebar {...defaultProps()} />, { roseDesktop: false });
+    const { unmount } = renderWithProviders(<AppSidebar {...defaultProps()} />, {
+      roseDesktop: false,
+    });
     await waitFor(() => expect(screen.getByLabelText('Resize sidebar')).toBeInTheDocument());
     expect(requests('GET', '/projects')).toHaveLength(0);
     unmount();
@@ -232,8 +277,13 @@ describe('Rose agent right-click menu', () => {
 
   it('lists the boxes.dev-style items in order; destructive items red', async () => {
     renderBar();
-    const menu = await openContextMenu(await screen.findByTestId('rose-agent-row-a-home'), 'rose-agent-menu');
-    const items = within(menu).getAllByRole('menuitem').map((i) => i.textContent);
+    const menu = await openContextMenu(
+      await screen.findByTestId('rose-agent-row-a-home'),
+      'rose-agent-menu',
+    );
+    const items = within(menu)
+      .getAllByRole('menuitem')
+      .map((i) => i.textContent);
     expect(items).toEqual([
       'New agent in this branchsame E2B session',
       'Archive agent',
@@ -246,8 +296,12 @@ describe('Rose agent right-click menu', () => {
       'Schedule a prompt…',
       'Copy',
     ]);
-    expect(within(menu).getByRole('menuitem', { name: 'Archive agent' }).className).toContain('text-[#e5484d]');
-    expect(within(menu).getByRole('menuitem', { name: 'Delete agent' }).className).toContain('text-[#e5484d]');
+    expect(within(menu).getByRole('menuitem', { name: 'Archive agent' }).className).toContain(
+      'text-[#e5484d]',
+    );
+    expect(within(menu).getByRole('menuitem', { name: 'Delete agent' }).className).toContain(
+      'text-[#e5484d]',
+    );
     expect(within(menu).getAllByRole('separator').length).toBeGreaterThanOrEqual(4);
     expect(menu.className).toContain('dark:bg-[#2f2f2c]');
   });
@@ -262,7 +316,10 @@ describe('Rose agent right-click menu', () => {
       }),
     );
     const props = renderBar();
-    const menu = await openContextMenu(await screen.findByTestId('rose-agent-row-a-home'), 'rose-agent-menu');
+    const menu = await openContextMenu(
+      await screen.findByTestId('rose-agent-row-a-home'),
+      'rose-agent-menu',
+    );
     await user.click(within(menu).getByRole('menuitem', { name: 'Archive agent' }));
     await waitFor(() => expect(deleted).toBe('a-home'));
     await waitFor(() => expect(props.onRefreshAgents).toHaveBeenCalled());
@@ -271,7 +328,10 @@ describe('Rose agent right-click menu', () => {
   it('Rename agent opens the existing rename dialog', async () => {
     const user = userEvent.setup();
     renderBar();
-    const menu = await openContextMenu(await screen.findByTestId('rose-agent-row-a-home'), 'rose-agent-menu');
+    const menu = await openContextMenu(
+      await screen.findByTestId('rose-agent-row-a-home'),
+      'rose-agent-menu',
+    );
     await user.click(within(menu).getByRole('menuitem', { name: 'Rename agent' }));
     expect(await screen.findByRole('dialog')).toBeInTheDocument();
   });
@@ -298,16 +358,24 @@ describe('Rose agent right-click menu', () => {
     const user = userEvent.setup();
     const onNewAgentInBranch = vi.fn();
     renderBar({ roseActions: { onNewAgentInBranch } });
-    const menu = await openContextMenu(await screen.findByTestId('rose-agent-row-a-home'), 'rose-agent-menu');
+    const menu = await openContextMenu(
+      await screen.findByTestId('rose-agent-row-a-home'),
+      'rose-agent-menu',
+    );
     await user.click(within(menu).getByRole('menuitem', { name: /^New agent in this branch/ }));
-    expect(onNewAgentInBranch).toHaveBeenCalledWith(expect.objectContaining({ agent_id: 'a-home' }));
+    expect(onNewAgentInBranch).toHaveBeenCalledWith(
+      expect.objectContaining({ agent_id: 'a-home' }),
+    );
   });
 
   it('Copy › Copy agent ID writes the id to the clipboard', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
     renderBar();
-    const menu = await openContextMenu(await screen.findByTestId('rose-agent-row-a-home'), 'rose-agent-menu');
+    const menu = await openContextMenu(
+      await screen.findByTestId('rose-agent-row-a-home'),
+      'rose-agent-menu',
+    );
     const copy = within(menu).getByRole('menuitem', { name: 'Copy' });
     fireEvent.keyDown(copy, { key: 'ArrowRight' });
     const copyId = await screen.findByRole('menuitem', { name: 'Copy agent ID' });

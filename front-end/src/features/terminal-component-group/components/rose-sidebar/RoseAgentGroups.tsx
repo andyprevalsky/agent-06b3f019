@@ -122,7 +122,8 @@ export default function RoseAgentGroups(props: RoseAgentGroupsProps) {
   const projectGroups = isFiltering
     ? grouped.projects.filter((g) => g.agents.length > 0)
     : grouped.projects;
-  const firstAgentGroup = grouped.home.length > 0 ? 'home' : projectGroups.find((g) => g.agents.length > 0)?.project.id;
+  const firstAgentGroup =
+    grouped.home.length > 0 ? 'home' : projectGroups.find((g) => g.agents.length > 0)?.project.id;
   return (
     <div data-testid="rose-agent-groups" className="flex flex-col">
       <div data-testid="rose-group-home" className="flex flex-col">
@@ -137,7 +138,9 @@ export default function RoseAgentGroups(props: RoseAgentGroupsProps) {
           </div>
         </Fragment>
       ))}
-      {isExpanded && !isFiltering && <NewProjectRow onCreate={props.projectActions.onCreateProject} />}
+      {isExpanded && !isFiltering && (
+        <NewProjectRow onCreate={props.projectActions.onCreateProject} />
+      )}
     </div>
   );
 }

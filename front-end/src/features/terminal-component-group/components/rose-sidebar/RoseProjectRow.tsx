@@ -34,8 +34,10 @@ const MENU_SURFACE =
 const MENU_ROW =
   'h-[34px] gap-[11px] rounded-[7px] px-[11px] py-0 text-sm focus:bg-[hsl(240_10%_96%)] dark:focus:bg-white/[0.06]';
 const MENU_ICON = 'h-[17px] w-[17px] flex-none';
-const ROW = 'flex h-[38px] flex-none items-center gap-3 whitespace-nowrap pl-[22px] pr-4 text-[13px]';
-const ICON_BUTTON = 'flex-none text-[hsl(240_6%_55%)] dark:text-[#a3a39d] hover:text-[hsl(240_15%_8%)] dark:hover:text-[#ecece8]';
+const ROW =
+  'flex h-[38px] flex-none items-center gap-3 whitespace-nowrap pl-[22px] pr-4 text-[13px]';
+const ICON_BUTTON =
+  'flex-none text-[hsl(240_6%_55%)] dark:text-[#a3a39d] hover:text-[hsl(240_15%_8%)] dark:hover:text-[#ecece8]';
 
 function InlineNameInput({
   label,
@@ -126,7 +128,10 @@ export default function RoseProjectRow(props: RoseProjectRowProps) {
       <ContextMenuTrigger asChild>
         <div
           data-testid={`rose-project-row-${project.id}`}
-          className={cn(ROW, isActive ? 'font-semibold' : 'text-[hsl(240_8%_40%)] dark:text-[#a3a39d]')}
+          className={cn(
+            ROW,
+            isActive ? 'font-semibold' : 'text-[hsl(240_8%_40%)] dark:text-[#a3a39d]',
+          )}
           style={isActive ? { color: ROSE_ACTIVE_COLOR } : undefined}
         >
           <Folder className="h-5 w-5 flex-none" strokeWidth={1.7} />
@@ -180,7 +185,10 @@ export function NewProjectRow({ onCreate }: { onCreate: (name: string) => void }
   }
   return (
     <div className={ROW}>
-      <Folder className="h-5 w-5 flex-none text-[hsl(240_8%_40%)] dark:text-[#a3a39d]" strokeWidth={1.7} />
+      <Folder
+        className="h-5 w-5 flex-none text-[hsl(240_8%_40%)] dark:text-[#a3a39d]"
+        strokeWidth={1.7}
+      />
       <InlineNameInput
         label="New project name"
         initial=""

@@ -39,7 +39,11 @@ export function FeedbackAppPanel() {
     return (
       <div className="space-y-3 p-5 text-[13px]">
         <p className="text-green-600 dark:text-green-400">Thank you for your feedback!</p>
-        <button type="button" onClick={() => setSent(false)} className="font-semibold text-[#e8507f]">
+        <button
+          type="button"
+          onClick={() => setSent(false)}
+          className="font-semibold text-[#e8507f]"
+        >
           Send more
         </button>
       </div>

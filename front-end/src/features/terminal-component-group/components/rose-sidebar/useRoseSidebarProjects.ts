@@ -16,14 +16,8 @@ import { useCallback, useState } from 'react';
 import { useToast } from '@/hooks/use-toast';
 import type { Project } from '@/lib/api/projects';
 
-import {
-  useCreateProject,
-  useDeleteProject,
-  useProjects,
-  useUpdateProject,
-} from './useProjects';
+import { useCreateProject, useDeleteProject, useProjects, useUpdateProject } from './useProjects';
 import type { RoseProjectActions } from './RoseAgentGroups';
-
 
 export function useRoseSidebarProjects(onCreateAgentInProject: (project: Project) => void) {
   const { toast } = useToast();

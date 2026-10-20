@@ -6,7 +6,7 @@
  * Projects, project settings and the agent right-click menu live in
  * rose-sidebar-projects.blackbox.tsx.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
@@ -25,13 +25,47 @@ import {
 import { renderWithProviders } from './test-wrapper';
 
 const RUNNING = { status: 'ACTIVE' as const, temporal_workflow_id: 'wf-1' };
+// Fixed creation times: within a run state, sortAgents orders newest first, so
+// Date.now()-based defaults would make same-state order depend on timing.
+const createdMinutesAgo = (minutes: number) => ({
+  created_at: new Date(Date.parse('2026-10-20T12:00:00Z') - minutes * 60_000).toISOString(),
+});
 const AGENTS = [
-  makeAgent({ agent_id: 'home-run', goal: 'Plan Tahoe trip', ...RUNNING }),
-  makeAgent({ agent_id: 'home-done', goal: 'Get me socks', status: 'COMPLETED' }),
-  makeAgent({ agent_id: 'rose-run', goal: 'Rose UI polish', ...RUNNING, project_id: 'p-rose' }),
-  makeAgent({ agent_id: 'rose-fail', goal: 'Fix Hub export retry', status: 'FAILED', project_id: 'p-rose' }),
-  makeAgent({ agent_id: 'habits-done', goal: 'Streak widget', status: 'COMPLETED', project_id: 'p-habits' }),
-  makeAgent({ agent_id: 'orphan', goal: 'Unknown project agent', ...RUNNING, project_id: 'gone' }),
+  makeAgent({ agent_id: 'home-run', goal: 'Plan Tahoe trip', ...RUNNING, ...createdMinutesAgo(1) }),
+  makeAgent({
+    agent_id: 'home-done',
+    goal: 'Get me socks',
+    status: 'COMPLETED',
+    ...createdMinutesAgo(2),
+  }),
+  makeAgent({
+    agent_id: 'rose-run',
+    goal: 'Rose UI polish',
+    ...RUNNING,
+    project_id: 'p-rose',
+    ...createdMinutesAgo(3),
+  }),
+  makeAgent({
+    agent_id: 'rose-fail',
+    goal: 'Fix Hub export retry',
+    status: 'FAILED',
+    project_id: 'p-rose',
+    ...createdMinutesAgo(4),
+  }),
+  makeAgent({
+    agent_id: 'habits-done',
+    goal: 'Streak widget',
+    status: 'COMPLETED',
+    project_id: 'p-habits',
+    ...createdMinutesAgo(5),
+  }),
+  makeAgent({
+    agent_id: 'orphan',
+    goal: 'Unknown project agent',
+    ...RUNNING,
+    project_id: 'gone',
+    ...createdMinutesAgo(6),
+  }),
 ];
 
 function renderBar(overrides: Parameters<typeof defaultProps>[0] = {}) {
@@ -42,9 +76,11 @@ function renderBar(overrides: Parameters<typeof defaultProps>[0] = {}) {
 
 function rowOrder(): string[] {
   const groups = screen.getByTestId('rose-agent-groups');
-  return [...groups.querySelectorAll<HTMLElement>('[data-testid^="rose-agent-row-"], [data-testid^="rose-project-row-"]')].map(
-    (el) => el.dataset.testid!.replace(/^rose-(agent|project)-row-/, '$1:'),
-  );
+  return [
+    ...groups.querySelectorAll<HTMLElement>(
+      '[data-testid^="rose-agent-row-"], [data-testid^="rose-project-row-"]',
+    ),
+  ].map((el) => el.dataset.testid!.replace(/^rose-(agent|project)-row-/, '$1:'));
 }
 
 describe('Rose left bar (flag on)', () => {
@@ -59,7 +95,9 @@ describe('Rose left bar (flag on)', () => {
   });
 
   it('flag off renders the stock sidebar, flag on the Rose bar', () => {
-    const { unmount } = renderWithProviders(<AppSidebar {...defaultProps()} />, { roseDesktop: false });
+    const { unmount } = renderWithProviders(<AppSidebar {...defaultProps()} />, {
+      roseDesktop: false,
+    });
     expect(screen.queryByTestId('rose-sidebar')).toBeNull();
     expect(screen.getByLabelText('Resize sidebar')).toBeInTheDocument();
     unmount();
@@ -99,8 +137,20 @@ describe('Rose left bar (flag on)', () => {
     // Project rows carry + (new agent here) and ⚙ (settings).
     const project = screen.getByTestId('rose-project-row-p-rose');
     expect(within(project).getByRole('button', { name: 'New agent in Rose' })).toBeInTheDocument();
-    expect(within(project).getByRole('button', { name: 'Rose project settings' })).toBeInTheDocument();
+    expect(
+      within(project).getByRole('button', { name: 'Rose project settings' }),
+    ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '+ New project' })).toBeInTheDocument();
+  });
+
+  it('Home returns to the root project and New Super Agent starts one (same handler as stock)', async () => {
+    const user = userEvent.setup();
+    const onCreateAgent = vi.fn();
+    renderBar({ onCreateAgent });
+    await user.click(within(roseBar()).getByRole('button', { name: 'Home' }));
+    expect(onCreateAgent).toHaveBeenCalledTimes(1);
+    await user.click(within(roseBar()).getByRole('button', { name: 'New Super Agent' }));
+    expect(onCreateAgent).toHaveBeenCalledTimes(2);
   });
 
   it('hover expands to titles; collapsed hides project rows behind 18x3 line-pill dividers', async () => {
@@ -140,9 +190,15 @@ describe('Rose left bar (flag on)', () => {
     expect(check.getAttribute('class')).toContain('text-gray-400');
     expect(check.getAttribute('class')).toContain('dark:text-[#22c55e]');
     // Failed = muted red x.
-    expect(within(row('rose-fail')).getByRole('img', { name: 'Failed' }).querySelector('.text-red-400\\/80')).not.toBeNull();
+    expect(
+      within(row('rose-fail'))
+        .getByRole('img', { name: 'Failed' })
+        .querySelector('.text-red-400\\/80'),
+    ).not.toBeNull();
     // No custom colored dots.
-    expect(roseBar().querySelector('.rounded-full.bg-green-500, .rounded-full.bg-\\[\\#22c55e\\]')).toBeNull();
+    expect(
+      roseBar().querySelector('.rounded-full.bg-green-500, .rounded-full.bg-\\[\\#22c55e\\]'),
+    ).toBeNull();
   });
 
   it('search filters agents and drops empty project groups', async () => {
@@ -163,7 +219,9 @@ describe('Rose left bar (flag on)', () => {
         .slice(-3);
     expect(bottom()).toEqual(['Feedback', 'Archived', 'Andy Prevalsky']);
     const bar = roseBar();
-    expect(within(bar).getByRole('button', { name: 'Feedback' }).querySelector('svg.lucide-megaphone')).not.toBeNull();
+    expect(
+      within(bar).getByRole('button', { name: 'Feedback' }).querySelector('svg.lucide-megaphone'),
+    ).not.toBeNull();
     expect(within(bar).queryByRole('button', { name: 'Settings' })).toBeNull();
     expect(within(bar).queryByRole('button', { name: 'Biz health' })).toBeNull();
     unmount();
@@ -202,7 +260,9 @@ describe('Rose left bar (flag on)', () => {
     expect(initial.style.fontFamily).toContain('Pinyon Script');
     expect(initial.style.fontSize).toBe('27px');
     expect(initial.className).not.toMatch(/rounded|bg-|border|ring/);
-    expect(initial.querySelector('style')?.textContent).toMatch(/@font-face\{font-family:'Pinyon Script'.*woff2/);
+    expect(initial.querySelector('style')?.textContent).toMatch(
+      /@font-face\{font-family:'Pinyon Script'.*woff2/,
+    );
 
     await user.click(account);
     const panel = screen.getByTestId('rose-app-panel');
@@ -211,7 +271,12 @@ describe('Rose left bar (flag on)', () => {
     expect(panel.style.right).toBe('0px');
     const body = within(panel).getByTestId('rose-app-panel-settings');
     const tabs = await within(body).findAllByRole('tab');
-    expect(tabs.map((t) => t.textContent)).toEqual(['Customization', 'Personal Info', 'Billing', 'API Keys']);
+    expect(tabs.map((t) => t.textContent)).toEqual([
+      'Customization',
+      'Personal Info',
+      'Billing',
+      'API Keys',
+    ]);
     // Embedded: the drawer header is the title; no second "Settings" card.
     expect(within(body).queryByRole('heading', { level: 1 })).toBeNull();
     await user.click(within(body).getByRole('tab', { name: 'Billing' }));
@@ -245,9 +310,15 @@ describe('Rose left bar (flag on)', () => {
     expect(bar.className).toContain('bg-white');
     expect(bar.className).toContain('dark:bg-[#262624]');
     expect(bar.className).toContain('dark:border-white/[0.09]');
-    expect(within(bar).getByRole('button', { name: 'Home' }).className).toContain('dark:text-[#ecece8]');
-    expect(within(bar).getByRole('button', { name: 'Archived' }).className).toContain('dark:text-[#a3a39d]');
-    const bot = screen.getByTestId('rose-agent-row-home-run').querySelector('[data-sidebar-agent-icon]')!;
+    expect(within(bar).getByRole('button', { name: 'Home' }).className).toContain(
+      'dark:text-[#ecece8]',
+    );
+    expect(within(bar).getByRole('button', { name: 'Archived' }).className).toContain(
+      'dark:text-[#a3a39d]',
+    );
+    const bot = screen
+      .getByTestId('rose-agent-row-home-run')
+      .querySelector('[data-sidebar-agent-icon]')!;
     expect(bot.getAttribute('class')).toContain('dark:text-[#a3a39d]');
   });
 });

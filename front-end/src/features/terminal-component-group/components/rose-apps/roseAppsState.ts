@@ -14,13 +14,7 @@ import type { Agent } from '../../hooks';
  *   integrations | benchmarks | feedback | health | settings   flush right panels
  */
 export type RoseApp =
-  | 'browser'
-  | 'phone'
-  | 'integrations'
-  | 'benchmarks'
-  | 'feedback'
-  | 'health'
-  | 'settings';
+  'browser' | 'phone' | 'integrations' | 'benchmarks' | 'feedback' | 'health' | 'settings';
 
 export interface AgentBrowserTab {
   agentId: string;

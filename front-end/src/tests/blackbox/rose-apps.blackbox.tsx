@@ -198,6 +198,9 @@ describe('top-right app icons', () => {
     expect(drawer.style.right).toBe('0px');
     expect(drawer.style.top).toBe('0px');
     expect(within(drawer).queryByRole('button', { name: /close/i })).toBeNull();
+    // The icon row floats over the drawer's top-right corner (it stacks above it).
+    expect(row.className).toContain('z-[90]');
+    expect(drawer.className).toContain('z-[66]');
     expect(screen.getByTestId('root-browser-empty')).toHaveTextContent('Your browser');
 
     // Clicking the active icon is how the drawer closes.
@@ -253,7 +256,11 @@ describe('top-right app icons', () => {
       http.get(`${API_BASE}/integrations`, () =>
         HttpResponse.json({
           integrations: [
-            { name: 'gmail', status: 'CONNECTED', emailCredentials: [{ email: 'a@b.c', state: 'needs_reconnect' }] },
+            {
+              name: 'gmail',
+              status: 'CONNECTED',
+              emailCredentials: [{ email: 'a@b.c', state: 'needs_reconnect' }],
+            },
             { name: 'whatsapp', status: 'CONNECTED' },
           ],
         }),
@@ -390,7 +397,11 @@ describe('Browser drawer', () => {
       },
     };
     renderWithProviders(
-      withAgent([ACTION, navigated], 'agent-a', <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />),
+      withAgent(
+        [ACTION, navigated],
+        'agent-a',
+        <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />,
+      ),
     );
     await user.click(screen.getByTitle('Preview').parentElement!);
     const drawer = screen.getByTestId('browser-app-drawer');
@@ -441,7 +452,10 @@ describe('Browser drawer', () => {
         'task-1',
       ),
     ).toBe('https://second.example/b?q=1');
-    expect(addressParts('https://second.example/b?q=1')).toEqual({ host: 'second.example', rest: '/b?q=1' });
+    expect(addressParts('https://second.example/b?q=1')).toEqual({
+      host: 'second.example',
+      rest: '/b?q=1',
+    });
     expect(addressParts('https://second.example/')).toEqual({ host: 'second.example', rest: '' });
   });
 

@@ -26,7 +26,7 @@ import { cn } from '@/lib/utils';
 
 import type { AppSidebarProps } from '../AppSidebar';
 import ArchivedAgentsDialog from '../ArchivedAgentsDialog';
-import { matchesQuery, sortAgents } from '../SidebarAgentList';
+import { matchesQuery, sortAgents } from '../agentListOrdering';
 import { useRoseApps } from '../rose-apps/roseAppsState';
 import { useAgentRowActions } from '../useAgentRowActions';
 import { useSidebarSearch } from '../useSidebarSearch';
@@ -34,7 +34,13 @@ import { DeleteProjectDialog } from './DeleteProjectDialog';
 import { groupAgentsByProject } from './groupAgentsByProject';
 import RoseAgentGroups from './RoseAgentGroups';
 import RoseProjectSettingsPanel from './RoseProjectSettingsPanel';
-import { RoseAccountRow, RoseHomeRow, RoseNavRow, RoseNewAgentButton, RoseSearchRow } from './RoseSidebarChrome';
+import {
+  RoseAccountRow,
+  RoseHomeRow,
+  RoseNavRow,
+  RoseNewAgentButton,
+  RoseSearchRow,
+} from './RoseSidebarChrome';
 import {
   ROSE_BAR_DURATION_MS,
   ROSE_BAR_EASE,
@@ -63,7 +69,11 @@ function useExpansion() {
   };
 }
 
-function useGroupedAgents(props: AppSidebarProps, query: string, projects: Parameters<typeof groupAgentsByProject>[1]) {
+function useGroupedAgents(
+  props: AppSidebarProps,
+  query: string,
+  projects: Parameters<typeof groupAgentsByProject>[1],
+) {
   const search = useSidebarSearch(props.agents, query);
   const needle = query.trim().toLowerCase();
   const attention = props.attentionAgentIds ?? NO_ATTENTION;
@@ -145,13 +155,36 @@ export default function RoseSidebar(props: AppSidebarProps) {
         </ScrollArea>
         {isExpanded && props.userUi?.menuSlot}
         <div className="flex flex-none flex-col pb-2">
-          <RoseNavRow icon={<Megaphone className="h-5 w-5" strokeWidth={1.7} />} label="Feedback" isExpanded={isExpanded} isActive={apps?.openApp === 'feedback'} onClick={() => openPanel('feedback')} />
+          <RoseNavRow
+            icon={<Megaphone className="h-5 w-5" strokeWidth={1.7} />}
+            label="Feedback"
+            isExpanded={isExpanded}
+            isActive={apps?.openApp === 'feedback'}
+            onClick={() => openPanel('feedback')}
+          />
           {props.showAdminHealth === true && (
-            <RoseNavRow icon={<Activity className="h-5 w-5" strokeWidth={1.7} />} label="Biz health" isExpanded={isExpanded} isActive={apps?.openApp === 'health'} onClick={() => openPanel('health')} />
+            <RoseNavRow
+              icon={<Activity className="h-5 w-5" strokeWidth={1.7} />}
+              label="Biz health"
+              isExpanded={isExpanded}
+              isActive={apps?.openApp === 'health'}
+              onClick={() => openPanel('health')}
+            />
           )}
-          <RoseNavRow icon={<Archive className="h-5 w-5" strokeWidth={1.7} />} label="Archived" isExpanded={isExpanded} onClick={() => setIsArchiveOpen(true)} />
+          <RoseNavRow
+            icon={<Archive className="h-5 w-5" strokeWidth={1.7} />}
+            label="Archived"
+            isExpanded={isExpanded}
+            onClick={() => setIsArchiveOpen(true)}
+          />
           {props.showBrowse === true && (
-            <RoseNavRow icon={<Globe className="h-5 w-5" strokeWidth={1.7} />} label="Browse" isExpanded={isExpanded} isActive={currentView === 'browse'} onClick={() => goToView('browse')} />
+            <RoseNavRow
+              icon={<Globe className="h-5 w-5" strokeWidth={1.7} />}
+              label="Browse"
+              isExpanded={isExpanded}
+              isActive={currentView === 'browse'}
+              onClick={() => goToView('browse')}
+            />
           )}
           <RoseAccountRow
             user={props.user}

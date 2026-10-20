@@ -15,7 +15,13 @@ import {
   SIDEBAR_WIDTH_EXPANDED,
   SIDEBAR_WIDTH_STORAGE_KEY,
 } from '@/features/terminal-component-group/config';
-import { defaultProps, makeAgent, mockSession, openRowMenu, renderStockSidebar } from './app-sidebar.fixtures';
+import {
+  defaultProps,
+  makeAgent,
+  mockSession,
+  openRowMenu,
+  renderStockSidebar,
+} from './app-sidebar.fixtures';
 
 describe('AppSidebar rows', () => {
   beforeEach(() => {

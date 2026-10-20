@@ -34,7 +34,11 @@ export function latestBrowserPageUrl(messages: Message[], taskId: string): strin
     const auxiliary = metadata.auxiliary;
     const url =
       urlIn(metadata) ??
-      urlIn(typeof auxiliary === 'object' && auxiliary !== null ? (auxiliary as Record<string, unknown>) : undefined);
+      urlIn(
+        typeof auxiliary === 'object' && auxiliary !== null
+          ? (auxiliary as Record<string, unknown>)
+          : undefined,
+      );
     if (url !== null) return url;
   }
   return null;

@@ -77,7 +77,10 @@ function Row({
   return (
     <ContextMenuItem onSelect={onSelect} className={cn(ROW, destructive && DESTRUCTIVE)}>
       <Icon
-        className={cn('h-[17px] w-[17px] flex-none', destructive ? '' : 'text-[hsl(240_6%_45%)] dark:text-[#a3a39d]')}
+        className={cn(
+          'h-[17px] w-[17px] flex-none',
+          destructive ? '' : 'text-[hsl(240_6%_45%)] dark:text-[#a3a39d]',
+        )}
         strokeWidth={1.7}
       />
       <span>{label}</span>
@@ -90,7 +93,10 @@ function Divider() {
   return <ContextMenuSeparator className="mx-1.5 my-1 bg-gray-200/95 dark:bg-white/[0.09]" />;
 }
 
-function CopySubmenu({ onCopyLink, onCopyId }: Pick<RoseAgentMenuActions, 'onCopyLink' | 'onCopyId'>) {
+function CopySubmenu({
+  onCopyLink,
+  onCopyId,
+}: Pick<RoseAgentMenuActions, 'onCopyLink' | 'onCopyId'>) {
   return (
     <ContextMenuPrimitive.Sub>
       <ContextMenuPrimitive.SubTrigger
@@ -100,7 +106,10 @@ function CopySubmenu({ onCopyLink, onCopyId }: Pick<RoseAgentMenuActions, 'onCop
           'data-[state=open]:bg-[hsl(240_10%_96%)] dark:data-[state=open]:bg-white/[0.06]',
         )}
       >
-        <Copy className="h-[17px] w-[17px] flex-none text-[hsl(240_6%_45%)] dark:text-[#a3a39d]" strokeWidth={1.7} />
+        <Copy
+          className="h-[17px] w-[17px] flex-none text-[hsl(240_6%_45%)] dark:text-[#a3a39d]"
+          strokeWidth={1.7}
+        />
         <span>Copy</span>
         <ChevronRight className="ml-auto h-4 w-4 text-[hsl(240_6%_55%)] dark:text-[#a3a39d]" />
       </ContextMenuPrimitive.SubTrigger>

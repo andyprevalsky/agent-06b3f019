@@ -37,7 +37,10 @@ function EnvFileRow({
 }) {
   const label = file.path === '' ? `file ${index + 1}` : file.path;
   return (
-    <div data-testid="project-env-file" className="border-b border-gray-100 dark:border-white/[0.09] py-[9px]">
+    <div
+      data-testid="project-env-file"
+      className="border-b border-gray-100 dark:border-white/[0.09] py-[9px]"
+    >
       <div className="flex items-center gap-2.5">
         <button
           type="button"
