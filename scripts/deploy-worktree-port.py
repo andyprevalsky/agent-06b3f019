@@ -40,6 +40,29 @@ def _range_is_bindable(base_port: int) -> bool:
             sock.close()
 
 
+def _foreign_claims(registries: tuple[Path, ...], owner: Path) -> set[int]:
+    """Live base ports another owner holds in a registry this one must respect.
+
+    Read-only: a foreign (for example legacy TMPDIR-scoped) registry is never
+    pruned or written here. Its live claims still reserve their ranges, because
+    their stacks may not be listening when this claim runs.
+    """
+    ports: set[int] = set()
+    for registry in registries:
+        for path in registry.glob("*.json") if registry.is_dir() else ():
+            value = _record(path)
+            if value is None:
+                continue
+            claimant = Path(str(value.get("owner", "")))
+            if str(claimant) == str(owner) or not claimant.is_dir():
+                continue
+            try:
+                ports.add(int(value["base_port"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+    return ports
+
+
 class Registry:
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -65,7 +88,7 @@ class Registry:
             records.append((path, value))
         return records
 
-    def claim(self, owner: Path) -> int:
+    def claim(self, owner: Path, respected: tuple[Path, ...] = ()) -> int:
         owner = owner.resolve()
         records = self._records()
         for _, value in records:
@@ -73,6 +96,7 @@ class Registry:
                 return int(value["base_port"])
 
         claimed = {int(value["base_port"]) for _, value in records}
+        claimed |= _foreign_claims(respected, owner)
         for base_port in range(
             FIRST_BASE_PORT, LAST_BASE_PORT + 1, PORTS_PER_WORKTREE
         ):
@@ -105,12 +129,24 @@ def main() -> int:
     parser.add_argument("action", choices=("claim",))
     parser.add_argument("--registry", type=Path, required=True)
     parser.add_argument("--owner", type=Path, required=True)
+    parser.add_argument(
+        "--respect-registry",
+        type=Path,
+        action="append",
+        default=[],
+        help="another registry whose live claims also reserve their ranges",
+    )
     args = parser.parse_args()
 
     if not args.owner.is_dir():
         parser.error(f"owner path is not a directory: {args.owner}")
     with Registry(args.registry) as registry:
-        print(registry.claim(args.owner))
+        respected = tuple(
+            path
+            for path in args.respect_registry
+            if path.resolve() != args.registry.resolve()
+        )
+        print(registry.claim(args.owner, respected))
     return 0
 
 

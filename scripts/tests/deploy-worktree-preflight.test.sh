@@ -189,6 +189,37 @@ deploy_two_name="$(
 [ "$deploy_two_name" != "$deploy_one_name" ] || fail "same-basename deploy worktrees must receive path-unique resource identities"
 echo "PASS: same-basename deploy worktrees receive path-unique resource identities"
 
+# Two concurrent deploys that ran preparation under different TMPDIR values
+# (/tmp vs the documented Linux /var/tmp) once used separate TMPDIR-scoped
+# registries and both received base port 56000 (2026-10-20). The default
+# registry is per repository, and earlier TMPDIR-scoped claims stay reserved.
+deploy_tmp_a="$TMP_ROOT/descend-I99-tmp-a"
+deploy_tmp_b="$TMP_ROOT/descend-I99-tmp-b"
+git -C "$controller" worktree add -q -b deploy-tmp-a "$deploy_tmp_a"
+git -C "$controller" worktree add -q -b deploy-tmp-b "$deploy_tmp_b"
+mkdir -p "$TMP_ROOT/tmpdir-a" "$TMP_ROOT/tmpdir-b"
+TMPDIR="$TMP_ROOT/tmpdir-a" bash "$PREFLIGHT" --worktree "$deploy_tmp_a" --source "$controller" \
+  --skip-dependencies --skip-database >/dev/null
+TMPDIR="$TMP_ROOT/tmpdir-b" bash "$PREFLIGHT" --worktree "$deploy_tmp_b" --source "$controller" \
+  --skip-dependencies --skip-database >/dev/null
+tmp_a_port="$(sed -nE 's/^export CONDUCTOR_PORT=([0-9]+)$/\1/p' "$deploy_tmp_a/.context/deploy-worktree.env")"
+tmp_b_port="$(sed -nE 's/^export CONDUCTOR_PORT=([0-9]+)$/\1/p' "$deploy_tmp_b/.context/deploy-worktree.env")"
+[ -n "$tmp_a_port" ] && [ "$tmp_a_port" != "$tmp_b_port" ] \
+  || fail "deploys prepared under different TMPDIR values must receive distinct ports ($tmp_a_port/$tmp_b_port)"
+[ -f "$(git -C "$controller" rev-parse --path-format=absolute --git-common-dir)/rose-deploy-worktree-ports/$tmp_a_port.json" ] \
+  || fail "the default port registry must live in the repository's git common directory"
+echo "PASS: deploys prepared under different TMPDIR values receive distinct ports"
+
+legacy_registry="$TMP_ROOT/legacy-ports"
+fresh_registry="$TMP_ROOT/fresh-ports"
+mkdir -p "$legacy_registry"
+printf '{"base_port": 56000, "owner": "%s", "schema_version": 1}\n' "$deploy_tmp_a" >"$legacy_registry/56000.json"
+respected_port="$(python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" claim --registry "$fresh_registry" \
+  --owner "$deploy_tmp_b" --respect-registry "$legacy_registry")"
+[ "$respected_port" != 56000 ] || fail "a live claim in a respected legacy registry must reserve its range"
+[ -f "$legacy_registry/56000.json" ] || fail "a respected legacy registry must not be modified"
+echo "PASS: a live legacy-registry claim reserves its range without being rewritten"
+
 mkdir -p "$deploy_one/node_modules"
 write_fake_venv "$deploy_one/agents/venv"
 PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \
