@@ -2,7 +2,7 @@
 // rose — Rose agent tools for code agents (CLI + MCP stdio server).
 // Installed by Rose at ~/.rose/bin/rose in every code session; do not edit.
 //
-//   rose display <file|url>... [--caption T] [--pinned --option "Label | description"... --recommended N --allow-other]
+//   rose display <file|folder|url>... [--caption T] [--pinned --option "Label | description"... --recommended N --allow-other]
 //   rose message <text> [--inline-view NAME] [--props JSON]
 //   rose approve <question>
 //   rose wait <request-id>
@@ -14,14 +14,17 @@
 // deadline; each poll is the liveness heartbeat. Re-running the same blocking
 // command after an interruption resumes the same request instead of asking twice.
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join, resolve } from 'node:path';
+import { basename, dirname, join, posix, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 
 const VERSION = '1';
 const MAX_ITEMS = 20;
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
+// Mirrors back-end/src/providers/agentTools/displayBundle.ts.
+const MAX_BUNDLE_FILES = 500;
+const MAX_BUNDLE_BYTES = 50 * 1024 * 1024;
 const WAIT_SECONDS = Number(process.env.ROSE_TOOLS_WAIT_SECONDS || 25);
 const SEND_ATTEMPTS = 6;
 
@@ -91,6 +94,181 @@ async function call(method, path, body, { forever = false } = {}) {
   }
 }
 
+// ── bundles: a folder, or an .html/.gltf/.obj plus the files it references ──
+// The reference walk mirrors collectDisplayBundleFiles in
+// back-end/src/providers/agentTools/displayBundle.ts.
+
+const extOf = (path) => path.slice(path.lastIndexOf('.') + 1).toLowerCase();
+const BUNDLE_ROOT_EXT = new Set(['html', 'htm', 'gltf', 'obj']);
+const SCANNABLE_EXT = new Set(['html', 'htm', 'css', 'js', 'mjs', 'gltf', 'obj', 'mtl']);
+const MODEL_EXT = new Set(['glb', 'gltf', 'obj', 'stl', 'usdz']);
+const ATTR_RE = /\b(?:src|href|poster|data)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
+const SRCSET_RE = /\bsrcset\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
+const CSS_URL_RE = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)"'\s]+))\s*\)/gi;
+const CSS_IMPORT_RE = /@import\s+(?:"([^"]*)"|'([^']*)')/gi;
+const JS_RE =
+  /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\bfetch\s*\(\s*|\bnew\s+URL\s*\(\s*|\bnew\s+(?:Shared)?Worker\s*\(\s*)(?:"([^"\n]*)"|'([^'\n]*)'|`([^`$\n]*)`)/g;
+
+function matches(re, text) {
+  const out = [];
+  for (const m of text.matchAll(re)) {
+    const value = m.slice(1).find((group) => group !== undefined);
+    if (value) out.push(value);
+  }
+  return out;
+}
+
+function rawRefs(path, bytes) {
+  const kind = extOf(path);
+  const text = bytes.toString('utf8');
+  if (kind === 'gltf') {
+    try {
+      const json = JSON.parse(text);
+      return [...(json.buffers || []), ...(json.images || [])]
+        .map((entry) => entry && entry.uri)
+        .filter((uri) => typeof uri === 'string');
+    } catch {
+      return [];
+    }
+  }
+  if (kind === 'obj') return matches(/^\s*mtllib\s+(.+?)\s*$/gm, text);
+  if (kind === 'mtl') {
+    return matches(/^\s*(?:map_\w+|bump|disp|decal|refl)\s+(?:-\S+\s+\S+\s+)*(\S+)\s*$/gm, text);
+  }
+  if (kind === 'css') return [...matches(CSS_URL_RE, text), ...matches(CSS_IMPORT_RE, text)];
+  if (kind === 'js' || kind === 'mjs') return matches(JS_RE, text);
+  const srcset = matches(SRCSET_RE, text).flatMap((value) =>
+    value.split(',').map((candidate) => candidate.trim().split(/\s+/)[0] || '')
+  );
+  return [
+    ...matches(ATTR_RE, text),
+    ...srcset,
+    ...matches(CSS_URL_RE, text),
+    ...matches(CSS_IMPORT_RE, text),
+    ...matches(JS_RE, text),
+  ];
+}
+
+/** Bundle-relative paths a file references (no schemes, root-absolute or escaping refs). */
+function relativeRefs(path, bytes) {
+  const dir = posix.dirname(path);
+  const out = new Set();
+  for (const raw of rawRefs(path, bytes)) {
+    const value = raw.trim().replace(/[?#].*$/, '');
+    if (!value || /^[a-z][a-z0-9+.-]*:/i.test(value) || value.startsWith('/')) continue;
+    let decoded;
+    try {
+      decoded = decodeURIComponent(value);
+    } catch {
+      continue;
+    }
+    // Bare module specifiers ("three") are import-map names, not files.
+    const pathLike = /^\.\.?\//.test(decoded) || decoded.includes('/') || /\.\w+$/.test(decoded);
+    if (!pathLike) continue;
+    const joined = posix.normalize(posix.join(dir === '.' ? '' : dir, decoded));
+    if (joined.startsWith('..') || joined === '.' || joined === '') continue;
+    out.add(joined);
+  }
+  out.delete(path);
+  return [...out];
+}
+
+function bundleCaps(label, count, total) {
+  if (count > MAX_BUNDLE_FILES) {
+    throw new ToolError(`${label}: more than ${MAX_BUNDLE_FILES} files (display a smaller folder)`);
+  }
+  if (total > MAX_BUNDLE_BYTES) throw new ToolError(`${label}: larger than 50 MB in total`);
+}
+
+function readCapped(abs, ref) {
+  if (statSync(abs).size > MAX_FILE_BYTES) throw new ToolError(`${ref}: larger than 20 MB`);
+  return readFileSync(abs);
+}
+
+/** The entry file plus every file under its folder it references, transitively. */
+function referencedFiles(abs, ref) {
+  const root = dirname(abs);
+  const entry = basename(abs);
+  const files = new Map([[entry, readCapped(abs, ref)]]);
+  const tried = new Set([entry]);
+  const queue = [entry];
+  let total = files.get(entry).length;
+  while (queue.length > 0) {
+    const path = queue.shift();
+    if (!SCANNABLE_EXT.has(extOf(path))) continue;
+    for (const child of relativeRefs(path, files.get(path))) {
+      if (tried.has(child)) continue;
+      tried.add(child);
+      if (child.split('/').some((part) => part.startsWith('.') || part === 'node_modules')) continue;
+      const full = join(root, ...child.split('/'));
+      let stat;
+      try {
+        stat = statSync(full);
+      } catch {
+        continue; // built at runtime, or not part of the page
+      }
+      if (!stat.isFile()) continue;
+      const bytes = readCapped(full, child);
+      files.set(child, bytes);
+      total += bytes.length;
+      bundleCaps(ref, files.size, total);
+      queue.push(child);
+    }
+  }
+  return { entry, files };
+}
+
+/** Every file in a folder (dot-files and node_modules skipped), capped. */
+function folderFiles(abs, ref) {
+  const files = new Map();
+  let total = 0;
+  const walk = (dir, rel) => {
+    const entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
+      a.name.localeCompare(b.name)
+    );
+    for (const item of entries) {
+      if (item.name.startsWith('.') || item.name === 'node_modules') continue;
+      const childRel = rel ? `${rel}/${item.name}` : item.name;
+      const full = join(dir, item.name);
+      if (item.isDirectory()) walk(full, childRel);
+      else if (item.isFile()) {
+        const bytes = readCapped(full, `${ref}/${childRel}`);
+        files.set(childRel, bytes);
+        total += bytes.length;
+        bundleCaps(ref, files.size, total);
+      }
+    }
+  };
+  walk(abs, '');
+  const top = [...files.keys()].filter((path) => !path.includes('/'));
+  const pick = (test) => top.filter((path) => test(extOf(path)));
+  const pages = pick((ext) => ext === 'html' || ext === 'htm');
+  const models = pick((ext) => MODEL_EXT.has(ext));
+  const pdfs = pick((ext) => ext === 'pdf');
+  const entry = files.has('index.html')
+    ? 'index.html'
+    : [pages, models, pdfs].find((list) => list.length === 1)?.[0];
+  if (!entry) {
+    throw new ToolError(
+      `${ref}: a folder needs an index.html, or exactly one top-level .html page, 3D model or .pdf`
+    );
+  }
+  return { entry, files };
+}
+
+function bundleItem(entry, files) {
+  const listing = [...files.entries()].sort(([a], [b]) => (a < b ? -1 : 1));
+  return {
+    body: {
+      bundle: {
+        entry,
+        files: listing.map(([path, bytes]) => ({ path, content_base64: bytes.toString('base64') })),
+      },
+    },
+    key: sha256(JSON.stringify([entry, listing.map(([path, bytes]) => [path, sha256(bytes)])])),
+  };
+}
+
 function fileItem(ref) {
   const abs = resolve(ref);
   let stat;
@@ -99,8 +277,16 @@ function fileItem(ref) {
   } catch {
     throw new ToolError(`${ref}: no such file`);
   }
+  if (stat.isDirectory()) {
+    const { entry, files } = folderFiles(abs, ref);
+    return bundleItem(entry, files);
+  }
   if (!stat.isFile()) throw new ToolError(`${ref}: not a regular file`);
   if (stat.size > MAX_FILE_BYTES) throw new ToolError(`${ref}: larger than 20 MB`);
+  if (BUNDLE_ROOT_EXT.has(extOf(abs))) {
+    const { entry, files } = referencedFiles(abs, ref);
+    if (files.size > 1) return bundleItem(entry, files);
+  }
   const bytes = readFileSync(abs);
   return {
     body: { content_base64: bytes.toString('base64'), filename: basename(abs) },
@@ -211,10 +397,14 @@ async function displayTool(args, onBeat) {
       : {}),
   };
   const describe = (result) =>
-    (result.items || []).map(
-      (item) =>
-        `${item.status === 'duplicate' ? 'already displayed' : 'displayed'} ${item.mime_type} (message ${item.message_id})`
-    );
+    (result.items || []).map((item) => {
+      const pointer = item.file_pointer || {};
+      const files = pointer.bundle ? ` (${pointer.bundle.file_count} files)` : '';
+      const at = pointer.usercontent_url ? ` at ${pointer.usercontent_url}` : '';
+      const framed = item.kind && item.kind !== 'image' && item.kind !== 'video';
+      const shown = item.status === 'duplicate' ? 'already displayed' : 'displayed';
+      return `${shown} ${item.mime_type}${framed ? ` as ${item.kind}${files}${at}` : ''} (message ${item.message_id})`;
+    });
   if (placement === 'inline') {
     // One request per item keeps each body far below the JSON body limit;
     // the server dedupes by content hash, so a retry never posts twice.
@@ -374,19 +564,20 @@ const MCP_TOOLS = [
   {
     name: 'display',
     description:
-      'Show images, videos or HTML pages to the user inline in Rose, or ask a question with numbered options (placement "pinned"): pinned above the user\'s query box when the root agent started you (blocks and returns the answer), otherwise sent to the agent that started you (its answer arrives as your next message).',
+      'Show the user images, videos, web pages, whole sites, 3D models or PDFs inline in Rose, or ask a question with numbered options (placement "pinned"): pinned above the user\'s query box when the root agent started you (blocks and returns the answer), otherwise sent to the agent that started you (its answer arrives as your next message). Pages run any CSS and JS (CDN scripts and modules, WebGL/WebGPU, WebAssembly, fetch) in a sandboxed frame.',
     inputSchema: {
       type: 'object',
       properties: {
         paths: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Local files (image/*, video/*, .html).',
+          description:
+            'Local files or folders: images, videos, an .html page (the files it references come along), a site folder (index.html), a 3D model (.glb .gltf .obj .stl .usdz) or a .pdf.',
         },
         urls: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Public http(s) URLs, fetched by Rose.',
+          description: 'Public http(s) URLs (image, video, page, model or PDF), fetched by Rose.',
         },
         caption: { type: 'string', description: 'Caption; for placement "pinned", the question.' },
         placement: { type: 'string', enum: ['inline', 'pinned'] },
@@ -503,7 +694,9 @@ function serveMcp() {
 // ── CLI ──
 
 const USAGE = `usage:
-  rose display <file|url>... [--caption TEXT]
+  rose display <file|folder|url>... [--caption TEXT]
+      images, videos, .html pages (+ the files they reference), site folders,
+      3D models (.glb .gltf .obj .stl .usdz) and PDFs
   rose display [<file|url>...] --pinned --caption QUESTION --option "Label | one-line description"... [--recommended N] [--no-other]
   rose message <text> [--inline-view NAME] [--props JSON]
   rose approve <question>
