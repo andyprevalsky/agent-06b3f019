@@ -157,6 +157,36 @@ def _message_metadata(message: dict[str, Any]) -> dict[str, Any]:
     return metadata if isinstance(metadata, dict) else {}
 
 
+def _completion_card_text(metadata: dict[str, Any]) -> str:
+    """Final answer of a finished ``completion_summary`` card, as the FE shows it.
+
+    The workflow posts the user's final answer with empty message text and the
+    content in ``metadata.completionSummary``; ``CompletionSummaryCard`` renders
+    its ``summary`` and ``outputs``. Odysseys judges the agent's own response
+    text per step, so this card is the final step's response.
+    """
+    card = metadata.get("completionSummary")
+    if (
+        metadata.get("toolName") != "completion_summary"
+        or str(metadata.get("toolStatus") or "").upper() != "FINISHED"
+        or not isinstance(card, dict)
+    ):
+        return ""
+    lines: list[str] = []
+    summary = str(card.get("summary") or "").strip()
+    if summary:
+        lines.append(summary)
+    outputs = card.get("outputs")
+    if isinstance(outputs, list):
+        for output in outputs:
+            if not isinstance(output, dict):
+                continue
+            label = str(output.get("label") or output.get("key") or "").strip()
+            value = json.dumps(output.get("value"), ensure_ascii=False, default=str)
+            lines.append(f"- {label}: {value}" if label else f"- {value}")
+    return "\n".join(lines)
+
+
 def _screenshot_from_message(message: dict[str, Any]) -> Optional[tuple[str, str]]:
     """Return (base64_payload, mime) if this message carries a screenshot."""
     metadata = _message_metadata(message)
@@ -239,6 +269,9 @@ def build_polar_trajectory(
             screenshots.append({"b64": shot[0], "mime": shot[1]})
 
         parts: list[str] = []
+        final_answer = _completion_card_text(metadata)
+        if final_answer:
+            parts.append(f"Response: {final_answer}")
         if role == "ASSISTANT" and text:
             parts.append(f"Response: {text}")
         if role in {"TOOL", "TOOL_RESULT"} or tool_name:

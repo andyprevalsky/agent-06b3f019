@@ -23651,6 +23651,60 @@ async def test_poll_elapsed_stall_and_chat():
                           [(10000-2900,20000+41)])
 
 
+async def test_polar_judge_sees_final_completion_summary():
+    """The polar judge must receive the final answer the product shows the user.
+
+    Polar batch 1 (2026-10-20): agent 25c02595 (polar-odysseys-7cc602f23977 K2)
+    finished with a ``completion_summary`` card whose message text is empty and
+    whose answer lives in ``metadata.completionSummary`` (summary + outputs),
+    which is exactly what the FE CompletionSummaryCard renders. The polar
+    action history dropped it, so the R4 judge reported "the trajectory ends
+    with verifier and completion actions ... not a final user-facing summary".
+    The fixture is that run's Hub transcript (Kernel live-view tokens redacted).
+    """
+    import gzip
+
+    from benchmarks.polar_evaluator import run_polar_evaluator
+
+    fixture = Path(__file__).resolve().parents[2] / "benchmarks/fixtures/polar/hub_transcript_25c02595.json.gz"
+    data = json.loads(gzip.decompress(fixture.read_bytes()))
+    finals = [
+        m["metadata"]["completionSummary"]
+        for m in data["messages"]
+        if (m.get("metadata") or {}).get("isFinalSummary") is True
+    ]
+    assert len(finals) == 1 and finals[0]["summary"]
+    card = finals[0]
+    # Precondition: the answer is only in metadata, as the agent posted it.
+    final_rows = [m for m in data["messages"] if (m.get("metadata") or {}).get("isFinalSummary") is True]
+    assert final_rows[0]["text"] == ""
+
+    prompts: list[str] = []
+
+    async def capture_judge(messages, **_kwargs):
+        prompts.append(messages[1]["content"][0]["text"])
+        return 'Thoughts: captured\nStatus: "success"'
+
+    evaluator = {
+        "method": "polar",
+        "rubrics": [{"id": "R4", "requirement": "Return a concise final summary.", "verification": "Final response."}],
+    }
+    await run_polar_evaluator(task_prompt=data["agent"]["goal"], evaluator=evaluator, data=data, judge_llm=capture_judge)
+    assert len(prompts) == 1
+    history = prompts[0].split("Full Action History:\n", 1)[1].split("\n\nScreenshots attached below:", 1)[0]
+    last_step = history.rsplit("\n265. ", 1)[-1]
+    # The final step is the completion card, presented as the agent's response.
+    assert last_step.startswith("Response: " + card["summary"]), last_step[:400]
+    assert "completion_summary" in last_step and "status=FINISHED" in last_step
+    for output in card["outputs"]:
+        assert output["label"] in last_step
+        for value in output["value"].values():
+            assert json.dumps(value, ensure_ascii=False) in last_step, (output["key"], value)
+    # The empty IN_PROGRESS card and the verifier rows are unchanged.
+    assert "\n264. Action: completion_summary | status=IN_PROGRESS\n" in history
+    assert history.count(card["summary"]) == 1
+
+
 async def test_stale_workflow_count_backs_off_on_namespace_rate_limit():
     """Guest stale cleanup must not multiply visibility load on a throttled namespace.
 
@@ -23717,6 +23771,7 @@ async def run_all_tests():
     await r.record_async("poll_elapsed_disabled_polar", test_poll_elapsed_disabled_polar)
     await r.record_async("poll_elapsed_payment_budget", test_poll_elapsed_payment_budget)
     await r.record_async("poll_elapsed_stall_and_chat", test_poll_elapsed_stall_and_chat)
+    await r.record_async("polar_judge_sees_final_completion_summary", test_polar_judge_sees_final_completion_summary)
     r.record("controller_v39_full_native_pair", test_controller_v39_full_native_pair)
     r.record("controller_v39_cleanup_all_uid_writers", test_controller_v39_cleanup_all_uid_writers)
     r.record("controller_v39_receipt_bound_runtime", test_controller_v39_receipt_bound_runtime)
