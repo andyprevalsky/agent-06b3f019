@@ -9,9 +9,16 @@
  * Tool name/status and cloud-agent start phase are exposed as inert data
  * attributes for end-to-end route verification.
  *
+ * INLINE USER VIEW: a message whose metadata carries a valid `inlineView`
+ * renders InlineUserView beneath its bubble (sandboxed frame pinned to the
+ * message's own version; poster/summary when offscreen, over the live-frame
+ * cap, or in safe mode).
+ *
  * With a web-search grouping, a turn's searches render as one row at the first
  * search's position (WebSearchGroupItem); the other searches render nothing.
  */
+import { InlineUserView, parseInlineViewMetadata } from '@/features/user-ui';
+
 import MessageBubble from './MessageBubble';
 import type { Message } from '../hooks';
 import type { ExploreStep, FeedbackData, WaitForCheck } from '../types';
@@ -109,6 +116,7 @@ function MessageListItem({
     (rawAgentStartPhase === 'plan' || rawAgentStartPhase === 'execute')
       ? rawAgentStartPhase
       : undefined;
+  const inlineView = parseInlineViewMetadata(message.metadata?.inlineView);
 
   return (
     <div
@@ -139,6 +147,7 @@ function MessageListItem({
         thinkingStreamStartedAtMs={thinkingMetrics.thinkingStreamStartedAtMs}
         streamingMetricsBySubAgentId={streamingMetricsBySubAgentId}
       />
+      {inlineView && <InlineUserView inlineView={inlineView} messageId={message.message_id} />}
     </div>
   );
 }

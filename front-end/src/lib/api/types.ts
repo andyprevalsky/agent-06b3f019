@@ -157,6 +157,7 @@ export interface Message {
     busId?: string;
     spawnGroupId?: string;
     forEachAggregate?: boolean;
+    inlineView?: import('../realtime-types/message-metadata').InlineViewMessageMetadata;
     [key: string]: unknown;
   };
   file_pointer?: FilePointer; // File attachment (OAI-style: one file per message)

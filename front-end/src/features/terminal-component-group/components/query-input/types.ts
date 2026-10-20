@@ -54,6 +54,8 @@ export interface QueryInputProps {
   showModelSelector?: boolean;
   dripStyles?: DripStyles;
   drippiness?: number;
+  /** Solid background (a per-user background image shows behind the app). */
+  opaqueSurface?: boolean;
   agentDetail?: AgentDetail | null;
   onAgentUpdate?: () => void;
   onAgentDelete?: () => void;
