@@ -364,6 +364,7 @@ run_suite "Cloud Benchmark Archived Reuse Stream Transport" python3 scripts/test
 run_suite "Cloud Benchmark Isolated Generation" python3 scripts/tests/cloudbench-isolated-generation.test.py
 run_suite "Cloud Benchmark Archived Owner Stop" python3 scripts/tests/cloudbench-archived-owner-stop.test.py
 run_suite "Cloud Benchmark Status Readiness Observability" python3 scripts/tests/cloudbench-status-readiness-observability.test.py
+run_suite "Cloud Benchmark Pre-Terminal Infra Release" python3 scripts/tests/cloudbench-preterminal-infra-release.test.py
 run_suite "Controller Operator Preflight" python3 scripts/tests/cloudbench-operator-preflight.test.py
 run_suite "Playwright Browser Bootstrap" python3 scripts/tests/playwright-browser-bootstrap.test.py
 run_suite "Cloud Benchmark Inventory Stdlib Startup" python3 scripts/tests/cloudbench-inventory-site-startup.test.py
