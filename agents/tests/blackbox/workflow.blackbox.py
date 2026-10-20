@@ -578,6 +578,15 @@ FAST_MODE_ENABLED_CAPTURE: Dict[str, List[bool]] = {}
 RESOLVE_FAST_CACHE_GOAL_CALLS: List[str] = []
 LEFTOVER_CHILD_AGENT_ID = "agent-test-leftover-child"
 LEFTOVER_CHILD_GOAL = "Produce fresh tool-grounded evidence for Andy Prevalsky's brand task."
+# A finished drafting sub-agent woken by its parent's send_message_to_agent
+# (NEW_TASK). The backend wake clears Agent.responseSchema and stores the
+# message as Agent.goal (tree-feedback-routing run 4, agent 7304d3f1).
+WOKEN_SUBAGENT_ID = "agent-test-woken-subagent"
+WOKEN_ORIGINAL_GOAL = "Draft one cold email to Garry Tan; return investor_name, investor_firm, subject, body."
+WOKEN_NEW_TASK = "Correction: re-sign your draft as 'Andy Prevalskii, Founder, Rose Labs' and return it."
+WOKEN_SCHEMA = {"fields": [{"name": "body", "type": "str", "required": True}]}
+SCHEMA_GENERATION_CAPTURE: Dict[str, List[List[str]]] = {}
+VERIFIER_SCHEMA_CAPTURE: Dict[str, List[Optional[Dict[str, Any]]]] = {}
 
 
 @activity.defn(name="resolve_fast_cache_goal_activity")
@@ -720,6 +729,8 @@ async def mock_check_progress(
 ) -> Dict[str, Any]:
     if agent_id in CUTOVER_VERIFIER_CONTEXTS:
         CUTOVER_VERIFIER_CONTEXTS[agent_id].append(list(context))
+    if agent_id in VERIFIER_SCHEMA_CAPTURE:
+        VERIFIER_SCHEMA_CAPTURE[agent_id].append(response_schema)
     return {
         "score": 1.0,
         "reasoning": "Complete",
@@ -815,7 +826,15 @@ async def mock_set_response_schema_activity(
     *args: Any,
     **kwargs: Any,
 ) -> Optional[Dict[str, Any]]:
+    if agent_id in SCHEMA_GENERATION_CAPTURE:
+        SCHEMA_GENERATION_CAPTURE[agent_id].append(list(user_messages))
+        return {"schema": WOKEN_SCHEMA, "usage": {}}
     return None
+
+
+@activity.defn(name="resolve_agent_address_activity")
+async def mock_resolve_agent_address_activity(agent_id: str, address: str, user_id: Optional[str]) -> Dict[str, Any]:
+    return {"agent_id": agent_id, "path": f"/root/{agent_id}"}
 
 
 @activity.defn(name="persist_response_schema_activity")
@@ -1047,6 +1066,7 @@ async def mock_spawn_claude_code_activity(
 
 # Collect all mock activities for Worker registration
 MOCK_ACTIVITIES = [
+    mock_resolve_agent_address_activity,
     mock_get_model_context_window,
     mock_update_agent_status,
     mock_acknowledge_workflow_replacement_bootstrap,
@@ -1520,6 +1540,83 @@ async def _run_all_workflow_tests() -> List[tuple]:
                 results.append((name, None))
             except Exception as e:
                 results.append((name, e))
+
+            # A woken sub-agent's verifier must judge the NEW_TASK it was woken
+            # with. The wake clears the previous run's schema; the verifier sees
+            # no goal row and drops agent-message rows, so without a regenerated
+            # schema it scores correct work 0% and the agent detours (run 4:
+            # 10-minute browser re-verification → tree timeout at 900s).
+            name = "wf_woken_subagent_verifier_judges_new_task_schema"
+            try:
+                woken_id = WOKEN_SUBAGENT_ID
+                CUTOVER_MESSAGES[woken_id] = [
+                    {
+                        "id": "woken-goal",
+                        "role": "USER",
+                        "text": WOKEN_ORIGINAL_GOAL,
+                        "timestamp": "2026-10-19T22:01:10+00:00",
+                        "metadata": {},
+                    },
+                    {
+                        "id": "woken-summary",
+                        "role": "TOOL",
+                        "text": "",
+                        "timestamp": "2026-10-19T22:02:41+00:00",
+                        "metadata": {"toolName": "completion_summary", "toolStatus": "FINISHED"},
+                    },
+                    {
+                        "id": "woken-new-task",
+                        "role": "USER",
+                        "text": WOKEN_NEW_TASK,
+                        "timestamp": "2026-10-19T22:02:50+00:00",
+                        "metadata": {
+                            "agentMessage": True,
+                            "messageType": "NEW_TASK",
+                            "fromAgentPath": "/root/outreach_coordinator",
+                            "toAgentPath": "/root/outreach_coordinator/draft_garry_tan",
+                        },
+                    },
+                ]
+                SCHEMA_GENERATION_CAPTURE[woken_id] = []
+                VERIFIER_SCHEMA_CAPTURE[woken_id] = []
+                handle = await env.client.start_workflow(
+                    AgentWorkflow.run,
+                    args=[
+                        woken_id,
+                        "user-test-1",
+                        WOKEN_NEW_TASK,
+                        "rose-labs/rose-1-flash",
+                        256,
+                        {"type": "FLOAT_LLM_JUDGE"},
+                        None,  # context
+                        "parent-wf-woken",  # parent_workflow_id
+                        "parent-agent-woken",  # parent_agent_id
+                        2,  # depth
+                        None,  # bus_id
+                        "execute",  # start_phase
+                    ],
+                    id=f"{woken_id}:wake:woken-new-task",
+                    task_queue=TASK_QUEUE,
+                )
+                for _ in range(60):
+                    if VERIFIER_SCHEMA_CAPTURE[woken_id]:
+                        break
+                    await asyncio.sleep(0.5)
+                judged = VERIFIER_SCHEMA_CAPTURE[woken_id]
+                assert judged, "woken sub-agent never reached its verifier"
+                assert judged[0] == WOKEN_SCHEMA, (
+                    f"woken sub-agent verifier judged without the new task's schema: {judged[0]!r}"
+                )
+                generated = SCHEMA_GENERATION_CAPTURE[woken_id]
+                assert len(generated) == 1, f"expected one startup schema generation, got {generated!r}"
+                assert generated[0][0] == WOKEN_NEW_TASK and WOKEN_ORIGINAL_GOAL in generated[0], generated
+                await _cancel_workflow(handle)
+                results.append((name, None))
+            except Exception as e:
+                results.append((name, e))
+            finally:
+                for capture in (CUTOVER_MESSAGES, SCHEMA_GENERATION_CAPTURE, VERIFIER_SCHEMA_CAPTURE):
+                    capture.pop(WOKEN_SUBAGENT_ID, None)
 
     return results
 

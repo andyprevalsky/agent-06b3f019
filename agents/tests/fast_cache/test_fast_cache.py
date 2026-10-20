@@ -2696,7 +2696,8 @@ def test_resolve_fast_cache_context_activity_returns_general_demo_gate(monkeypat
     import providers.fast_cache.client as cache_client_module
     from helpers.fast_cache_goal import resolve_fast_cache_context_activity
 
-    async def fake_resolve(agent_id: str):
+    async def fake_resolve(agent_id: str, *, refresh: bool = False):
+        assert refresh is True, "a workflow run start must re-read the agent row"
         assert agent_id == "fundraise-root"
         return (
             True,
@@ -4534,7 +4535,9 @@ def test_backend_policy_cache_identities_mirror_the_immutable_registry():
 
     source = (Path(__file__).resolve().parents[3] / "back-end/src/providers/fastCacheNormalizeConstants.ts").read_text()
     constants = dict(re.findall(r"const (WMH_[A-Z0-9_]+) =\s*'([^']+)'", source))
-    table = source[source.index("const WMH_EXECUTION_POLICIES") : source.index("]);", source.index("const WMH_EXECUTION_POLICIES"))]
+    table = source[
+        source.index("const WMH_EXECUTION_POLICIES") : source.index("]);", source.index("const WMH_EXECUTION_POLICIES"))
+    ]
     mirrored = {}
     for name, version, sha in re.findall(
         r"\[\s*('[^']+'|WMH_[A-Z0-9_]+),\s*\{\s*version:\s*('[^']+'|WMH_[A-Z0-9_]+),\s*sha256:\s*('[^']+'|WMH_[A-Z0-9_]+)",
@@ -4608,6 +4611,7 @@ def test_simulated_v2_cache_misses_v1_and_replays_its_own_tool_choice(mem, monke
         assert next(c for c in replay if c.kind == "metadata").data["from_fast_cache"] is True
 
     asyncio.run(body())
+
 
 def test_demo_replay_namespace_rejects_live_write_through(monkeypatch):
     """A live miss must not add entries to a frozen DEMO recording.

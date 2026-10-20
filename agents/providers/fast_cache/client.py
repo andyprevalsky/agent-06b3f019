@@ -668,6 +668,8 @@ _AGENT_FASTMODE: dict[str, tuple[bool, Optional[str], bool, Optional[str], Optio
 
 async def resolve_agent_fast_mode(
     agent_id: str,
+    *,
+    refresh: bool = False,
 ) -> tuple[bool, Optional[str], bool, Optional[str], Optional[str], bool]:
     """Look up (read_enabled, goal, write_enabled, root_agent_id, root_goal, provider_fast_mode).
 
@@ -675,8 +677,14 @@ async def resolve_agent_fast_mode(
     button). `provider_fast_mode` is the button / LLM speed flag persisted on
     the agent row. `write_enabled` follows demo cache (DEMO trees record+replay).
     Returns all-false on any error (degrade to no-cache / provider default).
+
+    `refresh=True` re-reads the agent row and replaces this process's memo. A
+    workflow run start uses it: a wake or chat follow-up persists a new
+    Agent.goal for the same agent id, so a memo from the previous run is stale.
     """
-    if agent_id in _AGENT_FASTMODE:
+    if refresh:
+        _AGENT_FASTMODE.pop(agent_id, None)
+    elif agent_id in _AGENT_FASTMODE:
         return _AGENT_FASTMODE[agent_id]
     enabled, goal, write_enabled, root_agent_id, root_goal = False, None, False, None, None
     provider_fast_mode = True
