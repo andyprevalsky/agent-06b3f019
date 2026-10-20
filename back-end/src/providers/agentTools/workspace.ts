@@ -2,7 +2,7 @@
  * Install the Rose agent tools into a code-agent session's HOME.
  *
  *   createClaudeCodeSession / createCodexCodeSession(agentId, userId, taskId)
- *     └─ withAgentTools(prepareUserUiWorkspaceSafe(userId), {userId, agentId, taskId, provider})
+ *     └─ withAgentTools(prepareUserUiWorkspaceSafe(userId, agentId), {userId, agentId, taskId, provider})
  *          rose CLI + MCP server ───────► ~/.rose/bin/rose          (on PATH)
  *          {url, token} ────────────────► ~/.rose/tools.json        (MCP servers may not inherit env)
  *          Claude Code MCP config ──────► ~/.rose/mcp.json          (ws-server passes --mcp-config;

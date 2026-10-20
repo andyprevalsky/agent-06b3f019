@@ -16,6 +16,8 @@ import {
   validateUserUiBundle,
   type UserUiBundleFile,
 } from '../../providers/userUi/manifest';
+import { broadcastUserUiActiveChanged } from '../../providers/chat/supabaseBroadcast';
+import { createLogger } from '../../providers/logger';
 import { mintUserUiPublishToken } from '../../providers/userUi/publishToken';
 import { USER_UI_LIST_LIMIT, configuredUsercontentBaseUrl } from './config';
 import * as repo from './repo';
@@ -31,6 +33,8 @@ export class UserUiError extends Error {
   }
 }
 
+const log = createLogger('UserUiService');
+
 const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
 
 function decodeFiles(body: PublishUserUiVersionBody): UserUiBundleFile[] {
@@ -44,7 +48,26 @@ function decodeFiles(body: PublishUserUiVersionBody): UserUiBundleFile[] {
   });
 }
 
-export async function publishVersion(userId: string, body: PublishUserUiVersionBody) {
+/** Tell an open Rose tab that the active UI moved (best-effort, never throws). */
+async function announceActiveChanged(userId: string, agentId: string, versionId: string) {
+  try {
+    const agentIds = await repo.userUiAnnounceAgentIds(userId, agentId);
+    if (agentIds.length > 0) await broadcastUserUiActiveChanged(agentIds, { versionId, agentId });
+  } catch (err) {
+    log.warn('USER_UI_ACTIVE_CHANGED broadcast failed', {
+      userId,
+      agentId,
+      versionId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+export async function publishVersion(
+  userId: string,
+  body: PublishUserUiVersionBody,
+  publisher: { agentId: string | null } = { agentId: null }
+) {
   const files = decodeFiles(body);
   const validation = validateUserUiBundle(files);
   if (!validation.ok) throw new UserUiError(400, 'Invalid bundle', validation.errors);
@@ -56,6 +79,9 @@ export async function publishVersion(userId: string, body: PublishUserUiVersionB
     totalBytes: validation.totalBytes,
     activate: body.activate !== false,
   });
+  if (body.activate !== false && publisher.agentId !== null) {
+    await announceActiveChanged(userId, publisher.agentId, version.id);
+  }
   return { versionId: version.id, manifest: version.manifest, active: body.activate !== false };
 }
 
