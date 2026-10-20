@@ -23,13 +23,9 @@ import {
   IMPERSONATED_MACHINE_DATA_MESSAGE,
 } from '../../base/impersonation';
 import { getErrorMessageOrFallback } from '../../../shared/utils/error';
-import { postIntegrationProgress, postWhatsAppConnect, postWhatsAppContacts } from './repo';
-import {
-  dispatchUploadWithTransportRetry,
-  resolveStrategy,
-  toIntegrationProgressResult,
-} from './service';
-import type { IntegrationProgressResult, UploadResult } from './types';
+import { postWhatsAppConnect, postWhatsAppContacts } from './repo';
+import { dispatchUploadWithTransportRetry, resolveStrategy } from './service';
+import type { UploadResult } from './types';
 
 /** Emit an `upload:progress` event on the supplied renderer window, if any. */
 function emitProgress(
@@ -50,7 +46,7 @@ export class Uploader {
    */
   static async registerWhatsAppConnected(
     accessToken: string,
-    account: { accountId: string; label: string } | null = null
+    account: { accountId: string; label: string; claimLegacy?: boolean } | null = null
   ): Promise<UploadResult> {
     try {
       const result = await postWhatsAppConnect(accessToken, account);
@@ -84,25 +80,6 @@ export class Uploader {
       return { success: true };
     } catch (error) {
       return { success: false, message: getErrorMessageOrFallback(error) };
-    }
-  }
-
-  /**
-   * Report one account's sync progress (POST .../accounts/:accountId/progress).
-   * Never throws: transport errors read as `failed` so the caller backs off.
-   */
-  static async reportIntegrationProgress(
-    provider: string,
-    accountId: string,
-    body: unknown,
-    accessToken: string
-  ): Promise<IntegrationProgressResult> {
-    if (accessTokenIsImpersonated(accessToken)) return { kind: 'stale' };
-    try {
-      const response = await postIntegrationProgress(provider, accountId, body, accessToken);
-      return toIntegrationProgressResult(response.status, response.body);
-    } catch {
-      return { kind: 'failed' };
     }
   }
 

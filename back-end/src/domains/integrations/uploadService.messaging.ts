@@ -18,7 +18,6 @@ import {
   type TelegramContactWithMessages,
   parseTelegramData,
 } from '../../services/integrations/telegramParser';
-import { upsertWhatsAppAccount } from './service.whatsappAccounts';
 
 // Re-export types needed by routes
 export type { ContactWithMessages } from '../../services/integrations/iMessageParser';
@@ -119,14 +118,12 @@ export async function processIMessageUpload(
 }
 
 /**
- * Process WhatsApp upload (async background processing). `accountId` (the
- * linked phone) attributes the batch to that account; '' = legacy single row.
+ * Process WhatsApp upload (async background processing).
  */
 export async function processWhatsAppUpload(
   userId: string,
   contacts: WhatsAppContactWithMessages[],
-  accessedAt?: string,
-  accountId = ''
+  accessedAt?: string
 ) {
   const totalMessages = contacts.reduce((sum, contact) => sum + (contact.messages?.length ?? 0), 0);
 
@@ -136,25 +133,22 @@ export async function processWhatsAppUpload(
     messages: totalMessages,
   });
 
-  const uploadConfig = {
-    contacts: contacts.length,
-    messages: totalMessages,
-    uploadedAt: new Date().toISOString(),
-    lastFrontendAccessAt: accessedAt ?? new Date().toISOString(),
-  };
-  const integration =
-    accountId === ''
-      ? await repo.upsertIntegrationForUpload({ userId, name: 'whatsapp', config: uploadConfig })
-      : await upsertWhatsAppAccount(userId, accountId, {
-          status: IntegrationStatus.SYNCING,
-          config: uploadConfig,
-        });
+  const integration = await repo.upsertIntegrationForUpload({
+    userId,
+    name: 'whatsapp',
+    config: {
+      contacts: contacts.length,
+      messages: totalMessages,
+      uploadedAt: new Date().toISOString(),
+      lastFrontendAccessAt: accessedAt ?? new Date().toISOString(),
+    },
+  });
 
   const jobId = `whatsapp-upload-${userId}-${Date.now()}`;
 
   void (async () => {
     try {
-      await parseWhatsAppData(userId, contacts, jobId, accountId);
+      await parseWhatsAppData(userId, contacts, jobId);
       const existingConfig = (integration.config as Record<string, unknown> | null) ?? {};
       await updateMessagingIntegration(
         integration.id,
@@ -179,24 +173,9 @@ export async function processWhatsAppUpload(
  * messages exist. Without it the integration row is only ever created by an
  * upload, while the mac-app's uploader refuses to upload until the integration
  * reads as CONNECTED — a deadlock that silently drops every synced message.
- * With `account` (multi-account Mac app) each linked phone gets its own row.
  */
-export async function processWhatsAppConnect(
-  userId: string,
-  account?: { accountId: string; label: string | null }
-) {
-  log.info('Creating WhatsApp integration', { userId, multiAccount: account !== undefined });
-  if (account !== undefined) {
-    const now = new Date();
-    return upsertWhatsAppAccount(userId, account.accountId, {
-      status: IntegrationStatus.CONNECTED,
-      isActive: true,
-      lastSyncAt: now,
-      label: account.label ?? account.accountId,
-      defaults: { connectedAt: now.toISOString() },
-      config: { lastConnectedAt: now.toISOString() },
-    });
-  }
+export async function processWhatsAppConnect(userId: string) {
+  log.info('Creating WhatsApp integration', { userId });
 
   // Re-pairing is routine (a 515 restart, a new device). Merge rather than
   // overwrite so reconnecting can't silently drop stored integration settings.

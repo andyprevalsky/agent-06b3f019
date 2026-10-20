@@ -1177,6 +1177,8 @@ class SpawnAgentManager(ToolManager):
             code_tool_call["attachments"] = tool_call["attachments"]
         if tool_call.get("github_repo_link"):
             code_tool_call["github_repo_link"] = tool_call["github_repo_link"]
+        if tool_call.get("target"):
+            code_tool_call["target"] = tool_call["target"]
 
         manager = get_code_manager()
         async for event in manager.execute_tool(workflow_instance, code_tool_call, tool_call_id):

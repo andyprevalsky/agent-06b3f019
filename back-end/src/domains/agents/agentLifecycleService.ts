@@ -12,6 +12,7 @@ import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailu
 import { deleteAgentRecursive as killAgentRecursive } from '../../providers/agentKill';
 import { createGithubRepo } from '../../providers/github';
 import { createLogger } from '../../providers/logger';
+import { originDeviceFields } from './agentOriginService';
 import { resolvePriceLimitCents } from '../../providers/priceLimitDefaults';
 import type { CreateAgentBody } from './types';
 import { getPromptSecret } from './config';
@@ -173,6 +174,24 @@ async function resolveSubAgentBenchmarkFlag(
 export interface CreateAgentOptions {
   /** Root repository for code sessions, persisted in the create transaction. */
   githubRepoUrl?: string;
+  /**
+   * `X-Rose-Device-Id` sent by the Rose Mac app's main process (C14). Recorded
+   * only for a MAC_APP root agent and only when the caller owns that device.
+   */
+  originDeviceHeader?: string;
+}
+
+/** Server-side create fields: the root repository and the Mac that started it. */
+async function serverCreateFields(
+  body: CreateAgentBody,
+  userId: string,
+  isSubAgent: boolean,
+  options: CreateAgentOptions
+): Promise<{ githubRepoUrl?: string; originDeviceId?: string }> {
+  return {
+    ...(options.githubRepoUrl !== undefined ? { githubRepoUrl: options.githubRepoUrl } : {}),
+    ...(await originDeviceFields(body, userId, isSubAgent, options.originDeviceHeader)),
+  };
 }
 
 export async function createAgent(
@@ -235,7 +254,7 @@ export async function createAgent(
     workflowContextGates: body.context_gates,
     workflowStartPhase: body.start_phase,
     workflowTaskQueue: body.task_queue,
-    ...(options.githubRepoUrl !== undefined ? { githubRepoUrl: options.githubRepoUrl } : {}),
+    ...(await serverCreateFields(body, userId, isSubAgent, options)),
     projectId,
   });
   const archiveStartFixture = !isSubAgent ? await prepareAgentStartArchive(agent.agent.id) : null;

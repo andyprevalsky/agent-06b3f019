@@ -235,7 +235,10 @@ describe('messaging-whatsapp > history-sync progress', () => {
     fakeTimers();
     const sync = await loadSync();
     await sync.connect();
-    expect(bodies(CONNECT_PATH)).toEqual([{ accountId: PHONE_A, label: PHONE_A }]);
+    // The legacy auth dir's phone claims the pre-multi-account history.
+    expect(bodies(CONNECT_PATH)).toEqual([
+      { accountId: PHONE_A, label: PHONE_A, claimLegacy: true },
+    ]);
 
     const sock = socketFor(legacyDir());
     historySet(sock, {
@@ -408,6 +411,7 @@ describe('messaging-whatsapp > multiple accounts', () => {
       { accountId: PHONE_A, connected: true },
       { accountId: PHONE_B, connected: true },
     ]);
+    // A phone paired in a new auth dir never claims the legacy row.
     expect(bodies(CONNECT_PATH).at(-1)).toEqual({ accountId: PHONE_B, label: PHONE_B });
   });
 

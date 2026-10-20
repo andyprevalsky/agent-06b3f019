@@ -1014,6 +1014,13 @@ class SpawnAgentTool(BaseModel):
             "the GitHub repo defaults to a repo automatically created for this agent tree."
         ),
     )
+    target: Optional[Literal["cloud", "local"]] = Field(
+        default="cloud",
+        description=(
+            "Optional when type='code': 'local' runs the coding agent on the user's Mac in a folder they "
+            "shared (only for agents started from the Rose Mac app), 'cloud' (default) runs it in a sandbox."
+        ),
+    )
     start_phase: Optional[Literal["PLAN", "EXECUTE"]] = Field(
         default=None,
         description=(
@@ -1157,6 +1164,13 @@ class SpawnAgentToolNoGP(BaseModel):
         default=None,
         description=(
             "Optional when type='code'. GitHub repository URL to clone and sync to. Ignored for every other type."
+        ),
+    )
+    target: Optional[Literal["cloud", "local"]] = Field(
+        default="cloud",
+        description=(
+            "Optional when type='code': 'local' runs the coding agent on the user's Mac in a folder they "
+            "shared (only for agents started from the Rose Mac app), 'cloud' (default) runs it in a sandbox."
         ),
     )
     context_gates: Optional[Dict[str, bool]] = Field(

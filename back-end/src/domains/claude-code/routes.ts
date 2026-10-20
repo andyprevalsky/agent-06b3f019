@@ -17,6 +17,14 @@ import { createSessionSchema, closeSessionSchema } from './types';
 import type { FilePointer } from '../../providers/storage';
 import * as service from './service';
 import { AgentOwnerMismatchError, MissingUserIdError, GitHubAccessDeniedError } from './service';
+import {
+  LocalTargetUnavailableError,
+  localTargetUnavailableBody,
+} from '../../providers/localDevices/messages';
+import {
+  LocalSessionOwnerMismatchError,
+  createLocalCodeSessionResponse,
+} from '../../providers/localDevices/session';
 import { ProjectNotFoundForSessionError } from '../../providers/projects/session';
 
 const log = createLogger('ClaudeCodeRoutes');
@@ -33,23 +41,44 @@ router.post(
   authenticate,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
-      const { agent_id, goal, attachments, github_repo_url, user_id, project_id } =
+      const { agent_id, goal, attachments, github_repo_url, user_id, project_id, target } =
         createSessionSchema.parse(req.body);
 
-      const result = await service.createSession({
-        agent_id,
-        goal,
-        attachments: attachments as FilePointer[] | undefined,
-        github_repo_url,
-        user_id,
-        project_id,
-      });
+      // C14: a local session runs on the agent tree's Mac with the user's own
+      // login, in the folder they granted (no clone or Project restore).
+      const result =
+        target === 'local'
+          ? {
+              ...(await createLocalCodeSessionResponse({
+                agentId: agent_id,
+                goal,
+                provider: 'claude',
+                expectedUserId: user_id,
+              })),
+              project: null,
+            }
+          : await service.createSession({
+              agent_id,
+              goal,
+              attachments: attachments as FilePointer[] | undefined,
+              github_repo_url,
+              user_id,
+              project_id,
+            });
 
       res.json({
         success: true,
         ...result,
       });
     } catch (error) {
+      if (error instanceof LocalTargetUnavailableError) {
+        res.status(409).json(localTargetUnavailableBody(error));
+        return;
+      }
+      if (error instanceof LocalSessionOwnerMismatchError) {
+        res.status(403).json({ error: error.message, code: 'AGENT_OWNER_MISMATCH' });
+        return;
+      }
       if (error instanceof MissingUserIdError) {
         res.status(400).json({
           error: 'user_id is required when using github_repo_url',

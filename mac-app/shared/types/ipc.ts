@@ -173,6 +173,17 @@ export interface IPC {
   // Codex/ChatGPT setup status events (install + `codex login` progress)
   onGptSetupStatus?: (callback: (status: string) => void) => () => void;
 
+  // Local code agents on this Mac (C14): device, folder grants, live sessions
+  localCode?: {
+    getStatus: () => Promise<LocalCodeStatus>;
+    /** Without a path, opens the macOS folder picker. */
+    addGrant: (path?: string) => Promise<LocalCodeGrantResult>;
+    removeGrant: (grantId: string) => Promise<LocalCodeGrantResult>;
+    setDefaultGrant: (grantId: string) => Promise<LocalCodeGrantResult>;
+    openTerminal: (taskId: string) => Promise<{ success: boolean }>;
+    onStatus: (callback: (status: LocalCodeStatus) => void) => () => void;
+  };
+
   // Atlas credentials
   atlas?: {
     storePassword: (password: string) => Promise<{ success: boolean; error?: string }>;
@@ -208,9 +219,15 @@ export interface IPC {
     isConnected: () => Promise<boolean>;
     connectWithExistingSession: () => Promise<{ success: boolean; error?: string }>;
     disconnect: () => Promise<{ success: boolean; error?: string }>;
-    logout: () => Promise<{ success: boolean; error?: string }>;
+    /** Log out one account (Telegram user id), or every connected account when omitted. */
+    logout: (accountId?: string) => Promise<{ success: boolean; error?: string }>;
+    /** Saved Telegram accounts on this Mac with their connection state. */
+    listAccounts?: () => Promise<
+      Array<{ accountId: string; label: string | null; connected: boolean }>
+    >;
     syncHistorical: (
-      messagesPerDialog?: number
+      messagesPerDialog?: number,
+      accountId?: string
     ) => Promise<{ success: boolean; count?: number; error?: string }>;
     // Auth flow methods
     startAuth: (phoneNumber: string) => Promise<{ success: boolean; error?: string }>;
@@ -413,4 +430,41 @@ export interface UpdateStatusPayload {
   version?: string;
   message?: string;
   percent?: number;
+}
+
+/** A folder the user shared with Rose for local code agents (C14). */
+export interface LocalCodeFolderGrant {
+  id: string;
+  /** Absolute, symlink-resolved path. */
+  path: string;
+  /** Home-abbreviated display path, e.g. "~/Developer/rose". */
+  label: string;
+  createdAt: string;
+  /** Used when an agent does not name a folder. */
+  isDefault: boolean;
+}
+
+export interface LocalCodeSessionView {
+  taskId: string;
+  agentId: string;
+  provider: 'claude' | 'codex';
+  /** Display path of the folder the session runs in. */
+  folder: string;
+  startedAt: string;
+}
+
+export interface LocalCodeStatus {
+  deviceId: string;
+  /** The Mac's Computer Name, as shown in the C14 disconnected error. */
+  deviceName: string;
+  /** Control channel to the backend is open (this Mac can take local runs). */
+  connected: boolean;
+  grants: LocalCodeFolderGrant[];
+  sessions: LocalCodeSessionView[];
+}
+
+export interface LocalCodeGrantResult {
+  success: boolean;
+  error?: string;
+  status: LocalCodeStatus;
 }

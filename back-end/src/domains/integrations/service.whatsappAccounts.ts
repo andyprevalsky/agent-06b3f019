@@ -1,108 +1,124 @@
 /**
  * WhatsApp multi-account (plan row I2): one Integration row per linked phone.
  *
- *   Mac connect / upload { accountId: '+1555…' }
- *     └─ upsertWhatsAppAccount ─► Integration(whatsapp, accountId)
- *          the first phone claims the legacy '' row (its pre-multi-account
- *          history came from that phone) and is marked `legacyHistory`
+ *   Mac connect { accountId: '+1555…', label, claimLegacy? }
+ *     └─ connectWhatsAppAccount ─► Integration(whatsapp, accountId)
+ *          claimLegacy (the phone of the Mac's legacy single auth dir) adopts the
+ *          legacy '' row and re-attributes its history inside the claim
+ *   Mac upload { contacts, accountId }
+ *     └─ uploadWhatsAppAccountBatch ─► guarded insert (stops once the row is gone);
+ *          an unknown/removed account is refused, so an in-flight Mac upload can
+ *          never resurrect an account the user deleted
  *   DELETE /api/integrations/whatsapp/accounts/:accountId
- *     └─ deleteWhatsAppAccount
- *          1. messages attributed to the phone (+ NULL rows if it holds legacy history)
- *          2. contacts a WhatsApp sync created that nothing references any more
- *          3. the account's Integration row
+ *     └─ deleteWhatsAppAccount: row, then its messages, then the contacts only
+ *          WhatsApp created that nothing references any more
  *
- * 10k rule: connect/upload add one advisory-locked upsert per batch (plus one
- * update on the one-time legacy claim); deletion walks one user's WhatsApp rows
- * in bounded batches. Nothing fans in across users or accounts.
+ * 10k rule: connect is one advisory-locked upsert (plus the one-time legacy
+ * adoption: indexed per-user UPDATEs); each upload batch is one guarded
+ * createMany per contact chunk; deletion walks one user's WhatsApp rows in
+ * bounded batches. Nothing fans in across users or accounts.
  */
 
 import { createLogger } from '../../providers/logger';
+import { MessageAccountRemovedError } from '../../services/integrations/personMessageManager';
+import {
+  parseWhatsAppData,
+  type WhatsAppContactWithMessages,
+} from '../../services/integrations/whatsappParser';
 import { findIntegrationAccount, upsertIntegrationAccount } from './repo.accounts';
 import * as repo from './repo.integration';
 import {
+  adoptLegacyWhatsAppMessages,
   deleteOrphanedWhatsAppContacts,
   deleteWhatsAppAccountMessages,
+  deleteWhatsAppAccountRow,
+  WHATSAPP_INTEGRATION_NAME,
 } from './repo.whatsappAccounts';
-import { type IntegrationStatus, IntegrationType, type Prisma } from './types';
+import { IntegrationStatus, IntegrationType } from './types';
 
 const log = createLogger('WhatsAppAccounts');
 
-export const WHATSAPP_INTEGRATION = 'whatsapp';
-/** Config flag: this account adopted the legacy row, so NULL-attributed history is its own. */
-const LEGACY_HISTORY = 'legacyHistory';
-
-function configObject(value: Prisma.JsonValue | null | undefined): Prisma.JsonObject {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : {};
+export interface WhatsAppConnectInput {
+  /** Storage account id: the linked phone in E.164. */
+  accountId: string;
+  label: string | null;
+  /** The Mac is migrating its legacy single auth dir to this phone. */
+  claimLegacy: boolean;
 }
 
-export interface WhatsAppAccountWrite {
-  status: IntegrationStatus;
-  isActive?: boolean;
-  lastSyncAt?: Date;
-  label?: string | null;
-  /** Merged over the account's stored config. */
-  config: Prisma.JsonObject;
-  /** Kept only where the stored config has no value yet (e.g. `connectedAt`). */
-  defaults?: Prisma.JsonObject;
-}
-
-/** Create or update one linked phone's Integration row. */
-export async function upsertWhatsAppAccount(
-  userId: string,
-  accountId: string,
-  write: WhatsAppAccountWrite
-) {
-  const [exact, legacy] = await Promise.all([
-    findIntegrationAccount(userId, WHATSAPP_INTEGRATION, accountId),
-    findIntegrationAccount(userId, WHATSAPP_INTEGRATION, ''),
-  ]);
-  const row = await upsertIntegrationAccount({
+/** Mark one linked phone CONNECTED (creating its row on first connect). */
+export async function connectWhatsAppAccount(userId: string, input: WhatsAppConnectInput) {
+  log.info('Connecting WhatsApp account', { userId, claimLegacy: input.claimLegacy });
+  return upsertIntegrationAccount({
     userId,
-    name: WHATSAPP_INTEGRATION,
-    accountId,
+    name: WHATSAPP_INTEGRATION_NAME,
+    accountId: input.accountId,
     type: IntegrationType.DATA_SOURCE,
-    legacy: 'claim',
-    status: write.status,
-    ...(write.isActive !== undefined && { isActive: write.isActive }),
-    ...(write.lastSyncAt !== undefined && { lastSyncAt: write.lastSyncAt }),
-    ...(write.label !== undefined && { accountEmail: write.label }),
-    config: { ...write.defaults, ...configObject(exact?.config), ...write.config },
-  });
-  if (exact !== null || legacy === null || row.id !== legacy.id) return row;
-  // This phone adopted the pre-multi-account row (the claim is exclusive under
-  // the account lock): keep that row's config and mark its history as ours.
-  log.info('WhatsApp account claimed the legacy row', { userId, integrationId: row.id });
-  return repo.updateIntegration(row.id, {
-    config: { ...configObject(legacy.config), ...configObject(row.config), [LEGACY_HISTORY]: true },
+    legacy: input.claimLegacy ? 'claim' : 'separate',
+    accountEmail: input.label ?? input.accountId,
+    status: IntegrationStatus.CONNECTED,
+    isActive: true,
+    lastSyncAt: new Date(),
+    adoptLegacyData: (tx, accountId) => adoptLegacyWhatsAppMessages(tx, userId, accountId),
   });
 }
 
 /**
+ * Accept one batch for a connected account and store it in the background.
+ * Resolves null for an unknown (never connected or removed) account.
+ */
+export async function uploadWhatsAppAccountBatch(
+  userId: string,
+  accountId: string,
+  contacts: WhatsAppContactWithMessages[]
+) {
+  const integration = await findIntegrationAccount(userId, WHATSAPP_INTEGRATION_NAME, accountId);
+  if (integration === null) return null;
+  const messages = contacts.reduce((sum, contact) => sum + (contact.messages?.length ?? 0), 0);
+  log.info('Received WhatsApp account batch', { userId, contacts: contacts.length, messages });
+
+  const jobId = `whatsapp-upload-${userId}-${Date.now()}`;
+  void (async () => {
+    try {
+      await parseWhatsAppData(userId, contacts, jobId, {
+        accountId,
+        integrationId: integration.id,
+      });
+    } catch (error: unknown) {
+      if (error instanceof MessageAccountRemovedError) {
+        log.info('WhatsApp account removed during upload; batch dropped', { userId, jobId });
+        return;
+      }
+      const reason = error instanceof Error ? error.message : 'Unknown error';
+      log.error('Error processing WhatsApp account batch', { userId, jobId, error: reason });
+      await repo
+        .updateIntegration(integration.id, {
+          status: IntegrationStatus.SYNC_FAILED,
+          lastFailedSyncAt: new Date(),
+          failureReason: reason,
+        })
+        .catch(() => undefined);
+    }
+  })();
+  return { integration, jobId };
+}
+
+/**
  * Account cleanup hook (service.accountRegistry): delete exactly this
- * account's messages and the contacts only WhatsApp created, then its row.
- * `accountId` is the storage key (`''` = the legacy default account).
+ * account's messages and the contacts only WhatsApp created, plus its row.
+ * `accountId` is the storage key (`''` = the legacy account, NULL-attributed rows).
+ * The row goes first: in-flight inserts check it under a key-share lock and stop.
  */
 export async function deleteWhatsAppAccount(ctx: {
   userId: string;
   accountId: string;
 }): Promise<boolean> {
-  const row = await findIntegrationAccount(ctx.userId, WHATSAPP_INTEGRATION, ctx.accountId);
-  const legacyAccount = ctx.accountId === '';
-  if (legacyAccount && row === null) return false;
-  const includeLegacy = legacyAccount || configObject(row?.config)[LEGACY_HISTORY] === true;
+  const existed = await deleteWhatsAppAccountRow(ctx.userId, ctx.accountId);
   const { messages, personIds } = await deleteWhatsAppAccountMessages(
     ctx.userId,
-    legacyAccount ? null : ctx.accountId,
-    includeLegacy
+    ctx.accountId === '' ? null : ctx.accountId
   );
   const contacts = await deleteOrphanedWhatsAppContacts(ctx.userId, personIds);
-  if (row !== null) await repo.deleteIntegration(row.id);
-  log.info('WhatsApp account deleted', {
-    userId: ctx.userId,
-    existed: row !== null,
-    includeLegacy,
-    messages,
-    contacts,
-  });
-  return row !== null || messages > 0;
+  log.info('WhatsApp account deleted', { userId: ctx.userId, existed, messages, contacts });
+  return existed || messages > 0;
 }

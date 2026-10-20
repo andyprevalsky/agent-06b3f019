@@ -22,7 +22,22 @@ export interface BrowserConfig {
   keychainAccount: string;
   needsManualPassword: boolean;
   cookieStore: 'sqlite' | 'safariBinary';
+  /**
+   * How the browser's profiles map to cookie stores:
+   *   - `multi`: Chromium-family browsers with one `<UserData>/<Profile>/Cookies`
+   *     (or `.../Network/Cookies`) store per profile. Every profile directory is
+   *     detected and read, and each cookie is tagged with its profile dir name.
+   *   - `single`: one cookie store for the whole browser (Opera, Atlas, Safari).
+   *     Its cookies are tagged with the `single` profile name below.
+   */
+  profileLayout: 'multi' | 'single';
 }
+
+/**
+ * Profile name used for a `single`-layout browser's one account. Keeps its
+ * account id well-formed (`<browser>:Default`) instead of an empty profile.
+ */
+export const SINGLE_STORE_PROFILE = 'Default';
 
 /**
  * `BrowserConfig` augmented with the result of probing the filesystem:

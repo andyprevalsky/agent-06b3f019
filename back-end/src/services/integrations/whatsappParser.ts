@@ -1,7 +1,11 @@
 import { MessageChannel, Prisma } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import { createLogger } from '../../providers/logger';
-import { upsertPersonAndMessageRecords, ContactToUpsert } from './personMessageManager';
+import {
+  ContactToUpsert,
+  MessageAccountRemovedError,
+  upsertPersonAndMessageRecords,
+} from './personMessageManager';
 
 const log = createLogger('WhatsAppParser');
 
@@ -10,6 +14,17 @@ export const WHATSAPP_CONTACT_SOURCE_PREFIX = 'whatsapp:';
 
 export function whatsappContactSource(accountId: string): string {
   return `${WHATSAPP_CONTACT_SOURCE_PREFIX}${accountId}`;
+}
+
+/** One linked phone's upload (multi-account Mac app): its Integration row. */
+export interface WhatsAppAccountScope {
+  accountId: string;
+  integrationId: string;
+}
+
+/** Account-scoped rows namespace the WhatsApp key.id ("<phone>:<key.id>"), like Telegram. */
+export function whatsappExternalId(messageId: string, accountId?: string): string {
+  return accountId === undefined ? messageId : `${accountId}:${messageId}`;
 }
 
 export interface WhatsAppContactWithMessages {
@@ -47,16 +62,15 @@ const normalizeHandle = (handle?: string | null): string => {
 
 /**
  * Transform WhatsApp contact data to the shared ContactToUpsert format.
- * `accountId` (the linked phone; '' = legacy single account) attributes the
- * messages and any contact this upload creates to that WhatsApp account.
+ * `accountId` (the linked phone; undefined = legacy single account) marks any
+ * contact this upload creates as that WhatsApp account's.
  */
 function transformToContactToUpsert(
   contact: WhatsAppContactWithMessages,
-  accountId: string
+  accountId?: string
 ): ContactToUpsert {
   const contactId = contact.contact_id;
   const isEmail = contactId.includes('@');
-  const attributed = accountId !== '';
 
   return {
     identifier: contactId,
@@ -67,15 +81,14 @@ function transformToContactToUpsert(
     title: contact.title,
     email: contact.email,
     emailAddresses: contact.emailAddresses,
-    ...(attributed && { createdBySource: whatsappContactSource(accountId) }),
+    ...(accountId !== undefined && { createdBySource: whatsappContactSource(accountId) }),
     messages: contact.messages.map((msg) => ({
       channel: MessageChannel.WHATSAPP,
       from: msg.is_from_me ? 'me' : msg.contactHandle || contactId,
       to: msg.is_from_me ? msg.contactHandle || contactId : 'me',
       timestamp: new Date(msg.date),
       message: msg.text,
-      externalId: msg.id, // WhatsApp message key.id for deduplication
-      ...(attributed && { sourceAccountId: accountId }),
+      externalId: whatsappExternalId(msg.id, accountId), // key.id dedup key
     })),
   };
 }
@@ -84,7 +97,7 @@ export async function parseWhatsAppData(
   userId: string,
   contacts: WhatsAppContactWithMessages[],
   jobId: string,
-  accountId = ''
+  scope?: WhatsAppAccountScope
 ): Promise<void> {
   let skippedContacts = 0;
   const sanitizedContacts = contacts.reduce<WhatsAppContactWithMessages[]>((acc, contact) => {
@@ -119,24 +132,40 @@ export async function parseWhatsAppData(
     });
   }
 
-  const integration = await prisma.integration.findUnique({
-    where: { userId_name_accountId: { userId, name: 'whatsapp', accountId } },
-  });
+  const integration =
+    scope === undefined
+      ? await prisma.integration.findUnique({
+          where: { userId_name_accountId: { userId, name: 'whatsapp', accountId: '' } },
+        })
+      : await prisma.integration.findFirst({ where: { id: scope.integrationId, userId } });
 
   if (!integration) {
+    if (scope !== undefined) throw new MessageAccountRemovedError();
     throw new Error('WhatsApp integration not found');
   }
 
   // Transform to shared format and call the manager
-  const contactsToUpsert = sanitizedContacts.map((c) => transformToContactToUpsert(c, accountId));
-  const result = await upsertPersonAndMessageRecords(userId, contactsToUpsert, jobId);
+  const contactsToUpsert = sanitizedContacts.map((c) =>
+    transformToContactToUpsert(c, scope?.accountId)
+  );
+  const result = await upsertPersonAndMessageRecords(
+    userId,
+    contactsToUpsert,
+    jobId,
+    undefined,
+    undefined,
+    scope === undefined
+      ? undefined
+      : { sourceAccountId: scope.accountId, integrationId: scope.integrationId }
+  );
 
   // Update Integration metadata
   const existingConfig =
     (integration.config as Prisma.JsonObject | null) || ({} as Prisma.JsonObject);
   const existingTotalMessages = Number(existingConfig.totalMessagesProcessed ?? 0);
   const existingBatches = Number(existingConfig.batchesReceived ?? 0);
-  await prisma.integration.update({
+  // `updateMany`: a no-op when the account was removed after this batch was stored.
+  await prisma.integration.updateMany({
     where: { id: integration.id },
     data: {
       config: {
@@ -145,6 +174,13 @@ export async function parseWhatsAppData(
         totalMessagesProcessed: existingTotalMessages + totalMessages,
         batchesReceived: existingBatches + 1,
       },
+      ...(scope !== undefined && {
+        status: 'CONNECTED',
+        isActive: true,
+        lastSyncAt: new Date(),
+        lastSuccessfulSyncAt: new Date(),
+        failureReason: null,
+      }),
     },
   });
 

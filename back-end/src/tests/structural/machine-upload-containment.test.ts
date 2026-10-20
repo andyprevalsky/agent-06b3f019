@@ -46,11 +46,12 @@ const MACHINE_DATA_ROUTES: Record<string, string[]> = {
     '/contacts/upload',
     '/email/upload',
     '/imessage/upload',
-    '/whatsapp/upload',
     '/telegram/upload',
     '/telegram/connect',
     '/passwords/apple/upload',
   ],
+  // One linked WhatsApp phone registering and uploading its history (I2).
+  'integrations/routes.whatsapp.ts': ['/whatsapp/upload', '/whatsapp/connect'],
   'integrations/routes.claude.ts': [
     '/claude-code/credentials/upload',
     '/gpt-code/credentials/upload',

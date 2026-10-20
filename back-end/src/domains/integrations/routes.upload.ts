@@ -13,7 +13,12 @@ import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { UPLOAD_LIMITS } from './config';
 import * as service from './service';
-import { InvalidAccountKeyError, toStorageAccountId } from './syncAccountsContract';
+import {
+  connectTelegramAccount,
+  telegramAccountIdSchema,
+  telegramConnectSchema,
+  uploadTelegramAccountBatch,
+} from './uploadService.telegram';
 
 const log = createLogger('Integrations');
 const router = Router({ mergeParams: true });
@@ -230,91 +235,54 @@ router.post(
 );
 
 /**
- * Optional WhatsApp `accountId` (the linked phone, plan row I2) as its storage
- * key: absent/'default' = the legacy single-account row. Throws on a bad id.
+ * POST /api/integrations/telegram/connect
+ * Body `{ accountId, label?, claimLegacy? }` connects ONE Telegram account
+ * (accountId = Telegram user id); an empty body is the legacy single account.
  */
-function whatsappAccountId(value: unknown): string {
-  if (value === undefined || value === null) return '';
-  if (typeof value !== 'string') throw new InvalidAccountKeyError('accountId must be a string');
-  return toStorageAccountId(value);
-}
-
-/** Parse the account fields of a WhatsApp body, answering 400 on a bad one. */
-function whatsappAccountOr400(
-  body: { accountId?: unknown } | undefined,
-  res: Response
-): string | null {
-  try {
-    return whatsappAccountId(body?.accountId);
-  } catch (error: unknown) {
-    if (!(error instanceof InvalidAccountKeyError)) throw error;
-    res.status(400).json({ error: error.message });
-    return null;
-  }
-}
-
-/** POST /api/integrations/whatsapp/upload  { contacts, accessedAt?, accountId? } */
-router.post(
-  '/whatsapp/upload',
-  authenticateMachineUpload,
-  asyncHandler(async (req: AuthRequest, res: Response) => {
-    const userId = req.user!.id;
-    const { contacts, accessedAt } = req.body;
-
-    if (!Array.isArray(contacts) || contacts.length === 0) {
-      return res.status(400).json({ error: 'contacts array is required' });
-    }
-    const accountId = whatsappAccountOr400(req.body, res);
-    if (accountId === null) return undefined;
-
-    const result = await service.processWhatsAppUpload(userId, contacts, accessedAt, accountId);
-    res.json({
-      message: 'WhatsApp payload received, processing in background',
-      integration: result.integration,
-      jobId: result.jobId,
-    });
-  })
-);
-
-/** POST /api/integrations/whatsapp/connect  { accountId?, label? } (body optional) */
-router.post(
-  '/whatsapp/connect',
-  authenticateMachineUpload,
-  asyncHandler(async (req: AuthRequest, res: Response) => {
-    const userId = req.user!.id;
-    const body = req.body as { accountId?: unknown; label?: unknown } | undefined;
-    const accountId = whatsappAccountOr400(body, res);
-    if (accountId === null) return undefined;
-    const label = typeof body?.label === 'string' && body.label.trim() !== '' ? body.label : null;
-    const integration = await service.processWhatsAppConnect(
-      userId,
-      accountId === '' ? undefined : { accountId, label }
-    );
-    res.json({ message: 'WhatsApp connected successfully', integration });
-  })
-);
-
-/** POST /api/integrations/telegram/connect */
 router.post(
   '/telegram/connect',
   authenticateMachineUpload,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;
-    const integration = await service.processTelegramConnect(userId);
+    const parsed = telegramConnectSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.errors[0]?.message ?? 'Invalid body' });
+    }
+    const { accountId } = parsed.data;
+    const integration =
+      accountId === undefined
+        ? await service.processTelegramConnect(userId)
+        : await connectTelegramAccount(userId, { ...parsed.data, accountId });
     res.json({ message: 'Telegram connected successfully', integration });
   })
 );
 
-/** POST /api/integrations/telegram/upload */
+/**
+ * POST /api/integrations/telegram/upload
+ * With `accountId` the batch belongs to that connected account (404 when it
+ * is not connected); without it, the legacy single account.
+ */
 router.post(
   '/telegram/upload',
   authenticateMachineUpload,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;
-    const { contacts, accessedAt } = req.body;
+    const { contacts, accessedAt, accountId } = req.body;
 
     if (!Array.isArray(contacts) || contacts.length === 0) {
       return res.status(400).json({ error: 'contacts array is required' });
+    }
+
+    if (accountId !== undefined) {
+      const parsedAccount = telegramAccountIdSchema.safeParse(accountId);
+      if (!parsedAccount.success) return res.status(400).json({ error: 'Invalid accountId' });
+      const at = typeof accessedAt === 'string' ? accessedAt : undefined;
+      const scoped = await uploadTelegramAccountBatch(userId, parsedAccount.data, contacts, at);
+      if (scoped === null) return res.status(404).json({ error: 'TELEGRAM_ACCOUNT_NOT_CONNECTED' });
+      return res.json({
+        message: 'Telegram payload received, processing in background',
+        ...scoped,
+      });
     }
 
     const result = await service.processTelegramUpload(userId, contacts, accessedAt);

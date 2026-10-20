@@ -12,7 +12,7 @@
 import { createLogger } from '../../providers/logger';
 import * as repo from './repo.progress';
 import { decideProgressWrite, type ProgressFields } from './service.progressRules';
-import { snapshotOf } from './service.accountsView';
+import { snapshotOf } from './service.progressSnapshot';
 import {
   assertProviderSlug,
   MAX_PROGRESS_ACCOUNTS_PER_USER,

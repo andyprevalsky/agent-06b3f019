@@ -22,6 +22,9 @@ import inviteCodesRouter from './domains/invite-codes/routes';
 import sendSmsRouter from './domains/send-sms/routes';
 import vapiRouter from './domains/vapi/routes';
 import { attachHoldStreamServer } from './domains/vapi/holdListenerService';
+import { HOLD_STREAM_PATH } from './domains/vapi/config';
+import localDevicesRouter from './domains/local-devices/routes';
+import { attachLocalDeviceServer } from './domains/local-devices/service';
 import voicesRouter from './domains/voices/routes';
 import browserSessionRouter from './domains/browser-session/routes';
 import peopleRouter from './domains/people/routes';
@@ -314,18 +317,8 @@ if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1') {
 }
 
 // Health check endpoint (no auth required)
-// An isolated black-box backend also names its run, so the runner's readiness
-// probe can tell its own backend from another worktree's on the same port.
-const BLACKBOX_INSTANCE = process.env.BLACKBOX_TEST_RUN_ID;
 app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    ...(BLACKBOX_INSTANCE !== undefined &&
-      BLACKBOX_INSTANCE !== '' && {
-        instance: BLACKBOX_INSTANCE,
-      }),
-  });
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
 // Deep health check — actually touches the DB so an EXTERNAL uptime monitor
@@ -552,6 +545,7 @@ app.use('/api/voices', voicesRouter); // public — exposes ElevenLabs preview M
 app.use('/api/browser-session', browserSessionRouter);
 app.use('/api/claude-code-session', codeSessionDirectChatRouter);
 app.use('/api/claude-code-session', claudeCodeRouter);
+app.use('/api/local-devices', localDevicesRouter);
 app.use('/api/codex-code-session', codexCodeRouter);
 app.use('/api/people', peopleRouter);
 app.use('/api/integrations', integrationsRouter);
@@ -684,6 +678,8 @@ const server = app.listen(PORT, () => {
 });
 // wait_for_human: Twilio streams parked calls' hold audio to this server.
 attachHoldStreamServer(server);
+// C14: Rose Mac app control channels and per-session local code relays.
+attachLocalDeviceServer(server, [HOLD_STREAM_PATH]);
 
 // Graceful shutdown
 const shutdown = async (signal: string) => {

@@ -91,4 +91,58 @@ if system_db_fallback_is_safe; then
   exit 1
 fi
 
+# ── System Postgres fallback: each workspace's own database, never `victoria` ──
+[[ "$(workspace_system_db_name "agent-a8eed88f04ecb85c0")" == "victoria_agent-a8eed88f04ecb85c0" ]] || {
+  echo "Expected victoria_<workspace> for a worktree hint" >&2
+  exit 1
+}
+for bad in "" "../x" "a b" "x;drop" "-lead" "$(printf 'x%.0s' {1..60})"; do
+  if workspace_system_db_name "$bad" >/dev/null; then
+    echo "Expected workspace hint '$bad' to be rejected" >&2
+    exit 1
+  fi
+done
+
+PSQL_CALLS=""
+DB_PRESENT=""
+psql() {
+  PSQL_CALLS+="$*"$'\n'
+  if [[ "$*" == *"SELECT 1 FROM pg_database"* ]]; then
+    [[ -n "$DB_PRESENT" ]] && echo 1
+    return 0
+  fi
+  if [[ "$*" == *"CREATE DATABASE"* ]]; then
+    DB_PRESENT=1
+    return 0
+  fi
+  return 1
+}
+ensure_workspace_system_db 5432 "victoria_agent-x" || {
+  echo "Expected a missing workspace database to be created" >&2
+  exit 1
+}
+[[ "$PSQL_CALLS" == *'CREATE DATABASE "victoria_agent-x"'* ]] || {
+  echo "Expected CREATE DATABASE for the workspace database, got: $PSQL_CALLS" >&2
+  exit 1
+}
+PSQL_CALLS=""
+ensure_workspace_system_db 5432 "victoria_agent-x" || exit 1
+[[ "$PSQL_CALLS" != *"CREATE DATABASE"* ]] || {
+  echo "Expected an existing workspace database to be reused" >&2
+  exit 1
+}
+if ensure_workspace_system_db 5432 "victoria"; then
+  echo "Expected the shared victoria database to be refused" >&2
+  exit 1
+fi
+unset -f psql
+
+# Both runners' system fallback must go through the workspace database.
+for runner in run-blackbox-tests.sh run-coverage.sh; do
+  grep -q 'workspace_system_db_name "$WORKSPACE_HINT"' "$SCRIPT_DIR/$runner" || {
+    echo "Expected $runner's system Postgres fallback to use workspace_system_db_name" >&2
+    exit 1
+  }
+done
+
 echo "Local DB container resolution tests passed"

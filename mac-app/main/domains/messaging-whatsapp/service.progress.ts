@@ -20,7 +20,12 @@ import {
   WHATSAPP_PROGRESS_RETRY_MS,
   WHATSAPP_PROGRESS_UNIT,
 } from './config';
-import type { WhatsAppProgressPoster, WhatsAppProgressWrite, WhatsAppSyncState } from './types';
+import type {
+  WhatsAppProgressPostResult,
+  WhatsAppProgressPoster,
+  WhatsAppProgressWrite,
+  WhatsAppSyncState,
+} from './types';
 
 type TerminalState = Exclude<WhatsAppSyncState, 'syncing'>;
 
@@ -36,6 +41,19 @@ interface Run {
 
 function newRunId(): string {
   return `wa-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+}
+
+/** Map one progress POST's HTTP status (and a 202's retryAfterMs) onto the next step. */
+export function toProgressPostResult(
+  status: number,
+  retryAfterMs: number | undefined
+): WhatsAppProgressPostResult {
+  if (status === 200) return { kind: 'applied' };
+  if (status === 202) {
+    return { kind: 'coalesced', retryAfterMs: retryAfterMs ?? WHATSAPP_PROGRESS_MIN_INTERVAL_MS };
+  }
+  if (status === 409) return { kind: 'stale' };
+  return { kind: 'failed' };
 }
 
 /** Clamp Baileys' percent into the contract's 0-100 range; null stays null. */

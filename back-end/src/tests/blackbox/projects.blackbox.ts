@@ -48,6 +48,7 @@ interface Project {
   startupTimeoutS: number;
   lifecycle: { autoWake: boolean };
   envFileCount: number;
+  githubConnected: boolean;
 }
 
 interface EnvFile {
@@ -131,6 +132,49 @@ test('create applies defaults; validation rejects bad settings', async () => {
   expectStatus(list, 200, 'list');
   const names = (list.data.projects as Project[]).map((p) => p.name).sort();
   assert(JSON.stringify(names) === JSON.stringify(['Defaults', 'Fresh']), `list ${names}`);
+});
+
+test('githubConnected reflects a GithubRepoAccess grant for the repo, per user', async () => {
+  const s = await anonymousSession();
+  const other = await anonymousSession();
+  const slug = `acme-${randomBytes(4).toString('hex')}`;
+  const granted = await createProject(s, {
+    name: 'Granted',
+    repoUrl: `https://github.com/${slug}/app.git`,
+  });
+  const ungranted = await createProject(s, {
+    name: 'Ungranted',
+    repoUrl: `https://github.com/${slug}/other`,
+  });
+  const noRepo = await createProject(s, { name: 'No repo' });
+  for (const p of [granted, ungranted, noRepo]) {
+    assert(p.githubConnected === false, 'no grant yet');
+  }
+  await prisma.githubRepoAccess.create({
+    data: { userId: s.userId, repoUrl: `https://github.com/${slug}/app` },
+  });
+  try {
+    const list = await call('/api/projects', { auth: s.token });
+    expectStatus(list, 200, 'list');
+    const flags = Object.fromEntries(
+      (list.data.projects as Project[]).map((p) => [p.name, p.githubConnected])
+    );
+    assert(
+      flags.Granted === true && flags.Ungranted === false && flags['No repo'] === false,
+      `list flags ${JSON.stringify(flags)}`
+    );
+    const one = await call(`/api/projects/${granted.id}`, { auth: s.token });
+    expectStatus(one, 200, 'get');
+    assert(one.data.githubConnected === true, 'detail reports the grant');
+
+    const theirs = await createProject(other, {
+      name: 'Same repo',
+      repoUrl: `https://github.com/${slug}/app`,
+    });
+    assert(theirs.githubConnected === false, "another user's grant never counts");
+  } finally {
+    await prisma.githubRepoAccess.deleteMany({ where: { userId: s.userId } });
+  }
 });
 
 test('owner scoping: another user cannot see or touch a project', async () => {

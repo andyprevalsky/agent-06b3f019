@@ -10,7 +10,7 @@
  */
 
 import { config } from '../../base/config';
-import { UPLOAD_ENDPOINTS, WHATSAPP_CONNECT_ENDPOINT, integrationProgressPath } from './config';
+import { UPLOAD_ENDPOINTS, WHATSAPP_CONNECT_ENDPOINT } from './config';
 import type { IMessageUploadPayload, UploadStrategy } from './types';
 
 /** Result of a single upload HTTP call — unwrapped for the service layer. */
@@ -31,14 +31,17 @@ function toResult(response: Response): UploadHttpResult {
   return { ok: response.ok, statusText: response.statusText };
 }
 
-/** POST a JSON `{ contacts, accessedAt, ...extra }` body to a contacts-upload endpoint. */
+/**
+ * POST a JSON `{ contacts, accessedAt }` body to a contacts-upload endpoint.
+ * `extra` adds fields such as the provider account a batch belongs to.
+ */
 async function postContactsJson(
   strategy: Extract<UploadStrategy, 'imessage' | 'whatsapp' | 'telegram'>,
   contacts: unknown,
   accessToken: string,
   extra: Record<string, string> = {}
 ): Promise<UploadHttpResult> {
-  const body = { contacts, accessedAt: new Date().toISOString(), ...extra };
+  const body = { ...extra, contacts, accessedAt: new Date().toISOString() };
   const response = await fetch(urlFor(strategy), {
     method: 'POST',
     headers: {
@@ -82,7 +85,7 @@ export function postWhatsAppContacts(
  */
 export async function postWhatsAppConnect(
   accessToken: string,
-  account: { accountId: string; label: string } | null = null
+  account: { accountId: string; label: string; claimLegacy?: boolean } | null = null
 ): Promise<UploadHttpResult> {
   const response = await fetch(`${config.apiUrl}${WHATSAPP_CONNECT_ENDPOINT}`, {
     method: 'POST',
@@ -95,42 +98,26 @@ export async function postWhatsAppConnect(
   return toResult(response);
 }
 
-/** Raw response of one per-account progress write. */
-export interface ProgressHttpResult {
-  status: number;
-  body: unknown;
+function isTelegramAccountBatch(data: unknown): data is { accountId: string; contacts: unknown } {
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) return false;
+  const batch = data as { accountId?: unknown; contacts?: unknown };
+  return typeof batch.accountId === 'string' && Array.isArray(batch.contacts);
 }
 
-/** POST /api/integrations/:provider/accounts/:accountId/progress */
-export async function postIntegrationProgress(
-  provider: string,
-  accountId: string,
-  body: unknown,
-  accessToken: string
-): Promise<ProgressHttpResult> {
-  const url = `${config.apiUrl}${integrationProgressPath(provider, accountId)}`;
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
-  let parsed: unknown = null;
-  try {
-    parsed = await response.json();
-  } catch {
-    parsed = null;
-  }
-  return { status: response.status, body: parsed };
-}
-
-/** POST a Telegram contacts blob to the dedicated endpoint. */
+/**
+ * POST a Telegram contacts blob to the dedicated endpoint. A
+ * `{ accountId, contacts }` batch belongs to that Telegram account; a bare
+ * contacts array is the legacy single-account upload.
+ */
 export function postTelegramContacts(
   contacts: unknown,
   accessToken: string
 ): Promise<UploadHttpResult> {
+  if (isTelegramAccountBatch(contacts)) {
+    return postContactsJson('telegram', contacts.contacts, accessToken, {
+      accountId: contacts.accountId,
+    });
+  }
   return postContactsJson('telegram', contacts, accessToken);
 }
 

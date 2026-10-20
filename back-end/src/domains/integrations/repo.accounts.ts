@@ -37,6 +37,12 @@ export interface UpsertIntegrationAccountParams {
   lastSyncAt?: Date;
   lastSuccessfulSyncAt?: Date;
   failureReason?: string | null;
+  /**
+   * Runs inside the claiming transaction, only when this call adopts the legacy
+   * row, so provider data stored under the legacy account moves atomically with
+   * it (Telegram re-attributes its unattributed messages).
+   */
+  adoptLegacyData?: (tx: Tx, accountId: string) => Promise<unknown>;
 }
 
 export async function findIntegrationAccount(userId: string, name: string, accountId: string) {
@@ -84,6 +90,8 @@ export async function upsertIntegrationAccount(params: UpsertIntegrationAccountP
     }),
     ...(params.failureReason !== undefined && { failureReason: params.failureReason }),
   };
+  // Room for a legacy-data adoption (indexed per-user UPDATEs) inside the claim.
+  const txOptions = params.adoptLegacyData === undefined ? undefined : { timeout: 30_000 };
   return runTransactionWithRetry(async (tx) => {
     await lockIntegrationName(tx, params.userId, params.name);
     const where = (id: string) => ({
@@ -96,6 +104,7 @@ export async function upsertIntegrationAccount(params: UpsertIntegrationAccountP
       params.legacy === 'claim' ? await tx.integration.findUnique({ where: where('') }) : null;
     if (legacy !== null) {
       await adoptLegacyProgress(tx, params.userId, params.name, accountId);
+      if (params.adoptLegacyData !== undefined) await params.adoptLegacyData(tx, accountId);
       return tx.integration.update({ where: { id: legacy.id }, data: { ...data, accountId } });
     }
     return tx.integration.create({
@@ -108,7 +117,7 @@ export async function upsertIntegrationAccount(params: UpsertIntegrationAccountP
         ...data,
       },
     });
-  });
+  }, txOptions);
 }
 
 /** Row fields an account chip is derived from (no secrets, no config). */
@@ -129,6 +138,39 @@ export interface EmailCredentialSource {
   email: string | null;
   state: string;
   lastErrorReason: string | null;
+}
+
+/**
+ * One synced browser profile: a (browserSource, browserProfile) pair that has
+ * at least one stored cookie. `browserProfile === ''` is the legacy
+ * pre-profile-detection snapshot (the `default` account).
+ */
+export interface CookieProfileSource {
+  browserSource: string;
+  browserProfile: string;
+  cookieCount: number;
+  lastSyncAt: Date | null;
+}
+
+/**
+ * Every synced browser profile of one user, one indexed group-by over the
+ * `Cookie` table (bounded by browser profiles, not cookie count; served by the
+ * `@@index([userId, browserSource, browserProfile])`). 10k rule: O(profiles),
+ * never O(agents) or O(cookies), and never fanned in across users.
+ */
+export async function listCookieProfileSources(userId: string): Promise<CookieProfileSource[]> {
+  const groups = await prisma.cookie.groupBy({
+    by: ['browserSource', 'browserProfile'],
+    where: { userId },
+    _count: { _all: true },
+    _max: { syncedAt: true },
+  });
+  return groups.map((group) => ({
+    browserSource: group.browserSource,
+    browserProfile: group.browserProfile,
+    cookieCount: group._count._all,
+    lastSyncAt: group._max.syncedAt ?? null,
+  }));
 }
 
 export interface PlaidItemSource {
