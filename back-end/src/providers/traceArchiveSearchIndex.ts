@@ -181,18 +181,8 @@ export class ArchivedTraceNotFoundError extends Error {
   }
 }
 
-async function replaceArchivedRows(
-  rootAgentId: string,
-  rows: ArchivedTrajectoryRow[]
-): Promise<void> {
-  await runTransactionWithRetry(
-    async (tx) => {
-      await tx.agentTrajectorySearch.deleteMany({
-        where: { rootAgentId, archivePath: { not: null } },
-      });
-      for (let start = 0; start < rows.length; start += WRITE_BATCH_SIZE) {
-        const batch = rows.slice(start, start + WRITE_BATCH_SIZE);
-        await tx.$executeRaw(Prisma.sql`
+function upsertRowsSql(batch: ArchivedTrajectoryRow[]): Prisma.Sql {
+  return Prisma.sql`
       INSERT INTO "AgentTrajectorySearch" (
         "messageId", "userId", "rootAgentId", "agentId", surface, role,
         "createdAt", "searchText", "agentGoal", "agentTitle", "archivePath", "traceKind"
@@ -219,11 +209,33 @@ async function replaceArchivedRows(
         "traceKind" = EXCLUDED."traceKind"
       WHERE "AgentTrajectorySearch"."userId" = EXCLUDED."userId"
         AND "AgentTrajectorySearch"."rootAgentId" = EXCLUDED."rootAgentId"
-      `);
+      `;
+}
+
+async function replaceArchivedRows(
+  rootAgentId: string,
+  rows: ArchivedTrajectoryRow[]
+): Promise<void> {
+  await runTransactionWithRetry(
+    async (tx) => {
+      // code_event rows come from code-session checkpoints, not this bundle;
+      // a finalize must not erase them.
+      await tx.agentTrajectorySearch.deleteMany({
+        where: { rootAgentId, archivePath: { not: null }, traceKind: { not: 'code_event' } },
+      });
+      for (let start = 0; start < rows.length; start += WRITE_BATCH_SIZE) {
+        await tx.$executeRaw(upsertRowsSql(rows.slice(start, start + WRITE_BATCH_SIZE)));
       }
     },
     { timeout: 60_000 }
   );
+}
+
+/** Idempotent upsert of derived rows (e.g. code-session code_event rows). */
+export async function upsertTrajectoryRows(rows: ArchivedTrajectoryRow[]): Promise<void> {
+  for (let start = 0; start < rows.length; start += WRITE_BATCH_SIZE) {
+    await prisma.$executeRaw(upsertRowsSql(rows.slice(start, start + WRITE_BATCH_SIZE)));
+  }
 }
 
 /** Index one finalized bundle. Grep then reads PostgreSQL, never scans R2. */

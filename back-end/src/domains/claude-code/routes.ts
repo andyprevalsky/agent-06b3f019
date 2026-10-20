@@ -2,7 +2,11 @@
  * Claude Code session routes -- thin controller layer.
  *
  * POST /api/claude-code-session/create   - Create a new E2B sandbox session
- * POST /api/claude-code-session/close    - Close a session (kill sandbox)
+ * POST /api/claude-code-session/close    - Close a session (checkpoint + pause a persistent
+ *                                          code session's sandbox; kill legacy sessions)
+ * POST /api/claude-code-session/checkpoint - Checkpoint a running task's code session
+ * GET  /api/claude-code-session/code-sessions/:id    - Owned code session (404 otherwise)
+ * DELETE /api/claude-code-session/code-sessions/:id - Retire it (kill + delete checkpoints)
  * GET  /api/claude-code-session/:taskId  - Get session info
  * GET  /api/claude-code-session/agent/:agentId - Get all sessions for an agent
  * POST /api/claude-code-session/:taskId/output - Persist terminal output
@@ -16,10 +20,13 @@ import { asyncHandler } from '../../utils/asyncHandler';
 import { createSessionSchema, closeSessionSchema } from './types';
 import type { FilePointer } from '../../providers/storage';
 import * as service from './service';
+import { registerCodeSessionRoutes, sendCodeSessionError } from './codeSessionRoutes';
 import { AgentOwnerMismatchError, MissingUserIdError, GitHubAccessDeniedError } from './service';
 
 const log = createLogger('ClaudeCodeRoutes');
 const router = Router();
+
+registerCodeSessionRoutes(router);
 
 /**
  * POST /api/claude-code-session/create
@@ -32,9 +39,8 @@ router.post(
   authenticate,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
-      const { agent_id, goal, attachments, github_repo_url, user_id } = createSessionSchema.parse(
-        req.body
-      );
+      const { agent_id, goal, attachments, github_repo_url, user_id, code_session_id, lease_owner } =
+        createSessionSchema.parse(req.body);
 
       const result = await service.createSession({
         agent_id,
@@ -42,6 +48,8 @@ router.post(
         attachments: attachments as FilePointer[] | undefined,
         github_repo_url,
         user_id,
+        code_session_id,
+        lease_owner,
       });
 
       res.json({
@@ -70,6 +78,7 @@ router.post(
         });
         return;
       }
+      if (sendCodeSessionError(res, error)) return;
       log.error('Failed to create Claude Code session', {
         error: error instanceof Error ? error.message : String(error),
       });
@@ -89,9 +98,17 @@ router.post(
   authenticate,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
-      const { task_id, user_id, agent_id, additional_paths } = closeSessionSchema.parse(req.body);
+      const { task_id, user_id, agent_id, additional_paths, reason } = closeSessionSchema.parse(
+        req.body
+      );
 
-      const result = await service.closeSession({ task_id, user_id, agent_id, additional_paths });
+      const result = await service.closeSession({
+        task_id,
+        user_id,
+        agent_id,
+        additional_paths,
+        reason,
+      });
 
       res.json({
         success: true,

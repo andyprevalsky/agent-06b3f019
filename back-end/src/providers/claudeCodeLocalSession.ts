@@ -16,7 +16,6 @@
  * outputs and terminate a surviving server after a backend restart.
  */
 import { type ChildProcess, spawn } from 'child_process';
-import { createServer } from 'net';
 import {
   existsSync,
   mkdirSync,
@@ -33,8 +32,10 @@ import { MAX_FILE_SIZE, type FilePointer, downloadFromStorage, uploadToStorage }
 import { randomUUID } from './crypto';
 import { isMissingLocalFileError, readRegularFileNoFollow } from './claudeCodeLocalFileRead';
 import { isFilePointer } from './claudeCodeLocalOwnership';
+import { allocatePort, waitForChildReadiness } from './claudeCodeLocalProcess';
 import { isSandboxCreateTimeoutOrAbortError } from './e2bSandboxCreate';
 import { materializeUserUiInLocalHome, type UserUiWorkspace } from './userUi/workspace';
+import { localCodeSessionRoot } from './codeSessions/lifecycle';
 
 const log = createLogger('ClaudeCodeLocal');
 
@@ -70,6 +71,11 @@ type LocalSessionOwnership = {
   workDir: string;
   port: number;
   pid: number | null;
+  /**
+   * Session HOME when it outlives the task (persistent code session); outputs
+   * are read from here. Absent for legacy sessions, whose HOME is workDir.
+   */
+  homeDir?: string;
   /** Durable per-file upload progress; objectId makes retries storage-idempotent. */
   outputCandidates?: LocalOutputCandidate[];
   /** Persisted before the DB close so retries never upload the same files twice. */
@@ -119,6 +125,7 @@ function writeOwnership(ownership: LocalSessionOwnership): void {
       workDir: ownership.workDir,
       port: ownership.port,
       pid: ownership.pid,
+      homeDir: ownership.homeDir,
       outputCandidates: ownership.outputCandidates,
       outputFiles: ownership.outputFiles,
     };
@@ -169,15 +176,22 @@ function readOwnership(taskId: string): LocalSessionOwnership | null {
     ) {
       return null;
     }
+    const homeDir =
+      typeof parsed.homeDir === 'string' && isPersistentLocalHome(parsed.homeDir)
+        ? parsed.homeDir
+        : undefined;
+    if (parsed.homeDir !== undefined && homeDir === undefined) return null;
+    const home = homeDir ?? workDir;
     return {
       taskId: parsed.taskId,
       sandboxId: parsed.sandboxId,
       workDir: parsed.workDir,
       port: parsed.port,
       pid: typeof parsed.pid === 'number' ? parsed.pid : null,
+      homeDir,
       outputCandidates:
         Array.isArray(parsed.outputCandidates) &&
-        parsed.outputCandidates.every((candidate) => isOutputCandidate(candidate, workDir))
+        parsed.outputCandidates.every((candidate) => isOutputCandidate(candidate, home))
           ? parsed.outputCandidates
           : undefined,
       outputFiles:
@@ -214,6 +228,12 @@ function buildLocalChildEnv(
   }
   Object.assign(childEnv, envs, extras);
   return childEnv;
+}
+
+/** Persistent code-session HOMEs live under one owned root. */
+function isPersistentLocalHome(path: string): boolean {
+  const root = localCodeSessionRoot();
+  return resolve(path).startsWith(`${root}${sep}`);
 }
 
 function isPathInsideWorkDir(workDir: string, candidate: string): boolean {
@@ -265,14 +285,18 @@ export function shouldAllowLocalClaudeCodeFallback(): boolean {
   return !process.env.FLY_APP_NAME;
 }
 
+/** Local fallback applies only to E2B billing blocks and create timeouts. */
+export function isLocalClaudeCodeFallbackEligible(err: unknown): boolean {
+  if (!shouldAllowLocalClaudeCodeFallback()) return false;
+  return isE2bTeamBillingBlockError(err) || isSandboxCreateTimeoutOrAbortError(err);
+}
+
 export async function createLocalClaudeCodeSessionIfBillingBlocked(
   err: unknown,
   params: Parameters<typeof createLocalClaudeCodeSession>[0]
 ): Promise<Awaited<ReturnType<typeof createLocalClaudeCodeSession>> | null> {
-  if (!shouldAllowLocalClaudeCodeFallback()) return null;
+  if (!isLocalClaudeCodeFallbackEligible(err)) return null;
   const billing = isE2bTeamBillingBlockError(err);
-  const timedOut = isSandboxCreateTimeoutOrAbortError(err);
-  if (!billing && !timedOut) return null;
   log.warn(
     billing
       ? `E2B team billing blocked sandbox create; falling back to local Claude Code for agent ${params.agentId}`
@@ -300,72 +324,6 @@ function findWsServerPath(): string {
   throw new Error(`Claude Code ws-server.mjs not found (tried ${candidates.join(', ')})`);
 }
 
-async function allocatePort(): Promise<number> {
-  return await new Promise((resolvePort, reject) => {
-    const server = createServer();
-    server.listen(0, '127.0.0.1', () => {
-      const addr = server.address();
-      if (!addr || typeof addr === 'string') {
-        server.close();
-        reject(new Error('Failed to allocate local port'));
-        return;
-      }
-      const { port } = addr;
-      server.close((err) => {
-        if (err) reject(err);
-        else resolvePort(port);
-      });
-    });
-    server.on('error', reject);
-  });
-}
-
-async function waitForChildReadiness(
-  child: ChildProcess,
-  port: number,
-  readinessToken: string,
-  timeoutMs: number
-): Promise<boolean> {
-  return await new Promise((resolveReady) => {
-    let settled = false;
-    let stdout = '';
-    const finish = (ready: boolean) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      child.stdout?.off('data', onData);
-      child.off('error', onFailure);
-      child.off('exit', onFailure);
-      resolveReady(ready);
-    };
-    const onFailure = () => finish(false);
-    const onData = (chunk: Buffer) => {
-      stdout += chunk.toString('utf8');
-      const lines = stdout.split('\n');
-      stdout = lines.pop() ?? '';
-      for (const line of lines) {
-        try {
-          const event = JSON.parse(line) as Record<string, unknown>;
-          if (
-            event.message === 'Server listening' &&
-            event.port === port &&
-            event.readinessToken === readinessToken
-          ) {
-            finish(true);
-            return;
-          }
-        } catch {
-          // Only the authenticated JSON readiness record can satisfy startup.
-        }
-      }
-    };
-    const timer = setTimeout(() => finish(false), timeoutMs);
-    child.stdout?.on('data', onData);
-    child.once('error', onFailure);
-    child.once('exit', onFailure);
-  });
-}
-
 export function resolveLocalAttachmentPath(workDir: string, filename: string): string {
   const attachmentDir = resolve(workDir, 'attachments');
   const target = resolve(attachmentDir, filename);
@@ -382,7 +340,8 @@ async function extractLocalFiles(
 ): Promise<FilePointer[]> {
   if (!userId) return [];
 
-  const { workDir } = ownership;
+  // Persistent sessions keep outputs in their long-lived HOME.
+  const workDir = ownership.homeDir ?? ownership.workDir;
   const byFilename = new Map(
     (ownership.outputCandidates ?? []).map((candidate) => [candidate.filename, candidate])
   );
@@ -476,6 +435,11 @@ async function extractLocalFiles(
 
 export async function createLocalClaudeCodeSession(params: {
   taskId: string;
+  /**
+   * Persistent code-session HOME (survives close; resume reuses it). Defaults
+   * to the per-task directory, which is the legacy ephemeral behavior.
+   */
+  homeDir?: string;
   agentId: string;
   goal: string;
   envs: Record<string, string>;
@@ -492,7 +456,13 @@ export async function createLocalClaudeCodeSession(params: {
 }> {
   const { taskId, agentId, goal, envs } = params;
   const sandboxId = `${LOCAL_SANDBOX_PREFIX}${taskId}`;
-  const workDir = resolveLocalSessionWorkDir(taskId);
+  const taskDir = resolveLocalSessionWorkDir(taskId);
+  if (params.homeDir !== undefined && !isPersistentLocalHome(params.homeDir)) {
+    throw new Error(`Local code-session HOME outside its root: ${params.homeDir}`);
+  }
+  const persistentHome = params.homeDir !== undefined;
+  const workDir = params.homeDir ?? taskDir;
+  mkdirSync(taskDir, { recursive: true });
   mkdirSync(join(workDir, 'attachments'), { recursive: true });
   mkdirSync(join(workDir, 'output'), { recursive: true });
   mkdirSync(join(workDir, '.claude'), { recursive: true });
@@ -563,9 +533,10 @@ export async function createLocalClaudeCodeSession(params: {
   const ownership: LocalSessionOwnership = {
     taskId,
     sandboxId,
-    workDir,
+    workDir: taskDir,
     port,
     pid: child.pid ?? null,
+    ...(persistentHome ? { homeDir: workDir } : {}),
   };
 
   try {
@@ -590,7 +561,8 @@ export async function createLocalClaudeCodeSession(params: {
       // already dead
     }
     try {
-      rmSync(workDir, { recursive: true, force: true });
+      // A persistent HOME holds earlier sessions' work; only the task dir goes.
+      rmSync(taskDir, { recursive: true, force: true });
     } catch {
       // best-effort
     }
@@ -616,9 +588,9 @@ export async function createLocalClaudeCodeSession(params: {
         );
       }
     }
-    clearOwnership(workDir);
+    clearOwnership(taskDir);
     try {
-      rmSync(workDir, { recursive: true, force: true });
+      rmSync(taskDir, { recursive: true, force: true });
     } catch (cleanupError) {
       // Rollback cleanup is best-effort. Never mask the ownership persistence
       // failure that made this session unusable in the first place.

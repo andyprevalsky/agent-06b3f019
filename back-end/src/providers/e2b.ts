@@ -29,7 +29,14 @@ import {
   overlayClaudeCodeWsServer,
   overlayCodexCodeWsServer,
 } from './e2bWsServerOverlay';
-import { createLocalClaudeCodeSessionIfBillingBlocked } from './claudeCodeLocalSession';
+import {
+  acquireCodeSessionSandbox,
+  type CodeAgentSessionResult,
+  codeSessionCreateOptions,
+  createLocalCodeSessionFallback,
+  releaseSandboxAfterFailedStart,
+} from './e2bCodeSessionSandbox';
+import { recordSandbox, type CodeSessionRow } from './codeSessions/store';
 import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
 import {
   applyUserUiSandboxEnvs,
@@ -49,6 +56,7 @@ import {
   shouldSkipSandboxAnthropicGatewayForOauth,
 } from './claudeCodeSandboxAuth';
 export { createSandboxWithRetry, isTransientSandboxCreateError } from './e2bSandboxCreate';
+export type { CodeAgentSessionResult } from './e2bCodeSessionSandbox';
 export {
   closeClaudeCodeSession,
   connectToSandbox,
@@ -109,13 +117,9 @@ export async function createClaudeCodeSession(
   attachments?: FilePointer[],
   githubRepoUrl?: string,
   userId?: string,
-  fastModeCacheEnabled?: boolean
-): Promise<{
-  wsUrl: string;
-  taskId: string;
-  sandboxId: string;
-  uploadedFiles: string[];
-}> {
+  fastModeCacheEnabled?: boolean,
+  codeSession?: CodeSessionRow | null
+): Promise<CodeAgentSessionResult> {
   // Serialize creates — concurrent reserve-script calls stampede E2B redis.
   return withClaudeCodeCreateSlot(() =>
     createClaudeCodeSessionUnlocked(
@@ -124,7 +128,8 @@ export async function createClaudeCodeSession(
       attachments,
       githubRepoUrl,
       userId,
-      fastModeCacheEnabled
+      fastModeCacheEnabled,
+      codeSession ?? null
     )
   );
 }
@@ -132,16 +137,12 @@ export async function createClaudeCodeSession(
 async function createClaudeCodeSessionUnlocked(
   agentId: string,
   goal: string,
-  attachments?: FilePointer[],
-  githubRepoUrl?: string,
-  userId?: string,
-  fastModeCacheEnabled?: boolean
-): Promise<{
-  wsUrl: string;
-  taskId: string;
-  sandboxId: string;
-  uploadedFiles: string[];
-}> {
+  attachments: FilePointer[] | undefined,
+  githubRepoUrl: string | undefined,
+  userId: string | undefined,
+  fastModeCacheEnabled: boolean | undefined,
+  codeSession: CodeSessionRow | null
+): Promise<CodeAgentSessionResult> {
   log.info(`Creating Claude Code session for agent ${agentId}`);
 
   if (!process.env.E2B_API_KEY || !process.env.E2B_CLAUDE_CODE_TEMPLATE_ID) {
@@ -340,19 +341,23 @@ async function createClaudeCodeSessionUnlocked(
   // Create sandbox first (before DB record) to avoid placeholder conflicts.
   // When E2B team billing blocks creates, fall back to a same-host local
   // Claude Code ws-server so code-agent benches can still make progress.
-  let sandbox;
+  const templateIdForCreate = process.env.E2B_CLAUDE_CODE_TEMPLATE_ID;
+  let acquired;
   try {
-    sandbox = await createSandboxWithRetry(
-      process.env.E2B_CLAUDE_CODE_TEMPLATE_ID,
-      {
-        apiKey: process.env.E2B_API_KEY,
-        timeoutMs: SANDBOX_TIMEOUT_MS,
-        envs,
-      },
-      'Claude Code'
+    acquired = await acquireCodeSessionSandbox(codeSession, () =>
+      createSandboxWithRetry(
+        templateIdForCreate,
+        {
+          apiKey: process.env.E2B_API_KEY,
+          timeoutMs: SANDBOX_TIMEOUT_MS,
+          envs,
+          ...codeSessionCreateOptions(codeSession),
+        },
+        'Claude Code'
+      )
     );
   } catch (err) {
-    const local = await createLocalClaudeCodeSessionIfBillingBlocked(err, {
+    const local = await createLocalCodeSessionFallback(err, codeSession, {
       taskId,
       agentId,
       goal,
@@ -366,8 +371,10 @@ async function createClaudeCodeSessionUnlocked(
     if (local) return local;
     throw err;
   }
+  const { sandbox, resumedFrom, cliSessionId } = acquired;
+  if (cliSessionId !== null) envs.CLAUDE_CODE_RESUME_SESSION_ID = cliSessionId;
 
-  log.info(`Created sandbox: ${sandbox.sandboxId}`);
+  log.info(`Using sandbox: ${sandbox.sandboxId} (${resumedFrom})`);
   await overlayClaudeCodeWsServer(sandbox);
   await writeUserUiWorkspaceToSandboxSafe(sandbox, userUiWorkspace, agentId);
 
@@ -379,10 +386,13 @@ async function createClaudeCodeSessionUnlocked(
 
   // Start the WebSocket server (runs Claude Code internally)
   // timeoutMs: 0 = no timeout (default is 60s which was killing the process!)
+  // envs: a resumed sandbox keeps its creation-time env; this spawn's goal,
+  // credentials and resume id must reach the new ws-server explicitly.
   sandbox.commands
     .run('node /home/user/ws-server.mjs', {
       background: true,
       timeoutMs: 0,
+      envs,
     })
     .catch((err) =>
       log.error('Failed to start WS server', {
@@ -417,7 +427,7 @@ async function createClaudeCodeSessionUnlocked(
   const totalElapsed = Date.now() - startTime;
   if (!wsReady) {
     log.warn(`WebSocket server readiness check timed out after ${totalElapsed}ms`);
-    await sandbox.kill();
+    await releaseSandboxAfterFailedStart(sandbox, codeSession);
     throw new Error('Claude Code WebSocket server failed to become ready');
   }
 
@@ -433,8 +443,12 @@ async function createClaudeCodeSessionUnlocked(
       claudeTokenSource,
       claudeTokenIntegrationId:
         credentialMeta?.source === 'pool' ? (credentialMeta.poolTokenId ?? null) : null,
+      codeSessionId: codeSession?.id ?? null,
     },
   });
+  if (codeSession !== null) {
+    await recordSandbox(codeSession.id, { sandboxKind: 'e2b', sandboxId: sandbox.sandboxId });
+  }
 
   log.info(`Session ready: ${taskId}, WS: ${wsUrl}`);
 
@@ -443,6 +457,8 @@ async function createClaudeCodeSessionUnlocked(
     taskId,
     sandboxId: sandbox.sandboxId,
     uploadedFiles,
+    resumedFrom,
+    cliSessionId,
   };
 }
 
@@ -457,8 +473,9 @@ export async function createCodexCodeSession(
     harnessMode?: 'code' | 'rose';
     roseApiBaseUrl?: string;
     memoryEnabled?: boolean;
-  }
-): Promise<{ wsUrl: string; taskId: string; sandboxId: string; uploadedFiles: string[] }> {
+  },
+  codeSession: CodeSessionRow | null = null
+): Promise<CodeAgentSessionResult> {
   log.info(`Creating Codex Code session for agent ${agentId}`);
 
   if (!process.env.E2B_API_KEY) {
@@ -587,17 +604,23 @@ export async function createCodexCodeSession(
   const userUiWorkspace = await prepareUserUiWorkspaceSafe(userId);
   applyUserUiSandboxEnvs(envs, userUiWorkspace);
 
-  const sandbox = await createSandboxWithRetry(
-    templateId,
-    {
-      apiKey: process.env.E2B_API_KEY,
-      timeoutMs: SANDBOX_TIMEOUT_MS,
-      envs,
-    },
-    'Codex Code'
+  const { sandbox, resumedFrom, cliSessionId } = await acquireCodeSessionSandbox(
+    codeSession,
+    () =>
+      createSandboxWithRetry(
+        templateId,
+        {
+          apiKey: process.env.E2B_API_KEY,
+          timeoutMs: SANDBOX_TIMEOUT_MS,
+          envs,
+          ...codeSessionCreateOptions(codeSession),
+        },
+        'Codex Code'
+      )
   );
+  if (cliSessionId !== null) envs.CODEX_RESUME_SESSION_ID = cliSessionId;
 
-  log.info(`Created Codex sandbox: ${sandbox.sandboxId}`);
+  log.info(`Using Codex sandbox: ${sandbox.sandboxId} (${resumedFrom})`);
   await overlayCodexCodeWsServer(sandbox);
   if (harnessMode === 'rose') {
     await overlayCodexRoseBridge(sandbox);
@@ -613,6 +636,7 @@ export async function createCodexCodeSession(
     .run('node /home/user/ws-server.mjs', {
       background: true,
       timeoutMs: 0,
+      envs,
     })
     .catch((err) =>
       log.error('Failed to start Codex WS server', {
@@ -642,7 +666,7 @@ export async function createCodexCodeSession(
 
   if (!wsReady) {
     log.warn(`Codex WebSocket server readiness check timed out after ${Date.now() - startTime}ms`);
-    await sandbox.kill();
+    await releaseSandboxAfterFailedStart(sandbox, codeSession);
     throw new Error('Codex WebSocket server failed to become ready');
   }
 
@@ -657,8 +681,12 @@ export async function createCodexCodeSession(
       claudeTokenSource: credentialMeta?.source ?? null,
       claudeTokenIntegrationId:
         credentialMeta?.integrationId ?? credentialMeta?.poolTokenId ?? null,
+      codeSessionId: codeSession?.id ?? null,
     },
   });
+  if (codeSession !== null) {
+    await recordSandbox(codeSession.id, { sandboxKind: 'e2b', sandboxId: sandbox.sandboxId });
+  }
 
   log.info(`Codex session ready: ${taskId}, WS: ${wsUrl}`);
 
@@ -667,5 +695,7 @@ export async function createCodexCodeSession(
     taskId,
     sandboxId: sandbox.sandboxId,
     uploadedFiles,
+    resumedFrom,
+    cliSessionId,
   };
 }

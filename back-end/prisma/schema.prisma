@@ -581,7 +581,9 @@ model BrowserSession {
 model ClaudeCodeSession {
   id                       String                  @id @default(uuid())
   agentId                  String
-  sandboxId                String                  @unique
+  // Not unique: a persistent CodeSession resumes the same paused sandbox for
+  // every spawn, so several ClaudeCodeSession rows can share one sandbox.
+  sandboxId                String
   streamUrl                String?
   goal                     String
   status                   ClaudeCodeSessionStatus @default(ACTIVE)
@@ -593,10 +595,48 @@ model ClaudeCodeSession {
   // rate-limited if the CLI output reports "You've hit your limit · resets X:XX (UTC)".
   claudeTokenSource        String?
   claudeTokenIntegrationId String?
+  /// Persistent code session this spawn attached to (null for legacy rows).
+  codeSessionId            String?
 
   @@index([agentId])
   @@index([sandboxId])
   @@index([status])
+  @@index([codeSessionId])
+}
+
+/// Persistent code-agent workspace scoped to (userId, rootAgentId, repoKey).
+/// Every spawn_code_agent call in a root tree resumes its latest session for
+/// the same repo: a paused sandbox when it survived, otherwise the latest
+/// verified checkpoint stored under user/<userId>/code-sessions/<id>/<seq>/.
+model CodeSession {
+  id                  String    @id @default(uuid())
+  userId              String
+  rootAgentId         String
+  repoUrl             String?
+  /// repoUrl ?? '' so the scope lookup is one indexed equality.
+  repoKey             String    @default("")
+  codeProvider        String    @default("claude")
+  /// ACTIVE (leased by a spawn) | PAUSED | RETIRED
+  state               String    @default("ACTIVE")
+  /// 'e2b' | 'local'
+  sandboxKind         String?
+  sandboxId           String?
+  /// Local fallback only: the persistent session HOME on the backend host.
+  homeDir             String?
+  cliSessionId        String?
+  /// Stable per tool call (Temporal retries of one spawn share it).
+  leaseOwner          String?
+  leaseExpiresAt      DateTime?
+  latestCheckpointSeq Int       @default(0)
+  nextCheckpointSeq   Int       @default(0)
+  lastRepoFacts       Json?
+  lastActiveAt        DateTime  @default(now())
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  retiredAt           DateTime?
+
+  @@index([userId, rootAgentId, repoKey, lastActiveAt(sort: Desc)])
+  @@index([userId, state, lastActiveAt])
 }
 
 model GithubRepoAccess {

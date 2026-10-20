@@ -5,6 +5,7 @@ import { asyncHandler } from '../../utils/asyncHandler';
 import type { FilePointer } from '../../providers/storage';
 import { createSessionSchema, closeSessionSchema } from './types';
 import * as service from './service';
+import { sendCodeSessionError } from '../claude-code/codeSessionRoutes';
 import { GitHubAccessDeniedError, MissingUserIdError } from './service';
 
 const log = createLogger('CodexCodeRoutes');
@@ -25,6 +26,8 @@ router.post(
         memory_enabled,
         harness_mode,
         rose_api_base_url,
+        code_session_id,
+        lease_owner,
       } = createSessionSchema.parse(req.body);
 
       const result = await service.createSession({
@@ -37,6 +40,8 @@ router.post(
         memory_enabled,
         harness_mode,
         rose_api_base_url,
+        code_session_id,
+        lease_owner,
       });
 
       res.json({ success: true, ...result });
@@ -49,6 +54,7 @@ router.post(
         res.status(403).json({ error: error.detail, code: 'GITHUB_ACCESS_DENIED' });
         return;
       }
+      if (sendCodeSessionError(res, error)) return;
       log.error('Failed to create Codex Code session', {
         error: error instanceof Error ? error.message : String(error),
       });
@@ -64,8 +70,16 @@ router.post(
   authenticate,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
-      const { task_id, user_id, agent_id, additional_paths } = closeSessionSchema.parse(req.body);
-      const result = await service.closeSession({ task_id, user_id, agent_id, additional_paths });
+      const { task_id, user_id, agent_id, additional_paths, reason } = closeSessionSchema.parse(
+        req.body
+      );
+      const result = await service.closeSession({
+        task_id,
+        user_id,
+        agent_id,
+        additional_paths,
+        reason,
+      });
       res.json({ success: true, ...result });
     } catch (error) {
       log.error('Failed to close Codex Code session', {

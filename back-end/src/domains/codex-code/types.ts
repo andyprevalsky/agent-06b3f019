@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { FilePointer } from '../../providers/storage';
 
 export const createSessionSchema = z.object({
   agent_id: z.string().uuid(),
@@ -10,6 +11,8 @@ export const createSessionSchema = z.object({
   memory_enabled: z.boolean().optional(),
   harness_mode: z.enum(['code', 'rose']).optional(),
   rose_api_base_url: z.string().url().optional(),
+  code_session_id: z.string().uuid().optional(),
+  lease_owner: z.string().min(1).max(200).optional(),
 });
 
 export const closeSessionSchema = z.object({
@@ -17,4 +20,27 @@ export const closeSessionSchema = z.object({
   user_id: z.string().uuid().optional(),
   agent_id: z.string().uuid().optional(),
   additional_paths: z.array(z.string()).optional(),
+  reason: z.string().min(1).max(64).optional(),
 });
+
+export interface CreateSessionParams {
+  agent_id: string;
+  goal: string;
+  attachments?: FilePointer[];
+  github_repo_url?: string;
+  user_id: string;
+  fast_mode_cache_enabled?: boolean;
+  memory_enabled?: boolean;
+  harness_mode?: 'code' | 'rose';
+  rose_api_base_url?: string;
+  code_session_id?: string;
+  lease_owner?: string;
+}
+
+export interface CloseSessionParams {
+  task_id: string;
+  user_id?: string;
+  agent_id?: string;
+  additional_paths?: string[];
+  reason?: string;
+}

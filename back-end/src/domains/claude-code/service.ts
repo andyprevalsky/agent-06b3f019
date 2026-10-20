@@ -8,7 +8,6 @@ import {
   closeClaudeCodeSession,
   getClaudeCodeSession,
 } from '../../providers/e2b';
-import type { FilePointer } from '../../providers/storage';
 import { checkGithubRepoAccess } from '../../providers/github';
 import { createLogger } from '../../providers/logger';
 import {
@@ -17,6 +16,7 @@ import {
 } from '../../providers/claudeCredentials';
 import { markAnthropicApiKeyOnCooldown } from '../../providers/computeCredentials';
 import { syncConnectionAfterIntegrationAuthFailure } from '../../providers/integrationConnectionSync';
+import { createWithCodeSession } from '../../providers/codeSessions/spawn';
 
 export type { HealthCheckResult } from './health';
 export { checkSandboxHealth } from './health';
@@ -59,21 +59,8 @@ export class AgentContextLookupError extends Error {
 // Create session
 // ---------------------------------------------------------------------------
 
-export interface CreateSessionParams {
-  agent_id: string;
-  goal: string;
-  attachments?: FilePointer[];
-  github_repo_url?: string;
-  user_id?: string;
-}
-
-export interface CreateSessionResult {
-  task_id: string;
-  sandbox_id: string;
-  ws_url: string;
-  uploaded_files: string[];
-  github_repo_url: string | null;
-}
+export type { CreateSessionParams, CreateSessionResult } from './types';
+import type { CloseSessionParams, CreateSessionParams, CreateSessionResult } from './types';
 
 /** Resolve the owning user and optional GitHub repo from the agent tree. */
 export async function resolveAgentContext(
@@ -169,13 +156,25 @@ export async function createSession(params: CreateSessionParams): Promise<Create
   // Code-agent Anthropic/Codex proxy is DEMO cache replay — not the Fast Mode button.
   const fastModeCacheEnabled = fastMode.enabled;
 
-  const session = await createClaudeCodeSession(
-    agent_id,
-    goal,
-    attachments,
-    normalizedRepoUrl,
-    effectiveUserId,
-    fastModeCacheEnabled
+  const { session, fields } = await createWithCodeSession(
+    {
+      agentId: agent_id,
+      userId: effectiveUserId,
+      repoUrl: normalizedRepoUrl ?? null,
+      codeProvider: 'claude',
+      codeSessionId: params.code_session_id,
+      leaseOwner: params.lease_owner,
+    },
+    (codeSession) =>
+      createClaudeCodeSession(
+        agent_id,
+        goal,
+        attachments,
+        normalizedRepoUrl,
+        effectiveUserId,
+        fastModeCacheEnabled,
+        codeSession
+      )
   );
 
   return {
@@ -184,6 +183,7 @@ export async function createSession(params: CreateSessionParams): Promise<Create
     ws_url: session.wsUrl,
     uploaded_files: session.uploadedFiles,
     github_repo_url: normalizedRepoUrl ?? null,
+    ...fields,
   };
 }
 
@@ -191,12 +191,7 @@ export async function createSession(params: CreateSessionParams): Promise<Create
 // Close session
 // ---------------------------------------------------------------------------
 
-export interface CloseSessionParams {
-  task_id: string;
-  user_id?: string;
-  agent_id?: string;
-  additional_paths?: string[];
-}
+export type { CloseSessionParams } from './types';
 
 export async function closeSession(params: CloseSessionParams) {
   const { task_id, user_id, agent_id, additional_paths } = params;
@@ -207,12 +202,15 @@ export async function closeSession(params: CloseSessionParams) {
     additional_paths: pathCount > 0 ? String(pathCount) : undefined,
   });
 
-  const result = await closeClaudeCodeSession(task_id, user_id, agent_id, additional_paths);
+  const result = await closeClaudeCodeSession(task_id, user_id, agent_id, additional_paths, {
+    reason: params.reason,
+  });
 
   return {
     status: 'CLOSED' as const,
     output_files: result.outputFiles,
     usage: result.usage,
+    code_session: result.codeSession ?? null,
   };
 }
 

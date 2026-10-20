@@ -47,7 +47,11 @@ function where(query: Query): Prisma.Sql {
     ))`,
   ];
   if (query.excludeRootAgentId !== undefined) {
-    clauses.push(Prisma.sql`s."rootAgentId" <> ${query.excludeRootAgentId}`);
+    // Prior runs only — except the caller tree's own code-agent events, so a
+    // root can grep what its earlier (now paused) code sessions ran.
+    clauses.push(
+      Prisma.sql`(s."rootAgentId" <> ${query.excludeRootAgentId} OR s."traceKind" = 'code_event')`
+    );
   }
   if (query.pattern) {
     clauses.push(

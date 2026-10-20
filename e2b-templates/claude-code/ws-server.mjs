@@ -5,8 +5,15 @@
  */
 
 import { WebSocketServer } from "ws";
-import { execSync, spawn } from "child_process";
-import { appendFileSync, writeFileSync, mkdirSync } from "fs";
+import { execFileSync, execSync, spawn } from "child_process";
+import {
+  appendFileSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  writeFileSync,
+} from "fs";
 import { homedir } from "os";
 import { join } from "path";
 
@@ -299,7 +306,43 @@ log("info", "Configuration written");
 let workDir = home;
 const REPO_WORKDIR = join(home, "workspace");
 
-if (GITHUB_REPO_URL) {
+// A resumed persistent code session (paused sandbox or restored checkpoint)
+// already has the repo with its local branches/commits/uncommitted edits:
+// never re-clone over it, only refresh the credentialed remote.
+const RESUMING_REPO =
+  Boolean(GITHUB_REPO_URL) && existsSync(join(REPO_WORKDIR, ".git"));
+
+if (RESUMING_REPO) {
+  workDir = REPO_WORKDIR;
+  try {
+    const authUrl = GITHUB_TOKEN
+      ? GITHUB_REPO_URL.replace(
+          "https://github.com",
+          `https://x-access-token:${GITHUB_TOKEN}@github.com`,
+        )
+      : GITHUB_REPO_URL;
+    try {
+      execFileSync("git", ["remote", "set-url", "origin", authUrl], {
+        cwd: workDir,
+      });
+    } catch {
+      execFileSync("git", ["remote", "add", "origin", authUrl], {
+        cwd: workDir,
+      });
+    }
+    writeFileSync(join(workDir, "CLAUDE.md"), CODE_AGENT_SYSTEM_PROMPT);
+    projects[workDir] = { allowedTools: ["*"], hasTrustDialogAccepted: true };
+    writeFileSync(
+      join(home, ".claude", "projects.json"),
+      JSON.stringify(projects),
+    );
+    settings.allowedDirectories.push(workDir);
+    writeFileSync(settingsPath, JSON.stringify(settings));
+    console.log(`[Setup] Resuming existing repo at ${workDir}`);
+  } catch (err) {
+    console.error(`[Setup] Failed to refresh resumed repo:`, err.message);
+  }
+} else if (GITHUB_REPO_URL) {
   console.log(`[Setup] Cloning GitHub repo: ${GITHUB_REPO_URL}`);
 
   const repoMatch = GITHUB_REPO_URL.match(/github\.com\/([^\/]+)\/([^\/]+)/);
@@ -487,6 +530,46 @@ function emitClaudeMessage(message) {
   });
 }
 
+/**
+ * Persistent code sessions pass the previous CLI session id. Claude Code looks
+ * the transcript up under ~/.claude/projects/<cwd slug>/<id>.jsonl, so a
+ * transcript restored under another cwd slug is copied into place. A missing
+ * transcript starts a fresh conversation instead of failing the CLI.
+ */
+function resolveResumeSessionId() {
+  const id = (process.env.CLAUDE_CODE_RESUME_SESSION_ID || "").trim();
+  if (!id) return null;
+  if (!/^[A-Za-z0-9-]{1,128}$/.test(id)) {
+    log("warn", "Ignoring malformed resume session id");
+    return null;
+  }
+  const projectsDir = join(home, ".claude", "projects");
+  const expectedDir = join(projectsDir, workDir.replace(/[^A-Za-z0-9]/g, "-"));
+  const expected = join(expectedDir, `${id}.jsonl`);
+  if (existsSync(expected)) return id;
+  let found = null;
+  try {
+    for (const entry of readdirSync(projectsDir)) {
+      const candidate = join(projectsDir, entry, `${id}.jsonl`);
+      if (existsSync(candidate)) {
+        found = candidate;
+        break;
+      }
+    }
+  } catch {
+    found = null;
+  }
+  if (!found) {
+    log("warn", "Resume transcript not found; starting a new conversation", {
+      sessionId: id,
+    });
+    return null;
+  }
+  mkdirSync(expectedDir, { recursive: true });
+  copyFileSync(found, expected);
+  return id;
+}
+
 async function runClaudeCli() {
   const sanitizedGoal = GOAL.replace(/\0/g, "");
   const prompt = `Task:\n${sanitizedGoal}`;
@@ -520,6 +603,10 @@ async function runClaudeCli() {
   }
   if (CODE_AGENT_SYSTEM_PROMPT) {
     args.push("--append-system-prompt", CODE_AGENT_SYSTEM_PROMPT);
+  }
+  const resumeSessionId = resolveResumeSessionId();
+  if (resumeSessionId) {
+    args.push("--resume", resumeSessionId);
   }
 
   // The prompt is delivered on stdin, NOT as a positional argument.

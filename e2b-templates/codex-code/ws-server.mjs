@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 import { WebSocketServer } from "ws";
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  rmSync,
+  writeFileSync,
+} from "fs";
 import { spawn, execFileSync } from "child_process";
 import { createServer } from "http";
 import { homedir } from "os";
@@ -458,9 +464,41 @@ if (CODEX_AUTH_JSON) {
   usingApiKey = true;
 }
 
+const CODEX_RESUME_SESSION_ID = /^[A-Za-z0-9-]{1,128}$/.test(
+  (process.env.CODEX_RESUME_SESSION_ID || "").trim(),
+)
+  ? process.env.CODEX_RESUME_SESSION_ID.trim()
+  : null;
+
 let workDir = "/home/user";
 const REPO_WORKDIR = "/home/user/workspace";
-if (GITHUB_REPO_URL) {
+// A resumed persistent code session already holds the repo (local branches,
+// commits, uncommitted edits): refresh the credentialed remote, never re-clone.
+if (GITHUB_REPO_URL && existsSync(join(REPO_WORKDIR, ".git"))) {
+  workDir = REPO_WORKDIR;
+  try {
+    const parsed = new URL(GITHUB_REPO_URL);
+    if (GITHUB_TOKEN) {
+      parsed.username = "x-access-token";
+      parsed.password = GITHUB_TOKEN;
+    }
+    try {
+      execFileSync("git", ["remote", "set-url", "origin", parsed.toString()], {
+        cwd: workDir,
+      });
+    } catch {
+      execFileSync("git", ["remote", "add", "origin", parsed.toString()], {
+        cwd: workDir,
+      });
+    }
+    writeFileSync(join(workDir, "AGENTS.md"), CODE_AGENT_SYSTEM_PROMPT);
+    log("info", "Resuming existing repository", { workDir });
+  } catch (err) {
+    log("error", "Failed to refresh resumed repository", {
+      error: err.message,
+    });
+  }
+} else if (GITHUB_REPO_URL) {
   try {
     const parsed = new URL(GITHUB_REPO_URL);
     if (!parsed.pathname.split("/").filter(Boolean).pop()) {
@@ -529,6 +567,8 @@ function buildCodexArgs({ useFastModeProxy }) {
     workDir,
     "-m",
     CODEX_MODEL,
+    // Persistent code sessions continue the previous Codex conversation.
+    ...(CODEX_RESUME_SESSION_ID ? ["resume", CODEX_RESUME_SESSION_ID] : []),
     sanitizedGoal,
   ];
   if (useFastModeProxy && codexFastModeProxy) {
