@@ -15,6 +15,7 @@ import {
   isUserUiPublishToken,
   verifyUserUiPublishToken,
 } from '../../providers/userUi/publishToken';
+import { displayResponseHeaders } from '../../providers/agentTools/displayCsp';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { USERCONTENT_CACHE_CONTROL, USERCONTENT_CSP } from './config';
@@ -170,23 +171,43 @@ export default router;
  */
 export const usercontentRouter = Router();
 
-/** HTML posted by the `display` tool, framed like an inline view. */
+/**
+ * Content posted by the `display` tool: a single page, or any file of a
+ * bundle (site, model viewer, PDF viewer). Arbitrary CSS/JS runs under the
+ * permissive display CSP; isolation is the opaque sandboxed origin
+ * (providers/agentTools/displayCsp.ts).
+ */
+function sendDisplay(
+  res: Response,
+  file: { content: Buffer; contentType: string } | null
+): void {
+  for (const [name, value] of Object.entries(displayResponseHeaders(file?.contentType))) {
+    res.setHeader(name, value);
+  }
+  if (!file) {
+    res.status(404).type('text/plain').send('Not found');
+    return;
+  }
+  res.setHeader('Cache-Control', USERCONTENT_CACHE_CONTROL);
+  res.setHeader('Content-Type', file.contentType);
+  res.status(200).send(file.content);
+}
+
 usercontentRouter.get(
   '/display/:agentId/:file',
   asyncHandler(async (req: Request, res: Response) => {
     const { agentId, file } = req.params as Record<string, string>;
     const content = await service.readDisplayHtml(agentId ?? '', file ?? '');
-    res.setHeader('Content-Security-Policy', USERCONTENT_CSP);
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-    if (!content) {
-      res.status(404).type('text/plain').send('Not found');
-      return;
-    }
-    res.setHeader('Cache-Control', USERCONTENT_CACHE_CONTROL);
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.status(200).send(content);
+    sendDisplay(res, content ? { content, contentType: 'text/html; charset=utf-8' } : null);
+  })
+);
+
+usercontentRouter.get(
+  '/display/:agentId/:hash/*',
+  asyncHandler(async (req: Request, res: Response) => {
+    const { agentId, hash } = req.params as Record<string, string>;
+    const path = (req.params as Record<string, string>)[0] ?? '';
+    sendDisplay(res, await service.readDisplayBundle(agentId ?? '', hash ?? '', path));
   })
 );
 

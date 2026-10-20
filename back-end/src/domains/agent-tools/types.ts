@@ -3,26 +3,45 @@ import { z } from 'zod';
 // Literal caps (mirrored in config.ts): types is the lowest layer.
 const MAX_ITEMS = 20;
 const MAX_OPTIONS = 9;
+const MAX_BUNDLE_FILES = 500;
+
+/**
+ * A multi-file site or model (the `rose` CLI: a directory, or an .html/.gltf/
+ * .obj plus the files it references). `entry` is the page (.html) or model
+ * file to show; every path is bundle-relative and served under one URL prefix.
+ */
+export const displayBundleInputSchema = z
+  .object({
+    entry: z.string().min(1).max(512),
+    files: z
+      .array(z.object({ path: z.string().min(1).max(512), content_base64: z.string() }).strict())
+      .min(1)
+      .max(MAX_BUNDLE_FILES),
+  })
+  .strict();
 
 /**
  * One item to display. Exactly one source:
- *   url             public http(s) image/video/HTML, fetched server-side
+ *   url             public http(s) image/video/PDF/model/HTML, fetched server-side
  *   file            a file already in this agent's tree (original_filename) or
- *                   one of the owner's storage paths (`<userId>/...`)
+ *                   one of the owner's storage paths (`<userId>/...`); an .html
+ *                   or .gltf/.obj brings the tree files it references along
  *   content_base64  raw bytes (the sandbox `rose` CLI), with filename
+ *   bundle          several files (the sandbox `rose` CLI), with an entry
  */
 export const displayItemSchema = z
   .object({
     url: z.string().min(1).max(4096).optional(),
     file: z.string().min(1).max(1024).optional(),
     content_base64: z.string().min(1).optional(),
+    bundle: displayBundleInputSchema.optional(),
     filename: z.string().min(1).max(255).optional(),
   })
   .refine(
     (item) =>
-      [item.url, item.file, item.content_base64].filter((value) => value !== undefined).length ===
-      1,
-    { message: 'each item needs exactly one of url, file or content_base64' }
+      [item.url, item.file, item.content_base64, item.bundle].filter((value) => value !== undefined)
+        .length === 1,
+    { message: 'each item needs exactly one of url, file, content_base64 or bundle' }
   );
 
 export const displayOptionSchema = z.object({
@@ -139,15 +158,25 @@ export interface RequestingAgent {
   task_id?: string;
 }
 
+/** What the UI renders: page/bundle/model/pdf in a sandboxed frame, image/video natively. */
+export type DisplayKind = 'page' | 'bundle' | 'model' | 'image' | 'video' | 'pdf';
+
 export interface DisplayFilePointer {
   id: string;
+  /** image/video/page: the stored file; bundle/model/pdf: the bundle manifest. */
   storage_path: string;
   original_filename: string;
   mime_type: string;
   size_bytes: number;
   created_at: string;
-  /** text/html only: frame this URL (sandboxed usercontent origin), not storage. */
+  kind: DisplayKind;
+  /**
+   * page/bundle/model/pdf: frame this URL (sandboxed usercontent origin,
+   * DISPLAY_IFRAME_SANDBOX), never storage. Absent for image/video.
+   */
   usercontent_url?: string;
+  /** bundle/model/pdf: the content-addressed bundle behind usercontent_url. */
+  bundle?: { hash: string; entry: string; source: string; file_count: number };
 }
 
 export interface DisplayItemResult {
@@ -156,7 +185,16 @@ export interface DisplayItemResult {
   message_id: string | null;
   sha256: string;
   mime_type: string;
+  kind: DisplayKind;
   file_pointer: DisplayFilePointer;
+  /**
+   * One id per displayed item, shared by every row that shows it: a code
+   * agent's own row and the mirrored row in its owning agent's conversation.
+   * dsp_ + first 32 hex chars of sha256("agent:<owningAgentId>:<contentSha>").
+   */
+  canonical_id?: string;
+  /** Code agents: the mirrored row in the owning Rose agent's conversation. */
+  parent_message_id?: string;
 }
 
 export interface DisplayResult {

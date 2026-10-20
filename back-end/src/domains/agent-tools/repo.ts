@@ -61,24 +61,40 @@ async function treeAgentIds(agent: ToolAgent): Promise<string[]> {
   return [...ids];
 }
 
+type TreeFilePointer = Record<string, unknown>;
+
+/**
+ * Looks up file pointers by name in one agent's tree. The tree's agent ids
+ * are read once per resolver, so a page that references many sibling files
+ * costs one indexed message query per name, not a tree walk per name.
+ */
+export function treeFilePointerResolver(
+  agent: ToolAgent
+): (filename: string) => Promise<TreeFilePointer | null> {
+  let ids: Promise<string[]> | null = null;
+  return async (filename) => {
+    ids ??= treeAgentIds(agent);
+    const row = await prisma.message.findFirst({
+      where: {
+        agentId: { in: await ids },
+        filePointer: { path: ['original_filename'], equals: filename },
+      },
+      orderBy: { timestamp: 'desc' },
+      select: { filePointer: true },
+    });
+    const pointer = row?.filePointer;
+    return pointer !== null && typeof pointer === 'object' && !Array.isArray(pointer)
+      ? (pointer as TreeFilePointer)
+      : null;
+  };
+}
+
 /** Most recent file pointer named `filename` in the agent's tree, or null. */
 export async function findTreeFilePointer(
   agent: ToolAgent,
   filename: string
-): Promise<Record<string, unknown> | null> {
-  const ids = await treeAgentIds(agent);
-  const row = await prisma.message.findFirst({
-    where: {
-      agentId: { in: ids },
-      filePointer: { path: ['original_filename'], equals: filename },
-    },
-    orderBy: { timestamp: 'desc' },
-    select: { filePointer: true },
-  });
-  const pointer = row?.filePointer;
-  return pointer !== null && typeof pointer === 'object' && !Array.isArray(pointer)
-    ? (pointer as Record<string, unknown>)
-    : null;
+): Promise<TreeFilePointer | null> {
+  return treeFilePointerResolver(agent)(filename);
 }
 
 export async function findAttentionRequest(id: string) {

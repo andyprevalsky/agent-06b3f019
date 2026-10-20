@@ -27,7 +27,15 @@ export interface DisplayItem {
   message_id: string;
   sha256: string;
   mime_type: string;
-  file_pointer: { storage_path: string; mime_type: string; original_filename: string };
+  kind: string;
+  file_pointer: {
+    storage_path: string;
+    mime_type: string;
+    original_filename: string;
+    kind: string;
+    usercontent_url?: string;
+    bundle?: { hash: string; entry: string; source: string; file_count: number };
+  };
 }
 export interface Question {
   request_id: string | null;
@@ -101,6 +109,117 @@ export const b64 = (bytes: Buffer, filename = 'shot.png') => ({
   content_base64: bytes.toString('base64'),
   filename,
 });
+
+/** A `bundle` display item from path → content. */
+export const bundleItem = (entry: string, files: Record<string, string | Buffer>) => ({
+  bundle: {
+    entry,
+    files: Object.entries(files).map(([path, content]) => ({
+      path,
+      content_base64: (typeof content === 'string' ? Buffer.from(content) : content).toString(
+        'base64'
+      ),
+    })),
+  },
+});
+
+/**
+ * A minimal valid binary glTF: one unit cube (24 vertices with normals, 36
+ * indices) with a solid PBR base colour. `tag` lands in asset.extras so every
+ * call can get a fresh content hash.
+ */
+export function cubeGlb(rgba: [number, number, number, number] = [1, 0, 0, 1], tag = ''): Buffer {
+  const faces: [number[], number[], number[]][] = [
+    [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    [[-1, 0, 0], [0, 0, 1], [0, 1, 0]],
+    [[0, 1, 0], [0, 0, 1], [1, 0, 0]],
+    [[0, -1, 0], [1, 0, 0], [0, 0, 1]],
+    [[0, 0, 1], [1, 0, 0], [0, 1, 0]],
+    [[0, 0, -1], [0, 1, 0], [1, 0, 0]],
+  ];
+  const positions: number[] = [];
+  const normals: number[] = [];
+  const indices: number[] = [];
+  faces.forEach(([n, u, v], face) => {
+    for (const [a, b] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+      for (let k = 0; k < 3; k += 1) positions.push(0.5 * (n[k] + a * u[k] + b * v[k]));
+      normals.push(...n);
+    }
+    const o = face * 4;
+    indices.push(o, o + 1, o + 2, o, o + 2, o + 3);
+  });
+  const bin = Buffer.concat([
+    Buffer.from(new Float32Array(positions).buffer),
+    Buffer.from(new Float32Array(normals).buffer),
+    Buffer.from(new Uint16Array(indices).buffer),
+  ]);
+  const json = {
+    asset: { version: '2.0', generator: 'rose-blackbox', extras: { tag } },
+    scene: 0,
+    scenes: [{ nodes: [0] }],
+    nodes: [{ mesh: 0 }],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0, NORMAL: 1 }, indices: 2, material: 0 }] }],
+    materials: [
+      { pbrMetallicRoughness: { baseColorFactor: rgba, metallicFactor: 0, roughnessFactor: 0.6 } },
+    ],
+    buffers: [{ byteLength: bin.length }],
+    bufferViews: [
+      { buffer: 0, byteOffset: 0, byteLength: 288, target: 34962 },
+      { buffer: 0, byteOffset: 288, byteLength: 288, target: 34962 },
+      { buffer: 0, byteOffset: 576, byteLength: 72, target: 34963 },
+    ],
+    accessors: [
+      { bufferView: 0, componentType: 5126, count: 24, type: 'VEC3', min: [-0.5, -0.5, -0.5], max: [0.5, 0.5, 0.5] },
+      { bufferView: 1, componentType: 5126, count: 24, type: 'VEC3' },
+      { bufferView: 2, componentType: 5123, count: 36, type: 'SCALAR' },
+    ],
+  };
+  const pad = (buf: Buffer, fill: number) =>
+    Buffer.concat([buf, Buffer.alloc((4 - (buf.length % 4)) % 4, fill)]);
+  const jsonChunk = pad(Buffer.from(JSON.stringify(json)), 0x20);
+  const binChunk = pad(bin, 0);
+  const chunk = (type: number, body: Buffer) => {
+    const head = Buffer.alloc(8);
+    head.writeUInt32LE(body.length, 0);
+    head.writeUInt32LE(type, 4);
+    return Buffer.concat([head, body]);
+  };
+  const body = Buffer.concat([chunk(0x4e4f534a, jsonChunk), chunk(0x004e4942, binChunk)]);
+  const header = Buffer.alloc(12);
+  header.write('glTF', 0, 'latin1');
+  header.writeUInt32LE(2, 4);
+  header.writeUInt32LE(12 + body.length, 8);
+  return Buffer.concat([header, body]);
+}
+
+/** A tiny one-page PDF. */
+export function minimalPdf(text = 'Rose'): Buffer {
+  const stream = `BT /F1 24 Tf 72 720 Td (${text}) Tj ET`;
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
+    `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+  ];
+  let out = '%PDF-1.4\n';
+  const offsets: number[] = [];
+  objects.forEach((body, i) => {
+    offsets.push(out.length);
+    out += `${i + 1} 0 obj\n${body}\nendobj\n`;
+  });
+  const xref = out.length;
+  out += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (const offset of offsets) out += `${String(offset).padStart(10, '0')} 00000 n \n`;
+  out += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return Buffer.from(out, 'latin1');
+}
+
+/** Fetch a usercontent URL through this test's backend (same path, any configured host). */
+export function usercontentFetch(url: string): Promise<Response> {
+  const parsed = new URL(url);
+  return fetch(`${BASE_URL}${parsed.pathname}${parsed.search}`);
+}
 
 export async function displayMessages(agentId: string) {
   const rows = await prisma.message.findMany({

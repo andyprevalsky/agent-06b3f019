@@ -1,4 +1,5 @@
 #!/usr/bin/env tsx
+import { rendererCliCases } from './agent-tools-render-cli.cases';
 /**
  * Black-box tests for the blocking agent tools and the shipped `rose` CLI:
  *
@@ -15,6 +16,9 @@
  *   - sandbox send_message_to_user pins a published inline view; unknown view → 400;
  *     a code session that publishes with rose-ui and runs `rose message
  *     --inline-view` lands that row in its own trajectory (C12)
+ *   - the shipped `rose` CLI by path alone: a site folder (index.html), a page
+ *     plus only the files it references, a .glb → model viewer; a folder with no
+ *     entry fails locally
  *   - the shipped `rose` CLI: display posts once then reports already displayed;
  *     `rose approve` blocks across long-polls until the user answers, then exits 0
  *
@@ -515,6 +519,7 @@ const tests: BlackboxTest[] = [
       }
     },
   },
+  ...rendererCliCases(),
   {
     name: 'shipped rose CLI: display once, then already displayed; approve blocks until answered',
     fn: async () => {
@@ -571,7 +576,14 @@ const tests: BlackboxTest[] = [
         const second = await execFileAsync('node', [cli, 'display', shot], { env });
         assert(second.stdout.includes('already displayed'), `second run: ${second.stdout}`);
         const rows = await displayMessages(otherA);
-        assert(rows.length === before + 1, 'CLI posted exactly once');
+        // Once in the code agent's own conversation + once in its owning agent's.
+        assert(rows.length === before + 2, `CLI posted exactly once per conversation`);
+        const canonical = new Set(
+          rows
+            .slice(before)
+            .map((r) => (r.metadata as { display: { canonical_id: string } }).display.canonical_id)
+        );
+        assert(canonical.size === 1, `one canonical display id: ${[...canonical].join(',')}`);
         assert(rows[rows.length - 1].text === 'from the CLI', 'CLI caption');
         const tooMany = await execFileAsync('node', [cli, 'display', ...Array(21).fill(shot)], {
           env,

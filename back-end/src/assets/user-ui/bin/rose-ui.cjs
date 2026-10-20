@@ -663,6 +663,7 @@ async function launchBrowser(opts = {}) {
   const pw = loadPlaywright();
   const args = ['--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--hide-scrollbars'];
   if (!opts.noWebgpu) args.push('--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-vulkan=swiftshader', '--use-webgpu-adapter=swiftshader');
+  if (Array.isArray(opts.args)) args.push(...opts.args);
   try {
     return await pw.chromium.launch({ headless: true, args });
   } catch (err) {
@@ -1274,5 +1275,5 @@ if (require.main === module) {
 module.exports = {
   CLI_VERSION, USERCONTENT_CSP, DEFAULT_BUDGETS, CURRENT_VIEWPORTS, CURRENT_ROUTES, LOCAL_ONLY_DIRS,
   parseArgs, parseViewport, routeSlug, isPublishablePath, listFiles, manifestEntries, lintTheme,
-  auditEntryFiles, frameStats, cumulativeLayoutShift, evaluateBudgets, decodePng, pngStats, diffFraction, startPreview, main,
+  auditEntryFiles, frameStats, cumulativeLayoutShift, evaluateBudgets, decodePng, pngStats, diffFraction, startPreview, launchBrowser, main,
 };

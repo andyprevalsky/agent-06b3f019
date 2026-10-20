@@ -1,276 +1,236 @@
 /**
- * `display`: publish images / videos / HTML and either post them inline in the
- * caller's trajectory or pin them with a question above the user's query box.
+ * `display`: publish images, videos, web pages, multi-file sites, 3D models and
+ * PDFs, and either post them inline in the caller's trajectory or pin them with
+ * a question above the user's query box.
  *
- *   items (url | file | content_base64), caption, placement, options
+ *   items (url | file | content_base64 | bundle), caption, placement, options
  *     │ resolve bytes  (url: bounded SSRF-guarded fetch; file: tree pointer or
- *     │                 owner storage path; base64: decode)       ── all-or-nothing
- *     │ classify       (magic bytes → image/* | video/*; declared + UTF-8 markup → text/html)
- *     │ caps           (≤ 20 items, ≤ 20 MB each, ≤ 100 MB total)
- *     ▼ per unique sha256: put <userId>/display/<sha256>.<ext>   (write-once)
+ *     │                 owner storage path, plus the tree files an .html/.gltf/
+ *     │                 .obj references; base64: decode; bundle: decode files)
+ *     │ classify       (magic bytes → image/* video/* pdf glb; declared + checked
+ *     │                 → text/html, .gltf/.obj/.stl/.usdz)        ── all-or-nothing
+ *     │ caps           (≤ 20 items, ≤ 20 MB per file, ≤ 100 MB per call;
+ *     │                 bundles ≤ 500 files and ≤ 50 MB)
+ *     ▼ kind
+ *     image / video ─► <owner>/display/<sha256>.<ext>            (write-once)
+ *     page (.html)  ─► <owner>/display/<sha256>.html             → usercontent page URL
+ *     bundle        ─► blobs + manifest (providers/agentTools/displayBundle.ts)
+ *     model / pdf   ─► bundle of the file + a generated viewer   → usercontent bundle URL
  *
  *   inline ─► ASSISTANT message per unique item,
- *             id = deterministicMessageId(agentId, "display:<sha256>")
+ *             id = deterministicMessageId(agentId, "display:<sha256 | bundle hash>")
  *             exists ─► duplicate (no post)                       (P2002-safe)
  *   pinned ─► questionService.openQuestion (routing: user pin | parent A2A)
  *
- * The FE already renders ASSISTANT messages with an image/video file_pointer
- * inline (AssistantAttachmentBubble), so inline media needs no new message type.
+ * Framed kinds carry `file_pointer.usercontent_url` + `kind`; the FE frames
+ * them with DISPLAY_IFRAME_SANDBOX (providers/agentTools/displayCsp.ts).
  */
 import { createHash } from '../../providers/crypto';
+import {
+  DISPLAY_BUNDLE_MAX_FILES,
+  DISPLAY_MODEL_EXTENSIONS,
+  buildDisplayBundle,
+  displayBlobKey,
+  storeDisplayBundle,
+  type BuiltDisplayBundle,
+  type DisplayBundleKind,
+} from '../../providers/agentTools/displayBundle';
 import {
   DISPLAY_EXTENSIONS,
   DisplayFetchError,
   classifyDisplayMedia,
+  displayBundleUsercontentUrl,
+  displayKindForType,
   displayUsercontentUrl,
-  fetchDisplayMedia,
-  getDisplayObject,
   putDisplayObject,
 } from '../../providers/agentTools/media';
-import { createLogger } from '../../providers/logger';
 import { deterministicMessageId } from '../../providers/messageIdempotency';
-import { createMessage } from '../../providers/messages';
-import {
-  DISPLAY_FETCH_CONCURRENCY,
-  DISPLAY_MAX_FILE_BYTES,
-  DISPLAY_MAX_TOTAL_BYTES,
-  DISPLAY_URL_TIMEOUT_MS,
-} from './config';
-import * as repo from './repo';
+import { DISPLAY_MAX_FILE_BYTES, DISPLAY_MAX_TOTAL_BYTES } from './config';
+import type * as repo from './repo';
 import { openQuestion } from './questionService';
-import { AgentToolsError, sandboxRowMetadata, type ToolContext } from './service';
+import { AgentToolsError, type ToolContext } from './service';
 import type {
-  DisplayFilePointer,
   DisplayItemInput,
   DisplayItemResult,
+  DisplayKind,
   DisplayRequestBody,
   DisplayResult,
 } from './types';
+import type { PreparedItem, ResolvedItem } from './displayTypes';
+import { itemLabel, resolveAll } from './displayResolution';
+import { canonicalScope, displayCanonicalId, itemResult, postInline } from './displayPosting';
+const TYPES_HELP =
+  'allowed: image/*, video/*, an .html page, a 3D model (.glb .gltf .obj .stl .usdz), a .pdf, or a site folder; SVG excluded';
+const extOf = (path: string) => path.slice(path.lastIndexOf('.') + 1).toLowerCase();
 
-const log = createLogger('AgentToolsDisplay');
-const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
-
-interface ResolvedItem {
-  index: number;
-  bytes: Buffer;
-  filename: string;
-  contentType: string;
+/** `<base href>` so a fetched page's relative links still load from its own site. */
+function withBaseHref(html: Buffer, url: string): Buffer {
+  const text = html.toString('utf8');
+  if (/<base\b/i.test(text)) return html;
+  const tag = `<base href="${url.replace(/&/g, '&amp;').replace(/"/g, '&quot;')}">`;
+  const anchor =
+    /<head\b[^>]*>/i.exec(text) ?? /<html\b[^>]*>/i.exec(text) ?? /<!doctype[^>]*>/i.exec(text);
+  if (!anchor) return Buffer.from(tag + text);
+  const at = anchor.index + anchor[0].length;
+  return Buffer.from(text.slice(0, at) + tag + text.slice(at));
 }
 
-interface StoredItem extends ResolvedItem {
-  sha256: string;
-  mimeType: string;
-  filePointer: DisplayFilePointer;
+/** The model / PDF file name the viewer loads, with the extension of its real type. */
+function viewerSourceName(filename: string, mimeType: string): string {
+  const ext = DISPLAY_EXTENSIONS[mimeType] ?? 'bin';
+  if (extOf(filename) === ext) return filename;
+  return `${filename.replace(/\.[^.]*$/, '') || 'model'}.${ext}`;
 }
 
-function itemLabel(item: DisplayItemInput, index: number): string {
-  const name = item.url ?? item.file ?? item.filename ?? `item ${index + 1}`;
-  return `#${index + 1} ${name.slice(0, 200)}`;
-}
-
-function basename(value: string): string {
-  const stripped = value.split(/[?#]/)[0] ?? value;
-  const last = stripped.split('/').filter(Boolean).pop() ?? '';
-  return last.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || 'media';
-}
-
-async function resolveFile(
-  agent: repo.ToolAgent,
-  file: string
-): Promise<{ bytes: Buffer; mime: string }> {
-  // An exact storage path is accepted only inside the owner's prefix.
-  if (file.startsWith(`${agent.userId}/`) && !file.includes('..')) {
-    const bytes = await getDisplayObject(file);
-    if (bytes) return { bytes, mime: '' };
-  }
-  const pointer = await repo.findTreeFilePointer(agent, file);
-  const storagePath = typeof pointer?.storage_path === 'string' ? pointer.storage_path : null;
-  if (storagePath === null || !storagePath.startsWith(`${agent.userId}/`)) {
-    throw new DisplayFetchError(`no file named ${file.slice(0, 200)} in this agent's files`);
-  }
-  const bytes = await getDisplayObject(storagePath);
-  if (!bytes) throw new DisplayFetchError(`${file.slice(0, 200)} is no longer in storage`);
-  return { bytes, mime: typeof pointer?.mime_type === 'string' ? pointer.mime_type : '' };
-}
-
-async function resolveItem(
-  agent: repo.ToolAgent,
-  item: DisplayItemInput,
-  index: number
-): Promise<ResolvedItem> {
-  if (item.content_base64 !== undefined) {
-    const raw = item.content_base64;
-    if (raw.length % 4 !== 0 || !BASE64_RE.test(raw)) {
-      throw new DisplayFetchError('content_base64 is not valid base64');
-    }
-    return {
-      index,
-      bytes: Buffer.from(raw, 'base64'),
-      filename: basename(item.filename ?? 'media'),
-      contentType: '',
-    };
-  }
-  if (item.url !== undefined) {
-    const { bytes, finalUrl, contentType } = await fetchDisplayMedia(item.url, {
-      maxBytes: DISPLAY_MAX_FILE_BYTES,
-      timeoutMs: DISPLAY_URL_TIMEOUT_MS,
-    });
-    return {
-      index,
-      bytes,
-      filename: basename(item.filename ?? new URL(finalUrl).pathname),
-      contentType,
-    };
-  }
-  const file = item.file ?? '';
-  const { bytes, mime } = await resolveFile(agent, file);
-  return { index, bytes, filename: basename(item.filename ?? file), contentType: mime };
-}
-
-/** Resolve every item (bounded concurrency); any failure rejects the whole call. */
-async function resolveAll(
-  agent: repo.ToolAgent,
-  items: DisplayItemInput[]
-): Promise<ResolvedItem[]> {
-  const results: ResolvedItem[] = new Array(items.length);
-  const errors: string[] = [];
-  let next = 0;
-  async function worker() {
-    while (next < items.length) {
-      const index = next;
-      next += 1;
-      try {
-        results[index] = await resolveItem(agent, items[index], index);
-      } catch (err) {
-        if (!(err instanceof DisplayFetchError)) throw err;
-        errors.push(`${itemLabel(items[index], index)}: ${err.message}`);
-      }
-    }
-  }
-  await Promise.all(
-    Array.from({ length: Math.min(DISPLAY_FETCH_CONCURRENCY, items.length) }, worker)
+function bundleKindForEntry(entry: string, bytes: Buffer): DisplayBundleKind {
+  const type = classifyDisplayMedia(bytes, { filename: entry });
+  if (type === 'text/html') return 'bundle';
+  if (type === 'application/pdf') return 'pdf';
+  if (type !== null && type.startsWith('model/') && DISPLAY_MODEL_EXTENSIONS.has(extOf(entry)))
+    return 'model';
+  throw new DisplayFetchError(
+    `entry ${entry.slice(0, 200)} must be an .html page, a 3D model (.glb .gltf .obj .stl .usdz) or a .pdf`
   );
-  if (errors.length > 0) throw new AgentToolsError(400, 'Could not read media', errors.sort());
-  return results;
 }
 
-function mediaType(entry: ResolvedItem): string | null {
-  return classifyDisplayMedia(entry.bytes, {
+function pointerBase(agent: repo.ToolAgent, sha: string) {
+  return {
+    id: deterministicMessageId(agent.id, `display:${sha}`),
+    created_at: new Date().toISOString(),
+  };
+}
+
+function prepareBundle(
+  agent: repo.ToolAgent,
+  index: number,
+  source: string,
+  files: Map<string, Buffer>,
+  kind: DisplayBundleKind
+): PreparedItem {
+  const built: BuiltDisplayBundle = buildDisplayBundle(source, files, kind);
+  const sourceType =
+    classifyDisplayMedia(files.get(source) as Buffer, { filename: source }) ?? 'text/html';
+  const displayKind: DisplayKind = kind;
+  return {
+    index,
+    sha256: built.hash,
+    mimeType: sourceType,
+    kind: displayKind,
+    sizeBytes: built.totalBytes,
+    filePointer: {
+      ...pointerBase(agent, built.hash),
+      // The displayed file itself (a name lookup in the tree finds real bytes).
+      storage_path: displayBlobKey(agent.userId, built.manifest.files[source].sha256),
+      original_filename: source.split('/').pop() ?? source,
+      mime_type: sourceType,
+      size_bytes: built.totalBytes,
+      kind: displayKind,
+      usercontent_url: displayBundleUsercontentUrl(agent.id, built.hash, built.manifest.entry),
+      bundle: {
+        hash: built.hash,
+        entry: built.manifest.entry,
+        source,
+        file_count: Object.keys(built.manifest.files).length,
+      },
+    },
+    store: () => storeDisplayBundle(agent.userId, built),
+  };
+}
+
+function prepareSingle(
+  agent: repo.ToolAgent,
+  entry: Extract<ResolvedItem, { type: 'single' }>
+): PreparedItem {
+  const mimeType = classifyDisplayMedia(entry.bytes, {
     filename: entry.filename,
     contentType: entry.contentType,
   });
+  if (mimeType === null) throw new DisplayFetchError(`is not a displayable file (${TYPES_HELP})`);
+  const kind = displayKindForType(mimeType);
+  if (kind === 'model' || kind === 'pdf') {
+    const source = viewerSourceName(entry.filename, mimeType);
+    return prepareBundle(agent, entry.index, source, new Map([[source, entry.bytes]]), kind);
+  }
+  const bytes =
+    kind === 'page' && entry.sourceUrl !== undefined
+      ? withBaseHref(entry.bytes, entry.sourceUrl)
+      : entry.bytes;
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const ext = DISPLAY_EXTENSIONS[mimeType] ?? 'bin';
+  const storagePath = `${agent.userId}/display/${sha256}.${ext}`;
+  const stem = entry.filename.replace(/\.[^.]*$/, '') || 'media';
+  return {
+    index: entry.index,
+    sha256,
+    mimeType,
+    kind,
+    sizeBytes: bytes.length,
+    filePointer: {
+      ...pointerBase(agent, sha256),
+      storage_path: storagePath,
+      original_filename: `${stem}.${ext}`,
+      mime_type: mimeType,
+      size_bytes: bytes.length,
+      kind,
+      ...(kind === 'page' ? { usercontent_url: displayUsercontentUrl(agent.id, sha256) } : {}),
+    },
+    store: () => putDisplayObject(storagePath, bytes, mimeType),
+  };
 }
 
-function validateMedia(items: DisplayItemInput[], resolved: ResolvedItem[]): string[] {
+/** Classify + build every item; all-or-nothing, every problem reported at once. */
+function prepareAll(
+  agent: repo.ToolAgent,
+  items: DisplayItemInput[],
+  resolved: ResolvedItem[]
+): PreparedItem[] {
   const errors: string[] = [];
+  const prepared: PreparedItem[] = [];
   let total = 0;
   for (const entry of resolved) {
     const label = itemLabel(items[entry.index], entry.index);
-    total += entry.bytes.length;
-    if (entry.bytes.length === 0) errors.push(`${label}: is empty`);
-    else if (entry.bytes.length > DISPLAY_MAX_FILE_BYTES) {
-      errors.push(`${label}: is larger than ${DISPLAY_MAX_FILE_BYTES / 1024 / 1024} MB`);
-    } else if (mediaType(entry) === null) {
-      errors.push(
-        `${label}: is not an image, video or HTML page (allowed: image/*, video/*, text/html as .html; SVG excluded)`
-      );
+    try {
+      if (entry.type === 'single') {
+        total += entry.bytes.length;
+        if (entry.bytes.length === 0) throw new DisplayFetchError('is empty');
+        if (entry.bytes.length > DISPLAY_MAX_FILE_BYTES) {
+          throw new DisplayFetchError(`is larger than ${DISPLAY_MAX_FILE_BYTES / 1024 / 1024} MB`);
+        }
+        prepared.push(prepareSingle(agent, entry));
+      } else {
+        for (const bytes of entry.files.values()) total += bytes.length;
+        if (entry.files.size > DISPLAY_BUNDLE_MAX_FILES) {
+          throw new DisplayFetchError(
+            `bundle has ${entry.files.size} files (max ${DISPLAY_BUNDLE_MAX_FILES})`
+          );
+        }
+        const entryBytes = entry.files.get(entry.entry);
+        if (!entryBytes) {
+          throw new DisplayFetchError(`entry ${entry.entry.slice(0, 200)} is not one of the files`);
+        }
+        const kind = bundleKindForEntry(entry.entry, entryBytes);
+        prepared.push(prepareBundle(agent, entry.index, entry.entry, entry.files, kind));
+      }
+    } catch (err) {
+      if (!(err instanceof DisplayFetchError)) throw err;
+      errors.push(`${label}: ${err.message}`);
     }
   }
   if (total > DISPLAY_MAX_TOTAL_BYTES) {
     errors.push(`total size exceeds ${DISPLAY_MAX_TOTAL_BYTES / 1024 / 1024} MB`);
   }
-  return errors;
+  if (errors.length > 0) throw new AgentToolsError(400, 'Invalid media', errors);
+  return prepared;
 }
 
 /** Upload once per content hash (content-addressed, write-once keys). */
-async function storeAll(agent: repo.ToolAgent, resolved: ResolvedItem[]): Promise<StoredItem[]> {
-  const stored: StoredItem[] = [];
-  const uploaded = new Set<string>();
-  for (const entry of resolved) {
-    const sha256 = createHash('sha256').update(entry.bytes).digest('hex');
-    const mimeType = mediaType(entry) ?? 'application/octet-stream';
-    const ext = DISPLAY_EXTENSIONS[mimeType] ?? 'bin';
-    const storagePath = `${agent.userId}/display/${sha256}.${ext}`;
-    if (!uploaded.has(storagePath)) {
-      await putDisplayObject(storagePath, entry.bytes, mimeType);
-      uploaded.add(storagePath);
-    }
-    const stem = entry.filename.replace(/\.[^.]*$/, '') || 'media';
-    stored.push({
-      ...entry,
-      sha256,
-      mimeType,
-      filePointer: {
-        id: deterministicMessageId(agent.id, `display:${sha256}`),
-        storage_path: storagePath,
-        original_filename: `${stem}.${ext}`,
-        mime_type: mimeType,
-        size_bytes: entry.bytes.length,
-        created_at: new Date().toISOString(),
-        ...(mimeType === 'text/html'
-          ? { usercontent_url: displayUsercontentUrl(agent.id, sha256) }
-          : {}),
-      },
-    });
+async function storeAll(prepared: PreparedItem[]): Promise<void> {
+  const stored = new Set<string>();
+  for (const entry of prepared) {
+    if (stored.has(entry.sha256)) continue;
+    await entry.store();
+    stored.add(entry.sha256);
   }
-  return stored;
-}
-
-async function postInline(
-  ctx: ToolContext,
-  entry: StoredItem,
-  caption: string
-): Promise<DisplayItemResult> {
-  const messageId = deterministicMessageId(ctx.agent.id, `display:${entry.sha256}`);
-  const existing = await repo.findMessage(messageId);
-  if (existing) {
-    return {
-      index: entry.index,
-      status: 'duplicate',
-      message_id: existing.id,
-      sha256: entry.sha256,
-      mime_type: entry.mimeType,
-      file_pointer: (existing.filePointer as DisplayFilePointer | null) ?? entry.filePointer,
-    };
-  }
-  const message = await createMessage({
-    agentId: ctx.agent.id,
-    text: caption,
-    role: 'ASSISTANT',
-    metadata: {
-      source: 'display',
-      idempotencyKey: `display:${entry.sha256}`,
-      display: {
-        placement: 'inline',
-        kind: 'media',
-        sha256: entry.sha256,
-        mime_type: entry.mimeType,
-        ...(caption ? { caption } : {}),
-      },
-      requestingAgent: ctx.requesting,
-      // The media is shown to the user; the caller's model gets the tool
-      // result instead, so this row never splits a tool_use / tool_result pair.
-      excludeFromModel: true,
-      ...sandboxRowMetadata(ctx),
-    },
-    filePointer: entry.filePointer,
-  });
-  log.info('Displayed media', {
-    agent_id: ctx.agent.id,
-    message_id: message.id,
-    sha256: entry.sha256,
-    mime_type: entry.mimeType,
-    size_bytes: entry.bytes.length,
-    via: ctx.requesting.kind,
-  });
-  return {
-    index: entry.index,
-    status: message.id === messageId ? 'posted' : 'duplicate',
-    message_id: message.id,
-    sha256: entry.sha256,
-    mime_type: entry.mimeType,
-    file_pointer: (message.filePointer as DisplayFilePointer | null) ?? entry.filePointer,
-  };
 }
 
 export async function displayMedia(
@@ -278,9 +238,8 @@ export async function displayMedia(
   body: DisplayRequestBody
 ): Promise<DisplayResult> {
   const resolved = await resolveAll(ctx.agent, body.items);
-  const errors = validateMedia(body.items, resolved);
-  if (errors.length > 0) throw new AgentToolsError(400, 'Invalid media', errors);
-  const stored = await storeAll(ctx.agent, resolved);
+  const prepared = prepareAll(ctx.agent, body.items, resolved);
+  await storeAll(prepared);
   const caption = body.caption?.trim() ?? '';
 
   if (body.placement === 'pinned') {
@@ -288,7 +247,7 @@ export async function displayMedia(
       question: caption,
       options: body.options ?? [],
       allowOther: body.allow_other !== false,
-      media: stored.map((entry) => entry.filePointer),
+      media: prepared.map((entry) => entry.filePointer),
       requestKey: body.request_key,
       workflowId: body.workflow_id,
     });
@@ -297,13 +256,9 @@ export async function displayMedia(
       placement: 'pinned',
       posted_count: 0,
       duplicate_count: 0,
-      items: stored.map((entry) => ({
-        index: entry.index,
-        status: 'attached',
-        message_id: question.message_id,
-        sha256: entry.sha256,
-        mime_type: entry.mimeType,
-        file_pointer: entry.filePointer,
+      items: prepared.map((entry) => ({
+        ...itemResult(entry, 'attached', question.message_id, entry.filePointer),
+        canonical_id: displayCanonicalId(canonicalScope(ctx), entry.sha256),
       })),
       question,
     };
@@ -313,7 +268,7 @@ export async function displayMedia(
   const seen = new Map<string, DisplayItemResult>();
   let captionPending = caption;
   // Sequential: keeps trajectory order equal to argument order.
-  for (const entry of stored) {
+  for (const entry of prepared) {
     const prior = seen.get(entry.sha256);
     if (prior) {
       results.push({ ...prior, index: entry.index, status: 'duplicate' });
