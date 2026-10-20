@@ -570,6 +570,9 @@ export async function markUserTokenRateLimited(
         return;
       }
     }
+    // An integration-scoped failure without an account identity must not fall
+    // into the legacy user-wide branch, which would flag sibling accounts.
+    if (resolvedAccountId === '' && options?.integrationId) return;
     await markConnectionNeedsReconnectFromIntegrationFailure({
       userId,
       integrationName: 'claude_code',
