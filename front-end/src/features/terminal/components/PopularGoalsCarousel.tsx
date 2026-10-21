@@ -27,17 +27,8 @@ import { useRoseTheme } from '@/features/rose-theme';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { cn } from '@/lib/utils';
 
-import {
-  POPULAR_GOALS,
-  ROSE_DESKTOP_HIDDEN_POPULAR_GOALS,
-  ROSE_DESKTOP_POPULAR_GOALS,
-} from '../config';
+import { POPULAR_GOALS, ROSE_DESKTOP_POPULAR_GOALS } from '../config';
 import type { DripStyles } from '../types';
-
-const ROSE_DESKTOP_GOALS = [
-  ...ROSE_DESKTOP_POPULAR_GOALS,
-  ...POPULAR_GOALS.filter((goal) => !ROSE_DESKTOP_HIDDEN_POPULAR_GOALS.includes(goal)),
-];
 
 const GOAL_PILL_CLASS =
   'px-3 py-1 text-xs bg-secondary hover:bg-secondary/80 rounded-full whitespace-nowrap flex-shrink-0 border';
@@ -63,7 +54,7 @@ export function PopularGoalsCarousel({
 }: PopularGoalsCarouselProps) {
   const roseDesktop = useRoseDesktop();
   const roseDark = useRoseTheme().isDark;
-  const goals = roseDesktop ? ROSE_DESKTOP_GOALS : POPULAR_GOALS;
+  const goals = roseDesktop ? ROSE_DESKTOP_POPULAR_GOALS : POPULAR_GOALS;
   const stockBorder = borderColor > 0 ? dripStyles.borderRgb : undefined;
   return (
     <div

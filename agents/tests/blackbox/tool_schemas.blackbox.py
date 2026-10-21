@@ -1059,13 +1059,15 @@ def _native_tools(rose_desktop: bool, phase=None):
     return {tool["name"]: tool for tool in tools}
 
 
-def test_rose_desktop_flag_covers_only_listed_accounts():
-    """The flag is the code-reviewed account list; anything else is a stock account."""
+def test_rose_desktop_flag_defaults_on_for_accounts():
+    """All account ids receive the UI; no-user contexts retain stock tools."""
     from utils.rose_desktop import ROSE_DESKTOP_USER_IDS, is_rose_desktop_user
 
     assert ROSE_DESKTOP_USER_IDS == (ROSE_DESKTOP_USER,)
     assert is_rose_desktop_user(ROSE_DESKTOP_USER)
-    for other in (STOCK_USER, "", None, 42, ROSE_DESKTOP_USER.upper()):
+    for account in (STOCK_USER, ROSE_DESKTOP_USER.upper()):
+        assert is_rose_desktop_user(account)
+    for other in ("", None, 42):
         assert not is_rose_desktop_user(other), other
 
 
@@ -1219,11 +1221,11 @@ async def test_call_llm_activity_declares_tools_for_the_calling_account():
     flagged = by_site["rose-desktop"]
     assert "inline_view" in flagged["send_message_to_user_execute_phase"]["input_schema"]["properties"]
     assert "placement" in flagged["display"]["input_schema"]["properties"]
-    for site in ("stock", "no-user"):
+    assert by_site["stock"] == by_site["rose-desktop"]
+    for site in ("no-user",):
         blob = json.dumps(by_site[site])
         for term in ROSE_DESKTOP_TERMS:
             assert term not in blob, f"{site} account declared {term!r}"
-    assert by_site["stock"] == by_site["no-user"]
 
 
 async def run_all_tests():
@@ -1316,7 +1318,7 @@ async def run_all_tests():
     r.record("create_action_custom_registry", test_create_agent_action_model_custom_registry)
     r.record("agent_action_openai_schema_spawn_items", test_agent_action_openai_schema_has_typed_spawn_agent_items)
     # Rose Desktop flag
-    r.record("rose_desktop_flag_covers_only_listed_accounts", test_rose_desktop_flag_covers_only_listed_accounts)
+    r.record("rose_desktop_flag_defaults_on_for_accounts", test_rose_desktop_flag_defaults_on_for_accounts)
     r.record("stock_tool_schemas_have_no_rose_desktop_surfaces", test_stock_tool_schemas_have_no_rose_desktop_surfaces)
     r.record(
         "rose_desktop_tool_schemas_add_only_new_ui_surfaces", test_rose_desktop_tool_schemas_add_only_new_ui_surfaces

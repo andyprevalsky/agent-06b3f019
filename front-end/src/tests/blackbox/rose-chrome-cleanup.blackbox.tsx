@@ -240,13 +240,29 @@ describe('Popular Goals (#15, #24, #55)', () => {
   const dripStyles = { borderRgb: 'rgb(0,0,0)' } as unknown as DripStyles;
   const ROSE_DESKTOP_ORDER = [
     'Import Code Repo',
-    'Make me an app',
-    'Make me a website',
-    'Change my background photo',
-    'Make me a game',
+    'Maximize my luck surface area',
+    'End world hunger',
     'Go to youtube.com',
+    'Raise me 1 million dollars',
+    'Make sure I accomplish my body goals',
+    'Make me an app',
+    'Get me 5 new friends',
+    'Mitigate the impending climate crisis',
+    'Get me socks',
+    'Make me a master painter',
     'Go to instagram.com',
+    'Make me a website',
+    'Find me my first 10 customers',
+    'Get me a girlfriend',
+    'Optimize my nutrition',
+    'Ensure my friends are well supported',
+    'Make sure my birthday is amazing',
+    'Make me a game',
     'Go to linkedin.com',
+    'Cure cancer',
+    'Make sure my startup succeeds',
+    'Get me a boyfriend',
+    'Change my background photo',
   ];
   const HIDDEN_FOR_ROSE_DESKTOP = [
     'Get me into Stanford',
@@ -276,7 +292,7 @@ describe('Popular Goals (#15, #24, #55)', () => {
       .map((b) => b.textContent ?? '');
   }
 
-  it('Rose Desktop rotation: spec order, then the stock goals minus the hidden four', () => {
+  it('Rose Desktop rotation interlaces all 24 goals without omissions or duplicates', () => {
     renderCarousel(true);
     expect(ROSE_DESKTOP_POPULAR_GOALS).toEqual(ROSE_DESKTOP_ORDER);
     expect([...ROSE_DESKTOP_HIDDEN_POPULAR_GOALS].sort()).toEqual(
@@ -285,8 +301,10 @@ describe('Popular Goals (#15, #24, #55)', () => {
     const goals = trackGoals();
     const expectedStockTail = POPULAR_GOALS.filter((g) => !HIDDEN_FOR_ROSE_DESKTOP.includes(g));
     expect(expectedStockTail).toHaveLength(POPULAR_GOALS.length - HIDDEN_FOR_ROSE_DESKTOP.length);
-    // One full rotation = new goals in order, then the remaining stock goals in order.
-    const oneCopy = [...ROSE_DESKTOP_ORDER, ...expectedStockTail];
+    // One complete, interlaced rotation; every retained stock topic remains present.
+    const oneCopy = ROSE_DESKTOP_ORDER;
+    expect(new Set(oneCopy).size).toBe(24);
+    for (const goal of expectedStockTail) expect(oneCopy).toContain(goal);
     expect(goals.slice(0, oneCopy.length)).toEqual(oneCopy);
     expect(goals).toHaveLength(oneCopy.length * 3);
     for (const hidden of HIDDEN_FOR_ROSE_DESKTOP) expect(goals).not.toContain(hidden);
@@ -316,7 +334,9 @@ describe('Popular Goals (#15, #24, #55)', () => {
     expect(goals.slice(0, POPULAR_GOALS.length)).toEqual(POPULAR_GOALS);
     expect(goals).toHaveLength(POPULAR_GOALS.length * 3);
     for (const hidden of HIDDEN_FOR_ROSE_DESKTOP) expect(goals).toContain(hidden);
-    for (const goal of ROSE_DESKTOP_ORDER) expect(goals).not.toContain(goal);
+    for (const goal of ROSE_DESKTOP_ORDER.filter((goal) => !POPULAR_GOALS.includes(goal))) {
+      expect(goals).not.toContain(goal);
+    }
   });
 
   it('Rose Desktop row is exactly the query box width with a 30px gap to the box', () => {

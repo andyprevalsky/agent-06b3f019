@@ -21,20 +21,36 @@ export const OPENING_MESSAGES: OpeningMessage[] = [
 // ── Popular goals carousel ────────────────────────────────────────────────
 
 /**
- * Goals shown first, in this order, for Rose Desktop accounts only
+ * Complete rotation, interlacing coding, social, personal, business and impact goals
  * (lib/roseDesktop.ts; UI ledger #15, #24). "Import Code Repo" is a plain goal
  * pill like every other one: first in the rotation, not pinned, no special
  * styling.
  */
 export const ROSE_DESKTOP_POPULAR_GOALS: string[] = [
   'Import Code Repo',
-  'Make me an app',
-  'Make me a website',
-  'Change my background photo',
-  'Make me a game',
+  'Maximize my luck surface area',
+  'End world hunger',
   'Go to youtube.com',
+  'Raise me 1 million dollars',
+  'Make sure I accomplish my body goals',
+  'Make me an app',
+  'Get me 5 new friends',
+  'Mitigate the impending climate crisis',
+  'Get me socks',
+  'Make me a master painter',
   'Go to instagram.com',
+  'Make me a website',
+  'Find me my first 10 customers',
+  'Get me a girlfriend',
+  'Optimize my nutrition',
+  'Ensure my friends are well supported',
+  'Make sure my birthday is amazing',
+  'Make me a game',
   'Go to linkedin.com',
+  'Cure cancer',
+  'Make sure my startup succeeds',
+  'Get me a boyfriend',
+  'Change my background photo',
 ];
 
 /** Stock goals left out of the Rose Desktop rotation (the stock list keeps them). */

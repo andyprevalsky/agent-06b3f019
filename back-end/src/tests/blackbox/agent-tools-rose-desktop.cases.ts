@@ -199,8 +199,8 @@ function toolsConfig(workspace: UserUiWorkspace): Record<string, unknown> {
 }
 
 async function assertStockSession(): Promise<void> {
-  assert(!isRoseDesktopUser(userA), 'test account is a stock account');
-  const stock = await prepareCodeSessionWorkspace(userA, otherA, 'task-stock', 'claude');
+  assert(isRoseDesktopUser(userA), 'ordinary accounts now default to Rose Desktop');
+  const stock = await prepareCodeSessionWorkspace(userA, otherA, 'task-stock', 'claude', false);
   assert(stock !== null, 'stock session gets a tools workspace');
   const paths = stock.files.map((file) => file.path);
   assert(

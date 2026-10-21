@@ -19,7 +19,11 @@ import assert from 'assert';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { ROSE_DESKTOP_USER_IDS, isRoseDesktopUser } from '../../utils/roseDesktop';
+import {
+  ROSE_DESKTOP_ENABLED_BY_DEFAULT,
+  ROSE_DESKTOP_USER_IDS,
+  isRoseDesktopUser,
+} from '../../utils/roseDesktop';
 import { ROSE_DEV_USER_IDS, isRoseDevUser } from '../../utils/roseDevAccess';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -92,15 +96,19 @@ const probes: Array<string | null | undefined> = [
   null,
 ];
 for (const id of backend) assert.equal(isRoseDesktopUser(id), true, `${id} must be flagged`);
-assert.equal(isRoseDesktopUser('00000000-0000-0000-0000-000000000000'), false);
+assert.equal(ROSE_DESKTOP_ENABLED_BY_DEFAULT, true);
+assert.match(fs.readFileSync(frontendFile, 'utf8'), /ROSE_DESKTOP_ENABLED_BY_DEFAULT = true/);
+assert.match(fs.readFileSync(agentsFile, 'utf8'), /ROSE_DESKTOP_ENABLED_BY_DEFAULT = True/);
+assert.equal(isRoseDesktopUser('00000000-0000-0000-0000-000000000000'), true);
+assert.equal(isRoseDevUser('00000000-0000-0000-0000-000000000000'), false);
 assert.equal(isRoseDesktopUser(''), false);
 assert.equal(isRoseDesktopUser(undefined), false);
 assert.equal(isRoseDesktopUser(null), false);
 for (const id of probes) {
   assert.equal(
     isRoseDevUser(id),
-    isRoseDesktopUser(id),
-    `isRoseDevUser(${JSON.stringify(id)}) must agree with isRoseDesktopUser`
+    typeof id === 'string' && backend.includes(id),
+    `isRoseDevUser(${JSON.stringify(id)}) must retain developer allowlist access`
   );
 }
 

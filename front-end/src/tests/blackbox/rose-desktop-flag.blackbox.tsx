@@ -1,6 +1,6 @@
 /**
- * Rose Desktop feature flag (lib/roseDesktop.ts): the new chrome is on only for
- * flagged accounts; every other account keeps the stock UI.
+ * Rose Desktop feature flag (lib/roseDesktop.ts): the new chrome defaults on for
+ * every signed-in account; explicit flag-off components retain the stock UI.
  *
  * Query box (UI ledger rows 23, 31, 40, 43, 53), flag on vs off:
  *  - #31 the toolbar lives on a Rose-gradient tab behind the box (4px lip,
@@ -62,10 +62,11 @@ function renderGoals(roseDesktop: boolean) {
 }
 
 describe('Rose Desktop flag', () => {
-  it('is on only for the allowlisted account', () => {
+  it('defaults on for every signed-in account while public visitors stay stock', () => {
     expect(ROSE_DESKTOP_USER_IDS).toEqual([ANDY]);
     expect(isRoseDesktopUser({ id: ANDY })).toBe(true);
-    expect(isRoseDesktopUser({ id: '8283e892-b0a4-4298-9ef7-b95bcc67e46b' })).toBe(false);
+    expect(isRoseDesktopUser({ id: '8283e892-b0a4-4298-9ef7-b95bcc67e46b' })).toBe(true);
+    expect(isRoseDesktopUser({ id: 'anonymous-session', is_anonymous: true })).toBe(false);
     expect(isRoseDesktopUser({ id: '' })).toBe(false);
     expect(isRoseDesktopUser(null)).toBe(false);
     expect(isRoseDesktopUser(undefined)).toBe(false);
@@ -89,9 +90,9 @@ describe('Rose Desktop flag', () => {
     expect(screen.getByTestId('query-toolbar-region')).toHaveAttribute('data-state', 'closed');
   });
 
-  it('new popular goals appear only with the flag, first in the rotation', () => {
+  it('new popular goals appear with the flag in the interlaced rotation', () => {
     const { unmount } = renderGoals(false);
-    for (const goal of ROSE_DESKTOP_POPULAR_GOALS) {
+    for (const goal of ROSE_DESKTOP_POPULAR_GOALS.filter((goal) => !POPULAR_GOALS.includes(goal))) {
       expect(screen.queryByText(goal)).not.toBeInTheDocument();
     }
     expect(screen.getAllByText(POPULAR_GOALS[0]).length).toBeGreaterThan(0);
@@ -514,10 +515,10 @@ describe('Rose Desktop query box: dark-only glass send (#53)', () => {
 describe('Rose Desktop new-agent defaults (#23)', () => {
   const signedIn = (id: string) => ({ isAnonymous: false, isFullySignedIn: true, user: { id } });
 
-  it('defaults new agents to rose-flash for flagged accounts only', () => {
+  it('defaults new agents to rose-flash for every signed-in account', () => {
     expect(defaultModelForAccount(signedIn(ANDY))).toBe('rose-labs/rose-1-flash');
     expect(defaultModelForAccount(signedIn('8283e892-b0a4-4298-9ef7-b95bcc67e46b'))).toBe(
-      'rose-labs/rose-1-ultra',
+      'rose-labs/rose-1-flash',
     );
     expect(
       defaultModelForAccount({ isAnonymous: true, isFullySignedIn: false, user: { id: ANDY } }),
