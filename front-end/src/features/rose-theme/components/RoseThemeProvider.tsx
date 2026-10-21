@@ -2,6 +2,7 @@
  * STATE MACHINE: RoseThemeProvider — see ../hooks.ts for the full diagram.
  *
  *   inactive (not Rose Desktop / no user) → [STOCK], html untouched
+ *   app login → smooth [DARK] once per identity; manual toggle remains available
  *   active   → [LIGHT] <--toggle()--> [DARK]; the stored choice is re-read
  *              whenever the signed-in account changes
  *   [DARK] mounted   → adds html.dark
@@ -20,6 +21,7 @@ import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 
 import { RoseThemeContext, readStoredRoseDark, writeStoredRoseDark } from '../hooks';
 import type { RoseThemeValue } from '../types';
+import { useLoginDarkMode } from '../hooks/useLoginDarkMode';
 
 interface ToggledChoice {
   userId: string;
@@ -29,10 +31,13 @@ interface ToggledChoice {
 export function RoseThemeProvider({
   userId,
   children,
+  darkOnLogin = false,
 }: {
   /** The signed-in account; null keeps the stock (light) UI. */
   userId: string | null;
   children: ReactNode;
+  /** The authenticated app enables the login transition; isolated views keep their theme. */
+  darkOnLogin?: boolean;
 }) {
   const roseDesktop = useRoseDesktop();
   const activeUserId = roseDesktop && userId ? userId : null;
@@ -47,6 +52,12 @@ export function RoseThemeProvider({
     writeStoredRoseDark(activeUserId, next);
     setToggled({ userId: activeUserId, dark: next });
   }, [activeUserId, isDark]);
+
+  const applyLoginDark = useCallback((id: string) => {
+    writeStoredRoseDark(id, true);
+    setToggled({ userId: id, dark: true });
+  }, []);
+  useLoginDarkMode(darkOnLogin ? activeUserId : null, applyLoginDark);
 
   useInsertionEffect(() => {
     if (!isDark) return;

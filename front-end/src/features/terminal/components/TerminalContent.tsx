@@ -130,7 +130,7 @@ function TerminalLayout(props: TerminalLayoutProps) {
   const roseDesktop = isRoseDesktopAccount(props.agents);
   return (
     <RoseDesktopContext.Provider value={roseDesktop}>
-      <RoseThemeProvider userId={props.agents.user?.id ?? null}>
+      <RoseThemeProvider userId={props.agents.user?.id ?? null} darkOnLogin>
         <RoseAppsProvider
           agents={props.agents.agents}
           selectedAgentId={props.agents.selectedAgentId}

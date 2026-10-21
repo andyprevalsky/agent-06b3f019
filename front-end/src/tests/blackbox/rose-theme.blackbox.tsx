@@ -629,19 +629,20 @@ describe('terminal wiring', () => {
     expect(await screen.findByTestId('terminal-small-tile-animation-canvas')).not.toBeVisible();
   });
 
-  it("the top-right Dark mode icon drives the terminal's RoseThemeProvider", async () => {
+  it('login enters dark mode and the top-right icon still toggles both ways', async () => {
     const user = userEvent.setup();
     mockSession(ROSE_THEME_USER);
     renderWithProviders(<Terminal />);
     const icon = await screen.findByTestId('rose-app-dark-mode');
-    expect(htmlIsDark()).toBe(false);
-    await user.click(icon);
     await waitFor(() => expect(htmlIsDark()).toBe(true));
     expect(localStorage.getItem(`rose-theme:${ROSE_THEME_USER}`)).toBe('dark');
-    expect(screen.getByTestId('rose-app-dark-mode')).toHaveAttribute('aria-label', 'Light mode');
-    await user.click(screen.getByTestId('rose-app-dark-mode'));
+    expect(icon).toHaveAttribute('aria-label', 'Light mode');
+    await user.click(icon);
     await waitFor(() => expect(htmlIsDark()).toBe(false));
     expect(localStorage.getItem(`rose-theme:${ROSE_THEME_USER}`)).toBe('light');
+    await user.click(screen.getByTestId('rose-app-dark-mode'));
+    await waitFor(() => expect(htmlIsDark()).toBe(true));
+    expect(localStorage.getItem(`rose-theme:${ROSE_THEME_USER}`)).toBe('dark');
   });
 
   it('an ordinary signed-in account restores its own dark choice', async () => {

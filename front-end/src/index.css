@@ -1424,3 +1424,14 @@ html {
 .liquid-white-shader canvas {
   filter: invert(1) brightness(1.1) contrast(0.9);
 }
+
+/* Login theme changes fade colors, leaving layout and animation timing alone. */
+@media (prefers-reduced-motion: no-preference) {
+  html.rose-login-theme-transition,
+  html.rose-login-theme-transition body,
+  html.rose-login-theme-transition body * {
+    transition-property: background-color, color, border-color, box-shadow, fill, stroke !important;
+    transition-duration: 400ms !important;
+    transition-timing-function: ease-in-out !important;
+  }
+}

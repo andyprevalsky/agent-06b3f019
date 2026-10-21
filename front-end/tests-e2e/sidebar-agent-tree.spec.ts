@@ -151,3 +151,32 @@ for (const width of [320, 390, 700]) {
     await expect(drawer).not.toBeVisible();
   });
 }
+
+test('authenticated app smoothly enters dark mode and manual light toggle still works', async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await page.addInitScript(() => {
+    const observer = new MutationObserver(() => {
+      if (
+        document.documentElement?.classList.contains('rose-login-theme-transition') &&
+        document.body
+      )
+        (window as unknown as { loginThemeDuration: string }).loginThemeDuration = getComputedStyle(
+          document.body,
+        ).transitionDuration;
+    });
+    observer.observe(document, { subtree: true, attributes: true, attributeFilter: ['class'] });
+  });
+  await openSidebarPreview(page, 390);
+  await expect(page.locator('html')).toHaveClass(/dark/);
+  await expect
+    .poll(() =>
+      page.evaluate(() => (window as unknown as { loginThemeDuration: string }).loginThemeDuration),
+    )
+    .toBe('0.4s');
+  await expect(page.locator('html')).not.toHaveClass(/rose-login-theme-transition/);
+  await page.getByRole('button', { name: 'Light mode', exact: true }).click();
+  await expect(page.locator('html')).not.toHaveClass(/dark/);
+  await expect(page.getByRole('button', { name: 'Dark mode', exact: true })).toBeVisible();
+});
