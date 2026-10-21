@@ -38,6 +38,7 @@ import {
   SessionNotFoundError,
 } from './service.local-storage';
 import { toUserSettings } from './service.serializers';
+import { buildTilionWorkerApplyPayload } from './service.worker-apply';
 import {
   buildSessionCredentialPayload,
   preserveSessionCredentialPayload,
@@ -141,6 +142,19 @@ export async function prepareSessionCredentials(
     storedPasswords,
     passkeys
   );
+  if (session.provider === 'tilion' && options.browser === undefined) {
+    // The agent worker holds Tilion's only CDP socket: hand it the state to apply.
+    const { payload, injection } = await buildTilionWorkerApplyPayload(userId, targetUrl);
+    return {
+      ...credentialPayload,
+      auth_credential_ref: injection.cookies.credentialRef,
+      cookies_injected: false,
+      cookies_count: injection.cookies.cookieCount,
+      auth_source: injection.cookies.authSource,
+      browser_state_injection: injection,
+      worker_apply: payload,
+    };
+  }
   const injectionResult = await preserveSessionCredentialPayload(
     () => injectUserData(sessionId, userId, targetUrl, options),
     credentialPayload
@@ -200,12 +214,20 @@ export async function initSession(userId: string, agentId: string, startUrl: str
     ...(requiredSteelProfileId !== null ? { requiredSteelProfileId } : {}),
   });
 
+  // Tilion accepts one CDP client: free the validation socket before the
+  // response (and before close's harvest) so the next attach is not refused with 4409.
+  const releaseTilionValidationSocket = async () => {
+    if (session.provider === 'tilion') {
+      await session.validationBrowser?.close().catch(() => undefined);
+    }
+  };
   let credentials: Awaited<ReturnType<typeof prepareSessionCredentials>>;
   try {
     credentials = await prepareSessionCredentials(session.sessionId, userId, startUrl, {
       browser: session.validationBrowser ?? undefined,
     });
   } catch (error) {
+    await releaseTilionValidationSocket();
     await closeSession(session.sessionId, false).catch((cleanupError) => {
       log.error('Failed to clean up browser after credential preparation error', {
         sessionId: session.sessionId,
@@ -213,6 +235,8 @@ export async function initSession(userId: string, agentId: string, startUrl: str
       });
     });
     throw error;
+  } finally {
+    await releaseTilionValidationSocket();
   }
   const userSettings = toUserSettings(user);
 

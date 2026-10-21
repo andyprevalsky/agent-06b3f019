@@ -17,17 +17,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const srcDir = path.resolve(__dirname, '../..');
 
 /**
- * Lane B (rotation/recovery) adds their Tilion branches on its own branch.
- * Remove each entry once that file mentions 'tilion' — this test fails on a
- * stale entry so the exemption cannot outlive the integration.
+ * Reviewed files whose provider comparisons only special-case other providers
+ * while Tilion takes a correct provider-generic path. Each needs a reason.
  */
-const PENDING_LANE_B = new Set([
-  'providers/browser/rotation.ts',
-  'providers/browser/challengeRecovery.ts',
-  'providers/browser/challengeRecoveryCandidates.ts',
-  'providers/browser/challengeRecoveryPromote.ts',
-  'providers/browser/challengeRecoverySupport.ts',
-  'providers/browserSessionResume.ts',
+const REVIEWED_GENERIC: ReadonlyMap<string, string> = new Map([
+  [
+    'providers/browserSessionResume.ts',
+    'rotation messages: Steel/Browser Use have bespoke copy; Tilion uses PROVIDER_DISPLAY_NAMES',
+  ],
 ]);
 
 const COMPARISON =
@@ -76,7 +73,8 @@ function testEveryDispatcherHandlesTilion(): void {
   for (const file of sourceFiles(srcDir)) {
     const relative = path.relative(srcDir, file).split(path.sep).join('/');
     const source = fs.readFileSync(file, 'utf8');
-    if (PENDING_LANE_B.has(relative)) {
+    if (REVIEWED_GENERIC.has(relative)) {
+      // Re-review once the file branches on tilion itself.
       if (source.includes("'tilion'")) stale.push(relative);
       continue;
     }
@@ -90,7 +88,7 @@ function testEveryDispatcherHandlesTilion(): void {
   assert.deepStrictEqual(
     stale,
     [],
-    `remove from PENDING_LANE_B (they now handle tilion): ${stale.join(', ')}`
+    `remove from REVIEWED_GENERIC (they now branch on tilion): ${stale.join(', ')}`
   );
 }
 

@@ -232,6 +232,8 @@ export async function createSessionWithContextUsingDependencies(
           ? { keepValidationConnection: options.keepValidationConnection }
           : {}),
         ...(options?.taskId !== undefined ? { taskId: options.taskId } : {}),
+        // A recovery-promoted Tilion exit type (e.g. mobile) must survive into the next session.
+        ...(usePreference?.tilionProxyType ? { proxyType: usePreference.tilionProxyType } : {}),
       });
     }
 

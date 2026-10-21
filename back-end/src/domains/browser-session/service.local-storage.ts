@@ -2,6 +2,7 @@ import { createLogger } from '../../providers/logger';
 import * as repo from './repo';
 import { injectLocalStorageViaCdp } from './service.cdp';
 import { SessionNoWsUrlError } from './types';
+import { WORKER_APPLY_REASON } from './service.worker-apply';
 
 const log = createLogger('BrowserSession');
 
@@ -54,6 +55,22 @@ export async function injectLocalStorage(sessionId: string, origin: string) {
   if (injectedHash !== undefined && injectedHash === currentHash) {
     log.info('Origin already injected with same hash, skipping', { origin });
     return { injected: false, reason: 'already_injected' as const, count: entries.length };
+  }
+
+  if (session.provider === 'tilion') {
+    // The worker holds Tilion's only CDP socket and applies these entries itself.
+    // injectedOrigins is not updated: the backend did not inject anything.
+    return {
+      injected: false,
+      reason: WORKER_APPLY_REASON,
+      count: entries.length,
+      worker_apply: {
+        provider: 'tilion' as const,
+        reason: WORKER_APPLY_REASON,
+        cookies: [],
+        local_storage: [{ origin, entries }],
+      },
+    };
   }
 
   if (session.wsUrl === null || session.wsUrl === undefined || session.wsUrl === '') {
