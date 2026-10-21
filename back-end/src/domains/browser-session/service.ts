@@ -25,7 +25,7 @@ import {
 } from '../../providers/browserSessionResume';
 import * as repo from './repo';
 import { storedBrowserProvider, type BrowserGeoTargeting } from '../../providers/browser/types';
-import { exitGeoLocale, withExitGeoLocale } from '../../providers/browser/exitGeoLocale';
+import { resolveExitGeoLocale } from '../../providers/browser/exitGeoLocale';
 import { validateBrowserKeySymbols } from './service.browser-input';
 import { validateSessionFilePath } from './service.file-path';
 import { findRequiredSteelProfileForStart } from './service.profile-binding';
@@ -190,12 +190,13 @@ export async function initSession(userId: string, agentId: string, startUrl: str
     auth_options: credentials.auth_options,
     auth_realm: credentials.auth_realm,
     fingerprint_injected: credentials.browser_state_injection.fingerprint.injected,
-    // Tilion never localises its exit: clock and language follow the exit country.
-    fingerprint_injection:
-      session.provider === 'tilion'
-        ? withExitGeoLocale(fingerprintInjection, exitGeoLocale(proxyGeo.country))
-        : fingerprintInjection,
-    ...(session.provider === 'tilion' ? { exit_geo_locale: exitGeoLocale(proxyGeo.country) } : {}),
+    // Tilion never localises its exit: the user's zone if it is in the exit country, else the country's.
+    ...(session.provider === 'tilion'
+      ? (({ fingerprint, exitGeoLocale }) => ({
+          fingerprint_injection: fingerprint,
+          exit_geo_locale: exitGeoLocale,
+        }))(resolveExitGeoLocale(fingerprintInjection, proxyGeo.country))
+      : { fingerprint_injection: fingerprintInjection }),
     passwords: credentials.passwords,
     passkeys: credentials.passkeys,
     user_settings: userSettings,

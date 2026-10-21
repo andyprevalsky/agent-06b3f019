@@ -15,7 +15,11 @@ import { respondToTilionRefusal } from '../../domains/browser-session/routes.fil
 import { buildBrowserSessionMetadata } from '../../domains/browser-session/service';
 import { buildPreferredBrowserConfig } from '../../providers/browser/challengeRecoverySupport';
 import { TilionRateLimitError } from '../../providers/browser/tilion';
-import { exitGeoLocale, withExitGeoLocale } from '../../providers/browser/exitGeoLocale';
+import {
+  exitGeoLocale,
+  resolveExitGeoLocale,
+  zoneInCountry,
+} from '../../providers/browser/exitGeoLocale';
 import type { Response } from 'express';
 import {
   selectedBrowserProvider,
@@ -516,14 +520,35 @@ export async function assertTilionExitGeoLocaleAndTargetingAreExposed(): Promise
   });
   nodeAssert.equal(exitGeoLocale('UK')?.timezone, 'Europe/London');
   nodeAssert.equal(exitGeoLocale('ZZ'), null, 'unknown countries never invent a zone');
-  const fingerprint = { timezone: 'America/Los_Angeles', initScript: 'x' };
-  nodeAssert.deepEqual(withExitGeoLocale(fingerprint, exitGeoLocale('DE')), {
-    timezone: 'Europe/Berlin',
+  const laUser = {
+    timezone: 'America/Los_Angeles',
     initScript: 'x',
-    locale: 'de-DE',
+    userAgentOverride: { acceptLanguage: 'en-US,en' },
+  };
+  // RCA 2026-08-05: page dates follow the USER's zone. A California user exiting in the US keeps LA.
+  const usExit = resolveExitGeoLocale(laUser, 'US');
+  nodeAssert.equal(usExit.fingerprint, laUser, 'a consistent user fingerprint is untouched');
+  nodeAssert.deepEqual(usExit.exitGeoLocale, {
+    country: 'US',
+    timezone: 'America/Los_Angeles',
+    locale: 'en-US',
+    source: 'user_fingerprint',
   });
-  nodeAssert.equal(withExitGeoLocale(null, exitGeoLocale('DE')), null);
-  nodeAssert.equal(withExitGeoLocale(fingerprint, null), fingerprint);
+  // A US user exiting in GB gets London: the user's zone lies in another country than the IP.
+  const gbExit = resolveExitGeoLocale(laUser, 'GB');
+  nodeAssert.equal(gbExit.fingerprint?.timezone, 'Europe/London');
+  nodeAssert.equal(gbExit.fingerprint?.locale, 'en-GB');
+  nodeAssert.equal(gbExit.exitGeoLocale?.source, 'exit_country');
+  // No fingerprint: the exit country's default; unknown exit country never overrides the user.
+  nodeAssert.equal(resolveExitGeoLocale(null, 'DE').exitGeoLocale?.timezone, 'Europe/Berlin');
+  nodeAssert.equal(resolveExitGeoLocale(null, 'DE').fingerprint, null);
+  const unknownExit = resolveExitGeoLocale(laUser, 'ZZ');
+  nodeAssert.equal(unknownExit.fingerprint, laUser);
+  nodeAssert.equal(unknownExit.exitGeoLocale?.source, 'user_fingerprint');
+  nodeAssert.equal(resolveExitGeoLocale(null, 'ZZ').exitGeoLocale, null);
+  // Backward-compatible tz aliases count as in-country.
+  nodeAssert.ok(zoneInCountry('US/Pacific', 'US') && zoneInCountry('Asia/Calcutta', 'IN'));
+  nodeAssert.ok(!zoneInCountry('America/Los_Angeles', 'CA'));
 
   const metadata = buildBrowserSessionMetadata(
     {

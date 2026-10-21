@@ -9,11 +9,12 @@ import { BROWSER_SESSION_MIN_REMAINING_MS } from '../../providers/steel/sessionL
 import { steelPublicCdpUrl } from '../../providers/steel/urls';
 import { storedBrowserProvider } from '../../providers/browser/types';
 import { refreshTilionConnectUrl } from '../../providers/browser/tilion';
-import {
-  exitGeoLocale,
-  withExitGeoLocale,
-  type ExitGeoLocale,
-} from '../../providers/browser/exitGeoLocale';
+import { resolveExitGeoLocale, type ExitGeoLocale } from '../../providers/browser/exitGeoLocale';
+
+type GeoFingerprintPayload = {
+  timezone: string | null;
+  userAgentOverride?: { acceptLanguage?: string };
+};
 import { DEFAULT_GEOLOCATION } from '../../providers/geoip';
 import * as repo from './repo';
 import { serializePasskeys, serializePasswords, toUserSettings } from './service.serializers';
@@ -259,16 +260,14 @@ export async function getTaskInfo(taskId: string, options: { validateLive?: bool
     // Same country initSession placed the exit in (agent proxy, else the default).
     const agent = await repo.findAgentProxy(session.agentId);
     const country = agent?.proxyCountry;
-    const exit = exitGeoLocale(
+    const resolved = resolveExitGeoLocale(
+      response.fingerprint_injection as GeoFingerprintPayload | null,
       country !== null && country !== undefined && country !== ''
         ? country
         : DEFAULT_GEOLOCATION.country
     );
-    response.exit_geo_locale = exit;
-    response.fingerprint_injection = withExitGeoLocale(
-      response.fingerprint_injection as { timezone: string | null } | null,
-      exit
-    );
+    response.exit_geo_locale = resolved.exitGeoLocale;
+    response.fingerprint_injection = resolved.fingerprint;
   }
 
   return options.validateLive === true ? applyLiveSessionAvailability(response, session) : response;

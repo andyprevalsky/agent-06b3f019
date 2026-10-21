@@ -9,11 +9,14 @@
  * than inventing a zone. US exits are not placed by state (country only), so
  * the US default stays America/New_York.
  */
+import { COUNTRY_ZONES } from './exitGeoZones';
+
 export interface ExitGeoLocale {
   country: string;
   timezone: string;
   locale: string;
-  source: 'exit_country';
+  /** user_fingerprint: the user's own zone lies in the exit country and is kept. */
+  source: 'exit_country' | 'user_fingerprint';
 }
 
 const COUNTRY_LOCALES: Readonly<Record<string, { timezone: string; locale: string }>> = {
@@ -51,15 +54,53 @@ export function exitGeoLocale(country: string | null | undefined): ExitGeoLocale
   return known === undefined ? null : { country: code, ...known, source: 'exit_country' };
 }
 
+type GeoFingerprint = {
+  timezone: string | null;
+  userAgentOverride?: { acceptLanguage?: string };
+};
+
+/** Whether an IANA zone belongs to a supported exit country (aliases included). */
+export function zoneInCountry(timezone: string, country: string): boolean {
+  const code = country.trim().toUpperCase();
+  return COUNTRY_ZONES[code === 'UK' ? 'GB' : code]?.includes(timezone) === true;
+}
+
 /**
- * Fingerprint payload for a provider that does not localise its exit: the
- * exit-country timezone/locale replace the user's own, because the browser's
- * clock and language must match the IP, not the user.
+ * Timezone/locale for a provider that does not localise its exit (Tilion).
+ *
+ * Page dates must follow the USER's timezone (RCA
+ * 2026-08-05-fingerprint-timezone-format-spoof-uses-host-tz), so a user zone
+ * inside the exit country is kept: a California user exiting in the US stays
+ * America/Los_Angeles. The exit country's default applies only when the user
+ * has no fingerprint zone or it lies in another country. An unknown exit
+ * country never overrides the user.
  */
-export function withExitGeoLocale<T extends { timezone: string | null }>(
+export function resolveExitGeoLocale<T extends GeoFingerprint>(
   fingerprint: T | null,
-  exit: ExitGeoLocale | null
-): (T & { locale?: string }) | null {
-  if (fingerprint === null || exit === null) return fingerprint;
-  return { ...fingerprint, timezone: exit.timezone, locale: exit.locale };
+  exitCountry: string | null | undefined
+): { fingerprint: (T & { locale?: string }) | null; exitGeoLocale: ExitGeoLocale | null } {
+  const exit = exitGeoLocale(exitCountry);
+  const userZone = fingerprint?.timezone ?? null;
+  const userLocale = fingerprint?.userAgentOverride?.acceptLanguage?.split(',')[0]?.trim();
+  if (userZone !== null && (exit === null || zoneInCountry(userZone, exit.country))) {
+    const code = (exitCountry ?? '').trim().toUpperCase();
+    return {
+      fingerprint,
+      exitGeoLocale: {
+        country: exit?.country ?? code,
+        timezone: userZone,
+        locale:
+          userLocale !== undefined && userLocale !== '' ? userLocale : (exit?.locale ?? 'en-US'),
+        source: 'user_fingerprint',
+      },
+    };
+  }
+  if (exit === null) return { fingerprint, exitGeoLocale: null };
+  return {
+    fingerprint:
+      fingerprint === null
+        ? null
+        : { ...fingerprint, timezone: exit.timezone, locale: exit.locale },
+    exitGeoLocale: exit,
+  };
 }
