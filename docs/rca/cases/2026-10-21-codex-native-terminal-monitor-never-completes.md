@@ -22,7 +22,7 @@ sources:
   - plan:sandbox iku38svp0lb6qg04tk9el
   - plan:/home/boxes/rose-ui/sem/logs/worker-resume-20261021.log
 repro: agents/tests/blackbox/spawn_claude_code_agent.blackbox.py test_native_codex_terminal_event_finishes_idle_app_server
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -76,11 +76,16 @@ the `spawn-claude-code-agent` blackbox domain, run by the agent coverage/deploy
 path. Native session-cumulative usage logs also preserve `usage_scope` instead
 of losing that qualifier. No prompt, timeout, evaluator or acceptance change.
 
-## Remaining outcome verification
+## Runtime outcome verification
 
-The original game rerun is owned by the UI lane. This case remains open until
-that unchanged live outcome is verified; local boundary regressions establish
-the consumer repair, not the game outcome. No paid rerun was performed here.
+The unchanged “Make me a game” follow-up root
+`446016aa-fb3d-4251-955c-4512546afb43` completed in 218.4 seconds. The consumer
+recognized the native Codex terminal event and the verifier received game.html;
+the root completed. This verifies the repaired parent completion boundary.
+The missing playable display in that run is a separate failure: the root called
+display twice with a JSON-encoded string instead of an array. That separate
+case remains open and this completion fix does not claim the entire GUI goal
+passed. No paid rerun was launched by this lane.
 
 ## Human feedback
 
