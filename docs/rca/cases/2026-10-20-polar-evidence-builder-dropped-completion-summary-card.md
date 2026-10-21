@@ -87,9 +87,35 @@ other 4 still fail, and their judges now cite the content of the final answer:
 missing Amazon UK options, product tabs closed at teardown, and a briefing that
 is not integrated.
 
+## 2026-10-21 benchmark-wide evidence normalization
+
+User alignment: "Yes that should be true across ALL benchmarks by default".
+The original Polar repair did not cover the sibling omissions: the declared
+builder retained only the last root card, capped summary/output content, and
+could discard child cards while slimming. The semantic output recovery judge
+omitted summary text and capped its serialized evidence at 8,000 characters.
+
+A pure `benchmarks.completion_evidence` boundary now projects actual FINISHED
+cards for Polar, declared single-turn/agentic evidence, and semantic output
+recovery. It preserves original summary strings, outputs, nonempty same-message
+text, and unidentifiable repeated messages. Only repeated durable message IDs
+with identical payload are deduplicated. The transport budget accounts for JSON
+wrapping before selecting the existing agentic fallback; final evidence is never
+silently truncated by the verifier wrapper. Static evaluators still consume raw
+typed data; SMS still evaluates the literal SMS conversation contract.
+
+The owning benchmark regression fails against origin/main df056930 and passes
+on the candidate. This is causal evidence preservation, not a new task outcome:
+no live task or judge rerun occurred. Historical 5/9 judge-only flips above used
+mixed served models and must not be described as benchmark PASSes. Cross-agent
+full-history ordering/root duplication remains the separate E4 candidate; this
+repair does not merge that frozen lane. Missing-timestamp cards retain stable
+collector order; timestamped cards sort chronologically in shared projections.
+
 ## Human feedback
 
-None recorded.
+"Yes that should be true across ALL benchmarks by default" (current parent
+alignment, 2026-10-21). No deployment or live outcome approval is inferred.
 
 ## Reusable lesson
 

@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 from typing import Any, Iterable
 
+from benchmarks.completion_evidence import completion_card, completion_messages, completion_payload, tree_completion_messages
+
 # Match wait_for's evidence budget — single-turn judges share one context window.
 SINGLE_TURN_CHAR_BUDGET = 320_000
 
@@ -105,6 +107,8 @@ def _evidence_rows_from_messages(
     rows: list[dict[str, Any]] = []
     message_list = [message for message in messages if isinstance(message, dict)]
     for message in message_list[-message_tail:]:
+        if completion_card(message.get("metadata")) is not None:
+            continue  # Final cards have their own untruncated evidence projection.
         role = str(message.get("role") or "").upper()
         if skip_user_system and role in {"USER", "SYSTEM"}:
             continue
@@ -154,41 +158,16 @@ def _sorted_tree_agent_ids(tree: dict[str, dict], root_id: str) -> list[str]:
 def _append_completion_card(
     rows: list[dict[str, Any]], data: dict, text_cap: int | None
 ) -> None:
-    summaries = _final_completion_summaries(data)
-    if not summaries:
-        return
-    completion = summaries[-1]
-    outputs = completion.get("outputs")
-    payload = {
-        "summary": _cap_text(str(completion.get("summary") or ""), text_cap),
-        "outputs": outputs[:200] if isinstance(outputs, list) else [],
-    }
-    rows.append(
-        {
+    for agent_id, message in tree_completion_messages(data):
+        rows.append({
             "role": "ASSISTANT",
-            "text": json.dumps(payload, default=str),
-            "metadata": {"evidence_type": "final_completion"},
-        }
-    )
+            "text": json.dumps(completion_payload(message), ensure_ascii=False, default=str),
+            "metadata": {"evidence_type": "final_completion", "source_agent_id": agent_id},
+        })
 
 
 def _final_completion_summaries(data: dict) -> list[dict]:
-    summaries: list[dict] = []
-    for message in data.get("messages", []) or []:
-        if not isinstance(message, dict):
-            continue
-        metadata = message.get("metadata")
-        if not isinstance(metadata, dict):
-            continue
-        completion = metadata.get("completionSummary")
-        if (
-            metadata.get("toolName") == "completion_summary"
-            and str(metadata.get("toolStatus") or "").upper() == "FINISHED"
-            and isinstance(completion, dict)
-        ):
-            summaries.append(completion)
-    return summaries
-
+    return [completion_card(message["metadata"]) for message in completion_messages(data.get("messages") or [])]
 
 def build_single_turn_evidence(
     data: dict, *, text_cap: int | None = SINGLE_TURN_TEXT_CAP
@@ -271,17 +250,7 @@ def build_agentic_evidence(data: dict) -> dict[str, Any]:
                 }
             )
 
-    completion_cards: list[dict[str, Any]] = []
-    summaries = _final_completion_summaries(data)
-    if summaries:
-        completion = summaries[-1]
-        outputs = completion.get("outputs")
-        completion_cards.append(
-            {
-                "summary": _cap_text(str(completion.get("summary") or ""), AGENTIC_TEXT_CAP),
-                "outputs": outputs[:200] if isinstance(outputs, list) else [],
-            }
-        )
+    completion_cards = [completion_payload(message) for _, message in tree_completion_messages(data)]
 
     agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
     return {
@@ -301,8 +270,16 @@ def single_turn_evidence_char_count(evidence: list[dict[str, Any]]) -> int:
     return len(json.dumps(evidence, default=str))
 
 
+def single_turn_transport_char_count(evidence: list[dict[str, Any]]) -> int:
+    # Account for the exact TOOL_RESULT JSON wrapping used by check_progress;
+    # escaping can otherwise truncate a card that fit as an evidence list.
+    payload = {"tool_name": "tool", "tool_call_id": None,
+               "result": json.dumps(evidence, default=str)}
+    return len("TOOL_RESULT " + json.dumps(payload, ensure_ascii=False, default=str))
+
+
 def single_turn_evidence_exceeds_budget(evidence: list[dict[str, Any]]) -> bool:
-    return single_turn_evidence_char_count(evidence) > SINGLE_TURN_CHAR_BUDGET
+    return single_turn_transport_char_count(evidence) > SINGLE_TURN_CHAR_BUDGET
 
 
 def _grounding_tool_rank(metadata: dict[str, Any]) -> int | None:
@@ -376,7 +353,7 @@ def pack_grounding_priority_rows(
             if low_priority_kept >= _LOW_PRIORITY_GROUNDING_MAX_ROWS:
                 continue
         trial = [*packed, row]
-        if single_turn_evidence_char_count(trial) > budget:
+        if single_turn_transport_char_count(trial) > budget:
             continue
         packed.append(row)
         if rank >= _GROUNDING_TOOL_RANK["web_search"]:
