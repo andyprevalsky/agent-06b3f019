@@ -104,6 +104,10 @@ GATES = (
     Gate("descend-command", ("bash", "scripts/tests/descend-command.test.sh")),
     Gate("benchmark-live-results", ("python3", "scripts/tests/benchmark-live-results.test.py")),
     Gate("jev-progress-core", ("python3", "scripts/tests/jev-progress-core.test.py")),
+    Gate(
+        "live-agent-display",
+        ("python3", "-m", "unittest", "discover", "-s", "scripts/live_display", "-p", "test_*.py"),
+    ),
     Gate("benchmark-scorecard", ("python3", "scripts/tests/cloudbench-scorecard.test.py")),
     Gate(
         "original600-portable-operator",
