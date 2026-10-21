@@ -142,6 +142,10 @@ def run(args, store):
         if args.iterations < 1:
             raise ValueError('Iterations must be positive')
         saved_config['search']['iterations_per_run'] = args.iterations
+    if args.patience is not None:
+        if args.patience < 1:
+            raise ValueError('Patience must be positive')
+        saved_config['search']['patience'] = args.patience
     until = now()
     run_id = until.replace(':', '').replace('+', '_')
     output = args.output / run_id
@@ -172,7 +176,7 @@ def run(args, store):
     # failures, never sealed rows, traces, results, or this receipt.
     save(output / 'prospective-summary.json', {k: v for k, v in receipt.items() if k != 'sealed_data'})
     print('PROSPECTIVE', json.dumps(receipt['metrics']), flush=True)
-    if new_train:
+    if new_train or args.train_existing:
         state['train_rows'].extend(examples(new_train))
         state['train_traces'].extend(new_train)
         dataset = output / 'dataset'
@@ -197,6 +201,7 @@ def run(args, store):
         subprocess.run([sys.executable, str(Path(__file__).with_name('optimize.py')),
                         '--dataset', str(dataset), '--output', str(experiment), '--start-at', str(start),
                         '--iterations', str(start + saved_config['search']['iterations_per_run'] - 1),
+                        '--patience', str(saved_config['search'].get('patience', 4)),
                         '--warm-start', str(experiment / 'warm-start.json')], check=True)
         winner = json.loads((experiment / 'winner.json').read_text())
         state['champion'] = winner['prompt']
@@ -221,6 +226,8 @@ def main():
     p.add_argument('--dataset', type=Path)
     p.add_argument('--prompt', type=Path)
     p.add_argument('--iterations', type=int, help='Explicitly override and persist the per-run budget')
+    p.add_argument('--train-existing', action='store_true', help='Continue optimization even if no new training families arrive')
+    p.add_argument('--patience', type=int, help='Persist consecutive non-improvement allowance; permits plateau probes')
     p.add_argument('--experiment-key', help='Encrypted initial experiment object for one-time adoption')
     args = p.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)

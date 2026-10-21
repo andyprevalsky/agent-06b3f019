@@ -15,6 +15,7 @@ from weekly import partition, goal_key
 from checkpoint import config, validate, export_optimizer, warm_candidates
 from core import digest, prepare
 import optimize
+from learning_curve import analyze
 
 
 class CoreTests(unittest.TestCase):
@@ -179,6 +180,14 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(evaluator.call_count, 2)
             self.assertEqual(json.loads((output/'winner.json').read_text())['name'], 'seed')
             self.assertEqual(json.loads((output/'optimizer-state.json').read_text())['next_iteration'], 12)
+
+    def test_late_drop_requires_a_plateau_then_a_material_improvement(self):
+        points = [{'iteration': i, 'joint_loss': v} for i,v in enumerate([1.1,1.2,1.05,1.03,.90],12)]
+        report = analyze(points)
+        self.assertEqual(report['late_drops'][0]['iteration'], 16)
+        self.assertAlmostEqual(report['late_drops'][0]['drop_from_plateau'], .1)
+        steady = [{'iteration': i, 'joint_loss': v} for i,v in enumerate([.99,.95,.9,.85,.8])]
+        self.assertEqual(analyze(steady)['late_drops'], [])
 
 
 if __name__ == "__main__":

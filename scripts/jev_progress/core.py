@@ -281,7 +281,7 @@ def summarize(rows, total):
 def evaluate(rows, traces, prompt, output, workers=12, transport=api):
     prompt_hash = digest(prompt)
     key = credential("TYPESAFE_API_KEY") if transport is api else "offline"
-    cache = output / "cache"
+    cache = Path(os.environ.get('JEV_CACHE_DIR', str(output / 'cache')))
     def one(row):
         trace = traces[row["trace_id"]]
         body = request(row, trace, prompt)

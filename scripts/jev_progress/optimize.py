@@ -104,7 +104,10 @@ def main():
     parser.add_argument("--iterations", type=int, default=8)
     parser.add_argument("--start-at", type=int, default=1)
     parser.add_argument("--warm-start", type=Path)
+    parser.add_argument("--patience", type=int, default=4, help="Consecutive non-improvements before stopping")
     args = parser.parse_args()
+    if args.patience < 1:
+        parser.error('patience must be positive')
     output = args.output
     cohorts = json.loads((output / "cohorts.json").read_text())
     verify_dataset(args.dataset, cohorts)
@@ -164,7 +167,7 @@ def main():
         validation_result = evaluate(validation, traces, prompt, output)
         save(output / "evaluations" / (name + "-validation.json"), validation_result)
         candidate = {"name": name, "prompt": prompt, "train": train_result, "validation": validation_result}
-        if validation_result["metrics"]["failed"]:
+        if train_result["metrics"]["failed"] or validation_result["metrics"]["failed"]:
             raise RuntimeError("Candidate has evaluation failures; no promotion or altered denominator")
         pool.append(candidate)
         score = validation_result["metrics"]
@@ -187,7 +190,7 @@ def main():
                   "candidate_count": len(pool), "phase": "mutation"}
         save(output / "status.json", status)
         print(json.dumps(status), flush=True)
-        if stale >= 4:
+        if stale >= args.patience:
             break
     # Merge independently successful components; evaluate under identical rules.
     eta_best = min(pool, key=lambda c: c["validation"]["metrics"]["eta_log_mae"])

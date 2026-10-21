@@ -90,6 +90,16 @@ parents. Saved historical scores are never substituted for current scores.
 The optimizer writes optimizer-state.json after each completed mutation.
 --iterations N explicitly changes and persists the per-run budget; omit it to
 retain the last setting. Protocol mismatches fail closed, never reset to defaults.
+To continue learning without waiting for new data and inspect late improvement:
+  agents/venv/bin/python scripts/jev_progress/weekly.py run --train-existing --iterations 10 --patience 10
+This runs ten mutations even across an early plateau, using the same validation
+set and incoming-champion normalization. --patience persists the stopping rule.
+Generate the per-candidate curve and a descriptive plateau/late-drop check with:
+  agents/venv/bin/python scripts/jev_progress/learning_curve.py --experiment <optimization-folder>
+The late-drop rule is a >=5% joint-error decrease after four candidates without
+a new best; it is descriptive, not proof of statistical double descent.
+JEV_CACHE_DIR optionally shares the content-addressed response cache across
+runs. It never changes inputs, labels, or which examples enter the experiment.
 Existing v1 checkpoints require the one-time explicit migrate command with the
 encrypted initial experiment artifact. The current checkpoint is migrated.
 
