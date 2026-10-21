@@ -959,6 +959,32 @@ recurrences. Add each card to an existing cluster by the same rules before
 creating a new one. If a task has two independently observed causes, preserve
 both memberships. An unknown cause remains an Observability Gap singleton.
 
+### Independent golden-reference review
+
+As soon as end/error clusters are known, start one independent read-only
+Explore subagent in parallel with RCA owners to review the current clusters
+against locally available golden references. Reuse that reviewer for new
+clusters or changed membership/first-bad boundaries; do not duplicate fix
+owners or block unrelated work. Give it exact cluster members, first-bad
+boundaries, exemplar evidence, and immutable source revisions.
+
+Route repository, reference, and evidence retrieval through the designated
+Explore agent; main and fix owners consume its evidence packet and request
+missing reads there. Reviewers may inspect actual diffs for review. For each
+cluster, check exact prompt copy, exact hyperparameters (including timeout and
+truncation limits with units), and critical new tools verbatim. Return an
+exact-match, partial, no-support, or read-gap disposition for each category,
+with necessary excerpts or exact values, paths/revisions, native integration
+constraints, and any required full-tail retrieval compatibility. Distinguish
+unavailable/unread source from a negative finding; do not refetch without
+network authorization.
+
+Golden references inform a candidate; they do not establish causality or
+authorize prompt/tool changes, relaxed budgets, or blind copying. Preserve
+existing approvals, RCA red/green proof, registered tests, and exact-task
+outcome proof. Return findings to main in the existing cluster handoff, not a
+new service, framework, or approval gate.
+
 ### Delegate cluster ownership
 
 Use managed delegated threads on boxes.dev through the
