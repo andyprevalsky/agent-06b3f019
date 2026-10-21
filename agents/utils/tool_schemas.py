@@ -1379,6 +1379,7 @@ class KillAgentTool(BaseModel):
 
     tool: Literal["kill_agent"]
     agent_id: str = Field(
+        pattern=r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
         description="Exact descendant agent ID to stop. This archives its entire subtree and stops its running work. Cannot target yourself, ancestors, siblings, or another user's agents."
     )
 

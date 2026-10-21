@@ -268,26 +268,39 @@ async def test_kill_agent_is_wired_and_reports_real_result():
     from unittest.mock import AsyncMock
     from workflows.agent_workflow import TOOL_EXECUTORS
     assert "kill_agent" in EXECUTE_PHASE_TOOLS
-    assert TOOL_MODELS["kill_agent"](tool="kill_agent", agent_id="child").agent_id == "child"
+    assert TOOL_MODELS["kill_agent"](tool="kill_agent", agent_id="00000000-0000-4000-8000-000000000002").agent_id == "00000000-0000-4000-8000-000000000002"
     assert TOOL_EXECUTORS["kill_agent"] is h.kill_agent
     events = []
     async def record(event, *args):
         events.append(event)
-    instance = SimpleNamespace(agent_id="parent", _handle_tool_event=record)
+    instance = SimpleNamespace(agent_id="00000000-0000-4000-8000-000000000001", _handle_tool_event=record)
     execute = AsyncMock(return_value={"ok": True, "status": "stopped", "message": "confirmed"})
     with patch.object(h.workflow, "execute_activity", execute):
-        await h.kill_agent(instance, {"agent_id": "child"}, "kill-1")
-        assert execute.call_args.kwargs["args"] == ["parent", "child"]
+        await h.kill_agent(instance, {"agent_id": "00000000-0000-4000-8000-000000000002"}, "kill-1")
+        assert execute.call_args.kwargs["args"] == ["00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002"]
         assert events[-1].status.value == "FINISHED"
-        await h.kill_agent(instance, {"agent_id": "parent"}, "kill-2")
+        await h.kill_agent(instance, {"agent_id": "00000000-0000-4000-8000-000000000001"}, "kill-2")
         assert execute.await_count == 1
         assert events[-1].status.value == "ERROR"
+
+
+async def test_kill_agent_rejects_path_escape_before_http():
+    from domains.kill_agent import handler as h
+    with patch.object(h.httpx, "AsyncClient") as client:
+        try:
+            await h.kill_agent_activity("parent", "../../agents/foreign")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("path escape was accepted")
+        client.assert_not_called()
 
 
 async def run_all_tests():
     print("agent-graph blackbox tests:")
     r = BlackboxResult()
     await r.record_async("kill_agent_wiring_and_result", test_kill_agent_is_wired_and_reports_real_result)
+    await r.record_async("kill_agent_rejects_path_escape", test_kill_agent_rejects_path_escape_before_http)
     try:
         r.record("root_spawned_question_goes_to_user", test_root_spawned_code_agent_question_goes_to_user)
         r.record(

@@ -1,6 +1,7 @@
 """Stop a descendant through a durable Temporal activity, never raw process signals."""
 from datetime import timedelta
 from typing import Any, Dict
+from uuid import UUID
 
 import httpx
 from temporalio import activity, workflow
@@ -12,6 +13,7 @@ from tools.base import EventType, MessageStatus, ToolEvent
 
 @activity.defn
 async def kill_agent_activity(caller_agent_id: str, target_agent_id: str) -> Dict[str, Any]:
+    target_agent_id = str(UUID(target_agent_id))
     config = load_config()
     async with httpx.AsyncClient(timeout=60) as client:
         response = await client.delete(
@@ -26,6 +28,10 @@ async def kill_agent_activity(caller_agent_id: str, target_agent_id: str) -> Dic
 
 async def kill_agent(workflow_instance, tool_call: Dict[str, Any], tool_call_id: str):
     target = str(tool_call.get("agent_id") or "").strip()
+    try:
+        target = str(UUID(target))
+    except ValueError:
+        target = ""
     if not target or target == str(workflow_instance.agent_id):
         result = {"ok": False, "error": "Choose a descendant agent ID; an agent cannot kill itself."}
     else:
