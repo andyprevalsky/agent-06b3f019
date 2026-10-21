@@ -9602,6 +9602,44 @@ async def _check_foundry_shared_state_case(case):
                     release.set()
                     await read
                     assert f._cooldown_until.get(key, 0) - time.monotonic() > 890, "old read erased acknowledged mark"
+            if case in {"pending_mark", "pending_mark_failure"}:
+                f._reset_foundry_cooldown_cache()
+                entered, release = asyncio.Event(), asyncio.Event()
+                reads = []
+                async def during_mark(req):
+                    if req.method == "POST":
+                        entered.set()
+                        await release.wait()
+                        return httpx.Response(503) if case == "pending_mark_failure" else httpx.Response(200, json=state())
+                    reads.append(1)
+                    return httpx.Response(200, json={"cooldowns": {}})
+                with patch.object(f, "httpx", client(during_mark)):
+                    mark = asyncio.create_task(f._report_rate_limit(region, key[1], 900))
+                    await asyncio.wait_for(entered.wait(), 2)
+                    try:
+                        await f._refresh_shared_cooldowns([key])
+                        preserved = f._cooldown_until.get(key, 0) - time.monotonic() > 890
+                        fresh = key in f._shared_checked_at
+                    finally:
+                        release.set()
+                        try:
+                            await mark
+                        except RoseServerError:
+                            assert case == "pending_mark_failure"
+                    assert preserved, "GET during pending mark erased known 429"
+                    assert not fresh, "pending write admitted a healthy read cache"
+                    if case == "pending_mark_failure":
+                        assert key not in f._shared_checked_at, "failed mark admitted healthy cache"
+                        count = len(reads)
+                        await f._refresh_shared_cooldowns([key])
+                        assert len(reads) > count, "failed mark suppressed a real authority recheck"
+                        assert f._cooldown_until.get(key, 0) - time.monotonic() > 890
+                        assert key not in f._shared_checked_at, "unpublished 429 was cached healthy"
+                        # A failed publisher has a bounded local hold, not an immortal fence.
+                        f._cooldown_until[key] = time.monotonic() - 1
+                        await f._refresh_shared_cooldowns([key])
+                        assert key not in f._cooldown_until, "expired local guard cannot clear"
+                        assert key in f._shared_checked_at
             if case == "malformed":
                 for payload in (
                     {},
@@ -9710,7 +9748,7 @@ async def _check_foundry_shared_state_case(case):
 
 
 async def test_foundry_shared_state_interleavings_and_validation():
-    for case in ("overlap", "malformed", "reset", "new_mark", "mark_order", "clock"):
+    for case in ("overlap", "pending_mark", "pending_mark_failure", "malformed", "reset", "new_mark", "mark_order", "clock"):
         await _check_foundry_shared_state_case(case)
 
 

@@ -52,6 +52,8 @@ _auth_cooldown_until: dict[str, float] = {}
 # Escalation strikes per (region endpoint, deployment), mirrored from the backend.
 _strikes: dict[tuple[str, str], int] = {}
 _state_generation: dict[tuple[str, str], int] = {}
+_pending_marks: dict[tuple[str, str], int] = {}
+_unconfirmed_marks: set[tuple[str, str]] = set()
 # When this process last read each deployment's shared cooldown (monotonic).
 _shared_checked_at: dict[tuple[str, str], float] = {}
 _shared_reads: dict[tuple[tuple[str, str], ...], asyncio.Task] = {}
@@ -317,6 +319,15 @@ def _advance_generation(key: tuple[str, str]) -> int:
     return _state_generation[key]
 
 
+def _read_can_replace_mark(key: tuple[str, str]) -> bool:
+    # A pre-commit snapshot cannot revoke a known 429. Failed publication keeps
+    # only its original bounded local hold; continue reading, but do not cache
+    # an empty authority snapshot as healthy until that hold expires.
+    return not _pending_marks.get(key, 0) and not (
+        key in _unconfirmed_marks and time.monotonic() < _cooldown_until.get(key, 0.0)
+    )
+
+
 async def _refresh_shared_cooldowns(keys: list[tuple[str, str]]) -> None:
     """Read the shared cooldown of every stale deployment in one request."""
     scope = _shared_scope()
@@ -344,7 +355,7 @@ async def _refresh_shared_cooldowns(keys: list[tuple[str, str]]) -> None:
             # Validate the whole response before mutating any local state.
             validated = {name: _validated_shared_state(value) for name, value in cooldowns.items()}
             for key in stale:
-                if _state_generation.get(key, 0) == generations[key]:
+                if _state_generation.get(key, 0) == generations[key] and _read_can_replace_mark(key):
                     _apply_shared_state(key, validated.get(_shared_key(key), (0, 0.0)))
         except Exception as exc:
             # With a configured authority, unknown shared state must not send
@@ -353,7 +364,7 @@ async def _refresh_shared_cooldowns(keys: list[tuple[str, str]]) -> None:
             raise RoseServerError("Foundry shared cooldown authority unavailable") from exc
         checked = time.monotonic()
         for key in stale:
-            if _state_generation.get(key, 0) == generations[key]:
+            if _state_generation.get(key, 0) == generations[key] and _read_can_replace_mark(key):
                 _shared_checked_at[key] = checked
 
     task = _shared_reads.get(stale)
@@ -382,6 +393,9 @@ async def _report_rate_limit(region: FoundryRegion, deployment: str, hint: Optio
     }
     if hint is not None:
         body["retryAfterSeconds"] = hint
+    _pending_marks[key] = _pending_marks.get(key, 0) + 1
+    _unconfirmed_marks.add(key)
+    _shared_checked_at.pop(key, None)
     try:
         async with asyncio.timeout(_SHARED_RPC_TIMEOUT_S):
             async with httpx.AsyncClient(timeout=_SHARED_RPC_TIMEOUT_S) as rpc:
@@ -395,11 +409,20 @@ async def _report_rate_limit(region: FoundryRegion, deployment: str, hint: Optio
         state = _validated_shared_state(response.json())
         if _state_generation.get(key, 0) == generation:
             _advance_generation(key)
+            _unconfirmed_marks.discard(key)
             _apply_shared_state(key, state)
             _shared_checked_at[key] = time.monotonic()
     except Exception as exc:
         logger.warning("rose.foundry.shared_cooldown_mark_failed", error_type=type(exc).__name__)
         raise RoseServerError("Foundry shared cooldown authority unavailable") from exc
+
+    finally:
+        _pending_marks[key] -= 1
+        if not _pending_marks[key]:
+            del _pending_marks[key]
+        # Reject reads already in flight when this write settled, even if the
+        # write failed. They may have read the authority before its commit.
+        _advance_generation(key)
 
 
 async def _report_served(region: FoundryRegion, deployment: str) -> None:
@@ -428,6 +451,7 @@ async def _report_served(region: FoundryRegion, deployment: str) -> None:
             _shared_checked_at.pop(key, None)
             if state["reset"]:
                 _strikes.pop(key, None)
+                _unconfirmed_marks.discard(key)
                 _cooldown_until.pop(key, None)
     except Exception as exc:
         _shared_checked_at.pop(key, None)
@@ -440,6 +464,8 @@ def _reset_foundry_cooldown_cache() -> None:
     _auth_cooldown_until.clear()
     _strikes.clear()
     _state_generation.clear()
+    _pending_marks.clear()
+    _unconfirmed_marks.clear()
     _shared_checked_at.clear()
     _shared_reads.clear()
 
