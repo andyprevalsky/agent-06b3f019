@@ -107,8 +107,14 @@ async def test_repeated_projection_is_stable_and_readable():
         assert page["content"] == "TAIL"
 
 
+async def test_main_retained_protocol_survives_redaction():
+    from tool_output_main_protocol import assert_main_preserves_only_authenticated_output
+    await assert_main_preserves_only_authenticated_output(fake_output_storage)
+
+
 async def run_all_tests():
     r = BlackboxResult()
+    await r.record_async("main_retained_protocol_survives_redaction", test_main_retained_protocol_survives_redaction)
     await r.record_async("projection_identity_scope_expiry_and_failure", test_projection_identity_scope_expiry_and_failure)
     await r.record_async("concurrent_projection_shares_upload", test_concurrent_projection_shares_upload)
     await r.record_async("repeated_projection_is_stable_and_readable", test_repeated_projection_is_stable_and_readable)
