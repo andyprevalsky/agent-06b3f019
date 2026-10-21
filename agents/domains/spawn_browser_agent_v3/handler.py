@@ -7588,7 +7588,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     error=str(lookup_error),
                 )
             if declined_session_id:
-                await _close_browser_with_cleanup_receipt(declined_session_id, pause=False)
+                await _close_browser_with_cleanup_receipt(declined_session_id, pause=True)
             logger.info("User declined auth assistance; ending browser task", task_id=task_id)
             return _visible_activity_result({
                 "status": "completed",
@@ -10607,7 +10607,7 @@ async def _spawn_browser_agent_activity_v3_real(
 
                         await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
                         dom_service = None
-                        await _close_browser_with_cleanup_receipt(session_id, pause=False)
+                        await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
 
                         context_message = build_context_summary(
                             success=True,
@@ -11629,7 +11629,7 @@ Based on this feedback, I need to continue working on the task and address the i
 
         await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
         dom_service = None
-        await _close_browser_with_cleanup_receipt(session_id, pause=False)
+        await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
 
         context_message = build_context_summary(
             success=False,
@@ -11790,11 +11790,10 @@ Based on this feedback, I need to continue working on the task and address the i
                 dom_service = None
 
         if session_id and cleanup_failure is None:
-            retryable_notification_error = isinstance(e, PurchaseApprovalNotificationRetryableError)
             await _close_browser_with_cleanup_receipt(
                 session_id,
-                pause=retryable_notification_error,
-                current_url=current_url if retryable_notification_error else None,
+                pause=True,
+                current_url=current_url,
             )
 
         error_context = f"Failed during: {last_action}"

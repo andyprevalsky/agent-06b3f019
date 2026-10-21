@@ -146,6 +146,11 @@ async def assert_full_browser_cleanup_failure_boundaries(owning_namespace, *, se
             terminal = [m for m in messages if m.get('action_type') == 'task_complete']
             cleanup = [m for m in terminal if (m.get('extra_metadata') or {}).get('browser_cleanup')]
             closecaptures = [c for c in get_captured_requests() if '/api/browser-session/close' in c['url']]
+            for close_call in close.await_args_list:
+                assert close_call.kwargs.get('pause') is True, (scenario, close_call)
+                if scenario in ('completion', 'maxstep'):
+                    assert close_call.kwargs.get('current_url') == 'https://example.com/login', (scenario, close_call)
+
             r = {'scenario': scenario, 'backgroundFailureInjected': fail_background, 'httpStatus': http_status, 'error': error, 'requests': len(closecaptures), 'closeAwaitCount': close.await_count, 'terminalStatuses': [str(m['status']) for m in terminal], 'terminalTitles': [m['title'] for m in terminal], 'cleanupReceipts': len(cleanup), 'backgroundTasks': len(owned_tasks), 'connectAttempts': len(connects)}
             results.append(r)
             if terminal_writer_status is not None:

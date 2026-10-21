@@ -47,6 +47,7 @@ import { z } from 'zod';
 import { prisma } from '../../providers/database';
 import { runBrowserInitDisconnectCases } from './browser-session-init-disconnect.cases';
 import { runBrowserPauseCheckpointCases } from './browser-session-pause-checkpoint.cases';
+import { runBrowserTerminalPauseCases } from './browser-session-terminal-pause.cases';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -619,12 +620,16 @@ async function testReproducibility_threeSequential() {
 async function runAll() {
   if (process.argv.includes('--pause-checkpoint-only')) {
     await runBrowserPauseCheckpointCases();
-    console.log('PASS browser-session pause checkpoint (4 cases; fixture provider)');
+    await runBrowserTerminalPauseCases();
+    console.log(
+      'PASS browser-session pause checkpoint/terminal release (7 cases; fixture provider)'
+    );
     return;
   }
   await runBrowserInitDisconnectCases();
   if (process.argv.includes('--init-disconnect-only')) return;
   await runBrowserPauseCheckpointCases();
+  await runBrowserTerminalPauseCases();
   console.log('Browser Session Black-box Tests\n');
   console.log(`Testing against: ${BASE_URL}`);
   console.log(`Case concurrency: ${CASE_CONCURRENCY}\n`);

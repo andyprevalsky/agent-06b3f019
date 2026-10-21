@@ -21371,7 +21371,7 @@ async def test_spawn_browser_activity_ends_cleanly_when_the_user_declines_auth_a
     assert result["message"] == "User declined to sign in to shop.example.", result
     assert close_mock.await_count == 1
     assert close_mock.await_args.args[1] == "session-refreshed-by-auth-page", close_mock.await_args
-    assert close_mock.await_args.kwargs == {"pause": False}
+    assert close_mock.await_args.kwargs == {"pause": True}
     assert fetch_mock.await_count == 1 and fetch_mock.await_args.args[1] == "task-1"
     resume_mock.assert_not_awaited()
     schema_mock.assert_not_awaited()
@@ -22103,7 +22103,9 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         assert result["status"] == "completed"
         assert result["structured_response"] == {"result": "ride requested"}
         assert result["session_id"] == "session-cookie"
-    close_mock.assert_awaited_once_with(_fake_config(), "session-cookie", pause=False)
+    assert close_mock.await_count == 1
+    assert close_mock.await_args.args == (_fake_config(), "session-cookie")
+    assert close_mock.await_args.kwargs["pause"] is True
     create_auth_mock.assert_not_awaited()
     restart_mock.assert_awaited_once_with(
         config=_fake_config(),
