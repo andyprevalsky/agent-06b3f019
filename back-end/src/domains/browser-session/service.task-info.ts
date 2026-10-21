@@ -39,7 +39,8 @@ type TaskInfoResponse = {
 
 export function isLiveBrowserStatus(status: string | null): boolean {
   if (status === null) return false;
-  return ['live', 'active', 'running'].includes(status.toLowerCase());
+  // Tilion reports a drivable session as `ready`; ended ones are `closed`/`expired`.
+  return ['live', 'active', 'running', 'ready'].includes(status.toLowerCase());
 }
 
 /**

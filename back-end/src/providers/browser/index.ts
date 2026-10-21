@@ -13,7 +13,7 @@ import { rotateSession as rotateSteelSession } from '../steel/sessionResume';
 import { getFingerprintInjectionData, listSessionFiles, uploadFileToSession } from '../steel/files';
 import { injectUserData } from '../steel/injection';
 import { compatiblePreferredBrowserConfig } from './challengeRecovery';
-import { browserUseEnabled, selectedBrowserProvider } from './config';
+import { browserUseEnabled, selectedBrowserProvider, tilionEnabled } from './config';
 import { getOrCreateBrowserContext } from './context';
 import {
   closeBrowserUseSession,
@@ -43,6 +43,19 @@ import {
 import type { KernelProxyType } from './kernelProxy';
 import type { RotationRecoveryAction, RotationStep } from './rotation';
 import { persistSignedInBrowserState } from './sessionAuthPersist';
+import {
+  captureTilionScreenshot,
+  closeTilionSession,
+  createTilionSessionWithContext,
+  getTilionCaptchaTelemetry,
+  getTilionSessionHealth,
+  listTilionSessionFiles,
+  pressTilionKeys,
+  readTilionSessionFile,
+  resumeTilionSession,
+  rotateTilionSession,
+  uploadTilionSessionFile,
+} from './tilion';
 import { releaseSupersededBrowser } from './sessionCleanup';
 import {
   storedBrowserProvider,
@@ -57,13 +70,34 @@ import {
 
 export {
   BrowserProviderRateLimitError,
+  BrowserSessionDrivenByClientError,
   type BrowserFileInfo,
   type BrowserProviderName,
   type BrowserSessionHealth,
   type BrowserViewport,
   type BrowserViewportResizeResult,
 } from './types';
-export { selectedBrowserProvider } from './config';
+export { selectedBrowserProvider, tilionEnabled, TilionApiKeyMissingError } from './config';
+
+/*
+ * Tilion single-CDP-client ordering (lane E live probe, 2026-10-21). A Tilion
+ * session accepts ONE CDP socket: a second is accepted then closed with 4409
+ * while the first is unaffected, and the same token reattaches after the first
+ * disconnects. While a CDP client is attached, REST drive calls do not wait:
+ * screenshot/act answer 409 `session_driven_by_client` and files/fetch 502
+ * `ExternalControlBusy`; only /status keeps working. Backend paths therefore:
+ *
+ *   initSession:   create (validation socket) → injectUserData (reuses it) → close it → worker attaches
+ *   prepare-auth / inject-local-storage (JIT):  worker detaches → backend CDP → worker reattaches
+ *   closeSession:  worker detaches → persistSignedInBrowserState harvest → provider release
+ *   screenshot / press-key / file read+list+upload: REST, valid only while no client is
+ *     attached; mid-run they raise BrowserSessionDrivenByClientError (HTTP 409
+ *     `session_driven_by_client`) and the worker uses its own CDP connection instead.
+ *   health / captcha telemetry / live view: REST status and token mints, safe while attached.
+ *
+ * A harvest that still collides is logged and the release proceeds, so a busy
+ * socket can cost a sign-in harvest but never leak a paid session.
+ */
 export { injectUserData, getFingerprintInjectionData };
 
 export const getOrCreateContext = getOrCreateBrowserContext;
@@ -76,6 +110,7 @@ export interface BrowserSessionCreationDependencies {
   createKernel: typeof createKernelSessionWithContext;
   createSteel: typeof createSteelSessionWithContext;
   createBrowserUse: typeof createBrowserUseSessionWithContext;
+  createTilion: typeof createTilionSessionWithContext;
 }
 
 export interface BrowserSessionCreationOptions {
@@ -96,6 +131,7 @@ const browserSessionCreationDependencies: BrowserSessionCreationDependencies = {
   createKernel: createKernelSessionWithContext,
   createSteel: createSteelSessionWithContext,
   createBrowserUse: createBrowserUseSessionWithContext,
+  createTilion: createTilionSessionWithContext,
 };
 
 async function fetchProviderApi<T>(
@@ -188,6 +224,17 @@ export async function createSessionWithContextUsingDependencies(
       }
       return dependencies.createBrowserUse(contextId, agentId, proxyLocation, startUrl, options);
     }
+    if (provider === 'tilion') {
+      if (!tilionEnabled()) {
+        throw new Error('Tilion is disabled by BROWSER_AGENT_TILION_ENABLED');
+      }
+      return dependencies.createTilion(contextId, agentId, proxyLocation, startUrl, {
+        ...(options?.keepValidationConnection !== undefined
+          ? { keepValidationConnection: options.keepValidationConnection }
+          : {}),
+        ...(options?.taskId !== undefined ? { taskId: options.taskId } : {}),
+      });
+    }
 
     const session = await dependencies.createSteel(contextId, agentId, proxyLocation, startUrl, {
       ...options,
@@ -214,7 +261,11 @@ export async function createSessionWithContextUsingDependencies(
     return createForProvider('steel', null);
   }
 
-  if (preferred !== null && (preferred.provider !== 'browser-use' || browserUseEnabled())) {
+  if (
+    preferred !== null &&
+    (preferred.provider !== 'browser-use' || browserUseEnabled()) &&
+    (preferred.provider !== 'tilion' || tilionEnabled())
+  ) {
     try {
       return await createForProvider(preferred.provider, preferred);
     } catch (error) {
@@ -249,6 +300,10 @@ export async function closeSession(
     await closeBrowserUseSession(sessionId, pause, currentUrl);
     return;
   }
+  if (provider === 'tilion') {
+    await closeTilionSession(sessionId, pause, currentUrl);
+    return;
+  }
   await closeSteelSession(sessionId, pause, currentUrl);
 }
 
@@ -261,8 +316,22 @@ export async function resumeSession(
 ): Promise<BrowserProviderResumeSession> {
   const provider = await providerForTask(taskId);
   if (provider === 'kernel') return resumeKernelSession(taskId, options);
-  if (provider === 'browser-use') {
-    if (!browserUseEnabled()) {
+  if (provider === 'tilion' && tilionEnabled()) {
+    const { previousSessionId, previousProvider, ...session } = await resumeTilionSession(
+      taskId,
+      options
+    );
+    await releaseSupersededBrowser({
+      taskId,
+      previousProvider,
+      previousSessionId,
+      operation: 'resume',
+    });
+    return session;
+  }
+  if (provider === 'browser-use' || provider === 'tilion') {
+    // A disabled rollout provider resumes on Kernel and releases its old session.
+    if (provider === 'tilion' || !browserUseEnabled()) {
       const previous = await prisma.browserSession.findUniqueOrThrow({
         where: { id: taskId },
         select: { sessionId: true },
@@ -270,7 +339,7 @@ export async function resumeSession(
       const replacement = await resumeKernelSession(taskId, options);
       await releaseSupersededBrowser({
         taskId,
-        previousProvider: 'browser-use',
+        previousProvider: provider,
         previousSessionId: previous.sessionId,
         operation: 'resume',
       });
@@ -342,6 +411,29 @@ export async function rotateProxy(
     };
   }
 
+  if (step.provider === 'tilion') {
+    if (!tilionEnabled()) {
+      throw new Error('Tilion is disabled by BROWSER_AGENT_TILION_ENABLED');
+    }
+    const { previousSessionId, previousProvider, ...session } = await rotateTilionSession(
+      taskId,
+      step.proxyType,
+      options
+    );
+    await releaseSupersededBrowser({
+      taskId,
+      previousProvider,
+      previousSessionId,
+      operation: 'rotation',
+    });
+    return {
+      ...session,
+      previousProvider,
+      recoveryAction: previousProvider === 'tilion' ? 'ip_rotated' : 'provider_switched',
+      proxyType: step.proxyType,
+    };
+  }
+
   if (step.provider === 'browser-use') {
     if (!browserUseEnabled()) {
       throw new Error('Browser Use is disabled by BROWSER_AGENT_BROWSER_USE_ENABLED');
@@ -402,6 +494,7 @@ export async function getBrowserSessionHealth(sessionId: string): Promise<Browse
   const provider = await providerForSession(sessionId);
   if (provider === 'kernel') return getKernelSessionHealth(sessionId);
   if (provider === 'browser-use') return getBrowserUseSessionHealth(sessionId);
+  if (provider === 'tilion') return getTilionSessionHealth(sessionId);
 
   const health = await getSteelSessionHealth(sessionId);
   return { provider: 'steel', ...health };
@@ -424,6 +517,7 @@ export async function getBrowserCaptchaTelemetry(taskId: string) {
       latestOutcome: null,
     };
   }
+  if (session.provider === 'tilion') return getTilionCaptchaTelemetry(session.sessionId);
   return session.provider === 'kernel'
     ? getKernelCaptchaTelemetry(session.sessionId)
     : getSteelCaptchaTelemetry(session.sessionId);
@@ -444,6 +538,7 @@ export async function resizeSessionViewport(
     };
   }
 
+  // Steel, Browser Use and Tilion expose no viewport resize API.
   return { provider, supported: false, resized: false, viewport };
 }
 
@@ -458,6 +553,9 @@ export async function uploadSessionFile(
   if (provider === 'browser-use') {
     return uploadBrowserUseSessionFile(sessionId, fileBuffer, filename, mimeType, options);
   }
+  if (provider === 'tilion') {
+    return uploadTilionSessionFile(sessionId, fileBuffer, filename, mimeType, options);
+  }
   // Steel's Files API owns /files; directory overrides only apply to Kernel.
   return provider === 'kernel'
     ? uploadKernelSessionFile(sessionId, fileBuffer, filename, options)
@@ -467,12 +565,14 @@ export async function uploadSessionFile(
 export async function listFiles(sessionId: string): Promise<BrowserFileInfo[]> {
   const provider = await providerForSession(sessionId);
   if (provider === 'browser-use') return listBrowserUseSessionFiles(sessionId);
+  if (provider === 'tilion') return listTilionSessionFiles(sessionId);
   return provider === 'kernel' ? listKernelSessionFiles(sessionId) : listSessionFiles(sessionId);
 }
 
 export async function readSessionFile(sessionId: string, filePath: string): Promise<Buffer> {
   const provider = await providerForSession(sessionId);
   if (provider === 'browser-use') return readBrowserUseSessionFile(sessionId, filePath);
+  if (provider === 'tilion') return readTilionSessionFile(sessionId, filePath);
   if (provider === 'kernel') return readKernelSessionFile(sessionId, filePath);
 
   const apiKey = process.env.STEEL_API_KEY?.trim();
@@ -495,6 +595,10 @@ export async function captureScreenshot(sessionId: string): Promise<{
   const provider = await providerForSession(sessionId);
   if (provider === 'kernel') {
     return { provider, image: await captureKernelScreenshot(sessionId) };
+  }
+  if (provider === 'tilion') {
+    // REST screenshot: refused (typed) while the agent holds the CDP slot.
+    return { provider, image: await captureTilionScreenshot(sessionId) };
   }
   if (provider === 'browser-use') {
     const session = await prisma.browserSession.findUniqueOrThrow({
@@ -544,6 +648,7 @@ export async function pressSessionKeys(
     providerForSession,
     pressKernelKeys,
     pressBrowserUseKeys,
+    pressTilionKeys,
   });
 }
 
@@ -554,6 +659,7 @@ export async function pressSessionKeysUsingDependencies(
     providerForSession: (sessionId: string) => Promise<BrowserProviderName>;
     pressKernelKeys: (sessionId: string, keys: string[]) => Promise<void>;
     pressBrowserUseKeys: (sessionId: string, keys: string[]) => Promise<void>;
+    pressTilionKeys: (sessionId: string, keys: string[]) => Promise<void>;
   }
 ): Promise<{
   provider: BrowserProviderName;
@@ -563,6 +669,7 @@ export async function pressSessionKeysUsingDependencies(
   const provider = await dependencies.providerForSession(sessionId);
   if (provider === 'kernel') await dependencies.pressKernelKeys(sessionId, keys);
   else if (provider === 'browser-use') await dependencies.pressBrowserUseKeys(sessionId, keys);
+  else if (provider === 'tilion') await dependencies.pressTilionKeys(sessionId, keys);
   else return { provider, supported: false, pressed: false };
   return { provider, supported: true, pressed: true };
 }

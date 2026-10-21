@@ -76,3 +76,22 @@ export class BrowserProviderRateLimitError extends Error {
     this.provider = provider;
   }
 }
+
+/**
+ * The provider refused a REST drive call because a CDP client holds the
+ * session (Tilion: 409 `session_driven_by_client`, or 502 `file_fetch_failed`
+ * with cause `ExternalControlBusy`). Retryable once the client detaches; while
+ * the agent is attached it must use its own CDP connection instead.
+ */
+export class BrowserSessionDrivenByClientError extends Error {
+  readonly provider: BrowserProviderName;
+  readonly operation: string;
+  readonly retryable = true;
+
+  constructor(provider: BrowserProviderName, operation: string, message?: string) {
+    super(message ?? `${provider} session is driven by another CDP client; ${operation} refused`);
+    this.name = 'BrowserSessionDrivenByClientError';
+    this.provider = provider;
+    this.operation = operation;
+  }
+}

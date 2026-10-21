@@ -1,5 +1,6 @@
 import { type Response, type Router } from 'express';
 import { type AuthRequest, authenticate } from '../../providers/auth';
+import { BrowserSessionDrivenByClientError } from '../../providers/browser/types';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { isValidBrowserKeySymbols } from './service.browser-input';
 import {
@@ -9,6 +10,19 @@ import {
   SessionNotFoundError,
   takeScreenshot,
 } from './service';
+
+/** 409 for a REST drive call refused because a CDP client (the agent) holds the session. */
+export function respondIfSessionDrivenByClient(error: unknown, res: Response): boolean {
+  if (!(error instanceof BrowserSessionDrivenByClientError)) return false;
+  res.status(409).json({
+    error: 'session_driven_by_client',
+    provider: error.provider,
+    operation: error.operation,
+    retryable: true,
+    message: error.message,
+  });
+  return true;
+}
 
 function userIdForSessionAccess(req: AuthRequest): string | undefined {
   return req.isInternal === true ? undefined : req.user?.id;
@@ -40,6 +54,7 @@ async function handlePressKey(req: AuthRequest, res: Response): Promise<void> {
       res.status(404).json({ error: error.message });
       return;
     }
+    if (respondIfSessionDrivenByClient(error, res)) return;
     throw error;
   }
 }
@@ -75,6 +90,7 @@ export function registerBrowserDataRoutes(router: Router): void {
           res.status(404).json({ error: error.message });
           return;
         }
+        if (respondIfSessionDrivenByClient(error, res)) return;
         throw error;
       }
     })
@@ -95,6 +111,7 @@ export function registerBrowserDataRoutes(router: Router): void {
           res.status(404).json({ error: error.message });
           return;
         }
+        if (respondIfSessionDrivenByClient(error, res)) return;
         throw error;
       }
     })

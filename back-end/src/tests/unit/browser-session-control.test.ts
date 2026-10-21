@@ -192,12 +192,17 @@ type LiveViewRecord = NonNullable<
   Awaited<ReturnType<typeof import('../../domains/browser-session/repo').findBrowserLiveViewRecord>>
 >;
 
-function liveViewRecord(status: LiveViewRecord['status'], userId = 'owner'): LiveViewRecord {
+function liveViewRecord(
+  status: LiveViewRecord['status'],
+  userId = 'owner',
+  provider = 'steel'
+): LiveViewRecord {
   return {
     id: 'task-live-view',
     sessionId: 'f26ee1ab-f769-42d7-90a0-5d014fc1284f',
     status,
     debugUrl: LIVE_URL,
+    provider,
     context: { userId },
   };
 }
@@ -265,6 +270,51 @@ async function testLiveViewHidesAnotherUsersTask(): Promise<void> {
   );
 }
 
+/** Tilion view tokens last 1800 s: every live read mints a fresh URL; ended sessions mint nothing. */
+async function testTilionLiveViewMintsFreshUrlAndEndedIsNotLive(): Promise<void> {
+  let mints = 0;
+  const mintTilionLiveViewUrl = async (sessionId: string) => {
+    mints += 1;
+    return `https://back.tilion.dev/v1/session/${sessionId}/live-view?token=t${mints}`;
+  };
+  const first = await getBrowserLiveView('task-live-view', 'owner', {
+    findRecord: async () => liveViewRecord('ACTIVE', 'owner', 'tilion'),
+    health: async () => health('ready', 600_000),
+    mintTilionLiveViewUrl,
+  });
+  const second = await getBrowserLiveView('task-live-view', 'owner', {
+    findRecord: async () => liveViewRecord('ACTIVE', 'owner', 'tilion'),
+    health: async () => health('ready', 600_000),
+    mintTilionLiveViewUrl,
+  });
+  assert.equal(first.live, true, 'Tilion `ready` is live');
+  assert.notEqual(first.debugUrl, second.debugUrl, 'each read mints a fresh token');
+  assert.match(second.debugUrl ?? '', /token=t2$/);
+
+  const ended = await getBrowserLiveView('task-live-view', 'owner', {
+    findRecord: async () => liveViewRecord('ACTIVE', 'owner', 'tilion'),
+    health: async () => health('expired', null),
+    mintTilionLiveViewUrl,
+  });
+  const closed = await getBrowserLiveView('task-live-view', 'owner', {
+    findRecord: async () => liveViewRecord('CLOSED', 'owner', 'tilion'),
+    health: async () => health('ready', 1),
+    mintTilionLiveViewUrl,
+  });
+  assert.equal(ended.live, false);
+  assert.equal(closed.live, false);
+  assert.equal(mints, 2, 'ended Tilion sessions must not mint view tokens');
+
+  const mintFailed = await getBrowserLiveView('task-live-view', 'owner', {
+    findRecord: async () => liveViewRecord('ACTIVE', 'owner', 'tilion'),
+    health: async () => health('ready', 600_000),
+    mintTilionLiveViewUrl: async () => {
+      throw new Error('mint unavailable');
+    },
+  });
+  assert.equal(mintFailed.debugUrl, LIVE_URL, 'a failed mint keeps the stored URL');
+}
+
 async function runAll(): Promise<void> {
   await testActiveTakeControlIsImmediateSameSession();
   await testLeftoverRequestedBecomesUserOnSameSession();
@@ -275,8 +325,9 @@ async function runAll(): Promise<void> {
   await testLiveViewReportsProviderEndedSessionAsNotLive();
   await testLiveViewClosedRowSkipsProviderAndUnknownHealthIsNull();
   await testLiveViewHidesAnotherUsersTask();
+  await testTilionLiveViewMintsFreshUrlAndEndedIsNotLive();
   await prisma.$disconnect();
-  process.stdout.write('PASS browser-session-control unit (9 cases)\n');
+  process.stdout.write('PASS browser-session-control unit (10 cases)\n');
 }
 
 runAll().catch(async (error) => {

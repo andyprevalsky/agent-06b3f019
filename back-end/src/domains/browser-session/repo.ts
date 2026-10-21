@@ -147,6 +147,7 @@ export async function findBrowserLiveViewRecord(taskId: string) {
       sessionId: true,
       status: true,
       debugUrl: true,
+      provider: true,
       context: { select: { userId: true } },
     },
   });
