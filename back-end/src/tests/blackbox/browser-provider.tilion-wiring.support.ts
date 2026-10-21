@@ -15,6 +15,7 @@ import { respondToTilionRefusal } from '../../domains/browser-session/routes.fil
 import { buildBrowserSessionMetadata } from '../../domains/browser-session/service';
 import { buildPreferredBrowserConfig } from '../../providers/browser/challengeRecoverySupport';
 import { TilionRateLimitError } from '../../providers/browser/tilion';
+import { assertTilionCarriedStateReachesReplacementsAndNever500s } from './browser-provider.tilion-carried-state.support';
 import {
   exitGeoLocale,
   resolveExitGeoLocale,
@@ -603,5 +604,9 @@ export const tilionWiringCases: Array<[string, () => Promise<void>]> = [
   [
     'Tilion exit-country timezone/locale and geo targeting reach the worker',
     assertTilionExitGeoLocaleAndTargetingAreExposed,
+  ],
+  [
+    'rotate-proxy/resume carry storage_state; uncarried Tilion swaps answer 409',
+    assertTilionCarriedStateReachesReplacementsAndNever500s,
   ],
 ];

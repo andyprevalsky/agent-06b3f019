@@ -23,9 +23,18 @@ export const closeSessionSchema = z.object({
   current_url: z.string().optional(), // Save current page URL for resume
 });
 
+const storageStateSchema = z
+  .object({
+    cookies: z.array(z.record(z.unknown())).default([]),
+    origins: z.array(z.record(z.unknown())).default([]),
+  })
+  .passthrough();
+
 export const resumeSessionSchema = z.object({
   task_id: z.string().uuid(), // Use stable task ID instead of session_id
   force_fresh_profile: z.boolean().optional().default(false),
+  /** Worker-captured state of a LIVE Tilion session (it holds the only CDP client). */
+  storage_state: storageStateSchema.optional(),
 });
 
 export const browserControlSchema = z.object({
@@ -37,14 +46,9 @@ export const browserControlSchema = z.object({
 export const rotateProxySchema = z.object({
   task_id: z.string().uuid(),
   current_url: z.string().min(1).max(8192).optional(),
+  /** Worker-captured state of a LIVE Tilion session; required by Tilion to replace it. */
+  storage_state: storageStateSchema.optional(),
 });
-
-const storageStateSchema = z
-  .object({
-    cookies: z.array(z.record(z.unknown())).default([]),
-    origins: z.array(z.record(z.unknown())).default([]),
-  })
-  .passthrough();
 
 const httpPublicUrlSchema = z
   .string()

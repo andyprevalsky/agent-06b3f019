@@ -4,6 +4,7 @@ import { createLogger } from '../../providers/logger';
 import { notifyAuthAssistance } from '../../providers/smsSupervisor/outboundEvents';
 import { getBrowserSessionHealth } from '../../providers/browser';
 import { resumeBrowserSession } from '../../providers/browserSessionResume';
+import { getTilionLiveViewUrl, TilionUncarriedStateError } from '../../providers/browser/tilion';
 import * as repo from './repo';
 import type {
   AuthAssistanceHandoff,
@@ -162,6 +163,24 @@ export async function getAuthAssistanceRequest(id: string, userId: string) {
   };
 }
 
+/** Hand off the still-live session; Tilion view tokens expire after 1800 s, so mint a fresh URL. */
+async function liveSameSessionHandoff(
+  request: Parameters<typeof serializeRequest>[0],
+  session: { sessionId: string; provider: string; debugUrl: string | null }
+) {
+  const debugUrl =
+    session.provider === 'tilion'
+      ? await getTilionLiveViewUrl(session.sessionId)
+      : session.debugUrl;
+  return {
+    request: serializeRequest(request),
+    handoff: handoffForMode('live_view', session.sessionId, debugUrl),
+    liveViewUrl: interactiveDebugUrl(debugUrl),
+    refreshed: false,
+    alreadyCompleted: false,
+  };
+}
+
 export async function refreshAuthAssistanceSession(id: string, userId: string) {
   const request = await repo.findRequestById(id);
   if (request === null) throw new NotFoundError('Auth assistance request not found');
@@ -219,18 +238,18 @@ export async function refreshAuthAssistanceSession(id: string, userId: string) {
     }
   }
 
-  if (sameSessionAvailable) {
-    const liveViewUrl = interactiveDebugUrl(session.debugUrl);
-    return {
-      request: serializeRequest(request),
-      handoff: handoffForMode('live_view', liveSteelSessionId, session.debugUrl),
-      liveViewUrl,
-      refreshed: false,
-      alreadyCompleted: false,
-    };
-  }
+  const sameSessionHandoff = () => liveSameSessionHandoff(request, session);
+  if (sameSessionAvailable) return sameSessionHandoff();
 
-  const resumed = await resumeBrowserSession(session.id);
+  let resumed: Awaited<ReturnType<typeof resumeBrowserSession>>;
+  try {
+    resumed = await resumeBrowserSession(session.id);
+  } catch (error) {
+    // A live (only expiring) Tilion browser holds state only the worker can
+    // capture; replacing it here would lose that state, so hand off the same one.
+    if (error instanceof TilionUncarriedStateError) return sameSessionHandoff();
+    throw error;
+  }
   const liveViewUrl = interactiveDebugUrl(resumed.debug_url);
   const updatedRequest = await repo.updateLiveViewHandoff(
     id,
