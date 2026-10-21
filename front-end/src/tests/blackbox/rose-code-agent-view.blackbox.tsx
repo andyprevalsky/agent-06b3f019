@@ -16,7 +16,7 @@
  * stock account never opens it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 
@@ -125,6 +125,7 @@ function serveBackend({
         agents: [agentRow(OWNER, 'Polish Rose UI', 1), agentRow(OTHER, 'Plan Tahoe trip', 2)],
       }),
     ),
+    http.get(`${API_BASE}/agents/tree`, () => HttpResponse.json({ agents: [] })),
     http.get(`${API_BASE}/agents/code-agents`, () => HttpResponse.json({ code_agents: [ROW] })),
     http.get(`${API_BASE}/agents/:agentId`, ({ params }) => {
       const id = String(params.agentId);
@@ -186,13 +187,20 @@ async function renderOnOwner(route = `/?agent-id=${OWNER}`) {
   window.history.replaceState({}, '', route);
   const user = userEvent.setup({ delay: null });
   renderWithProviders(<Terminal />);
+  await screen.findByTestId('rose-sidebar');
+  expandBar();
+  const ownerRow = await screen.findByTestId(`rose-agent-row-${OWNER}`);
+  const branch = ownerRow.closest('[data-agent-depth]') as HTMLElement;
+  const disclosure = await within(branch).findByRole('button', { name: /^Expand|^Collapse/ });
+  if (disclosure.getAttribute('aria-expanded') === 'false') fireEvent.click(disclosure);
   await screen.findByTestId(`rose-code-agent-row-${TASK}`);
   return user;
 }
 
 async function openFromRow(user: ReturnType<typeof userEvent.setup>) {
   await screen.findByTestId('code-agent-chip');
-  await user.click(row());
+  expandBar();
+  fireEvent.click(row());
   return screen.findByTestId('code-agent-view');
 }
 
@@ -545,7 +553,7 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
     expect(screen.getByTestId('code-agent-chip')).toBeInTheDocument();
     expect(urlParams().get('code-agent')).toBeNull();
 
-    await user.click(row());
+    fireEvent.click(row());
     await screen.findByTestId('code-agent-view');
     await user.click(screen.getByTestId(`rose-agent-row-${OTHER}`));
     await waitFor(() => expect(urlParams().get('agent-id')).toBe(OTHER));
@@ -553,7 +561,7 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
     expect(urlParams().get('code-agent')).toBeNull();
 
     // From another agent, the row selects its owner first, then opens.
-    await user.click(row());
+    fireEvent.click(row());
     expect(await screen.findByTestId('code-agent-view')).toBeInTheDocument();
     expect(urlParams().get('agent-id')).toBe(OWNER);
     await user.click(screen.getByRole('button', { name: 'Home' }));
@@ -576,7 +584,7 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
     const user = await renderOnOwner();
     await screen.findByTestId('code-agent-chip');
     const before = capturedRequests.length;
-    await user.click(row());
+    fireEvent.click(row());
     await screen.findByTestId('code-agent-view');
     await new Promise((resolve) => setTimeout(resolve, 300));
     const whileOpen = capturedRequests.slice(before).map((r) => new URL(r.url).pathname);
