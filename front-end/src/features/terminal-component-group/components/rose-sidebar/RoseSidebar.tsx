@@ -9,9 +9,10 @@
  *
  * LAYOUT (top → bottom, rows 17/30/57/59/63):
  *   Home · New Super Agent (black) · Search
- *   agents grouped by project (RoseAgentGroups), each followed by its tree's
- *   code agents (useRoseCodeAgents: one batched read per on-screen page of
- *   ≤50 roots; provider icon + title only) · + New project
+ *   agents grouped by project, with per-agent one-layer disclosures (RoseAgentGroups).
+ *   The compact rail shows active tree counts >1; code sessions retain their
+ *   provider icons. Code reads stay batched per on-screen page of ≤50 roots.
+ *   + New project
  *   ── Feedback · [Biz health, admins] · Archived · [Browse] · account row.
  *      Feedback, Biz health and the account row (Settings) open in the
  *      right-panel slot (RoseAppsProvider); clicking again closes it.
@@ -178,7 +179,7 @@ function RoseSidebarBar(props: AppSidebarProps) {
     onSelectAgent: props.onSelectAgent,
   });
   const actionsFor = useRoseAgentMenuActions(handlers, roseActions);
-  const { codeAgentsFor, observeRoot } = useRoseCodeAgents(
+  const { codeAgentsFor, observeRoot, visibleRootIds } = useRoseCodeAgents(
     [...grouped.home, ...grouped.projects.flatMap((g) => g.agents)],
     props.selectedAgentId,
   );
@@ -230,6 +231,7 @@ function RoseSidebarBar(props: AppSidebarProps) {
             codeAgentsFor={codeAgentsFor}
             onOpenCodeAgent={codeAgentRows.onOpenCodeAgent}
             observeRoot={observeRoot}
+            visibleRootIds={visibleRootIds}
             selectedCodeAgentId={codeAgentRows.selectedCodeAgentId}
           />
         </ScrollArea>

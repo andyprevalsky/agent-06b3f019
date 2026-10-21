@@ -23,7 +23,7 @@
  * owner row is not; any agent row (the owner without a reload) returns.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 
@@ -44,6 +44,12 @@ import {
   signedInUser,
 } from './rose-sidebar.fixtures';
 import { renderWithProviders } from './test-wrapper';
+
+vi.mock('@/lib/realtime', async (original) => ({
+  ...(await original<typeof import('@/lib/realtime')>()),
+  subscribeToBus: vi.fn(async () => ({ state: 'joined' })),
+  unsubscribe: vi.fn(),
+}));
 
 const API_BASE = 'http://localhost:3001/api';
 const RUNNING = { status: 'ACTIVE' as const, temporal_workflow_id: 'wf-1' };
@@ -274,6 +280,27 @@ beforeEach(() => {
     ControlledIntersectionObserver as unknown as typeof window.IntersectionObserver;
   mockProjectsApi([makeProject(), makeProject({ id: 'p-habits', name: 'Habits' })]);
   mockCodeAgents(ROWS);
+  server.use(
+    http.get(`${API_BASE}/agents/tree`, ({ request }) =>
+      HttpResponse.json({
+        agents:
+          new URL(request.url).searchParams.get('busId') === 'rose-run'
+            ? [
+                {
+                  agent_id: 'rose-sub',
+                  parent_agent_id: 'rose-run',
+                  goal: 'Research implementation',
+                  status: 'COMPLETED',
+                  progress: 1,
+                  tools_in_use: [],
+                  message_count: 1,
+                  tree_cost_cents: 0,
+                },
+              ]
+            : [],
+      }),
+    ),
+  );
 });
 
 afterEach(() => {
@@ -284,12 +311,27 @@ afterEach(() => {
   document.documentElement.classList.remove('dark');
 });
 
+async function openCodeRow(id: string) {
+  expandBar();
+  const bulk = /^cc-(\d+)$/.exec(id);
+  const root = bulk ? `bulk-${bulk[1]}` : id === 'cc-sub' ? 'rose-run' : 'home-run';
+  const owner = id === 'cc-sub' ? 'rose-sub' : root;
+  if (root === 'rose-run') await screen.findByTestId('rose-project-row-p-rose');
+  for (const agentId of new Set([root, owner])) {
+    const row = await screen.findByTestId(`rose-agent-row-${agentId}`);
+    const wrapper = row.closest('[data-agent-depth]') as HTMLElement;
+    const toggle = await within(wrapper).findByRole('button', { name: /^Expand|^Collapse/ });
+    if (toggle.getAttribute('aria-expanded') === 'false') fireEvent.click(toggle);
+  }
+  return screen.findByTestId(`rose-code-agent-row-${id}`);
+}
+
 describe('Rose left bar code agents (flag on)', () => {
   it("one batched request lists each tree's code agents under its root row, oldest first", async () => {
     renderBar();
     expandBar();
-    await screen.findByTestId('rose-code-agent-row-cc-sub');
-    await screen.findByTestId('rose-code-agent-row-cc-fix');
+    await openCodeRow('cc-sub');
+    await openCodeRow('cc-fix');
     expect(barRowOrder()).toEqual([
       'agent:home-run',
       'code-agent:cc-build',
@@ -298,6 +340,7 @@ describe('Rose left bar code agents (flag on)', () => {
       'agent:home-done',
       'project:p-rose',
       'agent:rose-run',
+      'agent:rose-sub',
       'code-agent:cc-sub',
       'agent:rose-fail',
       'project:p-habits',
@@ -305,10 +348,14 @@ describe('Rose left bar code agents (flag on)', () => {
     ]);
     expect(codeAgentRequests()).toHaveLength(1);
     expect(new Set(codeAgentRequests()[0])).toEqual(new Set(AGENTS.map((a) => a.agent_id)));
-    expect(treeRequests()).toHaveLength(0);
+    expect(new Set(treeRequests().map((r) => new URL(r.url).searchParams.get('busId')))).toEqual(
+      ids(AGENTS),
+    );
+    // Initially ungrouped roots can remount once when their projects arrive.
+    expect(treeRequests().length).toBeLessThanOrEqual(AGENTS.length * 2);
     // One level under the parent: Home agent rows sit at 22px, project agent rows at 34px.
-    expect(screen.getByTestId('rose-code-agent-row-cc-build').className).toContain('pl-[34px]');
-    expect(screen.getByTestId('rose-code-agent-row-cc-sub').className).toContain('pl-[46px]');
+    expect(screen.getByTestId('rose-code-agent-row-cc-build')).toHaveStyle({ paddingLeft: '38px' });
+    expect(screen.getByTestId('rose-code-agent-row-cc-sub')).toHaveStyle({ paddingLeft: '66px' });
     expect(screen.getByTestId('rose-code-agent-row-cc-build')).toHaveTextContent(
       'Build the widget',
     );
@@ -317,8 +364,8 @@ describe('Rose left bar code agents (flag on)', () => {
   it('uses the Claude / Codex icon instead of the Bot glyph: icon + title only', async () => {
     renderBar({}, { dark: true });
     const row = (id: string) => screen.getByTestId(`rose-code-agent-row-${id}`);
-    await screen.findByTestId('rose-code-agent-row-cc-sub');
-    await screen.findByTestId('rose-code-agent-row-cc-fix');
+    await openCodeRow('cc-sub');
+    await openCodeRow('cc-fix');
     for (const id of ['cc-build', 'cc-fix', 'cc-sub']) {
       expect(row(id).querySelector('[data-sidebar-agent-icon], svg.lucide-bot')).toBeNull();
     }
@@ -331,31 +378,27 @@ describe('Rose left bar code agents (flag on)', () => {
     expect(row('cc-fix')).toHaveTextContent('Fix flaky test');
   });
 
-  it("collapsed: code agents stay in their parent's group with no divider between them", async () => {
+  it('collapsed: children stay hidden inside their root and only active agents contribute to the badge', async () => {
     renderBar();
-    const build = await screen.findByTestId('rose-code-agent-row-cc-build');
-    const sub = await screen.findByTestId('rose-code-agent-row-cc-sub');
+    await waitFor(() => expect(codeAgentRequests()).toHaveLength(1));
     expect(roseBar()).toHaveAttribute('data-expanded', 'false');
-    expect(build.className).toContain('px-[22px]');
-    expect(screen.getByTestId('rose-group-home')).toContainElement(build);
-    expect(screen.getByTestId('rose-group-p-rose')).toContainElement(sub);
+    expect(screen.queryByTestId('rose-code-agent-row-cc-build')).toBeNull();
+    expect(await screen.findByTestId('rose-agent-count-home-run')).toHaveTextContent('2');
+    expect(screen.queryByTestId('rose-agent-count-rose-run')).toBeNull();
     expect(screen.getAllByTestId('rose-group-divider')).toHaveLength(2);
-    expect(
-      screen.getByTestId('rose-group-p-rose').querySelector('[data-testid="rose-group-divider"]'),
-    ).toBeNull();
   });
 
   it('clicking a code agent opens its owner conversation; a provided handler replaces that', async () => {
     const user = userEvent.setup();
     const onSelectAgent = vi.fn();
     const { unmount } = renderBar({ onSelectAgent });
-    await user.click(await screen.findByTestId('rose-code-agent-row-cc-sub'));
+    await user.click(await openCodeRow('cc-sub'));
     expect(onSelectAgent).toHaveBeenCalledWith('rose-sub');
     unmount();
 
     const onOpenCodeAgent = vi.fn();
     renderBar({ roseActions: { onOpenCodeAgent } });
-    await user.click(await screen.findByTestId('rose-code-agent-row-cc-fix'));
+    await user.click(await openCodeRow('cc-fix'));
     expect(onOpenCodeAgent).toHaveBeenCalledWith(
       expect.objectContaining({
         code_agent_id: 'cc-fix',
@@ -374,7 +417,7 @@ describe('Rose left bar code agents (flag on)', () => {
       codeAgent({ code_agent_id: 'cc-120', root_agent_id: 'bulk-120', owner_agent_id: 'bulk-120' }),
     ]);
     renderWithProviders(<AppSidebar {...defaultProps({ agents: many, user: signedInUser() })} />);
-    await screen.findByTestId('rose-code-agent-row-cc-3');
+    await openCodeRow('cc-3');
     await waitFor(() => expect(codeAgentRequests()).toHaveLength(2));
     // Display order is newest first (bulk-0 … bulk-129); pages are 50 roots each.
     const [first, second] = codeAgentRequests();
@@ -383,7 +426,7 @@ describe('Rose left bar code agents (flag on)', () => {
     expect(screen.queryByTestId('rose-code-agent-row-cc-120')).toBeNull();
 
     scrollTo((id) => id === 'bulk-120');
-    await screen.findByTestId('rose-code-agent-row-cc-120');
+    await openCodeRow('cc-120');
     expect(codeAgentRequests()).toHaveLength(3);
     expect(new Set(codeAgentRequests()[2])).toEqual(ids(many.slice(100)));
     expect(codeAgentRequests().every((page) => page.length <= 50)).toBe(true);
@@ -392,7 +435,7 @@ describe('Rose left bar code agents (flag on)', () => {
     scrollTo((id) => id === 'bulk-3');
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(codeAgentRequests()).toHaveLength(3);
-    expect(treeRequests()).toHaveLength(0);
+    expect(treeRequests().length).toBeLessThanOrEqual(5);
   });
 
   it('nothing on screen and nothing selected: no request at all', async () => {
@@ -474,8 +517,8 @@ describe('code-agent rows carry no status glyph (flag on)', () => {
     ['dark', true],
   ])('running, failed and completed rows show only the provider icon (%s)', async (_, dark) => {
     renderBar({}, { dark });
-    await screen.findByTestId('rose-code-agent-row-cc-sub');
-    await screen.findByTestId('rose-code-agent-row-cc-fix');
+    await openCodeRow('cc-sub');
+    await openCodeRow('cc-fix');
     expandBar();
     expectIconOnly('cc-build', 'Claude Code');
     expectIconOnly('cc-fix', 'Codex');
@@ -484,20 +527,20 @@ describe('code-agent rows carry no status glyph (flag on)', () => {
 
   it('a running code agent waiting on an unanswered question still shows no glyph', async () => {
     renderBar({}, { attention: [codeAgentQuestion('cc-build')] });
-    await screen.findByTestId('rose-code-agent-row-cc-build');
+    await openCodeRow('cc-build');
     expectIconOnly('cc-build', 'Claude Code');
   });
 
   it('a paused (CLOSED) session shows no glyph either', async () => {
     mockCodeAgents([codeAgent({ code_agent_id: 'cc-paused', status: 'CLOSED', title: 'Paused' })]);
     renderBar();
-    await screen.findByTestId('rose-code-agent-row-cc-paused');
+    await openCodeRow('cc-paused');
     expectIconOnly('cc-paused', 'Claude Code');
   });
 
   it('agent (robot) rows keep their status glyphs', async () => {
     renderBar({}, { dark: true });
-    await screen.findByTestId('rose-code-agent-row-cc-fix');
+    await openCodeRow('cc-fix');
     expect(
       within(screen.getByTestId('rose-agent-row-home-done')).getByRole('img', {
         name: 'Completed',
@@ -535,7 +578,7 @@ describe('a code-agent row opens its own conversation (flag on, view provider)',
     const user = userEvent.setup();
     const { onSelectAgent } = renderWithView('home-run');
     expandBar();
-    const row = await screen.findByTestId('rose-code-agent-row-cc-build');
+    const row = await openCodeRow('cc-build');
     const owner = screen.getByTestId('rose-agent-row-home-run');
     expect(owner).toHaveAttribute('aria-current', 'true');
     await user.click(row);
@@ -549,7 +592,9 @@ describe('a code-agent row opens its own conversation (flag on, view provider)',
 
     await user.click(owner);
     expect(onSelectAgent).not.toHaveBeenCalled();
-    expect(row).not.toHaveAttribute('aria-current');
+    expect(
+      document.querySelector('[data-testid="rose-code-agent-row-cc-build"][aria-current]'),
+    ).toBeNull();
     expect(owner).toHaveAttribute('aria-current', 'true');
     expect(new URL(window.location.href).searchParams.get('code-agent')).toBeNull();
   });
@@ -558,7 +603,7 @@ describe('a code-agent row opens its own conversation (flag on, view provider)',
     const user = userEvent.setup();
     const { onSelectAgent, rerenderWith } = renderWithView('home-run');
     expandBar();
-    await user.click(await screen.findByTestId('rose-code-agent-row-cc-sub'));
+    await user.click(await openCodeRow('cc-sub'));
     expect(onSelectAgent).toHaveBeenCalledWith('rose-sub');
     rerenderWith('rose-sub');
     expect(screen.getByTestId('rose-code-agent-row-cc-sub')).toHaveAttribute(

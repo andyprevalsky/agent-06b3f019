@@ -1,6 +1,6 @@
 /**
  * STATE MACHINE: RoseCodeAgentRow (a Claude Code / Codex session in the Rose
- * left bar, listed under the root row of the tree that spawned it; one row of
+ * left bar, disclosed under its actual owning agent; one row of
  * GET /api/agents/code-agents, labelled by its `title`)
  *
  * Stateless. Glyph = the provider's icon (Claude or Codex) instead of the Bot
@@ -11,7 +11,7 @@
  *   [SELECTED] its code-agent conversation is open in the chat column:
  *              foreground color + semibold (aria-current), no fill
  * EXPANDED: indented one level under its parent row, title faded in.
- * COLLAPSED: same 64px icon column as agent rows, part of the parent's group.
+ * COLLAPSED: descendants are hidden by the owning branch.
  *
  * [REST] --click--> onOpen (open the code agent's own conversation view)
  */
@@ -26,6 +26,7 @@ interface RoseCodeAgentRowProps {
   isExpanded: boolean;
   /** The parent agent row is itself indented (it sits under a project). */
   parentIndented: boolean;
+  depth?: number;
   /** This code agent's conversation is the one open in the chat column. */
   isSelected?: boolean;
   onOpen: () => void;
@@ -35,6 +36,7 @@ export default function RoseCodeAgentRow({
   codeAgent,
   isExpanded,
   parentIndented,
+  depth = 1,
   isSelected = false,
   onOpen,
 }: RoseCodeAgentRowProps) {
@@ -50,6 +52,11 @@ export default function RoseCodeAgentRow({
       data-provider={provider}
       data-selected={isSelected}
       title={name}
+      style={
+        isExpanded
+          ? { paddingLeft: 22 + (parentIndented ? 12 : 0) + depth * 16, paddingRight: 16 }
+          : undefined
+      }
       className={cn(
         'flex h-[34px] w-full flex-none items-center gap-3 whitespace-nowrap text-left text-[13px] transition-[padding,color] duration-300',
         isSelected

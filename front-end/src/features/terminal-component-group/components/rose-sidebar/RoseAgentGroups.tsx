@@ -14,11 +14,10 @@
  * COLLAPSED (64px rail): project rows and "+ New project" are hidden; the
  * non-empty groups of agent icons are separated by 18×3px neutral line pills.
  *
- * CODE AGENTS: each agent row is followed by the Claude Code / Codex sessions
- * of its tree (RoseCodeAgentRow: provider icon + title, no status glyph),
- * indented one level under it while expanded; collapsed they stay inside the
- * parent's group (no divider between them). Every agent row reports its
- * visibility (observeRoot) so only the trees on screen are read.
+ * AGENT TREES: each root starts closed. A disclosure reveals direct GP children
+ * and code sessions owned by that agent; each GP child has its own disclosure.
+ * Collapsed rail hides descendants and shows the root's active tree count >1.
+ * Only on-screen roots (and the selected root) subscribe to the shared tree.
  * SELECTION: [AGENT] the selected agent row is marked (color/weight)
  *   --code-agent row click--> [CODE AGENT] that row is marked instead; its
  *   owner agent row (still the selected agent underneath) is not.
@@ -33,8 +32,7 @@ import type { CodeAgentListItem } from '@/lib/api/tree';
 
 import type { Agent } from '../../hooks';
 import type { GroupedAgents } from './groupAgentsByProject';
-import RoseAgentRow from './RoseAgentRow';
-import RoseCodeAgentRow from './RoseCodeAgentRow';
+import RoseAgentBranch from './RoseAgentBranch';
 import type { RoseAgentMenuActions } from './RoseAgentRowMenu';
 import RoseProjectRow, { NewProjectRow } from './RoseProjectRow';
 
@@ -69,6 +67,7 @@ export interface RoseAgentGroupsProps {
   selectedCodeAgentId: string | null;
   /** Ref for each agent row; its visibility decides which code-agent pages are read. */
   observeRoot: (agentId: string) => (element: HTMLElement | null) => void;
+  visibleRootIds?: ReadonlySet<string>;
 }
 
 function GroupDivider() {
@@ -91,31 +90,7 @@ function AgentRows({
   return (
     <>
       {agents.map((agent) => (
-        <Fragment key={agent.agent_id}>
-          <RoseAgentRow
-            agent={agent}
-            isSelected={
-              props.selectedCodeAgentId === null && props.selectedAgentId === agent.agent_id
-            }
-            isExpanded={props.isExpanded}
-            indented={indented}
-            hasAttentionRequest={props.attentionAgentIds.has(agent.agent_id)}
-            onClick={() => props.onSelectAgent(agent.agent_id)}
-            actions={props.actionsFor(agent)}
-            onMenuOpenChange={props.onMenuOpenChange}
-            rowRef={props.observeRoot(agent.agent_id)}
-          />
-          {props.codeAgentsFor(agent.agent_id).map((codeAgent) => (
-            <RoseCodeAgentRow
-              key={codeAgent.code_agent_id}
-              codeAgent={codeAgent}
-              isExpanded={props.isExpanded}
-              parentIndented={indented}
-              isSelected={props.selectedCodeAgentId === codeAgent.code_agent_id}
-              onOpen={() => props.onOpenCodeAgent(codeAgent)}
-            />
-          ))}
-        </Fragment>
+        <RoseAgentBranch key={agent.agent_id} agent={agent} indented={indented} sidebar={props} />
       ))}
     </>
   );

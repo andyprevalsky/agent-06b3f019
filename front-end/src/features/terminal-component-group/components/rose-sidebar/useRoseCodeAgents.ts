@@ -141,6 +141,7 @@ export interface RoseCodeAgents {
   codeAgentsFor: (agentId: string) => readonly CodeAgentListItem[];
   /** Ref for a root row: its visibility decides which pages are read. */
   observeRoot: (agentId: string) => RowRef;
+  visibleRootIds: ReadonlySet<string>;
 }
 
 /**
@@ -191,5 +192,12 @@ export function useRoseCodeAgents(agents: Agent[], selectedAgentId: string | nul
     (agentId: string) => byRoot.get(agentId) ?? NO_CODE_AGENTS,
     [byRoot],
   );
-  return { codeAgentsFor, observeRoot };
+  return {
+    codeAgentsFor,
+    observeRoot,
+    visibleRootIds:
+      typeof IntersectionObserver === 'undefined'
+        ? new Set(agents.slice(0, CODE_AGENT_LIST_MAX_ROOTS).map((a) => a.agent_id))
+        : onScreen,
+  };
 }
