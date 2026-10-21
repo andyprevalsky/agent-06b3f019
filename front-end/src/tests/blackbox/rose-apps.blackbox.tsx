@@ -202,8 +202,8 @@ describe('top-right app icons', () => {
     expect(row.style.right).toBe('16px');
     expect(row.style.left).toBe('');
     expect(row.style.transform).toBe('');
-    expect(row.className).toContain('z-[90]');
-    expect(drawer.className).toContain('z-[66]');
+    expect(row.className).toContain('z-[102]');
+    expect(drawer.className).toContain('z-[101]');
     expect(screen.getByTestId('root-browser-empty')).toHaveTextContent('Your browser');
 
     // Clicking the active icon is how the drawer closes.
@@ -242,8 +242,8 @@ describe('top-right app icons', () => {
     expect(icons.style.right).toBe('16px');
     expect(icons.style.top).toBe('11px');
     await user.click(screen.getByTestId('rose-app-browser'));
-    expect(icons.className).toContain('z-[90]');
-    expect(screen.getByTestId('browser-app-drawer').className).toContain('z-[66]');
+    expect(icons.className).toContain('z-[102]');
+    expect(screen.getByTestId('browser-app-drawer').className).toContain('z-[101]');
   });
 
   it('Dark mode is a toggle (moon → sun, label swaps) that drives RoseThemeProvider and opens no panel', async () => {
@@ -412,6 +412,54 @@ describe('Browser drawer', () => {
     }
   });
 
+  it.each([false, true])(
+    'moves the same draft and send channel into Browser and restores it on close (native: %s)',
+    async (directChannel) => {
+      const submit = vi.fn();
+      const user = userEvent.setup();
+      function Draft() {
+        const [value, setValue] = React.useState('Keep this draft');
+        return (
+          <QueryInput
+            liftAboveApps
+            directChannel={directChannel}
+            value={value}
+            onChange={setValue}
+            onSubmit={submit}
+            selectedModel="rose-labs/rose-1-flash"
+            canSubmit
+          />
+        );
+      }
+      renderWithProviders(
+        withAgent(
+          [ACTION],
+          'agent-a',
+          <>
+            <Draft />
+            <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />
+          </>,
+        ),
+        { selectedAgentId: 'agent-a' },
+      );
+      expect(screen.getByTestId('query-input-layer')).toContainElement(screen.getByRole('textbox'));
+      await user.click(screen.getByTitle('Preview').parentElement!);
+      const composer = await screen.findByTestId('browser-query-input');
+      expect(screen.queryByTestId('query-input-layer')).toBeNull();
+      expect(screen.getAllByRole('textbox')).toHaveLength(1);
+      expect(screen.getByTestId('browser-composer-slot')).toContainElement(composer);
+      const input = within(composer).getByRole('textbox');
+      expect(input).toHaveValue('Keep this draft');
+      await user.type(input, ' safely');
+      await user.keyboard('{Enter}');
+      expect(submit).toHaveBeenCalledOnce();
+      await user.keyboard('{Escape}');
+      expect(screen.queryByTestId('browser-query-input')).toBeNull();
+      expect(screen.getByTestId('query-input-layer')).toContainElement(screen.getByRole('textbox'));
+      expect(screen.getByRole('textbox')).toHaveValue('Keep this draft safely');
+    },
+  );
+
   it('has browser chrome: Back / Forward dimmed, Reload remounts the live view, address bar shows the page', async () => {
     const user = userEvent.setup();
     const navigated: Message = {
@@ -421,6 +469,10 @@ describe('Browser drawer', () => {
         task_id: 'task-1',
         action_type: 'navigate',
         title: 'Opening tickets',
+        browser_session_metadata: {
+          proxy_source: 'byop',
+          proxy_location: { city: 'San Francisco', country: 'US' },
+        },
         auxiliary: { current_url: 'https://www.palisadestahoe.com/lift-tickets/2026-27' },
       },
     };
@@ -439,8 +491,13 @@ describe('Browser drawer', () => {
     const labels = within(chrome)
       .getAllByRole('button')
       .map((b) => b.getAttribute('aria-label') ?? b.textContent);
-    // Sites: the Root sites list (rose-apps-root-browser.blackbox.tsx).
-    expect(labels).toEqual(['Back', 'Forward', 'Reload', 'Sites']);
+    // Mode, agent tabs and proxy share one row; navigation has no Live/Sites extras.
+    expect(labels).toEqual(['Back', 'Forward', 'Reload']);
+    const row = within(drawer).getByTestId('browser-tabs-row');
+    expect(row).toContainElement(within(drawer).getByRole('group', { name: 'Browser mode' }));
+    expect(row).toContainElement(within(drawer).getByRole('tablist', { name: 'Browser tabs' }));
+    expect(row).toContainElement(within(drawer).getByLabelText('Browser proxy location'));
+    expect(within(drawer).queryByTestId('browser-drawer-live')).toBeNull();
     expect(within(chrome).getByRole('button', { name: 'Back' })).toBeDisabled();
     expect(within(chrome).getByRole('button', { name: 'Forward' })).toBeDisabled();
     const address = within(chrome).getByTestId('browser-address-bar');

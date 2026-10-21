@@ -3,11 +3,11 @@
  * the Browser app drawer: schema chip, optional step-progress bar, scrollable
  * MessageList, and an optional pending write-lock approval.
  *
- * Layout: full width below the letterboxed live browser (desktop drawer and
- * mobile bottom sheet alike), owning the remaining scroll space.
+ * Layout: a left column beside the browser on desktop, below it on mobile,
+ * owning its scroll space.
  *
  * STATE MACHINE (presentation branch, driven by the onClose prop):
- * [STACKED]        -> full-width panel always visible below the browser
+ * [SIDE_OR_STACKED] -> always-visible trajectory beside or below the browser
  * [LEGACY_OVERLAY] -> optional close affordance only when parent supplies onClose
  */
 

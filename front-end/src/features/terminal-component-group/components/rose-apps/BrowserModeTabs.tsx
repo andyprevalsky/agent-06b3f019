@@ -1,20 +1,18 @@
+import { Cloud, Monitor } from 'lucide-react';
 import { useRoseApps } from './roseAppsState';
 
 export function BrowserModeTabs() {
   const apps = useRoseApps();
   if (apps === null) return null;
   return (
-    <div
-      role="tablist"
-      aria-label="Browser mode"
-      className="flex flex-none gap-4 border-b border-border px-[18px] text-sm"
-    >
+    <div role="group" aria-label="Browser mode" className="flex flex-none items-center gap-1">
       {(['local', 'remote'] as const).map((mode) => (
         <button
           key={mode}
           type="button"
-          role="tab"
-          aria-selected={apps.browserMode === mode}
+          aria-label={mode === 'local' ? 'Local' : 'Remote'}
+          title={mode === 'local' ? 'Local preview' : 'Remote browser'}
+          aria-pressed={apps.browserMode === mode}
           tabIndex={apps.browserMode === mode ? 0 : -1}
           onClick={() => apps.setBrowserMode(mode)}
           onKeyDown={(event) => {
@@ -30,14 +28,16 @@ export function BrowserModeTabs() {
                     : 'local';
             apps.setBrowserMode(next);
             const buttons =
-              event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>(
-                '[role="tab"]',
-              );
+              event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('button');
             buttons?.[next === 'local' ? 0 : 1]?.focus();
           }}
-          className={`border-b-2 py-2 capitalize ${apps.browserMode === mode ? 'border-current font-semibold text-foreground' : 'border-transparent text-muted-foreground'}`}
+          className={`grid h-7 w-7 place-items-center rounded-md ${apps.browserMode === mode ? 'bg-muted text-foreground' : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground'}`}
         >
-          {mode === 'local' ? 'Local' : 'Remote'}
+          {mode === 'local' ? (
+            <Monitor className="h-4 w-4" aria-hidden="true" />
+          ) : (
+            <Cloud className="h-4 w-4" aria-hidden="true" />
+          )}
         </button>
       ))}
     </div>

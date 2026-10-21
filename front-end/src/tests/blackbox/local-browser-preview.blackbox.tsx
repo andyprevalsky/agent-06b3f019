@@ -36,10 +36,10 @@ describe('Local root preview binding', () => {
     renderWithProviders(<RoseAppIcons />);
     fireEvent.click(screen.getByRole('button', { name: /^Browser$/ }));
     await screen.findByRole('button', { name: 'Open browser' });
-    const local = screen.getByRole('tab', { name: /^Local$/ });
-    const remote = screen.getByRole('tab', { name: /^Remote$/ });
+    const local = screen.getByRole('button', { name: /^Local$/ });
+    const remote = screen.getByRole('button', { name: /^Remote$/ });
     fireEvent.click(local);
-    expect(local).toHaveAttribute('aria-selected', 'true');
+    expect(local).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByText('Select an agent to view its local code preview.')).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Open browser' })).toBeNull();
     expect(screen.queryByRole('link', { name: 'Stable link' })).toBeNull();
@@ -51,7 +51,7 @@ describe('Local root preview binding', () => {
       ),
     ).toBe(false);
     fireEvent.click(remote);
-    expect(remote).toHaveAttribute('aria-selected', 'true');
+    expect(remote).toHaveAttribute('aria-pressed', 'true');
     await screen.findByRole('button', { name: 'Open browser' });
   });
   it('fails closed when the handoff target differs from the root preview', async () => {
@@ -118,16 +118,20 @@ describe('Local root preview binding', () => {
     );
     expect(screen.queryByTitle('Local root preview')).toBeNull();
   });
-  it('offers keyboard-operable Local and Remote tabs on an agent', () => {
+  it('offers keyboard-operable Local and Remote icon buttons on an agent', () => {
     renderWithProviders(<BrowserModeTabs />, { selectedAgentId: 'child' });
-    const remote = screen.getByRole('tab', { name: 'Remote' }),
-      local = screen.getByRole('tab', { name: 'Local' });
+    const remote = screen.getByRole('button', { name: 'Remote' }),
+      local = screen.getByRole('button', { name: 'Local' });
+    expect(local.textContent).toBe('');
+    expect(remote.textContent).toBe('');
+    expect(local).toHaveAttribute('title', 'Local preview');
+    expect(remote).toHaveAttribute('title', 'Remote browser');
     remote.focus();
     fireEvent.keyDown(remote, { key: 'ArrowLeft' });
     expect(local).toHaveFocus();
-    expect(local).toHaveAttribute('aria-selected', 'true');
+    expect(local).toHaveAttribute('aria-pressed', 'true');
     fireEvent.keyDown(local, { key: 'End' });
     expect(remote).toHaveFocus();
-    expect(remote).toHaveAttribute('aria-selected', 'true');
+    expect(remote).toHaveAttribute('aria-pressed', 'true');
   });
 });
