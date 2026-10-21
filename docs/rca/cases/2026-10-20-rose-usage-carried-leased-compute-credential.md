@@ -103,6 +103,20 @@ telemetry at all.
 Follow-ups needing user approval: rotate the exposed credentials and purge the
 historical rows/log events listed above.
 
+## Review follow-up: web-fetch rotation lineage
+
+The second deployment review identified an omitted credential reference at the
+web-fetch summarizer boundary: the workflow passed the active credentials but
+not `compute_token_lineage_key`. A helper rotation could therefore lease outside
+the workflow lineage, while the workflow subsequently refreshed its own lineage.
+
+Thread the existing lineage through `web_fetch`, `WebFetchManager`, and the
+trailing optional activity parameter into `call_llm`. Cache sequence identity
+remains independent; the existing forced refresh remains unchanged. No prompt,
+retry, timeout, or terminal behavior changes. The summarizer regression failed
+before with an unexpected lineage parameter; it passes after, and owning
+workflow/manager tests verify the same reference across each boundary.
+
 ## Human feedback
 
 None recorded.

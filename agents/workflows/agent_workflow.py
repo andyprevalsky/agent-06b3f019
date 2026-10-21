@@ -3958,6 +3958,7 @@ class AgentWorkflow:
                 if tool_name == "web_fetch":
                     extra_executor_kwargs.update(
                         {
+                            "compute_token_lineage_key": self.compute_token_lineage_key,
                             "claude_token": self._active_claude_token(),
                             "claude_token_source": self._active_claude_source(),
                             "claude_token_pool_id": self._active_claude_pool_id(),

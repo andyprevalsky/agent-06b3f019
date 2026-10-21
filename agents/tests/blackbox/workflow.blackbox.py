@@ -10228,6 +10228,7 @@ async def test_workflow_execute_tool_web_fetch_preserves_fast_mode_kwargs():
     wf = _bare_workflow_instance()
     wf.agent_id = "agent-1"
     wf.user_id = "user-1"
+    wf.compute_token_lineage_key = "agent:lineage-1"
     # Cache kwargs must thread the persisted-row goal, not the (possibly
     # chat-refined) workflow input goal.
     wf.goal = "refined workflow input goal"
@@ -10256,6 +10257,7 @@ async def test_workflow_execute_tool_web_fetch_preserves_fast_mode_kwargs():
         assert captured_kwargs["fast_mode_goal"] == "root goal"
         assert "claude_token" in captured_kwargs
         assert "gpt_token" in captured_kwargs
+        assert captured_kwargs["compute_token_lineage_key"] == "agent:lineage-1"
     finally:
         workflow_module.TOOL_EXECUTORS["web_fetch"] = original_executor
         _restore_workflow(original)
