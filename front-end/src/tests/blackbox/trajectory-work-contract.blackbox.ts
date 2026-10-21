@@ -41,6 +41,21 @@ describe('ordered work projection boundaries', () => {
       expect([...groups.groupsByLeadId.values()][0].status).not.toBe('running');
     }
   });
+  it.each(['IN_PROGRESS', 'FINISHED', 'ERROR'])(
+    'keeps %s plans user-facing, outside work',
+    (toolStatus) => {
+      const thought = msg(
+        { toolName: 'thought', toolStatus: 'FINISHED' },
+        { message_id: 'thought' },
+      );
+      const plan = msg({ toolName: 'set_plan', toolStatus }, { message_id: 'plan' });
+      const groups = groupTrajectoryWork([thought, plan], 'ACTIVE');
+      expect(groups.foldedIds.has('thought')).toBe(true);
+      expect(groups.foldedIds.has('plan')).toBe(false);
+      expect(groups.groupsByLeadId.get('thought')?.status).not.toBe('running');
+    },
+  );
+
   it('stream-to-canonical handoff retains its slot identity and shows one tool', () => {
     const tool = {
       tool_call_id: 'call',

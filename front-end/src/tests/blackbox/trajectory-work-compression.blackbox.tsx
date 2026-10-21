@@ -79,6 +79,41 @@ describe('one ordered live trajectory carousel', () => {
       ),
     ).toEqual(['first', 'first-work', 'second', 'second-work']);
   });
+  it.each(['ACTIVE', 'COMPLETED'])(
+    'folds thoughts into worked history while keeping the plan outside for %s',
+    async (status) => {
+      const thought = msg(
+        { toolName: 'thought', toolCallId: 'thinking', toolStatus: 'FINISHED', title: 'Thinking' },
+        {
+          message_id: 'thought-before-plan',
+          text: 'Inspect the evidence first.',
+          timestamp: stamp(1),
+        },
+      );
+      const plan = msg(
+        {
+          toolName: 'set_plan',
+          toolCallId: 'plan',
+          toolStatus: 'FINISHED',
+          data: { title: 'User-facing plan', content: 'Build then verify.', tasks: [] },
+        },
+        { message_id: 'visible-plan', timestamp: stamp(5) },
+      );
+      renderWithProviders(view([thought, plan, work('after-plan')], status));
+      const planTitle = await screen.findByText('User-facing plan');
+      expect(planTitle.closest('[data-testid="trajectory-work-group"]')).toBeNull();
+      expect(screen.queryByTestId('trajectory-work-history')).toBeNull();
+      const firstGroup = screen.getAllByTestId('trajectory-work-group')[0];
+      expect(firstGroup).toHaveTextContent('Worked for 4.0s');
+      expect(firstGroup.querySelector('[data-message-id="thought-before-plan"]')).toBeNull();
+      fireEvent.click(within(firstGroup).getByRole('button'));
+      const history = screen.getByTestId('trajectory-work-history');
+      expect(history.querySelector('[data-message-id="thought-before-plan"]')).not.toBeNull();
+      expect(history.querySelector('[data-message-id="visible-plan"]')).toBeNull();
+      expect(planTitle).toBeVisible();
+    },
+  );
+
   it('deduplicates mirrors and pages the ordered history', () => {
     const messages = Array.from({ length: 45 }, (_, i) => [
       comm(String(i)),
