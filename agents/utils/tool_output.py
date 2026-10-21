@@ -22,7 +22,7 @@ _FILENAME = "retained-tool-output.json"
 
 
 class ReadToolOutputTool(BaseModel):
-    """Read or search a retained tool result. Offsets and limits count Unicode characters."""
+    """Read or search a retained tool result within its originating agent/session for 24h. Offsets and limits count Unicode characters."""
 
     tool: Literal["read_tool_output"]
     output_id: str = Field(pattern=r"^[a-f0-9]{32}$", description="Opaque ID from a tool result preview.")
@@ -75,7 +75,7 @@ def _preview(text: str, output_id: str, limit: int) -> str:
     for _ in range(4):
         suffix = (f'\n[Retained tool output: read_tool_output output_id="{output_id}" '
                   f'offset={offset} limit={READ_MAX_CHARS}; total_chars={len(text)}; '
-                  'Unicode characters; expires after 24h.]')
+                  'Unicode characters; originating agent/session only; expires after 24h.]')
         offset = limit - len(suffix)
     if offset < 0:
         raise ValueError("Inline output limit is too small for a retrieval marker")
