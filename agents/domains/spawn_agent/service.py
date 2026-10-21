@@ -209,7 +209,7 @@ def compile_explore_wrap_up(
     final_response: Any = "",
     tool_call_results: Optional[List[Any]] = None,
     *,
-    budget: int = EXPLORE_FALLBACK_PAYLOAD_BUDGET,
+    budget: Optional[int] = EXPLORE_FALLBACK_PAYLOAD_BUDGET,
 ) -> str:
     """Build the user-facing explore chip from a completion or tool evidence.
 
@@ -217,6 +217,8 @@ def compile_explore_wrap_up(
     as empty so the parent chip gets synthesized research, not Thinking... /
     Research started. Used by the explore activity return path and by Fast
     Mode drain when the activity times out after tools already ran.
+    ``budget=None`` keeps complete evidence for retention; callers must still
+    bound the presentation before publishing it to the model.
     """
     text = str(final_response or "").strip()
     lowered = text.lower()
@@ -225,7 +227,8 @@ def compile_explore_wrap_up(
     if text:
         return text
     parts = [_fallback_trace_text(item) for item in tool_call_results or []]
-    return _bounded_explore_parts([part for part in parts if part], budget)
+    parts = [part for part in parts if part]
+    return "\n\n".join(parts) if budget is None else _bounded_explore_parts(parts, budget)
 
 
 def compile_explore_grep_evidence(tool_call_results: List[Any], *, budget: int = 6_000) -> str:
@@ -554,8 +557,9 @@ async def spawn_explore_agent_activity(
     resume_details: Dict[str, Any] = {}
 
     def _heartbeat_payload() -> Dict[str, Any]:
-        compiled = compile_explore_wrap_up("", tool_call_results)
-        resume_details.update(result=compiled, tool_call_results=list(tool_call_results[-8:]))
+        # Do not hard-cut a speculative fallback on every heartbeat. The raw
+        # evidence travels to the parent, which can retain it in its root scope.
+        resume_details.update(result="", evidence_fallback=True, tool_call_results=list(tool_call_results[-8:]))
         return dict(resume_details)
 
     async def _heartbeat_loop() -> None:
@@ -1039,10 +1043,27 @@ async def spawn_explore_agent_activity(
     # but leaves result empty, the parent receives no evidence. Synthesize a
     # payload from accumulated tool results so the parent always has grounded data
     # to act on instead of hallucinating or re-spawning sub-agents.
-    final_response = compile_explore_wrap_up(
-        result.get("final_response", "") or "",
-        tool_call_results,
-    )
+    final_response = compile_explore_wrap_up(result.get("final_response", "") or "", [])
+    evidence_fallback = not bool(final_response)
+    if evidence_fallback:
+        from utils.tool_output import preview_tool_text
+
+        complete_evidence = compile_explore_wrap_up("", tool_call_results, budget=None)
+        # Explore shares the parent's agent ID; the empty/root session is what
+        # the parent's existing read_tool_output dispatcher authorizes.
+        if len(complete_evidence) <= EXPLORE_FALLBACK_PAYLOAD_BUDGET:
+            final_response = complete_evidence
+        else:
+            readback = await preview_tool_text(
+                complete_evidence, user_id=user_id, agent_id=agent_id, session_id="", limit=512,
+            )
+            # Preserve the fair head/tail presentation and late sources. Keep
+            # the complete native preview suffix so protocol authentication can
+            # validate its source prefix when the parent re-projects it.
+            presentation = compile_explore_wrap_up(
+                "", tool_call_results, budget=EXPLORE_FALLBACK_PAYLOAD_BUDGET - len(readback) - 2,
+            )
+            final_response = f"{presentation}\n\n{readback}"
 
     # Disconnected sources are a gap notice, not a hard explore failure. Grep
     # already skipped them and the parent still raises source_connect gates;
@@ -1075,6 +1096,7 @@ async def spawn_explore_agent_activity(
     run_completed = result.get("status") == "completed" and not completed_without_tool_evidence
     result_payload = {
         "status": "completed" if run_completed else "error",
+        "evidence_fallback": evidence_fallback,
         "result": final_response,
         "summary": final_response,
         "final_response": final_response,

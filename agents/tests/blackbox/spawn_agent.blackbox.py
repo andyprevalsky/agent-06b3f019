@@ -1391,6 +1391,115 @@ def _explore_timeout_activity_error(*heartbeat_details):
     return exc
 
 
+async def test_explore_fallback_middle_is_readable_by_parent():
+    """30k fallback evidence survives empty completion, depth and heartbeat timeouts."""
+    import copy
+    import re
+    from unittest.mock import AsyncMock, MagicMock
+    from _test_utils import retained_tool_output_fixture
+    import domains.spawn_agent.service as service
+    import tools.read_tool_output as reader
+    from domains.spawn_agent.handler import SpawnAgentManager
+    from helpers.handle_tool_event import handle_tool_event
+    from helpers.llm import build_llm_messages
+    from tools.base import MessageStatus
+
+    body = "A" * 15000 + "CRITICAL_MIDDLE_SENTINEL" + "B" * 15000
+    for mode in ("empty", "depth", "heartbeat", "small", "success"):
+        supplied = "short evidence" if mode == "small" else body
+        captured = {}
+        grep = MagicMock()
+        grep.execute_tool = AsyncMock(return_value={"message": supplied})
+
+        async def run_leaf(**kwargs):
+            await kwargs["execute_tool"]("grep", {"pattern": "fixture"}, "grep-1")
+            assert not objects, "The under-50k tool result must not be preemptively stored"
+            if mode == "depth":
+                try:
+                    await asyncio.sleep(1)
+                except asyncio.CancelledError:
+                    captured["depth_timeout"] = True
+                    raise
+                raise AssertionError("The real depth deadline did not fire")
+            return {"status": "completed", "final_response": "Successful synthesis" if mode == "success" else ""}
+
+        class Leaf(_Activity):
+            def __init__(self, fn, args):
+                super().__init__()
+                self.fn, self.args = fn, args
+            def __await__(self):
+                async def call():
+                    result = await self.fn(*self.args)
+                    captured.update(copy.deepcopy(result))
+                    return result
+                return call().__await__()
+
+        class Parent(_FakeSpawnWF):
+            def start_activity(self, fn, args=None, **kwargs):
+                if mode == "heartbeat":
+                    traces = ["[grep] " + json.dumps({"message": supplied})]
+                    captured["tool_call_results"] = copy.deepcopy(traces)
+                    return _Activity(exception=_explore_timeout_activity_error({"result": "", "tool_call_results": traces}))
+                return Leaf(fn, args)
+            async def execute_activity(self, fn, args=None, **kwargs):
+                if fn.__name__ in {"preview_tool_output_activity", "read_tool_output_activity"}:
+                    return await fn(*args)
+                return await super().execute_activity(fn, args=args, **kwargs)
+
+        parent = Parent(activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""})
+        instance = _FakeWFInstance(agent_id="parent-agent", user_id="parent-user")
+        saved = []
+        async def save(fn, args=None, **kwargs):
+            assert fn.__name__ == "post_agent_message"
+            saved.append({"role": args[2], "text": args[1], "metadata": args[3]})
+        async def persist(event, call_id, tool_name):
+            await handle_tool_event(event, instance.agent_id, call_id, tool_name, save, user_id=instance.user_id)
+        instance._handle_tool_event = persist
+
+        restore = _patch_spawn_workflow(parent)
+        with (retained_tool_output_fixture() as objects, patch("temporalio.activity.heartbeat"),
+              patch("loop.run_agent.run_agent", run_leaf), patch("tools.grep.GrepManager", return_value=grep),
+              patch.object(service, "explore_limits_for_depth", return_value=(5, timedelta(seconds=service.LIVE_EXPLORE_DRAIN_SLACK_SECONDS + .01)))):
+            try:
+                events = await _collect(SpawnAgentManager()._spawn_explore(instance, {"type": "explore", "goal": "gather fixture"}, "spawn", task_id="child-session"))
+                event = next(e for e in events if e.status == MessageStatus.FINISHED)
+                if mode == "depth":
+                    assert captured["depth_timeout"] is True
+                assert captured["tool_call_results"] and supplied in str(captured["tool_call_results"])
+                assert "tool_call_results" not in event.data
+                await persist(event, "spawn", "spawn_agent")
+                if mode in {"small", "success"}:
+                    assert not objects, "Small fallback or successful synthesis unnecessarily stored raw traces"
+                    assert ("short evidence" if mode == "small" else "Successful synthesis") in event.message
+                    if mode == "small":
+                        assert event.message == service.compile_explore_wrap_up("", captured["tool_call_results"])
+                    continue
+                assert "CRITICAL_MIDDLE_SENTINEL" not in event.message
+                match = re.search(r'output_id="([a-f0-9]{32})"', event.message)
+                assert match, "Fallback discarded the middle before creating a parent-readable handle"
+                assert len(event.message) <= 12000
+                assert any(supplied in json.loads(blob)["text"] for blob in objects.values())
+                model_context = [{"role": "ASSISTANT", "text": "", "metadata": {"tool_calls": [
+                    {"tool": "spawn_agent", "type": "explore", "goal": "gather fixture", "tool_call_id": "spawn"}]}}, saved[-1]]
+                messages = await build_llm_messages(model_context, "system", user_id=instance.user_id, agent_id=instance.agent_id)
+                assert match[1] in messages[-1]["content"]
+                with patch.object(reader.workflow, "execute_activity", parent.execute_activity):
+                    await reader.read_tool_output_for_workflow(instance, {"output_id": match[1], "query": "CRITICAL_MIDDLE_SENTINEL"}, "read")
+                model_context.extend([{"role": "ASSISTANT", "text": "", "metadata": {"tool_calls": [
+                    {"tool": "read_tool_output", "output_id": match[1], "tool_call_id": "read"}]}}, saved[-1]])
+                messages = await build_llm_messages(model_context, "system", user_id=instance.user_id, agent_id=instance.agent_id)
+                assert "CRITICAL_MIDDLE_SENTINEL" in messages[-1]["content"]
+                for user, agent, session in [("other", instance.agent_id, ""), (instance.user_id, "other", ""), (instance.user_id, instance.agent_id, "child-session")]:
+                    try:
+                        await reader.read_tool_output_activity(user, agent, session, {"output_id": match[1]})
+                    except ValueError:
+                        pass
+                    else:
+                        raise AssertionError("Fallback output leaked to another scope")
+            finally:
+                restore()
+
+
 async def test_handler_explore_timeout_finishes_with_heartbeat_wrap_up():
     """A timed-out explore must FINISH with heartbeat research, not ERROR."""
     from domains.spawn_agent.handler import SpawnAgentManager
@@ -3689,6 +3798,7 @@ async def test_explore_web_tool_messages_are_readable_and_skip_failed_fetch():
     from unittest.mock import AsyncMock, MagicMock, patch
 
     from domains.spawn_agent.service import spawn_explore_agent_activity
+    from _test_utils import retained_tool_output_fixture
 
     stale_answer = "**住民基本台帳による世帯と人口：毎月**\nJuly: 14,301,986\n" + "古い資料\n" * 2000
     search = MagicMock()
@@ -3733,6 +3843,7 @@ async def test_explore_web_tool_messages_are_readable_and_skip_failed_fetch():
         return {"status": "completed", "final_response": ""}
 
     with (
+        retained_tool_output_fixture(),
         patch("temporalio.activity.heartbeat"),
         patch("loop.run_agent.run_agent", new=fake_run_agent),
         patch(
@@ -5451,6 +5562,7 @@ async def test_tagged_execute_activity_injects_taskid_for_post_agent_message():
 async def run_all_tests():
     print("spawn-agent blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("explore_fallback_parent_readback", test_explore_fallback_middle_is_readable_by_parent)
     await r.record_async("explore_retained_output_dispatch", test_explore_retained_output_dispatch_scope_and_bounds)
     r.record(
         "explore_wrap_up_renders_late_verified_evidence", test_compile_explore_wrap_up_renders_late_verified_evidence
