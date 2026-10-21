@@ -5,15 +5,11 @@
  *   Plaid Link/exchange -> PlaidItem(access token + cursor)
  *     -> /transactions/sync pages -> normalized PlaidTransaction rows
  *     -> /api/data/grep source=transactions -> explore agents
- *     -> per-Item sync progress (service.plaidSyncProgress) -> account chips
- *
- * Every run (exchange, update mode, webhook, cron) reports its Item's progress:
- * syncing with an unknown total while pages arrive, then synced with its count;
- * still syncing (`waiting_for_plaid`) while Plaid has not finished preparing the
- * Item's history; needs_reconnect or failed on an error.
+ *     -> sync progress of the user's `plaid` row (transactions saved; Plaid
+ *        reports no up-front total, so the bar is indeterminate until synced)
  */
 
-import type { Transaction, TransactionsSyncResponse } from 'plaid';
+import type { Transaction } from 'plaid';
 import { createLogger } from '../../providers/logger';
 import { isPlaidError, syncTransactions } from '../../providers/plaid';
 import { decryptPlaidAccessTokenOrThrow } from '../../providers/plaidCredentials';
@@ -28,10 +24,36 @@ import {
   upsertPlaidTransaction,
   type PlaidTransactionUpsertInput,
 } from './repo.plaid';
-import { findSyncablePlaidItem } from './repo.plaidSync';
-import { startPlaidSyncProgress, type PlaidSyncProgress } from './service.plaidSyncProgress';
+import { reportProgressBestEffort } from './service.progress';
+import type { ProgressWriteInput } from './syncAccountsContract';
 
 const log = createLogger('PlaidTransactions');
+
+/**
+ * Best-effort sync progress of the user's one `plaid` Integration row (always
+ * accountId ''): transactions saved per /transactions/sync page, total unknown.
+ */
+function plaidRunProgress(userId: string, itemRowId: string) {
+  const runId = `plaid-sync:${itemRowId}:${Date.now()}`;
+  const report = (input: Omit<ProgressWriteInput, 'runId'>) =>
+    reportProgressBestEffort({
+      userId,
+      provider: 'plaid',
+      accountId: '',
+      input: { runId, ...input },
+    });
+  return {
+    start: () => report({ state: 'syncing', unit: 'transactions', done: 0, total: null }),
+    saved: (done: number) => report({ state: 'syncing', done }),
+    finish: (done: number) => report({ state: 'synced', done }),
+    fail: (err: unknown) => report({ state: 'failed', error: syncErrorMessage(err) }),
+  };
+}
+
+function syncErrorMessage(err: unknown): string {
+  if (isPlaidError(err)) return err.response.data.error_message;
+  return err instanceof Error ? err.message : String(err);
+}
 
 function parsePlaidDate(value: string | null | undefined): Date | null {
   if (typeof value !== 'string' || value.trim() === '') return null;
@@ -102,134 +124,92 @@ async function applyTransaction(
   return true;
 }
 
-export interface PlaidSyncOptions {
-  webhookAt?: Date;
-  /** Test seam: fetch one /transactions/sync page. */
-  syncPage?: typeof syncTransactions;
-  /** Test seam: the progress clock (the 1 s coalescing window). */
-  now?: () => Date;
-}
-
-export interface PlaidSyncResult {
-  added: number;
-  modified: number;
-  removed: number;
-  cursor: string | null;
-}
-
-type SyncCounts = Omit<PlaidSyncResult, 'cursor'>;
-
-interface SyncingItem {
-  id: string;
-  userId: string;
-  plaidItemId: string;
-}
-
-/** Plaid has not finished preparing the Item's history; a later webhook brings more. */
-const PLAID_STILL_PREPARING: ReadonlySet<string> = new Set([
-  'NOT_READY',
-  'INITIAL_UPDATE_COMPLETE',
-]);
-
-const savedCount = (counts: SyncCounts): number => counts.added + counts.modified + counts.removed;
-
-async function applyPage(
-  item: SyncingItem,
-  page: TransactionsSyncResponse,
-  counts: SyncCounts
-): Promise<void> {
-  for (const tx of page.added) {
-    if (await applyTransaction(item.userId, item.id, tx)) counts.added += 1;
-  }
-  for (const tx of page.modified) {
-    if (await applyTransaction(item.userId, item.id, tx)) counts.modified += 1;
-  }
-  for (const tx of page.removed) {
-    await markPlaidTransactionRemoved(tx.transaction_id);
-    counts.removed += 1;
-  }
-}
-
-async function recordSyncFailure(
-  item: SyncingItem,
-  progress: PlaidSyncProgress,
-  err: unknown
-): Promise<void> {
-  if (isPlaidError(err)) {
-    const code = err.response.data.error_code;
-    const message = err.response.data.error_message;
-    await markPlaidItemSyncFailed(item.id, code, message);
-    await progress.fail(code, message);
-    log.warn('Plaid transaction sync failed with Plaid error', {
-      userId: item.userId,
-      plaidItemId: item.plaidItemId,
-      code,
-    });
-    return;
-  }
-  const message = err instanceof Error ? err.message : String(err);
-  await markPlaidItemSyncFailed(item.id, 'SYNC_FAILED', message);
-  await progress.fail('SYNC_FAILED', message);
-  log.error('Plaid transaction sync failed', {
-    userId: item.userId,
-    plaidItemId: item.plaidItemId,
-    error: message,
-  });
-}
-
 export async function syncPlaidItemTransactions(
   itemRowId: string,
-  options: PlaidSyncOptions = {}
-): Promise<PlaidSyncResult> {
-  const item = await findSyncablePlaidItem(itemRowId);
+  options: {
+    webhookAt?: Date;
+    syncPage?: typeof syncTransactions;
+  } = {}
+): Promise<{ added: number; modified: number; removed: number; cursor: string | null }> {
+  const item = await findActivePlaidItemsWithTokens().then((items) =>
+    items.find((candidate) => candidate.id === itemRowId)
+  );
   if (!item) {
     throw new Error(`Plaid item ${itemRowId} is not active or has no access token`);
   }
 
   await markPlaidItemSyncing(item.id);
-  const progress = await startPlaidSyncProgress({
-    userId: item.userId,
-    itemRowId: item.id,
-    now: options.now,
-  });
+  const progress = plaidRunProgress(item.userId, item.id);
+  await progress.start();
 
   let cursor: string | null = item.cursor ?? null;
-  const counts: SyncCounts = { added: 0, modified: 0, removed: 0 };
+  let added = 0;
+  let modified = 0;
+  let removed = 0;
 
   try {
     const accessToken = decryptPlaidAccessTokenOrThrow(item.encryptedAccessToken);
     const syncPage = options.syncPage ?? syncTransactions;
     let hasMore = true;
-    let preparing = false;
 
     while (hasMore) {
       const page = await syncPage(accessToken, cursor);
-      await applyPage(item, page, counts);
+      for (const tx of page.added) {
+        if (await applyTransaction(item.userId, item.id, tx)) added += 1;
+      }
+      for (const tx of page.modified) {
+        if (await applyTransaction(item.userId, item.id, tx)) modified += 1;
+      }
+      for (const tx of page.removed) {
+        await markPlaidTransactionRemoved(tx.transaction_id);
+        removed += 1;
+      }
+
       cursor = page.next_cursor || cursor;
       hasMore = page.has_more;
-      preparing = PLAID_STILL_PREPARING.has(page.transactions_update_status);
-      if (hasMore) await progress.saved(savedCount(counts));
+      if (hasMore) await progress.saved(added + modified + removed);
     }
 
     await markPlaidItemSyncSucceeded(item.id, cursor, options.webhookAt);
-    if (preparing) await progress.waitingForPlaid(savedCount(counts));
-    else await progress.finish(savedCount(counts));
+    await progress.finish(added + modified + removed);
     log.info('Plaid transaction sync complete', {
       userId: item.userId,
       plaidItemId: item.plaidItemId,
-      ...counts,
-      preparing,
+      added,
+      modified,
+      removed,
     });
-    return { ...counts, cursor };
+    return { added, modified, removed, cursor };
   } catch (err) {
-    await recordSyncFailure(item, progress, err);
+    await progress.fail(err);
+    if (isPlaidError(err)) {
+      const code = err.response.data.error_code;
+      const message = err.response.data.error_message;
+      await markPlaidItemSyncFailed(item.id, code, message);
+      log.warn('Plaid transaction sync failed with Plaid error', {
+        userId: item.userId,
+        plaidItemId: item.plaidItemId,
+        code,
+      });
+    } else {
+      await markPlaidItemSyncFailed(
+        item.id,
+        'SYNC_FAILED',
+        err instanceof Error ? err.message : String(err)
+      );
+      log.error('Plaid transaction sync failed', {
+        userId: item.userId,
+        plaidItemId: item.plaidItemId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     throw err;
   }
 }
 
 export async function syncPlaidTransactionsByPlaidItemId(
   plaidItemId: string,
-  options: PlaidSyncOptions = {}
+  options: { webhookAt?: Date } = {}
 ): Promise<{ ok: true; skipped?: true }> {
   const item = await findPlaidItemByPlaidItemId(plaidItemId);
   if (!item) {

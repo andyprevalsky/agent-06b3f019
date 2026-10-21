@@ -7,6 +7,10 @@ from _test_utils import (
     teardown_mock,
 )
 
+# Inline views are a Rose Desktop surface (utils.rose_desktop).
+ROSE_DESKTOP_USER = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
+STOCK_USER = "user-stock-3333"
+
 
 # ── Validation errors / short-circuits via execute_tool ────────────────
 
@@ -495,7 +499,7 @@ async def test_inline_view_pinned_to_active_version_in_metadata():
     try:
         events = await _collect_events(
             SendMessageToUserManager().execute_tool(
-                workflow_instance=_FakeWorkflow(user_id="user-ui-1"),
+                workflow_instance=_FakeWorkflow(user_id=ROSE_DESKTOP_USER),
                 tool_call={
                     "message": "Here is your chart.",
                     "is_question": False,
@@ -507,7 +511,7 @@ async def test_inline_view_pinned_to_active_version_in_metadata():
     finally:
         restore()
 
-    assert fake.calls == [("resolve_user_ui_inline_view_activity", ["user-ui-1", "sales-chart"])]
+    assert fake.calls == [("resolve_user_ui_inline_view_activity", [ROSE_DESKTOP_USER, "sales-chart"])]
     assert len(events) == 1 and events[0].status == MessageStatus.FINISHED
     assert events[0].message == "Here is your chart."
     assert events[0].metadata["inlineView"] == {
@@ -531,7 +535,7 @@ async def test_inline_view_question_keeps_pin_on_every_event():
     try:
         events = await _collect_events(
             SendMessageToUserManager().execute_tool(
-                workflow_instance=_FakeWorkflow(has_new_messages=True),
+                workflow_instance=_FakeWorkflow(user_id=ROSE_DESKTOP_USER, has_new_messages=True),
                 tool_call={"message": "Pick one?", "is_question": True, "inline_view": {"view": "picker"}},
                 tool_call_id="tc-inline-q",
             )
@@ -561,7 +565,7 @@ async def test_inline_view_unknown_view_is_tool_error():
     try:
         events = await _collect_events(
             SendMessageToUserManager().execute_tool(
-                workflow_instance=_FakeWorkflow(),
+                workflow_instance=_FakeWorkflow(user_id=ROSE_DESKTOP_USER),
                 tool_call={"message": "Look", "is_question": False, "inline_view": {"view": "nope"}},
                 tool_call_id="tc-inline-bad",
             )
@@ -587,7 +591,7 @@ async def test_inline_view_activity_failure_is_tool_error():
     try:
         events = await _collect_events(
             SendMessageToUserManager().execute_tool(
-                workflow_instance=_FakeWorkflow(),
+                workflow_instance=_FakeWorkflow(user_id=ROSE_DESKTOP_USER),
                 tool_call={"message": "Look", "is_question": False, "inline_view": {"view": "hello"}},
                 tool_call_id="tc-inline-down",
             )
@@ -610,7 +614,7 @@ async def test_inline_view_invalid_shape_rejected_without_lookup():
         try:
             events = await _collect_events(
                 SendMessageToUserManager().execute_tool(
-                    workflow_instance=_FakeWorkflow(),
+                    workflow_instance=_FakeWorkflow(user_id=ROSE_DESKTOP_USER),
                     tool_call={"message": "Look", "is_question": False, "inline_view": bad},
                     tool_call_id="tc-inline-shape",
                 )
@@ -650,17 +654,59 @@ async def test_resolve_inline_view_activity_against_backend():
 
 
 def test_tool_schemas_expose_inline_view():
-    """Both send_message_to_user variants declare the optional inline_view argument."""
-    from utils.tool_schemas import SendMessageToUserExecutePhaseTool, SendMessageToUserTool
+    """Rose Desktop send_message_to_user variants declare the optional inline_view; stock ones do not."""
+    from utils.tool_schemas import (
+        SendMessageToUserExecutePhaseRoseDesktopTool,
+        SendMessageToUserExecutePhaseTool,
+        SendMessageToUserRoseDesktopTool,
+        SendMessageToUserTool,
+        get_tool_models,
+    )
 
-    for model in (SendMessageToUserTool, SendMessageToUserExecutePhaseTool):
+    for model in (SendMessageToUserRoseDesktopTool, SendMessageToUserExecutePhaseRoseDesktopTool):
         schema = model.model_json_schema()
         assert "inline_view" in schema["properties"]
         assert "inline_view" not in schema.get("required", [])
-    parsed = SendMessageToUserTool.model_validate(
+    parsed = SendMessageToUserRoseDesktopTool.model_validate(
         {"tool": "send_message_to_user", "message": "hi", "inline_view": {"view": "hello", "props": {"a": 1}}}
     )
     assert parsed.inline_view is not None and parsed.inline_view.view == "hello"
+
+    flagged = get_tool_models(rose_desktop=True)
+    assert flagged["send_message_to_user"] is SendMessageToUserRoseDesktopTool
+    assert flagged["send_message_to_user_execute_phase"] is SendMessageToUserExecutePhaseRoseDesktopTool
+    for model in (SendMessageToUserTool, SendMessageToUserExecutePhaseTool):
+        assert "inline_view" not in model.model_json_schema()["properties"]
+    # A stock parse drops an unadvertised inline_view, so the handler never sees it.
+    stock = SendMessageToUserTool.model_validate(
+        {"tool": "send_message_to_user", "message": "hi", "inline_view": {"view": "hello"}}
+    )
+    assert "inline_view" not in stock.model_dump()
+
+
+async def test_inline_view_ignored_for_stock_account():
+    """A stock account's message posts exactly as before: no lookup, no inlineView, no error."""
+    from domains.send_message_to_user.handler import SendMessageToUserManager
+    from tools.base import MessageStatus
+
+    fake = _RecordingWorkflowModule(
+        activity_results={"resolve_user_ui_inline_view_activity": {"ok": True, "version_id": "ver-123"}}
+    )
+    restore = _patch_handler_workflow(fake)
+    try:
+        events = await _collect_events(
+            SendMessageToUserManager().execute_tool(
+                workflow_instance=_FakeWorkflow(user_id=STOCK_USER),
+                tool_call={"message": "Here is your chart.", "is_question": False, "inline_view": {"view": "chart"}},
+                tool_call_id="tc-inline-stock",
+            )
+        )
+    finally:
+        restore()
+
+    assert fake.calls == [], "no rose_user_ui lookup for a stock account"
+    assert len(events) == 1 and events[0].status == MessageStatus.FINISHED
+    assert "inlineView" not in (events[0].metadata or {})
 
 
 async def run_all_tests():
@@ -697,6 +743,7 @@ async def run_all_tests():
     await r.record_async("inline_view_invalid_shape", test_inline_view_invalid_shape_rejected_without_lookup)
     await r.record_async("inline_view_activity_backend", test_resolve_inline_view_activity_against_backend)
     r.record("inline_view_tool_schema", test_tool_schemas_expose_inline_view)
+    await r.record_async("inline_view_ignored_for_stock_account", test_inline_view_ignored_for_stock_account)
     teardown_mock()
     return r.all_passed
 

@@ -10,6 +10,7 @@ import { IndexedDBUploadPayloadTooLargeError } from './types';
 // Re-export everything from sub-modules so service.ts imports stay unchanged
 export {
   processGenericUpload,
+  processLinkedInUpload,
   processContactsUpload,
   processEmailZipUpload,
 } from './uploadService.contacts';

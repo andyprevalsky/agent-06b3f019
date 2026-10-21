@@ -141,23 +141,13 @@ function buildWhatsAppBridge(ipcRenderer: IpcRenderer): IPC['whatsapp'] {
     hasCredentials: () => ipcRenderer.invoke('whatsapp:hasCredentials') as Promise<boolean>,
     getLinkedPhoneNumber: () =>
       ipcRenderer.invoke('whatsapp:getLinkedPhoneNumber') as Promise<string | null>,
-    isConnected: (accountId?: string) =>
-      ipcRenderer.invoke('whatsapp:isConnected', accountId) as Promise<boolean>,
-    listAccounts: () =>
-      ipcRenderer.invoke('whatsapp:listAccounts') as Promise<
-        Array<{ accountId: string; connected: boolean }>
-      >,
+    isConnected: () => ipcRenderer.invoke('whatsapp:isConnected') as Promise<boolean>,
     connect: () =>
       ipcRenderer.invoke('whatsapp:connect') as Promise<{ success: boolean; error?: string }>,
-    addAccount: () =>
-      ipcRenderer.invoke('whatsapp:addAccount') as Promise<{ success: boolean; error?: string }>,
     disconnect: () =>
       ipcRenderer.invoke('whatsapp:disconnect') as Promise<{ success: boolean; error?: string }>,
-    logout: (accountId?: string) =>
-      ipcRenderer.invoke('whatsapp:logout', accountId) as Promise<{
-        success: boolean;
-        error?: string;
-      }>,
+    logout: () =>
+      ipcRenderer.invoke('whatsapp:logout') as Promise<{ success: boolean; error?: string }>,
   };
 }
 
@@ -173,18 +163,10 @@ function buildTelegramBridge(ipcRenderer: IpcRenderer): IPC['telegram'] {
       }>,
     disconnect: () =>
       ipcRenderer.invoke('telegram:disconnect') as Promise<{ success: boolean; error?: string }>,
-    // Optional args are forwarded only when given, so main sees exactly the caller's call.
-    logout: (...args: [accountId?: string]) =>
-      ipcRenderer.invoke('telegram:logout', ...args) as Promise<{
-        success: boolean;
-        error?: string;
-      }>,
-    listAccounts: () =>
-      ipcRenderer.invoke('telegram:listAccounts') as Promise<
-        Array<{ accountId: string; label: string | null; connected: boolean }>
-      >,
-    syncHistorical: (...args: [messagesPerDialog?: number, accountId?: string]) =>
-      ipcRenderer.invoke('telegram:syncHistorical', ...args) as Promise<{
+    logout: () =>
+      ipcRenderer.invoke('telegram:logout') as Promise<{ success: boolean; error?: string }>,
+    syncHistorical: (messagesPerDialog?: number) =>
+      ipcRenderer.invoke('telegram:syncHistorical', messagesPerDialog) as Promise<{
         success: boolean;
         count?: number;
         error?: string;

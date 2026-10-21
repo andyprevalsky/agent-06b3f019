@@ -18,7 +18,7 @@ import {
   type GptCodeCredentialEnvelopeResult,
 } from './gptCredentials';
 import { buildCodeAgentSystemPrompt, buildCodexHarnessSystemPrompt } from './codeAgentPrompt';
-import { withAgentGraphInstructions } from './agentGraph/cli';
+import { isRoseDesktopUser } from '../utils/roseDesktop';
 import { uploadAttachmentsToSandbox } from './e2bAttachments';
 import { overlayCodexRoseBridge } from './e2bCodexHarness';
 import { workDirForGithubRepo } from './e2bWorkDir';
@@ -48,7 +48,6 @@ import { applyUserUiSandboxEnvs, writeUserUiWorkspaceToSandboxSafe } from './use
 import { prepareCodeSessionWorkspace } from './codeSessionWorkspace';
 import { applyPreviewUrlEnv, autostartRosePreview } from './codePreview/sandbox';
 import { isRoseRepoUrl } from './codePreview/preview';
-import { isRoseDevUser } from '../utils/roseDevAccess';
 import {
   claudeTaskIntegrationId,
   isRefreshOnlyOauthEnvelope,
@@ -186,16 +185,16 @@ async function createClaudeCodeSessionUnlocked(
     `wrapper:${fileHash(findLocalClaudeCodeWsServer())}`,
     `env:${process.env.FAST_MODE_CODE_AGENT_ENV_FINGERPRINT ?? 'default'}`,
   ].join('|');
-  const systemPrompt = withAgentGraphInstructions(
-    buildCodeAgentSystemPrompt({
-      githubRepoUrl,
-      workDir,
-      branch: codeSession?.branch,
-      mergeTarget: codeSession?.mergeTarget,
-      roseDev: isRoseDevUser(userId),
-      roseRepo: isRoseRepoUrl(projectWorkspace?.project.repoUrl ?? githubRepoUrl),
-    })
-  );
+  // The Rose skills table of contents (agent graph, talking to the user, ...)
+  // lists the skills prepareCodeSessionWorkspace installs for this account.
+  const systemPrompt = buildCodeAgentSystemPrompt({
+    githubRepoUrl,
+    workDir,
+    branch: codeSession?.branch,
+    mergeTarget: codeSession?.mergeTarget,
+    roseDesktop: isRoseDesktopUser(userId),
+    roseRepo: isRoseRepoUrl(projectWorkspace?.project.repoUrl ?? githubRepoUrl),
+  });
 
   // Build environment variables for sandbox
   const envs: Record<string, string> = {
@@ -371,7 +370,11 @@ async function createClaudeCodeSessionUnlocked(
   const templateIdForCreate = process.env.E2B_CLAUDE_CODE_TEMPLATE_ID;
   let acquired;
   try {
-    acquired = await acquireCodeSandbox(codeSession, templateIdForCreate, envs, 'Claude Code');
+    acquired = await acquireCodeSandbox(codeSession, templateIdForCreate, envs, 'Claude Code', {
+      provider: 'claude',
+      projectSize: projectWorkspace?.project.sandboxSize,
+      agentId,
+    });
   } catch (err) {
     const local = await createLocalCodeSessionFallback(err, codeSession, {
       taskId,
@@ -467,6 +470,7 @@ async function createClaudeCodeSessionUnlocked(
     cliSessionId,
     projectRestore: project.report,
     previewUrl,
+    sandboxSize: acquired.size,
   };
 }
 
@@ -511,15 +515,13 @@ export async function createCodexCodeSession(
           roseUserId: userId,
           anchorAgentId: agentId,
         })
-      : withAgentGraphInstructions(
-          buildCodeAgentSystemPrompt({
-            githubRepoUrl,
-            workDir,
-            branch: codeSession?.branch,
-            mergeTarget: codeSession?.mergeTarget,
-            roseDev: isRoseDevUser(userId),
-          })
-        );
+      : buildCodeAgentSystemPrompt({
+          githubRepoUrl,
+          workDir,
+          branch: codeSession?.branch,
+          mergeTarget: codeSession?.mergeTarget,
+          roseDesktop: isRoseDesktopUser(userId),
+        });
 
   const credentialMeta: GptCodeCredentialEnvelopeResult | null =
     await fetchGptCodeCredentialsWithMeta(userId);
@@ -623,12 +625,11 @@ export async function createCodexCodeSession(
   const userUiWorkspace = await prepareCodeSessionWorkspace(userId, agentId, taskId, 'codex');
   applyUserUiSandboxEnvs(envs, userUiWorkspace);
 
-  const { sandbox, resumedFrom, cliSessionId } = await acquireCodeSandbox(
-    codeSession,
-    templateId,
-    envs,
-    'Codex Code'
-  );
+  const acquired = await acquireCodeSandbox(codeSession, templateId, envs, 'Codex Code', {
+    provider: 'codex',
+    agentId,
+  });
+  const { sandbox, resumedFrom, cliSessionId } = acquired;
   if (cliSessionId !== null) envs.CODEX_RESUME_SESSION_ID = cliSessionId;
 
   log.info(`Using Codex sandbox: ${sandbox.sandboxId} (${resumedFrom})`);
@@ -697,5 +698,6 @@ export async function createCodexCodeSession(
     resumedFrom,
     cliSessionId,
     previewUrl,
+    sandboxSize: acquired.size,
   };
 }

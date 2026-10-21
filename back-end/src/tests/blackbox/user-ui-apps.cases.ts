@@ -223,7 +223,8 @@ export function userUiAppsCases(ctx: UserUiAppsCaseContext) {
             user.userId,
             agent.id,
             taskId,
-            'claude'
+            'claude',
+            true // Exercise the Rose Desktop publisher with this synthetic account.
           );
           const token = workspace?.envs.ROSE_UI_PUBLISH_TOKEN ?? '';
           const claims = verifyUserUiPublishToken(token);

@@ -22,6 +22,7 @@ import {
   MANIFEST_NAME,
   type CheckpointManifest,
   type CheckpointRepo,
+  type VerifiedCheckpoint,
 } from './checkpoint';
 import { indexCodeEvents } from './codeEvents';
 import { type CodeSessionFs, localSandboxFs } from './sandboxFs';
@@ -171,18 +172,17 @@ export function githubAuthRemoteUrl(remoteUrl: string): string {
 }
 
 /**
- * Restore the newest checkpoint that verifies. A corrupted checkpoint is
- * rejected (never applied) and the next older one is tried.
+ * The newest checkpoint that verifies, downloaded and hash-checked. A corrupted
+ * checkpoint is rejected (never returned) and the next older one is tried.
+ * Read-only: touches neither the session row nor any sandbox.
  */
-export async function restoreLatestCheckpoint(
-  session: CodeSessionRow,
-  fs: CodeSessionFs
-): Promise<{ seq: number; cliSessionId: string | null } | null> {
+export async function loadNewestVerifiedCheckpoint(
+  session: CodeSessionRow
+): Promise<VerifiedCheckpoint | null> {
   const newest = session.latestCheckpointSeq;
   for (let seq = newest; seq >= 1 && seq > newest - RESTORE_LOOKBACK; seq -= 1) {
-    let verified;
     try {
-      verified = await loadVerifiedCheckpoint(session.userId, session.id, seq);
+      return await loadVerifiedCheckpoint(session.userId, session.id, seq);
     } catch (error) {
       if (error instanceof CheckpointIntegrityError) {
         log.warn('Rejected code session checkpoint', {
@@ -194,15 +194,24 @@ export async function restoreLatestCheckpoint(
       }
       throw error;
     }
-    const { cliSessionId } = await applyCheckpoint(fs, verified, {
-      authRemoteUrl: githubAuthRemoteUrl,
-    });
-    // A checkpoint written by the other provider's CLI (a usage-limit handoff,
-    // C15) restores the files and history but not that CLI's conversation.
-    const sameProvider = verified.manifest.codeProvider === session.codeProvider;
-    return { seq, cliSessionId: sameProvider ? cliSessionId : null };
   }
   return null;
+}
+
+/** Restore the newest checkpoint that verifies (see loadNewestVerifiedCheckpoint). */
+export async function restoreLatestCheckpoint(
+  session: CodeSessionRow,
+  fs: CodeSessionFs
+): Promise<{ seq: number; cliSessionId: string | null } | null> {
+  const verified = await loadNewestVerifiedCheckpoint(session);
+  if (verified === null) return null;
+  const { cliSessionId } = await applyCheckpoint(fs, verified, {
+    authRemoteUrl: githubAuthRemoteUrl,
+  });
+  // A checkpoint written by the other provider's CLI (a usage-limit handoff,
+  // C15) restores the files and history but not that CLI's conversation.
+  const sameProvider = verified.manifest.codeProvider === session.codeProvider;
+  return { seq: verified.manifest.seq, cliSessionId: sameProvider ? cliSessionId : null };
 }
 
 /** Connect (and thereby resume) a paused E2B sandbox; null when it is gone. */

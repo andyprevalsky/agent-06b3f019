@@ -86,6 +86,8 @@ export interface CreateSessionResult {
   parent_code_session_id: string | null;
   code_provider: string;
   provider_handoff: boolean;
+  /** vCPUs / memory of the E2B sandbox (C16); null for a local session. */
+  sandbox_size: { cpu: number; memory_gb: number } | null;
   /** Restore summary when the session materialized a Project (PJ3). */
   project: ProjectRestoreReport | null;
   /** Live dev-server preview URL (Rose dev accounts, A1); null otherwise. */
@@ -117,6 +119,9 @@ export const codeTaskUsageLimitSchema = z.object({
   // Epoch seconds/ms or ISO time the provider reports the limit resets.
   resets_at: z.union([z.number().positive(), z.string().min(1).max(64)]).optional(),
 });
+
+/** POST /:taskId/resize — the attached activity applies a pending size change (C16). */
+export const codeTaskResizeSchema = z.object({ request_id: z.string().uuid() }).strict();
 
 /** POST /:taskId/publish — push the session's branch and open a PR (A1; never merges). */
 export const codePublishSchema = z

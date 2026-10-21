@@ -2,27 +2,25 @@
  * messaging-telegram service layer.
  *
  * TelegramClient — MTProto wrapper + auth state machine + historical/real-time
- * message fetching for ONE Telegram account. Emits `sync` events consumed by
- * the runtime coordinator.
- *
- *   new TelegramClient(null)  ── startAuth ──► login ──► identify (getMe) ──► accounts/<id>/session.txt
- *   new TelegramClient(null)  ── connectWithExistingSession ──► legacy session.txt ──► migrated to accounts/<id>/
- *   new TelegramClient(id)    ── connectWithExistingSession ──► accounts/<id>/session.txt
- *
- * `accountId` is the numeric Telegram user id; it is known after login or connect.
+ * message fetching. Emits `sync` events consumed by the runtime coordinator.
  *
  * Imports: own types, own config, own repo, own normalizer, GramJS SDK, EventEmitter.
  */
 import { EventEmitter } from 'events';
-import type { TelegramClient as GramClient } from 'telegram';
-import { StringSession } from 'telegram/sessions';
+import { TelegramClient as GramClient } from 'telegram';
+import type { StringSession } from 'telegram/sessions';
 import { NewMessage, type NewMessageEvent } from 'telegram/events';
 import { Api } from 'telegram/tl';
 import { getErrorMessage } from '../../../shared/utils/error';
-import { API_HASH, API_ID, DEFAULT_DIALOG_LIMIT, DEFAULT_MESSAGES_PER_DIALOG } from './config';
+import {
+  API_HASH,
+  API_ID,
+  CONNECTION_RETRIES,
+  DEFAULT_DIALOG_LIMIT,
+  DEFAULT_MESSAGES_PER_DIALOG,
+} from './config';
 import { normalizeTelegramMessage } from './normalizer';
 import { TelegramAuth } from './repo';
-import { identifyAccount, makeGramClient, readDialogHistory, readDialogs } from './service.gram';
 import type {
   AuthState,
   ConnectionState,
@@ -30,8 +28,17 @@ import type {
   NormalizedMessage,
   StartAuthResult,
   SyncEvent,
-  TelegramIdentity,
 } from './types';
+
+function makeGramClient(session: StringSession): GramClient {
+  return new GramClient(session, API_ID, API_HASH, { connectionRetries: CONNECTION_RETRIES });
+}
+
+function dialogDisplayName(dialog: { title?: string | null; name?: string | null }): string {
+  if (typeof dialog.title === 'string' && dialog.title.length > 0) return dialog.title;
+  if (typeof dialog.name === 'string' && dialog.name.length > 0) return dialog.name;
+  return 'Unknown';
+}
 
 /**
  * Telegram client using GramJS for MTProto protocol.
@@ -49,21 +56,6 @@ export class TelegramClient extends EventEmitter {
   // Monotonic auth attempt id — guards async callbacks from mutating state when
   // the user has cancelled or restarted auth mid-flight.
   private authAttemptId = 0;
-  private identity: TelegramIdentity | null = null;
-
-  /** `accountId` = a saved account to reconnect; null = a new login or the legacy session. */
-  constructor(private readonly savedAccountId: string | null = null) {
-    super();
-  }
-
-  /** Telegram user id of this session, once known (after login or connect). */
-  getAccountId(): string | null {
-    return this.identity?.accountId ?? this.savedAccountId;
-  }
-
-  getIdentity(): TelegramIdentity | null {
-    return this.identity;
-  }
 
   getAuthState(): AuthState {
     return this.authState;
@@ -102,8 +94,7 @@ export class TelegramClient extends EventEmitter {
     const attemptId = ++this.authAttemptId;
 
     try {
-      // A login always starts from an empty session: it adds (or re-adds) an account.
-      this.client = makeGramClient(new StringSession(''));
+      this.client = makeGramClient(TelegramAuth.loadSession());
       this.runAuthStart(this.client, attemptId, phoneNumber);
       return { success: true };
     } catch (error) {
@@ -136,19 +127,14 @@ export class TelegramClient extends EventEmitter {
       });
   }
 
-  private async onAuthSuccess(authClient: GramClient, attemptId: number): Promise<void> {
-    if (attemptId !== this.authAttemptId || this.client !== authClient) return;
-    const identity = await identifyAccount(authClient);
+  private onAuthSuccess(authClient: GramClient, attemptId: number): void {
     if (attemptId !== this.authAttemptId || this.client !== authClient) return;
     console.log('[TelegramClient] Auth completed successfully');
-    this.identity = identity;
     this.authState = 'authenticated';
-    TelegramAuth.saveAccountSession(identity.accountId, authClient.session as StringSession, {
-      label: identity.label,
-    });
+    TelegramAuth.saveSession(authClient.session as StringSession);
     this.setConnectionState('connected');
     this.setupMessageHandler();
-    this.emit('auth:complete', identity);
+    this.emit('auth:complete');
     this.emitConnectionChange(true);
   }
 
@@ -220,45 +206,21 @@ export class TelegramClient extends EventEmitter {
     this.setConnectionState('disconnected');
   }
 
-  private savedSession(): StringSession | null {
-    if (this.savedAccountId !== null) {
-      const session = TelegramAuth.loadAccountSession(this.savedAccountId);
-      return session.save().length > 0 ? session : null;
-    }
-    return TelegramAuth.hasLegacySession() ? TelegramAuth.loadSession() : null;
-  }
-
-  /** Identify the connected session; a legacy session moves into its account dir. */
-  private async adoptIdentity(client: GramClient): Promise<void> {
-    this.identity = await identifyAccount(client);
-    if (this.savedAccountId === null) {
-      TelegramAuth.adoptLegacySession(this.identity.accountId, this.identity.label);
-    } else {
-      const profile = TelegramAuth.readAccountProfile(this.savedAccountId);
-      TelegramAuth.writeAccountProfile(this.savedAccountId, {
-        ...profile,
-        label: this.identity.label ?? profile.label,
-      });
-    }
-  }
-
   async connectWithExistingSession(): Promise<boolean> {
-    const session = this.savedSession();
-    if (session === null) return false;
+    if (!TelegramAuth.hasSession()) return false;
     if (!TelegramClient.hasApiCredentials()) return false;
 
     this.isConnecting = true;
     this.setConnectionState('connecting');
 
     try {
-      this.client = makeGramClient(session);
+      this.client = makeGramClient(TelegramAuth.loadSession());
       await this.client.connect();
       if (!(await this.client.isUserAuthorized())) {
         this.client = null;
         this.setConnectionState('disconnected');
         return false;
       }
-      await this.adoptIdentity(this.client);
       this.setConnectionState('connected');
       this.setupMessageHandler();
       this.emitConnectionChange(true);
@@ -294,9 +256,7 @@ export class TelegramClient extends EventEmitter {
       }
     }
     await this.disconnect();
-    const accountId = this.getAccountId();
-    if (accountId !== null) TelegramAuth.clearAccountSession(accountId);
-    else TelegramAuth.clearLegacySession();
+    TelegramAuth.clearSession();
   }
 
   async fetchHistoricalMessages(
@@ -306,8 +266,19 @@ export class TelegramClient extends EventEmitter {
     minDate?: Date
   ): Promise<NormalizedMessage[]> {
     if (this.client === null || !this.isConnected()) return [];
+
     try {
-      return await readDialogHistory(this.client, dialogId, limit, offsetId, minDate);
+      const messages = await this.client.getMessages(dialogId, { limit, offsetId });
+      const minTimestamp = minDate?.getTime() ?? 0;
+      const normalized: NormalizedMessage[] = [];
+
+      for (const msg of messages) {
+        const n = normalizeTelegramMessage(msg);
+        if (n === null) continue;
+        if (minTimestamp > 0 && n.timestamp.getTime() <= minTimestamp) continue;
+        normalized.push(n);
+      }
+      return normalized;
     } catch (error) {
       console.error('[TelegramClient] Error fetching historical messages:', error);
       return [];
@@ -316,28 +287,48 @@ export class TelegramClient extends EventEmitter {
 
   async getDialogs(limit: number = DEFAULT_DIALOG_LIMIT): Promise<DialogSummary[]> {
     if (this.client === null || !this.isConnected()) return [];
+
     try {
-      return await readDialogs(this.client, limit);
+      const dialogs = await this.client.getDialogs({ limit });
+      return dialogs.map((dialog) => ({
+        id: String(dialog.id),
+        name: dialogDisplayName(dialog),
+        isGroup: dialog.isGroup,
+        isChannel: dialog.isChannel,
+      }));
     } catch (error) {
       console.error('[TelegramClient] Error fetching dialogs:', error);
       return [];
     }
   }
 
-  /** The chat list; throws when it cannot be read (history sync source). */
-  async listDialogs(): Promise<DialogSummary[]> {
-    if (this.client === null || !this.isConnected()) throw new Error('Telegram is not connected');
-    return readDialogs(this.client);
-  }
-
-  /** One chat's history; throws when the chat cannot be read (history sync source). */
-  async fetchDialogHistory(
-    dialogId: string,
-    limit: number,
-    minDate?: Date
+  async fetchAllHistoricalMessages(
+    messagesPerDialog: number = DEFAULT_MESSAGES_PER_DIALOG,
+    minDate?: Date,
+    /** Called with chats done of the chat list (0 first, then after each chat). */
+    onChatsDone?: (done: number, total: number) => Promise<unknown>
   ): Promise<NormalizedMessage[]> {
-    if (this.client === null || !this.isConnected()) throw new Error('Telegram is not connected');
-    return readDialogHistory(this.client, dialogId, limit, undefined, minDate);
+    if (this.client === null || !this.isConnected()) return [];
+
+    const all: NormalizedMessage[] = [];
+    const dialogs = await this.getDialogs();
+    await onChatsDone?.(0, dialogs.length);
+
+    for (const [index, dialog] of dialogs.entries()) {
+      try {
+        const messages = await this.fetchHistoricalMessages(
+          dialog.id,
+          messagesPerDialog,
+          undefined,
+          minDate
+        );
+        all.push(...messages);
+      } catch (error) {
+        console.warn(`[TelegramClient] Error fetching from dialog ${dialog.id}:`, error);
+      }
+      await onChatsDone?.(index + 1, dialogs.length);
+    }
+    return all;
   }
 
   private setupMessageHandler(): void {

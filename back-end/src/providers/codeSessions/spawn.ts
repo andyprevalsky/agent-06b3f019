@@ -21,6 +21,8 @@ import {
 } from './store';
 import { CODE_SANDBOX_IDLE_TIMEOUT_MS } from '../e2bCodeSessionSandbox';
 import { switchCodeSessionProvider } from './usageLimit';
+import { pendingResizeForTask, sizeView, type SizeView } from './sandboxResize';
+import type { SandboxSize } from './sandboxSize';
 
 const log = createLogger('CodeSessionSpawn');
 
@@ -106,7 +108,11 @@ export async function resolveSpawnCodeSession(
  * lease when the create fails so a retry (or the next spawn) can resume.
  */
 export async function createWithCodeSession<
-  T extends { resumedFrom?: string; cliSessionId?: string | null },
+  T extends {
+    resumedFrom?: string;
+    cliSessionId?: string | null;
+    sandboxSize?: SandboxSize | null;
+  },
 >(
   params: ResolveSpawnParams,
   create: (codeSession: CodeSessionRow | null, handoff: string | null) => Promise<T>
@@ -142,6 +148,10 @@ export async function createWithCodeSession<
       parent_code_session_id: codeSession?.parentCodeSessionId ?? null,
       code_provider: codeSession?.codeProvider ?? params.codeProvider,
       provider_handoff: handoff !== null,
+      sandbox_size:
+        session.sandboxSize !== undefined && session.sandboxSize !== null
+          ? sizeView(session.sandboxSize)
+          : null,
     },
   };
 }
@@ -162,6 +172,8 @@ export interface CodeSessionSpawnFields {
   code_provider: string;
   /** True when this spawn took the session over from the other provider. */
   provider_handoff: boolean;
+  /** vCPUs / memory of the E2B sandbox (C16); null for a local session. */
+  sandbox_size: SizeView | null;
 }
 
 export interface CodeSessionView {
@@ -233,6 +245,8 @@ export async function keepAliveCodeTask(
   alive: boolean;
   code_session_id: string | null;
   awaiting_parent: AwaitingParentQuestion | null;
+  /** A pending resize the attached activity applies (C16); present only when there is one. */
+  resize_requested?: { request_id: string; from: SizeView; to: SizeView };
 }> {
   const task = await prisma.claudeCodeSession.findUnique({ where: { id: taskId } });
   if (task === null || task.status === 'CLOSED') {
@@ -244,10 +258,12 @@ export async function keepAliveCodeTask(
     await setTimeoutFn(task.sandboxId, CODE_SANDBOX_IDLE_TIMEOUT_MS);
   }
   if (task.codeSessionId !== null) await extendLease(task.codeSessionId);
+  const resize = await pendingResizeForTask(task.codeSessionId);
   return {
     alive: true,
     code_session_id: task.codeSessionId,
     awaiting_parent: (task.awaitingParent ?? null) as AwaitingParentQuestion | null,
+    ...(resize !== null ? { resize_requested: resize } : {}),
   };
 }
 

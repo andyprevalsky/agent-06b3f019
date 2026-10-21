@@ -740,6 +740,20 @@ class GrepTool(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class InspectCodeTool(BaseModel):
+    """Ask a read-only code agent about the files in a code agent's workspace.
+
+    It answers from that session's latest checkpoint in a separate sandbox,
+    cites file:line, and cannot change the session.
+    """
+
+    tool: Literal["inspect_code"]
+    code_session_id: str = Field(description="The code_session_id from that code agent's result.")
+    question: str = Field(
+        description="A self-contained question about the code, naming the files, features or behavior to check."
+    )
+
+
 class InlineViewArg(BaseModel):
     """A published rose_user_ui inline view rendered with the message."""
 
@@ -766,6 +780,11 @@ class SendMessageToUserTool(BaseModel):
         default=True,
         description=("True to block workflow until the user responds. False to send a non-blocking FYI."),
     )
+
+
+class SendMessageToUserRoseDesktopTool(SendMessageToUserTool):
+    """Message the user during PLAN phase; optionally block for a reply."""
+
     inline_view: Optional[InlineViewArg] = Field(default=None, description=INLINE_VIEW_DESCRIPTION)
 
 
@@ -778,6 +797,11 @@ class SendMessageToUserExecutePhaseTool(BaseModel):
             "The exact user-visible non-blocking update explaining what the user needs to know."
         )
     )
+
+
+class SendMessageToUserExecutePhaseRoseDesktopTool(SendMessageToUserExecutePhaseTool):
+    """Send a non-blocking informational message to the user during EXECUTE phase."""
+
     inline_view: Optional[InlineViewArg] = Field(default=None, description=INLINE_VIEW_DESCRIPTION)
 
 
@@ -790,7 +814,7 @@ class DisplayOptionArg(BaseModel):
 
 
 class DisplayTool(BaseModel):
-    """Show images, videos or HTML to the user inline, or pin a question with numbered options."""
+    """Show images, videos or HTML to the user inline."""
 
     tool: Literal["display"]
     paths: Optional[List[str]] = Field(
@@ -798,6 +822,15 @@ class DisplayTool(BaseModel):
         description="Files already in this agent's tree (attachments or outputs), by file name.",
     )
     urls: Optional[List[str]] = Field(default=None, description="Public http(s) URLs of images, videos or HTML pages.")
+    caption: Optional[str] = Field(
+        default=None,
+        description=user_facing_text_description("Caption shown with the media."),
+    )
+
+
+class DisplayRoseDesktopTool(DisplayTool):
+    """Show images, videos or HTML to the user inline, or pin a question with numbered options."""
+
     caption: Optional[str] = Field(
         default=None,
         description=user_facing_text_description('Caption shown with the media; for placement "pinned", the question.'),
@@ -935,6 +968,39 @@ def url_origin_for_log(url: str) -> str:
     return f"{origin}:{port}" if port else origin
 
 
+# spawn_agent `type` description. The 'code' clause differs by account: Rose
+# Desktop accounts (utils.rose_desktop) also learn that the code sandbox holds
+# their rose_user_ui and publishes inline views; every other account gets the
+# stock clause, so its tool schema carries no Rose Desktop text.
+_SPAWN_TYPE_BROWSER = (
+    "Select by capability: 'browser' starts a browser session for stateful or authenticated web work; "
+)
+_SPAWN_TYPE_CODE_STOCK = (
+    "'code' starts a coding agent using Claude Code or Codex CLI in a persistent sandbox, selected by "
+    "available credentials and configuration; "
+)
+_SPAWN_TYPE_CODE_ROSE_DESKTOP = (
+    "'code' starts a coding agent using Claude Code or Codex CLI in a persistent sandbox, selected by "
+    "available credentials and configuration. Delegate all code writing to it. Its sandbox holds the "
+    "user's Rose app UI (rose_user_ui): it edits and publishes changes to how Rose looks or behaves for "
+    "the user, and it can publish a game, app or visual it builds as an inline view, which you show "
+    "with send_message_to_user's inline_view; "
+)
+_SPAWN_TYPE_REST = (
+    "'general_purpose' starts a full autonomous agent for "
+    "cross-domain multi-step work - DO NOT use it or assign it a goal unless that goal is sufficiently distinct from the goal you are tasked with, and the sub-agent's task complexity is strictly less than half of your issued task complexity (otherwise do the work yourself); Be wary of infinite recursion: general_purpose sub-agents can also spawn sub-agents. When using one as an intelligent retry for a faulty tool, instruct it not to spawn more general_purpose sub-agents; otherwise it will likely spawn another general_purpose to retry the same faulty tool after the first error. 'explore' performs read-only research for web or user-data facts; "
+    "'for_each' starts one general-purpose agent per item for repeated fan-out. "
+    "A 'browser' agent is given an auth inventory at session start, separately from the goal: the user's "
+    "saved sessions, cookies, passwords and passkeys for the target site, and a minted agent-owned "
+    "identity - an email address and phone number it can read delivered messages at, including "
+    "verification codes. It can only read messages sent to that minted identity or to a mailbox the "
+    "user has connected as an integration; any other address, including one you compose from the "
+    "user's name, is write-only to it."
+)
+SPAWN_AGENT_TYPE_DESCRIPTION = _SPAWN_TYPE_BROWSER + _SPAWN_TYPE_CODE_STOCK + _SPAWN_TYPE_REST
+SPAWN_AGENT_TYPE_DESCRIPTION_ROSE_DESKTOP = _SPAWN_TYPE_BROWSER + _SPAWN_TYPE_CODE_ROSE_DESKTOP + _SPAWN_TYPE_REST
+
+
 class SpawnAgentTool(BaseModel):
     """Spawn an autonomous agent; type selects capabilities and per-type required fields.
 
@@ -950,23 +1016,7 @@ class SpawnAgentTool(BaseModel):
 
     tool: Literal["spawn_agent"]
     type: Literal["browser", "code", "general_purpose", "explore", "for_each"] = Field(
-        description=(
-            "Select by capability: 'browser' starts a browser session for stateful or authenticated web work; "
-            "'code' starts a coding agent using Claude Code or Codex CLI in a persistent sandbox, selected by "
-            "available credentials and configuration. Delegate all code writing to it. Its sandbox holds the "
-            "user's Rose app UI (rose_user_ui): it edits and publishes changes to how Rose looks or behaves for "
-            "the user, and it can publish a game, app or visual it builds as an inline view, which you show "
-            "with send_message_to_user's inline_view; "
-            "'general_purpose' starts a full autonomous agent for "
-            "cross-domain multi-step work - DO NOT use it or assign it a goal unless that goal is sufficiently distinct from the goal you are tasked with, and the sub-agent's task complexity is strictly less than half of your issued task complexity (otherwise do the work yourself); Be wary of infinite recursion: general_purpose sub-agents can also spawn sub-agents. When using one as an intelligent retry for a faulty tool, instruct it not to spawn more general_purpose sub-agents; otherwise it will likely spawn another general_purpose to retry the same faulty tool after the first error. 'explore' performs read-only research for web or user-data facts; "
-            "'for_each' starts one general-purpose agent per item for repeated fan-out. "
-            "A 'browser' agent is given an auth inventory at session start, separately from the goal: the user's "
-            "saved sessions, cookies, passwords and passkeys for the target site, and a minted agent-owned "
-            "identity - an email address and phone number it can read delivered messages at, including "
-            "verification codes. It can only read messages sent to that minted identity or to a mailbox the "
-            "user has connected as an integration; any other address, including one you compose from the "
-            "user's name, is write-only to it."
-        )
+        description=SPAWN_AGENT_TYPE_DESCRIPTION
     )
     goal: str = Field(
         description=(
@@ -1119,6 +1169,24 @@ class SpawnAgentTool(BaseModel):
         if self.type == "explore" and self.output_schema:
             self.output_schema = None
         return self
+
+
+class SpawnAgentRoseDesktopTool(SpawnAgentTool):
+    """Spawn an autonomous agent; type selects capabilities and per-type required fields.
+
+    general_purpose: DO NOT use this agent type or assign it a goal unless that goal is
+    sufficiently distinct from the goal you are tasked with. Each general_purpose
+    sub-agent's task complexity must be strictly less than half of your issued task
+    complexity; otherwise do the work yourself. Be wary of infinite recursion:
+    general_purpose sub-agents can also spawn sub-agents. When using one as an
+    intelligent retry for a faulty tool, instruct it not to spawn more
+    general_purpose sub-agents; otherwise it will likely spawn another
+    general_purpose to retry the same faulty tool after the first error.
+    """
+
+    type: Literal["browser", "code", "general_purpose", "explore", "for_each"] = Field(
+        description=SPAWN_AGENT_TYPE_DESCRIPTION_ROSE_DESKTOP
+    )
 
 
 class SpawnAgentToolNoGP(BaseModel):
@@ -1379,6 +1447,8 @@ TOOL_MODELS: ToolRegistry = {
     "call_phone_number": CallPhoneNumberTool,
     # Local data search
     "grep": GrepTool,
+    # Read-only look inside a code agent's workspace (explore)
+    "inspect_code": InspectCodeTool,
 }
 
 # Phase-specific override registry. PLAN narrows spawn_agent to the explore-only
@@ -1387,6 +1457,31 @@ PLAN_TOOL_MODELS: ToolRegistry = {
     **TOOL_MODELS,
     "spawn_agent": SpawnExploreAgentTool,
 }
+
+# Rose Desktop accounts (utils.rose_desktop) swap these in for the stock models:
+# inline views on send_message_to_user, pinned questions on display, and the
+# rose_user_ui clause in spawn_agent's `type`. TOOL_MODELS / PLAN_TOOL_MODELS
+# stay the stock registries, so any caller that does not pass the flag gets the
+# stock surface.
+ROSE_DESKTOP_TOOL_MODELS: ToolRegistry = {
+    "send_message_to_user": SendMessageToUserRoseDesktopTool,
+    "send_message_to_user_execute_phase": SendMessageToUserExecutePhaseRoseDesktopTool,
+    "display": DisplayRoseDesktopTool,
+    "spawn_agent": SpawnAgentRoseDesktopTool,
+}
+
+
+def _with_rose_desktop_models(registry: ToolRegistry) -> ToolRegistry:
+    """Swap in the Rose Desktop variant of every stock model the registry holds.
+
+    Only exact stock entries are replaced, so the PLAN explore-only and the
+    no-general-purpose spawn_agent variants stay as they are.
+    """
+    stock = {name: TOOL_MODELS[name] for name in ROSE_DESKTOP_TOOL_MODELS}
+    return {
+        name: ROSE_DESKTOP_TOOL_MODELS[name] if stock.get(name) is model else model for name, model in registry.items()
+    }
+
 
 # Tools available inside the explore agent (subset of read-only tools).
 # Full registry list -  callers that inject tools into an explore agent MUST use
@@ -1397,6 +1492,7 @@ EXPLORE_AGENT_TOOLS = [
     "web_fetch",
     "grep",
     "api_request",
+    "inspect_code",
     "attempt_completion_with_result",
 ]
 
@@ -1477,22 +1573,24 @@ def render_tool_list(
 # ============================================================================
 
 
-def get_tool_models(*, phase: Optional[str] = None) -> ToolRegistry:
+def get_tool_models(*, phase: Optional[str] = None, rose_desktop: bool = False) -> ToolRegistry:
     """Return the tool registry for ``phase``, honoring GPA kill-switch.
 
     PLAN keeps the explore-only spawn_agent variant. EXECUTE (and unspecified)
     swaps in :class:`SpawnAgentToolNoGP` when
     ``ROSE_DISABLE_GENERAL_PURPOSE_AGENT`` is set so the LLM cannot select
-    general_purpose / for_each.
+    general_purpose / for_each. ``rose_desktop`` (``utils.rose_desktop``)
+    swaps in the Rose Desktop models; the default is the stock registry.
     """
     from utils.kill_switches import general_purpose_agent_disabled
 
     if phase == "plan":
-        return dict(PLAN_TOOL_MODELS)
-    registry = dict(TOOL_MODELS)
-    if general_purpose_agent_disabled():
-        registry["spawn_agent"] = SpawnAgentToolNoGP
-    return registry
+        registry = dict(PLAN_TOOL_MODELS)
+    else:
+        registry = dict(TOOL_MODELS)
+        if general_purpose_agent_disabled():
+            registry["spawn_agent"] = SpawnAgentToolNoGP
+    return _with_rose_desktop_models(registry) if rose_desktop else registry
 
 
 def get_planner_assignable_tools() -> list[str]:
@@ -1640,16 +1738,24 @@ __all__ = [
     "PeopleSearchTool",
     "WebFetchTool",
     "SendMessageToUserTool",
+    "SendMessageToUserRoseDesktopTool",
     "SendMessageToUserExecutePhaseTool",
+    "SendMessageToUserExecutePhaseRoseDesktopTool",
+    "DisplayTool",
+    "DisplayRoseDesktopTool",
     "MessagePersonTool",
     "SpawnAgentTool",
+    "SpawnAgentRoseDesktopTool",
     "SpawnAgentToolNoGP",
     "SetPlanTool",
     "AttemptCompletionTool",
     "AttemptCompletionWithResultTool",
     "CallPhoneNumberTool",
     "GrepTool",
+    "InspectCodeTool",
     "TOOL_MODELS",
+    "PLAN_TOOL_MODELS",
+    "ROSE_DESKTOP_TOOL_MODELS",
     "ToolRegistry",
     "create_agent_action_model",
     "get_tool_models",

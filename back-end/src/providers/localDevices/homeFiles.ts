@@ -1,7 +1,7 @@
 /**
  * The session HOME a local (Mac) code agent gets: the same workspace an E2B
- * session gets (rose_user_ui + `rose-ui`, `rose-agents` graph CLI, `rose`
- * agent-tools CLI/MCP), relocated to the Mac's session HOME and shipped in
+ * session gets (`rose-ui`, `rose-agents` graph CLI, `rose` agent-tools
+ * CLI/MCP, the Rose skills), relocated to the Mac's session HOME and shipped in
  * `start_session.home_files`. Tokens are scoped to this agent/session, exactly
  * as in the sandbox; they reach the backend over its public URL.
  */

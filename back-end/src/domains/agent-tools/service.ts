@@ -72,10 +72,22 @@ function requestingAgentFor(caller: AgentToolsCaller, agent: repo.ToolAgent): Re
   return { kind: 'agent', agent_id: agent.id, label: agentLabel(agent) };
 }
 
+/**
+ * 410 for an agent the user cancelled (archived): its code agents' waits end
+ * with this outcome instead of an ambiguous "not found".
+ */
+export function agentCancelledError(): AgentToolsError {
+  return new AgentToolsError(
+    410,
+    'This agent was cancelled; its questions and approvals will not be answered'
+  );
+}
+
 /** Load the caller's agent, check ownership, and decide who answers its questions. */
 export async function resolveContext(caller: AgentToolsCaller): Promise<ToolContext> {
   const agent = await repo.findAgent(caller.agentId);
-  if (agent === null || agent.deletedAt !== null) throw new AgentToolsError(404, 'Agent not found');
+  if (agent === null) throw new AgentToolsError(404, 'Agent not found');
+  if (agent.deletedAt !== null) throw agentCancelledError();
   if (caller.userId !== null && caller.userId !== agent.userId) {
     throw new AgentToolsError(403, 'Not allowed to use agent tools for this agent');
   }

@@ -3,7 +3,6 @@
  */
 
 import type { BrowserControlState } from '@prisma/client';
-import { findEnabledSessionPasswords } from '../../providers/browserPasswords';
 import { prisma } from '../../providers/database';
 
 /**
@@ -55,11 +54,22 @@ export async function findUserSettings(userId: string) {
 }
 
 /**
- * Enabled browser passwords for a user, newest use first: one per
- * origin+username when several browser sources or profiles saved the login.
+ * Find all browser passwords for a user, ordered by last used descending.
  */
 export async function findPasswords(userId: string) {
-  return findEnabledSessionPasswords(userId);
+  return prisma.browserPassword.findMany({
+    where: { userId, disabledAt: null },
+    select: {
+      id: true,
+      origin: true,
+      username: true,
+      encryptedPassword: true,
+      dateLastUsed: true,
+    },
+    orderBy: {
+      dateLastUsed: 'desc',
+    },
+  });
 }
 
 /**

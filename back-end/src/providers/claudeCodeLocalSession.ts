@@ -447,7 +447,7 @@ export async function createLocalClaudeCodeSession(params: {
   goal: string;
   envs: Record<string, string>;
   attachments?: FilePointer[];
-  /** rose_user_ui folder + rose-ui CLI to materialize under the session HOME. */
+  /** Session HOME files (CLIs, tools config, Rose skills) to materialize under the session HOME. */
   userUiWorkspace?: UserUiWorkspace | null;
   /** Project checkout + env files restored into `<HOME>/workspace` before the CLI starts. */
   projectWorkspace?: ProjectWorkspace | null;

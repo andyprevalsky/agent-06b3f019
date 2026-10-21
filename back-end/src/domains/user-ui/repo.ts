@@ -6,6 +6,7 @@ export {
   findTaskCodeSessionId,
   listUserUiVersions,
   readUserUiFile,
+  readUserUiVersionFiles,
   userExists,
   userUiAnnounceAgentIds,
   type UserUiVersionRecord,

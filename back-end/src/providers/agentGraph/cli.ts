@@ -1,10 +1,11 @@
 /**
- * The `rose-agents` CLI installed on every code-agent session PATH, plus the
- * static instruction lines appended to the code-agent system prompt.
+ * The `rose-agents` CLI installed on every code-agent session PATH. How to use
+ * it is the agent-graph Rose skill (assets/rose-skills/agent-graph/SKILL.md),
+ * listed in the code-agent prompt's table of contents (C17).
  *
- * Kept as string constants so the compiled backend ships them without an
- * asset-copy step. The text is agent-facing (prompt-scoped, CLAUDE.md rule
- * 26): changes need fresh approval.
+ * Kept as a string constant so the compiled backend ships it without an
+ * asset-copy step. The usage text is agent-facing (prompt-scoped, CLAUDE.md
+ * rule 26): changes need fresh approval.
  *
  *   rose-agents list                 → GET  $ROSE_AGENTS_URL/agents
  *   rose-agents send <id> <message>  → POST $ROSE_AGENTS_URL/messages
@@ -13,21 +14,7 @@
  */
 
 export const AGENT_GRAPH_CLI_NAME = 'rose-agents';
-export const AGENT_GRAPH_CLI_VERSION = '2';
-
-/** Static (no ids) so the system prompt stays cache-stable across sessions. */
-export const AGENT_GRAPH_PROMPT_SECTION = [
-  '',
-  'Rose agent graph:',
-  '- `rose-agents list` lists the agents in your tree (root, parents, siblings, children) with status.',
-  '- `rose-agents send <agent_id> "<message>"` messages one of them. `parent` is the agent that started you and `root` is the root agent. Use it to hand off results, ask for new work or information, or report a blocker.',
-  '- `rose-agents grep "<regex>"` searches what agents in your tree already said and did.',
-  '- Messages sent to you arrive as a new user turn after your current turn.',
-].join('\n');
-
-export function withAgentGraphInstructions(systemPrompt: string): string {
-  return `${systemPrompt}\n${AGENT_GRAPH_PROMPT_SECTION}`;
-}
+export const AGENT_GRAPH_CLI_VERSION = '3';
 
 export const AGENT_GRAPH_CLI_SCRIPT = `#!/usr/bin/env node
 'use strict';
@@ -64,19 +51,22 @@ function parse(argv) {
   return { positional, flags };
 }
 
-// The session token is short-lived; a refreshed one is kept here (0600) and
-// preferred over the env value once it exists.
+// The session token is short-lived; a refreshed one is kept here (0600). The
+// newer of it and the env token wins: a resumed session starts with a freshly
+// minted env token, which must beat a refreshed copy an earlier task left.
 const TOKEN_FILE = path.join(os.homedir(), '.rose', 'agents-token');
 const REFRESH_WINDOW_S = 30 * 60;
 
 function storedToken() {
+  let refreshed = '';
   try {
-    const token = fs.readFileSync(TOKEN_FILE, 'utf8').trim();
-    if (token) return token;
+    refreshed = fs.readFileSync(TOKEN_FILE, 'utf8').trim();
   } catch (err) {
     // no refreshed token yet
   }
-  return process.env.ROSE_AGENTS_TOKEN || '';
+  const minted = process.env.ROSE_AGENTS_TOKEN || '';
+  if (!refreshed || !minted) return refreshed || minted;
+  return tokenExpiry(refreshed) > tokenExpiry(minted) ? refreshed : minted;
 }
 
 function tokenExpiry(token) {

@@ -63,21 +63,6 @@ export class IntegrationCache {
     return all.find((i) => i.name === integrationName);
   }
 
-  /** Every account row of one provider (multi-account providers have one per account). */
-  static async getAccounts(integrationName: string): Promise<Integration[]> {
-    const { all } = await this.getIntegrations();
-    return all.filter((i) => i.name === integrationName);
-  }
-
-  /** The row of ONE account of a multi-account integration (e.g. a Telegram user id). */
-  static async getIntegrationAccount(
-    integrationName: string,
-    accountId: string
-  ): Promise<Integration | undefined> {
-    const { all } = await this.getIntegrations();
-    return all.find((i) => i.name === integrationName && i.accountId === accountId);
-  }
-
   /**
    * Invalidate cache to force fresh fetch on next call.
    * Call this after connecting/disconnecting an integration.
@@ -325,9 +310,6 @@ async function startTelegramRealTime(): Promise<void> {
   try {
     const success = await TelegramSync.connectWithExistingSession();
     if (success) {
-      // Each account (Telegram user id) must have its backend row before its
-      // batches upload; a migrated legacy session claims the legacy row here.
-      await TelegramSync.registerConnectedAccounts();
       logConsole('SyncManager', 'Telegram connected, syncing historical...');
       await TelegramSync.syncHistorical().catch((err) =>
         logConsoleError('SyncManager', 'Telegram historical sync error', err)

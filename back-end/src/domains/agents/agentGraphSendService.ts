@@ -2,7 +2,11 @@
  * Agent graph send: one A2A message from a Rose agent or a code agent to any
  * agent / code agent of the same tree (scope rules in agentGraphService).
  *
- *   Rose agent target → idempotent USER message (normal postMessage path)
+ *   per-sender budget → a new message over it is 429 + Retry-After (sendBudget);
+ *                       a retry of a delivered message is never limited
+ *   Rose agent target → one USER row per (sender, message id); only the write
+ *                       that creates it signals the workflow, and it never
+ *                       lifts a user pause (deliverAgentGraphMessage)
  *   code agent target → deliverUserTurnToCodeSession (sender "agent"): the
  *                       CLI's next user turn, delivered once per message id
  *   code agent sender/target → child-scoped chip rows, so the code agent's
@@ -12,6 +16,7 @@ import { createHash } from 'node:crypto';
 import { createMessage } from '../../providers/messages';
 import { deterministicMessageId } from '../../providers/messageIdempotency';
 import { deliverUserTurnToCodeSession, type TurnDelivery } from '../../providers/codeSessionTurns';
+import { takeSendBudget } from '../../providers/agentGraph/sendBudget';
 import { createLogger } from '../../providers/logger';
 import * as messageService from './agentMessageService';
 import * as graphRepo from './repoGraph';
@@ -194,31 +199,48 @@ async function recordCodeTimelineRow(args: {
 type AgentTarget = Extract<Target, { kind: 'agent' }>;
 type CodeTarget = Extract<Target, { kind: 'code' }>;
 
-/** Rose agent target: one USER row keyed by (target, sender key). */
+/**
+ * Rose agent target: one USER row keyed by (target, sender key). Only the
+ * call that writes the row signals the workflow, so concurrent attempts of
+ * one send (a Temporal retry racing a slow first attempt) deliver once; an
+ * agent's message never lifts the user's pause on the target.
+ */
 async function deliverToRoseAgent(args: {
-  caller: GraphCaller;
   target: AgentTarget;
   key: string;
   text: string;
   title: string;
   a2a: Record<string, unknown>;
 }): Promise<SendResult['status']> {
-  const existing = await graphRepo.findMessageById(
-    deterministicMessageId(args.target.id, args.key)
+  const { created } = await messageService.deliverAgentGraphMessage(args.target.id, {
+    message: args.text,
+    metadata: { a2a: args.a2a, idempotencyKey: args.key, title: args.title },
+  });
+  return created ? 'delivered' : 'duplicate';
+}
+
+/** The row a completed delivery leaves on the target (a retry of it is free). */
+async function alreadyDelivered(target: Target, key: string): Promise<boolean> {
+  const id =
+    target.kind === 'agent'
+      ? deterministicMessageId(target.id, key)
+      : deterministicMessageId(target.ownerAgentId, `${key}:received`);
+  return (await graphRepo.findMessageById(id)) !== null;
+}
+
+/** Per-sender cap (sendBudget): a new message over budget → 429 + Retry-After. */
+function spendSendBudget(caller: GraphCaller): void {
+  const budget = takeSendBudget(caller.self.id);
+  if (budget.ok) return;
+  log.warn('Agent graph sender over its send budget', {
+    from: caller.self.id,
+    retry_after_s: budget.retryAfterSeconds,
+  });
+  throw new AgentGraphError(
+    429,
+    `Too many agent messages from this sender; retry in ${budget.retryAfterSeconds}s`,
+    budget.retryAfterSeconds
   );
-  if (existing !== null) return 'duplicate';
-  const posted = await messageService.postMessage(
-    args.target.id,
-    {
-      message: args.text,
-      role: 'USER',
-      metadata: { a2a: args.a2a, idempotencyKey: args.key, title: args.title },
-    },
-    false,
-    args.caller.userId
-  );
-  if ('error' in posted) throw new AgentGraphError(posted.status ?? 500, posted.error);
-  return 'delivered';
 }
 
 /**
@@ -291,9 +313,10 @@ export async function sendGraphMessage(
   });
 
   const title = `${fromLabel} → ${toLabel}`;
+  if (!(await alreadyDelivered(target, key))) spendSendBudget(caller);
   const status =
     target.kind === 'agent'
-      ? await deliverToRoseAgent({ caller, target, key, text, title, a2a })
+      ? await deliverToRoseAgent({ target, key, text, title, a2a })
       : await deliverToCodeAgent({ target, key, text, title, a2a, original: input.text });
 
   if (caller.self.kind === 'code') {

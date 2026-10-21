@@ -20,6 +20,8 @@ from temporalio.exceptions import ApplicationError
 
 from domains.spawn_claude_code_agent.config import (
     CODE_AGENT_DRAIN_YIELD_STATUS,
+    CODE_AGENT_RESIZE_YIELD_REASON,
+    CODE_SESSION_RESIZE_HEARTBEAT_S,
     CODE_AGENT_ERROR_RETRY_LIMIT,
     CODE_AGENT_PAUSED_STATUS,
     CODE_AGENT_USAGE_LIMIT_STATUS,
@@ -46,6 +48,7 @@ from domains.spawn_claude_code_agent.repo import (
     keepalive_e2b_session,
     persist_terminal_output,
     report_code_usage_limit,
+    resize_e2b_session,
     save_claude_code_message,
     save_code_transcript_batch,
 )
@@ -755,6 +758,14 @@ class CodeSessionDrained(Exception):
         super().__init__(reason)
 
 
+class CodeSessionResizeRequested(CodeSessionDrained):
+    """C16: the code agent asked for another sandbox size; detach so the activity applies it."""
+
+    def __init__(self, request: Dict[str, Any]):
+        self.request = request
+        super().__init__(CODE_AGENT_RESIZE_YIELD_REASON)
+
+
 _CODE_SESSION_FIELDS = (
     "task_id",
     "sandbox_id",
@@ -778,6 +789,8 @@ _CODE_SESSION_FIELDS = (
     "folder",
     # Sandbox events whose transcript records are already persisted.
     "transcript_events",
+    # vCPUs / memory of the sandbox (C16); the code_agent block reports it.
+    "sandbox_size",
 )
 
 
@@ -1165,6 +1178,19 @@ async def _run_agentic_loop(
                     if loop_outcome is not None:
                         loop_outcome["awaiting_parent"] = awaiting
                     break
+                resize = keepalive.get("resize_requested") if isinstance(keepalive, dict) else None
+                if isinstance(resize, dict) and resize.get("request_id") and not direct_chat_active:
+                    # C16: the code agent asked for another sandbox size. Detach (the
+                    # final transcript flush still runs); the activity applies it.
+                    logger.info(
+                        "[ClaudeCode] Code agent asked for another sandbox size; detaching to apply it",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        request_id=resize.get("request_id"),
+                        to=resize.get("to"),
+                    )
+                    action_summary.append(f"Sandbox resize requested: {resize.get('to')}")
+                    raise CodeSessionResizeRequested(resize)
 
             # After the first SDK result, healthy CLIs exit in <1s. If the
             # process is still alive past the grace window (stdout may keep
@@ -1433,6 +1459,103 @@ async def _run_agentic_loop(
         total_output_tokens,
         code_events,
     )
+
+
+def _size_label(size: Any) -> str:
+    if isinstance(size, dict) and size.get("cpu") and size.get("memory_gb"):
+        return f"{size['cpu']} vCPU, {size['memory_gb']} GB RAM"
+    return "a new size"
+
+
+async def _apply_sandbox_resize(
+    *,
+    agent_id: str,
+    tool_call_id: str,
+    task_id: str,
+    code_provider: str,
+    request: Dict[str, Any],
+    session_record: Dict[str, Any],
+    code_agent_meta: Dict[str, Any],
+    started_at: float,
+    facts: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """C16: have the backend move the session into a sandbox of the requested size.
+
+    Heartbeats while the backend checkpoints, creates and restores. Returns the
+    session record of the task that continues the session (new sandbox, or the
+    old size when the move failed), or None when the backend could not apply it;
+    the caller then reattaches to the old sandbox as after a drain.
+    """
+    call = asyncio.create_task(resize_e2b_session(task_id, str(request["request_id"]), code_provider))
+    while not call.done():
+        safe_heartbeat("Resizing the code-agent sandbox")
+        await asyncio.wait({call}, timeout=CODE_SESSION_RESIZE_HEARTBEAT_S)
+    resized = call.result()
+    continuing = code_session_record(resized)
+    if not isinstance(resized, dict) or continuing is None:
+        logger.warning("[ClaudeCode] Sandbox resize not applied; reattaching", agent_id=agent_id, task_id=task_id)
+        return None
+    size = resized.get("sandbox_size") if isinstance(resized.get("sandbox_size"), dict) else None
+    applied = resized.get("resized") is True
+    # The record the next attempt reattaches to (also what later heartbeats carry).
+    session_record.update(
+        {
+            "task_id": continuing["task_id"],
+            "sandbox_id": continuing["sandbox_id"],
+            "ws_url": continuing["ws_url"],
+            "logged_events": 0,
+            "transcript_events": 0,
+            "sandbox_size": size or session_record.get("sandbox_size"),
+            "code_session_id": resized.get("code_session_id") or session_record.get("code_session_id"),
+        }
+    )
+    if size is not None:
+        code_agent_meta["sandbox_size"] = size
+    view = resized.get("request") if isinstance(resized.get("request"), dict) else {}
+    title = (
+        f"Environment resized to {_size_label(size)}"
+        if applied
+        else f"Environment resize failed; still on {_size_label(size)}"
+    )
+    await save_claude_code_message(
+        agent_id=agent_id,
+        title=title,
+        task_id=continuing["task_id"],
+        message=str(view.get("reason") or title),
+        status=MessageStatus.FINISHED if applied else MessageStatus.ERROR,
+        action_type="environment_resized",
+        tool_call_id=tool_call_id,
+        ws_url=continuing["ws_url"],
+        code_provider=code_provider,
+        code_agent={
+            **build_code_agent_metadata(
+                target_meta=code_agent_meta,
+                task_id=continuing["task_id"],
+                provider=code_provider,
+                state="live",
+                started_at=started_at,
+                facts=facts,
+            ),
+            "environment_resize": {
+                "request_id": request.get("request_id"),
+                "status": "done" if applied else "failed",
+                "from": view.get("from") or request.get("from"),
+                "to": view.get("to") or request.get("to"),
+                "reason": view.get("reason"),
+                "error": view.get("error"),
+                "from_task_id": task_id,
+            },
+        },
+    )
+    logger.info(
+        "[ClaudeCode] Session continues in a resized sandbox" if applied else "[ClaudeCode] Resize failed; continuing",
+        agent_id=agent_id,
+        from_task_id=task_id,
+        task_id=continuing["task_id"],
+        sandbox_id=continuing["sandbox_id"],
+        sandbox_size=size,
+    )
+    return dict(session_record)
 
 
 async def _handle_reconnect_exhausted(
@@ -2714,6 +2837,8 @@ async def spawn_claude_code_activity(
         code_agent_meta["folder"] = attached["folder"]
     if isinstance(attached, dict) and attached.get("preview_url"):
         code_agent_meta["preview_url"] = attached["preview_url"]
+    if isinstance(attached, dict) and isinstance(attached.get("sandbox_size"), dict):
+        code_agent_meta["sandbox_size"] = attached["sandbox_size"]
 
     logger.info(
         "[ClaudeCode] Using response schema from tool call",
@@ -2823,6 +2948,9 @@ async def spawn_claude_code_activity(
             if session_data.get("preview_url"):
                 # Live dev-server preview of this session (Rose dev accounts, A1).
                 code_agent_meta["preview_url"] = session_data["preview_url"]
+            if isinstance(session_data.get("sandbox_size"), dict):
+                # vCPUs / memory of the E2B sandbox (C16).
+                code_agent_meta["sandbox_size"] = session_data["sandbox_size"]
 
             logger.info(
                 "[ClaudeCode] Session created",
@@ -2853,6 +2981,7 @@ async def spawn_claude_code_activity(
             or (attached or {}).get("merge_target"),
             "transcript_events": int((attached or {}).get("transcript_events") or 0),
             "preview_url": code_agent_meta.get("preview_url"),
+            "sandbox_size": code_agent_meta.get("sandbox_size"),
         }
         if code_session_facts is None and code_session_id:
             code_session_facts = {
@@ -2975,6 +3104,27 @@ async def spawn_claude_code_activity(
             collector, log_collector = log_collector, None
             if collector:
                 await collector.stop()
+            if isinstance(drained, CodeSessionResizeRequested):
+                resized = await _apply_sandbox_resize(
+                    agent_id=agent_id,
+                    tool_call_id=tool_call_id,
+                    task_id=task_id,
+                    code_provider=code_provider,
+                    request=drained.request,
+                    session_record=session_record,
+                    code_agent_meta=code_agent_meta,
+                    started_at=start_time,
+                    facts=code_session_facts,
+                )
+                if resized is not None:
+                    # The next attempt reattaches to the task that continues the session.
+                    return {
+                        "status": CODE_AGENT_DRAIN_YIELD_STATUS,
+                        "yield_reason": CODE_AGENT_RESIZE_YIELD_REASON,
+                        "code_session": resized,
+                        "task_id": resized["task_id"],
+                        "code_provider": code_provider,
+                    }
             return {
                 "status": CODE_AGENT_DRAIN_YIELD_STATUS,
                 "yield_reason": drained.reason,

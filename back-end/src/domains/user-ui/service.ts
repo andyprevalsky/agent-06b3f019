@@ -5,6 +5,7 @@
  *   POST /versions ─► decode ─► validateUserUiBundle ─► store files ─► row (+activate)
  *                     (a code agent's publish token stamps publishedByAgentId/TaskId)
  *   GET  /active   ─► User.activeUiVersionId ─► { versionId, manifest, baseUrl }
+ *   GET  /bundle   ─► active version files, or the starting bundle (`rose-ui pull`)
  *   GET  /usercontent/:versionId/<path> ─► storage bytes (no auth; uuid id)
  *
  * 10k-agent behaviour: one pointer row per user; publishing is per-user and
@@ -25,6 +26,7 @@ import { getDisplayObject } from '../../providers/agentTools/media';
 import { broadcastUserUiActiveChanged } from '../../providers/chat/supabaseBroadcast';
 import { createLogger } from '../../providers/logger';
 import { mintUserUiPublishToken } from '../../providers/userUi/publishToken';
+import { userUiSeedFiles } from '../../providers/userUi/seed';
 import { USER_UI_LIST_LIMIT, configuredUsercontentBaseUrl } from './config';
 import * as repo from './repo';
 import type { PublishUserUiVersionBody } from './types';
@@ -102,6 +104,25 @@ export async function activateVersion(userId: string, versionId: string) {
 
 export function usercontentBaseUrl(requestOrigin: string, versionId: string): string {
   return `${configuredUsercontentBaseUrl() ?? requestOrigin}/usercontent/${versionId}/`;
+}
+
+/**
+ * The bundle `rose-ui pull` writes into a code session: the active version's
+ * files (the same read that restores a version), or the starting bundle when
+ * the user has published nothing yet. One read per pull; files are base64 and
+ * bounded by the publish limits (50 MB, 2000 files).
+ */
+export async function getBundle(userId: string) {
+  const active = await repo.findActiveUserUiVersion(userId);
+  const files = active ? await repo.readUserUiVersionFiles(userId, active.id) : userUiSeedFiles();
+  return {
+    versionId: active?.id ?? null,
+    source: active ? ('active' as const) : ('seed' as const),
+    files: files.map((file) => ({
+      path: file.path,
+      contentBase64: file.content.toString('base64'),
+    })),
+  };
 }
 
 export async function getActive(userId: string, requestOrigin: string) {

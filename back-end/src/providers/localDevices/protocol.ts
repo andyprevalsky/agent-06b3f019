@@ -38,7 +38,7 @@ export type ControlToDevice =
       /** Path (on the backend origin) of this session's tunnel leg. */
       relay_path: string;
       /**
-       * Files for the session HOME (rose_user_ui, `rose` / `rose-agents` CLIs,
+       * Files for the session HOME (Rose skills, `rose` / `rose-agents` CLIs,
        * MCP + tools config), already relocated to the Mac's session HOME.
        */
       home_files: LocalHomeFile[];

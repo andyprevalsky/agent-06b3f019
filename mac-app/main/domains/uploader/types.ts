@@ -31,25 +31,6 @@ export type UploadStrategy =
   | 'fingerprint'
   | 'generic';
 
-/**
- * The device account an iMessage batch belongs to (one per Mac). `connect`
- * creates or claims the account; `sync` requires it to exist, so a batch for a
- * removed Mac is refused (410) instead of recreating the account.
- */
-export interface IMessageDeviceAccount {
-  id: string;
-  label: string | null;
-  mode: 'connect' | 'sync';
-}
-
-/** Outcome of one device-scoped iMessage batch upload. */
-export interface DeviceUploadResult {
-  success: boolean;
-  /** The backend no longer has this Mac's account (deleted by the user). */
-  accountRemoved: boolean;
-  message?: string;
-}
-
 /** Browser identifiers that route to the shared cookies endpoint. */
 export type ChromiumBrowser =
   | 'chrome'

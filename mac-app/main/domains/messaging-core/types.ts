@@ -76,6 +76,8 @@ export interface SyncEvent {
   messages?: NormalizedMessage[];
   connected?: boolean;
   error?: Error;
+  /** History-sync batches only: the platform's progress (0-100) and whether this is the last batch. */
+  history?: { progress: number | null; isLatest: boolean };
 }
 
 /**

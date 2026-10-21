@@ -60,24 +60,32 @@ class MemoryFork:
         return [self.assistant_message, self.tool_message]
 
 
-_PLANNER_CONTEXT_TOOLS: list[dict[str, Any]] | None = None
+# One constant toolset per account group (stock / Rose Desktop), keyed by the flag.
+_PLANNER_CONTEXT_TOOLS: dict[bool, list[dict[str, Any]]] = {}
 
 
-def planner_context_tools() -> list[dict[str, Any]]:
+def planner_context_tools(*, rose_desktop: bool = False) -> list[dict[str, Any]]:
     """Constant history-only toolset for planner calls.
 
     These names/schemas describe native history that can appear in the planner
     context. Provider request builders deliberately do not add them to the
     callable tool set; the planner only emits its structured plan.
+    ``rose_desktop`` (``utils.rose_desktop``) selects the Rose Desktop schemas;
+    each group's list is byte-stable, so its cached prefix is too.
     """
-    global _PLANNER_CONTEXT_TOOLS
-    if _PLANNER_CONTEXT_TOOLS is None:
+    cached = _PLANNER_CONTEXT_TOOLS.get(rose_desktop)
+    if cached is None:
         from providers.rose.schema import build_anthropic_tools_from_response_model
-        from utils.tool_schemas import PLAN_PHASE_TOOLS, create_agent_action_model
+        from utils.tool_schemas import PLAN_PHASE_TOOLS, create_agent_action_model, get_tool_models
 
         # Only the plan-phase tools can appear in a pre-plan context (chat / plan loop).
-        phase_tools = build_anthropic_tools_from_response_model(create_agent_action_model(PLAN_PHASE_TOOLS)) or []
-        _PLANNER_CONTEXT_TOOLS = [
+        phase_tools = (
+            build_anthropic_tools_from_response_model(
+                create_agent_action_model(PLAN_PHASE_TOOLS, tool_registry=get_tool_models(rose_desktop=rose_desktop))
+            )
+            or []
+        )
+        cached = [
             *[
                 {**tool, CONTEXT_ONLY_TOOL_KEY: True}
                 for tool in phase_tools
@@ -85,7 +93,8 @@ def planner_context_tools() -> list[dict[str, Any]]:
             ],
             GET_MEMORIES_TOOL,
         ]
-    return list(_PLANNER_CONTEXT_TOOLS)
+        _PLANNER_CONTEXT_TOOLS[rose_desktop] = cached
+    return list(cached)
 
 
 def _clip(text: Any, limit: int) -> str:

@@ -27,8 +27,11 @@ from unittest.mock import AsyncMock, patch
 import httpx
 from _test_utils import BlackboxResult, setup_mock_fn, teardown_mock
 
-USER_A = "user-a-1111"
+# USER_A is a Rose Desktop account (utils.rose_desktop): user tools come from the
+# Rose Desktop rose_user_ui, so only flagged root agents pin them.
+USER_A = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 USER_B = "user-b-2222"
+STOCK_USER = "user-stock-3333"
 CDN = "https://usercontent.test"
 
 PY_ECHO = """
@@ -598,6 +601,79 @@ async def test_sub_agent_and_disabled_executor_get_no_tools():
     assert [t["name"] for t in pinned["tools"]] == ["user__weather"]
 
 
+async def test_unflagged_root_agent_pins_no_tools_without_resolving():
+    """A stock (non-Rose Desktop) root agent never resolves or declares user tools.
+
+    Even with a published version holding tools, the pin is empty, no resolve
+    activity runs, and run_agent declares only the built-in tools.
+    """
+    from domains.user_tools.handler import declared_user_tools, pin_user_tools
+
+    calls: List[Any] = []
+    with _local_executor():
+        backend = _weather_backend()
+        backend.publish(STOCK_USER, "v1", {"weather": _tool_json("weather")}, {"tools/weather/handler.py": PY_ECHO})
+        wf = _FakeWorkflow(user_id=STOCK_USER)
+        with _workflow_runtime(calls):
+            await pin_user_tools(wf, is_root=True)
+    assert calls == [], "no resolve activity for a stock account"
+    assert wf.user_tools_pinned and declared_user_tools(wf) == []
+    assert wf.user_tools["tools"] == [] and "Rose Desktop" in wf.user_tools["disabled_reason"]
+    assert not any(request.headers.get("X-User-Id") == STOCK_USER for request in backend.requests)
+
+
+async def test_restored_pin_cannot_declare_or_run_side_effect_tool_for_unflagged_account():
+    """A restored pin (continue_as_new state) holding a side-effecting tool is inert for a stock account.
+
+    pin_user_tools never resolves tools for an unflagged account, but a pin can
+    also arrive restored. Declaring and running both read through the Rose
+    Desktop gate, so the LLM never sees the tool and a call never reaches the
+    run activity or the handler.
+    """
+    from domains.user_tools.handler import declared_user_tools, pin_user_tools, run_user_tool
+    from workflows.agent_workflow import AgentWorkflow
+
+    counter = _counter_path()
+    calls: List[Any] = []
+    with _local_executor():
+        _charge_backend(counter)
+        pinned = await _resolve(USER_A)
+        assert [t["name"] for t in pinned["tools"]] == ["user__charge"]
+        assert pinned["tools"][0]["side_effects"] is True
+
+        # The pin survives continue_as_new into a run owned by a stock account.
+        old = AgentWorkflow()
+        old.max_iterations, old.context_gates = None, {}
+        old.user_tools = pinned
+        old.user_tools_pinned = True
+        restored = AgentWorkflow()
+        restored._restore_deployment_state(old._continuation_resume_state([]))
+        assert restored.user_tools_pinned and restored.user_tools["tools"]
+        restored.agent_id, restored.user_id = "agent-1", STOCK_USER
+        restored.events = []
+
+        async def _record(event: Any, tool_call_id: str, tool_name: str) -> None:
+            restored.events.append({"status": event.status.value if event.status else None, "title": event.title})
+
+        restored._handle_tool_event = _record
+        with _workflow_runtime(calls):
+            await pin_user_tools(restored, is_root=True)
+            declared = declared_user_tools(restored)
+            result = await run_user_tool(restored, "user__charge", {"city": "Paris"}, "tc-stock")
+    assert declared == [], "a restored pin must not declare tools for a stock account"
+    assert result.get("error") is True and "not available" in result["message"], result
+    assert [c["fn"] for c in calls] == [], "no resolve or run activity for a stock account"
+    assert [e["status"] for e in restored.events] == ["ERROR"]
+    assert _runs(counter) == 0, "the side-effecting handler must never run"
+
+    # Control: the same pin on the Rose Desktop account still declares and runs.
+    with _local_executor():
+        _charge_backend(counter)
+        flagged = _FakeWorkflow(user_id=USER_A)
+        flagged.user_tools, flagged.user_tools_pinned = pinned, True
+        assert [s["name"] for s in declared_user_tools(flagged)] == ["user__charge"]
+
+
 async def test_pinned_version_survives_mid_run_publish():
     """A version published mid-run changes neither the declared set nor the handler that runs."""
     from domains.user_tools.handler import declared_user_tools, pin_user_tools
@@ -1156,6 +1232,14 @@ async def run_all_tests():
         )
         await r.record_async(
             "sub_agent_and_disabled_executor_get_no_tools", test_sub_agent_and_disabled_executor_get_no_tools
+        )
+        await r.record_async(
+            "unflagged_root_agent_pins_no_tools_without_resolving",
+            test_unflagged_root_agent_pins_no_tools_without_resolving,
+        )
+        await r.record_async(
+            "restored_pin_cannot_declare_or_run_side_effect_tool_for_unflagged_account",
+            test_restored_pin_cannot_declare_or_run_side_effect_tool_for_unflagged_account,
         )
         await r.record_async("pinned_version_survives_mid_run_publish", test_pinned_version_survives_mid_run_publish)
         await r.record_async(

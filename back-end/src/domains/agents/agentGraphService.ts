@@ -39,7 +39,9 @@ export interface GraphCaller {
 export class AgentGraphError extends Error {
   constructor(
     readonly status: number,
-    message: string
+    message: string,
+    /** Set on 429: when the sender may try again (the Retry-After header). */
+    readonly retryAfterSeconds?: number
   ) {
     super(message);
   }
@@ -77,12 +79,24 @@ export async function callerForCodeSession(
   };
 }
 
-/** A code-session caller is valid only while its session still exists. */
+/**
+ * A code-session token is valid only while its task is open and its claims
+ * still describe the session's real owner, user and tree. A resumed session
+ * runs as a new task with a freshly minted token, so an ended task's token
+ * (e.g. a refreshed copy left on disk) cannot act for it.
+ */
 export async function assertCodeCallerLive(caller: GraphCaller): Promise<void> {
   if (caller.self.kind !== 'code') return;
   const session = await graphRepo.findGraphCodeSession(caller.self.id);
   if (session === null || session.agentId !== caller.self.ownerAgentId) {
     throw new AgentGraphError(401, 'Code session is not registered');
+  }
+  if (session.status === 'CLOSED') {
+    throw new AgentGraphError(401, 'This code session task has ended; use the current token');
+  }
+  const root = await graphRepo.findGraphRootId(caller.self.ownerAgentId, caller.userId);
+  if (root !== caller.rootAgentId) {
+    throw new AgentGraphError(401, 'Token does not match the code session’s agent tree');
   }
 }
 

@@ -1,55 +1,27 @@
-import type { BrowserWindow } from 'electron';
 import { IMessageWatcher } from '../../services/messaging/platforms/imessage/IMessageWatcher';
 import {
   canStartRealTimeSync,
   fetchNewMessagesSinceRowId,
   handleSyncEvent,
   initialRealTimeRowId,
+  runFullSync,
 } from './service';
-import { runDeviceSync } from './service.run';
-import type {
-  DeviceSyncOutcome,
-  NormalizedMessage,
-  SyncEvent,
-  SyncTrigger,
-  UploadResult,
-} from './types';
-
-/** IPC channel the renderer listens on for upload progress (shared with the Uploader). */
-const UPLOAD_PROGRESS_CHANNEL = 'upload:progress';
+import type { NormalizedMessage, SyncEvent } from './types';
 
 /**
  * Entry-point controller for the iMessage sync domain. Owns the long-lived
- * IMessageWatcher, the real-time ROWID cursor and the single in-flight device
- * sync (a scheduled tick and a user connect never run two loops over one
- * cursor). All business logic lives in ./service and ./service.run.
+ * IMessageWatcher instance and the last-seen ROWID cursor. All business logic
+ * lives in ./service; this class is a thin wrapper so existing call sites
+ * (SyncManager, IPC registry, blackbox tests) keep their public contract.
  */
 export class IMessageSync {
   private static watcher: IMessageWatcher | null = null;
   private static lastSyncRowId: number = 0;
-  private static inFlight: Promise<DeviceSyncOutcome> | null = null;
 
   private static async queryNewMessagesForWatcher(): Promise<NormalizedMessage[]> {
     const { messages, newMaxRowId } = await fetchNewMessagesSinceRowId(this.lastSyncRowId);
     this.lastSyncRowId = newMaxRowId;
     return messages;
-  }
-
-  private static async runOnce(
-    trigger: SyncTrigger,
-    onPercent?: (percent: number) => void
-  ): Promise<DeviceSyncOutcome> {
-    if (this.inFlight !== null) return this.inFlight;
-    this.inFlight = runDeviceSync(trigger, onPercent);
-    try {
-      const result = await this.inFlight;
-      if (result.upToRowId !== null && result.upToRowId > this.lastSyncRowId) {
-        this.lastSyncRowId = result.upToRowId;
-      }
-      return result;
-    } finally {
-      this.inFlight = null;
-    }
   }
 
   /**
@@ -88,22 +60,13 @@ export class IMessageSync {
   }
 
   /**
-   * Scheduled device sync (periodic background sync and startup).
+   * Full sync (used for periodic background sync and initial sync).
    */
   static async sync(): Promise<void> {
-    await this.runOnce('scheduled');
-  }
-
-  /**
-   * User-initiated connect: syncs this Mac into its own account (creating or
-   * claiming it) and streams real progress to the renderer window.
-   */
-  static async connect(window: BrowserWindow | null): Promise<UploadResult> {
-    const result = await this.runOnce('connect', (percent) => {
-      window?.webContents.send(UPLOAD_PROGRESS_CHANNEL, { type: 'imessage', percent });
-    });
-    if (result.status === 'synced' || result.status === 'up_to_date') return { success: true };
-    return { success: false, message: result.message ?? `iMessage sync ${result.status}` };
+    const { newMaxRowId } = await runFullSync();
+    if (newMaxRowId !== null && newMaxRowId > this.lastSyncRowId) {
+      this.lastSyncRowId = newMaxRowId;
+    }
   }
 
   /**

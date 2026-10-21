@@ -374,6 +374,10 @@ model User {
   isAnonymous                 Boolean                     @default(false)
   onboardingCompletedAt       DateTime?
   imessageBridgeLastSeenAt    DateTime?
+  /// Largest code-agent sandbox CPU count / memory (GB) this user's code agents
+  /// may resize to; null = the deployment default (C16).
+  codeSandboxMaxCpu           Int?
+  codeSandboxMaxMemoryGb      Int?
   // Per-number WhatsApp deliverability for mirrored lifecycle notifications.
   // null = unknown (try once, learn); true = reachable (received an inbound WA
   // message or a send succeeded); false = not on WhatsApp / undeliverable (skip
@@ -668,6 +672,10 @@ model CodeSession {
   mergeTarget         String?
   /// The parent agent's session this branch was cut from (sub-agents).
   parentCodeSessionId String?
+  /// vCPUs / memory (GB) of the sandbox the session holds; null = created
+  /// before sized sandboxes (the default size). C16.
+  sandboxCpu          Int?
+  sandboxMemoryGb     Int?
   lastActiveAt        DateTime  @default(now())
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
@@ -675,6 +683,31 @@ model CodeSession {
 
   @@index([userId, ownerAgentId, repoKey, lastActiveAt(sort: Desc)])
   @@index([userId, state, lastActiveAt])
+}
+
+/// A code agent's request to move its session to another sandbox size (C16).
+model CodeSessionResize {
+  id            String    @id @default(uuid())
+  codeSessionId String
+  userId        String
+  agentId       String
+  /// Task (ClaudeCodeSession) whose CLI asked for the resize.
+  taskId        String?
+  fromCpu       Int
+  fromMemoryGb  Int
+  toCpu         Int
+  toMemoryGb    Int
+  reason        String
+  /// PENDING (recorded) | RUNNING (being applied) | DONE | FAILED
+  status        String    @default("PENDING")
+  /// Task that continues the session after the resize (DONE, or FAILED on the old tier).
+  newTaskId     String?
+  error         String?
+  requestedAt   DateTime  @default(now())
+  startedAt     DateTime?
+  completedAt   DateTime?
+
+  @@index([codeSessionId, requestedAt(sort: Desc)])
 }
 
 /// "New agent in this branch": agentId works in the code session (worktree,
@@ -700,22 +733,17 @@ model GithubRepoAccess {
 }
 
 model MessageRecord {
-  id                 String         @id @default(uuid())
-  personId           String
-  channel            MessageChannel
-  from               String
-  to                 String
-  timestamp          DateTime
-  message            String
-  externalId         String? // Platform-native message ID (Telegram msg.id, iMessage ROWID, WhatsApp key.id)
+  id         String         @id @default(uuid())
+  personId   String
+  channel    MessageChannel
+  from       String
+  to         String
+  timestamp  DateTime
+  message    String
+  externalId String? // Platform-native message ID (Telegram msg.id, iMessage ROWID, WhatsApp key.id)
   googleAccountEmail String? // Source Gmail account for account-scoped deletion
-  /// Provider-side account that synced this message (a Telegram user id, a
-  /// WhatsApp linked phone), for account-scoped deletion. Null = the
-  /// legacy/default account. Rows that carry it namespace `externalId` as
-  /// "<sourceAccountId>:<native id>" so two accounts cannot collide on the dedup key.
-  sourceAccountId    String?
-  createdAt          DateTime       @default(now())
-  person             Person         @relation(fields: [personId], references: [id], onDelete: Cascade)
+  createdAt  DateTime       @default(now())
+  person     Person         @relation(fields: [personId], references: [id], onDelete: Cascade)
 
   @@unique([personId, channel, externalId]) // Primary dedup: same message can't be inserted twice
   @@index([personId, channel])
@@ -774,7 +802,6 @@ model Person {
   skills                     Json?           @default("[]")
   totalOnlineReach           Int?
   messagesExchanged          Int             @default(0)
-  createdBySource            String? // `<provider>:<accountId>` of the multi-account sync that created this contact; null = legacy/other source
   messageRecords             MessageRecord[]
 
   @@unique([userId, phoneNumber])
@@ -1504,9 +1531,7 @@ model BrowserPassword {
   disabledAt        DateTime?
   disabledReason    String?
 
-  /// One saved login per browser source and profile: the same site+username
-  /// saved in Chrome and Safari, or in two Chrome profiles, are separate rows.
-  @@unique([userId, origin, username, browserSource, browserProfile])
+  @@unique([userId, origin, username])
   @@index([userId])
   @@index([userId, origin])
 }
@@ -2025,6 +2050,8 @@ model Project {
   startupScript   String?
   startupTimeoutS Int                  @default(120)
   autoWake        Boolean              @default(false)
+  /// Default sandbox size for new code sessions: {cpu, memoryGb}; null = deployment default.
+  sandboxSize     Json?
   /// Per-project salt for content fingerprints (incremental re-sync).
   syncSalt        String
   /// Monotonic snapshot revision; bumped by every accepted sync.

@@ -1,6 +1,6 @@
 """Blackbox tests for persistent code sessions on the agents side.
 
-Covers rose-builds-rose rows C1, C2, C4, C11, C13 and C15 at the activity / sandbox
+Covers rose-builds-rose rows C1, C2, C4, C11, C13, C15 and C16 at the activity / sandbox
 boundary, for cloud sessions and for local (Mac, C14) runs. Every case runs the production ``ws-server.mjs`` on localhost with a
 scripted ``claude`` CLI; the backend session API is recorded. Like a paused E2B
 sandbox, the session HOME outlives each ws-server, so "resume" restarts the
@@ -142,7 +142,11 @@ class _SessionHome:
         }
         with self.log_path.open("a") as log:
             self.process = subprocess.Popen(
-                [node, str(_WS_SERVER)], cwd=self.home, env=full_env, stdout=log, stderr=subprocess.STDOUT,
+                [node, str(_WS_SERVER)],
+                cwd=self.home,
+                env=full_env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
         for _ in range(300):
@@ -181,7 +185,12 @@ class _Backend:
     """Records the session API; create/resume start ws-servers in one persistent HOME."""
 
     def __init__(
-        self, session_home: _SessionHome, *, fail_first_persist: bool = False, question_after: int | None = None
+        self,
+        session_home: _SessionHome,
+        *,
+        fail_first_persist: bool = False,
+        question_after: int | None = None,
+        resize_after: int | None = None,
     ) -> None:
         self.session_home = session_home
         self.created: list[dict] = []
@@ -201,6 +210,10 @@ class _Backend:
         self.local = False
         # What the usage-limit answer says a respawn leases (the backend's stored view).
         self.next_lease = dict(_SHARED_CLAUDE_LEASE)
+        # Keepalive number after which the code agent's resize request is pending (C16).
+        self.resize_after = resize_after
+        self.resize_calls: list[tuple] = []
+        self.resized_ws_url: str | None = None
 
     async def create_session(self, **kwargs):
         self.created.append(kwargs)
@@ -248,10 +261,21 @@ class _Backend:
                 "checkpoint_seq": len(self.closed),
                 "branch": "rose/write-answer-0a1b2c3d",
                 "merge_target": "main",
-                "repo": {"head": "a" * 40, "localCommits": 1, "pushed": False, "dirtyFiles": 1,
-                         "files": [{"path": "notes.txt", "added": 1, "removed": 0}]},
-                "merge": {"head": "a" * 40, "local_commits": 1, "pushed": False, "pr": None,
-                          "merged": False, "merge_target_contains_head": False},
+                "repo": {
+                    "head": "a" * 40,
+                    "localCommits": 1,
+                    "pushed": False,
+                    "dirtyFiles": 1,
+                    "files": [{"path": "notes.txt", "added": 1, "removed": 0}],
+                },
+                "merge": {
+                    "head": "a" * 40,
+                    "local_commits": 1,
+                    "pushed": False,
+                    "pr": None,
+                    "merged": False,
+                    "merge_target_contains_head": False,
+                },
             },
         }
 
@@ -268,7 +292,38 @@ class _Backend:
         awaiting = None
         if self.question_after is not None and self.keepalives >= self.question_after:
             awaiting = {"message_id": "q-1", "question": "Which database should I use?", "at": "2026-10-20T00:00:00Z"}
-        return {"alive": True, "code_session_id": "6c1d6f1e-0000-4000-8000-00000000c0de", "awaiting_parent": awaiting}
+        reply = {"alive": True, "code_session_id": "6c1d6f1e-0000-4000-8000-00000000c0de", "awaiting_parent": awaiting}
+        if self.resize_after is not None and self.keepalives >= self.resize_after and not self.resize_calls:
+            reply["resize_requested"] = {
+                "request_id": _RESIZE_REQUEST_ID,
+                "from": {"cpu": 2, "memory_gb": 4},
+                "to": {"cpu": 2, "memory_gb": 16},
+            }
+        return reply
+
+    async def resize(self, task_id, request_id, code_provider="claude"):
+        """The backend's resize: the held sandbox stops; a new one resumes the CLI with the resize turn."""
+        self.resize_calls.append((task_id, request_id, code_provider))
+        self.session_home.pause()
+        self.resized_ws_url = await self.session_home.start(
+            CLAUDE_CODE_RESUME_SESSION_ID=_CLI_SESSION_ID,
+            CLAUDE_CODE_GOAL="Your environment was resized from 2 vCPU, 4 GB RAM to 2 vCPU, 16 GB RAM.",
+        )
+        return {
+            "task_id": "task-resized",
+            "sandbox_id": "sb-resized",
+            "ws_url": self.resized_ws_url,
+            "code_session_id": "6c1d6f1e-0000-4000-8000-00000000c0de",
+            "sandbox_size": {"cpu": 2, "memory_gb": 16},
+            "resized": True,
+            "request": {
+                "request_id": request_id,
+                "status": "done",
+                "from": {"cpu": 2, "memory_gb": 4},
+                "to": {"cpu": 2, "memory_gb": 16},
+                "reason": "jest workers OOM-killed at 4 GB",
+            },
+        }
 
     async def report_usage(self, task_id, code_provider, resets_at):
         self.usage_reports.append((task_id, code_provider, resets_at))
@@ -300,6 +355,7 @@ class _Backend:
             patch.object(service, "persist_terminal_output", side_effect=self.persist_output),
             patch.object(service, "keepalive_e2b_session", side_effect=self.keepalive),
             patch.object(service, "report_code_usage_limit", side_effect=self.report_usage),
+            patch.object(service, "resize_e2b_session", side_effect=self.resize),
             patch.object(service, "fetch_code_credential_availability", side_effect=self.credential_availability),
             patch.object(service, "_run_verifier", side_effect=self.verifier),
             patch.object(service, "_log_code_agent_event", lambda event, **kw: None),
@@ -326,10 +382,20 @@ class _Backend:
 
 # The backend's stored view of the user's accounts on a usage limit (no provider calls).
 _ACCOUNTS = [
-    {"provider": "claude", "label": "me@example.com", "status": "limited",
-     "limited_until": "2026-10-03T00:50:00.000Z", "this_run": True},
-    {"provider": "codex", "label": "codex@example.com", "status": "available",
-     "limited_until": None, "this_run": False},
+    {
+        "provider": "claude",
+        "label": "me@example.com",
+        "status": "limited",
+        "limited_until": "2026-10-03T00:50:00.000Z",
+        "this_run": True,
+    },
+    {
+        "provider": "codex",
+        "label": "codex@example.com",
+        "status": "available",
+        "limited_until": None,
+        "this_run": False,
+    },
 ]
 _SHARED_CLAUDE_LEASE = {"provider": "claude", "label": None, "available_now": True, "available_at": None}
 _CODEX_LEASE = {"provider": "codex", "label": "codex@example.com", "available_now": True, "available_at": None}
@@ -340,13 +406,28 @@ _ACCOUNT_LINES = (
 )
 
 _MAC = "Andy's MacBook"
+_RESIZE_REQUEST_ID = "7d2e3f40-0000-4000-8000-00000000c16a"
 _MAC_FOLDER = "~/Developer/rose"
 
 
 def _activity_args(*, code_session_request=None, tool_call_id="tc-code", local=False) -> list:
     return [
-        "user-code", "agent-code", "Write answer.txt with the answer", tool_call_id, _SCHEMA, None,
-        "rose-labs/rose-1-flash", None, None, "claude", None, None, None, None, False, None,
+        "user-code",
+        "agent-code",
+        "Write answer.txt with the answer",
+        tool_call_id,
+        _SCHEMA,
+        None,
+        "rose-labs/rose-1-flash",
+        None,
+        None,
+        "claude",
+        None,
+        None,
+        None,
+        None,
+        False,
+        None,
         code_session_request,
         *(["local", "dev-1", _MAC] if local else []),
     ]
@@ -409,7 +490,9 @@ async def test_idle_past_every_old_limit_is_paused_not_failed_then_resumes():
             resumed = await asyncio.wait_for(
                 ActivityEnvironment().run(
                     service.spawn_claude_code_activity,
-                    *_activity_args(code_session_request={"code_session_id": paused["code_session"]["code_session_id"]}),
+                    *_activity_args(
+                        code_session_request={"code_session_id": paused["code_session"]["code_session_id"]}
+                    ),
                 ),
                 timeout=30,
             )
@@ -450,6 +533,166 @@ async def test_question_to_blocked_spawner_pauses_session_and_returns_it():
         assert [call.get("reason") for call in backend.closed] == ["awaiting_parent"], backend.closed
         assert outcome["code_agent"]["state"] == "paused", outcome["code_agent"]
         assert backend.keepalives >= 3, backend.keepalives
+    finally:
+        session_home.cleanup()
+
+
+async def test_question_while_cli_waits_for_its_answer_is_handed_over_before_idle():
+    """L-A2A-ADV 1: the code agent asked and went quiet waiting for its answer.
+
+    Its spawning agent is blocked inside this very spawn, so both would wait.
+    The next keepalive (well before the idle pause) must pause the session for
+    the question exactly once and hand it to the spawner; resuming the session
+    then runs normally with no stale question.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+    from domains.spawn_claude_code_agent.config import (
+        CODE_SESSION_IDLE_PAUSE_S,
+        CODE_SESSION_KEEPALIVE_INTERVAL_S,
+    )
+
+    scale = 200.0
+    session_home = _SessionHome()
+    backend = _Backend(session_home)
+    try:
+        with backend.patched(clock=_virtual_clock(scale)):
+            spawn = asyncio.create_task(
+                ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args())
+            )
+            await _wait_until(lambda: session_home.runs(), "the CLI to start")
+            session_home.release("tool_done")  # the tool ends; the CLI now waits for the answer
+            await asyncio.sleep(0.3)
+            assert not spawn.done(), "the session is still attached before the question"
+            asked_at = time.monotonic()
+            backend.question_after = backend.keepalives + 1  # the CLI asked its blocked spawner
+            outcome = await asyncio.wait_for(spawn, timeout=30)
+            handoff_virtual_s = (time.monotonic() - asked_at) * scale
+        assert outcome["status"] == "paused" and outcome["success"] is False, outcome
+        assert "Which database should I use?" in outcome["message"], outcome["message"]
+        assert [call.get("reason") for call in backend.closed] == ["awaiting_parent"], backend.closed
+        handoff_bound_s = 2 * CODE_SESSION_KEEPALIVE_INTERVAL_S
+        assert handoff_bound_s < CODE_SESSION_IDLE_PAUSE_S, (handoff_bound_s, CODE_SESSION_IDLE_PAUSE_S)
+        assert handoff_virtual_s <= handoff_bound_s, f"handed over after {handoff_virtual_s:.0f}s, not by a keepalive"
+        paused_rows = [m for m in backend.messages if m.get("action_type") == "session_paused"]
+        assert len(paused_rows) == 1, paused_rows
+        code_session_id = outcome["code_session"]["code_session_id"]
+
+        # The spawner answers by resuming the session; the new task has no question.
+        backend.question_after = None
+        with backend.patched():
+            resumed = await asyncio.wait_for(
+                ActivityEnvironment().run(
+                    service.spawn_claude_code_activity,
+                    *_activity_args(
+                        code_session_request={"code_session_id": code_session_id}, tool_call_id="tc-answer"
+                    ),
+                ),
+                timeout=30,
+            )
+        assert resumed["status"] == "completed" and resumed["success"] is True, resumed
+        assert backend.created[-1]["code_session_id"] == code_session_id, backend.created
+        assert [call.get("reason") for call in backend.closed] == ["awaiting_parent", "close"], backend.closed
+    finally:
+        session_home.cleanup()
+
+
+async def test_cancelled_spawner_unblocks_a_child_waiting_for_its_answer():
+    """L-A2A-ADV 10: the spawner is cancelled while its code agent waits for an answer.
+
+    The child asked and is idle; before the keepalive hands the question over,
+    the user cancels the spawning agent (the workflow cancels the activity).
+    The spawn returns a cancelled outcome promptly, the session is closed once,
+    and nothing keeps polling for it afterwards.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    session_home = _SessionHome()
+    backend = _Backend(session_home)
+    try:
+        with backend.patched(clock=_virtual_clock(200.0)):
+            env = ActivityEnvironment()
+            spawn = asyncio.create_task(env.run(service.spawn_claude_code_activity, *_activity_args()))
+            await _wait_until(lambda: session_home.runs(), "the CLI to start")
+            session_home.release("tool_done")
+            await asyncio.sleep(0.3)
+            assert not spawn.done(), "still attached while the child waits"
+            cancelled_at = time.monotonic()
+            env.cancel()
+            outcome = await asyncio.wait_for(spawn, timeout=15)
+            latency = time.monotonic() - cancelled_at
+            keepalives_at_return = backend.keepalives
+            await asyncio.sleep(0.5)
+            keepalives_later = backend.keepalives
+        assert outcome["status"] == "cancelled", outcome
+        assert latency < 10, f"cancel took {latency:.1f}s"
+        assert [call.get("reason") for call in backend.closed] == ["cancel"], backend.closed
+        assert keepalives_later == keepalives_at_return, "nothing polls the session after the cancel"
+        assert session_home.process is None, "the CLI and its ws-server are stopped"
+        cancelled_rows = [m for m in backend.messages if m.get("title") == "Session Cancelled"]
+        assert len(cancelled_rows) == 1, backend.messages
+    finally:
+        session_home.cleanup()
+
+
+async def test_resize_request_moves_session_and_next_attempt_reattaches():
+    """C16: the CLI's `rose env size` reaches the activity on a keepalive while a tool is in flight.
+
+    The activity detaches (no close: the backend's resize owns the old sandbox),
+    the backend moves the session into the new-size sandbox and resumes the CLI
+    conversation there, an `environment_resized` row names the new task and size,
+    and the attempt the workflow schedules next reattaches to that task (no
+    second create) and completes on the resumed conversation.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+    from domains.spawn_claude_code_agent.config import CODE_AGENT_DRAIN_YIELD_STATUS
+
+    session_home = _SessionHome()
+    backend = _Backend(session_home, resize_after=2)
+    try:
+        with backend.patched(clock=_virtual_clock(2000.0)):
+            first = await asyncio.wait_for(
+                ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args()), timeout=30
+            )
+        assert first["status"] == CODE_AGENT_DRAIN_YIELD_STATUS, first
+        assert first["yield_reason"] == "environment_resize", first
+        moved = first["code_session"]
+        assert moved["task_id"] == "task-resized" and moved["ws_url"] == backend.resized_ws_url, moved
+        assert moved["sandbox_size"] == {"cpu": 2, "memory_gb": 16}, moved
+        assert moved["code_session_id"] == "6c1d6f1e-0000-4000-8000-00000000c0de", moved
+        assert backend.resize_calls == [("task-1", _RESIZE_REQUEST_ID, "claude")], backend.resize_calls
+        assert backend.closed == [], f"the backend's resize owns the old sandbox: {backend.closed}"
+        rows = [m for m in backend.messages if m.get("action_type") == "environment_resized"]
+        assert len(rows) == 1, backend.messages
+        row = rows[0]
+        assert row["task_id"] == "task-resized" and row["ws_url"] == backend.resized_ws_url, row
+        assert row["title"] == "Environment resized to 2 vCPU, 16 GB RAM", row["title"]
+        assert row["code_agent"]["sandbox_size"] == {"cpu": 2, "memory_gb": 16}, row["code_agent"]
+        resize_meta = row["code_agent"]["environment_resize"]
+        assert resize_meta["from_task_id"] == "task-1" and resize_meta["status"] == "done", resize_meta
+        assert resize_meta["to"] == {"cpu": 2, "memory_gb": 16}, resize_meta
+        await _wait_until(lambda: len(session_home.runs()) >= 2, "the resumed CLI to start")
+        resumed_run = session_home.runs()[-1]
+        assert "--resume" in resumed_run["argv"], resumed_run
+        assert resumed_run["argv"][resumed_run["argv"].index("--resume") + 1] == _CLI_SESSION_ID, resumed_run
+
+        args = _activity_args()
+        args[15] = moved  # what the workflow schedules after a yield
+        with backend.patched():
+            second = await asyncio.wait_for(
+                ActivityEnvironment().run(service.spawn_claude_code_activity, *args), timeout=30
+            )
+        assert second["status"] == "completed" and second["success"] is True, second
+        assert len(backend.created) == 1, f"the next attempt reattaches, it does not create: {backend.created}"
+        assert [call.get("task_id") for call in backend.closed] == ["task-resized"], backend.closed
+        assert second["code_agent"]["sandbox_size"] == {"cpu": 2, "memory_gb": 16}, second["code_agent"]
+        texts = [e.get("text") for e in backend.verified_events[-1] if e.get("type") == "agent_message"]
+        assert "notes: uncommitted work" in texts, f"the resumed session keeps its files: {texts}"
     finally:
         session_home.cleanup()
 
@@ -555,7 +798,9 @@ async def test_local_session_idle_pauses_in_the_mac_folder():
     backend = _Backend(session_home)
     try:
         with backend.patched(clock=_virtual_clock(2000.0)):
-            run = asyncio.create_task(ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args(local=True)))
+            run = asyncio.create_task(
+                ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args(local=True))
+            )
             await _wait_until(lambda: session_home.runs(), "the CLI to start")
             await asyncio.sleep(1.0)  # ~2000 virtual seconds with Bash in flight
             assert not run.done(), f"an in-flight tool keeps a Mac session attached too: {run.result()}"
@@ -569,7 +814,10 @@ async def test_local_session_idle_pauses_in_the_mac_folder():
         assert [call.get("reason") for call in backend.closed] == ["idle"], backend.closed
         meta = paused["code_agent"]
         assert (meta["target"], meta["device_name"], meta["folder"], meta["state"]) == (
-            "local", _MAC, _MAC_FOLDER, "paused"
+            "local",
+            _MAC,
+            _MAC_FOLDER,
+            "paused",
         ), meta
         assert backend.keepalives >= 1, backend.keepalives
         assert backend.availability_own_only == [True], "a Mac run only counts the user's own logins"
@@ -631,15 +879,24 @@ def test_usage_limit_detection_reads_structured_events_only():
     """Only the CLIs' structured limit signals count; printed limit text never does (rule 25b)."""
     from domains.spawn_claude_code_agent.service import usage_limit_from_event
 
-    rejected = {"type": "cli_message", "raw_type": "rate_limit_event",
-                "cli_message": {"type": "rate_limit_event",
-                                "rate_limit_info": {"status": "rejected", "resetsAt": 5, "rateLimitType": "five_hour"}}}
+    rejected = {
+        "type": "cli_message",
+        "raw_type": "rate_limit_event",
+        "cli_message": {
+            "type": "rate_limit_event",
+            "rate_limit_info": {"status": "rejected", "resetsAt": 5, "rateLimitType": "five_hour"},
+        },
+    }
     assert usage_limit_from_event(rejected) == {"provider": "claude", "resets_at": 5, "limit_type": "five_hour"}
     warning = json.loads(json.dumps(rejected))
     warning["cli_message"]["rate_limit_info"]["status"] = "allowed_warning"
     assert usage_limit_from_event(warning) is None
-    codex = {"provider": "codex", "type": "error", "message": "x",
-             "usage_limit": {"reached_type": "rate_limit_reached", "resets_at": 9}}
+    codex = {
+        "provider": "codex",
+        "type": "error",
+        "message": "x",
+        "usage_limit": {"reached_type": "rate_limit_reached", "resets_at": 9},
+    }
     assert usage_limit_from_event(codex) == {"provider": "codex", "resets_at": 9, "limit_type": "rate_limit_reached"}
     for prose in (
         {"type": "agent_message", "text": "You've hit your limit · resets 5pm (UTC)"},
@@ -675,12 +932,28 @@ def test_usage_limit_parent_message_without_a_free_account_names_the_earliest_re
         code_provider="codex",
         resets_at_iso="2026-10-20T18:00:00.000Z",
         facts=facts,
-        accounts=[{"provider": "codex", "label": "Codex account 1", "status": "limited",
-                   "limited_until": "2026-10-20T18:00:00.000Z", "this_run": False},
-                  {"provider": "claude", "label": "me@example.com", "status": "reconnect",
-                   "limited_until": None, "this_run": False}],
-        next_lease={"provider": "codex", "label": "Codex account 1", "available_now": False,
-                    "available_at": "2026-10-20T18:00:00.000Z"},
+        accounts=[
+            {
+                "provider": "codex",
+                "label": "Codex account 1",
+                "status": "limited",
+                "limited_until": "2026-10-20T18:00:00.000Z",
+                "this_run": False,
+            },
+            {
+                "provider": "claude",
+                "label": "me@example.com",
+                "status": "reconnect",
+                "limited_until": None,
+                "this_run": False,
+            },
+        ],
+        next_lease={
+            "provider": "codex",
+            "label": "Codex account 1",
+            "available_now": False,
+            "available_at": "2026-10-20T18:00:00.000Z",
+        },
     )
     assert blocked == (
         "Code agent stopped: the Codex usage limit was reached (resets 2026-10-20T18:00:00.000Z). "
@@ -698,7 +971,10 @@ def test_usage_limit_parent_message_without_a_free_account_names_the_earliest_re
         "the respawn leases an account that is not rate-limited and resumes from the latest checkpoint."
     ), unknown
     shared = format_usage_limit_message(
-        code_provider="claude", resets_at_iso=None, facts=facts, accounts=[],
+        code_provider="claude",
+        resets_at_iso=None,
+        facts=facts,
+        accounts=[],
         next_lease={"provider": "claude", "label": None, "available_now": True, "available_at": None},
     )
     assert "\nConnected accounts: none.\n" in shared and "(now a shared Claude Code account)" in shared, shared
@@ -762,28 +1038,45 @@ async def test_tool_result_reports_branch_and_merged_only_when_confirmed():
     )
     open_pr = {
         "code_session": {
-            "code_session_id": "cs-1", "state": "PAUSED", "checkpoint_seq": 3, "branch": "rose/a--b-123456",
-            "merge_target": "rose/a", "repo": {"head": "b" * 40, "dirtyFiles": 0, "files": []},
-            "merge": {"head": "b" * 40, "local_commits": 0, "pushed": True,
-                      "pr": {"number": 7, "state": "open", "url": "https://github.com/o/r/pull/7", "merged": False},
-                      "merged": False, "merge_target_contains_head": False},
+            "code_session_id": "cs-1",
+            "state": "PAUSED",
+            "checkpoint_seq": 3,
+            "branch": "rose/a--b-123456",
+            "merge_target": "rose/a",
+            "repo": {"head": "b" * 40, "dirtyFiles": 0, "files": []},
+            "merge": {
+                "head": "b" * 40,
+                "local_commits": 0,
+                "pushed": True,
+                "pr": {"number": 7, "state": "open", "url": "https://github.com/o/r/pull/7", "merged": False},
+                "merged": False,
+                "merge_target_contains_head": False,
+            },
         }
     }
     facts = service._merge_close_code_session_facts(spawn, open_pr)
     text = service.format_code_session_summary(facts)
     assert "Branch: rose/a--b-123456 (merges into rose/a)" in text, text
     assert "PR: #7 open" in text and "Merged: no" in text, text
-    meta = service.build_code_agent_metadata(task_id="t", provider="claude", state="completed", started_at=0, facts=facts)
+    meta = service.build_code_agent_metadata(
+        task_id="t", provider="claude", state="completed", started_at=0, facts=facts
+    )
     assert meta["branch"] == "rose/a--b-123456" and "merged_into" not in meta["summary"], meta
     assert meta["base_branch"] == "rose/a", meta
 
     merged = json.loads(json.dumps(open_pr))
     merged["code_session"]["merge"].update(
-        {"merged": True, "merge_target_contains_head": True, "pr": {**open_pr["code_session"]["merge"]["pr"], "merged": True}}
+        {
+            "merged": True,
+            "merge_target_contains_head": True,
+            "pr": {**open_pr["code_session"]["merge"]["pr"], "merged": True},
+        }
     )
     facts = service._merge_close_code_session_facts(spawn, merged)
     assert "Merged: yes" in service.format_code_session_summary(facts)
-    meta = service.build_code_agent_metadata(task_id="t", provider="claude", state="completed", started_at=0, facts=facts)
+    meta = service.build_code_agent_metadata(
+        task_id="t", provider="claude", state="completed", started_at=0, facts=facts
+    )
     assert meta["summary"]["merged_into"] == "rose/a", meta
     assert meta["state"] == "completed" and meta["target"] == "cloud" and meta["started_at"].endswith("Z"), meta
     assert "failure_message" not in meta, meta
@@ -838,13 +1131,20 @@ async def test_ws_server_checks_out_the_code_session_branch():
         cases = [
             ({"CODE_AGENT_BRANCH": "rose/child-bbbb", "CODE_AGENT_BASE_BRANCH": ""}, "rose/child-bbbb", main_sha),
             (
-                {"CODE_AGENT_BRANCH": "rose/parent-aaaa--speed-cccc", "CODE_AGENT_BASE_BRANCH": "rose/parent-aaaa",
-                 "CODE_AGENT_MERGE_TARGET": "rose/parent-aaaa"},
+                {
+                    "CODE_AGENT_BRANCH": "rose/parent-aaaa--speed-cccc",
+                    "CODE_AGENT_BASE_BRANCH": "rose/parent-aaaa",
+                    "CODE_AGENT_MERGE_TARGET": "rose/parent-aaaa",
+                },
                 "rose/parent-aaaa--speed-cccc",
                 parent_sha,
             ),
             # Resume of a pushed branch: the existing remote branch wins over its base.
-            ({"CODE_AGENT_BRANCH": "rose/parent-aaaa", "CODE_AGENT_BASE_BRANCH": "main"}, "rose/parent-aaaa", parent_sha),
+            (
+                {"CODE_AGENT_BRANCH": "rose/parent-aaaa", "CODE_AGENT_BASE_BRANCH": "main"},
+                "rose/parent-aaaa",
+                parent_sha,
+            ),
         ]
         for env, branch, head in cases:
             session_home = _SessionHome(extra_env={"STUB_MODE": "finish"}, git_config=git_config)
@@ -924,7 +1224,19 @@ async def _run_all_tests():
         "question_to_blocked_spawner_pauses_session",
         test_question_to_blocked_spawner_pauses_session_and_returns_it,
     )
+    await r.record_async(
+        "question_while_cli_waits_handed_over_before_idle",
+        test_question_while_cli_waits_for_its_answer_is_handed_over_before_idle,
+    )
+    await r.record_async(
+        "cancelled_spawner_unblocks_waiting_child",
+        test_cancelled_spawner_unblocks_a_child_waiting_for_its_answer,
+    )
     await r.record_async("failed_attempt_retry_keeps_state", test_failed_attempt_retry_keeps_state_and_code_session_id)
+    await r.record_async(
+        "resize_request_moves_session_and_reattaches",
+        test_resize_request_moves_session_and_next_attempt_reattaches,
+    )
     await r.record_async(
         "usage_limit_saves_session_and_retry_leases_next",
         test_usage_limit_saves_session_and_retry_leases_next_credential,
@@ -944,7 +1256,9 @@ async def _run_all_tests():
         "local_usage_limit_retries_on_the_mac",
         test_local_usage_limit_retries_on_the_mac_with_the_other_login,
     )
-    await r.record_async("tool_result_reports_branch_and_merge", test_tool_result_reports_branch_and_merged_only_when_confirmed)
+    await r.record_async(
+        "tool_result_reports_branch_and_merge", test_tool_result_reports_branch_and_merged_only_when_confirmed
+    )
     await r.record_async("ws_server_checks_out_session_branch", test_ws_server_checks_out_the_code_session_branch)
     await r.record_async("preview_url_rides_every_code_agent_block", test_preview_url_rides_every_code_agent_block)
     teardown_mock()

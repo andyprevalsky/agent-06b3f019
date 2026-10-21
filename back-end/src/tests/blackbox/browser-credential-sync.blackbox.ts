@@ -339,12 +339,10 @@ test('password upload persists browserProfile and clears disabled state', async 
     });
     await prisma.browserPassword.update({
       where: {
-        userId_origin_username_browserSource_browserProfile: {
+        userId_origin_username: {
           userId,
           origin: 'https://www.amazon.com',
           username: 'shopper@example.com',
-          browserSource: 'chrome',
-          browserProfile: 'Profile 1',
         },
       },
       data: { disabledAt: new Date(), disabledReason: 'bad password' },
@@ -366,12 +364,10 @@ test('password upload persists browserProfile and clears disabled state', async 
 
     const password = await prisma.browserPassword.findUniqueOrThrow({
       where: {
-        userId_origin_username_browserSource_browserProfile: {
+        userId_origin_username: {
           userId,
           origin: 'https://www.amazon.com',
           username: 'shopper@example.com',
-          browserSource: 'chrome',
-          browserProfile: 'Profile 1',
         },
       },
     });

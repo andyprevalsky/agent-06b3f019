@@ -55,3 +55,6 @@ export const codeTaskUsageLimitSchema = z.object({
   // Epoch seconds/ms or ISO time the provider reports the limit resets.
   resets_at: z.union([z.number().positive(), z.string().min(1).max(64)]).optional(),
 });
+
+/** POST /:taskId/resize — the attached activity applies a pending size change (C16). */
+export const codeTaskResizeSchema = z.object({ request_id: z.string().uuid() }).strict();

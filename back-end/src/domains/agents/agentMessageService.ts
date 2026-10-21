@@ -5,7 +5,11 @@
 import { deliverUserMessageToWorkflow, signalUserResponse } from '../../providers/agentResume';
 import { handleChatMessage } from '../../providers/chat';
 import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailure';
-import { createMessage, createWorkflowMessageGroup } from '../../providers/messages';
+import {
+  createMessage,
+  createMessageOnce,
+  createWorkflowMessageGroup,
+} from '../../providers/messages';
 import {
   type FilePointer,
   processUploadedFile,
@@ -26,7 +30,7 @@ const log = createLogger('Agents');
  * Agent statuses whose Temporal workflow has already ended. A follow-up message
  * to any of these must resume chat mode, not signal a dead/paused workflow.
  */
-const TERMINAL_STATUSES: ReadonlyArray<string> = [
+export const TERMINAL_STATUSES: ReadonlyArray<string> = [
   'COMPLETED',
   'FAILED',
   'OUT_OF_CREDITS',
@@ -138,6 +142,30 @@ async function deliverUserMessage(
 ): Promise<void> {
   const signalValue = buildUserMessageSignalValue(body.message, body.metadata);
   await routeUserMessage(agentId, signalValue, authoredByWorkflow);
+}
+
+/**
+ * One agent-graph (A2A) USER row from another agent: written once per
+ * idempotency key and delivered only by the call that wrote it, so a retried
+ * or racing send never signals the workflow twice. An agent's message is not
+ * the user's instruction to continue, so it never lifts a user pause (the
+ * paused agent reads it when the user resumes it). A finished agent still
+ * resumes in chat mode, as for any message.
+ */
+export async function deliverAgentGraphMessage(
+  agentId: string,
+  body: { message: string; metadata: Record<string, unknown> }
+): Promise<{ created: boolean }> {
+  const { created } = await createMessageOnce({
+    agentId,
+    text: body.message,
+    role: 'USER',
+    metadata: body.metadata,
+  });
+  if (created) {
+    await routeUserMessage(agentId, buildUserMessageSignalValue(body.message, body.metadata), true);
+  }
+  return { created };
 }
 
 // ---------------------------------------------------------------------------
