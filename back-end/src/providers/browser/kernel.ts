@@ -1,7 +1,7 @@
 import { KernelSessionValidationError, resetKernelSessionTabs } from './kernelTabs';
 export { resetKernelSessionTabs } from './kernelTabs';
 import { browserResumeScope } from '../steel/lifecycleClaim';
-import { kernelResumeTags } from './resumeRecovery';
+import { kernelResumeTags, replacementBinding } from './resumeRecovery';
 import { PermissionDeniedError, RateLimitError } from '@onkernel/sdk';
 import type { Browser } from 'playwright';
 import { prisma } from '../database';
@@ -568,7 +568,7 @@ async function recreateKernelSession(
 
     await browserResumeScope()?.assertOwned();
     const replaced = await prisma.browserSession.updateMany({
-      where: { id: taskId, sessionId: previousSessionId },
+      where: replacementBinding(taskId, oldSession),
       data: {
         sessionId: remote.sessionId,
         debugUrl: remote.debugUrl,

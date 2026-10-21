@@ -1,5 +1,5 @@
 export { browserUseProxyCountry } from './resumeRecovery';
-import { allocateBrowserUseSession, type BrowserUseSession } from './resumeRecovery';
+import * as resumeRecovery from './resumeRecovery';
 import { browserResumeScope } from '../steel/lifecycleClaim';
 /** Browser Use Cloud V4 sessions, exposed through the same CDP contract as Steel and Kernel. */
 import { createHash, randomUUID } from 'node:crypto';
@@ -141,8 +141,8 @@ export async function cleanupBenchmarkBrowserUseProfiles(): Promise<void> {
 async function createRemote(
   location: ProxyGeoLocation,
   profileId: string | null
-): Promise<{ session: BrowserUseSession; browser: Browser }> {
-  const session = await allocateBrowserUseSession(location, profileId);
+): Promise<{ session: resumeRecovery.BrowserUseSession; browser: Browser }> {
+  const session = await resumeRecovery.allocateBrowserUseSession(location, profileId);
   try {
     if (!session.id || !session.cdpUrl || !session.liveUrl) {
       throw new Error('Browser Use create response omitted id, cdpUrl, or liveUrl');
@@ -393,7 +393,7 @@ async function replaceSession(
     await rememberInitialStorage(session.id, browser);
     await browserResumeScope()?.assertOwned();
     const replaced = await prisma.browserSession.updateMany({
-      where: { id: taskId, sessionId: old.sessionId },
+      where: resumeRecovery.replacementBinding(taskId, old),
       data: {
         sessionId: session.id,
         debugUrl: session.liveUrl,

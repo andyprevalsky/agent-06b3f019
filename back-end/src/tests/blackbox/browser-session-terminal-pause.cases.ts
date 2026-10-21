@@ -12,17 +12,46 @@ export async function runBrowserTerminalPauseCases(): Promise<void> {
   const previous = require.cache[path];
   const selections: string[][] = [];
   const releases: Array<{ sessionId: string; pause: boolean }> = [];
+  let lazyOnly = false;
+  let lazyStatus = 'PAUSED';
+  let lazyNative: string | null = null;
+  const retirements: unknown[] = [];
   const database = {
     browserSession: {
       findMany: async ({ where }: { where: { agentId: string; status: { in: string[] } } }) => {
         assert.equal(where.agentId, 'owner');
         selections.push(where.status.in);
+        if (lazyOnly)
+          return where.status.in.includes(lazyStatus)
+            ? [{ id: 'logical-task', sessionId: lazyNative }]
+            : [];
         return ['ACTIVE', 'PAUSED']
           .filter((status) => where.status.in.includes(status))
           .map((status) => ({ sessionId: `owned-${status}` }));
       },
+      updateMany: async (args: unknown) => {
+        retirements.push(args);
+        assert.deepEqual(args, {
+          where: {
+            id: 'logical-task',
+            agentId: 'owner',
+            logicalOwnerKey: 'agent:owner',
+            sessionId: null,
+            status: 'PAUSED',
+          },
+          data: { status: 'CLOSED', closedAt: assertDate(args) },
+        });
+        if (lazyNative !== null || lazyStatus !== 'PAUSED') return { count: 0 };
+        lazyStatus = 'CLOSED';
+        return { count: 1 };
+      },
     },
   };
+  function assertDate(args: unknown): Date {
+    const value = (args as { data: { closedAt: unknown } }).data.closedAt;
+    assert(value instanceof Date);
+    return value;
+  }
   loader._load = function (id, parent, isMain) {
     if (parent?.filename === path) {
       if (id === './database') return { prisma: database };
@@ -60,6 +89,32 @@ export async function runBrowserTerminalPauseCases(): Promise<void> {
       { sessionId: 'owned-ACTIVE', pause: false },
       { sessionId: 'owned-PAUSED', pause: false },
     ]);
+
+    lazyOnly = true;
+    assert.equal(await releaseAgentBrowserSessions('owner'), 0);
+    assert.equal(lazyStatus, 'PAUSED', 'ordinary shutdown preserves lazy logical identity');
+    assert.equal(retirements.length, 0);
+    assert.equal(await releaseAgentBrowserSessions('owner', {}, { retire: true }), 1);
+    assert.equal(lazyStatus, 'CLOSED');
+    assert.deepEqual(releases, [], 'unmaterialized retirement must not call a provider');
+    lazyStatus = 'PAUSED';
+    await assert.rejects(
+      releaseAgentBrowserSessions(
+        'owner',
+        {
+          findActiveSessions: async () => {
+            lazyNative = 'concurrently-bound';
+            return [{ id: 'logical-task', sessionId: null }];
+          },
+        },
+        { retire: true }
+      ),
+      AggregateError,
+      'a lost null-binding CAS must fail closed for retry'
+    );
+    assert.equal(lazyStatus, 'PAUSED');
+    assert.deepEqual(releases, []);
+    lazyOnly = false;
 
     const attempted: string[] = [];
     await assert.rejects(

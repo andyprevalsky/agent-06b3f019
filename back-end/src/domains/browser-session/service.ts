@@ -1,6 +1,5 @@
 import { initLegacySession } from './service.init-legacy';
 import { resumeOwnedBrowserSession } from './service.control';
-import { prisma } from '../../providers/database';
 import { ensureLogicalBrowser } from '../../providers/browser/logicalSession';
 /**
  * Browser-session domain service — business logic, no req/res.
@@ -187,10 +186,11 @@ export async function initSession(userId: string, agentId: string, startUrl: str
       prepare: prepareSessionCredentials,
       metadata: buildBrowserSessionMetadata,
     });
-  await prisma.browserSession.update({
-    where: { id: logical.id },
-    data: { startUrl: logical.startUrl ?? startUrl, currentUrl: logical.currentUrl ?? startUrl },
-  });
+  await repo.updateLogicalSessionUrls(
+    logical.id,
+    logical.startUrl ?? startUrl,
+    logical.currentUrl ?? startUrl
+  );
   return resumeOwnedBrowserSession(logical.id, userId);
 }
 

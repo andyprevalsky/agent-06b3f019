@@ -1,3 +1,4 @@
+import type { BrowserSession } from '@prisma/client';
 import { browserUseEnabled } from './config';
 import type { ProxyGeoLocation } from '../geoip';
 import { browserResumeScope } from '../steel/lifecycleClaim';
@@ -114,4 +115,16 @@ export function browserUseProxyCountry(location: ProxyGeoLocation): string {
     throw new Error(`Browser Use requires a two-letter proxy country, got ${location.country}`);
   }
   return country;
+}
+
+/** A retired logical row cannot be revived by a previously allocated native browser. */
+export function replacementBinding(
+  taskId: string,
+  session: Pick<BrowserSession, 'sessionId' | 'status' | 'logicalOwnerKey'>
+) {
+  return {
+    id: taskId,
+    sessionId: session.sessionId,
+    ...(session.logicalOwnerKey ? { status: session.status } : {}),
+  };
 }

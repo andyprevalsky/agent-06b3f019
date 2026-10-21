@@ -1,6 +1,5 @@
 import { ensureLogicalBrowser } from '../../providers/browser/logicalSession';
 import { resumeBrowserSession } from '../../providers/browserSessionResume';
-import { prisma } from '../../providers/database';
 /**
  * Browser world service (plan row A6): the user's one browser template, split
  * by website and account, and the home browser that shows it.
@@ -165,10 +164,7 @@ export async function openRootBrowser(
     }
     const startUrl = options.startUrl ?? (await defaultRootBrowserUrl(userId, options.agentId));
     if (startUrl !== null && startUrl !== '' && logical.startUrl === null)
-      await prisma.browserSession.update({
-        where: { id: logical.id },
-        data: { startUrl, currentUrl: startUrl },
-      });
+      await repo.updateRootSessionUrl(logical.id, startUrl);
     await resumeBrowserSession(logical.id);
     const current = await repo.findRootSessionByTaskId(logical.id);
     if (!current) throw new RootBrowserNotOpenError();

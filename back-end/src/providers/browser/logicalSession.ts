@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
 import { EMPTY_BROWSER_BASELINE } from './checkpoint';
-import { prisma } from '../database';
+import { runTransactionWithRetry } from '../database';
 import { rootBrowserAgentId } from './worldStateMerge';
 import { browserUseEnabled } from './config';
 import { storedBrowserProvider } from './types';
@@ -94,5 +94,5 @@ export async function createLogicalBrowserInTransaction(
 }
 
 export async function ensureLogicalBrowser(userId: string, agentId: string) {
-  return prisma.$transaction((tx) => createLogicalBrowserInTransaction(tx, userId, agentId));
+  return runTransactionWithRetry((tx) => createLogicalBrowserInTransaction(tx, userId, agentId));
 }

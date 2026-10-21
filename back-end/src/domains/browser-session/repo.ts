@@ -240,3 +240,10 @@ export async function updateInjectedOrigins(
     data: { injectedOrigins },
   });
 }
+
+export function updateLogicalSessionUrls(taskId: string, startUrl: string, currentUrl: string) {
+  return prisma.browserSession.update({
+    where: { id: taskId },
+    data: { startUrl, currentUrl },
+  });
+}

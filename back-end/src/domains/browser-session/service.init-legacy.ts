@@ -1,4 +1,6 @@
-import type { prepareSessionCredentials, buildBrowserSessionMetadata } from './service';
+import type { Browser } from 'playwright';
+import type { BrowserProviderSession } from '../../providers/browser/types';
+import type { SessionCredentialPayload } from './service.credential-error';
 /** Compatibility for pre-patch in-flight browser activities retaining their task ID. */
 import { type ProxyGeoLocation, DEFAULT_GEOLOCATION } from '../../providers/geoip';
 import { createLogger } from '../../providers/logger';
@@ -29,15 +31,33 @@ function legacyProxyLocation(
     : DEFAULT_GEOLOCATION;
 }
 
-export async function initLegacySession(
+interface LegacyCredentials extends SessionCredentialPayload {
+  cookies_injected: boolean;
+  cookies_count: number;
+  auth_source: string;
+  auth_credential_ref: unknown;
+  browser_state_injection: { fingerprint: { injected: boolean } };
+}
+
+interface LegacyInitDependencies<Credentials extends LegacyCredentials, Metadata> {
+  prepare: (
+    sessionId: string,
+    userId: string,
+    targetUrl: string,
+    options: { browser?: Browser }
+  ) => Promise<Credentials>;
+  metadata: (
+    session: BrowserProviderSession,
+    injection: Credentials['browser_state_injection']
+  ) => Metadata;
+}
+
+export async function initLegacySession<Credentials extends LegacyCredentials, Metadata>(
   userId: string,
   agentId: string,
   startUrl: string,
   id: string,
-  dependencies: {
-    prepare: typeof prepareSessionCredentials;
-    metadata: typeof buildBrowserSessionMetadata;
-  }
+  dependencies: LegacyInitDependencies<Credentials, Metadata>
 ) {
   log.info('Initializing browser session', {
     agentId,
@@ -68,7 +88,7 @@ export async function initLegacySession(
     ...(requiredSteelProfileId !== null ? { requiredSteelProfileId } : {}),
   });
 
-  let credentials: Awaited<ReturnType<typeof dependencies.prepare>>;
+  let credentials: Credentials;
   try {
     credentials = await dependencies.prepare(session.sessionId, userId, startUrl, {
       browser: session.validationBrowser ?? undefined,

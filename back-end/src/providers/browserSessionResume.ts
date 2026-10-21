@@ -225,6 +225,8 @@ export async function resumeBrowserSession(
 
   const read = () => prisma.browserSession.findUniqueOrThrow({ where: { id: taskId } });
   const initial = await read();
+  if (initial.logicalOwnerKey !== null && initial.status === 'CLOSED')
+    throw new Error('Retired logical browser cannot resume');
   if (initial.logicalOwnerKey !== null && initial.provider === 'steel')
     throw new Error('Logical Steel browser restore requires durable hydration custody');
   if (
@@ -235,6 +237,8 @@ export async function resumeBrowserSession(
   }
   const resume = async () => {
     const current = await read();
+    if (current.logicalOwnerKey !== null && current.status === 'CLOSED')
+      throw new Error('Retired logical browser cannot resume');
     if (
       current.controlState !== 'AGENT' &&
       (current.controlLeaseExpiresAt === null ||
