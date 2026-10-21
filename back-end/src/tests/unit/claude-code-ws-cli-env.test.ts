@@ -27,6 +27,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
+import { runInNewContext } from 'node:vm';
+import ts from 'typescript';
 
 const wsServerPath = resolve(
   __dirname,
@@ -55,15 +57,26 @@ let answered = false;
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => {
   stdin += chunk;
-  if (answered || !stdin.includes('\\n')) return;
+  let newline;
+  while (!answered && (newline = stdin.indexOf('\\n')) !== -1) {
+  const line = stdin.slice(0, newline);
+  stdin = stdin.slice(newline + 1);
+  const message = JSON.parse(line);
+  if (message.type === 'control_request') {
+    process.stdout.write(JSON.stringify({ type: 'control_response', response: {
+      request_id: message.request_id, subtype: 'success', response: { models: [] }
+    } }) + '\\n');
+    continue;
+  }
   answered = true;
   writeFileSync(process.env.FAKE_CLAUDE_CAPTURE_PATH, JSON.stringify({
     streamWatchdog: process.env.CLAUDE_ENABLE_STREAM_WATCHDOG ?? null,
     streamIdleTimeoutMs: process.env.CLAUDE_STREAM_IDLE_TIMEOUT_MS ?? null,
     oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? null,
-    stdin,
+    stdin: line,
   }));
   process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result: 'ok' }) + '\\n');
+  }
 });
 process.stdin.on('end', () => process.exit(0));
 `
@@ -167,4 +180,62 @@ test('ws-server launches the Claude Code CLI with its stream idle watchdog enabl
 test('ws-server forces the watchdog on even when the sandbox env disables it', async () => {
   const env = await captureCliEnv('inherited-off', { CLAUDE_ENABLE_STREAM_WATCHDOG: '0' });
   assert.equal(env.streamWatchdog, '1');
+});
+
+function nativeClaudeEmitter(events: Record<string, unknown>[]): (message: unknown) => void {
+  const source = readFileSync(wsServerPath, 'utf8');
+  const parsed = ts.createSourceFile(
+    wsServerPath,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.JS
+  );
+  const declaration = parsed.statements.find(
+    (statement): statement is ts.FunctionDeclaration =>
+      ts.isFunctionDeclaration(statement) && statement.name?.text === 'emitClaudeMessage'
+  );
+  assert.ok(declaration, 'real native event emitter must exist');
+  return runInNewContext(`(${declaration.getText(parsed)})`, {
+    appendEvent: (event: Record<string, unknown>) => events.push(event),
+  }) as (message: unknown) => void;
+}
+
+test('native Claude result codec preserves action identity and error evidence', () => {
+  const events: Record<string, unknown>[] = [];
+  const emit = nativeClaudeEmitter(events);
+  for (const isError of [false, true]) {
+    const result = { stdout: 'original tool output', exitCode: isError ? 1 : 0 };
+    emit({
+      type: 'user',
+      message: {
+        content: [{ type: 'tool_result', tool_use_id: 'native-call-17', is_error: isError }],
+      },
+      tool_use_result: result,
+    });
+    const event = events.at(-1);
+    assert.equal(event?.tool_use_id, 'native-call-17');
+    assert.equal(event?.is_error, isError);
+    assert.equal(event?.tool_use_result, result);
+  }
+  // A legacy/ambiguous payload remains explicitly unknown, never inferred success.
+  emit({ type: 'user', tool_use_result: { stdout: 'unbound output' } });
+  assert.equal(events.at(-1)?.tool_use_id, null);
+  assert.equal(events.at(-1)?.is_error, null);
+});
+
+test('native Claude batch retains every original block without assigning shared metadata', () => {
+  const events: Record<string, unknown>[] = [];
+  const emit = nativeClaudeEmitter(events);
+  const blocks = [
+    { type: 'tool_result', tool_use_id: 'native-first', is_error: false, content: 'first output' },
+    { type: 'tool_result', tool_use_id: 'native-second', is_error: true, content: 'second error' },
+  ];
+  const shared = { stdout: 'ambiguous shared output' };
+  emit({ type: 'user', message: { content: blocks }, tool_use_result: shared });
+  const event = events.at(-1);
+  assert.deepEqual(event?.tool_results, blocks);
+  assert.equal(event?.tool_use_result, shared);
+  assert.equal(event?.tool_use_id, null);
+  assert.equal(event?.is_error, null);
 });

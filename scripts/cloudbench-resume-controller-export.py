@@ -942,7 +942,11 @@ def check(
     need(len(drivers) == 1, "exact sealed native driver required")
     driver = base64.b64decode(drivers[0]["raw_value"], validate=True)
     need(
-        b"while :; do sleep 60; done" in driver and b"bound_controller_export export" in driver,
+        # Gates before PR #1560 idled forever after export; later ones idle until a
+        # bounded GATE_EXPORT_IDLE_UNTIL (TIMEOUT_S + launch grace, or one recovery
+        # hour after the result).
+        (b"while :; do sleep 60; done" in driver or b"GATE_EXPORT_IDLE_UNTIL" in driver)
+        and b"bound_controller_export export" in driver,
         "original idle-after-export driver contract required",
     )
     pins.update({str(path): B["fingerprint"](path) for path in (collector_path, launch_path, log_path)})

@@ -193,3 +193,19 @@ export async function assertInvalidGroupScheduleIsPermanent400(
   if (response.status !== 400 || body.error !== 'Invalid Benchmark Hub group schedule')
     throw new Error(`Expected a permanent 400, got ${response.status}: ${JSON.stringify(body)}`);
 }
+
+export const BENCHMARK_CATALOG_GROUPS = [
+  'pre-deploy',
+  'daily',
+  'rose-bench',
+  'process-bench',
+  'polar-bench',
+  'incomplete',
+];
+
+export function assertProcessBenchCatalog(tasks: Array<{ name: string; group: string }>): void {
+  const process = tasks.filter((task) => task.group === 'process-bench');
+  if (process.length !== 10 || !process.every((task) => task.name.startsWith('process-'))) {
+    throw new Error('Process Bench must expose exactly ten distinct process tasks in its group');
+  }
+}

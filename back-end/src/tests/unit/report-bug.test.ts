@@ -58,6 +58,7 @@ function testPromptIncludesRcaAndAgentId(): void {
 
 async function testReportAgentBugDoesNotTextOrRequireSms(): Promise<void> {
   let launchArgs: ReportBugLaunchArgs | null = null;
+  const recorded: Array<[string, string]> = [];
   const result = await reportAgentBug(
     '1f85ff25-6e29-4c1b-8739-f917bd101a30',
     'agent-xyz',
@@ -72,7 +73,15 @@ async function testReportAgentBugDoesNotTextOrRequireSms(): Promise<void> {
           url: 'https://boxes.dev/open/desktop?box=rose&automation=ta_test',
         };
       },
+      recordReport: async (agentId, runId) => {
+        recorded.push([agentId, runId]);
+      },
     }
+  );
+  assert.deepEqual(
+    recorded,
+    [['agent-xyz', 'run-no-sms']],
+    'manual report marks the agent reported'
   );
   assert.deepEqual(result, {
     success: true,
@@ -85,6 +94,22 @@ async function testReportAgentBugDoesNotTextOrRequireSms(): Promise<void> {
     promptText: '/rca the following bug for agent with ID: [agent-xyz]\nCheckout never finished',
     idempotencyKey: buildBugReportIdempotencyKey('agent-xyz', 'Checkout never finished'),
   });
+}
+
+async function testManualReportRecordFailureKeepsLaunchResult(): Promise<void> {
+  const result = await reportAgentBug(
+    '1f85ff25-6e29-4c1b-8739-f917bd101a30',
+    'agent-record-down',
+    'Stalled on checkout',
+    {
+      findAgentById: async () => ({ agent_id: 'agent-record-down' }) as never,
+      launch: async () => ({ run_id: 'run-record-down', name: 'n', url: 'https://boxes.dev/x' }),
+      recordReport: async () => {
+        throw new Error('db down');
+      },
+    }
+  );
+  assert.equal(result.run_id, 'run-record-down');
 }
 
 function testIdempotencyKeyIsStablePerReport(): void {
@@ -370,6 +395,10 @@ async function main(): Promise<void> {
     ['prompt embeds /rca + agent id', testPromptIncludesRcaAndAgentId],
     ['reportAgentBug launches without sending SMS', testReportAgentBugDoesNotTextOrRequireSms],
     ['report-bug service has no SMS side effect', testServiceHasNoSmsSideEffect],
+    [
+      'manual report record failure keeps the launch result',
+      testManualReportRecordFailureKeepsLaunchResult,
+    ],
     ['idempotency key is stable per agent + description', testIdempotencyKeyIsStablePerReport],
     ['default launch requires the boxes.dev secret', testDefaultLaunchRequiresBoxesSecret],
     ['boxes.dev run posts configurable request', testBoxesRunPostsConfigurableRequest],

@@ -5678,11 +5678,11 @@ class AgentWorkflow:
         except Exception as e:
             workflow.logger.error(f"Failed to mark failed: {e}")
 
-        # 3b. Alert #errors (and optionally launch an RCA agent) — root agents
-        # only. Sub-agent failures are frequently recovered by the parent, so
-        # alerting on each one is noise; a sub-failure that actually breaks the
-        # run propagates to the root's _mark_failed and alerts there. Best-effort
-        # and gated: the activity never raises and swallows its own errors.
+        # 3b. Record the failure in the worker log — root agents only. Sub-agent
+        # failures are frequently recovered by the parent; a sub-failure that
+        # breaks the run propagates to the root's _mark_failed. The bug report
+        # itself comes from the backend's 24h stuck-agent job, which covers every
+        # run that is not COMPLETED. The activity never raises.
         if not self.parent_workflow_id:
             try:
                 await workflow.execute_activity(

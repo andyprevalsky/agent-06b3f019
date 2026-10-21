@@ -20,6 +20,7 @@ import {
   isSteelSessionRateLimited,
   runCrossProviderRotationLadder,
 } from '../blackbox/browser-provider-rotation.support';
+import { withKernelProxyCache } from '../blackbox/browser-provider-proxy-health.support';
 
 function testMobileCandidates(): void {
   const candidates = kernelProxyCandidates(
@@ -236,39 +237,6 @@ async function testPaginatedProxyReuseAndConcurrentOwnership(): Promise<void> {
   }
 }
 
-type CachedProxyRow = { proxyKey: string; proxyId: string };
-
-async function withProxyCache<T>(rows: Map<string, string>, run: () => Promise<T>): Promise<T> {
-  const model = prisma.browserProviderProxy;
-  const originalFind = model.findUnique;
-  const originalCreate = model.create;
-  const originalDeleteMany = model.deleteMany;
-  model.findUnique = (async ({
-    where,
-  }: {
-    where: { provider_proxyKey: { proxyKey: string } };
-  }): Promise<CachedProxyRow | null> => {
-    const proxyKey = where.provider_proxyKey.proxyKey;
-    const proxyId = rows.get(proxyKey);
-    return proxyId === undefined ? null : { proxyKey, proxyId };
-  }) as unknown as typeof model.findUnique;
-  model.create = (async ({ data }: { data: CachedProxyRow }) => {
-    rows.set(data.proxyKey, data.proxyId);
-    return data;
-  }) as unknown as typeof model.create;
-  model.deleteMany = (async ({ where }: { where: { proxyKey: string } }) => {
-    const count = rows.delete(where.proxyKey) ? 1 : 0;
-    return { count };
-  }) as unknown as typeof model.deleteMany;
-  try {
-    return await run();
-  } finally {
-    model.findUnique = originalFind;
-    model.create = originalCreate;
-    model.deleteMany = originalDeleteMany;
-  }
-}
-
 function ladderClient(listedIds: Record<string, string>): {
   client: Kernel;
   created: string[];
@@ -315,7 +283,7 @@ async function testDeletedCachedProxyKeepsLocation(): Promise<void> {
   const relaxed: string[] = [];
   const attempted: string[] = [];
 
-  const session = await withProxyCache(rows, () =>
+  const session = await withKernelProxyCache(rows, () =>
     createSessionOnKernelProxyLadder(
       client,
       candidates,
@@ -344,7 +312,7 @@ async function testDeletedCachedProxyKeepsLocation(): Promise<void> {
   const missing = ladderClient({});
   const relaxedAfterRefresh: string[] = [];
   const cityAttempts: string[] = [];
-  const fallback = await withProxyCache(missingRows, () =>
+  const fallback = await withKernelProxyCache(missingRows, () =>
     createSessionOnKernelProxyLadder(
       missing.client,
       candidates,
@@ -365,7 +333,7 @@ async function testDeletedCachedProxyKeepsLocation(): Promise<void> {
   // A transport timeout does not prove the proxy is gone: keep the row, relax.
   const timeoutRows = new Map([[city!.proxyKey, 'healthy-city-proxy']]);
   const timeout = ladderClient({});
-  const timedOut = await withProxyCache(timeoutRows, () =>
+  const timedOut = await withKernelProxyCache(timeoutRows, () =>
     createSessionOnKernelProxyLadder(timeout.client, candidates, async (proxy) => {
       if (proxy.source === 'kernel_residential_city') throw new Error('Request timed out.');
       return proxy;

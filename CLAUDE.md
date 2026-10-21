@@ -999,6 +999,12 @@ Run `/factory-review` (canonical behavior in `.claude/commands/factory-review.md
 
 ## Critical Rules
 
+IF YOU KEEP RUNNING INTO DEPLOY ISSUES AND YOUR ORIGINAL GOAL WAS RELATIVELY SIMPLE, CONSIDER REFACTORING YOUR APPROACH SO IT IS SIMPLER, LESS COMPLEX, AND TOUCHES LESS EXISTING FUNCTIONALITY.
+
+IF YOU KEEP RUNNING INTO DEPLOY ISSUES AND YOUR ORIGINAL GOAL WAS RELATIVELY SIMPLE, CONSIDER REFACTORING YOUR APPROACH SO IT IS SIMPLER, LESS COMPLEX, AND TOUCHES LESS EXISTING FUNCTIONALITY.
+
+IF YOU KEEP RUNNING INTO DEPLOY ISSUES AND YOUR ORIGINAL GOAL WAS RELATIVELY SIMPLE, CONSIDER REFACTORING YOUR APPROACH SO IT IS SIMPLER, LESS COMPLEX, AND TOUCHES LESS EXISTING FUNCTIONALITY.
+
 1. **Every async task needs an operational owner.** That owner checks output growth, exact process liveness, exit and owned cleanup on rule 19's cadence, and reports actionable failures immediately. Delegation does not remove monitoring responsibility. Once that handoff is verified, the parent follows the experiment loop: coordinate useful independent work, otherwise sleep interruptibly and check workers every 15 minutes. Do not duplicate the worker's polling or pause workers while the parent waits.
 
 1b. **Every trajectory must leave the system more reliable than it found it.** When you hit friction in a part of the codebase or tooling you're using — a broken teardown that leaks resources, a script that orphans child processes on kill, a missing retry on a transient error, a footgun that nearly clobbered a shared resource, a flaky gate — do NOT just work around it for yourself. FIX the underlying issue so no future agent (or human) hits it again, then verify the fix. The cost of a workaround is paid once by you; the cost of the unfixed defect is paid by every future run. This is not scope creep — it is the job (see rule 24). If a fix is genuinely too large to land now, at minimum capture it durably (a memory, a tracked issue, a `TODO` with full context) so it is not silently re-encountered. "It worked for me this time" is not done; "future runs can't hit this" is.

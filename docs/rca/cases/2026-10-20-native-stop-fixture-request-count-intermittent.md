@@ -108,3 +108,21 @@ recorded.
 A maximum retry count inside a shared deadline is distinct from proof that all
 attempts ran. Preserve both the actual request count and the original deadline
 before attributing an intermittent fixture failure to scheduling.
+
+## Recurrence during PR1562 qualification (2026-10-21 UTC)
+
+The unchanged final runtime at `36fa3174f7887b04572671aad44545e97905c971`
+reproduced the same assertion in the deployment structural gate: 1099 passed,
+one failed, four skipped, 1242 deselected in 683.42 seconds. The original log
+is retained at `.context/stuck-report/combined-static.log` (owning stage log
+`.context/deploy-runs/20261020-215955-987042/logs/deploy-command-structural-20261021-004804-3829816.log`).
+It records two exact fake stop calls against the unchanged six-second deadline.
+The temporary fixture had already been removed by pytest retention before
+collection; no original per-phase timing or stderr is available. Two superseded
+structural runners overlapped the early part of this run and were stopped by
+exact owned PID, but that observation does not establish causality.
+
+The exact unchanged parameter passed in 5.83 seconds; its retained log is
+`.context/stuck-report/native-stop-recheck.log`. The unchanged owning suite subsequently passed: 1100 passed, four skipped,
+1242 deselected in 556.75 seconds (`.context/stuck-report/native-stop-owning-suite.log`). No runtime implementation, assertion, deadline, retry policy
+or remote resource was changed. This recurrence remains unresolved, not fixed.

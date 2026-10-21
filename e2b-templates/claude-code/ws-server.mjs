@@ -252,6 +252,9 @@ function appendOutput(type, data) {
   broadcast(type, data);
 }
 
+// Startup branch events can be emitted before the native CLI is initialized.
+let activeTurn = null;
+
 function appendEvent(event) {
   const normalized = {
     version: 1,
@@ -846,20 +849,19 @@ function emitClaudeMessage(message) {
   }
 
   if (message.type === "user" && message.tool_use_result !== undefined) {
-    const resultPart = (
+    const results = (
       Array.isArray(message.message?.content) ? message.message.content : []
-    ).find((part) => part?.type === "tool_result");
+    ).filter((part) => part?.type === "tool_result");
+    const result = results.length === 1 ? results[0] : null;
     appendEvent({
       type: "tool_result",
       raw_type: "user.tool_result",
-      tool_use_result: message.tool_use_result,
-      // Pair the result with its tool_use (transcript rows) and keep the
-      // CLI's error flag: a failed Bash reports `is_error` + "Exit code N".
       tool_use_id:
-        typeof resultPart?.tool_use_id === "string"
-          ? resultPart.tool_use_id
-          : null,
-      is_error: resultPart?.is_error === true,
+        typeof result?.tool_use_id === "string" ? result.tool_use_id : null,
+      is_error: result ? result.is_error === true : null,
+      // Keep each original block; shared metadata cannot be assigned by position.
+      ...(results.length > 1 ? { tool_results: results } : {}),
+      tool_use_result: message.tool_use_result,
     });
     return;
   }
@@ -992,7 +994,6 @@ const deliveredTurnIds = new Map();
 const pendingDeliveries = new Map();
 const controlRequests = new Map();
 let controlSerial = Promise.resolve();
-let activeTurn = null;
 let effectiveSettings = {
   model: CLAUDE_CODE_MODEL,
   ...(process.env.CLAUDE_CODE_EFFORT
