@@ -45,7 +45,8 @@ vi.mock('@/lib/supabase', () => ({
 // Agent context — drive ClaudeCodeChip messages deterministically.
 const messagesRef: { current: unknown[] } = { current: [] };
 const agentRef: { current: { status?: string } | null } = { current: null };
-vi.mock('@/features/agent-context', () => ({
+vi.mock('@/features/agent-context', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/features/agent-context')>()),
   useAgentContext: () => ({ messages: messagesRef.current, agent: agentRef.current }),
 }));
 

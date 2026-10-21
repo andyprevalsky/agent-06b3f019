@@ -14,6 +14,7 @@ import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
+import { makeItem as makePlaidItem } from './plaid.fixtures';
 
 import QueryInput from '@/features/terminal-component-group/components/QueryInput';
 import BrowserStatusBar from '@/features/terminal-component-group/components/BrowserStatusBar';
@@ -288,7 +289,9 @@ describe('top-right app icons', () => {
   it('a Plaid bank that needs sign-in also raises the dot, named in the tooltip', async () => {
     server.use(
       http.get(`${API_BASE}/integrations/plaid/items`, () =>
-        HttpResponse.json({ items: [{ institutionName: 'Chase', status: 'REQUIRES_REAUTH' }] }),
+        HttpResponse.json({
+          items: [makePlaidItem({ institutionName: 'Chase', status: 'REQUIRES_REAUTH' })],
+        }),
       ),
     );
     mockSession();
