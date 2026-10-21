@@ -67,7 +67,7 @@ export interface MessageListViewProps {
   onIncreaseCostLimit?: () => void;
   onNavigateToAgent?: (agentId: string) => void;
   onSubmitFeedback?: (feedback: FeedbackData) => Promise<void>;
-  onSendMessage: (text: string) => void;
+  onSendMessage: (text: string) => void | Promise<void>;
 }
 
 interface ThinkingIndicatorsProps {

@@ -42,7 +42,7 @@ export function StreamingTools({ tools, compact }: StreamingToolsProps) {
 
 interface StreamingAttentionBubbleProps {
   attention: StreamingAttention;
-  onSendMessage: (text: string) => void;
+  onSendMessage: (text: string) => void | Promise<void>;
 }
 
 export function StreamingAttentionBubble({

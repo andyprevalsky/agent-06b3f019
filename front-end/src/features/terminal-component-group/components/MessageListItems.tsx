@@ -67,7 +67,7 @@ interface MessageListItemsProps {
   onAnimationComplete: () => void;
   onNavigateToAgent?: (agentId: string) => void;
   selectedAgentId: string | null;
-  onSendMessage?: (text: string) => void;
+  onSendMessage?: (text: string) => void | Promise<void>;
   compact?: boolean;
   onSubmitFeedback?: (feedback: FeedbackData) => Promise<void>;
   exploreStepMap: Map<string, ExploreStep[]>;

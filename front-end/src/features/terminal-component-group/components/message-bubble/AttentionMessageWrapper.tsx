@@ -14,7 +14,7 @@ interface AttentionMessageWrapperProps {
   shouldType?: boolean;
   isStreaming?: boolean;
   onTypingComplete?: () => void;
-  onSendMessage?: (message: string) => void;
+  onSendMessage?: (message: string) => void | Promise<void>;
 }
 
 export function AttentionMessageWrapper({

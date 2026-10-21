@@ -191,7 +191,7 @@ export interface MessageListState {
   animatedTokenCount: number;
   thinkingVisible: boolean;
   webSearchGrouping: WebSearchTurnGrouping;
-  handleSendMessage: (text: string) => void;
+  handleSendMessage: (text: string) => Promise<void>;
 }
 
 export function useMessageListState({
@@ -260,11 +260,7 @@ export function useMessageListState({
   );
 
   const handleSendMessage = useCallback(
-    (text: string): void => {
-      ctx.sendMessage(text).catch((error: unknown) => {
-        console.error('Failed to send message:', error);
-      });
-    },
+    (text: string): Promise<void> => ctx.sendMessage(text),
     [ctx],
   );
 
