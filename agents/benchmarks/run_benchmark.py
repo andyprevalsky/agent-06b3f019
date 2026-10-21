@@ -15163,6 +15163,10 @@ async def _run_single_task_as_run_user(
                 tree = canonicalize_agent_tree(
                     await collect_tree_messages(agent_id, tree_agents, lambda a: get_agent(base_url, a))
                 )
+                if kill_evidence is not None:
+                    # Killed fixtures are absent from the active-tree API. Preserve their
+                    # actual pre-kill transcripts with verified terminal workflow states.
+                    tree.update(kill_evidence["fixture"]["tree"])
                 if not tree:
                     raise RuntimeError("collect_tree_messages returned a non-agent logs.tree")
                 child_transcripts = tree_child_transcript_count(tree, agent_id)

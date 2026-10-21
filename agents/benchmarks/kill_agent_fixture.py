@@ -6,6 +6,7 @@ from temporalio.client import Client
 from config import load_config
 from temporal_connection import temporal_connect_options
 from utils.tool_schemas import ResponseSchemaConfig
+from benchmarks.logs import collect_tree_messages
 
 TASK = "kill-agent-subtree"
 
@@ -29,6 +30,13 @@ async def prepare(base_url, root_id, user_id, api_key, task_queue):
             response = await client.post(f"{base_url}/api/agents", headers=headers, json=body)
             response.raise_for_status()
             fixture["agents"].append({"label": label, **response.json()})
+        async def snapshot(agent_id):
+            response = await client.get(f"{base_url}/api/agents/{agent_id}", headers=headers)
+            response.raise_for_status()
+            return response.json()
+        rows = [{"agent_id": row["agent_id"],
+                 "parent_agent_id": root_id if row["label"] != "grandchild" else fixture["agents"][0]["agent_id"]} for row in fixture["agents"]]
+        fixture["tree"] = await collect_tree_messages(root_id, rows, snapshot)
         target = fixture["agents"][0]["agent_id"]
         control = fixture["agents"][2]["agent_id"]
         response = await client.post(f"{base_url}/api/agents/{root_id}/messages", headers=headers,
@@ -60,6 +68,8 @@ async def verify_and_cleanup(base_url, api_key, fixture):
     for row in fixture["agents"]:
         description = await temporal.get_workflow_handle(row.get("temporal_workflow_id") or row["agent_id"]).describe()
         result["cleanup_states"][row["label"]] = description.status.name
+    for row in fixture["agents"]:
+        fixture["tree"][row["agent_id"]]["status"] = result["cleanup_states"][row["label"]]
     if any(state == "RUNNING" for state in result["cleanup_states"].values()):
         raise RuntimeError("Owned benchmark workflow cleanup remains unconfirmed")
     return result
