@@ -18,6 +18,7 @@ import {
   selectRotationStep,
   type RotationStep,
 } from './browser/rotation';
+import type { TilionCarriedState } from './browser/tilion';
 import { storedBrowserProvider } from './browser/types';
 import { browserProviderEnabled, browserUseEnabled } from './browser/config';
 
@@ -48,6 +49,25 @@ export interface BrowserSessionResumeDependencies {
   injectUserData: typeof injectUserData;
   closeSession: typeof closeSession;
   getBrowserCaptchaTelemetry: typeof getBrowserCaptchaTelemetry;
+}
+
+/**
+ * Worker-captured browser state (cookies, localStorage, IndexedDB; Playwright
+ * storageState shape). Tilion admits one CDP client, so the backend never
+ * harvests a live Tilion session itself: the worker's capture is the state a
+ * Tilion replacement carries.
+ */
+export interface BrowserStateCarry {
+  carriedState?: TilionCarriedState;
+}
+
+/** Provider options for a replacement; a non-literal so providers ignoring the carry still type-check. */
+function replacementOptions(carry: BrowserStateCarry) {
+  const options: { keepValidationConnection: true; carriedState?: TilionCarriedState } = {
+    keepValidationConnection: true,
+  };
+  if (carry.carriedState !== undefined) options.carriedState = carry.carriedState;
+  return options;
 }
 
 const defaultResumeDependencies: BrowserSessionResumeDependencies = {
@@ -234,7 +254,7 @@ async function reservePasskeysForRealm(userId: string, authRealm: string) {
 
 export async function resumeBrowserSession(
   taskId: string,
-  options: { forceFreshProfile?: boolean } = {},
+  options: { forceFreshProfile?: boolean } & BrowserStateCarry = {},
   dependencies: BrowserSessionResumeDependencies = defaultResumeDependencies
 ) {
   log.info('Resuming browser task', {
@@ -242,10 +262,13 @@ export async function resumeBrowserSession(
     forceFreshProfile: options.forceFreshProfile,
   });
 
-  const result = await dependencies.resumeSession(taskId, {
-    ...options,
-    keepValidationConnection: true,
-  });
+  const resumeOptions = {
+    ...replacementOptions(options),
+    ...(options.forceFreshProfile !== undefined
+      ? { forceFreshProfile: options.forceFreshProfile }
+      : {}),
+  };
+  const result = await dependencies.resumeSession(taskId, resumeOptions);
   return assembleResumeResponse(taskId, result, dependencies);
 }
 
@@ -425,6 +448,7 @@ export async function rotateBrowserProxy(
   taskId: string,
   userId?: string,
   currentUrl?: string,
+  carry: BrowserStateCarry = {},
   dependencies: BrowserSessionResumeDependencies = defaultResumeDependencies
 ) {
   // Reserve one rotation atomically. UPDATE ... RETURNING both enforces the cap
@@ -499,9 +523,7 @@ export async function rotateBrowserProxy(
 
   let result: Awaited<ReturnType<typeof rotateProxy>>;
   try {
-    result = await dependencies.rotateProxy(taskId, step, {
-      keepValidationConnection: true,
-    });
+    result = await dependencies.rotateProxy(taskId, step, replacementOptions(carry));
   } catch (error) {
     // A transient provider failure did not deliver a new IP, so return its
     // reservation to the shared budget. The decrement is atomic and composes
