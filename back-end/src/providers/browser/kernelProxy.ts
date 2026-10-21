@@ -320,6 +320,7 @@ const STICKY_PROXY_ERRORS = [
   'invalid proxy',
   'proxy unavailable',
   'proxy is unavailable',
+  'proxy is marked unavailable',
   'no_peer',
   'no peer',
 ];
@@ -383,6 +384,9 @@ export function isKernelProxyAvailabilityError(error: unknown): boolean {
     'no peer',
     'proxy unavailable',
     'proxy is unavailable',
+    'proxy is marked unavailable',
+    'proxy health check failed',
+    'error when testing a connection through the proxy',
     'proxy configuration validation failed',
     'invalid proxy',
     'no available',
