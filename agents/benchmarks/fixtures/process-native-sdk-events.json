@@ -1,0 +1,66 @@
+{
+  "provenance": {
+    "source_sha": "65b4e225defbc988b3f0dd0d3b7fe7b10da70694",
+    "source_sha256": "bf3b3f405af3719c4f665f282e2a2dfadec245c6bd8279e2e48bffac81bdebae",
+    "template_id": "kng6z68u1md05bfdhq47",
+    "observed_at": "2026-10-21T10:05:47.457Z",
+    "raw_receipt_sha256": "1d23b28d5be5f98e3d6ccec8af2acc0f708fb6c67620acb9362925b78d6dd2a4",
+    "native_absence_verified": true
+  },
+  "events": [
+    {
+      "version": 1,
+      "provider": "claude",
+      "timestamp": "2026-10-21T10:06:03.067Z",
+      "type": "tool_use",
+      "raw_type": "assistant.tool_use",
+      "tool": "Bash",
+      "tool_use_id": "toolu_01VAdBFk8H8Xf9Q2kkeGDksd",
+      "input": {
+        "command": "python3 -c \"print('PROCESS_NATIVE_OK')\"",
+        "description": "Print native OK marker"
+      },
+      "paths": []
+    },
+    {
+      "version": 1,
+      "provider": "claude",
+      "timestamp": "2026-10-21T10:06:03.640Z",
+      "type": "tool_result",
+      "raw_type": "user.tool_result",
+      "tool_use_id": "toolu_01VAdBFk8H8Xf9Q2kkeGDksd",
+      "is_error": false,
+      "tool_use_result": {
+        "stdout": "PROCESS_NATIVE_OK",
+        "stderr": "",
+        "interrupted": false,
+        "isImage": false,
+        "noOutputExpected": false
+      }
+    },
+    {
+      "version": 1,
+      "provider": "claude",
+      "timestamp": "2026-10-21T10:06:05.648Z",
+      "type": "tool_use",
+      "raw_type": "assistant.tool_use",
+      "tool": "Bash",
+      "tool_use_id": "toolu_01PQ265K52wrdHyTk9VW8cTc",
+      "input": {
+        "command": "python3 -c \"import sys; print('PROCESS_NATIVE_EXPECTED_FAILURE'); sys.exit(7)\"",
+        "description": "Print expected failure marker and exit nonzero"
+      },
+      "paths": []
+    },
+    {
+      "version": 1,
+      "provider": "claude",
+      "timestamp": "2026-10-21T10:06:05.685Z",
+      "type": "tool_result",
+      "raw_type": "user.tool_result",
+      "tool_use_id": "toolu_01PQ265K52wrdHyTk9VW8cTc",
+      "is_error": true,
+      "tool_use_result": "Error: Exit code 7\nPROCESS_NATIVE_EXPECTED_FAILURE"
+    }
+  ]
+}

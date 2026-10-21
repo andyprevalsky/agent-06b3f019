@@ -69,7 +69,10 @@ impossible condition values, evaluator drift and fixture drift; `--write`
 regenerates only changed Process Bench evaluator entries. Existing task bytes
 are preserved. Catalog loading and canonical evaluation enforce that generated
 contract. Native SDK command/result checks precede the existing tree-aware
-semantic judge, which receives original full evidence without tail truncation.
+semantic judge, which receives the original available rows without further tail
+truncation. Process checks require the native full event count to match the
+retained events. The existing producer caps SDK rows at 200 events; longer or
+missing-count histories fail closed before judging rather than hiding a prefix.
 The fixture permits incorrect order so the evaluator, rather than the fixture,
 must catch skipped work. A successful operation is still insufficient when
 substantive input, original scope, handoff or process evidence is missing.
@@ -96,6 +99,14 @@ controls run in the existing `benchmark` blackbox domain and deploy coverage.
 They execute real fixture operations with captured native-event envelopes and
 mock only the semantic provider boundary. This proves enforcement and complete
 judge input, not model judgment accuracy or a live ten-task success rate.
+The sanitized `fixtures/process-native-sdk-events.json` also records an actual
+E2B success and explicit error-string result, with source/template provenance.
+Errors remain failed evidence; numeric exit codes are not inferred from prose.
+Original batch result blocks are retained, but association with shared metadata
+is unsupported and fails closed. Local writable fixtures are not cryptographic
+proof: recorded mutations are rejected and the full semantic evidence remains
+required. The learning ledger records these implementation findings separately
+from the saved task1 observations, without claiming a task1 cause or fix.
 
 Every detached launcher prints the private log and exact controller exit marker.
 The controller log prints `scripts/run-bench monitor <run-directory>` for its

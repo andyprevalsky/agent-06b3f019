@@ -147,6 +147,8 @@ def _sdk_streams(data: dict) -> list[list[dict]]:
         _require(text.startswith(prefix), "missing original SDK event envelope")
         events = json.loads(text[len(prefix):])["code_agent_events"]
         _require(isinstance(events, list), "missing SDK event list")
+        count = metadata.get("steps_taken")
+        _require(type(count) is int and count == len(events), "missing/truncated SDK evidence count")
         identity = metadata.get("task_id")
         _require(isinstance(identity, str) and bool(identity), "missing code session identity")
         if identity in streams:
@@ -187,14 +189,21 @@ def _commands(events: list[dict]):
         elif kind == "command" and event.get("status") == "completed":
             command = event.get("command", "")
             _require(command in pending_commands, "missing native command start")
-            yield pending_commands.pop(command), index, command, event.get("output", ""), event.get("exit_code")
+            code = event.get("exit_code")
+            _require(type(code) is int, "missing/invalid native command exit code")
+            yield pending_commands.pop(command), index, command, event.get("output", ""), code
         elif kind == "tool_use":
             identity = event.get("tool_use_id")
             _require(isinstance(identity, str) and bool(identity) and identity not in pending,
                      "missing/duplicate native tool identity")
             pending[identity] = (index, event)
         elif kind == "tool_result":
-            result = event.get("tool_use_result") or {}
+            _require(not event.get("tool_results"), "ambiguous native batch result association")
+            result = event.get("tool_use_result")
+            if isinstance(result, str):
+                _require(event.get("is_error") is True, "native string result lacks explicit failure status")
+                # Failure classification only: never infer an exit code from prose.
+                result = {"stdout": result, "exit_code": 1}
             _require(isinstance(result, dict), "missing native tool result")
             identity = event.get("tool_use_id") or result.get("tool_use_id")
             if event.get("tool_use_id") and result.get("tool_use_id"):
@@ -202,12 +211,15 @@ def _commands(events: list[dict]):
             _require(identity in pending, "unmatched native result identity (old codec or unrelated result)")
             idx, started = pending.pop(identity)
             if started.get("tool") == "Bash":
-                is_error = event.get("is_error", result.get("is_error"))
-                code = result.get("exitCode", result.get("exit_code"))
-                _require(type(is_error) is bool or type(code) is int, "native result lacks success/error status")
-                if code is None:
-                    code = 0 if is_error is False else 1
-                if is_error or result.get("interrupted"):
+                statuses = [v for v in (event.get("is_error"), result.get("is_error")) if v is not None]
+                codes = [v for v in (result.get("exitCode"), result.get("exit_code")) if v is not None]
+                _require(all(type(v) is bool for v in statuses) and len(set(statuses)) <= 1,
+                         "invalid/conflicting native error status")
+                _require(all(type(v) is int for v in codes) and len(set(codes)) <= 1,
+                         "invalid/conflicting native exit code")
+                _require(bool(statuses or codes), "native result lacks success/error status")
+                code = codes[0] if codes else (1 if statuses[0] else 0)
+                if any(statuses) or result.get("interrupted"):
                     code = 1
                 yield idx, index, started.get("input", {}).get("command", ""), result.get("stdout", ""), code
 

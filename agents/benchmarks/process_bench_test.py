@@ -68,7 +68,7 @@ def _trace(task):
     for event in events:
         native_events.extend([dict(type='command',status='started',command=event['command']),event])
     events=native_events
-    row = dict(role='TOOL',message='Code-agent SDK event JSON:\n\n'+json.dumps({'code_agent_events':events}),metadata=dict(toolName='code_agent_sdk_events',toolStatus='FINISHED',task_id='fixture-session'))
+    row = dict(role='TOOL',message='Code-agent SDK event JSON:\n\n'+json.dumps({'code_agent_events':events}),metadata=dict(toolName='code_agent_sdk_events',toolStatus='FINISHED',task_id='fixture-session',steps_taken=len(events)))
     data = dict(agent=dict(agent_id='root',status='COMPLETED',progress=1.0),messages=[dict(role='ASSISTANT',message='Everything is perfectly complete.')],_semantic_evaluator_tree={'root':dict(parent_agent_id=None,messages=[]),'child':dict(parent_agent_id='root',messages=[row])},_benchmark={})
     return data
 
@@ -83,6 +83,7 @@ def _store(row, events):
     if all(e.get('type')=='command' and e.get('status')=='completed' for e in events):
         events=[item for e in events for item in (dict(type='command',status='started',command=e['command']),e)]
     row['message']='Code-agent SDK event JSON:\n\n'+json.dumps({'code_agent_events':events})
+    row['metadata']['steps_taken'] = len(events)
 
 
 def test_all_ten_real_fixture_traces_pass_and_select():
@@ -292,3 +293,150 @@ def test_action_started_before_prerequisite_result_fails():
     row['message']='Code-agent SDK event JSON:\n\n'+json.dumps({'code_agent_events':events})
     assert not check_process_trace(task.process_spec,data)[0]
 
+
+
+def _observed_native_sdk_events():
+    path = Path(__file__).with_name('fixtures') / 'process-native-sdk-events.json'
+    return json.loads(path.read_text())['events']
+
+
+def test_observed_native_sdk_success_and_string_error():
+    from benchmarks.process_bench import _commands
+    events = _observed_native_sdk_events()
+    commands = list(_commands(events))
+    assert len(commands) == 2
+    assert commands[0][4] == 0 and commands[0][3] == 'PROCESS_NATIVE_OK'
+    assert commands[1][4] != 0 and 'PROCESS_NATIVE_EXPECTED_FAILURE' in commands[1][3]
+    # An unrelated failed command is retained as evidence, not an unmet process step.
+    task = _task(); trace = _trace(task)
+    row = trace['_semantic_evaluator_tree']['child']['messages'][0]
+    fixture_events = json.loads(row['message'].split('\n\n', 1)[1])['code_agent_events']
+    row['message'] = 'Code-agent SDK event JSON:\n\n' + json.dumps({'code_agent_events': events + fixture_events})
+    row['metadata']['steps_taken'] = len(events) + len(fixture_events)
+    assert check_process_trace(task.process_spec, trace)[0]
+
+
+@pytest.mark.parametrize('mutation', ['unknown-status', 'string-success', 'id-mismatch'])
+def test_native_string_error_cannot_claim_success_or_wrong_identity(mutation):
+    from benchmarks.process_bench import _commands
+    events = _observed_native_sdk_events()
+    result = events[-1]
+    if mutation == 'unknown-status': result.pop('is_error')
+    elif mutation == 'string-success': result['is_error'] = False
+    else: result['tool_use_id'] = 'unrelated-native-call'
+    with pytest.raises(ValueError): list(_commands(events))
+
+
+def test_native_fixture_string_failure_cannot_complete_required_step():
+    task = _task(); trace = _trace(task)
+    row = trace['_semantic_evaluator_tree']['child']['messages'][0]
+    events = json.loads(row['message'].split('\n\n', 1)[1])['code_agent_events']
+    native = _observed_native_sdk_events()[-2:]
+    native[0]['input']['command'] = events[0]['command']
+    row['message'] = 'Code-agent SDK event JSON:\n\n' + json.dumps({'code_agent_events': native + events[2:]})
+    row['metadata']['steps_taken'] = len(native) + len(events[2:])
+    assert not check_process_trace(task.process_spec, trace)[0]
+
+
+def test_ambiguous_native_batch_cannot_credit_process_steps():
+    task = _task(); trace = _trace(task)
+    row, events = _events(trace)
+    first = events[0]
+    native = [
+        dict(type='tool_use', tool='Bash', tool_use_id='first', input={'command': first['command']}),
+        dict(type='tool_use', tool='Bash', tool_use_id='second', input={'command': 'false'}),
+        dict(type='tool_result', tool_use_id='first', is_error=False,
+             tool_use_result={'stdout': first['output'], 'exitCode': 0},
+             tool_results=[
+                 dict(type='tool_result', tool_use_id='first', is_error=False, content=first['output']),
+                 dict(type='tool_result', tool_use_id='second', is_error=True, content='failed'),
+             ]),
+    ]
+    # Even apparently useful shared metadata is not credited to either ID.
+    _store(row, native + [item for event in events[1:] for item in
+        (dict(type='command', status='started', command=event['command']), event)])
+    passed, reason = check_process_trace(task.process_spec, trace)
+    assert not passed and 'ambiguous native batch' in reason
+
+
+@pytest.mark.parametrize('case,action,day,reason', [
+    ('purchase-approval', 'read-request', 'not-a-day', 'invalid business action input'),
+    ('purchase-approval', 'read-request', None, 'invalid business action input'),
+    ('purchase-approval', 'read-request', '-1', 'invalid business action input'),
+    ('unknown-case', 'read-request', '0', 'unknown fixture case/action'),
+    ('purchase-approval', 'unknown-action', '0', 'unknown fixture case/action'),
+])
+def test_invalid_fixture_calls_emit_no_completion_receipt(tmp_path, case, action, day, reason):
+    module_spec = importlib.util.spec_from_file_location('invalid_process_fixture', ASSETS / 'process-fixture.py')
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    fixtures = ASSETS / 'process-fixtures.json'
+    fingerprint = hashlib.sha256(fixtures.read_bytes()).hexdigest()
+    output = tmp_path / 'artifacts'
+    with pytest.raises(ValueError, match=reason):
+        module.execute(case, action, 'buyer', 'order', day, '{}', fingerprint,
+                       fixture_path=fixtures, output_dir=output)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize('count', [None, True, '18', -1])
+def test_missing_or_invalid_native_event_count_fails_closed(count):
+    task = _task(); trace = _trace(task)
+    row = trace['_semantic_evaluator_tree']['child']['messages'][0]
+    row['metadata']['steps_taken'] = count
+    passed, reason = check_process_trace(task.process_spec, trace)
+    assert not passed and 'SDK evidence count' in reason
+
+
+def test_actual_producer_truncation_cannot_hide_earlier_forbidden_action():
+    from domains.spawn_claude_code_agent.service import _persist_code_agent_judge_evidence
+    task = _task(); trace = _trace(task)
+    row = trace['_semantic_evaluator_tree']['child']['messages'][0]
+    events = json.loads(row['message'].split('\n\n', 1)[1])['code_agent_events']
+    full = [dict(type='file_change', changes=[{'path': FIXTURE_PATH}])]
+    full += [dict(type='progress', text='unrelated progress') for _ in range(205)]
+    full += events
+    row['message'] = 'Code-agent SDK event JSON:\n\n' + json.dumps({'code_agent_events': full})
+    row['metadata']['steps_taken'] = len(full)
+    assert not check_process_trace(task.process_spec, trace)[0]
+    persisted = AsyncMock()
+    with patch('domains.spawn_claude_code_agent.service.save_claude_code_message', persisted):
+        asyncio.run(_persist_code_agent_judge_evidence(
+            agent_id='root', task_id='fixture-session', code_provider='claude',
+            code_events=full, output_files=[], action_summary=[]))
+    original = persisted.call_args_list[0].kwargs
+    retained = json.loads(original['message'].split('\n\n', 1)[1])['code_agent_events']
+    assert len(retained) == 200 and original['steps_taken'] == len(full) > 200
+    assert not any(event.get('type') == 'file_change' for event in retained)
+    row['message'] = original['message']
+    row['metadata']['steps_taken'] = original['steps_taken']
+    from benchmarks import run_benchmark as runner
+    with patch('helpers.llm.check_progress', AsyncMock()) as judge:
+        passed, reason, results = asyncio.run(runner._run_declared_evaluators(task, trace))
+    assert not passed and 'truncated SDK evidence count' in reason
+    assert results[0]['id'] == 'process-native-trace'
+    judge.assert_not_called()
+
+
+@pytest.mark.parametrize('code', [False, '0', None])
+def test_native_command_exit_code_requires_integer(code):
+    task = _task(); trace = _trace(task); row, events = _events(trace)
+    events[0]['exit_code'] = code
+    _store(row, events)
+    passed, reason = check_process_trace(task.process_spec, trace)
+    assert not passed and 'native command exit code' in reason
+
+
+@pytest.mark.parametrize('changes', [
+    {'is_error': True}, {'is_error': 'false'},
+    {'exitCode': False}, {'exit_code': 1},
+])
+def test_native_result_rejects_conflicting_or_invalid_status(changes):
+    from benchmarks.process_bench import _commands
+    result = {'stdout': 'output', 'exitCode': 0, **changes}
+    events = [
+        dict(type='tool_use', tool='Bash', tool_use_id='A', input={'command': 'command'}),
+        dict(type='tool_result', tool_use_id='A', is_error=False, tool_use_result=result),
+    ]
+    with pytest.raises(ValueError):
+        list(_commands(events))

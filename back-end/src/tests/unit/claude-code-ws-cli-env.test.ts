@@ -193,3 +193,24 @@ test('native Claude result codec preserves action identity and error evidence', 
   assert.equal(events.at(-1)?.tool_use_id, null);
   assert.equal(events.at(-1)?.is_error, null);
 });
+
+test('native Claude batch retains every original block without assigning shared metadata', () => {
+  const source = readFileSync(wsServerPath, 'utf8');
+  const start = source.indexOf('function emitClaudeMessage(message)');
+  const end = source.indexOf('async function runClaudeCli()', start);
+  const events: Record<string, unknown>[] = [];
+  const emit = runInNewContext(`(${source.slice(start, end).trim()})`, {
+    appendEvent: (event: Record<string, unknown>) => events.push(event),
+  }) as (message: unknown) => void;
+  const blocks = [
+    { type: 'tool_result', tool_use_id: 'native-first', is_error: false, content: 'first output' },
+    { type: 'tool_result', tool_use_id: 'native-second', is_error: true, content: 'second error' },
+  ];
+  const shared = { stdout: 'ambiguous shared output' };
+  emit({ type: 'user', message: { content: blocks }, tool_use_result: shared });
+  const event = events.at(-1);
+  assert.deepEqual(event?.tool_results, blocks);
+  assert.equal(event?.tool_use_result, shared);
+  assert.equal(event?.tool_use_id, null);
+  assert.equal(event?.is_error, null);
+});

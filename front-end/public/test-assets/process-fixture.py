@@ -19,12 +19,19 @@ def execute(case, action, actor, entity, day, input_json, expected_hash, *, fixt
     if hashlib.sha256(raw).hexdigest() != expected_hash:
         raise ValueError("fixture fingerprint does not match")
     data = json.loads(input_json)
-    if not isinstance(data, dict) or not actor or not entity or int(day) < 0:
+    try:
+        business_day = int(day)
+    except (TypeError, ValueError):
+        raise ValueError("invalid business action input") from None
+    if not isinstance(data, dict) or not actor or not entity or business_day < 0:
         raise ValueError("invalid business action input")
     fixtures = json.loads(raw)
-    result = fixtures[case][action]
+    try:
+        result = fixtures[case][action]
+    except KeyError:
+        raise ValueError(f"unknown fixture case/action: {case}/{action}") from None
     receipt = dict(process_receipt=1, case=case, action=action, actor=actor,
-                   entity=entity, day=int(day), input=data, output=result)
+                   entity=entity, day=business_day, input=data, output=result)
     output_dir = output_dir or Path("/home/user/output/process-artifacts")
     output_dir.mkdir(parents=True, exist_ok=True)
     # Append: repeated/mistaken actions stay visible, never rewrite history.
