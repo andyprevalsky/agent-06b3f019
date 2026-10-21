@@ -1501,6 +1501,16 @@ historical scores are provenance, never fresh comparison scores. Protocol
 mismatches fail closed and require explicit migration. `--iterations N` is an
 explicit persisted budget change; omit it to continue the saved budget.
 
+Latest continuation: ten new mutations (#12–#21), all evaluated on the same
+500 validation cases, produced no new winner. Best new joint error was 8.55%
+worse than the re-evaluated incoming champion. No >=5% late improvement below
+the previous best followed the four-candidate plateau. Retain the champion;
+next mutation is #22, with 27 candidate prompts in durable history. The saved
+per-run budget and patience are now 10. No fresh eligible production examples
+arrived in this short window, and the historical 2,000-case test was not rerun.
+Local curve/report: `.context/jev-weekly/2026-10-21T024539.635435_0000/optimization/learning-curve.json`.
+This is a prompt-search observation, not a proof about statistical double descent.
+
 Every weekly run durably freezes the incoming prompt before a read-only
 production pull. Newly observed families with unseen normalized goals receive
 a permanent random 80/20 training/sealed split. All prefixes of the sealed 20%

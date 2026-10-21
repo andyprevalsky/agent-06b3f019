@@ -41,6 +41,14 @@ def main():
                        'progress_mae_pp': m['progress_mae_pp'], 'trace_macro_mae_pp':m['trace_macro_mae_pp'],
                        'eta_log_mae':m['eta_log_mae']})
     report={'baseline':baseline, 'points':points, **analyze(points)}
+    merged_path=a.experiment/'evaluations/merged-validation.json'
+    if merged_path.exists():
+        m=json.loads(merged_path.read_text())['metrics']
+        if not m['failed']:
+            report['component_merge']={'joint_loss':joint_loss(m,baseline),
+                'trace_macro_mae_pp':m['trace_macro_mae_pp'], 'eta_log_mae':m['eta_log_mae'],
+                'progress_mae_pp':m['progress_mae_pp'],
+                'note':'Evaluated after the mutations; distinguish this from a late mutation drop.'}
     (a.experiment/'learning-curve.json').write_text(json.dumps(report,indent=2))
     im=Image.new('RGB',(1450,800),'#f6f8fc');d=ImageDraw.Draw(im)
     def text(x,y,s,size=20,color='#233047'):
@@ -48,7 +56,8 @@ def main():
     text(35,24,'Joint progress + ETA optimization: mutation trajectory',32)
     text(35,75,'Fixed 500-case validation set. Errors normalized to the incoming champion; lower is better.',22)
     x,y,w,h=110,175,1280,480
-    values=[1.]+[v for t in points for v in (t['joint_loss'],t['trace_macro_mae_pp']/baseline['trace_macro_mae_pp'],t['eta_log_mae']/baseline['eta_log_mae'])]
+    plot_points=points+([dict(iteration='Merge',**report['component_merge'])] if 'component_merge' in report else [])
+    values=[1.]+[v for t in plot_points for v in (t['joint_loss'],t['trace_macro_mae_pp']/baseline['trace_macro_mae_pp'],t['eta_log_mae']/baseline['eta_log_mae'])]
     lo=max(0,min(values)-.08);hi=max(values)+.08
     scale=lambda v:y+h*(hi-v)/(hi-lo)
     for i in range(6):
@@ -60,18 +69,18 @@ def main():
             ('ETA error','#dd8447',lambda t:t['eta_log_mae']/baseline['eta_log_mae'])]
     for n,(label,color,get) in enumerate(series):
         text(125+n*380,125,label,22,color)
-        pts=[(x,scale(1))]+[(x+w*(i+1)/max(1,len(points)),scale(get(t))) for i,t in enumerate(points)]
+        pts=[(x,scale(1))]+[(x+w*(i+1)/max(1,len(plot_points)),scale(get(t))) for i,t in enumerate(plot_points)]
         if len(pts)>1:d.line(pts,fill=color,width=3)
         for px,py in pts:d.ellipse((px-4,py-4,px+4,py+4),fill=color)
     best=1.
     best_points=[(x,scale(best))]
-    for i,t in enumerate(points):
+    for i,t in enumerate(plot_points):
         best=min(best,t['joint_loss'])
-        best_points.append((x+w*(i+1)/max(1,len(points)),scale(best)))
+        best_points.append((x+w*(i+1)/max(1,len(plot_points)),scale(best)))
     if len(best_points)>1:d.line(best_points,fill='#263044',width=3)
     text(1110,125,'Best joint',22,'#263044')
     text(x-25,y+h+15,'Start',17)
-    for i,t in enumerate(points):text(x+w*(i+1)/len(points)-10,y+h+15,str(t['iteration']),17)
+    for i,t in enumerate(plot_points):text(x+w*(i+1)/len(plot_points)-10,y+h+15,str(t['iteration']),17)
     text(520,y+h+55,'Mutation number (candidate scores, not test scores)',20)
     message='No >=5% late joint-error drop detected after a four-candidate plateau.'
     if report['late_drops']:message='Late drop detected: '+', '.join(str(r['iteration']) for r in report['late_drops'])
