@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { phoneFixtureNumber } from './phone-fixture-users';
+import { createPhoneFixtureUser } from './iphone-test-user';
 import { config } from 'dotenv';
 import { randomUUID } from 'crypto';
 import { prisma } from '../../providers/database';
@@ -33,25 +33,7 @@ async function request(
   const data = await response.json().catch(() => null);
   return { status: response.status, data };
 }
-async function user(phone?: string) {
-  const userId = `iphone-blackbox-${randomUUID()}`;
-  users.push(userId);
-  await prisma.user.create({
-    data: {
-      userId,
-      phone:
-        phone === '+19729777432'
-          ? phoneFixtureNumber()
-          : phone
-            ? `+1888${BigInt('0x' + randomUUID().replaceAll('-', '').slice(0, 12))
-                .toString()
-                .padStart(10, '0')
-                .slice(-10)}`
-            : undefined,
-    },
-  });
-  return userId;
-}
+const user = (phone?: string) => createPhoneFixtureUser(users, phone);
 test('unauthenticated capability is rejected', async () => {
   const response = await request('/capability');
   assert(response.status === 401, `expected 401, got ${response.status}`);

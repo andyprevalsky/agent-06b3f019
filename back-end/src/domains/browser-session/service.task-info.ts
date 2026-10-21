@@ -141,7 +141,7 @@ function buildTaskInfoResponse(
     passkeys: injection.passkeys,
     user_settings: injection.userSettings,
     browser_session_metadata: {
-      provider: session.sessionId?.startsWith('local-') ? 'local' : provider,
+      provider: session.sessionId?.startsWith('local-') === true ? 'local' : provider,
       profile_id: profileId,
       ...(provider === 'steel' ? { steel_profile_id: profileId } : {}),
     },

@@ -201,7 +201,7 @@ export async function refreshAuthAssistanceSession(id: string, userId: string) {
     throw new BadRequestError('Browser context is not available for this request');
   const liveSteelSessionId = session.sessionId;
 
-  if (liveSteelSessionId?.startsWith('local-')) {
+  if (liveSteelSessionId?.startsWith('local-') === true) {
     const liveViewUrl = interactiveDebugUrl(session.debugUrl);
     return {
       request: serializeRequest(request),
