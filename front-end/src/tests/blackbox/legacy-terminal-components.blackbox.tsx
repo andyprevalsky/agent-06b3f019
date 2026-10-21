@@ -368,10 +368,16 @@ describe('QueryInput (blackbox)', () => {
     // Model picker shows both model options with their descriptions
     await waitFor(() => {
       expect(
-        screen.getByText('Cerebras Qwen 3.8 27B for execute and browser; planner stays Ultra'),
+        screen.getByText(
+          'Super fast execution with full-strength planning. Avg tok/s: not yet measured. Intelligence vs frontier: not yet benchmarked.',
+        ),
       ).toBeInTheDocument();
     });
-    expect(screen.getByText('Most capable for complex reasoning')).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'Maximum reasoning for complex, long-horizon tasks. For example: get more calls on my calendar with people who match my ideal customer profile.',
+      ),
+    ).toBeInTheDocument();
   });
 
   it('selecting an unknown-provider model fallbacks to provider description', async () => {
@@ -438,7 +444,7 @@ describe('QueryInput (blackbox)', () => {
     const btn = (infoSvg as SVGElement)!.closest('button')!;
     await user.click(btn);
     expect(
-      screen.getByText(/Rose-fast runs execute and browser on Cerebras Qwen 3.8 27B/),
+      screen.getByText(/Super fast execution with full-strength planning/),
     ).toBeInTheDocument();
   });
 

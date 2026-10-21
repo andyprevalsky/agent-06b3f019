@@ -86,8 +86,10 @@ export const ROSE_MODEL_SHORT_NAMES: Record<string, string> = {
 
 /** Static descriptions for the built-in Rose models in the model picker. */
 export const ROSE_MODEL_DESCRIPTIONS: Record<string, string> = {
-  [ROSE_MODEL_IDS.flash]: 'Cerebras Qwen 3.8 27B for execute and browser; planner stays Ultra',
-  [ROSE_MODEL_IDS.ultra]: 'Most capable for complex reasoning',
+  [ROSE_MODEL_IDS.flash]:
+    'Super fast execution with full-strength planning. Avg tok/s: not yet measured. Intelligence vs frontier: not yet benchmarked.',
+  [ROSE_MODEL_IDS.ultra]:
+    'Maximum reasoning for complex, long-horizon tasks. For example: get more calls on my calendar with people who match my ideal customer profile.',
 };
 
 /** Tool name to human-readable label mapping (mirrors backend TOOL_DISPLAY_NAMES). */

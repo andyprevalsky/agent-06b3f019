@@ -383,10 +383,16 @@ describe('QueryInput (blackbox)', () => {
     // Model picker shows both model options with their descriptions
     await waitFor(() => {
       expect(
-        screen.getByText('Cerebras Qwen 3.8 27B for execute and browser; planner stays Ultra'),
+        screen.getByText(
+          'Super fast execution with full-strength planning. Avg tok/s: not yet measured. Intelligence vs frontier: not yet benchmarked.',
+        ),
       ).toBeInTheDocument();
     });
-    expect(screen.getByText('Most capable for complex reasoning')).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'Maximum reasoning for complex, long-horizon tasks. For example: get more calls on my calendar with people who match my ideal customer profile.',
+      ),
+    ).toBeInTheDocument();
     // Rose Desktop (#77): the options read rose-flash / rose-ultra too.
     const options = screen.getAllByRole('option').map((o) => o.querySelector('.font-medium'));
     expect(options.map((o) => o?.textContent)).toEqual(['rose-flash', 'rose-ultra']);

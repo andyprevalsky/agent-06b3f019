@@ -5,7 +5,7 @@
  * WIDTH (UI ledger row 21, no dragging):
  *   [COLLAPSED 64px] --pointer enters--> [EXPANDED 236px, full titles]
  *   [EXPANDED] --pointer leaves (non-Mac, no menu/input)--> [COLLAPSED]
- *   Mac stays expanded after leaving; pointer within 8px of left edge collapses it.
+ *   Mac stays expanded after leaving; pointer in the left18% outside controls or a leftward drag collapses it.
  *   A right-click menu, the search box or an inline name input keeps it EXPANDED.
  *
  * LAYOUT (top → bottom, rows 17/30/57/59/63):
