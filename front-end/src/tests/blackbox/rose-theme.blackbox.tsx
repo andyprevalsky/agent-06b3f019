@@ -320,7 +320,7 @@ describe('dark background', () => {
     const flow = screen
       .getByTestId('terminal-grid-energy-layer')
       .querySelector('g.grid-energy-pill-flow');
-    expect(flow).toHaveAttribute('opacity', '0.28');
+    expect(flow).toHaveAttribute('opacity', '0.14');
     expect(flow).toHaveAttribute('mask', 'url(#terminal-energy-large-tile-mask)');
   });
 
@@ -341,12 +341,12 @@ describe('dark background', () => {
       <MobileGridEnergyPillsCanvas
         patternOffset={{ x: 0, y: 0 }}
         selectedAgentId={null}
-        opacity={0.28}
+        opacity={0.14}
       />,
     );
     act(() => canvas.runFrame(1000));
     expect(canvas.alphaAtFill.length).toBeGreaterThan(0);
-    expect(new Set(canvas.alphaAtFill)).toEqual(new Set([0.28]));
+    expect(new Set(canvas.alphaAtFill)).toEqual(new Set([0.14]));
   });
 
   it('turns the desktop header pill dark with light text and hides the marble layer', () => {
@@ -495,7 +495,7 @@ describe('instant theme switch (row 72)', () => {
     expect(htmlIsDark()).toBe(true);
     expect(tiles()).not.toBeVisible();
     expect(gridLayer().querySelector('#grid-pattern > rect')).toHaveAttribute('stroke', SILVER);
-    expect(flow()).toHaveAttribute('opacity', '0.28');
+    expect(flow()).toHaveAttribute('opacity', '0.14');
 
     toggleThemeInOneCommit();
     expect(htmlIsDark()).toBe(false);
@@ -552,7 +552,7 @@ describe('instant theme switch (row 72)', () => {
     toggleThemeInOneCommit();
     expect(canvas.framesRun()).toBe(0);
     expect(canvas.alphaAtFill.length).toBeGreaterThan(0);
-    expect(new Set(canvas.alphaAtFill)).toEqual(new Set([0.28]));
+    expect(new Set(canvas.alphaAtFill)).toEqual(new Set([0.14]));
     // Painted after html.dark flipped: the dark gradient stops are used.
     expect(canvas.gradient.addColorStop).toHaveBeenCalledWith(0.52, DARK_CORE_STOP);
     expect(canvas.gradient.addColorStop).not.toHaveBeenCalledWith(0.52, LIGHT_CORE_STOP);

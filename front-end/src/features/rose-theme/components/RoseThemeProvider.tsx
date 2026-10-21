@@ -9,7 +9,8 @@
  *   [DARK] unmounted / → removes only the html.dark it added
  *     theme or user changes
  *
- * INSTANT SWITCH: the class flips in an insertion effect, i.e. inside the same
+ * COLOR TRANSITION: manual and login changes ease the painted colors.
+ * Theme state remains synchronous: the class flips in an insertion effect, i.e. inside the same
  * commit that re-renders the themed layers and BEFORE any of their layout
  * effects, so canvases that redraw synchronously on theme change already see
  * the new html.dark. Everything lands on one frame (no next-tick repaint).
@@ -21,6 +22,7 @@ import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 
 import { RoseThemeContext, readStoredRoseDark, writeStoredRoseDark } from '../hooks';
 import type { RoseThemeValue } from '../types';
+import { useThemeTransition } from '../hooks/useThemeTransition';
 import { useLoginDarkMode } from '../hooks/useLoginDarkMode';
 
 interface ToggledChoice {
@@ -46,12 +48,15 @@ export function RoseThemeProvider({
   const isDark =
     activeUserId !== null && (toggled?.userId === activeUserId ? toggled.dark : storedDark);
 
+  const beginTransition = useThemeTransition();
   const toggle = useCallback(() => {
     if (activeUserId === null) return;
     const next = !isDark;
-    writeStoredRoseDark(activeUserId, next);
-    setToggled({ userId: activeUserId, dark: next });
-  }, [activeUserId, isDark]);
+    beginTransition(() => {
+      writeStoredRoseDark(activeUserId, next);
+      setToggled({ userId: activeUserId, dark: next });
+    });
+  }, [activeUserId, isDark, beginTransition]);
 
   const applyLoginDark = useCallback((id: string) => {
     writeStoredRoseDark(id, true);

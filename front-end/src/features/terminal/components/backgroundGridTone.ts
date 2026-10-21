@@ -26,4 +26,4 @@ export const ROSE_DARK_GRID_TONE: GridTone = {
 };
 
 /** Rose dark: energy pill streaks dimmed to this group opacity. */
-export const ROSE_DARK_ENERGY_OPACITY = 0.28;
+export const ROSE_DARK_ENERGY_OPACITY = 0.14;

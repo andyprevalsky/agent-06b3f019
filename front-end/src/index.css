@@ -1434,13 +1434,25 @@ html {
   filter: invert(1) brightness(1.1) contrast(0.9);
 }
 
-/* Login theme changes fade colors, leaving layout and animation timing alone. */
+/* Login and manual theme changes: quick lift, gentle settle, no overshoot. */
 @media (prefers-reduced-motion: no-preference) {
   html.rose-login-theme-transition,
   html.rose-login-theme-transition body,
   html.rose-login-theme-transition body * {
     transition-property: background-color, color, border-color, box-shadow, fill, stroke !important;
-    transition-duration: 400ms !important;
-    transition-timing-function: ease-in-out !important;
+    transition-duration: 420ms !important;
+    transition-timing-function: cubic-bezier(0.22, 0.8, 0.25, 1) !important;
+  }
+}
+
+/* Snapshot crossfade includes canvas artwork, so it never flashes ahead of the chrome. */
+@media (prefers-reduced-motion: no-preference) {
+  html.rose-theme-crossfade::view-transition-old(root),
+  html.rose-theme-crossfade::view-transition-new(root) {
+    animation-duration: 420ms;
+    animation-timing-function: cubic-bezier(0.22, 0.8, 0.25, 1);
+  }
+  html.rose-theme-crossfade::view-transition-group(root) {
+    pointer-events: none;
   }
 }

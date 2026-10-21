@@ -24,6 +24,34 @@ afterEach(() => {
   document.documentElement.className = '';
 });
 describe('login dark mode hook', () => {
+  it('eases manual theme changes in both directions and cleans up after rapid toggles', () => {
+    vi.useFakeTimers();
+    const view = renderWithProviders(
+      <RoseThemeProvider userId="manual">
+        <Theme />
+      </RoseThemeProvider>,
+    );
+    const toggle = screen.getByTestId('login-theme');
+    fireEvent.click(toggle);
+    expect(document.documentElement).toHaveClass('dark', 'rose-login-theme-transition');
+    act(() => {
+      vi.advanceTimersByTime(240);
+    });
+    fireEvent.click(toggle);
+    expect(document.documentElement).not.toHaveClass('dark');
+    act(() => {
+      vi.advanceTimersByTime(240);
+    });
+    expect(document.documentElement).toHaveClass('rose-login-theme-transition');
+    act(() => {
+      vi.advanceTimersByTime(240);
+    });
+    expect(document.documentElement).not.toHaveClass('rose-login-theme-transition');
+    fireEvent.click(toggle);
+    view.unmount();
+    expect(document.documentElement).not.toHaveClass('rose-login-theme-transition');
+  });
+
   it('smoothly changes to dark once on login, keeps manual choice until next login, and cleans up', () => {
     vi.useFakeTimers();
     localStorage.setItem('rose-theme:viewer', 'light');
