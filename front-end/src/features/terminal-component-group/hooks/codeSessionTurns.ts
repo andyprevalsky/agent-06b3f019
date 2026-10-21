@@ -37,6 +37,13 @@ import {
 
 export type WorkStatus = 'running' | TurnOutcome;
 
+export interface WorkTurnMetrics {
+  outputTokens?: number;
+  scope?: 'turn' | 'session';
+  sampledAt: number | null;
+  tokensPerSecond?: number;
+}
+
 export interface WorkTurn {
   key: string;
   status: WorkStatus;
@@ -46,6 +53,10 @@ export interface WorkTurn {
   activities: Message[];
   /** "Explored 2 files, searched code, ran 4 commands"; null without tool events. */
   summary: string | null;
+  streamingMessageId?: string;
+  isThinking?: boolean;
+  activityType?: 'thinking' | 'message' | 'tool' | 'control';
+  metrics?: WorkTurnMetrics;
 }
 
 export type CodeSessionEntry =
@@ -260,6 +271,8 @@ interface OpenTurn {
   tools: TranscriptEntry[];
   /** Last narration record (becomes the final answer when the turn ends). */
   lastNarration: { entry: TranscriptEntry; id: string } | null;
+  metricSample?: { count: number; at: number | null; scope: 'turn' | 'session' };
+  metricBaseline?: number;
 }
 
 class SessionBuilder {
@@ -338,11 +351,39 @@ class SessionBuilder {
       open.emitted = true;
       this.out.push({ kind: 'work', key: open.turn.key, turn: open.turn });
     }
+    open.turn.activityType =
+      entry.type === 'thinking' || entry.type === 'message' || entry.type === 'tool'
+        ? entry.type
+        : 'control';
     const id = this.id(entry.key);
+    open.turn.isThinking = entry.type === 'thinking' && entry.partial === true;
+    open.turn.streamingMessageId =
+      entry.type === 'message' && entry.partial === true ? id : undefined;
     open.turn.activities.push(activityMessage(entry, id));
     if (entry.type === 'tool') open.tools.push(entry);
     if (entry.type === 'message') open.lastNarration = { entry, id };
     open.turn.summary = summarize(open.tools);
+  }
+
+  metrics(entry: TranscriptEntry) {
+    const open = this.open;
+    if (!open || (entry.turnId && open.turnId && entry.turnId !== open.turnId)) return;
+    const previous = open.metricSample;
+    const count = entry.outputTokens;
+    const scope = entry.usageScope;
+    const at = entry.at;
+    if (count == null || !scope) return;
+    const reset = !previous || previous.scope !== scope || count < previous.count;
+    if (reset) open.metricBaseline = count;
+    const elapsed = at != null && previous?.at != null ? (at - previous.at) / 1000 : 0;
+    open.turn.metrics = {
+      outputTokens:
+        scope === 'turn' ? count : !reset ? count - (open.metricBaseline ?? count) : undefined,
+      scope,
+      sampledAt: at,
+      tokensPerSecond: !reset && elapsed > 0 ? (count - previous!.count) / elapsed : undefined,
+    };
+    open.metricSample = { count, at, scope };
   }
 
   end(entry: TranscriptEntry) {
@@ -455,6 +496,8 @@ export function buildCodeSession(input: CodeSessionInput): CodeSessionEntry[] {
             ? roseMessage(input, id, entry)
             : personMessage(id, entry.text, entry.at ?? item.at);
         builder.person(message, entry.at ?? item.at, entry.turnId, entry.turnStartedAt);
+      } else if (entry.type === 'metrics') {
+        builder.metrics(entry);
       } else if (entry.type === 'turn') {
         builder.lifecycle(entry);
       } else if (entry.type === 'result' || entry.type === 'error') {
