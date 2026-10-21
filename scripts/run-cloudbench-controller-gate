@@ -274,6 +274,10 @@ fi
 # The multi-workstream suite alone took 30–42 min on shared-cpu-4x (2026-10-06),
 # so the ten suites need more than the former 40 min; 2400s timed out mid-suite.
 TIMEOUT_S="${CLOUDBENCH_GATE_TIMEOUT_S:-5400}"
+case "$TIMEOUT_S" in ''|*[!0-9]*) echo "invalid CLOUDBENCH_GATE_TIMEOUT_S" >&2; exit 2 ;; esac
+# Export-mode guest idle bound after GATE_RESULT (see the gate script below).
+GATE_EXPORT_LAUNCH_GRACE_S=900
+GATE_EXPORT_RECOVERY_S=3600
 REPO_URL="${CLOUDBENCH_GATE_REPO_URL:-https://github.com/Rose-Ai-Labs/rose.git}"
 
 # shellcheck disable=SC2016  # the pytest -k expression is quoted for the remote shell
@@ -604,7 +608,18 @@ REMOTE_EXPORT_PENDING
   echo '# stream. Stay alive until the controller has copied the full step logs out'
   echo '# (it touches /tmp/gate/fetched); --rm destroys the machine on exit.'
   if [ "$EXPORT_HOST" = 1 ]; then
-    echo 'while :; do sleep 60; done'
+    # Export mode keeps the guest up for the host's export downloads and for
+    # cloudbench-resume-controller-export.py after a dead host, but never
+    # forever: 2026-10-20 two sharded gates idled ~8.5 h after their host died.
+    # Every host download is bounded by its own deadline (TIMEOUT_S after
+    # `machine run`; the guest started within 6 s of it in both measured shard
+    # launches), so TIMEOUT_S + 900 s never shortens a healthy export. A command
+    # that outlives that still leaves a dead-host recovery hour after its result.
+    printf 'gate_idle_until=$((%s + %s)); [ $((SECONDS + %s)) -le "$gate_idle_until" ] || gate_idle_until=$((SECONDS + %s))\n' \
+      "$TIMEOUT_S" "$GATE_EXPORT_LAUNCH_GRACE_S" "$GATE_EXPORT_RECOVERY_S" "$GATE_EXPORT_RECOVERY_S"
+    echo 'echo "GATE_EXPORT_IDLE_UNTIL elapsed_s=$gate_idle_until"'
+    echo 'while [ "$SECONDS" -lt "$gate_idle_until" ]; do sleep 30; done'
+    echo 'echo "GATE_EXPORT_IDLE_EXPIRED elapsed_s=$SECONDS"'
   else
     echo 'if [ "$overall" -ne 0 ]; then for _ in $(seq 1 900); do [ -e /tmp/gate/fetched ] && break; sleep 1; done; fi'
   fi

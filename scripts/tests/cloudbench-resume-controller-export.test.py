@@ -454,7 +454,8 @@ class ExportResume(unittest.TestCase):
                 volume_id="vol_fixture",
             ),
         )
-        driver = b"bound_controller_export export\nwhile :; do sleep 60; done\n"
+        # Bounded idle driver (PR #1560); the second fixture keeps the original forever-idle form.
+        driver = b'bound_controller_export export\necho "GATE_EXPORT_IDLE_UNTIL elapsed_s=$gate_idle_until"\n'
         machine = dict(
             id=self.mid,
             instance_id="native-instance",
