@@ -32,6 +32,8 @@ export function trajectoryActivity(message: Message): TrajectoryActivity | null 
     message.file_pointer ||
     metadata?.inlineView ||
     metadata?.isUserAttentionMessage ||
+    metadata?.isFinalSummary ||
+    metadata?.completionSummary ||
     metadata?.requestUserApproval ||
     metadata?.error ||
     /failed|error/i.test(String(metadata?.toolStatus ?? ''))

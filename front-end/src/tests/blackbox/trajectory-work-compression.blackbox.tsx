@@ -1,5 +1,5 @@
 import { createElement } from 'react';
-import { fireEvent, screen, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { MessageListItems } from '@/features/terminal-component-group/components/MessageListItems';
 import type { Message } from '@/lib/api';
@@ -117,6 +117,42 @@ describe('one ordered live trajectory carousel', () => {
           ?.closest('[data-testid="trajectory-work-group"]'),
       ).toBeNull();
   });
+  it.each(['completion_summary', 'complete'])(
+    'keeps canonical %s finals visible before and after terminal status',
+    async (toolName) => {
+      const final = msg(
+        {
+          toolName,
+          toolStatus: 'FINISHED',
+          isFinalSummary: true,
+          completionSummary: {
+            summary: 'Completed the mission',
+            outputs: [],
+            toolUsage: [],
+            totalToolCalls: 2,
+            durationSeconds: 20,
+            costDollars: 0,
+          },
+        },
+        { message_id: 'canonical-final', timestamp: stamp(20) },
+      );
+      const messages = [comm('before-final'), work('final-check'), final];
+      const rendered = renderWithProviders(view(messages));
+      for (const status of ['ACTIVE', 'COMPLETED']) {
+        rendered.rerender(view(messages, status));
+        await waitFor(() => expect(screen.getByText('Completed the mission')).toBeVisible());
+        expect(
+          screen
+            .getByText('Completed the mission')
+            .closest('[data-testid="trajectory-work-group"]'),
+        ).toBeNull();
+        expect(screen.queryByTestId('trajectory-work-history')).toBeNull();
+        expect(
+          within(screen.getByTestId('trajectory-work-group')).getByRole('button'),
+        ).toBeEnabled();
+      }
+    },
+  );
   it.each(['PAUSED', 'FAILED'])('compresses %s work with honest outcome', (status) => {
     renderWithProviders(view([comm('a'), work('b')], status));
     const row = screen.getByTestId('trajectory-work-group');
