@@ -92,6 +92,44 @@ links. A file pointer never substitutes for the diff.
   `infra jobs / scheduled jobs`; never use finished attempts as denominator.
   Earlier wrong 1/1 stops are erroneous early aborts, not valid threshold hits.
 
+# Whole-devbox deploy ownership (standing user instruction, October 21, 2026)
+
+A `/deploy` invoked from **any thread on this devbox deploys the entire Rose
+source workspace**, not that thread's files. The deploy owner must include all
+committed branch changes relative to `origin/main`, staged and unstaged edits,
+and untracked non-ignored source from every parallel thread. Do not leave JEV,
+UI, backend, runtime, or another contributor's changes behind merely because
+the invoking thread did not author them. This is standing authorization to
+integrate the whole devbox; it does not waive tests or snapshot-scoped approvals.
+
+Before freezing the deploy source, discover the other Rose threads on the same
+`devboxId` (using the boxes read/message skills), read their latest handoffs, and
+cross-validate with active owners and UI Main / Code Main when present. Inventory
+`git worktree list --porcelain`: gather current deliverables from their isolated
+worktrees into the canonical shared checkout, preserving each feature and its
+provenance. A detached test copy or historical branch is not automatically a
+new deliverable; reconcile it against the owner handoff and integrated history.
+If discovery is unavailable, record that gap and use local handoff/worktree
+receipts; never describe an unverified inventory as complete. Do not silently
+exclude known outstanding work.
+
+Use one deploy coordinator for the devbox. Another thread invoking `/deploy`
+joins that owner rather than launching competing commits, branch changes,
+merges, migrations, or deploys. Agree a source-freeze boundary with parallel
+editors; do not interrupt or discard their work. Capture the combined commit,
+source digest, included paths, owners and outstanding blockers in the existing
+deploy-run receipt. Validate that combined snapshot through the normal gates.
+A previous green result on a smaller UI-only snapshot does not validate later
+JEV/backend/runtime additions. Changes arriving after the freeze must be
+integrated and the affected gates rerun before merge; never silently ship an
+older subset as the whole devbox.
+
+“Entire devbox” means its intended Rose source deliverables, not arbitrary files
+on the machine: keep credentials, ignored `.env` files, caches, dependencies,
+research data and generated evidence out of Git. Preserve Freedom. Use the
+canonical source recorded by `ROSE_DEPLOY_SOURCE_WORKSPACE` when invoked from a
+prepared deploy worktree. Follow `.claude/commands/deploy.md` for execution.
+
 # Rose Labs
 
 **Rose is an RWLH: a Real World Long Horizon computer.** It is a computer that
@@ -1446,6 +1484,25 @@ before merge. A fourth cycle blocks the deploy as review-unstable.
 - If the next step is to check a log file, make sure to call the tool. NEVER ask the user to check a log file for you.
 
 ## JEV progress and ETA research checkpoint — October 21, 2026
+
+Runtime integration follow-up: user approved using saved JEV and requires an
+asynchronous refresh every Rose turn. Prepared root/child/explore/browser
+producer hooks, pinned candidate-165 configuration, generation-scoped root/task
+DB storage and full-size sidebar bot with a top-right ring and hover-only ETA. All are UNDEPLOYED.
+User approved the exact new Zod payload; it is applied and verified.
+Implementation checkpoint `9347c525a` and worker IDs are recorded in `.context/jev-runtime-integration/checkpoint.json`.
+Backend schema patch is `/dev/shm/jev-integration/backend-schema.patch`. A real
+JEV adapter check returned successfully in 0.25s with backend publication
+mocked; that is not end-to-end production proof. Backend schema/API coverage
+passed 36 actual HTTP requests with local DB and mocked outbound broadcasts;
+full backend typecheck passed. The ring now matches the warning icon at 14px.
+Complete normal deployment gates before claiming live integration. Keep older research test metrics
+separate from this integration.
+Adversarial integration review: estimate-only UPDATEs now merge directly without
+agent-list refetch or chat-mode changes. The existing batched broadcaster publishes
+to both agent and tree bus channels; root/child rings use the existing shared tree
+subscription. Tree lifecycle events carry their accepted workflow generation.
+Duplicate deltas keep state identity, and DB reads select only required columns.
 
 CURRENT DATA QUALITY OVERRIDE: user requires SUCCEEDED tasks, not merely
 COMPLETED lifecycles. Audit found a 142-hour label whose terminal result was

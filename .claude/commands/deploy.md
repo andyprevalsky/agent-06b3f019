@@ -196,6 +196,35 @@ Carry this report forward into Phase 2 for use in the commit message and PR body
 
 ## Step 0: Change detection + execution plan
 
+### Whole-devbox collection and parallel-thread cross-validation
+
+This command obeys **Whole-devbox deploy ownership** in `CLAUDE.md`. Invoking
+`/deploy` in any thread makes that thread the coordinator for the entire devbox's
+Rose work, or joins the existing coordinator. The invoking thread is never the
+scope boundary. Before change detection or freezing gate inputs:
+
+1. Resolve the canonical shared source checkout (or the recorded
+   `ROSE_DEPLOY_SOURCE_WORKSPACE` for a prepared deploy worktree). Discover
+   same-devbox Rose threads by `devboxId`, read their handoffs, and cross-validate
+   active owners plus UI Main / Code Main when present using the read/message
+   skills. Record unavailable discovery explicitly.
+2. Inventory `git worktree list --porcelain` and `git status --short`, including
+   committed, staged, unstaged and untracked non-ignored source. Integrate each
+   outstanding current deliverable from parallel isolated worktrees into that
+   shared source. Use owner receipts and history to distinguish deliverables
+   from historical branches and disposable test copies; never merge every old
+   branch blindly or silently omit known unfinished integration.
+3. Keep one deploy owner; join an existing run instead of racing its Git or
+   production mutations. Agree a source freeze with editors, then record the
+   combined SHA/source digest, included paths, owners and blockers in the
+   existing deploy-run receipt. Preserve all work and required approvals.
+4. Run the normal gates on that combined snapshot. Prior subset-only green
+   receipts do not cover newly included changes. Reconcile any later edits
+   before merge and rerun affected gates; do not claim an older snapshot includes
+   the whole devbox. Never stage secrets, ignored env files, caches, dependencies,
+   raw research datasets or generated evidence as source.
+
+
 **`/deploy` ALWAYS ships the ENTIRE worktree — every change present relative to `origin/main`, no exceptions.** This includes work you did not author: changes made by a concurrent agent sharing this worktree, pre-existing uncommitted edits, and any feature intermixed with yours. Do NOT stop to ask "these changes aren't mine / weren't part of my task." Do NOT try to isolate, cherry-pick, or exclude a subset onto a clean branch. The unit of deploy is the worktree, and everything in it is yours to carry through the gates and ship. The only reason to halt is a gate failure you cannot fix or a credential/billing escalation — never change ownership or scope. (Whoever ran `/deploy` is asserting the whole worktree is ready; the gates are what prove it.) **"Credential/billing escalation" NEVER includes a code-review provider being out of credits/quota** — that case is pre-authorized to proceed without asking (Step 9a, "Review-provider usage exhaustion").
 
 If the branch is behind `origin/main`, sync first (commit the worktree, then
