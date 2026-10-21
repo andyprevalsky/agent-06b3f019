@@ -79,6 +79,23 @@ describe('one ordered live trajectory carousel', () => {
       ),
     ).toEqual(['first', 'first-work', 'second', 'second-work']);
   });
+  it.each([
+    msg({}, { role: 'ASSISTANT', message_id: 'empty-assistant', text: '' }),
+    msg({}, { role: 'USER', message_id: 'empty-user', text: '' }),
+    msg(
+      { toolName: 'request_user_approval', requestUserApproval: { toolApproval: {} } },
+      { message_id: 'inbox-approval' },
+    ),
+    msg({ toolName: 'gate', gate: { id: 'gate' } }, { message_id: 'external-gate' }),
+  ])('does not split adjacent work or add blank spacing for hidden row $message_id', (hidden) => {
+    renderWithProviders(view([work('before-hidden'), hidden, work('after-hidden')], 'COMPLETED'));
+    const group = screen.getByTestId('trajectory-work-group');
+    expect(group).toHaveTextContent('2 activities');
+    expect(document.querySelector(`[data-message-id="${hidden.message_id}"]`)).toBeNull();
+    fireEvent.click(within(group).getByRole('button'));
+    expect(screen.getAllByTestId('trajectory-history-entry')).toHaveLength(2);
+  });
+
   it.each(['FINISHED', 'ERROR'])(
     'folds terminal Browser Agent %s results and keeps their card accessible in history',
     async (toolStatus) => {

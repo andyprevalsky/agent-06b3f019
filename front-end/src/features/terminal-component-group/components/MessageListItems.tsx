@@ -28,6 +28,7 @@
  */
 import { useEffect, type ReactNode } from 'react';
 import { InlineUserView, parseInlineViewMetadata } from '@/features/user-ui';
+import { isHiddenTrajectoryRow } from './trajectoryRowVisibility';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 
 import MessageBubble from './MessageBubble';
@@ -268,6 +269,7 @@ export function MessageListItems({
   agentExchangeProjection,
   ...itemProps
 }: MessageListItemsProps) {
+  const roseDesktop = useRoseDesktop();
   const { visibleMessages, openDisplay, displayGrouping, localExchanges, workGroups } =
     useMessageListProjection({
       ...itemProps,
@@ -277,6 +279,7 @@ export function MessageListItems({
     });
   const { groups: exchangeGroups, now } = agentExchangeProjection ?? localExchanges;
   return visibleMessages.map((message) => {
+    if (roseDesktop && isHiddenTrajectoryRow(message)) return null;
     const workGroup = workGroups.groupsByLeadId.get(message.message_id);
     if (workGroup)
       return (

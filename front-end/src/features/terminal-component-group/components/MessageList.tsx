@@ -86,7 +86,7 @@ function computeChatModeActionsVisible({
 
 export function MessageList({
   subAgentId,
-  containerClassName = 'w-full min-w-0 max-w-4xl mx-auto flex flex-col gap-1.5 pb-32 relative z-20',
+  containerClassName = 'w-full min-w-0 max-w-4xl mx-auto flex flex-col gap-4 pb-32 relative z-20',
   showStatusBanners = true,
   showThinkingIndicator = true,
   compact = false,

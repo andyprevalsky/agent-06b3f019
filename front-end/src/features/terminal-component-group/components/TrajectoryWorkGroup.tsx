@@ -31,7 +31,7 @@ export function TrajectoryWorkGroup({
       data-testid="trajectory-work-group"
       data-group-key={group.key}
       data-state={group.status}
-      className="min-w-0 py-1"
+      className="min-w-0"
     >
       <button
         type="button"

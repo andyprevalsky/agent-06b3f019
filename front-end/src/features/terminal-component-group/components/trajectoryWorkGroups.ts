@@ -1,6 +1,7 @@
 /** Ordered UI projection only: live comms and work share a single trajectory slot. */
 import type { Message } from '../hooks';
 import { isBrowserAgentResult } from './browserAgentResult';
+import { isHiddenTrajectoryRow } from './trajectoryRowVisibility';
 import {
   eventTimeMs,
   parseAgentToAgentMessage,
@@ -100,6 +101,10 @@ export function groupTrajectoryWork(
   let seen = new Set<string>();
   const canonicalComms = new Set<string>();
   for (const message of messages) {
+    if (isHiddenTrajectoryRow(message)) {
+      result.foldedIds.add(message.message_id);
+      continue;
+    }
     const activity = trajectoryActivity(message);
     if (!activity) {
       if (current) {
