@@ -59,6 +59,7 @@ import { smsTimezoneBehaviorCases } from './sms-supervisor.timezone.behavior';
 import { smsPausedReplyBehaviorCases } from './sms-supervisor.paused-reply.behavior';
 import { smsStartPhaseBehaviorCases } from './sms-supervisor.start-phase.behavior';
 import { smsQueuedAgentBehaviorCases } from './sms-supervisor.queued-agent.behavior';
+import { smsPhoneAttentionBehaviorCases } from './sms-supervisor.phone-attention.behavior';
 import { buildToolFailureMessage } from '../../providers/smsSupervisor/supervisorHandler';
 import { commitPendingWrites, PendingOp } from '../../providers/smsSupervisor/supervisorTools';
 const prisma = new PrismaClient();
@@ -628,6 +629,7 @@ async function runAll() {
     ...smsPausedReplyBehaviorCases(prisma),
     ...smsStartPhaseBehaviorCases(prisma),
     ...smsQueuedAgentBehaviorCases(prisma),
+    ...smsPhoneAttentionBehaviorCases(prisma),
     {
       name: 'prompt -- supervisor never exposes routing identifiers',
       fn: () => testPrompt_neverExposeRoutingIds(prisma),
