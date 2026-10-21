@@ -5843,8 +5843,8 @@ async def check_progress(
             )
         )
 
-    # B2: Force verifier model and ignore the caller-passed model arg.
-    forced_model = VERIFIER_MODEL
+    # B2: Force Ultra except for the explicit fail-closed local pool.
+    forced_model = "rose-labs/rose-local" if model == "rose-labs/rose-local" else VERIFIER_MODEL
     if model != forced_model:
         logger.debug(
             "check_progress overriding caller model",
@@ -7371,13 +7371,14 @@ async def call_planner_llm_activity(
     from utils.tool_schemas import get_planner_response_model
 
     planner_response_model = get_planner_response_model()
-    if model != PLANNER_MODEL:
+    if model != PLANNER_MODEL and model != "rose-labs/rose-local":
         logger.info(
             "planner.model_override",
             requested_model=model,
             planner_model=PLANNER_MODEL,
         )
-    model = PLANNER_MODEL
+    if model != "rose-labs/rose-local":
+        model = PLANNER_MODEL
 
     activity_start = time.perf_counter()
     _safe_heartbeat("Calling planner LLM")

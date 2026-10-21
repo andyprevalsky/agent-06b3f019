@@ -658,6 +658,12 @@ class RoseClient:
         agent_id = kwargs.get("agent_id")
         messages = kwargs.get("messages")
         pool = kwargs.get("pool")
+        if pool == "rose-local":
+            # Local mode must never consult the cloud-backed Fast Mode cache.
+            async with aclosing(self._complete_impl(**kwargs)) as live_stream:
+                async for chunk in live_stream:
+                    yield chunk
+            return
         probe_read_only = os.environ.get("BENCHMARK_DEMO_CACHE_READ_ONLY") == "1" and os.environ.get(
             "BENCHMARK_ISOLATED_RUN", ""
         ).strip().lower() in {"1", "true", "yes", "on"}
@@ -992,6 +998,22 @@ class RoseClient:
             waterfall_tools = direct_auth_tools
         if waterfall_tools:
             waterfall_tool_choice = effective_tool_choice or "any"
+        if pool == "rose-local":
+            # No auth, cloud cache, remote dump, or paid fallback is reachable.
+            from providers.rose.local import local_complete
+
+            async for chunk in local_complete(
+                messages=messages,
+                tools=waterfall_tools,
+                tool_choice=waterfall_tool_choice,
+                response_format=None if waterfall_tools else openrouter_response_format,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                seed=seed,
+                request_id=rid,
+            ):
+                yield chunk
+            return
         dump_path: Optional[str] = None
         dump_result = RoseResponse()
         if dump_context:

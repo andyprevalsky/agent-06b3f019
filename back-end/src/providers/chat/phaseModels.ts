@@ -1,8 +1,8 @@
 /**
  * Chat model selection boundary.
  *
- * requested model ──┬─ router ──> rose-fast via direct-cerebras (Qwen + 0.8s hedge)
- *                   ├─ generator ──> rose-fast via direct-cerebras (same)
+ * requested model ──┬─ router ──> rose-fast via direct-cerebras (or Rose Local)
+ *                   ├─ generator ──> rose-fast via direct-cerebras (or Rose Local)
  *                   └─ Temporal ──> persisted requested model (outside this module)
  *
  * `direct-cerebras` selects the exclusive chat hedge path in Rose client; the
@@ -31,6 +31,15 @@ export interface ChatPhaseModels {
 }
 
 export function selectChatPhaseModels(requestedModel: string): ChatPhaseModels {
+  if (requestedModel === 'rose-labs/rose-local') {
+    return {
+      requested: requestedModel,
+      router: requestedModel,
+      routerProviderRoute: 'openrouter-waterfall',
+      generator: requestedModel,
+      generatorProviderRoute: 'openrouter-waterfall',
+    };
+  }
   return {
     requested: requestedModel,
     router: ROSE_FAST_MODEL,

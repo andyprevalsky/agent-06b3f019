@@ -38,6 +38,8 @@ _MODEL_TO_POOL: dict[str, PoolName] = {
     "rose-labs/rose-1-ultra": "rose-1-ultra",
     "rose-labs/rose-1-browser-use": "rose-1-browser-use",
     "rose-labs/rose-1-oss": "rose-1-oss",
+    "rose-labs/rose-local": "rose-local",
+    "rose-local": "rose-local",
     "rose": "rose-1-flash",
     "rose-flash": "rose-1-flash",
     "rose-fast": "rose-1-flash",
@@ -69,6 +71,8 @@ def pool_for_model(model: str) -> Optional[PoolName]:
         return _MODEL_TO_POOL[lowered]
     # Fuzzy fall-back: "rose-labs/..." with anything after mini/flash/lite/ultra.
     if "rose-labs" in lowered:
+        if "local" in lowered:
+            return "rose-local"
         if "browser-use" in lowered:
             return "rose-1-browser-use"
         if "oss" in lowered:

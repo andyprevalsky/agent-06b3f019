@@ -656,7 +656,11 @@ async def run_planner_attempt(
     agent_id = workflow_instance.agent_id
     planner_args = [
         messages,
-        PLANNER_MODEL,
+        (
+            "rose-labs/rose-local"
+            if getattr(workflow_instance, "model", None) == "rose-labs/rose-local"
+            else PLANNER_MODEL
+        ),
         tools_description,
         user_context,
         response_schema,

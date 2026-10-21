@@ -217,7 +217,7 @@ describe('Settings page', () => {
       expect(screen.queryByTestId('fast-mode-toggle')).toBeNull();
     });
 
-    it('shows Fast Mode on the account-info tab when the verified phone is an admin number', async () => {
+    it('keeps Fast Mode out of Settings even for an admin account', async () => {
       const user = userEvent.setup();
       installSettingsHandlers({
         userSettings: {
@@ -246,10 +246,8 @@ describe('Settings page', () => {
       await waitFor(() => {
         expect(screen.getByLabelText('Verified Phone')).toHaveValue('+19729777432');
       });
-      const toggle = screen.getByTestId('fast-mode-toggle');
-      expect(toggle).toBeInTheDocument();
-      expect(toggle).toHaveTextContent('Fast Mode');
-      expect(screen.getByText(/same control as the chat query box/i)).toBeInTheDocument();
+      expect(screen.queryByTestId('fast-mode-toggle')).toBeNull();
+      expect(screen.queryByText(/same control as the chat query box/i)).toBeNull();
     });
 
     it('switches to Billing tab and shows subscription info', async () => {

@@ -74,7 +74,9 @@ export function ModelSelector({
     shortRoseName(roseDesktop, selectedModel) ??
     (selectedInfo ? `${selectedInfo.provider}/${selectedInfo.name}` : selectedModel);
   const isRoseModel =
-    selectedModel === ROSE_MODEL_IDS.flash || selectedModel === ROSE_MODEL_IDS.ultra;
+    selectedModel === ROSE_MODEL_IDS.flash ||
+    selectedModel === ROSE_MODEL_IDS.ultra ||
+    selectedModel === ROSE_MODEL_IDS.local;
 
   return (
     <>
@@ -176,6 +178,7 @@ function ModelList({
 const ROSE_TOOLTIP_BODY: Record<string, string> = {
   [ROSE_MODEL_IDS.flash]: ROSE_MODEL_DESCRIPTIONS[ROSE_MODEL_IDS.flash],
   [ROSE_MODEL_IDS.ultra]: ROSE_MODEL_DESCRIPTIONS[ROSE_MODEL_IDS.ultra],
+  [ROSE_MODEL_IDS.local]: ROSE_MODEL_DESCRIPTIONS[ROSE_MODEL_IDS.local],
 };
 
 function RoseModelTooltip({ selectedModel }: { selectedModel: string }) {

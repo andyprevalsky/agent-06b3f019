@@ -980,6 +980,29 @@ async def test_run_planner_attempt_redelivers_after_dead_worker():
         "never heartbeats is redelivered instead of burning the 240s LLM budget"
     )
     assert heartbeat < start_to_close
+
+    local_instance = _FakeWFInstance()
+    local_instance.model = "rose-labs/rose-local"
+    restore = _patch_service_workflow(fake_wf)
+    try:
+        await run_planner_attempt(
+            workflow_instance=local_instance,
+            messages=[{"role": "user", "content": "goal"}],
+            tools_description="tools",
+            user_context="",
+            response_schema=None,
+            claude_max_token=None,
+            gpt_token=None,
+            gpt_account_id=None,
+            gpt_token_source=None,
+            gpt_token_pool_id=None,
+            user_messages=["goal"],
+            tool_call_id="tc-local",
+            attempt=0,
+        )
+    finally:
+        restore()
+    assert captured["args"][1] == "rose-labs/rose-local", "Local planner must stay on local inference"
     assert captured.get("schedule_to_start_timeout") is None, (
         "A short schedule_to_start with max_attempts=2 can fail a healthy pickup "
         "that would have succeeded inside the 240s StartToClose budget"

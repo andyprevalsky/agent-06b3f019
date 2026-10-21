@@ -409,6 +409,25 @@ describe('QueryInput (blackbox)', () => {
     expect(options.map((o) => o?.textContent)).toEqual(['rose-fast', 'rose-1-ultra']);
   });
 
+  it('shows Rose Local in the querybox with an honest privacy and speed description', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <QueryInput
+        {...defaultProps}
+        showModelSelector
+        availableModels={[
+          ...defaultProps.availableModels,
+          { id: 'rose-labs/rose-local', name: 'rose-local', provider: 'rose-labs', description: 'local' },
+        ]}
+      />,
+      { roseDesktop: true },
+    );
+    await user.click(screen.getByText('rose-flash').closest('button')!);
+    expect(screen.getByText('rose-local')).toBeInTheDocument();
+    expect(screen.getByText(/Agent data still uses Rose cloud services/)).toBeInTheDocument();
+    expect(screen.getByText(/Avg tok\/s and max throughput: unmeasured/)).toBeInTheDocument();
+  });
+
   it('selecting an unknown-provider model fallbacks to provider description', async () => {
     const user = userEvent.setup();
     renderWithProviders(

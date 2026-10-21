@@ -16,8 +16,65 @@ import json
 import os
 import ssl
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
+
+
+async def test_rose_local_loopback_and_no_fallback():
+    from providers.rose.local import local_config
+
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            requests.append((self.path, json.loads(self.rfile.read(length))))
+            payload = (
+                'data: {"choices":[{"index":0,"delta":{"content":"local ok"},"finish_reason":null}]}\n\n'
+                'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],'
+                '"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}\n\n'
+                'data: [DONE]\n\n'
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with patch.dict(os.environ, {
+            "ROSE_LOCAL_BASE_URL": f"http://127.0.0.1:{server.server_port}/v1",
+            "ROSE_LOCAL_MODEL": "test-local-model",
+        }):
+            with patch("providers.rose.client.waterfall_complete", side_effect=AssertionError("remote fallback")):
+                chunks = [chunk async for chunk in RoseClient().complete(
+                    pool="rose-local", messages=[{"role": "user", "content": "hello"}], dump_context=False,
+                )]
+            assert requests[0][0] == "/v1/chat/completions"
+            assert requests[0][1]["model"] == "test-local-model"
+            assert requests[0][1]["messages"][-1]["content"] == "hello"
+            assert next(chunk.data["actual_model"] for chunk in chunks if chunk.kind == "metadata") == "local/test-local-model"
+            assert "".join(chunk.data["text"] for chunk in chunks if chunk.kind == "content") == "local ok"
+            assert any(chunk.kind == "done" for chunk in chunks)
+        with patch.dict(os.environ, {"ROSE_LOCAL_BASE_URL": "https://api.openrouter.ai/v1", "ROSE_LOCAL_MODEL": "x"}):
+            try:
+                local_config()
+            except RoseError:
+                pass
+            else:
+                raise AssertionError("Rose Local accepted a remote endpoint")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 from _test_utils import BlackboxResult, set_mock_handler, teardown_mock
 from _rose_stream_progress_fixture import single_step_waterfall
@@ -154,7 +211,7 @@ def test_oss_pool_is_open_weights_only():
     assert foundry_model(oss) != oss.gpt_auth_model
     # Speed pools skip Claude/GPT auth so Cerebras Qwen is the real primary.
     # The explicit WMH runner pins its exact GPT-6.1 Sol waterfall model.
-    auth_skipped = {"rose-1-oss", "rose-1-flash", "rose-1-browser-use", "rose-wmh-gpt61"}
+    auth_skipped = {"rose-1-oss", "rose-1-flash", "rose-1-browser-use", "rose-wmh-gpt61", "rose-local"}
     for name, spec in POOL_REGISTRY.items():
         if name in auth_skipped:
             assert spec.direct_auth_enabled is False, f"{name} should skip direct auth"
@@ -9770,6 +9827,7 @@ async def test_truncation_retains_incoming_candidate_exclusions():
 async def run_all_tests():
     print("rose blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("rose_local_loopback_no_fallback", test_rose_local_loopback_and_no_fallback)
     await r.record_async(
         "truncation_preserves_candidate_exclusions", test_truncation_retains_incoming_candidate_exclusions
     )

@@ -338,7 +338,8 @@ function ChatQueryInputBox({
             m.id === 'rose-labs/rose-1-flash' ||
             m.id === 'rose-labs/rose-fast' ||
             m.id === 'rose-labs/rose-1-lite' ||
-            m.id === 'rose-labs/rose-1-ultra',
+            m.id === 'rose-labs/rose-1-ultra' ||
+            m.id === 'rose-labs/rose-local',
         )}
         modelsLoading={modelsLoading}
         contextPercentage={a.agentDetail ? getContextPercentage(a.agentDetail, models) : 0}

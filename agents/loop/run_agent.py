@@ -2934,7 +2934,7 @@ async def _run_verifier(
 
     # C7: dead `phase` positional arg has been removed from check_progress;
     # callers no longer pass it. `model` is kept as a positional but ignored
-    # internally (verifier always forces rose-1-ultra). All other args are
+    # internally (verifier forces Ultra except for Rose Local). All other args are
     # passed positionally because Temporal activities only accept `args=`.
     # C14: context is already agent-scoped — `context` here is the calling
     # agent's own visible conversation, accumulated from `poll_messages`

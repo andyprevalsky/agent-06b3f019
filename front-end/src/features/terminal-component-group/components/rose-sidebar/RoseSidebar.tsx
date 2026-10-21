@@ -209,7 +209,7 @@ function RoseSidebarBar(props: AppSidebarProps) {
             {expansion.sticky && isExpanded && (
               <div
                 aria-hidden="true"
-                className="absolute left-[22px] top-[9px] text-muted-foreground"
+                className="absolute left-[22px] top-1/2 -translate-y-1/2 text-muted-foreground"
                 data-testid="sidebar-collapse-hint"
               >
                 <ArrowLeft className="h-5 w-5" strokeWidth={1.7} />
