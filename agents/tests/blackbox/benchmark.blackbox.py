@@ -23864,7 +23864,7 @@ async def test_stale_workflow_count_backs_off_on_namespace_rate_limit():
     assert len(calls) == 1 and sleeps == [], (calls, sleeps)
 
 
-def test_all_benchmark_judges_preserve_complete_final_cards():
+async def test_all_benchmark_judges_preserve_complete_final_cards():
     """Final cards are actual agent evidence, independent of evaluator family."""
     from benchmarks.semantic_evaluator_evidence import build_single_turn_evidence, build_agentic_evidence
     from benchmarks.run_benchmark import _declared_evaluator_evidence, _extract_agent_structured_output, _message_text
@@ -23948,7 +23948,7 @@ def test_all_benchmark_judges_preserve_complete_final_cards():
             assert result[0]["evidence_mode"] == "agentic_llm_judge"
             assert judge.call_args.args[2] is oversized
             assert len(build_agentic_evidence(oversized)["completion_cards"][0]["summary"]) == 330000
-    asyncio.run(route_oversized())
+    await route_oversized()
     # Transcript slimming must not discard child completion evidence.
     with patch("benchmarks.semantic_evaluator_evidence.single_turn_evidence_exceeds_budget", side_effect=[True, True, False]):
         slimmed = _declared_evaluator_evidence(data)
@@ -23981,7 +23981,7 @@ async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
     r.record("polar_completion_card_no_same_message_repeat", test_polar_completion_card_does_not_repeat_same_message_summary)
-    r.record("all_benchmark_judges_complete_final_cards", test_all_benchmark_judges_preserve_complete_final_cards)
+    await r.record_async("all_benchmark_judges_complete_final_cards", test_all_benchmark_judges_preserve_complete_final_cards)
     await r.record_async("poll_elapsed_deadlines_900", test_poll_elapsed_deadlines_900)
     await r.record_async("poll_elapsed_deadlines_1200", test_poll_elapsed_deadlines_1200)
     await r.record_async("poll_elapsed_progress_does_not_reset_deadline", test_poll_elapsed_progress_does_not_reset_deadline)

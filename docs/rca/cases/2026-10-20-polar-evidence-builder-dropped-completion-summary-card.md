@@ -122,3 +122,17 @@ alignment, 2026-10-21). No deployment or live outcome approval is inferred.
 When an evaluator flattens a Rose transcript, render every metadata-only row that
 the FE shows as content, above all the `completion_summary` card. Prove it with a
 real transcript rather than a hand-written text-only fixture.
+
+### 2026-10-21 integration runner correction
+
+The final-card regression passed direct pytest execution but failed through its
+actual owning `run_all_tests` registration: a synchronous `r.record` test called
+`asyncio.run(route_oversized())` inside the runner's existing event loop, raising
+`RuntimeError: asyncio.run() cannot be called from a running event loop`.
+Integration retained every assertion, made the test async, awaited the same
+oversized-route check and registered it with `record_async`. The exact selected
+owning-registration run changed from 22 pass / 1 fail to 23 pass / 0 fail, with
+zero external I/O attempts. These checks also exercised the integrated shared
+output helper, main/explore/browser tail readers and the original compute-token
+lineage parameter retained alongside the new session parameter. This is local
+causal/registration proof, not an unchanged Polar task outcome.
