@@ -26,30 +26,90 @@ DATABASE_URL="$LOCAL_URL" DIRECT_URL="$LOCAL_URL" PRISMA_LOCAL_PUSH_DRY_RUN=1 \
 # Scan a single workspace's active instructions; reusable for isolated fixtures.
 assert_safe_instruction_docs() {
   local root=$1
-  local bare
-  bare=$(cd "$root" && find CLAUDE.md AGENTS.md .claude docs \
-    -path .claude/worktrees -prune -o -name '*.md' \
-  -not -path 'docs/rca/*' -not -path 'docs/plans/*' -print0 2>/dev/null \
-  | xargs -0 awk '
-    FNR == 1 { command = ""; continued = 0 }
-    {
-      command = continued ? command " " $0 : $0
-      continued = ($0 ~ /\\[[:space:]]*$/)
-      if (continued) next
-      local_url = "postgres(ql)?://[^@ ]*@(localhost|127\\.0\\.0\\.1)"
-      scoped = command ~ ("DATABASE_URL=\"?" local_url) && command ~ ("DIRECT_URL=\"?" local_url)
-      if (command ~ /npx( --no-install)? prisma db push/ && !scoped) print FILENAME ":" FNR ": " $0
-    }' || true)
-  if [ -n "$bare" ]; then
-    printf '%s\n' "$bare" >&2
-    echo "instruction docs tell agents to run a bare prisma db push; use npm run prisma:push:local" >&2
-    return 1
-  fi
+  python3 - "$root" <<'PYSCAN'
+import os
+from pathlib import Path
+import re
+import shlex
+import sys
+from urllib.parse import urlsplit
+
+root = Path(sys.argv[1])
+paths = [root / "CLAUDE.md", root / "AGENTS.md"]
+for directory in (".claude", "docs"):
+    for parent, directories, files in os.walk(root / directory):
+        if Path(parent) == root / ".claude":
+            directories[:] = [name for name in directories if name != "worktrees"]
+        if Path(parent) == root / "docs":
+            directories[:] = [name for name in directories if name not in ("rca", "plans")]
+        paths.extend(Path(parent) / name for name in files if name.endswith(".md"))
+
+push = re.compile(r"\bnpx(?:\s+--no-install)?\s+prisma\s+db\s+push\b")
+assignment = re.compile(r"[A-Za-z_][A-Za-z_0-9]*=")
+
+def local_url(value):
+    try:
+        parsed = urlsplit(value)
+        return parsed.scheme in ("postgres", "postgresql") and parsed.hostname in ("localhost", "127.0.0.1")
+    except ValueError:
+        return False
+
+def scoped(command):
+    # Only an outer inline-code pair is Markdown; interior shell substitutions
+    # execute before command-scoped assignments and cannot prove local scope.
+    command = command.strip()
+    if command.startswith("`") and command.endswith("`"):
+        command = command[1:-1]
+    if "`" in command or "$(" in command:
+        return False
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return False
+    positions = []
+    for i, token in enumerate(tokens):
+        offset = 2 if tokens[i:i + 2] == ["npx", "--no-install"] else 1
+        if token == "npx" and tokens[i + offset:i + offset + 3] == ["prisma", "db", "push"]:
+            positions.append(i)
+    if len(positions) != len(push.findall(command)):
+        return False
+    for i in positions:
+        start = max((j + 1 for j in range(i) if tokens[j] and all(c in ";&|()" for c in tokens[j])), default=0)
+        prefix = tokens[start:i]
+        if prefix[:1] == ["env"]:
+            prefix = prefix[1:]
+        if any(not assignment.match(token) for token in prefix):
+            return False
+        values = dict(token.split("=", 1) for token in prefix)
+        if not all(local_url(values.get(name, "")) for name in ("DATABASE_URL", "DIRECT_URL")):
+            return False
+    return True
+
+unsafe = False
+for path in sorted(paths):
+    if not path.is_file():
+        continue
+    command = ""
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        command += line
+        if command.rstrip().endswith("\\"):
+            command = command.rstrip()[:-1] + " "
+            continue
+        if push.search(command) and not scoped(command):
+            print(f"{path.relative_to(root)}:{number}: {line}", file=sys.stderr)
+            unsafe = True
+        command = ""
+if unsafe:
+    print("instruction docs tell agents to run a bare prisma db push; use npm run prisma:push:local", file=sys.stderr)
+    sys.exit(1)
+PYSCAN
 }
 
 # Exercise discovery and rejection together, without touching repository instructions.
 test_instruction_scan_ownership() (
-  local fixture active output line
+  local fixture active output line unsafe failures=0
   local -a active_files=(CLAUDE.md AGENTS.md .claude/commands/setup.md
     .claude/worktrees-guide.md docs/guides/setup.md)
   fixture=$(mktemp -d)
@@ -94,11 +154,36 @@ test_instruction_scan_ownership() (
     fi
     printf '%s\n' 'Use npm run prisma:push:local.' > "$fixture/$active"
   done
+  for unsafe in \
+    'DATABASE_URL=postgresql://u:p@localhost.evil.example/db DIRECT_URL=postgresql://u:p@localhost/db npx prisma db push' \
+    'DATABASE_URL=postgresql://u:p@localhost/db DIRECT_URL=postgresql://u:p@127.0.0.1.evil.example/db npx prisma db push' \
+    'DATABASE_URL=postgresql://u:p@localhost/db DIRECT_URL=postgresql://u:p@localhost/db echo ok && npx prisma db push' \
+    'DATABASE_URL=postgresql://u:p@localhost/db DIRECT_URL=postgresql://u:p@localhost/db npx prisma db push && npx prisma db push' \
+    'echo "DATABASE_URL=postgresql://u:p@localhost/db DIRECT_URL=postgresql://u:p@localhost/db"; npx prisma db push' \
+    'DATABASE_URL=postgresql://u:p@localhost/db DIRECT_URL=postgresql://u:p@localhost/db `npx prisma db push`' \
+    'DATABASE_URL=postgresql://u:p@localhost/db DIRECT_URL=postgresql://u:p@localhost/db $(npx prisma db push)'; do
+    printf '%s\n' "$unsafe" > "$fixture/docs/guides/unsafe.md"
+    if output=$(assert_safe_instruction_docs "$fixture" 2>&1); then
+      echo "instruction scanner accepted remote or unscoped push: $unsafe" >&2
+      failures=$((failures + 1))
+    fi
+  done
+  rm "$fixture/docs/guides/unsafe.md"
+  if [ "$failures" -ne 0 ]; then
+    exit 1
+  fi
   printf '%s\n' \
     'DATABASE_URL=postgresql://postgres:postgres@localhost:5432/test \' \
     'DIRECT_URL=postgresql://postgres:postgres@127.0.0.1:5432/test npx prisma db push' \
     > "$fixture/docs/guides/local.md"
   assert_safe_instruction_docs "$fixture"
+  for safe in \
+    'cd back-end && DATABASE_URL=postgresql://u:p@localhost:5432/db DIRECT_URL=postgresql://u:p@127.0.0.1/db npx prisma db push' \
+    'env DIRECT_URL="postgresql://u:p@localhost/db" DATABASE_URL="postgresql://u:p@localhost/db" npx --no-install prisma db push' \
+    '`DATABASE_URL=postgresql://u:p@localhost/db DIRECT_URL=postgresql://u:p@localhost/db npx prisma db push`'; do
+    printf '%s\n' "$safe" > "$fixture/docs/guides/local.md"
+    assert_safe_instruction_docs "$fixture"
+  done
   echo 'instruction scanner workspace ownership and active safety: PASS'
 )
 

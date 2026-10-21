@@ -130,3 +130,46 @@ all five active-file checks and remote URL guards remain unchanged. No runtime
 or protected-instruction changes are involved. Evidence:
 `.context/stuck-report/scanner-pipe/{pre-fix,pre-fix-full,post-fix-full}.log` and
 `final-verification.json`; the latter records five full-script passes.
+
+
+## Follow-up: exact host and command scope (PR 1562 review)
+
+Review of `ebe268215f366199ee0df4d753b149951f437298` exposed a separate
+weakness in the preserved line-wide AWK policy: `localhost.evil.example` passed
+as localhost, and local assignments on a prior command could authorize a bare
+push later on the line. One scoped push also hid a second unscoped push.
+The final unchanged regression adds seven rejected forms, including interior
+backtick and `$()` substitutions. On the baseline all seven were accepted;
+the script exits 1 with each unsafe instruction in the diagnostic.
+
+The same reusable scanner now discovers owned files with stdlib `os.walk`,
+retaining exact worktree/history pruning. It checks every push with `shlex`
+command boundaries and requires literal DATABASE_URL and DIRECT_URL assignments
+on that command. `urlsplit` must identify the exact localhost or 127.0.0.1 host.
+Only a complete outer Markdown backtick pair is presentation; interior command
+substitution fails closed. This is intentionally a limited accepted grammar,
+not a full shell interpreter. Supported positive forms include multiline,
+`env`, a preceding `cd &&`, and outer inline-code delimiters.
+
+Reproduction remains `bash back-end/scripts/prisma-local-push.test.sh`.
+Final test bytes were held constant while only the scanner function was
+replaced with the pre-fix version. Retained receipts in
+`.context/stuck-report/review-fixes/` are `scanner-baseline-frozen.log`
+(exit 1), `scanner-final-bytes.sh`, `scanner-frozen-pass-1.log` through
+`scanner-frozen-pass-5.log`, and `scanner-frozen-five.json`. All five final runs
+exit 0 in 2.715, 2.744, 2.756, 2.825, and 2.742 seconds. Remote DB wrapper guards
+and scratch DB normalization still run; no real remote schema push occurs.
+The script SHA256 is
+`7a93f44077c6e459c42fd7c434535698c650df87864c7c5f2a9c3d120fd137ea`.
+
+Archive searches `localhost.evil prisma instruction scope` and
+`Prisma remote hostname local shell assignment` identify this scanner case as
+the owner. Exact golden-reference implementation remains N/A: none of the
+four reference repositories owns this repository-specific instruction policy.
+At 10k agents the gate remains static, with no agent runtime or database cost.
+Parent independent review specifically requested rejection of interior shell
+substitutions and preservation of real remote-DB safety checks.
+
+Parent independent review of the final scanner found no new blocking issue;
+it confirmed conservative parsing and retention of active-file safety. Final
+backend structural verification passed with 1,081 archive cases.

@@ -150,6 +150,7 @@ export async function markStuckAgentBugReportLaunched(
       status: 'SUCCEEDED',
       externalId: runId,
       response: { runId, launchedAt: now.toISOString() },
+      updatedAt: now,
     },
   });
   return result.count === 1;
@@ -174,12 +175,12 @@ export async function markStuckAgentBugReportFailed(
   `);
 }
 
-/** Stuck-agent reports created in [since, until] (launched or in flight), for the daily cap. */
+/** Stuck-agent reports attempted in [since, until] (launched or in flight), for the daily cap. */
 export async function countStuckAgentBugReportsBetween(since: Date, until: Date): Promise<number> {
   return prisma.toolSideEffect.count({
     where: {
       operationType: AGENT_BUG_REPORT_OPERATION_TYPE,
-      createdAt: { gte: since, lte: until },
+      updatedAt: { gte: since, lte: until },
       status: { in: ['STARTED', 'SUCCEEDED'] },
       request: { path: ['source'], equals: 'stuck_24h' },
     },

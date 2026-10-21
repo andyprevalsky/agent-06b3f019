@@ -21,6 +21,8 @@ import { reportAgentBug, type ReportBugLaunchArgs } from '../../domains/agents/b
 import {
   AGENT_BUG_REPORT_OPERATION_TYPE,
   agentBugReportKey,
+  claimStuckAgentBugReport,
+  markStuckAgentBugReportLaunched,
 } from '../../domains/agents/repoAgentBugReports';
 import {
   MAX_STUCK_AGENT_REPORTS_PER_DAY,
@@ -462,6 +464,7 @@ test('stuck-agent reports stop at the daily cap and report the newest runs first
         externalId: `run-prior-${agentId}`,
         request: { agentId, source: 'stuck_24h', attempts: 1 },
         createdAt: new Date(now.getTime() - HOUR_MS),
+        updatedAt: new Date(now.getTime() - HOUR_MS),
       })),
     });
     const fake = fakeLauncher();
@@ -481,6 +484,77 @@ test('stuck-agent reports stop at the daily cap and report the newest runs first
     );
   } finally {
     await dropClaims([...priorIds, ...agentIds]);
+  }
+});
+
+test('stuck-agent reports count a successful old-claim retry against the current daily cap', async () => {
+  const now = caseClock(60);
+  const old = new Date(now.getTime() - 48 * HOUR_MS);
+  const person = await createRealPerson('retry-cap');
+  const retryId = await seedAgent(person, 'old-retry', {
+    createdAt: new Date(old.getTime() - 30 * HOUR_MS),
+  });
+  const pendingId = await seedAgent(person, 'pending-after-retry', {
+    createdAt: new Date(now.getTime() - 30 * HOUR_MS),
+  });
+  const priorIds = Array.from({ length: MAX_STUCK_AGENT_REPORTS_PER_DAY - 1 }, () => randomUUID());
+  try {
+    await prisma.toolSideEffect.create({
+      data: {
+        operationKey: agentBugReportKey(retryId),
+        operationType: AGENT_BUG_REPORT_OPERATION_TYPE,
+        status: 'FAILED',
+        request: {
+          agentId: retryId,
+          source: 'stuck_24h',
+          attempts: 1,
+          nextAttemptAt: new Date(now.getTime() - HOUR_MS).toISOString(),
+        },
+        createdAt: old,
+        updatedAt: old,
+      },
+    });
+    await prisma.toolSideEffect.createMany({
+      data: priorIds.map((agentId) => ({
+        operationKey: agentBugReportKey(agentId),
+        operationType: AGENT_BUG_REPORT_OPERATION_TYPE,
+        status: 'SUCCEEDED',
+        externalId: `run-prior-${agentId}`,
+        request: { agentId, source: 'stuck_24h', attempts: 1 },
+        createdAt: new Date(now.getTime() - HOUR_MS),
+        updatedAt: new Date(now.getTime() - HOUR_MS),
+      })),
+    });
+    const ownerId = randomUUID();
+    const retry = await claimStuckAgentBugReport(
+      retryId,
+      ownerId,
+      { name: 'old retry', promptText: 'retry the original report' },
+      now,
+      now,
+      new Date(now.getTime() - HOUR_MS)
+    );
+    assert(retry !== null, 'the old failed claim is reclaimed');
+    assert(
+      await markStuckAgentBugReportLaunched(retryId, ownerId, 'retried-report', now),
+      'the reclaimed launch is recorded'
+    );
+    const next = fakeLauncher();
+    const summary = await runStuckAgentBugReports(
+      {
+        now: new Date(now.getTime() + 60_000),
+        candidateAgentIds: [pendingId],
+        firstCreatedAt: EPOCH,
+      },
+      next
+    );
+    assert(next.calls.length === 0, 'a successful retry must exhaust the current daily cap');
+    assert(summary.capRemaining === 0, 'the retry counts in the current window');
+    const claim = await claimOf(retryId);
+    assert(claim?.createdAt.getTime() === old.getTime(), 'the original claim time stays frozen');
+    assert(claim.updatedAt.getTime() === now.getTime(), 'success records the actual launch time');
+  } finally {
+    await dropClaims([retryId, pendingId, ...priorIds]);
   }
 });
 
