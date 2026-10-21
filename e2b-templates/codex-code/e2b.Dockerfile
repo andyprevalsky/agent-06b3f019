@@ -1,7 +1,7 @@
 # Minimal E2B template for Codex CLI with WebSocket streaming.
 FROM ubuntu:22.04
 
-ARG CODEX_VERSION=0.144.1
+ARG CODEX_VERSION=0.159.0
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \

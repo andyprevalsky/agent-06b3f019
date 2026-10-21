@@ -126,6 +126,10 @@ class LocalCodeSessionSandbox:
             env["REPLAY_CLI_GATE"] = str(self.tmp)
         if self.provider == "codex":
             env.update({"CODEX_GOAL": self.goal, "CODEX_AUTH_JSON": "{}"})
+            if not self.cli_bin:
+                # Recorded exec JSON is a historical fixture; real CLI runs
+                # exercise the production default app-server transport.
+                env["CODEX_TRANSPORT"] = "exec"
         else:
             env["CLAUDE_CODE_GOAL"] = self.goal
             if not any(key in self.extra_env for key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")):

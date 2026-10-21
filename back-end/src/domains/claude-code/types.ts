@@ -101,16 +101,29 @@ export interface CloseSessionParams {
 }
 
 /** POST /api/agents/:id/code-agent/:taskId/messages — a user turn typed to the CLI. */
-export const directTurnSchema = z.object({
-  client_message_id: z
-    .string()
-    .min(8)
-    .max(128)
-    .regex(/^[A-Za-z0-9_-]+$/),
-  text: z.string().trim().min(1).max(100_000),
-  tool_call_id: z.string().min(1).max(256).optional(),
-  user_id: z.string().uuid().optional(), // internal callers only (API key)
-});
+export const directTurnSchema = z
+  .object({
+    client_message_id: z
+      .string()
+      .min(8)
+      .max(128)
+      .regex(/^[A-Za-z0-9_-]+$/),
+    text: z.string().trim().max(100_000).default(''),
+    attachments: z
+      .array(
+        filePointerSchema.extend({ storage_path: z.string().min(1) }).omit({ base64_data: true })
+      )
+      .max(20)
+      .optional(),
+    model: z.string().trim().min(1).max(128).optional(),
+    reasoning_effort: z
+      .enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'])
+      .optional(),
+    speed: z.enum(['standard', 'fast', 'ultrafast']).optional(),
+    tool_call_id: z.string().min(1).max(256).optional(),
+    user_id: z.string().uuid().optional(), // internal callers only (API key)
+  })
+  .refine((value) => value.text.length > 0 || (value.attachments?.length ?? 0) > 0);
 
 /** POST /:taskId/usage-limit — the code agent stopped on a provider usage limit (C15). */
 export const codeTaskUsageLimitSchema = z.object({

@@ -69,7 +69,17 @@ CLAUDE_TURN_2 = "Reply with one short sentence: what did you change?"
 
 def _stable(events: list[dict[str, Any]], home: str) -> list[dict[str, Any]]:
     """Events minus wall-clock fields, with the temp sandbox HOME shown as E2B's /home/user."""
-    timeless = [{key: value for key, value in event.items() if key != "timestamp"} for event in events]
+    turn_ids = {}
+    for event in events:
+        turn_id = event.get("turn_id")
+        if isinstance(turn_id, str) and turn_id not in turn_ids:
+            turn_ids[turn_id] = f"native-turn-{len(turn_ids) + 1}"
+    timeless = []
+    for event in events:
+        item = {key: value for key, value in event.items() if key not in ("timestamp", "turn_started_at", "turn_ended_at")}
+        if item.get("turn_id") in turn_ids:
+            item["turn_id"] = turn_ids[item["turn_id"]]
+        timeless.append(item)
     return json.loads(json.dumps(timeless).replace(home, "/home/user"))
 
 
@@ -94,7 +104,21 @@ async def _claude_session_with_direct_turn(sandbox: LocalCodeSessionSandbox) -> 
     await observer.start()
     # The stand-in CLI holds turn 1's `result` at the gate; wait until every
     # event before it is out so the user's turn lands at a fixed position.
-    await observer.wait_for(lambda: observer.count("tool_result") >= 4 and observer.count("agent_message") >= 4)
+    # Streamed text now creates many partial upserts. Wait for the final
+    # native usage snapshot before injecting the external user turn, otherwise
+    # its order races the remaining recorded CLI events on a busy host.
+    expected_usage = 0
+    for line in CLAUDE_RAW.read_text().splitlines():
+        raw = json.loads(line)
+        if raw.get("type") == "result":
+            break
+        event = raw.get("event") or {}
+        if raw.get("type") == "stream_event" and (
+            isinstance(event.get("usage"), dict) or
+            (event.get("type") == "message_start" and isinstance((event.get("message") or {}).get("usage"), dict))
+        ):
+            expected_usage += 1
+    await observer.wait_for(lambda: observer.count("tool_result") >= 4 and observer.count("usage") >= expected_usage)
     delivery = await deliver_user_turn_to_code_session(
         sandbox.ws_url, task_id="fixture", text=CLAUDE_TURN_2, turn_id="fixture-turn-2", token=TEST_TURN_TOKEN
     )
@@ -160,7 +184,8 @@ def test_claude_transcript_records_from_fixture():
 
     users = _by_kind(records, "user")
     assert [(u["sender"], u["text"]) for u in users] == [("agent", CLAUDE_GOAL), ("user", CLAUDE_TURN_2)]
-    assert users[1]["turn_id"] == "fixture-turn-2"
+    assert users[1]["client_message_id"] == "fixture-turn-2"
+    assert users[1]["turn_id"] == "native-turn-1"
 
     thinking = _by_kind(records, "thinking")
     assert len(thinking) == 1 and thinking[0]["redacted"] is True and thinking[0]["text"] == ""
@@ -181,7 +206,7 @@ def test_claude_transcript_records_from_fixture():
         and run_ok["output"] == "all tests passed"
     )
     assert run_fail["exit_code"] == 3 and "42" in run_fail["output"]
-    assert all(t["id"].startswith("tool:toolu_") and t["rev"] == 2 for t in tools)
+    assert all(t["id"].startswith("tool:toolu_") and t["rev"] >= 2 for t in tools)
 
     assistant = [r["text"] for r in _by_kind(records, "assistant")]
     assert assistant[0].startswith("I'll read calc.py") and len(assistant) >= 4
@@ -200,7 +225,7 @@ def test_claude_transcript_records_from_fixture():
 def test_ui_records_follow_the_transcript_tab_contract():
     events = json.loads(CLAUDE_EVENTS.read_text())
     ui = [to_ui_record(record) for record in build_code_transcript(events, "claude", goal=CLAUDE_GOAL)]
-    assert {r["type"] for r in ui} == {"message", "thinking", "tool", "result", "control"}
+    assert {r["type"] for r in ui} == {"message", "thinking", "tool", "result", "control", "turn", "metrics"}
     tools = [r["tool"] for r in ui if r["type"] == "tool"]
     assert [(t["name"], t["target"]) for t in tools] == [
         ("Read", "calc.py"),
@@ -596,9 +621,52 @@ async def test_transcript_batch_row_carries_code_agent_events():
     assert meta["transcript"] == {"version": 1, "task_id": "task-9", "provider": "codex", "events": [0, len(events)]}
 
 
+
+async def test_claude_native_direct_chat_contract():
+    process = await asyncio.create_subprocess_exec(
+        "node", "--test", str(Path(__file__).resolve().parents[3] / "e2b-templates/claude-code/direct-chat.test.mjs"),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    )
+    output, _ = await process.communicate()
+    assert process.returncode == 0, output.decode(errors="replace")
+
+
+async def test_codex_native_app_server_contract():
+    process = await asyncio.create_subprocess_exec(
+        "node", "--test", str(Path(__file__).resolve().parents[3] / "e2b-templates/codex-code/app-server.test.mjs"),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    )
+    output, _ = await process.communicate()
+    assert process.returncode == 0, output.decode(errors="replace")
+
+def test_attachment_only_turn_and_distinct_steers_remain_visible():
+    builder = CodeTranscriptBuilder("claude")
+    builder.feed({"type":"turn_started", "turn_id":"native", "turn_started_at":"2026-10-20T00:00:00Z"}, 0)
+    builder.feed({"type":"user_turn", "turn_id":"native", "client_message_id":"one", "text":"", "attachments":[{"name":"notes.txt"}]}, 1)
+    builder.feed({"type":"user_turn", "turn_id":"native", "client_message_id":"two", "text":"steer"}, 2)
+    builder.feed({"type":"usage", "turn_id":"native", "usage_scope":"turn", "output_tokens":12, "cached_input_tokens":0}, 3)
+    builder.feed({"type":"usage", "turn_id":"native", "usage_scope":"turn", "output_tokens":16}, 4)
+    builder.feed({"type":"turn_ended", "turn_id":"native", "turn_ended_at":"2026-10-20T00:00:02Z", "turn_outcome":"interrupted"}, 5)
+    users = [to_ui_record(r) for r in builder.records if r.get("kind") == "user"]
+    assert len(users) == 2 and users[0]["text"] == "Attached: notes.txt"
+    assert [r["client_message_id"] for r in users] == ["one", "two"]
+    assert {r["turn_id"] for r in users} == {"native"}
+    assert users[0]["attachments"] == [{"name":"notes.txt"}]
+    metrics = [to_ui_record(r) for r in builder.records if r.get("kind") == "metrics"]
+    assert len(metrics) == 2 and metrics[0]["id"] != metrics[1]["id"]
+    assert [m["output_tokens"] for m in metrics] == [12,16]
+    assert metrics[0]["cached_input_tokens"] == 0
+    assert "input_tokens" not in metrics[0] and metrics[0]["usage_scope"] == "turn"
+    ended = next(to_ui_record(r) for r in builder.records if r.get("kind") == "turn")
+    assert ended["turn_outcome"] == "interrupted" and ended["turn_ended_at"] == "2026-10-20T00:00:02Z"
+
+
 async def run_all_tests():
     print("code-session-direct-chat blackbox tests:")
     r = BlackboxResult()
+    r.record("attachment_only_turn_and_distinct_steers_remain_visible", test_attachment_only_turn_and_distinct_steers_remain_visible)
+    await r.record_async("codex_native_app_server_contract", test_codex_native_app_server_contract)
+    await r.record_async("claude_native_direct_chat_contract", test_claude_native_direct_chat_contract)
     await r.record_async(
         "claude_recording_through_ws_server_matches_event_fixture",
         test_claude_recording_through_ws_server_matches_event_fixture,

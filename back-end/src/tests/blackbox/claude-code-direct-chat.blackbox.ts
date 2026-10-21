@@ -97,7 +97,10 @@ async function sandboxUserTurns(): Promise<Array<{ turn_id: string; text: string
       resolveTurns(
         (msg.data as Array<Record<string, unknown>>)
           .filter((event) => event.type === 'user_turn')
-          .map((event) => ({ turn_id: String(event.turn_id), text: String(event.text) }))
+          .map((event) => ({
+            turn_id: String(event.client_message_id ?? event.turn_id),
+            text: String(event.text),
+          }))
       );
     });
     ws.on('error', reject);
@@ -336,4 +339,29 @@ test('hand back releases the hold once', async () => {
   const again = await post(path, {});
   assert.equal(again.status, 200);
   assert.equal(again.json.status, 'not_held');
+});
+
+test('direct turns reject foreign attachments before any storage read or delivery', async () => {
+  const beforeTurns = await sandboxUserTurns();
+  const response = await originals.fetch(`${apiUrl}/api/claude-code-session/${TASK_ID}/turns`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY, 'X-User-Id': OWNER },
+    body: JSON.stringify({
+      client_message_id: 'foreign-attachment',
+      text: '',
+      attachments: [
+        {
+          id: 'file-one',
+          storage_path: `${STRANGER}/notes.txt`,
+          original_filename: 'notes.txt',
+          mime_type: 'text/plain',
+          size_bytes: 2,
+          created_at: '2026-10-20T00:00:00Z',
+        },
+      ],
+    }),
+  });
+  assert.equal(response.status, 400);
+  assert.equal(((await response.json()) as { code: string }).code, 'INVALID_ATTACHMENT');
+  assert.deepEqual(await sandboxUserTurns(), beforeTurns);
 });

@@ -16,7 +16,12 @@ import { type Response, Router } from 'express';
 import { createLogger } from '../../providers/logger';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { asyncHandler } from '../../utils/asyncHandler';
-import { DirectChatError, handBackDirectChat, sendDirectTurn } from './directChatService';
+import {
+  DirectChatError,
+  handBackDirectChat,
+  sendDirectTurn,
+  getDirectChatCapabilities,
+} from './directChatService';
 import { directTurnSchema } from './types';
 
 const log = createLogger('ClaudeCodeDirectChatRoutes');
@@ -53,6 +58,12 @@ function turnHandler(agentIdParam: string | null) {
         userId: req.userId,
         clientMessageId: parsed.data.client_message_id,
         text: parsed.data.text,
+        attachments: parsed.data.attachments,
+        settings: {
+          model: parsed.data.model,
+          effort: parsed.data.reasoning_effort,
+          speed: parsed.data.speed,
+        },
         toolCallId: parsed.data.tool_call_id,
       });
       res.json(result);
@@ -88,3 +99,15 @@ sessionScopedRouter.post('/:taskId/turns', auth, turnHandler(null));
 sessionScopedRouter.post('/:taskId/hand-back', auth, handBackHandler(null));
 
 export default router;
+
+sessionScopedRouter.get(
+  '/:taskId/capabilities',
+  auth,
+  asyncHandler(async (req: HybridAuthRequest, res: Response) => {
+    try {
+      res.json(await getDirectChatCapabilities({ taskId: req.params.taskId, userId: req.userId }));
+    } catch (error) {
+      sendDirectChatError(res, error, 'read code session capabilities');
+    }
+  })
+);

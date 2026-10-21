@@ -26,9 +26,12 @@ import { createLogger } from '../../providers/logger';
 import {
   deliverUserTurnToCodeSession,
   handBackCodeSession,
+  readCodeSessionCapabilities,
   type TurnDelivery,
+  type CodeTurnSettings,
 } from '../../providers/codeSessionTurns';
 import * as repo from './repo';
+import { prepareDirectTurnAttachments, type DirectAttachment } from './directChatAttachments';
 
 const log = createLogger('ClaudeCodeDirectChat');
 
@@ -79,6 +82,20 @@ function deliveryError(delivery: TurnDelivery): DirectChatError {
     return new DirectChatError(502, 'CODE_SESSION_UNREACHABLE', 'Could not reach the code session');
   }
   switch (delivery.reason) {
+    case 'unsupported_settings':
+    case 'unsupported_while_active':
+    case 'settings_rejected':
+      return new DirectChatError(
+        409,
+        'UNSUPPORTED_SETTINGS',
+        'The code session cannot apply those settings. Refresh its available settings and retry.'
+      );
+    case 'settings_unconfirmed':
+      return new DirectChatError(
+        502,
+        'SETTINGS_UNCONFIRMED',
+        'Could not confirm settings; your message was not sent.'
+      );
     case 'session_ended':
       return new DirectChatError(
         409,
@@ -106,6 +123,9 @@ export interface DirectTurnResult {
   task_id: string;
   agent_id: string;
   code_provider: 'claude' | 'codex';
+  effective_settings?: CodeTurnSettings;
+  delivery_mode?: 'steer' | 'start';
+  turn_id?: string;
 }
 
 export async function sendDirectTurn(params: {
@@ -115,6 +135,8 @@ export async function sendDirectTurn(params: {
   userId: string | undefined;
   clientMessageId: string;
   text: string;
+  attachments?: DirectAttachment[];
+  settings?: CodeTurnSettings;
   toolCallId?: string;
 }): Promise<DirectTurnResult> {
   const { taskId, userId, clientMessageId, text } = params;
@@ -124,21 +146,23 @@ export async function sendDirectTurn(params: {
   const chip = await repo.findCodeSessionChip(session.agentId, taskId);
   const toolCallId = params.toolCallId ?? chip.toolCallId ?? undefined;
 
-  const metadata: Record<string, unknown> = {
-    toolName: 'spawn_claude_code_agent',
-    title: 'You',
-    task_id: taskId,
-    action_type: 'user_direct_turn',
-    code_provider: chip.provider,
-    // Child-scoped like the chip's progress rows: visible in the code agent's
-    // trajectory and tree grep, not replayed into the root planner mid-run.
-    subAgentId: taskId,
-    direct_turn_id: clientMessageId,
-    isDirectCodeTurn: true,
-    idempotencyKey: `code-turn:${taskId}:${clientMessageId}`,
-    ...(toolCallId !== undefined ? { toolCallId } : {}),
-  };
+  const metadata = directTurnMetadata(taskId, clientMessageId, chip.provider, toolCallId);
 
+  const attachments = await prepareDirectTurnAttachments(params.attachments, userId ?? '').catch(
+    (error: unknown) => {
+      if (
+        error instanceof Error &&
+        ['INVALID_ATTACHMENT', 'ATTACHMENTS_TOO_LARGE'].includes(error.message)
+      ) {
+        throw new DirectChatError(400, error.message, 'Could not accept these attachments');
+      }
+      throw new DirectChatError(
+        502,
+        'ATTACHMENTS_UNAVAILABLE',
+        'Could not load attachments; your message was not sent'
+      );
+    }
+  );
   const startedAt = Date.now();
   const delivery = await deliverUserTurnToCodeSession({
     wsUrl: session.streamUrl,
@@ -146,6 +170,8 @@ export async function sendDirectTurn(params: {
     turnId: clientMessageId,
     text,
     sender: 'user',
+    attachments,
+    settings: params.settings,
   });
   if (delivery.status !== 'delivered' && delivery.status !== 'duplicate') {
     log.warn('Direct turn not delivered', {
@@ -163,7 +189,13 @@ export async function sendDirectTurn(params: {
     agentId: session.agentId,
     role: 'TOOL',
     text,
-    metadata,
+    metadata: {
+      ...metadata,
+      ...((params.attachments?.length ?? 0) > 0 ? { attachments: params.attachments } : {}),
+      effective_settings: delivery.effective_settings,
+      turn_id: delivery.turn_id,
+      delivery_mode: delivery.delivery_mode,
+    },
   });
   log.info('Direct turn delivered', {
     taskId,
@@ -178,6 +210,9 @@ export async function sendDirectTurn(params: {
     task_id: taskId,
     agent_id: session.agentId,
     code_provider: chip.provider,
+    ...(delivery.effective_settings ? { effective_settings: delivery.effective_settings } : {}),
+    ...(delivery.delivery_mode ? { delivery_mode: delivery.delivery_mode } : {}),
+    ...(delivery.turn_id !== undefined ? { turn_id: delivery.turn_id } : {}),
   };
 }
 
@@ -199,4 +234,52 @@ export async function handBackDirectChat(params: {
     );
   }
   return { status };
+}
+
+export async function getDirectChatCapabilities(params: {
+  taskId: string;
+  userId: string | undefined;
+}) {
+  const session = await requireOwnedLiveSession(undefined, params.taskId, params.userId);
+  try {
+    const capabilities = await readCodeSessionCapabilities({
+      wsUrl: session.streamUrl,
+      taskId: params.taskId,
+    });
+    if (capabilities.status !== 'delivered')
+      throw new Error(capabilities.reason ?? 'Capabilities unavailable');
+    return {
+      code_provider: capabilities.code_provider,
+      effective_settings: capabilities.effective_settings,
+      models: capabilities.models ?? [],
+    };
+  } catch {
+    throw new DirectChatError(
+      502,
+      'CAPABILITIES_UNAVAILABLE',
+      'Could not confirm code session capabilities'
+    );
+  }
+}
+
+function directTurnMetadata(
+  taskId: string,
+  clientMessageId: string,
+  provider: string,
+  toolCallId: string | undefined
+): Record<string, unknown> {
+  return {
+    toolName: 'spawn_claude_code_agent',
+    title: 'You',
+    task_id: taskId,
+    action_type: 'user_direct_turn',
+    code_provider: provider,
+    // Child-scoped like the chip's progress rows: visible in the code agent's
+    // trajectory and tree grep, not replayed into the root planner mid-run.
+    subAgentId: taskId,
+    direct_turn_id: clientMessageId,
+    isDirectCodeTurn: true,
+    idempotencyKey: `code-turn:${taskId}:${clientMessageId}`,
+    ...(toolCallId !== undefined ? { toolCallId } : {}),
+  };
 }

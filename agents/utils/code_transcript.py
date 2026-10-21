@@ -46,7 +46,7 @@ TRANSCRIPT_VERSION = 1
 # full output; a row shows the tail a user scans for the failure.
 TOOL_OUTPUT_PREVIEW_CHARS = 4000
 
-RecordKind = Literal["user", "thinking", "assistant", "tool", "result", "error", "control"]
+RecordKind = Literal["user", "thinking", "assistant", "tool", "result", "error", "control", "turn", "metrics"]
 
 _READ_TOOLS = frozenset({"Read", "NotebookRead"})
 _EDIT_TOOLS = frozenset({"Edit", "MultiEdit", "Write", "NotebookEdit"})
@@ -65,6 +65,17 @@ class TranscriptRecord(TypedDict, total=False):
     text: str
     sender: str
     turn_id: Optional[str]
+    client_message_id: Optional[str]
+    turn_started_at: Optional[str]
+    turn_ended_at: Optional[str]
+    turn_outcome: Optional[str]
+    activity_kind: str
+    partial: bool
+    attachments: list[Any]
+    output_tokens: int
+    input_tokens: int
+    cached_input_tokens: int
+    usage_scope: str
     redacted: bool
     tokens: Optional[int]
     category: str
@@ -164,6 +175,8 @@ class CodeTranscriptBuilder:
         self._thinking_tokens: Optional[int] = None
         self._goal = goal.strip() if isinstance(goal, str) and goal.strip() else None
         self._goal_emitted = False
+        self._turn_context: dict[str, Any] = {}
+        self._event_context: dict[str, Any] = {}
 
     # -- public -------------------------------------------------------------
 
@@ -174,6 +187,12 @@ class CodeTranscriptBuilder:
     def feed(self, event: dict[str, Any], index: int) -> list[TranscriptRecord]:
         if not isinstance(event, dict):
             return []
+        self._event_context = {
+            key: event[key] for key in ("turn_id", "turn_started_at", "turn_ended_at", "turn_outcome")
+            if isinstance(event.get(key), str)
+        }
+        if event.get("type") == "turn_started":
+            self._turn_context = dict(self._event_context)
         out: list[TranscriptRecord] = []
         if not self._goal_emitted and self._goal is not None:
             self._goal_emitted = True
@@ -191,6 +210,8 @@ class CodeTranscriptBuilder:
         handler = getattr(self, f"_on_{event.get('type')}", None)
         if handler is not None:
             out.extend(record for record in handler(event, index) if record is not None)
+        if event.get("type") == "turn_ended":
+            self._turn_context = {}
         return out
 
     # -- record helpers -----------------------------------------------------
@@ -201,6 +222,8 @@ class CodeTranscriptBuilder:
             record = {"id": key, "rev": 0, "seq": index, "provider": self.provider, "at": None}
             self._records[key] = record
             self._order.append(key)
+        record.update(self._turn_context)
+        record.update(self._event_context)
         record.update(fields)
         record["rev"] = int(record.get("rev") or 0) + 1
         record["at"] = at if isinstance(at, str) else record.get("at")
@@ -210,21 +233,48 @@ class CodeTranscriptBuilder:
 
     def _on_user_turn(self, event: dict[str, Any], index: int) -> list[Optional[TranscriptRecord]]:
         text = event.get("text")
+        attachments = event.get("attachments") if isinstance(event.get("attachments"), list) else []
         if not isinstance(text, str) or not text.strip():
-            return []
+            names = [item.rsplit("/", 1)[-1] if isinstance(item, str) else str(item.get("name") or "attachment") for item in attachments if isinstance(item, (str, dict))]
+            if not names:
+                return []
+            text = "Attached: " + ", ".join(names)
         turn_id = event.get("turn_id") if isinstance(event.get("turn_id"), str) else None
+        client_message_id = event.get("client_message_id") if isinstance(event.get("client_message_id"), str) else turn_id
         sender = "agent" if event.get("sender") == "agent" else "user"
         return [
             self._upsert(
-                f"turn:{turn_id or index}",
+                f"turn:{client_message_id or index}",
                 index,
                 event.get("timestamp"),
                 kind="user",
                 text=text,
                 sender=sender,
                 turn_id=turn_id,
+                client_message_id=client_message_id,
+                attachments=attachments,
             )
         ]
+
+    def _on_usage(self, event: dict[str, Any], index: int) -> list[Optional[TranscriptRecord]]:
+        fields = {key: event[key] for key in ("output_tokens", "input_tokens", "cached_input_tokens")
+                  if isinstance(event.get(key), (int, float)) and not isinstance(event.get(key), bool) and event[key] >= 0}
+        if not fields:
+            return []
+        return [self._upsert(f"metrics:{event.get('turn_id') or 'session'}:{index}", index, event.get("timestamp"),
+                            kind="metrics", text="", usage_scope=event.get("usage_scope"), **fields)]
+
+    def _on_turn_started(self, event: dict[str, Any], index: int) -> list[Optional[TranscriptRecord]]:
+        turn_id = event.get("turn_id")
+        if not isinstance(turn_id, str):
+            return []
+        return [self._upsert(f"lifecycle:{turn_id}", index, event.get("timestamp"), kind="turn", event="started", text="")]
+
+    def _on_turn_ended(self, event: dict[str, Any], index: int) -> list[Optional[TranscriptRecord]]:
+        turn_id = event.get("turn_id")
+        if not isinstance(turn_id, str):
+            return []
+        return [self._upsert(f"lifecycle:{turn_id}", index, event.get("timestamp"), kind="turn", event="ended", text="")]
 
     def _on_direct_chat(self, event: dict[str, Any], index: int) -> list[Optional[TranscriptRecord]]:
         status = event.get("status")
@@ -257,6 +307,7 @@ class CodeTranscriptBuilder:
                 text=text,
                 redacted=bool(event.get("redacted")) or not text,
                 tokens=tokens,
+                partial=event.get("partial") is True,
             )
         ]
 
@@ -277,7 +328,7 @@ class CodeTranscriptBuilder:
         if not isinstance(text, str) or not text.strip():
             return []
         key = f"item:{event['item_id']}" if isinstance(event.get("item_id"), str) else f"assistant:{index}"
-        return [self._upsert(key, index, event.get("timestamp"), kind="assistant", text=text)]
+        return [self._upsert(key, index, event.get("timestamp"), kind="assistant", text=text, partial=event.get("partial") is True)]
 
     def _on_result(self, event: dict[str, Any], index: int) -> list[Optional[TranscriptRecord]]:
         status = "completed" if event.get("status") == "completed" else "failed"
@@ -307,7 +358,8 @@ class CodeTranscriptBuilder:
         tool_use_id = event.get("tool_use_id") if isinstance(event.get("tool_use_id"), str) else None
         key = f"tool:{tool_use_id}" if tool_use_id else f"tool:{index}"
         title, path, command = _tool_title(name, tool_input)
-        self._pending_tools.append(key)
+        if key not in self._pending_tools:
+            self._pending_tools.append(key)
         return [
             self._upsert(
                 key,
@@ -523,6 +575,9 @@ def to_ui_record(record: TranscriptRecord) -> dict[str, Any]:
         "provider": record.get("provider"),
         "ts": record.get("at"),
     }
+    for key in ("turn_id", "client_message_id", "turn_started_at", "turn_ended_at", "turn_outcome", "partial", "attachments"):
+        if key in record:
+            out[key] = record[key]
     text = record.get("text")
     if kind in ("assistant", "user"):
         out.update(type="message", role="assistant" if kind == "assistant" else "user", text=text or "")
@@ -548,6 +603,7 @@ def to_ui_record(record: TranscriptRecord) -> dict[str, Any]:
             "target": target,
             "raw_name": raw_name,
             "category": category,
+            "activity_kind": "web" if raw_name in ("WebSearch", "WebFetch") else "exec" if category == "run" else category,
             "result": result,
         }
         if category == "edit":
@@ -555,6 +611,13 @@ def to_ui_record(record: TranscriptRecord) -> dict[str, Any]:
         if record.get("paths"):
             tool["paths"] = record.get("paths")
         out.update(type="tool", text=record.get("title") or "", tool=tool)
+    elif kind == "metrics":
+        out.update(type="metrics", usage_scope=record.get("usage_scope"))
+        for key in ("output_tokens", "input_tokens", "cached_input_tokens"):
+            if key in record:
+                out[key] = record[key]
+    elif kind == "turn":
+        out.update(type="turn", event=record.get("event"), text="")
     elif kind == "result":
         out.update(type="result", text=text or "", status=record.get("status"))
     elif kind == "error":

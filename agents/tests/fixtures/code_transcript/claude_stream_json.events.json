@@ -2,6 +2,7 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 0,
   "type": "session",
   "status": "starting",
   "cwd": "/home/user",
@@ -10,6 +11,15 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 1,
+  "turn_id": "native-turn-1",
+  "type": "turn_started"
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 2,
+  "turn_id": "native-turn-1",
   "type": "session",
   "raw_type": "system.init",
   "session_id": "54fc65d8-c2d4-41e5-a2d8-d4df7c487c60",
@@ -48,6 +58,8 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 3,
+  "turn_id": "native-turn-1",
   "type": "cli_message",
   "raw_type": "system",
   "cli_message": {
@@ -61,7 +73,32 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 4,
+  "turn_id": "native-turn-1",
+  "type": "usage",
+  "usage_scope": "turn",
+  "output_tokens": 2,
+  "input_tokens": 2,
+  "cached_input_tokens": 18643
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 5,
+  "turn_id": "native-turn-1",
   "type": "thinking",
+  "item_id": "msg_011CgDPMdn6L6hHpXfkGFo2T:0",
+  "text": "",
+  "delta": "",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 6,
+  "turn_id": "native-turn-1",
+  "type": "thinking",
+  "item_id": "msg_011CgDPMdn6L6hHpXfkGFo2T:0",
   "raw_type": "assistant.thinking",
   "text": "",
   "redacted": true
@@ -69,6 +106,19 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 7,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPMdn6L6hHpXfkGFo2T:1",
+  "text": "I'll read",
+  "delta": "I'll read",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 8,
+  "turn_id": "native-turn-1",
   "type": "cli_message",
   "raw_type": "rate_limit_event",
   "cli_message": {
@@ -98,9 +148,46 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 9,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPMdn6L6hHpXfkGFo2T:1",
+  "text": "I'll read calc.py first to",
+  "delta": " calc.py first to",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 10,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPMdn6L6hHpXfkGFo2T:1",
+  "text": "I'll read calc.py first to find",
+  "delta": " find",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 11,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPMdn6L6hHpXfkGFo2T:1",
+  "text": "I'll read calc.py first to find the bug.",
+  "delta": " the bug.",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 12,
+  "turn_id": "native-turn-1",
   "type": "agent_message",
   "raw_type": "assistant",
+  "item_id": "msg_011CgDPMdn6L6hHpXfkGFo2T:1",
   "text": "I'll read calc.py first to find the bug.",
+  "partial": false,
   "usage": {
    "input_tokens": 2,
    "cache_creation_input_tokens": 61922,
@@ -118,6 +205,19 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 13,
+  "turn_id": "native-turn-1",
+  "type": "tool_use",
+  "tool": "Read",
+  "tool_use_id": "toolu_018yFxWy1mWPEU5pfTb42xus",
+  "input": {},
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 14,
+  "turn_id": "native-turn-1",
   "type": "tool_use",
   "raw_type": "assistant.tool_use",
   "tool": "Read",
@@ -132,6 +232,19 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 15,
+  "turn_id": "native-turn-1",
+  "type": "usage",
+  "usage_scope": "turn",
+  "output_tokens": 162,
+  "input_tokens": 2,
+  "cached_input_tokens": 18643
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 16,
+  "turn_id": "native-turn-1",
   "type": "tool_result",
   "raw_type": "user.tool_result",
   "tool_use_result": {
@@ -150,6 +263,8 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 17,
+  "turn_id": "native-turn-1",
   "type": "cli_message",
   "raw_type": "system",
   "cli_message": {
@@ -163,9 +278,79 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 18,
+  "turn_id": "native-turn-1",
+  "type": "usage",
+  "usage_scope": "turn",
+  "output_tokens": 163,
+  "input_tokens": 4,
+  "cached_input_tokens": 99208
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 19,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPMxDc2agToeu3amNiE:0",
+  "text": "`",
+  "delta": "`",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 20,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPMxDc2agToeu3amNiE:0",
+  "text": "`add` u",
+  "delta": "add` u",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 21,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPMxDc2agToeu3amNiE:0",
+  "text": "`add` uses sub",
+  "delta": "ses sub",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 22,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPMxDc2agToeu3amNiE:0",
+  "text": "`add` uses subtraction instead of addition",
+  "delta": "traction instead of addition",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 23,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPMxDc2agToeu3amNiE:0",
+  "text": "`add` uses subtraction instead of addition. Fixing it.",
+  "delta": ". Fixing it.",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 24,
+  "turn_id": "native-turn-1",
   "type": "agent_message",
   "raw_type": "assistant",
+  "item_id": "msg_011CgDPMxDc2agToeu3amNiE:0",
   "text": "`add` uses subtraction instead of addition. Fixing it.",
+  "partial": false,
   "usage": {
    "input_tokens": 2,
    "cache_creation_input_tokens": 252,
@@ -183,6 +368,19 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 25,
+  "turn_id": "native-turn-1",
+  "type": "tool_use",
+  "tool": "Edit",
+  "tool_use_id": "toolu_01SJDJjrTW26WcFmpX9D8f4j",
+  "input": {},
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 26,
+  "turn_id": "native-turn-1",
   "type": "tool_use",
   "raw_type": "assistant.tool_use",
   "tool": "Edit",
@@ -200,6 +398,19 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 27,
+  "turn_id": "native-turn-1",
+  "type": "usage",
+  "usage_scope": "turn",
+  "output_tokens": 340,
+  "input_tokens": 4,
+  "cached_input_tokens": 99208
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 28,
+  "turn_id": "native-turn-1",
   "type": "tool_result",
   "raw_type": "user.tool_result",
   "tool_use_result": {
@@ -232,6 +443,8 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 29,
+  "turn_id": "native-turn-1",
   "type": "cli_message",
   "raw_type": "system",
   "cli_message": {
@@ -245,6 +458,30 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 30,
+  "turn_id": "native-turn-1",
+  "type": "usage",
+  "usage_scope": "turn",
+  "output_tokens": 360,
+  "input_tokens": 6,
+  "cached_input_tokens": 180025
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 31,
+  "turn_id": "native-turn-1",
+  "type": "tool_use",
+  "tool": "Bash",
+  "tool_use_id": "toolu_01GsBwrtfNmuSQc5mCrqi7e5",
+  "input": {},
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 32,
+  "turn_id": "native-turn-1",
   "type": "tool_use",
   "raw_type": "assistant.tool_use",
   "tool": "Bash",
@@ -258,6 +495,19 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 33,
+  "turn_id": "native-turn-1",
+  "type": "usage",
+  "usage_scope": "turn",
+  "output_tokens": 422,
+  "input_tokens": 6,
+  "cached_input_tokens": 180025
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 34,
+  "turn_id": "native-turn-1",
   "type": "tool_result",
   "raw_type": "user.tool_result",
   "tool_use_result": {
@@ -273,6 +523,8 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 35,
+  "turn_id": "native-turn-1",
   "type": "cli_message",
   "raw_type": "system",
   "cli_message": {
@@ -286,9 +538,79 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 36,
+  "turn_id": "native-turn-1",
+  "type": "usage",
+  "usage_scope": "turn",
+  "output_tokens": 425,
+  "input_tokens": 8,
+  "cached_input_tokens": 261146
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 37,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPNJ2Uk8LdKC4sg4ssh:0",
+  "text": "Now running",
+  "delta": "Now running",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 38,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPNJ2Uk8LdKC4sg4ssh:0",
+  "text": "Now running the stand",
+  "delta": " the stand",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 39,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPNJ2Uk8LdKC4sg4ssh:0",
+  "text": "Now running the standalone command ex",
+  "delta": "alone command ex",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 40,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPNJ2Uk8LdKC4sg4ssh:0",
+  "text": "Now running the standalone command exactly as given",
+  "delta": "actly as given",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 41,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPNJ2Uk8LdKC4sg4ssh:0",
+  "text": "Now running the standalone command exactly as given.",
+  "delta": ".",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 42,
+  "turn_id": "native-turn-1",
   "type": "agent_message",
   "raw_type": "assistant",
+  "item_id": "msg_011CgDPNJ2Uk8LdKC4sg4ssh:0",
   "text": "Now running the standalone command exactly as given.",
+  "partial": false,
   "usage": {
    "input_tokens": 2,
    "cache_creation_input_tokens": 132,
@@ -306,6 +628,19 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 43,
+  "turn_id": "native-turn-1",
+  "type": "tool_use",
+  "tool": "Bash",
+  "tool_use_id": "toolu_01LrquaCPK3a8EDN3op1RAZ6",
+  "input": {},
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 44,
+  "turn_id": "native-turn-1",
   "type": "tool_use",
   "raw_type": "assistant.tool_use",
   "tool": "Bash",
@@ -319,6 +654,19 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 45,
+  "turn_id": "native-turn-1",
+  "type": "usage",
+  "usage_scope": "turn",
+  "output_tokens": 547,
+  "input_tokens": 8,
+  "cached_input_tokens": 261146
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 46,
+  "turn_id": "native-turn-1",
   "type": "tool_result",
   "raw_type": "user.tool_result",
   "tool_use_result": "Error: Exit code 3\n42",
@@ -328,6 +676,8 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 47,
+  "turn_id": "native-turn-1",
   "type": "cli_message",
   "raw_type": "system",
   "cli_message": {
@@ -341,9 +691,156 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 48,
+  "turn_id": "native-turn-1",
+  "type": "usage",
+  "usage_scope": "turn",
+  "output_tokens": 552,
+  "input_tokens": 10,
+  "cached_input_tokens": 342399
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 49,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPNTr59m8Gu32E3ec7d:0",
+  "text": "Fixed `",
+  "delta": "Fixed `",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 50,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPNTr59m8Gu32E3ec7d:0",
+  "text": "Fixed `add` (was `a -",
+  "delta": "add` (was `a -",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 51,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPNTr59m8Gu32E3ec7d:0",
+  "text": "Fixed `add` (was `a - b`, now",
+  "delta": " b`, now",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 52,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPNTr59m8Gu32E3ec7d:0",
+  "text": "Fixed `add` (was `a - b`, now `a + b`); `test",
+  "delta": " `a + b`); `test",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 53,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPNTr59m8Gu32E3ec7d:0",
+  "text": "Fixed `add` (was `a - b`, now `a + b`); `test_cal",
+  "delta": "_cal",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 54,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPNTr59m8Gu32E3ec7d:0",
+  "text": "Fixed `add` (was `a - b`, now `a + b`); `test_calc.py` re",
+  "delta": "c.py` re",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 55,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPNTr59m8Gu32E3ec7d:0",
+  "text": "Fixed `add` (was `a - b`, now `a + b`); `test_calc.py` reports \"all tests passed\".",
+  "delta": "ports \"all tests passed\".",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 56,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPNTr59m8Gu32E3ec7d:0",
+  "text": "Fixed `add` (was `a - b`, now `a + b`); `test_calc.py` reports \"all tests passed\". The standalone command printed `",
+  "delta": " The standalone command printed `",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 57,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPNTr59m8Gu32E3ec7d:0",
+  "text": "Fixed `add` (was `a - b`, now `a + b`); `test_calc.py` reports \"all tests passed\". The standalone command printed `42` to",
+  "delta": "42` to",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 58,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPNTr59m8Gu32E3ec7d:0",
+  "text": "Fixed `add` (was `a - b`, now `a + b`); `test_calc.py` reports \"all tests passed\". The standalone command printed `42` to stdout and exited with code",
+  "delta": " stdout and exited with code",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 59,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPNTr59m8Gu32E3ec7d:0",
+  "text": "Fixed `add` (was `a - b`, now `a + b`); `test_calc.py` reports \"all tests passed\". The standalone command printed `42` to stdout and exited with code 3,",
+  "delta": " 3,",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 60,
+  "turn_id": "native-turn-1",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPNTr59m8Gu32E3ec7d:0",
+  "text": "Fixed `add` (was `a - b`, now `a + b`); `test_calc.py` reports \"all tests passed\". The standalone command printed `42` to stdout and exited with code 3, as expected.",
+  "delta": " as expected.",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 61,
+  "turn_id": "native-turn-1",
   "type": "agent_message",
   "raw_type": "assistant",
+  "item_id": "msg_011CgDPNTr59m8Gu32E3ec7d:0",
   "text": "Fixed `add` (was `a - b`, now `a + b`); `test_calc.py` reports \"all tests passed\". The standalone command printed `42` to stdout and exited with code 3, as expected.",
+  "partial": false,
   "usage": {
    "input_tokens": 2,
    "cache_creation_input_tokens": 184,
@@ -361,6 +858,19 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 62,
+  "turn_id": "native-turn-1",
+  "type": "usage",
+  "usage_scope": "turn",
+  "output_tokens": 614,
+  "input_tokens": 10,
+  "cached_input_tokens": 342399
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 63,
+  "turn_id": "native-turn-1",
   "type": "direct_chat",
   "status": "held",
   "sender": "user"
@@ -368,14 +878,30 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 64,
+  "turn_id": "native-turn-1",
   "type": "user_turn",
-  "turn_id": "fixture-turn-2",
+  "client_message_id": "fixture-turn-2",
   "sender": "user",
-  "text": "Reply with one short sentence: what did you change?"
+  "text": "Reply with one short sentence: what did you change?",
+  "attachments": []
  },
  {
   "version": 1,
   "provider": "claude",
+  "seq": 65,
+  "turn_id": "native-turn-1",
+  "type": "usage",
+  "usage_scope": "turn",
+  "output_tokens": 614,
+  "input_tokens": 10,
+  "cached_input_tokens": 342399
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 66,
+  "turn_id": "native-turn-1",
   "type": "result",
   "raw_type": "result.success",
   "status": "completed",
@@ -448,6 +974,15 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 67,
+  "turn_id": "native-turn-1",
+  "type": "turn_ended",
+  "turn_outcome": "completed"
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 68,
   "type": "session",
   "raw_type": "system.init",
   "session_id": "54fc65d8-c2d4-41e5-a2d8-d4df7c487c60",
@@ -486,6 +1021,7 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 69,
   "type": "cli_message",
   "raw_type": "system",
   "cli_message": {
@@ -499,9 +1035,97 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 70,
+  "turn_id": "native-turn-2",
+  "type": "turn_started"
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 71,
+  "turn_id": "native-turn-2",
+  "type": "usage",
+  "usage_scope": "turn",
+  "output_tokens": 1,
+  "input_tokens": 2,
+  "cached_input_tokens": 81437
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 72,
+  "turn_id": "native-turn-2",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPNcDMKc8EeNsC5KJeZ:0",
+  "text": "I",
+  "delta": "I",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 73,
+  "turn_id": "native-turn-2",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPNcDMKc8EeNsC5KJeZ:0",
+  "text": "I changed `add` in",
+  "delta": " changed `add` in",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 74,
+  "turn_id": "native-turn-2",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPNcDMKc8EeNsC5KJeZ:0",
+  "text": "I changed `add` in cal",
+  "delta": " cal",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 75,
+  "turn_id": "native-turn-2",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPNcDMKc8EeNsC5KJeZ:0",
+  "text": "I changed `add` in calc.py from `return a -",
+  "delta": "c.py from `return a -",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 76,
+  "turn_id": "native-turn-2",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPNcDMKc8EeNsC5KJeZ:0",
+  "text": "I changed `add` in calc.py from `return a - b` to `return a + b",
+  "delta": " b` to `return a + b",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 77,
+  "turn_id": "native-turn-2",
+  "type": "agent_message",
+  "item_id": "msg_011CgDPNcDMKc8EeNsC5KJeZ:0",
+  "text": "I changed `add` in calc.py from `return a - b` to `return a + b`.",
+  "delta": "`.",
+  "partial": true
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 78,
+  "turn_id": "native-turn-2",
   "type": "agent_message",
   "raw_type": "assistant",
+  "item_id": "msg_011CgDPNcDMKc8EeNsC5KJeZ:0",
   "text": "I changed `add` in calc.py from `return a - b` to `return a + b`.",
+  "partial": false,
   "usage": {
    "input_tokens": 2,
    "cache_creation_input_tokens": 124,
@@ -519,6 +1143,30 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 79,
+  "turn_id": "native-turn-2",
+  "type": "usage",
+  "usage_scope": "turn",
+  "output_tokens": 28,
+  "input_tokens": 2,
+  "cached_input_tokens": 81437
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 80,
+  "turn_id": "native-turn-2",
+  "type": "usage",
+  "usage_scope": "turn",
+  "output_tokens": 28,
+  "input_tokens": 2,
+  "cached_input_tokens": 81437
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 81,
+  "turn_id": "native-turn-2",
   "type": "result",
   "raw_type": "result.success",
   "status": "completed",
@@ -591,6 +1239,15 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 82,
+  "turn_id": "native-turn-2",
+  "type": "turn_ended",
+  "turn_outcome": "completed"
+ },
+ {
+  "version": 1,
+  "provider": "claude",
+  "seq": 83,
   "type": "direct_chat",
   "status": "released",
   "reason": "handed_back"
@@ -598,6 +1255,7 @@
  {
   "version": 1,
   "provider": "claude",
+  "seq": 84,
   "type": "final",
   "status": "completed",
   "exit_code": 0

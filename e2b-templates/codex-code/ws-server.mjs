@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -52,6 +53,8 @@ if (!CODEX_AUTH_JSON && !OPENAI_API_KEY) {
   process.exit(1);
 }
 
+const CODEX_TRANSPORT = process.env.CODEX_TRANSPORT || "app-server";
+
 let outputBuffer = "";
 let eventBuffer = [];
 let exitCode = null;
@@ -80,6 +83,7 @@ const clients = new Set();
 const queuedTurns = [];
 let turnsClosed = false;
 let codexThreadId = null;
+let nativeCodex = null;
 
 // After Codex exits the server keeps serving its final buffer until the
 // session is closed, so a detached or retried activity can always reattach.
@@ -134,7 +138,10 @@ function newestCodexRollout() {
     for (const entry of entries) {
       const path = join(dir, entry.name);
       if (entry.isDirectory()) walk(path, depth + 1);
-      else if (entry.name.startsWith("rollout-") && entry.name.endsWith(".jsonl")) {
+      else if (
+        entry.name.startsWith("rollout-") &&
+        entry.name.endsWith(".jsonl")
+      ) {
         const mtime = statSync(path).mtimeMs;
         if (!newest || mtime > newest.mtime) newest = { path, mtime };
       }
@@ -154,7 +161,10 @@ function codexUsageLimit() {
       if (!line.includes('"token_count"')) continue;
       try {
         const entry = JSON.parse(line);
-        if (entry?.type === "event_msg" && entry.payload?.type === "token_count") {
+        if (
+          entry?.type === "event_msg" &&
+          entry.payload?.type === "token_count"
+        ) {
           limits = entry.payload.rate_limits ?? null;
           if (limits) break;
         }
@@ -167,7 +177,9 @@ function codexUsageLimit() {
   }
   if (!limits) return null;
   const windows = [limits.primary, limits.secondary].filter(Boolean);
-  const exhausted = windows.filter((window) => Number(window.used_percent) >= 100);
+  const exhausted = windows.filter(
+    (window) => Number(window.used_percent) >= 100,
+  );
   if (!limits.rate_limit_reached_type && exhausted.length === 0) return null;
   const resets = (exhausted.length > 0 ? exhausted : windows)
     .map((window) => window.resets_at)
@@ -198,6 +210,10 @@ function appendEvent(event) {
     provider: "codex",
     timestamp: new Date().toISOString(),
     ...event,
+    ...(typeof CODEX_TRANSPORT !== "undefined" &&
+    CODEX_TRANSPORT === "app-server"
+      ? { seq: eventBuffer.length + 1 }
+      : {}),
   };
   eventBuffer.push(normalized);
   broadcast("code_agent_event", normalized);
@@ -364,6 +380,7 @@ function appendCodexStdout(data) {
 
 async function shutdown(code = 0) {
   log("info", "Starting graceful shutdown", { code });
+  nativeCodex?.child.kill("SIGTERM");
   if (codexFastModeProxy) {
     await new Promise((resolve) => codexFastModeProxy.server.close(resolve));
   }
@@ -381,6 +398,8 @@ const TURN_TOKEN = process.env.CODE_SESSION_TURN_TOKEN || "";
 const MAX_TURN_TEXT_CHARS = 100_000;
 const MAX_TURN_ID_CHARS = 128;
 const deliveredTurnIds = new Set();
+const inFlightTurnIds = new Set();
+const nativeDeliveryAcks = new Map();
 
 function tokenMatches(candidate) {
   if (!TURN_TOKEN || typeof candidate !== "string") return false;
@@ -393,19 +412,60 @@ function turnAck(id, status, reason) {
   return { type: "user_turn_ack", id, status, ...(reason ? { reason } : {}) };
 }
 
-function handleUserTurn(msg) {
+async function handleUserTurn(msg) {
   const id = typeof msg.id === "string" ? msg.id : "";
   if (!tokenMatches(msg.token)) return turnAck(id, "rejected", "unauthorized");
   if (!id || id.length > MAX_TURN_ID_CHARS) {
     return turnAck(id, "rejected", "invalid_id");
   }
-  if (deliveredTurnIds.has(id)) return turnAck(id, "duplicate");
+  if (deliveredTurnIds.has(id))
+    return {
+      ...(nativeDeliveryAcks.get(id) || turnAck(id, "duplicate")),
+      status: "duplicate",
+    };
+  if (inFlightTurnIds.has(id))
+    return turnAck(id, "rejected", "delivery_in_progress_retry");
   const text = typeof msg.text === "string" ? msg.text.replace(/\0/g, "") : "";
-  if (!text.trim() || text.length > MAX_TURN_TEXT_CHARS) {
+  if (
+    (!text.trim() && !msg.attachments?.length) ||
+    text.length > MAX_TURN_TEXT_CHARS
+  ) {
     return turnAck(id, "rejected", "invalid_text");
   }
   if (turnsClosed) return turnAck(id, "rejected", "session_ended");
   const sender = msg.sender === "agent" ? "agent" : "user";
+  if (CODEX_TRANSPORT === "app-server") {
+    inFlightTurnIds.add(id);
+    try {
+      if (!nativeCodex) return turnAck(id, "rejected", "session_starting");
+      if (nativeCodex.initialization) await nativeCodex.initialization;
+      const input = [
+        { type: "text", text, text_elements: [] },
+        ...stageDirectAttachments(id, msg.attachments),
+      ];
+      const effective = await nativeCodex.deliver(msg, input);
+      deliveredTurnIds.add(id);
+      appendEvent({
+        type: "user_turn",
+        turn_id: effective.turn_id,
+        request_id: id,
+        client_message_id: id,
+        sender,
+        text,
+        attachments: (msg.attachments || []).map(({ name, mime_type }) => ({
+          name,
+          mime_type,
+        })),
+      });
+      const ack = { ...turnAck(id, "delivered"), ...effective };
+      nativeDeliveryAcks.set(id, ack);
+      return ack;
+    } catch (error) {
+      return turnAck(id, "rejected", error.message);
+    } finally {
+      inFlightTurnIds.delete(id);
+    }
+  }
   deliveredTurnIds.add(id);
   queuedTurns.push({ id, sender, text });
   appendEvent({ type: "user_turn", turn_id: id, sender, text });
@@ -430,12 +490,21 @@ wss.on("connection", (ws, req) => {
   }
   if (replay && outputBuffer.length > 0)
     ws.send(JSON.stringify({ type: "buffer", data: outputBuffer }));
+  const cursor = Number(
+    new URL(req?.url || "/", "http://localhost").searchParams.get("cursor") ||
+      0,
+  );
   if (replay && eventBuffer.length > 0)
-    ws.send(JSON.stringify({ type: "code_agent_events", data: eventBuffer }));
+    ws.send(
+      JSON.stringify({
+        type: "code_agent_events",
+        data: eventBuffer.filter((event) => !event.seq || event.seq > cursor),
+      }),
+    );
   if (processExited)
     ws.send(JSON.stringify({ type: "exit", code: exitCode ?? 0 }));
 
-  ws.on("message", (data) => {
+  ws.on("message", async (data) => {
     try {
       const msg = JSON.parse(data.toString());
       if (msg.type === "stdin") {
@@ -445,8 +514,45 @@ wss.on("connection", (ws, req) => {
             error: "Codex exec is non-interactive",
           }),
         );
+      } else if (msg.type === "session_capabilities") {
+        if (!tokenMatches(msg.token))
+          ws.send(
+            JSON.stringify({
+              type: "session_capabilities_ack",
+              status: "rejected",
+              reason: "unauthorized",
+            }),
+          );
+        else if (!nativeCodex?.ready)
+          ws.send(
+            JSON.stringify({
+              type: "session_capabilities_ack",
+              status: "rejected",
+              reason: "session_starting",
+            }),
+          );
+        else
+          ws.send(
+            JSON.stringify({
+              type: "session_capabilities_ack",
+              status: "delivered",
+              code_provider: "codex",
+              effective_settings: nativeCodex.settings,
+              models: nativeCodex.models.map((model) => ({
+                model: model.model || model.id,
+                label: model.displayName || model.model || model.id,
+                efforts: (model.supportedReasoningEfforts || []).map(
+                  (e) => e.reasoningEffort,
+                ),
+                speeds: [
+                  "standard",
+                  ...(model.serviceTiers || []).map((t) => t.id),
+                ].filter((value, index, all) => all.indexOf(value) === index),
+              })),
+            }),
+          );
       } else if (msg.type === "user_turn") {
-        ws.send(JSON.stringify(handleUserTurn(msg)));
+        ws.send(JSON.stringify(await handleUserTurn(msg)));
       } else if (msg.type === "hand_back") {
         // Codex has no direct-chat hold: queued turns always run in order.
         ws.send(JSON.stringify({ type: "hand_back_ack", status: "not_held" }));
@@ -732,7 +838,9 @@ function prepareCodeSessionBranch(repoDir) {
     return null;
   }
   const result = { branch, base: base || null, source: null, error: null };
-  if (gitRun(["rev-parse", "--verify", "-q", `refs/heads/${branch}`], repoDir).ok) {
+  if (
+    gitRun(["rev-parse", "--verify", "-q", `refs/heads/${branch}`], repoDir).ok
+  ) {
     const current = gitRun(["symbolic-ref", "-q", "--short", "HEAD"], repoDir);
     if (current.out !== branch) {
       const switched = gitRun(["checkout", branch], repoDir);
@@ -741,18 +849,31 @@ function prepareCodeSessionBranch(repoDir) {
     result.source = "local";
   } else if (
     gitRun(
-      ["fetch", "-q", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`],
+      [
+        "fetch",
+        "-q",
+        "origin",
+        `+refs/heads/${branch}:refs/remotes/origin/${branch}`,
+      ],
       repoDir,
     ).ok
   ) {
-    const created = gitRun(["checkout", "-B", branch, `origin/${branch}`], repoDir);
+    const created = gitRun(
+      ["checkout", "-B", branch, `origin/${branch}`],
+      repoDir,
+    );
     if (!created.ok) result.error = created.out.slice(0, 300);
     result.source = "remote";
   } else {
     let start = null;
     if (base) {
       const fetched = gitRun(
-        ["fetch", "-q", "origin", `+refs/heads/${base}:refs/remotes/origin/${base}`],
+        [
+          "fetch",
+          "-q",
+          "origin",
+          `+refs/heads/${base}:refs/remotes/origin/${base}`,
+        ],
         repoDir,
       );
       if (fetched.ok) {
@@ -775,8 +896,10 @@ function prepareCodeSessionBranch(repoDir) {
       if (!created.ok) result.error = created.out.slice(0, 300);
     }
   }
-  result.current = gitRun(["symbolic-ref", "-q", "--short", "HEAD"], repoDir).out || null;
-  result.head = gitRun(["rev-parse", "-q", "--verify", "HEAD"], repoDir).out || null;
+  result.current =
+    gitRun(["symbolic-ref", "-q", "--short", "HEAD"], repoDir).out || null;
+  result.head =
+    gitRun(["rev-parse", "-q", "--verify", "HEAD"], repoDir).out || null;
   log(result.error ? "warn" : "info", "Code session branch prepared", result);
   return result;
 }
@@ -906,74 +1029,562 @@ function runCodex(args) {
   });
 }
 
-// An API-key-only session (no OAuth credential) must skip the ChatGPT fast-mode
-// proxy — it targets the ChatGPT backend, which won't authenticate an API key.
-let { code, signal } = await runCodex(
-  buildCodexArgs({ useFastModeProxy: !usingApiKey }),
-);
-
-// Runtime fallback: the ChatGPT OAuth token became unusable mid-run. Re-login
-// with the funded OpenAI API key and retry ONCE against the default OpenAI
-// endpoint (no ChatGPT proxy). Mirrors the Rose compute-token→API-key fallback.
-if (code !== 0 && !usingApiKey && OPENAI_API_KEY && oauthFallbackReason) {
-  const fallbackReason = oauthFallbackReason;
-  log("info", "Codex OAuth unavailable; retrying with OPENAI_API_KEY", {
-    reason: fallbackReason,
-  });
-  appendOutput(
-    "stdout",
-    "[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\n",
-  );
-  appendEvent({
-    type: "auth_fallback",
-    from: "chatgpt_oauth",
-    to: "openai_api_key",
-    reason: fallbackReason,
-  });
-  try {
-    rmSync(join(codexHome, "auth.json"), { force: true });
-  } catch {
-    // Best-effort: a stale auth.json only matters if the API-key login fails.
+// Native Codex app-server transport. JSON-RPC is newline-delimited on stdio;
+// the process stays alive between turns so Send can steer the active turn.
+class CodexAppServer {
+  constructor(child, emit, defaults) {
+    this.child = child;
+    this.emit = emit;
+    this.settings = defaults;
+    this.pending = new Map();
+    this.nextId = 1;
+    this.activeTurnId = null;
+    this.threadId = null;
+    this.rows = new Map();
+    this.endedTurnIds = new Set();
+    this.rateLimits = null;
+    this.settingsVersion = 0;
+    this.turnStartedAt = null;
+    this.ready = false;
+    this.controlBusy = false;
+    let buffer = "";
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString();
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+      for (const line of lines) {
+        try {
+          this.receive(JSON.parse(line));
+        } catch (error) {
+          log("warn", "Invalid app-server notification", {
+            error: error.message,
+          });
+        }
+      }
+    });
+    const fail = (error) => {
+      this.ready = false;
+      for (const pending of this.pending.values()) pending.reject(error);
+      this.pending.clear();
+    };
+    child.on("error", fail);
+    child.on("close", () => fail(new Error("app_server_closed")));
   }
-  if (await loginWithApiKey()) {
-    usingApiKey = true;
-    oauthFallbackReason = null;
+  request(method, params) {
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      this.child.stdin.write(
+        JSON.stringify({ id, method, params }) + "\n",
+        (error) => {
+          if (error) {
+            this.pending.delete(id);
+            reject(error);
+          }
+        },
+      );
+    });
+  }
+  receive(message) {
+    if (message.id !== undefined && this.pending.has(message.id)) {
+      const pending = this.pending.get(message.id);
+      this.pending.delete(message.id);
+      if (message.error)
+        pending.reject(
+          new Error(message.error.message || "native_request_failed"),
+        );
+      else pending.resolve(message.result);
+      return;
+    }
+    // Never silently accept a new approval method. This session uses the
+    // explicit never approval policy; unexpected requests fail closed.
+    if (message.id !== undefined && message.method) {
+      this.child.stdin.write(
+        JSON.stringify({
+          id: message.id,
+          error: { code: -32601, message: "Unsupported server request" },
+        }) + "\n",
+      );
+      return;
+    }
+    const p = message.params || {};
+    const common = {
+      raw_type: message.method,
+      thread_id: p.threadId || this.threadId,
+      turn_id: p.turnId || p.turn?.id || this.activeTurnId,
+      ...(this.turnStartedAt ? { turn_started_at: this.turnStartedAt } : {}),
+    };
+    if (message.method === "account/rateLimits/updated") {
+      this.rateLimits = {
+        ...this.rateLimits,
+        ...Object.fromEntries(
+          Object.entries(p.rateLimits || {}).filter(
+            ([, value]) => value !== null,
+          ),
+        ),
+      };
+    } else if (message.method === "thread/settings/updated") {
+      const settings = p.threadSettings;
+      this.settings = {
+        model: settings.model,
+        effort: settings.effort,
+        speed: settings.serviceTier || "standard",
+      };
+      this.settingsVersion++;
+      this.emit({
+        ...common,
+        type: "settings",
+        effective_settings: this.settings,
+      });
+    } else if (message.method === "model/rerouted") {
+      this.settings = { ...this.settings, model: p.toModel };
+      this.settingsVersion++;
+      this.emit({
+        ...common,
+        type: "settings",
+        effective_settings: this.settings,
+        reason: p.reason,
+      });
+    } else if (message.method === "turn/started") {
+      this.activeTurnId = p.turn.id;
+      this.turnStartedAt = new Date().toISOString();
+      this.emit({
+        ...common,
+        type: "turn_started",
+        turn_started_at: this.turnStartedAt,
+        status: "started",
+      });
+    } else if (message.method === "turn/completed") {
+      this.endedTurnIds.add(p.turn.id);
+      if (this.activeTurnId === p.turn.id) this.activeTurnId = null;
+      const outcome = p.turn.status;
+      this.emit({
+        ...common,
+        type: "turn_ended",
+        turn_started_at: this.turnStartedAt,
+        turn_ended_at: new Date().toISOString(),
+        turn_outcome: outcome,
+        status: outcome,
+        outcome,
+        error: p.turn.error || null,
+      });
+      if (outcome === "failed")
+        this.emit({
+          ...common,
+          type: "error",
+          message: p.turn.error?.message || "Codex turn failed",
+          error: p.turn.error,
+          usage_limit: this.usageLimit(),
+        });
+      this.emit({
+        ...common,
+        type: "final",
+        status: outcome,
+        exit_code: outcome === "completed" ? 0 : 1,
+      });
+    } else if (
+      [
+        "item/agentMessage/delta",
+        "item/reasoning/summaryTextDelta",
+        "item/reasoning/textDelta",
+      ].includes(message.method)
+    ) {
+      const type =
+        message.method === "item/agentMessage/delta"
+          ? "agent_message"
+          : "thinking";
+      // Summary and raw reasoning are different streams, even on one item.
+      const itemId =
+        type === "thinking"
+          ? `${p.itemId}:${message.method.includes("summary") ? "summary" : "reasoning"}:${p.summaryIndex ?? p.contentIndex ?? 0}`
+          : p.itemId;
+      const key = `${p.turnId}:${itemId}`;
+      const text = (this.rows.get(key) || "") + p.delta;
+      this.rows.set(key, text);
+      this.emit({
+        ...common,
+        type,
+        item_id: itemId,
+        text,
+        delta: p.delta,
+        partial: true,
+      });
+    } else if (
+      message.method === "item/started" ||
+      message.method === "item/completed"
+    ) {
+      const item = p.item;
+      const completed = message.method === "item/completed";
+      const base = {
+        ...common,
+        item_id: item.id,
+        status: completed ? "completed" : "started",
+        partial: !completed,
+      };
+      if (item.type === "agentMessage" && completed)
+        this.emit({ ...base, type: "agent_message", text: item.text || "" });
+      else if (item.type === "commandExecution")
+        this.emit({
+          ...base,
+          type: "command",
+          tool_kind: "shell",
+          command: item.command,
+          output: item.aggregatedOutput || "",
+          exit_code: item.exitCode ?? null,
+        });
+      else if (item.type === "fileChange")
+        this.emit({
+          ...base,
+          type: "file_change",
+          tool_kind: "file",
+          changes: item.changes || [],
+          paths: (item.changes || []).map((c) => c.path),
+        });
+      else if (item.type === "mcpToolCall") {
+        this.emit({
+          ...base,
+          type: "tool_use",
+          tool_use_id: item.id,
+          tool_kind: "mcp",
+          tool: `${item.server}.${item.tool}`,
+          input: item.arguments,
+        });
+        if (completed)
+          this.emit({
+            ...base,
+            type: "tool_result",
+            tool_use_id: item.id,
+            tool_kind: "mcp",
+            tool_use_result: JSON.stringify(item.result || item.error || {}),
+            is_error: Boolean(item.error),
+          });
+      } else if (item.type === "webSearch")
+        this.emit({
+          ...base,
+          type: "tool_use",
+          tool_kind: "web",
+          name: "web_search",
+          input: item.action,
+        });
+    } else if (message.method === "thread/tokenUsage/updated") {
+      const total = p.tokenUsage?.total || {};
+      const usage = Object.fromEntries(
+        [
+          ["output_tokens", total.outputTokens],
+          ["input_tokens", total.inputTokens],
+          ["cached_input_tokens", total.cachedInputTokens],
+        ].filter(
+          ([, value]) =>
+            typeof value === "number" && Number.isFinite(value) && value >= 0,
+        ),
+      );
+      this.emit({
+        ...common,
+        type: "usage",
+        usage_scope: "session",
+        token_usage: p.tokenUsage,
+        usage,
+        ...usage,
+      });
+    } else if (message.method === "error")
+      this.emit({
+        ...common,
+        type: "error",
+        message: p.error?.message || p.message,
+        error: p.error,
+        usage_limit: this.usageLimit(),
+      });
+  }
+  usageLimit() {
+    const limits = this.rateLimits;
+    if (!limits) return null;
+    const windows = [limits.primary, limits.secondary].filter(Boolean);
+    const exhausted = windows.filter((window) => window.usedPercent >= 100);
+    if (!limits.rateLimitReachedType && !exhausted.length) return null;
+    const resets = (exhausted.length ? exhausted : windows)
+      .map((window) => window.resetsAt)
+      .filter((value) => typeof value === "number");
+    return {
+      reached_type: limits.rateLimitReachedType || null,
+      resets_at: resets.length ? Math.max(...resets) : null,
+    };
+  }
+  async initialize(resumeId, goal) {
+    await this.request("initialize", {
+      clientInfo: { name: "rose", title: "Rose", version: "1.0.0" },
+      capabilities: { experimentalApi: true },
+    });
+    this.child.stdin.write(JSON.stringify({ method: "initialized" }) + "\n");
+    const catalog = await this.request("model/list", { includeHidden: true });
+    this.models = catalog.data || [];
+    const response = await this.request(
+      resumeId ? "thread/resume" : "thread/start",
+      {
+        ...(resumeId ? { threadId: resumeId } : {}),
+        model: this.settings.model,
+        serviceTier:
+          this.settings.speed === "standard" ? null : this.settings.speed,
+        ...(this.settings.effort
+          ? { config: { model_reasoning_effort: this.settings.effort } }
+          : {}),
+        cwd: workDir,
+        approvalPolicy: "never",
+        sandbox: "danger-full-access",
+      },
+    );
+    this.threadId = response.thread.id;
+    this.settings = {
+      model: response.model,
+      effort: response.reasoningEffort ?? this.settings.effort,
+      speed: response.serviceTier || "standard",
+    };
+    await this.start(
+      [{ type: "text", text: goal, text_elements: [] }],
+      this.settings,
+    );
+    this.ready = true;
+    this.emit({
+      type: "session",
+      thread_id: this.threadId,
+      status: "ready",
+      effective_settings: this.settings,
+    });
+  }
+  validateSettings(requested = {}) {
+    const next = { ...this.settings, ...requested };
+    const model = this.models.find(
+      (m) => m.model === next.model || m.id === next.model,
+    );
+    if (!model) throw new Error("unsupported_model");
+    if (
+      next.effort &&
+      !(model.supportedReasoningEfforts || []).some(
+        (e) => e.reasoningEffort === next.effort,
+      )
+    )
+      throw new Error("unsupported_effort");
+    const tiers = (model.serviceTiers || []).map((t) => t.id);
+    if (next.speed !== "standard" && !tiers.includes(next.speed))
+      throw new Error("unsupported_speed");
+    return next;
+  }
+  async start(input, settings, clientId) {
+    const settingsVersion = this.settingsVersion;
+    const response = await this.request("turn/start", {
+      threadId: this.threadId,
+      input,
+      model: settings.model,
+      effort: settings.effort,
+      serviceTier: settings.speed === "standard" ? null : settings.speed,
+      ...(clientId ? { clientUserMessageId: clientId } : {}),
+    });
+    this.activeTurnId = this.endedTurnIds.has(response.turn.id)
+      ? null
+      : response.turn.id;
+    if (this.settingsVersion === settingsVersion) this.settings = settings;
+    return response.turn.id;
+  }
+  async deliver(msg, input) {
+    if (!this.ready) throw new Error("session_starting");
+    if (this.controlBusy) throw new Error("concurrent_control_retry");
+    this.controlBusy = true;
+    try {
+      const settings = this.validateSettings(msg.settings);
+      let delivery_mode;
+      let turn_id;
+      if (this.activeTurnId) {
+        if (JSON.stringify(settings) !== JSON.stringify(this.settings))
+          throw new Error("settings_change_requires_idle");
+        const response = await this.request("turn/steer", {
+          threadId: this.threadId,
+          expectedTurnId: this.activeTurnId,
+          input,
+          clientUserMessageId: msg.id,
+        });
+        turn_id = response.turnId || this.activeTurnId;
+        delivery_mode = "steer";
+      } else {
+        turn_id = await this.start(input, settings, msg.id);
+        delivery_mode = "start";
+      }
+      return {
+        delivery_mode,
+        turn_id,
+        effective_settings: { ...this.settings },
+      };
+    } finally {
+      this.controlBusy = false;
+    }
+  }
+}
+
+function stageDirectAttachments(id, attachments = []) {
+  if (!Array.isArray(attachments) || attachments.length > 20)
+    throw new Error("invalid_attachments");
+  const directory = join(
+    home,
+    "attachments",
+    "direct",
+    Buffer.from(id).toString("hex"),
+  );
+  const inputs = [];
+  for (const [index, attachment] of attachments.entries()) {
+    if (
+      typeof attachment.base64_data !== "string" ||
+      attachment.base64_data.length > 28_000_000 ||
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+        attachment.base64_data,
+      )
+    )
+      throw new Error("invalid_attachment_data");
+    const name = `${index}-${String(attachment.name || "attachment")
+      .replace(/[^A-Za-z0-9._-]/g, "_")
+      .slice(0, 120)}`;
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const path = join(directory, name);
+    const temporary = `${path}.tmp`;
+    writeFileSync(temporary, Buffer.from(attachment.base64_data, "base64"), {
+      mode: 0o600,
+    });
+    renameSync(temporary, path);
+    inputs.push(
+      String(attachment.mime_type || "").startsWith("image/")
+        ? { type: "localImage", path }
+        : { type: "text", text: `Attached file: ${path}`, text_elements: [] },
+    );
+  }
+  return inputs;
+}
+
+async function runCodexAppServer() {
+  const legacyArgs = buildCodexArgs({ useFastModeProxy: !usingApiKey });
+  // Keep the existing MCP/proxy overrides, replacing exec-only flags.
+  const args = ["app-server", "--listen", "stdio://"];
+  for (let i = 1; i < legacyArgs.length; i++) {
+    if (legacyArgs[i] === "-c") args.push(legacyArgs[i], legacyArgs[++i]);
+  }
+  args.push(
+    "-c",
+    'approval_policy="never"',
+    "-c",
+    'sandbox_mode="danger-full-access"',
+  );
+  const child = spawn("codex", args, {
+    cwd: workDir,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      CODEX_HOME: codexHome,
+      HOME: home,
+      TERM: "xterm-256color",
+    },
+  });
+  child.stderr.on("data", (data) => appendOutput("stderr", data.toString()));
+  nativeCodex = new CodexAppServer(child, appendEvent, {
+    model: CODEX_MODEL,
+    effort: process.env.CODEX_REASONING_EFFORT || null,
+    speed: process.env.CODEX_SPEED || "standard",
+  });
+  const closed = new Promise((resolve) =>
+    child.once("close", (code, signal) => resolve({ code: code ?? 1, signal })),
+  );
+  try {
+    nativeCodex.initialization = nativeCodex.initialize(
+      CODEX_RESUME_SESSION_ID,
+      sanitizedGoal,
+    );
+    await nativeCodex.initialization;
+  } catch (error) {
+    appendEvent({ type: "error", message: error.message });
+    child.kill("SIGTERM");
+  }
+  const result = await closed;
+  turnsClosed = true;
+  exitCode = result.code;
+  processExited = true;
+  appendEvent({
+    type: "final",
+    status: result.code === 0 ? "completed" : "failed",
+    exit_code: result.code,
+    signal: result.signal,
+  });
+  broadcast("exit", result.code);
+}
+
+if (CODEX_TRANSPORT === "app-server") {
+  await runCodexAppServer();
+} else {
+  // An API-key-only session (no OAuth credential) must skip the ChatGPT fast-mode
+  // proxy — it targets the ChatGPT backend, which won't authenticate an API key.
+  let { code, signal } = await runCodex(
+    buildCodexArgs({ useFastModeProxy: !usingApiKey }),
+  );
+
+  // Runtime fallback: the ChatGPT OAuth token became unusable mid-run. Re-login
+  // with the funded OpenAI API key and retry ONCE against the default OpenAI
+  // endpoint (no ChatGPT proxy). Mirrors the Rose compute-token→API-key fallback.
+  if (code !== 0 && !usingApiKey && OPENAI_API_KEY && oauthFallbackReason) {
+    const fallbackReason = oauthFallbackReason;
+    log("info", "Codex OAuth unavailable; retrying with OPENAI_API_KEY", {
+      reason: fallbackReason,
+    });
+    appendOutput(
+      "stdout",
+      "[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\n",
+    );
+    appendEvent({
+      type: "auth_fallback",
+      from: "chatgpt_oauth",
+      to: "openai_api_key",
+      reason: fallbackReason,
+    });
+    try {
+      rmSync(join(codexHome, "auth.json"), { force: true });
+    } catch {
+      // Best-effort: a stale auth.json only matters if the API-key login fails.
+    }
+    if (await loginWithApiKey()) {
+      usingApiKey = true;
+      oauthFallbackReason = null;
+      ({ code, signal } = await runCodex(
+        buildCodexArgs({ useFastModeProxy: false }),
+      ));
+    }
+  }
+
+  // Delivered user turns run, in order, as resumed turns of the same thread.
+  while (code === 0 && codexThreadId && queuedTurns.length > 0) {
+    const turn = queuedTurns.shift();
+    log("info", "Starting queued user turn", {
+      id: turn.id,
+      sender: turn.sender,
+    });
     ({ code, signal } = await runCodex(
-      buildCodexArgs({ useFastModeProxy: false }),
+      buildCodexArgs({
+        useFastModeProxy: !usingApiKey,
+        resume: { threadId: codexThreadId, text: turn.text },
+      }),
     ));
   }
-}
+  turnsClosed = true;
+  if (queuedTurns.length > 0) {
+    appendEvent({
+      type: "user_turn_undelivered",
+      turn_ids: queuedTurns.map((turn) => turn.id),
+    });
+  }
 
-// Delivered user turns run, in order, as resumed turns of the same thread.
-while (code === 0 && codexThreadId && queuedTurns.length > 0) {
-  const turn = queuedTurns.shift();
-  log("info", "Starting queued user turn", {
-    id: turn.id,
-    sender: turn.sender,
-  });
-  ({ code, signal } = await runCodex(
-    buildCodexArgs({
-      useFastModeProxy: !usingApiKey,
-      resume: { threadId: codexThreadId, text: turn.text },
-    }),
-  ));
-}
-turnsClosed = true;
-if (queuedTurns.length > 0) {
+  exitCode = code ?? 1;
+  processExited = true;
   appendEvent({
-    type: "user_turn_undelivered",
-    turn_ids: queuedTurns.map((turn) => turn.id),
+    type: "final",
+    status: exitCode === 0 ? "completed" : "failed",
+    exit_code: exitCode,
+    signal,
+  });
+  log("info", "Codex exited", { code: exitCode, signal });
+  broadcast("exit", exitCode);
+  log("info", "Serving final buffer for reattach until closed", {
+    code: exitCode,
   });
 }
-
-exitCode = code ?? 1;
-processExited = true;
-appendEvent({
-  type: "final",
-  status: exitCode === 0 ? "completed" : "failed",
-  exit_code: exitCode,
-  signal,
-});
-log("info", "Codex exited", { code: exitCode, signal });
-broadcast("exit", exitCode);
-log("info", "Serving final buffer for reattach until closed", { code: exitCode });
