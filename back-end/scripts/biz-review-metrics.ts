@@ -20,10 +20,12 @@ import {
   findRootAgentRunsBetween,
   findRootAgentRunUsageBetween,
 } from '../src/domains/admin-health/costRepo';
-import { ADMIN_USER_IDS } from '../src/domains/admin-health/config';
-import { CHAT_ONLY_TOOL_NAMES } from '../src/domains/admin-health/costTelemetry';
 import { prisma } from '../src/providers/database';
-import { realWaitlistPersonSql } from '../src/providers/waitlistIdentity';
+import {
+  agentRanToolsSql,
+  realRootAgentSql,
+  realTaskOwnerSql,
+} from '../src/providers/realAgentRuns';
 
 interface UsageRow {
   kind: string;
@@ -82,18 +84,14 @@ interface UserTaskRow {
 
 /** Root tasks real people started on prod, live and archived, one row per task. */
 async function userTasks(start: Date, end: Date): Promise<UserTaskRow[]> {
-  const chatOnly = Prisma.join([...CHAT_ONLY_TOOL_NAMES]);
-  const admins = Prisma.join([...ADMIN_USER_IDS]);
   return prisma.$queryRaw<UserTaskRow[]>(Prisma.sql`
     WITH live AS (
       SELECT agent.id, agent."userId", COALESCE(NULLIF(agent.title, ''), agent.goal) AS title,
              agent."createdAt", agent.status::text AS status, agent.source::text AS source,
              agent."deletedAt" IS NOT NULL AS archived,
-             EXISTS (SELECT 1 FROM "ToolUsage" usage WHERE usage."agentId" = agent.id
-                       AND usage."toolName" NOT IN (${chatOnly})) AS "agentRun"
+             ${agentRanToolsSql('agent')} AS "agentRun"
       FROM "Agent" agent
-      WHERE agent."parentAgentId" IS NULL AND agent.depth = 0
-        AND agent."isBenchmark" = false AND agent."worldModelMode" = 'real'
+      WHERE ${realRootAgentSql('agent')}
         AND agent."createdAt" >= ${start} AND agent."createdAt" < ${end}
     ), legacy AS (
       SELECT DISTINCT ON (history."originalAgentId")
@@ -109,7 +107,7 @@ async function userTasks(start: Date, end: Date): Promise<UserTaskRow[]> {
     SELECT LEFT(roots.title, 160) AS title, COALESCE(NULLIF(person.name, ''), 'Unnamed user') AS owner,
            roots."createdAt", roots.status, roots.source, roots.archived, roots."agentRun"
     FROM roots INNER JOIN "User" person ON person."userId" = roots."userId"
-    WHERE roots."userId" IN (${admins}) OR ${realWaitlistPersonSql('person')}
+    WHERE ${realTaskOwnerSql(Prisma.sql`roots."userId"`, 'person')}
     ORDER BY roots."createdAt" DESC
   `);
 }

@@ -1,5 +1,12 @@
 # Agent Failure Alerting + Auto-RCA
 
+> **2026-10-20 update — agent failures moved off this path.** Root-agent failures
+> no longer post to Slack or dispatch a GitHub Auto RCA; `report_failure_activity`
+> only logs. Every real prod agent run that is not COMPLETED 24 hours after it
+> started gets one Report Bug `/rca` from the backend's hourly stuck-agent job
+> (`back-end/src/domains/agents/stuckAgentBugReportService.ts`). Chat, SMS,
+> WhatsApp, and backend-crash alerts below are unchanged.
+
 ## Goal
 
 When anything user-facing breaks in prod — an **agent breaks**, the **chat loop**

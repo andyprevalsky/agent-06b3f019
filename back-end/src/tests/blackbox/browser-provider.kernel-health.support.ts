@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import type Kernel from '@onkernel/sdk';
+import { APIError, type Kernel } from '@onkernel/sdk';
 import { prisma } from '../../providers/database';
 import {
   createSessionOnKernelProxyLadder,
@@ -13,12 +13,12 @@ export async function assertKernelProxyHealthFallback(): Promise<void> {
     {
       message:
         '400 Proxy health check failed: transport error: proxy connection failed: context deadline exceeded (Client.Timeout exceeded while awaiting headers)',
-      invalidate: false,
+      invalidate: true,
     },
     {
       message:
         '400 error when testing a connection through the proxy: transport error: proxy connection failed: context deadline exceeded (Client.Timeout exceeded while awaiting headers)',
-      invalidate: false,
+      invalidate: true,
     },
     { message: '401 Unauthorized', terminal: true, invalidate: false },
     { message: '400 Invalid request payload', terminal: true, invalidate: false },
@@ -48,9 +48,19 @@ export async function assertKernelProxyHealthFallback(): Promise<void> {
         count: Number(rows.delete(where.proxyKey)),
       })) as unknown as typeof model.deleteMany;
       const attempts: string[] = [];
-      const failure = new Error(test.message);
+      const failure = APIError.generate(
+        Number(test.message.slice(0, 3)),
+        { message: test.message.slice(4) },
+        undefined,
+        new Headers()
+      );
+      const client = {
+        proxies: {
+          retrieve: async () => ({ status: test.invalidate ? 'unavailable' : 'available' }),
+        },
+      } as unknown as Kernel;
       const run = () =>
-        createSessionOnKernelProxyLadder({} as Kernel, candidates, async (proxy) => {
+        createSessionOnKernelProxyLadder(client, candidates, async (proxy) => {
           attempts.push(proxy.proxyId);
           if (proxy.proxyId === 'state-proxy') throw failure;
           return proxy;

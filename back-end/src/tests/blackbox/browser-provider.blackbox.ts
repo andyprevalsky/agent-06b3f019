@@ -34,6 +34,7 @@ import {
 import { runLiveKernelSteelAuthPersist } from './browser-provider.auth-persist.live';
 import { assertAuthPersistFailedInitCustody } from './browser-provider.auth-persist.cleanup.support';
 import { runLiveProviderParity } from './browser-provider.live.support';
+import { assertKernelUnhealthyProxyRelaxesLocation } from './browser-provider-proxy-health.support';
 import { runOptionalLiveBrowserUseProvider } from './browser-provider.browser-use-live.support';
 import {
   createBrowserUseRecoverySession,
@@ -407,6 +408,10 @@ const tests: Array<[string, () => void | Promise<void>]> = [
     },
   ],
   ['Kernel city inventory errors trigger location fallback', assertKernelCityInventoryFallback],
+  [
+    'Kernel proxy marked unavailable by its health check relaxes location and drops the cached row',
+    assertKernelUnhealthyProxyRelaxesLocation,
+  ],
   ['Kernel SDK request timeouts trigger location fallback', assertKernelTimeoutFallback],
   [
     'Kernel navigation retries only transient proxy failures',

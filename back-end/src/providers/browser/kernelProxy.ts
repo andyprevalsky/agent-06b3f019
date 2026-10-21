@@ -1,4 +1,4 @@
-import Kernel, { APIConnectionTimeoutError } from '@onkernel/sdk';
+import Kernel, { APIConnectionTimeoutError, BadRequestError } from '@onkernel/sdk';
 import type { ProxyListResponse } from '@onkernel/sdk/resources/proxies';
 import { prisma } from '../database';
 import type { ProxyGeoLocation } from '../geoip';
@@ -309,21 +309,32 @@ export async function getOrCreateKernelProxy(
   }
 }
 
-export async function forgetKernelProxy(proxyKey: string): Promise<void> {
+/** Drop the cache row only while it still names the failed proxy, not a concurrent replacement. */
+export async function forgetKernelProxy(proxyKey: string, proxyId: string): Promise<void> {
   await prisma.browserProviderProxy.deleteMany({
-    where: { provider: 'kernel', proxyKey },
+    where: { provider: 'kernel', proxyKey, proxyId },
   });
 }
 
-const STICKY_PROXY_ERRORS = [
-  'proxy not found',
-  'invalid proxy',
-  'proxy unavailable',
-  'proxy is unavailable',
-  'proxy is marked unavailable',
-  'no_peer',
-  'no peer',
-];
+/**
+ * Kernel health-checks a managed proxy while creating a browser on it, records
+ * the verdict on the proxy, and rejects the request with a 400 when it fails.
+ * The rejection text differs between the failing check and later requests, so
+ * the recorded status, not the message, says whether this proxy caused the 400.
+ */
+async function kernelRejectedUnhealthyProxy(
+  client: Kernel,
+  error: unknown,
+  proxyId: string
+): Promise<boolean> {
+  if (!(error instanceof BadRequestError)) return false;
+  const proxy = await client.proxies
+    .retrieve(proxyId, { timeout: 10_000, maxRetries: 0 })
+    .catch(() => undefined);
+  return proxy?.status === 'unavailable';
+}
+
+const STICKY_PROXY_ERRORS = ['proxy not found', 'invalid proxy', 'no_peer', 'no peer'];
 
 export interface KernelProxyLadderEvents {
   onRefresh?: (candidate: KernelProxyCandidate, error: unknown) => void;
@@ -336,7 +347,8 @@ export interface KernelProxyLadderEvents {
  *
  * Geo proxies are shared project-wide, so a cached ID can be deleted by another
  * actor. `proxy not found` proves the ID is stale, not that the location lacks
- * inventory: the same candidate is re-resolved once before relaxing.
+ * inventory: the same candidate is re-resolved once before relaxing. A proxy
+ * Kernel marked unavailable is no longer cached and its location is relaxed.
  */
 export async function createSessionOnKernelProxyLadder<T>(
   client: Kernel,
@@ -356,14 +368,21 @@ export async function createSessionOnKernelProxyLadder<T>(
         // gone — forgetting it would recreate orphans for the same geo key.
         const message =
           error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
-        if (resolved !== undefined && STICKY_PROXY_ERRORS.some((f) => message.includes(f))) {
-          await forgetKernelProxy(resolved.proxyKey).catch(() => {});
+        const unhealthy =
+          resolved !== undefined &&
+          (await kernelRejectedUnhealthyProxy(client, error, resolved.proxyId));
+        if (
+          resolved !== undefined &&
+          (unhealthy || STICKY_PROXY_ERRORS.some((f) => message.includes(f)))
+        ) {
+          await forgetKernelProxy(resolved.proxyKey, resolved.proxyId).catch(() => {});
         }
         if (resolved !== undefined && !refreshed && message.includes('proxy not found')) {
           events.onRefresh?.(candidate, error);
           continue;
         }
-        if (!isKernelProxyAvailabilityError(error) || index + 1 >= candidates.length) throw error;
+        if (!(unhealthy || isKernelProxyAvailabilityError(error)) || index + 1 >= candidates.length)
+          throw error;
         events.onRelax?.(candidate, error);
         break;
       }
@@ -382,11 +401,6 @@ export function isKernelProxyAvailabilityError(error: unknown): boolean {
   return [
     'no_peer',
     'no peer',
-    'proxy unavailable',
-    'proxy is unavailable',
-    'proxy is marked unavailable',
-    'proxy health check failed',
-    'error when testing a connection through the proxy',
     'proxy configuration validation failed',
     'invalid proxy',
     'no available',
