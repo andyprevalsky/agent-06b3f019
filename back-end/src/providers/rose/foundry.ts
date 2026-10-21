@@ -13,6 +13,11 @@
  */
 
 import { createHash } from 'node:crypto';
+import {
+  readSharedFoundryCooldowns,
+  reportSharedFoundryRateLimit,
+  reportSharedFoundryServed,
+} from '../foundryDeploymentCooldown';
 
 import { buildCodexResponsesBody } from './gptAuth';
 import {
@@ -38,8 +43,6 @@ import type {
 
 const log = createLogger('Rose');
 
-/** Keyed by `${endpoint}\n${deployment}`. */
-const cooldownUntil = new Map<string, number>();
 /** Keyed by region endpoint: one key belongs to one Azure resource. */
 const authCooldownUntil = new Map<string, number>();
 
@@ -241,18 +244,20 @@ export function foundryRoutePlan(
 
 /** Test hook: forget every rate-limit and auth cooldown and every once-only warning. */
 export function __resetFoundryCooldowns(): void {
-  cooldownUntil.clear();
   authCooldownUntil.clear();
   warnedInsecureRegions.clear();
 }
 
-function cooldownMs(headers: Headers): number {
-  const ms = Number(headers.get('retry-after-ms'));
-  if (Number.isFinite(ms) && ms > 0) return Math.max(1_000, Math.min(60_000, ms));
-  const seconds = Number(headers.get('retry-after'));
-  if (Number.isFinite(seconds) && seconds > 0)
-    return Math.max(1_000, Math.min(60_000, seconds * 1_000));
-  return 1_000;
+function retryHintSeconds(headers: Headers, message = ''): number | undefined {
+  for (const [name, scale] of [
+    ['retry-after-ms', 1000],
+    ['retry-after', 1],
+  ] as const) {
+    const value = Number(headers.get(name));
+    if (Number.isFinite(value) && value > 0) return value / scale;
+  }
+  const match = /try again in\s*(\d+(?:\.\d+)?)\s*(ms|seconds?|s)/i.exec(message);
+  return match ? Number(match[1]) / (match[2].toLowerCase() === 'ms' ? 1000 : 1) : undefined;
 }
 
 export interface FoundryOptions {
@@ -275,10 +280,9 @@ function recordHttpFailure(
   status: number,
   region: FoundryRegion,
   deployment: string,
-  headers: Headers
+  _headers: Headers
 ): RoseError {
   if (status === 429) {
-    cooldownUntil.set(`${region.endpoint}\n${deployment}`, Date.now() + cooldownMs(headers));
     return new RoseRateLimitError(`Foundry deployment ${deployment} rate limited`, status);
   }
   if (status === 401 || status === 403) {
@@ -291,6 +295,18 @@ function recordHttpFailure(
   return new RoseServerError(`Foundry deployment ${deployment} returned ${status}`, status);
 }
 
+async function reportRateLimitOrFail(
+  region: FoundryRegion,
+  deployment: string,
+  retryAfterSeconds?: number
+): Promise<void> {
+  try {
+    await reportSharedFoundryRateLimit(region.host.toLowerCase(), deployment, retryAfterSeconds);
+  } catch (cause) {
+    throw Object.assign(new RoseServerError('Foundry shared cooldown authority unavailable'), { cause });
+  }
+}
+
 export async function* foundryComplete(opts: FoundryOptions): AsyncIterable<RoseStreamChunk> {
   const models = foundryModels(opts.poolSpec);
   const regions = routableRegions();
@@ -299,11 +315,19 @@ export async function* foundryComplete(opts: FoundryOptions): AsyncIterable<Rose
   let skippedCooling = false;
   let attempt = 0;
 
-  for (const { region, deployment } of foundryRoutePlan(regions, models, opts.routeKey)) {
+  const plan = foundryRoutePlan(regions, models, opts.routeKey);
+  let cooldowns: Awaited<ReturnType<typeof readSharedFoundryCooldowns>>;
+  try {
+    cooldowns = await readSharedFoundryCooldowns(
+      plan.map(({ region, deployment }) => `${region.host.toLowerCase()}:${deployment}`)
+    );
+  } catch {
+    throw new RoseServerError('Foundry shared cooldown authority unavailable');
+  }
+  for (const { region, deployment } of plan) {
     const now = Date.now();
     if (now < (authCooldownUntil.get(region.endpoint) ?? 0)) continue;
-    const cooldownKey = `${region.endpoint}\n${deployment}`;
-    if (now < (cooldownUntil.get(cooldownKey) ?? 0)) {
+    if ((cooldowns[`${region.host.toLowerCase()}:${deployment}`]?.remainingSeconds ?? 0) > 0) {
       skippedCooling = true;
       continue;
     }
@@ -350,6 +374,12 @@ export async function* foundryComplete(opts: FoundryOptions): AsyncIterable<Rose
     if (response.status !== 200) {
       const status = response.status;
       lastError = recordHttpFailure(status, region, deployment, response.headers);
+      if (status === 429)
+        await reportRateLimitOrFail(
+          region,
+          deployment,
+          retryHintSeconds(response.headers)
+        );
       log.warn('foundry.attempt_failed', { ...where, status });
       // A request-shape error applies to every region and deployment.
       if (status === 400) break;
@@ -380,8 +410,22 @@ export async function* foundryComplete(opts: FoundryOptions): AsyncIterable<Rose
         yield chunk;
       }
       log.info('foundry.served', { ...where, attempt });
+      try {
+        if ((cooldowns[`${region.host.toLowerCase()}:${deployment}`]?.strikes ?? 0) > 0) {
+          await reportSharedFoundryServed(region.host.toLowerCase(), deployment);
+        }
+      } catch (error) {
+        log.warn('foundry.shared_cooldown_reset_failed', { error: String(error) });
+      }
       return;
     } catch (err) {
+      if (err instanceof RoseRateLimitError) {
+        await reportRateLimitOrFail(
+          region,
+          deployment,
+          retryHintSeconds(response.headers, err.message)
+        );
+      }
       if (yieldedVisible || opts.abortSignal?.aborted) throw err;
       lastError =
         err instanceof RoseError
@@ -389,9 +433,6 @@ export async function* foundryComplete(opts: FoundryOptions): AsyncIterable<Rose
           : new RoseServerError(
               `Foundry stream failed: ${err instanceof Error ? err.name : 'unknown'}`
             );
-      if (lastError instanceof RoseRateLimitError) {
-        cooldownUntil.set(cooldownKey, Date.now() + cooldownMs(response.headers));
-      }
       log.warn('foundry.stream_failed', { ...where, error_type: lastError.name });
       // An in-stream request-shape rejection is the same everywhere.
       if (lastError instanceof RoseInvalidRequest) break;
