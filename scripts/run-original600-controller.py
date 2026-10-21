@@ -1444,7 +1444,7 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
                              runtime_env=env, sibling_controller_slots=controllers - 1, scheduled_total=copies,
                              guest_env=guest_env)
             shard_objects[item['index']] = shard
-            shards.append(dict(index=item['index'], out=shard_dir / 'run', config=str(config),
+            shards.append(dict(index=item['index'], expected_count=len(shard['tasks'])*shard['runs'], out=shard_dir / 'run', config=str(config),
                                config_sha256=digest(runner['read'](config))))
         runner['save'](directory / 'shards.private.json', dict(plan=plan, runtime_env=env, group_run_id=group_id,
                        shards=[dict(s, out=str(s['out'])) for s in shards]))
@@ -1489,7 +1489,7 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
             config = prepare(args, root, pins, runner, attempt_dir, fresh, started_at=started_at, shard=bound,
                              runtime_env=env, sibling_controller_slots=controllers - 1, scheduled_total=copies,
                              guest_env=guest_env)
-            replacement = dict(index=index, out=attempt_dir / 'run', config=str(config),
+            replacement = dict(index=index, expected_count=len(bound['tasks'])*bound['runs'], out=attempt_dir / 'run', config=str(config),
                                config_sha256=digest(runner['read'](config)))
             print(json.dumps(dict(status='SHARD_RETRY', shard=index, directory=str(attempt_dir))), flush=True)
             return replacement, spawn(replacement)

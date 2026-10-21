@@ -59,6 +59,27 @@ waits for CANARY_JOINED. This is local causal/contract evidence, not proof that
 60 live guests can become ready in 900 seconds, or original task outcome proof.
 The old 1350.6-second startup would now abort before task launch.
 
+## Follow-up: strict required cohort
+
+Independent review accepted the budget repair but demonstrated a separate,
+pre-existing survivor-release policy at both owners: one failed member and one
+ready member could release only the ready member. This conflicts with the
+SAME60 sharded strict-barrier contract, not with ordinary unsharded survivor
+semantics. The new owning two-member controls fail on the accepted budget
+candidate and pass after the focused correction.
+
+The existing external-barrier boundary now requires every planned member;
+failed required members abort the shard after supported infra retries. A safe,
+released pre-barrier infra retry retains the same cohort, epoch and cutoff,
+archives the prior PID readiness receipt and rejoins that barrier. It never
+uses independent-retry bypass. The host compares all typed ready/failed/
+survivor counts against its manifest-bound expected count before global
+release, aborting and joining exact owned runners on an invalid ready report.
+Canceled peers remain canceled, separate from actual failed-member infra.
+Native local campaign controls cover retry success and exhaustion; ordinary
+non-external survivor release remains covered. Live full-cohort readiness and
+native provider retirement remain unproven.
+
 ## Human feedback
 
 The user requires the exact original 7200/9300 CLI, no bound increase, no

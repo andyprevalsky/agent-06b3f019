@@ -2564,7 +2564,7 @@ class Sharded(unittest.TestCase):
                     launched.append(self)
 
                 def status(self, barrier):
-                    (self.out/'shard-status.json').write_text(json.dumps(dict(state='LIVE', barrier=dict(status=barrier), infra=dict(infra_true=0))))
+                    (self.out/'shard-status.json').write_text(json.dumps(dict(state='LIVE', barrier=dict(status=barrier, ready_count=len(self.config['shard']['tasks'])*self.config['shard']['runs'], failed_count=0, expected_count=len(self.config['shard']['tasks'])*self.config['shard']['runs'], survivor_count=len(self.config['shard']['tasks'])*self.config['shard']['runs']), infra=dict(infra_true=0))))
 
                 def poll(self):
                     self.polls += 1
@@ -2752,7 +2752,7 @@ class Sharded(unittest.TestCase):
                             info.size = len(raw); tar.addfile(info, io.BytesIO(raw))
                         self.code = 0
                     elif self.polls == 1:
-                        (self.out/'shard-status.json').write_text(json.dumps(dict(state='LIVE', barrier=dict(status='ready'), infra=dict(infra_true=0))))
+                        (self.out/'shard-status.json').write_text(json.dumps(dict(state='LIVE', barrier=dict(status='ready', ready_count=len(self.config['shard']['tasks'])*self.config['shard']['runs'], failed_count=0, expected_count=len(self.config['shard']['tasks'])*self.config['shard']['runs'], survivor_count=len(self.config['shard']['tasks'])*self.config['shard']['runs']), infra=dict(infra_true=0))))
                     return self.code
 
                 def wait(self):

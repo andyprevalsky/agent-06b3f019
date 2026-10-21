@@ -39,6 +39,22 @@ def startup_deadline_monotonic(env, e2e_started_at, e2e_timeout, *, now_epoch, n
     return now_monotonic + deadline - now_epoch
 
 
+def rejoin_required_cohort(job):
+    """A released failed attempt may retry, but never bypass its original barrier."""
+    ready = job["_cohort"]["_directory"] / "ready" / (str(job["job_id"]) + ".json")
+    if ready.exists():
+        receipt = json.loads(ready.read_text())
+        if ready.is_symlink() or receipt.get("controller_pid") != job["controller_pid"] or receipt.get("job_id") != job["job_id"]:
+            raise ValueError("retry readiness does not belong to previous attempt")
+        # Preserve prior readiness as evidence; publish a fresh PID receipt on retry.
+        archived = ready.with_name(str(job["job_id"]) + ".attempt-" + str(job["attempt"] - 1) + ".json")
+        os.link(ready, archived)
+        ready.unlink()
+    job.pop("startup_failed_before_release", None)
+    job["_independent_retry"] = False
+    job["startup_ready_at"] = None
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -1558,12 +1574,17 @@ def main() -> int:
                 f"⏸️ campaign startup {cohort['cohort_id']}: {ready_count}/{cohort['expected_count']} copies ready"
             )
             write_json_atomic(summary_path, state)
+        if external_barrier is not None and (failed_count or len(cohort["_jobs"]) != cohort["expected_count"]):
+            barrier_failure = True
+            first_failure = first_failure or 1
+            abort_startup_cohort(cohort, "required shard member failed before global release")
+            return
         if not survivors:
             cohort["status"] = "failed"
             publish_external_barrier(cohort, "failed")
             write_json_atomic(summary_path, state)
             return
-        if ready_count != len(survivors):
+        if ready_count != (cohort["expected_count"] if external_barrier is not None else len(survivors)):
             publish_external_barrier(cohort, "waiting")
             return
         if external_barrier is not None:
@@ -2129,6 +2150,11 @@ def main() -> int:
                     # Only release eligibility changes; healthy peers and later
                     # cohorts can still complete, while the campaign stays failed.
                     job["startup_failed_before_release"] = True
+                    if external_barrier is not None:
+                        # Withdraw stale ready status before classifying/retrying this attempt.
+                        job["_cohort"]["failed_count"] = sum(bool(member.get("startup_failed_before_release")) for member in job["_cohort"]["_jobs"])
+                        job["_cohort"]["ready_count"] = 0
+                        publish_external_barrier(job["_cohort"], "waiting")
                 job["status"] = (
                     "cancelled"
                     if job.pop("_terminated_by_campaign", False)
@@ -2161,11 +2187,15 @@ def main() -> int:
                             and job["status"] != "cancelled"):
                         job["status"] = "passed"  # infrastructure health; task verdict is retained separately
                     elif (disposition.get("resources_released") and disposition.get("infra_failure")
-                          and job["attempt"] <= args.retry_infra and not stop_signal and not barrier_failure and not deadline_expired()):
+                          and job["attempt"] <= args.retry_infra and not stop_signal and not barrier_failure and not deadline_expired()
+                          and (external_barrier is None or not exited_before_release or not startup_expired())):
                         job["attempt"] += 1
                         job["status"] = "queued"
                         job["log"] = str(campaign_dir / f"{job['job_id']}.attempt-{job['attempt']}.log")
-                        job["_independent_retry"] = True
+                        if external_barrier is not None and exited_before_release:
+                            rejoin_required_cohort(job)
+                        else:
+                            job["_independent_retry"] = True
                         pending.appendleft(job)
                         print(f"↻ {job['job_id']} INFRA attempt released; admitting fresh attempt {job['attempt']} without restarting peers")
                     else:

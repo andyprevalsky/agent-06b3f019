@@ -320,6 +320,17 @@ def adopt_coordinate(shards, spawn, journal, *, stop_reason=None, poll_seconds=1
         os.close(lock)
 
 
+def full_cohort_ready(barrier, expected=None):
+    """Only complete, zero-failure readiness can authorize the strict shard barrier."""
+    if not isinstance(barrier, dict):
+        return False
+    count = barrier.get('expected_count')
+    return (type(count) is int and type(expected) is int and expected > 0 and count == expected
+            and all(type(barrier.get(k)) is int for k in ('ready_count', 'failed_count', 'survivor_count'))
+            and barrier['ready_count'] == count and barrier['survivor_count'] == count
+            and barrier['failed_count'] == 0)
+
+
 def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='enabled',
                poll_seconds=1.0, clock=time.time, sleep=time.sleep, respawn=None,
                stagger_seconds=0.0, max_attempts=MAX_SHARD_ATTEMPTS, startup_deadline=None):
@@ -388,13 +399,15 @@ def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='ena
                     record['shards'][str(i)] = dict(out=str(shard['out']), pid=process.pid)
                     save(journal, record)
             startup_expired = startup_deadline is not None and clock() >= startup_deadline
+            invalid_ready = [s['index'] for s in shards if barrier[s['index']] in RELEASED_STATES
+                             and not full_cohort_ready((statuses[s['index']] or {}).get('barrier'), s.get('expected_count'))]
             if decided is None:
                 failed = [i for i in runners if barrier[i] in FAILED_STATES or exited[i] is not None
                           or (statuses[i] or {}).get('state') in TERMINAL_SUPERVISOR]
-                if stop[0] or failed or startup_expired:
+                if stop[0] or failed or startup_expired or invalid_ready:
                     decided = 'abort'
                     record.update(aborted_at=clock(), abort_reason=(
-                        'operator ' + stop[0] if stop[0] else 'startup budget exhausted before global release' if startup_expired else 'shard %s failed before global release' % failed))
+                        'operator ' + stop[0] if stop[0] else 'startup budget exhausted before global release' if startup_expired else 'incomplete shard readiness: %s' % invalid_ready if invalid_ready else 'shard %s failed before global release' % failed))
                     decision = ('global-abort.json', dict(release_id=release_id, reason=record['abort_reason']))
                     save(journal, record)
                 elif all(barrier[i] in RELEASED_STATES for i in runners):
@@ -410,9 +423,9 @@ def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='ena
                     if target.is_dir() and not (target / decision[0]).exists():
                         write_once(target / decision[0], decision[1])
             threshold = infra_early_stop == 'enabled' and 20 * infra >= scheduled_total
-            if record['terminated_at'] is None and (stop[0] or threshold or (decided == 'abort' and startup_expired)):
-                record.update(terminated_at=clock(), terminate_cause='signal' if stop[0] else 'startup_budget' if decided == 'abort' and startup_expired else 'threshold', terminate_reason=(
-                    'operator ' + stop[0] if stop[0] else 'startup budget exhausted before global release' if decided == 'abort' and startup_expired else 'infra %d/%d reached the 5%% threshold' % (infra, scheduled_total)))
+            if record['terminated_at'] is None and (stop[0] or threshold or (decided == 'abort' and (startup_expired or invalid_ready))):
+                record.update(terminated_at=clock(), terminate_cause='signal' if stop[0] else 'startup_budget' if decided == 'abort' and startup_expired else 'cohort_incomplete' if invalid_ready else 'threshold', terminate_reason=(
+                    'operator ' + stop[0] if stop[0] else 'startup budget exhausted before global release' if decided == 'abort' and startup_expired else 'incomplete shard readiness: %s' % invalid_ready if invalid_ready else 'infra %d/%d reached the 5%% threshold' % (infra, scheduled_total)))
                 for process in runners.values():
                     if process.poll() is None:
                         process.send_signal(signal.SIGTERM)  # runner forwards TERM to its own supervisor only
