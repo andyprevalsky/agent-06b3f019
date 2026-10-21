@@ -1458,6 +1458,10 @@ root family AND normalized goal. Progress is fraction of actual issued tool
 batches, not semantic completion. ETA is time to the final own completion-tool
 receipt. Browser/explore histories lack reliable ETA labels. The historical
 sample is not a random census of production; repeated prefixes are correlated.
+Distribution audit: 125/179 held-out traces have two tool batches. Of 499
+prefixes in the 50–60% histogram bin, 449 are exactly 50%, including 369 from
+two-batch traces. One root family contributes 186 of those 449. These are
+event-weighted counts, not time occupancy or semantic goal-completion levels.
 
 Model: TypeSafe `jev-1.13.0`. Remaining-batch anchors: 0,1,2,3,5,8,13,21,34,55+;
 expected remaining batches produce progress = observed/(observed+remaining).

@@ -59,6 +59,15 @@ goal completion. ETA uses the final verifier FINISHED time; browser/explore
 ETA references are missing. Unknown future human waits cannot be inferred
 reliably from a prefix. Report prefix and trace-macro metrics together.
 
+Full-bucket plots (gray actual, blue optimized JEV) are reproducible with:
+  agents/venv/bin/python scripts/jev_progress/bucket_plot.py --winner <test-results.json> --view eta --output <eta.png>
+  agents/venv/bin/python scripts/jev_progress/bucket_plot.py --winner <test-results.json> --view batches --output <batches.png>
+All configured buckets, including empty buckets, are displayed. Actual values
+map to the nearest available anchor. The batch estimate is the expected count,
+then mapped to its nearest anchor; this is not the raw probability distribution.
+These histograms count saved prefixes; short traces and repeated tool-result
+events create discrete progress spikes. They do not measure wall-clock occupancy.
+
 Weekly fresh-data workflow
 -------------------------
 Also requires boto3, cryptography, python-dotenv and psql. R2_ACCOUNT_ID,
