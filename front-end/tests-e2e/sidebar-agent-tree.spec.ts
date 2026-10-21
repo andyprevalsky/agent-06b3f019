@@ -212,7 +212,7 @@ test('mobile drawer survives repeated close, Escape, selection and rotation with
     await expect(drawer).not.toBeVisible();
   }
   await menu.click();
-  await drawer.getByRole('button', { name: 'Launch a product', exact: true }).click();
+  await drawer.getByRole('heading', { name: 'Launch a product', exact: true }).click();
   await expect(drawer).not.toBeVisible();
   await expect(page).toHaveURL(new RegExp('agent-id=' + ROOT));
   await menu.click();
@@ -239,7 +239,11 @@ test('ordinary mobile account has no public-site links and includes the new popu
     .getByRole('button', { name: 'Get Rose Api Key', exact: true })
     .first();
   await expect(goal).toBeAttached();
-  await goal.scrollIntoViewIfNeeded();
-  await goal.click({ force: true });
+  // Freeze the decorative ticker only; exercise the actual goal click/composer path.
+  await page.addStyleTag({
+    content: '[data-testid="popular-goals-track"] { transform: none !important; }',
+  });
+  await goal.evaluate((el) => el.scrollIntoView({ block: 'nearest', inline: 'center' }));
+  await goal.click({ timeout: 5000 });
   await expect(page.getByPlaceholder('Enter any goal')).toHaveValue('Get Rose Api Key');
 });
