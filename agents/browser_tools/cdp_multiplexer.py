@@ -77,9 +77,11 @@ class SingleCdpConnectionMultiplexer:
         upstream_url: str,
         *,
         upstream_connect: Optional[UpstreamConnect] = None,
+        refresh_url: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
         label: str = "",
     ) -> None:
         self._upstream_url = upstream_url
+        self._refresh_url = refresh_url
         self._upstream_connect = upstream_connect or _default_upstream_connect
         self._label = label
         self._server: Any = None
@@ -136,7 +138,18 @@ class SingleCdpConnectionMultiplexer:
         async with self._upstream_lock:
             if self._upstream is not None:
                 return
-            self._upstream = await self._upstream_connect(self._upstream_url)
+            try:
+                self._upstream = await self._upstream_connect(self._upstream_url)
+            except websockets.InvalidStatus as error:
+                # Tilion connect tokens last 1800 s; an expired one is refused
+                # with HTTP 403 at the handshake. Mint a fresh URL once.
+                status = getattr(getattr(error, "response", None), "status_code", None)
+                fresh = await self._refresh_url() if status == 403 and self._refresh_url else None
+                if not fresh or fresh == self._upstream_url:
+                    raise CdpMultiplexerUpstreamClosed(status, "provider refused the CDP handshake") from error
+                logger.info("[CdpMux] Reattaching with a freshly minted CDP URL (label=%s)", self._label)
+                self._upstream_url = fresh
+                self._upstream = await self._upstream_connect(self._upstream_url)
             self.upstream_connections_opened += 1
             self._reader = asyncio.create_task(self._read_upstream(self._upstream))
             logger.info(

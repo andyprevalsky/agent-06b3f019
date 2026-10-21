@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Optional, Tuple
+from typing import Any, Awaitable, Callable, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
@@ -65,17 +65,24 @@ def redact_cdp_url(cdp_url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
 
 
-async def open_browser_cdp_connection(cdp_url: str, *, label: str = "") -> Tuple[str, Optional[Any]]:
+async def open_browser_cdp_connection(
+    cdp_url: str,
+    *,
+    label: str = "",
+    refresh_url: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
+) -> Tuple[str, Optional[Any]]:
     """Return ``(url to connect local CDP clients to, multiplexer or None)``.
 
     Tilion admits one CDP client per session, so its URL (token intact) is held
     by one loopback multiplexer that browser-use and Playwright both attach to.
     The caller owns the returned multiplexer and closes it with its DOMService.
+    ``refresh_url`` mints a fresh connect URL when a redial finds the token
+    expired (Tilion tokens last 1800 s).
     Other providers connect directly, as before.
     """
     if not is_tilion_cdp_url(cdp_url):
         return steel_cdp_connection_url(cdp_url), None
     from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
 
-    multiplexer = SingleCdpConnectionMultiplexer(cdp_url, label=label)
+    multiplexer = SingleCdpConnectionMultiplexer(cdp_url, label=label, refresh_url=refresh_url)
     return await multiplexer.start(), multiplexer
