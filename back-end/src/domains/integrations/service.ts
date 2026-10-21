@@ -32,6 +32,11 @@ import {
   releaseComputeTokenLineage,
 } from '../../providers/computeCredentials';
 import {
+  getFoundryDeploymentCooldowns,
+  markFoundryDeploymentCooldown,
+  markFoundryDeploymentServed,
+} from '../../providers/foundryDeploymentCooldown';
+import {
   fetchGptCodeAccessToken,
   fetchGptPoolToken,
   markGptPoolTokenRateLimited,
@@ -775,6 +780,9 @@ export async function markComputeTokenRateLimited(
     failureReason?: string;
     credentialId?: string;
     model?: string;
+    region?: string;
+    deployment?: string;
+    retryAfterSeconds?: number;
   }
 ) {
   if (type === 'claude') {
@@ -802,10 +810,21 @@ export async function markComputeTokenRateLimited(
     await markGptApiKeyOnCooldown(params.failureReason ?? 'out_of_credits');
     return { ok: true, type, rateLimitedUntil: null };
   }
+  if (type === 'foundry') {
+    // One shared cooldown per Azure (region, deployment) for every worker.
+    const state = await markFoundryDeploymentCooldown(
+      params.region ?? '',
+      params.deployment ?? '',
+      params.retryAfterSeconds
+    );
+    return { ok: true, type, ...state };
+  }
   throw new Error(
-    'Invalid type. Must be "claude", "gpt", "anthropic", "cerebras", or "gpt_api_key".'
+    'Invalid type. Must be "claude", "gpt", "anthropic", "cerebras", "foundry", or "gpt_api_key".'
   );
 }
+
+export { getFoundryDeploymentCooldowns, markFoundryDeploymentServed };
 
 export async function getGptApiKeyCooldown() {
   return {

@@ -201,6 +201,7 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
     start_url: 'https://example.com',
   });
   let settlePending: (() => void) | undefined;
+  let removeRequestObserver = () => {};
   try {
     for (const scenario of [
       'disconnect-during-preparation',
@@ -266,7 +267,10 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
           responseClosed,
           intentionalDestroy,
         }));
-      server.once('request', (_req, res) => {
+      const observeInitRequest = (_req: IncomingMessage, res: ServerResponse) => {
+        const requestPath = (_req as express.Request).originalUrl ?? _req.url;
+        if (_req.method !== 'POST' || requestPath !== '/api/browser-session/init') return;
+        server.off('request', observeInitRequest);
         recordRequest('request-event', { req: _req, res });
         mark('server-request');
         res.once('close', () => {
@@ -275,7 +279,9 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
           responseClosed = true;
           disconnected.resolve();
         });
-      });
+      };
+      removeRequestObserver = () => server.off('request', observeInitRequest);
+      server.on('request', observeInitRequest);
       init = async () => {
         if (scenario !== 'disconnect-before-allocation' && scenario !== 'init-error')
           sessions.set(ownedSessionId, 'ACTIVE');
@@ -304,6 +310,16 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
         closeObserved.resolve();
         if (scenario === 'close-failure') throw new Error('fixture provider close unavailable');
       };
+      // An unrelated native request must not satisfy this scenario's close observation.
+      await observed(new Promise<void>((resolve, reject) => {
+        const unrelated = httpRequest({ hostname: '127.0.0.1', port: address.port, path: '/', method: 'HEAD' }, (response) => {
+          response.resume();
+          response.once('end', resolve);
+          response.once('error', reject);
+        });
+        unrelated.once('error', reject);
+        unrelated.end();
+      }), 'unrelated-head');
       const client = httpRequest({
         hostname: '127.0.0.1',
         port: address.port,
@@ -367,6 +383,7 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
       console.log(`PASS browser-session init ${scenario}: exact owner, foreign unchanged`);
     }
   } finally {
+    removeRequestObserver();
     settlePending?.();
     await new Promise<void>((resolve) => setImmediate(resolve));
     server.closeAllConnections();

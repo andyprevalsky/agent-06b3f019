@@ -85,6 +85,10 @@ def run_campaign(
     env.update(
         PATH=str(binary) + os.pathsep + str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", ""),
         CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY="0",
+        # This fixture tests barrier ordering, not physical disk reserve sizing.
+        CLOUDBENCH_CLEANUP_DISK_RESERVE_MB="1",
+        CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB="1",
+        CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB="0",
         FIXTURE_ROOT=str(tmp_path),
         FIXTURE_EVENTS=str(events),
         FIXTURE_FAIL_JOBS=" ".join(map(str, fail_jobs or (fail_job,))),
@@ -157,6 +161,7 @@ def run_campaign(
         if strict:
             shutil.rmtree(admission, ignore_errors=True)
     summary = json.loads(next((tmp_path / ".context/benchmarks/campaigns").glob("*/summary.json")).read_text())
+    assert events.exists(), (result.returncode, result.stdout, result.stderr, summary)
     records = [json.loads(line) for line in events.read_text().splitlines()]
     return result, summary, records
 
