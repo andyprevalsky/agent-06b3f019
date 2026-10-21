@@ -321,12 +321,14 @@ export async function resumeSession(
       taskId,
       options
     );
-    await releaseSupersededBrowser({
-      taskId,
-      previousProvider,
-      previousSessionId,
-      operation: 'resume',
-    });
+    if (previousSessionId !== '' && previousSessionId !== session.sessionId) {
+      await releaseSupersededBrowser({
+        taskId,
+        previousProvider,
+        previousSessionId,
+        operation: 'resume',
+      });
+    }
     return session;
   }
   if (provider === 'browser-use' || provider === 'tilion') {
@@ -402,9 +404,29 @@ export async function rotateProxy(
 ): Promise<BrowserProxyRotationResult> {
   const currentProvider = await providerForTask(taskId);
   if (step.provider === 'kernel') {
-    if (currentProvider !== 'kernel') throw new ProxyRotationUnsupportedError(currentProvider);
+    // Tilion → Kernel is a ladder step; recreateKernelSession accepts the
+    // non-Kernel row but evicts only Kernel predecessors, so release Tilion here.
+    if (currentProvider !== 'kernel' && currentProvider !== 'tilion') {
+      throw new ProxyRotationUnsupportedError(currentProvider);
+    }
+    const previous =
+      currentProvider === 'tilion'
+        ? await prisma.browserSession.findUniqueOrThrow({
+            where: { id: taskId },
+            select: { sessionId: true },
+          })
+        : null;
+    const session = await rotateKernelSession(taskId, step.proxyType, options);
+    if (previous !== null) {
+      await releaseSupersededBrowser({
+        taskId,
+        previousProvider: 'tilion',
+        previousSessionId: previous.sessionId,
+        operation: 'rotation',
+      });
+    }
     return {
-      ...(await rotateKernelSession(taskId, step.proxyType, options)),
+      ...session,
       previousProvider: currentProvider,
       recoveryAction: step.recoveryAction,
       proxyType: step.proxyType,
@@ -415,21 +437,25 @@ export async function rotateProxy(
     if (!tilionEnabled()) {
       throw new Error('Tilion is disabled by BROWSER_AGENT_TILION_ENABLED');
     }
+    if (currentProvider !== 'tilion') throw new ProxyRotationUnsupportedError(currentProvider);
     const { previousSessionId, previousProvider, ...session } = await rotateTilionSession(
       taskId,
       step.proxyType,
       options
     );
-    await releaseSupersededBrowser({
-      taskId,
-      previousProvider,
-      previousSessionId,
-      operation: 'rotation',
-    });
+    // An in-place rotate-ip keeps the session id; releasing it would kill the live browser.
+    if (previousSessionId !== '' && previousSessionId !== session.sessionId) {
+      await releaseSupersededBrowser({
+        taskId,
+        previousProvider,
+        previousSessionId,
+        operation: 'rotation',
+      });
+    }
     return {
       ...session,
-      previousProvider,
-      recoveryAction: previousProvider === 'tilion' ? 'ip_rotated' : 'provider_switched',
+      previousProvider: currentProvider,
+      recoveryAction: step.recoveryAction,
       proxyType: step.proxyType,
     };
   }
