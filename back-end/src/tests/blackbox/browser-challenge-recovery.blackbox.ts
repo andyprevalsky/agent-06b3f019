@@ -13,6 +13,13 @@ import {
   searchAndPromoteBrowserConfig,
   type BrowserConfigSearchRuntimeDependencies,
 } from '../../providers/browser/challengeRecovery';
+import type { BrowserProxyRotationResult } from '../../providers/browser';
+import type { RotationStep } from '../../providers/browser/rotation';
+import {
+  resumeBrowserSession,
+  rotateBrowserProxy,
+  type BrowserSessionResumeDependencies,
+} from '../../providers/browserSessionResume';
 
 config();
 
@@ -333,6 +340,412 @@ async function testConfigSearchPersistsAndReusesWinnerWithoutChildChips(): Promi
 test(
   'config search persists the winner and the next session reuses it without child chips',
   testConfigSearchPersistsAndReusesWinnerWithoutChildChips
+);
+
+// ---------------------------------------------------------------------------
+// Mid-run provider switches persist (Tilion is the deployment default).
+// Provider operations are fakes that apply the same BrowserSession row writes
+// the real providers make; the ladder, the persisted-provider read, the state
+// carried into the replacement and the promoted preference are the real code.
+// ---------------------------------------------------------------------------
+
+async function withEnv<T>(values: Record<string, string | undefined>, run: () => Promise<T>) {
+  const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+  for (const [key, value] of Object.entries(values)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return await run();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+const TILION_DEFAULT_ENV = {
+  BROWSER_PROVIDER: 'tilion',
+  BROWSER_AGENT_TILION_ENABLED: undefined,
+  BROWSER_AGENT_BROWSER_USE_ENABLED: undefined,
+  TILION_API_KEY: 'fake-tilion-key',
+};
+
+async function seedRun(provider: string, proxyTier: string | null = null) {
+  // Direct fixture rows: these cases exercise provider persistence, not HTTP auth.
+  const owner = { userId: `tilion-switch-${randomUUID()}` };
+  await prisma.user.create({ data: { userId: owner.userId } });
+  const agent = await prisma.agent.create({
+    data: { userId: owner.userId, goal: 'Test mid-run provider switch persistence' },
+  });
+  const context = await prisma.browserContext.create({
+    data: { userId: owner.userId, contextId: null },
+  });
+  const session = await prisma.browserSession.create({
+    data: {
+      contextId: context.id,
+      agentId: agent.id,
+      sessionId: `${provider}-original-${randomUUID()}`,
+      debugUrl: `https://${provider}.invalid/original`,
+      wsUrl: `wss://${provider}.invalid/original`,
+      startUrl: 'https://shop.example.com/',
+      currentUrl: 'https://shop.example.com/cart',
+      status: 'ACTIVE',
+      provider,
+      proxyTier,
+    },
+  });
+  const cleanup = async () => {
+    await prisma.browserSession.delete({ where: { id: session.id } }).catch(() => undefined);
+    await prisma.browserContext.delete({ where: { id: context.id } }).catch(() => undefined);
+    await prisma.agent.delete({ where: { id: agent.id } }).catch(() => undefined);
+    await prisma.user.delete({ where: { userId: owner.userId } }).catch(() => undefined);
+  };
+  return { owner, agent, context, session, cleanup };
+}
+
+/** Fake provider operations that write the row the way the real providers do. */
+function fakeProviderOperations() {
+  const steps: RotationStep[] = [];
+  const injected: Array<{ sessionId: string; userId: string; url: string }> = [];
+  const resumedFrom: string[] = [];
+  let sequence = 0;
+  const replace = async (taskId: string, provider: string, proxyTier: string | null) => {
+    sequence += 1;
+    const sessionId = `${provider}-replacement-${sequence}-${randomUUID()}`;
+    const row = await prisma.browserSession.update({
+      where: { id: taskId },
+      data: {
+        sessionId,
+        provider,
+        proxyTier,
+        wsUrl: `wss://${provider}.invalid/${sequence}`,
+        debugUrl: `https://${provider}.invalid/${sequence}`,
+        status: 'ACTIVE',
+        closedAt: null,
+      },
+    });
+    return {
+      provider: provider as 'kernel' | 'steel' | 'tilion',
+      sessionId,
+      debugUrl: row.debugUrl ?? '',
+      wsUrl: row.wsUrl ?? '',
+      savedUrl: row.currentUrl ?? row.startUrl ?? undefined,
+      proxySource: `${provider}_${proxyTier ?? 'resume'}`,
+      proxyLocation: DEFAULT_GEOLOCATION,
+      profileId: null,
+      profileSource: 'test',
+    };
+  };
+  const dependencies: BrowserSessionResumeDependencies = {
+    rotateProxy: async (taskId, step): Promise<BrowserProxyRotationResult> => {
+      steps.push(step);
+      const before = await prisma.browserSession.findUniqueOrThrow({ where: { id: taskId } });
+      const session = await replace(taskId, step.provider, step.proxyType);
+      return {
+        ...session,
+        previousProvider: before.provider as BrowserProxyRotationResult['previousProvider'],
+        recoveryAction: step.recoveryAction,
+        proxyType: step.proxyType,
+      };
+    },
+    // Resume dispatches on the persisted provider (index.ts providerForTask).
+    resumeSession: async (taskId) => {
+      const row = await prisma.browserSession.findUniqueOrThrow({ where: { id: taskId } });
+      resumedFrom.push(row.provider);
+      return replace(taskId, row.provider, row.proxyTier);
+    },
+    injectUserData: async (sessionId, userId, url) => {
+      injected.push({ sessionId, userId, url });
+      return {
+        cookies: { injected: true, cookieCount: 3, authSource: 'none', credentialRef: null },
+        fingerprint: { injected: false },
+      } as unknown as Awaited<ReturnType<BrowserSessionResumeDependencies['injectUserData']>>;
+    },
+    closeSession: async () => undefined,
+    getBrowserCaptchaTelemetry: async () => null as never,
+  };
+  return { dependencies, steps, injected, resumedFrom };
+}
+
+async function testTilionToKernelSwitchPersistsThroughPauseResume(): Promise<void> {
+  const run = await seedRun('tilion', 'residential');
+  const fake = fakeProviderOperations();
+  try {
+    await withEnv(TILION_DEFAULT_ENV, async () => {
+      const first = await rotateBrowserProxy(
+        run.session.id,
+        run.owner.userId,
+        undefined,
+        fake.dependencies
+      );
+      assert(first.provider === 'tilion', `rotation 1 left Tilion: ${first.provider}`);
+      assert(first.next_recovery === 'rotate_tilion_mobile_ip', `next: ${first.next_recovery}`);
+      const second = await rotateBrowserProxy(
+        run.session.id,
+        run.owner.userId,
+        'https://shop.example.com/checkout',
+        fake.dependencies
+      );
+      assert(second.proxy_tier === 'mobile', `rotation 2 tier: ${second.proxy_tier}`);
+      assert(second.next_recovery === 'switch_provider_to_kernel', `${second.next_recovery}`);
+      const third = await rotateBrowserProxy(
+        run.session.id,
+        run.owner.userId,
+        undefined,
+        fake.dependencies
+      );
+      assert(third.provider === 'kernel', `rotation 3 provider: ${third.provider}`);
+      assert(third.recovery_action === 'provider_switched', `${third.recovery_action}`);
+      assert(third.previous_provider === 'tilion', `previous: ${third.previous_provider}`);
+      assert(
+        /^Switched from Tilion to Kernel/.test(third.rotation_message),
+        third.rotation_message
+      );
+      // Ladder position 4 reads the persisted Kernel provider, not the Tilion default.
+      assert(third.next_recovery === 'switch_provider_to_steel', `${third.next_recovery}`);
+      assert(
+        third.cookies_injected && third.saved_url === 'https://shop.example.com/checkout',
+        `state not carried into Kernel: ${JSON.stringify(third)}`
+      );
+
+      // Pause, then resume: the run stays on Kernel with its URL and state.
+      await prisma.browserSession.update({
+        where: { id: run.session.id },
+        data: { status: 'PAUSED', closedAt: new Date() },
+      });
+      const resumed = await resumeBrowserSession(run.session.id, {}, fake.dependencies);
+      assert(
+        resumed.browser_session_metadata.provider === 'kernel',
+        `resume reverted the switched provider: ${resumed.browser_session_metadata.provider}`
+      );
+      assert(resumed.current_url === 'https://shop.example.com/checkout', resumed.current_url!);
+      const row = await prisma.browserSession.findUniqueOrThrow({ where: { id: run.session.id } });
+      assert(row.provider === 'kernel', `persisted provider after resume: ${row.provider}`);
+      assert(row.status === 'ACTIVE', `resumed row status: ${row.status}`);
+      assert(row.proxyRotationCount === 3, `rotation budget changed: ${row.proxyRotationCount}`);
+      const last = fake.injected[fake.injected.length - 1]!;
+      assert(
+        last.sessionId === row.sessionId &&
+          last.userId === run.owner.userId &&
+          last.url === 'https://shop.example.com/checkout',
+        `state not injected into the resumed Kernel session: ${JSON.stringify(last)}`
+      );
+
+      // The fourth rotation follows the persisted provider too.
+      const fourth = await rotateBrowserProxy(
+        run.session.id,
+        run.owner.userId,
+        undefined,
+        fake.dependencies
+      );
+      assert(fourth.provider === 'steel', `rotation 4 provider: ${fourth.provider}`);
+    });
+    assert(
+      JSON.stringify(fake.steps.map((step) => [step.provider, step.proxyType])) ===
+        JSON.stringify([
+          ['tilion', 'residential'],
+          ['tilion', 'mobile'],
+          ['kernel', 'residential'],
+          ['steel', 'residential'],
+        ]),
+      `unexpected ladder: ${JSON.stringify(fake.steps)}`
+    );
+    assert(
+      JSON.stringify(fake.resumedFrom) === JSON.stringify(['kernel']),
+      `resume dispatched on ${JSON.stringify(fake.resumedFrom)}`
+    );
+  } finally {
+    await run.cleanup();
+  }
+}
+
+test(
+  'Tilion → Kernel rotation switch persists through pause/resume with its state',
+  testTilionToKernelSwitchPersistsThroughPauseResume
+);
+
+async function testKernelToTilionPromotionPersistsAndIsHonoured(): Promise<void> {
+  const run = await seedRun('kernel', 'residential_city');
+  const created: string[] = [];
+  const released: string[] = [];
+  const closedProbeClients: string[] = [];
+  const probedWsUrls: string[] = [];
+  const validationClient = (sessionId: string) =>
+    ({
+      close: async () => {
+        closedProbeClients.push(sessionId);
+      },
+    }) as unknown as Browser;
+  const candidate = (provider: string, proxySource: string) => {
+    const sessionId = `${provider}-candidate-${created.length + 1}`;
+    created.push(proxySource);
+    return {
+      sessionId,
+      debugUrl: `https://${provider}.invalid/${sessionId}`,
+      wsUrl: `wss://${provider}.invalid/${sessionId}`,
+      proxySource,
+      proxyLocation: DEFAULT_GEOLOCATION,
+      profileId: null,
+      profileSource: 'challenge_candidate_ephemeral',
+      validationBrowser: validationClient(sessionId),
+    };
+  };
+  const tilionCreates: unknown[] = [];
+  const runtime: BrowserConfigSearchRuntimeDependencies = {
+    createKernel: async (_agentId, _location, proxy) =>
+      candidate('kernel', `${proxy.type}_${proxy.specificity}`),
+    createSteel: async (input) => candidate('steel', input.proxyMode),
+    createBrowserUse: async () => {
+      throw new Error('Browser Use is disabled in this test');
+    },
+    createTilion: async (_location, options) => {
+      tilionCreates.push(options);
+      return candidate('tilion', `tilion_${options.proxyType}`);
+    },
+    releaseKernel: async (sessionId) => void released.push(sessionId),
+    releaseSteel: async (sessionId) => void released.push(sessionId),
+    releaseBrowserUse: async (sessionId) => void released.push(sessionId),
+    releaseTilion: async (sessionId) => void released.push(sessionId),
+    announceBinding: async () => undefined,
+    probe: async (candidateSession) => {
+      probedWsUrls.push(candidateSession.wsUrl);
+      const clean = candidateSession.proxySource === 'tilion_mobile';
+      return { stablePasses: clean ? 1 : 0, attempts: 1, latencyMs: 1, paymentCdnOk: true };
+    },
+  };
+  const fake = fakeProviderOperations();
+  try {
+    const result = await withEnv({ ...TILION_DEFAULT_ENV, BROWSER_PROVIDER: 'kernel' }, async () =>
+      searchAndPromoteBrowserConfig(
+        {
+          taskId: run.session.id,
+          userId: run.owner.userId,
+          targetUrl: 'https://shop.example.com/cart',
+          storageState: { cookies: [], origins: [] },
+          fingerprintInjection: null,
+        },
+        runtime
+      )
+    );
+    assert(result.provider === 'tilion', `winner provider: ${result.provider}`);
+    assert(result.recovery_action === 'provider_switched', result.recovery_action);
+    assert(
+      JSON.stringify(tilionCreates.at(-1)) === JSON.stringify({ proxyType: 'mobile' }),
+      `Tilion exit type not requested: ${JSON.stringify(tilionCreates)}`
+    );
+    // Recovery never opens a client on the live session (storage comes from the worker).
+    assert(!probedWsUrls.includes(run.session.wsUrl!), 'probe touched the live session');
+    // Tilion allows one CDP client: the winner's probe client is gone before the agent reattaches.
+    assert(closedProbeClients.includes(result.session_id), 'Tilion probe client left attached');
+    assert(released.includes(run.session.sessionId), 'superseded Kernel session not released');
+    assert(!released.includes(result.session_id), 'promoted Tilion session was released');
+
+    const row = await prisma.browserSession.findUniqueOrThrow({ where: { id: run.session.id } });
+    assert(row.provider === 'tilion', `persisted provider: ${row.provider}`);
+    assert(row.sessionId === result.session_id, 'promoted session id not persisted');
+    assert(row.kernelProxySource === null, 'Kernel proxy source survived the switch');
+    const context = await prisma.browserContext.findUniqueOrThrow({
+      where: { id: run.context.id },
+    });
+    const preferred = context.preferredBrowserConfig as {
+      provider?: string;
+      tilionProxyType?: string;
+    } | null;
+    assert(preferred?.provider === 'tilion', `preferred: ${JSON.stringify(preferred)}`);
+    assert(preferred.tilionProxyType === 'mobile', `preferred: ${JSON.stringify(preferred)}`);
+
+    // With Kernel as the deployment default, the next rotation reads the
+    // persisted Tilion provider and stays on the Tilion ladder.
+    await withEnv({ ...TILION_DEFAULT_ENV, BROWSER_PROVIDER: 'kernel' }, async () => {
+      const rotated = await rotateBrowserProxy(
+        run.session.id,
+        run.owner.userId,
+        undefined,
+        fake.dependencies
+      );
+      assert(rotated.provider === 'tilion', `rotation after promotion: ${rotated.provider}`);
+      assert(rotated.recovery_action === 'ip_rotated', rotated.recovery_action);
+    });
+    // Kill switch off: the Tilion run leaves for Kernel at the ladder's tier.
+    await withEnv({ ...TILION_DEFAULT_ENV, BROWSER_AGENT_TILION_ENABLED: 'false' }, async () => {
+      const rotated = await rotateBrowserProxy(
+        run.session.id,
+        run.owner.userId,
+        undefined,
+        fake.dependencies
+      );
+      assert(rotated.provider === 'kernel', `kill switch rotated into ${rotated.provider}`);
+      assert(rotated.proxy_tier === 'mobile', `kill switch tier: ${rotated.proxy_tier}`);
+      assert(rotated.recovery_action === 'provider_switched', rotated.recovery_action);
+    });
+
+    // The promoted preference is honoured by the next new session.
+    const tilionOptions: unknown[] = [];
+    const creationDependencies = {
+      readPreferredConfig: async (contextId: string) =>
+        (
+          await prisma.browserContext.findUnique({
+            where: { id: contextId },
+            select: { preferredBrowserConfig: true },
+          })
+        )?.preferredBrowserConfig,
+      defaultProvider: () => 'kernel' as const,
+      createKernel: async () => {
+        throw new Error('deployment default must not run before the promoted Tilion winner');
+      },
+      createSteel: async () => {
+        throw new Error('a Tilion preference must never fall through to Steel');
+      },
+      createBrowserUse: async () => {
+        throw new Error('Browser Use is disabled in this test');
+      },
+      createTilion: async (
+        _contextId: string,
+        _agentId: string,
+        location: typeof DEFAULT_GEOLOCATION,
+        _startUrl?: string,
+        options?: unknown
+      ) => {
+        tilionOptions.push(options);
+        return {
+          provider: 'tilion' as const,
+          sessionId: 'preferred-tilion-session',
+          debugUrl: 'https://tilion.invalid/preferred',
+          taskId: 'preferred-task',
+          wsUrl: 'wss://tilion.invalid/preferred',
+          proxySource: 'tilion_mobile',
+          proxyLocation: location,
+          profileId: null,
+          profileSource: 'test',
+          validationBrowser: null,
+        };
+      },
+    } as unknown as BrowserSessionCreationDependencies;
+    const next = await withEnv(TILION_DEFAULT_ENV, async () =>
+      createSessionWithContextUsingDependencies(
+        run.context.id,
+        run.agent.id,
+        DEFAULT_GEOLOCATION,
+        undefined,
+        undefined,
+        creationDependencies
+      )
+    );
+    assert(next.provider === 'tilion', `next session ignored the Tilion winner: ${next.provider}`);
+    assert(
+      JSON.stringify(tilionOptions) === JSON.stringify([{ proxyType: 'mobile' }]),
+      `next session did not receive the Tilion exit type: ${JSON.stringify(tilionOptions)}`
+    );
+  } finally {
+    await run.cleanup();
+  }
+}
+
+test(
+  'Kernel → Tilion recovery promotion persists, rotates on Tilion and is honoured next session',
+  testKernelToTilionPromotionPersistsAndIsHonoured
 );
 
 async function main(): Promise<void> {
