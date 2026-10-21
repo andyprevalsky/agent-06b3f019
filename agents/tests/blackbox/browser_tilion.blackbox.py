@@ -37,6 +37,12 @@ class FakeTilionGateway:
         self.max_concurrent = 0
         self.port = 0
         self._server = None
+        self._sockets: set = set()
+
+    async def drop_all(self) -> None:
+        """Simulate Tilion dropping the attached client (network blip, LB)."""
+        for downstream in list(self._sockets):
+            await downstream.close(code=1011, reason="upstream reset")
 
     @property
     def cdp_url(self) -> str:
@@ -49,6 +55,7 @@ class FakeTilionGateway:
             return
         self.active += 1
         self.accepted += 1
+        self._sockets.add(downstream)
         self.max_concurrent = max(self.max_concurrent, self.active)
         try:
             async with websockets.connect(self.endpoint, max_size=None, proxy=None) as upstream:
@@ -69,6 +76,7 @@ class FakeTilionGateway:
                         task.cancel()
                     await asyncio.gather(*tasks, return_exceptions=True)
         finally:
+            self._sockets.discard(downstream)
             self.active -= 1
 
     async def __aenter__(self):
@@ -293,9 +301,20 @@ async def _fixture_site():
     async def headers(request):
         return web.json_response({"accept_language": request.headers.get("Accept-Language", "")})
 
+    async def first_script(request):
+        return web.Response(
+            content_type="text/html",
+            text=(
+                "<script>window.firstFacts = [Intl.DateTimeFormat().resolvedOptions().timeZone,"
+                " Intl.DateTimeFormat().resolvedOptions().locale, navigator.userAgent];</script>"
+                f"<p>{request.headers.get('Accept-Language', '')}</p>"
+            ),
+        )
+
     app = web.Application()
     app.router.add_get("/", index)
     app.router.add_get("/headers", headers)
+    app.router.add_get("/first-script", first_script)
     app.router.add_get("/files/report.pdf", report)
     app.router.add_get("/static/logo.png", logo)
     runner = web.AppRunner(app, access_log=None)
@@ -310,7 +329,7 @@ async def _fixture_site():
 
 
 @contextlib.asynccontextmanager
-async def _tilion_worker_stack():
+async def _tilion_worker_stack(emulation: Optional[Dict[str, Any]] = None):
     """Real Chromium behind the fake Tilion gateway, attached like the worker does."""
     from browser_tools.dom_service import DOMService, browser_downloads_path_for_provider
     from domains.spawn_browser_agent_v3.cdp_urls import open_browser_cdp_connection
@@ -318,7 +337,7 @@ async def _tilion_worker_stack():
     async with _chromium() as (playwright, _browser, endpoint):
         async with FakeTilionGateway(endpoint) as gateway:
             with _tilion_env(gateway):
-                local_url, multiplexer = await open_browser_cdp_connection(gateway.cdp_url)
+                local_url, multiplexer = await open_browser_cdp_connection(gateway.cdp_url, emulation=emulation)
                 service = DOMService(
                     cdp_url=local_url,
                     downloads_path=browser_downloads_path_for_provider("tilion"),
@@ -551,6 +570,15 @@ async def test_tilion_cost_row_is_12_cents_per_hour_plus_create():
     assert abs(service_row["cost_cents"] - (12.0 + 0.4)) < 1e-6, service_row
     resumed = build_usage_items(1000, 100, pricing, 60_000, provider="tilion", session_creates=0)
     assert abs(next(i for i in resumed if i["type"] == "service")["cost_cents"] - 0.2) < 1e-6
+    replaced = build_usage_items(1000, 100, pricing, 3_600_000, provider="tilion", session_creates=3)
+    assert abs(next(i for i in replaced if i["type"] == "service")["cost_cents"] - (12.0 + 1.2)) < 1e-6
+    from pathlib import Path
+
+    handler_source = (Path(__file__).resolve().parents[2] / "domains/spawn_browser_agent_v3/handler.py").read_text()
+    # Every provider-priced cost row passes the activity's Tilion create count,
+    # counted at the initial create, a replacement resume and both rotation paths.
+    assert handler_source.count('session_creates=tilion_creates["count"]') == 5
+    assert handler_source.count('tilion_creates["count"] += 1') == 4
     fast = build_usage_items(1000, 100, pricing, 3_600_000, provider="tilion", fast_mode_cache_enabled=True)
     assert next(i for i in fast if i["type"] == "service")["cost_cents"] == 0.0
 
@@ -716,12 +744,13 @@ async def test_tilion_press_key_uses_cdp_input_not_backend_computer_api():
 
 async def test_tilion_locale_override_applies_intl_and_accept_language():
     """Backend contract (A2): fingerprint_injection.{timezone,locale} first, then
-    exit_geo_locale; nothing when both are absent; every page, including new ones."""
+    exit_geo_locale; nothing when both are absent. The multiplexer holds every
+    new target until the overrides land, so a popup's FIRST script already sees
+    them, and re-applies them after an upstream redial."""
     from domains.spawn_browser_agent_v3.tilion_worker import (
         accept_language_for_locale,
-        apply_geo_locale_override,
-        install_geo_locale_for_new_pages,
         resolve_geo_locale,
+        tilion_emulation,
     )
 
     assert accept_language_for_locale("de-DE") == "de-DE,de"
@@ -732,56 +761,88 @@ async def test_tilion_locale_override_applies_intl_and_accept_language():
     assert resolve_geo_locale(None, exit_geo) == {"timezone": "Europe/Berlin", "locale": "de-DE"}
     assert resolve_geo_locale({"locale": "fr-FR"}, exit_geo) == {"locale": "fr-FR", "timezone": "Europe/Berlin"}
     assert resolve_geo_locale({"locale": "de_DE; drop"}, None) == {}
+    assert tilion_emulation(None, {"timezone": None, "locale": None}) is None
 
-    async def page_facts(page):
-        await page.goto(base + "/headers")
-        header = (await page.evaluate("JSON.parse(document.body.innerText)"))["accept_language"]
-        locale, zone = await page.evaluate(
-            "[Intl.DateTimeFormat().resolvedOptions().locale, Intl.DateTimeFormat().resolvedOptions().timeZone]"
-        )
-        return header, locale, zone
+    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) RoseFixture/1.0"
+    fingerprint = {"locale": "de-DE", "userAgentOverride": {"userAgent": user_agent, "platform": "Win32"}}
+    emulation = tilion_emulation(fingerprint, {"timezone": "Asia/Tokyo", "locale": "ja-JP"})
+    assert emulation == {
+        "locale": "de-DE",
+        "timezone": "Asia/Tokyo",
+        "accept_language": "de-DE,de",
+        "user_agent_override": {"userAgent": user_agent, "platform": "Win32"},
+    }
+    expected = ["Asia/Tokyo", "de-DE", user_agent]
 
-    async with _fixture_site() as base, _tilion_worker_stack() as (_service, pw_browser, gateway):
+    async def first_facts(page):
+        return await page.evaluate("window.firstFacts")
+
+    # Control: without emulation the host defaults show (so the check discriminates).
+    async with _fixture_site() as base, _tilion_worker_stack() as (_service, pw_browser, _gateway):
+        page = pw_browser.contexts[0].pages[0]
+        await page.goto(base + "/first-script")
+        default_facts = await first_facts(page)
+        assert default_facts != expected and default_facts[0] != "Asia/Tokyo", default_facts
+
+    async with _fixture_site() as base, _tilion_worker_stack(emulation) as (service, pw_browser, gateway):
         context = pw_browser.contexts[0]
         page = context.pages[0]
-        default = await page_facts(page)
-
-        # Neither source set: current behaviour, nothing sent.
-        assert await apply_geo_locale_override(page, {"userAgentOverride": {"userAgent": "UA"}}, None) == {}
-        assert install_geo_locale_for_new_pages(context, None, {"timezone": None, "locale": None}) is False
-        assert await page_facts(page) == default
-
-        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) RoseFixture/1.0"
-        fingerprint = {"locale": "de-DE", "userAgentOverride": {"userAgent": user_agent, "platform": "Win32"}}
-        applied = await apply_geo_locale_override(page, fingerprint, {"timezone": "Asia/Tokyo", "locale": "ja-JP"})
-        assert applied == {"locale": "de-DE", "timezone": "Asia/Tokyo"}
-        assert await page_facts(page) == ("de-DE,de;q=0.9", "de-DE", "Asia/Tokyo")
+        await page.goto(base + "/first-script")
+        assert await first_facts(page) == expected
+        assert await page.evaluate("document.body.innerText") == "de-DE,de;q=0.9"
         assert await page.evaluate("new Intl.NumberFormat().format(1234.5)") == "1.234,5"
-        # The backend's user-agent override is re-sent, not dropped.
-        assert await page.evaluate("navigator.userAgent") == user_agent
 
-        # Overrides are per CDP session: a page opened later gets them too.
-        assert install_geo_locale_for_new_pages(context, None, exit_geo) is True
-        assert install_geo_locale_for_new_pages(context, None, exit_geo) is False, "installed once per context"
-        opened = await context.new_page()
-        expected = ("de-DE,de;q=0.9", "de-DE", "Europe/Berlin")
-        facts = None
-        for _ in range(50):
-            facts = await page_facts(opened)
-            if facts == expected:
-                break
-            await asyncio.sleep(0.1)
-        assert facts == expected, facts
+        # A popup's first document sees the overrides: no first-navigation race.
+        async with page.expect_popup() as popup_info:
+            await page.evaluate(f"window.open({json.dumps(base + '/first-script')})")
+        popup = await popup_info.value
+        await popup.wait_for_load_state("domcontentloaded")
+        # Timezone/locale are read when scripts run, so holding the target makes
+        # the popup's FIRST script see them. User-Agent/Accept-Language are fixed
+        # when the opener starts the popup's first request (an open issue);
+        # they hold from the popup's next navigation on.
+        popup_first = await first_facts(popup)
+        assert popup_first[:2] == expected[:2], popup_first
+        await popup.reload()
+        assert await first_facts(popup) == expected
+        assert await popup.evaluate("document.body.innerText") == "de-DE,de;q=0.9"
+        await popup.close()
+        multiplexer = service.cdp_multiplexer
+        assert multiplexer.emulation_applied >= 2
         assert gateway.rejected_4409 == 0
 
-    # Both worker attach sites (session start, rotation reattach) apply it and
-    # cover new pages.
+    # Re-applied after an in-activity upstream redial (not only on rotation).
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
+
+    async with _fixture_site() as base, _chromium() as (playwright, browser, endpoint):
+        async with FakeTilionGateway(endpoint) as gateway:
+            multiplexer = SingleCdpConnectionMultiplexer(gateway.cdp_url, emulation=emulation)
+            local_url = await multiplexer.start()
+            try:
+                first = await playwright.chromium.connect_over_cdp(local_url)
+                page = await first.contexts[0].new_page()
+                await page.goto(base + "/first-script")
+                assert await first_facts(page) == expected
+                await gateway.drop_all()  # Chrome detaches every session: overrides gone
+                for _ in range(50):
+                    if not first.is_connected():
+                        break
+                    await asyncio.sleep(0.1)
+                assert not first.is_connected()
+                second = await playwright.chromium.connect_over_cdp(local_url)  # redial
+                assert multiplexer.upstream_connections_opened == 2
+                reattached = next(p for p in second.contexts[0].pages if p.url.endswith("/first-script"))
+                await reattached.reload()
+                assert await first_facts(reattached) == expected
+                await second.close()
+            finally:
+                await multiplexer.close()
+
+    # Both worker attach sites (session start, rotation reattach) configure it.
     from pathlib import Path
 
     handler_source = (Path(__file__).resolve().parents[2] / "domains/spawn_browser_agent_v3/handler.py").read_text()
-    assert handler_source.count("await apply_tilion_geo_locale(") == 2
-    assert handler_source.count("install_tilion_geo_locale_for_new_pages(") == 2
-    assert handler_source.count("exit_geo_locale=") == 2
+    assert handler_source.count("emulation=tilion_emulation(") == 2
 
 
 async def test_multiplexer_hides_and_releases_browser_ui_targets():
@@ -882,6 +943,233 @@ async def test_multiplexer_hides_and_releases_browser_ui_targets():
             await multiplexer.close()
 
 
+class _RawCdpClient:
+    """Minimal flat-session CDP client (browser-use style) for ordering tests."""
+
+    def __init__(self, socket_):
+        self.socket = socket_
+        self.events: List[Dict[str, Any]] = []
+        self._next = 0
+        self._replies: Dict[int, asyncio.Future] = {}
+        self._reader = asyncio.create_task(self._read())
+
+    async def _read(self):
+        async for raw in self.socket:
+            message = json.loads(raw)
+            future = self._replies.pop(message.get("id"), None) if "id" in message else None
+            if future is not None:
+                future.set_result(message)
+            else:
+                self.events.append(message)
+
+    async def send(self, method, params=None, session_id=None):
+        self._next += 1
+        future = asyncio.get_running_loop().create_future()
+        self._replies[self._next] = future
+        message = {"id": self._next, "method": method, "params": params or {}}
+        if session_id:
+            message["sessionId"] = session_id
+        await self.socket.send(json.dumps(message))
+        reply = await asyncio.wait_for(future, 10)
+        assert "error" not in reply, reply
+        return reply["result"]
+
+    async def attached(self, predicate):
+        for _ in range(100):
+            for event in self.events:
+                if event.get("method") == "Target.attachedToTarget" and predicate(event["params"]):
+                    return event["params"]
+            await asyncio.sleep(0.05)
+        raise AssertionError(f"no matching attach in {[e.get('method') for e in self.events]}")
+
+    async def close(self):
+        self._reader.cancel()
+        await asyncio.gather(self._reader, return_exceptions=True)
+
+
+async def test_multiplexer_holds_new_targets_until_emulation_lands():
+    """A client that does NOT wait for the debugger (browser-use) still gets
+    popups whose first script sees the emulation: the multiplexer holds new
+    targets itself, then releases them (and never leaves one paused)."""
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
+
+    emulation = {"timezone": "Asia/Tokyo", "locale": "de-DE", "accept_language": "de-DE,de"}
+    async with _fixture_site() as base, _chromium() as (_playwright, _browser, endpoint):
+        async with FakeTilionGateway(endpoint) as gateway:
+            multiplexer = SingleCdpConnectionMultiplexer(gateway.cdp_url, emulation=emulation)
+            local_url = await multiplexer.start()
+            try:
+                async with websockets.connect(local_url, max_size=None, proxy=None) as socket_:
+                    client = _RawCdpClient(socket_)
+                    try:
+                        await client.send(
+                            "Target.setAutoAttach",
+                            {"autoAttach": True, "waitForDebuggerOnStart": False, "flatten": True},
+                        )
+                        created = await client.send("Target.createTarget", {"url": base + "/"})
+                        opener = await client.attached(lambda p: p["targetInfo"]["targetId"] == created["targetId"])
+                        assert opener["waitingForDebugger"] is False, "client asked for running targets"
+                        for _ in range(100):
+                            with contextlib.suppress(AssertionError):
+                                ready = await client.send(
+                                    "Runtime.evaluate",
+                                    {"expression": "document.readyState", "returnByValue": True},
+                                    opener["sessionId"],
+                                )
+                                if ready["result"].get("value") == "complete":
+                                    break
+                            await asyncio.sleep(0.05)
+                        await client.send(
+                            "Runtime.evaluate",
+                            {"expression": f"window.open({json.dumps(base + '/first-script')}); 1"},
+                            opener["sessionId"],
+                        )
+                        popup = await client.attached(
+                            lambda p: (
+                                p["targetInfo"]["type"] == "page" and p["targetInfo"]["targetId"] != created["targetId"]
+                            )
+                        )
+                        assert popup["waitingForDebugger"] is False
+                        facts = None
+                        for _ in range(100):
+                            result = await client.send(
+                                "Runtime.evaluate",
+                                {"expression": "window.firstFacts || null", "returnByValue": True},
+                                popup["sessionId"],
+                            )
+                            facts = result["result"].get("value")
+                            if facts:
+                                break
+                            await asyncio.sleep(0.05)
+                        assert facts and facts[:2] == ["Asia/Tokyo", "de-DE"], facts
+                        assert multiplexer.emulation_applied >= 2
+                    finally:
+                        await client.close()
+                assert gateway.rejected_4409 == 0
+            finally:
+                await multiplexer.close()
+
+
+async def test_tilion_downloads_survive_provider_switch_and_pause():
+    """Lane B review: (1) after Tilion -> Kernel both the ledger and the new
+    provider's files are listed and read by path prefix; (2) each Tilion
+    download is durable as it lands (attachment storage, idempotent), so a
+    write-lock/payment pause or another worker still extracts it, and the
+    worker keeps only the pointer."""
+    from domains.spawn_browser_agent_v3 import service as browser_service
+    from domains.spawn_browser_agent_v3 import tilion_worker
+    from domains.spawn_browser_agent_v3.download_persist import persist_bytes_to_session_downloads
+
+    stored: List[Dict[str, Any]] = []
+
+    async def fake_upload_to_storage(*, user_id, file_content, filename, mime_type, idempotency_key=None):
+        stored.append({"filename": filename, "content": file_content, "key": idempotency_key})
+        return {"storage_path": f"{user_id}/{filename}", "original_filename": filename, "size": len(file_content)}
+
+    tilion_id, kernel_id, resumed_id = "tilion-switch-1", "kernel-after-switch", "tilion-resumed-2"
+    with patch("helpers.attachments.upload_to_storage", fake_upload_to_storage):
+        tilion_worker.register_download_session(tilion_id)
+        recorded = await persist_bytes_to_session_downloads(
+            object(),
+            tilion_id,
+            filename="a.pdf",
+            content=DOWNLOAD_BYTES,
+            mime_type="application/pdf",
+            provider="tilion",
+            user_id="user-1",
+        )
+        again = await persist_bytes_to_session_downloads(
+            object(),
+            tilion_id,
+            filename="a.pdf",
+            content=DOWNLOAD_BYTES,
+            mime_type="application/pdf",
+            provider="tilion",
+            user_id="user-1",
+        )
+    assert recorded["storage_path"] == "user-1/a.pdf" and again["path"] == recorded["path"]
+    assert stored[0]["key"] == stored[1]["key"], "same bytes must map to one storage object (at-least-once)"
+    assert tilion_worker.read_download(tilion_id, recorded["path"]) is None, "durable entries keep no bytes in RSS"
+
+    # (1) Tilion -> Kernel: the ledger moves; Kernel's own files are listed too.
+    tilion_worker.move_session(tilion_id, kernel_id)
+    assert not tilion_worker.is_tilion_session(kernel_id)
+    reads: List[str] = []
+
+    async def kernel_list(_config, session_id):
+        assert session_id == kernel_id
+        return [{"path": "/tmp/downloads/b.pdf", "size": 3}]
+
+    async def kernel_read(_config, session_id, path):
+        reads.append(path)
+        return {"content": b"b!!", "filename": "b.pdf", "mime_type": "application/pdf"}
+
+    uploaded: List[str] = []
+
+    async def extract_upload(*, user_id, file_content, filename, mime_type, idempotency_key=None):
+        uploaded.append(filename)
+        return {"storage_path": f"{user_id}/{filename}", "original_filename": filename}
+
+    with (
+        patch.object(browser_service, "list_session_files", kernel_list),
+        patch.object(browser_service, "download_session_file", kernel_read),
+        patch("helpers.attachments.upload_to_storage", extract_upload),
+    ):
+        listed = await browser_service._session_files_for_listing(object(), kernel_id)
+        assert [f["path"] for f in listed] == [recorded["path"], "/tmp/downloads/b.pdf"], listed
+        pointers = await browser_service.extract_session_files(kernel_id, "user-1", object())
+    assert [p["original_filename"] for p in pointers] == ["a.pdf", "b.pdf"], pointers
+    assert reads == ["/tmp/downloads/b.pdf"], "tilion-download:// paths never go to the provider file API"
+    assert uploaded == ["b.pdf"], "the durable Tilion pointer is reused, not re-uploaded"
+
+    # (2) Pause -> resume (worker memory gone): pointers come back from the resume context.
+    durable = tilion_worker.durable_downloads(kernel_id)
+    assert [entry["filename"] for entry in durable] == ["a.pdf"]
+    tilion_worker.release_session(kernel_id)
+    assert tilion_worker.list_downloads(kernel_id) == []
+    tilion_worker.register_download_session(resumed_id)
+    assert tilion_worker.restore_downloads(resumed_id, json.loads(json.dumps(durable))) == 1
+    with patch.object(browser_service, "list_session_files", kernel_list):
+        resumed = await browser_service.extract_session_files(resumed_id, "user-1", object())
+    assert resumed == [{"storage_path": "user-1/a.pdf", "original_filename": "a.pdf", "size": len(DOWNLOAD_BYTES)}]
+    tilion_worker.release_session(resumed_id)
+
+    from pathlib import Path
+
+    handler_source = (Path(__file__).resolve().parents[2] / "domains/spawn_browser_agent_v3/handler.py").read_text()
+    assert '"tilion_downloads": durable_tilion_downloads(session_id)' in handler_source
+    assert 'restore_tilion_downloads(session_id, private_browser_runtime.get("tilion_downloads"))' in handler_source
+    assert "user_id=user_id," in handler_source[handler_source.index("BrowserDownloadPersister.create(") :][:400]
+
+
+async def test_tilion_staged_uploads_are_bounded_per_session():
+    """Lane B review (3): screenshots must not grow worker RSS without bound."""
+    from domains.spawn_browser_agent_v3 import tilion_worker
+
+    session_id = "tilion-staged-cap"
+    paths = [
+        tilion_worker.stage_upload(session_id, "screenshot.png", bytes([index]) * 1000, "image/png")["path"]
+        for index in range(6)
+    ]
+    kept = [path for path in paths if tilion_worker.staged_upload_payload(path) is not None]
+    assert kept == paths[-tilion_worker._KEPT_SCREENSHOTS :], kept
+    attachment = tilion_worker.stage_upload(session_id, "resume.pdf", b"x" * 1000, "application/pdf")
+    with patch.object(tilion_worker, "_MAX_STAGED_BYTES", 3500):
+        # Over budget: the oldest screenshots go first, the attachment stays.
+        tilion_worker.stage_upload(session_id, "screenshot.png", b"y" * 1000, "image/png")
+        assert tilion_worker.staged_upload_payload(attachment["path"]) is not None
+        try:
+            tilion_worker.stage_upload(session_id, "big.bin", b"z" * 4000, "application/octet-stream")
+        except ValueError as error:
+            assert "would exceed" in str(error)
+        else:
+            raise AssertionError("an upload past the per-session budget must be refused")
+    total = sum(len(item["buffer"]) for item in tilion_worker._staged_uploads[session_id].values())
+    assert total <= 3500, total
+    tilion_worker.release_session(session_id)
+    assert session_id not in tilion_worker._staged_uploads
+
+
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
@@ -903,6 +1191,9 @@ async def run_all_tests():
         ("tilion_press_key_uses_cdp_input", test_tilion_press_key_uses_cdp_input_not_backend_computer_api),
         ("tilion_locale_override", test_tilion_locale_override_applies_intl_and_accept_language),
         ("multiplexer_hides_browser_ui_targets", test_multiplexer_hides_and_releases_browser_ui_targets),
+        ("multiplexer_holds_new_targets_for_emulation", test_multiplexer_holds_new_targets_until_emulation_lands),
+        ("tilion_downloads_survive_switch_and_pause", test_tilion_downloads_survive_provider_switch_and_pause),
+        ("tilion_staged_uploads_bounded", test_tilion_staged_uploads_are_bounded_per_session),
     ]:
         await result.record_async(name, test)
     return result.all_passed

@@ -633,10 +633,15 @@ def append_completion_evidence(
 
 async def _session_files_for_listing(config: Any, session_id: str) -> List[Dict[str, Any]]:
     """Session downloads: Tilion's live in the worker ledger (its file routes
-    fail while the worker holds CDP); other providers list via the backend."""
-    if tilion_files.owns_download_session(session_id):
-        return tilion_files.list_downloads(session_id)
-    return await list_session_files(config, session_id)
+    fail while the worker holds CDP); other providers list via the backend.
+
+    After a Tilion -> Kernel/Steel switch the ledger moved to the new session
+    while new downloads land in the new provider's files, so list both.
+    """
+    ledger = tilion_files.list_downloads(session_id) if tilion_files.owns_download_session(session_id) else []
+    if tilion_files.is_tilion_session(session_id):
+        return ledger
+    return [*ledger, *(await list_session_files(config, session_id) or [])]
 
 
 async def extract_session_files(
@@ -674,9 +679,16 @@ async def extract_session_files(
 
         logger.info(f"[Extract] Processing: {file_path}")
 
+        if str(file_path).startswith(tilion_files.TILION_DOWNLOAD_PATH_PREFIX):
+            # Already durable in attachment storage when it landed: reuse it.
+            stored_pointer = tilion_files.download_file_pointer(session_id, file_path)
+            if stored_pointer is not None:
+                output_files.append(stored_pointer)
+                continue
+
         downloaded = (
             tilion_files.read_download(session_id, file_path)
-            if tilion_files.owns_download_session(session_id)
+            if str(file_path).startswith(tilion_files.TILION_DOWNLOAD_PATH_PREFIX)
             else await download_session_file(config, session_id, file_path)
         )
         if not downloaded:

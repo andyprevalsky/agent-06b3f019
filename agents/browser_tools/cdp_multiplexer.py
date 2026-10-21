@@ -26,7 +26,7 @@ import itertools
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 import websockets
 
@@ -44,6 +44,10 @@ _CLIENT_LOCAL_METHODS = frozenset({"Browser.close"})
 # They are not the user's pages; no local client may see, select or drive them.
 # Only this type is hidden: iframes, workers and service workers stay visible.
 _HIDDEN_TARGET_TYPES = frozenset({"browser_ui"})
+# Targets whose documents get the session's timezone/locale/user-agent
+# emulation. Workers have no Emulation domain.
+_EMULATED_TARGET_TYPES = frozenset({"page", "iframe"})
+_EMULATION_COMMAND_TIMEOUT_SECONDS = 5.0
 
 
 class CdpMultiplexerUpstreamClosed(ConnectionError):
@@ -61,6 +65,11 @@ class _Client:
     number: int
     browser_session_id: str = ""
     child_sessions: Set[str] = field(default_factory=set)
+    # Ordered delivery: a held Target.attachedToTarget (a Future) blocks every
+    # later message to this client until its emulation lands, so CDP ordering
+    # (attach before Target.createTarget's response, before child events) holds.
+    outbox: "asyncio.Queue[Any]" = field(default_factory=asyncio.Queue)
+    sender: Optional[asyncio.Task] = None
 
 
 async def _default_upstream_connect(url: str) -> Any:
@@ -81,6 +90,7 @@ class SingleCdpConnectionMultiplexer:
         *,
         upstream_connect: Optional[UpstreamConnect] = None,
         refresh_url: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
+        emulation: Optional[Dict[str, Any]] = None,
         label: str = "",
     ) -> None:
         self._upstream_url = upstream_url
@@ -101,6 +111,15 @@ class SingleCdpConnectionMultiplexer:
         self._browser_session_owner: Dict[str, _Client] = {}
         self._hidden_target_ids: Set[str] = set()
         self._hidden_sessions: Set[str] = set()
+        # emulation = {"timezone"?, "locale"?, "accept_language"?, "user_agent_override"?}.
+        # Applied on every page/iframe session any client attaches, before the
+        # target runs its first script (see _apply_emulation_then_forward).
+        self._emulation = {key: value for key, value in (emulation or {}).items() if value}
+        self._wants_debugger_wait: Dict[Tuple[_Client, str], bool] = {}
+        self._background: Set[asyncio.Task] = set()
+        self._browser_user_agent: Optional[str] = None
+        self.emulation_applied = 0
+        self.emulation_failures = 0
         self._closed = False
         self.upstream_connections_opened = 0
         self.last_upstream_close: Optional[Tuple[Optional[int], str]] = None
@@ -125,6 +144,8 @@ class SingleCdpConnectionMultiplexer:
 
     async def close(self) -> None:
         self._closed = True
+        for task in list(self._background):
+            task.cancel()
         for client in list(self._clients):
             with contextlib.suppress(Exception):
                 await client.websocket.close(code=1001, reason="multiplexer closed")
@@ -170,6 +191,8 @@ class SingleCdpConnectionMultiplexer:
             self._session_owner.clear()
             self._browser_session_owner.clear()
             self._hidden_sessions.clear()
+            self._wants_debugger_wait.clear()
+            self._browser_user_agent = None
             if upstream is not None:
                 with contextlib.suppress(Exception):
                     await upstream.close()
@@ -277,6 +300,14 @@ class SingleCdpConnectionMultiplexer:
             return
         if method == "Target.attachedToTarget" and params.get("sessionId"):
             self._own_session(client, params["sessionId"])
+            target_type = (params.get("targetInfo") or {}).get("type")
+            if self._emulation and target_type in _EMULATED_TARGET_TYPES:
+                released: asyncio.Future = asyncio.get_running_loop().create_future()
+                client.outbox.put_nowait(released)
+                task = asyncio.create_task(self._apply_emulation_then_release(client, session_id, message, released))
+                self._background.add(task)
+                task.add_done_callback(self._background.discard)
+                return
         await self._send_to_client(client, message)
         if method == "Target.detachedFromTarget" and params.get("sessionId"):
             self._session_owner.pop(params["sessionId"], None)
@@ -326,13 +357,95 @@ class SingleCdpConnectionMultiplexer:
                 )
         return True
 
+    async def _send_session_command(self, session_id: str, method: str, params: Dict[str, Any]) -> asyncio.Future:
+        """Send without waiting. Commands on one session are processed in order,
+        so overrides sent before Runtime.runIfWaitingForDebugger land before the
+        target's first script, although a paused target answers only after it runs."""
+        upstream = self._upstream
+        if upstream is None:
+            raise CdpMultiplexerUpstreamClosed(*(self.last_upstream_close or (None, "not attached")))
+        message_id = next(self._ids)
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._internal[message_id] = future
+        await upstream.send(json.dumps({"id": message_id, "method": method, "params": params, "sessionId": session_id}))
+        return future
+
+    async def _user_agent_override(self) -> Optional[Dict[str, Any]]:
+        override = dict(self._emulation.get("user_agent_override") or {})
+        accept_language = self._emulation.get("accept_language")
+        if not override and not accept_language:
+            return None
+        if accept_language:
+            override["acceptLanguage"] = accept_language
+        if not override.get("userAgent"):
+            if self._browser_user_agent is None:
+                version = await self._internal_command("Browser.getVersion")
+                self._browser_user_agent = str(version.get("userAgent") or "")
+            override["userAgent"] = self._browser_user_agent
+        return override
+
+    async def _send_emulation(self, session_id: str) -> List[Tuple[str, asyncio.Future]]:
+        commands = []
+        if self._emulation.get("timezone"):
+            commands.append(("Emulation.setTimezoneOverride", {"timezoneId": self._emulation["timezone"]}))
+        if self._emulation.get("locale"):
+            commands.append(("Emulation.setLocaleOverride", {"locale": self._emulation["locale"]}))
+        user_agent_override = await self._user_agent_override()
+        if user_agent_override:
+            # Emulation (not Network) variant: no Network.enable, so no event
+            # stream is turned on for a client that did not ask for it.
+            commands.append(("Emulation.setUserAgentOverride", user_agent_override))
+        return [(method, await self._send_session_command(session_id, method, params)) for method, params in commands]
+
+    async def _apply_emulation_then_release(
+        self, client: _Client, parent_session: str, message: Dict[str, Any], released: asyncio.Future
+    ) -> None:
+        params = message.get("params") or {}
+        child = str(params["sessionId"])
+        sent: List[Tuple[str, asyncio.Future]] = []
+        try:
+            sent = await asyncio.wait_for(self._send_emulation(child), timeout=_EMULATION_COMMAND_TIMEOUT_SECONDS)
+        except Exception as error:
+            self.emulation_failures += 1
+            logger.warning("[CdpMux] Emulation for new target not sent; releasing it anyway: %s", str(error)[:200])
+        try:
+            client_waits = self._wants_debugger_wait.get((client, parent_session), True)
+            if params.get("waitingForDebugger") and not client_waits:
+                # The multiplexer forced the hold; this client expects a running target.
+                params["waitingForDebugger"] = False
+                with contextlib.suppress(Exception):
+                    resumed = await self._send_session_command(child, "Runtime.runIfWaitingForDebugger", {})
+                    resumed.add_done_callback(lambda done: done.cancelled() or done.exception())
+        finally:
+            if not released.done():
+                released.set_result(message)
+        for method, future in sent:
+            try:
+                response = await asyncio.wait_for(future, timeout=4 * _EMULATION_COMMAND_TIMEOUT_SECONDS)
+            except Exception as error:
+                response = {"error": {"message": f"no reply: {type(error).__name__}"}}
+            if "error" in response:
+                # Chrome keeps one timezone/locale override per target; another
+                # client's session may already hold it.
+                self.emulation_failures += 1
+                logger.info("[CdpMux] %s not applied on %s: %s", method, child[:12], str(response["error"])[:160])
+        if sent:
+            self.emulation_applied += 1
+
     def _own_session(self, client: _Client, session_id: str) -> None:
         self._session_owner[session_id] = client
         client.child_sessions.add(session_id)
 
     async def _send_to_client(self, client: _Client, message: Dict[str, Any]) -> None:
-        with contextlib.suppress(websockets.ConnectionClosed):
-            await client.websocket.send(json.dumps(message))
+        client.outbox.put_nowait(message)
+
+    async def _drain_outbox(self, client: _Client) -> None:
+        while True:
+            item = await client.outbox.get()
+            if isinstance(item, asyncio.Future):
+                item = await item
+            with contextlib.suppress(websockets.ConnectionClosed):
+                await client.websocket.send(json.dumps(item))
 
     # ----- downstream -----------------------------------------------------
 
@@ -341,6 +454,7 @@ class SingleCdpConnectionMultiplexer:
             await websocket.close(code=1001, reason="multiplexer closed")
             return
         client = _Client(websocket=websocket, number=next(self._client_numbers))
+        client.sender = asyncio.create_task(self._drain_outbox(client))
         self._clients.add(client)
         try:
             try:
@@ -357,6 +471,8 @@ class SingleCdpConnectionMultiplexer:
             pass
         finally:
             self._clients.discard(client)
+            if client.sender is not None:
+                client.sender.cancel()
             await self._release_client(client)
 
     async def _forward_client_message(self, client: _Client, raw: Any) -> None:
@@ -364,7 +480,8 @@ class SingleCdpConnectionMultiplexer:
         method = str(message.get("method") or "")
         original_id = message.get("id")
         if method in _CLIENT_LOCAL_METHODS and not message.get("sessionId"):
-            await self._send_to_client(client, {"id": original_id, "result": {}})
+            with contextlib.suppress(websockets.ConnectionClosed):
+                await client.websocket.send(json.dumps({"id": original_id, "result": {}}))
             await client.websocket.close(code=1000, reason="client disconnected")
             return
         upstream = self._upstream
@@ -376,6 +493,14 @@ class SingleCdpConnectionMultiplexer:
         message["id"] = message_id
         if not message.get("sessionId"):
             message["sessionId"] = client.browser_session_id
+        if method == "Target.setAutoAttach" and self._emulation:
+            # Hold every new target until its emulation lands; remember whether
+            # this client resumes targets itself or the multiplexer must.
+            params = dict(message.get("params") or {})
+            self._wants_debugger_wait[(client, message["sessionId"])] = bool(params.get("waitForDebuggerOnStart"))
+            if params.get("autoAttach"):
+                params["waitForDebuggerOnStart"] = True
+            message["params"] = params
         await upstream.send(json.dumps(message))
 
     async def _release_client(self, client: _Client) -> None:

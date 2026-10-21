@@ -210,19 +210,22 @@ from .state_prefetch import BrowserStatePrefetch
 from .step_timing import StepPhaseTimer
 from .streaming import BrowserStreamingRoseClient, BrowserThinkingStream
 from .tilion_worker import (
-    apply_geo_locale_override as apply_tilion_geo_locale,
-)
-from .tilion_worker import (
     apply_worker_state as apply_tilion_worker_state,
 )
 from .tilion_worker import (
-    install_geo_locale_for_new_pages as install_tilion_geo_locale_for_new_pages,
+    durable_downloads as durable_tilion_downloads,
 )
 from .tilion_worker import (
     release_session as release_tilion_session_files,
 )
 from .tilion_worker import (
+    restore_downloads as restore_tilion_downloads,
+)
+from .tilion_worker import (
     stage_upload as stage_tilion_upload,
+)
+from .tilion_worker import (
+    tilion_emulation,
 )
 from .tilion_worker import (
     worker_apply_payload as tilion_worker_apply_payload,
@@ -2244,6 +2247,9 @@ async def _reconnect_browser_stack_after_rotation(
         new_cdp_url,
         label=f"rotation:{agent_id}",
         refresh_url=_fresh_connect_url_minter(config, task_id),
+        # Tilion stays on New York/en-US whatever the exit geo; the multiplexer
+        # applies the session's timezone/locale to every target it attaches.
+        emulation=tilion_emulation(fingerprint_injection, exit_geo_locale),
     )
     dom_service = DOMService(
         cdp_url=connection_cdp_url,
@@ -2288,12 +2294,6 @@ async def _reconnect_browser_stack_after_rotation(
 
             with contextlib.suppress(Exception):
                 await apply_fingerprint_injection(pw_page, fingerprint_injection)
-        if getattr(dom_service, "single_cdp_client", False) is True:
-            # Tilion stays on New York/en-US whatever the exit geo; overrides
-            # are per CDP session, so re-apply on reattach and on new pages.
-            with contextlib.suppress(Exception):
-                await apply_tilion_geo_locale(pw_page, fingerprint_injection, exit_geo_locale)
-            install_tilion_geo_locale_for_new_pages(pw_context, fingerprint_injection, exit_geo_locale)
     except BaseException:
         # Best-effort, like the disconnect below. Unsuppressed, a failure here
         # replaces the original attach error (so the caller never learns why the
@@ -7196,6 +7196,9 @@ async def _spawn_browser_agent_activity_v3_real(
                 "current_url": current_url, "auth_realm": auth_realm,
                 "browser_output_schema": response_schema,
                 "write_lock_approvals": dict(write_lock_approvals), "grant_url": grant_url,
+                # Tilion downloads are durable in attachment storage; the
+                # resumed activity (maybe on another worker) extracts them.
+                "tilion_downloads": durable_tilion_downloads(session_id),
                 **({"pending_action_target": approval_result["pending_action_target"]}
                    if approval_result and approval_result.get("pending_action_target") else {}),
             },
@@ -7644,6 +7647,9 @@ async def _spawn_browser_agent_activity_v3_real(
         t_session = time.monotonic()
         session_worker_apply: Optional[Dict[str, Any]] = None
         session_exit_geo_locale: Optional[Dict[str, Any]] = None
+        # Tilion bills 2 credits per session create; count this activity's creates
+        # (initial, replacement on resume, rotation/recovery) for the cost row.
+        tilion_creates = {"count": 0}
         fingerprint_injection = None
         user_profile = {}
         # Current backends return auth_options from the same realm-preparation
@@ -7762,6 +7768,9 @@ async def _spawn_browser_agent_activity_v3_real(
             session_exit_geo_locale = session_info.get("exit_geo_locale")
             session_credential_ref = session_info.get("credential_ref") or session_info.get("auth_credential_ref")
             browser_session_metadata = session_info.get("browser_session_metadata") or {}
+            if browser_session_metadata.get("provider") == "tilion" and bool(session_info.get("resume_mode")):
+                # A replacement session was created; a same-session resume was not.
+                tilion_creates["count"] += 1
             user_profile, auth_realm = _resume_context_from_session_info(session_info, auth_realm)
             browser_activity_checkpoint(f"Resuming task {task_id}")
         else:
@@ -7843,8 +7852,13 @@ async def _spawn_browser_agent_activity_v3_real(
             session_exit_geo_locale = session_data.get("exit_geo_locale")
             session_credential_ref = session_data.get("credential_ref") or session_data.get("auth_credential_ref")
             browser_session_metadata = session_data.get("browser_session_metadata") or {}
+            if browser_session_metadata.get("provider") == "tilion":
+                tilion_creates["count"] += 1
             user_profile = session_data.get("user_settings") or {}
         _record_timing("session_init", t_session)
+        # Durable Tilion downloads from before a write-lock/payment/auth pause,
+        # keyed by the session this activity actually runs on.
+        restore_tilion_downloads(session_id, private_browser_runtime.get("tilion_downloads"))
 
         if not cdp_url:
             raise RuntimeError("No CDP URL provided - backend must return provider ws_url")
@@ -7912,6 +7926,10 @@ async def _spawn_browser_agent_activity_v3_real(
                 cdp_url,
                 label=f"session:{agent_id}",
                 refresh_url=_fresh_connect_url_minter(config, task_id),
+                # Tilion stays on New York/en-US whatever the exit geo; the
+                # multiplexer applies the session's timezone/locale to every
+                # target before it runs, including after a redial.
+                emulation=tilion_emulation(fingerprint_injection, session_exit_geo_locale),
             )
             _dom_service = DOMService(
                 cdp_url=connection_cdp_url,
@@ -7976,21 +7994,6 @@ async def _spawn_browser_agent_activity_v3_real(
 
                 if _botsigged_diagnostics_enabled(start_url):
                     await _install_botsigged_diagnostics(_pw_page, agent_id=agent_id, task_id=task_id)
-
-                if getattr(_dom_service, "single_cdp_client", False) is True:
-                    # Tilion stays on New York/en-US whatever the exit geo; apply
-                    # the backend's timezone/locale over the worker's own socket,
-                    # on this page and on every page opened later.
-                    try:
-                        await apply_tilion_geo_locale(_pw_page, fingerprint_injection, session_exit_geo_locale)
-                    except Exception as locale_error:
-                        logger.warning(
-                            "\u26a0\ufe0f Failed to apply Tilion timezone/locale - browser stays New York/en-US",
-                            error=extract_error_message(locale_error),
-                        )
-                    install_tilion_geo_locale_for_new_pages(
-                        _pw_context, fingerprint_injection, session_exit_geo_locale
-                    )
 
                 t = time.monotonic()
                 fingerprint_injection_enabled = _env_enabled("BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED", True)
@@ -8262,6 +8265,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 browser_session=dom_service.session,
                 session_id=session_id,
                 config=config,
+                user_id=user_id,
                 agent_id=agent_id,
                 task_id=task_id or "",
                 provider=browser_session_metadata.get("provider"),
@@ -9040,6 +9044,8 @@ async def _spawn_browser_agent_activity_v3_real(
                                 usage_by_model,
                                 pricing_pool=browser_pool,
                                 fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
+                                provider=browser_session_metadata.get("provider"),
+                                session_creates=tilion_creates["count"],
                             ),
                             **drain_continuity,
                         })
@@ -9695,6 +9701,8 @@ async def _spawn_browser_agent_activity_v3_real(
                         session_credential_ref = pending_session_credential_ref
                         auth_realm = pending_auth_realm
                         browser_session_metadata = pending_browser_session_metadata
+                        if browser_session_metadata.get("provider") == "tilion":
+                            tilion_creates["count"] += 1
                         dom_service = reconnected["dom_service"]
                         if hasattr(dom_service, "model_visible_value"):
                             action_history.bind_dom_service(dom_service)
@@ -9894,6 +9902,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     pricing_pool=browser_pool,
                     fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
                     provider=browser_session_metadata.get("provider"),
+                    session_creates=tilion_creates["count"],
                 )
                 await _propagate_browser_credentials_with_progress(
                     redact=_redact_activity_value,
@@ -10224,6 +10233,8 @@ async def _spawn_browser_agent_activity_v3_real(
                         browser_url = config_result.get("debug_url", browser_url)
                         cdp_url = new_cdp_url
                         browser_session_metadata = promoted_metadata
+                        if browser_session_metadata.get("provider") == "tilion":
+                            tilion_creates["count"] += 1
                         # Preloaded winners already applied auth/origin state during
                         # candidate probes. Re-running origin restore clears
                         # localStorage and rewrites the challenged capture onto the
@@ -10713,6 +10724,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             pricing_pool=browser_pool,
                             fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
                             provider=browser_session_metadata.get("provider"),
+                            session_creates=tilion_creates["count"],
                         )
                         await _propagate_browser_credentials_with_progress(
                             redact=_redact_activity_value,
@@ -11732,6 +11744,7 @@ Based on this feedback, I need to continue working on the task and address the i
             pricing_pool=browser_pool,
             fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
             provider=browser_session_metadata.get("provider"),
+            session_creates=tilion_creates["count"],
         )
         await _propagate_browser_credentials_with_progress(
             redact=_redact_activity_value,
@@ -11932,6 +11945,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     execution_time_ms, usage_by_model, pricing_pool=browser_pool,
                     fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
                     provider=browser_session_metadata.get("provider"),
+                    session_creates=tilion_creates["count"],
                 ),
                 "execution_time_ms": execution_time_ms,
             })
