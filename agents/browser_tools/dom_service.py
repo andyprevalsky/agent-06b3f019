@@ -8,6 +8,7 @@ This module provides:
 """
 
 import asyncio
+import contextlib
 import inspect
 import json
 import logging
@@ -177,14 +178,16 @@ def browser_downloads_path_for_provider(provider: Optional[str] = None) -> str:
 
     ``Browser.setDownloadBehavior`` must write into a directory the provider's
     session-file listing actually exposes. Kernel and Browser Use use
-    ``/tmp/downloads``; Steel uses ``/files``.
+    ``/tmp/downloads``; Steel uses ``/files``. Tilion has no file listing; its
+    Chrome writes to ``/tmp/downloads`` and the worker reads files back over
+    its own CDP socket.
     """
     import os
 
     resolved = (provider if provider is not None else os.getenv("BROWSER_PROVIDER", "kernel")).strip().lower()
     if resolved == "steel":
         return STEEL_DOWNLOADS_PATH
-    if resolved == "browser-use":
+    if resolved in ("browser-use", "tilion"):
         return KERNEL_DOWNLOADS_PATH
     return KERNEL_DOWNLOADS_PATH
 
@@ -751,6 +754,7 @@ class DOMService:
         viewport_width: int = 1280,
         viewport_height: int = 800,
         downloads_path: Optional[str] = None,
+        cdp_multiplexer: Any = None,
     ):
         """Initialize DOM service.
 
@@ -760,8 +764,12 @@ class DOMService:
             viewport_height: Browser viewport height (WXGA default)
             downloads_path: CDP download directory. Defaults to the path for
                 ``BROWSER_PROVIDER`` (Kernel/Browser Use ``/tmp/downloads``, Steel ``/files``).
+            cdp_multiplexer: Loopback single-socket multiplexer for providers that
+                admit one CDP client per session (Tilion). This service owns it and
+                closes it on disconnect, releasing the provider's client slot.
         """
         self.cdp_url = cdp_url
+        self.cdp_multiplexer = cdp_multiplexer
         self.viewport_width = viewport_width
         self.viewport_height = viewport_height
         self.downloads_path = downloads_path or browser_downloads_path_for_provider()
@@ -1117,12 +1125,46 @@ class DOMService:
 
         self._captcha_indicator_task = asyncio.create_task(_loop())
 
+    @property
+    def single_cdp_client(self) -> bool:
+        """True when the provider admits only this worker's CDP socket (Tilion).
+
+        Such providers fail REST drive calls (screenshot, key press, file fetch)
+        while the worker is attached, so those must go over this connection.
+        """
+        return self.cdp_multiplexer is not None
+
+    async def capture_viewport_png(self) -> str:
+        """Base64 PNG of the focused tab's viewport over this service's CDP socket."""
+        target_id = self._session.agent_focus_target_id
+        if not target_id:
+            raise RuntimeError("No focused browser tab to screenshot")
+        cdp_session = await self._session.get_or_create_cdp_session(target_id, focus=False)
+        result = await cdp_session.cdp_client.send_raw(
+            "Page.captureScreenshot",
+            {"format": "png", "fromSurface": True},
+            session_id=cdp_session.session_id,
+        )
+        data = result.get("data")
+        if not data:
+            raise RuntimeError("Page.captureScreenshot returned no image")
+        return data
+
     async def disconnect(self) -> None:
         """Disconnect from the browser.
 
         Note: For remote browsers (Steel), this just releases our connection.
         The actual browser session may still be alive on the server.
         """
+        try:
+            await self._disconnect_session()
+        finally:
+            multiplexer, self.cdp_multiplexer = self.cdp_multiplexer, None
+            if multiplexer is not None:
+                with contextlib.suppress(Exception):
+                    await multiplexer.close()
+
+    async def _disconnect_session(self) -> None:
         if self._session:
             session = self._session
             task = self._captcha_indicator_task

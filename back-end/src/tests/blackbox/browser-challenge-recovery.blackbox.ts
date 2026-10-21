@@ -411,6 +411,7 @@ function fakeProviderOperations() {
   const injected: Array<{ sessionId: string; userId: string; url: string }> = [];
   const resumedFrom: string[] = [];
   const replacements: string[] = [];
+  const carriedStates: unknown[] = [];
   const closedValidation: string[] = [];
   let sequence = 0;
   const replace = async (taskId: string, provider: string, proxyTier: string | null) => {
@@ -449,8 +450,9 @@ function fakeProviderOperations() {
     };
   };
   const dependencies: BrowserSessionResumeDependencies = {
-    rotateProxy: async (taskId, step): Promise<BrowserProxyRotationResult> => {
+    rotateProxy: async (taskId, step, options): Promise<BrowserProxyRotationResult> => {
       steps.push(step);
+      carriedStates.push((options as { carriedState?: unknown } | undefined)?.carriedState);
       const before = await prisma.browserSession.findUniqueOrThrow({ where: { id: taskId } });
       const session = await replace(taskId, step.provider, step.proxyType);
       return {
@@ -461,7 +463,8 @@ function fakeProviderOperations() {
       };
     },
     // Resume dispatches on the persisted provider (index.ts providerForTask).
-    resumeSession: async (taskId) => {
+    resumeSession: async (taskId, options) => {
+      carriedStates.push((options as { carriedState?: unknown } | undefined)?.carriedState);
       const row = await prisma.browserSession.findUniqueOrThrow({ where: { id: taskId } });
       resumedFrom.push(row.provider);
       return replace(taskId, row.provider, row.proxyTier);
@@ -476,7 +479,15 @@ function fakeProviderOperations() {
     closeSession: async () => undefined,
     getBrowserCaptchaTelemetry: async () => null as never,
   };
-  return { dependencies, steps, injected, resumedFrom, replacements, closedValidation };
+  return {
+    dependencies,
+    steps,
+    injected,
+    resumedFrom,
+    replacements,
+    closedValidation,
+    carriedStates,
+  };
 }
 
 async function testTilionToKernelSwitchPersistsThroughPauseResume(): Promise<void> {
@@ -488,6 +499,7 @@ async function testTilionToKernelSwitchPersistsThroughPauseResume(): Promise<voi
         run.session.id,
         run.owner.userId,
         undefined,
+        {},
         fake.dependencies
       );
       assert(first.provider === 'tilion', `rotation 1 left Tilion: ${first.provider}`);
@@ -496,6 +508,7 @@ async function testTilionToKernelSwitchPersistsThroughPauseResume(): Promise<voi
         run.session.id,
         run.owner.userId,
         'https://shop.example.com/checkout',
+        {},
         fake.dependencies
       );
       assert(second.proxy_tier === 'mobile', `rotation 2 tier: ${second.proxy_tier}`);
@@ -504,6 +517,7 @@ async function testTilionToKernelSwitchPersistsThroughPauseResume(): Promise<voi
         run.session.id,
         run.owner.userId,
         undefined,
+        {},
         fake.dependencies
       );
       assert(third.provider === 'kernel', `rotation 3 provider: ${third.provider}`);
@@ -548,6 +562,7 @@ async function testTilionToKernelSwitchPersistsThroughPauseResume(): Promise<voi
         run.session.id,
         run.owner.userId,
         undefined,
+        {},
         fake.dependencies
       );
       assert(fourth.provider === 'steel', `rotation 4 provider: ${fourth.provider}`);
@@ -586,6 +601,73 @@ async function testTilionToKernelSwitchPersistsThroughPauseResume(): Promise<voi
 test(
   'Tilion → Kernel rotation switch persists through pause/resume with its state',
   testTilionToKernelSwitchPersistsThroughPauseResume
+);
+
+async function testWorkerCapturedStateReachesTilionReplacement(): Promise<void> {
+  const run = await seedRun('tilion', 'residential');
+  const fake = fakeProviderOperations();
+  // The worker captures the live session's state over its own (only) CDP socket.
+  const workerState = {
+    cookies: [
+      {
+        name: 'cart',
+        value: 'three-items',
+        domain: '.shop.example.com',
+        path: '/',
+        expires: -1,
+        httpOnly: false,
+        secure: true,
+        sameSite: 'Lax' as const,
+      },
+    ],
+    origins: [
+      {
+        origin: 'https://shop.example.com',
+        localStorage: [{ name: 'checkoutStep', value: 'shipping' }],
+        indexedDB: [],
+      },
+    ],
+  };
+  try {
+    await withEnv(TILION_DEFAULT_ENV, async () => {
+      await rotateBrowserProxy(
+        run.session.id,
+        run.owner.userId,
+        undefined,
+        { carriedState: workerState },
+        fake.dependencies
+      );
+      await rotateBrowserProxy(run.session.id, run.owner.userId, undefined, {}, fake.dependencies);
+      await prisma.browserSession.update({
+        where: { id: run.session.id },
+        data: { status: 'PAUSED' },
+      });
+      await resumeBrowserSession(run.session.id, { carriedState: workerState }, fake.dependencies);
+    });
+    assert(
+      fake.steps[0]?.provider === 'tilion' && fake.steps[0].proxyType === 'residential',
+      `first step was not a Tilion rotation: ${JSON.stringify(fake.steps)}`
+    );
+    assert(
+      fake.carriedStates[0] === workerState,
+      `Tilion rotation did not receive the worker's storage_state: ${JSON.stringify(fake.carriedStates[0])}`
+    );
+    assert(
+      fake.carriedStates[1] === undefined,
+      'a rotation without worker state invented a carried state'
+    );
+    assert(
+      fake.carriedStates[2] === workerState,
+      `resume did not receive the worker's storage_state: ${JSON.stringify(fake.carriedStates[2])}`
+    );
+  } finally {
+    await run.cleanup();
+  }
+}
+
+test(
+  'worker-captured storage_state reaches the Tilion rotation and resume replacement',
+  testWorkerCapturedStateReachesTilionReplacement
 );
 
 async function testKernelToTilionPromotionPersistsAndIsHonoured(): Promise<void> {
@@ -692,6 +774,7 @@ async function testKernelToTilionPromotionPersistsAndIsHonoured(): Promise<void>
         run.session.id,
         run.owner.userId,
         undefined,
+        {},
         fake.dependencies
       );
       assert(rotated.provider === 'tilion', `rotation after promotion: ${rotated.provider}`);
@@ -703,6 +786,7 @@ async function testKernelToTilionPromotionPersistsAndIsHonoured(): Promise<void>
         run.session.id,
         run.owner.userId,
         undefined,
+        {},
         fake.dependencies
       );
       assert(rotated.provider === 'kernel', `kill switch rotated into ${rotated.provider}`);

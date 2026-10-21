@@ -511,6 +511,8 @@ _BROWSER_PROVIDER_DOMAIN_SUFFIXES = (
     "kernel.sh",
     "steel.dev",
     "browser-use.com",
+    # Tilion live view / CDP: back.tilion.dev
+    "tilion.dev",
     "browserbase.com",
     "hyperbrowser.ai",
 )
@@ -1161,7 +1163,15 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
             if write_lock_result:
                 return write_lock_result
         provider_pressed = False
-        if context.config is not None and context.session_id and context.user_id.strip():
+        # Tilion fails REST input (409 session_driven_by_client) while the
+        # worker holds CDP, and has no browser-window UI to reach; use CDP input.
+        provider_window_input = getattr(context.dom_service, "single_cdp_client", False) is not True
+        if (
+            provider_window_input
+            and context.config is not None
+            and context.session_id
+            and context.user_id.strip()
+        ):
             from domains.spawn_browser_agent_v3.repo import press_browser_computer_key
 
             # Fall back only when the provider reports unsupported input or the
@@ -4132,9 +4142,26 @@ async def _execute_upload_file(
     if humanizer and element_coords:
         await humanizer.click_at_coords(element_coords["x"], element_coords["y"])
 
-    event = session.event_bus.dispatch(UploadFileEvent(node=element, file_path=remote_path))
-    await event
-    await event.event_result(raise_if_any=True, raise_if_none=False)
+    from domains.spawn_browser_agent_v3 import tilion_worker
+
+    if tilion_worker.is_staged_upload_path(remote_path):
+        # Tilion: a remote path set by DOM.setFileInputFiles silently does
+        # nothing, so set the worker-held bytes through Playwright.
+        payload = tilion_worker.staged_upload_payload(remote_path)
+        if payload is None:
+            return {"success": False, "error": f"File '{filename}' is no longer staged for this browser session"}
+        landed = await tilion_worker.set_staged_file_on_input(
+            input_page=_humanizer_input_page(humanizer),
+            browser_session=session,
+            element=element,
+            payload=payload,
+        )
+        if landed != len(payload["buffer"]):
+            return {"success": False, "error": f"File '{filename}' did not land on the input ({landed} bytes)"}
+    else:
+        event = session.event_bus.dispatch(UploadFileEvent(node=element, file_path=remote_path))
+        await event
+        await event.event_result(raise_if_any=True, raise_if_none=False)
 
     await action_history.record_action(
         dom_service=dom_service,
@@ -4250,7 +4277,13 @@ async def _execute_screenshot(
     if not session_id:
         raise RuntimeError("Browser session id is required for screenshot capture")
 
-    screenshot_result = await take_browser_computer_screenshot(config, session_id)
+    single_cdp_client = getattr(dom_service, "single_cdp_client", False) is True
+    if single_cdp_client:
+        # Tilion: REST screenshots fail while the worker holds CDP; its
+        # full_browser:false sessions have no window chrome to crop.
+        screenshot_result = {"base64_image": await dom_service.capture_viewport_png(), "provider": "tilion"}
+    else:
+        screenshot_result = await take_browser_computer_screenshot(config, session_id)
     full_screenshot_b64 = screenshot_result["base64_image"]
     full_screenshot_bytes = base64.b64decode(full_screenshot_b64)
     screenshot_bytes = (
@@ -4261,7 +4294,11 @@ async def _execute_screenshot(
     screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
 
     saved_path = None
-    if config:
+    if single_cdp_client:
+        from domains.spawn_browser_agent_v3.tilion_worker import stage_upload
+
+        saved_path = stage_upload(session_id, "screenshot.png", screenshot_bytes, "image/png")["path"]
+    elif config:
         upload_name = (
             f"screenshot-{uuid.uuid4().hex}.png"
             if screenshot_result.get("provider") == "browser-use"

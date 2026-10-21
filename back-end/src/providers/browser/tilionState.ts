@@ -7,6 +7,7 @@
  *            pause snapshot map / live harvest ──▶ restoreTilionBrowserState(new browser)
  */
 import type { Browser, BrowserContext, Cookie } from 'playwright';
+import { prisma } from '../database';
 import { createLogger } from '../logger';
 import { recoveryOriginStorageScript } from './recoveryOriginStorage';
 import {
@@ -20,29 +21,82 @@ const log = createLogger('Tilion');
 
 export type StorageState = Awaited<ReturnType<BrowserContext['storageState']>>;
 
-// Browser state captured when a session is paused, read back by the next
-// resume of the same task. Process-local and bounded: a resume served by
-// another backend instance falls back to the persisted user data that the
-// resume path re-injects (sessionAuthPersist / injectUserData).
-const pausedState = new Map<string, { state: StorageState; savedAt: number }>();
-const PAUSED_STATE_TTL_MS = 2 * 60 * 60_000;
-const PAUSED_STATE_MAX = 200;
+// Browser state captured when a Tilion session pauses lives on the task's own
+// BrowserSession row (`pausedBrowserState`), so any backend instance can resume
+// it and nothing accumulates in process memory. One bounded blob per task,
+// cleared by the resume that consumes it or by a final close.
+export const PAUSED_STATE_MAX_BYTES = 512 * 1024;
 
-export function rememberPausedState(sessionId: string, state: StorageState): void {
-  pausedState.delete(sessionId);
-  pausedState.set(sessionId, { state, savedAt: Date.now() });
-  while (pausedState.size > PAUSED_STATE_MAX) {
-    const oldest = pausedState.keys().next().value;
-    if (oldest === undefined) break;
-    pausedState.delete(oldest);
-  }
+function serializedBytes(state: StorageState): number {
+  return Buffer.byteLength(JSON.stringify(state), 'utf8');
 }
 
-export function takePausedState(sessionId: string): StorageState | null {
-  const entry = pausedState.get(sessionId);
-  pausedState.delete(sessionId);
-  if (!entry || Date.now() - entry.savedAt > PAUSED_STATE_TTL_MS) return null;
-  return entry.state;
+/** Fit the snapshot under the cap: drop IndexedDB first, then localStorage; cookies last. */
+export function boundPausedState(state: StorageState): StorageState | null {
+  const steps: StorageState[] = [
+    state,
+    {
+      cookies: state.cookies,
+      origins: state.origins.map(({ origin, localStorage }) => ({ origin, localStorage })),
+    },
+    { cookies: state.cookies, origins: [] },
+  ];
+  return steps.find((candidate) => serializedBytes(candidate) <= PAUSED_STATE_MAX_BYTES) ?? null;
+}
+
+function isStorageState(value: unknown): value is StorageState {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    Array.isArray((value as StorageState).cookies) &&
+    Array.isArray((value as StorageState).origins)
+  );
+}
+
+export async function savePausedState(sessionId: string, state: StorageState): Promise<boolean> {
+  const bounded = boundPausedState(state);
+  if (bounded === null) {
+    log.warn('Paused browser state exceeds the cap even as cookies only; not stored', {
+      sessionId,
+      cookies: state.cookies.length,
+    });
+    return false;
+  }
+  if (bounded !== state) {
+    log.warn('Paused browser state trimmed to fit the cap', {
+      sessionId,
+      maxBytes: PAUSED_STATE_MAX_BYTES,
+      originsKept: bounded.origins.length,
+    });
+  }
+  const json = JSON.stringify(bounded);
+  const updated = await prisma.$executeRaw`
+    UPDATE "BrowserSession" SET "pausedBrowserState" = ${json}::jsonb WHERE "sessionId" = ${sessionId}`;
+  return updated === 1;
+}
+
+/** The snapshot the task's paused session left, if the row still points at that session. */
+export async function loadPausedState(
+  taskId: string,
+  sessionId: string
+): Promise<StorageState | null> {
+  const rows = await prisma.$queryRaw<Array<{ state: unknown }>>`
+    SELECT "pausedBrowserState" AS state FROM "BrowserSession"
+    WHERE "id" = ${taskId} AND "sessionId" = ${sessionId}`;
+  const state = rows[0]?.state;
+  return isStorageState(state) ? state : null;
+}
+
+export async function clearPausedState(where: { taskId: string } | { sessionId: string }) {
+  if ('taskId' in where) {
+    await prisma.$executeRaw`
+      UPDATE "BrowserSession" SET "pausedBrowserState" = NULL
+      WHERE "id" = ${where.taskId} AND "pausedBrowserState" IS NOT NULL`;
+  } else {
+    await prisma.$executeRaw`
+      UPDATE "BrowserSession" SET "pausedBrowserState" = NULL
+      WHERE "sessionId" = ${where.sessionId} AND "pausedBrowserState" IS NOT NULL`;
+  }
 }
 
 // ── browser state carry ──────────────────────────────────────────────────────

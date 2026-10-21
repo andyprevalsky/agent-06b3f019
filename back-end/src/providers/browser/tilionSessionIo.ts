@@ -66,24 +66,9 @@ export async function captureTilionScreenshot(sessionId: string): Promise<Buffer
 
 const TILION_FILE_CAP_BYTES = 32 * 1024 * 1024;
 const FILE_FETCH_TIMEOUT_MS = 90_000;
-const downloadsBySession = new Map<string, Map<string, BrowserFileInfo>>();
-
-/**
- * Record a download the session made (the worker sees it over CDP). Tilion has
- * no downloads listing; the recorded URL is the file's path for read.
- */
-export function recordTilionSessionDownload(sessionId: string, file: BrowserFileInfo): void {
-  const files = downloadsBySession.get(sessionId) ?? new Map<string, BrowserFileInfo>();
-  files.set(file.path, file);
-  downloadsBySession.set(sessionId, files);
-}
-
-export function forgetTilionSessionDownloads(sessionId: string): void {
-  downloadsBySession.delete(sessionId);
-}
-
-export async function listTilionSessionFiles(sessionId: string): Promise<BrowserFileInfo[]> {
-  return [...(downloadsBySession.get(sessionId)?.values() ?? [])];
+/** Tilion has no downloads listing; the worker's download ledger is the source of truth. */
+export async function listTilionSessionFiles(_sessionId: string): Promise<BrowserFileInfo[]> {
+  return [];
 }
 
 /** Read a download by URL through the session's browser (its cookies/TLS identity), ≤ 32 MiB. */
@@ -109,7 +94,6 @@ export async function readTilionSessionFile(sessionId: string, path: string): Pr
     throw new Error('Tilion file fetch response did not contain file content');
   }
   const content = Buffer.from(result.content_base64, 'base64');
-  recordTilionSessionDownload(sessionId, { path: url.toString(), size: content.length });
   return content;
 }
 
