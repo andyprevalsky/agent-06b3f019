@@ -12640,7 +12640,6 @@ def _scripted_judge_provider(verdict_from_invocation: int | None, score: float =
     import benchmarks.run_benchmark as bench
     import helpers.llm as llm
     from providers.rose.client import _reset_anthropic_api_key_cooldown_cache
-    from _test_utils import setup_mock_fn, teardown_mock
 
     real_check_progress = llm.check_progress
     probe = SimpleNamespace(invocations=0, openrouter_calls=0, call_sites=[], sleeps=AsyncMock())
@@ -12680,10 +12679,24 @@ def _scripted_judge_provider(verdict_from_invocation: int | None, score: float =
             return httpx.Response(429, json={"error": {"message": "Rate limit exceeded", "code": 429}})
         return httpx.Response(404, json={"error": f"No mock for {url}"})
 
+    # Install at send, before the capture harness's transport-level mock. A
+    # strict offline send guard otherwise prevents that mock from ever seeing
+    # requests: the no-verdict case passes accidentally, but recovery cannot.
+    # This boundary still builds real HTTPX requests and runs the real Rose
+    # waterfall/SSE parser. It never calls a network-capable client/transport.
+    mock_transport = httpx.MockTransport(handler)
+
+    async def mocked_send(_client, request, **kwargs):
+        response = await mock_transport.handle_async_request(request)
+        response.request = request
+        if not kwargs.get("stream", False):
+            await response.aread()
+        return response
+
     _reset_anthropic_api_key_cooldown_cache()
-    setup_mock_fn(handler)
     try:
         with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(httpx.AsyncClient, "send", mocked_send))
             stack.enter_context(patch.object(llm, "check_progress", counting_check_progress))
             stack.enter_context(patch.object(bench, "_benchmark_judge_claude_auth_kwargs", AsyncMock(return_value={})))
             stack.enter_context(patch.object(bench, "_benchmark_judge_gpt_auth_kwargs", AsyncMock(return_value={})))
@@ -12691,7 +12704,6 @@ def _scripted_judge_provider(verdict_from_invocation: int | None, score: float =
             stack.enter_context(patch("temporalio.activity.heartbeat"))
             yield probe
     finally:
-        teardown_mock()
         _reset_anthropic_api_key_cooldown_cache()
 
 
@@ -12828,10 +12840,12 @@ async def test_semantic_output_judge_without_verdict_is_judge_unavailable():
             raise AssertionError(f"no-verdict semantic judge was scored: {outcome}")
     assert probe.invocations == 1 + len(bench.BENCHMARK_JUDGE_NO_VERDICT_RETRY_DELAYS_S), probe.invocations
     assert set(probe.call_sites) == {"semantic_output_field_recovery_judge"}, probe.call_sites
+    assert probe.openrouter_calls >= probe.invocations  # actual scripted 429s, not blocked HTTP
 
     with _scripted_judge_provider(verdict_from_invocation=2, output={"receipt_id": "tp_c505"}) as probe:
         assert await bench._judge_output_recovers_expected_fields("agent-1", blob, schema, "receipt-task") is None
     assert probe.invocations == 2, probe.invocations
+    assert probe.openrouter_calls >= probe.invocations  # scripted recovery reached the SSE parser
 
 
 async def test_declared_judge_low_score_verdict_is_not_rejudged():
