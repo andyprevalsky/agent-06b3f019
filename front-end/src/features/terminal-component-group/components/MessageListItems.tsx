@@ -58,8 +58,9 @@ import { useAgentExchangeGroups } from './useAgentExchangeGroups';
 import { AgentExchangeGroup } from './AgentExchangeGroup';
 
 interface MessageListItemsProps {
-  /** Normal GP lists opt in; native code sessions preserve their existing rendering. */
+  /** GP lists opt in; native sessions can supply one projection across chunks. */
   groupAgentMessages?: boolean;
+  agentExchangeProjection?: ReturnType<typeof useAgentExchangeGroups> & { viewerId?: string };
   filteredMessages: Message[];
   streamingMessageIds?: ReadonlySet<string>;
   currentAnimatingId: string | null;
@@ -250,6 +251,7 @@ export function MessageListItems({
   filteredMessages,
   webSearchGrouping = EMPTY_WEB_SEARCH_GROUPING,
   groupAgentMessages = false,
+  agentExchangeProjection,
   ...itemProps
 }: MessageListItemsProps) {
   const roseDesktop = useRoseDesktop();
@@ -266,12 +268,13 @@ export function MessageListItems({
     () => (roseDesktop ? groupDisplayMedia(visibleMessages) : EMPTY_DISPLAY_MEDIA_GROUPING),
     [visibleMessages, roseDesktop],
   );
-  const { groups: exchangeGroups, now } = useAgentExchangeGroups(
+  const localExchanges = useAgentExchangeGroups(
     visibleMessages,
     roseDesktop && groupAgentMessages,
     itemProps.currentAnimatingId,
     itemProps.onAnimationComplete,
   );
+  const { groups: exchangeGroups, now } = agentExchangeProjection ?? localExchanges;
   return (
     <>
       {visibleMessages.map((message) => {
@@ -281,7 +284,7 @@ export function MessageListItems({
             <AgentExchangeGroup
               key={exchangeGroup.key}
               group={exchangeGroup}
-              viewerId={itemProps.selectedAgentId}
+              viewerId={agentExchangeProjection?.viewerId ?? itemProps.selectedAgentId}
               now={now}
             />
           );

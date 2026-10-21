@@ -16,12 +16,17 @@ export interface AgentExchangeGroup {
   key: string;
   leadId: string;
   exchanges: AgentExchange[];
+  /** Native instruction records lack a canonical exchange identity. */
+  metricsUnknown?: boolean;
 }
 export interface AgentExchangeGrouping {
   groupsByLeadId: Map<string, AgentExchangeGroup>;
   foldedIds: Set<string>;
 }
-export function groupAgentExchanges(messages: Message[]): AgentExchangeGrouping {
+export function groupAgentExchanges(
+  messages: Message[],
+  includeCodeOnly = false,
+): AgentExchangeGrouping {
   const result: AgentExchangeGrouping = { groupsByLeadId: new Map(), foldedIds: new Set() };
   let turn = 'initial';
   let current: AgentExchangeGroup | null = null;
@@ -33,7 +38,8 @@ export function groupAgentExchanges(messages: Message[]): AgentExchangeGrouping 
       current = null;
       exchanges = new Map();
     }
-    if (!a2a || (a2a.from.kind !== 'agent' && a2a.to.kind !== 'agent')) continue;
+    if (!a2a || (!includeCodeOnly && a2a.from.kind !== 'agent' && a2a.to.kind !== 'agent'))
+      continue;
     if (parsePinnedQuestion(message.metadata)) continue;
     const key = JSON.stringify([a2a.from.id, a2a.to.id, a2a.message_id]);
     if (!current) {

@@ -8,8 +8,12 @@ export function useAgentExchangeGroups(
   enabled: boolean,
   animatingId: string | null,
   onComplete: () => void,
+  includeCodeOnly = false,
 ) {
-  const groups = useMemo(() => groupAgentExchanges(enabled ? messages : []), [enabled, messages]);
+  const groups = useMemo(
+    () => groupAgentExchanges(enabled ? messages : [], includeCodeOnly),
+    [enabled, messages, includeCodeOnly],
+  );
   const [now, setNow] = useState(Date.now);
   const completed = useRef<string | null>(null);
   useEffect(() => {

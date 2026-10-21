@@ -5,8 +5,12 @@
  * trajectory (never user bubbles); flag off keeps the stock rendering.
  * Malformed metadata always falls back to the stock UI.
  */
+import { createElement } from 'react';
+import { isRoutineAgentRouting } from '@/features/terminal-component-group/components/code-agent-view/routineAgentRouting';
+import { CodeSessionMessages } from '@/features/terminal-component-group/components/code-agent-view/CodeSessionMessages';
+import { renderWithProviders } from './test-wrapper';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { screen, within } from '@testing-library/react';
+import { fireEvent, screen, within } from '@testing-library/react';
 
 import { PinnedQuestionMount } from '@/features/terminal-component-group/components/PinnedQuestion';
 import { filterMessagesForSubAgent } from '@/features/terminal-component-group/components/useMessageFiltering';
@@ -19,6 +23,8 @@ import {
 import { collectCodeAgentEvents } from '@/features/terminal-component-group/hooks/codeSessionTranscript';
 
 import {
+  msg,
+  WithAgent,
   LIVE_EVENTS,
   QUESTION_DISPLAY,
   a2aInboundUserMessage,
@@ -73,6 +79,279 @@ describe('agent-to-agent rows (L-A2A contract, rows 12 + 47b)', () => {
     }
     // The chip stays the one desktop chip; timeline rows never become a second chip.
     expect(screen.getAllByTestId('code-agent-chip')).toHaveLength(1);
+  });
+
+  it('native code-session groups preserve directions as "Codex → Rose" / "Rose → Codex"', () => {
+    const messages = [chipMessage(), eventsMessage(LIVE_EVENTS), SENT(), RECEIVED()];
+    renderWithProviders(
+      createElement(
+        WithAgent,
+        { messages },
+        createElement(CodeSessionMessages, {
+          c: { provider: 'codex', chipState: 'live', meta: null } as unknown as Parameters<
+            typeof CodeSessionMessages
+          >[0]['c'],
+          taskId: 'task-1',
+          echoes: [],
+        }),
+      ),
+    );
+    const transcript = screen.getByTestId('code-agent-transcript');
+    const group = within(transcript).getByTestId('agent-exchange-group');
+    expect(within(transcript).queryByTestId('a2a-row')).toBeNull();
+    fireEvent.click(within(group).getByRole('button', { name: /Agents coordinating/ }));
+    const rows = within(transcript).getAllByTestId('a2a-row');
+    expect(rows.map((r) => [r.getAttribute('data-a2a-direction'), r.textContent])).toEqual([
+      ['sent', 'Codex → RoseTests pass; ready to merge.'],
+      ['received', 'Rose → CodexMerge it after the scorecard.'],
+    ]);
+    for (const row of rows) {
+      expect(within(row).getByRole('img', { name: 'Codex' })).toBeInTheDocument();
+    }
+    // The chip stays the one desktop chip; timeline rows never become a second chip.
+    expect(within(transcript).getAllByTestId('code-work-slot')).toHaveLength(1);
+  });
+
+  it('collapses hundreds of canonical mirrors across native work slots with bounded details', () => {
+    const records = [
+      { id: 'start1', type: 'turn', event: 'started', turn_id: 'one', ts: 1000 },
+      {
+        id: 'end1',
+        type: 'turn',
+        event: 'ended',
+        turn_id: 'one',
+        ts: 2000,
+        turn_outcome: 'completed',
+      },
+      { id: 'start2', type: 'turn', event: 'started', turn_id: 'two', ts: 3000 },
+      {
+        id: 'end2',
+        type: 'turn',
+        event: 'ended',
+        turn_id: 'two',
+        ts: 4000,
+        turn_outcome: 'completed',
+      },
+    ];
+    const rows = Array.from({ length: 120 }, (_, i) => {
+      const row = a2aTimelineMessage('sent', `Native private ${i}`, `canonical-${i}`);
+      row.timestamp = new Date(i < 60 ? 1500 : 3500).toISOString();
+      if (i % 2 === 0) {
+        const a2a = row.metadata!.a2a as Record<string, unknown>;
+        a2a.to = { id: 'other-code', kind: 'code', label: 'Other code' };
+      }
+      return [row, { ...row, message_id: `mirror-${i}` }];
+    }).flat();
+    const messages = [eventsMessage(records), ...rows];
+    const native = (records: typeof messages) =>
+      createElement(
+        WithAgent,
+        { messages: records },
+        createElement(CodeSessionMessages, {
+          c: { provider: 'codex', chipState: 'completed', meta: null } as unknown as Parameters<
+            typeof CodeSessionMessages
+          >[0]['c'],
+          taskId: 'task-1',
+          echoes: [],
+        }),
+      );
+    const view = renderWithProviders(native(messages));
+    expect(screen.getAllByTestId('code-work-slot')).toHaveLength(2);
+    const group = screen.getByTestId('agent-exchange-group');
+    expect(group).toHaveTextContent('120 exchanges');
+    expect(screen.queryByTestId('a2a-row')).toBeNull();
+    fireEvent.click(within(group).getByRole('button', { name: /Agents coordinating/ }));
+    expect(within(group).getAllByTestId('a2a-row')).toHaveLength(20);
+    fireEvent.click(within(group).getByRole('button', { name: 'Next exchanges' }));
+    expect(within(group).getByText('Native private 20')).toBeInTheDocument();
+    expect(within(group).queryByText('Native private 0')).toBeNull();
+    view.rerender(native([{ ...rows[0], message_id: 'replayed-lead' }, ...messages]));
+    expect(screen.getByTestId('agent-exchange-group')).toBe(group);
+    expect(within(group).getByText('Native private 20')).toBeVisible();
+    expect(group).toHaveTextContent('120 exchanges');
+  });
+
+  it('keeps human turns, user-facing questions and final answers in the native transcript', () => {
+    const one = SENT();
+    one.timestamp = new Date(400).toISOString();
+    const two = RECEIVED();
+    two.timestamp = new Date(1000).toISOString();
+    const question = msg(
+      {
+        toolName: 'send_message_to_user',
+        isUserAttentionMessage: true,
+        requestingAgent: { kind: 'code_agent', task_id: 'task-1', provider: 'codex' },
+      },
+      { text: 'Visible question', timestamp: new Date(500).toISOString() },
+    );
+    const messages = [
+      eventsMessage([
+        {
+          id: 'human1',
+          type: 'message',
+          role: 'user',
+          sender: 'user',
+          text: 'First human steer',
+          ts: 100,
+        },
+        { id: 'start1', type: 'turn', event: 'started', turn_id: 'one', ts: 200 },
+        { id: 'answer', type: 'message', text: 'Visible final answer', ts: 600, turn_id: 'one' },
+        {
+          id: 'end1',
+          type: 'turn',
+          event: 'ended',
+          turn_id: 'one',
+          ts: 700,
+          turn_outcome: 'completed',
+        },
+        {
+          id: 'human2',
+          type: 'message',
+          role: 'user',
+          sender: 'user',
+          text: 'Second human steer',
+          ts: 800,
+        },
+        { id: 'start2', type: 'turn', event: 'started', turn_id: 'two', ts: 900 },
+        {
+          id: 'end2',
+          type: 'turn',
+          event: 'ended',
+          turn_id: 'two',
+          ts: 1100,
+          turn_outcome: 'completed',
+        },
+      ]),
+      one,
+      two,
+      question,
+    ];
+    renderWithProviders(
+      createElement(
+        WithAgent,
+        { messages },
+        createElement(CodeSessionMessages, {
+          c: { provider: 'codex', chipState: 'completed', meta: null } as unknown as Parameters<
+            typeof CodeSessionMessages
+          >[0]['c'],
+          taskId: 'task-1',
+          echoes: [],
+        }),
+      ),
+    );
+    expect(screen.getAllByTestId('agent-exchange-group')).toHaveLength(2);
+    for (const text of [
+      'First human steer',
+      'Second human steer',
+      'Visible question',
+      'Visible final answer',
+    ]) {
+      expect(screen.getByText(text)).toBeVisible();
+    }
+    expect(screen.getAllByTestId('code-work-slot')).toHaveLength(2);
+  });
+
+  it('does not invent exchange metrics for native Rose instructions lacking canonical identity', () => {
+    const messages = [
+      eventsMessage([
+        {
+          id: 'instruction',
+          type: 'message',
+          role: 'user',
+          sender: 'agent',
+          client_message_id: 'native-delivery',
+          text: 'Private native instruction',
+          ts: 1000,
+        },
+      ]),
+      RECEIVED(),
+    ];
+    renderWithProviders(
+      createElement(
+        WithAgent,
+        { messages },
+        createElement(CodeSessionMessages, {
+          c: { provider: 'codex', chipState: 'live', meta: null } as unknown as Parameters<
+            typeof CodeSessionMessages
+          >[0]['c'],
+          taskId: 'task-1',
+          echoes: [],
+        }),
+      ),
+    );
+    const group = screen.getByTestId('agent-exchange-group');
+    expect(group).not.toHaveTextContent(/exchanges|in last minute|ago/);
+    expect(screen.queryByText('Private native instruction')).toBeNull();
+    fireEvent.click(within(group).getByRole('button'));
+    expect(within(group).getByText('Private native instruction')).toBeVisible();
+  });
+
+  it('keeps successful native send payloads behind details and leaves errors visible', () => {
+    const messages = [
+      eventsMessage([
+        { id: 'start', type: 'turn', event: 'started', turn_id: 'one', ts: 1000 },
+        {
+          id: 'send',
+          type: 'tool',
+          turn_id: 'one',
+          ts: 1500,
+          tool: {
+            name: 'Run',
+            target: 'rose-agents send parent "private payload"',
+            activity_kind: 'exec',
+            result: { status: 'running' },
+          },
+        },
+      ]),
+    ];
+    const view = renderWithProviders(
+      createElement(
+        WithAgent,
+        { messages },
+        createElement(CodeSessionMessages, {
+          c: { provider: 'codex', chipState: 'live', meta: null } as unknown as Parameters<
+            typeof CodeSessionMessages
+          >[0]['c'],
+          taskId: 'task-1',
+          echoes: [],
+        }),
+      ),
+    );
+    expect(screen.queryByText(/private payload/)).toBeNull();
+    const routing = screen.getByTestId('code-routing-activity');
+    fireEvent.click(within(routing).getByRole('button'));
+    expect(within(routing).getByText(/private payload/)).toBeVisible();
+    view.unmount();
+    const failed = [
+      eventsMessage([
+        {
+          id: 'failure',
+          type: 'tool',
+          ts: 2000,
+          tool: {
+            name: 'Run',
+            target: 'rose-agents send parent "failed payload"',
+            activity_kind: 'exec',
+            result: { status: 'error', output: 'Permission denied' },
+          },
+        },
+      ]),
+    ];
+    renderWithProviders(
+      createElement(
+        WithAgent,
+        { messages: failed },
+        createElement(CodeSessionMessages, {
+          c: { provider: 'codex', chipState: 'live', meta: null } as unknown as Parameters<
+            typeof CodeSessionMessages
+          >[0]['c'],
+          taskId: 'task-1',
+          echoes: [],
+        }),
+      ),
+    );
+    expect(screen.queryByTestId('code-routing-activity')).toBeNull();
+    expect(screen.getByText(/failed payload/)).toBeVisible();
   });
 
   it('timeline rows stay nested under the code session, out of the root filter', () => {
@@ -204,4 +483,38 @@ describe('contract adapter: absent or malformed metadata keeps the stock behavio
     expect(screen.queryByTestId('code-agent-chip')).not.toBeInTheDocument();
     expect(screen.queryByPlaceholderText(/directly…/)).not.toBeInTheDocument();
   });
+});
+
+it('only folds known healthy routing tools, preserving user delivery, approvals and unknown states', () => {
+  const routing = msg({ toolName: 'send_message_to_agent', toolStatus: 'IN_PROGRESS' });
+  expect(isRoutineAgentRouting(routing)).toBe(true);
+  for (const metadata of [
+    { toolName: 'send_message_to_user' },
+    { error: true },
+    { requestUserApproval: { toolApproval: true } },
+    { toolStatus: 'APPROVAL_REQUIRED' },
+    { isUserAttentionMessage: true },
+  ])
+    expect(
+      isRoutineAgentRouting({
+        ...routing,
+        metadata: { ...routing.metadata, ...metadata } as typeof routing.metadata,
+      }),
+    ).toBe(false);
+  const native = msg({
+    toolName: 'Run',
+    toolStatus: 'FINISHED',
+    title: 'Run rose-agents send parent "hello"',
+  });
+  expect(isRoutineAgentRouting(native)).toBe(false);
+  expect(isRoutineAgentRouting(native, true)).toBe(true);
+  expect(
+    isRoutineAgentRouting(
+      {
+        ...native,
+        metadata: { ...native.metadata, title: 'Run echo hello; rose-agents send parent hi' },
+      },
+      true,
+    ),
+  ).toBe(false);
 });

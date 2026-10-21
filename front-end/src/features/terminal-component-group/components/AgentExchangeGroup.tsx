@@ -17,7 +17,7 @@ export function AgentExchangeGroup({
   const [page, setPage] = useState(0);
   const lastPage = Math.max(0, Math.ceil(group.exchanges.length / PAGE_SIZE) - 1);
   const activePage = Math.min(page, lastPage);
-  const pace = exchangePace(group, now);
+  const pace = group.metricsUnknown ? null : exchangePace(group, now);
   return (
     <div
       data-testid="agent-exchange-group"
@@ -32,9 +32,11 @@ export function AgentExchangeGroup({
       >
         {expanded ? <ChevronDown size={13} aria-hidden /> : <ChevronRight size={13} aria-hidden />}
         <span>Agents coordinating</span>
-        <span>
-          {group.exchanges.length} {group.exchanges.length === 1 ? 'exchange' : 'exchanges'}
-        </span>
+        {!group.metricsUnknown && (
+          <span>
+            {group.exchanges.length} {group.exchanges.length === 1 ? 'exchange' : 'exchanges'}
+          </span>
+        )}
         {pace && <span>{pace}</span>}
       </button>
       {expanded && (
