@@ -249,7 +249,10 @@ def build_polar_trajectory(
         if final_answer:
             final_ids.discard(id(message))
             parts.append(f"Response: {final_answer}")
-        if role == "ASSISTANT" and text and text != final_answer:
+        if role == "ASSISTANT" and text and text not in (
+            final_answer,
+            (completion_card(metadata) or {}).get("summary"),
+        ):
             parts.append(f"Response: {text}")
         if role in {"TOOL", "TOOL_RESULT"} or tool_name:
             action_bits = []

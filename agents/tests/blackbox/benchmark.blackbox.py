@@ -12810,8 +12810,9 @@ async def test_declared_judge_without_verdict_is_judge_unavailable_error():
                 stack.enter_context(patch.object(sms, "parse_sms_script", return_value={"turns": []}))
                 stack.enter_context(patch.object(sms, "_user_phone", return_value="+15555550100"))
                 stack.enter_context(patch.object(sms, "_live_agent_ids", return_value=set()))
-                for helper in ("_reset_session", "_seed_transcript", "_cleanup", "_apply_web_search_fixture"):
+                for helper in ("_reset_session", "_seed_transcript", "_apply_web_search_fixture"):
                     stack.enter_context(patch.object(sms, helper))
+                stack.enter_context(patch.object(sms, "_cleanup", return_value={"verified": True}))
                 stack.enter_context(patch.object(sms, "_seed_agents", return_value=[]))
                 sms_results[label] = await sms.run_sms_task("http://127.0.0.1:32001", sms_task, deps)
             assert set(probe.call_sites) == {"benchmark_sms_evaluator"}, probe.call_sites
@@ -23906,9 +23907,32 @@ def test_all_benchmark_judges_preserve_complete_final_cards():
     assert len([row for row in slimmed if row.get("metadata", {}).get("evidence_type") == "final_completion"]) == 2
 
 
+def test_polar_completion_card_does_not_repeat_same_message_summary():
+    """Project a card once while preserving distinct and independently repeated prose."""
+    from benchmarks.polar_evaluator import build_polar_trajectory
+
+    summary = "ACTUAL FINAL SUMMARY"
+    final = {"id": "finished-card", "role": "ASSISTANT", "text": summary, "metadata": {
+        "toolName": "completion_summary", "toolStatus": "FINISHED",
+        "completionSummary": {"summary": summary, "outputs": [{"key": "answer", "value": 42}]},
+    }}
+    for role in ("ASSISTANT", "TOOL"):
+        for text in (summary, summary + "\n- answer: 42", "distinct final detail"):
+            history, _ = build_polar_trajectory({"messages": [dict(final, role=role, text=text)]})
+            assert history.count(summary) == 1, history
+            assert history.count("- answer: 42") == 1, history
+            if text == "distinct final detail":
+                assert text in history, history
+    history, _ = build_polar_trajectory({"messages": [
+        final, {"id": "independent-message", "role": "ASSISTANT", "text": summary}
+    ]})
+    assert history.count(summary) == 2, history
+
+
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
+    r.record("polar_completion_card_no_same_message_repeat", test_polar_completion_card_does_not_repeat_same_message_summary)
     r.record("all_benchmark_judges_complete_final_cards", test_all_benchmark_judges_preserve_complete_final_cards)
     await r.record_async("poll_elapsed_deadlines_900", test_poll_elapsed_deadlines_900)
     await r.record_async("poll_elapsed_deadlines_1200", test_poll_elapsed_deadlines_1200)
