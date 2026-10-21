@@ -566,7 +566,13 @@ model BrowserSession {
   id                     String               @id @default(uuid())
   contextId              String
   agentId                String
-  sessionId              String               @unique
+  sessionId              String?              @unique
+  // Internal owner key: agent:<Agent.id> or home:<BrowserContext.userId>.
+  logicalOwnerKey        String?              @unique
+  // Private immutable encrypted artifact IDs, never public/presigned URLs.
+  baselineCheckpointRef  String?
+  checkpointRef          String?
+  checkpointRevision     Int                  @default(0)
   status                 BrowserSessionStatus @default(ACTIVE)
   debugUrl               String?
   startUrl               String?
@@ -1582,6 +1588,10 @@ model BrowserSiteState {
   // When this exact login was last validated (agent sign-in evidence or a
   // completed live-view sign-in); null when never validated.
   validatedAt            DateTime?
+  authVerifiedAt         DateTime?
+  authBundleCiphertext   String?
+  authRevokedAt          DateTime?
+  authTransferability    String?
   // Age of the head's login, for "ties go to the newer".
   observedAt             DateTime?
   // Logins this account already replaced or the user forgot, newest first and
@@ -1594,6 +1604,7 @@ model BrowserSiteState {
   createdAt              DateTime  @default(now())
   updatedAt              DateTime  @updatedAt
   user                   User      @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  credentialSubscribers BrowserSiteFork[] @relation("BrowserVerifiedCredentialSubscription")
 
   @@unique([userId, site, account])
 }
@@ -1609,6 +1620,9 @@ model BrowserSiteFork {
   agentId          String
   site             String
   account          String         @default("")
+  credentialAccountKey      String?
+  credentialAppliedRevision Int @default(0)
+  credentialPendingRevision Int @default(0)
   baseRevision     Int
   baseFingerprint  String
   baseAuthKeys     String[]       @default([])
@@ -1621,9 +1635,11 @@ model BrowserSiteFork {
   mergedAt         DateTime?
   updatedAt        DateTime       @updatedAt
   browserSession   BrowserSession @relation(fields: [browserSessionId], references: [id], onDelete: Cascade)
+  credentialState BrowserSiteState? @relation("BrowserVerifiedCredentialSubscription", fields: [userId, site, credentialAccountKey], references: [userId, site, account], onDelete: Restrict, onUpdate: Cascade)
 
   @@unique([browserSessionId, site])
   @@index([userId, agentId])
+  @@index([userId, site, credentialAccountKey])
 }
 
 model SteelSessionAuth {
