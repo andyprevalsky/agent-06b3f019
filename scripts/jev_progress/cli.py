@@ -33,6 +33,7 @@ def main():
         rows = [r for r in rows if r["example_id"] in wanted]
     traces = {t["trace_id"]: t for t in load_rows(args.dataset / "traces.jsonl.gz")}
     prompt = json.loads((args.prompt or args.output / "prompts/seed.json").read_text())
+    prompt = prompt.get('prompt', prompt)
     result = evaluate(rows, traces, prompt, args.output)
     save(args.result or args.output / (args.cohort + "-baseline.json"), result)
     print(json.dumps(result["metrics"], indent=2))

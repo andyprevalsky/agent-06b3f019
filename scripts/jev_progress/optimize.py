@@ -43,6 +43,8 @@ def feedback(rows, traces, results, prompt):
         row = source[result["example_id"]]
         state = request(row, traces[row["trace_id"]], prompt)["state"]
         history = state["history"]
+        if isinstance(history, str):
+            history = history.splitlines()
         examples.append({"kind": result["kind"], "goal": state["goal"][:1600],
                          "output_schema": state["output_schema"],
                          "observed_batches": state["observed_batches"],
