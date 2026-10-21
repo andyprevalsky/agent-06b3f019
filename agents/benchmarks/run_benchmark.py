@@ -14771,9 +14771,15 @@ async def _run_single_task_as_run_user(
 
             return await _poll_agent(base_url, agent_id, task, realtime_monitor, snapshot)
 
-        execution_result = await _run_with_agent_execution_backstop(
-            base_url, agent_id, execute_agent, started_at=execution_started_at, task=task
-        )
+        try:
+            execution_result = await _run_with_agent_execution_backstop(
+                base_url, agent_id, execute_agent, started_at=execution_started_at, task=task
+            )
+        except BaseException:
+            if kill_fixture is not None:
+                from benchmarks.kill_agent_fixture import retire_fixture
+                await retire_fixture(base_url, API_KEY, kill_fixture)
+            raise
         kill_evidence = None
         if kill_fixture is not None:
             from benchmarks.kill_agent_fixture import verify_and_cleanup
