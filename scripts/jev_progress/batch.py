@@ -140,8 +140,22 @@ def main():
     pool=[]
     # Reuse exact request caches for incumbent rescoring, never old scores.
     for c in [{'name':'incoming','prompt':source_state['champion']}]+warm_candidates(state['optimizer'],source_state['champion']):
-        tr=evaluate(train,traces,c['prompt'],a.output,request_builder=parallel_builder)
-        vr=evaluate(val,traces,c['prompt'],a.output,request_builder=parallel_builder)
+        restored=None
+        if initial['completed_rounds']:
+            for receipt in a.output.glob('round-*/*.receipt.json'):
+                info=json.loads(receipt.read_text())
+                if info['name']==c['name']:
+                    saved=store.get(info['artifact'])['candidate']
+                    if (digest(saved['prompt'])==digest(c['prompt'])
+                        and saved['train']['cohort_hash']==digest(sorted(r['example_id'] for r in train))
+                        and saved['validation']['cohort_hash']==digest(sorted(r['example_id'] for r in val))):
+                        restored=saved
+                    break
+        if restored:
+            tr,vr=restored['train'],restored['validation']
+        else:
+            tr=evaluate(train,traces,c['prompt'],a.output,request_builder=parallel_builder)
+            vr=evaluate(val,traces,c['prompt'],a.output,request_builder=parallel_builder)
         if tr['metrics']['failed'] or vr['metrics']['failed']:raise RuntimeError('Incumbent rescore failed')
         pool.append({**c,'train':tr,'validation':vr})
     baseline=pool[0]['validation']['metrics']
@@ -165,6 +179,11 @@ def main():
         # Parent identities and the cohort freeze before any candidate in this
         # round is evaluated. No intra-round adaptive selection.
         round_dir=a.output/f'round-{round_index+1:02d}'
+        if (round_dir/'plan.json').exists():
+            old_plan=json.loads((round_dir/'plan.json').read_text())
+            parents={digest(c['prompt']):c for c in pool}
+            selections=[(r['candidate'],parents[r['parent']],r['format'],themes[i%len(themes)])
+                        for i,r in enumerate(old_plan['parents'])]
         save(round_dir/'plan.json',{'round':round_index+1,'parents':[{'candidate':i,'parent':digest(c['prompt']),
              'format':fmt} for i,c,fmt,_ in selections],'baseline':baseline,'cohort_hash':digest(cohorts)})
         completed=[]

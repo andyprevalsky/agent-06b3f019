@@ -20,6 +20,8 @@ from previous_prediction import build_priors, builder
 from batch import select_completed_round, initialize_builder, build_request
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
+from types import SimpleNamespace
+import production
 
 
 class CoreTests(unittest.TestCase):
@@ -227,6 +229,15 @@ class CoreTests(unittest.TestCase):
         with ProcessPoolExecutor(max_workers=1,mp_context=multiprocessing.get_context('spawn'),
                                  initializer=initialize_builder,initargs=({'a':self.trace},)) as executor:
             self.assertEqual(executor.submit(build_request,self.row,prompt).result(timeout=20),expected)
+
+    def test_production_queries_have_explicit_read_only_transaction(self):
+        fake=SimpleNamespace(dotenv_values=lambda _: {'DATABASE_URL':'postgresql://test:test@example.invalid/db'})
+        result=SimpleNamespace(returncode=0,stdout='{"ok":true}\n')
+        with patch.dict(sys.modules,{'dotenv':fake}),patch.object(production.subprocess,'run',return_value=result) as run:
+            self.assertEqual(production.query('SELECT json_build_object(\'ok\',true)'),[{'ok':True}])
+        self.assertTrue(run.call_args.kwargs['input'].startswith('BEGIN READ ONLY;'))
+        self.assertTrue(run.call_args.kwargs['input'].endswith('ROLLBACK;\n'))
+        self.assertIn('ON_ERROR_STOP=1',run.call_args.args[0])
 
 
 if __name__ == "__main__":
