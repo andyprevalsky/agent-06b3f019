@@ -28908,6 +28908,8 @@ async def _run_browser_durable_user_feedback_replay(*, change_fields=False, veri
         "same_session_available": True,
     }
     patch_targets = [
+        # This fixture owns feedback/schema behavior, not the live worker registry.
+        patch("helpers.activity_generation_drain.read_agent_queue_pointer", AsyncMock(return_value={"task_queue": "test", "surface_hash": None})),
         patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
         patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
         patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", AsyncMock(side_effect=fetch_agent_snapshot)),
