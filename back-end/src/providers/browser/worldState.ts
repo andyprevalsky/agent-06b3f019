@@ -39,7 +39,11 @@ import {
   persistedMergeReceipt,
   type WorldStateMergeReceipt,
 } from './worldStateMerge';
-import { siteAuthSnapshot, type WorldStateCookie } from './worldStateKeepBest';
+import {
+  assertLegacyBrowserAccount,
+  siteAuthSnapshot,
+  type WorldStateCookie,
+} from './worldStateKeepBest';
 
 export {
   assessSiteCredentials,
@@ -121,6 +125,7 @@ export async function recordSiteFork(params: {
   baseObservedAt?: Date | null;
   liveCookies: WorldStateCookie[];
 }): Promise<void> {
+  assertLegacyBrowserAccount(params.account);
   const snapshot = siteAuthSnapshot(params.liveCookies, params.site);
   const base = {
     account: params.account,

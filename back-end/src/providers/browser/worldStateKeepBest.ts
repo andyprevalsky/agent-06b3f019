@@ -252,3 +252,9 @@ export function nextSuperseded(previous: string[], retired: string[], current: s
     .filter((fingerprint) => fingerprint !== '' && fingerprint !== current)
     .slice(0, MAX_SUPERSEDED);
 }
+
+/** Verified credential heads are owned exclusively by an authenticated proof writer. */
+export function assertLegacyBrowserAccount(account: string): void {
+  if (account.startsWith('verified:'))
+    throw new Error('Verified browser credentials require authenticated account proof');
+}
