@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 import structlog
 
+from domains.spawn_browser_agent_v3.cdp_urls import redact_url_secrets
 from domains.spawn_browser_agent_v3.config import (
     EXTRACT_LLM_MAX_TOKENS,
     EXTRACT_LLM_MODEL,
@@ -178,7 +179,7 @@ async def save_browser_action_message(
             "toolStatus": status.value,
             "title": title,
             "task_id": task_id,
-            "browser_url": browser_url,
+            "browser_url": redact_url_secrets(browser_url),
             "action_type": action_type,
             "auxiliary": auxiliary or {},
         }
@@ -307,7 +308,7 @@ async def save_browser_credential_ref_message(
             "credential_ref": credential_ref,
         }
         if browser_url:
-            metadata["browser_url"] = browser_url
+            metadata["browser_url"] = redact_url_secrets(browser_url)
         if role == "TOOL":
             metadata.update(
                 {

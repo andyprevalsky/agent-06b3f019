@@ -173,6 +173,9 @@ def drop_browser_use_serial_dom_probes() -> None:
     DomService._get_all_trees = _get_all_trees_without_serial_probes
 
 
+VIEWPORT_SCREENSHOT_TIMEOUT_SECONDS = 10.0
+
+
 def browser_downloads_path_for_provider(provider: Optional[str] = None) -> str:
     """Return the CDP download directory for the active browser provider.
 
@@ -1140,11 +1143,25 @@ class DOMService:
         if not target_id:
             raise RuntimeError("No focused browser tab to screenshot")
         cdp_session = await self._session.get_or_create_cdp_session(target_id, focus=False)
-        result = await cdp_session.cdp_client.send_raw(
-            "Page.captureScreenshot",
-            {"format": "png", "fromSurface": True},
-            session_id=cdp_session.session_id,
-        )
+        started = time.monotonic()
+        try:
+            result = await asyncio.wait_for(
+                cdp_session.cdp_client.send_raw(
+                    "Page.captureScreenshot",
+                    {"format": "png", "fromSurface": True},
+                    session_id=cdp_session.session_id,
+                ),
+                timeout=VIEWPORT_SCREENSHOT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            elapsed_ms = round((time.monotonic() - started) * 1000)
+            logger.warning(
+                f"📸 Browser CDP call timed out: Page.captureScreenshot after {elapsed_ms} ms "
+                f"(limit {VIEWPORT_SCREENSHOT_TIMEOUT_SECONDS:g}s)"
+            )
+            raise TimeoutError(
+                f"Page.captureScreenshot timed out after {VIEWPORT_SCREENSHOT_TIMEOUT_SECONDS:g}s"
+            ) from None
         data = result.get("data")
         if not data:
             raise RuntimeError("Page.captureScreenshot returned no image")

@@ -301,6 +301,17 @@ class SingleCdpConnectionMultiplexer:
         if method == "Target.attachedToTarget" and params.get("sessionId"):
             self._own_session(client, params["sessionId"])
             target_type = (params.get("targetInfo") or {}).get("type")
+            client_waits = self._wants_debugger_wait.get((client, session_id), True)
+            if params.get("waitingForDebugger") and not client_waits and target_type not in _EMULATED_TARGET_TYPES:
+                # Held only because the multiplexer forced waitForDebuggerOnStart
+                # (workers, service workers): this client never resumes targets,
+                # so release it now or it stays paused for good.
+                params["waitingForDebugger"] = False
+                with contextlib.suppress(Exception):
+                    resumed = await self._send_session_command(
+                        str(params["sessionId"]), "Runtime.runIfWaitingForDebugger", {}
+                    )
+                    resumed.add_done_callback(lambda done: done.cancelled() or done.exception())
             if self._emulation and target_type in _EMULATED_TARGET_TYPES:
                 released: asyncio.Future = asyncio.get_running_loop().create_future()
                 client.outbox.put_nowait(released)
