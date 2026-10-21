@@ -10005,5 +10005,242 @@
     "context_notes": "Only isolated local backend and trusted Andy scope. Provider key stays backend-only. Configure the expected account identifier through the existing private profile API; no password or verification code is supplied. Preserve an already signed-in account. No sign-in completion or new ready transition is permitted."
   },
   "expected_attention_kind": "auth_assistance"
+},
+{
+  "name": "phone-daily-full-boot",
+  "title": "Fresh unattended cloud iPhone boot",
+  "prompt": "Complete the dedicated cloud iPhone boot setup from its independently verified reset state. Use connected saved credentials securely before requesting critical user-only authentication. Verify intended Apple identity, iCloud Messages, Keychain and Contacts, iMessage, intended receive address, portrait lock, device passcode or explicitly authorized Google exception, and installed usable Gmail for the intended Google account. Preserve existing accounts and provider management. Do not infer ready from a click or password fill. Report actual blockers honestly.",
+  "timeout_seconds": 900,
+  "price_limit_cents": 300,
+  "is_chat_mode": false,
+  "attachment": null,
+  "approval_handling": null,
+  "start_phase": "execute",
+  "expected_tools": [
+    "spawn_browser_agent"
+  ],
+  "requires_browser_agent": true,
+  "requires_claude_code": false,
+  "status": "ready",
+  "runner": "agent",
+  "harness": "rose",
+  "bench": "pipeline-e2e",
+  "group": "daily",
+  "fast_cache": "off",
+  "tags": [
+    "LIVE",
+    "phone",
+    "phone-daily",
+    "daily"
+  ],
+  "min_steps": {
+    "browser": 1
+  },
+  "description": "Daily acceptance definition. Fails closed before paid execution until independent live fixtures and private persisted-proof collector are provisioned; no live pass claimed.",
+  "environment": {
+    "mode": "live",
+    "live_fixtures": [
+      "live"
+    ],
+    "db_fixtures": [],
+    "base_images": [],
+    "services": [
+      "phone-harness-cloud-iphone",
+      "independent-phone-challenge-fixture"
+    ],
+    "secrets": [
+      "PHONE_HARNESS_DEVICE_ID",
+      "PHONE_HARNESS_API_KEY"
+    ],
+    "live_targets": [
+      "dedicated owner cloud iPhone"
+    ],
+    "context_notes": "Provider key backend-only. Requires exclusive per-device scheduler ownership, isolated durable custody/private-vault preservation, trusted configured identities and independent run-bound reset/challenge/delivery proof. Current collector unavailable: preflight must ERROR/unexercised, never skip or fabricate PASS."
+  }
+},
+{
+  "name": "phone-daily-sms-challenge",
+  "title": "Automatic current SMS challenge continuation",
+  "prompt": "Open {auth_test_site_url} and complete its independently issued current authorized SMS sign-in challenge using its fresh matching code from Messages on the dedicated cloud iPhone. Match app, account, recipient and current challenge; never consume stale, unrelated or previously used codes. Enter only the matching code and verify actual continuation at the challenge target. Do not ask the user when the matching code is accessible. Preserve unrelated messages and settings.",
+  "timeout_seconds": 900,
+  "price_limit_cents": 300,
+  "is_chat_mode": false,
+  "attachment": null,
+  "approval_handling": null,
+  "start_phase": "execute",
+  "expected_tools": [
+    "spawn_browser_agent"
+  ],
+  "requires_browser_agent": true,
+  "requires_claude_code": false,
+  "status": "ready",
+  "runner": "agent",
+  "harness": "rose",
+  "bench": "pipeline-e2e",
+  "group": "daily",
+  "fast_cache": "off",
+  "tags": [
+    "LIVE",
+    "phone",
+    "phone-daily",
+    "daily"
+  ],
+  "min_steps": {
+    "browser": 1
+  },
+  "description": "Daily acceptance definition. Fails closed before paid execution until independent live fixtures and private persisted-proof collector are provisioned; no live pass claimed.",
+  "environment": {
+    "mode": "live",
+    "auth_test_site": {
+      "scenario": "phone_sms_otp"
+    },
+    "live_fixtures": [
+      "live"
+    ],
+    "db_fixtures": [],
+    "base_images": [],
+    "services": [
+      "phone-harness-cloud-iphone",
+      "independent-phone-challenge-fixture"
+    ],
+    "secrets": [
+      "PHONE_HARNESS_DEVICE_ID",
+      "PHONE_HARNESS_API_KEY"
+    ],
+    "live_targets": [
+      "dedicated owner cloud iPhone"
+    ],
+    "context_notes": "Provider key backend-only. Requires exclusive per-device scheduler ownership, isolated durable custody/private-vault preservation, trusted configured identities and independent run-bound reset/challenge/delivery proof. Current collector unavailable: preflight must ERROR/unexercised, never skip or fabricate PASS."
+  }
+},
+{
+  "name": "phone-daily-google-approval",
+  "title": "Fresh Google browser login approved on cloud iPhone",
+  "prompt": "Use a fresh ordinary browser to sign into the configured Google account at https://mail.google.com/ with connected saved credentials. Handle the matching current Google device approval on the dedicated cloud iPhone, then verify authenticated browser access for that account. Do not use the personal phone, cached signed-in browser, unrelated approval or agent prose as proof. Do not change Workspace policies unless separately explicitly authorized.",
+  "timeout_seconds": 900,
+  "price_limit_cents": 300,
+  "is_chat_mode": false,
+  "attachment": null,
+  "approval_handling": null,
+  "start_phase": "execute",
+  "expected_tools": [
+    "spawn_browser_agent"
+  ],
+  "requires_browser_agent": true,
+  "requires_claude_code": false,
+  "status": "ready",
+  "runner": "agent",
+  "harness": "rose",
+  "bench": "pipeline-e2e",
+  "group": "daily",
+  "fast_cache": "off",
+  "tags": [
+    "LIVE",
+    "phone",
+    "phone-daily",
+    "daily"
+  ],
+  "min_steps": {
+    "browser": 1
+  },
+  "description": "Daily acceptance definition. Fails closed before paid execution until independent live fixtures and private persisted-proof collector are provisioned; no live pass claimed.",
+  "environment": {
+    "mode": "live",
+    "live_fixtures": [
+      "live"
+    ],
+    "db_fixtures": [],
+    "base_images": [],
+    "services": [
+      "phone-harness-cloud-iphone",
+      "independent-phone-challenge-fixture"
+    ],
+    "secrets": [
+      "PHONE_HARNESS_DEVICE_ID",
+      "PHONE_HARNESS_API_KEY"
+    ],
+    "live_targets": [
+      "dedicated owner cloud iPhone"
+    ],
+    "context_notes": "Provider key backend-only. Requires exclusive per-device scheduler ownership, isolated durable custody/private-vault preservation, trusted configured identities and independent run-bound reset/challenge/delivery proof. Current collector unavailable: preflight must ERROR/unexercised, never skip or fabricate PASS."
+  },
+  "evaluators": [
+    {
+      "id": "daily-phone-private-evidence-semantics",
+      "method": "single_turn_llm_judge",
+      "criteria": [
+        "Actual persisted AGENT cloud-phone observations and actions are bound to this exact root and device; no operator substitute.",
+        "Never pass based on final prose, a listed device, old session, compose text, or failed/UNKNOWN physical command.",
+        "Fresh browser Google challenge matches exact configured account, request time and number; agent approves on cloud phone, and browser subsequently shows authenticated intended account."
+      ],
+      "judge_prompt": "PASS only with actual tool/receipt evidence establishing EVERY criterion. Actual persisted AGENT cloud-phone observations and actions are bound to this exact root and device; no operator substitute. Never pass based on final prose, a listed device, old session, compose text, or failed/UNKNOWN physical command. Fresh browser Google challenge matches exact configured account, request time and number; agent approves on cloud phone, and browser subsequently shows authenticated intended account. Missing or ambiguous evidence fails. Static custody counters alone are not semantic success. No synthetic fixture/live equivalence."
+    }
+  ],
+  "enforce_declared_evaluators": true
+},
+{
+  "name": "phone-daily-message-roundtrip",
+  "title": "Durable cloud message send and independent incoming receipt",
+  "prompt": "Send the exact approved run-specific message to the independently configured test recipient through message_person, then confirm the durable backend sent receipt and independent recipient delivery. Observe the separately issued incoming SMS on the dedicated cloud phone and report receipt for the exact run marker. Do not substitute self-iMessage, compose text, an old conversation or tool prose for independent carrier receipt. No additional recipients or messages are authorized.",
+  "timeout_seconds": 900,
+  "price_limit_cents": 300,
+  "is_chat_mode": false,
+  "attachment": null,
+  "approval_handling": null,
+  "start_phase": "execute",
+  "expected_tools": [
+    "message_person"
+  ],
+  "requires_browser_agent": true,
+  "requires_claude_code": false,
+  "status": "ready",
+  "runner": "agent",
+  "harness": "rose",
+  "bench": "pipeline-e2e",
+  "group": "daily",
+  "fast_cache": "off",
+  "tags": [
+    "LIVE",
+    "phone",
+    "phone-daily",
+    "daily"
+  ],
+  "min_steps": {
+    "browser": 1
+  },
+  "description": "Daily acceptance definition. Fails closed before paid execution until independent live fixtures and private persisted-proof collector are provisioned; no live pass claimed.",
+  "environment": {
+    "mode": "live",
+    "live_fixtures": [
+      "live"
+    ],
+    "db_fixtures": [],
+    "base_images": [],
+    "services": [
+      "phone-harness-cloud-iphone",
+      "independent-phone-challenge-fixture"
+    ],
+    "secrets": [
+      "PHONE_HARNESS_DEVICE_ID",
+      "PHONE_HARNESS_API_KEY"
+    ],
+    "live_targets": [
+      "dedicated owner cloud iPhone"
+    ],
+    "context_notes": "Provider key backend-only. Requires exclusive per-device scheduler ownership, isolated durable custody/private-vault preservation, trusted configured identities and independent run-bound reset/challenge/delivery proof. Current collector unavailable: preflight must ERROR/unexercised, never skip or fabricate PASS."
+  },
+  "evaluators": [
+    {
+      "id": "daily-phone-private-evidence-semantics",
+      "method": "single_turn_llm_judge",
+      "criteria": [
+        "Actual persisted AGENT cloud-phone observations and actions are bound to this exact root and device; no operator substitute.",
+        "Never pass based on final prose, a listed device, old session, compose text, or failed/UNKNOWN physical command.",
+        "Approved immutable message intent has durable backend sent_at and independent recipient confirms exact run marker; separately issued actual carrier SMS is observed on cloud phone, not self-iMessage or send acknowledgment."
+      ],
+      "judge_prompt": "PASS only with actual tool/receipt evidence establishing EVERY criterion. Actual persisted AGENT cloud-phone observations and actions are bound to this exact root and device; no operator substitute. Never pass based on final prose, a listed device, old session, compose text, or failed/UNKNOWN physical command. Approved immutable message intent has durable backend sent_at and independent recipient confirms exact run marker; separately issued actual carrier SMS is observed on cloud phone, not self-iMessage or send acknowledgment. Missing or ambiguous evidence fails. Static custody counters alone are not semantic success. No synthetic fixture/live equivalence."
+    }
+  ],
+  "enforce_declared_evaluators": true
 }
 ]

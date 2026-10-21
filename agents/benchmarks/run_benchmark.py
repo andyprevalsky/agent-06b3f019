@@ -107,6 +107,16 @@ from benchmarks.phone_callee import (
     resolve_callee_prompt,
 )
 from benchmarks.phone_critical_attention import PHONE_BENCH_TASK_NAMES
+from benchmarks.phone_daily import (
+    TASK_KINDS as PHONE_DAILY_TASKS,
+)
+from benchmarks.phone_daily import (
+    apply_daily_fixture,
+    cleanup_daily_phone,
+    evaluate_daily,
+    evaluate_sms_daily,
+    preflight_daily,
+)
 from benchmarks.plan_assertions import evaluate_plan_assertions, find_accepted_plan
 from benchmarks.polar_catalog import (
     is_polar_bench_task,
@@ -366,6 +376,8 @@ TEST_ASSETS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "front-end
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _AGENTS_ENV = os.path.join(os.path.dirname(__file__), "..", ".env")
 _BACKEND_ENV = os.path.join(os.path.dirname(__file__), "..", "..", "back-end", ".env")
+PHONE_BENCH_TASK_NAMES = PHONE_BENCH_TASK_NAMES | frozenset(PHONE_DAILY_TASKS)
+
 API_KEY = load_env_var("BACKEND_API_KEY", _AGENTS_ENV, _BACKEND_ENV)
 USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME = "gate-subscription-free-credit"
@@ -6483,14 +6495,20 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
         primary_ids.add(root_ids[-1])
     phone_roots = {root for name in PHONE_BENCH_TASK_NAMES for root in live_ids.get(name, [])}
     phone_roots.update(r.agent_id for r in results if r.name in PHONE_BENCH_TASK_NAMES and r.agent_id)
+    daily_roots = {root for name in PHONE_DAILY_TASKS for root in live_ids.get(name, [])}
+    daily_roots.update(r.agent_id for r in results if r.name in PHONE_DAILY_TASKS and r.agent_id)
     for phone_root in phone_roots:
         from benchmarks.phone_connectivity import ANDY, cleanup_phone
-        identity = _owned_cleanup_user_id.set(ANDY)
+        phone_user_id = _current_benchmark_user_id() if phone_root in daily_roots else ANDY
+        identity = _owned_cleanup_user_id.set(phone_user_id)
         try:
             if not await pause_agent(base_url, phone_root):
                 from benchmarks.phone_connectivity import PhoneCleanupBlocked
                 raise PhoneCleanupBlocked("Phone batch cleanup cannot quiesce exact root")
-            await cleanup_phone(base_url, ANDY, phone_root, _local_victoria_database_url(), API_KEY)
+            if phone_root in daily_roots:
+                await cleanup_daily_phone(base_url, phone_user_id, phone_root, _local_victoria_database_url(), API_KEY)
+            else:
+                await cleanup_phone(base_url, ANDY, phone_root, _local_victoria_database_url(), API_KEY)
             critical_roots = set(live_ids.get("browser-cloud-iphone-critical-attention", [])) | {r.agent_id for r in results if r.name == "browser-cloud-iphone-critical-attention" and r.agent_id}
             if phone_root in critical_roots:
                 from benchmarks.phone_critical_attention import cleanup_owner_transport
@@ -13783,7 +13801,10 @@ async def _run_single_task_as_run_user(
 
     if task.name in PHONE_BENCH_TASK_NAMES:
         from benchmarks.phone_connectivity import device_id, guard
-        guard(base_url, _current_benchmark_user_id())
+        if task.name in PHONE_DAILY_TASKS:
+            preflight_daily(task.name, base_url, _current_benchmark_user_id())
+        else:
+            guard(base_url, _current_benchmark_user_id())
         device_id()
         if _interrupt_cleanup_contract() is None:
             raise RuntimeError("Live phone benchmark requires owned --local cleanup retention contract")
@@ -13941,8 +13962,12 @@ async def _run_single_task_as_run_user(
             if not await pause_agent(base_url, agent_id):
                 from benchmarks.phone_connectivity import PhoneCleanupBlocked
                 raise PhoneCleanupBlocked("Phone cleanup cannot quiesce exact root; retain isolated database")
-            await cleanup_phone(base_url, _current_benchmark_user_id(), agent_id,
-                                _local_victoria_database_url(), API_KEY, deadline=phone_cleanup_deadline)
+            if task.name in PHONE_DAILY_TASKS:
+                await cleanup_daily_phone(base_url, _current_benchmark_user_id(), agent_id,
+                                          _local_victoria_database_url(), API_KEY)
+            else:
+                await cleanup_phone(base_url, _current_benchmark_user_id(), agent_id,
+                                    _local_victoria_database_url(), API_KEY, deadline=phone_cleanup_deadline)
             if task.name == "browser-cloud-iphone-critical-attention":
                 from benchmarks.phone_critical_attention import cleanup_owner_transport, probe
                 await asyncio.to_thread(cleanup_owner_transport, base_url, _current_benchmark_user_id(), agent_id, _local_victoria_database_url())
@@ -14029,11 +14054,16 @@ async def _run_single_task_as_run_user(
         # scenario intentionally removes shared browser state and must restore it
         # even when agent creation or evaluation fails.
         live_fixture_manifests = await _apply_live_fixtures(task, base_url)
+        if task.name in PHONE_DAILY_TASKS:
+            preflight_daily(task.name, base_url, _current_benchmark_user_id())
         if task.name in PHONE_BENCH_TASK_NAMES:
             from benchmarks.phone_connectivity import apply_fixture
             if _is_simulate_mode() or task.fast_cache != "off":
                 raise RuntimeError("Live iPhone benchmark forbids simulation/demo cache")
-            await apply_fixture(base_url, _current_benchmark_user_id(), API_KEY)
+            if task.name in PHONE_DAILY_TASKS:
+                await apply_daily_fixture(task.name, base_url, _current_benchmark_user_id(), API_KEY, _local_victoria_database_url())
+            else:
+                await apply_fixture(base_url, _current_benchmark_user_id(), API_KEY)
             if task.name == "browser-cloud-iphone-critical-attention":
                 from benchmarks.phone_critical_attention import configure_profile
                 await configure_profile(base_url, _current_benchmark_user_id(), API_KEY, _local_victoria_database_url())
@@ -14260,6 +14290,22 @@ async def _run_single_task_as_run_user(
             if not grep_passed:
                 passed = False
                 failure_reason = grep_reason
+        if task.name in PHONE_DAILY_TASKS:
+            if PHONE_DAILY_TASKS[task.name] == "sms":
+                phone_ok, phone_reason, phone_proof = await evaluate_sms_daily(
+                    base_url, _current_benchmark_user_id(), agent_id,
+                    _local_victoria_database_url(), auth_test_site_manifest or {},
+                    {"X-API-Key": API_KEY, "X-User-Id": _current_benchmark_user_id()},
+                )
+            else:
+                phone_ok, phone_reason, phone_proof = await asyncio.to_thread(
+                    evaluate_daily, task.name, base_url, _current_benchmark_user_id(), agent_id,
+                    _local_victoria_database_url(),
+                )
+            data["_phone_daily_proof"] = phone_proof
+            if not phone_ok:
+                passed, failure_reason = False, phone_reason
+
         if task.name == "browser-cloud-iphone-settings":
             from benchmarks.phone_connectivity import evaluate_persisted, reported_heading
             phone_ok, phone_reason, phone_proof = await asyncio.to_thread(

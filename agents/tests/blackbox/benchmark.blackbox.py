@@ -22653,6 +22653,11 @@ async def run_all_tests():
     await r.record_async("interrupted_finalization_retains_one_error", test_interrupted_finalization_retains_one_error_occurrence)
     # The explicit-only live-phone task's offline fixture/proof contracts recur
     # with the existing benchmark suite; pytest owns parameter expansion.
+    from benchmarks import phone_daily_test
+    for name in sorted(dir(phone_daily_test)):
+        if name.startswith("test_"):
+            r.record("phone_daily_" + name[5:], _with_pytest_fixtures(getattr(phone_daily_test, name)))
+
     from benchmarks import phone_connectivity_test
     for name in sorted(dir(phone_connectivity_test)):
         if name.startswith("test_"):

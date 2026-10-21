@@ -113,3 +113,49 @@ video is `.context/phone-harness/google-drive-cloud-phone-full-recording.mp4`.
 This is a real operator-driven UI acceptance test; it is not relabeled as an
 unattended Rose-agent run. The fresh test browser context was closed afterward;
 phone custody, pending private state and original browser state were preserved.
+
+## DAILY regression coverage
+
+The normal DAILY catalog now includes:
+
+- `phone-daily-full-boot`: all current version-6 configuration checks, connected
+  credentials, and a genuinely fresh provider-reset boot. It remains blocked
+  until a trusted provider reset can be established; retained state is not a pass.
+- `phone-daily-sms-challenge`: a new, single-use SMS challenge, a matching actual
+  cloud-phone observation, and successful consumption at the original site.
+  Stale/unrelated codes, user-entered codes, and send acknowledgments cannot pass.
+- `phone-daily-google-approval`: a fresh browser Google challenge, matching
+  approval on the cloud phone, and authenticated browser continuation.
+- `phone-daily-message-roundtrip`: the approved durable cloud-phone send plus
+  independent recipient and inbound-message evidence for the run marker.
+
+These are additive DAILY entries; the original explicit Settings connectivity
+and critical-attention tasks retain their original definitions. Private setup
+configuration comes from `PHONE_DAILY_PROFILE_FILE` with only
+`expectedAppleIdentity`, `expectedGoogleIdentity`, and optional boolean
+`allowGooglePasscodeException`. No password or passcode belongs in that file.
+The fixture uses the existing profile revision CAS and avoids resetting an
+already matching profile. Each run requires an assigned dedicated device;
+cleanup must verify release of only its own phone lease before deleting its
+isolated database. A retained pilot database is never a benchmark fixture.
+
+The normal benchmark runtime deliberately mocks outbound SMS. Therefore the
+LIVE SMS entry fails preflight until a separately authorized live issuer is
+available; a mock transport cannot earn live-delivery credit. The controlled
+site scenario `phone_sms_otp` supports a normal, explicitly live-enabled local
+issuer without changing this transport policy. It derives the recipient from
+the owner, uses fresh expiring single-use challenges, and reports only opaque
+challenge metadata and a keyed digest to its private evaluator. Google and
+message tasks require both persisted operation evidence and their declared
+semantic evaluators. Missing prerequisites/evidence must remain failures or
+explicitly unexercised outcomes, not successful skips.
+
+On 2026-10-21, a normal autonomous root and browser agent attempted the controlled
+SMS sign-in. The site sent a fresh challenge through Surge at 05:19:43 UTC. The
+agent operated Messages without user input, but did not observe the matching
+message before the code expired. No authenticated site session was created.
+The provider status was still `sent`, not `delivered`, when checked. This is a
+failed end-to-end attempt and does not establish a code-entry defect or SMS
+arrival. Safe evidence: `.context/phone-harness/automatic-sms-live-result.json`.
+The browser closed, the phone lease was released and provider returned idle;
+the private vault and existing phone accounts/data were preserved.

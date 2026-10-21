@@ -1,3 +1,4 @@
+import './auth-test-site.phone-sms.cases';
 /**
  * Rose Shop cases for codes and links: an emailed second factor, codes that
  * never arrive or arrive expired, sign-in links, texted codes, and a code sent

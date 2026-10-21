@@ -269,3 +269,18 @@ export async function deliverTextToMockPhone(params: {
     data: { ...params, channel: 'sms', receivedAt: new Date() },
   });
 }
+
+/** Only the dedicated phone scenario reads this account/device context. */
+export async function findPhoneSmsOwner(userId: string) {
+  const [user, device] = await Promise.all([
+    prisma.user.findUnique({
+      where: { userId },
+      select: { userId: true, phone: true, isAnonymous: true },
+    }),
+    prisma.iPhoneDevice.findUnique({
+      where: { userId },
+      select: { enabled: true, providerDeviceId: true },
+    }),
+  ]);
+  return { user, device };
+}

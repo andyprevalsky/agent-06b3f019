@@ -38,6 +38,7 @@ export const AUTH_TEST_SITE_SCENARIOS = [
   'code_never_arrives',
   'expired_code',
   'minted_sms_otp',
+  'phone_sms_otp',
   'magic_link',
   'email_otp',
   'signup',
@@ -171,12 +172,22 @@ export interface SignInAttempt {
 
 export type CodePurpose = 'sign_in' | 'second_factor' | 'signup' | 'sms';
 
+export interface PhoneSmsChallenge {
+  challengeId: string;
+  issuedAt: string;
+  expiresAt: string;
+  consumedAt: string | null;
+  deliveryAck: boolean;
+  liveTransport: boolean;
+  codeDigest: string;
+}
 export interface IssuedCode {
   email: string;
   code: string;
   purpose: CodePurpose;
   expiresAtMs: number;
   consumed: boolean;
+  phoneChallenge?: PhoneSmsChallenge;
 }
 
 export interface SiteSession {
@@ -311,6 +322,7 @@ export interface AuthTestSiteManifest {
 }
 
 export interface AuthTestSiteReport {
+  phoneSmsChallenges?: PhoneSmsChallenge[];
   siteId: string;
   scenario: AuthTestSiteScenario;
   realm: string;
