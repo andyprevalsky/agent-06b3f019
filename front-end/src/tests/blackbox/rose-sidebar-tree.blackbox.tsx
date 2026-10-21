@@ -1,6 +1,7 @@
-import { fireEvent, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
+import { subscribeToBus } from '@/lib/realtime';
 import AppSidebar from '@/features/terminal-component-group/components/AppSidebar';
 import { defaultProps, makeAgent, mockSession } from './app-sidebar.fixtures';
 import { expandBar, mockProjectsApi, signedInUser, roseBar } from './rose-sidebar.fixtures';
@@ -133,5 +134,42 @@ describe('sidebar agent hierarchy', () => {
     );
     fireEvent.mouseLeave(roseBar());
     expect(screen.queryByTestId('rose-agent-count-root')).toBeNull();
+  });
+  it('updates counts from real tree events without counting paused/completed agents, cycles or replay twice', async () => {
+    setup();
+    await waitFor(() => expect(screen.getByTestId('rose-agent-count-root')).toHaveTextContent('4'));
+    const handlers = vi
+      .mocked(subscribeToBus)
+      .mock.calls.filter(([id]) => id === 'root')
+      .at(-1)![1];
+    const update = (
+      agentId: string,
+      status: 'ACTIVE' | 'PAUSED' | 'COMPLETED',
+      parentAgentId: string,
+    ) => {
+      act(() =>
+        handlers.onAgentStateChanged?.({
+          agentId,
+          parentAgentId,
+          goal: agentId === 'worker' ? 'Research' : 'Check sources',
+          status,
+          progress: 0,
+          toolsInUse: [],
+          messageCount: 1,
+          costCents: 0,
+        }),
+      );
+    };
+    update('worker', 'PAUSED', 'root');
+    expect(screen.getByTestId('rose-agent-count-root')).toHaveTextContent('3');
+    update('leaf', 'COMPLETED', 'worker');
+    expect(screen.getByTestId('rose-agent-count-root')).toHaveTextContent('2');
+    update('worker', 'ACTIVE', 'root');
+    update('worker', 'ACTIVE', 'root');
+    expect(screen.getByTestId('rose-agent-count-root')).toHaveTextContent('3');
+    update('worker', 'ACTIVE', 'leaf');
+    expect(screen.queryByTestId('rose-agent-count-root')).toBeNull();
+    expandBar();
+    expect(screen.queryByTestId('rose-agent-row-worker')).toBeNull();
   });
 });

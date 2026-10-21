@@ -137,18 +137,35 @@ test('sidebar opens direct children only and badges active tree agents on the mi
 for (const width of [320, 390, 700]) {
   test(`mobile drawer fills all ${width}px of the viewport`, async ({ page }) => {
     await openSidebarPreview(page, width);
-    await page.getByRole('button', { name: 'Open menu', exact: true }).click();
+    const header = page.getByTestId('rose-mobile-header');
+    const menu = header.getByRole('button', { name: 'Open menu', exact: true });
+    const rose = header.getByRole('button', { name: 'Rose', exact: true });
+    const menuRect = await menu.boundingBox();
+    const roseRect = await rose.boundingBox();
+    expect(menuRect!.x).toBeLessThan(10);
+    expect(width - (roseRect!.x + roseRect!.width)).toBeLessThan(10);
+    const controls = await header.getByRole('button').all();
+    const boxes = (await Promise.all(controls.map((button) => button.boundingBox())))
+      .filter((box): box is NonNullable<typeof box> => box !== null)
+      .sort((a, b) => a.x - b.x);
+    for (let i = 1; i < boxes.length; i++)
+      expect(boxes[i].x).toBeGreaterThanOrEqual(boxes[i - 1].x + boxes[i - 1].width - 1);
+    await menu.click();
     const drawer = page.getByRole('dialog', { name: 'Menu', exact: true });
     await expect(drawer).toBeVisible();
+    await expect(drawer).toHaveClass(/slide-in-from-left/);
     await expect(async () => {
       const rect = await drawer.boundingBox();
       expect(rect).not.toBeNull();
       expect(Math.abs(rect!.x)).toBeLessThan(1);
       expect(Math.abs(rect!.width - width)).toBeLessThan(1);
     }).toPass();
-    if (width === 390) await page.screenshot({ path: '/tmp/rose-mobile-drawer-full-width.png' });
+    if (width === 390) {
+      await page.screenshot({ path: '/tmp/rose-mobile-drawer-full-width.png' });
+    }
     await drawer.getByRole('button', { name: 'Close', exact: true }).click();
     await expect(drawer).not.toBeVisible();
+    if (width === 390) await page.screenshot({ path: '/tmp/rose-mobile-header-rose-right.png' });
   });
 }
 
@@ -179,4 +196,50 @@ test('authenticated app smoothly enters dark mode and manual light toggle still 
   await page.getByRole('button', { name: 'Light mode', exact: true }).click();
   await expect(page.locator('html')).not.toHaveClass(/dark/);
   await expect(page.getByRole('button', { name: 'Dark mode', exact: true })).toBeVisible();
+});
+
+test('mobile drawer survives repeated close, Escape, selection and rotation without trapping the app', async ({
+  page,
+}) => {
+  await openSidebarPreview(page, 390);
+  const menu = page.getByRole('button', { name: 'Open menu', exact: true });
+  const drawer = page.getByRole('dialog', { name: 'Menu', exact: true });
+  for (let i = 0; i < 3; i++) {
+    await menu.click();
+    await expect(drawer).toHaveCount(1);
+    if (i === 0) await page.keyboard.press('Escape');
+    else await drawer.getByRole('button', { name: 'Close', exact: true }).click();
+    await expect(drawer).not.toBeVisible();
+  }
+  await menu.click();
+  await drawer.getByRole('button', { name: 'Launch a product', exact: true }).click();
+  await expect(drawer).not.toBeVisible();
+  await expect(page).toHaveURL(new RegExp('agent-id=' + ROOT));
+  await menu.click();
+  await page.setViewportSize({ width: 844, height: 390 });
+  await expect(page.getByTestId('rose-sidebar')).toBeVisible();
+  await expect(drawer).toHaveCount(0);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await menu.click();
+  await expect(drawer).toBeVisible();
+  await drawer.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Rose', exact: true })).toBeVisible();
+});
+
+test('ordinary mobile account has no public-site links and includes the new popular goal', async ({
+  page,
+}) => {
+  await openSidebarPreview(page, 390);
+  await page.getByRole('button', { name: 'Rose', exact: true }).click();
+  await expect(page.getByTestId('popular-goals-track')).toBeVisible();
+  for (const label of ['Research', 'Careers', 'About', 'Privacy', 'Terms'])
+    await expect(page.getByRole('button', { name: label, exact: true })).toHaveCount(0);
+  const goal = page
+    .getByTestId('popular-goals-track')
+    .getByRole('button', { name: 'Get Rose Api Key', exact: true })
+    .first();
+  await expect(goal).toBeAttached();
+  await goal.scrollIntoViewIfNeeded();
+  await goal.click({ force: true });
+  await expect(page.getByPlaceholder('Enter any goal')).toHaveValue('Get Rose Api Key');
 });

@@ -104,33 +104,29 @@ afterEach(() => {
 
 describe('Rose mobile header (flag on, < 768px)', () => {
   it.each([375, 390, 430, 744])(
-    'at %ipx: hamburger · Rose pill (brand + bell) · four app icons, all >= 40px',
+    'at %ipx: menu left · actions middle · Rose icon far right, all >= 40px',
     async (width) => {
       setViewport(width);
       await renderTerminal();
       const row = header();
-      // Exactly three groups, in order: hamburger, pill, icons.
       const groups = [...row.children] as HTMLElement[];
       expect(groups).toHaveLength(3);
       const menu = within(groups[0]).getByRole('button', { name: 'Open menu' });
-      const pill = within(groups[1]).getByTestId('rose-mobile-pill');
-      const icons = within(groups[2]).getByRole('navigation', { name: 'Apps' });
+      const icons = within(groups[1]).getByRole('navigation', { name: 'Apps' });
+      const bell = within(groups[1]).getByRole('button', { name: 'Attention requests' });
+      const rose = within(groups[2]).getByRole('button', { name: 'Rose' });
       expect(icons).toHaveAttribute('data-placement', 'header');
-
-      expect(within(pill).getByRole('button', { name: /Rose/ })).toBeInTheDocument();
-      const bell = within(pill).getByRole('button', { name: 'Attention requests' });
       const appButtons = within(icons).getAllByRole('button');
-      expect(appButtons.map((b) => b.getAttribute('aria-label'))).toEqual(APP_LABELS);
-      for (const target of [menu, bell, ...appButtons]) expectTarget(target);
-
-      // Side groups never shrink; the pill's slot does — so nothing overlaps.
+      expect(
+        appButtons.map((b) => b.getAttribute('aria-label')?.replace('Light mode', 'Dark mode')),
+      ).toEqual(APP_LABELS);
+      for (const target of [menu, bell, rose, ...appButtons]) expectTarget(target);
       expect(groups[0].className).toContain('flex-none');
       expect(groups[2].className).toContain('flex-none');
-      expect(groups[1].className).toMatch(/\bmin-w-0\b.*\bflex-1\b|\bflex-1\b.*\bmin-w-0\b/);
-      expect(groups[1].className).toContain('justify-center');
-      // Room left for the pill (brand 32px logo + "Rose" + 40px bell ≈ 135px).
-      const pillRoom = width - ROW_PADDING - ROW_GAPS - TARGET - APP_LABELS.length * TARGET;
-      expect(pillRoom).toBeGreaterThanOrEqual(150);
+      expect(groups[1].className).toContain('justify-end');
+      expect(width - ROW_PADDING - ROW_GAPS).toBeGreaterThanOrEqual(
+        (APP_LABELS.length + 3) * TARGET,
+      );
       // Only one icon row on screen: the corner one stays desktop-only.
       expect(screen.getAllByRole('navigation', { name: 'Apps' })).toHaveLength(1);
     },
@@ -142,6 +138,9 @@ describe('Rose mobile header (flag on, < 768px)', () => {
     await user.click(within(header()).getByRole('button', { name: 'Open menu' }));
     const drawer = await screen.findByRole('dialog');
     expect(drawer.className).toContain('left-0');
+    expect(drawer.className).toContain('data-[state=open]:slide-in-from-left');
+    expect(drawer.className).toContain('w-screen');
+    expect(within(drawer).getByRole('button', { name: 'Close' })).toBeInTheDocument();
     expect(within(drawer).getByRole('button', { name: 'Agents' })).toBeInTheDocument();
   });
 
@@ -192,16 +191,15 @@ describe('Rose mobile header (flag on, < 768px)', () => {
     await waitFor(() => expect(screen.queryByTestId('rose-phone')).toBeNull());
   });
 
-  it('dark mode from the header icon darkens the pill (light by default)', async () => {
+  it('login dark mode and manual header toggle keep the far-right Rose icon accessible', async () => {
     setViewport(390);
     const user = await renderTerminal();
-    const pill = within(header()).getByTestId('rose-mobile-pill');
-    expect(pill.className).toContain('bg-white/85');
-    expect(pill.className).toContain('dark:bg-[rgba(32,32,30,0.78)]');
+    await waitFor(() => expect(document.documentElement).toHaveClass('dark'));
+    expect(within(header()).getByRole('button', { name: 'Rose' })).toBeInTheDocument();
+    await user.click(within(header()).getByRole('button', { name: 'Light mode' }));
     expect(document.documentElement).not.toHaveClass('dark');
     await user.click(within(header()).getByRole('button', { name: 'Dark mode' }));
     expect(document.documentElement).toHaveClass('dark');
-    expect(within(header()).getByRole('button', { name: 'Light mode' })).toBeInTheDocument();
   });
 });
 

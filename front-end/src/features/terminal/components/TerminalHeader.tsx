@@ -13,12 +13,9 @@
  * [MOBILE  <  md] Rose Desktop --> transparent row at y=0 (safe-area aware):
  *                        left   = hamburger (40px; opens the agents drawer from
  *                                 the LEFT, the left bar's place)
- *                        center = the Rose PILL (brand + bell), centered in the
- *                                 space between hamburger and icons
- *                        right  = the four app icons (RoseAppIcons placement
- *                                 'header': Browser, Phone, Integrations + red
- *                                 reconnect dot, Dark mode; 40px targets)
- *                        fits 375-430px without overlap; light + dark
+ *                        center = bell and the four app actions (40px targets)
+ *                        far right = Rose icon (40px target)
+ *                        fits 320-744px without overlap; light + dark
  *
  * MOBILE RIGHT ACTION:
  * [SIGNED_IN]  -- tap hamburger --> MobileAgentDrawer (opens from RIGHT; Agents +
@@ -129,13 +126,21 @@ function MarbleBackground({
   );
 }
 
-function BrandButton({ onCreateNewAgent }: Pick<TerminalHeaderProps, 'onCreateNewAgent'>) {
+function BrandButton({
+  onCreateNewAgent,
+  compact = false,
+}: Pick<TerminalHeaderProps, 'onCreateNewAgent'> & { compact?: boolean }) {
   return (
     <div className="flex items-center space-x-1">
       <button
         type="button"
         onClick={onCreateNewAgent}
-        className="flex items-center space-x-2.5 cursor-pointer hover:opacity-80 transition-opacity"
+        aria-label={compact ? 'Rose' : undefined}
+        className={
+          compact
+            ? 'grid h-10 w-10 place-items-center cursor-pointer hover:opacity-80 transition-opacity'
+            : 'flex items-center space-x-2.5 cursor-pointer hover:opacity-80 transition-opacity'
+        }
       >
         <div
           className="w-8 h-8 rounded-lg"
@@ -144,7 +149,7 @@ function BrandButton({ onCreateNewAgent }: Pick<TerminalHeaderProps, 'onCreateNe
               'linear-gradient(to bottom left, #FE7503, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC)',
           }}
         />
-        <span className="text-base font-semibold tracking-tight">Rose</span>
+        {!compact && <span className="text-base font-semibold tracking-tight">Rose</span>}
       </button>
     </div>
   );
@@ -275,12 +280,10 @@ function MobileHeaderBar(props: TerminalHeaderProps) {
 }
 
 /** Rose dark mode only for the mobile pill (light keeps its translucent white). */
-const ROSE_MOBILE_PILL_CLASSES =
-  'flex h-11 min-w-0 items-center gap-1 rounded-2xl border border-border/50 bg-white/85 pl-2 pr-0.5 shadow-sm backdrop-blur-md dark:border-white/[0.08] dark:bg-[rgba(32,32,30,0.78)] dark:text-[#ececea]';
 
 /**
- * Rose Desktop mobile (< md): hamburger left · Rose pill (brand + bell) centered
- * between · the four app icons right. The row itself is transparent and lets
+ * Rose Desktop mobile (< md): agent menu far left, bell and app actions between,
+ * Rose icon far right. The row itself is transparent and lets
  * taps through between its controls.
  */
 function RoseMobileHeaderBar(props: TerminalHeaderProps) {
@@ -304,21 +307,16 @@ function RoseMobileHeaderBar(props: TerminalHeaderProps) {
           onLogout={props.onLogout}
         />
       </div>
-      <div className="flex min-w-0 flex-1 justify-center">
-        <div
-          data-testid="rose-mobile-pill"
-          className={`pointer-events-auto ${ROSE_MOBILE_PILL_CLASSES}`}
-        >
-          <BrandButton onCreateNewAgent={onCreateNewAgent} />
-          <HeaderAuthAction
-            isSignedIn={isSignedIn}
-            onLoginClick={onLoginClick}
-            onSelectAgent={onSelectAgent}
-          />
-        </div>
-      </div>
-      <div className="pointer-events-auto flex-none">
+      <div className="pointer-events-auto flex min-w-0 flex-1 items-center justify-end">
+        <HeaderAuthAction
+          isSignedIn={isSignedIn}
+          onLoginClick={onLoginClick}
+          onSelectAgent={onSelectAgent}
+        />
         <RoseAppIcons placement="header" />
+      </div>
+      <div data-testid="rose-mobile-pill" className="pointer-events-auto flex-none">
+        <BrandButton compact onCreateNewAgent={onCreateNewAgent} />
       </div>
     </header>
   );
