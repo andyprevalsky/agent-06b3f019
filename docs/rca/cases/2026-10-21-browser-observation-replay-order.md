@@ -9,6 +9,7 @@ problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: Browser label readers treated array append order as observation time
 symptoms:
   - Browser address or model reverts after older replay data arrives
+  - keeps the newest observed URL and model when older events arrive after hydration
 tags:
   - browser
   - realtime
