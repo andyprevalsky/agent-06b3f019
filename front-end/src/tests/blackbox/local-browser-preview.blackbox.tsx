@@ -34,10 +34,10 @@ describe('Local root preview binding', () => {
       http.get(`${API}/browser-world/root`, () => HttpResponse.json({ root: null, sites: [] })),
     );
     renderWithProviders(<RoseAppIcons />);
-    fireEvent.click(screen.getByRole('button', { name: 'Browser', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: /^Browser$/ }));
     await screen.findByRole('button', { name: 'Open browser' });
-    const local = screen.getByRole('tab', { name: 'Local', exact: true });
-    const remote = screen.getByRole('tab', { name: 'Remote', exact: true });
+    const local = screen.getByRole('tab', { name: /^Local$/ });
+    const remote = screen.getByRole('tab', { name: /^Remote$/ });
     fireEvent.click(local);
     expect(local).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByText('Select an agent to view its local code preview.')).toBeVisible();
