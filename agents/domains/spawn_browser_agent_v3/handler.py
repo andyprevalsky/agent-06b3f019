@@ -2609,6 +2609,54 @@ async def _wait_for_browser_user_control(config: Any, task_id: str) -> bool:
     return yielded
 
 
+def _native_phone_auth_metadata(result: Dict[str, Any]) -> Dict[str, Any]:
+    target = result.get("auth_target")
+    if not isinstance(target, dict) or target.get("kind") != "iphone":
+        return {}
+    return {"target": target, "criticalReason": result.get("critical_reason"),
+            "steelSessionId": None, "liveViewUrl": None, "handoffMode": "manual_step"}
+
+
+async def _native_phone_auth_pause(
+    *, config, user_id, agent_id, task_id, decision_id, snapshot, critical_reason,
+    action_history, dom_service, unified_action, browser_turn_messages,
+    continuity_state, runtime,
+):
+    """Native handoff returns through the existing exact-request workflow pause."""
+    from .phone import _identity, request_native_phone_authentication
+    outcome = await request_native_phone_authentication(
+        config=config, user_id=user_id, agent_id=agent_id, task_id=task_id,
+        decision_id=decision_id, snapshot=snapshot, critical_reason=critical_reason,
+    )
+    info = outcome.get("request_info") or {}
+    request = info.get("request") or {}
+    result = ({"success": True, "request_id": request["id"], "target": request["target"],
+               "criticalReason": critical_reason} if outcome.get("success") else outcome)
+    await action_history.record_action(
+        dom_service=dom_service, action="request_user_assistance_for_authentication",
+        thinking=unified_action.get("thinking"), params=unified_action.get("params") or {}, result=result,
+    )
+    _append_browser_turn_messages(
+        browser_turn_messages, unified_action=unified_action, result=result,
+        tool_call_id=decision_id or _identity("native-auth-tool", task_id, (snapshot or {}).get("interaction", {}).get("cursor")),
+    )
+    if not outcome.get("success"):
+        return outcome
+    target = request["target"]
+    state = {**continuity_state(), "auth_target": target, "critical_reason": critical_reason}
+    return {
+        **runtime, "status": "awaiting_auth_assistance", "request_id": request["id"],
+        "auth_assistance_request": info, "auth_target": target, "critical_reason": critical_reason,
+        "task_id": task_id, "auth_realm": "iphone", "base_site": "Cloud iPhone",
+        "handoff_mode": "native_phone",
+        **(await persist_resume_context(
+            agent_id=agent_id, task_id=task_id,
+            force_private=bool(action_history.secret_redaction_state().get("secret_redaction_refs")),
+            state=state,
+        )),
+    }
+
+
 def _browser_action_tool_call_id(llm_result: Dict[str, Any]) -> str:
     """Return the one streamed tool-call id used for an action's full lifecycle."""
     return str(llm_result.get("tool_call_id") or uuid_module.uuid4())
@@ -2998,6 +3046,7 @@ async def _call_browser_use_with_rotation(
     pool: str = BROWSER_USE_PRICING_POOL,
     dump_extra: Optional[Dict[str, Any]] = None,
     dom_service: Any = None,
+    phone_observation: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Call rose-1-browser-use with in-activity claudeAuth rotation.
 
@@ -3007,7 +3056,19 @@ async def _call_browser_use_with_rotation(
     replacement, and retry up to MAX_CLAUDE_TOKEN_ROTATIONS. If all rotations
     exhaust (or there's no token to start), fall through to the waterfall.
     """
+    from .phone import GOOGLE_POLICY_GUIDANCE, PHONE_GUIDANCE, phone_actions
+    # Discovery belongs to the trusted profile-gated decision loop. Ordinary
+    # browser calls must preserve their pre-phone request and cache inputs.
+    phone_snapshot = phone_observation if isinstance(phone_observation, dict) and phone_observation.get("enabled") is True else {}
     browser_state_for_llm = dict(browser_state)
+    available_actions = phone_actions(AVAILABLE_ACTIONS, phone_snapshot)
+    if phone_snapshot.get("enabled"):
+        browser_state_for_llm["phone"] = phone_snapshot
+        dynamic_system_context = dynamic_system_context + "\n\n" + PHONE_GUIDANCE
+        interaction = phone_snapshot.get("interaction")
+        setup = interaction.get("setup") if isinstance(interaction, dict) else None
+        if isinstance(setup, dict) and setup.get("googlePasscodeExceptionAllowed") is True:
+            dynamic_system_context += "\n\n" + GOOGLE_POLICY_GUIDANCE
     if extra_user_messages:
         browser_state_for_llm["_extra_user_messages"] = extra_user_messages
 
@@ -3017,7 +3078,7 @@ async def _call_browser_use_with_rotation(
         browser_state=browser_state_for_llm,
         action_history=action_entries,
         available_actions=[
-            action for action in AVAILABLE_ACTIONS
+            action for action in available_actions
             if action != "screenshot" or getattr(dom_service, "secret_values_used", False) is not True
         ],
         dynamic_system_context=dynamic_system_context,
@@ -3093,10 +3154,13 @@ async def _call_browser_use_with_rotation(
         else None
     )
 
-    llm_result = await rose_client.complete_browser_use(claude_auth=claude_auth, gpt_auth=gpt_auth, **rose_kwargs)
+    from .phone import with_phone_heartbeat
+    model_work = rose_client.complete_browser_use(claude_auth=claude_auth, gpt_auth=gpt_auth, **rose_kwargs)
+    llm_result = (await with_phone_heartbeat(model_work, config, user_id, phone_snapshot)
+                  if phone_snapshot.get("enabled") else await model_work)
 
     if not use_claude:
-        return llm_result
+        return {**llm_result, "_phone_snapshot": phone_snapshot} if phone_snapshot.get("enabled") else llm_result
 
     rotations = 0
     while (
@@ -3157,9 +3221,11 @@ async def _call_browser_use_with_rotation(
             pool_token_id=token_state.pool_token_id,
             max_rotations=0,
         )
-        llm_result = await rose_client.complete_browser_use(claude_auth=rotated_auth, **rose_kwargs)
+        model_work = rose_client.complete_browser_use(claude_auth=rotated_auth, **rose_kwargs)
+        llm_result = (await with_phone_heartbeat(model_work, config, user_id, phone_snapshot)
+                      if phone_snapshot.get("enabled") else await model_work)
 
-    return llm_result
+    return {**llm_result, "_phone_snapshot": phone_snapshot} if phone_snapshot.get("enabled") else llm_result
 
 
 def _browser_tool_arguments(unified_action: Dict[str, Any]) -> Dict[str, Any]:
@@ -3207,6 +3273,11 @@ def _append_browser_turn_messages(
     action_name = unified_action.get("action") or "unknown"
     thinking = unified_action.get("thinking") or ""
     args = _browser_tool_arguments(unified_action)
+    if action_name == "phone":
+        from browser_tools.secret_refs import redact_current_secret_values
+        args = redact_current_secret_values(args)
+        thinking = redact_current_secret_values(thinking)
+        result = redact_current_secret_values(result)
     # The provider normalizes click_coordinates to an internal click + coordinates.
     # Reconstruct the advertised tool name here so the next LLM turn does not see
     # a successful but invalid-looking click({}) and try to correct a valid action.
@@ -5867,6 +5938,8 @@ _BROWSER_RESUME_CONTINUITY_FIELDS = (
     "reasoning_messages",
     "action_summary",
     "auth_attempts",
+    "auth_target",
+    "critical_reason",
     "secret_values_used",
     "browser_resume_context_ref",
     "user_instruction_messages",
@@ -7208,13 +7281,13 @@ async def _spawn_browser_agent_activity_v3_real(
                 result["pending_action_target"]["index"] = target["index"]
         if isinstance(auth_response, dict):
             request_ids = ("id", "requestId", "request_id", "attentionRequestId", "agentId", "userId",
-                           "browserSessionId", "steelSessionId", "mode")
+                           "browserSessionId", "steelSessionId", "mode", "target", "criticalReason")
             visible_auth = result["auth_assistance_request"]
             for key in request_ids:
                 if key in auth_response:
                     visible_auth[key] = auth_response[key]
             for key, protocol_keys in (("request", request_ids),
-                                       ("handoff", ("type", "steelSessionId", "liveViewUrl"))):
+                                       ("handoff", ("type", "steelSessionId", "liveViewUrl", "target", "criticalReason"))):
                 original = auth_response.get(key)
                 if isinstance(original, dict):
                     visible_auth[key] = _redact_activity_value(original)
@@ -7829,6 +7902,7 @@ async def _spawn_browser_agent_activity_v3_real(
             auth_realm = auth_options.get("realm") or auth_realm
         elif not auth_options:
             auth_options = {"realm": "this site"}
+
         if auth_options_prefetch is not None:
             if not auth_options_prefetch.done():
                 auth_options_prefetch.cancel()
@@ -8828,6 +8902,9 @@ async def _spawn_browser_agent_activity_v3_real(
         async def _execute_action(*args: Any, **kwargs: Any) -> Dict[str, Any]:
             """Observe every real action and retain its secrets through redaction."""
             nonlocal action_redaction_refs
+            action = kwargs.get("action") or (args[2] if len(args) > 2 else {})
+            if action.get("action") == "phone" and not (kwargs.get("phone_snapshot") or {}).get("enabled"):
+                return {"success": False, "error": "Phone unavailable for this decision"}
             redaction_refs = [dict(secret_refs)]
             action_redaction_refs = redaction_refs
             kwargs["auth_context_for_url"] = _auth_context_for_url
@@ -8865,6 +8942,20 @@ async def _spawn_browser_agent_activity_v3_real(
                 else:
                     for refs in redaction_refs:
                         result = mask_secret_values(result, refs)
+                action = kwargs.get("action") or (args[2] if len(args) > 2 else {})
+                if action.get("action") == "phone":
+                    # Phone dispatch bypasses DOM action implementations, which
+                    # normally record execution. Preserve the same real result
+                    # for completion verification and encrypted resume history.
+                    safe_params = action.get("params") or {}
+                    safe_thinking = action.get("thinking")
+                    for refs in redaction_refs:
+                        safe_params = mask_secret_values(safe_params, refs)
+                        safe_thinking = mask_secret_values(safe_thinking, refs)
+                    await action_history.record_action(
+                        dom_service=dom_service, action="phone", thinking=safe_thinking,
+                        params=safe_params, result=result,
+                    )
                 return result
             finally:
                 action_redaction_refs = None
@@ -9235,6 +9326,9 @@ async def _spawn_browser_agent_activity_v3_real(
                 if not observe_needs_dom:
                     state_prefetch.start(dom_service)
 
+                from .phone import observe_phone, phone_profile_enabled
+                phone_before_decision = (await observe_phone(config, user_id, task_id)
+                                         if phone_profile_enabled(user_profile) else {})
                 # Fast Mode: replay the recorded decision when the browser request
                 # fingerprint matches. The live browser session still executes the
                 # action — only the LLM "what next" decision is cached.
@@ -9277,6 +9371,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         ),
                         pool=browser_pool,
                         dom_service=dom_service_snapshot,
+                        phone_observation=phone_before_decision,
                     )
                     return _attach_browser_replay_target(live_result, dom_service_snapshot)
 
@@ -9296,7 +9391,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     fm_write_through = write_through_enabled_for_user(user_id)
                     llm_result = await asyncio.wait_for(
                         cached_browser_decision(
-                            enabled=bool(fast_mode_cache_enabled),
+                            enabled=bool(fast_mode_cache_enabled) and not phone_before_decision.get("enabled"),
                             goal=goal,
                             request={
                                 "task": task_prompt,
@@ -9316,7 +9411,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             },
                             call_llm=_live_browser_decision,
                             write_enabled=bool(
-                                fast_mode_cache_enabled or fm_write_through
+                                (fast_mode_cache_enabled or fm_write_through) and not phone_before_decision.get("enabled")
                             ),
                             agent_id=agent_id,
                         ),
@@ -9565,6 +9660,32 @@ async def _spawn_browser_agent_activity_v3_real(
 
             # 5. Handle special actions
             if action_name == "request_user_assistance_for_authentication":
+                if (unified_action.get("params") or {}).get("targetKind", "browser") == "iphone":
+                    native_pause = await _native_phone_auth_pause(
+                        config=config, user_id=user_id, agent_id=agent_id, task_id=task_id,
+                        decision_id=str(llm_result.get("tool_call_id") or ""),
+                        snapshot=llm_result.get("_phone_snapshot") if phone_profile_enabled(user_profile) else None,
+                        critical_reason=(unified_action.get("params") or {}).get("criticalReason"),
+                        action_history=action_history, dom_service=dom_service,
+                        unified_action=unified_action, browser_turn_messages=browser_turn_messages,
+                        continuity_state=_pause_continuity_state,
+                        runtime={"session_id": session_id, "cdp_url": cdp_url, "browser_url": browser_url,
+                                 "step_count": iteration},
+                    )
+                    if native_pause.get("status") != "awaiting_auth_assistance":
+                        continue
+                    execution_time_ms = (safe_time() - start_time) * 1000
+                    native_pause["recorded_passkey_credential_ids"] = sorted(recorded_passkey_credential_ids)
+                    native_pause["execution_time_ms"] = execution_time_ms
+                    native_pause["usage_items"] = build_usage_items(
+                        total_input_tokens, total_output_tokens, model_pricing, execution_time_ms,
+                        usage_by_model, pricing_pool=browser_pool,
+                        fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
+                        provider=browser_session_metadata.get("provider"),
+                    )
+                    browser_task_paused_for_resume = True
+                    await browser_stream.finish_tools(status="FINISHED")
+                    return _visible_activity_result(native_pause)
                 tool_call_id_action = str(llm_result.get("tool_call_id") or uuid_module.uuid4())
                 base_site = auth_realm or get_domain_from_url(current_url) or "Current Site"
                 logger.info(
@@ -9783,6 +9904,12 @@ async def _spawn_browser_agent_activity_v3_real(
                     or (request_info.get("request") or {}).get("id")
                 )
 
+                retained_phone = llm_result.get("_phone_snapshot") or {}
+                if (request_id and phone_profile_enabled(user_profile)
+                    and retained_phone.get("enabled") is True
+                    and ((retained_phone.get("interaction") or {}).get("lease") or {}).get("status") == "ACTIVE"):
+                    from .phone import retain_phone_for_auth
+                    await retain_phone_for_auth(config, user_id, task_id, request_id, snapshot=retained_phone)
                 success_result = {"success": True, "request_id": request_id}
                 if dom_service is not None:
                     await action_history.record_action(
@@ -10863,6 +10990,10 @@ Based on this feedback, I need to continue working on the task and address the i
                         password_origins=password_origins,
                         credential_refs_by_secret_ref=credential_refs_by_secret_ref,
                         user_id=user_id,
+                        agent_id=agent_id,
+                        browser_task_id=task_id,
+                        tool_call_id_decision=str(llm_result.get("tool_call_id") or ""),
+                        phone_snapshot=llm_result.get("_phone_snapshot") if phone_profile_enabled(user_profile) else None,
                         current_url=current_url,
                         trusted_page_urls=visited_urls,
                         write_lock_enabled=write_lock_enabled,
@@ -10876,10 +11007,21 @@ Based on this feedback, I need to continue working on the task and address the i
                     )
             )
             try:
-                result = await asyncio.wait_for(
-                    action_task,
-                    timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
-                )
+                if action_name == "phone":
+                    # Phone owns its deadlines; never classify a physical operation as a CDP stall.
+                    try:
+                        result = await action_task
+                    except asyncio.TimeoutError:
+                        result = {
+                            "success": False,
+                            "status": "UNKNOWN",
+                            "error": "Phone outcome unconfirmed; inspect owned receipt",
+                        }
+                else:
+                    result = await asyncio.wait_for(
+                        action_task,
+                        timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
+                    )
             except asyncio.TimeoutError:
                 from domains.spawn_browser_agent_v3.service_actions import BrowserEvaluateDeadlineExceeded
 
@@ -12278,6 +12420,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
                     activity_args.append(world_model_mode if world_model_mode != "real" else None)
                     activity_args.append(getattr(workflow_instance, "model", None))
+                    if tool_call.get("approvedMessageIntent"):
+                        activity_args.append(tool_call["approvedMessageIntent"])
                     async with span(
                         "browser_activity_wait",
                         agent_id=agent_id,
@@ -13113,12 +13257,17 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 "action_type": "auth_assistance",
                                 "browser_page_observation": result.get("browser_page_observation"),
                                 "task_id": result.get("task_id"),
+                                **({"authAssistance": {
+                                    "requestId": request_id, "mode": "manual_step",
+                                    **_native_phone_auth_metadata(result),
+                                }} if _native_phone_auth_metadata(result) else {}),
                                 "requestUserAuthentication": {
                                     "requestId": request_id,
                                     "authRealm": result.get("auth_realm"),
                                     "steelSessionId": result.get("session_id"),
                                     "taskId": result.get("task_id"),
                                     "handoffMode": result.get("handoff_mode"),
+                                    **_native_phone_auth_metadata(result),
                                     "browserUrl": result.get("browser_url"),
                                     "liveViewUrl": (
                                         auth_request.get("liveViewUrl")
@@ -13196,7 +13345,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     write_lock_resume_state = {
                         "pending_action": None,
                         "write_lock_approvals": result.get("write_lock_approvals", {}),
-                        "approval_type": AUTH_ASSISTANCE_DECLINED if user_declined else "auth_assistance",
+                        "approval_type": (AUTH_ASSISTANCE_DECLINED if user_declined else
+                                          "native_auth_assistance" if (result.get("auth_target") or {}).get("kind") == "iphone" else "auth_assistance"),
                         "step_count": result.get("step_count", 0),
                         "session_id": result.get("session_id"),
                         "cdp_url": result.get("cdp_url"),
@@ -13223,12 +13373,17 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "toolName": "spawn_browser_agent",
                             "action_type": "auth_assistance",
                             "task_id": result.get("task_id"),
-                            "requestUserAuthentication": {
+                            **({"authAssistance": {
+                                    "requestId": request_id, "mode": "manual_step",
+                                    **_native_phone_auth_metadata(result),
+                                }} if _native_phone_auth_metadata(result) else {}),
+                                "requestUserAuthentication": {
                                 "requestId": request_id,
                                 "authRealm": result.get("auth_realm"),
                                 "steelSessionId": result.get("session_id"),
                                 "taskId": result.get("task_id"),
                                 "handoffMode": result.get("handoff_mode"),
+                                **_native_phone_auth_metadata(result),
                             },
                         },
                     )

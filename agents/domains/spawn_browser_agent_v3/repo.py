@@ -1256,3 +1256,22 @@ async def fetch_recent_imessages(user_id: str, api_url: str, api_key: str, since
     except Exception as e:
         logger.warning("Failed to fetch iMessages", error=str(e))
         return []
+
+
+async def create_phone_auth_assistance_request(
+    config: Any, *, user_id: str, agent_id: str, task_id: str,
+    critical_reason: str, request_key: str, expected_cursor: int,
+    client: httpx.AsyncClient,
+) -> httpx.Response:
+    """Native creation has no browser URL/profile or credential-bearing fields."""
+    return await client.post(
+        f"{config.backend.api_url.rstrip('/')}/api/auth-assistance",
+        headers={"X-API-Key": config.backend.api_key or "", "X-User-Id": user_id},
+        json={
+            "agentId": agent_id, "authRealm": "iphone", "mode": "manual_step",
+            "targetKind": "iphone", "browserTaskId": task_id,
+            "criticalReason": critical_reason, "requestKey": request_key,
+            "expectedCursor": expected_cursor,
+        },
+        timeout=15.0,
+    )

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit
 
 import structlog
 
@@ -69,6 +70,9 @@ def is_payment_cdn_url(url: str) -> bool:
 def should_cache(method: str, resource_type: str, url: str) -> bool:
     method_upper = method.upper()
     resource_lower = resource_type.lower()
+    path = urlsplit(url).path.lower()
+    if path == "/api/iphone" or path.startswith("/api/iphone/"):
+        return False
     if is_payment_cdn_url(url):
         return False
     if resource_lower not in CACHEABLE_RESOURCE_TYPES:

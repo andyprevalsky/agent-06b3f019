@@ -168,6 +168,11 @@ def dump_llm_context(
         if extra:
             payload["extra"] = extra
 
+        # Browser activities bind private refs in a task-local context. Apply
+        # that policy before either the private archive or a public dump/log.
+        from browser_tools.secret_refs import redact_current_secret_values
+        payload = redact_current_secret_values(payload)
+
         archive_ref = archive_json(
             root_agent_id=archive_root_agent_id,
             path=f"llm/{dump_id}.json.gz.enc",
@@ -234,6 +239,13 @@ def update_llm_dump(
     """Merge late-arriving Rose response details into an existing dump."""
     if not path:
         return
+    from browser_tools.secret_refs import redact_current_secret_values
+    model = redact_current_secret_values(model)
+    config = redact_current_secret_values(config)
+    response_format = redact_current_secret_values(response_format)
+    tools = redact_current_secret_values(tools)
+    output = redact_current_secret_values(output)
+    extra = redact_current_secret_values(extra)
 
     if path.startswith(_CLICKHOUSE_DUMP_SCHEME):
         try:

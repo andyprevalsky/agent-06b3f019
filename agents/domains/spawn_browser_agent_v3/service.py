@@ -1016,7 +1016,7 @@ def browser_usage_items_to_tool_usage(usage_items: Optional[List[Dict[str, Any]]
 # ========================================
 
 
-def build_action_titles(  # noqa: C901
+def build_action_titles(
     action_name: str,
     unified_action: Dict[str, Any],
     element_desc: Optional[str],
@@ -1110,6 +1110,9 @@ def build_action_titles(  # noqa: C901
     elif action_name == "request_user_assistance_for_authentication":
         title_progress = "Requesting authentication assistance..."
         title_done = "Requested authentication assistance"
+    elif action_name == "phone":
+        title_progress = "Using cloud iPhone..."
+        title_done = "Cloud iPhone result"
     elif action_name == "request_payment_card":
         total_cents = unified_action.get("params", {}).get("total_cents", 0)
         merchant = unified_action.get("params", {}).get("merchant", "merchant")

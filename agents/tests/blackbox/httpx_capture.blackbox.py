@@ -221,6 +221,7 @@ async def test_local_credential_exchange_uses_real_transport_and_metadata_only_c
                 "/oauth/token",
                 "/api/integrations/lantern-people/credentials/token",
                 "/api/integrations/lantern-people/credentials/upload",
+                "/api/iphone/leases/" + secret + "/operations",
             ):
                 capture.clear_captures()
                 payload = "refresh_token=" + secret
@@ -237,7 +238,7 @@ async def test_local_credential_exchange_uses_real_transport_and_metadata_only_c
                 entries = capture.get_captures()
                 assert len(entries) == 1, "A real local credential exchange must publish safe response metadata"
                 entry = entries[0]
-                assert entry["url"] == origin + path
+                assert entry["url"] == ("https://private.invalid/api/iphone" if path.startswith("/api/iphone/") else origin + path)
                 assert entry["method"] == "POST" and entry["responseStatus"] == 201
                 assert entry["requestHeaders"] == {} and entry["requestBody"] is None
                 assert entry["responseBody"] is None
@@ -266,7 +267,188 @@ async def run_all_tests():
     r.record("get_captures_after_filter", test_get_captures_after_filter)
     await r.record_async("mock_handler_wraps_proxy_mount_transports", test_mock_handler_wraps_proxy_mount_transports)
     teardown_mock()
+    await r.record_async("phone_transport_capture_privacy", test_phone_transport_captures_metadata_only_and_preserves_wire)
+    await r.record_async(
+        "phone_mixed_case_transport_privacy", test_phone_mixed_case_transport_privacy
+    )
+    await r.record_async(
+        "phone_mixed_case_never_enters_browser_cache", test_phone_mixed_case_never_enters_browser_cache
+    )
     return r.all_passed
+
+
+
+
+
+async def test_phone_transport_captures_metadata_only_and_preserves_wire():
+    import httpx
+    import helpers.httpx_capture as hc
+    canary='CANARY-PHONE-INPUT-OBSERVATION'
+    from providers.fast_cache.browser_http import should_cache
+    for private_url in ('https://backend.test/api/iphone', 'https://backend.test/api/iphone/leases/private/frame'):
+        assert not should_cache('GET', 'fetch', private_url), 'phone bodies must not become replay fixtures'
+    paths=('/api/iphone','/api/iphone/','/api/iphone/capability','/api/iphone/interactions/'+canary,
+           '/api/iphone/leases/'+canary+'/operations','/api/iphone/leases/'+canary+'/frame')
+    def backend(request):
+        assert canary in request.content.decode()
+        return httpx.Response(200,json={'result':canary},headers={'x-private':canary})
+    hc.set_mock_handler(backend)
+    try:
+        async with httpx.AsyncClient() as client:
+            for path in paths:
+                hc.clear_captures()
+                response=await client.post('https://backend.test'+path+'?opaque='+canary,json={'args':{'s':canary}},headers={'x-api-key':canary,'x-private':canary})
+                assert response.json()['result']==canary
+                entry=hc.get_captures()[0]
+                assert canary not in json.dumps(entry), 'phone wire data leaked into capture'
+                assert entry['url']=='https://private.invalid/api/iphone'
+                assert entry['requestHeaders']=={} and entry['requestBody'] is None and entry['responseBody'] is None
+                assert entry['responseStatus']==200
+        def failure(request):
+            raise httpx.ReadError('echo '+canary+' '+str(request.url))
+        hc.set_mock_handler(failure)
+        hc.clear_captures()
+        async with httpx.AsyncClient() as client:
+            try:
+                await client.get('https://backend.test/api/iphone/leases/'+canary)
+            except httpx.ReadError as error:
+                assert canary not in str(error)
+            else:
+                raise AssertionError('expected failure')
+        assert hc.get_captures()[0]['error']=='Private phone request failed'
+        assert canary not in json.dumps(hc.get_captures())
+        # A similarly named, unrelated API must retain ordinary capture behavior.
+        hc.set_mock_handler(lambda request:httpx.Response(200,json={'ordinary':'visible'}))
+        hc.clear_captures()
+        async with httpx.AsyncClient() as client:
+            await client.get('https://backend.test/api/iphone-other')
+        assert 'visible' in hc.get_captures()[0]['responseBody']
+    finally:
+        hc.clear_mock_handler()
+        hc.clear_captures()
+
+
+async def test_phone_mixed_case_transport_privacy():
+    """Route-equivalent spelling must not opt a private exchange into capture."""
+    import traceback
+
+    import httpx
+    import helpers.httpx_capture as hc
+
+    canary = "Unregistered-Phone-Secret-CaSe-6a"
+    payload = {"args": {"s": canary}, "unchanged": "MiXeD-BODY"}
+    paths = (
+        "/API/IPHONE",
+        "/API/IPHONE/",
+        f"/Api/Iphone/leases/{canary}/operations",
+        f"/aPi/iPhOnE/leases/{canary}/frame",
+    )
+    seen = []
+
+    def backend(request):
+        assert request.url.path == paths[len(seen)]
+        assert request.url.username == canary
+        assert request.url.password == canary
+        assert request.url.query == f"opaque={canary}".encode()
+        assert request.url.fragment == canary
+        assert request.headers["x-private"] == canary
+        assert request.headers["x-api-key"] == canary
+        assert json.loads(request.content) == payload
+        seen.append(request.url.path)
+        return httpx.Response(503, json=payload, headers={"x-private": canary})
+
+    try:
+        hc.set_mock_handler(backend)
+        async with httpx.AsyncClient() as client:
+            for path in paths:
+                hc.clear_captures()
+                response = await client.post(
+                    f"https://{canary}:{canary}@Backend.test{path}?opaque={canary}#{canary}",
+                    json=payload,
+                    headers={"x-private": canary, "x-api-key": canary},
+                )
+                assert response.status_code == 503
+                assert response.json() == payload
+                assert response.headers["x-private"] == canary
+                entries = hc.get_captures()
+                assert len(entries) == 1
+                entry = entries[0]
+                assert canary not in json.dumps(entry), "Mixed-case phone capture leaked unregistered secret"
+                assert entry["url"] == "https://private.invalid/api/iphone"
+                assert entry["requestHeaders"] == {}
+                assert entry["requestBody"] is None and entry["responseBody"] is None
+                assert entry["responseStatus"] == 503 and entry["error"] is None
+        assert seen == list(paths)
+
+        def failure(request):
+            raise httpx.ReadError(f"echo {canary} {request.url}", request=request)
+
+        hc.set_mock_handler(failure)
+        async with httpx.AsyncClient() as client:
+            for path in paths:
+                hc.clear_captures()
+                try:
+                    await client.get(
+                        f"https://{canary}:{canary}@Backend.test{path}?opaque={canary}#{canary}",
+                        headers={"x-private": canary},
+                    )
+                except httpx.ReadError as error:
+                    assert str(error) == "Private phone request failed"
+                    assert canary not in "".join(traceback.format_exception(error))
+                else:
+                    raise AssertionError("Expected transport failure")
+                entry = hc.get_captures()[0]
+                assert entry["error"] == "Private phone request failed"
+                assert entry["url"] == "https://private.invalid/api/iphone"
+                assert canary not in json.dumps(entry)
+
+        # Prefix lookalikes retain normal URL, body, response and error semantics.
+        ordinary = {"public": "Ordinary-CaSe-Sensitive-Body"}
+        hc.set_mock_handler(lambda request: httpx.Response(200, json=json.loads(request.content)))
+        async with httpx.AsyncClient() as client:
+            for path in ("/api/iphone-other", "/API/IPHONE-other"):
+                hc.clear_captures()
+                response = await client.post(f"https://backend.test{path}", json=ordinary)
+                assert response.json() == ordinary
+                entry = hc.get_captures()[0]
+                assert entry["url"] == f"https://backend.test{path}"
+                assert json.loads(entry["requestBody"]) == ordinary
+                assert json.loads(entry["responseBody"]) == ordinary
+    finally:
+        hc.clear_mock_handler()
+        hc.clear_captures()
+
+
+async def test_phone_mixed_case_never_enters_browser_cache():
+    """Neither cache read, write, key construction nor logging may see secrets."""
+    from unittest.mock import AsyncMock, patch
+
+    from providers.fast_cache import browser_http
+
+    canary = "Unregistered-Cache-Secret-CaSe-6a"
+    paths = ("/API/IPHONE", f"/Api/Iphone/leases/{canary}/operations", "/aPi/iPhOnE/frame")
+    cache = browser_http.BrowserHttpCache("synthetic phone privacy")
+    with (
+        patch.object(browser_http.cache_client, "cache_get", new_callable=AsyncMock) as get,
+        patch.object(browser_http.cache_client, "cache_set", new_callable=AsyncMock) as put,
+        patch.object(browser_http.normalize, "browser_http_key") as key,
+        patch.object(browser_http, "logger") as logger,
+    ):
+        for path in paths:
+            url = f"https://{canary}:{canary}@Backend.test{path}?opaque={canary}#{canary}"
+            for method, resource in (("GET", "fetch"), ("HEAD", "document"), ("POST", "xhr")):
+                assert not browser_http.should_cache(method, resource, url), "Mixed-case phone traffic remains replayable"
+                assert await cache.lookup(method, url, resource, {"x-private": canary}, canary) is None
+                assert not await cache.record(method, url, resource, 200, {"x-private": canary}, canary.encode(), {"x-private": canary}, canary)
+        get.assert_not_awaited()
+        put.assert_not_awaited()
+        key.assert_not_called()
+        assert not logger.mock_calls
+    for path in ("/api/iphone-other", "/API/IPHONE-other"):
+        url = f"https://backend.test{path}"
+        assert browser_http.should_cache("GET", "fetch", url)
+        assert browser_http.should_cache("POST", "xhr", url)
+        assert not browser_http.should_cache("POST", "document", url)
 
 
 if __name__ == "__main__":
