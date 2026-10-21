@@ -946,12 +946,14 @@ async def test_summarize_and_filter_links_actually_summarizes():
             markdown="# Lunette Cambodia\nLok Lak $21.00",
             links=["https://order.toasttab.com/online/lunette-cambodia/item-lok-lak"],
             cache_sequence_id="seq-1",
+            compute_token_lineage_key="agent:lineage-1",
         )
 
     assert result["summarized"] is True, result
     assert result["summary"] == "Lok Lak costs $21.00."
     assert llm.await_count == 1
     assert llm.await_args.kwargs["cache_sequence_id"] == "seq-1"
+    assert llm.await_args.kwargs["compute_token_lineage_key"] == "agent:lineage-1"
 
 
 async def run_all_tests():

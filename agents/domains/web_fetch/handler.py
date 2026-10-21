@@ -117,6 +117,7 @@ class WebFetchManager(ToolManager):
         fast_mode_goal: Optional[str] = None,
         fast_mode_cache_write_enabled: bool = False,
         world_model_mode: str = "real",
+        compute_token_lineage_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Execute web fetch and post events via handle_tool_event."""
         url = tool_call.get("url", "")
@@ -212,6 +213,7 @@ class WebFetchManager(ToolManager):
                     user_id,  # gpt_token_user_id
                     agent_id,
                     f"agent:{agent_id}:tool:{tool_call_id}:call:summarize_web_fetch",
+                    compute_token_lineage_key,
                 ],
                 start_to_close_timeout=timedelta(seconds=90),
                 retry_policy=RetryPolicy(maximum_attempts=2),
@@ -374,6 +376,7 @@ async def web_fetch(
     fast_mode_goal: Optional[str] = None,
     fast_mode_cache_write_enabled: bool = False,
     world_model_mode: str = "real",
+    compute_token_lineage_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute web fetch tool."""
     manager = get_manager()
@@ -394,6 +397,7 @@ async def web_fetch(
         fast_mode_goal=fast_mode_goal,
         fast_mode_cache_write_enabled=fast_mode_cache_write_enabled,
         world_model_mode=world_model_mode,
+        compute_token_lineage_key=compute_token_lineage_key,
     )
 
 

@@ -327,12 +327,18 @@ def _fire_and_forget_lease_heartbeat(auth: ComputeAuthContext) -> None:
 
 
 def _compute_token_payload(auth: ComputeAuthContext) -> Dict[str, Any]:
+    """Non-secret identity of the lease that served this call.
+
+    Usage is serialized into Temporal activity results, LLM dumps (ClickHouse
+    and the trace archive) and run records, so it must never carry the
+    credential itself. Consumers that need the rotated credential re-read it
+    from the backend lease by ``lineageKey``.
+    """
     return {
         "type": auth.token_type,
-        "accessToken": auth.token,
-        "accountId": auth.account_id,
         "source": auth.source,
         "poolTokenId": auth.pool_token_id,
+        "lineageKey": auth.lineage_key,
     }
 
 
