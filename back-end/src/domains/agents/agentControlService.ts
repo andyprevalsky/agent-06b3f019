@@ -42,7 +42,7 @@ export async function pauseAgent(agentId: string): Promise<void> {
     try {
       const client = await getTemporalClient();
       const handle = client.workflow.getHandle(paused.temporalWorkflowId);
-      await handle.signal('pause');
+      await handle.signal('pause', 'user');
     } catch (error) {
       log.warn('Pause signal failed, DB updated. Workflow will sync next iteration', {
         agent_id: agentId,

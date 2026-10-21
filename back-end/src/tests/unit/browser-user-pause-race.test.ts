@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { resolve } from 'node:path';
 import { prisma } from '../../providers/database';
 import {
   persistLockedToolLifecycleMessage,
@@ -114,6 +116,110 @@ async function main() {
       assert.ok(
         terminals[0].text.startsWith(pauseFirst ? 'original partial result' : 'completed result')
       );
+    }
+    // B3: A's annotation is invisible while B commits a newer ordinary row.
+    await prisma.message.deleteMany({ where: { agentId: id } });
+    const oldResult = await seed();
+    let releaseAnnotation!: () => void;
+    let annotationWritten!: () => void;
+    const held = new Promise<void>((resolve) => {
+      releaseAnnotation = resolve;
+    });
+    const written = new Promise<void>((resolve) => {
+      annotationWritten = resolve;
+    });
+    let annotationPid = 0;
+    let ordinaryPid = 0;
+    const annotation = prisma.$transaction(async (tx) => {
+      annotationPid = (
+        await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
+      )[0].pid;
+      const result = await persistLockedToolLifecycleMessage(tx, params, identity);
+      annotationWritten();
+      await held;
+      return result;
+    });
+    let annotatedAtCommit;
+    try {
+      await written;
+      // Different transaction/session and a later real clock, not a fabricated watermark.
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const newer = await prisma.$transaction(async (tx) => {
+        ordinaryPid = (
+          await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
+        )[0].pid;
+        return tx.message.create({
+          data: {
+            agentId: id,
+            workflowGeneration: id,
+            role: 'ASSISTANT',
+            text: 'newer independent result',
+            timestamp: new Date(),
+          },
+        });
+      });
+      assert.notEqual(
+        annotationPid,
+        ordinaryPid,
+        'held annotation and ordinary commit use two SQL sessions'
+      );
+      const firstPoll = await findMessages(id, oldResult.timestamp);
+      assert.deepEqual(
+        firstPoll.map((row) => row.id),
+        [newer.id]
+      );
+      releaseAnnotation();
+      annotatedAtCommit = (await annotation).message;
+      assert.ok(
+        Date.parse((annotatedAtCommit.metadata as any).userPause.recordedAt) <
+          newer.timestamp.getTime()
+      );
+      const afterCommit = await findMessages(id, newer.timestamp);
+      assert.deepEqual(
+        afterCommit.map((row) => row.id),
+        [oldResult.id],
+        'B3: a late committed annotation must replay after the ordinary cursor advances'
+      );
+      assert.equal(afterCommit[0].timestamp.getTime(), oldResult.timestamp.getTime());
+      assert.equal((afterCommit[0].metadata as any).errorCode, 'ORIGINAL');
+      assert.ok(afterCommit[0].text.startsWith(oldResult.text));
+      // Without an acknowledgement, another poll must still replay it for a lost/restarted reader.
+      assert.deepEqual(
+        (await findMessages(id, newer.timestamp)).map((row) => row.id),
+        [oldResult.id]
+      );
+      const root = resolve(__dirname, '../../../..');
+      const consumer = execFileSync(
+        resolve(root, 'agents/venv/bin/python'),
+        [resolve(root, 'agents/tests/blackbox/pause_control_provenance.py'), 'replay'],
+        {
+          cwd: root,
+          encoding: 'utf8',
+          maxBuffer: 2 * 1024 * 1024,
+          input: JSON.stringify({
+            initial: [oldResult],
+            firstPoll,
+            secondPoll: afterCommit,
+            originalText: oldResult.text,
+          }),
+        }
+      );
+      assert.match(consumer, /B3_CONSUMER_PASS/);
+      console.log(consumer.trim());
+      console.log(
+        'B3_PASS',
+        JSON.stringify({
+          annotationPid,
+          ordinaryPid,
+          annotationClock: (annotatedAtCommit.metadata as any).userPause.recordedAt,
+          ordinaryCursor: newer.timestamp.toISOString(),
+          replayedResultId: oldResult.id,
+          originalClock: oldResult.timestamp.toISOString(),
+        })
+      );
+    } finally {
+      releaseAnnotation();
+      await annotation;
     }
     console.log(
       'browser user pause real PostgreSQL: PASS (10 concurrent annotations, SQL polling, both completion/pause lock orderings)'

@@ -87,8 +87,11 @@ cancelled-attempt write cannot replace the paused result. Existing terminal
 results take priority over progress rows. Ordinary tools retain latest-result
 semantics.
 
-Same-ID broadcasts and timestamp-filtered polls deliver the annotation without
-moving the original result in conversation order. Both workflow/planner caches
+Same-ID broadcasts and per-agent polling deliver the annotation without
+moving the original result in conversation order. Typed user-pause TOOL rows
+replay regardless of the ordinary timestamp cursor: a transaction can stamp
+an annotation, remain uncommitted while another row advances the cursor, and
+commit later. Timestamp comparisons alone cannot guarantee delivery. Both workflow/planner caches
 and the realtime UI accept this narrowly typed update and reject stale replay.
 The separate `recordedAt` clock advances delivery cursors, not outcome clocks.
 
@@ -107,8 +110,8 @@ The original read-only incident probe also runs against the repaired source.
 Local causal proof is distinct from Polar outcome proof.
 
 10k agents: existing lifecycle locks are reused, no global lock or provider call
-is added. The poll query now also considers the user-pause annotation clock;
-large-fleet throughput was not measured. Outcome proof and the reason the original
+is added. The poll query replays all typed user-pause TOOL rows for that agent;
+its work grows with the paused-result count, and large-fleet throughput was not measured. Outcome proof and the reason the original
 tasks used the full 30 minutes remain open. Parent owns the authorized same-60
 rerun after all three clusters are integrated; this lane does not run it.
 
@@ -125,3 +128,30 @@ this lane.
 Transport cancellation is not user intent. Put pause ownership at the workflow
 which observed that intent, and make it an idempotent annotation of the owned
 result, preserving both its payload and position across durable and cached views.
+
+
+## Independent review repairs (2026-10-21)
+
+B1: a subscription webhook used the same argument-free PAUSE signal as a user
+control. The signal producer now supplies `subscription` or `user`, and the
+workflow propagates that cause to children. Only `user` sets explicit intent;
+the optional argument defaults to `user` for legacy user controls, while an
+unknown supplied cause does not. The registered backend regression invokes
+three real webhook handlers and the real user control, then feeds their actual
+signal arguments through the workflow, child and browser manager.
+
+B2: price-limit recovery unpaused execution without clearing that intent, so a
+later automatic cost stop inherited a completed user episode. All eight source
+unpause assignments now clear the active marker, including restored ACTIVE,
+parent recovery/orphan exits, budget wrap-up and auth-gate recovery. Captured
+intent in an already-cancelled manager attempt remains unchanged. Parent-query
+inheritance carries explicit intent instead of guessing it from status.
+
+B3: a real two-session PostgreSQL regression reproduces the late-commit loss:
+TxA stamps the pause and waits, TxB commits a newer ordinary row, the poll sees
+TxB and advances, then TxA commits. The old query returns no annotation. The
+new narrowly typed replay predicate delivers the original row, and the real
+planner consumer refreshes it without adding a terminal or moving its clock.
+The same final tests fail on 50f9dc499a1f2940fb7464a6d955ea1659dadb67 and pass
+with these repairs. Receipts and exact commands are in the source-bound P2
+handoff. Outcome proof remains open; no benchmark or provider run was performed.

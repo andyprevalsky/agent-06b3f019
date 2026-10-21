@@ -13162,6 +13162,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             isinstance(signal_response, str) and signal_response.strip() == REJECTION_SENTINEL
                         )
                         workflow_instance.is_paused = False
+                        workflow_instance._user_pause_active = False
                         if hasattr(workflow_instance, "_update_tree_state"):
                             await workflow_instance._update_tree_state(status="ACTIVE")
 

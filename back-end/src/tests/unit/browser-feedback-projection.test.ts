@@ -47,7 +47,7 @@ async function main(): Promise<void> {
           {
             OR: [
               { timestamp: { gt: floor } },
-              { metadata: { path: ['userPause', 'recordedAt'], gt: floor.toISOString() } },
+              { role: 'TOOL', metadata: { path: ['userPause', 'reason'], equals: 'user' } },
             ],
           },
         ],
@@ -77,7 +77,7 @@ async function main(): Promise<void> {
           {
             OR: [
               { timestamp: { gt: floor } },
-              { metadata: { path: ['userPause', 'recordedAt'], gt: floor.toISOString() } },
+              { role: 'TOOL', metadata: { path: ['userPause', 'reason'], equals: 'user' } },
             ],
           },
         ],

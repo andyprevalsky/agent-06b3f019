@@ -261,7 +261,9 @@ export async function findAncestors(agentId: string) {
 // ---------------------------------------------------------------------------
 
 /** Fetch messages for an agent ordered by timestamp ascending.
- *  If `since` is provided, only returns messages with timestamp > since. */
+ * Ordinary rows follow `since`. Typed pause annotations replay independently
+ * of that cursor: their transaction may commit after a newer ordinary row.
+ * Consumers deduplicate annotations by stable message ID and recordedAt. */
 export async function findMessages(agentId: string, since?: Date, browserToolCallId?: string) {
   return prisma.message.findMany({
     where: {
@@ -272,7 +274,10 @@ export async function findMessages(agentId: string, since?: Date, browserToolCal
               {
                 OR: [
                   { timestamp: { gt: since } },
-                  { metadata: { path: ['userPause', 'recordedAt'], gt: since.toISOString() } },
+                  {
+                    role: 'TOOL' as const,
+                    metadata: { path: ['userPause', 'reason'], equals: 'user' },
+                  },
                 ],
               },
             ],

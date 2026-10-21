@@ -224,14 +224,14 @@ async def test_user_pause_refresh_keeps_original_result_order_and_error():
                 "text": "Original error", "metadata": {"toolCallId": "call", "toolStatus": "ERROR",
                     "error": True, "errorCode": "ORIGINAL", "workflowGeneration": "generation"}}
     following = {"message_id": "next", "role": "ASSISTANT", "text": "Next turn",
-                 "timestamp": "2026-01-01T00:00:01+00:00"}
+                 "timestamp": "2026-01-01T00:00:03+00:00"}
     context = [copy.deepcopy(original), following]
     paused = copy.deepcopy(original)
     paused["text"] += "\n\n[User paused the browser agent.]"
     paused["metadata"]["userPause"] = {"reason": "user", "recordedAt": "2026-01-01T00:00:02+00:00"}
     cursor = datetime.fromisoformat(following["timestamp"])
     cursor = await poll_and_update_context(AsyncMock(return_value=[paused]), context, cursor)
-    assert cursor == datetime.fromisoformat(paused["metadata"]["userPause"]["recordedAt"])
+    assert cursor == datetime.fromisoformat(following["timestamp"]), "late commit cannot rewind the ordinary cursor"
     assert [row["message_id"] for row in context] == ["result", "next"]
     assert context[0]["text"].startswith(paused["text"])
     assert context[0]["metadata"]["errorCode"] == "ORIGINAL"
@@ -2410,12 +2410,12 @@ def test_workflow_parent_state_query():
     wf = _bare_workflow_instance()
     wf.is_paused = True
     wf._cost_limit_reached = True
-    assert wf.parent_state_query() == {"is_paused": True, "is_cost_limit_reached": True}
+    assert wf.parent_state_query() == {"is_paused": True, "is_cost_limit_reached": True, "user_pause_active": False}
 
 
 def test_workflow_parent_state_query_all_false():
     wf = _bare_workflow_instance()
-    assert wf.parent_state_query() == {"is_paused": False, "is_cost_limit_reached": False}
+    assert wf.parent_state_query() == {"is_paused": False, "is_cost_limit_reached": False, "user_pause_active": False}
 
 
 def test_workflow_format_outputs_no_schema_emits_response_keys():
@@ -3062,6 +3062,69 @@ def _restore_workflow(original):
     import workflows.agent_workflow as m
 
     m.workflow = original
+
+
+async def test_pause_intent_ends_with_recovered_episode():
+    from unittest.mock import AsyncMock
+    wf = _bare_workflow_instance()
+    wf.agent_id = "pause-episode"
+    wf._update_tree_state = AsyncMock()
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf.pause()
+        assert wf._user_pause_active
+        await wf.price_limit_increased({"new_limit_cents": 100})
+        assert not wf.is_paused and not wf._user_pause_active, "B2: price recovery retained old intent"
+        await wf.cost_limit_reached()
+        assert wf.is_paused and not wf._user_pause_active, "B2: automatic stop inherited old user intent"
+        # A stale marker in a restored ACTIVE snapshot is not a live pause episode.
+        state = _deployment_resume_fixture("ACTIVE")
+        state["runtime_state"] = {"user_pause_active": True}
+        wf._restore_deployment_state(state)
+        assert not wf.is_paused and not wf._user_pause_active
+        wf._user_pause_active = True
+        wf._apply_deployment_control_state({"status": "ACTIVE"})
+        assert not wf._user_pause_active
+        # The parent's explicit cause is inherited, never inferred from pause alone.
+        for explicit in (False, True):
+            wf.parent_workflow_id = "parent"
+            wf.is_paused = False
+            wf._paused_by_parent = False
+            wf._query_parent_state = AsyncMock(return_value={"is_paused": True, "user_pause_active": explicit})
+            await wf._check_parent_state()
+            assert wf.is_paused and wf._user_pause_active is explicit
+        # Parent recovery and orphan recovery also end inherited pause intent.
+        for parent_state in ({"is_paused": False, "is_cost_limit_reached": False}, {"parent_missing": True}):
+            wf.parent_workflow_id = "parent"
+            wf._orphaned = False
+            wf._paused_by_parent = True
+            wf.is_paused = True
+            wf._user_pause_active = True
+            wf._query_parent_state = AsyncMock(return_value=parent_state)
+            await wf._check_parent_state()
+            assert not wf.is_paused and not wf._user_pause_active
+        # The transient-parent orphan exit and one-shot budget wrap-up also unpause.
+        import workflows.agent_workflow as module
+        wf._orphaned = False
+        wf._paused_by_parent = True
+        wf.is_paused = True
+        wf._user_pause_active = True
+        wf._parent_query_failures_while_paused = module._ORPHAN_TRANSIENT_FAILURE_LIMIT - 1
+        wf._query_parent_state = AsyncMock(return_value={})
+        await wf._check_parent_state()
+        assert not wf.is_paused and not wf._user_pause_active
+        wf._cost_limit_reached = True
+        wf._paused_by_parent = False
+        wf.is_paused = True
+        wf._user_pause_active = True
+        wf.price_limit_cents = 10
+        wf.subtree_cost_cents = 11
+        wf._maybe_arm_cost_limit_wrapup_after_browser(tool_name="spawn_browser_agent", result={"success": True},
+            paused_before=False, cost_limit_before=False)
+        assert not wf.is_paused and not wf._user_pause_active
+    finally:
+        _restore_workflow(original)
 
 
 async def test_workflow_signal_pause_sets_paused_flag():
@@ -11230,6 +11293,7 @@ async def run_all_tests():
 
     # Signal-handler + cost-tracking tests (fake workflow module)
     await r.record_async("wf_signal_pause", test_workflow_signal_pause_sets_paused_flag)
+    await r.record_async("pause_intent_ends_with_recovered_episode", test_pause_intent_ends_with_recovered_episode)
     await r.record_async("wf_signal_pause_cascade", test_workflow_signal_pause_cascades_to_children)
     await r.record_async("wf_signal_resume", test_workflow_signal_resume_clears_paused_flag)
     await r.record_async(
