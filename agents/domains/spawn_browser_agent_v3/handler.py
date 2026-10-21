@@ -11660,7 +11660,19 @@ Based on this feedback, I need to continue working on the task and address the i
         })
 
     except asyncio.CancelledError as cancellation:
-        logger.info("\U0001f534 Browser agent activity cancelled (paused)")
+        cancellation_details = activity.cancellation_details()
+        # Cancellation details identify transport cause, not user intent. The
+        # workflow alone observes actual user pause and owns its result annotation.
+        # Missing SDK details may still return cleanup ownership to the manager;
+        # they do not authorize a user-pause annotation.
+        return_cancelled_result = cancellation_details is None or cancellation_details.cancel_requested
+        logger.info(
+            "\U0001f534 Browser agent activity cancelled",
+            agent_id=agent_id,
+            task_id=task_id,
+            returns_cancellation=return_cancelled_result,
+            cancellation=repr(cancellation_details),
+        )
 
         if isinstance(cancellation, _BrowserSessionPreparationCancelled):
             prepared = cancellation.session_data
@@ -11697,28 +11709,15 @@ Based on this feedback, I need to continue working on the task and address the i
         if session_id and cleanup_failure is None:
             await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
 
-        if task_id:
-            with _suppress_browser_cleanup_errors():
-                await _save_browser_action_message(
-                    agent_id=agent_id,
-                    title="Browser Session Cancelled",
-                    task_id=task_id,
-                    message="Agent paused by user",
-                    status=MessageStatus.FINISHED,
-                    browser_url=browser_url or "",
-                    action_type="task_complete",
-                    tool_call_id=tool_call_id,
-                    is_completion_message=True,
-                    output_schema=response_schema,
-                    extra_metadata={"browser_cleanup": cleanup_failure} if cleanup_failure else None,
-                )
+        if not return_cancelled_result:
+            raise
 
         return {
             "status": "cancelled",
             "task_id": task_id,
             "session_id": session_id,
             "browser_url": browser_url,
-            "message": "Browser agent cancelled by user",
+            "message": "Browser activity cancelled",
             **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
         }
 
@@ -12201,6 +12200,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 return park
 
             while True:
+                user_pause_requested = False
                 reentered_pause = parked_result is not None
                 if reentered_pause:
                     # Re-enter the pause branch the previous generation parked in
@@ -12273,6 +12273,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         )
                         if workflow_instance.is_paused and not activity_handle.done():
                             logger.info("\U0001f534 Cancelling browser agent due to pause")
+                            user_pause_requested = bool(getattr(workflow_instance, "_user_pause_active", False))
                             activity_handle.cancel()
                             was_cancelled = True
 
@@ -12286,7 +12287,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             was_cancelled = True
                             result = {
                                 "status": "cancelled",
-                                "message": "Browser agent cancelled by user",
+                                "message": "Browser activity cancelled",
                             }
                             if known_task_id:
                                 result["task_id"] = known_task_id
@@ -12302,13 +12303,19 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         )
 
                 if was_cancelled or (result and result.get("status") == "cancelled"):
+                    user_pause_requested = user_pause_requested or (
+                        workflow_instance.is_paused and bool(getattr(workflow_instance, "_user_pause_active", False))
+                    )
                     logger.info("\U0001f534 Browser agent cancelled")
                     yield ToolEvent(
                         type=EventType.POST_MESSAGE,
-                        title="Browser Session Paused",
-                        message="User paused the browser agent",
+                        title="Browser Session Paused" if user_pause_requested else "Browser Session Cancelled",
+                        message="User paused the browser agent" if user_pause_requested else "Browser activity cancelled",
                         status=MessageStatus.ERROR,
-                        metadata=_browser_task_terminal_metadata(result, activity_task_id),
+                        metadata={
+                            **_browser_task_terminal_metadata(result, activity_task_id),
+                            **({"userPauseRequested": True} if user_pause_requested else {}),
+                        },
                     )
                     return
 
@@ -13149,6 +13156,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             isinstance(signal_response, str) and signal_response.strip() == REJECTION_SENTINEL
                         )
                         workflow_instance.is_paused = False
+                        workflow_instance._user_pause_active = False
                         if hasattr(workflow_instance, "_update_tree_state"):
                             await workflow_instance._update_tree_state(status="ACTIVE")
 

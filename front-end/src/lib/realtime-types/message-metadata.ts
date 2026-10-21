@@ -89,6 +89,7 @@ export type ClaudeCodeWsMessage =
  * Different message types use different subsets of these fields.
  */
 export interface MessageMetadata {
+  userPause?: { reason: 'user'; recordedAt: string };
   auxiliary?: { coordinates?: { x: number; y: number } };
   requestUserApproval?: Partial<RequestUserApprovalMetadata['requestUserApproval']>;
   imageUrl?: string | null;

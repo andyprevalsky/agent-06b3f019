@@ -145,6 +145,7 @@ export interface Message {
     browser_url?: string;
     task_id?: string;
     action_type?: import('../realtime-types/message-metadata').MessageMetadata['action_type'];
+    userPause?: import('../realtime-types/message-metadata').MessageMetadata['userPause'];
     auxiliary?: {
       coordinates?: { x: number; y: number };
       [key: string]: unknown;

@@ -82,6 +82,7 @@ with workflow.unsafe.imports_passed_through():
     from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
     from helpers.wait_on_world_clock import _read_world_time_ms, _refresh_world_time_cursor
     from helpers.world_model_runtime import world_clock_activity
+    from loop.context_utils import refresh_user_pause
     from loop.dag_executor import (
         TaskDAG,
         execute_dag,
@@ -779,6 +780,7 @@ class AgentWorkflow:
         self.is_paused: bool = False
         # Authentication can pause itself while waiting for the user's reply.
         self._pause_signal_sequence: int = 0
+        self._user_pause_active: bool = False  # Explicit PAUSE signal, not budget/auth waits.
         self._paused_by_parent: bool = False  # Track if pause was inherited from parent
         # Orphan detection: every child must stop once Temporal confirms that its
         # parent chain is gone. Otherwise an active child can keep spending after a
@@ -1015,6 +1017,7 @@ class AgentWorkflow:
         if self._resume_prior_status == "OUT_OF_CREDITS":
             self._has_credits = False
         self.is_paused = self._resume_prior_status in {"PAUSED", "COST_LIMIT_REACHED", "OUT_OF_CREDITS"}
+        self._user_pause_active = False
 
         runtime = state.get("runtime_state")
         if not isinstance(runtime, dict):
@@ -1023,6 +1026,7 @@ class AgentWorkflow:
         self._deployment_validation = runtime.get("deployment_validation") is True
         self.last_message_check = self._restored_datetime(runtime.get("last_message_check"))
         self._paused_by_parent = runtime.get("paused_by_parent") is True
+        self._user_pause_active = self.is_paused and runtime.get("user_pause_active") is True
         pause_sequence = runtime.get("pause_signal_sequence")
         if type(pause_sequence) is int and pause_sequence >= 0:
             self._pause_signal_sequence = pause_sequence
@@ -1227,6 +1231,7 @@ class AgentWorkflow:
             "allowing one wrap-up turn for attempt_completion"
         )
         self.is_paused = False
+        self._user_pause_active = False
         self._cost_limit_wrapup_pending = True
         self._cost_limit_wrapup_consumed = False
 
@@ -1248,6 +1253,7 @@ class AgentWorkflow:
         elif status == "ACTIVE":
             self._resume_prior_status = "ACTIVE"
             self.is_paused = False
+            self._user_pause_active = False
             self._cost_limit_reached = False
             self._has_credits = True
         price_limit = agent_config.get("price_limit_cents")
@@ -1299,6 +1305,7 @@ class AgentWorkflow:
                 "last_message_check": self._serialized_datetime(self.last_message_check),
                 "paused_by_parent": self._paused_by_parent,
                 "pause_signal_sequence": self._pause_signal_sequence,
+                "user_pause_active": self._user_pause_active,
                 "orphaned": self._orphaned,
                 "parent_query_failures": self._parent_query_failures_while_paused,
                 "has_new_messages": self._has_new_messages,
@@ -1420,10 +1427,12 @@ class AgentWorkflow:
     # =========================================================================
 
     @workflow.signal
-    async def pause(self):
-        """Pause workflow execution."""
+    async def pause(self, cause: str = "user"):
+        """Pause with producer-supplied cause; omitted cause preserves legacy user controls."""
         workflow.logger.info("🔴 Received PAUSE signal")
         self._pause_signal_sequence = getattr(self, "_pause_signal_sequence", 0) + 1
+        self._user_pause_active = cause == "user" or (self.is_paused and self._user_pause_active)
+        episode_cause = "user" if self._user_pause_active else cause
         self.is_paused = True
         await self._update_tree_state(status="PAUSED")
 
@@ -1431,7 +1440,7 @@ class AgentWorkflow:
         for child_wf_id in self._get_pending_child_workflow_ids():
             try:
                 handle = workflow.get_external_workflow_handle(child_wf_id)
-                await handle.signal("pause")
+                await handle.signal("pause", episode_cause)
             except Exception as e:
                 workflow.logger.warning(f"Failed to cascade pause to child: {e}")
 
@@ -1457,6 +1466,7 @@ class AgentWorkflow:
             self._has_credits = True
         workflow.logger.info("🟢 Received RESUME signal")
         self.is_paused = False
+        self._user_pause_active = False
         self._paused_by_parent = False
         await self._update_tree_state(status="ACTIVE")
 
@@ -1808,6 +1818,7 @@ class AgentWorkflow:
         self.price_limit_cents = new_limit
         self._cost_limit_reached = False
         self.is_paused = False
+        self._user_pause_active = False
         self._paused_by_parent = False
         await self._update_tree_state(status="ACTIVE")
 
@@ -3789,6 +3800,7 @@ class AgentWorkflow:
                     message_id = msg.get("message_id") or msg.get("id")
                     if message_id:
                         if message_id in seen_message_ids:
+                            refresh_user_pause(self.context, msg)
                             continue
                         seen_message_ids.add(message_id)
                     else:
@@ -4661,6 +4673,7 @@ class AgentWorkflow:
                 workflow.logger.warning("Parent workflow gone — orphaned child aborting")
                 self._orphaned = True
                 self.is_paused = False
+                self._user_pause_active = False
                 self._paused_by_parent = False
             self._parent_query_failures_while_paused = 0
             return
@@ -4678,6 +4691,7 @@ class AgentWorkflow:
                     )
                     self._orphaned = True
                     self.is_paused = False
+                    self._user_pause_active = False
                     self._paused_by_parent = False
             return
 
@@ -4697,15 +4711,19 @@ class AgentWorkflow:
         elif parent_paused:
             if not self.is_paused:
                 workflow.logger.warning("Parent is paused — inheriting state")
+                self._user_pause_active = state.get("user_pause_active") is True
                 self.is_paused = True
                 self._paused_by_parent = True
                 await self._update_tree_state(status="PAUSED")
+            elif self._paused_by_parent:
+                self._user_pause_active = state.get("user_pause_active") is True
         else:
             # Parent is running — unpause if we were paused by parent
             if self._paused_by_parent:
                 workflow.logger.info("Parent resumed — clearing inherited pause")
                 self._cost_limit_reached = False
                 self.is_paused = False
+                self._user_pause_active = False
                 self._paused_by_parent = False
                 await self._update_tree_state(status="ACTIVE")
 
@@ -6122,7 +6140,8 @@ class AgentWorkflow:
     @workflow.query
     def parent_state_query(self) -> Dict:
         """Combined query for children to check parent's pause/cost-limit state."""
-        return {"is_paused": self.is_paused, "is_cost_limit_reached": self._cost_limit_reached}
+        return {"is_paused": self.is_paused, "is_cost_limit_reached": self._cost_limit_reached,
+                "user_pause_active": self.is_paused and self._user_pause_active}
 
     @workflow.query
     def deployment_initialized_query(self) -> bool:

@@ -254,7 +254,7 @@ async function pauseUserAgents(userId: string): Promise<void> {
       try {
         const client = await getTemporalClient();
         const handle = client.workflow.getHandle(agent.temporalWorkflowId);
-        await handle.signal('pause');
+        await handle.signal('pause', 'subscription');
         await repo.updateAgentStatus(agent.id, 'PAUSED');
         log.info('Paused agent (subscription lapsed)', {
           workflow_id: agent.temporalWorkflowId,
