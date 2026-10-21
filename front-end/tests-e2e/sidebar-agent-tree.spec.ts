@@ -1,11 +1,9 @@
 /** Actual sidebar screenshots with deterministic agent trees; no live agents. */
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { FRONTEND_URL } from './helpers';
 const ROOT = 'launch-root';
-test('sidebar opens direct children only and badges active tree agents on the minimized robot', async ({
-  page,
-}) => {
-  await page.setViewportSize({ width: 1280, height: 820 });
+async function openSidebarPreview(page: Page, width: number) {
+  await page.setViewportSize({ width, height: 820 });
   await page.addInitScript(() => {
     const user = { id: 'sidebar-preview-user', is_anonymous: false };
     localStorage.setItem('app-user', JSON.stringify(user));
@@ -99,6 +97,12 @@ test('sidebar opens direct children only and badges active tree agents on the mi
     await route.fulfill({ json: body });
   });
   await page.goto(`${FRONTEND_URL}/?agent-id=${ROOT}`, { waitUntil: 'domcontentloaded' });
+}
+
+test('sidebar opens direct children only and badges active tree agents on the minimized robot', async ({
+  page,
+}) => {
+  await openSidebarPreview(page, 1280);
   const sidebar = page.getByTestId('rose-sidebar');
   const badge = page.getByTestId(`rose-agent-count-${ROOT}`);
   await expect(badge).toHaveText('5', { timeout: 60000 });
@@ -129,3 +133,21 @@ test('sidebar opens direct children only and badges active tree agents on the mi
     sidebar.getByRole('button', { name: 'Expand Research audience', exact: true }),
   ).toHaveAttribute('aria-expanded', 'false');
 });
+
+for (const width of [320, 390, 700]) {
+  test(`mobile drawer fills all ${width}px of the viewport`, async ({ page }) => {
+    await openSidebarPreview(page, width);
+    await page.getByRole('button', { name: 'Open menu', exact: true }).click();
+    const drawer = page.getByRole('dialog', { name: 'Menu', exact: true });
+    await expect(drawer).toBeVisible();
+    await expect(async () => {
+      const rect = await drawer.boundingBox();
+      expect(rect).not.toBeNull();
+      expect(Math.abs(rect!.x)).toBeLessThan(1);
+      expect(Math.abs(rect!.width - width)).toBeLessThan(1);
+    }).toPass();
+    if (width === 390) await page.screenshot({ path: '/tmp/rose-mobile-drawer-full-width.png' });
+    await drawer.getByRole('button', { name: 'Close', exact: true }).click();
+    await expect(drawer).not.toBeVisible();
+  });
+}

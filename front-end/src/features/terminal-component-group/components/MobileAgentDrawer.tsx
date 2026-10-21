@@ -201,7 +201,7 @@ export default function MobileAgentDrawer({
       <SheetContent
         side={roseHeader ? 'left' : 'right'}
         onCloseAutoFocus={handleCloseAutoFocus}
-        className="flex w-[min(340px,88vw)] flex-col p-0 pt-[var(--safe-area-inset-top)]"
+        className="flex w-screen max-w-none flex-col p-0 pt-[var(--safe-area-inset-top)]"
       >
         <SheetTitle className="sr-only">Menu</SheetTitle>
         <SheetDescription className="sr-only">Your agents and notifications</SheetDescription>
