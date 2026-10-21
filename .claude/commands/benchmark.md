@@ -24,13 +24,60 @@ QUEUED / IN_PROGRESS / COMPLETED, then PASS / HARNESS FAILURE / INFRA FAILURE.
 Preserve genuine agent failures, cancellations and unknown classifications
 separately; keep the infra threshold in a minor note. Include the latest three
 experiments, last-run age, recorded tokens/15-minute rate, LIFE and lifecycle
-coverage. Refresh on agent start/completion, fixed 15-minute checkpoints and
-benchmark-state changes, without resetting clocks or stopping ongoing work.
+coverage. Refresh on the 10-minute checkpoints and transitions below, without
+resetting clocks or stopping ongoing work.
 Use the original scheduled denominator for the existing 5% infra stop policy,
 not completed attempts. Delegate issues with `/RCA` and `/deploy` only within
 the user's authorized scope, using isolated immutable checkpoints.
 Required approval requests follow `.claude/shared/approval-format.md` instead,
 using the same styling and its complete evidence/diff/Links requirements.
+
+**Default delegation and parent cadence (user instruction, October 20, 2026).**
+By default, a sub-agent owns each benchmark run: launch (or adoption of an
+already-launched run), operational monitoring, infra-failure `/RCA` delegation,
+exact-owner cleanup and the returned results with clustered failures. The main
+agent does not poll the run itself. It posts only the CLI-rendered batch
+scorecard, every **10 minutes** and on three transitions: tasks started, no more
+queued, and run end (an infra early stop counts as the end). Approval requests
+for harness and eval fixes still go to the user from the main agent.
+
+**Resumed Polar scope (October 20, 2026).** The user's newer instruction
+supersedes the attachment's 50-task suggestion: at most **20 tasks at K=3**,
+grouped by comparable expected duration, fastest groups first. Reconcile and
+preserve accepted K slots before selecting only missing slots; do not rerun
+accepted slots to fill a batch. Execution timeout is **7200 seconds (2 hours)**;
+reject larger values with the requested lower-timeout/settings explanation.
+After each batch, wait for the user's explicit go before the next 20. Neither
+continuation, an infra repair nor a completed review grants that go. Keep BU
+results separate and report benchmark costs and retry costs without inventing
+missing charges. Do not use Gmail, Calendar or Drive for this work.
+
+**Explicit same-cohort rerun authorization (October 21, 2026).** After the three
+aligned repairs (result-preserving real pause, actual final-answer evidence for
+all benchmarks, and bounded/retrievable tool results for main/explore/browser)
+are implemented and well tested, run the **same 60 with the same CLI in a
+benchmark sub-agent**. Align fixes one at a time, implement independent agreed
+fixes in parallel; see `/descend` for the retained behavior contracts. This is
+an explicit repeat of the original 20-task K=3 cohort, not Batch 2 or permission
+for the next 20. Preserve original settings, baseline grades and producer clocks;
+record the rerun separately. Existing backend-first, warm-source and admission
+requirements still apply; recorded authorization needs no duplicate permission.
+
+Actual final-answer/completion-card evidence must reach the evaluator for **all
+benchmarks by default**. Verify the real producer-to-evaluator path, preserving
+text/errors and distinct messages; a fixture-only pass or judge-only replay is
+not a benchmark outcome. Tool-result truncation must keep bounded previews plus
+retrievable full tails across main, explore and browser, using one shared helper
+and one paged read through existing attachments, with generous fallback limits
+where previously uncapped. Keep full authorized archive/evaluator evidence and
+existing redaction/access controls; do not expand this into a new storage system.
+
+Harness/eval candidates go only through main-chat approval, sorted by
+priority then affected-run count, showing **X of N**, overlapping memberships
+and the exact inline diff. Use `/descend`'s owning failure-clustering guidance
+for causal coverage and reference policy. Mocked causal checks, restored judge
+evidence and judge-only replays never become accepted benchmark outcomes.
+These scope rules override unrelated campaign profiles below.
 
 For the current user-requested five consecutive LIVE DAILY runs of fifty,
 follow the **Current width-fifty LIVE acceptance** subsection of
