@@ -6810,6 +6810,7 @@ async def test_browser_observation_survives_action_persistence_without_planner_d
     namespace.update(result=result, action_history=history,
                      write_lock_resume_state={"secret_redaction_refs": {"pwd:synthetic": "secret-plaintext"}}, action_name="read_browser_state", auth_runtime_state=SimpleNamespace(mark_credential_ref=lambda _: None),
                      save_browser_action_message=repo.save_browser_action_message, agent_id="ag1", title_done="read_browser_state", task_id="t1",
+                     current_url="https://private-user:private-password@example.com/login?token=private-token#private-fragment",
                      MessageStatus=MessageStatus, browser_url="https://viewer.invalid", tool_call_id_action="read-1", iteration=5,
                      MAX_ITERATIONS=250, coords_for_cursor=None)
     exec(compile(module, "<real-action-persistence>", "exec"), namespace)
@@ -6823,6 +6824,9 @@ async def test_browser_observation_survives_action_persistence_without_planner_d
     assert "pwd:synthetic" in evidence
     assert body["metadata"]["task_id"] == "t1" and body["metadata"]["toolCallId"] == "read-1"
     assert body["message"] == "Browser state captured."
+    assert body["metadata"]["auxiliary"].get("current_url") == "https://example.com/login"
+    for private_part in ("private-user", "private-password", "private-token", "private-fragment"):
+        assert private_part not in json.dumps(body)
     row = {"role": "TOOL", "text": body["message"], "metadata": body["metadata"]}
     before = convert_context_to_messages([row])
     row["metadata"] = {k: v for k, v in row["metadata"].items() if k != "browser_observation"}
@@ -6839,6 +6843,15 @@ async def test_browser_observation_survives_action_persistence_without_planner_d
         control = json.loads(assert_captured_call(index=len(get_captured_requests()) - 1, url_contains="/api/agents/ag1/messages", method="POST")["requestBody"])
         assert "browser_observation" not in control["metadata"]
         assert control["metadata"]["credential_ref"] == ref and marked == [ref]
+    for observed_url in ("", "about:blank", "javascript:alert(1)"):
+        setup_mock({"/api/agents/": {"status": 200, "json": {"ok": True}}})
+        namespace.update(current_url=observed_url, coords_for_cursor={"x": 12, "y": 34})
+        with patch("config.load_config", return_value=_fake_config()):
+            await namespace["persist"]()
+        empty = json.loads(assert_captured_call(index=len(get_captured_requests()) - 1, url_contains="/api/agents/ag1/messages", method="POST")["requestBody"])
+        assert "current_url" not in empty["metadata"]["auxiliary"], "Never invent a page URL"
+        assert empty["metadata"]["auxiliary"]["coordinates"] == {"x": 12, "y": 34}
+        assert empty["metadata"]["task_id"] == "t1"
 
 
 async def test_save_browser_action_message_posts_metadata():

@@ -137,6 +137,7 @@ from .config import (
 from .credential_runtime import build_realm_credential_state, unknown_realm_credential_state
 from .download_persist import BrowserDownloadPersister
 from .recording import (
+    _redact_url_query,
     BrowserAgentRecorder,
     BrowserNetworkRecorder,
     SimulatedBrowserRecorder,
@@ -7199,6 +7200,11 @@ async def _spawn_browser_agent_activity_v3_real(
         # Routing IDs stay exact; only user/model-visible payloads are redacted.
         trusted_credential_ref = (kwargs.get("extra_metadata") or {}).get("credential_ref")
         trusted_coordinates = (kwargs.get("auxiliary") or {}).get("coordinates")
+        if isinstance(current_url, str) and current_url.lower().startswith(("https://", "http://")):
+            kwargs["auxiliary"] = {
+                **(kwargs.get("auxiliary") or {}),
+                "current_url": _redact_url_query(current_url),
+            }
         for key in ("title", "message", "extra_metadata", "auxiliary"):
             if key in kwargs:
                 kwargs[key] = _redact_activity_value(kwargs[key])
