@@ -23,9 +23,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.benchmark_tasks import BenchmarkTask, all_tasks  # noqa: E402
-from benchmarks.long_horizon import validate_catalog  # noqa: E402
-from benchmarks.polar_catalog import POLAR_GROUP, is_polar_bench_task  # noqa: E402
+from benchmarks.benchmark_tasks import BenchmarkTask, all_tasks
+from benchmarks.long_horizon import validate_catalog
+from benchmarks.polar_catalog import POLAR_GROUP, is_polar_bench_task
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -99,7 +99,7 @@ def main() -> int:
     parser.add_argument("--only", help="Comma-separated benchmark task names to run")
     parser.add_argument(
         "--bench",
-        choices=["rose-bench", "pipeline-e2e"],
+        choices=["rose-bench", "pipeline-e2e", "process-bench"],
         help="Run only one bench axis (rose-bench = capability, pipeline-e2e = plumbing)",
     )
     args = parser.parse_args()
@@ -124,7 +124,9 @@ def main() -> int:
         selected = [t for t in tasks if t.status == "ready" and not is_polar_bench_task(t)]
 
     if args.bench:
-        selected = [t for t in selected if t.bench == args.bench]
+        selected = [t for t in selected if "process" in t.tags] if args.bench == "process-bench" else [
+            t for t in selected if t.bench == args.bench
+        ]
     skipped = [t for t in tasks if t.status == "incomplete"]
     agent_names = [t.name for t in selected]
 

@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "standing_workflow": "NEVER FORGET TO LET THE LEARNINGS FLOW. Confirmed task1/WHM failures and fixes update applicable process specs, generator/checks and negative/positive traces; Process Bench findings feed back to task1. Keep original outcomes immutable and never weaken requirements for a pass.",
+  "source_commit": "0ab5620a5",
+  "sources": [
+    "/project/whm-task1-82fa0515/parent-analysis/original-goal-vs-execution.json",
+    "/project/whm-task1-82fa0515/parent-analysis/janice-verifier-timing.json",
+    "/project/whm-task1-82fa0515/recovery-20261021/recovery-report.json"
+  ],
+  "confirmed_observations": [
+    {
+      "id": "authored-scope",
+      "observation": "Top-level plan retained the goal; populated subgoals reduced opportunity mapping to four existing relationships and continuous control to one bounded setup audit.",
+      "cases": [
+        "process-investor-outreach"
+      ],
+      "general_check": "Judge original process, not weaker generated plans; require all active steps.",
+      "regression": "missing-prerequisite"
+    },
+    {
+      "id": "contact-waterfall",
+      "observation": "Contact tried completion at turn 15 without definitive pass or exhausted follow-up; only initial email observed, no completed day4/day10/day21/LinkedIn/intake sequence.",
+      "cases": [
+        "process-investor-outreach"
+      ],
+      "general_check": "Enforce dependency order and lifecycle completion before final success.",
+      "regression": "premature-success"
+    },
+    {
+      "id": "decline-artifacts",
+      "observation": "Unsuccessful child schema required nonnullable SAFE/wire references. Overall run had six agents, three firms, two emails and zero settled dollars.",
+      "cases": [
+        "process-investor-outreach",
+        "process-contract-renewal",
+        "process-refund-exception"
+      ],
+      "general_check": "Valid declined/blocked subresult does not satisfy overall success; never invent absent artifacts.",
+      "regression": "test_legitimate_decline_and_inactive_branch_succeed_but_not_missing_settlement"
+    },
+    {
+      "id": "material-handoff",
+      "observation": "Parent had deck text, first browser child said attachment unavailable; combined create/share failed, then create, fill and share succeeded.",
+      "cases": [
+        "process-investor-outreach",
+        "process-customer-onboarding"
+      ],
+      "general_check": "Require actual input/material references and verified creation before downstream sharing/use.",
+      "regression": "bad-input"
+    },
+    {
+      "id": "clock-budget",
+      "observation": "Child cap was 25 iterations. Two wait_for calls totaled 1666.184 seconds; longest was 1280.431 seconds. Verifier call totals are not critical-path wall time.",
+      "cases": [
+        "process-investor-outreach",
+        "process-meeting-scheduling",
+        "process-incident-recovery"
+      ],
+      "general_check": "Keep business time distinct from wall time; require explicit business-day evidence.",
+      "regression": "backwards-clock",
+      "causal_status": "Shared-world-clock blocker remains unreconstructed. No timeout/cap cause or runtime fix is claimed without replay."
+    }
+  ],
+  "feedback_to_task1": "Apply original-scope and verified-material checks to populated subgoals; allow nullable absent investment artifacts on unsuccessful children; replay premature completion and shared-clock waits before claiming any task1 runtime fix. This feature does not change task1 or launch a fundraiser.",
+  "source_sha256": {
+    "/project/whm-task1-82fa0515/parent-analysis/original-goal-vs-execution.json": "2ad6f22b112cbc69586aebae1cd56bdb38c12d5a90a0f05be329417f5fc48cf4",
+    "/project/whm-task1-82fa0515/parent-analysis/janice-verifier-timing.json": "d8332a2f316ff561b979d06a0473cbbdad5f266d6a44d157ff65976eaa91af83",
+    "/project/whm-task1-82fa0515/recovery-20261021/recovery-report.json": "bf651afcf1b2aca787dd9d325d3501c8258fcd7d9c0f32a014c5b37a72c6346b"
+  }
+}

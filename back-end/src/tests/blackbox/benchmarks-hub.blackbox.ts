@@ -32,6 +32,8 @@ import { Prisma, PrismaClient } from '@prisma/client';
 import { config } from 'dotenv';
 import { z } from 'zod';
 import {
+  BENCHMARK_CATALOG_GROUPS,
+  assertProcessBenchCatalog,
   assertEnvironmentReconcileFromFile,
   assertInvalidGroupScheduleIsPermanent400,
   assertToastPromptMigration,
@@ -164,10 +166,7 @@ async function testCatalog_groupsAreLabelDriven(): Promise<void> {
   const tasks = (res.data as { tasks: Array<{ name: string; group: string }> }).tasks;
   const groups = new Set(tasks.map((t) => t.group));
   for (const g of groups) {
-    assert(
-      ['pre-deploy', 'daily', 'rose-bench', 'polar-bench', 'incomplete'].includes(g),
-      `unexpected group: ${g}`
-    );
+    assert(BENCHMARK_CATALOG_GROUPS.includes(g), `unexpected group: ${g}`);
   }
   // Grouping is driven off the stored `group` label in tasks.json; every ready
   // runnable bucket must be represented (proves the label resolves, not just
@@ -176,6 +175,7 @@ async function testCatalog_groupsAreLabelDriven(): Promise<void> {
   assert(groups.has('daily'), 'no daily tasks found');
   assert(groups.has('rose-bench'), 'no rose-bench tasks found');
   assert(groups.has('polar-bench'), 'no polar-bench tasks found');
+  assertProcessBenchCatalog(tasks);
   const polarTask = tasks.find((task) => task.group === 'polar-bench');
   assert(polarTask, 'expected at least one polar-bench catalog task');
   assert(
