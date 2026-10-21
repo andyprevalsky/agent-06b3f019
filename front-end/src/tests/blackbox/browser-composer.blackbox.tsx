@@ -136,17 +136,25 @@ it('retains draft files when moving between the owner composer and Browser, and 
   ]);
 });
 
-it('never ports a native direct-channel composer into the owner Browser slot', () => {
+it('keeps the native code composer usable on its original direct channel in Browser', () => {
+  const nativeSubmit = vi.fn();
   renderWithProviders(
     <RoseAppsContext.Provider value={browser()}>
       <QueryInput
         liftAboveApps
         directChannel
         value="native draft"
+        placeholder="Message Codex directly…"
+        canSubmit
         onChange={vi.fn()}
-        onSubmit={vi.fn()}
+        onSubmit={nativeSubmit}
       />
     </RoseAppsContext.Provider>,
   );
-  expect(screen.queryByTestId('browser-query-input')).toBeNull();
+  const box = within(screen.getByTestId('browser-query-input'));
+  expect(box.getByPlaceholderText('Message Codex directly…')).toHaveValue('native draft');
+  expect(box.queryByText('Model unavailable')).toBeNull();
+  expect(box.queryByPlaceholderText('Message Rose about this browser')).toBeNull();
+  fireEvent.click(box.getByRole('button', { name: 'Send' }));
+  expect(nativeSubmit).toHaveBeenCalledOnce();
 });

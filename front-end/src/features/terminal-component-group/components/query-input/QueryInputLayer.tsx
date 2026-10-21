@@ -9,12 +9,10 @@ type Geometry = { left: number; top: number; width: number; height: number };
 export function QueryInputLayer({
   enabled,
   children,
-  browserEligible = true,
   ownerAgentId,
 }: {
   enabled: boolean;
   children: ReactNode;
-  browserEligible?: boolean;
   ownerAgentId?: string;
 }) {
   const apps = useRoseApps();
@@ -64,7 +62,7 @@ export function QueryInputLayer({
   }, [raised]);
 
   if (enabled && browserOpen) {
-    const target = browserEligible ? browserComposerTarget(apps, ownerAgentId) : null;
+    const target = browserComposerTarget(apps, ownerAgentId);
     // Preserve the existing send/stop channel; only move it into its selected owner's pane.
     if (!target) return null;
     return createPortal(

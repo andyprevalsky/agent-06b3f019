@@ -91,11 +91,7 @@ export default function QueryInput(props: QueryInputProps) {
     !!browserComposerTarget(apps, props.agentId) && !!props.liftAboveApps && !directChannel;
 
   return (
-    <QueryInputLayer
-      enabled={roseDesktop && !!props.liftAboveApps}
-      browserEligible={!directChannel}
-      ownerAgentId={props.agentId}
-    >
+    <QueryInputLayer enabled={roseDesktop && !!props.liftAboveApps} ownerAgentId={props.agentId}>
       <div className="w-full md:px-0">
         <div
           data-testid="query-input-host"
