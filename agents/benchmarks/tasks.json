@@ -10242,5 +10242,92 @@
     }
   ],
   "enforce_declared_evaluators": true
+},
+{
+  "name": "browser-auth-doordash-cloud-iphone",
+  "title": "Live DoorDash sign-in using the account cloud iPhone",
+  "prompt": "Use one browser agent to sign into https://www.doordash.com/ with my existing connected account. Start signed out; sign out of this test browser only if needed. Use my dedicated cloud iPhone to handle any matching current SMS code or Google device approval that is accessible there, then verify the actual DoorDash account is signed in. Do not ask me for a code you can obtain on that phone. Do not create an account, order anything, change passwords or account settings, or approve an unrelated request. If sign-in succeeds without a phone challenge, report that phone use was not exercised. Report the real outcome and any blocker, and release the phone when finished.",
+  "timeout_seconds": 900,
+  "price_limit_cents": 300,
+  "is_chat_mode": false,
+  "attachment": null,
+  "approval_handling": null,
+  "start_phase": "execute",
+  "expected_tools": [
+    "spawn_browser_agent"
+  ],
+  "requires_browser_agent": true,
+  "requires_claude_code": false,
+  "status": "ready",
+  "runner": "agent",
+  "harness": "rose",
+  "bench": "pipeline-e2e",
+  "group": "daily",
+  "fast_cache": "off",
+  "browser_profile_mode": "fresh",
+  "browser_auth_realm": "doordash.com",
+  "tags": [
+    "LIVE",
+    "auth",
+    "browser",
+    "phone",
+    "daily"
+  ],
+  "environment": {
+    "mode": "live",
+    "live_fixtures": [
+      "live"
+    ],
+    "fresh_auth_realms": [
+      "doordash.com",
+      "google.com"
+    ],
+    "services": [
+      "phone-harness-cloud-iphone",
+      "doordash.com"
+    ],
+    "secrets": [
+      "PHONE_HARNESS_DEVICE_ID",
+      "PHONE_HARNESS_API_KEY"
+    ],
+    "live_targets": [
+      "https://www.doordash.com/"
+    ],
+    "context_notes": "Use owner account, real browser, assigned cloud iPhone and private profile file. Isolated database only; disable inherited DoorDash and Google sessions while preserving saved passwords. The public Rose /join route returned 404 when this case was authored, so DoorDash is the explicit target. No challenge is not a phone-use PASS."
+  },
+  "evaluators": [
+    {
+      "id": "live-auth-session",
+      "method": "static_check",
+      "criteria": [
+        "Exactly one browser session",
+        "Root completes"
+      ],
+      "checks": [
+        {
+          "type": "browser_agent_session_count",
+          "min": 1,
+          "max": 1
+        },
+        {
+          "type": "agent_status",
+          "value": "COMPLETED"
+        }
+      ]
+    },
+    {
+      "id": "live-auth-phone-use",
+      "method": "single_turn_llm_judge",
+      "criteria": [
+        "The browser begins signed out with no inherited DoorDash or Google session; saved credentials may be used securely.",
+        "The actual browser tool evidence shows authenticated DoorDash access for the configured owner account, not merely a filled form or submitted code.",
+        "A current sign-in challenge is actually observed, matched to the configured account and current request, and handled autonomously on the owned cloud iPhone; actual persisted AGENT phone read and input receipts support it.",
+        "An accessible SMS code or matching Google approval is handled without asking the user or operator to supply it. If no phone challenge occurs, report not exercised and fail this phone-use criterion.",
+        "No ordering, payments, account creation, password changes or unrelated messages occur. A blocker, personal-phone approval, invented receipt or final prose alone never passes."
+      ],
+      "judge_prompt": "Pass only when every criterion is grounded in actual browser and phone tool evidence across the complete agent tree. The browser begins signed out with no inherited DoorDash or Google session; saved credentials may be used securely. The actual browser tool evidence shows authenticated DoorDash access for the configured owner account, not merely a filled form or submitted code. A current sign-in challenge is actually observed, matched to the configured account and current request, and handled autonomously on the owned cloud iPhone; actual persisted AGENT phone read and input receipts support it. An accessible SMS code or matching Google approval is handled without asking the user or operator to supply it. If no phone challenge occurs, report not exercised and fail this phone-use criterion. No ordering, payments, account creation, password changes or unrelated messages occur. A blocker, personal-phone approval, invented receipt or final prose alone never passes."
+    }
+  ],
+  "enforce_declared_evaluators": true
 }
 ]

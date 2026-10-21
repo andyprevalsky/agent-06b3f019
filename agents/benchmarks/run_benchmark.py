@@ -14075,15 +14075,17 @@ async def _run_single_task_as_run_user(
         if task.browser_profile_mode == "fresh" and not _is_simulate_mode():
             if not _is_local_base_url(base_url):
                 raise RuntimeError(f"{task.name}: fresh browser state requires an isolated local benchmark stack")
-            live_fixture_manifests.append(
-                _apply_fresh_browser_state_scenario(
-                    LiveFixtureContext(
-                        base_url=base_url,
-                        user_id=_current_benchmark_user_id(),
-                        auth_realm=str(task.browser_auth_realm),
+            from benchmarks.phone_live_auth import fresh_auth_realms
+            for auth_realm in fresh_auth_realms(task):
+                live_fixture_manifests.append(
+                    _apply_fresh_browser_state_scenario(
+                        LiveFixtureContext(
+                            base_url=base_url,
+                            user_id=_current_benchmark_user_id(),
+                            auth_realm=auth_realm,
+                        )
                     )
                 )
-            )
 
         if _effective_harness(task) == "codex":
             from benchmarks.codex_runner import build_deps_from_module, run_codex_task

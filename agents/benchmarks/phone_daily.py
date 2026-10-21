@@ -10,6 +10,7 @@ TASK_KINDS = {
     'phone-daily-full-boot': 'boot',
     'phone-daily-sms-challenge': 'sms',
     'phone-daily-google-approval': 'google',
+    'browser-auth-doordash-cloud-iphone': 'google',
     'phone-daily-message-roundtrip': 'messages',
 }
 CONFIG_TARGETS = ('apple_account', 'icloud_messages', 'icloud_keychain', 'icloud_contacts',
