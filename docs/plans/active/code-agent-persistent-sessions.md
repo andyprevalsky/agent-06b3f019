@@ -110,6 +110,133 @@ One checkpoint write + one index batch per turn per session, keyed to that
 session; no shared row or channel. Paused sandboxes cost storage, not compute;
 TTL bounds storage. Grep uses existing per-user indexes.
 
+## Parent merge-down contract (specified 2026-10-21; implementation pending)
+
+The user model is **one agent = one conversation thread**. A thread owns a
+logical workspace and an append-only event history; it need not allocate an
+E2B VM or browser until work needs one. The physical worker, provider session,
+and sandbox may change without changing thread identity. This section defines
+the requested next contract; it does not claim the current runtime enforces it.
+
+### Fork and ownership
+
+- Each child records its direct parent, root, user, project/repo identity, fork
+  base revision, and its own thread/workspace identity. A browser fork also
+  records origin and authenticated account; a code fork records repo base SHA.
+- Normal child work is isolated. The parent continues working while children
+  run. Children submit results to their **direct parent**, never directly to a
+  grandparent, default branch, global browser template, or another sibling.
+- Existing “New agent in this branch” is an explicit collaborative mode, not
+  the default: threads stay separate and one writer lease serializes shared
+  workspace mutation. It must not silently give concurrent agents the same
+  writable checkout or browser page.
+- A logical fork is cheap: allocate a physical sandbox/context lazily. Use a
+  verified checkpoint or supported provider fork as an optimization, with a
+  restore fallback. Do not assume native snapshot/fork is enabled for an E2B
+  account or compatible with the installed SDK.
+
+### Submit, validate, merge, acknowledge
+
+A child checkpoints completed units of work and submits an immutable proposal:
+thread/parent identity, base revision, child revision, artifact hashes, changed
+resources, validation evidence, and external-action receipts. A proposal is
+keyed by child thread plus revision; retries cannot apply it twice.
+
+The parent is the sole integration authority for its workspace. Stage the
+proposal against the **current** parent head, validate the combined result,
+then compare-and-swap that head. If another proposal or the parent changed it,
+re-evaluate/retest rather than overwrite it. Serialize the final publish step;
+independent child execution can remain parallel. A stale/conflicting proposal
+returns actionable conflict details to the child and leaves the parent intact.
+
+Track separate outcomes: work completed, submitted, validating, conflicted,
+merged, or rejected. “Child completed” does not imply “merged.” The acknowledgment
+records proposal ID, parent revision before/after, applied resources, checks,
+and exclusions. Parent timeline shows a concise result with links to the child
+and receipt, not a concatenation of the child's entire native conversation.
+
+### Code and E2B snapshots
+
+- Versioned code uses a three-way Git merge from the recorded fork SHA into
+  the direct parent's branch. Verify repo/user identity and declared changes;
+  never push to the default branch merely because a child finished. Root
+  publication follows the existing user/deploy authorization separately.
+- Non-Git outputs use a content-hashed manifest and explicit deletes. Apply a
+  path only if its parent value still equals the fork base, or both sides made
+  the same change; otherwise surface a conflict. Binary files, deletion/edit
+  conflicts, and incompatible generated outputs require an explicit decision.
+- Never overlay a child's whole filesystem/snapshot onto a live parent. E2B
+  snapshots/checkpoints are for fork, pause, recovery, and evidence; **the
+  merge unit is code/data changes**, not RAM, processes, sockets, PID files,
+  credentials, dependency caches, or provider identity. Recreate necessary
+  services in the parent from its resulting code and validated startup recipe.
+- Before publish, preserve a recoverable parent checkpoint. Validate in a
+  staging worktree/environment, publish the revision atomically, then refresh
+  the parent's stable preview. Do not swap the parent preview to a child URL
+  and call that a merge. A runtime activation failure retains the old serving
+  revision and reports the candidate as not activated.
+- Checkpoint and failure recovery preserve dirty/untracked work, but a merge
+  proposal explicitly names what it integrates. A missing or hash-invalid
+  artifact fails closed. Excluded large files must be reported, not silently
+  treated as successfully transferred.
+
+### Browsers and external world state
+
+Browser execution state has no generic three-way merge. Fork an isolated
+context from an allowed parent authentication baseline. Merge back these
+separate categories:
+
+| Child result | Parent treatment |
+|---|---|
+| Findings, URLs, screenshots, downloaded files | Attach immutable evidence/artifacts to the parent with provenance. Open a resulting page when requested; do not replace the parent's tabs or history. |
+| Cookies/local storage/IndexedDB needed for the task | Origin-and-account-scoped candidates; compare with fork base/current parent, validate account identity and session health, apply only allowed keys while the affected context is quiescent. Conflicts stay explicit. |
+| Purchases, sends, edits, submissions, other remote mutations | Already affected the external service: record confirmed remote IDs/status, never replay as a “merge.” Use service idempotency keys where available; uncertain results require reconciliation before retry. |
+| DOM, JS heap, sockets, in-flight requests, cursor/focus | Do not merge. Re-open/navigate/reconnect in the parent's own context if needed. |
+
+Acquire a scoped lease before conflicting external mutations (account/site/
+resource); read-only research can run concurrently. An approval covers the
+actual action, not an unrestricted child or merge. Preserve user-owned tabs,
+manual activity, and protected software such as Freedom. Logout, account
+switch, and auth rotation are explicit identity-sensitive operations, not
+“newest cookie wins.” Unsupported browser state is reported as unsupported.
+
+The present keep-best credential policy may help select a healthy login, but
+its direct user-template promotion is **not** the parent-first contract.
+Child candidates must reach their parent first; only the root's explicit
+credential-persistence policy may promote to a user-level browser template.
+Do not claim a browser snapshot includes or reverses external server state.
+
+### Evidence, lifecycle, and required acceptance
+
+A merged child can pause after its artifacts and receipt are durable. Preserve
+its checkpoint through the retention policy; conflicts/failures remain
+resumable. Stop only its owned idle compute after confirming no active lease
+or parent consumer depends on it. Parent crash recovery reconciles an accepted
+proposal by ID instead of repeating remote actions or applying files twice.
+
+Required proofs before calling this implemented:
+
+1. Two children change disjoint files; both integrate into the current parent,
+   and its preview serves the combined revision. Overlapping edits/deletes
+   return a conflict without losing parent or sibling work.
+2. Duplicate delivery, stale base, parent crash between apply and ACK, corrupted
+   checkpoint, and failed combined validation never produce a false merged
+   receipt or repeat an external action.
+3. Browser same-account findings merge; another account's auth is rejected;
+   fresh parent credentials survive a stale child; logout and IndexedDB
+   conflicts do not silently replace them. User tabs and Freedom remain intact.
+4. Child send/submit succeeds but ACK is lost: reconciliation finds the remote
+   action once, without sending/submitting again. Unknown outcomes stay unknown.
+5. E2B pause/resume failure restores verified files and conversation identity,
+   recreates services explicitly, and never merges a child's live process
+   memory into the parent. Large omitted files are visible in the receipt.
+6. Grandchild merges into child, then child into parent; parent code, browser
+   artifacts, receipt history, and root preview retain the correct identities.
+
+Provider references (capabilities must be checked against our pinned versions):
+[E2B snapshot/fork architecture](https://github.com/e2b-dev/runtime/blob/main/docs/ARCHITECTURE.md)
+and [Playwright browser storage state](https://playwright.dev/docs/api/class-browsercontext#browser-context-storage-state).
+
 ## Verification (automated)
 
 All registered in existing `/deploy` suites:
