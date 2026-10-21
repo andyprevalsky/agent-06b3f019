@@ -3765,6 +3765,63 @@ async def test_explore_web_tool_messages_are_readable_and_skip_failed_fetch():
     assert "Page not found" not in result["result"]
 
 
+async def test_explore_retained_output_dispatch_scope_and_bounds():
+    import re
+    from unittest.mock import AsyncMock
+    from _test_utils import retained_tool_output_fixture
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+    from utils.tool_output import preview_tool_text
+    from helpers.llm import build_llm_messages
+    from utils.tool_schemas import get_explore_agent_tools, TOOL_MODELS, ALL_PHASE_TOOLS
+
+    assert "read_tool_output" in get_explore_agent_tools()
+    assert "read_tool_output" in ALL_PHASE_TOOLS
+    assert "user_id" not in TOOL_MODELS["read_tool_output"].model_fields
+    raw = "large body " * 12000 + "EXPLORE_TAIL_SENTINEL"
+
+    async def fake_run_agent(**kwargs):
+        execute = kwargs["execute_tool"]
+        preview = await preview_tool_text(raw, user_id="user", agent_id="parent", session_id="task", limit=50000)
+        output_id = re.search(r'output_id="([a-f0-9]{32})"', preview)[1]
+        page = await execute("read_tool_output", {"output_id": output_id, "query": "EXPLORE_TAIL_SENTINEL"}, "read-1")
+        assert page["success"]
+        controls = await preview_tool_text("\x01" * 100001, user_id="user", agent_id="parent", session_id="task", limit=50000)
+        control_id = re.search(r'output_id="([a-f0-9]{32})"', controls)[1]
+        control_page = await execute("read_tool_output", {"output_id": control_id, "limit": 20000}, "read-control")
+        assert len(control_page["message"]) < 21000
+        assert "Retained tool output:" not in control_page["message"]
+        assert "EXPLORE_TAIL_SENTINEL" in page["message"]
+        context = [
+            {"role": "ASSISTANT", "text": "", "metadata": {"tool_calls": [
+                {"tool": "read_tool_output", "tool_call_id": "read-1", "output_id": output_id}]}},
+            {"role": "TOOL", "text": page["message"], "metadata": {
+                "toolCallId": "read-1", "toolName": "read_tool_output", "toolStatus": "FINISHED"}},
+        ]
+        messages = await build_llm_messages(context, "system", user_id="user", agent_id="parent", session_id="task")
+        assert "EXPLORE_TAIL_SENTINEL" in messages[-1]["content"]
+        for args in ({"output_id": "invalid"}, {"output_id": output_id, "limit": 20001},
+                     {"output_id": output_id, "offset": -1}, {"output_id": output_id, "offset": len(raw)+1}):
+            try:
+                await execute("read_tool_output", args, "bad")
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("Invalid read accepted")
+        try:
+            await execute("read_tool_output", {"output_id": other_scope}, "bad-scope")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Read another explore task's output")
+        return {"status": "completed", "final_response": "tail read"}
+
+    with retained_tool_output_fixture(), patch("temporalio.activity.heartbeat"), patch("loop.run_agent.run_agent", fake_run_agent):
+        other = await preview_tool_text(raw, user_id="user", agent_id="parent", session_id="another-task", limit=50000)
+        other_scope = re.search(r'output_id="([a-f0-9]{32})"', other)[1]
+        result = await spawn_explore_agent_activity(agent_id="parent", user_id="user", task_id="task", goal="read retained output", model="fixture", attachment_texts=["fixture"])
+        assert result["status"] == "completed"
+
+
 async def test_spawn_explore_agent_activity_runs_run_agent_and_returns_result():
     """spawn_explore_agent_activity calls run_agent with proper args, returns shaped dict."""
     from unittest.mock import AsyncMock, patch
@@ -5399,6 +5456,7 @@ async def test_tagged_execute_activity_injects_taskid_for_post_agent_message():
 async def run_all_tests():
     print("spawn-agent blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("explore_retained_output_dispatch", test_explore_retained_output_dispatch_scope_and_bounds)
     r.record(
         "explore_wrap_up_renders_late_verified_evidence", test_compile_explore_wrap_up_renders_late_verified_evidence
     )

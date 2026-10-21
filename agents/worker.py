@@ -163,6 +163,7 @@ from helpers.world_model_runtime import (
 )
 from temporal_connection import temporal_connect_options
 from tools.people_search import people_search_activity  # not yet refactored into domains/
+from tools.read_tool_output import preview_tool_output_activity, read_tool_output_activity
 from tools.web_search import web_search_activity  # not yet refactored into domains/
 from workflows import AgentWorkflow
 
@@ -1574,6 +1575,8 @@ async def main():
         web_fetch_download_activity,
         save_tool_usage,
         read_message_history_activity,
+        read_tool_output_activity,
+        preview_tool_output_activity,
         generate_message_activity,
         fetch_recent_messages_activity,
         queue_imessage_activity,

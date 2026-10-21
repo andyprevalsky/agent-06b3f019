@@ -242,3 +242,29 @@ async def native_browser_start_source(timestamp: str, *, tool_call_id: str = "to
     await handle_tool_event(event, "agent-1", tool_call_id, "spawn_browser_agent", persistence)
     args = persistence.await_args.kwargs["args"]
     return {"id": "native-browser-origin", "role": args[2], "text": args[1], "metadata": args[3], "timestamp": timestamp}
+
+
+@contextlib.contextmanager
+def retained_tool_output_fixture():
+    """Exercise the real shared retention helper without network or credentials."""
+    import uuid
+    from unittest.mock import patch
+
+    stored = {}
+
+    async def upload(user_id, body, filename, mime_type, *, idempotency_key):
+        path = f"{user_id}/{uuid.uuid5(uuid.NAMESPACE_URL, idempotency_key)}_{filename}"
+        stored[path] = body
+        return {"storage_path": path}
+
+    async def download(path):
+        if path not in stored:
+            raise ValueError("No retained output in this scope")
+        return stored[path]
+
+    with (patch("helpers.attachments.upload_to_storage", side_effect=upload),
+          patch("helpers.attachments.download_from_storage", side_effect=download),
+          patch("httpx.AsyncClient.send", side_effect=AssertionError("Unexpected provider/network request"))):
+        yield stored
+
+from contextlib import contextmanager

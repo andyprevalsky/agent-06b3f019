@@ -746,6 +746,7 @@ async def summarize_tool_result(
     gpt_token_user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     cache_sequence_id: Optional[str] = None,
+    session_id: str = "",
 ) -> Dict[str, Any]:
     """Summarize a verbose tool result (e.g. web_fetch body) before it lands in context.
 
@@ -761,6 +762,11 @@ async def summarize_tool_result(
         On failure: summary is the raw text hard-capped to TOOL_RESULT_HARD_CAP_CHARS
         with a marker, and summarized=False.
     """
+    from utils.tool_output import preview_tool_text
+
+    retained = await preview_tool_text(tool_result_text, user_id=claude_token_user_id or gpt_token_user_id or "",
+                                       agent_id=agent_id or "", session_id=session_id, limit=TOOL_RESULT_HARD_CAP_CHARS)
+    marker = retained[retained.rfind("\n[Retained tool output:"):] if "\n[Retained tool output:" in retained else ""
     try:
         activity.heartbeat(f"Summarizing {tool_name} result ({len(tool_result_text)} chars)")
 
@@ -773,7 +779,7 @@ The agent is trying to: {parent_objective}
 
 Web page contents:
 ---
-{tool_result_text}
+{retained}
 ---
 
 Produce a concise summary (target 1,500 tokens, hard cap 2,000) that:
@@ -820,7 +826,7 @@ Output the summary only — no preamble."""
             tokens_used=usage.get("total_tokens", 0),
         )
 
-        return {"summary": summary, "usage": usage, "summarized": True}
+        return {"summary": summary + marker, "usage": usage, "summarized": True}
 
     except Exception as e:
         logger.warning(
@@ -828,14 +834,7 @@ Output the summary only — no preamble."""
             tool_name=tool_name,
             error=str(e),
         )
-        original_len = len(tool_result_text)
-        if original_len > TOOL_RESULT_HARD_CAP_CHARS:
-            truncated = (
-                tool_result_text[:TOOL_RESULT_HARD_CAP_CHARS]
-                + f"\n\n...[truncated, original_len={original_len}]"
-            )
-        else:
-            truncated = tool_result_text
+        truncated = retained
         return {"summary": truncated, "usage": {}, "summarized": False, "error": str(e)}
 
 
@@ -859,6 +858,7 @@ async def summarize_and_filter_links(
     agent_id: Optional[str] = None,
     cache_sequence_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
+    session_id: str = "",
 ) -> Dict[str, Any]:
     """Run one Haiku call that summarizes a fetched web page and curates which
     of the page's links are worth downloading.
@@ -881,16 +881,17 @@ async def summarize_and_filter_links(
     """
     import json
 
+    from utils.tool_output import preview_tool_text
+
+    retained = await preview_tool_text(markdown, user_id=claude_token_user_id or gpt_token_user_id or "",
+                                       agent_id=agent_id or "", session_id=session_id, limit=max_markdown_length)
+    marker = retained[retained.rfind("\n[Retained tool output:"):] if "\n[Retained tool output:" in retained else ""
     try:
         activity.heartbeat(f"Summarizing web_fetch result ({len(markdown)} chars, {len(links)} links)")
 
         from helpers.llm import call_llm
 
-        truncation_marker = "\n\n[Content truncated due to length...]"
-        if len(markdown) > max_markdown_length:
-            markdown_for_prompt = markdown[: max_markdown_length - len(truncation_marker)] + truncation_marker
-        else:
-            markdown_for_prompt = markdown
+        markdown_for_prompt = retained
 
         prompt = f"""You are filtering a fetched web page for an autonomous agent.
 
@@ -912,8 +913,7 @@ Rules for summary:
   relevant to the objective.
 - Start with the source URL and page title (if known).
 - Omit nav, ads, related-articles, and boilerplate.
-- If the input ended with "[Content truncated due to length...]", note that
-  the page was truncated.
+- If the input contains a retained-output marker, note that this is a preview.
 
 Rules for files_to_download:
 - Only URLs the objective explicitly requires. Empty list is the default.
@@ -967,7 +967,7 @@ Rules for files_to_download:
         )
 
         return {
-            "summary": summary,
+            "summary": summary + marker,
             "files_to_download": files_to_download,
             "usage": usage,
             "summarized": True,
@@ -979,14 +979,7 @@ Rules for files_to_download:
             url=url,
             error=str(e),
         )
-        original_len = len(markdown)
-        if original_len > TOOL_RESULT_HARD_CAP_CHARS:
-            truncated = (
-                markdown[:TOOL_RESULT_HARD_CAP_CHARS]
-                + f"\n\n...[truncated, original_len={original_len}]"
-            )
-        else:
-            truncated = markdown
+        truncated = retained
         return {
             "summary": truncated,
             "files_to_download": [],

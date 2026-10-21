@@ -44,10 +44,10 @@ from helpers.llm import (
 from helpers.messages import CoalescingStreamBroadcaster, schedule_background_broadcast
 from helpers.summarize import ESTIMATE_SAFETY_MULTIPLIER as SUMMARIZE_ESTIMATE_SAFETY_MULTIPLIER
 from helpers.summarize import (
+    TOOL_RESULT_HARD_CAP_CHARS,
     compaction_saved_ratio,
     compress_context,
     estimate_context_tokens,
-    hard_cap_tool_result_text,
 )
 from helpers.tracing import span, traced
 from helpers.update_status import update_agent_status
@@ -63,6 +63,7 @@ from utils.llm_timeouts import (
     STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS,
     VERIFIER_ACTIVITY_TIMEOUT_SECONDS,
 )
+from utils.tool_output import preview_tool_text
 from utils.tool_schemas import PLAN_TOOL_MODELS, create_agent_action_model
 
 logger = structlog.get_logger()
@@ -352,6 +353,20 @@ async def run_agent(
     execute_activity = (
         call_temporal_activity_from_activity if is_inside_temporal_activity else workflow.execute_activity
     )
+
+    async def preview_result(text: str) -> str:
+        if not is_inside_temporal_activity and len(text) > TOOL_RESULT_HARD_CAP_CHARS:
+            from tools.read_tool_output import preview_tool_output_activity
+
+            return await execute_activity(
+                preview_tool_output_activity,
+                args=[user_id, agent_id, task_id or "", text, TOOL_RESULT_HARD_CAP_CHARS],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+        return await preview_tool_text(
+            text, user_id=user_id, agent_id=agent_id, session_id=task_id or "", limit=TOOL_RESULT_HARD_CAP_CHARS,
+        )
 
     # Handle tool event wrapper - used by all tools
     async def _handle_tool_event(event, tool_call_id: str, tool_name: str):
@@ -1158,6 +1173,8 @@ async def run_agent(
                         llm_context,
                         current_system_prompt,
                         user_id=user_id,
+                        agent_id=agent_id,
+                        session_id=task_id or "",
                     )
             if is_inside_temporal_activity and completion_instruction and messages is not None:
                 messages.append({"role": "user", "content": completion_instruction})
@@ -1914,7 +1931,7 @@ async def run_agent(
                             context.append(
                                 {
                                     "role": "TOOL",
-                                    "text": hard_cap_tool_result_text(f"Error: {error}"),
+                                    "text": await preview_result(f"Error: {error}"),
                                     "timestamp": _safe_now().isoformat(),
                                     "metadata": {
                                         "toolCallId": tool_call_id,
@@ -1970,7 +1987,7 @@ async def run_agent(
                     # push the protected compaction tail past the overflow
                     # trigger (prod a890a362: 228k→210k still above 167k).
                     if not poll_messages:
-                        result_message = hard_cap_tool_result_text(result_message or "")
+                        result_message = await preview_result(result_message or "")
                     if is_error:
                         new_msg = {
                             "role": "TOOL",
@@ -2141,7 +2158,7 @@ async def run_agent(
                     if post_message:
                         try:
                             await post_message(
-                                hard_cap_tool_result_text(completion_tool_error),
+                                await preview_result(completion_tool_error),
                                 "TOOL",
                                 error_metadata,
                             )
@@ -2157,7 +2174,7 @@ async def run_agent(
                         context.append(
                             {
                                 "role": "TOOL",
-                                "text": hard_cap_tool_result_text(f"Error: {completion_tool_error}"),
+                                "text": await preview_result(f"Error: {completion_tool_error}"),
                                 "timestamp": _safe_now().isoformat(),
                                 "metadata": {
                                     key: value for key, value in error_metadata.items() if key != "subAgentId"

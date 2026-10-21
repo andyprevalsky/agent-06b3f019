@@ -643,6 +643,8 @@ async def spawn_explore_agent_activity(
         post_agent_message is dispatched in the background (create_task) so the tool
         call returns immediately; every other activity is awaited as before.
         """
+        if activity_fn.__name__ == "summarize_and_filter_links" and args:
+            args = [*args, task_id or ""]
         if activity_fn.__name__ == "post_agent_message" and args and len(args) >= 4:
             metadata = args[3]
             chain_key: Optional[str] = None
@@ -731,7 +733,12 @@ async def spawn_explore_agent_activity(
 
         tool_call_dict = {"tool": tool_name, **tool_args}
 
-        if tool_name == "web_search":
+        if tool_name == "read_tool_output":
+            from tools.read_tool_output import format_read_tool_output, read_tool_output_activity
+
+            result = await read_tool_output_activity(user_id, agent_id, task_id or "", tool_args)
+            return {"success": True, "message": format_read_tool_output(result)}
+        elif tool_name == "web_search":
             manager = WebSearchManager()
             result = await manager.execute_tool(
                 execute_activity=tagged_execute_activity,

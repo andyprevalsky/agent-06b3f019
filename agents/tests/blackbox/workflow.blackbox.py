@@ -10015,6 +10015,60 @@ async def test_workflow_poll_messages_exception_raises():
         _restore_workflow(original)
 
 
+async def test_workflow_retained_output_dispatch_and_error_pairing():
+    import re
+    from unittest.mock import AsyncMock, patch
+    from _test_utils import retained_tool_output_fixture
+    from utils.tool_output import preview_tool_text
+    from tools.read_tool_output import read_tool_output_activity
+    import tools.read_tool_output as reader
+    from helpers.llm import build_llm_messages
+
+    import ast
+    from pathlib import Path
+    from tools.read_tool_output import preview_tool_output_activity
+
+    registry_tree = ast.parse((Path(__file__).resolve().parents[2] / "worker.py").read_text())
+    registry = next(node.value for node in ast.walk(registry_tree) if isinstance(node, ast.Assign)
+                    and any(isinstance(target, ast.Name) and target.id == "registered_activities" for target in node.targets))
+    registered_names = {node.id for node in registry.elts if isinstance(node, ast.Name)}
+    for fn in (read_tool_output_activity, preview_tool_output_activity):
+        assert fn.__temporal_activity_definition.name in registered_names
+
+    wf = _bare_workflow_instance()
+    wf.agent_id, wf.user_id = "agent", "user"
+    wf._update_tree_state = AsyncMock()
+    receipts = []
+
+    async def handle(event, call_id, name):
+        receipts.append({"role": "TOOL", "text": event.message, "metadata": {
+            "toolCallId": call_id, "toolName": name, "toolStatus": event.status.value}})
+    wf._handle_tool_event = handle
+
+    async def execute_activity(fn, *, args, **kwargs):
+        assert fn is read_tool_output_activity
+        return await fn(*args)
+
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        with retained_tool_output_fixture(), patch.object(reader.workflow, "execute_activity", execute_activity):
+            preview = await preview_tool_text("body " * 25000 + "MAIN_TAIL", user_id="user", agent_id="agent")
+            output_id = re.search(r'output_id="([a-f0-9]{32})"', preview)[1]
+            result = await wf._execute_tool("read_tool_output", {"output_id": output_id, "query": "MAIN_TAIL", "user_id": "attacker"}, "read-main")
+            assert not result.get("error"), result
+            context = [{"role": "ASSISTANT", "text": "", "metadata": {"tool_calls": [
+                {"tool": "read_tool_output", "tool_call_id": "read-main", "output_id": output_id}]}}, receipts[-1]]
+            messages = await build_llm_messages(context, "system", user_id="user", agent_id="agent")
+            assert "MAIN_TAIL" in messages[-1]["content"]
+            for args in ({"output_id": "invalid"}, {"output_id": "f" * 32}):
+                result = await wf._execute_tool("read_tool_output", args, "bad-read")
+                assert result.get("error"), result
+                assert receipts[-1]["metadata"]["toolStatus"] == "ERROR"
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_execute_tool_unknown_tool_returns_error():
     """Unknown tool: returns error AND posts a TOOL event so the loop's next
     iteration sees a paired tool_result for the LLM's tool_use. Without the
@@ -11066,6 +11120,7 @@ async def test_workflow_post_message_does_not_throttle_tree_outside_demo():
 async def run_all_tests():
     print("workflow blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("wf_retained_output_dispatch", test_workflow_retained_output_dispatch_and_error_pairing)
 
     # Pure logic tests (sync)
     r.record("task_dag_parallel", test_task_dag_parallel)

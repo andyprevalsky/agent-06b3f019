@@ -6,7 +6,6 @@ Uses run_agent for the core loop. Workflow handles:
 - continue_as_new for context overflow
 """
 
-from helpers.wmh_activity_policy import wmh_activity_timeout_options
 import asyncio
 import contextlib
 import hashlib
@@ -21,6 +20,8 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
+
+from helpers.wmh_activity_policy import wmh_activity_timeout_options
 
 # Import pass-through for workflow context:
 # - Our own modules are safe (config.py has no import-time side effects)
@@ -107,12 +108,13 @@ with workflow.unsafe.imports_passed_through():
         raise_gate_direct,
     )
     from tools.google_oauth_demo import google_oauth_demo
-
-    # Tool executors (map tool name → workflow helper)
     from tools.grep import grep
     from tools.knowledge_base import save_blueprint_activity
     from tools.message_person import message_person
     from tools.prompts import TOOL_PROMPTS
+
+    # Tool executors (map tool name → workflow helper)
+    from tools.read_tool_output import read_tool_output_for_workflow
     from tools.request_user_approval import (
         UserRejectedError,
         request_user_approval_direct,
@@ -208,6 +210,7 @@ def _fast_cache_compute_affinity_key(user_id: str, goal: str) -> str:
 
 # Tool name → executor function mapping
 TOOL_EXECUTORS = {
+    "read_tool_output": read_tool_output_for_workflow,
     "google_workspace_run": google_oauth_demo,
     "spawn_agent": spawn_agent,  # Unified: browser/code/general_purpose/explore
     "wait_for": wait_for,

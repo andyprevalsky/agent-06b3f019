@@ -36,6 +36,7 @@ TOOL_PROMPTS: dict[str, str] = {
     "send_message_to_user_execute_phase": send_message_to_user_execute_phase_prompt,
     "message_person": message_person_prompt,
     "call_phone_number": call_phone_number_prompt,
+    "read_tool_output": "Read omitted tool output using its opaque output_id. Pages use Unicode character offsets; follow next_offset or search with query. Only outputs from this agent/session can be read.",
     # Research
     "grep": grep_prompt,
     "google_workspace_run": google_workspace_run_prompt,

@@ -33,6 +33,7 @@ from utils.response_schema_constraints import (
     bounds_from_entries,
     coerce_direct_bounds_to_entries,
 )
+from utils.tool_output import ReadToolOutputTool
 from utils.user_facing_writing_prompt import user_facing_text_description
 
 logger = structlog.get_logger(__name__)
@@ -45,6 +46,7 @@ logger = structlog.get_logger(__name__)
 
 # Tools available during PLAN phase (research + create execution plan)
 PLAN_PHASE_TOOLS = [
+    "read_tool_output",
     "spawn_agent",  # Only type="explore" allowed in PLAN (enforced at runtime)
     "send_message_to_user",
     "set_plan",
@@ -53,6 +55,7 @@ PLAN_PHASE_TOOLS = [
 
 # Tools available during EXECUTE phase (run the plan)
 EXECUTE_PHASE_TOOLS = [
+    "read_tool_output",
     "spawn_agent",  # Unified: type=browser|code|general_purpose|explore
     "wait_for",
     "send_message_to_user_execute_phase",
@@ -1274,6 +1277,7 @@ ToolRegistry = Dict[str, Type[BaseModel]]
 
 # Map tool names to their Pydantic models
 TOOL_MODELS: ToolRegistry = {
+    "read_tool_output": ReadToolOutputTool,
     "wait_for": WaitForTool,
     "web_search": WebSearchTool,
     "people_search": PeopleSearchTool,
@@ -1308,6 +1312,7 @@ PLAN_TOOL_MODELS: ToolRegistry = {
 # Full registry list -  callers that inject tools into an explore agent MUST use
 # `get_explore_agent_tools()` so ROSE_DISABLE_API_REQUEST can strip api_request.
 EXPLORE_AGENT_TOOLS = [
+    "read_tool_output",
     "web_search",
     "people_search",
     "web_fetch",
