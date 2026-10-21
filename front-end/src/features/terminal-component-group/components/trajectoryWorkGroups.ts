@@ -1,12 +1,8 @@
 /** Ordered UI projection only: live comms and work share a single trajectory slot. */
 import type { Message } from '../hooks';
-import { isBrowserAgentResult } from './browserAgentResult';
+import { isUserFacingWorkBoundary } from './trajectoryUserFacingBoundary';
 import { isHiddenTrajectoryRow } from './trajectoryRowVisibility';
-import {
-  eventTimeMs,
-  parseAgentToAgentMessage,
-  parsePinnedQuestion,
-} from '../hooks/codeAgentContract';
+import { eventTimeMs, parseAgentToAgentMessage } from '../hooks/codeAgentContract';
 
 export interface TrajectoryActivity {
   key: string;
@@ -29,20 +25,7 @@ export interface TrajectoryWorkGrouping {
 
 export function trajectoryActivity(message: Message): TrajectoryActivity | null {
   const metadata = message.metadata;
-  if (
-    parsePinnedQuestion(metadata) ||
-    message.file_pointer ||
-    metadata?.inlineView ||
-    metadata?.isUserAttentionMessage ||
-    metadata?.isFinalSummary ||
-    metadata?.completionSummary ||
-    metadata?.toolName === 'spawn_claude_code_agent' ||
-    metadata?.toolName === 'set_plan' ||
-    metadata?.requestUserApproval ||
-    (!isBrowserAgentResult(message) &&
-      (metadata?.error || /failed|error/i.test(String(metadata?.toolStatus ?? ''))))
-  )
-    return null;
+  if (isUserFacingWorkBoundary(message)) return null;
   const a2a = parseAgentToAgentMessage(message);
   if (a2a)
     return {
@@ -55,18 +38,13 @@ export function trajectoryActivity(message: Message): TrajectoryActivity | null 
   if (message.role === 'ASSISTANT' && message.text.trim())
     return { key: message.message_id, message, kind: 'thinking', label: 'Thinking' };
   const tool = metadata?.toolName;
-  if (
-    message.role !== 'TOOL' ||
-    typeof tool !== 'string' ||
-    /send_message_to_user|display|request_user|approv|ask_user|phone|payment|connect|credit|attempt_completion/.test(
-      tool,
-    )
-  )
-    return null;
+  if (message.role !== 'TOOL') return null;
   const title =
     typeof metadata?.title === 'string' && metadata.title.trim()
       ? metadata.title
-      : tool.replaceAll('_', ' ');
+      : typeof tool === 'string'
+        ? tool.replaceAll('_', ' ')
+        : 'Tool result';
   return {
     key: message.message_id,
     message,
@@ -75,9 +53,19 @@ export function trajectoryActivity(message: Message): TrajectoryActivity | null 
   };
 }
 
-function outcome(status?: string): TrajectoryWorkGroup['status'] {
+function hasWorkFailure(activities: TrajectoryActivity[]): boolean {
+  return activities.some(
+    ({ message }) =>
+      message.metadata?.error || /failed|error/i.test(String(message.metadata?.toolStatus ?? '')),
+  );
+}
+
+function outcome(
+  status: string | undefined,
+  activities: TrajectoryActivity[],
+): TrajectoryWorkGroup['status'] {
   if (status === 'COMPLETED') return 'completed';
-  if (status === 'FAILED') return 'failed';
+  if (status === 'FAILED') return hasWorkFailure(activities) ? 'failed' : 'completed';
   if (status === 'PAUSED' || status === 'CANCELLED') return 'interrupted';
   return 'running';
 }
@@ -108,11 +96,11 @@ export function groupTrajectoryWork(
     const activity = trajectoryActivity(message);
     if (!activity) {
       if (current) {
-        current.status =
+        const failedEnd =
+          status === 'FAILED' ||
           message.metadata?.error ||
-          /failed|error/i.test(String(message.metadata?.toolStatus ?? ''))
-            ? 'failed'
-            : 'completed';
+          /failed|error/i.test(String(message.metadata?.toolStatus ?? ''));
+        current.status = hasWorkFailure(current.activities) && failedEnd ? 'failed' : 'completed';
         current.endedAt = at(message);
       }
       current = null;
@@ -143,7 +131,7 @@ export function groupTrajectoryWork(
     }
   }
   if (current) {
-    current.status = outcome(status);
+    current.status = outcome(status, current.activities);
     if (current.status !== 'running') {
       const end = endedAt ? eventTimeMs(endedAt) : null;
       current.endedAt = end !== null && end >= (current.startedAt ?? 0) ? end : null;

@@ -29,17 +29,60 @@ describe('ordered work projection boundaries', () => {
     expect(groups.groupsByLeadId.size).toBe(1);
     expect(groups.foldedIds.has('late-mirror')).toBe(true);
   });
-  it('leaves approvals, pinned questions, media and failures outside the history', () => {
-    const boundary = [
-      msg({ toolName: 'request_user_approval' }),
-      msg({ toolName: 'display' }),
-      msg({ toolName: 'execute', toolStatus: 'ERROR' }),
-    ];
+  it('leaves pending approvals, pinned questions and media outside the history', () => {
+    const boundary = [msg({ toolName: 'request_user_approval' }), msg({ toolName: 'display' })];
     for (const message of boundary) {
       const groups = groupTrajectoryWork([comm('one'), message], 'ACTIVE');
       expect(groups.foldedIds.has(message.message_id)).toBe(false);
       expect([...groups.groupsByLeadId.values()][0].status).not.toBe('running');
     }
+  });
+  it.each([
+    {
+      toolName: 'attempt_completion',
+      toolStatus: 'ERROR',
+      error: true,
+      title: '❌ Plan required',
+      phase: 'PLAN',
+    },
+    { toolName: 'read_file', toolStatus: 'ERROR', error: true, title: 'Read failed' },
+    { toolName: 'make_payment', toolStatus: 'FINISHED', title: 'Payment result' },
+    {
+      toolName: 'attempt_completion',
+      toolStatus: 'IN_PROGRESS',
+      phase: 'EXECUTE',
+      title: 'Running verifier',
+    },
+  ])('folds internal status/result $title into work', (metadata) => {
+    const message = msg(metadata, { message_id: 'internal-status' });
+    const groups = groupTrajectoryWork(
+      [comm('before-status'), message, comm('after-status')],
+      'COMPLETED',
+    );
+    expect(groups.groupsByLeadId.size).toBe(1);
+    expect(groups.foldedIds.has(message.message_id)).toBe(true);
+    expect([...groups.groupsByLeadId.values()][0].activities).toHaveLength(3);
+  });
+  it.each([
+    {
+      toolName: 'attempt_completion',
+      toolStatus: 'FINISHED',
+      phase: 'PLAN',
+      title: 'Beginning Execute Phase',
+    },
+    { toolName: 'attempt_completion', toolStatus: 'FINISHED', title: 'Beginning Execute Phase' },
+    { toolName: 'send_message_to_user_execute_phase', toolStatus: 'ERROR', error: true },
+    { toolName: 'completion_summary', toolStatus: 'FINISHED' },
+    {
+      toolName: 'spawn_browser_agent',
+      toolStatus: 'FINISHED',
+      requestUserAuthentication: { requestId: 'auth', taskId: 'task' },
+    },
+    { toolName: 'call_phone_number', toolStatus: 'IN_PROGRESS' },
+  ])('keeps user-facing transition/output/control $toolName outside work', (metadata) => {
+    const message = msg(metadata, { message_id: 'user-facing' });
+    const groups = groupTrajectoryWork([comm('before-control'), message], 'ACTIVE');
+    expect(groups.foldedIds.has(message.message_id)).toBe(false);
   });
   it.each(['IN_PROGRESS', 'FINISHED', 'ERROR'])(
     'keeps %s plans user-facing, outside work',
