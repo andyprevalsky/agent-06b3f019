@@ -125,7 +125,11 @@ export interface MessageMetadata {
   browser_url?: string;
   /** Action type for browser/code agents */
   action_type?:
-    BrowserActionType | CodeActionType | ClaudeCodeActionType | 'credential_failure_classification';
+    | 'phone'
+    | BrowserActionType
+    | CodeActionType
+    | ClaudeCodeActionType
+    | 'credential_failure_classification';
   /** Task ID for browser/code agents */
   task_id?: string;
   /** Preview URL for deployed code */

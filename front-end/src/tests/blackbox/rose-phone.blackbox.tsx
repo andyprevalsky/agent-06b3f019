@@ -31,7 +31,7 @@ function mockSession() {
 }
 
 const phoneRequests = () =>
-  capturedRequests.filter((r) => new URL(r.url).pathname.startsWith('/api/phones'));
+  capturedRequests.filter((r) => /^\/api\/(phones|iphone)(\/|$)/.test(new URL(r.url).pathname));
 
 /** Let any request the Phone might start reach the MSW capture on the real clock. */
 async function settle(ms = 50) {
@@ -51,8 +51,8 @@ describe('Rose Desktop Phone (Coming soon)', () => {
     const phone = screen.getByTestId('rose-phone');
     const device = within(phone).getByTestId('rose-phone-device');
     const screenEl = within(device).getByTestId('phone-screen');
-    expect(screenEl).toHaveTextContent('Coming soon');
-    expect(screenEl).toHaveTextContent('Rose will be able to use your iPhone here.');
+    expect(screenEl).toHaveTextContent('Select an agent to view its phone.');
+    expect(screenEl).toHaveTextContent('Phone access requires the connected phone service.');
     // Floating device only: no buttons, frame image, overlay or connect message.
     expect(within(phone).queryAllByRole('button')).toHaveLength(0);
     expect(within(phone).queryByTestId('phone-frame')).toBeNull();
@@ -73,7 +73,9 @@ describe('Rose Desktop Phone (Coming soon)', () => {
     await user.keyboard('{Escape}');
     expect(screen.queryByTestId('rose-phone')).toBeNull();
     await user.click(screen.getByTestId('rose-app-phone'));
-    expect(screen.getByTestId('rose-phone')).toHaveTextContent('Coming soon');
+    expect(screen.getByTestId('rose-phone')).toHaveTextContent(
+      'Select an agent to view its phone.',
+    );
     await user.click(screen.getByTestId('rose-app-phone'));
     expect(screen.queryByTestId('rose-phone')).toBeNull();
     await settle();
