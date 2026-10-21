@@ -15,7 +15,7 @@ describe('Mac sidebar hover latch', () => {
     expect(bar).toHaveAttribute('data-expanded', 'true');
     expect(screen.getByTestId('sidebar-collapse-hint')).toHaveAttribute('aria-hidden', 'true');
     expect(screen.getByTestId('sidebar-collapse-hint').querySelector('button')).toBeNull();
-    fireEvent.mouseLeave(bar);
+    fireEvent.mouseLeave(bar, { clientX: 400 });
     fireEvent.mouseMove(window, { clientX: 400, clientY: 500 });
     expect(bar).toHaveAttribute('data-expanded', 'true');
     fireEvent.mouseMove(window, { clientX: window.innerWidth * 0.17, clientY: 700 });
@@ -27,7 +27,7 @@ describe('Mac sidebar hover latch', () => {
     expect(bar).toHaveAttribute('data-expanded', 'true');
     fireEvent.mouseMove(bar, { clientX: 30, clientY: 20 });
     expect(bar).toHaveAttribute('data-expanded', 'true');
-    fireEvent.mouseLeave(bar);
+    fireEvent.mouseLeave(bar, { clientX: 400 });
     fireEvent.mouseMove(window, { clientX: 0, clientY: 20 });
     expect(bar).toHaveAttribute('data-expanded', 'false');
   });
@@ -52,6 +52,26 @@ describe('Mac sidebar hover latch', () => {
     pointer(window, 'pointerup', 140);
   });
 
+  it('closes when returning into the left zone over a row, without conflicting with initial entry', () => {
+    vi.stubGlobal('navigator', Object.create(navigator, { platform: { value: 'MacIntel' } }));
+    renderWithProviders(<AppSidebar {...defaultProps()} />);
+    const bar = screen.getByTestId('rose-sidebar');
+    const home = screen.getByRole('button', { name: 'Home' });
+    fireEvent.mouseEnter(bar);
+    fireEvent.mouseLeave(bar, { clientX: 100 });
+    fireEvent.mouseMove(window, { clientX: 110, clientY: 50 });
+    expect(bar).toHaveAttribute('data-expanded', 'true');
+    fireEvent.mouseMove(home, { clientX: 30, clientY: 50 });
+    expect(bar).toHaveAttribute('data-expanded', 'true');
+    fireEvent.mouseLeave(bar, { clientX: 100 });
+    fireEvent.mouseMove(window, { clientX: window.innerWidth * 0.6, clientY: 50 });
+    fireEvent.mouseEnter(bar);
+    fireEvent.mouseMove(home, { clientX: 30, clientY: 50 });
+    expect(bar).toHaveAttribute('data-expanded', 'false');
+    fireEvent.mouseEnter(bar);
+    expect(bar).toHaveAttribute('data-expanded', 'false');
+  });
+
   it('preserves ordinary hover collapse outside Mac', () => {
     vi.stubGlobal('navigator', Object.create(navigator, { platform: { value: 'Linux x86_64' } }));
     renderWithProviders(<AppSidebar {...defaultProps()} />);
@@ -59,7 +79,7 @@ describe('Mac sidebar hover latch', () => {
     fireEvent.mouseEnter(bar);
     expect(bar).toHaveAttribute('data-expanded', 'true');
     expect(screen.queryByTestId('sidebar-collapse-hint')).toBeNull();
-    fireEvent.mouseLeave(bar);
+    fireEvent.mouseLeave(bar, { clientX: 400 });
     expect(bar).toHaveAttribute('data-expanded', 'false');
   });
 });

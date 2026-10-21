@@ -1,5 +1,6 @@
 /** Switch once per authenticated identity; manual changes remain usable afterward. */
 import { useEffect, useRef } from 'react';
+import { readStoredRoseChoice, writeStoredRoseDark } from '../hooks';
 
 export function useLoginDarkMode(userId: string | null, applyDark: (userId: string) => void) {
   const previous = useRef<string | null>(null);
@@ -10,6 +11,12 @@ export function useLoginDarkMode(userId: string | null, applyDark: (userId: stri
       return;
     }
     if (!changed) return;
+    const saved = readStoredRoseChoice(userId);
+    if (saved !== null) {
+      previous.current = userId;
+      writeStoredRoseDark(userId, saved === 'dark');
+      return;
+    }
     const root = document.documentElement;
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     let frame = 0;

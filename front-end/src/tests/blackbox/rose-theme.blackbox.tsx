@@ -138,6 +138,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  for (const cookie of document.cookie.split(';')) {
+    const key = cookie.trim().split('=')[0];
+    if (key.startsWith('rose-theme')) document.cookie = `${key}=; Max-Age=0; Path=/`;
+  }
   document.documentElement.classList.remove('dark');
   localStorage.clear();
   vi.restoreAllMocks();

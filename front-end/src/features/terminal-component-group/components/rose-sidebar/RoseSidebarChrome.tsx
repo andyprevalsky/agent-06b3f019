@@ -37,13 +37,25 @@ function Label({ isExpanded, children }: { isExpanded: boolean; children: ReactN
   );
 }
 
-export function RoseHomeRow({ isExpanded, onClick }: { isExpanded: boolean; onClick: () => void }) {
+export function RoseHomeRow({
+  isExpanded,
+  onClick,
+  insetForBackArrow = false,
+}: {
+  isExpanded: boolean;
+  onClick: () => void;
+  insetForBackArrow?: boolean;
+}) {
   return (
     <button
       type="button"
       aria-label="Home"
       onClick={onClick}
-      className={cn(ROW, 'font-semibold text-[hsl(240_15%_8%)] dark:text-[#ecece8]')}
+      className={cn(
+        ROW,
+        'font-semibold text-[hsl(240_15%_8%)] dark:text-[#ecece8]',
+        insetForBackArrow && 'pl-[54px]',
+      )}
     >
       <Home className="h-[21px] w-[21px] flex-none" strokeWidth={1.7} />
       <Label isExpanded={isExpanded}>Home</Label>

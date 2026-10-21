@@ -21,6 +21,10 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   localStorage.clear();
+  for (const cookie of document.cookie.split(';')) {
+    const key = cookie.trim().split('=')[0];
+    if (key.startsWith('rose-theme')) document.cookie = `${key}=; Max-Age=0; Path=/`;
+  }
   document.documentElement.className = '';
 });
 describe('login dark mode hook', () => {
@@ -52,9 +56,8 @@ describe('login dark mode hook', () => {
     expect(document.documentElement).not.toHaveClass('rose-login-theme-transition');
   });
 
-  it('smoothly changes to dark once on login, keeps manual choice until next login, and cleans up', () => {
+  it('smoothly changes to dark once on login, remembers manual choice on the next login, and cleans up', () => {
     vi.useFakeTimers();
-    localStorage.setItem('rose-theme:viewer', 'light');
     const view = renderWithProviders(ui(null));
     expect(screen.getByTestId('login-theme')).toHaveAttribute('data-dark', 'false');
     view.rerender(ui('viewer'));
@@ -79,10 +82,38 @@ describe('login dark mode hook', () => {
     act(() => {
       vi.advanceTimersByTime(80);
     });
-    expect(document.documentElement).toHaveClass('dark');
+    expect(document.documentElement).not.toHaveClass('dark');
     view.unmount();
     expect(document.documentElement).not.toHaveClass('dark', 'rose-login-theme-transition');
   });
+  it('remembers both light and dark from cookies after remount and storage loss, scoped per account', () => {
+    vi.useFakeTimers();
+    const view = renderWithProviders(ui('cookie-viewer'));
+    act(() => {
+      vi.advanceTimersByTime(600);
+    });
+    expect(document.documentElement).toHaveClass('dark');
+    expect(document.cookie).toContain('rose-theme%3Acookie-viewer=dark');
+    fireEvent.click(screen.getByTestId('login-theme'));
+    expect(document.cookie).toContain('rose-theme%3Acookie-viewer=light');
+    view.unmount();
+    localStorage.clear();
+    const restored = renderWithProviders(ui('cookie-viewer'));
+    act(() => {
+      vi.advanceTimersByTime(600);
+    });
+    expect(document.documentElement).not.toHaveClass('dark');
+    expect(localStorage.getItem('rose-theme:cookie-viewer')).toBe('light');
+    fireEvent.click(screen.getByTestId('login-theme'));
+    restored.unmount();
+    localStorage.clear();
+    const dark = renderWithProviders(ui('cookie-viewer'));
+    expect(document.documentElement).toHaveClass('dark');
+    dark.unmount();
+    renderWithProviders(ui('other-viewer'));
+    expect(document.documentElement).not.toHaveClass('dark');
+  });
+
   it('honors reduced motion and switches immediately without transition', () => {
     vi.spyOn(window, 'matchMedia').mockImplementation((media) => ({
       matches: media === '(prefers-reduced-motion: reduce)',

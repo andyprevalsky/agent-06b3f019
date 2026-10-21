@@ -37,6 +37,7 @@
 
 import { ArrowLeft, Activity, Archive, Globe, Megaphone } from 'lucide-react';
 import { useState } from 'react';
+import { createPortal } from 'react-dom';
 
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useIsMobile } from '@/hooks/use-mobile';
@@ -183,96 +184,105 @@ function RoseSidebarBar(props: AppSidebarProps) {
   const profile = useAccountProfileName(props.user);
   return (
     <>
-      <aside
-        data-testid="rose-sidebar"
-        data-expanded={isExpanded}
-        data-surface="opaque"
-        aria-label="Agents"
-        {...expansion.surface}
-        className={cn(
-          'fixed bottom-0 left-0 top-0 z-[70] hidden flex-col overflow-hidden border-r border-gray-200/70 bg-white pt-3.5 text-[13px] dark:border-white/[0.09] dark:bg-[#262624] md:flex',
-          isExpanded && 'shadow-[0_10px_40px_rgba(20,20,40,0.10)]',
-        )}
-        style={{
-          width: isExpanded ? ROSE_BAR_EXPANDED_WIDTH : ROSE_BAR_WIDTH,
-          transition: `width ${ROSE_BAR_DURATION_MS}ms ${ROSE_BAR_EASE}`,
-        }}
-      >
-        {expansion.sticky && isExpanded && (
-          <div
-            aria-hidden="true"
-            className="flex h-7 flex-none items-center px-[22px] text-muted-foreground"
-            data-testid="sidebar-collapse-hint"
-          >
-            <ArrowLeft className="h-5 w-5" strokeWidth={1.7} />
+      {createPortal(
+        <aside
+          data-testid="rose-sidebar"
+          data-expanded={isExpanded}
+          data-surface="opaque"
+          aria-label="Agents"
+          {...expansion.surface}
+          className={cn(
+            'fixed bottom-0 left-0 top-0 z-[70] hidden flex-col overflow-hidden border-r border-gray-200/70 bg-white pt-3.5 text-[13px] dark:border-white/[0.09] dark:bg-[#262624] md:flex',
+            isExpanded && 'z-[110] shadow-[0_10px_40px_rgba(20,20,40,0.10)]',
+          )}
+          style={{
+            width: isExpanded ? ROSE_BAR_EXPANDED_WIDTH : ROSE_BAR_WIDTH,
+            transition: `width ${ROSE_BAR_DURATION_MS}ms ${ROSE_BAR_EASE}`,
+          }}
+        >
+          <div className="relative h-[38px] flex-none">
+            <RoseHomeRow
+              isExpanded={isExpanded}
+              onClick={exits.onCreateAgent}
+              insetForBackArrow={expansion.sticky && isExpanded}
+            />
+            {expansion.sticky && isExpanded && (
+              <div
+                aria-hidden="true"
+                className="absolute left-[22px] top-[9px] text-muted-foreground"
+                data-testid="sidebar-collapse-hint"
+              >
+                <ArrowLeft className="h-5 w-5" strokeWidth={1.7} />
+              </div>
+            )}
           </div>
-        )}
-        <RoseHomeRow isExpanded={isExpanded} onClick={exits.onCreateAgent} />
-        <RoseNewAgentButton isExpanded={isExpanded} onClick={exits.onCreateAgent} />
-        <RoseSearchRow isExpanded={isExpanded} value={query} onChange={setQuery} />
-        <ScrollArea className="min-h-0 flex-1">
-          <RoseAgentGroups
-            grouped={grouped}
-            isExpanded={isExpanded}
-            isFiltering={isFiltering}
-            selectedAgentId={props.selectedAgentId}
-            attentionAgentIds={attention}
-            settingsProjectId={projects.openProject?.id ?? null}
-            renamingProjectId={projects.renamingProjectId}
-            onSelectAgent={codeAgentRows.selectAgentRow}
-            actionsFor={actionsFor}
-            onMenuOpenChange={expansion.setMenuOpen}
-            projectActions={projects.projectActions}
-            codeAgentsFor={codeAgentsFor}
-            onOpenCodeAgent={codeAgentRows.onOpenCodeAgent}
-            observeRoot={observeRoot}
-            visibleRootIds={visibleRootIds}
-            selectedCodeAgentId={codeAgentRows.selectedCodeAgentId}
-          />
-        </ScrollArea>
-        <div className="flex flex-none flex-col pb-2">
-          <RoseNavRow
-            icon={<Megaphone className="h-5 w-5" strokeWidth={1.7} />}
-            label="Feedback"
-            isExpanded={isExpanded}
-            isActive={apps?.openApp === 'feedback'}
-            onClick={() => openPanel('feedback')}
-          />
-          {props.showAdminHealth === true && (
-            <RoseNavRow
-              icon={<Activity className="h-5 w-5" strokeWidth={1.7} />}
-              label="Biz health"
+          <RoseNewAgentButton isExpanded={isExpanded} onClick={exits.onCreateAgent} />
+          <RoseSearchRow isExpanded={isExpanded} value={query} onChange={setQuery} />
+          <ScrollArea className="min-h-0 flex-1">
+            <RoseAgentGroups
+              grouped={grouped}
               isExpanded={isExpanded}
-              isActive={apps?.openApp === 'health'}
-              onClick={() => openPanel('health')}
+              isFiltering={isFiltering}
+              selectedAgentId={props.selectedAgentId}
+              attentionAgentIds={attention}
+              settingsProjectId={projects.openProject?.id ?? null}
+              renamingProjectId={projects.renamingProjectId}
+              onSelectAgent={codeAgentRows.selectAgentRow}
+              actionsFor={actionsFor}
+              onMenuOpenChange={expansion.setMenuOpen}
+              projectActions={projects.projectActions}
+              codeAgentsFor={codeAgentsFor}
+              onOpenCodeAgent={codeAgentRows.onOpenCodeAgent}
+              observeRoot={observeRoot}
+              visibleRootIds={visibleRootIds}
+              selectedCodeAgentId={codeAgentRows.selectedCodeAgentId}
             />
-          )}
-          <RoseNavRow
-            icon={<Archive className="h-5 w-5" strokeWidth={1.7} />}
-            label="Archived"
-            isExpanded={isExpanded}
-            onClick={() => setIsArchiveOpen(true)}
-          />
-          {props.showBrowse === true && (
+          </ScrollArea>
+          <div className="flex flex-none flex-col pb-2">
             <RoseNavRow
-              icon={<Globe className="h-5 w-5" strokeWidth={1.7} />}
-              label="Browse"
+              icon={<Megaphone className="h-5 w-5" strokeWidth={1.7} />}
+              label="Feedback"
               isExpanded={isExpanded}
-              isActive={currentView === 'browse'}
-              onClick={() => goToView('browse')}
+              isActive={apps?.openApp === 'feedback'}
+              onClick={() => openPanel('feedback')}
             />
-          )}
-          <RoseAccountRow
-            user={props.user}
-            profileName={profile.name}
-            profileLoading={profile.loading}
-            isExpanded={isExpanded}
-            isActive={apps?.openApp === 'settings'}
-            onOpenSettings={() => openPanel('settings')}
-            onLoginClick={props.onLoginClick}
-          />
-        </div>
-      </aside>
+            {props.showAdminHealth === true && (
+              <RoseNavRow
+                icon={<Activity className="h-5 w-5" strokeWidth={1.7} />}
+                label="Biz health"
+                isExpanded={isExpanded}
+                isActive={apps?.openApp === 'health'}
+                onClick={() => openPanel('health')}
+              />
+            )}
+            <RoseNavRow
+              icon={<Archive className="h-5 w-5" strokeWidth={1.7} />}
+              label="Archived"
+              isExpanded={isExpanded}
+              onClick={() => setIsArchiveOpen(true)}
+            />
+            {props.showBrowse === true && (
+              <RoseNavRow
+                icon={<Globe className="h-5 w-5" strokeWidth={1.7} />}
+                label="Browse"
+                isExpanded={isExpanded}
+                isActive={currentView === 'browse'}
+                onClick={() => goToView('browse')}
+              />
+            )}
+            <RoseAccountRow
+              user={props.user}
+              profileName={profile.name}
+              profileLoading={profile.loading}
+              isExpanded={isExpanded}
+              isActive={apps?.openApp === 'settings'}
+              onOpenSettings={() => openPanel('settings')}
+              onLoginClick={props.onLoginClick}
+            />
+          </div>
+        </aside>,
+        document.body,
+      )}
       {projects.openProject !== null && (
         <RoseProjectSettingsPanel
           project={projects.openProject}

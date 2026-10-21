@@ -40,13 +40,35 @@ export function useRoseTheme(): RoseThemeValue {
   return useContext(RoseThemeContext);
 }
 
+export function readStoredRoseChoice(userId: string | null): RoseThemeChoice | null {
+  if (userId === null) return null;
+  const stored = getItem(roseThemeStorageKey(userId));
+  if (stored === 'dark' || stored === 'light') return stored;
+  try {
+    const key = encodeURIComponent(roseThemeStorageKey(userId)) + '=';
+    const cookie = document.cookie
+      .split(';')
+      .map((part) => part.trim())
+      .find((part) => part.startsWith(key));
+    const value = cookie?.slice(key.length);
+    return value === 'dark' || value === 'light' ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 export function readStoredRoseDark(userId: string | null): boolean {
-  if (userId === null) return false;
-  return getItem(roseThemeStorageKey(userId)) === 'dark';
+  return readStoredRoseChoice(userId) === 'dark';
 }
 
 /** Best-effort: without storage (private mode / quota) the choice lasts this session. */
 export function writeStoredRoseDark(userId: string, dark: boolean): void {
   const choice: RoseThemeChoice = dark ? 'dark' : 'light';
   setItem(roseThemeStorageKey(userId), choice);
+  try {
+    const secure = location.protocol === 'https:' ? '; Secure' : '';
+    document.cookie = `${encodeURIComponent(roseThemeStorageKey(userId))}=${choice}; Max-Age=31536000; Path=/; SameSite=Lax${secure}`;
+  } catch {
+    /* Local storage remains available when browser cookies are blocked. */
+  }
 }

@@ -1,5 +1,13 @@
 /** Mac desktop hover stays open until the pointer returns to the window's left edge. */
-import { useEffect, useRef, useState, type FocusEvent, type PointerEvent } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type FocusEvent,
+  type PointerEvent,
+  type MouseEvent as ReactMouseEvent,
+} from 'react';
+import { ROSE_BAR_EXPANDED_WIDTH } from './roseSidebarLayout';
 
 export function useSidebarExpansion() {
   const sticky =
@@ -23,10 +31,8 @@ export function useSidebarExpansion() {
     const collapseAtEdge = (event: MouseEvent) => {
       const inZone = event.clientX <= window.innerWidth * 0.18;
       if (!inZone) suppressOpen.current = false;
-      const onControl =
-        event.target instanceof Element &&
-        event.target.closest('button, input, textarea, a, [role="button"]');
-      if (closeArmed.current && inZone && !onControl) collapse();
+      if (expandedRef.current && event.clientX > ROSE_BAR_EXPANDED_WIDTH) closeArmed.current = true;
+      if (closeArmed.current && inZone) collapse();
     };
     const drag = (event: globalThis.PointerEvent) => {
       if (dragStart.current !== null && event.clientX <= dragStart.current - 48) {
@@ -69,8 +75,12 @@ export function useSidebarExpansion() {
         expandedRef.current = true;
         setHovered(true);
       },
-      onMouseLeave: () => {
-        if (sticky) closeArmed.current = expandedRef.current;
+      onMouseLeave: (event: ReactMouseEvent<HTMLElement>) => {
+        // During width animation, the pointer may briefly outrun the painted edge.
+        // Only leaving the intended expanded width arms the return-to-close gesture.
+        if (sticky)
+          closeArmed.current =
+            expandedRef.current && (event.clientX > ROSE_BAR_EXPANDED_WIDTH || event.clientX <= 0);
         else {
           expandedRef.current = false;
           setHovered(false);
