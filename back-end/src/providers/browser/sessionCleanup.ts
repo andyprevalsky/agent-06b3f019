@@ -12,6 +12,8 @@ export interface SupersededBrowserRelease {
   previousProvider: BrowserProviderName;
   previousSessionId: string;
   operation: 'resume' | 'rotation';
+  /** The replacement's session id; equal to previousSessionId on a reattach/in-place rotate. */
+  currentSessionId?: string;
 }
 
 export interface SupersededBrowserReleaseDependencies {
@@ -33,6 +35,8 @@ export async function releaseSupersededBrowser(
   release: SupersededBrowserRelease,
   dependencies: SupersededBrowserReleaseDependencies = defaultDependencies
 ): Promise<boolean> {
+  // A reattach or in-place rotate keeps the same remote session: nothing was superseded.
+  if (release.currentSessionId === release.previousSessionId) return true;
   try {
     if (release.previousProvider === 'kernel') {
       await dependencies.releaseKernel(release.previousSessionId);

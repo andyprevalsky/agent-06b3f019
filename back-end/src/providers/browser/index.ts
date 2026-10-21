@@ -70,7 +70,6 @@ import {
 
 export {
   BrowserProviderRateLimitError,
-  BrowserSessionDrivenByClientError,
   type BrowserFileInfo,
   type BrowserProviderName,
   type BrowserSessionHealth,
@@ -91,7 +90,7 @@ export { selectedBrowserProvider, tilionEnabled, TilionApiKeyMissingError } from
  *   prepare-auth / inject-local-storage (JIT):  worker detaches → backend CDP → worker reattaches
  *   closeSession:  worker detaches → persistSignedInBrowserState harvest → provider release
  *   screenshot / press-key / file read+list+upload: REST, valid only while no client is
- *     attached; mid-run they raise BrowserSessionDrivenByClientError (HTTP 409
+ *     attached; mid-run they raise TilionSessionBusyError (HTTP 409
  *     `session_driven_by_client`) and the worker uses its own CDP connection instead.
  *   health / captcha telemetry / live view: REST status and token mints, safe while attached.
  *

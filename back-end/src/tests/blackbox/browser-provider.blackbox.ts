@@ -37,6 +37,16 @@ import { runLiveProviderParity } from './browser-provider.live.support';
 import { assertKernelUnhealthyProxyRelaxesLocation } from './browser-provider-proxy-health.support';
 import { runOptionalLiveBrowserUseProvider } from './browser-provider.browser-use-live.support';
 import {
+  assertDefaultCreationDispatchesToTilion,
+  assertStoredTilionRowDispatchesToTilion,
+  assertSupersededTilionReleaseIsExplicit,
+  assertTilionIsTheDefaultProvider,
+  assertTilionKillSwitchRoutesNewWorkToKernel,
+  assertTilionMissingKeyFailsLoudly,
+  assertTilionReaperReleasesOnlyOwnedTerminalSessions,
+  assertUnknownProviderFailsClosedAndTilionRowsAreRecognised,
+} from './browser-provider.tilion-wiring.support';
+import {
   createBrowserUseRecoverySession,
   browserUseProxyCountry,
   getBrowserUseSessionHealth,
@@ -70,12 +80,20 @@ const tests: Array<[string, () => void | Promise<void>]> = [
     'auth-persist failed-init cleanup discovers owned allocations and retains recovery custody',
     assertAuthPersistFailedInitCustody,
   ],
+  // Tilion became the default for new sessions (docs/plans/active/tilion-browser-provider.md).
+  ['Tilion is the default provider', assertTilionIsTheDefaultProvider],
+  ['Tilion kill switch routes new work to Kernel', assertTilionKillSwitchRoutesNewWorkToKernel],
+  ['Tilion selection without TILION_API_KEY fails loudly', assertTilionMissingKeyFailsLoudly],
   [
-    'Kernel is the default provider',
-    () =>
-      withProvider(undefined, () =>
-        assert(selectedBrowserProvider() === 'kernel', 'expected kernel')
-      ),
+    'unknown providers fail closed and stored tilion rows stay on Tilion',
+    assertUnknownProviderFailsClosedAndTilionRowsAreRecognised,
+  ],
+  ['default session creation dispatches to Tilion', assertDefaultCreationDispatchesToTilion],
+  ['a stored Tilion row dispatches to Tilion', assertStoredTilionRowDispatchesToTilion],
+  ['superseded Tilion sessions release through Tilion', assertSupersededTilionReleaseIsExplicit],
+  [
+    'Tilion reaper releases only owned terminal sessions',
+    assertTilionReaperReleasesOnlyOwnedTerminalSessions,
   ],
   [
     'Kernel is selected by one environment parameter',

@@ -8,6 +8,7 @@ import { canonicalAuthRealm } from '../../providers/authRealm';
 import { BROWSER_SESSION_MIN_REMAINING_MS } from '../../providers/steel/sessionLifetime';
 import { steelPublicCdpUrl } from '../../providers/steel/urls';
 import { storedBrowserProvider } from '../../providers/browser/types';
+import { refreshTilionConnectUrl } from '../../providers/browser/tilion';
 import * as repo from './repo';
 import { serializePasskeys, serializePasswords, toUserSettings } from './service.serializers';
 
@@ -213,6 +214,24 @@ async function applyLiveSessionAvailability(
   return response;
 }
 
+/**
+ * Tilion connect tokens expire after 1800 s, so the stored wsUrl of a run
+ * longer than 30 minutes is stale. Task info is how the worker reattaches to an
+ * existing session, so it mints a fresh connect URL (and persists it). A failed
+ * mint keeps the stored URL; the worker's attach then reports the real error.
+ */
+async function freshTilionConnectUrl(sessionId: string, stored: string): Promise<string> {
+  try {
+    return await refreshTilionConnectUrl(sessionId);
+  } catch (error) {
+    log.warn('Tilion connect URL refresh failed', {
+      sessionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return stored;
+  }
+}
+
 export async function getTaskInfo(taskId: string, options: { validateLive?: boolean } = {}) {
   const session = await repo.findSessionByTaskId(taskId);
 
@@ -225,6 +244,9 @@ export async function getTaskInfo(taskId: string, options: { validateLive?: bool
   const authRealm = canonicalAuthRealm(currentUrl ?? startUrl ?? '');
   const injection = await collectUserInjectionData(session.context?.userId, authRealm, taskId);
   const response = buildTaskInfoResponse(session, currentUrl, startUrl, authRealm, injection);
+  if (session.provider === 'tilion' && session.status === 'ACTIVE' && response.ws_url !== null) {
+    response.ws_url = await freshTilionConnectUrl(session.sessionId, response.ws_url);
+  }
 
   return options.validateLive === true ? applyLiveSessionAvailability(response, session) : response;
 }
