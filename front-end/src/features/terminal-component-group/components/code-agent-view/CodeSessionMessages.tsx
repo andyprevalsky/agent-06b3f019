@@ -10,6 +10,7 @@ import {
   type WorkTurn,
   type CodeSessionEntry,
 } from '../../hooks/codeSessionTurns';
+import { ThinkingIndicator } from '../ThinkingIndicator';
 import { MessageListItems } from '../MessageListItems';
 import type { CodeAgentConversation } from './useCodeAgentConversation';
 
@@ -19,13 +20,16 @@ const empty = new Map();
 function Messages({
   messages,
   owner,
+  streamingMessageId,
 }: {
+  streamingMessageId?: string;
   messages: ReturnType<typeof useAgentContext>['messages'];
   owner: string | null;
 }) {
   return (
     <MessageListItems
       filteredMessages={messages}
+      streamingMessageIds={streamingMessageId ? new Set([streamingMessageId]) : undefined}
       currentAnimatingId={null}
       onAnimationComplete={noop}
       selectedAgentId={owner}
@@ -61,7 +65,22 @@ function WorkSlot({ turn, owner }: { turn: WorkTurn; owner: string | null }) {
         {turn.summary && <span>· {turn.summary}</span>}
       </button>
       <div hidden={!running && !expanded} data-testid="code-work-activities">
-        <Messages messages={visible} owner={owner} />
+        {running && (turn.isThinking || !turn.activityType || turn.streamingMessageId) && (
+          <ThinkingIndicator
+            compact
+            isClaudeStreaming
+            label={turn.streamingMessageId ? 'Streaming' : 'Thinking'}
+            streamStartedAtMs={turn.startedAt ?? undefined}
+            streamingTokenCount={turn.metrics?.outputTokens}
+            animatedTokenCount={turn.metrics?.outputTokens}
+            tokensPerSecond={turn.metrics?.tokensPerSecond}
+          />
+        )}
+        <Messages
+          messages={visible}
+          owner={owner}
+          streamingMessageId={running ? turn.streamingMessageId : undefined}
+        />
       </div>
     </div>
   );

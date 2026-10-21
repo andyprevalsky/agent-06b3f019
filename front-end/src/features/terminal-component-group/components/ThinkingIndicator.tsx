@@ -21,8 +21,10 @@ interface ThinkingIndicatorProps {
   compact: boolean;
   isClaudeStreaming: boolean;
   streamStartedAtMs?: number;
-  streamingTokenCount: number;
-  animatedTokenCount: number;
+  streamingTokenCount?: number;
+  tokensPerSecond?: number;
+  label?: 'Thinking' | 'Streaming';
+  animatedTokenCount?: number;
 }
 
 export function ThinkingIndicator({
@@ -31,6 +33,8 @@ export function ThinkingIndicator({
   streamStartedAtMs,
   streamingTokenCount,
   animatedTokenCount,
+  tokensPerSecond,
+  label = 'Thinking',
 }: ThinkingIndicatorProps) {
   return (
     <div data-testid="thinking-indicator" className={cn('flex', !compact && 'gap-3')}>
@@ -45,11 +49,12 @@ export function ThinkingIndicator({
             gradient={isClaudeStreaming ? CLAUDE_GRADIENT : undefined}
           />
           <span className="text-sm font-medium animate-shimmer bg-gradient-to-r bg-[length:200%_100%] bg-clip-text text-transparent from-foreground via-muted-foreground to-foreground">
-            Thinking
+            {label}
           </span>
           <StreamingMetric
             startedAtMs={streamStartedAtMs}
             tokenCount={streamingTokenCount}
+            tokensPerSecond={tokensPerSecond}
             animatedTokenCount={animatedTokenCount}
             className="ml-auto text-xs"
             iconClassName="h-3 w-3"

@@ -119,3 +119,30 @@ it('deduplicates canonical displays after conversation filtering and prefers the
   expect(dedupeCodeDisplays([own, parent])).toEqual([parent]);
   expect(dedupeCodeDisplays([own])).toEqual([own]);
 });
+
+it('resets measured session rates at native turn boundaries and counter resets', () => {
+  const metrics = (id: string, turnId: string, second: number, output: number) => ({
+    id,
+    type: 'metrics',
+    turn_id: turnId,
+    ts: at(second),
+    output_tokens: output,
+    usage_scope: 'session',
+  });
+  const entries = build([
+    turn('started'),
+    metrics('m1', 'native-1', 1, 1000),
+    metrics('m2', 'native-1', 3, 1040),
+    turn('ended', 'native-1', 4),
+    turn('started', 'native-2', 5),
+    metrics('m3', 'native-2', 6, 1100),
+    metrics('m4', 'native-2', 7, 10),
+  ]);
+  const slots = entries.filter((entry) => entry.kind === 'work');
+  expect(slots[0].kind === 'work' && slots[0].turn.metrics).toMatchObject({
+    outputTokens: 40,
+    tokensPerSecond: 20,
+  });
+  expect(slots[1].kind === 'work' && slots[1].turn.metrics?.tokensPerSecond).toBeUndefined();
+  expect(slots[1].kind === 'work' && slots[1].turn.metrics?.outputTokens).toBeUndefined();
+});

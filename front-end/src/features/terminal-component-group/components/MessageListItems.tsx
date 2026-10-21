@@ -55,6 +55,7 @@ import { EMPTY_WEB_SEARCH_GROUPING, type WebSearchTurnGrouping } from './webSear
 
 interface MessageListItemsProps {
   filteredMessages: Message[];
+  streamingMessageIds?: ReadonlySet<string>;
   currentAnimatingId: string | null;
   onAnimationComplete: () => void;
   onNavigateToAgent?: (agentId: string) => void;
@@ -182,6 +183,7 @@ function StockMessageListItem({
   streamingPlanCharCount,
   streamingPlanStartedAtMs,
   streamingMetricsBySubAgentId,
+  streamingMessageIds,
 }: MessageListItemProps & { roseDesktop: boolean }) {
   const planCharCount = resolvePlanCharCount(message, streamingPlanCharCount);
   const thinkingMetrics = resolveMessageThinkingMetrics(message, streamingMetricsBySubAgentId);
@@ -208,7 +210,13 @@ function StockMessageListItem({
       data-message-id={message.message_id}
       data-message-role={message.role}
       data-message-kind={isFinalAnswer ? 'final-answer' : undefined}
-      data-message-state={isFinalAnswer ? 'canonical' : undefined}
+      data-message-state={
+        streamingMessageIds?.has(message.message_id)
+          ? 'streaming'
+          : isFinalAnswer
+            ? 'canonical'
+            : undefined
+      }
       data-tool-call-id={toolCallId}
       data-tool-name={toolName}
       data-tool-status={toolStatus}
@@ -218,6 +226,7 @@ function StockMessageListItem({
       {attribution && <CodeAgentAttribution requester={attribution} />}
       <MessageBubble
         message={message}
+        isStreaming={streamingMessageIds?.has(message.message_id) === true}
         shouldType={message.message_id === currentAnimatingId}
         onTypingComplete={onAnimationComplete}
         onNavigateToAgent={onNavigateToAgent}

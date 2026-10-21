@@ -31,7 +31,7 @@ import {
 } from './codeAgentContract';
 
 export type TranscriptType =
-  'thinking' | 'message' | 'tool' | 'result' | 'error' | 'control' | 'turn';
+  'thinking' | 'message' | 'tool' | 'result' | 'error' | 'control' | 'turn' | 'metrics';
 export type ToolCategory = 'read' | 'edit' | 'run' | 'search' | 'other';
 export type TurnOutcome = 'completed' | 'interrupted' | 'failed';
 
@@ -53,6 +53,9 @@ export interface TranscriptEntry {
   type: TranscriptType;
   event?: string;
   clientMessageId?: string;
+  partial?: boolean;
+  outputTokens?: number;
+  usageScope?: 'turn' | 'session';
   /** Latest contributing event (ms); null when unknown. */
   at: number | null;
   /** The carrier row's time (ms) when the record was first seen. */
@@ -92,6 +95,7 @@ const TYPES: readonly TranscriptType[] = [
   'error',
   'control',
   'turn',
+  'metrics',
 ];
 const OUTCOMES: readonly TurnOutcome[] = ['completed', 'interrupted', 'failed'];
 
@@ -178,6 +182,12 @@ function parseRecord(
     type,
     event: str(r.event),
     clientMessageId: str(r.client_message_id),
+    partial: typeof r.partial === 'boolean' ? r.partial : undefined,
+    outputTokens:
+      num(r.output_tokens) !== undefined && Number(r.output_tokens) >= 0
+        ? num(r.output_tokens)
+        : undefined,
+    usageScope: r.usage_scope === 'turn' || r.usage_scope === 'session' ? r.usage_scope : undefined,
     at: eventTimeMs(r.ts as string | number | undefined),
     firstSeenAt: carrierAt,
     text,

@@ -401,6 +401,100 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
     expect(requests('POST', `/api/claude-code-session/${TASK}/turns`)).toHaveLength(0);
   });
 
+  it.each(['claude', 'codex'] as const)(
+    'shows real %s stream counters with the existing indicator',
+    async (provider) => {
+      const start = '2026-10-20T12:00:00.000Z';
+      const scope = provider === 'claude' ? 'turn' : 'session';
+      serveBackend({
+        ownerMessages: ownerChat([
+          chipMessage({ provider }),
+          eventsMessage([
+            {
+              id: 'native-start',
+              type: 'turn',
+              event: 'started',
+              turn_id: 'native-stream',
+              ts: start,
+              turn_started_at: start,
+            },
+            {
+              id: 'partial-answer',
+              type: 'message',
+              partial: true,
+              turn_id: 'native-stream',
+              ts: '2026-10-20T12:00:01.000Z',
+              text: 'Live native answer',
+            },
+            {
+              id: 'metric-1',
+              type: 'metrics',
+              turn_id: 'native-stream',
+              usage_scope: scope,
+              output_tokens: 100,
+              ts: '2026-10-20T12:00:02.000Z',
+            },
+            {
+              id: 'metric-2',
+              type: 'metrics',
+              turn_id: 'native-stream',
+              usage_scope: scope,
+              output_tokens: 120,
+              ts: '2026-10-20T12:00:04.000Z',
+            },
+          ]),
+        ]),
+      });
+      const user = await renderOnOwner();
+      await openFromRow(user);
+      const indicator = screen.getByTestId('thinking-indicator');
+      expect(indicator).toHaveTextContent('Streaming');
+      expect(indicator).toHaveTextContent(provider === 'claude' ? '120 tokens' : '20 tokens');
+      expect(indicator).toHaveTextContent('10.0 tok/s');
+      expect(
+        screen.getByText('Live native answer').closest('[data-message-state]'),
+      ).toHaveAttribute('data-message-state', 'streaming');
+    },
+  );
+
+  it('a resumed Codex stream has no invented zero counter or rate before its next native sample', async () => {
+    serveBackend({
+      ownerMessages: ownerChat([
+        chipMessage(),
+        eventsMessage([
+          {
+            id: 'start',
+            type: 'turn',
+            event: 'started',
+            turn_id: 'resumed',
+            ts: '2026-10-20T12:00:00.000Z',
+          },
+          {
+            id: 'thinking',
+            type: 'thinking',
+            partial: true,
+            text: 'Thinking about the task',
+            turn_id: 'resumed',
+            ts: '2026-10-20T12:00:01.000Z',
+          },
+          {
+            id: 'metric',
+            type: 'metrics',
+            usage_scope: 'session',
+            output_tokens: 12000,
+            turn_id: 'resumed',
+            ts: '2026-10-20T12:00:02.000Z',
+          },
+        ]),
+      ]),
+    });
+    const user = await renderOnOwner();
+    await openFromRow(user);
+    const indicator = screen.getByTestId('thinking-indicator');
+    expect(indicator).toHaveTextContent('Thinking');
+    expect(indicator).not.toHaveTextContent(/tokens|tok\/s/);
+  });
+
   it('a completed session stays open; a send shows the backend error as one plain line', async () => {
     serveBackend({
       ownerMessages: ownerChat([
