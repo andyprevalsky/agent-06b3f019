@@ -5,12 +5,10 @@ import {
   closeSession as closeSteelSession,
   createSessionWithContext as createSteelSessionWithContext,
   resumeSession as resumeSteelSession,
-  steelApiUrl,
-  steelSessionFileUrl,
 } from '../steel/session';
 import { getSteelCaptchaTelemetry, getSteelSessionHealth } from '../steel/sessionInspect';
 import { rotateSession as rotateSteelSession } from '../steel/sessionResume';
-import { getFingerprintInjectionData, listSessionFiles, uploadFileToSession } from '../steel/files';
+import { getFingerprintInjectionData } from '../steel/files';
 import { injectUserData } from '../steel/injection';
 import { compatiblePreferredBrowserConfig } from './challengeRecovery';
 import { browserUseEnabled, selectedBrowserProvider, tilionEnabled } from './config';
@@ -19,53 +17,36 @@ import {
   closeBrowserUseSession,
   createBrowserUseSessionWithContext,
   getBrowserUseSessionHealth,
-  listBrowserUseSessionFiles,
-  pressBrowserUseKeys,
-  readBrowserUseSessionFile,
   resumeBrowserUseSession,
   rotateBrowserUseSession,
-  uploadBrowserUseSessionFile,
 } from './browserUse';
 import {
-  captureKernelScreenshot,
   closeKernelSession,
   createKernelSessionWithContext,
   getKernelSessionHealth,
   getKernelCaptchaTelemetry,
-  listKernelSessionFiles,
-  pressKernelKeys,
-  readKernelSessionFile,
-  resizeKernelViewport,
   resumeKernelSession,
   rotateKernelSession,
-  uploadKernelSessionFile,
 } from './kernel';
 import type { KernelProxyType } from './kernelProxy';
 import type { RotationRecoveryAction, RotationStep } from './rotation';
 import { persistSignedInBrowserState } from './sessionAuthPersist';
 import {
-  captureTilionScreenshot,
   closeTilionSession,
   createTilionSessionWithContext,
   getTilionCaptchaTelemetry,
   getTilionSessionHealth,
-  listTilionSessionFiles,
-  pressTilionKeys,
-  readTilionSessionFile,
   resumeTilionSession,
   rotateTilionSession,
-  uploadTilionSessionFile,
+  type TilionCarriedState,
 } from './tilion';
 import { releaseSupersededBrowser } from './sessionCleanup';
+import { providerForSession, providerForTask } from './sessionProvider';
 import {
-  storedBrowserProvider,
-  type BrowserFileInfo,
   type BrowserProviderName,
   type BrowserProviderResumeSession,
   type BrowserProviderSession,
   type BrowserSessionHealth,
-  type BrowserViewport,
-  type BrowserViewportResizeResult,
 } from './types';
 
 export {
@@ -98,9 +79,18 @@ export { selectedBrowserProvider, tilionEnabled, TilionApiKeyMissingError } from
  * socket can cost a sign-in harvest but never leak a paid session.
  */
 export { injectUserData, getFingerprintInjectionData };
+export {
+  BrowserOperationWorkerOwnedError,
+  captureScreenshot,
+  listFiles,
+  pressSessionKeys,
+  pressSessionKeysUsingDependencies,
+  readSessionFile,
+  resizeSessionViewport,
+  uploadSessionFile,
+} from './sessionIo';
 
 export const getOrCreateContext = getOrCreateBrowserContext;
-const PROVIDER_FETCH_TIMEOUT_MS = 15_000;
 const log = createLogger('BrowserProvider');
 
 export interface BrowserSessionCreationDependencies {
@@ -132,39 +122,6 @@ const browserSessionCreationDependencies: BrowserSessionCreationDependencies = {
   createBrowserUse: createBrowserUseSessionWithContext,
   createTilion: createTilionSessionWithContext,
 };
-
-async function fetchProviderApi<T>(
-  url: string,
-  init: RequestInit,
-  consume: (response: Response) => Promise<T>
-): Promise<T> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), PROVIDER_FETCH_TIMEOUT_MS);
-  try {
-    const response = await fetch(url, { ...init, signal: controller.signal });
-    return await consume(response);
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function providerForSession(sessionId: string): Promise<BrowserProviderName> {
-  const session = await prisma.browserSession.findUnique({
-    where: { sessionId },
-    select: { provider: true },
-  });
-  if (session === null) throw new Error(`Browser session not found: ${sessionId}`);
-  return storedBrowserProvider(session.provider);
-}
-
-async function providerForTask(taskId: string): Promise<BrowserProviderName> {
-  const session = await prisma.browserSession.findUnique({
-    where: { id: taskId },
-    select: { provider: true },
-  });
-  if (session === null) throw new Error(`Browser task not found: ${taskId}`);
-  return storedBrowserProvider(session.provider);
-}
 
 export async function createSessionWithContext(
   contextId: string,
@@ -313,15 +270,18 @@ export async function resumeSession(
   options: {
     forceFreshProfile?: boolean;
     keepValidationConnection?: boolean;
+    /** Worker-captured storage_state of a live Tilion session; ignored by other providers. */
+    carriedState?: TilionCarriedState;
   } = {}
 ): Promise<BrowserProviderResumeSession> {
+  const { carriedState, ...providerOptions } = options;
   const provider = await providerForTask(taskId);
-  if (provider === 'kernel') return resumeKernelSession(taskId, options);
+  if (provider === 'kernel') return resumeKernelSession(taskId, providerOptions);
   if (provider === 'tilion' && tilionEnabled()) {
-    const { previousSessionId, previousProvider, ...session } = await resumeTilionSession(
-      taskId,
-      options
-    );
+    const { previousSessionId, previousProvider, ...session } = await resumeTilionSession(taskId, {
+      ...providerOptions,
+      ...(carriedState !== undefined ? { carriedState } : {}),
+    });
     if (previousSessionId !== '' && previousSessionId !== session.sessionId) {
       await releaseSupersededBrowser({
         taskId,
@@ -339,7 +299,7 @@ export async function resumeSession(
         where: { id: taskId },
         select: { sessionId: true },
       });
-      const replacement = await resumeKernelSession(taskId, options);
+      const replacement = await resumeKernelSession(taskId, providerOptions);
       await releaseSupersededBrowser({
         taskId,
         previousProvider: provider,
@@ -361,7 +321,7 @@ export async function resumeSession(
     return session;
   }
 
-  const replacement = await resumeSteelSession(taskId, options);
+  const replacement = await resumeSteelSession(taskId, providerOptions);
   const { previousSessionId, previousProvider, previousSessionReleased, ...session } = replacement;
   if (!previousSessionReleased)
     await releaseSupersededBrowser({
@@ -401,8 +361,13 @@ export interface BrowserProxyRotationResult extends BrowserProviderResumeSession
 export async function rotateProxy(
   taskId: string,
   step: RotationStep,
-  options: { keepValidationConnection?: boolean } = {}
+  options: {
+    keepValidationConnection?: boolean;
+    /** Worker-captured storage_state of a live Tilion session; ignored by other providers. */
+    carriedState?: TilionCarriedState;
+  } = {}
 ): Promise<BrowserProxyRotationResult> {
+  const { carriedState, ...providerOptions } = options;
   const currentProvider = await providerForTask(taskId);
   if (step.provider === 'kernel') {
     // Tilion → Kernel is a ladder step; recreateKernelSession accepts the
@@ -417,7 +382,7 @@ export async function rotateProxy(
             select: { sessionId: true },
           })
         : null;
-    const session = await rotateKernelSession(taskId, step.proxyType, options);
+    const session = await rotateKernelSession(taskId, step.proxyType, providerOptions);
     if (previous !== null) {
       await releaseSupersededBrowser({
         taskId,
@@ -442,7 +407,7 @@ export async function rotateProxy(
     const { previousSessionId, previousProvider, ...session } = await rotateTilionSession(
       taskId,
       step.proxyType,
-      options
+      { ...providerOptions, ...(carriedState !== undefined ? { carriedState } : {}) }
     );
     // An in-place rotate-ip keeps the session id; releasing it would kill the live browser.
     if (previousSessionId !== '' && previousSessionId !== session.sessionId) {
@@ -483,7 +448,7 @@ export async function rotateProxy(
     };
   }
 
-  const replacement = await rotateSteelSession(taskId, options);
+  const replacement = await rotateSteelSession(taskId, providerOptions);
   const { previousSessionId, previousProvider, previousSessionReleased, ...session } = replacement;
   if (!previousSessionReleased)
     await releaseSupersededBrowser({
@@ -548,157 +513,6 @@ export async function getBrowserCaptchaTelemetry(taskId: string) {
   return session.provider === 'kernel'
     ? getKernelCaptchaTelemetry(session.sessionId)
     : getSteelCaptchaTelemetry(session.sessionId);
-}
-
-export async function resizeSessionViewport(
-  sessionId: string,
-  viewport: BrowserViewport,
-  knownProvider?: BrowserProviderName
-): Promise<BrowserViewportResizeResult> {
-  const provider = knownProvider ?? (await providerForSession(sessionId));
-  if (provider === 'kernel') {
-    return {
-      provider,
-      supported: true,
-      resized: true,
-      viewport: await resizeKernelViewport(sessionId, viewport),
-    };
-  }
-
-  // Steel, Browser Use and Tilion expose no viewport resize API.
-  return { provider, supported: false, resized: false, viewport };
-}
-
-export async function uploadSessionFile(
-  sessionId: string,
-  fileBuffer: Buffer,
-  filename: string,
-  mimeType = 'application/octet-stream',
-  options: { directory?: string } = {}
-): Promise<{ path: string; size: number }> {
-  const provider = await providerForSession(sessionId);
-  if (provider === 'browser-use') {
-    return uploadBrowserUseSessionFile(sessionId, fileBuffer, filename, mimeType, options);
-  }
-  if (provider === 'tilion') {
-    return uploadTilionSessionFile(sessionId, fileBuffer, filename, mimeType, options);
-  }
-  // Steel's Files API owns /files; directory overrides only apply to Kernel.
-  return provider === 'kernel'
-    ? uploadKernelSessionFile(sessionId, fileBuffer, filename, options)
-    : uploadFileToSession(sessionId, fileBuffer, filename, mimeType);
-}
-
-export async function listFiles(sessionId: string): Promise<BrowserFileInfo[]> {
-  const provider = await providerForSession(sessionId);
-  if (provider === 'browser-use') return listBrowserUseSessionFiles(sessionId);
-  if (provider === 'tilion') return listTilionSessionFiles(sessionId);
-  return provider === 'kernel' ? listKernelSessionFiles(sessionId) : listSessionFiles(sessionId);
-}
-
-export async function readSessionFile(sessionId: string, filePath: string): Promise<Buffer> {
-  const provider = await providerForSession(sessionId);
-  if (provider === 'browser-use') return readBrowserUseSessionFile(sessionId, filePath);
-  if (provider === 'tilion') return readTilionSessionFile(sessionId, filePath);
-  if (provider === 'kernel') return readKernelSessionFile(sessionId, filePath);
-
-  const apiKey = process.env.STEEL_API_KEY?.trim();
-  if (!apiKey) throw new Error('STEEL_API_KEY is required to read Steel session files');
-  const relativePath = filePath.replace(/^\/files\//, '').replace(/^\//, '');
-  return fetchProviderApi(
-    steelSessionFileUrl(sessionId, relativePath),
-    { headers: { 'steel-api-key': apiKey } },
-    async (response) => {
-      if (!response.ok) throw new Error(`Steel file read failed: HTTP ${response.status}`);
-      return Buffer.from(await response.arrayBuffer());
-    }
-  );
-}
-
-export async function captureScreenshot(sessionId: string): Promise<{
-  provider: BrowserProviderName;
-  image: Buffer;
-}> {
-  const provider = await providerForSession(sessionId);
-  if (provider === 'kernel') {
-    return { provider, image: await captureKernelScreenshot(sessionId) };
-  }
-  if (provider === 'tilion') {
-    // REST screenshot: refused (typed) while the agent holds the CDP slot.
-    return { provider, image: await captureTilionScreenshot(sessionId) };
-  }
-  if (provider === 'browser-use') {
-    const session = await prisma.browserSession.findUniqueOrThrow({
-      where: { sessionId },
-    });
-    if (!session.wsUrl) throw new Error('Browser Use CDP URL unavailable for screenshot');
-    const { chromium } = await import('playwright');
-    const browser = await chromium.connectOverCDP(session.wsUrl);
-    try {
-      const context = browser.contexts()[0];
-      const page = context?.pages()[0];
-      if (!page) throw new Error('Browser Use session has no page for screenshot');
-      return { provider, image: await page.screenshot() };
-    } finally {
-      await browser.close().catch(() => {});
-    }
-  }
-
-  const apiKey = process.env.STEEL_API_KEY?.trim();
-  if (!apiKey) throw new Error('STEEL_API_KEY is required to capture Steel screenshots');
-  return fetchProviderApi(
-    steelApiUrl(`v1/sessions/${encodeURIComponent(sessionId)}/computer`),
-    {
-      method: 'POST',
-      headers: { 'steel-api-key': apiKey, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'take_screenshot' }),
-    },
-    async (response) => {
-      if (!response.ok) throw new Error(`Steel screenshot failed: HTTP ${response.status}`);
-      const result = (await response.json()) as { base64_image?: string };
-      if (!result.base64_image)
-        throw new Error('Steel screenshot response did not contain an image');
-      return { provider, image: Buffer.from(result.base64_image, 'base64') };
-    }
-  );
-}
-
-export async function pressSessionKeys(
-  sessionId: string,
-  keys: string[]
-): Promise<{
-  provider: BrowserProviderName;
-  supported: boolean;
-  pressed: boolean;
-}> {
-  return pressSessionKeysUsingDependencies(sessionId, keys, {
-    providerForSession,
-    pressKernelKeys,
-    pressBrowserUseKeys,
-    pressTilionKeys,
-  });
-}
-
-export async function pressSessionKeysUsingDependencies(
-  sessionId: string,
-  keys: string[],
-  dependencies: {
-    providerForSession: (sessionId: string) => Promise<BrowserProviderName>;
-    pressKernelKeys: (sessionId: string, keys: string[]) => Promise<void>;
-    pressBrowserUseKeys: (sessionId: string, keys: string[]) => Promise<void>;
-    pressTilionKeys: (sessionId: string, keys: string[]) => Promise<void>;
-  }
-): Promise<{
-  provider: BrowserProviderName;
-  supported: boolean;
-  pressed: boolean;
-}> {
-  const provider = await dependencies.providerForSession(sessionId);
-  if (provider === 'kernel') await dependencies.pressKernelKeys(sessionId, keys);
-  else if (provider === 'browser-use') await dependencies.pressBrowserUseKeys(sessionId, keys);
-  else if (provider === 'tilion') await dependencies.pressTilionKeys(sessionId, keys);
-  else return { provider, supported: false, pressed: false };
-  return { provider, supported: true, pressed: true };
 }
 
 export async function closeAllActiveSessions(): Promise<number> {

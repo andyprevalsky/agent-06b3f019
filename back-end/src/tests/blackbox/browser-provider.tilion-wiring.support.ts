@@ -7,8 +7,12 @@ import nodeAssert from 'node:assert/strict';
 import {
   createSessionWithContextUsingDependencies,
   getBrowserSessionHealth,
+  pressSessionKeysUsingDependencies,
+  uploadSessionFile,
+  BrowserOperationWorkerOwnedError,
 } from '../../providers/browser';
-import { pressSessionKeysUsingDependencies } from '../../providers/browser';
+import { respondToTilionRefusal } from '../../domains/browser-session/routes.files';
+import type { Response } from 'express';
 import {
   selectedBrowserProvider,
   TilionApiKeyMissingError,
@@ -337,3 +341,64 @@ export async function assertTilionReaperReleasesOnlyOwnedTerminalSessions(): Pro
     sessions.findMany = previousFindMany;
   }
 }
+
+export async function assertTilionUploadIsWorkerOwned(): Promise<void> {
+  const sessions = prisma.browserSession as unknown as { findUnique: unknown };
+  const previousFindUnique = sessions.findUnique;
+  const previousFetch = globalThis.fetch;
+  let providerCalls = 0;
+  sessions.findUnique = async () => ({ provider: 'tilion' });
+  globalThis.fetch = (async () => {
+    providerCalls += 1;
+    return new Response(null, { status: 500 });
+  }) as typeof fetch;
+  try {
+    const error = await uploadSessionFile('sess_upload', Buffer.from('x'), 'a.txt').then(
+      () => null,
+      (rejected: unknown) => rejected
+    );
+    nodeAssert.ok(error instanceof BrowserOperationWorkerOwnedError, String(error));
+    nodeAssert.equal(providerCalls, 0, 'a worker-owned upload must not reach Tilion');
+    let status = 0;
+    let body: unknown;
+    const res = {
+      status(code: number) {
+        status = code;
+        return this;
+      },
+      json(value: unknown) {
+        body = value;
+        return this;
+      },
+    } as unknown as Response;
+    nodeAssert.equal(respondToTilionRefusal(error, res), true);
+    nodeAssert.equal(status, 409);
+    nodeAssert.equal((body as { error?: string }).error, 'worker_owned');
+    nodeAssert.equal(respondToTilionRefusal(new Error('other'), res), false);
+  } finally {
+    sessions.findUnique = previousFindUnique;
+    globalThis.fetch = previousFetch;
+  }
+}
+
+/** Registered by browser-provider.blackbox.ts (one list keeps that file under max-lines). */
+export const tilionWiringCases: Array<[string, () => Promise<void>]> = [
+  ['Tilion is the default provider', assertTilionIsTheDefaultProvider],
+  ['Tilion kill switch routes new work to Kernel', assertTilionKillSwitchRoutesNewWorkToKernel],
+  ['Tilion selection without TILION_API_KEY fails loudly', assertTilionMissingKeyFailsLoudly],
+  [
+    'unknown providers fail closed and stored tilion rows stay on Tilion',
+    assertUnknownProviderFailsClosedAndTilionRowsAreRecognised,
+  ],
+  ['default session creation dispatches to Tilion', assertDefaultCreationDispatchesToTilion],
+  ['a stored Tilion row dispatches to Tilion', assertStoredTilionRowDispatchesToTilion],
+  ['superseded Tilion sessions release through Tilion', assertSupersededTilionReleaseIsExplicit],
+  [
+    'Tilion reaper releases only owned terminal sessions',
+    assertTilionReaperReleasesOnlyOwnedTerminalSessions,
+  ],
+  [
+    'Tilion uploads are worker-owned and refused with a typed error',
+    assertTilionUploadIsWorkerOwned,
+  ],
+];

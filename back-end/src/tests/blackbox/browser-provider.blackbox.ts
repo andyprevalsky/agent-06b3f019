@@ -36,16 +36,7 @@ import { assertAuthPersistFailedInitCustody } from './browser-provider.auth-pers
 import { runLiveProviderParity } from './browser-provider.live.support';
 import { assertKernelUnhealthyProxyRelaxesLocation } from './browser-provider-proxy-health.support';
 import { runOptionalLiveBrowserUseProvider } from './browser-provider.browser-use-live.support';
-import {
-  assertDefaultCreationDispatchesToTilion,
-  assertStoredTilionRowDispatchesToTilion,
-  assertSupersededTilionReleaseIsExplicit,
-  assertTilionIsTheDefaultProvider,
-  assertTilionKillSwitchRoutesNewWorkToKernel,
-  assertTilionMissingKeyFailsLoudly,
-  assertTilionReaperReleasesOnlyOwnedTerminalSessions,
-  assertUnknownProviderFailsClosedAndTilionRowsAreRecognised,
-} from './browser-provider.tilion-wiring.support';
+import { tilionWiringCases } from './browser-provider.tilion-wiring.support';
 import {
   createBrowserUseRecoverySession,
   browserUseProxyCountry,
@@ -81,20 +72,7 @@ const tests: Array<[string, () => void | Promise<void>]> = [
     assertAuthPersistFailedInitCustody,
   ],
   // Tilion became the default for new sessions (docs/plans/active/tilion-browser-provider.md).
-  ['Tilion is the default provider', assertTilionIsTheDefaultProvider],
-  ['Tilion kill switch routes new work to Kernel', assertTilionKillSwitchRoutesNewWorkToKernel],
-  ['Tilion selection without TILION_API_KEY fails loudly', assertTilionMissingKeyFailsLoudly],
-  [
-    'unknown providers fail closed and stored tilion rows stay on Tilion',
-    assertUnknownProviderFailsClosedAndTilionRowsAreRecognised,
-  ],
-  ['default session creation dispatches to Tilion', assertDefaultCreationDispatchesToTilion],
-  ['a stored Tilion row dispatches to Tilion', assertStoredTilionRowDispatchesToTilion],
-  ['superseded Tilion sessions release through Tilion', assertSupersededTilionReleaseIsExplicit],
-  [
-    'Tilion reaper releases only owned terminal sessions',
-    assertTilionReaperReleasesOnlyOwnedTerminalSessions,
-  ],
+  ...tilionWiringCases,
   [
     'Kernel is selected by one environment parameter',
     () =>
