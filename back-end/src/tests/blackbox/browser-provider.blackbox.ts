@@ -31,9 +31,9 @@ import {
   isSteelProvisioningOutage,
   isSteelSessionValidationFailure,
 } from './browser-provider-rotation.support';
-import { runLiveKernelSteelAuthPersist } from './browser-provider.auth-persist.live';
 import { assertAuthPersistFailedInitCustody } from './browser-provider.auth-persist.cleanup.support';
 import { runLiveProviderParity } from './browser-provider.live.support';
+import { runLiveCrossProviderCases } from './browser-provider.tilion-live.support';
 import { assertKernelUnhealthyProxyRelaxesLocation } from './browser-provider-proxy-health.support';
 import { runOptionalLiveBrowserUseProvider } from './browser-provider.browser-use-live.support';
 import { tilionWiringCases } from './browser-provider.tilion-wiring.support';
@@ -574,16 +574,7 @@ async function main(): Promise<void> {
     );
   }
 
-  if (process.env.TEST_BASE_URL) {
-    try {
-      await runLiveKernelSteelAuthPersist();
-    } catch (error) {
-      failed++;
-      console.error(
-        `FAIL live Kernel/Steel auth persist: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-  }
+  failed += await runLiveCrossProviderCases();
 
   if (failed > 0) process.exit(1);
   console.log(

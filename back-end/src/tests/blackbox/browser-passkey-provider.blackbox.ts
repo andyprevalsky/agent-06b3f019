@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-/** Live CDP WebAuthn transfer: one Kernel passkey signs in on Steel and Browser Use. */
+/** Live CDP WebAuthn transfer: one Kernel passkey signs in on Steel, Tilion and Browser Use. */
 import { randomUUID } from 'node:crypto';
 import type { Browser, CDPSession, Page } from 'playwright';
 import { DEFAULT_GEOLOCATION } from '../../providers/geoip';
@@ -13,6 +13,10 @@ import {
   createBrowserUseRecoverySession,
   releaseBrowserUseRemoteSession,
 } from '../../providers/browser/browserUse';
+import {
+  createTilionRecoverySession,
+  releaseTilionRemoteSession,
+} from '../../providers/browser/tilion';
 
 type Credential = {
   credentialId: string;
@@ -179,10 +183,11 @@ async function assertTransferredPasskey(
 }
 
 async function run(): Promise<void> {
-  const required = ['KERNEL_API_KEY', 'STEEL_API_KEY', 'BROWSER_USE_API_KEY'];
+  const required = ['KERNEL_API_KEY', 'STEEL_API_KEY', 'TILION_API_KEY', 'BROWSER_USE_API_KEY'];
   for (const name of required) assert(process.env[name]?.trim(), `${name} is required`);
   let kernel: Awaited<ReturnType<typeof createKernelRecoverySession>> | undefined;
   let steel: Awaited<ReturnType<typeof createSteelRecoverySession>> | undefined;
+  let tilion: Awaited<ReturnType<typeof createTilionRecoverySession>> | undefined;
   let browserUse: Awaited<ReturnType<typeof createBrowserUseRecoverySession>> | undefined;
   let failure: unknown;
   try {
@@ -201,6 +206,11 @@ async function run(): Promise<void> {
     await assertTransferredPasskey('Steel', steel.validationBrowser, key);
     await steel.validationBrowser.close();
 
+    tilion = await createTilionRecoverySession(DEFAULT_GEOLOCATION);
+    assert(tilion.validationBrowser, 'Tilion validation browser unavailable');
+    await assertTransferredPasskey('Tilion', tilion.validationBrowser, key);
+    await tilion.validationBrowser.close();
+
     browserUse = await createBrowserUseRecoverySession(DEFAULT_GEOLOCATION);
     assert(browserUse.validationBrowser, 'Browser Use validation browser unavailable');
     await assertTransferredPasskey('Browser Use', browserUse.validationBrowser, key);
@@ -211,9 +221,11 @@ async function run(): Promise<void> {
     const results = await Promise.allSettled([
       kernel?.validationBrowser?.close(),
       steel?.validationBrowser?.close(),
+      tilion?.validationBrowser?.close(),
       browserUse?.validationBrowser?.close(),
       kernel && releaseKernelRemoteSession(kernel.sessionId),
       steel && releaseSteelRemoteSession(steel.sessionId),
+      tilion && releaseTilionRemoteSession(tilion.sessionId),
       browserUse && releaseBrowserUseRemoteSession(browserUse.sessionId),
     ]);
     const rejected = results.find((result) => result.status === 'rejected');

@@ -169,10 +169,16 @@ function credentialMetadataUrl(url: string): string {
   return parsed.toString();
 }
 
+/** Statuses the WHATWG Response constructor rejects with any body, even ''. */
+const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304]);
+
 function responseFromSerialized(serialized: SerializedResponse): globalThis.Response {
   const headers: Record<string, string> = { ...serialized.headers };
-  const body =
-    serialized.bodyEncoding === 'base64' ? Buffer.from(serialized.body, 'base64') : serialized.body;
+  const body = NULL_BODY_STATUSES.has(serialized.status)
+    ? null
+    : serialized.bodyEncoding === 'base64'
+      ? Buffer.from(serialized.body, 'base64')
+      : serialized.body;
 
   return new globalThis.Response(body, {
     status: serialized.status,
@@ -282,6 +288,18 @@ function publishCapture(entry: Omit<CapturedCall, 'id'>): void {
   captures.push({ ...entry, id: nextId++ });
 }
 
+/** Tilion's API host, including a TILION_BASE_URL override (staging, local fake). */
+function isTilionHost(hostname: string): boolean {
+  if (hostname === 'back.tilion.dev') return true;
+  const configured = process.env.TILION_BASE_URL?.trim();
+  if (!configured) return false;
+  try {
+    return new URL(configured).hostname.toLowerCase() === hostname;
+  } catch {
+    return false;
+  }
+}
+
 /** Control-plane calls create mutable remote resources and must never be replayed. */
 export function shouldBypassOutboundReplay(url: string): boolean {
   if (isCredentialExchange(url)) return true;
@@ -292,6 +310,7 @@ export function shouldBypassOutboundReplay(url: string): boolean {
       hostname.endsWith('.e2b.app') ||
       hostname === 'api.onkernel.com' ||
       hostname === 'api.browser-use.com' ||
+      isTilionHost(hostname) ||
       hostname === 'amplitude.com' ||
       hostname === 'analytics.eu.amplitude.com'
     );
