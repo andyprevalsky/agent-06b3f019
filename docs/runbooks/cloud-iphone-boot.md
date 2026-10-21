@@ -94,3 +94,22 @@ Reusable recovery rule: after selecting the number, inspect the originating
 browser until its actual authenticated result appears; the phone closing its
 prompt alone is insufficient. Do not reuse the challenge number, repeat input,
 or infer success from the broker's input acknowledgment.
+
+## Recorded fresh Google Drive acceptance
+
+A second, fully recorded test used a new isolated cloud-browser context and
+Google Drive. It started at the signed-out page, entered the configured account
+and masked saved credential, and waited for the actual Google challenge. A
+notification arrived on the cloud iPhone. Opening Gmail showed the matching
+current Linux sign-in prompt; choosing Yes on that phone let the browser load
+My Drive. Opening the browser account menu confirmed the exact account, with
+the phone account still visible beside it. No personal-phone approval was used.
+
+The side-by-side recording preserves the whole captured timeline, including
+navigation/locator attempts and brief frame gaps. Each pane shows capture age;
+wall-clock intervals were not shortened. The event receipt is
+`.context/phone-harness/google-drive-cloud-phone-recorded-proof.json` and the
+video is `.context/phone-harness/google-drive-cloud-phone-full-recording.mp4`.
+This is a real operator-driven UI acceptance test; it is not relabeled as an
+unattended Rose-agent run. The fresh test browser context was closed afterward;
+phone custody, pending private state and original browser state were preserved.
