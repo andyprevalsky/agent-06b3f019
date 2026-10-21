@@ -601,6 +601,23 @@ async def test_sub_agent_and_disabled_executor_get_no_tools():
     assert [t["name"] for t in pinned["tools"]] == ["user__weather"]
 
 
+async def test_ordinary_root_agent_pins_tools_with_default_rollout():
+    """A non-pilot account gets its own published tools under the global rollout."""
+    from domains.user_tools.handler import declared_user_tools, pin_user_tools
+
+    calls: List[Any] = []
+    with _local_executor():
+        backend = _weather_backend()
+        backend.publish(STOCK_USER, "v1", {"weather": _tool_json("weather")}, {"tools/weather/handler.py": PY_ECHO})
+        wf = _FakeWorkflow(user_id=STOCK_USER)
+        with _workflow_runtime(calls):
+            await pin_user_tools(wf, is_root=True)
+    assert wf.user_tools_pinned
+    assert [tool["name"] for tool in declared_user_tools(wf)] == ["user__weather"]
+    assert calls, "ordinary account resolves its published tools"
+
+
+@patch("utils.rose_desktop.ROSE_DESKTOP_ENABLED_BY_DEFAULT", False)
 async def test_unflagged_root_agent_pins_no_tools_without_resolving():
     """A stock (non-Rose Desktop) root agent never resolves or declares user tools.
 
@@ -622,6 +639,7 @@ async def test_unflagged_root_agent_pins_no_tools_without_resolving():
     assert not any(request.headers.get("X-User-Id") == STOCK_USER for request in backend.requests)
 
 
+@patch("utils.rose_desktop.ROSE_DESKTOP_ENABLED_BY_DEFAULT", False)
 async def test_restored_pin_cannot_declare_or_run_side_effect_tool_for_unflagged_account():
     """A restored pin (continue_as_new state) holding a side-effecting tool is inert for a stock account.
 
@@ -1232,6 +1250,9 @@ async def run_all_tests():
         )
         await r.record_async(
             "sub_agent_and_disabled_executor_get_no_tools", test_sub_agent_and_disabled_executor_get_no_tools
+        )
+        await r.record_async(
+            "ordinary_root_agent_pins_tools_with_default_rollout", test_ordinary_root_agent_pins_tools_with_default_rollout
         )
         await r.record_async(
             "unflagged_root_agent_pins_no_tools_without_resolving",

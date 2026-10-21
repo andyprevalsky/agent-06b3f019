@@ -202,6 +202,7 @@ async def test_validation_errors_never_reach_the_backend():
     assert backend.bodies == [], f"validation must not call the backend: {backend.bodies}"
 
 
+@patch("utils.rose_desktop.ROSE_DESKTOP_ENABLED_BY_DEFAULT", False)
 async def test_stock_account_gets_inline_media_only():
     """A stock account's display call never pins a question: pinned arguments are dropped.
 
@@ -682,12 +683,12 @@ async def _wait_for(predicate: Any, timeout: float = 10) -> None:
         await asyncio.sleep(0.05)
 
 
-async def test_mcp_server_lists_the_three_rose_tools():
+async def test_mcp_server_lists_the_four_rose_tools():
     with FakeAgentTools() as fake, _home() as home:
         async with _mcp_server(fake, home) as mcp:
             listed = await mcp.response(await mcp.send("tools/list"))
             names = sorted(tool["name"] for tool in listed["result"]["tools"])
-            assert names == ["display", "request_user_approval", "send_message_to_user"], names
+            assert names == ["change_environment_size", "display", "request_user_approval", "send_message_to_user"], names
             unknown = await mcp.response(await mcp.send("tools/call", {"name": "nope", "arguments": {}}))
             assert "error" in unknown, unknown
 
@@ -810,7 +811,8 @@ async def test_stock_session_tools_have_no_pinned_questions_or_inline_views():
         async with _mcp_server(fake, home, rose_desktop=False) as mcp:
             listed = await mcp.response(await mcp.send("tools/list"))
             tools = {tool["name"]: tool for tool in listed["result"]["tools"]}
-            assert sorted(tools) == ["display", "request_user_approval", "send_message_to_user"], tools
+            assert sorted(tools) == ["change_environment_size", "display", "request_user_approval", "send_message_to_user"], tools
+            assert set(tools["change_environment_size"]["inputSchema"]["properties"]) == {"cpu", "memory_gb", "reason"}
             assert list(tools["display"]["inputSchema"]["properties"]) == ["paths", "urls", "caption"]
             assert list(tools["send_message_to_user"]["inputSchema"]["properties"]) == ["message"]
             blob = json.dumps(listed)
@@ -856,7 +858,7 @@ async def run_all_tests():
             "pinned_question_blocks_and_resumes_in_production_sandbox",
             test_pinned_question_blocks_and_resumes_in_production_sandbox,
         )
-        await r.record_async("mcp_server_lists_the_three_rose_tools", test_mcp_server_lists_the_three_rose_tools)
+        await r.record_async("mcp_server_lists_the_four_rose_tools", test_mcp_server_lists_the_four_rose_tools)
         await r.record_async(
             "mcp_approval_blocks_across_long_polls_then_resumes", test_mcp_approval_blocks_across_long_polls_then_resumes
         )

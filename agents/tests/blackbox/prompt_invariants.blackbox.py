@@ -524,7 +524,7 @@ async def test_planner_tools_description_follows_the_workflow_account():
             wf_mod.now.return_value = datetime.datetime(2026, 10, 20)
             async for _event in SetPlanManager().execute_tool(_Wf(user_id), {"tool": "set_plan"}, "call-1"):
                 pass
-    assert captured == [True, False, False]
+    assert captured == [True, True, False]
 
 
 def test_planner_spawn_aliases_documented_in_prompt():

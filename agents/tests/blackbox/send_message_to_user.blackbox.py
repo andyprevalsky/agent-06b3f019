@@ -1,6 +1,7 @@
 """Blackbox tests for send-message-to-user domain."""
 
 import asyncio
+from unittest.mock import patch
 from _test_utils import (
     BlackboxResult,
     get_captured_requests,
@@ -684,6 +685,7 @@ def test_tool_schemas_expose_inline_view():
     assert "inline_view" not in stock.model_dump()
 
 
+@patch("utils.rose_desktop.ROSE_DESKTOP_ENABLED_BY_DEFAULT", False)
 async def test_inline_view_ignored_for_stock_account():
     """A stock account's message posts exactly as before: no lookup, no inlineView, no error."""
     from domains.send_message_to_user.handler import SendMessageToUserManager
