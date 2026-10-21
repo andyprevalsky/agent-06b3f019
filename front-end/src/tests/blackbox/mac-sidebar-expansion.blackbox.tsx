@@ -32,7 +32,7 @@ describe('Mac sidebar hover and explicit close', () => {
       }
       fireEvent.mouseEnter(bar);
       expect(bar).toHaveAttribute('data-expanded', 'true');
-      fireEvent.click(screen.getByRole('button', { name: 'Home', exact: true }));
+      fireEvent.click(screen.getByRole('button', { name: /^Home$/ }));
       expect(create).toHaveBeenCalledOnce();
     },
   );
