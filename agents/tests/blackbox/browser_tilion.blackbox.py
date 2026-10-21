@@ -290,8 +290,12 @@ async def _fixture_site():
     async def logo(_request):
         return web.Response(body=b"\x89PNG\r\n\x1a\nnot-a-download", content_type="image/png")
 
+    async def headers(request):
+        return web.json_response({"accept_language": request.headers.get("Accept-Language", "")})
+
     app = web.Application()
     app.router.add_get("/", index)
+    app.router.add_get("/headers", headers)
     app.router.add_get("/files/report.pdf", report)
     app.router.add_get("/static/logo.png", logo)
     runner = web.AppRunner(app, access_log=None)
@@ -710,6 +714,174 @@ async def test_tilion_press_key_uses_cdp_input_not_backend_computer_api():
     assert pressed == ["Escape"]
 
 
+async def test_tilion_locale_override_applies_intl_and_accept_language():
+    """Backend contract (A2): fingerprint_injection.{timezone,locale} first, then
+    exit_geo_locale; nothing when both are absent; every page, including new ones."""
+    from domains.spawn_browser_agent_v3.tilion_worker import (
+        accept_language_for_locale,
+        apply_geo_locale_override,
+        install_geo_locale_for_new_pages,
+        resolve_geo_locale,
+    )
+
+    assert accept_language_for_locale("de-DE") == "de-DE,de"
+    assert accept_language_for_locale("fr") == "fr"
+    exit_geo = {"country": "DE", "timezone": "Europe/Berlin", "locale": "de-DE", "source": "exit_ip"}
+    assert resolve_geo_locale(None, None) == {}
+    assert resolve_geo_locale({"timezone": None, "locale": None}, {"timezone": None, "locale": None}) == {}
+    assert resolve_geo_locale(None, exit_geo) == {"timezone": "Europe/Berlin", "locale": "de-DE"}
+    assert resolve_geo_locale({"locale": "fr-FR"}, exit_geo) == {"locale": "fr-FR", "timezone": "Europe/Berlin"}
+    assert resolve_geo_locale({"locale": "de_DE; drop"}, None) == {}
+
+    async def page_facts(page):
+        await page.goto(base + "/headers")
+        header = (await page.evaluate("JSON.parse(document.body.innerText)"))["accept_language"]
+        locale, zone = await page.evaluate(
+            "[Intl.DateTimeFormat().resolvedOptions().locale, Intl.DateTimeFormat().resolvedOptions().timeZone]"
+        )
+        return header, locale, zone
+
+    async with _fixture_site() as base, _tilion_worker_stack() as (_service, pw_browser, gateway):
+        context = pw_browser.contexts[0]
+        page = context.pages[0]
+        default = await page_facts(page)
+
+        # Neither source set: current behaviour, nothing sent.
+        assert await apply_geo_locale_override(page, {"userAgentOverride": {"userAgent": "UA"}}, None) == {}
+        assert install_geo_locale_for_new_pages(context, None, {"timezone": None, "locale": None}) is False
+        assert await page_facts(page) == default
+
+        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) RoseFixture/1.0"
+        fingerprint = {"locale": "de-DE", "userAgentOverride": {"userAgent": user_agent, "platform": "Win32"}}
+        applied = await apply_geo_locale_override(page, fingerprint, {"timezone": "Asia/Tokyo", "locale": "ja-JP"})
+        assert applied == {"locale": "de-DE", "timezone": "Asia/Tokyo"}
+        assert await page_facts(page) == ("de-DE,de;q=0.9", "de-DE", "Asia/Tokyo")
+        assert await page.evaluate("new Intl.NumberFormat().format(1234.5)") == "1.234,5"
+        # The backend's user-agent override is re-sent, not dropped.
+        assert await page.evaluate("navigator.userAgent") == user_agent
+
+        # Overrides are per CDP session: a page opened later gets them too.
+        assert install_geo_locale_for_new_pages(context, None, exit_geo) is True
+        assert install_geo_locale_for_new_pages(context, None, exit_geo) is False, "installed once per context"
+        opened = await context.new_page()
+        expected = ("de-DE,de;q=0.9", "de-DE", "Europe/Berlin")
+        facts = None
+        for _ in range(50):
+            facts = await page_facts(opened)
+            if facts == expected:
+                break
+            await asyncio.sleep(0.1)
+        assert facts == expected, facts
+        assert gateway.rejected_4409 == 0
+
+    # Both worker attach sites (session start, rotation reattach) apply it and
+    # cover new pages.
+    from pathlib import Path
+
+    handler_source = (Path(__file__).resolve().parents[2] / "domains/spawn_browser_agent_v3/handler.py").read_text()
+    assert handler_source.count("await apply_tilion_geo_locale(") == 2
+    assert handler_source.count("install_tilion_geo_locale_for_new_pages(") == 2
+    assert handler_source.count("exit_geo_locale=") == 2
+
+
+async def test_multiplexer_hides_and_releases_browser_ui_targets():
+    """Tilion's Chrome reports chrome://omnibox-popup.top-chrome as attached
+    type "browser_ui" targets (lane E, 23:03Z). No local client may see or
+    drive them; an auto-attached one is resumed and detached, never left paused."""
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
+
+    page = {"targetId": "PAGE1", "type": "page", "url": "https://example.com/", "attached": True}
+    frame = {"targetId": "FRAME1", "type": "iframe", "url": "https://ads.example/", "attached": True}
+    omnibox = {
+        "targetId": "UI1",
+        "type": "browser_ui",
+        "url": "chrome://omnibox-popup.top-chrome/",
+        "attached": True,
+    }
+    sent_upstream: List[Dict[str, Any]] = []
+
+    async def fake_tilion(socket_):
+        async for raw in socket_:
+            message = json.loads(raw)
+            sent_upstream.append(message)
+            method, session = message.get("method"), message.get("sessionId")
+            reply: Dict[str, Any] = {"id": message["id"], "result": {}}
+            if session:
+                reply["sessionId"] = session
+            if method == "Target.attachToBrowserTarget":
+                reply["result"] = {"sessionId": "BROWSER-SESSION"}
+            elif method == "Target.getTargets":
+                reply["result"] = {"targetInfos": [page, omnibox, frame]}
+            await socket_.send(json.dumps(reply))
+            if method == "Target.setAutoAttach":
+                for info, child in ((omnibox, "UI-SESSION"), (page, "PAGE-SESSION")):
+                    await socket_.send(
+                        json.dumps(
+                            {
+                                "method": "Target.attachedToTarget",
+                                "sessionId": session,
+                                "params": {"sessionId": child, "targetInfo": info, "waitingForDebugger": True},
+                            }
+                        )
+                    )
+                for method_name in ("Target.targetCreated", "Target.targetInfoChanged"):
+                    await socket_.send(
+                        json.dumps({"method": method_name, "sessionId": session, "params": {"targetInfo": omnibox}})
+                    )
+                await socket_.send(
+                    json.dumps(
+                        {"method": "Target.targetDestroyed", "sessionId": session, "params": {"targetId": "UI1"}}
+                    )
+                )
+                await socket_.send(
+                    json.dumps({"method": "Page.loadEventFired", "sessionId": "UI-SESSION", "params": {}})
+                )
+                await socket_.send(json.dumps({"id": 0, "method": "Rose.fixtureDone", "sessionId": session}))
+
+    quiet = logging.getLogger("browser_tilion.fake_browser_ui")
+    quiet.setLevel(logging.CRITICAL)
+    async with websockets.serve(fake_tilion, "127.0.0.1", 0, logger=quiet) as server:
+        port = server.sockets[0].getsockname()[1]
+        multiplexer = SingleCdpConnectionMultiplexer(f"ws://127.0.0.1:{port}/v1/session/x/cdp?token=t")
+        local_url = await multiplexer.start()
+        try:
+            async with websockets.connect(local_url, proxy=None) as client:
+                await client.send(json.dumps({"id": 1, "method": "Target.getTargets"}))
+                targets = json.loads(await asyncio.wait_for(client.recv(), 10))
+                assert [info["targetId"] for info in targets["result"]["targetInfos"]] == ["PAGE1", "FRAME1"]
+                await client.send(
+                    json.dumps(
+                        {
+                            "id": 2,
+                            "method": "Target.setAutoAttach",
+                            "params": {"autoAttach": True, "waitForDebuggerOnStart": True, "flatten": True},
+                        }
+                    )
+                )
+                received: List[Dict[str, Any]] = []
+                with contextlib.suppress(asyncio.TimeoutError):
+                    while True:
+                        received.append(json.loads(await asyncio.wait_for(client.recv(), 1.5)))
+                assert {"id": 2, "result": {}} in received
+                attached = [m for m in received if m.get("method") == "Target.attachedToTarget"]
+                assert [m["params"]["targetInfo"]["targetId"] for m in attached] == ["PAGE1"], received
+                assert "UI1" not in json.dumps(received) and "UI-SESSION" not in json.dumps(received), received
+            released = [m for m in sent_upstream if (m.get("params") or {}).get("sessionId") == "UI-SESSION"]
+            resumed = [
+                m
+                for m in sent_upstream
+                if m.get("method") == "Runtime.runIfWaitingForDebugger" and m.get("sessionId") == "UI-SESSION"
+            ]
+            assert resumed, "browser_ui target left paused by waitForDebuggerOnStart"
+            assert [m["method"] for m in released] == ["Target.detachFromTarget"], sent_upstream
+            assert released[0]["sessionId"] == "BROWSER-SESSION"
+            assert not [m for m in sent_upstream if m.get("sessionId") == "PAGE-SESSION"], (
+                "page must stay with its client"
+            )
+        finally:
+            await multiplexer.close()
+
+
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
@@ -729,6 +901,8 @@ async def run_all_tests():
         ("multiplexer_refreshes_expired_connect_token", test_multiplexer_refreshes_expired_connect_token),
         ("resume_request_carries_worker_storage_state", test_resume_request_carries_worker_storage_state),
         ("tilion_press_key_uses_cdp_input", test_tilion_press_key_uses_cdp_input_not_backend_computer_api),
+        ("tilion_locale_override", test_tilion_locale_override_applies_intl_and_accept_language),
+        ("multiplexer_hides_browser_ui_targets", test_multiplexer_hides_and_releases_browser_ui_targets),
     ]:
         await result.record_async(name, test)
     return result.all_passed
