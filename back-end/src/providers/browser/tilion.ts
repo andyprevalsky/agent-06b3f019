@@ -95,6 +95,8 @@ export type TilionReplacementSession = BrowserProviderResumeSession & {
   previousProvider: BrowserProviderName;
   /** Present when the exit rotated in place (`POST rotate-ip`); record it in the rotation log. */
   ipRotation?: { rotated: boolean; freshAllocation: boolean; region: string | null };
+  /** Requested vs applied exit placement of a newly created replacement. */
+  geoTargeting?: TilionGeoTargeting;
 };
 
 interface TilionSessionRecord {
@@ -121,6 +123,7 @@ interface RemoteTilionSession {
   proxyLocation: ProxyGeoLocation;
   proxyType: TilionProxyType;
   browser: Browser;
+  geoTargeting: TilionGeoTargeting;
 }
 
 class TilionSessionValidationError extends Error {}
@@ -184,38 +187,40 @@ async function postSession(
   });
 }
 
-/** Create on the most specific geo Tilion honours: city → state → country. */
+/**
+ * Requested vs applied exit placement. Tilion residential exits honour only
+ * the country (live 2026-10-21: state, city and zip all `geo_unsupported`), so
+ * a narrower agent location is recorded as a gap instead of paying for creates
+ * Tilion would refuse.
+ */
+export interface TilionGeoTargeting {
+  requested: GeoSpecificity;
+  applied: GeoSpecificity;
+  requestedLocation: ProxyGeoLocation;
+  geoApplied: boolean | null;
+  geoUnsupported: string[];
+}
+
+/** One create pinned to the country, the only placement Tilion honours. */
 async function createPlacedSession(
   location: ProxyGeoLocation,
   proxyType: TilionProxyType
-): Promise<{ record: TilionSessionRecord; specificity: GeoSpecificity }> {
-  const ladder = geoSpecificities(location);
-  for (let index = 0; index < ladder.length; index++) {
-    const specificity = ladder[index];
-    const record = await postSession(location, proxyType, specificity);
-    const unsupported = record.geo_unsupported ?? [];
-    const honoured = record.geo_applied !== false && unsupported.length === 0;
-    if (honoured || specificity === 'country') return { record, specificity };
-    // Tilion fell back to the country exit. A less specific pin can still beat it.
-    const next = ladder[index + 1];
-    // Tilion lists every field it could not honour; a rung it already refused
-    // (live 2026-10-21: city and state both unsupported) would only buy another browser.
-    if (next === 'country' || unsupported.includes(next)) {
-      log.info('Tilion geo pin unsupported; keeping country exit', {
-        sessionId: record.session_id,
-        unsupported,
-      });
-      return { record, specificity: 'country' };
-    }
-    log.info('Tilion geo unsupported; recreating with a wider pin', {
+): Promise<{ record: TilionSessionRecord; geoTargeting: TilionGeoTargeting }> {
+  const record = await postSession(location, proxyType, 'country');
+  const geoTargeting: TilionGeoTargeting = {
+    requested: geoSpecificities(location)[0],
+    applied: 'country',
+    requestedLocation: location,
+    geoApplied: record.geo_applied ?? null,
+    geoUnsupported: record.geo_unsupported ?? [],
+  };
+  if (geoTargeting.requested !== 'country' || geoTargeting.geoApplied === false) {
+    log.warn('Tilion exit placed at country level; narrower targeting unavailable', {
       sessionId: record.session_id,
-      requested: specificity,
-      next,
-      unsupported,
+      ...geoTargeting,
     });
-    await releaseTilionRemoteSession(record.session_id);
   }
-  throw new Error('Tilion geo ladder exhausted');
+  return { record, geoTargeting };
 }
 
 async function createRemote(
@@ -223,7 +228,7 @@ async function createRemote(
   proxyType: TilionProxyType
 ): Promise<RemoteTilionSession> {
   for (let attempt = 1; ; attempt++) {
-    const { record, specificity } = await createPlacedSession(location, proxyType);
+    const { record, geoTargeting } = await createPlacedSession(location, proxyType);
     const sessionId = record.session_id;
     let browser: Browser | null = null;
     try {
@@ -240,17 +245,19 @@ async function createRemote(
       log.info('Created Tilion browser session', {
         sessionId,
         proxyType,
-        specificity,
+        requestedGeo: geoTargeting.requested,
+        appliedGeo: geoTargeting.applied,
         exitId: record.exit_id ?? null,
       });
       return {
         sessionId,
         wsUrl: record.connect_url,
         debugUrl,
-        proxySource: `tilion_${proxyType}_${specificity}`,
-        proxyLocation: landedLocation(location, specificity),
+        proxySource: `tilion_${proxyType}_country`,
+        proxyLocation: landedLocation(location, 'country'),
         proxyType,
         browser,
+        geoTargeting,
       };
     } catch (error) {
       await browser?.close().catch(() => {});
@@ -288,7 +295,7 @@ export async function createTilionSessionWithContext(
   location: ProxyGeoLocation = DEFAULT_GEOLOCATION,
   startUrl?: string,
   options?: { keepValidationConnection?: boolean; taskId?: string; proxyType?: KernelProxyType }
-): Promise<BrowserProviderSession> {
+): Promise<BrowserProviderSession & { geoTargeting: TilionGeoTargeting }> {
   const proxyType = tilionProxyType(options?.proxyType ?? 'residential');
   const remote = await createRemote(location, proxyType);
   let row;
@@ -332,6 +339,7 @@ export async function createTilionSessionWithContext(
     profileId: null,
     profileSource: 'tilion_ephemeral',
     validationBrowser: keep ? remote.browser : null,
+    geoTargeting: remote.geoTargeting,
   };
 }
 
@@ -348,6 +356,7 @@ export async function createTilionRecoverySession(
   profileId: null;
   profileSource: string;
   validationBrowser: Browser | null;
+  geoTargeting: TilionGeoTargeting;
 }> {
   const remote = await createRemote(location, tilionProxyType(options.proxyType ?? 'residential'));
   return {
@@ -359,6 +368,7 @@ export async function createTilionRecoverySession(
     profileId: null,
     profileSource: 'challenge_candidate_ephemeral',
     validationBrowser: remote.browser,
+    geoTargeting: remote.geoTargeting,
   };
 }
 
@@ -607,6 +617,7 @@ async function replaceSession(
       profileSource: state !== null ? 'tilion_carried_state' : 'tilion_ephemeral',
       previousSessionId: old.sessionId,
       previousProvider,
+      geoTargeting: remote.geoTargeting,
     };
   } catch (error) {
     await releaseTilionRemoteSession(remote.sessionId).catch(() => {});

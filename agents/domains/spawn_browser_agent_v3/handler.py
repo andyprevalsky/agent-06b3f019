@@ -68,8 +68,8 @@ from loop.activity_helper import call_temporal_activity_from_activity
 from providers.fast_cache.browser_use_cache import cached_browser_decision
 from providers.fast_cache.context import write_through_enabled_for_user
 from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
-from providers.rose.errors import BrowserModelOutputValidationError
 from providers.rose.browser_use import format_browser_state_for_tool
+from providers.rose.errors import BrowserModelOutputValidationError
 from providers.rose.types import ComputeTokenSource
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.attention_requests import REJECTION_SENTINEL
@@ -88,7 +88,7 @@ from .activity_heartbeat import (
     stop_browser_activity_heartbeat,
     wait_for_browser_work,
 )
-from .cdp_urls import steel_cdp_connection_url
+from .cdp_urls import open_browser_cdp_connection, redact_cdp_url
 from .challenge_recovery import (
     commit_cookie_removals,
     live_tab_looks_challenged,
@@ -209,6 +209,18 @@ from .service_crypto import (
 from .state_prefetch import BrowserStatePrefetch
 from .step_timing import StepPhaseTimer
 from .streaming import BrowserStreamingRoseClient, BrowserThinkingStream
+from .tilion_worker import (
+    apply_worker_state as apply_tilion_worker_state,
+)
+from .tilion_worker import (
+    release_session as release_tilion_session_files,
+)
+from .tilion_worker import (
+    stage_upload as stage_tilion_upload,
+)
+from .tilion_worker import (
+    worker_apply_payload as tilion_worker_apply_payload,
+)
 from .types import ClaudeTokenState
 
 logger = structlog.get_logger()
@@ -2163,6 +2175,28 @@ def _updated_rotation_session_metadata(
     return updated
 
 
+def _cdp_multiplexer_kwargs(cdp_multiplexer: Optional[Any]) -> Dict[str, Any]:
+    """DOMService kwargs: only single-CDP-client sessions hand over a multiplexer."""
+    return {"cdp_multiplexer": cdp_multiplexer} if cdp_multiplexer is not None else {}
+
+
+def _fresh_connect_url_minter(config: Any, task_id: Optional[str]) -> Optional[Callable[[], Awaitable[Optional[str]]]]:
+    """Mint a fresh provider CDP URL for an in-activity redial (Tilion tokens last 1800 s).
+
+    GET /api/browser-session/task/{task_id} returns a freshly minted ws_url for
+    ACTIVE Tilion rows; the cached URL is never reused after expiry.
+    """
+    if config is None or not task_id:
+        return None
+
+    async def mint() -> Optional[str]:
+        info = await fetch_session_info(config, task_id)
+        ws_url = info.get("ws_url") if isinstance(info, dict) else None
+        return ws_url if isinstance(ws_url, str) and ws_url else None
+
+    return mint
+
+
 async def _reconnect_browser_stack_after_rotation(
     *,
     new_cdp_url: str,
@@ -2199,10 +2233,15 @@ async def _reconnect_browser_stack_after_rotation(
 
     # 2. Attach DOMService + Playwright to the rotated session.
     _disable_cdp_websocket_proxy()
-    connection_cdp_url = steel_cdp_connection_url(new_cdp_url)
+    connection_cdp_url, cdp_multiplexer = await open_browser_cdp_connection(
+        new_cdp_url,
+        label=f"rotation:{agent_id}",
+        refresh_url=_fresh_connect_url_minter(config, task_id),
+    )
     dom_service = DOMService(
         cdp_url=connection_cdp_url,
         downloads_path=browser_downloads_path_for_provider(provider),
+        **_cdp_multiplexer_kwargs(cdp_multiplexer),
     )
     if hasattr(old_dom_service, "secret_redaction_state"):
         dom_service.restore_secret_redaction_state(old_dom_service.secret_redaction_state())
@@ -7590,6 +7629,7 @@ async def _spawn_browser_agent_activity_v3_real(
 
         # ===== PHASE 1: SESSION INIT =====
         t_session = time.monotonic()
+        session_worker_apply: Optional[Dict[str, Any]] = None
         fingerprint_injection = None
         user_profile = {}
         # Current backends return auth_options from the same realm-preparation
@@ -7704,6 +7744,7 @@ async def _spawn_browser_agent_activity_v3_real(
             session_passwords = session_info.get("passwords", [])
             session_passkeys = session_info.get("passkeys", [])
             session_auth_options = session_info.get("auth_options")
+            session_worker_apply = tilion_worker_apply_payload(session_info)
             session_credential_ref = session_info.get("credential_ref") or session_info.get("auth_credential_ref")
             browser_session_metadata = session_info.get("browser_session_metadata") or {}
             user_profile, auth_realm = _resume_context_from_session_info(session_info, auth_realm)
@@ -7783,6 +7824,7 @@ async def _spawn_browser_agent_activity_v3_real(
             session_passwords = session_data.get("passwords", [])
             session_passkeys = session_data.get("passkeys", [])
             session_auth_options = session_data.get("auth_options")
+            session_worker_apply = tilion_worker_apply_payload(session_data)
             session_credential_ref = session_data.get("credential_ref") or session_data.get("auth_credential_ref")
             browser_session_metadata = session_data.get("browser_session_metadata") or {}
             user_profile = session_data.get("user_settings") or {}
@@ -7839,7 +7881,7 @@ async def _spawn_browser_agent_activity_v3_real(
         )
         _record_timing("auth_options", t_auth)
 
-        browser_activity_checkpoint(f"Connecting via CDP: {cdp_url[:50]}...")
+        browser_activity_checkpoint(f"Connecting via CDP: {redact_cdp_url(cdp_url)[:50]}...")
 
         # ===== PHASE 2: PARALLEL SETUP =====
         t_parallel = time.monotonic()
@@ -7848,12 +7890,19 @@ async def _spawn_browser_agent_activity_v3_real(
             """Connect DOMService + Playwright, apply fingerprint, init humanizer."""
             nonlocal playwright_driver_pid
             _disable_cdp_websocket_proxy()
-            connection_cdp_url = steel_cdp_connection_url(cdp_url)
+            # Tilion admits one CDP client: browser-use and Playwright share one
+            # loopback-multiplexed socket owned (and closed) by the DOMService.
+            connection_cdp_url, _cdp_multiplexer = await open_browser_cdp_connection(
+                cdp_url,
+                label=f"session:{agent_id}",
+                refresh_url=_fresh_connect_url_minter(config, task_id),
+            )
             _dom_service = DOMService(
                 cdp_url=connection_cdp_url,
                 downloads_path=browser_downloads_path_for_provider(
                     browser_session_metadata.get("provider")
                 ),
+                **_cdp_multiplexer_kwargs(_cdp_multiplexer),
             )
             if hasattr(_dom_service, "restore_secret_redaction_state"):
                 _dom_service.restore_secret_redaction_state(write_lock_resume_state or {})
@@ -8306,6 +8355,11 @@ async def _spawn_browser_agent_activity_v3_real(
         # ===== PHASE 3: POST-SETUP =====
         t_post = time.monotonic()
 
+        if session_worker_apply:
+            # Tilion: the backend returned saved state instead of connecting to
+            # the browser this worker holds; apply it over the worker's socket.
+            await apply_tilion_worker_state(playwright_browser, session_worker_apply)
+
         # Upload attachments
         if attachments:
             t = time.monotonic()
@@ -8324,13 +8378,23 @@ async def _spawn_browser_agent_activity_v3_real(
                     file_content = await download_from_storage(storage_path)
 
                     browser_activity_checkpoint(f"Uploading {filename} to browser session...")
-                    upload_result = await upload_file_to_session(
-                        config,
-                        session_id,
-                        filename,
-                        file_content,
-                        fp.get("mime_type", "application/octet-stream"),
-                    )
+                    if getattr(dom_service, "single_cdp_client", False) is True:
+                        # Tilion: the backend cannot reach the browser while the
+                        # worker holds CDP; upload_file sets these bytes itself.
+                        upload_result = stage_tilion_upload(
+                            session_id,
+                            filename,
+                            file_content,
+                            fp.get("mime_type", "application/octet-stream"),
+                        )
+                    else:
+                        upload_result = await upload_file_to_session(
+                            config,
+                            session_id,
+                            filename,
+                            file_content,
+                            fp.get("mime_type", "application/octet-stream"),
+                        )
                     if upload_result:
                         remote_path = upload_result.get("path", f"/tmp/{filename}")
                         available_file_paths[filename] = remote_path
@@ -8703,6 +8767,9 @@ async def _spawn_browser_agent_activity_v3_real(
                     f"{type(prep_error).__name__}:{extract_error_message(prep_error)[:160]}"
                 )
                 raise
+            realm_worker_apply = tilion_worker_apply_payload(payload)
+            if realm_worker_apply:
+                await apply_tilion_worker_state(playwright_browser, realm_worker_apply)
             realm_state = await build_realm_credential_state(
                 payload,
                 decryption_key=config.payment.decryption_key,
@@ -9627,6 +9694,7 @@ async def _spawn_browser_agent_activity_v3_real(
                                 await browser_download_persister.transition_browser(
                                     browser_session=dom_service.session,
                                     session_id=session_id,
+                                    provider=browser_session_metadata.get("provider"),
                                 )
                         humanizer = await _replace_browser_humanizer(
                             current_humanizer=humanizer,
@@ -10171,6 +10239,7 @@ async def _spawn_browser_agent_activity_v3_real(
                                 await browser_download_persister.transition_browser(
                                     browser_session=dom_service.session,
                                     session_id=session_id,
+                                    provider=browser_session_metadata.get("provider"),
                                 )
 
                         humanizer = await _replace_browser_humanizer(
@@ -11167,7 +11236,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     "Returning to workflow for write lock approval",
                     task_id=task_id,
                     session_id=session_id,
-                    cdp_url=cdp_url[:50] if cdp_url else None,
+                    cdp_url=redact_cdp_url(cdp_url)[:50] if cdp_url else None,
                 )
                 await browser_stream.finish_tools(status="FINISHED")
                 resume_result = {
@@ -11682,7 +11751,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 browser_url = prepared.get("debug_url")
                 browser_session_metadata = prepared.get("browser_session_metadata") or {}
                 provider = browser_session_metadata.get("provider")
-                if provider in {"kernel", "steel", "browser-use"}:
+                if provider in {"kernel", "steel", "browser-use", "tilion"}:
                     preparation_cancellation = {
                         "version": 1,
                         "agent_id": agent_id,
@@ -11915,6 +11984,9 @@ Based on this feedback, I need to continue working on the task and address the i
             if browser_download_persister is not None:
                 with contextlib.suppress(Exception):
                     await browser_download_persister.close()
+            # Worker-held Tilion uploads/downloads end with the activity that
+            # extracted them; keep worker RSS bounded.
+            release_tilion_session_files(session_id)
             _schedule_browser_cleanup(
                 agent_id=agent_id,
                 preparation_cancellation=preparation_cancellation,

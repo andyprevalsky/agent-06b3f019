@@ -571,8 +571,17 @@ async def resume_browser_session(
     task_id: str,
     *,
     force_fresh_profile: bool = False,
+    storage_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Resume a paused browser session by asking backend/Steel for a fresh session."""
+    """Resume a paused browser session by asking backend/Steel for a fresh session.
+
+    ``storage_state`` (cookies, origins with localStorage/IndexedDB, current_url)
+    is the worker's own capture of a LIVE single-CDP-client (Tilion) session:
+    the backend cannot connect to that browser while the worker holds CDP.
+    """
+    body: Dict[str, Any] = {"task_id": task_id, "force_fresh_profile": force_fresh_profile}
+    if storage_state is not None:
+        body["storage_state"] = storage_state
     async with httpx.AsyncClient(timeout=180.0) as client:
         response = await client.post(
             f"{config.backend.api_url}/api/browser-session/resume",
@@ -581,7 +590,7 @@ async def resume_browser_session(
                 "Content-Type": "application/json",
                 **workflow_generation_headers(),
             },
-            json={"task_id": task_id, "force_fresh_profile": force_fresh_profile},
+            json=body,
         )
     if response.status_code in [200, 201]:
         return response.json()
