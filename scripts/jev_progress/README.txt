@@ -68,6 +68,22 @@ then mapped to its nearest anchor; this is not the raw probability distribution.
 These histograms count saved prefixes; short traces and repeated tool-result
 events create discrete progress spikes. They do not measure wall-clock occupancy.
 
+Isolated prior-prediction ablation (does not change the champion):
+  agents/venv/bin/python scripts/jev_progress/previous_prediction.py --experiment <previous-optimization-folder> --dataset <dataset-folder> --output <ablation-folder>
+It adds only one strictly earlier baseline prediction to each prefix, preserving
+the frozen prompt and validation IDs. First prefixes have no prior. This tests
+one-step conditioning, not recursive production rollout behavior.
+
+Parallel adaptive search (35 independent proposals, then select; five rounds):
+  agents/venv/bin/python scripts/jev_progress/batch.py --dataset <dataset-folder> --cohorts <cohorts.json> --output <batch-folder> --width 35 --rounds 5
+This restores the durable champion and Pareto alternatives, freezes the incoming
+normalization and cohort for the run, and advances selection only after each
+whole round passes. Each round includes history, timeline and compact formats.
+API concurrency is bounded and backs off on 429s; perfect throughput scaling
+is not assumed. Raw responses and per-candidate results are encrypted in R2,
+so parallel evaluation does not fill the disk with caches. Round manifests and
+the next candidate number survive in the durable checkpoint.
+
 Weekly fresh-data workflow
 -------------------------
 Also requires boto3, cryptography, python-dotenv and psql. R2_ACCOUNT_ID,

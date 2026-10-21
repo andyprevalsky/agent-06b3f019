@@ -1511,6 +1511,19 @@ arrived in this short window, and the historical 2,000-case test was not rerun.
 Local curve/report: `.context/jev-weekly/2026-10-21T024539.635435_0000/optimization/learning-curve.json`.
 This is a prompt-search observation, not a proof about statistical double descent.
 
+Isolated previous-prediction experiment: same frozen prompt and 500 validation
+prefixes, with an earlier estimate available in 457. One-step conditioning
+changed progress MAE 14.99→15.25pp and ETA log error 1.726→1.683; joint error
+was 0.06% worse. Recursive sampled-prefix feedback gave 15.31pp / 1.688 and
+0.17% worse joint error. Keep this feature off by default; it is not part of
+the active 35-candidate × 5-round search. See scripts/jev_progress/previous_prediction.py.
+
+Integration audit confirmed research is NOT wired into the live lifecycle,
+database estimate fields, event payloads, or sidebar. Legacy Agent.progress
+is not a JEV estimate. Evidence: `.context/jev-integration-audit/report.txt`.
+The research DB helper now wraps queries in explicit BEGIN READ ONLY / ROLLBACK;
+startup PGOPTIONS alone was not reliable through the production connection.
+
 Every weekly run durably freezes the incoming prompt before a read-only
 production pull. Newly observed families with unseen normalized goals receive
 a permanent random 80/20 training/sealed split. All prefixes of the sealed 20%

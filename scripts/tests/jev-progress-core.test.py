@@ -16,6 +16,10 @@ from checkpoint import config, validate, export_optimizer, warm_candidates
 from core import digest, prepare
 import optimize
 from learning_curve import analyze
+from previous_prediction import build_priors, builder
+from batch import select_completed_round, initialize_builder, build_request
+from concurrent.futures import ProcessPoolExecutor
+import multiprocessing
 
 
 class CoreTests(unittest.TestCase):
@@ -188,6 +192,41 @@ class CoreTests(unittest.TestCase):
         self.assertAlmostEqual(report['late_drops'][0]['drop_from_plateau'], .1)
         steady = [{'iteration': i, 'joint_loss': v} for i,v in enumerate([.99,.95,.9,.85,.8])]
         self.assertEqual(analyze(steady)['late_drops'], [])
+
+    def test_previous_prediction_feature_excludes_labels_and_future_predictions(self):
+        first = {**self.row, 'example_id': 'first', 'cutoff_event_index': 0}
+        current = {**self.row, 'example_id': 'current', 'cutoff_event_index': 1}
+        prediction = {'example_id':'first','ok':True,'predicted_progress':.4,
+                      'remaining_predicted':1.5,'eta_predicted':60,'actual_progress':'SECRET_LABEL'}
+        future_prediction = {**prediction,'example_id':'current','predicted_progress':.99}
+        priors = build_priors([current,first], {'a':self.trace}, {'rows':[prediction,future_prediction]})
+        self.assertNotIn('first',priors)
+        self.assertEqual(priors['current']['predicted_progress_fraction'],.4)
+        self.assertNotIn('SECRET',str(priors))
+        body = builder(priors)(current,self.trace,SEED)
+        self.assertEqual(body['state']['previous_jev_prediction'],priors['current'])
+        self.assertNotIn('SECRET',str(body))
+
+    def test_parallel_round_cannot_promote_a_partial_or_failed_round(self):
+        base={'failed':0,'trace_macro_mae_pp':10,'eta_log_mae':2}
+        def candidate(name,metrics):
+            return {'name':name,'train':{'metrics':metrics},'validation':{'metrics':metrics}}
+        incumbent=candidate('old',base)
+        improved=candidate('new',{**base,'trace_macro_mae_pp':8})
+        with self.assertRaises(ValueError):
+            select_completed_round([incumbent],[improved],2,base)
+        failed=candidate('failed',{**base,'failed':1})
+        with self.assertRaises(ValueError):
+            select_completed_round([incumbent],[improved,failed],2,base)
+        _,winner=select_completed_round([incumbent],[improved],1,base)
+        self.assertEqual(winner['name'],'new')
+
+    def test_parallel_request_builder_preserves_exact_model_inputs(self):
+        prompt={**SEED,'input_format':'timeline'}
+        expected=request(self.row,self.trace,prompt)
+        with ProcessPoolExecutor(max_workers=1,mp_context=multiprocessing.get_context('spawn'),
+                                 initializer=initialize_builder,initargs=({'a':self.trace},)) as executor:
+            self.assertEqual(executor.submit(build_request,self.row,prompt).result(timeout=20),expected)
 
 
 if __name__ == "__main__":

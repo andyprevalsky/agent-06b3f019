@@ -24,7 +24,10 @@ def query(sql):
                                                 if k in ('sslmode', 'connect_timeout')})))
     env = {**os.environ, 'PGOPTIONS': '-c default_transaction_read_only=on -c statement_timeout=25000',
            'PGCONNECT_TIMEOUT': '10'}
-    result = subprocess.run(['psql', '-X', '-w', '-d', db, '-At'], input=sql, env=env,
+    # Transaction-pooling proxies may reset/ignore startup PGOPTIONS. Require
+    # a server-side read-only transaction around the actual statement too.
+    transaction = 'BEGIN READ ONLY;\n' + sql.rstrip().rstrip(';') + ';\nROLLBACK;\n'
+    result = subprocess.run(['psql', '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-w', '-d', db, '-At'], input=transaction, env=env,
                             capture_output=True, text=True, timeout=90)
     if result.returncode:
         raise RuntimeError('Read-only production query failed (credentials and data suppressed)')

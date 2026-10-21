@@ -278,16 +278,16 @@ def summarize(rows, total):
                                    (r.get("usage") or {}).get("output_tokens", 0) for r in valid)}
 
 
-def evaluate(rows, traces, prompt, output, workers=12, transport=api):
+def evaluate(rows, traces, prompt, output, workers=12, transport=api, request_builder=request, cache_dir=None):
     prompt_hash = digest(prompt)
     key = credential("TYPESAFE_API_KEY") if transport is api else "offline"
-    cache = Path(os.environ.get('JEV_CACHE_DIR', str(output / 'cache')))
+    cache = None if cache_dir is False else Path(cache_dir or os.environ.get('JEV_CACHE_DIR', str(output / 'cache')))
     def one(row):
         trace = traces[row["trace_id"]]
-        body = request(row, trace, prompt)
+        body = request_builder(row, trace, prompt)
         cache_key = digest({"request": body, "scoring_version": 1})
-        path = cache / (cache_key + ".json.gz")
-        cached = path.exists()
+        path = cache / (cache_key + ".json.gz") if cache is not None else None
+        cached = path is not None and path.exists()
         if cached:
             with gzip.open(path, "rt") as stream:
                 stored = json.load(stream)
@@ -296,9 +296,12 @@ def evaluate(rows, traces, prompt, output, workers=12, transport=api):
             stored = {"raw": raw, "latency": latency, "request_hash": digest(body)}
             # Validate before marking response reusable; malformed output never becomes a hit.
             decode(raw, row, trace)
-            cache.mkdir(exist_ok=True, parents=True)
-            with gzip.open(path, "wt") as stream:
-                json.dump(stored, stream)
+            if path is not None:
+                cache.mkdir(exist_ok=True, parents=True)
+                temporary = path.with_name(path.name + f'.{threading.get_ident()}.tmp')
+                with gzip.open(temporary, "wt") as stream:
+                    json.dump(stored, stream)
+                temporary.replace(path)
         result = decode(stored["raw"], row, trace)
         return {**result, "ok": True, "cache_hit": cached, "request_hash": stored["request_hash"],
                 "usage": stored["raw"].get("usage"), "latency_seconds": stored["latency"], "prompt_hash": prompt_hash}
