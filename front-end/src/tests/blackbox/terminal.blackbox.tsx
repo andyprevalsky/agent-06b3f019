@@ -175,12 +175,10 @@ describe('Terminal page', () => {
       expect(screen.getByLabelText('Last name')).toBeInTheDocument();
     });
 
-    it('shows Popular Goals carousel when no agent is selected', async () => {
+    it('omits Popular Goals when no agent is selected', async () => {
       renderWithProviders(<Terminal />);
-      await waitFor(() => {
-        // Should show at least one popular goal button
-        expect(screen.getAllByText('Maximize my luck surface area').length).toBeGreaterThan(0);
-      });
+      expect(await screen.findByPlaceholderText('Enter any goal')).toBeInTheDocument();
+      expect(screen.queryByTestId('popular-goals-row')).not.toBeInTheDocument();
     });
 
     it('keeps grid energy pills in the background layer below terminal content', async () => {
@@ -490,20 +488,13 @@ describe('Terminal page', () => {
       expect(textarea).toHaveValue('Find me a new apartment');
     });
 
-    it('clicking a popular goal populates the input', async () => {
+    it('keeps the composer available without suggested goals', async () => {
       const user = userEvent.setup({ delay: null });
       renderWithProviders(<Terminal />);
-
-      await waitFor(() => {
-        expect(screen.getAllByText('Get me socks').length).toBeGreaterThan(0);
-      });
-
-      // Click the first instance of a popular goal
-      const goalButtons = screen.getAllByText('Get me socks');
-      await user.click(goalButtons[0]);
-
-      const textarea = screen.getByPlaceholderText('Enter any goal');
-      expect(textarea).toHaveValue('Get me socks');
+      const textarea = await screen.findByPlaceholderText('Enter any goal');
+      expect(screen.queryByText('Get me socks')).not.toBeInTheDocument();
+      await user.type(textarea, 'My own goal');
+      expect(textarea).toHaveValue('My own goal');
     });
 
     it('submitting a goal creates a new agent via POST /api/agents', async () => {

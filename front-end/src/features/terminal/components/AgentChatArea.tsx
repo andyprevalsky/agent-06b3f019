@@ -2,7 +2,7 @@
  * STATE MACHINE: AgentChatArea
  *
  * STATES (derived from props):
- *   NO_AGENT + NO_LOADING    → show opening animation + popular goals
+ *   NO_AGENT + NO_LOADING    → show opening animation + composer
  *   NO_AGENT + LOADING       → show "Loading AI Network..." dots
  *   AGENT_SELECTED + LOADING → show "Loading AI Network..." dots
  *   AGENT_SELECTED + READY   → show message list, query input, browser status
@@ -42,7 +42,6 @@
  */
 
 import { useRef, Suspense, type ComponentType, type ReactNode } from 'react';
-import * as analytics from '@/lib/analytics';
 import { isBenchmarkSharedView } from '@/lib/benchmarkShare';
 
 import {
@@ -57,7 +56,6 @@ import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { cn } from '@/lib/utils';
 import { GateStack } from './GateStack';
 
-import { useTickerCarousel } from '../hooks/useTickerCarousel';
 import { useOpeningAnimation } from '../hooks/useOpeningAnimation';
 import { getContextPercentage, getModelContextWindow } from '../hooks/derivations';
 import type {
@@ -74,7 +72,6 @@ import { AppScreenHost } from './AppScreenHost';
 import { ChatScrollArea } from './ChatScrollArea';
 import { SubAgentBreadcrumb } from './SubAgentBreadcrumb';
 import { SystemMessagesPanel } from './SystemMessagesPanel';
-import { PopularGoalsCarousel } from './PopularGoalsCarousel';
 import { composerCanSubmit } from './composerCanSubmit';
 import { TerminalLegalFooter } from './TerminalLegalFooter';
 
@@ -121,7 +118,6 @@ function ChatColumn({
 }: AgentChatAreaProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const opening = useOpeningAnimation(a.selectedAgentId, a.isLoadingNetwork);
-  const { tickerOffset, tickerRef } = useTickerCarousel(a.selectedAgentId);
   const roseDesktop = useRoseDesktop();
   const readOnlyMessage = readOnlyNotice(a);
 
@@ -184,8 +180,6 @@ function ChatColumn({
           pendingApproval={pendingApproval}
           pendingGates={pendingGates}
           canSubmit={canSubmit}
-          tickerOffset={tickerOffset}
-          tickerRef={tickerRef}
         />
       )}
 
@@ -219,8 +213,6 @@ interface InputAreaProps {
   pendingApproval: PendingApproval | null;
   pendingGates: PendingGate[];
   canSubmit: boolean;
-  tickerOffset: number;
-  tickerRef: React.RefObject<HTMLDivElement>;
 }
 
 function InputArea({
@@ -231,8 +223,6 @@ function InputArea({
   pendingApproval,
   pendingGates,
   canSubmit,
-  tickerOffset,
-  tickerRef,
 }: InputAreaProps) {
   // shrink-0: this row is a flex sibling of the flex-1 chat scroll area inside
   // an `overflow-hidden` column. Without it, a tall child (an approval card
@@ -256,20 +246,6 @@ function InputArea({
         opacity: a.agentDetail?.status === 'FAILED' && pendingGates.length === 0 ? 0.8 : 1,
       }}
     >
-      {!a.selectedAgentId && (
-        <PopularGoalsCarousel
-          tickerOffset={tickerOffset}
-          tickerRef={tickerRef}
-          onGoalClick={(goal) => {
-            analytics.track('goal_typed');
-            analytics.track('popular_goal_clicked', { goal });
-            a.setMessageInput(goal);
-          }}
-          dripStyles={drip.dripStyles}
-          borderColor={drip.borderColor}
-        />
-      )}
-
       {/* Gate cards pin above the input UI regardless of the approval/query toggle. */}
       <GateStack
         pendingGates={pendingGates}
@@ -320,6 +296,7 @@ function ChatQueryInputBox({
   return (
     <div className="relative z-10">
       <QueryInput
+        liftAboveApps
         value={a.messageInput}
         onChange={a.setMessageInput}
         onSubmit={(attachments) => {

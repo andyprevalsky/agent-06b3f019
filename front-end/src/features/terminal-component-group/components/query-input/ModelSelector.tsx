@@ -108,7 +108,7 @@ export function ModelSelector({
         </PopoverTrigger>
         {showModelSelector && (
           <PopoverContent
-            className={cn('w-[300px] p-0 z-50', roseDark && ROSE_DARK_MENU_CLASS)}
+            className={cn('w-[300px] p-0 z-[120]', roseDark && ROSE_DARK_MENU_CLASS)}
             align="start"
           >
             <ModelList

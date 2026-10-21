@@ -16,7 +16,7 @@
  *   InputContainer with: bare paperclip, model selector (short rose-flash /
  *     rose-ultra names, no info button), 3-state SpeedToggle at the
  *     selector's height, dark-only glass send.
- *   The host gets 14px top margin: 30px from the Popular Goals row (mb-4).
+ *   The host keeps 14px top clearance for the nub.
  *
  * Sub-state lives in hooks:
  *   - useAttachments     : attachment lifecycle + paste/drag
@@ -60,6 +60,7 @@ import { type QueryInputProps, DEFAULT_DRIP_STYLES } from './query-input/types';
 import { useAttachments } from './query-input/useAttachments';
 import { usePriceLimit } from './query-input/usePriceLimit';
 import { AttachmentList } from './query-input/AttachmentList';
+import { QueryInputLayer } from './query-input/QueryInputLayer';
 import { InputContainer } from './query-input/InputContainer';
 import { TopBar, type TopBarProps } from './query-input/TopBar';
 import { NubTab } from './query-input/ToolbarNub';
@@ -97,36 +98,38 @@ export default function QueryInput(props: QueryInputProps) {
   const roseDark = useRoseTheme().isDark;
 
   return (
-    <div className="w-full md:px-0">
-      <div
-        data-testid="query-input-host"
-        className={cn('max-w-4xl mx-auto', roseDesktop && 'relative mt-[14px]')}
-      >
-        {roseDesktop && !directChannel && (
-          <NubTab reveal={reveal}>
-            <NubToolbar {...topBarProps} />
-          </NubTab>
-        )}
-        <QueryInputShell
-          dripStyles={dripStyles}
-          drippiness={drippiness}
-          isDragOver={attachments.isDragOver}
-          dragHandlers={attachments.dragHandlers}
-          aboveTab={roseDesktop}
-          roseDark={roseDark}
+    <QueryInputLayer enabled={roseDesktop && !!props.liftAboveApps}>
+      <div className="w-full md:px-0">
+        <div
+          data-testid="query-input-host"
+          className={cn('max-w-4xl mx-auto', roseDesktop && 'relative mt-[14px]')}
         >
-          <QueryInputBody
-            {...props}
-            attachments={attachments}
-            textareaRef={textareaRef}
-            handleSubmit={handleSubmit}
-            topBarProps={topBarProps}
-            roseDesktop={roseDesktop}
+          {roseDesktop && !directChannel && (
+            <NubTab reveal={reveal}>
+              <NubToolbar {...topBarProps} />
+            </NubTab>
+          )}
+          <QueryInputShell
+            dripStyles={dripStyles}
+            drippiness={drippiness}
+            isDragOver={attachments.isDragOver}
+            dragHandlers={attachments.dragHandlers}
+            aboveTab={roseDesktop}
             roseDark={roseDark}
-          />
-        </QueryInputShell>
+          >
+            <QueryInputBody
+              {...props}
+              attachments={attachments}
+              textareaRef={textareaRef}
+              handleSubmit={handleSubmit}
+              topBarProps={topBarProps}
+              roseDesktop={roseDesktop}
+              roseDark={roseDark}
+            />
+          </QueryInputShell>
+        </div>
       </div>
-    </div>
+    </QueryInputLayer>
   );
 }
 

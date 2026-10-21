@@ -257,7 +257,7 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
     // The owner's chat is replaced (its chip and composer are gone).
     expect(screen.queryByTestId('code-agent-chip')).toBeNull();
     expect(screen.queryByPlaceholderText('Type your message...')).toBeNull();
-    const box = within(screen.getByTestId('code-agent-view-composer'));
+    const box = within(screen.getByTestId('query-input-layer'));
     expect(box.getByPlaceholderText('Message Codex…')).toBeInTheDocument();
     // Text only: no nub tab, pinned tools, model selector or paperclip.
     expect(box.queryByTestId('query-toolbar-nub')).toBeNull();
@@ -334,15 +334,17 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
     await user.selectOptions(await screen.findByLabelText('Reasoning effort'), 'high');
     await user.selectOptions(screen.getByLabelText('Code speed'), 'fast');
     await user.upload(
-      composer.querySelector('input[type="file"]') as HTMLInputElement,
+      screen
+        .getByTestId('query-input-layer')
+        .querySelector('input[type="file"]') as HTMLInputElement,
       new File(['hello'], 'notes.txt', { type: 'text/plain' }),
     );
-    await within(composer).findByText('notes.txt');
+    await screen.findByText('notes.txt');
     const input = screen.getByPlaceholderText('Message Codex…');
     await user.type(input, 'Inspect this{Enter}');
     await screen.findByText('Native turn unavailable');
     expect(input).toHaveValue('Inspect this');
-    expect(within(composer).getByText('notes.txt')).toBeInTheDocument();
+    expect(screen.getByText('notes.txt')).toBeInTheDocument();
     expect(within(composer).getByRole('status')).toHaveTextContent('medium · standard');
     await user.keyboard('{Escape}');
     await openFromRow(user);

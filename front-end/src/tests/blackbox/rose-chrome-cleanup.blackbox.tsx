@@ -132,9 +132,11 @@ describe('mobile query box safe area (#11)', () => {
     expect(inputArea).toHaveClass('rose-mobile-query-area', 'pb-[var(--mobile-querybox-gap)]');
     expect(inputArea.className).not.toMatch(/safe-area-inset-bottom/);
     // The hug rule's [data-surface] target is the query box shell itself.
-    const box = within(inputArea).getByTestId('query-input-surface');
+    const layer = screen.getByTestId('query-input-layer');
+    expect(layer).toHaveClass('rose-mobile-query-area');
+    const box = within(layer).getByTestId('query-input-surface');
     expect(box).toHaveAttribute('data-surface');
-    expect(inputArea.querySelectorAll('[data-surface]')).toHaveLength(1);
+    expect(layer.querySelectorAll('[data-surface]')).toHaveLength(1);
     // Nothing (e.g. the old legal footer) sits between the box and the screen edge.
     expect(screen.queryByTestId('terminal-legal-links')).not.toBeInTheDocument();
   });
@@ -361,25 +363,23 @@ describe('Popular Goals (#15, #24, #55)', () => {
     expect(row).not.toHaveClass('max-w-4xl', 'mx-auto', 'mb-[30px]');
   });
 
-  it('Rose Desktop Terminal: the goals row and the query box share one width box', async () => {
+  it('Rose Desktop Terminal: composer is lifted above apps and Popular Goals are absent', async () => {
     setViewport(1280, 800);
     await renderTerminal(true);
-    const inputArea = screen.getByTestId('terminal-input-area');
-    const row = within(inputArea).getByTestId('popular-goals-row');
-    const box = within(inputArea).getByTestId('query-input-surface');
-    const boxContainer = box.parentElement as HTMLElement;
-    expect(boxContainer).toHaveClass('max-w-4xl', 'mx-auto');
-    for (const cls of ['max-w-4xl', 'mx-auto']) expect(row).toHaveClass(cls);
-    // Both sit directly in the full-width input column (no extra side padding on the row).
-    expect(row.parentElement).toBe(inputArea);
-    expect(row.className).not.toMatch(/\b(px|mx)-\d/);
+    expect(screen.queryByTestId('popular-goals-row')).not.toBeInTheDocument();
+    const layer = screen.getByTestId('query-input-layer');
+    expect(layer.parentElement).toBe(document.body);
+    expect(layer).toHaveClass('z-[100]');
+    expect(within(layer).getByTestId('query-input-host')).toHaveClass('max-w-4xl', 'mx-auto');
+    expect(within(layer).getByTestId('query-toolbar-nub')).toBeInTheDocument();
   });
 
-  it('Rose Desktop Terminal: clicking Import Code Repo prefills the composer', async () => {
+  it('Rose Desktop Terminal: custom goals remain editable without the ticker', async () => {
     const user = userEvent.setup({ delay: null });
     await renderTerminal(true);
-    const [importRepo] = within(screen.getByTestId('popular-goals-track')).getAllByRole('button');
-    await user.click(importRepo);
-    expect(screen.getByPlaceholderText('Enter any goal')).toHaveValue('Import Code Repo');
+    expect(screen.queryByTestId('popular-goals-track')).not.toBeInTheDocument();
+    const input = screen.getByPlaceholderText('Enter any goal');
+    await user.type(input, 'Import my repository');
+    expect(input).toHaveValue('Import my repository');
   });
 });

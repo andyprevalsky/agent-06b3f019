@@ -78,9 +78,9 @@ describe('app view', () => {
     expect(within(view).queryByText('History')).not.toBeInTheDocument();
     expect(within(view).getByRole('button', { name: 'Publish' })).toBeInTheDocument();
     // The normal query box floats over the app; the chat (and its composer) is gone.
-    expect(within(view).getByTestId('query-input-surface')).toBeInTheDocument();
-    expect(within(view).queryByTestId('query-toolbar-nub')).not.toBeInTheDocument();
-    expect(within(view).getByPlaceholderText('Message Claude Code directly…')).toBeInTheDocument();
+    expect(screen.getByTestId('query-input-surface')).toBeInTheDocument();
+    expect(screen.queryByTestId('query-toolbar-nub')).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Message Claude Code directly…')).toBeInTheDocument();
     expect(screen.queryByText('Popular Goals')).not.toBeInTheDocument();
     expect(screen.queryByTestId('code-agent-chip')).not.toBeInTheDocument();
     expect(screen.queryByPlaceholderText('Type your message...')).not.toBeInTheDocument();
@@ -120,9 +120,7 @@ describe('app view', () => {
       expect(within(view).queryByTestId('app-view-frame')).not.toBeInTheDocument();
       expect(within(view).queryByTestId('app-view-quiet')).not.toBeInTheDocument();
       expect(screen.queryByText(/refused/)).not.toBeInTheDocument();
-      expect(
-        within(view).getByPlaceholderText('Message Claude Code directly…'),
-      ).toBeInTheDocument();
+      expect(screen.getByPlaceholderText('Message Claude Code directly…')).toBeInTheDocument();
     },
   );
 
@@ -131,7 +129,7 @@ describe('app view', () => {
     serveHandoff();
     const user = userEvent.setup({ delay: null });
     const view = await openAppView();
-    const box = within(view).getByPlaceholderText('Message Claude Code directly…');
+    const box = screen.getByPlaceholderText('Message Claude Code directly…');
     await user.click(box);
     await user.type(box, 'Make the snake faster{Enter}');
 
@@ -163,7 +161,7 @@ describe('app view', () => {
     );
     const user = userEvent.setup({ delay: null });
     const view = await openAppView();
-    const box = within(view).getByPlaceholderText('Message Claude Code directly…');
+    const box = screen.getByPlaceholderText('Message Claude Code directly…');
     await user.click(box);
     await user.type(box, 'Add a score{Enter}');
     expect(await within(view).findByRole('alert')).toHaveTextContent(
@@ -194,23 +192,25 @@ describe('app view', () => {
     );
     const user = userEvent.setup({ delay: null });
     const view = await openAppView();
-    const box = within(view).getByPlaceholderText('Message Claude Code directly…');
+    const box = screen.getByPlaceholderText('Message Claude Code directly…');
     await user.upload(
-      view.querySelector('input[type="file"]') as HTMLInputElement,
+      screen
+        .getByTestId('query-input-layer')
+        .querySelector('input[type="file"]') as HTMLInputElement,
       new File(['hello'], 'notes.txt', { type: 'text/plain' }),
     );
-    await within(view).findByText('notes.txt');
+    await screen.findByText('notes.txt');
     await user.type(box, 'Read these notes{Enter}');
     await within(view).findByRole('alert');
     expect(box).toHaveValue('Read these notes');
-    expect(within(view).getByText('notes.txt')).toBeInTheDocument();
+    expect(screen.getByText('notes.txt')).toBeInTheDocument();
     await user.type(box, '{Enter}');
     await waitFor(() => expect(box).toHaveValue(''));
     const turns = requests('POST', `/claude-code-session/${TASK_ID}/turns`);
     expect(turns).toHaveLength(2);
     expect(turns[0].body).toEqual(turns[1].body);
     expect(turns[1].body).toEqual(expect.objectContaining({ attachments: [file] }));
-    expect(within(view).queryByText('notes.txt')).not.toBeInTheDocument();
+    expect(screen.queryByText('notes.txt')).not.toBeInTheDocument();
   });
 
   it('Escape returns to the chat; an agent row and the mobile close icon do too', async () => {

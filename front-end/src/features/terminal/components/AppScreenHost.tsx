@@ -27,6 +27,7 @@ interface AppScreenHostProps {
 export function AppScreenHost({ target, onClose, agents: a, drip }: AppScreenHostProps) {
   const renderQueryBox = (binding: AppQueryBoxBinding) => (
     <QueryInput
+      liftAboveApps
       directChannel
       draftKey={binding.draftKey}
       canSubmit

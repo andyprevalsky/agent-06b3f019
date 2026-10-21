@@ -63,6 +63,7 @@ export function CodeSessionComposer({ c, taskId }: { c: CodeAgentConversation; t
   return (
     <div data-testid="code-agent-view-composer" className="relative z-10">
       <QueryInput
+        liftAboveApps
         directChannel
         draftKey={taskId}
         value={draft.text}

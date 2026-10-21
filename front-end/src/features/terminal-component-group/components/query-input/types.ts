@@ -35,6 +35,8 @@ export interface DripStyles {
 }
 
 export interface QueryInputProps {
+  /** Real terminal composers sit above app panels and their icon category. */
+  liftAboveApps?: boolean;
   value: string;
   onChange: (value: string) => void;
   onSubmit: (attachments?: FilePointer[]) => void | Promise<boolean>;
