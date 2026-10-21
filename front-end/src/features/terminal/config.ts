@@ -43,6 +43,7 @@ export const ROSE_DESKTOP_POPULAR_GOALS: string[] = [
   'Find me my first 10 customers',
   'Get me a girlfriend',
   'Optimize my nutrition',
+  'Get Rose Api Key',
   'Ensure my friends are well supported',
   'Make sure my birthday is amazing',
   'Make me a game',

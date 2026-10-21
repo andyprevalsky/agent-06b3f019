@@ -258,6 +258,7 @@ describe('Popular Goals (#15, #24, #55)', () => {
     'Find me my first 10 customers',
     'Get me a girlfriend',
     'Optimize my nutrition',
+    'Get Rose Api Key',
     'Ensure my friends are well supported',
     'Make sure my birthday is amazing',
     'Make me a game',
@@ -295,7 +296,7 @@ describe('Popular Goals (#15, #24, #55)', () => {
       .map((b) => b.textContent ?? '');
   }
 
-  it('Rose Desktop rotation interlaces all 24 goals without omissions or duplicates', () => {
+  it('Rose Desktop rotation interlaces all 25 goals without omissions or duplicates', () => {
     renderCarousel(true);
     expect(ROSE_DESKTOP_POPULAR_GOALS).toEqual(ROSE_DESKTOP_ORDER);
     expect([...ROSE_DESKTOP_HIDDEN_POPULAR_GOALS].sort()).toEqual(
@@ -306,7 +307,7 @@ describe('Popular Goals (#15, #24, #55)', () => {
     expect(expectedStockTail).toHaveLength(POPULAR_GOALS.length - HIDDEN_FOR_ROSE_DESKTOP.length);
     // One complete, interlaced rotation; every retained stock topic remains present.
     const oneCopy = ROSE_DESKTOP_ORDER;
-    expect(new Set(oneCopy).size).toBe(24);
+    expect(new Set(oneCopy).size).toBe(25);
     for (const goal of expectedStockTail) expect(oneCopy).toContain(goal);
     expect(goals.slice(0, oneCopy.length)).toEqual(oneCopy);
     expect(goals).toHaveLength(oneCopy.length * 3);
