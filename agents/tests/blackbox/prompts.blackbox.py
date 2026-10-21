@@ -37,10 +37,7 @@ def test_build_system_prompt_execute():
     assert "You are a Rose Labs Agent" in result
     assert "EXECUTE phase" in result
     assert "attempt_completion" in result
-    assert (
-        "The beginning of your context might have information generated from the PLAN phase"
-        in result
-    )
+    assert "The beginning of your context might have information generated from the PLAN phase" in result
     assert "real-world, long-horizon task execution" in result
     assert "no further actions required from the user" in result
 
@@ -85,6 +82,27 @@ def test_user_facing_style_is_attached_only_to_user_visible_outputs():
 
     assert "USER_FACING_WRITING_STYLE" in inspect.getsource(generate_message_activity)
     assert "USER_FACING_WRITING_STYLE" in inspect.getsource(generate_completion_summary)
+
+
+def test_result_scorecards_are_in_both_root_prompt_phases():
+    from utils.prompts import build_system_prompt
+
+    for phase in ("PLAN", "EXECUTE"):
+        prompt = build_system_prompt(phase=phase, enabled_tools=[])
+        assert "# Presenting results as Rose scorecards" in prompt
+        for reference in (
+            "github.com/Rose-Ai-Labs/rose/blob/main/front-end/src/index.css",
+            "github.com/Rose-Ai-Labs/rose/blob/main/.claude/shared/report-display-format.md",
+            "linear.app/insights",
+            "vercel.com/products/observability",
+            "stripe.com/sigma",
+            "mercury.com/insights",
+            "ramp.com/reporting",
+        ):
+            assert reference in prompt
+        assert "Never invent scores, metrics, trends or completed checks" in prompt
+        assert "Brief acknowledgements and clarification questions can remain plain text" in prompt
+        assert "Never paste HTML source into a chat message" in prompt
 
 
 def test_build_system_prompt_with_user_context():
@@ -139,6 +157,7 @@ async def run_all_tests():
         "user_facing_style_is_attached_only_to_user_visible_outputs",
         test_user_facing_style_is_attached_only_to_user_visible_outputs,
     )
+    r.record("result_scorecards", test_result_scorecards_are_in_both_root_prompt_phases)
     r.record("build_system_prompt_with_user_context", test_build_system_prompt_with_user_context)
     r.record("build_verifier_prompt", test_build_verifier_prompt)
     r.record("build_verifier_prompt_with_schema", test_build_verifier_prompt_with_schema)
