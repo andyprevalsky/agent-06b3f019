@@ -317,6 +317,11 @@ export async function runLiveTilionProviderParity(): Promise<void> {
         used: rotated.rotations_used,
       })}`
     );
+    // In place: rotate-ip with fresh_allocation keeps the session, CDP and storage.
+    assert(
+      String(rotated.session_id) === liveSessionId,
+      `rotation 1 replaced the session instead of rotating in place (${String(rotated.session_id)})`
+    );
     liveSessionId = String(rotated.session_id);
     const ipAfter = await readExitIpWithRetry(String(rotated.ws_url), ipBefore);
     const keptAfterRotate = await withPage(String(rotated.ws_url), async (page) => {
@@ -324,35 +329,6 @@ export async function runLiveTilionProviderParity(): Promise<void> {
       return page.evaluate(() => localStorage.getItem('rose_tilion_parity'));
     });
     assert(keptAfterRotate === 'kept', 'rotation 1 lost the browser localStorage');
-
-    // Rotation 2: Tilion mobile exit, then the ladder leaves for Kernel.
-    const mobile = await post('/rotate-proxy', { task_id: taskId });
-    assert(
-      mobile.provider === 'tilion' &&
-        mobile.proxy_tier === 'mobile' &&
-        mobile.rotations_used === 2 &&
-        mobile.next_recovery === 'switch_provider_to_kernel',
-      `rotation 2 expected Tilion mobile then Kernel: ${JSON.stringify({
-        provider: mobile.provider,
-        tier: mobile.proxy_tier,
-        used: mobile.rotations_used,
-        next: mobile.next_recovery,
-      })}`
-    );
-    if (String(mobile.session_id) !== liveSessionId) {
-      const superseded = await tilionApi('GET', `/v1/session/${liveSessionId}/status`);
-      const state = (superseded.body as { state?: string } | null)?.state;
-      assert(
-        state === 'closed' || state === 'expired',
-        `superseded Tilion session ${liveSessionId} is still ${String(state)} (paid leak)`
-      );
-    }
-    liveSessionId = String(mobile.session_id);
-    const mobileWsUrl = String(mobile.ws_url);
-    const mobileIp = await readExitIpWithRetry(mobileWsUrl, ipAfter);
-    console.log(
-      `[tilion rotate_ip] exit IP ladder: ${ipBefore} -> ${ipAfter} -> mobile ${mobileIp}`
-    );
 
     const taskResponse = await get(`/task/${taskId}?validateLive=true`);
     const task = (await taskResponse.json()) as BrowserApiResponse;
@@ -418,7 +394,7 @@ export async function runLiveTilionProviderParity(): Promise<void> {
     assert(resumed.browser_session_metadata?.provider === 'tilion', 'resume changed providers');
     assert(
       resumed.browser_session_metadata?.proxy_source ===
-        mobile.browser_session_metadata?.proxy_source,
+        rotated.browser_session_metadata?.proxy_source,
       'resume lost the rotated Tilion exit type'
     );
     const keptAfterResume = await withPage(String(resumed.ws_url), async (page) => {
@@ -440,6 +416,37 @@ export async function runLiveTilionProviderParity(): Promise<void> {
       await navigateKernelPage(page, 'https://example.com');
       assert((await page.title()) === 'Example Domain', 'recreated Tilion session is not drivable');
     });
+
+    // Rotation 2 (last: it replaces the live session and needs the worker's carried
+    // state): a Tilion mobile exit, then the ladder leaves for Kernel.
+    const ipBeforeMobile = await readExitIpWithRetry(String(recreated.ws_url));
+    const mobile = await post('/rotate-proxy', { task_id: taskId });
+    assert(
+      mobile.provider === 'tilion' &&
+        mobile.proxy_tier === 'mobile' &&
+        mobile.rotations_used === 2 &&
+        mobile.next_recovery === 'switch_provider_to_kernel',
+      `rotation 2 expected Tilion mobile then Kernel: ${JSON.stringify({
+        provider: mobile.provider,
+        tier: mobile.proxy_tier,
+        used: mobile.rotations_used,
+        next: mobile.next_recovery,
+      })}`
+    );
+    if (String(mobile.session_id) !== liveSessionId) {
+      const superseded = await tilionApi('GET', `/v1/session/${liveSessionId}/status`);
+      const state = (superseded.body as { state?: string } | null)?.state;
+      assert(
+        state === 'closed' || state === 'expired',
+        `superseded Tilion session ${liveSessionId} is still ${String(state)} (paid leak)`
+      );
+    }
+    liveSessionId = String(mobile.session_id);
+    const mobileWsUrl = String(mobile.ws_url);
+    const mobileIp = await readExitIpWithRetry(mobileWsUrl, ipBeforeMobile);
+    console.log(
+      `[tilion rotate_ip] exit IP ladder: ${ipBefore} -> ${ipAfter} -> mobile ${mobileIp}`
+    );
 
     await post('/close', { session_id: liveSessionId, pause: false });
     liveSessionId = undefined;
