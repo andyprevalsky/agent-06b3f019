@@ -32,7 +32,11 @@ export function useSidebarExpansion() {
     const collapseAtEdge = (event: MouseEvent) => {
       const inZone = event.clientX <= window.innerWidth * 0.18;
       if (!inZone) suppressOpen.current = false;
-      if (expandedRef.current && event.clientX > ROSE_BAR_EXPANDED_WIDTH) closeArmed.current = true;
+      if (
+        expandedRef.current &&
+        event.clientX > Math.max(ROSE_BAR_EXPANDED_WIDTH, window.innerWidth * 0.18)
+      )
+        closeArmed.current = true;
       if (closeArmed.current && inZone) collapse();
     };
     const drag = (event: globalThis.PointerEvent) => {
@@ -87,10 +91,12 @@ export function useSidebarExpansion() {
       },
       onMouseLeave: (event: ReactMouseEvent<HTMLElement>) => {
         // During width animation, the pointer may briefly outrun the painted edge.
-        // Only leaving the intended expanded width arms the return-to-close gesture.
+        // Only leaving both the drawer and the close zone arms return-to-close.
         if (sticky)
           closeArmed.current =
-            expandedRef.current && (event.clientX > ROSE_BAR_EXPANDED_WIDTH || event.clientX <= 0);
+            expandedRef.current &&
+            (event.clientX > Math.max(ROSE_BAR_EXPANDED_WIDTH, window.innerWidth * 0.18) ||
+              event.clientX <= 0);
         else {
           expandedRef.current = false;
           setHovered(false);
