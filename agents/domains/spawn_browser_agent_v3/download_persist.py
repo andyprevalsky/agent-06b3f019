@@ -38,6 +38,13 @@ from browser_tools.dom_service import (
     browser_downloads_path_for_provider,
 )
 
+from domains.spawn_browser_agent_v3.tilion_worker import (
+    is_single_cdp_client_provider,
+    move_session,
+    record_download,
+    register_download_session,
+)
+
 logger = structlog.get_logger()
 
 # Re-export for callers/tests that historically imported KERNEL_DOWNLOADS_DIR.
@@ -273,6 +280,10 @@ async def persist_bytes_to_session_downloads(
         )
         return None
     safe_name = os.path.basename(filename) or "download.bin"
+    if is_single_cdp_client_provider(resolve_browser_provider(provider)):
+        # Tilion has no session file API usable while the worker is attached;
+        # the worker's ledger is the session downloads root.
+        return record_download(session_id, filename=safe_name, content=content, mime_type=mime_type)
     downloads_dir = browser_downloads_path_for_provider(provider)
     upload_directory = session_upload_directory_for_provider(provider)
     uploaded = await upload_file_to_session(
@@ -322,6 +333,8 @@ class BrowserDownloadPersister:
         self.task_id = task_id
         self.provider = resolve_browser_provider(provider)
         self.downloads_dir = browser_downloads_path_for_provider(self.provider)
+        if is_single_cdp_client_provider(self.provider):
+            register_download_session(session_id)
         self._closed = False
         self._cdp_client: Any = None
         self._tasks: Set[asyncio.Task] = set()
@@ -421,11 +434,21 @@ class BrowserDownloadPersister:
                 downloads_dir=self.downloads_dir,
             )
 
-    async def transition_browser(self, *, browser_session: Any, session_id: str) -> None:
+    async def transition_browser(
+        self, *, browser_session: Any, session_id: str, provider: Optional[str] = None
+    ) -> None:
         if self._closed:
             return
+        previous_session_id = self.session_id
         self.browser_session = browser_session
         self.session_id = session_id
+        move_session(previous_session_id, session_id)
+        if provider:
+            # Rotation/recovery may switch provider; persist where the new one can.
+            self.provider = resolve_browser_provider(provider)
+            self.downloads_dir = browser_downloads_path_for_provider(self.provider)
+        if is_single_cdp_client_provider(self.provider):
+            register_download_session(session_id)
         await self.start()
 
     async def close(self) -> None:
@@ -546,7 +569,8 @@ class BrowserDownloadPersister:
         # Fall back to a credentialed page fetch of the Chrome-download URL.
         file_path = str(meta.get("file_path") or "").strip()
         result: Optional[Dict[str, Any]] = None
-        if file_path:
+        # Tilion fails files/fetch while the worker holds CDP; read in-page instead.
+        if file_path and not is_single_cdp_client_provider(self.provider):
             result = await self._materialize_from_provider_file_path(
                 file_path=file_path,
                 filename=filename,

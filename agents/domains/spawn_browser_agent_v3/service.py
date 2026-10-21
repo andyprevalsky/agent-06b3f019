@@ -20,8 +20,11 @@ from domains.spawn_browser_agent_v3.config import (
     BROWSER_USE_COST_CENTS_PER_MS,
     BROWSER_USE_PRICING_POOL,
     KERNEL_COST_CENTS_PER_MS,
+    TILION_COST_CENTS_PER_MS,
+    TILION_CREATE_COST_CENTS,
     STEEL_COST_CENTS_PER_MS,
 )
+from domains.spawn_browser_agent_v3 import tilion_worker as tilion_files
 from domains.spawn_browser_agent_v3.repo import (
     download_session_file,
     list_session_files,
@@ -460,7 +463,7 @@ async def build_browser_verifier_context(
     dom_tree = browser_state.get("dom_tree", "") or ""
     # A blank placeholder frame (capture failed) is not rendered-page evidence.
     final_screenshot_b64 = None if browser_state.get("screenshot_placeholder") else browser_state.get("screenshot")
-    session_files = await list_session_files(config, session_id)
+    session_files = await _session_files_for_listing(config, session_id)
     files_text = "Downloaded Files in Session:\n"
     if session_files:
         for f in session_files:
@@ -628,6 +631,14 @@ def append_completion_evidence(
 # ========================================
 
 
+async def _session_files_for_listing(config: Any, session_id: str) -> List[Dict[str, Any]]:
+    """Session downloads: Tilion's live in the worker ledger (its file routes
+    fail while the worker holds CDP); other providers list via the backend."""
+    if tilion_files.owns_download_session(session_id):
+        return tilion_files.list_downloads(session_id)
+    return await list_session_files(config, session_id)
+
+
 async def extract_session_files(
     session_id: str, user_id: str, config: Any, exclude_paths: Optional[List[str]] = None
 ) -> List[Dict[str, Any]]:
@@ -640,7 +651,7 @@ async def extract_session_files(
     """
     from helpers.attachments import upload_to_storage
 
-    session_files = await list_session_files(config, session_id)
+    session_files = await _session_files_for_listing(config, session_id)
     if not session_files:
         logger.info("No files to extract from session", session_id=session_id)
         return []
@@ -663,7 +674,11 @@ async def extract_session_files(
 
         logger.info(f"[Extract] Processing: {file_path}")
 
-        downloaded = await download_session_file(config, session_id, file_path)
+        downloaded = (
+            tilion_files.read_download(session_id, file_path)
+            if tilion_files.owns_download_session(session_id)
+            else await download_session_file(config, session_id, file_path)
+        )
         if not downloaded:
             logger.warning(f"[Extract] Failed to download: {file_path}")
             continue
@@ -925,6 +940,7 @@ def build_usage_items(
     fast_mode_cache_enabled: bool = False,
     provider: Optional[str] = None,
     pricing_pool: str = BROWSER_USE_PRICING_POOL,
+    session_creates: int = 1,
 ) -> List[Dict[str, Any]]:
     """Build standardized usage items for cost tracking.
 
@@ -940,6 +956,9 @@ def build_usage_items(
     row so OAi-demo warm paths stay ~$0. Mixed ledgers (soft + mislabeled live
     rows) previously still billed wall-clock cents under the live-LLM check
     alone (verify19 ~4.5¢ Kernel on child d24898d1).
+
+    Tilion also bills a fixed 2 credits per session create; ``session_creates``
+    counts the creates this browser activity is charged for.
     """
     browser_provider = (provider or os.getenv("BROWSER_PROVIDER", "kernel")).strip().lower()
     if browser_provider == "kernel":
@@ -948,6 +967,8 @@ def build_usage_items(
         service_provider, cost_per_ms = "Steel.dev Browser", STEEL_COST_CENTS_PER_MS
     elif browser_provider == "browser-use":
         service_provider, cost_per_ms = "Browser Use Browser", BROWSER_USE_COST_CENTS_PER_MS
+    elif browser_provider == "tilion":
+        service_provider, cost_per_ms = "Tilion Browser", TILION_COST_CENTS_PER_MS
     else:
         raise ValueError(f"Unsupported browser provider for usage: {browser_provider}")
     llm_items = build_browser_llm_usage_items(
@@ -962,7 +983,8 @@ def build_usage_items(
     # demos otherwise pick up residual wall-clock cents.
     has_live_llm = any(not bool(item.get("from_fast_cache")) for item in llm_items)
     zero_service = bool(fast_mode_cache_enabled) or not has_live_llm
-    service_cost = 0.0 if zero_service else round(execution_time_ms * cost_per_ms, 4)
+    fixed_cost = TILION_CREATE_COST_CENTS * max(session_creates, 0) if browser_provider == "tilion" else 0.0
+    service_cost = 0.0 if zero_service else round(execution_time_ms * cost_per_ms + fixed_cost, 4)
     return [
         *llm_items,
         {

@@ -173,6 +173,11 @@ WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS = 120
 STEEL_COST_CENTS_PER_MS = 100 / 3_600_000  # ~0.00002778
 KERNEL_COST_CENTS_PER_MS = float(os.getenv("KERNEL_COST_CENTS_PER_HOUR", "48")) / 3_600_000
 BROWSER_USE_COST_CENTS_PER_MS = float(os.getenv("BROWSER_USE_COST_CENTS_PER_HOUR", "2")) / 3_600_000
+# Tilion bills 2 credits per session create + 1 credit per minute alive, at
+# $0.002/credit (0.2 cents): 12 cents/hour plus 0.4 cents per create.
+TILION_CENTS_PER_CREDIT = 0.2
+TILION_COST_CENTS_PER_MS = TILION_CENTS_PER_CREDIT / 60_000
+TILION_CREATE_COST_CENTS = 2 * TILION_CENTS_PER_CREDIT
 
 # Browser supervisor watchdogs. These must be longer than browser-use's own
 # per-event caps because those EventBus requests are not reliably cancellable
