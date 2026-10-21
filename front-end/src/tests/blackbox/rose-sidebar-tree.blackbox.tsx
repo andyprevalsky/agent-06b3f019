@@ -23,6 +23,17 @@ function setup(activeChildren = true) {
       HttpResponse.json({
         agents: [
           {
+            agent_id: 'root',
+            parent_agent_id: null,
+            goal: 'Launch report',
+            status: 'ACTIVE',
+            temporal_workflow_id: 'root-wf',
+            progress: 0,
+            tools_in_use: [],
+            message_count: 1,
+            tree_cost_cents: 0,
+          },
+          {
             agent_id: 'worker',
             parent_agent_id: 'root',
             goal: 'Research',
@@ -92,6 +103,28 @@ function setup(activeChildren = true) {
   return onSelectAgent;
 }
 describe('sidebar agent hierarchy', () => {
+  it('updates the root ring directly from the shared tree bus', async () => {
+    setup();
+    await screen.findByTestId('rose-agent-count-root');
+    const handlers = vi.mocked(subscribeToBus).mock.calls.at(-1)![1];
+    act(() =>
+      handlers.onUpdate?.({
+        agentId: 'root',
+        temporalWorkflowId: 'root-wf',
+        progressEstimate: {
+          progress: 0.8,
+          etaSeconds: 60,
+          sequence: 2,
+          observedAt: '2026-10-21T01:00:00Z',
+          model: 'jev',
+          promptVersion: 'test',
+        },
+      }),
+    );
+    expect(
+      screen.getByTestId('rose-agent-row-root').querySelector('[role="progressbar"]'),
+    ).toHaveAttribute('aria-valuenow', '80');
+  });
   it('opens one layer per disclosure and resets nested disclosures on parent collapse', async () => {
     const select = setup();
     await screen.findByTestId('rose-agent-count-root');

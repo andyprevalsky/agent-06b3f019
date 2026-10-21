@@ -771,6 +771,7 @@ async def update_agent_tree_state(
         broadcast_payload: Optional payload for bus broadcast
     """
     config = load_config()
+    generation_headers = workflow_generation_headers()
 
     # Persist first. The backend generation CAS is the authority; broadcasting
     # before it accepts would let a sealed workflow overwrite current UI state.
@@ -795,7 +796,7 @@ async def update_agent_tree_state(
             headers={
                 "X-API-Key": config.backend.api_key,
                 "Content-Type": "application/json",
-                **workflow_generation_headers(),
+                **generation_headers,
             },
             timeout=10.0,
         )
@@ -818,6 +819,11 @@ async def update_agent_tree_state(
 
         if bus_id and broadcast_payload:
             try:
+                # Carry the same accepted generation fence onto the existing tree bus.
+                broadcast_payload = dict(broadcast_payload)
+                generation = generation_headers.get("X-Agent-Workflow-Generation")
+                if generation:
+                    broadcast_payload["temporalWorkflowId"] = generation
                 await _queue_realtime_record(
                     f"bus:{bus_id}",
                     "AGENT_STATE_CHANGED",

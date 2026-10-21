@@ -3,6 +3,7 @@
  */
 
 import * as repo from './repo';
+import { hydrateProgressEstimates } from '../../providers/agentProgressEstimates';
 import { listGraphCodeSessions } from './repoGraph';
 import { codeAgentProvider } from './agentCodeAgentsService';
 import {
@@ -15,7 +16,11 @@ import {
 // List agents
 // ---------------------------------------------------------------------------
 
-type ListedAgent = Awaited<ReturnType<typeof repo.findTopLevelAgents>>[number];
+type ListedAgent = Awaited<
+  ReturnType<
+    typeof hydrateProgressEstimates<Awaited<ReturnType<typeof repo.findTopLevelAgents>>[number]>
+  >
+>[number];
 
 /** Shared row shape for the active and archived sidebar lists. */
 function toListItem(agent: ListedAgent) {
@@ -29,6 +34,8 @@ function toListItem(agent: ListedAgent) {
     source: agent.source,
     reasoning_max_tokens: agent.reasoningMaxTokens,
     progress: agent.progress,
+    progressEstimate: agent.progressEstimate ?? null,
+    taskProgressEstimates: agent.taskProgressEstimates ?? {},
     status: agent.status,
     status_message: agent.statusMessage,
     temporal_workflow_id: agent.temporalWorkflowId,
@@ -48,21 +55,25 @@ function toListItem(agent: ListedAgent) {
 
 /** Get all top-level, non-archived agents for a user (pinned first). */
 export async function listAgents(userId: string) {
-  const agents = await repo.findTopLevelAgents(userId);
+  const agents = await hydrateProgressEstimates(await repo.findTopLevelAgents(userId));
 
   return { agents: agents.map(toListItem) };
 }
 
 /** Search a user's active top-level chats across title, goal, and messages. */
 export async function searchAgents(userId: string, query: string) {
-  const agents = await repo.findTopLevelAgentsMatching(userId, query);
+  const agents = await hydrateProgressEstimates(
+    await repo.findTopLevelAgentsMatching(userId, query)
+  );
 
   return { agents: agents.map(toListItem) };
 }
 
 /** Get a user's archived (soft-deleted) top-level agents, newest archive first. */
 export async function listArchivedAgents(userId: string, limit: number) {
-  const agents = await repo.findArchivedTopLevelAgents(userId, limit);
+  const agents = await hydrateProgressEstimates(
+    await repo.findArchivedTopLevelAgents(userId, limit)
+  );
 
   return { agents: agents.map(toListItem) };
 }
@@ -77,7 +88,7 @@ export async function listArchivedAgents(userId: string, limit: number) {
  * agent that owns each session; `agents` keeps its Agent-row shape.
  */
 export async function getAgentTree(busId: string, allowBenchmarkArchive = false) {
-  const agents = await repo.findAgentsByBusId(busId);
+  const agents = await hydrateProgressEstimates(await repo.findAgentsByBusId(busId));
 
   if (agents.length === 0 && allowBenchmarkArchive) {
     const archived = await getBenchmarkArchivedTree(busId);
@@ -97,9 +108,12 @@ export async function getAgentTree(busId: string, allowBenchmarkArchive = false)
     agents: agents.map((agent) => ({
       agent_id: agent.id,
       parent_agent_id: agent.parentAgentId,
+      temporal_workflow_id: agent.temporalWorkflowId,
       goal: agent.goal,
       status: agent.status,
       progress: agent.progress,
+      progressEstimate: agent.progressEstimate ?? null,
+      taskProgressEstimates: agent.taskProgressEstimates ?? {},
       tools_in_use: agent.toolsInUse,
       message_count: agent.messageCount,
       tokens_in: agent.tokensIn,
@@ -208,8 +222,15 @@ async function getMissingAgentDetail(agentId: string, options: AgentDetailOption
   return getBenchmarkArchivedDetail(agentId);
 }
 
+function detailFailureContext(agent: { status: string; structuredResponse: unknown }) {
+  return agent.status === 'FAILED' && agent.structuredResponse !== null
+    ? { partial_structured_response: agent.structuredResponse }
+    : null;
+}
+
 export async function getAgentDetail(agentId: string, options: AgentDetailOptions = {}) {
-  const agent = await repo.findAgentWithRelations(agentId, options.userId);
+  const rawAgent = await repo.findAgentWithRelations(agentId, options.userId);
+  const agent = rawAgent === null ? null : (await hydrateProgressEstimates([rawAgent]))[0];
 
   if (!agent) {
     return getMissingAgentDetail(agentId, options);
@@ -236,6 +257,8 @@ export async function getAgentDetail(agentId: string, options: AgentDetailOption
       source: agent.source,
       reasoning_max_tokens: agent.reasoningMaxTokens,
       progress: agent.progress,
+      progressEstimate: agent.progressEstimate ?? null,
+      taskProgressEstimates: agent.taskProgressEstimates ?? {},
       status: agent.status,
       status_message: agent.statusMessage,
       temporal_workflow_id: agent.temporalWorkflowId,
@@ -259,10 +282,7 @@ export async function getAgentDetail(agentId: string, options: AgentDetailOption
       updated_at: agent.updatedAt,
       write_lock_enabled: agent.writeLockEnabled,
       structured_output: agent.structuredResponse,
-      failure_context:
-        agent.status === 'FAILED' && agent.structuredResponse !== null
-          ? { partial_structured_response: agent.structuredResponse }
-          : null,
+      failure_context: detailFailureContext(agent),
       verifier: agent.verifier
         ? {
             type: agent.verifier.type,

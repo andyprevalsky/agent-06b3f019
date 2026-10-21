@@ -205,6 +205,20 @@ export const postMessageSchema = z.object({
   file_pointer: filePointerSchema.optional(), // Single file pointer for this message (OAI-style)
 });
 
+export const progressEstimateSchema = z.object({
+  progress: z.number().min(0).max(1),
+  etaSeconds: z.number().min(60).max(31536000),
+  observedAt: z.string().datetime(),
+  sequence: z.number().int().nonnegative(),
+  model: z.literal('jev-1.13.0'),
+  promptVersion: z.string(),
+  taskId: z.string().optional(),
+});
+
+export const updateProgressEstimateSchema = z.object({
+  progressEstimate: progressEstimateSchema.nullable(),
+});
+
 export const updateStatusSchema = z.object({
   status: z.enum([
     'STARTING_UP',

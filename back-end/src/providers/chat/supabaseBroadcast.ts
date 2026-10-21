@@ -268,6 +268,8 @@ export async function broadcastAgentUpdate(
     treeCostCents?: number;
     contextSize?: number;
     progress?: number;
+    progressEstimate?: import('../../utils/progressEstimate').ProgressEstimate | null;
+    taskProgressEstimates?: Record<string, import('../../utils/progressEstimate').ProgressEstimate>;
     status?: string;
     statusMessage?: string;
     tokenCount?: number;
@@ -275,17 +277,17 @@ export async function broadcastAgentUpdate(
     tokensOut?: number;
     messageCount?: number;
     temporalWorkflowId?: string | null;
-  }
+    updatedAt?: string;
+  },
+  busId?: string
 ): Promise<void> {
   log.info('[Broadcast] UPDATE', { agentId, ...updates });
-  await broadcast({
-    topic: `agent:${agentId}`,
-    event: 'UPDATE',
-    payload: {
-      agentId,
-      ...updates,
-    },
-  });
+  const payload = { agentId, ...updates };
+  // Reuse the batched realtime transport and existing tree subscription. No per-row channels.
+  await Promise.all([
+    broadcast({ topic: `agent:${agentId}`, event: 'UPDATE', payload }),
+    ...(busId ? [broadcast({ topic: `bus:${busId}`, event: 'UPDATE', payload })] : []),
+  ]);
 }
 
 /**

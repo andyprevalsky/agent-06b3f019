@@ -109,7 +109,7 @@ test('sidebar opens direct children only and badges active tree agents on the mi
   await expect(sidebar).toHaveAttribute('data-expanded', 'false');
   const color = await badge.evaluate((el) => ({
     badge: getComputedStyle(el).color,
-    robot: getComputedStyle(el.parentElement!.querySelector('svg')!).color,
+    robot: getComputedStyle(el.parentElement!.querySelector('[data-sidebar-agent-icon]')!).color,
   }));
   expect(color.badge).toBe(color.robot);
   await expect(page.getByTestId('rose-agent-row-research')).toHaveCount(0);
@@ -122,7 +122,7 @@ test('sidebar opens direct children only and badges active tree agents on the mi
   await expect(page.getByTestId('rose-agent-row-competitors')).toHaveCount(0);
   await expect(page.getByTestId('rose-code-agent-row-landing')).toHaveCount(0);
   await expect(
-    sidebar.getByTestId('rose-agent-row-launch-root').locator('[data-letter]'),
+    sidebar.getByTestId('rose-agent-row-launch-root').getByRole('progressbar'),
   ).toBeVisible();
   await page.screenshot({ path: '/tmp/rose-sidebar-first-layer.png' });
   await sidebar.getByRole('button', { name: 'Expand Research audience', exact: true }).click();

@@ -41,6 +41,7 @@ from helpers.llm import (
     check_progress,
     fetch_compute_token_activity,
 )
+from helpers.jev_progress import JEVSession, prefix_events, with_jev_session
 from helpers.messages import CoalescingStreamBroadcaster, schedule_background_broadcast
 from helpers.summarize import ESTIMATE_SAFETY_MULTIPLIER as SUMMARIZE_ESTIMATE_SAFETY_MULTIPLIER
 from helpers.summarize import (
@@ -166,6 +167,7 @@ def _resolve_cache_sequence_id(
 
 
 @traced("run_agent")
+@with_jev_session
 async def run_agent(
     # Identity
     agent_id: str,
@@ -260,6 +262,10 @@ async def run_agent(
     # Pinned user-authored tools (root agent only; see domains/user_tools). Declared
     # after the built-in tools, sorted by name, so the cached tool prefix is stable.
     user_tools: Optional[List[Dict[str, Any]]] = None,
+    jev_goal: Optional[str] = None,
+    jev_agent_kind: Optional[str] = None,
+    get_jev_response_schema: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
+    _jev_session: Optional[JEVSession] = None,
 ) -> Dict[str, Any]:
     """
     Run the unified agent loop.
@@ -1095,6 +1101,16 @@ async def run_agent(
                     agent_id=agent_id,
                     iteration=iteration,
                     output_fields=sorted(completed_child_output),
+                )
+
+            # Only history visible before this turn; prediction runs beside the decision.
+            if _jev_session is not None:
+                current_jev_goal = jev_goal or goal_text or next(
+                    (m.get("text", "") for m in context if m.get("role", "").upper() == "USER"), ""
+                )
+                _jev_session.schedule(
+                    current_jev_goal, get_jev_response_schema() if get_jev_response_schema else response_schema,
+                    prefix_events(context, task_id),
                 )
 
             # 6. Build system prompt (calls API for fresh shared memory each iteration)

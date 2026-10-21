@@ -1,5 +1,6 @@
 /** Each disclosure opens direct children only; off-screen roots do not subscribe. */
 import { useEffect, useMemo, useState } from 'react';
+import { mergeProgressEstimate } from '@/lib/progressEstimate';
 import { useAgentTree, type TreeNode } from '@/hooks/useAgentTree';
 import type { Agent } from '../../hooks';
 import { agentRunStatus, type AgentRunStatus } from '../agentRunState';
@@ -26,6 +27,9 @@ function childAgent(root: Agent, node: TreeNode): Agent {
   return {
     ...root,
     agent_id: node.agentId,
+    progress_estimate: node.progressEstimate,
+    task_progress_estimates: undefined,
+    task_id: node.taskId,
     goal: node.goal,
     title: null,
     status: node.status,
@@ -62,7 +66,19 @@ export default function RoseAgentBranch({
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const codes = s.codeAgentsFor(agent.agent_id);
   const { agents, children, counts } = useMemo(() => {
-    const agents = new Map<string, Agent>([[agent.agent_id, agent]]);
+    const rootNode = tree.get(agent.agent_id);
+    const progress =
+      rootNode?.workflowGeneration === agent.temporal_workflow_id
+        ? mergeProgressEstimate(
+            agent.progress_estimate,
+            rootNode?.progressEstimate,
+            agent.agent_id,
+            agent.status,
+          )
+        : agent.progress_estimate;
+    const root =
+      progress === agent.progress_estimate ? agent : { ...agent, progress_estimate: progress };
+    const agents = new Map<string, Agent>([[agent.agent_id, root]]);
     const children = new Map<string, string[]>();
     for (const node of tree.values()) {
       if (node.agentId === agent.agent_id) continue;

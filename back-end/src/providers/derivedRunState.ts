@@ -5,6 +5,8 @@ export const DERIVED_RUN_STATE_RESET = {
   responseSchema: Prisma.DbNull,
   structuredResponse: Prisma.DbNull,
   progress: 0,
+  progressEstimate: Prisma.DbNull,
+  progressEstimateGeneration: null,
   toolsInUse: [] as string[],
   statusMessage: null,
 } as const;

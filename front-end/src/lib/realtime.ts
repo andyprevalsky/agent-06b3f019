@@ -360,6 +360,7 @@ export async function subscribeToAttentionRequests(
  * Uses typed payloads from realtime-types.ts.
  */
 export interface BusHandlers {
+  onUpdate?: (payload: UpdateAgentPayload) => void;
   onAgentStateChanged?: (payload: AgentStateChangedPayload) => void;
   onDisconnect?: () => void;
 }
@@ -383,6 +384,13 @@ export async function subscribeToBus(
     eventHandlers['AGENT_STATE_CHANGED'] = (wrapper: unknown) => {
       const record = extractAgentStateChangedPayload(wrapper);
       if (record) handlers.onAgentStateChanged!(record);
+    };
+  }
+
+  if (handlers.onUpdate) {
+    eventHandlers['UPDATE'] = (wrapper: unknown) => {
+      const record = extractUpdatePayload(wrapper);
+      if (record) handlers.onUpdate!(record);
     };
   }
 

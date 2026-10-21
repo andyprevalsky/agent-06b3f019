@@ -47,6 +47,9 @@ export interface UpdateAgentPayload {
   agentId?: string;
   title?: string | null;
   progress?: number;
+  progressEstimate?: import('../api/types').ProgressEstimate | null;
+  taskId?: string;
+  taskProgressEstimates?: Record<string, import('../api/types').ProgressEstimate>;
   status?: Agent['status'];
   statusMessage?: string | null;
   model?: string;

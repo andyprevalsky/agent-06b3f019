@@ -987,6 +987,7 @@ async def spawn_explore_agent_activity(
                 get_gpt_token_pool_id=(lambda: gpt_token_pool_id),
                 on_tokens=on_tokens,
                 call_site_override="explore_agent",
+                jev_goal=goal,
                 cache_sequence_id=explore_cache_sequence_id,
                 # Fast Mode: key this explore agent by ITS OWN goal (not the shared parent
                 # agent_id), so the N parallel explore agents under one sub-agent don't all

@@ -214,9 +214,10 @@ describe('Rose left bar (flag on)', () => {
     renderBar({ attentionAgentIds: new Set(['home-done']) });
     const row = (id: string) => screen.getByTestId(`rose-agent-row-${id}`);
     await waitFor(() => expect(row('home-run')).toBeInTheDocument());
-    // Running = bare Bot (no status glyph).
+    // Running = bot with an empty prediction ring until the model responds.
     expect(row('home-run').querySelector('[data-sidebar-agent-icon]')).not.toBeNull();
-    expect(within(row('home-run')).queryByRole('img')).toBeNull();
+    expect(within(row('home-run')).getByRole('img', { name: 'Working' })).toBeInTheDocument();
+    expect(within(row('home-run')).getByRole('progressbar')).not.toHaveAttribute('aria-valuenow');
     // Needs your input = amber alert.
     expect(row('home-done').querySelector('.text-amber-500')).not.toBeNull();
     // Done = muted check; light keeps the stock gray check (green only in
@@ -404,7 +405,7 @@ describe('Rose left bar (flag on)', () => {
     const bot = screen
       .getByTestId('rose-agent-row-home-run')
       .querySelector('[data-sidebar-agent-icon]')!;
-    expect(bot.getAttribute('class')).toContain('dark:text-[#a3a39d]');
+    expect(bot.closest('button')?.className).toContain('dark:text-[#a3a39d]');
   });
 });
 

@@ -15,6 +15,7 @@
 import { createLogger } from '../../providers/logger';
 import { withGoogleScopeHealth } from './integrationScopeHealth';
 import { findIntegrationAccount, listAccountRowSources } from './repo.accounts';
+export { findIntegrationAccount } from './repo.accounts';
 import { listProgressForUser, type ProgressRow } from './repo.progress';
 import * as service from './service';
 import { accountOfRow, buildAccountsView, type AccountViewRow } from './service.accountsView';

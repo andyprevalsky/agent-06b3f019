@@ -1,3 +1,4 @@
+import { hydrateProgressEstimate } from '../progressEstimate';
 import { API_BASE_WITH_PATH, getAuthHeaders } from './client';
 import { getAdminAccessToken } from '../impersonation';
 import type { Agent, AgentDetail, AgentDetailResponse, CreateAgentPayload, Tool } from './types';
@@ -33,7 +34,7 @@ export async function getAllAgents(): Promise<Agent[]> {
   }
 
   const data = await response.json();
-  return data.agents;
+  return data.agents.map(hydrateProgressEstimate);
 }
 
 /** Search active chats by title, goal, or message content. */
@@ -50,7 +51,7 @@ export async function searchAgents(query: string, signal?: AbortSignal): Promise
   }
 
   const data = await response.json();
-  return data.agents;
+  return data.agents.map(hydrateProgressEstimate);
 }
 
 // Get agent details with messages
@@ -181,7 +182,7 @@ export async function getArchivedAgents(): Promise<Agent[]> {
   }
 
   const data = await response.json();
-  return data.agents;
+  return data.agents.map(hydrateProgressEstimate);
 }
 
 // Restore an archived agent (does not resume its run)

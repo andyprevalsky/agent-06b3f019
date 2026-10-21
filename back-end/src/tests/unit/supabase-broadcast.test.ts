@@ -18,6 +18,7 @@ async function run(): Promise<void> {
 
   const requestBodies: Array<{
     messages: Array<{
+      topic: string;
       event: string;
       payload: { record: Record<string, unknown> };
     }>;
@@ -29,6 +30,7 @@ async function run(): Promise<void> {
     requestBodies.push(
       JSON.parse(String(init?.body)) as {
         messages: Array<{
+          topic: string;
           event: string;
           payload: { record: Record<string, unknown> };
         }>;
@@ -234,6 +236,31 @@ async function run(): Promise<void> {
       ],
       'attention immediate drain must preserve keyed FIFO ordering'
     );
+    await broadcast.__flushBroadcastQueueForTests();
+    const before = requestBodies.length;
+    await broadcast.broadcastAgentUpdate(
+      'jev-child',
+      {
+        temporalWorkflowId: 'wf',
+        progressEstimate: {
+          progress: 0.5,
+          etaSeconds: 60,
+          observedAt: '2026-10-21T01:00:00Z',
+          sequence: 1,
+          model: 'jev-1.13.0',
+          promptVersion: 'test',
+        },
+      },
+      'jev-root'
+    );
+    await broadcast.__flushBroadcastQueueForTests();
+    const updates = requestBodies.slice(before).flatMap((body) => body.messages);
+    assert.deepStrictEqual(updates.map((message) => message.topic).sort(), [
+      'agent:jev-child',
+      'bus:jev-root',
+    ]);
+    assert.ok(updates.every((message) => message.event === 'UPDATE'));
+    assert.deepStrictEqual(updates[0].payload.record, updates[1].payload.record);
   } finally {
     await broadcast.__flushBroadcastQueueForTests();
     globalThis.fetch = originalFetch;

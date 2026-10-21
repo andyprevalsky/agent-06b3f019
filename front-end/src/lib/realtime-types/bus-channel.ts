@@ -7,7 +7,7 @@ import type { Agent, OutputSchema } from '../api';
 /**
  * Event names for the bus channel.
  */
-export type BusChannelEvent = 'AGENT_STATE_CHANGED';
+export type BusChannelEvent = 'AGENT_STATE_CHANGED' | 'UPDATE';
 
 // -----------------------------------------------------------------------------
 // AGENT_STATE_CHANGED Event - Sub-agent tree update
@@ -51,6 +51,7 @@ export interface FailureContext {
  * of state changes. Used for real-time tree rendering.
  */
 export interface AgentStateChangedPayload {
+  temporalWorkflowId?: string;
   /** The agent broadcasting this update */
   agentId: string;
   /** Parent agent ID (for tree structure) */
@@ -61,6 +62,9 @@ export interface AgentStateChangedPayload {
   status: Agent['status'];
   /** Progress value (0.0-1.0) */
   progress: number;
+  progressEstimate?: import('../api/types').ProgressEstimate | null;
+  taskId?: string;
+  updatedAt?: string;
   /** List of currently active tool names */
   toolsInUse: string[];
   /** Total message count */

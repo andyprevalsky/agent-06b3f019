@@ -15,7 +15,7 @@ import { type Response, Router } from 'express';
 import { ZodError } from 'zod';
 import { type AuthRequest, authenticate, authenticateMachineUpload } from '../../providers/auth';
 import { asyncHandler } from '../../utils/asyncHandler';
-import { findIntegrationAccount } from './repo.accounts';
+import { findIntegrationAccount } from './service.accounts';
 import * as service from './service';
 import * as accounts from './service.accounts';
 import { ProgressAccountLimitError, reportIntegrationProgress } from './service.progress';

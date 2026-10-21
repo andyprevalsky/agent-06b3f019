@@ -128,6 +128,7 @@ from helpers import (
     summarize_tool_result,
     update_agent_status,
 )
+from helpers.jev_progress import predict_jev_progress
 from helpers.agent_graph import ask_code_agent_question_activity, send_agent_graph_message_activity
 from helpers.attachments import fetch_parent_attachments_activity, resolve_attachments_activity
 from helpers.error_alert import report_failure_activity
@@ -1607,6 +1608,7 @@ async def main():
         mark_gpt_token_rate_limited_activity,
         release_compute_token_lineage_activity,
         update_agent_status,
+        predict_jev_progress,
         acknowledge_workflow_replacement_bootstrap,
         finalize_workflow_replacement_bootstrap,
         compress_context,

@@ -18,6 +18,16 @@ export interface FilePointer {
 export const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB max per file
 export const MAX_TOTAL_ATTACHMENTS_SIZE = 100 * 1024 * 1024; // 100MB max total
 
+export interface ProgressEstimate {
+  progress: number;
+  etaSeconds: number;
+  observedAt: string;
+  sequence: number;
+  model: string;
+  promptVersion: string;
+  taskId?: string;
+}
+
 export interface Agent {
   agent_id: string;
   goal: string;
@@ -33,6 +43,9 @@ export interface Agent {
   source: 'WEB' | 'MAC_APP';
   reasoning_effort: 'off' | 'low' | 'medium' | 'high';
   progress: number;
+  progress_estimate?: ProgressEstimate | null;
+  task_progress_estimates?: Record<string, ProgressEstimate>;
+  task_id?: string | null;
   status:
     | 'STARTING_UP'
     | 'ACTIVE'
@@ -207,6 +220,13 @@ export interface OutputSchema {
 }
 
 export interface AgentTreeNode {
+  taskProgressEstimates?: Record<string, ProgressEstimate>;
+  temporal_workflow_id?: string | null;
+  updated_at?: string;
+  progress_estimate?: ProgressEstimate | null;
+  task_progress_estimates?: Record<string, ProgressEstimate>;
+  progressEstimate?: ProgressEstimate | null;
+  task_id?: string | null;
   agent_id: string;
   parent_agent_id: string | null;
   goal: string;

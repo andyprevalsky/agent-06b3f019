@@ -3325,6 +3325,10 @@ class AgentWorkflow:
                 }
             run_agent_kwargs["get_requirement_revision"] = lambda: self._response_schema_revision
             run_agent_kwargs.setdefault("user_tools", declared_user_tools(self))
+            # Read the latest known schema without waiting for async schema regeneration.
+            run_agent_kwargs["get_jev_response_schema"] = lambda: self.output_schema
+            run_agent_kwargs["jev_goal"] = self.goal
+            run_agent_kwargs["jev_agent_kind"] = "normal_child" if self.parent_agent_id else "normal_root"
             return await run_agent(**run_agent_kwargs)
         finally:
             self._tool_parking_enabled = False

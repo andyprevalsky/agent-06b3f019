@@ -19,6 +19,8 @@ const AGENT_LIST_SELECT = {
   reasoningMaxTokens: true,
   source: true,
   progress: true,
+  progressEstimate: true,
+  progressEstimateGeneration: true,
   status: true,
   statusMessage: true,
   temporalWorkflowId: true,

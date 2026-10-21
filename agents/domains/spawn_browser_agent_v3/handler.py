@@ -53,6 +53,7 @@ from helpers.generation_handoff import (
     park_pending_tool,
     take_tool_resume,
 )
+from helpers.jev_progress import JEVSession, browser_prefix_events
 from helpers.messages import poll_new_messages, stream_browser_cursor
 from helpers.model_pricing import get_model_pricing_with_fallback
 from helpers.tracing import span, traced
@@ -6389,6 +6390,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
                 browser_session_metadata={"provider": "wmh", "simulated": True},
             )
 
+    jev_session = JEVSession(agent_id, task_id, "browser")
     try:
         if not browser_state:
             # Seed the server-side WMH session with the same neutral start page
@@ -6498,6 +6500,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
             )
 
         while iteration < MAX_ITERATIONS:
+            jev_session.schedule(goal, output_schema, browser_prefix_events(action_entries))
             iteration += 1
             if not await sync_user_instructions():
                 await sync_user_instructions(require_confirmed_read=True)
@@ -6865,6 +6868,9 @@ async def _spawn_browser_agent_activity_v3_simulated(
             "simulated_browser_steps": iteration,
             "simulated_latest_frame": latest_frame,
         }
+    finally:
+        jev_session.close()
+
 
 
 async def _publish_browser_session_metadata_message(
@@ -7085,6 +7091,7 @@ async def _spawn_browser_agent_activity_v3_real(
     interaction_layer_task: Optional[asyncio.Task] = None
     cursor_streamer: Optional[BrowserCursorRealtimeStreamer] = None
     action_history = ActionHistory()
+    jev_session = JEVSession(agent_id, task_id, "browser")
 
     def _redact_activity_value(value: Any) -> Any:
         # Private hydration can precede DOM binding, and cleanup can outlive
@@ -8899,6 +8906,11 @@ async def _spawn_browser_agent_activity_v3_real(
         step_timer = StepPhaseTimer(agent_id=agent_id, task_id=task_id)
         tab_focus_cache = TabFocusCache()
         while iteration < MAX_ITERATIONS:
+            jev_session.schedule(
+                _redact_activity_value(goal),
+                _model_visible_browser_output_schema(response_schema, _redact_activity_value),
+                browser_prefix_events(_redact_activity_value(action_history.get_entries())),
+            )
             # Drain checkpoint. Between steps, with no approved action still
             # owed, the task is fully captured by the same resume payload a
             # write-lock pause returns, so the manager can restart it at this
@@ -11861,6 +11873,7 @@ Based on this feedback, I need to continue working on the task and address the i
         raise safe_error from None
 
     finally:
+        jev_session.close()
         try:
             generation_sealed = generation_sealed or isinstance(sys.exception(), WorkflowGenerationSealed)
             if generation_sealed and otp_poll_task is not None:

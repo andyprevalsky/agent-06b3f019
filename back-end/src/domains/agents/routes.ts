@@ -17,6 +17,7 @@ import messageRoutes from './routes.messages';
 import exploreEvidenceRoutes from './routes.exploreEvidence';
 import batchRoutes from './routes.batch';
 import statusRoutes from './routes.status';
+import progressEstimateRoutes from './routes.progressEstimate';
 import archiveRoutes from './routes.archive';
 import reportBugRoutes from './routes.reportBug';
 import phoneRoutes from './routes.phone';
@@ -209,6 +210,7 @@ router.delete(
 );
 
 router.use(statusRoutes);
+router.use(progressEstimateRoutes);
 
 router.patch(
   '/:id',

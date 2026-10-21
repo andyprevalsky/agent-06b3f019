@@ -223,6 +223,25 @@ async def _run_single_iteration(
     return result, posted_messages, executed_tools
 
 
+async def test_jev_schedules_every_turn_without_changing_decisions():
+    from helpers.jev_progress import JEVSession
+    snapshots = []
+    def record(session, goal, schema, events):
+        snapshots.append({"goal": goal, "schema": schema, "events": events})
+    with patch.object(JEVSession, "schedule", record), patch.object(JEVSession, "close") as close:
+        result, _, executed = await _run_single_iteration(
+            [{"tool": "web_search", "query": "facts"}],
+            [("web_search", "tc-jev", 1.0)], max_iterations=2,
+            response_schema={"type": "object"},
+        )
+    assert len(snapshots) == 2
+    assert snapshots[0]["events"] == []
+    assert sum(e["role"] == "assistant" for e in snapshots[1]["events"]) == 1
+    assert snapshots[0]["schema"] == {"type": "object"}
+    assert len(executed) == 2 and result["status"] == "max_iterations"
+    close.assert_called_once()
+
+
 async def test_iteration_fixture_retires_its_realtime_sender():
     from helpers import messages
 
@@ -3356,6 +3375,7 @@ async def run_all_tests():
 
     print("run-agent blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("jev_schedules_every_turn", test_jev_schedules_every_turn_without_changing_decisions)
     await r.record_async("iteration_fixture_retires_realtime", test_iteration_fixture_retires_its_realtime_sender)
     await r.record_async(
         "iteration_offset_reported_with_usage",
