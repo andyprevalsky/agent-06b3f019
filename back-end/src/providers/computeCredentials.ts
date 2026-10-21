@@ -51,7 +51,7 @@ type RequiredLineageLease = Required<
 >;
 
 const LINEAGE_LEASE_TTL_MS = 5 * 60 * 1000;
-const GPT_LINEAGE_CAPACITY = 16;
+export const GPT_LINEAGE_CAPACITY = 16;
 const CLAUDE_LINEAGE_CAPACITY = 12;
 
 function capacityForType(type: ComputeCodeCredentialType): number {

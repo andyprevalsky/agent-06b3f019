@@ -10,6 +10,12 @@
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import {
+  getFoundryDeploymentCooldowns,
+  InvalidFoundryCooldownRequest,
+} from '../../providers/foundryDeploymentCooldown';
+import { prisma } from '../../providers/database';
+import { runFoundryReviewCases } from './rose-foundry-regions.review-cases';
 
 import { createStreamingCompletion } from '../../providers/rose';
 import {
@@ -43,18 +49,66 @@ const ok = (): Response =>
 type Attempt = [region: string, deployment: string];
 type Handler = (region: string, deployment: string) => Response | Promise<Response>;
 
-function configure(handler: Handler, regions = [R1, R2, R3], deployments = 'gpt-6-sol'): Attempt[] {
+function configure(
+  handler: Handler,
+  regions = [R1, R2, R3],
+  deployments = 'gpt-6-sol',
+  report?: (body: { retryAfterSeconds?: number }) => void
+): Attempt[] {
   for (const name of FOUNDRY_REGION_ENV_NAMES) delete process.env[name];
   regions.forEach((endpoint, index) => {
     const suffix = index === 0 ? '' : `_${index + 1}`;
     process.env[`AZURE_FOUNDRY_ENDPOINT${suffix}`] = endpoint;
-    process.env[`AZURE_FOUNDRY_API_KEY${suffix}`] = KEYS[endpoint];
+    process.env[`AZURE_FOUNDRY_API_KEY${suffix}`] = KEYS[endpoint] ?? 'fixture-invalid-region-key';
     process.env[`AZURE_FOUNDRY_DEPLOYMENTS${suffix}`] = deployments;
   });
   __resetFoundryCooldowns();
   const attempts: Attempt[] = [];
+  // Per-case authority state: provider routing cases must not share DB marks.
+  process.env.COMPUTE_TOKEN_AUTHORITY_URL = 'https://authority.example.test';
+  process.env.COMPUTE_TOKEN_AUTHORITY_API_KEY = 'fixture';
+  const cooldowns: Record<
+    string,
+    { strikes: number; remainingSeconds: number; rateLimitedUntil: string }
+  > = {};
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
+    if (url.origin === 'https://authority.example.test') {
+      if (url.pathname.endsWith('/cooldown')) {
+        const original = prisma.integration.findMany;
+        prisma.integration.findMany = (async () => []) as typeof original;
+        try {
+          await getFoundryDeploymentCooldowns((url.searchParams.get('keys') ?? '').split(','));
+        } catch (error) {
+          if (error instanceof InvalidFoundryCooldownRequest)
+            return new Response('', { status: 400 });
+          throw error;
+        } finally {
+          prisma.integration.findMany = original;
+        }
+        return Response.json({ cooldowns });
+      }
+      const body = JSON.parse(String(init?.body)) as {
+        region: string;
+        deployment: string;
+        retryAfterSeconds?: number;
+      };
+      const key = `${body.region}:${body.deployment}`;
+      if (url.pathname.endsWith('/served')) {
+        delete cooldowns[key];
+        return Response.json({ reset: true });
+      }
+      assert(url.pathname.endsWith('/token/rate-limited'));
+      report?.(body);
+      const seconds = body.retryAfterSeconds ?? 30;
+      const state = {
+        strikes: 1,
+        remainingSeconds: seconds,
+        rateLimitedUntil: new Date(Date.now() + seconds * 1000).toISOString(),
+      };
+      cooldowns[key] = state;
+      return Response.json(state);
+    }
     const region = url.origin;
     if (!(region in KEYS)) {
       assert.equal(url.host, 'openrouter.ai', `unexpected provider ${url.host}`);
@@ -121,6 +175,8 @@ async function main(): Promise<void> {
   const originalFetch = globalThis.fetch;
   const saved = [
     ...FOUNDRY_REGION_ENV_NAMES,
+    'COMPUTE_TOKEN_AUTHORITY_URL',
+    'COMPUTE_TOKEN_AUTHORITY_API_KEY',
     'GPT_API_KEY',
     'OPENAI_API_KEY',
     'ANTHROPIC_API_KEY',
@@ -132,6 +188,15 @@ async function main(): Promise<void> {
   delete process.env.ANTHROPIC_API_KEY;
   process.env.OPENROUTER_API_KEY = 'ork-test';
   try {
+    await runFoundryReviewCases({
+      configure,
+      drain,
+      keyWithPrimary,
+      text,
+      primary: R1,
+      fallback: R2,
+    });
+
     // Region 1 429 → another region serves; region 1 then cools for this agent.
     let attempts = configure((region) =>
       region === R1

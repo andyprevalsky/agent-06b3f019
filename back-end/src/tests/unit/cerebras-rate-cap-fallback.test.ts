@@ -61,6 +61,9 @@ async function run(): Promise<void> {
   const originalCerebrasKey = process.env.CEREBRAS_API_KEY;
   const originalOpenRouterKey = process.env.OPENROUTER_API_KEY;
   const originalHedgeMs = process.env.CEREBRAS_CHAT_HEDGE_MS;
+  const originalNodeEnv = process.env.NODE_ENV;
+  // Measure the production router deadline without synchronous development dumps.
+  process.env.NODE_ENV = 'production';
   process.env.CEREBRAS_API_KEY = 'cerebras-rate-cap-test';
   process.env.OPENROUTER_API_KEY = 'openrouter-rate-cap-test';
   process.env.CEREBRAS_CHAT_HEDGE_MS = '0';
@@ -118,6 +121,8 @@ async function run(): Promise<void> {
     else process.env.OPENROUTER_API_KEY = originalOpenRouterKey;
     if (originalHedgeMs === undefined) delete process.env.CEREBRAS_CHAT_HEDGE_MS;
     else process.env.CEREBRAS_CHAT_HEDGE_MS = originalHedgeMs;
+    if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = originalNodeEnv;
   }
 }
 
