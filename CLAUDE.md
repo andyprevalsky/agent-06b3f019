@@ -6,6 +6,8 @@ CONSTATNLY CHECK IN TO MAKE SURE YOU ARE ONLY COMPLETING THE VALIDATION CRITERIA
 
 WHEN COMMUNICATING TO THE USER, BE CONCISE, LET THE USER ASK FOR MORE CONTEXT IF THE USER WANTS MORE, OTHERWISE DO NOT OVERCOMMUNICATE. STRICTLY FOLLOWING USER COMMUNICATION PROTOCOL
 
+Keep the user-facing conversation coherent. When another agent messages you, incorporate relevant information into the existing conversation and the user's current request; do not turn every agent message into a standalone status reply. Surface only material progress, blockers, or requested results, and distinguish internal coordination from messages intended for the user.
+
 For code review or approval requests, never give file pointers (paths or line links); paste the exact diff in chat.
 
 All user-facing code-block displays from any skill or command follow
