@@ -27,7 +27,7 @@
  */
 
 import { useQuery } from '@tanstack/react-query';
-import { Globe, Moon, Plug, Smartphone, Sun, type LucideIcon } from 'lucide-react';
+import { Globe, MonitorPlay, Moon, Plug, Smartphone, Sun, type LucideIcon } from 'lucide-react';
 
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useRoseTheme } from '@/features/rose-theme';
@@ -96,6 +96,7 @@ function IconButton({
 
 const APPS: { app: RoseApp; label: string; icon: LucideIcon }[] = [
   { app: 'browser', label: 'Browser', icon: Globe },
+  { app: 'display', label: 'Agent Display', icon: MonitorPlay },
   { app: 'phone', label: 'Phone', icon: Smartphone },
   { app: 'integrations', label: 'Integrations', icon: Plug },
 ];
@@ -130,6 +131,7 @@ export function RoseAppIcons({ placement = 'corner' }: { placement?: 'corner' | 
         apps={apps}
         isDark={theme.isDark}
         onToggleTheme={theme.toggle}
+        showDisplay={!header}
         size={header ? HEADER_ICON_SIZE : APP_ICON_SIZE}
       />
     </nav>
@@ -141,7 +143,9 @@ function AppIconButtons({
   isDark,
   onToggleTheme,
   size,
+  showDisplay,
 }: {
+  showDisplay: boolean;
   apps: NonNullable<ReturnType<typeof useRoseApps>>;
   isDark: boolean;
   onToggleTheme: () => void;
@@ -151,7 +155,7 @@ function AppIconButtons({
   const idle = isDark ? IDLE_COLOR_DARK : IDLE_COLOR;
   return (
     <>
-      {APPS.map(({ app, label, icon }) => (
+      {APPS.filter(({ app }) => showDisplay || app !== 'display').map(({ app, label, icon }) => (
         <IconButton
           key={app}
           testId={`rose-app-${app}`}

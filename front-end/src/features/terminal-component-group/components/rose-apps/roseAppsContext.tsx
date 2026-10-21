@@ -52,6 +52,7 @@ import type { Agent } from '../../hooks';
 import { appIconsInset, clampDrawerWidth, defaultDrawerWidth } from './roseAppsLayout';
 import { ROSE_APP_ICON_COUNT } from './roseAppCatalog';
 import { RoseAppDrawers } from './RoseAppDrawers';
+import { useAgentDisplays } from './useAgentDisplays';
 import {
   RoseAppsContext,
   type AgentBrowserTab,
@@ -153,6 +154,8 @@ export function RoseAppsProvider({
   publishLayout = false,
   onLogout,
 }: ProviderProps) {
+  const displays = useAgentDisplays();
+  const { selectDisplay } = displays;
   const [openApp, setOpenApp] = useState<RoseApp | null>(null);
   const [browserTabAgentId, setBrowserTabAgentId] = useState<string | null>(null);
   const [slot, setSlot] = useState<HTMLElement | null>(null);
@@ -202,6 +205,14 @@ export function RoseAppsProvider({
     },
     [openApp, selectedAgentId],
   );
+  const openAgentDisplay = useCallback(
+    (agentId: string, id: string) => {
+      selectDisplay({ agentId, id });
+      if (agentId !== selectedAgentId) onSelectAgent?.(agentId);
+      setOpenApp('display');
+    },
+    [selectDisplay, onSelectAgent, selectedAgentId],
+  );
   const closeApp = useCallback(() => setOpenApp(null), []);
 
   const openAgentBrowser = useCallback(
@@ -244,6 +255,8 @@ export function RoseAppsProvider({
   const value = useMemo<RoseAppsValue>(
     () => ({
       openApp,
+      ...displays,
+      openAgentDisplay,
       browserTabAgentId,
       tabs,
       agents,
@@ -268,6 +281,8 @@ export function RoseAppsProvider({
     }),
     [
       openApp,
+      displays,
+      openAgentDisplay,
       browserTabAgentId,
       tabs,
       agents,

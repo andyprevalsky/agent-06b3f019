@@ -9,6 +9,7 @@
  *   null                                        -> all closed
  */
 
+import { AgentDisplayDrawer } from './AgentDisplayDrawer';
 import { BrowserAppDrawer } from './BrowserAppDrawer';
 import { PhoneApp } from './PhoneApp';
 import { RoseAppPanelDrawer } from './RoseAppPanels';
@@ -17,6 +18,7 @@ export function RoseAppDrawers() {
   return (
     <>
       <BrowserAppDrawer />
+      <AgentDisplayDrawer />
       <RoseAppPanelDrawer />
       <PhoneApp />
     </>

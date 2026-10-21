@@ -6,6 +6,7 @@
 
 import { createContext, useContext } from 'react';
 import type { Agent } from '../../hooks';
+import type { AgentDisplayEntry } from './agentDisplayEntries';
 
 /**
  * Everything that opens in the right-panel slot (one at a time):
@@ -14,7 +15,14 @@ import type { Agent } from '../../hooks';
  *   integrations | benchmarks | feedback | health | settings   flush right panels
  */
 export type RoseApp =
-  'browser' | 'phone' | 'integrations' | 'benchmarks' | 'feedback' | 'health' | 'settings';
+  | 'browser'
+  | 'display'
+  | 'phone'
+  | 'integrations'
+  | 'benchmarks'
+  | 'feedback'
+  | 'health'
+  | 'settings';
 
 export interface AgentBrowserTab {
   agentId: string;
@@ -26,6 +34,11 @@ export interface AgentBrowserTab {
 
 export interface RoseAppsValue {
   openApp: RoseApp | null;
+  displayEntries: AgentDisplayEntry[];
+  displaySelection: { agentId: string; id: string } | null;
+  registerDisplays: (entries: AgentDisplayEntry[]) => void;
+  selectDisplay: (selection: { agentId: string; id: string }) => void;
+  openAgentDisplay: (agentId: string, id: string) => void;
   /** null = Root tab. */
   browserTabAgentId: string | null;
   tabs: AgentBrowserTab[];

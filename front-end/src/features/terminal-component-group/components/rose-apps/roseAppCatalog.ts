@@ -5,4 +5,4 @@
  */
 
 /** Icons in the top-right row (3 apps + the dark-mode toggle). */
-export const ROSE_APP_ICON_COUNT = 4;
+export const ROSE_APP_ICON_COUNT = 5;

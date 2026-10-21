@@ -44,14 +44,15 @@ import {
   messageRequester,
   parseAgentToAgentMessage,
   type AgentToAgentMessage,
-  type DisplayMediaItem,
   parsePinnedQuestion,
 } from '../hooks/codeAgentContract';
 import { AgentToAgentRow } from './AgentToAgentRow';
 import { CodeAgentAttribution } from './CodeAgentAttribution';
-import { DisplayMediaGroup } from './inline-media/DisplayMediaGroup';
 import { EMPTY_DISPLAY_MEDIA_GROUPING, groupDisplayMedia } from './inline-media/displayMediaGroups';
 import { EMPTY_WEB_SEARCH_GROUPING, type WebSearchTurnGrouping } from './webSearchTurnGroups';
+
+import { DisplayMediaListItem } from './rose-apps/AgentDisplayMessage';
+import { useDisplayDestination } from './rose-apps/useDisplayDestination';
 
 import { useAgentExchangeGroups } from './useAgentExchangeGroups';
 import { AgentExchangeGroup } from './AgentExchangeGroup';
@@ -114,35 +115,6 @@ function getMessageRenderKey(message: Message): string {
     return `code-agent:${toolCallId}`;
   }
   return message.message_id;
-}
-
-/** One display call's media at its first row; completes the typing chain like other bubbles. */
-function DisplayMediaListItem({
-  message,
-  items,
-  agentId,
-  shouldType,
-  onTypingComplete,
-}: {
-  message: Message;
-  items: DisplayMediaItem[];
-  agentId?: string;
-  shouldType: boolean;
-  onTypingComplete: () => void;
-}) {
-  useEffect(() => {
-    if (shouldType) onTypingComplete();
-  }, [shouldType, onTypingComplete]);
-  return (
-    <div
-      data-message-id={message.message_id}
-      data-message-role={message.role}
-      data-message-kind="display-media"
-      className="min-w-0 max-w-full"
-    >
-      <DisplayMediaGroup items={items} agentId={agentId} />
-    </div>
-  );
 }
 
 /** Agent-to-agent row in the trajectory; completes the typing chain like other bubbles. */
@@ -285,6 +257,11 @@ export function MessageListItems({
     () => (roseDesktop ? dedupeCodeDisplays(filteredMessages) : filteredMessages),
     [filteredMessages, roseDesktop],
   );
+  const openDisplay = useDisplayDestination(
+    visibleMessages,
+    itemProps.selectedAgentId,
+    roseDesktop,
+  );
   const displayGrouping = useMemo(
     () => (roseDesktop ? groupDisplayMedia(visibleMessages) : EMPTY_DISPLAY_MEDIA_GROUPING),
     [visibleMessages, roseDesktop],
@@ -318,6 +295,7 @@ export function MessageListItems({
               key={message.message_id}
               message={message}
               items={displayItems}
+              onOpen={openDisplay ? () => openDisplay(message) : undefined}
               agentId={itemProps.selectedAgentId || undefined}
               shouldType={message.message_id === itemProps.currentAnimatingId}
               onTypingComplete={itemProps.onAnimationComplete}
