@@ -1,5 +1,5 @@
 import { getBrowserSessionHealth } from '../../providers/browser';
-import { getTilionLiveViewUrl } from '../../providers/browser/tilion';
+import { getTilionLiveViewUrl, isTilionSessionEndedError } from '../../providers/browser/tilion';
 import { resumeBrowserSession as resumeBrowserSessionProvider } from '../../providers/browserSessionResume';
 import { createLogger } from '../../providers/logger';
 import * as repo from './repo';
@@ -80,6 +80,8 @@ async function providerLiveness(
     if (observed.ttlMs !== null && observed.ttlMs <= 0) return false;
     return isLiveBrowserStatus(observed.status);
   } catch (error) {
+    // Tilion answers 404/410 once an ended session's record ages out: it is gone, not unknown.
+    if (isTilionSessionEndedError(error)) return false;
     log.warn('Live-view provider health check failed', {
       sessionId,
       error: error instanceof Error ? error.message : String(error),

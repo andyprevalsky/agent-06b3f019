@@ -15,6 +15,7 @@ import {
 } from '../../domains/browser-session/service.control';
 import { SessionNotFoundError } from '../../domains/browser-session/service.local-storage';
 import type { BrowserSessionHealth } from '../../providers/browser/types';
+import { TilionApiError } from '../../providers/browser/tilion';
 
 const LIVE_URL = 'https://connect.steel.dev/v1/sessions/second-browser/player?interactive=false';
 
@@ -303,6 +304,24 @@ async function testTilionLiveViewMintsFreshUrlAndEndedIsNotLive(): Promise<void>
   });
   assert.equal(ended.live, false);
   assert.equal(closed.live, false);
+  const agedOut = await getBrowserLiveView('task-live-view', 'owner', {
+    findRecord: async () => liveViewRecord('ACTIVE', 'owner', 'tilion'),
+    health: async () => {
+      throw new TilionApiError({
+        status: 404,
+        slug: null,
+        message: 'No such session',
+        method: 'GET',
+        path: '/v1/session/x/status',
+        retryable: false,
+        requestId: null,
+        retryAfterMs: null,
+        detail: 'No such session',
+      });
+    },
+    mintTilionLiveViewUrl,
+  });
+  assert.equal(agedOut.live, false, 'a 404 Tilion record is ended, not unknown');
   assert.equal(mints, 2, 'ended Tilion sessions must not mint view tokens');
 
   const mintFailed = await getBrowserLiveView('task-live-view', 'owner', {
