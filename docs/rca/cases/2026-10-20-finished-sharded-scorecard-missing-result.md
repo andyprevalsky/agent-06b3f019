@@ -112,3 +112,13 @@ accepted grades agree. This restores classifications, not agent outcomes, and
 runs no provider/LLM request. Preparation and rendering commands plus sealed
 hashes are in the lane's BATCH2-LAUNCH.md handoff. At 10k jobs validation is a
 linear local join using keyed identities, no provider requests or shared state.
+
+## Emitted cadence correction
+
+The user-guideline audit found the actual CLI instruction and shared emitted
+report contract still advertised a 15-minute publication cadence despite the
+explicit 10-minute user rule. The owning instruction test and a new real
+`run-bench report-format` regression both failed before correction. The
+instruction, live-card footer and emitted contract now say 10 minutes; the
+rolling 15-minute token-rate window is unchanged and asserted separately.
+No launch scheduler, source/admission proof, timestamp or outcome changed.

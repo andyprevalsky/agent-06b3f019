@@ -26,7 +26,7 @@ Communication contract (mandatory)
   window), the outcome bar with PASS, HARNESS FAILURE and INFRA FAILURE always
   shown, failure causes, timing/cost/cache/LLM coverage, the lifecycle
   checklist, LAST 3 EXPERIMENTS, active sub-agents and ISSUES / NEXT ACTION.
-- Publish the card on agent start/completion, every fixed 15-minute checkpoint,
+- Publish the card on agent start/completion, every fixed 10-minute checkpoint,
   and benchmark-state changes. Events never reset the checkpoint or run clock.
 - User-requested approval messages use .claude/shared/approval-format.md instead:
   the same styled text frame, all seven required sections with How: immediately
