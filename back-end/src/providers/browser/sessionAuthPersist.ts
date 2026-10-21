@@ -1,5 +1,5 @@
 /**
- * Persist a Kernel/Steel sign-in before its session ends so the next
+ * Persist a Kernel/Steel/Tilion sign-in before its session ends so the next
  * browser-agent call — including the other provider — injects it through the
  * existing CookieBundle / LocalStorageOrigin path.
  *
@@ -124,7 +124,10 @@ export function shouldPersistSignedInBrowserState(session: {
     return { persist: false, reason: 'benchmark_isolated_profiles' };
   }
   const provider = storedBrowserProvider(session.provider);
-  if (provider !== 'kernel' && provider !== 'steel') {
+  // Browser Use is not harvested. Tilion is: its single CDP slot is free once
+  // the worker detaches before close (ordering documented in index.ts); a 4409
+  // collision fails the harvest within budget and the release still runs.
+  if (provider !== 'kernel' && provider !== 'steel' && provider !== 'tilion') {
     return { persist: false, reason: 'unsupported_provider' };
   }
   if (session.providerProfileSource?.startsWith('benchmark_anon') === true) {

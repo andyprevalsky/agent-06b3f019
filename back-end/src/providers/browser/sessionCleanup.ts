@@ -2,6 +2,7 @@ import { createLogger } from '../logger';
 import { releaseSteelRemoteSession } from '../steel/session';
 import { releaseKernelRemoteSession } from './kernel';
 import { releaseBrowserUseRemoteSession } from './browserUse';
+import { releaseTilionRemoteSession } from './tilion';
 import type { BrowserProviderName } from './types';
 
 const log = createLogger('BrowserProvider');
@@ -11,18 +12,22 @@ export interface SupersededBrowserRelease {
   previousProvider: BrowserProviderName;
   previousSessionId: string;
   operation: 'resume' | 'rotation';
+  /** The replacement's session id; equal to previousSessionId on a reattach/in-place rotate. */
+  currentSessionId?: string;
 }
 
 export interface SupersededBrowserReleaseDependencies {
   releaseKernel: (sessionId: string) => Promise<void>;
   releaseSteel: (sessionId: string) => Promise<void>;
   releaseBrowserUse: (sessionId: string) => Promise<void>;
+  releaseTilion: (sessionId: string) => Promise<void>;
 }
 
 const defaultDependencies: SupersededBrowserReleaseDependencies = {
   releaseKernel: releaseKernelRemoteSession,
   releaseSteel: releaseSteelRemoteSession,
   releaseBrowserUse: releaseBrowserUseRemoteSession,
+  releaseTilion: releaseTilionRemoteSession,
 };
 
 /** Reap an already-replaced remote browser without hiding cleanup exhaustion. */
@@ -30,11 +35,15 @@ export async function releaseSupersededBrowser(
   release: SupersededBrowserRelease,
   dependencies: SupersededBrowserReleaseDependencies = defaultDependencies
 ): Promise<boolean> {
+  // A reattach or in-place rotate keeps the same remote session: nothing was superseded.
+  if (release.currentSessionId === release.previousSessionId) return true;
   try {
     if (release.previousProvider === 'kernel') {
       await dependencies.releaseKernel(release.previousSessionId);
     } else if (release.previousProvider === 'browser-use') {
       await dependencies.releaseBrowserUse(release.previousSessionId);
+    } else if (release.previousProvider === 'tilion') {
+      await dependencies.releaseTilion(release.previousSessionId);
     } else {
       await dependencies.releaseSteel(release.previousSessionId);
     }

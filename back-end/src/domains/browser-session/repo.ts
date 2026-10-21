@@ -3,6 +3,7 @@
  */
 
 import type { BrowserControlState } from '@prisma/client';
+import { cookieSelectionWhere } from '../../providers/browserCookies';
 import { prisma } from '../../providers/database';
 
 /**
@@ -147,6 +148,7 @@ export async function findBrowserLiveViewRecord(taskId: string) {
       sessionId: true,
       status: true,
       debugUrl: true,
+      provider: true,
       context: { select: { userId: true } },
     },
   });
@@ -236,5 +238,33 @@ export async function updateInjectedOrigins(
   return prisma.browserSession.update({
     where: { sessionId },
     data: { injectedOrigins },
+  });
+}
+
+/** Cookie rows of one selected CookieBundle source for a realm (worker_apply). */
+export async function findCookieBundleCookies(
+  userId: string,
+  cookieDomain: string,
+  source: { browserSource: string; browserProfile: string }
+) {
+  return prisma.cookie.findMany({
+    where: { userId, ...cookieSelectionWhere(cookieDomain), ...source },
+  });
+}
+
+/** LocalStorageOrigin rows for an auth realm, oldest first; boundary-aware (no evilamazon.com). */
+export async function findRealmLocalStorageOrigins(userId: string, authRealm: string) {
+  return prisma.localStorageOrigin.findMany({
+    where: {
+      userId,
+      OR: [
+        { origin: { endsWith: `://${authRealm}` } },
+        { origin: { contains: `://${authRealm}:` } },
+        { origin: { endsWith: `.${authRealm}` } },
+        { origin: { contains: `.${authRealm}:` } },
+      ],
+    },
+    select: { origin: true, entries: true, updatedAt: true },
+    orderBy: { updatedAt: 'asc' },
   });
 }

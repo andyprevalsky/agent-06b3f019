@@ -2,42 +2,344 @@
  * Tilion Cloud browser sessions, exposed through the same CDP contract as
  * Steel, Kernel and Browser Use. See docs/plans/active/tilion-browser-provider.md.
  *
- * CONTRACT STUB: lane A1 owns this file and replaces every body. The exported
- * names and signatures are the cross-lane contract; change them only through
- * the parent coordinator.
+ * create:  POST /v1/session (residential, geo city→state→country, Idempotency-Key)
+ *            → CDP validation on connect_url → view-token live view → BrowserSession row
+ *            (validation failure or row failure releases the paid session)
+ * close:   release (DELETE; 204/404/410 = released, 503 retried) → PAUSED/CLOSED,
+ *            or ACTIVE/ERROR when release failed. Pause snapshots browser state first.
+ * resume:  live ACTIVE Tilion session → reattach in place (fresh connect/view tokens)
+ *          otherwise → replacement session carrying cookies/localStorage/IndexedDB + URL
+ * rotate:  replacement session on a fresh residential or mobile exit, state carried
+ *
+ * Tilion admits ONE CDP client per session (a second socket closes with 4409).
+ * Every helper here that opens CDP does so only on a session it just created
+ * (before the worker attaches) or as a best-effort read that tolerates 4409.
+ * Account-wide saved logins (`/v1/auth*`) are never used: browser state moves
+ * only through the provider-neutral injection path and this module's carry.
  */
+import { randomUUID } from 'node:crypto';
 import type { Browser } from 'playwright';
+import { prisma } from '../database';
 import { DEFAULT_GEOLOCATION, type ProxyGeoLocation } from '../geoip';
+import { createLogger } from '../logger';
+import { connectValidatedBrowser } from '../steel/sessionConnection';
+import { browserProviderEnabled } from './config';
 import type { KernelProxyType } from './kernelProxy';
+import { rotationGeolocation } from './rotationGeolocation';
+import { announceBrowserSessionBinding } from './sessionBindingAnnounce';
+import { persistBrowserSessionRow } from './sessionPersist';
+import {
+  mintTilionConnectUrl,
+  mintTilionLiveViewUrl,
+  TilionApiError,
+  tilionRequest,
+  tilionRequestWithMeta,
+  tilionSessionPath,
+  type TilionError,
+} from './tilionClient';
 import type {
-  BrowserFileInfo,
   BrowserProviderName,
   BrowserProviderResumeSession,
   BrowserProviderSession,
-  BrowserSessionHealth,
 } from './types';
-import type { BrowserCaptchaTelemetry } from './captchaTelemetry';
 
-function notImplemented(name: string): never {
-  throw new Error(`Tilion provider ${name} is not implemented yet`);
-}
+import {
+  type StorageState,
+  harvestBrowserState,
+  savePausedState,
+  loadPausedState,
+  clearPausedState,
+  restoreTilionBrowserState,
+} from './tilionState';
+import {
+  geoForSpecificity,
+  geoSpecificities,
+  type GeoSpecificity,
+  landedLocation,
+  regionForCountry,
+  tilionProxyType,
+  type TilionProxyType,
+  tilionSessionLifetime,
+} from './tilionConfig';
+import { agentLocation, rotateInPlace } from './tilionRotateInPlace';
+
+export {
+  captureTilionScreenshot,
+  getTilionCaptchaTelemetry,
+  getTilionLiveViewUrl,
+  getTilionSessionHealth,
+  refreshTilionConnectUrl,
+  listTilionSessionFiles,
+  pressTilionKeys,
+  readTilionSessionFile,
+  uploadTilionSessionFile,
+} from './tilionSessionIo';
+export { restoreTilionBrowserState, type StorageState as TilionCarriedState } from './tilionState';
+export {
+  resetTilionRegionCacheForTests,
+  TILION_MIN_TTL_SECONDS,
+  tilionSessionLifetime,
+} from './tilionConfig';
+export {
+  TilionApiError,
+  TilionInsufficientCreditsError,
+  TilionRateLimitError,
+  TilionSessionBusyError,
+  TilionTimeoutError,
+} from './tilionClient';
+
+const log = createLogger('Tilion');
 
 export type TilionReplacementSession = BrowserProviderResumeSession & {
   previousSessionId: string;
   previousProvider: BrowserProviderName;
+  /** Present when the exit rotated in place (`POST rotate-ip`); record it in the rotation log. */
+  ipRotation?: { rotated: boolean; freshAllocation: boolean; region: string | null };
 };
 
-export async function createTilionSessionWithContext(
-  _contextId: string,
-  _agentId: string,
-  _location: ProxyGeoLocation = DEFAULT_GEOLOCATION,
-  _startUrl?: string,
-  _options?: { keepValidationConnection?: boolean; taskId?: string }
-): Promise<BrowserProviderSession> {
-  return notImplemented('createTilionSessionWithContext');
+interface TilionSessionRecord {
+  session_id: string;
+  state: string;
+  created_at: number | null;
+  last_active?: number | null;
+  idle_timeout?: number | null;
+  ttl?: number | null;
+  expires_at?: number | null;
+  closed_at?: number | null;
+  reason?: string | null;
+  connect_url?: string | null;
+  exit_id?: string | null;
+  geo_applied?: boolean | null;
+  geo_unsupported?: string[] | null;
 }
 
-export async function createTilionRecoverySession(_location: ProxyGeoLocation): Promise<{
+interface RemoteTilionSession {
+  sessionId: string;
+  wsUrl: string;
+  debugUrl: string;
+  proxySource: string;
+  proxyLocation: ProxyGeoLocation;
+  proxyType: TilionProxyType;
+  browser: Browser;
+}
+
+class TilionSessionValidationError extends Error {}
+
+/** A live Tilion session would be replaced without the worker-captured browser state. */
+export class TilionUncarriedStateError extends Error {
+  readonly taskId: string;
+  readonly sessionId: string;
+  constructor(taskId: string, sessionId: string) {
+    super(
+      `Tilion task ${taskId}: live session ${sessionId} has uncarried browser state; ` +
+        'the caller must pass the worker-captured carriedState'
+    );
+    this.name = 'TilionUncarriedStateError';
+    this.taskId = taskId;
+    this.sessionId = sessionId;
+  }
+}
+
+/** DELETE could not be confirmed after bounded retries; the paid browser may still run. */
+export class TilionSessionReleaseError extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string, cause: unknown) {
+    super(
+      `Tilion session ${sessionId} release was not confirmed: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+      { cause }
+    );
+    this.name = 'TilionSessionReleaseError';
+    this.sessionId = sessionId;
+  }
+}
+
+// ── session create ───────────────────────────────────────────────────────────
+
+async function postSession(
+  location: ProxyGeoLocation,
+  proxyType: TilionProxyType,
+  specificity: GeoSpecificity
+): Promise<TilionSessionRecord> {
+  const { ttl, idleTimeout } = tilionSessionLifetime();
+  const region = await regionForCountry(location.country);
+  return tilionRequest<TilionSessionRecord>('/v1/session', {
+    method: 'POST',
+    // One key per logical create: a retried request after a lost reply returns
+    // the same session instead of paying for a second browser.
+    idempotencyKey: `rose-${randomUUID()}`,
+    retryOnTimeout: true,
+    body: {
+      ttl,
+      idle_timeout: idleTimeout,
+      // Live probe: cdp_observe solved neither reCAPTCHA v2 nor Turnstile and
+      // adds 100-250 ms per navigation, so it is opt-in.
+      cdp_observe: browserProviderEnabled('TILION_CDP_OBSERVE', false),
+      residential: true,
+      proxy_type: proxyType,
+      ...(region ? { region } : {}),
+      geo: geoForSpecificity(location, specificity),
+    },
+  });
+}
+
+/** Create on the most specific geo Tilion honours: city → state → country. */
+async function createPlacedSession(
+  location: ProxyGeoLocation,
+  proxyType: TilionProxyType
+): Promise<{ record: TilionSessionRecord; specificity: GeoSpecificity }> {
+  const ladder = geoSpecificities(location);
+  for (let index = 0; index < ladder.length; index++) {
+    const specificity = ladder[index];
+    const record = await postSession(location, proxyType, specificity);
+    const unsupported = record.geo_unsupported ?? [];
+    const honoured = record.geo_applied !== false && unsupported.length === 0;
+    if (honoured || specificity === 'country') return { record, specificity };
+    // Tilion fell back to the country exit. A less specific pin can still beat it.
+    const next = ladder[index + 1];
+    // Tilion lists every field it could not honour; a rung it already refused
+    // (live 2026-10-21: city and state both unsupported) would only buy another browser.
+    if (next === 'country' || unsupported.includes(next)) {
+      log.info('Tilion geo pin unsupported; keeping country exit', {
+        sessionId: record.session_id,
+        unsupported,
+      });
+      return { record, specificity: 'country' };
+    }
+    log.info('Tilion geo unsupported; recreating with a wider pin', {
+      sessionId: record.session_id,
+      requested: specificity,
+      next,
+      unsupported,
+    });
+    await releaseTilionRemoteSession(record.session_id);
+  }
+  throw new Error('Tilion geo ladder exhausted');
+}
+
+async function createRemote(
+  location: ProxyGeoLocation,
+  proxyType: TilionProxyType
+): Promise<RemoteTilionSession> {
+  for (let attempt = 1; ; attempt++) {
+    const { record, specificity } = await createPlacedSession(location, proxyType);
+    const sessionId = record.session_id;
+    let browser: Browser | null = null;
+    try {
+      if (!sessionId || !record.connect_url) {
+        throw new TilionSessionValidationError(
+          'Tilion create response omitted session_id or connect_url (raw CDP not enabled for this key?)'
+        );
+      }
+      browser = await connectValidatedBrowser(record.connect_url);
+      if (browser === null) {
+        throw new TilionSessionValidationError(`Tilion session ${sessionId} failed CDP validation`);
+      }
+      const debugUrl = await mintTilionLiveViewUrl(sessionId);
+      log.info('Created Tilion browser session', {
+        sessionId,
+        proxyType,
+        specificity,
+        exitId: record.exit_id ?? null,
+      });
+      return {
+        sessionId,
+        wsUrl: record.connect_url,
+        debugUrl,
+        proxySource: `tilion_${proxyType}_${specificity}`,
+        proxyLocation: landedLocation(location, specificity),
+        proxyType,
+        browser,
+      };
+    } catch (error) {
+      await browser?.close().catch(() => {});
+      if (sessionId) {
+        try {
+          await releaseTilionRemoteSession(sessionId);
+        } catch (releaseError) {
+          throw new AggregateError(
+            [error, releaseError],
+            `Tilion session ${sessionId} failed validation and cleanup`
+          );
+        }
+      }
+      if (error instanceof TilionSessionValidationError && attempt < 2) {
+        log.warn('Tilion session failed validation; creating another', {
+          sessionId,
+          error: error.message,
+        });
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+/**
+ * New Tilion session for a task. With `keepValidationConnection`, the returned
+ * `validationBrowser` is the session's only CDP client and the CALLER owns it:
+ * it must close it before the agent worker attaches, or the worker's socket is
+ * refused with 4409.
+ */
+export async function createTilionSessionWithContext(
+  contextId: string,
+  agentId: string,
+  location: ProxyGeoLocation = DEFAULT_GEOLOCATION,
+  startUrl?: string,
+  options?: { keepValidationConnection?: boolean; taskId?: string; proxyType?: KernelProxyType }
+): Promise<BrowserProviderSession> {
+  const proxyType = tilionProxyType(options?.proxyType ?? 'residential');
+  const remote = await createRemote(location, proxyType);
+  let row;
+  try {
+    row = await persistBrowserSessionRow({
+      taskId: options?.taskId,
+      contextId,
+      agentId,
+      sessionId: remote.sessionId,
+      debugUrl: remote.debugUrl,
+      wsUrl: remote.wsUrl,
+      startUrl: startUrl || undefined,
+      provider: 'tilion',
+      providerProfileId: null,
+      providerProfileSource: 'tilion_ephemeral',
+      kernelProxySource: remote.proxySource,
+      releaseRemoteSession: releaseTilionRemoteSession,
+    });
+    // Recovery keys avoided exits on the tier (tilion_mobile vs tilion_residential).
+    await prisma.browserSession.updateMany({
+      where: { id: row.id, sessionId: remote.sessionId },
+      data: { proxyTier: proxyType },
+    });
+  } catch (error) {
+    await Promise.allSettled([
+      remote.browser.close(),
+      releaseTilionRemoteSession(remote.sessionId),
+    ]);
+    throw error;
+  }
+  const keep = options?.keepValidationConnection === true;
+  if (!keep) await remote.browser.close().catch(() => {});
+  return {
+    provider: 'tilion',
+    sessionId: remote.sessionId,
+    debugUrl: remote.debugUrl,
+    taskId: row.id,
+    wsUrl: remote.wsUrl,
+    proxySource: remote.proxySource,
+    proxyLocation: remote.proxyLocation,
+    profileId: null,
+    profileSource: 'tilion_ephemeral',
+    validationBrowser: keep ? remote.browser : null,
+  };
+}
+
+/** Row-free candidate for challenge recovery; the caller owns the browser and the release. */
+export async function createTilionRecoverySession(
+  location: ProxyGeoLocation,
+  options: { proxyType?: KernelProxyType } = {}
+): Promise<{
   sessionId: string;
   debugUrl: string;
   wsUrl: string;
@@ -47,81 +349,321 @@ export async function createTilionRecoverySession(_location: ProxyGeoLocation): 
   profileSource: string;
   validationBrowser: Browser | null;
 }> {
-  return notImplemented('createTilionRecoverySession');
+  const remote = await createRemote(location, tilionProxyType(options.proxyType ?? 'residential'));
+  return {
+    sessionId: remote.sessionId,
+    debugUrl: remote.debugUrl,
+    wsUrl: remote.wsUrl,
+    proxySource: remote.proxySource,
+    proxyLocation: remote.proxyLocation,
+    profileId: null,
+    profileSource: 'challenge_candidate_ephemeral',
+    validationBrowser: remote.browser,
+  };
+}
+
+// ── release / close ──────────────────────────────────────────────────────────
+
+/** Idempotent remote release: 204/404/410 count as released; bounded retries on 429/5xx. */
+export async function releaseTilionRemoteSession(sessionId: string): Promise<void> {
+  try {
+    await tilionRequestWithMeta<null>(tilionSessionPath(sessionId), {
+      method: 'DELETE',
+      acceptStatuses: [404, 410],
+      retryOnTimeout: true,
+      maxAttempts: 4,
+      // 503 "retry cleanup" means the browser is not confirmed gone.
+      shouldRetry: (error: TilionError) => [429, 500, 502, 503, 504].includes(error.status),
+    });
+  } catch (error) {
+    throw new TilionSessionReleaseError(sessionId, error);
+  }
 }
 
 export async function closeTilionSession(
-  _sessionId: string,
-  _pause = false,
-  _currentUrl?: string
+  sessionId: string,
+  pause = false,
+  currentUrl?: string
 ): Promise<void> {
-  notImplemented('closeTilionSession');
+  if (pause) {
+    const state = await harvestBrowserState({ provider: 'tilion', sessionId, wsUrl: null });
+    if (state !== null) {
+      await savePausedState(sessionId, state).catch((error: unknown) =>
+        log.warn('Could not store paused Tilion browser state', {
+          sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      );
+    }
+  }
+  let releaseError: unknown = null;
+  try {
+    await releaseTilionRemoteSession(sessionId);
+  } catch (error) {
+    releaseError = error;
+    log.warn('Failed to release Tilion session; retaining retryable local session state', {
+      sessionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  await prisma.browserSession.update({
+    where: { sessionId },
+    data: {
+      status: releaseError === null ? (pause ? 'PAUSED' : 'CLOSED') : pause ? 'ACTIVE' : 'ERROR',
+      closedAt: releaseError === null && !pause ? new Date() : null,
+      currentUrl: currentUrl || undefined,
+    },
+  });
+  if (releaseError === null && !pause) await clearPausedState({ sessionId });
+  await announceBrowserSessionBinding({ sessionId });
+  if (releaseError !== null) throw releaseError;
 }
 
-/** Idempotent remote release: 204/404/410 count as released; bounded retries on 429/5xx. */
-export async function releaseTilionRemoteSession(_sessionId: string): Promise<void> {
-  notImplemented('releaseTilionRemoteSession');
+/** `/status` (no idle-clock reset); an unreadable status counts as live, failing closed. */
+async function tilionSessionStillLive(sessionId: string): Promise<boolean> {
+  try {
+    const record = await tilionRequest<TilionSessionRecord>(
+      tilionSessionPath(sessionId, '/status'),
+      {
+        retryOnTimeout: true,
+      }
+    );
+    return record.state === 'ready' || record.state === 'remote';
+  } catch (error) {
+    return !isTilionSessionEndedError(error);
+  }
 }
 
-/** Replace the task's session (resume after pause/expiry) on Tilion, preserving browser state. */
+// ── resume / rotate ──────────────────────────────────────────────────────────
+
+function storedProvider(value: string): BrowserProviderName {
+  return value === 'kernel' || value === 'browser-use' || value === 'tilion' ? value : 'steel';
+}
+
+type OldRow = Awaited<ReturnType<typeof prisma.browserSession.findUniqueOrThrow>>;
+
+/** Deploy drain / worker restart: the old Tilion session is still alive, so reattach to it. */
+async function reattachLiveSession(
+  old: OldRow,
+  options: { keepValidationConnection?: boolean }
+): Promise<TilionReplacementSession | null> {
+  let status: TilionSessionRecord;
+  try {
+    status = await tilionRequest<TilionSessionRecord>(tilionSessionPath(old.sessionId, '/status'), {
+      retryOnTimeout: true,
+    });
+  } catch {
+    return null;
+  }
+  if (status.state !== 'ready') return null;
+  const wsUrl = await mintTilionConnectUrl(old.sessionId).catch(() => null);
+  if (wsUrl === null) return null;
+  const browser = await connectValidatedBrowser(wsUrl);
+  if (browser === null) return null;
+  let handedOff = false;
+  try {
+    const debugUrl = await mintTilionLiveViewUrl(old.sessionId);
+    const updated = await prisma.browserSession.updateMany({
+      where: { id: old.id, sessionId: old.sessionId },
+      data: { wsUrl, debugUrl, status: 'ACTIVE', closedAt: null },
+    });
+    if (updated.count !== 1) throw new Error(`Browser task ${old.id} changed during reattach`);
+    await announceBrowserSessionBinding({ id: old.id });
+    handedOff = true;
+    const proxyType: TilionProxyType = old.proxyTier === 'mobile' ? 'mobile' : 'residential';
+    return {
+      ...(options.keepValidationConnection ? { validationBrowser: browser } : {}),
+      provider: 'tilion',
+      sessionId: old.sessionId,
+      debugUrl,
+      wsUrl,
+      savedUrl: old.currentUrl || old.startUrl || undefined,
+      proxySource: old.kernelProxySource ?? `tilion_${proxyType}_country`,
+      proxyLocation: await agentLocation(old.agentId),
+      profileId: null,
+      profileSource: 'tilion_reattached',
+      // Same id: the caller must not release the "superseded" session.
+      previousSessionId: old.sessionId,
+      previousProvider: 'tilion',
+    };
+  } finally {
+    if (!options.keepValidationConnection || !handedOff) await browser.close().catch(() => {});
+  }
+}
+
+async function replaceSession(
+  taskId: string,
+  options: {
+    forceFreshProfile?: boolean;
+    keepValidationConnection?: boolean;
+    rotateTo?: TilionProxyType;
+    carriedState?: StorageState;
+  }
+): Promise<TilionReplacementSession> {
+  const old = await prisma.browserSession.findUniqueOrThrow({ where: { id: taskId } });
+  const previousProvider = storedProvider(old.provider);
+  const live = old.status === 'ACTIVE';
+
+  if (
+    options.rotateTo === undefined &&
+    previousProvider === 'tilion' &&
+    live &&
+    !options.forceFreshProfile
+  ) {
+    const reattached = await reattachLiveSession(old, options);
+    if (reattached !== null) return reattached;
+  }
+
+  // A live Tilion session may hold the worker's CDP socket (the only client
+  // Tilion admits), so the backend never connects to it mid-run: the worker
+  // captures its state and passes it as `carriedState`. Other providers admit
+  // a second client and are harvested directly.
+  let carried: StorageState | null = options.forceFreshProfile
+    ? null
+    : (options.carriedState ?? null);
+  if (carried === null && !options.forceFreshProfile && live) {
+    if (previousProvider !== 'tilion') {
+      carried = await harvestBrowserState({
+        provider: previousProvider,
+        sessionId: old.sessionId,
+        wsUrl: old.wsUrl,
+      });
+    } else if (await tilionSessionStillLive(old.sessionId)) {
+      // The old browser still holds state nobody handed us: never swap it for a blank one.
+      throw new TilionUncarriedStateError(taskId, old.sessionId);
+    }
+  }
+  const state =
+    carried ?? (options.forceFreshProfile ? null : await loadPausedState(taskId, old.sessionId));
+
+  const baseLocation = await agentLocation(old.agentId);
+  // A rotation must land elsewhere; like Kernel, move to another state and drop the city.
+  const location =
+    options.rotateTo !== undefined
+      ? rotationGeolocation(baseLocation, taskId, old.proxyRotationCount)
+      : baseLocation;
+  const proxyType: TilionProxyType =
+    options.rotateTo ??
+    (previousProvider === 'tilion' && old.proxyTier === 'mobile' ? 'mobile' : 'residential');
+
+  const remote = await createRemote(location, proxyType);
+  let handedOff = false;
+  try {
+    if (state !== null) {
+      const restored = await restoreTilionBrowserState(remote.browser, state);
+      log.info('Carried browser state into Tilion replacement', {
+        taskId,
+        sessionId: remote.sessionId,
+        previousSessionId: old.sessionId,
+        ...restored,
+      });
+    }
+    const replaced = await prisma.browserSession.updateMany({
+      where: { id: taskId, sessionId: old.sessionId },
+      data: {
+        sessionId: remote.sessionId,
+        debugUrl: remote.debugUrl,
+        wsUrl: remote.wsUrl,
+        status: 'ACTIVE',
+        closedAt: null,
+        provider: 'tilion',
+        providerProfileId: null,
+        providerProfileSource: 'tilion_ephemeral',
+        providerProfilePersist: true,
+        kernelProxySource: remote.proxySource,
+        proxyTier: proxyType,
+      },
+    });
+    if (replaced.count !== 1) throw new Error(`Browser task ${taskId} changed during replacement`);
+    // The snapshot now lives in the replacement browser; never replay it twice.
+    await clearPausedState({ taskId });
+    await announceBrowserSessionBinding({ id: taskId });
+
+    const savedUrl = old.currentUrl || old.startUrl || undefined;
+    if (savedUrl) {
+      try {
+        const context = remote.browser.contexts()[0];
+        const page = context.pages()[0] ?? (await context.newPage());
+        await page.goto(savedUrl, { waitUntil: 'domcontentloaded', timeout: 10_000 });
+      } catch (error) {
+        // The row is committed; the worker can navigate after attaching.
+        log.warn('Tilion replacement could not restore saved URL', {
+          taskId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    handedOff = true;
+    return {
+      ...(options.keepValidationConnection ? { validationBrowser: remote.browser } : {}),
+      provider: 'tilion',
+      debugUrl: remote.debugUrl,
+      sessionId: remote.sessionId,
+      wsUrl: remote.wsUrl,
+      savedUrl,
+      proxySource: remote.proxySource,
+      proxyLocation: remote.proxyLocation,
+      profileId: null,
+      profileSource: state !== null ? 'tilion_carried_state' : 'tilion_ephemeral',
+      previousSessionId: old.sessionId,
+      previousProvider,
+    };
+  } catch (error) {
+    await releaseTilionRemoteSession(remote.sessionId).catch(() => {});
+    throw error;
+  } finally {
+    if (!options.keepValidationConnection || !handedOff)
+      await remote.browser.close().catch(() => {});
+  }
+}
+
+/**
+ * Resume the task's browser on Tilion. A still-live Tilion session (deploy
+ * drain) is reattached in place and returned with `previousSessionId ===
+ * sessionId`; otherwise a replacement carries the previous browser state and
+ * saved URL. The caller releases a superseded previous session.
+ */
 export async function resumeTilionSession(
-  _taskId: string,
-  _options: { forceFreshProfile?: boolean; keepValidationConnection?: boolean } = {}
+  taskId: string,
+  options: {
+    forceFreshProfile?: boolean;
+    keepValidationConnection?: boolean;
+    /** Worker-captured cookies/localStorage/IndexedDB (Playwright storageState shape). */
+    carriedState?: StorageState;
+  } = {}
 ): Promise<TilionReplacementSession> {
-  return notImplemented('resumeTilionSession');
+  return replaceSession(taskId, options);
 }
 
-/** Rotation step on Tilion: fresh exit of the requested proxy type, browser state preserved. */
+/**
+ * Rotation step on Tilion: a replacement session on a fresh exit of the
+ * requested type (residential → new residential exit in another state, mobile
+ * → `proxy_type: mobile`), browser state carried, proxy tier persisted. Same
+ * return semantics as rotateKernelSession plus the previous binding.
+ */
 export async function rotateTilionSession(
-  _taskId: string,
-  _proxyType: KernelProxyType,
-  _options: { keepValidationConnection?: boolean } = {}
+  taskId: string,
+  proxyType: KernelProxyType,
+  options: { keepValidationConnection?: boolean; carriedState?: StorageState } = {}
 ): Promise<TilionReplacementSession> {
-  return notImplemented('rotateTilionSession');
+  const rotateTo = tilionProxyType(proxyType);
+  if (rotateTo === 'residential') {
+    const inPlace = await rotateInPlace(taskId);
+    if (inPlace !== null) return inPlace;
+  }
+  return replaceSession(taskId, { ...options, rotateTo });
 }
 
-export async function getTilionSessionHealth(_sessionId: string): Promise<BrowserSessionHealth> {
-  return notImplemented('getTilionSessionHealth');
-}
-
-export async function getTilionCaptchaTelemetry(
-  _sessionId: string
-): Promise<BrowserCaptchaTelemetry> {
-  return notImplemented('getTilionCaptchaTelemetry');
-}
-
-/** Fresh interactive live-view URL (mints a new view token; tokens last 1800 s). */
-export async function getTilionLiveViewUrl(_sessionId: string): Promise<string> {
-  return notImplemented('getTilionLiveViewUrl');
-}
-
-export async function pressTilionKeys(_sessionId: string, _keys: string[]): Promise<void> {
-  notImplemented('pressTilionKeys');
-}
-
-export async function captureTilionScreenshot(_sessionId: string): Promise<Buffer> {
-  return notImplemented('captureTilionScreenshot');
-}
-
-export async function listTilionSessionFiles(_sessionId: string): Promise<BrowserFileInfo[]> {
-  return notImplemented('listTilionSessionFiles');
-}
-
-export async function readTilionSessionFile(_sessionId: string, _path: string): Promise<Buffer> {
-  return notImplemented('readTilionSessionFile');
-}
-
-export async function uploadTilionSessionFile(
-  _sessionId: string,
-  _content: Buffer,
-  _filename: string,
-  _mimeType: string,
-  _options: { directory?: string } = {}
-): Promise<{ path: string; size: number }> {
-  return notImplemented('uploadTilionSessionFile');
-}
+// ── account listing ──────────────────────────────────────────────────────────
 
 /** Live Tilion session ids for this API key (account-wide; never implies ownership). */
 export async function listLiveTilionSessionIds(): Promise<string[]> {
-  return notImplemented('listLiveTilionSessionIds');
+  const sessions = await tilionRequest<TilionSessionRecord[]>('/v1/sessions', {
+    retryOnTimeout: true,
+  });
+  return (sessions ?? []).map((session) => session.session_id).filter(Boolean);
+}
+
+export function isTilionSessionEndedError(error: unknown): boolean {
+  return error instanceof TilionApiError && (error.status === 404 || error.status === 410);
 }

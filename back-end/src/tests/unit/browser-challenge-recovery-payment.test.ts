@@ -30,6 +30,8 @@ function testTransportFailureTriesAlternateProviderBeforeSameProviderTiers(): vo
       // The raw catalog includes Browser Use; production drops it while the
       // rollout flag is off (availableBrowserRecoveryCandidates).
       'browser_use_residential_country',
+      'tilion_residential',
+      'tilion_mobile',
       ...configs.filter((config) => config.provider === 'kernel').map((config) => config.key),
     ]
   );

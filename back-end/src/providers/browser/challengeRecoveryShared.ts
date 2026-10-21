@@ -40,6 +40,11 @@ export function recoveryConfigKeyForSession(
       ? 'browser_use_residential_country'
       : undefined;
   }
+  if ((provider || '').toLowerCase() === 'tilion') {
+    if (tier.startsWith('mobile')) return 'tilion_mobile';
+    if (tier === '' || tier.startsWith('residential')) return 'tilion_residential';
+    return undefined;
+  }
   if ((provider || '').toLowerCase() === 'steel') {
     if (tier === 'fixed') return 'steel_fixed';
     if (tier === 'managed' || tier === '') return 'steel_managed';

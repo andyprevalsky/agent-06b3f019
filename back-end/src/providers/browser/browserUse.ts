@@ -13,6 +13,8 @@ import { getProviderProfile, rememberProviderProfile } from './context';
 import { persistBrowserSessionRow } from './sessionPersist';
 import { announceBrowserSessionBinding } from './sessionBindingAnnounce';
 import {
+  storedBrowserProvider,
+  type BrowserProviderName,
   type BrowserProviderResumeSession,
   type BrowserProviderSession,
   type BrowserSessionHealth,
@@ -363,7 +365,7 @@ async function replaceSession(
 ): Promise<
   BrowserProviderResumeSession & {
     previousSessionId: string;
-    previousProvider: 'browser-use' | 'kernel' | 'steel';
+    previousProvider: BrowserProviderName;
   }
 > {
   const old = await prisma.browserSession.findUniqueOrThrow({
@@ -438,8 +440,8 @@ async function replaceSession(
       profileId: profile.id,
       profileSource: profile.source,
       previousSessionId: old.sessionId,
-      previousProvider:
-        old.provider === 'kernel' ? 'kernel' : old.provider === 'steel' ? 'steel' : 'browser-use',
+      // Released through this provider: keep Tilion/Kernel/Steel predecessors' own name.
+      previousProvider: storedBrowserProvider(old.provider),
     };
   } catch (error) {
     await releaseBrowserUseRemoteSession(session.id).catch(() => {});

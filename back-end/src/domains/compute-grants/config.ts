@@ -41,12 +41,12 @@ export function credentialPublicKeyPem(): string {
 /**
  * Which remote-browser provider the compute-grants domain uses.
  *
- * Kernel is the default; Steel and Browser Use remain selectable via
+ * Kernel is the default; Steel, Browser Use and Tilion remain selectable via
  * COMPUTE_GRANT_BROWSER_PROVIDER so a provider outage cannot block account
  * connect or grant recovery -- the two paths whose failure silently pushes every
  * request onto paid models.
  */
-export function computeGrantBrowserProvider(): 'kernel' | 'steel' | 'browser-use' {
+export function computeGrantBrowserProvider(): 'kernel' | 'steel' | 'browser-use' | 'tilion' {
   const configured = process.env.COMPUTE_GRANT_BROWSER_PROVIDER?.trim();
   const selected = configured === undefined || configured === '' ? 'kernel' : configured;
   // Domain config cannot import the browser provider layer. Match its rollout
@@ -57,7 +57,20 @@ export function computeGrantBrowserProvider(): 'kernel' | 'steel' | 'browser-use
   if (selected === 'browser-use' && !browserUseEnabled) {
     return 'kernel';
   }
-  if (selected === 'kernel' || selected === 'steel' || selected === 'browser-use') return selected;
+  // Same parser as BROWSER_AGENT_TILION_ENABLED in providers/browser/config.ts.
+  const tilionFlag = process.env.BROWSER_AGENT_TILION_ENABLED;
+  const tilionEnabled =
+    tilionFlag === undefined ||
+    !['0', 'false', 'no', 'off', 'disabled'].includes(tilionFlag.trim().toLowerCase());
+  if (selected === 'tilion' && !tilionEnabled) return 'kernel';
+  if (
+    selected === 'kernel' ||
+    selected === 'steel' ||
+    selected === 'browser-use' ||
+    selected === 'tilion'
+  ) {
+    return selected;
+  }
   throw new Error(`Unsupported COMPUTE_GRANT_BROWSER_PROVIDER=${selected}`);
 }
 

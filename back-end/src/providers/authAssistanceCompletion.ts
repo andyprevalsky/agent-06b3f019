@@ -186,7 +186,8 @@ export async function completeAuthAssistanceForUser(
         liveViewSteelContextId = steelContextId;
       } else if (
         liveViewSession.provider !== 'kernel' &&
-        liveViewSession.provider !== 'browser-use'
+        liveViewSession.provider !== 'browser-use' &&
+        liveViewSession.provider !== 'tilion'
       ) {
         return {
           status: 'missing_steel_context' as const,

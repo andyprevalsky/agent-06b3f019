@@ -14,6 +14,7 @@
 import assert from 'node:assert/strict';
 
 import { createStreamingCompletion } from '../../providers/rose';
+import { FOUNDRY_REGION_ENV_NAMES } from '../../providers/rose/foundry';
 import { buildOpenRouterBody } from '../../providers/rose/waterfall';
 import { applyAnthropicToolConfig, withNativeToolContract } from '../../providers/rose/transforms';
 import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
@@ -221,9 +222,9 @@ async function main(): Promise<void> {
   await verifyExclusiveOpenRouterTools();
   const originalFetch = globalThis.fetch;
   const envKeys = [
-    'AZURE_FOUNDRY_ENDPOINT',
-    'AZURE_FOUNDRY_API_KEY',
-    'AZURE_FOUNDRY_DEPLOYMENTS',
+    ...FOUNDRY_REGION_ENV_NAMES,
+    'COMPUTE_TOKEN_AUTHORITY_URL',
+    'COMPUTE_TOKEN_AUTHORITY_API_KEY',
     'GPT_API_KEY',
     'ANTHROPIC_API_KEY',
     'OPENROUTER_API_KEY',
@@ -233,12 +234,19 @@ async function main(): Promise<void> {
   for (const key of envKeys) delete process.env[key];
 
   try {
+    process.env.COMPUTE_TOKEN_AUTHORITY_URL = 'https://authority.example.test';
+    process.env.COMPUTE_TOKEN_AUTHORITY_API_KEY = 'fixture';
     // Responses leg (Foundry serves GPT-6 Sol for ultra without a token).
     process.env.AZURE_FOUNDRY_ENDPOINT = 'https://a-4989-resource.openai.azure.com';
     process.env.AZURE_FOUNDRY_API_KEY = 'test-key';
     process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol';
     let responsesBody: Record<string, unknown> | null = null;
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).startsWith('https://authority.example.test/')) {
+        return Response.json(
+          String(input).includes('/cooldown?') ? { cooldowns: {} } : { reset: true }
+        );
+      }
       assert.equal(String(input), FOUNDRY_URL);
       responsesBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
       return new Response(responsesFunctionCall('call_sol', 'grep', '{"pattern":"passport"}'));

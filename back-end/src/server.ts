@@ -657,7 +657,12 @@ attachHoldStreamServer(server);
 const shutdown = async (signal: string) => {
   log.info(`${signal} received, closing server...`);
   // Remote browsers bill until released and are tracked in memory, so exiting
-  // without this strands every in-flight connect session.
+  // without this strands every in-flight connect session (every provider,
+  // Tilion included: release is a provider-bound closure). Agent browser
+  // sessions are deliberately NOT closed here: a deploy drain resumes the same
+  // session, and terminal/orphaned rows are released by the per-minute
+  // terminal-browser reconcile and its owned-only Tilion reaper. Tilion keeps
+  // no benchmark profiles, so it has no profile cleanup step below.
   await releaseAllConnectSessions().catch((err: unknown) => {
     log.warn('connect_session_cleanup_failed', {
       error: err instanceof Error ? err.message : String(err),

@@ -40,7 +40,7 @@ import {
 import { closeSessionSchema, injectLocalStorageSchema } from './types';
 import { registerBrowserInitRoute } from './routes.init';
 import { registerBrowserCredentialRoutes } from './routes.credentials';
-import { registerBrowserDataRoutes } from './routes.files';
+import { registerBrowserDataRoutes, respondToTilionRefusal } from './routes.files';
 import { registerBrowserRotationRoute } from './routes.rotation';
 import { registerBrowserControlRoutes } from './routes.control';
 import { registerBrowserResumeRoute } from './routes.resume';
@@ -272,6 +272,7 @@ router.post(
 
       res.json({ success: true, ...result });
     } catch (error) {
+      if (respondToTilionRefusal(error, res)) return;
       log.error('Failed to upload file to session', { error: String(error) });
       res.status(500).json({
         error: error instanceof Error ? error.message : 'Failed to upload file to session',
@@ -296,6 +297,7 @@ router.get(
 
       res.json({ success: true, ...result });
     } catch (error) {
+      if (respondToTilionRefusal(error, res)) return;
       log.error('Failed to list session files', { error: String(error) });
       res.status(500).json({
         error: error instanceof Error ? error.message : 'Failed to list session files',
