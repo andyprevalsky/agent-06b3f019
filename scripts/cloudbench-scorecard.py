@@ -17,6 +17,9 @@ invented number. Stdlib only, so it runs from a scripts-only checkout.
 from __future__ import annotations
 
 import argparse
+import runpy
+import hashlib
+import os
 import html
 import json
 import math
@@ -347,6 +350,7 @@ def finish_experiment(exp: dict) -> dict:
     # Live-counter rows carry no task or job identity: count them, never invent a name.
     unknown = [r for r in rows if classify(r) == "UNKNOWN"]
     unreleased = [r for r in rows if started_terminal(r) and r.get("released") is False]
+    exp["infra_unreconciled"] = not exp.get("recovered_provenance") and not exp.get("infra_jobs") and bool(unknown or states["CANCELLED"]) and not exp.get("cancelled_before_release")
     exp["unknown_count"], exp["unknown_jobs"] = len(unknown), job_names(unknown)
     exp["unreleased_count"], exp["unreleased_jobs"] = len(unreleased), job_names(unreleased)
     return exp
@@ -720,9 +724,21 @@ def load(run_dir: Path, deep: bool = True) -> dict:
 # ------------------------------------------------------------- whole card
 
 def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None, agents=None, issues=None,
-          now: float | None = None, deep: bool = True) -> dict:
+          now: float | None = None, deep: bool = True, recovered_results: Path | None = None, recovered_sha256: str | None = None) -> dict:
     now = time.time() if now is None else now
-    exp = load(run_dir, deep)
+    exp = load(run_dir, deep if recovered_results is None else False)
+    if recovered_results is not None:
+        raw = Path(recovered_results).read_bytes()
+        if hashlib.sha256(raw).hexdigest() != recovered_sha256:
+            raise ValueError("recovered results: sidecar hash differs")
+        recovery = runpy.run_path(str(HERE / "cloudbench-recovered-results.py"))
+        rows, provenance = recovery["rows"](json.loads(raw), run_dir)
+        exp["original_observation"] = {k: exp.get(k) for k in ("outcomes", "rows_source", "progress", "cost")}
+        exp["recovered_provenance"] = provenance
+        exp["rows"] = rows
+        exp["rows_source"] = "hash-bound recovered classifications (job + Hub snapshots + accepted grades)"
+        exp["recovery_sha256"] = recovered_sha256
+        exp = finish_experiment(exp)
     entries = ledger_mod.read(ledger)
     every = ledger_mod.experiments(entries)
     mine = next((e for e in every if e["id"] == exp["id"] or e.get("run_dir") == exp["run_dir"]), None)
@@ -786,7 +802,7 @@ def _history_row(exp: dict) -> dict:
     keys = ("number", "id", "label", "state", "state_reason", "triggered_at", "ended_at", "scheduled_total",
             "progress", "outcomes", "scored", "terminal_attempts", "infra_attempts", "infra_jobs", "cost",
             "harness_classified", "released", "rows_source", "end_evidence", "cancelled_before_release",
-            "never_started")
+            "never_started", "infra_unreconciled")
     return {k: exp.get(k) for k in keys}
 
 
@@ -996,8 +1012,8 @@ def render_html(card: dict) -> str:
         if category == "HARNESS":
             legend.append(f'<span class="{harness_cls}">■ HARNESS FAILURE {e(harness_text)}</span>')
             continue
-        value = f"{count} · {pct(count, total)}" if o and total else "UNMEASURED"
-        cls = "warn" if not o else "ok" if category == "INFRA" and not count else CATEGORY_CLASS[category]
+        value = "UNRECONCILED" if category == "INFRA" and exp.get("infra_unreconciled") else f"{count} · {pct(count, total)}" if o and total else "UNMEASURED"
+        cls = "warn" if not o or (category == "INFRA" and exp.get("infra_unreconciled")) else "ok" if category == "INFRA" and not count else CATEGORY_CLASS[category]
         legend.append(f'<span class="{cls}">■ {labels.get(category, category)} {e(value)}</span>')
     pending = (progress["queued"] + progress["in_progress"] + progress["unobserved"]) if progress else 0
     if pending:
@@ -1008,6 +1024,8 @@ def render_html(card: dict) -> str:
                  f"Stop at {threshold}/{total} unique infra-failed jobs (5% of scheduled)." if threshold
                  else "Stop at 5% of the original scheduled total; scheduled total UNRECORDED.")
     source = f' Source: {e(exp["rows_source"])}.' if exp.get("rows_source") else ""
+    if exp.get("recovery_sha256"):
+        source += f' Recovery SHA256: {e(exp["recovery_sha256"])}; original observations retained in JSON.'
     out.append(f'<section data-section="outcomes"><h2>Outcomes</h2>{_bar(o, total)}'
                f'<div class="legend">{"".join(legend)}</div><div class="note">{e(stop_note)}{source}</div></section>')
     # Failure causes
@@ -1120,7 +1138,7 @@ def _history_html(card) -> str:
             scored = h.get("scored") or 0
             attempts = h.get("terminal_attempts") or 0
             pass_text = f'PASS {o["PASS"]}/{scored} ({pct(o["PASS"], scored)})' if scored else "NO SCORED TASKS"
-            infra_text = (f'INFRA {h.get("infra_attempts") or 0}/{attempts}' if attempts else "NO TERMINAL ATTEMPTS")
+            infra_text = ("INFRA UNRECONCILED" if h.get("infra_unreconciled") else f'INFRA {h.get("infra_attempts") or 0}/{attempts}' if attempts else "NO TERMINAL ATTEMPTS")
             harness = "HARNESS " + (str(o["HARNESS"]) if o["HARNESS"] or h.get("harness_classified") else "UNCLASSIFIED")
             extra = [f"{c.lower()} {o[c]}" for c in ("AGENT FAIL", "UNKNOWN", "CANCELLED", "SKIPPED") if o.get(c)]
             if h.get("cancelled_before_release"):
@@ -1167,7 +1185,8 @@ def render_text(card: dict) -> str:
                  if prog else "QUEUED / IN_PROGRESS / COMPLETED UNMEASURED")
     harness, _ = _harness(exp)
     if o:
-        lines.append(f'PASS {o["PASS"]} · HARNESS FAILURE {harness} · INFRA FAILURE {o["INFRA"]}')
+        infra = "UNRECONCILED" if exp.get("infra_unreconciled") else str(o["INFRA"])
+        lines.append(f'PASS {o["PASS"]} · HARNESS FAILURE {harness} · INFRA FAILURE {infra}')
         extra = [f'{"AGENT FAILURE" if c == "AGENT FAIL" else c} {o[c]}' for c in ("AGENT FAIL", "UNKNOWN", "CANCELLED", "SKIPPED") if o.get(c)]
         if extra:
             lines.append(" · ".join(extra))
@@ -1196,7 +1215,7 @@ def render_text(card: dict) -> str:
                      f'{pacific(h.get("triggered_at"))} → '
                      + ("RUNNING" if h["state"] == "RUNNING" and not h.get("ended_at") else pacific(h["ended_at"], date=False) if h.get("ended_at") else "END UNRECORDED")
                      + ((f' · PASS {ho.get("PASS")}/{h.get("scored")}' if h.get("scored") else " · NO SCORED TASKS")
-                        + (f' · INFRA {h.get("infra_attempts")}/{h.get("terminal_attempts")}' if h.get("terminal_attempts") else " · NO TERMINAL ATTEMPTS")
+                        + (" · INFRA UNRECONCILED" if h.get("infra_unreconciled") else f' · INFRA {h.get("infra_attempts")}/{h.get("terminal_attempts")}' if h.get("terminal_attempts") else " · NO TERMINAL ATTEMPTS")
                         + (f' · {ho["CANCELLED"]} cancelled' if ho.get("CANCELLED") else "")
                         + (f' · {h["scheduled_total"]} never started' if h.get("never_started") else "") if ho else " · UNMEASURED"))
     lines.append("ACTIVE SUB-AGENTS / PARENT")
@@ -1309,6 +1328,13 @@ def main(argv=None) -> int:
     parser.add_argument("--goal", help="experiment goal for numbering and history")
     parser.add_argument("--now", type=float, help=argparse.SUPPRESS)
     parser.add_argument("--shallow", action="store_true", help="skip reading verified export archives")
+    parser.add_argument("--recovered-results", type=Path, help="hash-bound recovered classification sidecar")
+    parser.add_argument("--recovered-sha256", help="expected SHA256 of the recovery sidecar")
+    parser.add_argument("--write-recovered-results", type=Path, help="validate and create a recovery sidecar; never changes run receipts")
+    parser.add_argument("--results-csv", type=Path)
+    parser.add_argument("--accepted-grades", type=Path)
+    parser.add_argument("--recovery-jobs", type=Path)
+    parser.add_argument("--recovery-hub", type=Path)
     parser.add_argument("--validate", type=Path, metavar="HTML", help="check a card against FORMAT v8")
     parser.add_argument("--instruction", type=Path, metavar="RUN_DIR", help="print the mandatory reporting instruction")
     args = parser.parse_args(argv)
@@ -1324,11 +1350,28 @@ def main(argv=None) -> int:
         return 0 if not problems else 1
     if args.run_dir is None or not args.run_dir.is_dir():
         parser.error("an existing <run-dir> is required")
+    if args.write_recovered_results:
+        if args.run_dir.resolve() in args.write_recovered_results.resolve().parents:
+            parser.error("recovery sidecar must be outside the original run; receipts are read-only")
+        if not all((args.results_csv, args.accepted_grades, args.recovery_jobs, args.recovery_hub)):
+            parser.error("recovery import requires results CSV, accepted grades, jobs and Hub snapshots")
+        recovery = runpy.run_path(str(HERE / "cloudbench-recovered-results.py"))
+        value = recovery["prepare"](args.run_dir, args.results_csv, args.accepted_grades, args.recovery_jobs, args.recovery_hub)
+        raw = (json.dumps(value, sort_keys=True, indent=2) + "\n").encode()
+        with os.fdopen(os.open(args.write_recovered_results, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as output:
+            output.write(raw)
+        print(json.dumps({"recovered_results": str(args.write_recovered_results), "sha256": hashlib.sha256(raw).hexdigest()}))
+        return 0
+    if any((args.results_csv, args.accepted_grades, args.recovery_jobs, args.recovery_hub)):
+        parser.error("recovery source arguments require --write-recovered-results")
+    if bool(args.recovered_results) != bool(args.recovered_sha256):
+        parser.error("--recovered-results requires --recovered-sha256")
     agents = read_json(args.agents) if args.agents else None
     issues = read_json(args.issues) if args.issues else None
     card = build(args.run_dir, ledger=args.ledger or ledger_mod.ledger_path(HERE.parent), goal=args.goal,
                  agents=agents if isinstance(agents, list) else None,
-                 issues=issues if isinstance(issues, list) else None, now=args.now, deep=not args.shallow)
+                 issues=issues if isinstance(issues, list) else None, now=args.now, deep=not args.shallow,
+                 recovered_results=args.recovered_results, recovered_sha256=args.recovered_sha256)
     if args.html:
         document = render_html(card)
         problems = validate_html(document)

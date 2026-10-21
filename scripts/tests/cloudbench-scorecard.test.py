@@ -317,6 +317,86 @@ class Scorecard(unittest.TestCase):
         (admission / "shard-02/run/global-abort.json").unlink()
         self.assertIsNone(render(admission, self.f)["experiment"]["progress"], "undelivered abort is not proof")
 
+    def test_unresolved_infra_never_renders_a_green_zero(self):
+        admission = self.f.sharded(live=True)
+        status = admission / "shard-01/run/shard-status.json"
+        value = json.loads(status.read_text())
+        value["infra"]["progress"]["combos"] = [["failed", None, None, 2]]
+        write(status, value)
+        data = render(admission, self.f)
+        self.assertIn("INFRA FAILURE UNRECONCILED", CARD["render_text"](data))
+        self.assertIn('class="warn">■ INFRA FAILURE UNRECONCILED', self.valid(data))
+
+    def test_recovered_results_bind_all_sixty_jobs_and_preserve_accepted_grades(self):
+        import csv
+        import copy
+        import hashlib
+        recovery = runpy.run_path(str(ROOT / "scripts/cloudbench-recovered-results.py"))
+        run = self.tmp / "recovered-run"
+        group_id, source = "original-group", "a" * 40
+        tasks = ["task-" + str(i) for i in range(20)]
+        members, results, jobs, hubs = [], [], [], []
+        accepted = {t: {"benchmark": t} for t in tasks}
+        for k in range(1, 4):
+            for i, task in enumerate(tasks):
+                n = (k - 1) * 20 + i
+                jid = f"r{k:03d}-j{n+1:04d}"
+                verdict = "PASS" if n < 10 else "FAIL" if n < 57 else "INFRA"
+                fleet = f"20261020-043621-{1000+n}"
+                hub = fleet + "-m123456789012"
+                agent = "agent-" + str(n) if verdict != "INFRA" else ""
+                members.append(dict(name=task, run_number=k, member_id=jid))
+                results.append(dict(task=task, K=k, job_id=jid, verdict=verdict, controller="c"+str(i%2),
+                                    fleet_run=fleet, hub_run_id=hub, agent_id=agent, failure_reason="recorded infra" if verdict=="INFRA" else "",
+                                    cost_usd="0.1" if agent else "", duration_s="1" if agent else ""))
+                jobs.append(dict(task=task, run=k, job=jid, machine="c"+str(i%2), run_id=fleet,
+                                 task_status="PASSED" if verdict=="PASS" else "FAILED" if verdict=="FAIL" else None,
+                                 status="passed" if verdict=="PASS" else "failed", attempts=1, wall=2, released=bool(agent)))
+                hubs.append(dict(run_id=hub, name=task, agent_id=agent or None,
+                                 status="passed" if verdict=="PASS" else "failed" if verdict=="FAIL" else "INFRA_ERROR",
+                                 passed=None if verdict=="INFRA" else verdict=="PASS"))
+                accepted[task]["K"+str(k)] = verdict if verdict!="INFRA" else "UNGRADED"
+        write(run/'coordination.json', dict(controllers=2, scheduled_total=60, finished_at=T0+2000,
+              shards={str(i): dict(out=str(run/f"shard-{i:02d}/run")) for i in range(2)}))
+        write(run/'hub-group/hub-group.json', dict(run_id=group_id, run_group=dict(members=members)))
+        write(run/'shards.private.json', {})
+        for i in range(2):
+            write(run/f'shard-{i:02d}/attempt-start.safe.json', dict(source_ref=source))
+            write(run/f'shard-{i:02d}/config.private.json', dict(source_ref=source, shard=dict(group_run_id=group_id,tasks=tasks[i::2])))
+            write(run/f'shard-{i:02d}/run/export/launch.json', dict(source_ref=source,machine_id='c'+str(i)))
+        def csvfile(name, data):
+            path=self.tmp/name
+            with path.open('w',newline='') as f:
+                writer=csv.DictWriter(f,fieldnames=list(data[0]));writer.writeheader();writer.writerows(data)
+            return path
+        result_path=csvfile('results.csv',results)
+        grades_path=csvfile('accepted.csv',list(accepted.values()))
+        jobs_path=write(self.tmp/'jobs.jsonl','\n'.join(json.dumps(j) for j in jobs))
+        hub_path=write(self.tmp/'hub.json',hubs)
+        sidecar=recovery['prepare'](run,result_path,grades_path,jobs_path,hub_path)
+        path=write(self.tmp/'recovered.json',sidecar)
+        sha=hashlib.sha256(path.read_bytes()).hexdigest()
+        data=CARD['build'](run,ledger=self.f.ledger,deep=False,recovered_results=path,recovered_sha256=sha)
+        exp=data['experiment']
+        self.assertEqual([exp['outcomes'][c] for c in ('PASS','AGENT FAIL','INFRA')],[10,47,3])
+        self.assertEqual(exp['ended_at'],T0+2000)
+        self.assertEqual(len(exp['recovered_provenance']['observations']),60)
+        self.assertFalse((run/'result.json').exists())
+        self.assertIn('INFRA FAILURE 3',CARD['render_text'](data))
+        self.assertIn('Recovery SHA256',self.valid(data))
+        with self.assertRaisesRegex(ValueError,'sidecar hash'):
+            CARD['build'](run,recovered_results=path,recovered_sha256='0'*64)
+        bad=copy.deepcopy(sidecar);bad['run_id']='wrong'
+        with self.assertRaisesRegex(ValueError,'wrong run'):recovery['rows'](bad,run)
+        csvfile('results.csv',results+[results[0]])
+        with self.assertRaisesRegex(ValueError,'source hash'):recovery['rows'](sidecar,run)
+        bad=copy.deepcopy(sidecar);bad['inputs']['results']=recovery['descriptor'](result_path)
+        with self.assertRaisesRegex(ValueError,'duplicate'):recovery['rows'](bad,run)
+        csvfile('results.csv',results)
+        accepted[tasks[19]]['K3']='FAIL';csvfile('accepted.csv',list(accepted.values()))
+        bad=copy.deepcopy(sidecar);bad['inputs']['accepted']=recovery['descriptor'](grades_path)
+        with self.assertRaisesRegex(ValueError,'accepted grade conflict'):recovery['rows'](bad,run)
+
     def test_headline_progress_precedes_exact_failure_counts(self):
         data = render(self.f.campaign(), self.f)
         document = self.valid(data)

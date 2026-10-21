@@ -79,3 +79,36 @@ zero elapsed time remains explicitly unmeasured. User instruction and
 .claude/shared/report-display-format.md are the authoritative display contract.
 Golden text fixtures and HTML-order, count, numeric-rate and zero-time tests
 cover the repair. No receipt, outcome or producer timestamp is changed.
+
+## Recovered classification reconciliation
+
+Parent identified a second independent reporting defect: both shallow counters
+and verified exports retained 10 PASS / 47 agent failures / 0 infrastructure
+failures / 2 cancellations / 1 unknown, while the original batch CSV and saved
+Hub/job investigation recorded 10 / 47 / 3. Rendering green INFRA 0 was false
+confidence. Existing terminal recovery only retrieves/releases controller
+exports; the normal join path writes result.json, and no importer existed for
+subsequently reconciled classifications.
+
+The scorecard now supports an explicit SHA256-bound recovered-results sidecar.
+It never writes result.json or changes source receipts. The sidecar seals the
+original run path/id, original source/config/group/launch/terminal evidence,
+60 exact task/K/job memberships, and hashes of CSV, accepted-grade CSV, job
+snapshot and Hub snapshot. Read validates every source hash, unique complete
+membership, controller/fleet/Hub/agent identities, Hub verdict and accepted
+grade. Infrastructure may fill only an UNGRADED slot; a recorded PASS/FAIL is
+never overridden. Both observations survive in normalized JSON and rendered
+provenance names the recovery hash. Unknowns without a bound reconciliation
+render INFRA UNRECONCILED, not a green zero. Positive known infra counts remain
+visible.
+
+The new test first failed against the old renderer with INFRA FAILURE 0 where
+UNRECONCILED was required. Tests now cover 60 records at the observed 10/47/3
+counts, the original end clock, no result.json creation, duplicate/missing
+membership, wrong run, source-hash drift and accepted-grade conflict. All run
+through the existing scorecard suite. Native saved Hub entries for r001-j0003,
+r002-j0026 and r003-j0054 are INFRA_ERROR, with no accepted grade; the 57 other
+accepted grades agree. This restores classifications, not agent outcomes, and
+runs no provider/LLM request. Preparation and rendering commands plus sealed
+hashes are in the lane's BATCH2-LAUNCH.md handoff. At 10k jobs validation is a
+linear local join using keyed identities, no provider requests or shared state.

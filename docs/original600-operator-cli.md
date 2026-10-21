@@ -674,3 +674,37 @@ Unselected credentials and unrelated Fly config metadata do not invalidate a
 waiting check. A change to the selected credential, environment files, source
 or owner still refuses reuse. A private `identity-mismatch-*.json` receipt records
 the differing field names and hashed bindings, without token or config contents.
+
+
+### Recovered classifications without rewriting terminal receipts
+
+When verified exports still contain stale unknown/cancelled observations, the
+scorecard can consume a separately sealed reconciliation. This never writes
+`result.json` or changes accepted grades. Keep the sidecar outside the original
+run directory. Supply the original per-task/K results CSV, cumulative accepted
+grades CSV, raw job JSONL and raw Hub-row JSON captured for the same run:
+
+```bash
+scripts/run-bench scorecard "$ORIGINAL_RUN" \
+  --write-recovered-results "$SIDECAR" \
+  --results-csv "$RESULTS_CSV" --accepted-grades "$ACCEPTED_CSV" \
+  --recovery-jobs "$JOBS_JSONL" --recovery-hub "$HUB_ROWS_JSON"
+```
+
+The command prints the sidecar SHA256. Use that exact value on every read:
+
+```bash
+scripts/run-bench scorecard "$ORIGINAL_RUN" \
+  --recovered-results "$SIDECAR" --recovered-sha256 "$SIDECAR_SHA256" \
+  --html "$CARD_HTML" --json
+```
+
+Preparation and consumption validate complete unique task/K/job membership,
+original source/controller/group bindings, source-file hashes, fleet/Hub/agent
+identities and accepted PASS/FAIL grades. An INFRA classification requires a
+matching Hub INFRA_ERROR and an UNGRADED accepted slot. Any mismatch fails
+closed. Input updates require a newly validated sidecar and new hash; never
+change an old hash to mask a discrepancy. The normalized output retains the
+original observations alongside the recovered classifications and provenance.
+Without valid reconciliation, unresolved jobs cannot establish a green INFRA
+zero. This import performs no provider calls and is not a benchmark rerun.
