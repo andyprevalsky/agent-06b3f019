@@ -116,7 +116,7 @@ export function RoseAppPanelDrawer() {
         <>
           <div
             data-testid="rose-app-panel-header"
-            className="flex h-14 flex-none items-center border-b border-gray-200/90 px-[18px] pr-12 text-sm dark:border-white/[0.07] md:pr-56"
+            className="flex h-[56px] flex-none items-center border-b border-gray-200/90 px-[18px] pr-12 text-sm dark:border-white/[0.07] md:pr-56"
           >
             <b className="font-semibold">{meta.title}</b>
           </div>
