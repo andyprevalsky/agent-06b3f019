@@ -45,6 +45,7 @@ import {
   recordE2bCodeSessionSandbox,
 } from '../../providers/e2bCodeSessionSandbox';
 import { writeUserUiWorkspaceToSandbox } from '../../providers/userUi/workspace';
+import { assertResizeMigrationIsolation } from './code-session-resize-migration.cases';
 
 config();
 
@@ -277,6 +278,11 @@ after(async () => {
   rmSync(fixtureDir, { recursive: true, force: true });
   await prisma.$disconnect();
 });
+
+test(
+  'resize migration keeps bookkeeping private from client roles',
+  assertResizeMigrationIsolation
+);
 
 test('resize round trip: new sandbox from the size template keeps branch, files and conversation; retry is idempotent', async () => {
   const homeA = join(fixtureDir, 'home-a');

@@ -34,3 +34,5 @@ CREATE TABLE "CodeSessionResize" (
 -- CreateIndex
 CREATE INDEX "CodeSessionResize_codeSessionId_requestedAt_idx" ON "CodeSessionResize"("codeSessionId", "requestedAt" DESC);
 
+-- Backend-only bookkeeping: authenticated API owns reads and writes.
+ALTER TABLE "CodeSessionResize" ENABLE ROW LEVEL SECURITY;
