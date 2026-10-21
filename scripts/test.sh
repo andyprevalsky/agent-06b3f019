@@ -378,7 +378,7 @@ run_suite "Blackbox Backend Teardown" bash scripts/tests/blackbox-backend-teardo
 run_suite "Agent Workflow Surface Hash" bash scripts/tests/agent-surface-hash.test.sh
 run_suite "Fly Cutover Clone Recovery" bash scripts/tests/deploy-agent-clone-recovery.test.sh
 run_suite "Mac App Release Drift" bash scripts/tests/mac-app-release-drift.test.sh
-if auto_rca_changed '^(scripts/(run\.sh|run-in-new-session\.py|run-bench|run-bench-cloud|run-bench-fleet|run-predeploy-(cloud|local)|create-worktree-patch\.sh|cloudbench-|lib/cloudbench-|tests/cloudbench-)|agents/benchmarks/(cloud_batch_cleanup_test|cloudbench_(dependency_sync|recovery_review|codex_auth)_test|run_benchmark|wall_clock_backstop_test)\.py)'; then
+if auto_rca_changed '^(scripts/(run\.sh|run-in-new-session\.py|run-bench|run-bench-cloud|run-bench-fleet|run-cloudbench-controller-gate|run-predeploy-(cloud|local)|create-worktree-patch\.sh|cloudbench-|lib/cloudbench-|tests/cloudbench-)|agents/benchmarks/(cloud_batch_cleanup_test|cloudbench_(dependency_sync|recovery_review|codex_auth)_test|run_benchmark|wall_clock_backstop_test)\.py)'; then
   run_suite "Cloud Benchmark Environment" bash scripts/tests/cloudbench-env.test.sh
   run_suite "Cloud Benchmark Controller GitHub Token" bash scripts/tests/cloudbench-controller-github-token.test.sh
   run_suite "Cloud Benchmark Mandatory Autoscale" bash scripts/tests/cloudbench-acceptance-autoscale.test.sh
@@ -396,6 +396,7 @@ if auto_rca_changed '^(scripts/(run\.sh|run-in-new-session\.py|run-bench|run-ben
   run_suite "Cloud Benchmark Cleanup Ticket Campaign" python3 scripts/tests/cloudbench-cleanup-ticket-campaign.test.py
   run_suite "Cloud Benchmark Clone Rate Response" python3 scripts/tests/cloudbench-clone-rate-response.test.py
   run_suite "Cloud Benchmark Controller Client" python3 scripts/tests/cloudbench-controller-client-path.test.py
+  run_suite "Cloud Benchmark Controller Gate flyctl Bounds" python3 scripts/tests/cloudbench-controller-gate-flyctl-bounds.test.py
   run_suite "Cloud Benchmark Disposable Hub Finalization" python3 scripts/tests/cloudbench-disposable-hub-finalize.test.py
   run_suite "Cloud Benchmark Disposable Controller" python3 scripts/tests/cloudbench-disposable-controller.test.py
   run_suite "Cloud Benchmark Disposable Volume Backups" python3 scripts/tests/cloudbench-disposable-volume.test.py
