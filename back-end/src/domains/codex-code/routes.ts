@@ -120,6 +120,7 @@ router.post(
         lease_owner,
         base_branch,
         target,
+        device_id,
       } = createSessionSchema.parse(req.body);
 
       // C14: a local session runs on the agent tree's Mac with the user's own
@@ -131,6 +132,7 @@ router.post(
               goal,
               provider: 'codex',
               expectedUserId: user_id,
+              deviceId: device_id,
             })
           : await service.createSession({
               agent_id,

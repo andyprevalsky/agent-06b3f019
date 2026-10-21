@@ -1,8 +1,7 @@
 """Code-agent run target: a cloud sandbox (default) or the user's Mac (C14).
 
 A ``local`` run executes the same ws-server as the E2B template inside a folder
-the user granted to the Rose Mac app, relayed through the backend. It is only
-offered to agents whose tree was started from the Mac app, and it never waits
+the user granted to the Rose Mac app, relayed through the backend. Cloud and Mac roots may explicitly select it; it never waits
 for, or silently falls back to, the cloud: an unavailable Mac fails the tool
 call at once with the exact text in ``config.py``.
 """
@@ -17,8 +16,12 @@ from domains.spawn_claude_code_agent.config import (
     CODE_TARGET_LOCAL,
     LOCAL_TARGET_DEVICE_DISCONNECTED,
     LOCAL_TARGET_DISCONNECTED_TEMPLATE,
+    LOCAL_TARGET_NO_OWNED_DEVICE,
+    LOCAL_TARGET_NO_OWNED_DEVICE_MESSAGE,
     LOCAL_TARGET_NOT_MAC_ORIGIN,
     LOCAL_TARGET_NOT_MAC_ORIGIN_MESSAGE,
+    LOCAL_TARGET_SELECTION_REQUIRED,
+    LOCAL_TARGET_SELECTION_REQUIRED_MESSAGE,
     LOCAL_TARGET_UNKNOWN_DEVICE_NAME,
 )
 from domains.spawn_claude_code_agent.repo import fetch_local_agent_target
@@ -36,6 +39,10 @@ def normalize_code_target(raw: Any) -> str:
 
 def local_target_error(reason: Optional[str], device_name: Optional[str]) -> str:
     """The exact tool error for an unavailable local target."""
+    if reason == LOCAL_TARGET_NO_OWNED_DEVICE:
+        return LOCAL_TARGET_NO_OWNED_DEVICE_MESSAGE
+    if reason == LOCAL_TARGET_SELECTION_REQUIRED:
+        return LOCAL_TARGET_SELECTION_REQUIRED_MESSAGE
     if reason == LOCAL_TARGET_NOT_MAC_ORIGIN:
         return LOCAL_TARGET_NOT_MAC_ORIGIN_MESSAGE
     return LOCAL_TARGET_DISCONNECTED_TEMPLATE.format(device_name=device_name or LOCAL_TARGET_UNKNOWN_DEVICE_NAME)
@@ -83,7 +90,12 @@ def target_from_backend(payload: Dict[str, Any]) -> CodeAgentTarget:
             "error": None,
         }
     reason = _text("reason")
-    if reason not in (LOCAL_TARGET_NOT_MAC_ORIGIN, LOCAL_TARGET_DEVICE_DISCONNECTED):
+    if reason not in (
+        LOCAL_TARGET_NOT_MAC_ORIGIN,
+        LOCAL_TARGET_DEVICE_DISCONNECTED,
+        LOCAL_TARGET_NO_OWNED_DEVICE,
+        LOCAL_TARGET_SELECTION_REQUIRED,
+    ):
         reason = LOCAL_TARGET_DEVICE_DISCONNECTED if device_id else LOCAL_TARGET_NOT_MAC_ORIGIN
     return {
         "target": CODE_TARGET_LOCAL,
@@ -99,8 +111,8 @@ def target_from_backend(payload: Dict[str, Any]) -> CodeAgentTarget:
 async def resolve_code_agent_target_activity(agent_id: str, target: str) -> CodeAgentTarget:
     """Resolve the run target once, recorded in history for deterministic replay.
 
-    A local request asks the backend whether this agent tree was started from
-    the Mac app and whether that Mac's control channel is connected right now.
+    A local request asks the backend which owned Mac this agent may use and whether
+    its control channel is connected right now.
     """
     if normalize_code_target(target) != CODE_TARGET_LOCAL:
         return cloud_target()

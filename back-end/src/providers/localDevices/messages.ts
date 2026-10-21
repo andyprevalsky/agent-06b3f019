@@ -9,7 +9,12 @@
 export const LOCAL_TARGET_UNAVAILABLE_CODE = 'LOCAL_TARGET_UNAVAILABLE';
 
 export type LocalTargetReason =
-  'not_mac_origin' | 'device_disconnected' | 'no_folder_granted' | 'no_own_credentials';
+  | 'not_mac_origin'
+  | 'no_owned_device'
+  | 'device_selection_required'
+  | 'device_disconnected'
+  | 'no_folder_granted'
+  | 'no_own_credentials';
 
 export const LOCAL_TARGET_NOT_MAC_ORIGIN: LocalTargetReason = 'not_mac_origin';
 export const LOCAL_TARGET_DEVICE_DISCONNECTED: LocalTargetReason = 'device_disconnected';
@@ -44,6 +49,10 @@ export function localTargetError(
   providerLabel = 'Claude Code'
 ): string {
   switch (reason) {
+    case 'no_owned_device':
+      return 'No owned Mac is available for this local run. Connect your Mac in Rose and retry.';
+    case 'device_selection_required':
+      return 'More than one owned Mac is registered. Select the intended Mac explicitly before starting this local run.';
     case 'not_mac_origin':
       return LOCAL_TARGET_NOT_MAC_ORIGIN_MESSAGE;
     case 'no_folder_granted':

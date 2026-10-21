@@ -28,8 +28,7 @@ DISCONNECTED = (
     "Open the Rose Mac app and retry, or run this agent in the cloud."
 )
 WEB_ORIGIN = (
-    "Local runs need an agent started from the Rose Mac app. "
-    "Start this agent from the Mac app, or run it in the cloud."
+    "Local runs need an agent started from the Rose Mac app. Start this agent from the Mac app, or run it in the cloud."
 )
 SCHEMA = {"fields": [{"name": "summary", "type": "str", "description": "What changed", "required": True}]}
 
@@ -162,7 +161,10 @@ def test_spawn_agent_schemas_declare_target_default_cloud():
             {"tool": "spawn_agent", "type": "code", "goal": "g", "output_schema": SCHEMA, "target": "local"}
         )
         assert parsed.target == "local"
-        assert model.model_validate({"tool": "spawn_agent", "type": "code", "goal": "g", "output_schema": SCHEMA}).target == "cloud"
+        assert (
+            model.model_validate({"tool": "spawn_agent", "type": "code", "goal": "g", "output_schema": SCHEMA}).target
+            == "cloud"
+        )
 
 
 def _target_keys(code_agent):
@@ -263,7 +265,7 @@ async def test_disconnected_mac_fails_immediately_with_exact_error():
     assert event.metadata["error_code"] == "LOCAL_TARGET_UNAVAILABLE"
 
 
-async def test_web_started_agent_asking_local_gets_exact_error():
+async def test_legacy_not_mac_origin_error_remains_replayable():
     from tools.base import MessageStatus
 
     fake = _Workflow(_Handle(result=_ok_result()), target_result=_unavailable("not_mac_origin"))
@@ -338,7 +340,9 @@ def test_exact_strings_and_reason_mapping():
     assert local_target_error("not_mac_origin", None) == WEB_ORIGIN
     ok = target_from_backend({"available": True, "device_id": "dev-1", "device_name": DEVICE})
     assert ok == _available()
-    down = target_from_backend({"available": False, "reason": "device_disconnected", "device_id": "dev-1", "device_name": DEVICE})
+    down = target_from_backend(
+        {"available": False, "reason": "device_disconnected", "device_id": "dev-1", "device_name": DEVICE}
+    )
     assert down["error"] == DISCONNECTED and down["available"] is False
     web = target_from_backend({"available": False, "reason": "not_mac_origin"})
     assert web["error"] == WEB_ORIGIN
@@ -360,13 +364,20 @@ async def test_target_activity_asks_backend_for_local():
         {
             "/api/local-devices/agent-target/agent-1": {
                 "status": 200,
-                "json": {"available": False, "reason": "device_disconnected", "device_id": "dev-1", "device_name": DEVICE},
+                "json": {
+                    "available": False,
+                    "reason": "device_disconnected",
+                    "device_id": "dev-1",
+                    "device_name": DEVICE,
+                },
             }
         }
     )
     result = await resolve_code_agent_target_activity("agent-1", "local")
     assert result["error"] == DISCONNECTED
-    assert_captured_call(url_contains="/api/local-devices/agent-target/agent-1", method="GET", header_present="x-api-key")
+    assert_captured_call(
+        url_contains="/api/local-devices/agent-target/agent-1", method="GET", header_present="x-api-key"
+    )
 
 
 async def test_repo_local_create_sends_target_and_maps_409():
@@ -486,6 +497,8 @@ def test_messages_match_backend_templates():
     )
     disconnected_ts = config.LOCAL_TARGET_DISCONNECTED_TEMPLATE.replace("{device_name}", "${deviceName}")
     assert disconnected_ts in source, disconnected_ts
+    assert config.LOCAL_TARGET_NO_OWNED_DEVICE_MESSAGE in source
+    assert config.LOCAL_TARGET_SELECTION_REQUIRED_MESSAGE in source
     assert f"'{config.LOCAL_TARGET_NOT_MAC_ORIGIN}'" in source
     assert f"'{config.LOCAL_TARGET_DEVICE_DISCONNECTED}'" in source
 
@@ -493,6 +506,28 @@ def test_messages_match_backend_templates():
 def test_target_activity_registered_with_worker():
     worker = (REPO_ROOT / "agents" / "worker.py").read_text()
     assert worker.count("resolve_code_agent_target_activity") >= 2
+
+
+async def test_ambiguous_local_machine_never_starts_or_falls_back():
+    from tools.base import MessageStatus
+    from domains.spawn_claude_code_agent.config import LOCAL_TARGET_SELECTION_REQUIRED_MESSAGE
+
+    fake = _Workflow(_Handle(result=_ok_result()), target_result=_unavailable("device_selection_required"))
+    events = await _run({"goal": "build locally", "output_schema": SCHEMA, "target": "local"}, fake)
+    assert fake.started == []
+    assert len(events) == 1
+    assert events[0].status == MessageStatus.ERROR
+    assert events[0].message == LOCAL_TARGET_SELECTION_REQUIRED_MESSAGE
+
+
+def test_cloud_local_device_failure_reasons_preserved():
+    from domains.spawn_claude_code_agent.service_target import target_from_backend
+
+    for reason in ("no_owned_device", "device_selection_required"):
+        result = target_from_backend({"available": False, "reason": reason})
+        assert result["reason"] == reason
+        assert result["available"] is False
+        assert "Mac" in result["error"]
 
 
 async def run_all_tests():
@@ -504,8 +539,10 @@ async def run_all_tests():
     await r.record_async("explicit_cloud_matches_default", test_explicit_cloud_target_matches_default)
     await r.record_async("local_routes_to_mac", test_local_routes_to_the_mac)
     await r.record_async("disconnected_mac_exact_error", test_disconnected_mac_fails_immediately_with_exact_error)
-    await r.record_async("web_origin_exact_error", test_web_started_agent_asking_local_gets_exact_error)
-    await r.record_async("mac_lost_before_create_exact_error", test_mac_lost_between_check_and_create_maps_to_exact_error)
+    await r.record_async("web_origin_exact_error", test_legacy_not_mac_origin_error_remains_replayable)
+    await r.record_async(
+        "mac_lost_before_create_exact_error", test_mac_lost_between_check_and_create_maps_to_exact_error
+    )
     await r.record_async("reattach_keeps_mac", test_reattach_keeps_the_mac_without_a_new_lookup)
     r.record("exact_strings_and_mapping", test_exact_strings_and_reason_mapping)
     await r.record_async("target_activity_cloud_skips_backend", test_target_activity_cloud_skips_backend)
@@ -515,6 +552,8 @@ async def run_all_tests():
     await r.record_async("save_message_code_agent_metadata", test_save_message_merges_code_agent_metadata)
     r.record("messages_match_backend", test_messages_match_backend_templates)
     r.record("target_activity_registered", test_target_activity_registered_with_worker)
+    await r.record_async("ambiguous_local_no_fallback", test_ambiguous_local_machine_never_starts_or_falls_back)
+    r.record("cloud_local_reasons", test_cloud_local_device_failure_reasons_preserved)
     teardown_mock()
     return r.summary()
 

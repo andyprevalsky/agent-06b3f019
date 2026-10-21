@@ -174,8 +174,7 @@ LOCAL_TARGET_DEVICE_DISCONNECTED: Final[str] = "device_disconnected"
 # red failure box. The backend owns the same templates;
 # code_agent_local_target.blackbox.py asserts the two never drift.
 LOCAL_TARGET_NOT_MAC_ORIGIN_MESSAGE: Final[str] = (
-    "Local runs need an agent started from the Rose Mac app. "
-    "Start this agent from the Mac app, or run it in the cloud."
+    "Local runs need an agent started from the Rose Mac app. Start this agent from the Mac app, or run it in the cloud."
 )
 LOCAL_TARGET_DISCONNECTED_TEMPLATE: Final[str] = (
     "Can't run locally: the Rose Mac app on {device_name} is closed or disconnected. "
@@ -183,3 +182,13 @@ LOCAL_TARGET_DISCONNECTED_TEMPLATE: Final[str] = (
 )
 # Only when a Mac-origin agent's device row has no name.
 LOCAL_TARGET_UNKNOWN_DEVICE_NAME: Final[str] = "your Mac"
+
+# Explicit local runs can originate in the cloud; machine ownership is still required.
+LOCAL_TARGET_NO_OWNED_DEVICE: Final[str] = "no_owned_device"
+LOCAL_TARGET_SELECTION_REQUIRED: Final[str] = "device_selection_required"
+LOCAL_TARGET_NO_OWNED_DEVICE_MESSAGE: Final[str] = (
+    "No owned Mac is available for this local run. Connect your Mac in Rose and retry."
+)
+LOCAL_TARGET_SELECTION_REQUIRED_MESSAGE: Final[str] = (
+    "More than one owned Mac is registered. Select the intended Mac explicitly before starting this local run."
+)

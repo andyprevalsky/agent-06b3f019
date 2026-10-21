@@ -2686,3 +2686,35 @@ rows, follow-ups); `❌` when the deploy is not complete.
 That example is the PR #1456 deploy. Keep the layout and replace every value. For
 a deploy that stops early, the header reads `❌ BLOCKED · <lane> <result>`, the
 failing lane is listed first, and lanes that never ran are omitted.
+
+
+### Required post-deploy: cloud-origin local Mac execution and computer use
+
+This is an explicit user acceptance gate. Keep it **OPEN** until witnessed on an
+owned connected Mac; offline relay tests or a tool acknowledgement are insufficient.
+Do not start a new database, migrate production, replace encryption keys, or reset
+sign-in/app data to satisfy it. Preserve Freedom and all its blocking services.
+
+1. Start a WEB/cloud-origin Rose root using the deployed revision. Explicitly call
+   `spawn_agent(type="code", target="local", ...)`. Resolve the intended owned Mac:
+   one registered Mac may resolve automatically; multiple Macs require explicit
+   selection. Preserve that device ID through recorded target resolution, session
+   creation, reconnect and replay. Never fall back to E2B or another device.
+2. Record root/child/task/device IDs (no credentials), the granted project folder,
+   `uname -s` = `Darwin`, actual working directory and checked-out revision. Verify
+   commands travel through the authenticated local relay to this same Mac.
+3. Exercise a harmless local computer-use action through the supported relay and
+   verify its visible effect on that Mac. Record the actual transport, permission
+   state and evidence. Terminal command success alone does not pass computer use;
+   absent screen/control support or missing macOS consent is a precise blocker.
+4. Build the current Rose native Mac app in the granted existing checkout using
+   its existing production backend/auth configuration and authoritative Mac setup
+   instructions. Retain the user's existing keys, credentials, account, app data
+   and database. Capture build command, exit status and native artifact path/hash;
+   launch/verify that artifact against the intended production account.
+5. Record disconnect, denied-folder and foreign-device rejection; no session or
+   cloud fallback may be created. Close only the test-owned session and preserve
+   the Mac app, granted files, data, user services and Freedom.
+
+Owner: Code Main. Missing connected Mac/access/consent keeps this acceptance OPEN;
+report that prerequisite instead of marking a mocked or Linux-only run successful.

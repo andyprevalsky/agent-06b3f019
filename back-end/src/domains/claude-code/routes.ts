@@ -59,6 +59,7 @@ async function createSessionForTarget(body: unknown) {
     base_branch,
     project_id,
     target,
+    device_id,
   } = createSessionSchema.parse(body);
   if (target === 'local') {
     const local = await createLocalCodeSessionResponse({
@@ -66,6 +67,7 @@ async function createSessionForTarget(body: unknown) {
       goal,
       provider: 'claude',
       expectedUserId: user_id,
+      deviceId: device_id,
     });
     return { ...local, project: null };
   }

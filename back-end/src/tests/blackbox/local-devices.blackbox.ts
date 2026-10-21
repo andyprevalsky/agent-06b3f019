@@ -26,10 +26,7 @@ import jwt from 'jsonwebtoken';
 import { originDeviceFields } from '../../domains/agents/agentOriginService';
 import type { CreateAgentBody } from '../../domains/agents/types';
 import { prisma } from '../../providers/database';
-import {
-  LOCAL_TARGET_NOT_MAC_ORIGIN_MESSAGE,
-  localTargetDisconnectedMessage,
-} from '../../providers/localDevices/messages';
+import { localTargetDisconnectedMessage } from '../../providers/localDevices/messages';
 import {
   type OpenedSocket,
   type TestResult,
@@ -105,6 +102,8 @@ async function sectionB(): Promise<TestResult[]> {
   const userA = randomUUID();
   const userB = randomUUID();
   const deviceA = randomUUID();
+  const deviceA2 = randomUUID();
+  const foreignDevice = randomUUID();
   const createdAgents: string[] = [];
   await prisma.user.createMany({
     data: [
@@ -145,7 +144,9 @@ async function sectionB(): Promise<TestResult[]> {
           body: { device_id: 'not-a-uuid', name: '' },
         });
         assert.strictEqual(bad.status, 400);
-        const row = await prisma.localDevice.findUnique({ where: { id: deviceA } });
+        const row = await prisma.localDevice.findUnique({
+          where: { id: deviceA },
+        });
         assert.strictEqual(row?.userId, userA);
       })
     );
@@ -202,23 +203,30 @@ async function sectionB(): Promise<TestResult[]> {
     const macRoot = await seedAgent(userA, 'MAC_APP', deviceA);
     const macChild = await seedAgent(userA, 'WEB', null, macRoot);
     const webRoot = await seedAgent(userA, 'WEB', null);
-    createdAgents.push(macChild, macRoot, webRoot);
+    const noDeviceRoot = await seedAgent(userB, 'WEB', null);
+    createdAgents.push(macChild, macRoot, webRoot, noDeviceRoot);
 
     results.push(
       await runTest(
-        'B3 agent-target: web tree and closed Mac get the exact text at once',
+        'B3 agent-target: cloud and Mac trees report an owned disconnected Mac',
         async () => {
           const forbidden = await http(`/api/local-devices/agent-target/${macRoot}`, {
             headers: { Authorization: `Bearer ${tokenA}` },
           });
           assert.strictEqual(forbidden.status, 403);
+          const noDevice = await http(`/api/local-devices/agent-target/${noDeviceRoot}`, {
+            headers: internal,
+          });
+          assert.strictEqual(noDevice.data.reason, 'no_owned_device');
+          assert.strictEqual(noDevice.data.device_id, null);
+          assert.strictEqual(noDevice.data.device_name, null);
           const web = await http(`/api/local-devices/agent-target/${webRoot}`, {
             headers: internal,
           });
           assert.strictEqual(web.status, 200);
           assert.strictEqual(web.data.available, false);
-          assert.strictEqual(web.data.reason, 'not_mac_origin');
-          assert.strictEqual(web.data.message, LOCAL_TARGET_NOT_MAC_ORIGIN_MESSAGE);
+          assert.strictEqual(web.data.reason, 'device_disconnected');
+          assert.strictEqual(web.data.message, localTargetDisconnectedMessage(DEVICE_NAME));
           const began = Date.now();
           const closed = await http(`/api/local-devices/agent-target/${macChild}`, {
             headers: internal,
@@ -241,7 +249,7 @@ async function sectionB(): Promise<TestResult[]> {
         'B4 session create target=local fails with 409 + exact text, no cloud fallback',
         async () => {
           for (const [agentId, expected] of [
-            [webRoot, LOCAL_TARGET_NOT_MAC_ORIGIN_MESSAGE],
+            [webRoot, localTargetDisconnectedMessage(DEVICE_NAME)],
             [macChild, localTargetDisconnectedMessage(DEVICE_NAME)],
           ] as const) {
             for (const path of [
@@ -304,6 +312,74 @@ async function sectionB(): Promise<TestResult[]> {
             device_id: deviceA,
             device_name: DEVICE_NAME,
           });
+          const cloud = await http(`/api/local-devices/agent-target/${webRoot}`, {
+            headers: internal,
+          });
+          assert.deepStrictEqual(cloud.data, open.data);
+          await prisma.localDevice.createMany({
+            data: [
+              { id: deviceA2, userId: userA, name: 'Second Mac', platform: 'darwin' },
+              {
+                id: foreignDevice,
+                userId: userB,
+                name: 'Private foreign name',
+                platform: 'darwin',
+              },
+            ],
+          });
+          const ambiguous = await http(`/api/local-devices/agent-target/${webRoot}`, {
+            headers: internal,
+          });
+          assert.strictEqual(ambiguous.data.reason, 'device_selection_required');
+          const stillPinned = await http(`/api/local-devices/agent-target/${macChild}`, {
+            headers: internal,
+          });
+          assert.deepStrictEqual(stillPinned.data, open.data);
+          for (const path of [
+            '/api/claude-code-session/create',
+            '/api/codex-code-session/create',
+          ]) {
+            const wrongOwner = await http(path, {
+              method: 'POST',
+              headers: internal,
+              body: {
+                agent_id: webRoot,
+                user_id: userB,
+                goal: 'local build',
+                target: 'local',
+                device_id: deviceA,
+              },
+            });
+            assert.strictEqual(wrongOwner.status, 403, JSON.stringify(wrongOwner.data));
+            assert.strictEqual(wrongOwner.data.code, 'AGENT_OWNER_MISMATCH');
+            for (const deviceId of [deviceA2, foreignDevice, randomUUID()]) {
+              const before = await prisma.claudeCodeSession.count({ where: { agentId: webRoot } });
+              const rejected = await http(path, {
+                method: 'POST',
+                headers: internal,
+                body: {
+                  agent_id: webRoot,
+                  user_id: userA,
+                  goal: 'local build',
+                  target: 'local',
+                  device_id: deviceId,
+                },
+              });
+              assert.strictEqual(rejected.status, 409, JSON.stringify(rejected.data));
+              assert.strictEqual(
+                rejected.data.reason,
+                deviceId === deviceA2 ? 'device_disconnected' : 'no_owned_device'
+              );
+              assert.strictEqual(
+                rejected.data.device_name,
+                deviceId === deviceA2 ? 'Second Mac' : null
+              );
+              assert.strictEqual(
+                await prisma.claudeCodeSession.count({ where: { agentId: webRoot } }),
+                before
+              );
+            }
+          }
           // Relay endpoints for another user's task are refused.
           await expectRefused(
             `${WS_BASE}/api/local-code-relay/${randomUUID()}/device`,
@@ -329,7 +405,9 @@ async function sectionB(): Promise<TestResult[]> {
       await prisma.claudeCodeSession.deleteMany({ where: { agentId: id } }).catch(() => undefined);
       await prisma.agent.deleteMany({ where: { id } }).catch(() => undefined);
     }
-    await prisma.localDevice.deleteMany({ where: { id: deviceA } });
+    await prisma.localDevice.deleteMany({
+      where: { id: { in: [deviceA, deviceA2, foreignDevice] } },
+    });
     await prisma.user.deleteMany({ where: { userId: { in: [userA, userB] } } });
   }
   return results;

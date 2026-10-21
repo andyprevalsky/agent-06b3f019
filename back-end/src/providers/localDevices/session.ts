@@ -24,13 +24,12 @@ import {
 } from './hub';
 import {
   LOCAL_TARGET_DEVICE_DISCONNECTED,
-  LOCAL_TARGET_NOT_MAC_ORIGIN,
   LocalTargetUnavailableError,
   localTargetError,
   type LocalTargetReason,
 } from './messages';
 import { relayDevicePath, type LocalCodeProvider } from './protocol';
-import { findAgentOrigin, findLocalDevice } from './store';
+import { findAgentOrigin, findLocalDevice, listLocalDevices } from './store';
 import { prepareLocalHome } from './homeFiles';
 
 const log = createLogger('LocalDevices');
@@ -52,24 +51,36 @@ export type LocalTargetResolution =
       message: string;
     };
 
-/** Whether `agentId` may run a code agent on its Mac right now (never waits). */
+/** Resolve an explicit local request; never substitute another owner's device or cloud. */
 export async function resolveLocalTarget(
   agentId: string,
-  hub: LocalDeviceHub = localDeviceHub()
+  hub: LocalDeviceHub = localDeviceHub(),
+  requestedDeviceId?: string
 ): Promise<LocalTargetResolution> {
-  const origin = await findAgentOrigin(agentId);
-  const notMac = (): LocalTargetResolution => ({
+  const unavailable = (reason: LocalTargetReason): LocalTargetResolution => ({
     available: false,
-    reason: LOCAL_TARGET_NOT_MAC_ORIGIN,
+    reason,
     deviceId: null,
     deviceName: null,
-    message: localTargetError(LOCAL_TARGET_NOT_MAC_ORIGIN, null),
+    message: localTargetError(reason, null),
   });
-  if (origin === null || origin.source !== 'MAC_APP' || origin.originDeviceId === null) {
-    return notMac();
+  const origin = await findAgentOrigin(agentId);
+  if (origin === null) return unavailable('no_owned_device');
+  // Preserve the originating Mac when present. An explicit device pins replay;
+  // neither a stale nor a foreign selection may silently switch machines.
+  const selectedId = requestedDeviceId ?? origin.originDeviceId;
+  let device;
+  if (selectedId !== null && selectedId !== undefined) {
+    device = await findLocalDevice(selectedId);
+    if (device === null || device.userId !== origin.userId || device.platform !== 'darwin') {
+      return unavailable('no_owned_device');
+    }
+  } else {
+    const devices = (await listLocalDevices(origin.userId)).filter((d) => d.platform === 'darwin');
+    if (devices.length === 0) return unavailable('no_owned_device');
+    if (devices.length > 1) return unavailable('device_selection_required');
+    device = devices[0];
   }
-  const device = await findLocalDevice(origin.originDeviceId);
-  if (device === null || device.userId !== origin.userId) return notMac();
   if (!hub.isDeviceConnected(device.id)) {
     return {
       available: false,
@@ -183,10 +194,11 @@ export async function createLocalDeviceCodeSession(
     folder?: string | null;
     /** Caller-asserted owner; must match the agent's owner. */
     expectedUserId?: string;
+    deviceId?: string;
   },
   hub: LocalDeviceHub = localDeviceHub()
 ): Promise<LocalDeviceSessionResult> {
-  const target = await resolveLocalTarget(params.agentId, hub);
+  const target = await resolveLocalTarget(params.agentId, hub, params.deviceId);
   if (
     target.available &&
     params.expectedUserId !== undefined &&
@@ -275,6 +287,7 @@ export async function createLocalCodeSessionResponse(params: {
   goal: string;
   provider: LocalCodeProvider;
   expectedUserId?: string;
+  deviceId?: string;
 }): Promise<{
   task_id: string;
   sandbox_id: string;
