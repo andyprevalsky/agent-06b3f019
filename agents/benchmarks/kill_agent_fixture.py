@@ -5,6 +5,7 @@ import httpx
 from temporalio.client import Client
 from config import load_config
 from temporal_connection import temporal_connect_options
+from utils.tool_schemas import ResponseSchemaConfig
 
 TASK = "kill-agent-subtree"
 
@@ -21,7 +22,8 @@ async def prepare(base_url, root_id, user_id, api_key, task_queue):
                     "user_id": user_id, "parent_agent_id": parent_id, "parent_workflow_id": parent_id,
                     "bus_id": root_id, "start_phase": "execute", "pause_state": True,
                     "depth": 2 if parent_index is not None else 1, "price_limit_cents": 10,
-                    "response_schema": {"fields": [{"name": "result", "type": "string", "required": True}]}}
+                    "response_schema": {"fields": [{"name": "result", "type": "str", "required": True}]}}
+            ResponseSchemaConfig.model_validate(body["response_schema"])
             if task_queue:
                 body["task_queue"] = task_queue
             response = await client.post(f"{base_url}/api/agents", headers=headers, json=body)
