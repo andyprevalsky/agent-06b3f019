@@ -40,6 +40,10 @@ describe('Local root preview binding', () => {
     const remote = screen.getByRole('button', { name: /^Remote$/ });
     fireEvent.click(local);
     expect(local).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByLabelText('Browser proxy location')).toHaveAttribute(
+      'title',
+      'Traffic is routed through your local computer.',
+    );
     expect(screen.getByText('Select an agent to view its local code preview.')).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Open browser' })).toBeNull();
     expect(screen.queryByRole('link', { name: 'Stable link' })).toBeNull();
@@ -124,8 +128,14 @@ describe('Local root preview binding', () => {
       local = screen.getByRole('button', { name: 'Local' });
     expect(local.textContent).toBe('');
     expect(remote.textContent).toBe('');
-    expect(local).toHaveAttribute('title', 'Local preview');
-    expect(remote).toHaveAttribute('title', 'Remote browser');
+    expect(local).toHaveAttribute(
+      'title',
+      'Local preview: View the app running in your agent’s code workspace.',
+    );
+    expect(remote).toHaveAttribute(
+      'title',
+      'Remote browser: View and control the browser used by this agent.',
+    );
     remote.focus();
     fireEvent.keyDown(remote, { key: 'ArrowLeft' });
     expect(local).toHaveFocus();

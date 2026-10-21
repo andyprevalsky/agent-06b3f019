@@ -21,6 +21,8 @@ import type { BrowserProxyLocation, BrowserSessionMetadata } from './types';
 interface BrowserProxyLocationChipProps {
   metadata: BrowserSessionMetadata | null;
   className?: string;
+  routing?: 'local' | 'remote';
+  bare?: boolean;
   tooltipPosition?: 'top' | 'bottom' | 'left' | 'right';
 }
 
@@ -40,32 +42,49 @@ function formatLocation(location: BrowserProxyLocation | undefined): string | nu
 export function BrowserProxyLocationChip({
   metadata,
   className,
+  routing,
+  bare = false,
   tooltipPosition = 'bottom',
 }: BrowserProxyLocationChipProps) {
-  if (!metadata) return null;
+  if (!metadata && !routing) return null;
 
-  const proxySource = metadata.proxy_source ?? metadata.proxySource;
-  const location = metadata.proxy_location ?? metadata.proxyLocation;
+  const proxySource = metadata?.proxy_source ?? metadata?.proxySource;
+  const location = metadata?.proxy_location ?? metadata?.proxyLocation;
   const locationLabel = formatLocation(location);
-  if (!proxySource && !locationLabel) return null;
+  if (!proxySource && !locationLabel && !routing) return null;
+  const routeLabel =
+    routing === 'local'
+      ? 'Traffic is routed through your local computer.'
+      : !proxySource && !locationLabel
+        ? 'Remote browser proxy location is not available yet.'
+        : undefined;
 
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <div
+        <button
+          type="button"
+          title={routeLabel}
           className={cn(
-            'inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md border border-border bg-background/70 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground',
+            'inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground',
+            !bare && 'border border-border bg-background/70',
             className,
           )}
           aria-label="Browser proxy location"
         >
-          <MapPin className="h-3.5 w-3.5" />
-        </div>
+          <MapPin className="h-4 w-4 shrink-0" strokeWidth={2} aria-hidden="true" />
+        </button>
       </TooltipTrigger>
       <TooltipContent side={tooltipPosition} className="max-w-[240px]">
         <div className="space-y-0.5 text-xs leading-5">
-          <div>Proxy: {humanizeProxySource(proxySource)}</div>
-          {locationLabel && <div>Location: {locationLabel}</div>}
+          {routeLabel ? (
+            <div>{routeLabel}</div>
+          ) : (
+            <>
+              <div>Proxy: {humanizeProxySource(proxySource)}</div>
+              {locationLabel && <div>Location: {locationLabel}</div>}
+            </>
+          )}
         </div>
       </TooltipContent>
     </Tooltip>

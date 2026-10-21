@@ -189,7 +189,7 @@ describe('top-right app icons', () => {
     expect(browser).toHaveAttribute('aria-pressed', 'false');
     await user.click(browser);
     expect(browser).toHaveAttribute('aria-pressed', 'true');
-    expect(browser).toHaveStyle({ color: '#e8507f' });
+    expect(browser).toHaveStyle({ color: '#9cddff' });
     const drawer = screen.getByTestId('browser-app-drawer');
     expect(drawer).toHaveAttribute('data-state', 'open');
     // Full height, from the left bar to the window's right edge; no close X.

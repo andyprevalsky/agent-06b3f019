@@ -11,7 +11,11 @@ export function BrowserModeTabs() {
           key={mode}
           type="button"
           aria-label={mode === 'local' ? 'Local' : 'Remote'}
-          title={mode === 'local' ? 'Local preview' : 'Remote browser'}
+          title={
+            mode === 'local'
+              ? 'Local preview: View the app running in your agent’s code workspace.'
+              : 'Remote browser: View and control the browser used by this agent.'
+          }
           aria-pressed={apps.browserMode === mode}
           tabIndex={apps.browserMode === mode ? 0 : -1}
           onClick={() => apps.setBrowserMode(mode)}

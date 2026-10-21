@@ -38,7 +38,7 @@ import { fetchIntegrationHealth, integrationsNeedingReconnect } from '@/lib/api/
 import { APP_ICON_EDGE, APP_ICON_GAP, APP_ICON_SIZE } from './roseAppsLayout';
 import { useRoseApps, type RoseApp } from './roseAppsState';
 
-export const APP_ACTIVE_COLOR = '#e8507f';
+export const APP_ACTIVE_COLOR = '#9cddff';
 /** Mobile header tap target (>= 40px). */
 const HEADER_ICON_SIZE = 40;
 const IDLE_COLOR = 'hsl(240 8% 45%)';

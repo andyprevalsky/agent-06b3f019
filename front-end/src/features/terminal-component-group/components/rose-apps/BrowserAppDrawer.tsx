@@ -44,7 +44,7 @@ function DrawerTab({
       data-testid={testId}
       onClick={onClick}
       className={cn(
-        '-mb-px flex max-w-[220px] flex-none items-center gap-[7px] whitespace-nowrap border-b-2 pb-2.5 pt-[9px] text-[13px]',
+        'flex h-full max-w-[220px] flex-none items-center gap-[7px] whitespace-nowrap border-b-2 text-[13px]',
         selected
           ? 'border-[#272725] font-semibold text-[hsl(240_15%_8%)] dark:border-[#ecece8] dark:text-[#ecece8]'
           : 'border-transparent text-[hsl(240_8%_45%)] hover:text-[hsl(240_15%_8%)] dark:text-[#a3a39d] dark:hover:text-[#ecece8]',
@@ -126,7 +126,7 @@ function BrowserTabs({ apps, isRoot }: { apps: RoseAppsValue; isRoot: boolean })
     <div
       role="tablist"
       aria-label="Browser tabs"
-      className="flex min-w-0 flex-1 items-center gap-5 overflow-x-auto"
+      className="flex h-full min-h-0 min-w-0 flex-1 items-center gap-5 overflow-x-auto overflow-y-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
     >
       <DrawerTab
         testId="browser-tab-root"
@@ -249,10 +249,14 @@ export function BrowserAppDrawer() {
         ) : (
           <div className="flex-1" />
         )}
-        <BrowserModeTabs />
-        {apps.browserMode === 'remote' && (
-          <BrowserProxyLocationChip metadata={activeTab?.browserSessionMetadata ?? null} />
-        )}
+        <div className="flex flex-none items-center gap-1">
+          <BrowserModeTabs />
+          <BrowserProxyLocationChip
+            metadata={activeTab?.browserSessionMetadata ?? null}
+            routing={apps.browserMode}
+            bare
+          />
+        </div>
       </div>
       {apps.browserMode === 'local' ? (
         active && <LocalPreviewPane key={apps.selectedAgentId} agentId={apps.selectedAgentId} />
