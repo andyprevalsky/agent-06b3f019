@@ -1,4 +1,5 @@
 #!/usr/bin/env tsx
+import { runTest, type TestResult } from './browser-session-test-support';
 /**
  * Black-box tests for /api/browser-session
  *
@@ -48,6 +49,7 @@ import { prisma } from '../../providers/database';
 import { runBrowserInitDisconnectCases } from './browser-session-init-disconnect.cases';
 import { runBrowserPauseCheckpointCases } from './browser-session-pause-checkpoint.cases';
 import { runBrowserTerminalPauseCases } from './browser-session-terminal-pause.cases';
+import { runBrowserResumeCustodyCases } from './browser-session-resume-custody.cases';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -61,13 +63,6 @@ const CASE_CONCURRENCY = Number(
 const ErrorResponse = z.object({ error: z.string() });
 
 // ==================== TEST INFRASTRUCTURE ====================
-
-interface TestResult {
-  name: string;
-  passed: boolean;
-  error?: string;
-  duration: number;
-}
 
 interface TestContext {
   accessToken?: string;
@@ -96,21 +91,6 @@ async function request(
 
 function apiKeyHeaders(): Record<string, string> {
   return { 'X-API-Key': API_KEY };
-}
-
-async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
-  const start = Date.now();
-  try {
-    await fn();
-    return { name, passed: true, duration: Date.now() - start };
-  } catch (error) {
-    return {
-      name,
-      passed: false,
-      error: error instanceof Error ? error.message : String(error),
-      duration: Date.now() - start,
-    };
-  }
 }
 
 function assertStatus(actual: number, expected: number, data: unknown): void {
@@ -618,6 +598,11 @@ async function testReproducibility_threeSequential() {
 // ==================== RUN ====================
 
 async function runAll() {
+  if (process.argv.includes('--resume-custody-only')) {
+    await runBrowserResumeCustodyCases();
+    await prisma.$disconnect();
+    return;
+  }
   if (process.argv.includes('--pause-checkpoint-only')) {
     await runBrowserPauseCheckpointCases();
     await runBrowserTerminalPauseCases();

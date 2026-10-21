@@ -1,4 +1,5 @@
-import { randomUUID } from 'node:crypto';
+import { browserResumeScope } from '../steel/lifecycleClaim';
+import { kernelResumeTags } from './resumeRecovery';
 import { PermissionDeniedError, RateLimitError } from '@onkernel/sdk';
 import type { Browser } from 'playwright';
 import { prisma } from '../database';
@@ -219,29 +220,29 @@ async function createRemoteSession(
           agentId,
           proxySource: proxy.proxySource,
         });
-        const session = await client.browsers.create(
-          {
-            headless: browserProviderEnabled('KERNEL_HEADLESS_ENABLED', false),
-            stealth,
-            telemetry: kernelCaptchaTelemetryConfig(),
-            gpu: browserProviderEnabled('KERNEL_GPU_ENABLED', false),
-            // Do not let Chromium reopen the profile's previous window. The new-tab
-            // page created by this policy is replaced below along with any unexpected
-            // restored pages, leaving one clean bootstrap tab.
-            chrome_policy: { RestoreOnStartup: 5 },
-            timeout_seconds: kernelTimeoutSeconds(),
-            viewport: { width: 1280, height: 800, refresh_rate: 60 },
-            ...(profile.profileId !== null
-              ? { profile: { id: profile.profileId, save_changes: true } }
-              : {}),
-            ...(proxy.proxyId !== undefined ? { proxy_id: proxy.proxyId } : {}),
-            tags: {
-              rose_agent_id: agentId,
-              rose_session_request: randomUUID(),
-            },
-          },
-          KERNEL_CREATE_REQUEST_OPTIONS
-        );
+        const intent = await browserResumeScope()?.beforeCreate('kernel');
+        const session = intent?.recoveredId
+          ? await client.browsers.retrieve(intent.recoveredId, {}, KERNEL_CREATE_REQUEST_OPTIONS)
+          : await client.browsers.create(
+              {
+                headless: browserProviderEnabled('KERNEL_HEADLESS_ENABLED', false),
+                stealth,
+                telemetry: kernelCaptchaTelemetryConfig(),
+                gpu: browserProviderEnabled('KERNEL_GPU_ENABLED', false),
+                // Do not let Chromium reopen the profile's previous window. The new-tab
+                // page created by this policy is replaced below along with any unexpected
+                // restored pages, leaving one clean bootstrap tab.
+                chrome_policy: { RestoreOnStartup: 5 },
+                timeout_seconds: kernelTimeoutSeconds(),
+                viewport: { width: 1280, height: 800, refresh_rate: 60 },
+                ...(profile.profileId !== null
+                  ? { profile: { id: profile.profileId, save_changes: true } }
+                  : {}),
+                ...(proxy.proxyId !== undefined ? { proxy_id: proxy.proxyId } : {}),
+                tags: kernelResumeTags(agentId, intent),
+              },
+              KERNEL_CREATE_REQUEST_OPTIONS
+            );
         log.info('Kernel browser creation completed', {
           agentId,
           sessionId: session.session_id,
@@ -263,7 +264,9 @@ async function createRemoteSession(
         if (validationBrowser !== null) {
           try {
             await ensureKernelSessionFileDirectories(session.session_id);
-            const closedTabCount = await resetKernelSessionTabs(validationBrowser);
+            const closedTabCount = intent?.recoveredId
+              ? 0
+              : await resetKernelSessionTabs(validationBrowser);
             // Visible live-view cue while Kernel's stealth auto-solver runs.
             // Agent CDP attach re-installs this — validation connections close
             // before the worker attaches (see captchaSolveIndicator.ts).
@@ -579,6 +582,7 @@ async function recreateKernelSession(
   try {
     if (!opts.keepValidationConnection) await remote.validationBrowser.close().catch(() => {});
 
+    await browserResumeScope()?.assertOwned();
     const replaced = await prisma.browserSession.updateMany({
       where: { id: taskId, sessionId: previousSessionId },
       data: {

@@ -1,3 +1,6 @@
+export { browserUseProxyCountry } from './resumeRecovery';
+import { allocateBrowserUseSession, type BrowserUseSession } from './resumeRecovery';
+import { browserResumeScope } from '../steel/lifecycleClaim';
 /** Browser Use Cloud V4 sessions, exposed through the same CDP contract as Steel and Kernel. */
 import { createHash, randomUUID } from 'node:crypto';
 import type { Browser } from 'playwright';
@@ -8,7 +11,6 @@ import { request } from './browserUseClient';
 import { retryWithBackoff } from '../retry';
 import { connectValidatedBrowser } from '../steel/sessionConnection';
 import { benchmarkIsolatedBrowserProfilesEnabled } from './benchmarkProfileIsolation';
-import { browserUseEnabled } from './config';
 import { getProviderProfile, rememberProviderProfile } from './context';
 import { persistBrowserSessionRow } from './sessionPersist';
 import { announceBrowserSessionBinding } from './sessionBindingAnnounce';
@@ -23,15 +25,6 @@ const log = createLogger('BrowserUse');
 const profileCreationByContext = new Map<string, Promise<{ id: string; source: string }>>();
 const benchmarkProfilesByAgent = new Map<string, Promise<string>>();
 const initialStorageHashes = new Map<string, string>();
-
-type BrowserUseSession = {
-  id: string;
-  status: string;
-  cdpUrl: string | null;
-  liveUrl: string | null;
-  startedAt: string;
-  timeoutAt: string;
-};
 
 type BrowserUseProfile = { updatedAt: string };
 
@@ -70,16 +63,6 @@ async function waitForProfileSave(profileId: string, before: string): Promise<vo
     await new Promise((resolve) => setTimeout(resolve, 500));
   } while (Date.now() < deadline);
   throw new Error('Browser Use profile did not finish saving browser state after stop');
-}
-
-export function browserUseProxyCountry(location: ProxyGeoLocation): string {
-  // Browser Use's API enumerates UK, while the rest of Rose stores ISO GB.
-  const raw = location.country.trim().toLowerCase();
-  const country = raw === 'gb' ? 'uk' : raw;
-  if (!/^[a-z]{2}$/.test(country)) {
-    throw new Error(`Browser Use requires a two-letter proxy country, got ${location.country}`);
-  }
-  return country;
 }
 
 async function profileForContext(
@@ -159,21 +142,7 @@ async function createRemote(
   location: ProxyGeoLocation,
   profileId: string | null
 ): Promise<{ session: BrowserUseSession; browser: Browser }> {
-  if (!browserUseEnabled()) {
-    throw new Error('Browser Use is disabled by BROWSER_AGENT_BROWSER_USE_ENABLED');
-  }
-  const session = await request<BrowserUseSession>('/browsers', {
-    method: 'POST',
-    body: JSON.stringify({
-      ...(profileId ? { profileId } : {}),
-      proxyCountryCode: browserUseProxyCountry(location),
-      timeout: 240,
-      browserScreenWidth: 1280,
-      browserScreenHeight: 800,
-      solveCaptchas: true,
-      enableRecording: true,
-    }),
-  });
+  const session = await allocateBrowserUseSession(location, profileId);
   try {
     if (!session.id || !session.cdpUrl || !session.liveUrl) {
       throw new Error('Browser Use create response omitted id, cdpUrl, or liveUrl');
@@ -395,7 +364,12 @@ async function replaceSession(
   });
   // Browser Use writes persistent profile state asynchronously after stop.
   // Reusing the profile while the old browser is still active loses fresh login state.
-  if (old.provider === 'browser-use' && old.status === 'ACTIVE') {
+  if (
+    old.provider === 'browser-use' &&
+    old.status === 'ACTIVE' &&
+    !browserResumeScope()?.recovering() &&
+    !browserResumeScope()?.sourceEnded()
+  ) {
     await closeBrowserUseSession(old.sessionId, true, old.currentUrl ?? undefined);
   }
   const agent = await prisma.agent.findUnique({
@@ -414,6 +388,7 @@ async function replaceSession(
   let handedOff = false;
   try {
     await rememberInitialStorage(session.id, browser);
+    await browserResumeScope()?.assertOwned();
     const replaced = await prisma.browserSession.updateMany({
       where: { id: taskId, sessionId: old.sessionId },
       data: {
