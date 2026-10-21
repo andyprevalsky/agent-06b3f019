@@ -53,8 +53,37 @@ function configure(handler: Handler, regions = [R1, R2, R3], deployments = 'gpt-
   });
   __resetFoundryCooldowns();
   const attempts: Attempt[] = [];
+  // Per-case authority state: provider routing cases must not share DB marks.
+  process.env.COMPUTE_TOKEN_AUTHORITY_URL = 'https://authority.example.test';
+  process.env.COMPUTE_TOKEN_AUTHORITY_API_KEY = 'fixture';
+  const cooldowns: Record<
+    string,
+    { strikes: number; remainingSeconds: number; rateLimitedUntil: string }
+  > = {};
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
+    if (url.origin === 'https://authority.example.test') {
+      if (url.pathname.endsWith('/cooldown')) return Response.json({ cooldowns });
+      const body = JSON.parse(String(init?.body)) as {
+        region: string;
+        deployment: string;
+        retryAfterSeconds?: number;
+      };
+      const key = `${body.region}:${body.deployment}`;
+      if (url.pathname.endsWith('/served')) {
+        delete cooldowns[key];
+        return Response.json({ reset: true });
+      }
+      assert(url.pathname.endsWith('/token/rate-limited'));
+      const seconds = body.retryAfterSeconds ?? 30;
+      const state = {
+        strikes: 1,
+        remainingSeconds: seconds,
+        rateLimitedUntil: new Date(Date.now() + seconds * 1000).toISOString(),
+      };
+      cooldowns[key] = state;
+      return Response.json(state);
+    }
     const region = url.origin;
     if (!(region in KEYS)) {
       assert.equal(url.host, 'openrouter.ai', `unexpected provider ${url.host}`);
@@ -121,6 +150,8 @@ async function main(): Promise<void> {
   const originalFetch = globalThis.fetch;
   const saved = [
     ...FOUNDRY_REGION_ENV_NAMES,
+    'COMPUTE_TOKEN_AUTHORITY_URL',
+    'COMPUTE_TOKEN_AUTHORITY_API_KEY',
     'GPT_API_KEY',
     'OPENAI_API_KEY',
     'ANTHROPIC_API_KEY',
