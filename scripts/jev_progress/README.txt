@@ -145,3 +145,10 @@ The JSON adapter preserves the returned model and rejects a model mismatch.
 --limit is a transport pilot only; use all cases for the paired comparison.
 Results include actual provider-reported cost, latency and separate/joint
 metrics; this does not mutate the incumbent or touch the held-out test.
+
+Explicitly requested report-only test curve for completed parallel rounds:
+  agents/venv/bin/python scripts/jev_progress/test_curve.py --batch <batch-folder> --dataset <dataset-folder> --cohorts <cohorts.json> --output <test-report-folder>
+Selects each round's best new candidate using validation before evaluating
+the frozen 2,000-case test. Never reads test scores into the optimizer; stores
+raw responses and scored results encrypted, and resumes completed reports.
+Re-run after the final round if it was not complete at the initial launch.
