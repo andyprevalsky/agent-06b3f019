@@ -517,6 +517,40 @@ async function main(): Promise<void> {
     assert.match(rotated.proxySource, /^tilion_mobile_/);
     await assert.rejects(tilion.rotateTilionSession('task-a', 'isp'), /no isp exit/);
 
+    // ── direct (datacenter) exit: residential egress refuses payment hosts ──
+    const lastCreate = () =>
+      server.callsTo('POST', /^\/v1\/session$/).at(-1)!.body as Record<string, unknown>;
+    const direct = await tilion.createTilionSessionWithContext(
+      'ctx-1',
+      'agent-1',
+      { country: 'US', state: 'TX', city: 'DALLAS' },
+      'https://checkout.test/pay',
+      { taskId: 'task-direct', proxyType: 'direct' }
+    );
+    const directBody = lastCreate();
+    assert.equal(directBody.residential, false);
+    assert.equal('proxy_type' in directBody, false, 'direct sends no proxy_type');
+    assert.equal('geo' in directBody, false, 'direct sends no exit geo');
+    assert.equal(directBody.region, 'us');
+    assert.equal(direct.proxySource, 'tilion_direct_country');
+    assert.equal(direct.geoTargeting.geoApplied, null);
+    assert.equal(rows.get('task-direct')?.proxyTier, 'direct');
+    assert.equal(rows.get('task-direct')?.kernelProxySource, 'tilion_direct_country');
+    const directCandidate = await tilion.createTilionRecoverySession(
+      { country: 'US' },
+      { proxyType: 'direct' }
+    );
+    assert.equal(lastCreate().residential, false);
+    assert.equal(directCandidate.proxySource, 'tilion_direct_country');
+    await tilion.releaseTilionRemoteSession(directCandidate.sessionId);
+    // A paused direct session resumes on a direct exit again.
+    await tilion.closeTilionSession(direct.sessionId, true);
+    const directResumed = await tilion.resumeTilionSession('task-direct');
+    assert.equal(lastCreate().residential, false);
+    assert.equal(directResumed.proxySource, 'tilion_direct_country');
+    assert.equal(rows.get('task-direct')?.proxyTier, 'direct');
+    await tilion.closeTilionSession(directResumed.sessionId, false);
+
     // ── B: a live Tilion session is never swapped for a blank browser ──────
     rotateReplies.push({
       status: 409,
