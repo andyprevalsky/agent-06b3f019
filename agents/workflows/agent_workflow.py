@@ -760,6 +760,7 @@ class AgentWorkflow:
         # fast_cache_goal; wait_for / spawn gates read this when the child's
         # own spawn goal is not the catalog prefix.
         self.root_goal: Optional[str] = None
+        self._browser_activity_cleanup_unknown: bool = False
         self.fast_mode_cache_enabled: bool = False
         self.memory_enabled: bool = False
         # User-authored tools pinned once per run (domains/user_tools); carried
@@ -1116,6 +1117,7 @@ class AgentWorkflow:
         self._has_credits = runtime.get("has_credits", self._has_credits) is True
         self._last_credit_check = int(runtime.get("last_credit_check", 0))
         self.write_lock_enabled = runtime.get("write_lock_enabled", True) is True
+        self._browser_activity_cleanup_unknown = runtime.get("browser_activity_cleanup_unknown") is True
         self._signup_completed = runtime.get("signup_completed") is True
         self._signup_dismissed = runtime.get("signup_dismissed") is True
         if isinstance(runtime.get("context"), list):
@@ -1342,6 +1344,8 @@ class AgentWorkflow:
                 "has_credits": self._has_credits,
                 "last_credit_check": self._last_credit_check,
                 "write_lock_enabled": self.write_lock_enabled,
+                **({"browser_activity_cleanup_unknown": True}
+                   if self._browser_activity_cleanup_unknown else {}),
                 "signup_completed": self._signup_completed,
                 "signup_dismissed": self._signup_dismissed,
                 "context": list(context or self.context),

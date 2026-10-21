@@ -26,6 +26,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from browser_activity_queue_cases import (
+    test_browser_activity_queue_lifecycle,
+    test_browser_activity_timeout_fence_survives_continuation,
+)
+
 from _test_utils import (
     BlackboxResult,
     native_browser_start_source,
@@ -247,7 +252,7 @@ def test_stateful_browser_activity_has_one_thirty_minute_attempt():
     assert ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES == 30
     assert MAX_ACTIVITY_ATTEMPTS == 1
 
-    execute_source = inspect.getsource(SpawnBrowserAgentManagerV3.execute_tool)
+    execute_source = inspect.getsource(SpawnBrowserAgentManagerV3._execute_tool)
     assert "browser_start_to_close_timeout_minutes" in execute_source
     assert "timedelta(minutes=browser_timeout_minutes)" in execute_source
     assert "RetryPolicy(maximum_attempts=MAX_ACTIVITY_ATTEMPTS)" in execute_source
@@ -259,7 +264,7 @@ def test_browser_spawn_goal_uses_tool_call_goal_verbatim():
 
     from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
 
-    source = inspect.getsource(SpawnBrowserAgentManagerV3.execute_tool)
+    source = inspect.getsource(SpawnBrowserAgentManagerV3._execute_tool)
     assert 'goal = tool_call.get("goal", "")' in source
     assert "_browser_spawn_goal_from_parent" not in source
     assert "BENCHMARK EXECUTION CONTRACT" not in source
@@ -16152,7 +16157,7 @@ def test_passkey_usage_dedupe_survives_every_browser_activity_resume_boundary():
     from domains.spawn_browser_agent_v3 import handler
 
     activity_source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
-    manager_source = inspect.getsource(handler.SpawnBrowserAgentManagerV3.execute_tool)
+    manager_source = inspect.getsource(handler.SpawnBrowserAgentManagerV3._execute_tool)
     drain_resume_source = inspect.getsource(handler._drain_resume_state)
 
     assert activity_source.count('"recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids)') == 4
@@ -21378,7 +21383,7 @@ async def test_spawn_browser_activity_ends_cleanly_when_the_user_declines_auth_a
 
 
 @_in_browser_activity_context
-async def test_spawn_browser_activity_auth_assistance_resume_reuses_backend_refreshed_session():
+async def test_spawn_browser_activity_auth_assistance_resume_reuses_backend_refreshed_session(await_owner_cleanup=False):
     """A handoff refresh may replace the provider session while keeping the browser task stable."""
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
@@ -21433,6 +21438,7 @@ async def test_spawn_browser_activity_auth_assistance_resume_reuses_backend_refr
                 is_resume=True,
                 output_schema={"fields": [{"name": "result", "type": "string"}]},
                 use_claude_mode=False,
+                await_owner_cleanup=await_owner_cleanup,
                 write_lock_resume_state={
                     "approval_type": "auth_assistance",
                     "task_id": "task-1",
@@ -21456,6 +21462,30 @@ async def test_spawn_browser_activity_auth_assistance_resume_reuses_backend_refr
     resume_mock.assert_not_awaited()
     assert connected_cdp_urls == ["ws://refreshed-by-auth-page"]
     assert session_info["resume_mode"] == "backend_refreshed_session"
+
+
+async def test_browser_activity_waits_for_owned_cleanup():
+    cleanup_started, release_cleanup = asyncio.Event(), asyncio.Event()
+
+    def schedule(**_kwargs):
+        async def cleanup():
+            cleanup_started.set()
+            await release_cleanup.wait()
+        return asyncio.create_task(cleanup())
+
+    with patch("domains.spawn_browser_agent_v3.handler._schedule_browser_cleanup", side_effect=schedule):
+        activity_task = asyncio.create_task(
+            test_spawn_browser_activity_auth_assistance_resume_reuses_backend_refreshed_session(
+                await_owner_cleanup=True
+            )
+        )
+        try:
+            await asyncio.wait_for(cleanup_started.wait(), timeout=5)
+            await asyncio.sleep(0)
+            assert not activity_task.done(), "activity acknowledged before its owned cleanup"
+        finally:
+            release_cleanup.set()
+            await activity_task
 
 @_in_browser_activity_context
 async def test_spawn_browser_activity_auth_assistance_resume_falls_back_when_live_session_expired():
@@ -24387,6 +24417,8 @@ async def test_manager_cancelled_browser_pause_preserves_preallocated_task_id():
         return handle
 
     with (
+        patch("domains.spawn_browser_agent_v3.handler.workflow.in_workflow", return_value=True),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.patched", return_value=False),
         patch(
             "domains.spawn_browser_agent_v3.handler.workflow.start_activity",
             side_effect=fake_start_activity,
@@ -24714,9 +24746,13 @@ async def test_manager_generation_handoff_terminal_falls_back_to_preallocated_ta
     result_without_task_id = {
         key: value for key, value in _AWAITING_PURCHASE_WRITE_APPROVAL.items() if key != "task_id"
     }
-    workflow_instance, events, raised = await _run_manager_with_parked_activity(
-        result_without_task_id, approval_error=GenerationHandoffRequested("navi-agent-tasks@new")
-    )
+    with (
+        patch("domains.spawn_browser_agent_v3.handler.workflow.in_workflow", return_value=True),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.patched", return_value=False),
+    ):
+        workflow_instance, events, raised = await _run_manager_with_parked_activity(
+            result_without_task_id, approval_error=GenerationHandoffRequested("navi-agent-tasks@new")
+        )
 
     assert isinstance(raised, GenerationHandoffRequested)
     assert events[-1].metadata["action_type"] == "task_complete"
@@ -31562,6 +31598,9 @@ async def run_all_tests():
         "manager_payment_gate_subscription_checkout_failure_still_raises_gate",
         test_manager_payment_gate_subscription_checkout_failure_still_raises_gate,
     )
+    await r.record_async("browser_activity_queue_lifecycle", test_browser_activity_queue_lifecycle)
+    await r.record_async("browser_activity_cleanup_ack", test_browser_activity_waits_for_owned_cleanup)
+    await r.record_async("browser_activity_timeout_continuation", test_browser_activity_timeout_fence_survives_continuation)
     await r.record_async(
         "manager_terminal_scope_and_pending_resumes",
         test_manager_terminal_scope_and_pending_resumes,

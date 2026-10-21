@@ -32,6 +32,7 @@ from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 from temporalio.exceptions import CancelledError as TemporalCancelledError
+from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 from browser_tools.schemas import AVAILABLE_ACTIONS, BrowserToolArgsValidationError
 from browser_tools.secret_refs import (
@@ -41,6 +42,12 @@ from browser_tools.secret_refs import (
     secret_placeholder,
 )
 from config import load_config
+from domains.spawn_browser_agent_v3.browser_activity_queue import (
+    await_owned_browser_cleanup,
+    browser_activity_queue_enabled,
+    browser_activity_turn,
+    cancel_and_join_browser_activity,
+)
 from helpers.activity_generation_drain import GENERATION_SUPERSEDED, activity_drain_reason
 from helpers.attachments import extract_attachments_from_context, upload_to_storage
 from helpers.file_resolution import (
@@ -69,8 +76,8 @@ from loop.activity_helper import call_temporal_activity_from_activity
 from providers.fast_cache.browser_use_cache import cached_browser_decision
 from providers.fast_cache.context import write_through_enabled_for_user
 from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
-from providers.rose.errors import BrowserModelOutputValidationError
 from providers.rose.browser_use import format_browser_state_for_tool
+from providers.rose.errors import BrowserModelOutputValidationError
 from providers.rose.types import ComputeTokenSource
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.attention_requests import REJECTION_SENTINEL
@@ -5458,6 +5465,7 @@ async def spawn_browser_agent_activity_v3(
     fast_mode_cache_enabled: bool = False,
     world_model_mode: Optional[str] = None,
     agent_model: Optional[str] = None,
+    await_owner_cleanup: bool = False,
 ) -> Dict[str, Any]:
     # Browser steps run on the spawning agent's Rose pool (ultra root → ultra).
     browser_pool = browser_pool_for_agent_model(agent_model)
@@ -5520,6 +5528,7 @@ async def spawn_browser_agent_activity_v3(
         gpt_token_pool_id=gpt_token_pool_id,
         fast_mode_cache_enabled=fast_mode_cache_enabled,
         browser_pool=browser_pool,
+        await_owner_cleanup=await_owner_cleanup,
     )
 
 
@@ -7062,6 +7071,7 @@ async def _spawn_browser_agent_activity_v3_real(
     gpt_token_pool_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     browser_pool: str = BROWSER_USE_PRICING_POOL,
+    await_owner_cleanup: bool = False,
 ) -> Dict[str, Any]:
     """Browser agent activity using browser-use BrowserSession + Rose API."""
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
@@ -12102,7 +12112,7 @@ Based on this feedback, I need to continue working on the task and address the i
             if browser_download_persister is not None:
                 with contextlib.suppress(Exception):
                     await browser_download_persister.close()
-            _schedule_browser_cleanup(
+            owned_cleanup = _schedule_browser_cleanup(
                 agent_id=agent_id,
                 preparation_cancellation=preparation_cancellation,
                 cleanup_failure=cleanup_failure,
@@ -12133,6 +12143,8 @@ Based on this feedback, I need to continue working on the task and address the i
                 local_only_recorders=locally_owned_recorders,
                 local_only_setup_tasks=(download_persister_task,),
             )
+            if await_owner_cleanup:
+                await await_owned_browser_cleanup(owned_cleanup)
             playwright_browser = None
             playwright_instance = None
             input_page = None
@@ -12242,6 +12254,20 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
     async def execute_tool(
         self, workflow_instance: Any, tool_call: Dict[str, Any], tool_call_id: str
+    ) -> AsyncGenerator[ToolEvent, None]:
+        serialized = browser_activity_queue_enabled()
+        async with browser_activity_turn(workflow_instance, serialized):
+            if serialized and getattr(workflow_instance, "_browser_activity_cleanup_unknown", False):
+                raise RuntimeError("Previous browser activity cleanup is unconfirmed")
+            async with contextlib.aclosing(self._execute_tool(
+                workflow_instance, tool_call, tool_call_id, serialized=serialized
+            )) as events:
+                async for event in events:
+                    yield event
+
+    async def _execute_tool(
+        self, workflow_instance: Any, tool_call: Dict[str, Any], tool_call_id: str,
+        *, serialized: bool,
     ) -> AsyncGenerator[ToolEvent, None]:
         """Spawn browser agent with browser-use + Rose API."""
         start_url = tool_call.get("start_url", "")
@@ -12431,6 +12457,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
                     activity_args.append(world_model_mode if world_model_mode != "real" else None)
                     activity_args.append(getattr(workflow_instance, "model", None))
+                    if serialized:
+                        activity_args.append(True)
                     async with span(
                         "browser_activity_wait",
                         agent_id=agent_id,
@@ -12451,7 +12479,10 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             args=activity_args,
                             start_to_close_timeout=timedelta(minutes=browser_timeout_minutes),
                             heartbeat_timeout=timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS),
-                            cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
+                            cancellation_type=(
+                                workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED
+                                if serialized else workflow.ActivityCancellationType.TRY_CANCEL
+                            ),
                             retry_policy=RetryPolicy(maximum_attempts=MAX_ACTIVITY_ATTEMPTS),
                         )
                         activity_task_id = known_task_id
@@ -12461,9 +12492,14 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         # so TRY_CANCEL cannot erase the ownership key along with the
                         # activity return value.
                         # cutover-class: activity-bound — cannot continue_as_new until browser activity ends
-                        await workflow.wait_condition(
-                            lambda handle=activity_handle: handle.done() or workflow_instance.is_paused
-                        )
+                        try:
+                            await workflow.wait_condition(
+                                lambda handle=activity_handle: handle.done() or workflow_instance.is_paused
+                            )
+                        except asyncio.CancelledError:
+                            if serialized:
+                                await cancel_and_join_browser_activity(activity_handle)
+                            raise
                         if workflow_instance.is_paused and not activity_handle.done():
                             logger.info("\U0001f534 Cancelling browser agent due to pause")
                             activity_handle.cancel()
@@ -13501,6 +13537,10 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 )
             raise
         except Exception as e:
+            if serialized and isinstance(e, ActivityError) and isinstance(e.cause, TemporalTimeoutError):
+                # A server timeout does not acknowledge the worker's cleanup.
+                # Fail later same-GP turns closed until workflow reconciliation.
+                workflow_instance._browser_activity_cleanup_unknown = True
             if isinstance(e, asyncio.CancelledError):
                 raise
 
