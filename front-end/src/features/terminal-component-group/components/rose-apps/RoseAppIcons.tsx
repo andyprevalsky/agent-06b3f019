@@ -28,16 +28,7 @@
 
 import { useHoverOpen } from './useHoverOpen';
 import { useQuery } from '@tanstack/react-query';
-import {
-  ClipboardCheck,
-  Globe,
-  Monitor,
-  Moon,
-  Plug,
-  Smartphone,
-  Sun,
-  type LucideIcon,
-} from 'lucide-react';
+import { Globe, Monitor, Moon, Plug, Smartphone, Sun, type LucideIcon } from 'lucide-react';
 
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useRoseTheme } from '@/features/rose-theme';
@@ -132,7 +123,6 @@ function IconButton({
 const APPS: { app: RoseApp; label: string; icon: LucideIcon }[] = [
   { app: 'display', label: 'Agent Display', icon: Monitor },
   { app: 'browser', label: 'Browser', icon: Globe },
-  { app: 'validation', label: 'Validation Criteria', icon: ClipboardCheck },
   { app: 'phone', label: 'Phone', icon: Smartphone },
   { app: 'integrations', label: 'Integrations', icon: Plug },
 ];
@@ -196,11 +186,7 @@ function AppIconButtons({
   const idle = isDark ? IDLE_COLOR_DARK : IDLE_COLOR;
   return (
     <>
-      {APPS.filter(
-        ({ app }) =>
-          (showDisplay || app !== 'display') &&
-          (app !== 'validation' || apps.selectedAgentId !== null),
-      ).map(({ app, label, icon }) => (
+      {APPS.filter(({ app }) => showDisplay || app !== 'display').map(({ app, label, icon }) => (
         <IconButton
           key={app}
           testId={`rose-app-${app}`}
