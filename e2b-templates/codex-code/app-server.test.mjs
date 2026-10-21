@@ -32,7 +32,7 @@ const Native = vm.runInNewContext(block + "\nCodexAppServer", {
   workDir: "/work",
   codexUsageLimit: () => null,
 });
-function fixture() {
+function fixture(options = {}) {
   const child = new EventEmitter();
   child.stdout = new PassThrough();
   const calls = [];
@@ -46,7 +46,7 @@ function fixture() {
       let result = {};
       if (request.method === "model/list")
         result = {
-          data: [
+          data: options.models || [
             {
               id: "model",
               model: "model",
@@ -62,8 +62,9 @@ function fixture() {
         result = {
           thread: { id: "thread" },
           model: "model",
-          reasoningEffort: "high",
-          serviceTier: null,
+          reasoningEffort:
+            request.params.config?.model_reasoning_effort ?? "high",
+          serviceTier: request.params.serviceTier,
         };
       if (request.method === "turn/start")
         result = { turn: { id: `turn-${++serial}` } };
@@ -76,11 +77,15 @@ function fixture() {
   };
   const events = [];
   return {
-    native: new Native(child, (event) => events.push(event), {
-      model: "model",
-      effort: "high",
-      speed: "standard",
-    }),
+    native: new Native(
+      child,
+      (event) => events.push(event),
+      options.settings || {
+        model: "model",
+        effort: "high",
+        speed: "standard",
+      },
+    ),
     child,
     calls,
     events,
@@ -117,6 +122,79 @@ test("native initialization, active steer and idle start preserve settings and t
     calls.some((c) => /queue/.test(c.method)),
     false,
   );
+});
+test("new sessions select medium and fastest advertised tier before the first turn", async () => {
+  for (const tiers of [["priority", "ultrafast"], ["fast"], ["priority"], []]) {
+    const { native, calls } = fixture({
+      settings: { model: "model", effort: null, speed: null },
+      models: [
+        {
+          id: "model",
+          model: "model",
+          supportedReasoningEfforts: [
+            { reasoningEffort: "medium" },
+            { reasoningEffort: "high" },
+          ],
+          serviceTiers: tiers.map((id) => ({ id })),
+        },
+      ],
+    });
+    await native.initialize(null, "hello");
+    const expectedTier = tiers.includes("ultrafast")
+      ? "ultrafast"
+      : tiers.includes("fast")
+        ? "fast"
+        : tiers.includes("priority")
+          ? "priority"
+          : null;
+    const startup = calls.find((c) => c.method === "thread/start");
+    assert.equal(startup.params.config.model_reasoning_effort, "medium");
+    assert.equal(startup.params.serviceTier, expectedTier);
+    assert.equal(calls.at(-1).params.effort, "medium");
+    assert.equal(calls.at(-1).params.serviceTier, expectedTier);
+    assert.equal(native.settings.speed, expectedTier || "standard");
+  }
+});
+test("startup preserves explicit settings and never invents unsupported effort", async () => {
+  const explicit = fixture();
+  await explicit.native.initialize(null, "hello");
+  assert.equal(
+    explicit.calls.find((c) => c.method === "thread/start").params.config
+      .model_reasoning_effort,
+    "high",
+  );
+  assert.equal(explicit.calls.at(-1).params.serviceTier, null);
+  const unsupported = fixture({
+    settings: { model: "model", effort: null, speed: null },
+  });
+  await unsupported.native.initialize(null, "hello");
+  assert.equal(
+    unsupported.calls.find((c) => c.method === "thread/start").params.config,
+    undefined,
+  );
+});
+test("resuming leaves saved native settings authoritative instead of replacing them with defaults", async () => {
+  const { native, calls } = fixture({
+    settings: { model: "model", effort: null, speed: null },
+    models: [
+      {
+        id: "model",
+        model: "model",
+        supportedReasoningEfforts: [{ reasoningEffort: "medium" }],
+        serviceTiers: [{ id: "fast" }],
+      },
+    ],
+  });
+  await native.initialize("saved-thread", "continue");
+  assert.equal(
+    calls.find((c) => c.method === "thread/resume").params.config,
+    undefined,
+  );
+  assert.equal(
+    calls.find((c) => c.method === "thread/resume").params.serviceTier,
+    null,
+  );
+  assert.equal(native.settings.effort, "high");
 });
 test("catalog rejects invented tiers, invalid effort and settings changes during a turn", async () => {
   const { native } = fixture();

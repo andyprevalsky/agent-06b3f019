@@ -1317,6 +1317,28 @@ class CodexAppServer {
     this.child.stdin.write(JSON.stringify({ method: "initialized" }) + "\n");
     const catalog = await this.request("model/list", { includeHidden: true });
     this.models = catalog.data || [];
+    // Catalog -> supported defaults -> native ACK -> first turn.
+    const model =
+      this.models.find(
+        (m) => m.model === this.settings.model || m.id === this.settings.model,
+      ) || this.models.find((m) => m.isDefault);
+    const efforts = (model?.supportedReasoningEfforts || []).map(
+      (e) => e.reasoningEffort,
+    );
+    const tiers = (model?.serviceTiers || []).map((t) => t.id);
+    this.settings = {
+      ...this.settings,
+      effort:
+        this.settings.effort ??
+        (!resumeId && efforts.includes("medium") ? "medium" : null),
+      speed:
+        this.settings.speed ??
+        (!resumeId
+          ? ["ultrafast", "fast", "priority"].find((tier) =>
+              tiers.includes(tier),
+            ) || "standard"
+          : null),
+    };
     const response = await this.request(
       resumeId ? "thread/resume" : "thread/start",
       {
@@ -1483,7 +1505,7 @@ async function runCodexAppServer() {
   nativeCodex = new CodexAppServer(child, appendEvent, {
     model: CODEX_MODEL,
     effort: process.env.CODEX_REASONING_EFFORT || null,
-    speed: process.env.CODEX_SPEED || "standard",
+    speed: process.env.CODEX_SPEED || null,
   });
   const closed = new Promise((resolve) =>
     child.once("close", (code, signal) => resolve({ code: code ?? 1, signal })),

@@ -13,7 +13,7 @@ claude
     (``message_start`` → text delta → assistant text → ``result``). Exits 0 when
     stdin closes, as the real CLI does.
 
-    ``REPLAY_CLI_STDIN_LOG``: append every received stdin line (proves a turn
+    ``REPLAY_CLI_STDIN_LOG``: append every received user-message line (proves a turn
     reached the CLI exactly once). ``REPLAY_CLI_GATE``: before the first
     turn's ``result``, wait until the file ``<gate>/finish-turn-1`` exists, so a
     test can deliver a turn while that turn is still running.
@@ -117,6 +117,31 @@ def run_claude() -> int:
     turn = 0
     while (line := stdin.readline()) is not None:
         if not line.strip():
+            continue
+        incoming = json.loads(line)
+        if incoming.get("type") == "control_request":
+            subtype = incoming.get("request", {}).get("subtype")
+            response = {}
+            if subtype == "initialize":
+                response = {
+                    "models": [
+                        {
+                            "value": os.environ.get("CLAUDE_CODE_MODEL", "replay"),
+                            "supportedEffortLevels": [],
+                            "supportsFastMode": False,
+                        }
+                    ]
+                }
+            _emit_json(
+                {
+                    "type": "control_response",
+                    "response": {
+                        "request_id": incoming["request_id"],
+                        "subtype": "success" if subtype in {"initialize", "apply_flag_settings"} else "error",
+                        "response": response,
+                    },
+                }
+            )
             continue
         _log_stdin(stdin_log, line)
         turn += 1

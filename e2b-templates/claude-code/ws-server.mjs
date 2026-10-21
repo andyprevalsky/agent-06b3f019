@@ -196,16 +196,27 @@ wss.on("connection", (ws, req) => {
             }),
           );
         else
-          void sessionCapabilities().then((caps) => {
-            if (ws.readyState === 1)
-              ws.send(
-                JSON.stringify({
-                  type: "session_capabilities_ack",
-                  status: "delivered",
-                  ...caps,
-                }),
-              );
-          });
+          void sessionCapabilities()
+            .then((caps) => {
+              if (ws.readyState === 1)
+                ws.send(
+                  JSON.stringify({
+                    type: "session_capabilities_ack",
+                    status: "delivered",
+                    ...caps,
+                  }),
+                );
+            })
+            .catch((error) => {
+              if (ws.readyState === 1)
+                ws.send(
+                  JSON.stringify({
+                    type: "session_capabilities_ack",
+                    status: "rejected",
+                    reason: error.message,
+                  }),
+                );
+            });
       } else if (msg.type === "hand_back") {
         ws.send(JSON.stringify(handleHandBack(msg)));
       }
@@ -990,6 +1001,7 @@ let effectiveSettings = {
   speed: CLAUDE_CODE_FAST_MODE ? "fast" : "standard",
 };
 let modelCatalog = null;
+let nativeInitialization = null;
 
 function startNativeTurn(id = randomUUID()) {
   if (activeTurn) return activeTurn;
@@ -1067,14 +1079,58 @@ function settleControl(message) {
   }
   return true;
 }
+function nativeModelOption(models, model) {
+  return (
+    models.find((m) => m.value === model) ||
+    models.find(
+      (m) =>
+        ["sonnet", "opus", "haiku"].includes(m.value) &&
+        model.startsWith(`claude-${m.value}-`),
+    )
+  );
+}
+function nativeDefaultSettings(models, model, env) {
+  const option = nativeModelOption(models, model);
+  const effort =
+    env.CLAUDE_CODE_EFFORT ||
+    (option?.supportedEffortLevels?.includes("medium") ? "medium" : null);
+  // The native speed selection is independent of the opt-in cache proxy.
+  const speed =
+    env.CLAUDE_CODE_SPEED ||
+    (env.CLAUDE_CODE_FAST_MODE
+      ? env.CLAUDE_CODE_FAST_MODE === "1"
+        ? "fast"
+        : "standard"
+      : option?.supportsFastMode
+        ? "fast"
+        : "standard");
+  if (
+    !["standard", "fast"].includes(speed) ||
+    (speed === "fast" && !option?.supportsFastMode) ||
+    (effort && !option?.supportedEffortLevels?.includes(effort))
+  )
+    throw new Error("unsupported_settings");
+  return { ...(effort ? { effort } : {}), speed };
+}
+async function initializeNativeSettings() {
+  const response = await cliControl({ subtype: "initialize" });
+  modelCatalog = Array.isArray(response.models) ? response.models : [];
+  const defaults = nativeDefaultSettings(
+    modelCatalog,
+    effectiveSettings.model,
+    process.env,
+  );
+  await cliControl({
+    subtype: "apply_flag_settings",
+    settings: {
+      ...(defaults.effort ? { effortLevel: defaults.effort } : {}),
+      fastMode: defaults.speed === "fast",
+    },
+  });
+  Object.assign(effectiveSettings, defaults);
+}
 async function sessionCapabilities() {
-  try {
-    const response = await cliControl({ subtype: "list_models" });
-    const models = Array.isArray(response) ? response : response.models;
-    if (Array.isArray(models)) modelCatalog = models;
-  } catch {
-    /* Older CLIs expose only their verified current configuration. */
-  }
+  if (nativeInitialization) await nativeInitialization;
   const models = (modelCatalog || [])
     .filter((m) => typeof m.value === "string")
     .map((m) => ({
@@ -1083,6 +1139,17 @@ async function sessionCapabilities() {
       efforts: m.supportedEffortLevels || [],
       speeds: m.supportsFastMode ? ["standard", "fast"] : ["standard"],
     }));
+  const current = nativeModelOption(
+    modelCatalog || [],
+    effectiveSettings.model,
+  );
+  if (current && !models.some((m) => m.model === effectiveSettings.model))
+    models.push({
+      model: effectiveSettings.model,
+      label: current.displayName || effectiveSettings.model,
+      efforts: current.supportedEffortLevels || [],
+      speeds: current.supportsFastMode ? ["standard", "fast"] : ["standard"],
+    });
   if (!models.length)
     models.push({
       model: effectiveSettings.model,
@@ -1260,6 +1327,7 @@ async function deliverNativeTurn(msg) {
     return turnAck(id, "rejected", "relay_paused");
   }
   try {
+    if (nativeInitialization) await nativeInitialization;
     await applyTurnSettings(msg.settings);
   } catch (error) {
     return turnAck(id, "rejected", error.message);
@@ -1534,9 +1602,7 @@ async function runClaudeCli(startupReport = null) {
   });
   cliChild = child;
   cliStdinOpen = true;
-  pendingTurns = 1;
-  startNativeTurn();
-  child.stdin.write(prompt);
+  // Attach output/control handlers before negotiating settings or writing a turn.
 
   let stdoutRemainder = "";
   let sawResult = false;
@@ -1612,6 +1678,19 @@ async function runClaudeCli(startupReport = null) {
     log("info", "Claude Code CLI exited", { exitCode, sawResult });
     finishRun(exitCode);
   });
+  // Catalog -> confirmed native flags -> first task turn. No proxy is enabled.
+  nativeInitialization = initializeNativeSettings();
+  try {
+    await nativeInitialization;
+    if (!cliStdinOpen) return;
+    pendingTurns = 1;
+    startNativeTurn();
+    child.stdin.write(prompt);
+  } catch (error) {
+    appendEvent({ type: "error", message: error.message });
+    endCliStdin("native settings unconfirmed");
+    child.kill("SIGTERM");
+  }
 }
 
 runProjectStartup().then((report) => runClaudeCli(report));
