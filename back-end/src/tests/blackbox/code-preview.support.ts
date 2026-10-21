@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 /**
  * Fixtures for code-preview.blackbox.ts: a code-session HOME whose
  * `workspace/front-end` is a private copy of this checkout's Rose front-end
@@ -61,4 +62,11 @@ export function percentile(values: number[], p: number): number {
   const sorted = [...values].sort((a, b) => a - b);
   const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
   return sorted[index] ?? NaN;
+}
+
+/** Exact publication contract, shared without changing the owning assertions. */
+export function assertPublicationPolicy(text: string): void {
+  assert.match(text, /Publishing a Rose change to the agent network uses the existing `\/deploy`/);
+  assert.match(text, /open pull request is not yet publication/);
+  assert.match(text, /Preserve its checks and approvals/);
 }
