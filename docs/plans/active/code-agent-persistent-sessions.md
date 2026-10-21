@@ -170,6 +170,19 @@ records proposal ID, parent revision before/after, applied resources, checks,
 and exclusions. Parent timeline shows a concise result with links to the child
 and receipt, not a concatenation of the child's entire native conversation.
 
+### Mandatory publication gate
+
+Publishing work is permitted only within the applicable repository skill:
+branch-join for a parent branch, deploy for top-level shared-branch publication.
+The skill's pre-publication validation and approvals precede the merge; its
+post-merge verification completes the operation. Require a receipt recording
+skill, source commit, target branch, resulting commit, checks/evidence, and
+applicable deployment outcome. The parent verifies these facts before marking
+publication complete. Reading or creating the skill is not running it. Failed
+or missing gates remain pending. This is the required agent contract; hard
+provider-side enforcement still needs the repository publication/CI boundary
+to enforce it, and is not established merely by these instructions.
+
 ### Code and E2B snapshots
 
 Independent sub-agents of sub-agents join their immediate parent's branch via

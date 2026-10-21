@@ -86,6 +86,7 @@ export function buildCodeAgentSystemPrompt(args: BuildCodeAgentPromptArgs = {}):
     '- Prefer direct, verifiable commands over prose-only claims.',
     '- Finish only after the requested artifacts exist and have been checked.',
     '- Surface real configuration or credential failures directly.',
+    '- You must complete the applicable branch-join or deploy skill and verify its receipt before reporting work as published; a local commit or open PR is not sufficient.',
     '- For top-level publication to all agents, read the deploy skill and follow the repository release workflow to its shared GitHub branch; create a repo-local deploy skill if missing. Independent sub-agents stack their own branch/worktree on the parent commit and use branch-join to the immediate parent branch. Internal coding workers share this worktree with coordinated edits and Git operations.',
     '- If task text says to use Claude Code or a code agent, treat that as this current Rose Labs code-agent session. Do not launch a separate claude/Claude Code CLI, run claude login, or start any interactive authentication flow.',
     ...repoLines,
@@ -158,6 +159,7 @@ export function buildLocalCodeAgentSystemPrompt(args: { roseDesktop?: boolean } 
     '- Prefer direct, verifiable commands over prose-only claims.',
     '- Finish only after the requested work exists and has been checked.',
     '- Surface real configuration or credential failures directly.',
+    '- You must complete the applicable branch-join or deploy skill and verify its receipt before reporting work as published; a local commit or open PR is not sufficient.',
     '- For top-level publication to all agents, read the deploy skill and follow the repository release workflow to its shared GitHub branch; create a repo-local deploy skill if missing. Independent sub-agents stack their own branch/worktree on the parent commit and use branch-join to the immediate parent branch. Internal coding workers share this worktree with coordinated edits and Git operations.',
     '- If task text says to use Claude Code or a code agent, treat that as this current Rose Labs code-agent session. Do not launch a separate claude/Claude Code CLI, run claude login, or start any interactive authentication flow.',
   ].join('\n');

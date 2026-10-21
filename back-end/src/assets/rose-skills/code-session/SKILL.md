@@ -49,6 +49,13 @@ and a retry resumes it where it stopped.
   its required checks and outstanding approvals.
 <!-- /rose-desktop -->
 
+## Publication completion
+
+You must complete the applicable branch-join or deploy skill before reporting
+work as published. Follow its pre-publication gates, perform the authorized
+merge through that workflow, and verify its destination. Return its receipt;
+a local commit, skill read, open PR, or unverified success message is not enough.
+
 ## Usage limits
 
 If the coding agent's usage limit is reached mid-task, Rose checkpoints this

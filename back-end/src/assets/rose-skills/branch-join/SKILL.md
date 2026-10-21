@@ -37,3 +37,18 @@ a branch join. Assign nonoverlapping files or serialize overlapping edits;
 let the owning coding agent coordinate commits, checkout/rebase, and publication.
 Sharing a worktree does not make simultaneous Git mutations safe. Do not launch
 another code-agent CLI merely to manufacture an internal worker.
+
+## Required publication gate
+
+Publication is allowed only through this skill and the repository workflow it
+selects. Complete the required validation and approval steps before the merge
+step; verify the destination afterward. Reading or creating a skill file is
+not execution of the skill.
+
+Return a completion receipt naming the skill used, source commit, target branch,
+resulting commit, and check results with their evidence. Include the deployment
+outcome for deploy, or the verified parent update for branch-join. Do not claim
+publication until the applicable skill has completed and those facts are
+verified. A failed or unrun requirement leaves publication pending. The parent
+must verify the receipt against GitHub/check evidence instead of accepting a
+child's success statement alone.

@@ -49,3 +49,18 @@ Tell the parent which revision is available. Running agents synchronize at safe
 boundaries, preserving local changes; do not reset their active worktrees or
 restart unrelated sessions. Failed checks or missing credentials are explicit
 blockers, not a successful publication.
+
+## Required publication gate
+
+Publication is allowed only through this skill and the repository workflow it
+selects. Complete the required validation and approval steps before the merge
+step; verify the destination afterward. Reading or creating a skill file is
+not execution of the skill.
+
+Return a completion receipt naming the skill used, source commit, target branch,
+resulting commit, and check results with their evidence. Include the deployment
+outcome for deploy, or the verified parent update for branch-join. Do not claim
+publication until the applicable skill has completed and those facts are
+verified. A failed or unrun requirement leaves publication pending. The parent
+must verify the receipt against GitHub/check evidence instead of accepting a
+child's success statement alone.

@@ -288,3 +288,32 @@ test('nested agents join parent branches while internal coding workers share the
     );
   }
 });
+
+test('publication requires the applicable skill and a verifiable completion receipt', () => {
+  for (const roseDesktop of [false, true]) {
+    const skills = installedRoseSkills(roseDesktop);
+    for (const name of ['deploy', 'branch-join']) {
+      const text =
+        skills
+          .find((skill) => skill.name === name)
+          ?.files.find((file) => file.path === 'SKILL.md')
+          ?.content.toString('utf8') ?? '';
+      assert.match(text, /Publication is allowed only through this skill/);
+      for (const required of [
+        'source commit',
+        'target branch',
+        'resulting commit',
+        'check results',
+      ]) {
+        assert.ok(text.includes(required), `${name} requires ${required}`);
+      }
+      assert.match(text, /Do not claim\s+publication/);
+    }
+    for (const prompt of [
+      buildCodeAgentSystemPrompt({ roseDesktop }),
+      buildLocalCodeAgentSystemPrompt({ roseDesktop }),
+    ]) {
+      assert.match(prompt, /must complete the applicable branch-join or deploy skill/);
+    }
+  }
+});
