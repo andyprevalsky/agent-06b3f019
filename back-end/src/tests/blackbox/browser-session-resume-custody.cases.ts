@@ -10,7 +10,9 @@ type Outcome = { ok: boolean; sessionId?: string; error?: string; pid: number };
 export async function runBrowserResumeCustodyCases() {
   const url = new URL(process.env.DATABASE_URL ?? '');
   assert(['localhost', '127.0.0.1'].includes(url.hostname), 'custody fixtures require local DB');
-  assert.equal(url.pathname, '/victoria_browser_resume_custody_oct21', 'dedicated DB only');
+  // The normal blackbox runner selects a local victoria_<workspace> database.
+  // Every fixture creates and removes only its UUID-owned context and ledger row.
+  assert.match(url.pathname, /^\/victoria_[\w-]+$/, 'isolated workspace DB only');
   const outcomes: unknown[] = [];
   for (const provider of ['browser-use', 'kernel']) {
     for (const scenario of [

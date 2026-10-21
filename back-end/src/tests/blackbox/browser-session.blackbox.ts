@@ -615,6 +615,7 @@ async function runAll() {
   if (process.argv.includes('--init-disconnect-only')) return;
   await runBrowserPauseCheckpointCases();
   await runBrowserTerminalPauseCases();
+  await runBrowserResumeCustodyCases();
   console.log('Browser Session Black-box Tests\n');
   console.log(`Testing against: ${BASE_URL}`);
   console.log(`Case concurrency: ${CASE_CONCURRENCY}\n`);
