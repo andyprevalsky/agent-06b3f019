@@ -12,7 +12,7 @@
  *
  * PLACEMENT (one instance on screen per viewport, useIsMobile):
  *   'corner' (md+)  four bare icons (34px hit targets, tooltip on hover) in the
- *                   window's top-right corner — no bar, background, tile or
+ *                   window's fixed top-right corner, unchanged when panels open — no bar, background, tile or
  *                   ring. They float above the full-height drawers (z 90), so
  *                   clicking the active icon is how a drawer closes (row 67).
  *   'header' (< md) the same four icons inline at the right of the mobile
@@ -146,7 +146,6 @@ export function RoseAppIcons({ placement = 'corner' }: { placement?: 'corner' | 
   const theme = useRoseTheme();
   const isMobile = useIsMobile();
   const header = placement === 'header';
-  const fullDrawerOpen = ['browser', 'display', 'validation'].includes(apps?.openApp ?? '');
   if (apps === null || header !== isMobile) return null;
   return (
     <nav
@@ -158,18 +157,7 @@ export function RoseAppIcons({ placement = 'corner' }: { placement?: 'corner' | 
           ? 'flex min-w-0 items-center overflow-x-auto'
           : 'fixed z-[90] hidden items-center md:flex'
       }
-      style={
-        header
-          ? undefined
-          : fullDrawerOpen
-            ? {
-                top: 11,
-                left: 'calc(50% + 32px)',
-                transform: 'translateX(-50%)',
-                gap: APP_ICON_GAP,
-              }
-            : { top: 11, right: APP_ICON_EDGE, gap: APP_ICON_GAP }
-      }
+      style={header ? undefined : { top: 11, right: APP_ICON_EDGE, gap: APP_ICON_GAP }}
     >
       <AppIconButtons
         apps={apps}

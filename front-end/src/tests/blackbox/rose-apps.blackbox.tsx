@@ -199,6 +199,9 @@ describe('top-right app icons', () => {
     expect(drawer.style.top).toBe('0px');
     expect(within(drawer).queryByRole('button', { name: /close/i })).toBeNull();
     // The icon row floats over the drawer's top-right corner (it stacks above it).
+    expect(row.style.right).toBe('16px');
+    expect(row.style.left).toBe('');
+    expect(row.style.transform).toBe('');
     expect(row.className).toContain('z-[90]');
     expect(drawer.className).toContain('z-[66]');
     expect(screen.getByTestId('root-browser-empty')).toHaveTextContent('Your browser');
