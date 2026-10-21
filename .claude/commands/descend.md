@@ -38,6 +38,11 @@ budgets, concurrency and acceptance rules rather than importing another run's
 special profile. Invocation authorizes running the requested slice and repairing
 infra; it does not approve a runtime/product fix or a different paid workload.
 
+Explicit user scheduling holds override automatic reruns and next-slice defaults.
+For the resumed Polar campaign, retain `/benchmark`'s 20-task K=3, fastest-first
+comparable duration groups, 2-hour cap and user-go-before-next-20 scope; none of
+the repair, approval or continuation steps below grants a new batch launch.
+
 ## The iteration loop
 
 1. **Run and monitor** the requested experiment on its frozen source. When
@@ -855,6 +860,60 @@ per-run observed mechanism, not the count, grants membership.
   only after searching. A change with no reference precedent must say why
   every reference approach does not fit. Never cite from memory.
 
+### Match proof to the claimed boundary
+
+Continuously add reusable findings to this owning section as reviews arrive;
+reuse partial work and accepted unchanged evidence instead of restarting an RCA.
+
+- **Audit causal coverage, not just green test counts.** Name each real producer,
+  consumer and mocked boundary. A dispatcher test whose `record_action` is an
+  AsyncMock proves the submitted arguments, not durable history persistence.
+  A captured judge request proves evidence delivery, not provider acceptance,
+  reasoning quality or an unchanged benchmark outcome. Verify registration in
+  the actual owning runner: a test definition is not coverage when
+  `run_all_tests` never calls it. Preserve before/after output and exact source.
+- **A reserve is not a proved admission bound.** A between-turn check at
+  timeout minus 300 seconds cannot guarantee completion if an admitted action
+  plus recovery can take 660 seconds. Trace admission, cancellation-resistant
+  awaits and finalization against the same remaining clock; test a step crossing
+  the boundary and finalization exhaustion. Distinguish cooperative timeout
+  fixtures from a hard wall deadline. Do not silently increase the task budget.
+- **Separate restored judge evidence from input capacity and error grading.**
+  Removing a 4000-character cut restores archived text; it does not establish
+  that the configured provider accepts the complete history plus screenshots.
+  Record actual input size and provider limit evidence separately. A synthetic
+  context rejection returning score 0 proves the error path, not a real provider
+  failure or a task FAIL. Keep missing completion summaries, clipped tool text,
+  duplicate root hydration and absent screenshots as distinct mechanisms;
+  preserve original step labels and accepted grades. Never hide a capacity gap
+  by silently reintroducing clipping or changing rubric thresholds.
+- **Check actual reference policy and units.** Cite source bytes/revision and
+  the real conditional, configured use and value, not a bundled library symbol
+  or plausible analogy. Correct reversed predicates and rendered-line offsets.
+  Browser-use's 20000-character evaluate cap and DOM-only cap do not imply a
+  40000-character whole-state policy; Codex byte truncation is not a Unicode
+  character bound. A reference budget does not establish local 120/180/60-second
+  reserves. Label local choices, loss/type changes and unproved memory bounds.
+- **Distinguish lifecycle contracts and external failures.** Closing a browser
+  before a retained-tab obligation ends is a custody/lifetime design gap; a
+  recorded URL list does not prove live tabs. An observed Google challenge is
+  external evidence, while failed recovery needs per-candidate receipts before
+  assigning its cause. Keep independent answer-quality failures separate from
+  both, even when their transcripts share a browser kill.
+- **Shared limits need shared authority proof.** Preserve per-bench isolation
+  while checking the approved shared token/cooldown boundary with fresh and
+  already-warm readers, expiry, unavailable-authority behavior and served reset.
+  Check overlapping read/mark/reset operations: an old successful read must not
+  erase a newly acknowledged mark, and malformed HTTP 200 state is not a valid
+  empty state. Require acknowledged resets and account for authority/worker
+  clock skew; sequential mocks do not prove these interleavings.
+  A five-second read cache is bounded propagation, not instantaneous exclusion;
+  a two-second RPC timeout is not proof of provider admission capacity. Honor
+  explicit provider retry hints (including 900 seconds) before the approved
+  OpenClaw transient fallback of 30/60/300 seconds; do not substitute its separate
+  exponential rate-limit policy. Backend-first rollout and unchanged task
+  outcome proof remain distinct from local PostgreSQL plus mocked-provider proof.
+
 Give every cluster a stable row ID, a kebab-case name for its boundary and
 mechanism, its member tasks, and one **exemplar**: the member with `observed`
 evidence and the cheapest owning-boundary repro. Membership is a hypothesis
@@ -936,10 +995,15 @@ ready. Never wait for an infra-clean run or every other RCA to finish.
 
 The queue holds clusters, not tasks. Sort it by:
 
-1. member-task count, largest first, so the fix that flips the most tasks is
-   decided first;
-2. complexity class, easiest first, from the table below; then
-3. row ID.
+1. priority, highest first, honoring explicit user priorities;
+2. affected-run count, largest first, with member-task count, largest first
+   recorded separately when runs and tasks differ;
+3. complexity class, easiest first, from the table below; then row ID.
+
+Only the main chat delivers harness/eval approval requests. Show the current
+queue position as **X of N**, priority, affected-run numerator/denominator,
+unique task count and overlaps, followed by the exact inline diff and canonical
+approval evidence. Do not turn queue rank or a worker's review into approval.
 
 Infra and External Blocker never enter the runtime-fix approval queue; keep
 their repair/observability states in the same durable cluster ledger.
@@ -952,8 +1016,8 @@ their repair/observability states in the same durable cluster ledger.
 | 4    | Harness                   | Prompting Inconsistency, Agent Reasoning Failure, Resource/Performance Failure |
 
 Re-rank only when membership changes: a later epoch's clustering, a split, or a
-merge. Between those events the order is stable, and a cluster whose
-outcome-proof rerun fails keeps its position.
+merge, or when the user changes priority. Between those events the order is
+stable, and a cluster whose outcome-proof rerun fails keeps its position.
 
 A cluster is **idle** when it is not applying, outcome-rerunning, or in RCA.
 Deliver the top ready idle cluster's request in the main thread. A

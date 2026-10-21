@@ -41,6 +41,24 @@ scorecard, every **10 minutes** and on three transitions: tasks started, no more
 queued, and run end (an infra early stop counts as the end). Approval requests
 for harness and eval fixes still go to the user from the main agent.
 
+**Resumed Polar scope (October 20, 2026).** The user's newer instruction
+supersedes the attachment's 50-task suggestion: at most **20 tasks at K=3**,
+grouped by comparable expected duration, fastest groups first. Reconcile and
+preserve accepted K slots before selecting only missing slots; do not rerun
+accepted slots to fill a batch. Execution timeout is **7200 seconds (2 hours)**;
+reject larger values with the requested lower-timeout/settings explanation.
+After each batch, wait for the user's explicit go before the next 20. Neither
+continuation, an infra repair nor a completed review grants that go. Keep BU
+results separate and report benchmark costs and retry costs without inventing
+missing charges. Do not use Gmail, Calendar or Drive for this work.
+
+Harness/eval candidates go only through main-chat approval, sorted by
+priority then affected-run count, showing **X of N**, overlapping memberships
+and the exact inline diff. Use `/descend`'s owning failure-clustering guidance
+for causal coverage and reference policy. Mocked causal checks, restored judge
+evidence and judge-only replays never become accepted benchmark outcomes.
+These scope rules override unrelated campaign profiles below.
+
 For the current user-requested five consecutive LIVE DAILY runs of fifty,
 follow the **Current width-fifty LIVE acceptance** subsection of
 the Operations Runbook in `agents/benchmarks/README.md`. Each run
