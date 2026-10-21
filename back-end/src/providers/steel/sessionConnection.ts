@@ -126,13 +126,16 @@ export async function validateBrowserConnection(
         let browser: Browser | undefined;
         let connectTimer: NodeJS.Timeout | undefined;
         try {
+          const connecting = connect(wsUrl);
           browser = await Promise.race([
-            connect(wsUrl),
+            connecting,
             new Promise<never>((_, reject) => {
-              connectTimer = setTimeout(
-                () => reject(new Error('Connection timeout')),
-                SESSION_VALIDATION_TIMEOUT
-              );
+              connectTimer = setTimeout(() => {
+                // A connect that lands after the timeout must not keep the
+                // session's CDP slot (Tilion admits one client; later ones get 4409).
+                void connecting.then((late) => late.close()).catch(() => {});
+                reject(new Error('Connection timeout'));
+              }, SESSION_VALIDATION_TIMEOUT);
             }),
           ]).finally(() => clearTimeout(connectTimer));
           const contexts = browser.contexts();
