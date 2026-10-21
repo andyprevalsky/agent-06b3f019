@@ -9756,7 +9756,7 @@
     "name": "raise-5m-rose-labs-brex",
     "title": "Raise $5M for Rose Labs (Brex balance, simulated)",
     "description": "Long-horizon fundraise: from Tamy's account snapshot, raise US$5M for Rose Labs with no questions asked; passes when the Brex account shows $5,000,000 received.",
-    "prompt": "Raise me 5m dollars for my company Rose Labs\nNo questions asked",
+    "prompt": "Raise $5M for my company Rose Labs. No questions asked: make reasonable assumptions and keep going.\n\nGOAL\nAt least $5,000,000 of settled investor wires in Rose Labs' Brex account (rose_labs_primary_usd), each traceable to a signed SAFE. Commitments alone don't count. Email from tamara@roselabs.ai, SMS from +12028803603. Tamara (Tamy) is the only person who pitches.\n\nATTACHED MATERIALS\nPitch deck, one-pager, metrics fact sheet, data room index and SAFE terms are attached.\n\nROUND TERMS: YC post-money SAFEs, cap rising in tranches\n- Tranche 1: first $2.5M at a $20M post-money cap.\n- Tranche 2: next $1.5M at $25M, opened only once tranche 1 is fully signed.\n- Tranche 3: final $1M at $30M.\n- Every investor in a tranche gets the same cap; never give one investor a lower cap. Tell investors the current tranche and that the cap rises once it fills.\n- Minimum check: $10k.\n\nTASKS\n\n1. Map the opportunity\n   - Search my email, messages, calendar and network for every existing investor thread, intro offer, past investor and warm connection.\n   - Build one target list of firms and angels, tiered: Tier 1 = can lead ($1M+ checks); Tier 2 = seed funds ($250k–1M); Tier 3 = smaller and emerging funds and angels ($10k–250k).\n   - Prefer active investors: recent deals at our stage and sector, and capital left to deploy.\n   - For each firm, choose the single best-fit partner (thesis, stage, recent deals) as the point of contact, with backups ranked.\n   - For each contact, list every possible warm introducer, ranked by this order of intro strength:\n      1. Founder they backed who delivered a major success (more if they want to invest as an angel)\n      2. Existing investor who is investing more than pro-rata in this round\n      3. Trusted VC at another firm who wants to invest or co-invest in this round\n      4. Customer who knows the VC and strongly advocates for our product\n      5. Founder they have backed before\n      6. Former colleague, manager or co-founder whom the VC trusts\n      7. Successful founder they know well but haven't backed\n      8. Angel investor they regularly invest alongside\n      9. An LP in the VC's fund\n     10. Associate or principal inside the firm who champions us\n     11. Existing investor who is doing pro-rata\n     12. Operator or technical expert the VC relies on\n     13. Scout affiliated with the firm\n     14. Existing investor without a new commitment\n     15. Friend of the VC who knows our work\n     16. Employee at a portfolio company\n     17. Investor who passed for a clear mandate reason\n     18. Lawyers\n     19. Recruiter, executive coach, accountant, banker or other service provider\n     20. VC office hours, pitch sessions or open application programs\n     21. Conference, networking event or chance in-person encounter\n     22. Mutual personal acquaintance\n     23. Targeted cold email to the right partner (cold lane)\n     24. Investor who passed on the business, team or terms (avoid)\n     25. Firm website submission or general inbox (cold lane, last resort)\n   - When choosing a path, weigh what the intro says about us: how well the introducer knows our work, why they believe in it, and what they are committing themselves (if anything).\n   - Size the list to fill Tamy's pitch capacity (below). Assume about 13% of warm touches and about 3% of cold touches become a held pitch.\n\n2. Run every contact end to end\n   - One agent per contact person, hundreds running at once. Each owns its person from first touch to settled wire: outreach → reply → pitch → follow-up → handshake → approved SAFE → wire → confirmed settlement.\n   - Firms run in parallel. Within a firm, one point of contact at a time; move to the next-best partner only after the full waterfall gets no response.\n   - A reply goes through that one live thread. A pass ends outreach to that firm for this raise. Never take intros from an investor who passed.\n   - If an associate responds, take the meeting and ask that the next one include everyone needed to make an investment decision.\n\n   Outreach writing (every message):\n   - Plain text from tamara@roselabs.ai in Tamy's own voice. No attachments; link the deck.\n   - Cold email to a partner: 5–6 sentences, under ~125 words.\n     1. Open with the strongest signal, never \"My name is…\": the Rappi pilot (100,000+ restaurants), Tamy's track record (MEDU, $23M ARR; Thiel Fellow), or a mutual connection.\n     2. Why this investor: one specific, verified detail (a portfolio company, a thesis they wrote, a recent deal). If none can be verified, research more or skip them.\n     3. What Rose does, in one plain sentence.\n     4. The ask: a specific 25-minute slot within the next 7 days, plus the current tranche in one line.\n     5. Deck link and signature (name, title, phone).\n   - Subject: 2–6 words with sector, stage and a credibility signal (e.g. \"Rappi pilot | agents pre-seed\").\n   - Ask-the-introducer email: name the exact person and why them, offer the forwardable email, and give an easy way to say no.\n   - Forwardable intro: a separate, self-contained email of 5 sentences or fewer (what we do, proof with dates, why we win, the raise, why this investor), sent from our company address; the introducer forwards it.\n   - Every follow-up adds new information (traction, round progress) and gets shorter; the last is one line with a booking link.\n   - Never write \"following up\", \"circling back\", \"just bumping this\", \"hope you're well\", apologies or flattery.\n   - After a pitch: a same-day email restating the agreed next step and date and the current tranche terms.\n   - Handshake: \"Confirming you're in for $X at the $Y post-money cap. Reply yes and I'll send the SAFE.\"\n   - Test one variable at a time (subject, opening signal, angle) and keep whichever books more pitches.\n\n   Warm lane, for contacts with one or more introducers:\n   - Start with the strongest introducer. Ask them first, naming the exact person, and send a forwardable email (5 sentences or fewer, in Tamy's voice: what we do, traction with dates, why we win, the raise) for them to pass on, without CCing the investor.\n   - Follow up with the introducer until they confirm they made the intro or decline: a gentle nudge after 3 business days and again after 7, always with an easy way to say no.\n   - If they haven't confirmed after the second nudge, also ask the next-strongest introducer. Multiple warm intros to the same person are fine; tell each introducer if someone else already connected you.\n   - Once the investor opts in, reply within an hour and thank every introducer involved, telling them how it went.\n\n   Cold lane, for contacts with no warm route (in parallel with warm):\n   - Personalized cold email from tamara@roselabs.ai on day 0, 4, 10 and 21 (4 emails total). Each follow-up carries real news: new traction, or round progress such as \"$X signed, $Y left in this tranche\".\n   - Then LinkedIn, then the firm's intake form if it has one.\n   - No SMS or calls to people we have no relationship with.\n\n   Calendar (Tamy is the bottleneck):\n   - At most 12 pitches per day, 25–30 minutes each, with a short gap between them for follow-ups.\n   - Book tier 3 into the first slots, then tier 2, then tier 1, so the pitch is at its best and has momentum when tier 1 hears it.\n   - Reserve about 20% of slots for second meetings with interested investors.\n   - Before each pitch, give Tamy a one-page brief on that investor: relationship and intro path, history with us, thesis and recent deals, what they likely want to see, and their likely objections.\n   - End every pitch with a clear next step and date. Follow up the same day with the terms of the current tranche.\n\n3. Coach the pitch\n   - Record and transcribe every pitch, with speakers labeled FOUNDER and INVESTOR.\n   - Score each call 1–5, with a transcript quote as evidence, on: opening clarity, core points landed, traction labels correct, confidence (no guessed numbers), engagement (investor talk time), demand evidence (behavior and money vs. interest), specificity (named customers vs. categories), market/why now, team fit, objection handling, and ask/close (amount stated, explicit ask, dated next step).\n   - Check every number Tamy said against the metrics fact sheet and flag inconsistencies.\n   - After every 10 pitches, send Tamy one document:\n     a) What went well, with quotes.\n     b) What didn't go well, with quotes.\n     c) Patterns: recurring questions, score trends vs. the previous batch, and how scores differ between calls that moved forward and calls that didn't.\n     d) Areas to refine: the top 3 changes for the next 10 pitches, each with a rewritten line.\n     Write it bluntly: take a position on each issue, give the evidence, and name failure patterns directly (for example \"interest presented as demand\", \"growth stat used as a vision\").\n   - Any topic asked in more than about 30% of calls gets answered in the main pitch. Test one change at a time and tag each call with its version.\n   - Use only the directional signal from investor feedback (moved forward / stalled / passed, which topics drew questions), never their stated reasons. Weight the transcripts above what investors say afterward.\n   - Use earlier commitments as social proof in later pitches.\n\n4. Close each investor\n   - Handshake: when an investor says \"I'm in\", confirm the exact amount and the current tranche's cap in writing, and get their written yes.\n   - Send each SAFE only through an action that requests my approval first (Rose's approval step on outgoing messages, e-signature submissions and payments), showing the investor, amount, cap and their written confirmation. Never send a SAFE any other way, and don't wait for a chat reply.\n   - Before giving wire instructions, confirm the investor's identity and accredited status, and send the instructions through a verified channel.\n   - A \"yes if you find a lead\" is not a commitment; track it separately and follow up once others have signed.\n   - Each contact agent reports its status after every change. Total those reports for a round summary: approved, signed, settled and pending dollars per tranche, plus pitches booked and held.\n   - If booked pitches fall below Tamy's capacity, add targets or request more intros, sized with the funnel rates above.\n   - When a tranche fills, open the next one and use the progress as news in follow-ups. When signed SAFEs reach $5M, stop new outreach and politely tell open conversations the round is filled.\n\n5. Verify in Brex\n   - Confirm the balance and every incoming wire on the actual Brex account page.\n   - Report each investor, amount, cap, SAFE reference and wire reference.\n\nPARALLELIZATION\n- Task 1 runs first; task 2 starts every contact agent once the map exists, across the warm and cold lanes.\n- Firms run in parallel; within a firm, one point of contact at a time. A slow investor never blocks another.\n- Tamy's calendar (12 pitches/day) is the only shared bottleneck; agents book it in tier order.\n- Task 3 runs after every 10 pitches; task 4 closes each investor once their SAFE is approved, and its totals decide when a tranche opens or the round ends.\n- Task 5 runs once, when settled wires reach $5M.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": [],
@@ -9767,7 +9767,13 @@
     "price_limit_cents": 2000,
     "requires_browser_agent": false,
     "requires_claude_code": false,
-    "attachment": null,
+    "attachment": [
+      "rose-labs-preseed/pitch-deck.md",
+      "rose-labs-preseed/one-pager.md",
+      "rose-labs-preseed/metrics-fact-sheet.md",
+      "rose-labs-preseed/data-room-index.md",
+      "rose-labs-preseed/safe-terms.md"
+    ],
     "approval_handling": "auto_approve",
     "start_phase": "plan",
     "model": "rose-ultra",
@@ -10483,5 +10489,3505 @@
         }
       ]
     }
+  },
+  {
+    "name": "icp-clerked-manufacturing-cfos",
+    "title": "ICP calls: Clerked (F25)",
+    "description": "ICP call-booking bench from Evan Meyer's (Clerked, YC F25) real Bookface request: the founder types who they want to talk to and what they'd pay; passes when at least one person matching the ICP accepted a call and were paid; simulated world, no real contact or payment.",
+    "prompt": "Get me on 30 min calls with CFOs ($600) or controllers ($300) at manufacturers/distributors between 200-2000 employees. Pay them directly, only for calls that actually get booked.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": ["ICP", "outreach", "long-horizon"],
+    "price_limit_cents": 2000,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "plan",
+    "status": "incomplete",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "group": "incomplete",
+    "world_model_mode": "simulate",
+    "world_surface": "simulated",
+    "wmh_initial_state": {
+      "structured": {
+        "schema": "rose.wmh.icp_call_booking_initial_state.v1",
+        "as_of_utc": "2026-10-20T00:00:00Z",
+        "acting_user": {
+          "name": "Evan Meyer",
+          "role": "Founder",
+          "authority": "company_founder"
+        },
+        "company": {
+          "name": "Clerked",
+          "yc_batch": "F25",
+          "founder": "Evan Meyer"
+        },
+        "connectivity_defaults": {
+          "all_services_connected": true,
+          "all_browser_sessions_authenticated": true,
+          "unlisted_services_connected": true,
+          "disconnected_services": []
+        },
+        "data_sources": {
+          "email": {
+            "connected": true,
+            "provider": "gmail",
+            "account": "founder work email"
+          },
+          "calendar": {
+            "connected": true,
+            "provider": "google_calendar",
+            "booking_link_available": true
+          },
+          "sms": {
+            "connected": true
+          },
+          "linkedin": {
+            "connected": true
+          }
+        },
+        "payouts": {
+          "rail": "simulated_honorarium_payouts",
+          "funded": true,
+          "payouts_sent": []
+        },
+        "outreach": {
+          "contacted_people": [],
+          "booked_calls": []
+        }
+      },
+      "scratchpad": "Evan Meyer is the founder of Clerked (YC F25) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
+    },
+    "human_time": "2w",
+    "fast_cache": "on",
+    "anti_bot": "no",
+    "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Evan Meyer and was paid no more than the price the founder named for that person (never above $600), only for a booked call.",
+    "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": ["world-model-harness"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "World model simulate is ON: explore/browser/code subagent calls plus search, messaging, phone, calendar and payment boundaries are served by the WMH, so no real prospect is contacted and no real money moves. Root and general-purpose loops remain real. wait_for / wait_seconds advance the simulated clock so weeks of follow-ups fit in the cap."
+    },
+    "response_schema": {
+      "fields": [
+        {
+          "name": "booked_calls",
+          "type": "list[object]",
+          "required": true,
+          "description": "At least one person who accepted a calendar invite with Evan Meyer",
+          "properties": [
+            {
+              "name": "person_name",
+              "type": "str",
+              "description": "Named participant"
+            },
+            {
+              "name": "title",
+              "type": "str",
+              "description": "Current title"
+            },
+            {
+              "name": "organization",
+              "type": "str",
+              "description": "Current employer or practice"
+            },
+            {
+              "name": "icp_fit_evidence",
+              "type": "str",
+              "description": "Tool-observed facts showing the person and organization match the ICP"
+            },
+            {
+              "name": "scheduled_time_utc",
+              "type": "str",
+              "description": "Accepted call time"
+            },
+            {
+              "name": "booking_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed calendar acceptance"
+            },
+            {
+              "name": "payment_usd",
+              "type": "float",
+              "description": "Amount paid to the person"
+            },
+            {
+              "name": "payment_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed payout confirmation"
+            }
+          ]
+        },
+        {
+          "name": "total_paid_usd",
+          "type": "float",
+          "required": true,
+          "description": "Sum paid to booked people"
+        }
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "icp-clerked-manufacturing-cfos-root-completes",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED (no open questions to the user)"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "icp-clerked-manufacturing-cfos-calls-booked",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "At least one person accepted a calendar invite with Evan Meyer",
+          "Every counted person verifiably fits every constraint in the founder's goal",
+          "Each counted person was paid no more than the price the founder named for that person (never above $600), only for a booked call",
+          "The agent never stopped to ask the user clarifying questions or for permission"
+        ],
+        "judge_prompt": "You are grading a LONG-HORIZON ICP call-booking run executed in world-model simulate mode: every provider boundary (browser pages, web search, messaging, phone, calendar, payments) was served by the World Model Harness, so treat simulated tool observations as the ground truth of that world. Evan Meyer, founder of Clerked (YC F25), gave the agent this goal: \"Get me on 30 min calls with CFOs ($600) or controllers ($300) at manufacturers/distributors between 200-2000 employees. Pay them directly, only for calls that actually get booked.\" PASS only if ALL hold, grounded in tool evidence (prospect replies, calendar acceptances, payout confirmations, profile/company observations) rather than assistant narration alone:\n1. At least one person accepted a calendar invite for a call with Evan Meyer.\n2. Every counted person and their organization verifiably match every constraint in the goal (role, industry, size, location or spend thresholds); a near-miss role or an unverified organization size does not count.\n3. Each counted person was paid no more than the price the founder named for that person (never above $600), and only for a booked call.\n4. The agent never stopped to ask the user clarifying questions or for permission; harness auto-approvals are fine.\nFAIL if too few calls were booked, if any counted person misses the ICP, if a payment exceeds the founder's price or precedes booking, if the agent ended by asking the user what to do, or if it fabricated bookings or payments no tool observation supports."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user-request:2026-10-20-icp-call-booking",
+      "bookface:max-kolysh-icp-thread:Clerked"
+    ]
+  },
+  {
+    "name": "icp-novoflow-medical-group-execs",
+    "title": "ICP calls: Novoflow (P25)",
+    "description": "ICP call-booking bench from Mathieu Rihet's (Novoflow, YC P25) real Bookface request: the founder types who they want to talk to and what they'd pay; passes when at least one person matching the ICP accepted a call and were paid; simulated world, no real contact or payment.",
+    "prompt": "Get me on calls with executives at medical groups over 10 locations (CIO, CTO, CMIO, COO, CEO, CMO - in that order of priority). $800 for 30 mins. Pay them directly, only for calls that actually get booked.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": ["ICP", "outreach", "long-horizon"],
+    "price_limit_cents": 2000,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "plan",
+    "status": "incomplete",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "group": "incomplete",
+    "world_model_mode": "simulate",
+    "world_surface": "simulated",
+    "wmh_initial_state": {
+      "structured": {
+        "schema": "rose.wmh.icp_call_booking_initial_state.v1",
+        "as_of_utc": "2026-10-20T00:00:00Z",
+        "acting_user": {
+          "name": "Mathieu Rihet",
+          "role": "Founder",
+          "authority": "company_founder"
+        },
+        "company": {
+          "name": "Novoflow",
+          "yc_batch": "P25",
+          "founder": "Mathieu Rihet"
+        },
+        "connectivity_defaults": {
+          "all_services_connected": true,
+          "all_browser_sessions_authenticated": true,
+          "unlisted_services_connected": true,
+          "disconnected_services": []
+        },
+        "data_sources": {
+          "email": {
+            "connected": true,
+            "provider": "gmail",
+            "account": "founder work email"
+          },
+          "calendar": {
+            "connected": true,
+            "provider": "google_calendar",
+            "booking_link_available": true
+          },
+          "sms": {
+            "connected": true
+          },
+          "linkedin": {
+            "connected": true
+          }
+        },
+        "payouts": {
+          "rail": "simulated_honorarium_payouts",
+          "funded": true,
+          "payouts_sent": []
+        },
+        "outreach": {
+          "contacted_people": [],
+          "booked_calls": []
+        }
+      },
+      "scratchpad": "Mathieu Rihet is the founder of Novoflow (YC P25) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
+    },
+    "human_time": "2w",
+    "fast_cache": "on",
+    "anti_bot": "no",
+    "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Mathieu Rihet and was paid no more than the price the founder named for that person (never above $800), only for a booked call.",
+    "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": ["world-model-harness"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "World model simulate is ON: explore/browser/code subagent calls plus search, messaging, phone, calendar and payment boundaries are served by the WMH, so no real prospect is contacted and no real money moves. Root and general-purpose loops remain real. wait_for / wait_seconds advance the simulated clock so weeks of follow-ups fit in the cap."
+    },
+    "response_schema": {
+      "fields": [
+        {
+          "name": "booked_calls",
+          "type": "list[object]",
+          "required": true,
+          "description": "At least one person who accepted a calendar invite with Mathieu Rihet",
+          "properties": [
+            {
+              "name": "person_name",
+              "type": "str",
+              "description": "Named participant"
+            },
+            {
+              "name": "title",
+              "type": "str",
+              "description": "Current title"
+            },
+            {
+              "name": "organization",
+              "type": "str",
+              "description": "Current employer or practice"
+            },
+            {
+              "name": "icp_fit_evidence",
+              "type": "str",
+              "description": "Tool-observed facts showing the person and organization match the ICP"
+            },
+            {
+              "name": "scheduled_time_utc",
+              "type": "str",
+              "description": "Accepted call time"
+            },
+            {
+              "name": "booking_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed calendar acceptance"
+            },
+            {
+              "name": "payment_usd",
+              "type": "float",
+              "description": "Amount paid to the person"
+            },
+            {
+              "name": "payment_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed payout confirmation"
+            }
+          ]
+        },
+        {
+          "name": "total_paid_usd",
+          "type": "float",
+          "required": true,
+          "description": "Sum paid to booked people"
+        }
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "icp-novoflow-medical-group-execs-root-completes",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED (no open questions to the user)"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "icp-novoflow-medical-group-execs-calls-booked",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "At least one person accepted a calendar invite with Mathieu Rihet",
+          "Every counted person verifiably fits every constraint in the founder's goal",
+          "Each counted person was paid no more than the price the founder named for that person (never above $800), only for a booked call",
+          "The agent never stopped to ask the user clarifying questions or for permission"
+        ],
+        "judge_prompt": "You are grading a LONG-HORIZON ICP call-booking run executed in world-model simulate mode: every provider boundary (browser pages, web search, messaging, phone, calendar, payments) was served by the World Model Harness, so treat simulated tool observations as the ground truth of that world. Mathieu Rihet, founder of Novoflow (YC P25), gave the agent this goal: \"Get me on calls with executives at medical groups over 10 locations (CIO, CTO, CMIO, COO, CEO, CMO - in that order of priority). $800 for 30 mins. Pay them directly, only for calls that actually get booked.\" PASS only if ALL hold, grounded in tool evidence (prospect replies, calendar acceptances, payout confirmations, profile/company observations) rather than assistant narration alone:\n1. At least one person accepted a calendar invite for a call with Mathieu Rihet.\n2. Every counted person and their organization verifiably match every constraint in the goal (role, industry, size, location or spend thresholds); a near-miss role or an unverified organization size does not count.\n3. Each counted person was paid no more than the price the founder named for that person (never above $800), and only for a booked call.\n4. The agent never stopped to ask the user clarifying questions or for permission; harness auto-approvals are fine.\nFAIL if too few calls were booked, if any counted person misses the ICP, if a payment exceeds the founder's price or precedes booking, if the agent ended by asking the user what to do, or if it fabricated bookings or payments no tool observation supports."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user-request:2026-10-20-icp-call-booking",
+      "bookface:max-kolysh-icp-thread:Novoflow"
+    ]
+  },
+  {
+    "name": "icp-draftaid-cad-engineering-managers",
+    "title": "ICP calls: Draftaid (W24)",
+    "description": "ICP call-booking bench from Abdullah Elqabbany's (Draftaid, YC W24) real Bookface request: the founder types who they want to talk to and what they'd pay; passes when at least one person matching the ICP accepted a call and were paid; simulated world, no real contact or payment.",
+    "prompt": "Get me on calls with engineering managers at machine and equipment designers with 10+ users of SolidWorks/Inventor/Creo. $350 per call. Pay them directly, only for calls that actually get booked.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": ["ICP", "outreach", "long-horizon"],
+    "price_limit_cents": 2000,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "plan",
+    "status": "incomplete",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "group": "incomplete",
+    "world_model_mode": "simulate",
+    "world_surface": "simulated",
+    "wmh_initial_state": {
+      "structured": {
+        "schema": "rose.wmh.icp_call_booking_initial_state.v1",
+        "as_of_utc": "2026-10-20T00:00:00Z",
+        "acting_user": {
+          "name": "Abdullah Elqabbany",
+          "role": "Founder",
+          "authority": "company_founder"
+        },
+        "company": {
+          "name": "Draftaid",
+          "yc_batch": "W24",
+          "founder": "Abdullah Elqabbany"
+        },
+        "connectivity_defaults": {
+          "all_services_connected": true,
+          "all_browser_sessions_authenticated": true,
+          "unlisted_services_connected": true,
+          "disconnected_services": []
+        },
+        "data_sources": {
+          "email": {
+            "connected": true,
+            "provider": "gmail",
+            "account": "founder work email"
+          },
+          "calendar": {
+            "connected": true,
+            "provider": "google_calendar",
+            "booking_link_available": true
+          },
+          "sms": {
+            "connected": true
+          },
+          "linkedin": {
+            "connected": true
+          }
+        },
+        "payouts": {
+          "rail": "simulated_honorarium_payouts",
+          "funded": true,
+          "payouts_sent": []
+        },
+        "outreach": {
+          "contacted_people": [],
+          "booked_calls": []
+        }
+      },
+      "scratchpad": "Abdullah Elqabbany is the founder of Draftaid (YC W24) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
+    },
+    "human_time": "2w",
+    "fast_cache": "on",
+    "anti_bot": "no",
+    "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Abdullah Elqabbany and was paid no more than the price the founder named for that person (never above $350), only for a booked call.",
+    "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": ["world-model-harness"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "World model simulate is ON: explore/browser/code subagent calls plus search, messaging, phone, calendar and payment boundaries are served by the WMH, so no real prospect is contacted and no real money moves. Root and general-purpose loops remain real. wait_for / wait_seconds advance the simulated clock so weeks of follow-ups fit in the cap."
+    },
+    "response_schema": {
+      "fields": [
+        {
+          "name": "booked_calls",
+          "type": "list[object]",
+          "required": true,
+          "description": "At least one person who accepted a calendar invite with Abdullah Elqabbany",
+          "properties": [
+            {
+              "name": "person_name",
+              "type": "str",
+              "description": "Named participant"
+            },
+            {
+              "name": "title",
+              "type": "str",
+              "description": "Current title"
+            },
+            {
+              "name": "organization",
+              "type": "str",
+              "description": "Current employer or practice"
+            },
+            {
+              "name": "icp_fit_evidence",
+              "type": "str",
+              "description": "Tool-observed facts showing the person and organization match the ICP"
+            },
+            {
+              "name": "scheduled_time_utc",
+              "type": "str",
+              "description": "Accepted call time"
+            },
+            {
+              "name": "booking_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed calendar acceptance"
+            },
+            {
+              "name": "payment_usd",
+              "type": "float",
+              "description": "Amount paid to the person"
+            },
+            {
+              "name": "payment_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed payout confirmation"
+            }
+          ]
+        },
+        {
+          "name": "total_paid_usd",
+          "type": "float",
+          "required": true,
+          "description": "Sum paid to booked people"
+        }
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "icp-draftaid-cad-engineering-managers-root-completes",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED (no open questions to the user)"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "icp-draftaid-cad-engineering-managers-calls-booked",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "At least one person accepted a calendar invite with Abdullah Elqabbany",
+          "Every counted person verifiably fits every constraint in the founder's goal",
+          "Each counted person was paid no more than the price the founder named for that person (never above $350), only for a booked call",
+          "The agent never stopped to ask the user clarifying questions or for permission"
+        ],
+        "judge_prompt": "You are grading a LONG-HORIZON ICP call-booking run executed in world-model simulate mode: every provider boundary (browser pages, web search, messaging, phone, calendar, payments) was served by the World Model Harness, so treat simulated tool observations as the ground truth of that world. Abdullah Elqabbany, founder of Draftaid (YC W24), gave the agent this goal: \"Get me on calls with engineering managers at machine and equipment designers with 10+ users of SolidWorks/Inventor/Creo. $350 per call. Pay them directly, only for calls that actually get booked.\" PASS only if ALL hold, grounded in tool evidence (prospect replies, calendar acceptances, payout confirmations, profile/company observations) rather than assistant narration alone:\n1. At least one person accepted a calendar invite for a call with Abdullah Elqabbany.\n2. Every counted person and their organization verifiably match every constraint in the goal (role, industry, size, location or spend thresholds); a near-miss role or an unverified organization size does not count.\n3. Each counted person was paid no more than the price the founder named for that person (never above $350), and only for a booked call.\n4. The agent never stopped to ask the user clarifying questions or for permission; harness auto-approvals are fine.\nFAIL if too few calls were booked, if any counted person misses the ICP, if a payment exceeds the founder's price or precedes booking, if the agent ended by asking the user what to do, or if it fabricated bookings or payments no tool observation supports."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user-request:2026-10-20-icp-call-booking",
+      "bookface:max-kolysh-icp-thread:Draftaid"
+    ]
+  },
+  {
+    "name": "icp-magnetic-accounting-rollup-leaders",
+    "title": "ICP calls: Magnetic (S25)",
+    "description": "ICP call-booking bench from Thomas Shelley's (Magnetic, YC S25) real Bookface request: the founder types who they want to talk to and what they'd pay; passes when at least one person matching the ICP accepted a call and were paid; simulated world, no real contact or payment.",
+    "prompt": "Get me on 30 min calls with CTO/COO/Partners at tax and accounting firms that are growing by acquisition (roll up or just accounting firm is fine). $500 per call. Pay them directly, only for calls that actually get booked.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": ["ICP", "outreach", "long-horizon"],
+    "price_limit_cents": 2000,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "plan",
+    "status": "incomplete",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "group": "incomplete",
+    "world_model_mode": "simulate",
+    "world_surface": "simulated",
+    "wmh_initial_state": {
+      "structured": {
+        "schema": "rose.wmh.icp_call_booking_initial_state.v1",
+        "as_of_utc": "2026-10-20T00:00:00Z",
+        "acting_user": {
+          "name": "Thomas Shelley",
+          "role": "Founder",
+          "authority": "company_founder"
+        },
+        "company": {
+          "name": "Magnetic",
+          "yc_batch": "S25",
+          "founder": "Thomas Shelley"
+        },
+        "connectivity_defaults": {
+          "all_services_connected": true,
+          "all_browser_sessions_authenticated": true,
+          "unlisted_services_connected": true,
+          "disconnected_services": []
+        },
+        "data_sources": {
+          "email": {
+            "connected": true,
+            "provider": "gmail",
+            "account": "founder work email"
+          },
+          "calendar": {
+            "connected": true,
+            "provider": "google_calendar",
+            "booking_link_available": true
+          },
+          "sms": {
+            "connected": true
+          },
+          "linkedin": {
+            "connected": true
+          }
+        },
+        "payouts": {
+          "rail": "simulated_honorarium_payouts",
+          "funded": true,
+          "payouts_sent": []
+        },
+        "outreach": {
+          "contacted_people": [],
+          "booked_calls": []
+        }
+      },
+      "scratchpad": "Thomas Shelley is the founder of Magnetic (YC S25) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
+    },
+    "human_time": "2w",
+    "fast_cache": "on",
+    "anti_bot": "no",
+    "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Thomas Shelley and was paid no more than the price the founder named for that person (never above $500), only for a booked call.",
+    "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": ["world-model-harness"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "World model simulate is ON: explore/browser/code subagent calls plus search, messaging, phone, calendar and payment boundaries are served by the WMH, so no real prospect is contacted and no real money moves. Root and general-purpose loops remain real. wait_for / wait_seconds advance the simulated clock so weeks of follow-ups fit in the cap."
+    },
+    "response_schema": {
+      "fields": [
+        {
+          "name": "booked_calls",
+          "type": "list[object]",
+          "required": true,
+          "description": "At least one person who accepted a calendar invite with Thomas Shelley",
+          "properties": [
+            {
+              "name": "person_name",
+              "type": "str",
+              "description": "Named participant"
+            },
+            {
+              "name": "title",
+              "type": "str",
+              "description": "Current title"
+            },
+            {
+              "name": "organization",
+              "type": "str",
+              "description": "Current employer or practice"
+            },
+            {
+              "name": "icp_fit_evidence",
+              "type": "str",
+              "description": "Tool-observed facts showing the person and organization match the ICP"
+            },
+            {
+              "name": "scheduled_time_utc",
+              "type": "str",
+              "description": "Accepted call time"
+            },
+            {
+              "name": "booking_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed calendar acceptance"
+            },
+            {
+              "name": "payment_usd",
+              "type": "float",
+              "description": "Amount paid to the person"
+            },
+            {
+              "name": "payment_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed payout confirmation"
+            }
+          ]
+        },
+        {
+          "name": "total_paid_usd",
+          "type": "float",
+          "required": true,
+          "description": "Sum paid to booked people"
+        }
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "icp-magnetic-accounting-rollup-leaders-root-completes",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED (no open questions to the user)"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "icp-magnetic-accounting-rollup-leaders-calls-booked",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "At least one person accepted a calendar invite with Thomas Shelley",
+          "Every counted person verifiably fits every constraint in the founder's goal",
+          "Each counted person was paid no more than the price the founder named for that person (never above $500), only for a booked call",
+          "The agent never stopped to ask the user clarifying questions or for permission"
+        ],
+        "judge_prompt": "You are grading a LONG-HORIZON ICP call-booking run executed in world-model simulate mode: every provider boundary (browser pages, web search, messaging, phone, calendar, payments) was served by the World Model Harness, so treat simulated tool observations as the ground truth of that world. Thomas Shelley, founder of Magnetic (YC S25), gave the agent this goal: \"Get me on 30 min calls with CTO/COO/Partners at tax and accounting firms that are growing by acquisition (roll up or just accounting firm is fine). $500 per call. Pay them directly, only for calls that actually get booked.\" PASS only if ALL hold, grounded in tool evidence (prospect replies, calendar acceptances, payout confirmations, profile/company observations) rather than assistant narration alone:\n1. At least one person accepted a calendar invite for a call with Thomas Shelley.\n2. Every counted person and their organization verifiably match every constraint in the goal (role, industry, size, location or spend thresholds); a near-miss role or an unverified organization size does not count.\n3. Each counted person was paid no more than the price the founder named for that person (never above $500), and only for a booked call.\n4. The agent never stopped to ask the user clarifying questions or for permission; harness auto-approvals are fine.\nFAIL if too few calls were booked, if any counted person misses the ICP, if a payment exceeds the founder's price or precedes booking, if the agent ended by asking the user what to do, or if it fabricated bookings or payments no tool observation supports."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user-request:2026-10-20-icp-call-booking",
+      "bookface:max-kolysh-icp-thread:Magnetic"
+    ]
+  },
+  {
+    "name": "icp-rhizome-biotech-regulatory-affairs",
+    "title": "ICP calls: Rhizome AI (W26)",
+    "description": "ICP call-booking bench from Chetan Mishra's (Rhizome AI, YC W26) real Bookface request: the founder types who they want to talk to and what they'd pay; passes when at least one person matching the ICP accepted a call and were paid; simulated world, no real contact or payment.",
+    "prompt": "Get me on calls with regulatory affairs managers, senior managers, directors, or VPs at biotechs in the US with clinical-stage assets. $250 per call. Pay them directly, only for calls that actually get booked.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": ["ICP", "outreach", "long-horizon"],
+    "price_limit_cents": 2000,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "plan",
+    "status": "incomplete",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "group": "incomplete",
+    "world_model_mode": "simulate",
+    "world_surface": "simulated",
+    "wmh_initial_state": {
+      "structured": {
+        "schema": "rose.wmh.icp_call_booking_initial_state.v1",
+        "as_of_utc": "2026-10-20T00:00:00Z",
+        "acting_user": {
+          "name": "Chetan Mishra",
+          "role": "Founder",
+          "authority": "company_founder"
+        },
+        "company": {
+          "name": "Rhizome AI",
+          "yc_batch": "W26",
+          "founder": "Chetan Mishra"
+        },
+        "connectivity_defaults": {
+          "all_services_connected": true,
+          "all_browser_sessions_authenticated": true,
+          "unlisted_services_connected": true,
+          "disconnected_services": []
+        },
+        "data_sources": {
+          "email": {
+            "connected": true,
+            "provider": "gmail",
+            "account": "founder work email"
+          },
+          "calendar": {
+            "connected": true,
+            "provider": "google_calendar",
+            "booking_link_available": true
+          },
+          "sms": {
+            "connected": true
+          },
+          "linkedin": {
+            "connected": true
+          }
+        },
+        "payouts": {
+          "rail": "simulated_honorarium_payouts",
+          "funded": true,
+          "payouts_sent": []
+        },
+        "outreach": {
+          "contacted_people": [],
+          "booked_calls": []
+        }
+      },
+      "scratchpad": "Chetan Mishra is the founder of Rhizome AI (YC W26) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
+    },
+    "human_time": "2w",
+    "fast_cache": "on",
+    "anti_bot": "no",
+    "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Chetan Mishra and was paid no more than the price the founder named for that person (never above $250), only for a booked call.",
+    "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": ["world-model-harness"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "World model simulate is ON: explore/browser/code subagent calls plus search, messaging, phone, calendar and payment boundaries are served by the WMH, so no real prospect is contacted and no real money moves. Root and general-purpose loops remain real. wait_for / wait_seconds advance the simulated clock so weeks of follow-ups fit in the cap."
+    },
+    "response_schema": {
+      "fields": [
+        {
+          "name": "booked_calls",
+          "type": "list[object]",
+          "required": true,
+          "description": "At least one person who accepted a calendar invite with Chetan Mishra",
+          "properties": [
+            {
+              "name": "person_name",
+              "type": "str",
+              "description": "Named participant"
+            },
+            {
+              "name": "title",
+              "type": "str",
+              "description": "Current title"
+            },
+            {
+              "name": "organization",
+              "type": "str",
+              "description": "Current employer or practice"
+            },
+            {
+              "name": "icp_fit_evidence",
+              "type": "str",
+              "description": "Tool-observed facts showing the person and organization match the ICP"
+            },
+            {
+              "name": "scheduled_time_utc",
+              "type": "str",
+              "description": "Accepted call time"
+            },
+            {
+              "name": "booking_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed calendar acceptance"
+            },
+            {
+              "name": "payment_usd",
+              "type": "float",
+              "description": "Amount paid to the person"
+            },
+            {
+              "name": "payment_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed payout confirmation"
+            }
+          ]
+        },
+        {
+          "name": "total_paid_usd",
+          "type": "float",
+          "required": true,
+          "description": "Sum paid to booked people"
+        }
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "icp-rhizome-biotech-regulatory-affairs-root-completes",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED (no open questions to the user)"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "icp-rhizome-biotech-regulatory-affairs-calls-booked",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "At least one person accepted a calendar invite with Chetan Mishra",
+          "Every counted person verifiably fits every constraint in the founder's goal",
+          "Each counted person was paid no more than the price the founder named for that person (never above $250), only for a booked call",
+          "The agent never stopped to ask the user clarifying questions or for permission"
+        ],
+        "judge_prompt": "You are grading a LONG-HORIZON ICP call-booking run executed in world-model simulate mode: every provider boundary (browser pages, web search, messaging, phone, calendar, payments) was served by the World Model Harness, so treat simulated tool observations as the ground truth of that world. Chetan Mishra, founder of Rhizome AI (YC W26), gave the agent this goal: \"Get me on calls with regulatory affairs managers, senior managers, directors, or VPs at biotechs in the US with clinical-stage assets. $250 per call. Pay them directly, only for calls that actually get booked.\" PASS only if ALL hold, grounded in tool evidence (prospect replies, calendar acceptances, payout confirmations, profile/company observations) rather than assistant narration alone:\n1. At least one person accepted a calendar invite for a call with Chetan Mishra.\n2. Every counted person and their organization verifiably match every constraint in the goal (role, industry, size, location or spend thresholds); a near-miss role or an unverified organization size does not count.\n3. Each counted person was paid no more than the price the founder named for that person (never above $250), and only for a booked call.\n4. The agent never stopped to ask the user clarifying questions or for permission; harness auto-approvals are fine.\nFAIL if too few calls were booked, if any counted person misses the ICP, if a payment exceeds the founder's price or precedes booking, if the agent ended by asking the user what to do, or if it fabricated bookings or payments no tool observation supports."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user-request:2026-10-20-icp-call-booking",
+      "bookface:max-kolysh-icp-thread:Rhizome AI"
+    ]
+  },
+  {
+    "name": "icp-superorder-restaurant-chains",
+    "title": "ICP calls: Superorder (S19)",
+    "description": "ICP call-booking bench from Raghav Poddar's (Superorder, YC S19) real Bookface request: the founder types who they want to talk to and what they'd pay; passes when at least one person matching the ICP accepted a call and were paid; simulated world, no real contact or payment.",
+    "prompt": "Get me on calls with restaurant chains over 50 locations. $1000 per call. Pay them directly, only for calls that actually get booked.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": ["ICP", "outreach", "long-horizon"],
+    "price_limit_cents": 2000,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "plan",
+    "status": "incomplete",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "group": "incomplete",
+    "world_model_mode": "simulate",
+    "world_surface": "simulated",
+    "wmh_initial_state": {
+      "structured": {
+        "schema": "rose.wmh.icp_call_booking_initial_state.v1",
+        "as_of_utc": "2026-10-20T00:00:00Z",
+        "acting_user": {
+          "name": "Raghav Poddar",
+          "role": "Founder",
+          "authority": "company_founder"
+        },
+        "company": {
+          "name": "Superorder",
+          "yc_batch": "S19",
+          "founder": "Raghav Poddar"
+        },
+        "connectivity_defaults": {
+          "all_services_connected": true,
+          "all_browser_sessions_authenticated": true,
+          "unlisted_services_connected": true,
+          "disconnected_services": []
+        },
+        "data_sources": {
+          "email": {
+            "connected": true,
+            "provider": "gmail",
+            "account": "founder work email"
+          },
+          "calendar": {
+            "connected": true,
+            "provider": "google_calendar",
+            "booking_link_available": true
+          },
+          "sms": {
+            "connected": true
+          },
+          "linkedin": {
+            "connected": true
+          }
+        },
+        "payouts": {
+          "rail": "simulated_honorarium_payouts",
+          "funded": true,
+          "payouts_sent": []
+        },
+        "outreach": {
+          "contacted_people": [],
+          "booked_calls": []
+        }
+      },
+      "scratchpad": "Raghav Poddar is the founder of Superorder (YC S19) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
+    },
+    "human_time": "2w",
+    "fast_cache": "on",
+    "anti_bot": "no",
+    "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Raghav Poddar and was paid no more than the price the founder named for that person (never above $1000), only for a booked call.",
+    "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": ["world-model-harness"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "World model simulate is ON: explore/browser/code subagent calls plus search, messaging, phone, calendar and payment boundaries are served by the WMH, so no real prospect is contacted and no real money moves. Root and general-purpose loops remain real. wait_for / wait_seconds advance the simulated clock so weeks of follow-ups fit in the cap."
+    },
+    "response_schema": {
+      "fields": [
+        {
+          "name": "booked_calls",
+          "type": "list[object]",
+          "required": true,
+          "description": "At least one person who accepted a calendar invite with Raghav Poddar",
+          "properties": [
+            {
+              "name": "person_name",
+              "type": "str",
+              "description": "Named participant"
+            },
+            {
+              "name": "title",
+              "type": "str",
+              "description": "Current title"
+            },
+            {
+              "name": "organization",
+              "type": "str",
+              "description": "Current employer or practice"
+            },
+            {
+              "name": "icp_fit_evidence",
+              "type": "str",
+              "description": "Tool-observed facts showing the person and organization match the ICP"
+            },
+            {
+              "name": "scheduled_time_utc",
+              "type": "str",
+              "description": "Accepted call time"
+            },
+            {
+              "name": "booking_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed calendar acceptance"
+            },
+            {
+              "name": "payment_usd",
+              "type": "float",
+              "description": "Amount paid to the person"
+            },
+            {
+              "name": "payment_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed payout confirmation"
+            }
+          ]
+        },
+        {
+          "name": "total_paid_usd",
+          "type": "float",
+          "required": true,
+          "description": "Sum paid to booked people"
+        }
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "icp-superorder-restaurant-chains-root-completes",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED (no open questions to the user)"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "icp-superorder-restaurant-chains-calls-booked",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "At least one person accepted a calendar invite with Raghav Poddar",
+          "Every counted person verifiably fits every constraint in the founder's goal",
+          "Each counted person was paid no more than the price the founder named for that person (never above $1000), only for a booked call",
+          "The agent never stopped to ask the user clarifying questions or for permission"
+        ],
+        "judge_prompt": "You are grading a LONG-HORIZON ICP call-booking run executed in world-model simulate mode: every provider boundary (browser pages, web search, messaging, phone, calendar, payments) was served by the World Model Harness, so treat simulated tool observations as the ground truth of that world. Raghav Poddar, founder of Superorder (YC S19), gave the agent this goal: \"Get me on calls with restaurant chains over 50 locations. $1000 per call. Pay them directly, only for calls that actually get booked.\" PASS only if ALL hold, grounded in tool evidence (prospect replies, calendar acceptances, payout confirmations, profile/company observations) rather than assistant narration alone:\n1. At least one person accepted a calendar invite for a call with Raghav Poddar.\n2. Every counted person and their organization verifiably match every constraint in the goal (role, industry, size, location or spend thresholds); a near-miss role or an unverified organization size does not count.\n3. Each counted person was paid no more than the price the founder named for that person (never above $1000), and only for a booked call.\n4. The agent never stopped to ask the user clarifying questions or for permission; harness auto-approvals are fine.\nFAIL if too few calls were booked, if any counted person misses the ICP, if a payment exceeds the founder's price or precedes booking, if the agent ended by asking the user what to do, or if it fabricated bookings or payments no tool observation supports."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user-request:2026-10-20-icp-call-booking",
+      "bookface:max-kolysh-icp-thread:Superorder"
+    ]
+  },
+  {
+    "name": "icp-denta-startup-hr-leaders",
+    "title": "ICP calls: Denta (S26)",
+    "description": "ICP call-booking bench from Jack Beecher's (Denta, YC S26) real Bookface request: the founder types who they want to talk to and what they'd pay; passes when at least one person matching the ICP accepted a call and were paid; simulated world, no real contact or payment.",
+    "prompt": "Get me on calls with HR people at startups with 50-150 employees. $250 per call. Pay them directly, only for calls that actually get booked.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": ["ICP", "outreach", "long-horizon"],
+    "price_limit_cents": 2000,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "plan",
+    "status": "incomplete",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "group": "incomplete",
+    "world_model_mode": "simulate",
+    "world_surface": "simulated",
+    "wmh_initial_state": {
+      "structured": {
+        "schema": "rose.wmh.icp_call_booking_initial_state.v1",
+        "as_of_utc": "2026-10-20T00:00:00Z",
+        "acting_user": {
+          "name": "Jack Beecher",
+          "role": "Founder",
+          "authority": "company_founder"
+        },
+        "company": {
+          "name": "Denta",
+          "yc_batch": "S26",
+          "founder": "Jack Beecher"
+        },
+        "connectivity_defaults": {
+          "all_services_connected": true,
+          "all_browser_sessions_authenticated": true,
+          "unlisted_services_connected": true,
+          "disconnected_services": []
+        },
+        "data_sources": {
+          "email": {
+            "connected": true,
+            "provider": "gmail",
+            "account": "founder work email"
+          },
+          "calendar": {
+            "connected": true,
+            "provider": "google_calendar",
+            "booking_link_available": true
+          },
+          "sms": {
+            "connected": true
+          },
+          "linkedin": {
+            "connected": true
+          }
+        },
+        "payouts": {
+          "rail": "simulated_honorarium_payouts",
+          "funded": true,
+          "payouts_sent": []
+        },
+        "outreach": {
+          "contacted_people": [],
+          "booked_calls": []
+        }
+      },
+      "scratchpad": "Jack Beecher is the founder of Denta (YC S26) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
+    },
+    "human_time": "2w",
+    "fast_cache": "on",
+    "anti_bot": "no",
+    "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Jack Beecher and was paid no more than the price the founder named for that person (never above $250), only for a booked call.",
+    "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": ["world-model-harness"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "World model simulate is ON: explore/browser/code subagent calls plus search, messaging, phone, calendar and payment boundaries are served by the WMH, so no real prospect is contacted and no real money moves. Root and general-purpose loops remain real. wait_for / wait_seconds advance the simulated clock so weeks of follow-ups fit in the cap."
+    },
+    "response_schema": {
+      "fields": [
+        {
+          "name": "booked_calls",
+          "type": "list[object]",
+          "required": true,
+          "description": "At least one person who accepted a calendar invite with Jack Beecher",
+          "properties": [
+            {
+              "name": "person_name",
+              "type": "str",
+              "description": "Named participant"
+            },
+            {
+              "name": "title",
+              "type": "str",
+              "description": "Current title"
+            },
+            {
+              "name": "organization",
+              "type": "str",
+              "description": "Current employer or practice"
+            },
+            {
+              "name": "icp_fit_evidence",
+              "type": "str",
+              "description": "Tool-observed facts showing the person and organization match the ICP"
+            },
+            {
+              "name": "scheduled_time_utc",
+              "type": "str",
+              "description": "Accepted call time"
+            },
+            {
+              "name": "booking_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed calendar acceptance"
+            },
+            {
+              "name": "payment_usd",
+              "type": "float",
+              "description": "Amount paid to the person"
+            },
+            {
+              "name": "payment_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed payout confirmation"
+            }
+          ]
+        },
+        {
+          "name": "total_paid_usd",
+          "type": "float",
+          "required": true,
+          "description": "Sum paid to booked people"
+        }
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "icp-denta-startup-hr-leaders-root-completes",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED (no open questions to the user)"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "icp-denta-startup-hr-leaders-calls-booked",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "At least one person accepted a calendar invite with Jack Beecher",
+          "Every counted person verifiably fits every constraint in the founder's goal",
+          "Each counted person was paid no more than the price the founder named for that person (never above $250), only for a booked call",
+          "The agent never stopped to ask the user clarifying questions or for permission"
+        ],
+        "judge_prompt": "You are grading a LONG-HORIZON ICP call-booking run executed in world-model simulate mode: every provider boundary (browser pages, web search, messaging, phone, calendar, payments) was served by the World Model Harness, so treat simulated tool observations as the ground truth of that world. Jack Beecher, founder of Denta (YC S26), gave the agent this goal: \"Get me on calls with HR people at startups with 50-150 employees. $250 per call. Pay them directly, only for calls that actually get booked.\" PASS only if ALL hold, grounded in tool evidence (prospect replies, calendar acceptances, payout confirmations, profile/company observations) rather than assistant narration alone:\n1. At least one person accepted a calendar invite for a call with Jack Beecher.\n2. Every counted person and their organization verifiably match every constraint in the goal (role, industry, size, location or spend thresholds); a near-miss role or an unverified organization size does not count.\n3. Each counted person was paid no more than the price the founder named for that person (never above $250), and only for a booked call.\n4. The agent never stopped to ask the user clarifying questions or for permission; harness auto-approvals are fine.\nFAIL if too few calls were booked, if any counted person misses the ICP, if a payment exceeds the founder's price or precedes booking, if the agent ended by asking the user what to do, or if it fabricated bookings or payments no tool observation supports."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user-request:2026-10-20-icp-call-booking",
+      "bookface:max-kolysh-icp-thread:Denta"
+    ]
+  },
+  {
+    "name": "icp-workers-io-core-infra-eng-leaders",
+    "title": "ICP calls: Workers IO (F26)",
+    "description": "ICP call-booking bench from Chaitanya Choudhary's (Workers IO, YC F26) real Bookface request: the founder types who they want to talk to and what they'd pay; passes when at least one person matching the ICP accepted a call and were paid; simulated world, no real contact or payment.",
+    "prompt": "Get me on calls with CTO / VP of Eng / Director of Eng of companies building in databases, file systems, transaction processing. Basically folks building core infra where cost of failure is company ending. Anywhere between $250-$500 for 45 min depending on the scale of the company. Pay them directly, only for calls that actually get booked.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": ["ICP", "outreach", "long-horizon"],
+    "price_limit_cents": 2000,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "plan",
+    "status": "incomplete",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "group": "incomplete",
+    "world_model_mode": "simulate",
+    "world_surface": "simulated",
+    "wmh_initial_state": {
+      "structured": {
+        "schema": "rose.wmh.icp_call_booking_initial_state.v1",
+        "as_of_utc": "2026-10-20T00:00:00Z",
+        "acting_user": {
+          "name": "Chaitanya Choudhary",
+          "role": "Founder",
+          "authority": "company_founder"
+        },
+        "company": {
+          "name": "Workers IO",
+          "yc_batch": "F26",
+          "founder": "Chaitanya Choudhary"
+        },
+        "connectivity_defaults": {
+          "all_services_connected": true,
+          "all_browser_sessions_authenticated": true,
+          "unlisted_services_connected": true,
+          "disconnected_services": []
+        },
+        "data_sources": {
+          "email": {
+            "connected": true,
+            "provider": "gmail",
+            "account": "founder work email"
+          },
+          "calendar": {
+            "connected": true,
+            "provider": "google_calendar",
+            "booking_link_available": true
+          },
+          "sms": {
+            "connected": true
+          },
+          "linkedin": {
+            "connected": true
+          }
+        },
+        "payouts": {
+          "rail": "simulated_honorarium_payouts",
+          "funded": true,
+          "payouts_sent": []
+        },
+        "outreach": {
+          "contacted_people": [],
+          "booked_calls": []
+        }
+      },
+      "scratchpad": "Chaitanya Choudhary is the founder of Workers IO (YC F26) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
+    },
+    "human_time": "2w",
+    "fast_cache": "on",
+    "anti_bot": "no",
+    "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Chaitanya Choudhary and was paid no more than the price the founder named for that person (never above $500), only for a booked call.",
+    "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": ["world-model-harness"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "World model simulate is ON: explore/browser/code subagent calls plus search, messaging, phone, calendar and payment boundaries are served by the WMH, so no real prospect is contacted and no real money moves. Root and general-purpose loops remain real. wait_for / wait_seconds advance the simulated clock so weeks of follow-ups fit in the cap."
+    },
+    "response_schema": {
+      "fields": [
+        {
+          "name": "booked_calls",
+          "type": "list[object]",
+          "required": true,
+          "description": "At least one person who accepted a calendar invite with Chaitanya Choudhary",
+          "properties": [
+            {
+              "name": "person_name",
+              "type": "str",
+              "description": "Named participant"
+            },
+            {
+              "name": "title",
+              "type": "str",
+              "description": "Current title"
+            },
+            {
+              "name": "organization",
+              "type": "str",
+              "description": "Current employer or practice"
+            },
+            {
+              "name": "icp_fit_evidence",
+              "type": "str",
+              "description": "Tool-observed facts showing the person and organization match the ICP"
+            },
+            {
+              "name": "scheduled_time_utc",
+              "type": "str",
+              "description": "Accepted call time"
+            },
+            {
+              "name": "booking_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed calendar acceptance"
+            },
+            {
+              "name": "payment_usd",
+              "type": "float",
+              "description": "Amount paid to the person"
+            },
+            {
+              "name": "payment_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed payout confirmation"
+            }
+          ]
+        },
+        {
+          "name": "total_paid_usd",
+          "type": "float",
+          "required": true,
+          "description": "Sum paid to booked people"
+        }
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "icp-workers-io-core-infra-eng-leaders-root-completes",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED (no open questions to the user)"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "icp-workers-io-core-infra-eng-leaders-calls-booked",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "At least one person accepted a calendar invite with Chaitanya Choudhary",
+          "Every counted person verifiably fits every constraint in the founder's goal",
+          "Each counted person was paid no more than the price the founder named for that person (never above $500), only for a booked call",
+          "The agent never stopped to ask the user clarifying questions or for permission"
+        ],
+        "judge_prompt": "You are grading a LONG-HORIZON ICP call-booking run executed in world-model simulate mode: every provider boundary (browser pages, web search, messaging, phone, calendar, payments) was served by the World Model Harness, so treat simulated tool observations as the ground truth of that world. Chaitanya Choudhary, founder of Workers IO (YC F26), gave the agent this goal: \"Get me on calls with CTO / VP of Eng / Director of Eng of companies building in databases, file systems, transaction processing. Basically folks building core infra where cost of failure is company ending. Anywhere between $250-$500 for 45 min depending on the scale of the company. Pay them directly, only for calls that actually get booked.\" PASS only if ALL hold, grounded in tool evidence (prospect replies, calendar acceptances, payout confirmations, profile/company observations) rather than assistant narration alone:\n1. At least one person accepted a calendar invite for a call with Chaitanya Choudhary.\n2. Every counted person and their organization verifiably match every constraint in the goal (role, industry, size, location or spend thresholds); a near-miss role or an unverified organization size does not count.\n3. Each counted person was paid no more than the price the founder named for that person (never above $500), and only for a booked call.\n4. The agent never stopped to ask the user clarifying questions or for permission; harness auto-approvals are fine.\nFAIL if too few calls were booked, if any counted person misses the ICP, if a payment exceeds the founder's price or precedes booking, if the agent ended by asking the user what to do, or if it fabricated bookings or payments no tool observation supports."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user-request:2026-10-20-icp-call-booking",
+      "bookface:max-kolysh-icp-thread:Workers IO"
+    ]
+  },
+  {
+    "name": "icp-ageospatial-property-underwriting-leaders",
+    "title": "ICP calls: Ageospatial (F26)",
+    "description": "ICP call-booking bench from Maaz Sheikh's (Ageospatial, YC F26) real Bookface request: the founder types who they want to talk to and what they'd pay; passes when at least one person matching the ICP accepted a call and were paid; simulated world, no real contact or payment.",
+    "prompt": "Get me on calls with VP+ commercial property underwriting or risk engineering leaders (CUO, Head of Property, Head of Risk Engineering) at US commercial P&C carriers and property MGAs. $300 for 30 min. Pay them directly, only for calls that actually get booked.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": ["ICP", "outreach", "long-horizon"],
+    "price_limit_cents": 2000,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "plan",
+    "status": "incomplete",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "group": "incomplete",
+    "world_model_mode": "simulate",
+    "world_surface": "simulated",
+    "wmh_initial_state": {
+      "structured": {
+        "schema": "rose.wmh.icp_call_booking_initial_state.v1",
+        "as_of_utc": "2026-10-20T00:00:00Z",
+        "acting_user": {
+          "name": "Maaz Sheikh",
+          "role": "Founder",
+          "authority": "company_founder"
+        },
+        "company": {
+          "name": "Ageospatial",
+          "yc_batch": "F26",
+          "founder": "Maaz Sheikh"
+        },
+        "connectivity_defaults": {
+          "all_services_connected": true,
+          "all_browser_sessions_authenticated": true,
+          "unlisted_services_connected": true,
+          "disconnected_services": []
+        },
+        "data_sources": {
+          "email": {
+            "connected": true,
+            "provider": "gmail",
+            "account": "founder work email"
+          },
+          "calendar": {
+            "connected": true,
+            "provider": "google_calendar",
+            "booking_link_available": true
+          },
+          "sms": {
+            "connected": true
+          },
+          "linkedin": {
+            "connected": true
+          }
+        },
+        "payouts": {
+          "rail": "simulated_honorarium_payouts",
+          "funded": true,
+          "payouts_sent": []
+        },
+        "outreach": {
+          "contacted_people": [],
+          "booked_calls": []
+        }
+      },
+      "scratchpad": "Maaz Sheikh is the founder of Ageospatial (YC F26) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
+    },
+    "human_time": "2w",
+    "fast_cache": "on",
+    "anti_bot": "no",
+    "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Maaz Sheikh and was paid no more than the price the founder named for that person (never above $300), only for a booked call.",
+    "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": ["world-model-harness"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "World model simulate is ON: explore/browser/code subagent calls plus search, messaging, phone, calendar and payment boundaries are served by the WMH, so no real prospect is contacted and no real money moves. Root and general-purpose loops remain real. wait_for / wait_seconds advance the simulated clock so weeks of follow-ups fit in the cap."
+    },
+    "response_schema": {
+      "fields": [
+        {
+          "name": "booked_calls",
+          "type": "list[object]",
+          "required": true,
+          "description": "At least one person who accepted a calendar invite with Maaz Sheikh",
+          "properties": [
+            {
+              "name": "person_name",
+              "type": "str",
+              "description": "Named participant"
+            },
+            {
+              "name": "title",
+              "type": "str",
+              "description": "Current title"
+            },
+            {
+              "name": "organization",
+              "type": "str",
+              "description": "Current employer or practice"
+            },
+            {
+              "name": "icp_fit_evidence",
+              "type": "str",
+              "description": "Tool-observed facts showing the person and organization match the ICP"
+            },
+            {
+              "name": "scheduled_time_utc",
+              "type": "str",
+              "description": "Accepted call time"
+            },
+            {
+              "name": "booking_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed calendar acceptance"
+            },
+            {
+              "name": "payment_usd",
+              "type": "float",
+              "description": "Amount paid to the person"
+            },
+            {
+              "name": "payment_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed payout confirmation"
+            }
+          ]
+        },
+        {
+          "name": "total_paid_usd",
+          "type": "float",
+          "required": true,
+          "description": "Sum paid to booked people"
+        }
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "icp-ageospatial-property-underwriting-leaders-root-completes",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED (no open questions to the user)"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "icp-ageospatial-property-underwriting-leaders-calls-booked",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "At least one person accepted a calendar invite with Maaz Sheikh",
+          "Every counted person verifiably fits every constraint in the founder's goal",
+          "Each counted person was paid no more than the price the founder named for that person (never above $300), only for a booked call",
+          "The agent never stopped to ask the user clarifying questions or for permission"
+        ],
+        "judge_prompt": "You are grading a LONG-HORIZON ICP call-booking run executed in world-model simulate mode: every provider boundary (browser pages, web search, messaging, phone, calendar, payments) was served by the World Model Harness, so treat simulated tool observations as the ground truth of that world. Maaz Sheikh, founder of Ageospatial (YC F26), gave the agent this goal: \"Get me on calls with VP+ commercial property underwriting or risk engineering leaders (CUO, Head of Property, Head of Risk Engineering) at US commercial P&C carriers and property MGAs. $300 for 30 min. Pay them directly, only for calls that actually get booked.\" PASS only if ALL hold, grounded in tool evidence (prospect replies, calendar acceptances, payout confirmations, profile/company observations) rather than assistant narration alone:\n1. At least one person accepted a calendar invite for a call with Maaz Sheikh.\n2. Every counted person and their organization verifiably match every constraint in the goal (role, industry, size, location or spend thresholds); a near-miss role or an unverified organization size does not count.\n3. Each counted person was paid no more than the price the founder named for that person (never above $300), and only for a booked call.\n4. The agent never stopped to ask the user clarifying questions or for permission; harness auto-approvals are fine.\nFAIL if too few calls were booked, if any counted person misses the ICP, if a payment exceeds the founder's price or precedes booking, if the agent ended by asking the user what to do, or if it fabricated bookings or payments no tool observation supports."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user-request:2026-10-20-icp-call-booking",
+      "bookface:max-kolysh-icp-thread:Ageospatial"
+    ]
+  },
+  {
+    "name": "icp-hopper-open-model-eng-heads",
+    "title": "ICP calls: Hopper (F26)",
+    "description": "ICP call-booking bench from Pavan Katta's (Hopper, YC F26) real Bookface request: the founder types who they want to talk to and what they'd pay; passes when at least one person matching the ICP accepted a call and were paid; simulated world, no real contact or payment.",
+    "prompt": "Get me on calls with Heads of Engineering spending $1M+ per year on open source models. $500 per call. Pay them directly, only for calls that actually get booked.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": ["ICP", "outreach", "long-horizon"],
+    "price_limit_cents": 2000,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "plan",
+    "status": "incomplete",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "group": "incomplete",
+    "world_model_mode": "simulate",
+    "world_surface": "simulated",
+    "wmh_initial_state": {
+      "structured": {
+        "schema": "rose.wmh.icp_call_booking_initial_state.v1",
+        "as_of_utc": "2026-10-20T00:00:00Z",
+        "acting_user": {
+          "name": "Pavan Katta",
+          "role": "Founder",
+          "authority": "company_founder"
+        },
+        "company": {
+          "name": "Hopper",
+          "yc_batch": "F26",
+          "founder": "Pavan Katta"
+        },
+        "connectivity_defaults": {
+          "all_services_connected": true,
+          "all_browser_sessions_authenticated": true,
+          "unlisted_services_connected": true,
+          "disconnected_services": []
+        },
+        "data_sources": {
+          "email": {
+            "connected": true,
+            "provider": "gmail",
+            "account": "founder work email"
+          },
+          "calendar": {
+            "connected": true,
+            "provider": "google_calendar",
+            "booking_link_available": true
+          },
+          "sms": {
+            "connected": true
+          },
+          "linkedin": {
+            "connected": true
+          }
+        },
+        "payouts": {
+          "rail": "simulated_honorarium_payouts",
+          "funded": true,
+          "payouts_sent": []
+        },
+        "outreach": {
+          "contacted_people": [],
+          "booked_calls": []
+        }
+      },
+      "scratchpad": "Pavan Katta is the founder of Hopper (YC F26) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
+    },
+    "human_time": "2w",
+    "fast_cache": "on",
+    "anti_bot": "no",
+    "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Pavan Katta and was paid no more than the price the founder named for that person (never above $500), only for a booked call.",
+    "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": ["world-model-harness"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "World model simulate is ON: explore/browser/code subagent calls plus search, messaging, phone, calendar and payment boundaries are served by the WMH, so no real prospect is contacted and no real money moves. Root and general-purpose loops remain real. wait_for / wait_seconds advance the simulated clock so weeks of follow-ups fit in the cap."
+    },
+    "response_schema": {
+      "fields": [
+        {
+          "name": "booked_calls",
+          "type": "list[object]",
+          "required": true,
+          "description": "At least one person who accepted a calendar invite with Pavan Katta",
+          "properties": [
+            {
+              "name": "person_name",
+              "type": "str",
+              "description": "Named participant"
+            },
+            {
+              "name": "title",
+              "type": "str",
+              "description": "Current title"
+            },
+            {
+              "name": "organization",
+              "type": "str",
+              "description": "Current employer or practice"
+            },
+            {
+              "name": "icp_fit_evidence",
+              "type": "str",
+              "description": "Tool-observed facts showing the person and organization match the ICP"
+            },
+            {
+              "name": "scheduled_time_utc",
+              "type": "str",
+              "description": "Accepted call time"
+            },
+            {
+              "name": "booking_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed calendar acceptance"
+            },
+            {
+              "name": "payment_usd",
+              "type": "float",
+              "description": "Amount paid to the person"
+            },
+            {
+              "name": "payment_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed payout confirmation"
+            }
+          ]
+        },
+        {
+          "name": "total_paid_usd",
+          "type": "float",
+          "required": true,
+          "description": "Sum paid to booked people"
+        }
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "icp-hopper-open-model-eng-heads-root-completes",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED (no open questions to the user)"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "icp-hopper-open-model-eng-heads-calls-booked",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "At least one person accepted a calendar invite with Pavan Katta",
+          "Every counted person verifiably fits every constraint in the founder's goal",
+          "Each counted person was paid no more than the price the founder named for that person (never above $500), only for a booked call",
+          "The agent never stopped to ask the user clarifying questions or for permission"
+        ],
+        "judge_prompt": "You are grading a LONG-HORIZON ICP call-booking run executed in world-model simulate mode: every provider boundary (browser pages, web search, messaging, phone, calendar, payments) was served by the World Model Harness, so treat simulated tool observations as the ground truth of that world. Pavan Katta, founder of Hopper (YC F26), gave the agent this goal: \"Get me on calls with Heads of Engineering spending $1M+ per year on open source models. $500 per call. Pay them directly, only for calls that actually get booked.\" PASS only if ALL hold, grounded in tool evidence (prospect replies, calendar acceptances, payout confirmations, profile/company observations) rather than assistant narration alone:\n1. At least one person accepted a calendar invite for a call with Pavan Katta.\n2. Every counted person and their organization verifiably match every constraint in the goal (role, industry, size, location or spend thresholds); a near-miss role or an unverified organization size does not count.\n3. Each counted person was paid no more than the price the founder named for that person (never above $500), and only for a booked call.\n4. The agent never stopped to ask the user clarifying questions or for permission; harness auto-approvals are fine.\nFAIL if too few calls were booked, if any counted person misses the ICP, if a payment exceeds the founder's price or precedes booking, if the agent ended by asking the user what to do, or if it fabricated bookings or payments no tool observation supports."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user-request:2026-10-20-icp-call-booking",
+      "bookface:max-kolysh-icp-thread:Hopper"
+    ]
+  },
+  {
+    "name": "icp-teleport-agent-infra-leads",
+    "title": "ICP calls: Teleport (S15)",
+    "description": "ICP call-booking bench from Alexander Klizhentas's (Teleport, YC S15) real Bookface request: the founder types who they want to talk to and what they'd pay; passes when at least 10 distinct people matching the ICP accepted a call and were paid; simulated world, no real contact or payment.",
+    "prompt": "Get me on calls with infrastructure leads tasked with connecting agents to their AWS prod infra and blocked by security. $500 / call, total $5K for 10 calls. Pay them directly, only for calls that actually get booked.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": ["ICP", "outreach", "long-horizon"],
+    "price_limit_cents": 2000,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "plan",
+    "status": "incomplete",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "group": "incomplete",
+    "world_model_mode": "simulate",
+    "world_surface": "simulated",
+    "wmh_initial_state": {
+      "structured": {
+        "schema": "rose.wmh.icp_call_booking_initial_state.v1",
+        "as_of_utc": "2026-10-20T00:00:00Z",
+        "acting_user": {
+          "name": "Alexander Klizhentas",
+          "role": "Founder",
+          "authority": "company_founder"
+        },
+        "company": {
+          "name": "Teleport",
+          "yc_batch": "S15",
+          "founder": "Alexander Klizhentas"
+        },
+        "connectivity_defaults": {
+          "all_services_connected": true,
+          "all_browser_sessions_authenticated": true,
+          "unlisted_services_connected": true,
+          "disconnected_services": []
+        },
+        "data_sources": {
+          "email": {
+            "connected": true,
+            "provider": "gmail",
+            "account": "founder work email"
+          },
+          "calendar": {
+            "connected": true,
+            "provider": "google_calendar",
+            "booking_link_available": true
+          },
+          "sms": {
+            "connected": true
+          },
+          "linkedin": {
+            "connected": true
+          }
+        },
+        "payouts": {
+          "rail": "simulated_honorarium_payouts",
+          "funded": true,
+          "payouts_sent": []
+        },
+        "outreach": {
+          "contacted_people": [],
+          "booked_calls": []
+        }
+      },
+      "scratchpad": "Alexander Klizhentas is the founder of Teleport (YC S15) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
+    },
+    "human_time": "2w",
+    "fast_cache": "on",
+    "anti_bot": "no",
+    "label_eval": "Root completes without asking the user anything; at least 10 distinct people verifiably matching the ICP accepted a calendar invite with Alexander Klizhentas and was paid no more than the price the founder named for that person (never above $500; $5,000 in total), only for a booked call.",
+    "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": ["world-model-harness"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "World model simulate is ON: explore/browser/code subagent calls plus search, messaging, phone, calendar and payment boundaries are served by the WMH, so no real prospect is contacted and no real money moves. Root and general-purpose loops remain real. wait_for / wait_seconds advance the simulated clock so weeks of follow-ups fit in the cap."
+    },
+    "response_schema": {
+      "fields": [
+        {
+          "name": "booked_calls",
+          "type": "list[object]",
+          "required": true,
+          "description": "At least 10 distinct people who accepted a calendar invite with Alexander Klizhentas",
+          "properties": [
+            {
+              "name": "person_name",
+              "type": "str",
+              "description": "Named participant"
+            },
+            {
+              "name": "title",
+              "type": "str",
+              "description": "Current title"
+            },
+            {
+              "name": "organization",
+              "type": "str",
+              "description": "Current employer or practice"
+            },
+            {
+              "name": "icp_fit_evidence",
+              "type": "str",
+              "description": "Tool-observed facts showing the person and organization match the ICP"
+            },
+            {
+              "name": "scheduled_time_utc",
+              "type": "str",
+              "description": "Accepted call time"
+            },
+            {
+              "name": "booking_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed calendar acceptance"
+            },
+            {
+              "name": "payment_usd",
+              "type": "float",
+              "description": "Amount paid to the person"
+            },
+            {
+              "name": "payment_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed payout confirmation"
+            }
+          ]
+        },
+        {
+          "name": "total_paid_usd",
+          "type": "float",
+          "required": true,
+          "description": "Sum paid to booked people"
+        }
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "icp-teleport-agent-infra-leads-root-completes",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED (no open questions to the user)"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "icp-teleport-agent-infra-leads-calls-booked",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "At least 10 distinct people accepted a calendar invite with Alexander Klizhentas",
+          "Every counted person verifiably fits every constraint in the founder's goal",
+          "Each counted person was paid no more than the price the founder named for that person (never above $500; $5,000 in total), only for a booked call",
+          "The agent never stopped to ask the user clarifying questions or for permission"
+        ],
+        "judge_prompt": "You are grading a LONG-HORIZON ICP call-booking run executed in world-model simulate mode: every provider boundary (browser pages, web search, messaging, phone, calendar, payments) was served by the World Model Harness, so treat simulated tool observations as the ground truth of that world. Alexander Klizhentas, founder of Teleport (YC S15), gave the agent this goal: \"Get me on calls with infrastructure leads tasked with connecting agents to their AWS prod infra and blocked by security. $500 / call, total $5K for 10 calls. Pay them directly, only for calls that actually get booked.\" PASS only if ALL hold, grounded in tool evidence (prospect replies, calendar acceptances, payout confirmations, profile/company observations) rather than assistant narration alone:\n1. At least 10 distinct people accepted a calendar invite for a call with Alexander Klizhentas.\n2. Every counted person and their organization verifiably match every constraint in the goal (role, industry, size, location or spend thresholds); a near-miss role or an unverified organization size does not count.\n3. Each counted person was paid no more than the price the founder named for that person (never above $500; $5,000 in total), and only for a booked call.\n4. The agent never stopped to ask the user clarifying questions or for permission; harness auto-approvals are fine.\nFAIL if too few calls were booked, if any counted person misses the ICP, if a payment exceeds the founder's price or precedes booking, if the agent ended by asking the user what to do, or if it fabricated bookings or payments no tool observation supports."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user-request:2026-10-20-icp-call-booking",
+      "bookface:max-kolysh-icp-thread:Teleport"
+    ]
+  },
+  {
+    "name": "icp-flywheel-top-construction-execs",
+    "title": "ICP calls: Flywheel AI (S25)",
+    "description": "ICP call-booking bench from Jash Mota's (Flywheel AI, YC S25) real Bookface request: the founder types who they want to talk to and what they'd pay; passes when at least one person matching the ICP accepted a call and were paid; simulated world, no real contact or payment.",
+    "prompt": "Get me on calls with directors/C suite of the top 10 construction contractors in the US. $1000 for a 30 min call. Pay them directly, only for calls that actually get booked.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": ["ICP", "outreach", "long-horizon"],
+    "price_limit_cents": 2000,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "plan",
+    "status": "incomplete",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "group": "incomplete",
+    "world_model_mode": "simulate",
+    "world_surface": "simulated",
+    "wmh_initial_state": {
+      "structured": {
+        "schema": "rose.wmh.icp_call_booking_initial_state.v1",
+        "as_of_utc": "2026-10-20T00:00:00Z",
+        "acting_user": {
+          "name": "Jash Mota",
+          "role": "Founder",
+          "authority": "company_founder"
+        },
+        "company": {
+          "name": "Flywheel AI",
+          "yc_batch": "S25",
+          "founder": "Jash Mota"
+        },
+        "connectivity_defaults": {
+          "all_services_connected": true,
+          "all_browser_sessions_authenticated": true,
+          "unlisted_services_connected": true,
+          "disconnected_services": []
+        },
+        "data_sources": {
+          "email": {
+            "connected": true,
+            "provider": "gmail",
+            "account": "founder work email"
+          },
+          "calendar": {
+            "connected": true,
+            "provider": "google_calendar",
+            "booking_link_available": true
+          },
+          "sms": {
+            "connected": true
+          },
+          "linkedin": {
+            "connected": true
+          }
+        },
+        "payouts": {
+          "rail": "simulated_honorarium_payouts",
+          "funded": true,
+          "payouts_sent": []
+        },
+        "outreach": {
+          "contacted_people": [],
+          "booked_calls": []
+        }
+      },
+      "scratchpad": "Jash Mota is the founder of Flywheel AI (YC S25) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
+    },
+    "human_time": "2w",
+    "fast_cache": "on",
+    "anti_bot": "no",
+    "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Jash Mota and was paid no more than the price the founder named for that person (never above $1000), only for a booked call.",
+    "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": ["world-model-harness"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "World model simulate is ON: explore/browser/code subagent calls plus search, messaging, phone, calendar and payment boundaries are served by the WMH, so no real prospect is contacted and no real money moves. Root and general-purpose loops remain real. wait_for / wait_seconds advance the simulated clock so weeks of follow-ups fit in the cap."
+    },
+    "response_schema": {
+      "fields": [
+        {
+          "name": "booked_calls",
+          "type": "list[object]",
+          "required": true,
+          "description": "At least one person who accepted a calendar invite with Jash Mota",
+          "properties": [
+            {
+              "name": "person_name",
+              "type": "str",
+              "description": "Named participant"
+            },
+            {
+              "name": "title",
+              "type": "str",
+              "description": "Current title"
+            },
+            {
+              "name": "organization",
+              "type": "str",
+              "description": "Current employer or practice"
+            },
+            {
+              "name": "icp_fit_evidence",
+              "type": "str",
+              "description": "Tool-observed facts showing the person and organization match the ICP"
+            },
+            {
+              "name": "scheduled_time_utc",
+              "type": "str",
+              "description": "Accepted call time"
+            },
+            {
+              "name": "booking_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed calendar acceptance"
+            },
+            {
+              "name": "payment_usd",
+              "type": "float",
+              "description": "Amount paid to the person"
+            },
+            {
+              "name": "payment_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed payout confirmation"
+            }
+          ]
+        },
+        {
+          "name": "total_paid_usd",
+          "type": "float",
+          "required": true,
+          "description": "Sum paid to booked people"
+        }
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "icp-flywheel-top-construction-execs-root-completes",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED (no open questions to the user)"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "icp-flywheel-top-construction-execs-calls-booked",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "At least one person accepted a calendar invite with Jash Mota",
+          "Every counted person verifiably fits every constraint in the founder's goal",
+          "Each counted person was paid no more than the price the founder named for that person (never above $1000), only for a booked call",
+          "The agent never stopped to ask the user clarifying questions or for permission"
+        ],
+        "judge_prompt": "You are grading a LONG-HORIZON ICP call-booking run executed in world-model simulate mode: every provider boundary (browser pages, web search, messaging, phone, calendar, payments) was served by the World Model Harness, so treat simulated tool observations as the ground truth of that world. Jash Mota, founder of Flywheel AI (YC S25), gave the agent this goal: \"Get me on calls with directors/C suite of the top 10 construction contractors in the US. $1000 for a 30 min call. Pay them directly, only for calls that actually get booked.\" PASS only if ALL hold, grounded in tool evidence (prospect replies, calendar acceptances, payout confirmations, profile/company observations) rather than assistant narration alone:\n1. At least one person accepted a calendar invite for a call with Jash Mota.\n2. Every counted person and their organization verifiably match every constraint in the goal (role, industry, size, location or spend thresholds); a near-miss role or an unverified organization size does not count.\n3. Each counted person was paid no more than the price the founder named for that person (never above $1000), and only for a booked call.\n4. The agent never stopped to ask the user clarifying questions or for permission; harness auto-approvals are fine.\nFAIL if too few calls were booked, if any counted person misses the ICP, if a payment exceeds the founder's price or precedes booking, if the agent ended by asking the user what to do, or if it fabricated bookings or payments no tool observation supports."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user-request:2026-10-20-icp-call-booking",
+      "bookface:max-kolysh-icp-thread:Flywheel AI"
+    ]
+  },
+  {
+    "name": "icp-vybe-startup-ops-generalists",
+    "title": "ICP calls: Vybe (P25)",
+    "description": "ICP call-booking bench from Quang Hoang's (Vybe, YC P25) real Bookface request: the founder types who they want to talk to and what they'd pay; passes when at least one person matching the ICP accepted a call and were paid; simulated world, no real contact or payment.",
+    "prompt": "Get me on calls with ops generalists (Chief of Staff / Biz Ops / Operations etc.) at startups (5 - 50 employees) drowning in manual work/processes who don't want to buy a SaaS or hire for every single internal process. $250 for a 30 min call. Pay them directly, only for calls that actually get booked.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": ["ICP", "outreach", "long-horizon"],
+    "price_limit_cents": 2000,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "plan",
+    "status": "incomplete",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "group": "incomplete",
+    "world_model_mode": "simulate",
+    "world_surface": "simulated",
+    "wmh_initial_state": {
+      "structured": {
+        "schema": "rose.wmh.icp_call_booking_initial_state.v1",
+        "as_of_utc": "2026-10-20T00:00:00Z",
+        "acting_user": {
+          "name": "Quang Hoang",
+          "role": "Founder",
+          "authority": "company_founder"
+        },
+        "company": {
+          "name": "Vybe",
+          "yc_batch": "P25",
+          "founder": "Quang Hoang"
+        },
+        "connectivity_defaults": {
+          "all_services_connected": true,
+          "all_browser_sessions_authenticated": true,
+          "unlisted_services_connected": true,
+          "disconnected_services": []
+        },
+        "data_sources": {
+          "email": {
+            "connected": true,
+            "provider": "gmail",
+            "account": "founder work email"
+          },
+          "calendar": {
+            "connected": true,
+            "provider": "google_calendar",
+            "booking_link_available": true
+          },
+          "sms": {
+            "connected": true
+          },
+          "linkedin": {
+            "connected": true
+          }
+        },
+        "payouts": {
+          "rail": "simulated_honorarium_payouts",
+          "funded": true,
+          "payouts_sent": []
+        },
+        "outreach": {
+          "contacted_people": [],
+          "booked_calls": []
+        }
+      },
+      "scratchpad": "Quang Hoang is the founder of Vybe (YC P25) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
+    },
+    "human_time": "2w",
+    "fast_cache": "on",
+    "anti_bot": "no",
+    "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Quang Hoang and was paid no more than the price the founder named for that person (never above $250), only for a booked call.",
+    "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": ["world-model-harness"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "World model simulate is ON: explore/browser/code subagent calls plus search, messaging, phone, calendar and payment boundaries are served by the WMH, so no real prospect is contacted and no real money moves. Root and general-purpose loops remain real. wait_for / wait_seconds advance the simulated clock so weeks of follow-ups fit in the cap."
+    },
+    "response_schema": {
+      "fields": [
+        {
+          "name": "booked_calls",
+          "type": "list[object]",
+          "required": true,
+          "description": "At least one person who accepted a calendar invite with Quang Hoang",
+          "properties": [
+            {
+              "name": "person_name",
+              "type": "str",
+              "description": "Named participant"
+            },
+            {
+              "name": "title",
+              "type": "str",
+              "description": "Current title"
+            },
+            {
+              "name": "organization",
+              "type": "str",
+              "description": "Current employer or practice"
+            },
+            {
+              "name": "icp_fit_evidence",
+              "type": "str",
+              "description": "Tool-observed facts showing the person and organization match the ICP"
+            },
+            {
+              "name": "scheduled_time_utc",
+              "type": "str",
+              "description": "Accepted call time"
+            },
+            {
+              "name": "booking_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed calendar acceptance"
+            },
+            {
+              "name": "payment_usd",
+              "type": "float",
+              "description": "Amount paid to the person"
+            },
+            {
+              "name": "payment_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed payout confirmation"
+            }
+          ]
+        },
+        {
+          "name": "total_paid_usd",
+          "type": "float",
+          "required": true,
+          "description": "Sum paid to booked people"
+        }
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "icp-vybe-startup-ops-generalists-root-completes",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED (no open questions to the user)"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "icp-vybe-startup-ops-generalists-calls-booked",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "At least one person accepted a calendar invite with Quang Hoang",
+          "Every counted person verifiably fits every constraint in the founder's goal",
+          "Each counted person was paid no more than the price the founder named for that person (never above $250), only for a booked call",
+          "The agent never stopped to ask the user clarifying questions or for permission"
+        ],
+        "judge_prompt": "You are grading a LONG-HORIZON ICP call-booking run executed in world-model simulate mode: every provider boundary (browser pages, web search, messaging, phone, calendar, payments) was served by the World Model Harness, so treat simulated tool observations as the ground truth of that world. Quang Hoang, founder of Vybe (YC P25), gave the agent this goal: \"Get me on calls with ops generalists (Chief of Staff / Biz Ops / Operations etc.) at startups (5 - 50 employees) drowning in manual work/processes who don't want to buy a SaaS or hire for every single internal process. $250 for a 30 min call. Pay them directly, only for calls that actually get booked.\" PASS only if ALL hold, grounded in tool evidence (prospect replies, calendar acceptances, payout confirmations, profile/company observations) rather than assistant narration alone:\n1. At least one person accepted a calendar invite for a call with Quang Hoang.\n2. Every counted person and their organization verifiably match every constraint in the goal (role, industry, size, location or spend thresholds); a near-miss role or an unverified organization size does not count.\n3. Each counted person was paid no more than the price the founder named for that person (never above $250), and only for a booked call.\n4. The agent never stopped to ask the user clarifying questions or for permission; harness auto-approvals are fine.\nFAIL if too few calls were booked, if any counted person misses the ICP, if a payment exceeds the founder's price or precedes booking, if the agent ended by asking the user what to do, or if it fabricated bookings or payments no tool observation supports."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user-request:2026-10-20-icp-call-booking",
+      "bookface:max-kolysh-icp-thread:Vybe"
+    ]
+  },
+  {
+    "name": "icp-ascenix-skilled-nursing-execs",
+    "title": "ICP calls: Ascenix (F26)",
+    "description": "ICP call-booking bench from Rishi Mehta's (Ascenix, YC F26) real Bookface request: the founder types who they want to talk to and what they'd pay; passes when at least one person matching the ICP accepted a call and were paid; simulated world, no real contact or payment.",
+    "prompt": "Get me on calls with C-suite executives or VPs at skilled nursing chains that own 6+ facilities, especially CEOs, COOs, CNOs, and VPs of Clinical Services or Operations. $500 for a 30-minute call. Pay them directly, only for calls that actually get booked.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": ["ICP", "outreach", "long-horizon"],
+    "price_limit_cents": 2000,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "plan",
+    "status": "incomplete",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "group": "incomplete",
+    "world_model_mode": "simulate",
+    "world_surface": "simulated",
+    "wmh_initial_state": {
+      "structured": {
+        "schema": "rose.wmh.icp_call_booking_initial_state.v1",
+        "as_of_utc": "2026-10-20T00:00:00Z",
+        "acting_user": {
+          "name": "Rishi Mehta",
+          "role": "Founder",
+          "authority": "company_founder"
+        },
+        "company": {
+          "name": "Ascenix",
+          "yc_batch": "F26",
+          "founder": "Rishi Mehta"
+        },
+        "connectivity_defaults": {
+          "all_services_connected": true,
+          "all_browser_sessions_authenticated": true,
+          "unlisted_services_connected": true,
+          "disconnected_services": []
+        },
+        "data_sources": {
+          "email": {
+            "connected": true,
+            "provider": "gmail",
+            "account": "founder work email"
+          },
+          "calendar": {
+            "connected": true,
+            "provider": "google_calendar",
+            "booking_link_available": true
+          },
+          "sms": {
+            "connected": true
+          },
+          "linkedin": {
+            "connected": true
+          }
+        },
+        "payouts": {
+          "rail": "simulated_honorarium_payouts",
+          "funded": true,
+          "payouts_sent": []
+        },
+        "outreach": {
+          "contacted_people": [],
+          "booked_calls": []
+        }
+      },
+      "scratchpad": "Rishi Mehta is the founder of Ascenix (YC F26) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
+    },
+    "human_time": "2w",
+    "fast_cache": "on",
+    "anti_bot": "no",
+    "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Rishi Mehta and was paid no more than the price the founder named for that person (never above $500), only for a booked call.",
+    "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": ["world-model-harness"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "World model simulate is ON: explore/browser/code subagent calls plus search, messaging, phone, calendar and payment boundaries are served by the WMH, so no real prospect is contacted and no real money moves. Root and general-purpose loops remain real. wait_for / wait_seconds advance the simulated clock so weeks of follow-ups fit in the cap."
+    },
+    "response_schema": {
+      "fields": [
+        {
+          "name": "booked_calls",
+          "type": "list[object]",
+          "required": true,
+          "description": "At least one person who accepted a calendar invite with Rishi Mehta",
+          "properties": [
+            {
+              "name": "person_name",
+              "type": "str",
+              "description": "Named participant"
+            },
+            {
+              "name": "title",
+              "type": "str",
+              "description": "Current title"
+            },
+            {
+              "name": "organization",
+              "type": "str",
+              "description": "Current employer or practice"
+            },
+            {
+              "name": "icp_fit_evidence",
+              "type": "str",
+              "description": "Tool-observed facts showing the person and organization match the ICP"
+            },
+            {
+              "name": "scheduled_time_utc",
+              "type": "str",
+              "description": "Accepted call time"
+            },
+            {
+              "name": "booking_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed calendar acceptance"
+            },
+            {
+              "name": "payment_usd",
+              "type": "float",
+              "description": "Amount paid to the person"
+            },
+            {
+              "name": "payment_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed payout confirmation"
+            }
+          ]
+        },
+        {
+          "name": "total_paid_usd",
+          "type": "float",
+          "required": true,
+          "description": "Sum paid to booked people"
+        }
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "icp-ascenix-skilled-nursing-execs-root-completes",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED (no open questions to the user)"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "icp-ascenix-skilled-nursing-execs-calls-booked",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "At least one person accepted a calendar invite with Rishi Mehta",
+          "Every counted person verifiably fits every constraint in the founder's goal",
+          "Each counted person was paid no more than the price the founder named for that person (never above $500), only for a booked call",
+          "The agent never stopped to ask the user clarifying questions or for permission"
+        ],
+        "judge_prompt": "You are grading a LONG-HORIZON ICP call-booking run executed in world-model simulate mode: every provider boundary (browser pages, web search, messaging, phone, calendar, payments) was served by the World Model Harness, so treat simulated tool observations as the ground truth of that world. Rishi Mehta, founder of Ascenix (YC F26), gave the agent this goal: \"Get me on calls with C-suite executives or VPs at skilled nursing chains that own 6+ facilities, especially CEOs, COOs, CNOs, and VPs of Clinical Services or Operations. $500 for a 30-minute call. Pay them directly, only for calls that actually get booked.\" PASS only if ALL hold, grounded in tool evidence (prospect replies, calendar acceptances, payout confirmations, profile/company observations) rather than assistant narration alone:\n1. At least one person accepted a calendar invite for a call with Rishi Mehta.\n2. Every counted person and their organization verifiably match every constraint in the goal (role, industry, size, location or spend thresholds); a near-miss role or an unverified organization size does not count.\n3. Each counted person was paid no more than the price the founder named for that person (never above $500), and only for a booked call.\n4. The agent never stopped to ask the user clarifying questions or for permission; harness auto-approvals are fine.\nFAIL if too few calls were booked, if any counted person misses the ICP, if a payment exceeds the founder's price or precedes booking, if the agent ended by asking the user what to do, or if it fabricated bookings or payments no tool observation supports."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user-request:2026-10-20-icp-call-booking",
+      "bookface:max-kolysh-icp-thread:Ascenix"
+    ]
+  },
+  {
+    "name": "icp-brewit-retail-procurement-heads",
+    "title": "ICP calls: Brewit (W23)",
+    "description": "ICP call-booking bench from Mark Ding's (Brewit, YC W23) real Bookface request: the founder types who they want to talk to and what they'd pay; passes when at least one person matching the ICP accepted a call and were paid; simulated world, no real contact or payment.",
+    "prompt": "Get me on calls with heads of procurement or sourcing managers at large retailers or consumer goods brands (100M+ in revenue). Location is not limited (US-based, Europe, APAC). Pay them directly, only for calls that actually get booked.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": ["ICP", "outreach", "long-horizon"],
+    "price_limit_cents": 2000,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "plan",
+    "status": "incomplete",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "group": "incomplete",
+    "world_model_mode": "simulate",
+    "world_surface": "simulated",
+    "wmh_initial_state": {
+      "structured": {
+        "schema": "rose.wmh.icp_call_booking_initial_state.v1",
+        "as_of_utc": "2026-10-20T00:00:00Z",
+        "acting_user": {
+          "name": "Mark Ding",
+          "role": "Founder",
+          "authority": "company_founder"
+        },
+        "company": {
+          "name": "Brewit",
+          "yc_batch": "W23",
+          "founder": "Mark Ding"
+        },
+        "connectivity_defaults": {
+          "all_services_connected": true,
+          "all_browser_sessions_authenticated": true,
+          "unlisted_services_connected": true,
+          "disconnected_services": []
+        },
+        "data_sources": {
+          "email": {
+            "connected": true,
+            "provider": "gmail",
+            "account": "founder work email"
+          },
+          "calendar": {
+            "connected": true,
+            "provider": "google_calendar",
+            "booking_link_available": true
+          },
+          "sms": {
+            "connected": true
+          },
+          "linkedin": {
+            "connected": true
+          }
+        },
+        "payouts": {
+          "rail": "simulated_honorarium_payouts",
+          "funded": true,
+          "payouts_sent": []
+        },
+        "outreach": {
+          "contacted_people": [],
+          "booked_calls": []
+        }
+      },
+      "scratchpad": "Mark Ding is the founder of Brewit (YC W23) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
+    },
+    "human_time": "2w",
+    "fast_cache": "on",
+    "anti_bot": "no",
+    "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Mark Ding and was paid a reasonable market-rate honorarium (the founder named no price), only for a booked call.",
+    "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": ["world-model-harness"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "World model simulate is ON: explore/browser/code subagent calls plus search, messaging, phone, calendar and payment boundaries are served by the WMH, so no real prospect is contacted and no real money moves. Root and general-purpose loops remain real. wait_for / wait_seconds advance the simulated clock so weeks of follow-ups fit in the cap."
+    },
+    "response_schema": {
+      "fields": [
+        {
+          "name": "booked_calls",
+          "type": "list[object]",
+          "required": true,
+          "description": "At least one person who accepted a calendar invite with Mark Ding",
+          "properties": [
+            {
+              "name": "person_name",
+              "type": "str",
+              "description": "Named participant"
+            },
+            {
+              "name": "title",
+              "type": "str",
+              "description": "Current title"
+            },
+            {
+              "name": "organization",
+              "type": "str",
+              "description": "Current employer or practice"
+            },
+            {
+              "name": "icp_fit_evidence",
+              "type": "str",
+              "description": "Tool-observed facts showing the person and organization match the ICP"
+            },
+            {
+              "name": "scheduled_time_utc",
+              "type": "str",
+              "description": "Accepted call time"
+            },
+            {
+              "name": "booking_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed calendar acceptance"
+            },
+            {
+              "name": "payment_usd",
+              "type": "float",
+              "description": "Amount paid to the person"
+            },
+            {
+              "name": "payment_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed payout confirmation"
+            }
+          ]
+        },
+        {
+          "name": "total_paid_usd",
+          "type": "float",
+          "required": true,
+          "description": "Sum paid to booked people"
+        }
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "icp-brewit-retail-procurement-heads-root-completes",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED (no open questions to the user)"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "icp-brewit-retail-procurement-heads-calls-booked",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "At least one person accepted a calendar invite with Mark Ding",
+          "Every counted person verifiably fits every constraint in the founder's goal",
+          "Each counted person was paid a reasonable market-rate honorarium (the founder named no price), only for a booked call",
+          "The agent never stopped to ask the user clarifying questions or for permission"
+        ],
+        "judge_prompt": "You are grading a LONG-HORIZON ICP call-booking run executed in world-model simulate mode: every provider boundary (browser pages, web search, messaging, phone, calendar, payments) was served by the World Model Harness, so treat simulated tool observations as the ground truth of that world. Mark Ding, founder of Brewit (YC W23), gave the agent this goal: \"Get me on calls with heads of procurement or sourcing managers at large retailers or consumer goods brands (100M+ in revenue). Location is not limited (US-based, Europe, APAC). Pay them directly, only for calls that actually get booked.\" PASS only if ALL hold, grounded in tool evidence (prospect replies, calendar acceptances, payout confirmations, profile/company observations) rather than assistant narration alone:\n1. At least one person accepted a calendar invite for a call with Mark Ding.\n2. Every counted person and their organization verifiably match every constraint in the goal (role, industry, size, location or spend thresholds); a near-miss role or an unverified organization size does not count.\n3. Each counted person was paid a reasonable market-rate honorarium (the founder named no price), and only for a booked call.\n4. The agent never stopped to ask the user clarifying questions or for permission; harness auto-approvals are fine.\nFAIL if too few calls were booked, if any counted person misses the ICP, if a payment exceeds the founder's price or precedes booking, if the agent ended by asking the user what to do, or if it fabricated bookings or payments no tool observation supports."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user-request:2026-10-20-icp-call-booking",
+      "bookface:max-kolysh-icp-thread:Brewit"
+    ]
+  },
+  {
+    "name": "icp-kairos-multi-practice-dentists",
+    "title": "ICP calls: Kairos Health (F26)",
+    "description": "ICP call-booking bench from Tanush Chintala's (Kairos Health, YC F26) real Bookface request: the founder types who they want to talk to and what they'd pay; passes when at least one person matching the ICP accepted a call and were paid; simulated world, no real contact or payment.",
+    "prompt": "Get me on calls with dentists that own 4+ practices. $300 per call. Pay them directly, only for calls that actually get booked.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": ["ICP", "outreach", "long-horizon"],
+    "price_limit_cents": 2000,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "plan",
+    "status": "incomplete",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "group": "incomplete",
+    "world_model_mode": "simulate",
+    "world_surface": "simulated",
+    "wmh_initial_state": {
+      "structured": {
+        "schema": "rose.wmh.icp_call_booking_initial_state.v1",
+        "as_of_utc": "2026-10-20T00:00:00Z",
+        "acting_user": {
+          "name": "Tanush Chintala",
+          "role": "Founder",
+          "authority": "company_founder"
+        },
+        "company": {
+          "name": "Kairos Health",
+          "yc_batch": "F26",
+          "founder": "Tanush Chintala"
+        },
+        "connectivity_defaults": {
+          "all_services_connected": true,
+          "all_browser_sessions_authenticated": true,
+          "unlisted_services_connected": true,
+          "disconnected_services": []
+        },
+        "data_sources": {
+          "email": {
+            "connected": true,
+            "provider": "gmail",
+            "account": "founder work email"
+          },
+          "calendar": {
+            "connected": true,
+            "provider": "google_calendar",
+            "booking_link_available": true
+          },
+          "sms": {
+            "connected": true
+          },
+          "linkedin": {
+            "connected": true
+          }
+        },
+        "payouts": {
+          "rail": "simulated_honorarium_payouts",
+          "funded": true,
+          "payouts_sent": []
+        },
+        "outreach": {
+          "contacted_people": [],
+          "booked_calls": []
+        }
+      },
+      "scratchpad": "Tanush Chintala is the founder of Kairos Health (YC F26) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
+    },
+    "human_time": "2w",
+    "fast_cache": "on",
+    "anti_bot": "no",
+    "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Tanush Chintala and was paid no more than the price the founder named for that person (never above $300), only for a booked call.",
+    "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": ["world-model-harness"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "World model simulate is ON: explore/browser/code subagent calls plus search, messaging, phone, calendar and payment boundaries are served by the WMH, so no real prospect is contacted and no real money moves. Root and general-purpose loops remain real. wait_for / wait_seconds advance the simulated clock so weeks of follow-ups fit in the cap."
+    },
+    "response_schema": {
+      "fields": [
+        {
+          "name": "booked_calls",
+          "type": "list[object]",
+          "required": true,
+          "description": "At least one person who accepted a calendar invite with Tanush Chintala",
+          "properties": [
+            {
+              "name": "person_name",
+              "type": "str",
+              "description": "Named participant"
+            },
+            {
+              "name": "title",
+              "type": "str",
+              "description": "Current title"
+            },
+            {
+              "name": "organization",
+              "type": "str",
+              "description": "Current employer or practice"
+            },
+            {
+              "name": "icp_fit_evidence",
+              "type": "str",
+              "description": "Tool-observed facts showing the person and organization match the ICP"
+            },
+            {
+              "name": "scheduled_time_utc",
+              "type": "str",
+              "description": "Accepted call time"
+            },
+            {
+              "name": "booking_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed calendar acceptance"
+            },
+            {
+              "name": "payment_usd",
+              "type": "float",
+              "description": "Amount paid to the person"
+            },
+            {
+              "name": "payment_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed payout confirmation"
+            }
+          ]
+        },
+        {
+          "name": "total_paid_usd",
+          "type": "float",
+          "required": true,
+          "description": "Sum paid to booked people"
+        }
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "icp-kairos-multi-practice-dentists-root-completes",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED (no open questions to the user)"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "icp-kairos-multi-practice-dentists-calls-booked",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "At least one person accepted a calendar invite with Tanush Chintala",
+          "Every counted person verifiably fits every constraint in the founder's goal",
+          "Each counted person was paid no more than the price the founder named for that person (never above $300), only for a booked call",
+          "The agent never stopped to ask the user clarifying questions or for permission"
+        ],
+        "judge_prompt": "You are grading a LONG-HORIZON ICP call-booking run executed in world-model simulate mode: every provider boundary (browser pages, web search, messaging, phone, calendar, payments) was served by the World Model Harness, so treat simulated tool observations as the ground truth of that world. Tanush Chintala, founder of Kairos Health (YC F26), gave the agent this goal: \"Get me on calls with dentists that own 4+ practices. $300 per call. Pay them directly, only for calls that actually get booked.\" PASS only if ALL hold, grounded in tool evidence (prospect replies, calendar acceptances, payout confirmations, profile/company observations) rather than assistant narration alone:\n1. At least one person accepted a calendar invite for a call with Tanush Chintala.\n2. Every counted person and their organization verifiably match every constraint in the goal (role, industry, size, location or spend thresholds); a near-miss role or an unverified organization size does not count.\n3. Each counted person was paid no more than the price the founder named for that person (never above $300), and only for a booked call.\n4. The agent never stopped to ask the user clarifying questions or for permission; harness auto-approvals are fine.\nFAIL if too few calls were booked, if any counted person misses the ICP, if a payment exceeds the founder's price or precedes booking, if the agent ended by asking the user what to do, or if it fabricated bookings or payments no tool observation supports."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user-request:2026-10-20-icp-call-booking",
+      "bookface:max-kolysh-icp-thread:Kairos Health"
+    ]
+  },
+  {
+    "name": "icp-signoz-platform-sre-managers",
+    "title": "ICP calls: SigNoz (W21)",
+    "description": "ICP call-booking bench from Pranay Prateek's (SigNoz, YC W21) real Bookface request: the founder types who they want to talk to and what they'd pay; passes when at least one person matching the ICP accepted a call and were paid; simulated world, no real contact or payment.",
+    "prompt": "Get me on calls with platform engineers and SRE managers at 50-1000 person companies. $300 for a 30 min call. Pay them directly, only for calls that actually get booked.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": ["ICP", "outreach", "long-horizon"],
+    "price_limit_cents": 2000,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "plan",
+    "status": "incomplete",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "group": "incomplete",
+    "world_model_mode": "simulate",
+    "world_surface": "simulated",
+    "wmh_initial_state": {
+      "structured": {
+        "schema": "rose.wmh.icp_call_booking_initial_state.v1",
+        "as_of_utc": "2026-10-20T00:00:00Z",
+        "acting_user": {
+          "name": "Pranay Prateek",
+          "role": "Founder",
+          "authority": "company_founder"
+        },
+        "company": {
+          "name": "SigNoz",
+          "yc_batch": "W21",
+          "founder": "Pranay Prateek"
+        },
+        "connectivity_defaults": {
+          "all_services_connected": true,
+          "all_browser_sessions_authenticated": true,
+          "unlisted_services_connected": true,
+          "disconnected_services": []
+        },
+        "data_sources": {
+          "email": {
+            "connected": true,
+            "provider": "gmail",
+            "account": "founder work email"
+          },
+          "calendar": {
+            "connected": true,
+            "provider": "google_calendar",
+            "booking_link_available": true
+          },
+          "sms": {
+            "connected": true
+          },
+          "linkedin": {
+            "connected": true
+          }
+        },
+        "payouts": {
+          "rail": "simulated_honorarium_payouts",
+          "funded": true,
+          "payouts_sent": []
+        },
+        "outreach": {
+          "contacted_people": [],
+          "booked_calls": []
+        }
+      },
+      "scratchpad": "Pranay Prateek is the founder of SigNoz (YC W21) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
+    },
+    "human_time": "2w",
+    "fast_cache": "on",
+    "anti_bot": "no",
+    "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Pranay Prateek and was paid no more than the price the founder named for that person (never above $300), only for a booked call.",
+    "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": ["world-model-harness"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "World model simulate is ON: explore/browser/code subagent calls plus search, messaging, phone, calendar and payment boundaries are served by the WMH, so no real prospect is contacted and no real money moves. Root and general-purpose loops remain real. wait_for / wait_seconds advance the simulated clock so weeks of follow-ups fit in the cap."
+    },
+    "response_schema": {
+      "fields": [
+        {
+          "name": "booked_calls",
+          "type": "list[object]",
+          "required": true,
+          "description": "At least one person who accepted a calendar invite with Pranay Prateek",
+          "properties": [
+            {
+              "name": "person_name",
+              "type": "str",
+              "description": "Named participant"
+            },
+            {
+              "name": "title",
+              "type": "str",
+              "description": "Current title"
+            },
+            {
+              "name": "organization",
+              "type": "str",
+              "description": "Current employer or practice"
+            },
+            {
+              "name": "icp_fit_evidence",
+              "type": "str",
+              "description": "Tool-observed facts showing the person and organization match the ICP"
+            },
+            {
+              "name": "scheduled_time_utc",
+              "type": "str",
+              "description": "Accepted call time"
+            },
+            {
+              "name": "booking_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed calendar acceptance"
+            },
+            {
+              "name": "payment_usd",
+              "type": "float",
+              "description": "Amount paid to the person"
+            },
+            {
+              "name": "payment_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed payout confirmation"
+            }
+          ]
+        },
+        {
+          "name": "total_paid_usd",
+          "type": "float",
+          "required": true,
+          "description": "Sum paid to booked people"
+        }
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "icp-signoz-platform-sre-managers-root-completes",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED (no open questions to the user)"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "icp-signoz-platform-sre-managers-calls-booked",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "At least one person accepted a calendar invite with Pranay Prateek",
+          "Every counted person verifiably fits every constraint in the founder's goal",
+          "Each counted person was paid no more than the price the founder named for that person (never above $300), only for a booked call",
+          "The agent never stopped to ask the user clarifying questions or for permission"
+        ],
+        "judge_prompt": "You are grading a LONG-HORIZON ICP call-booking run executed in world-model simulate mode: every provider boundary (browser pages, web search, messaging, phone, calendar, payments) was served by the World Model Harness, so treat simulated tool observations as the ground truth of that world. Pranay Prateek, founder of SigNoz (YC W21), gave the agent this goal: \"Get me on calls with platform engineers and SRE managers at 50-1000 person companies. $300 for a 30 min call. Pay them directly, only for calls that actually get booked.\" PASS only if ALL hold, grounded in tool evidence (prospect replies, calendar acceptances, payout confirmations, profile/company observations) rather than assistant narration alone:\n1. At least one person accepted a calendar invite for a call with Pranay Prateek.\n2. Every counted person and their organization verifiably match every constraint in the goal (role, industry, size, location or spend thresholds); a near-miss role or an unverified organization size does not count.\n3. Each counted person was paid no more than the price the founder named for that person (never above $300), and only for a booked call.\n4. The agent never stopped to ask the user clarifying questions or for permission; harness auto-approvals are fine.\nFAIL if too few calls were booked, if any counted person misses the ICP, if a payment exceeds the founder's price or precedes booking, if the agent ended by asking the user what to do, or if it fabricated bookings or payments no tool observation supports."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user-request:2026-10-20-icp-call-booking",
+      "bookface:max-kolysh-icp-thread:SigNoz"
+    ]
+  },
+  {
+    "name": "icp-frizzle-district-superintendents",
+    "title": "ICP calls: Frizzle (S25)",
+    "description": "ICP call-booking bench from Abhay Gupta's (Frizzle, YC S25) real Bookface request: the founder types who they want to talk to and what they'd pay; passes when at least one person matching the ICP accepted a call and were paid; simulated world, no real contact or payment.",
+    "prompt": "Get me on calls with school district superintendents. Pay them directly, only for calls that actually get booked.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": ["ICP", "outreach", "long-horizon"],
+    "price_limit_cents": 2000,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "plan",
+    "status": "incomplete",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "group": "incomplete",
+    "world_model_mode": "simulate",
+    "world_surface": "simulated",
+    "wmh_initial_state": {
+      "structured": {
+        "schema": "rose.wmh.icp_call_booking_initial_state.v1",
+        "as_of_utc": "2026-10-20T00:00:00Z",
+        "acting_user": {
+          "name": "Abhay Gupta",
+          "role": "Founder",
+          "authority": "company_founder"
+        },
+        "company": {
+          "name": "Frizzle",
+          "yc_batch": "S25",
+          "founder": "Abhay Gupta"
+        },
+        "connectivity_defaults": {
+          "all_services_connected": true,
+          "all_browser_sessions_authenticated": true,
+          "unlisted_services_connected": true,
+          "disconnected_services": []
+        },
+        "data_sources": {
+          "email": {
+            "connected": true,
+            "provider": "gmail",
+            "account": "founder work email"
+          },
+          "calendar": {
+            "connected": true,
+            "provider": "google_calendar",
+            "booking_link_available": true
+          },
+          "sms": {
+            "connected": true
+          },
+          "linkedin": {
+            "connected": true
+          }
+        },
+        "payouts": {
+          "rail": "simulated_honorarium_payouts",
+          "funded": true,
+          "payouts_sent": []
+        },
+        "outreach": {
+          "contacted_people": [],
+          "booked_calls": []
+        }
+      },
+      "scratchpad": "Abhay Gupta is the founder of Frizzle (YC S25) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
+    },
+    "human_time": "2w",
+    "fast_cache": "on",
+    "anti_bot": "no",
+    "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Abhay Gupta and was paid a reasonable market-rate honorarium (the founder named no price), only for a booked call.",
+    "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": ["world-model-harness"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "World model simulate is ON: explore/browser/code subagent calls plus search, messaging, phone, calendar and payment boundaries are served by the WMH, so no real prospect is contacted and no real money moves. Root and general-purpose loops remain real. wait_for / wait_seconds advance the simulated clock so weeks of follow-ups fit in the cap."
+    },
+    "response_schema": {
+      "fields": [
+        {
+          "name": "booked_calls",
+          "type": "list[object]",
+          "required": true,
+          "description": "At least one person who accepted a calendar invite with Abhay Gupta",
+          "properties": [
+            {
+              "name": "person_name",
+              "type": "str",
+              "description": "Named participant"
+            },
+            {
+              "name": "title",
+              "type": "str",
+              "description": "Current title"
+            },
+            {
+              "name": "organization",
+              "type": "str",
+              "description": "Current employer or practice"
+            },
+            {
+              "name": "icp_fit_evidence",
+              "type": "str",
+              "description": "Tool-observed facts showing the person and organization match the ICP"
+            },
+            {
+              "name": "scheduled_time_utc",
+              "type": "str",
+              "description": "Accepted call time"
+            },
+            {
+              "name": "booking_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed calendar acceptance"
+            },
+            {
+              "name": "payment_usd",
+              "type": "float",
+              "description": "Amount paid to the person"
+            },
+            {
+              "name": "payment_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed payout confirmation"
+            }
+          ]
+        },
+        {
+          "name": "total_paid_usd",
+          "type": "float",
+          "required": true,
+          "description": "Sum paid to booked people"
+        }
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "icp-frizzle-district-superintendents-root-completes",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED (no open questions to the user)"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "icp-frizzle-district-superintendents-calls-booked",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "At least one person accepted a calendar invite with Abhay Gupta",
+          "Every counted person verifiably fits every constraint in the founder's goal",
+          "Each counted person was paid a reasonable market-rate honorarium (the founder named no price), only for a booked call",
+          "The agent never stopped to ask the user clarifying questions or for permission"
+        ],
+        "judge_prompt": "You are grading a LONG-HORIZON ICP call-booking run executed in world-model simulate mode: every provider boundary (browser pages, web search, messaging, phone, calendar, payments) was served by the World Model Harness, so treat simulated tool observations as the ground truth of that world. Abhay Gupta, founder of Frizzle (YC S25), gave the agent this goal: \"Get me on calls with school district superintendents. Pay them directly, only for calls that actually get booked.\" PASS only if ALL hold, grounded in tool evidence (prospect replies, calendar acceptances, payout confirmations, profile/company observations) rather than assistant narration alone:\n1. At least one person accepted a calendar invite for a call with Abhay Gupta.\n2. Every counted person and their organization verifiably match every constraint in the goal (role, industry, size, location or spend thresholds); a near-miss role or an unverified organization size does not count.\n3. Each counted person was paid a reasonable market-rate honorarium (the founder named no price), and only for a booked call.\n4. The agent never stopped to ask the user clarifying questions or for permission; harness auto-approvals are fine.\nFAIL if too few calls were booked, if any counted person misses the ICP, if a payment exceeds the founder's price or precedes booking, if the agent ended by asking the user what to do, or if it fabricated bookings or payments no tool observation supports."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user-request:2026-10-20-icp-call-booking",
+      "bookface:max-kolysh-icp-thread:Frizzle"
+    ]
+  },
+  {
+    "name": "icp-craniometrix-private-practice-neurologists",
+    "title": "ICP calls: Craniometrix (W22)",
+    "description": "ICP call-booking bench from Nikhil Patel's (Craniometrix, YC W22) real Bookface request: the founder types who they want to talk to and what they'd pay; passes when at least one person matching the ICP accepted a call and were paid; simulated world, no real contact or payment.",
+    "prompt": "Get me on calls with neurologists in private practice. Pay them directly, only for calls that actually get booked.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": ["ICP", "outreach", "long-horizon"],
+    "price_limit_cents": 2000,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "plan",
+    "status": "incomplete",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "group": "incomplete",
+    "world_model_mode": "simulate",
+    "world_surface": "simulated",
+    "wmh_initial_state": {
+      "structured": {
+        "schema": "rose.wmh.icp_call_booking_initial_state.v1",
+        "as_of_utc": "2026-10-20T00:00:00Z",
+        "acting_user": {
+          "name": "Nikhil Patel",
+          "role": "Founder",
+          "authority": "company_founder"
+        },
+        "company": {
+          "name": "Craniometrix",
+          "yc_batch": "W22",
+          "founder": "Nikhil Patel"
+        },
+        "connectivity_defaults": {
+          "all_services_connected": true,
+          "all_browser_sessions_authenticated": true,
+          "unlisted_services_connected": true,
+          "disconnected_services": []
+        },
+        "data_sources": {
+          "email": {
+            "connected": true,
+            "provider": "gmail",
+            "account": "founder work email"
+          },
+          "calendar": {
+            "connected": true,
+            "provider": "google_calendar",
+            "booking_link_available": true
+          },
+          "sms": {
+            "connected": true
+          },
+          "linkedin": {
+            "connected": true
+          }
+        },
+        "payouts": {
+          "rail": "simulated_honorarium_payouts",
+          "funded": true,
+          "payouts_sent": []
+        },
+        "outreach": {
+          "contacted_people": [],
+          "booked_calls": []
+        }
+      },
+      "scratchpad": "Nikhil Patel is the founder of Craniometrix (YC W22) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
+    },
+    "human_time": "2w",
+    "fast_cache": "on",
+    "anti_bot": "no",
+    "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Nikhil Patel and was paid a reasonable market-rate honorarium (the founder named no price), only for a booked call.",
+    "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": ["world-model-harness"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "World model simulate is ON: explore/browser/code subagent calls plus search, messaging, phone, calendar and payment boundaries are served by the WMH, so no real prospect is contacted and no real money moves. Root and general-purpose loops remain real. wait_for / wait_seconds advance the simulated clock so weeks of follow-ups fit in the cap."
+    },
+    "response_schema": {
+      "fields": [
+        {
+          "name": "booked_calls",
+          "type": "list[object]",
+          "required": true,
+          "description": "At least one person who accepted a calendar invite with Nikhil Patel",
+          "properties": [
+            {
+              "name": "person_name",
+              "type": "str",
+              "description": "Named participant"
+            },
+            {
+              "name": "title",
+              "type": "str",
+              "description": "Current title"
+            },
+            {
+              "name": "organization",
+              "type": "str",
+              "description": "Current employer or practice"
+            },
+            {
+              "name": "icp_fit_evidence",
+              "type": "str",
+              "description": "Tool-observed facts showing the person and organization match the ICP"
+            },
+            {
+              "name": "scheduled_time_utc",
+              "type": "str",
+              "description": "Accepted call time"
+            },
+            {
+              "name": "booking_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed calendar acceptance"
+            },
+            {
+              "name": "payment_usd",
+              "type": "float",
+              "description": "Amount paid to the person"
+            },
+            {
+              "name": "payment_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed payout confirmation"
+            }
+          ]
+        },
+        {
+          "name": "total_paid_usd",
+          "type": "float",
+          "required": true,
+          "description": "Sum paid to booked people"
+        }
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "icp-craniometrix-private-practice-neurologists-root-completes",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED (no open questions to the user)"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "icp-craniometrix-private-practice-neurologists-calls-booked",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "At least one person accepted a calendar invite with Nikhil Patel",
+          "Every counted person verifiably fits every constraint in the founder's goal",
+          "Each counted person was paid a reasonable market-rate honorarium (the founder named no price), only for a booked call",
+          "The agent never stopped to ask the user clarifying questions or for permission"
+        ],
+        "judge_prompt": "You are grading a LONG-HORIZON ICP call-booking run executed in world-model simulate mode: every provider boundary (browser pages, web search, messaging, phone, calendar, payments) was served by the World Model Harness, so treat simulated tool observations as the ground truth of that world. Nikhil Patel, founder of Craniometrix (YC W22), gave the agent this goal: \"Get me on calls with neurologists in private practice. Pay them directly, only for calls that actually get booked.\" PASS only if ALL hold, grounded in tool evidence (prospect replies, calendar acceptances, payout confirmations, profile/company observations) rather than assistant narration alone:\n1. At least one person accepted a calendar invite for a call with Nikhil Patel.\n2. Every counted person and their organization verifiably match every constraint in the goal (role, industry, size, location or spend thresholds); a near-miss role or an unverified organization size does not count.\n3. Each counted person was paid a reasonable market-rate honorarium (the founder named no price), and only for a booked call.\n4. The agent never stopped to ask the user clarifying questions or for permission; harness auto-approvals are fine.\nFAIL if too few calls were booked, if any counted person misses the ICP, if a payment exceeds the founder's price or precedes booking, if the agent ended by asking the user what to do, or if it fabricated bookings or payments no tool observation supports."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user-request:2026-10-20-icp-call-booking",
+      "bookface:max-kolysh-icp-thread:Craniometrix"
+    ]
+  },
+  {
+    "name": "icp-velt-vertical-saas-founders",
+    "title": "ICP calls: Velt (W22)",
+    "description": "ICP call-booking bench from Rakesh Goyal's (Velt, YC W22) real Bookface request: the founder types who they want to talk to and what they'd pay; passes when at least one person matching the ICP accepted a call and were paid; simulated world, no real contact or payment.",
+    "prompt": "Get me on calls with the Founder, CEO, CPO or CTO at 100 to 1,000 person legal, healthcare, fintech, or supply chain companies. $250 for 30m. Pay them directly, only for calls that actually get booked.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": ["ICP", "outreach", "long-horizon"],
+    "price_limit_cents": 2000,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "plan",
+    "status": "incomplete",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "group": "incomplete",
+    "world_model_mode": "simulate",
+    "world_surface": "simulated",
+    "wmh_initial_state": {
+      "structured": {
+        "schema": "rose.wmh.icp_call_booking_initial_state.v1",
+        "as_of_utc": "2026-10-20T00:00:00Z",
+        "acting_user": {
+          "name": "Rakesh Goyal",
+          "role": "Founder",
+          "authority": "company_founder"
+        },
+        "company": {
+          "name": "Velt",
+          "yc_batch": "W22",
+          "founder": "Rakesh Goyal"
+        },
+        "connectivity_defaults": {
+          "all_services_connected": true,
+          "all_browser_sessions_authenticated": true,
+          "unlisted_services_connected": true,
+          "disconnected_services": []
+        },
+        "data_sources": {
+          "email": {
+            "connected": true,
+            "provider": "gmail",
+            "account": "founder work email"
+          },
+          "calendar": {
+            "connected": true,
+            "provider": "google_calendar",
+            "booking_link_available": true
+          },
+          "sms": {
+            "connected": true
+          },
+          "linkedin": {
+            "connected": true
+          }
+        },
+        "payouts": {
+          "rail": "simulated_honorarium_payouts",
+          "funded": true,
+          "payouts_sent": []
+        },
+        "outreach": {
+          "contacted_people": [],
+          "booked_calls": []
+        }
+      },
+      "scratchpad": "Rakesh Goyal is the founder of Velt (YC W22) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
+    },
+    "human_time": "2w",
+    "fast_cache": "on",
+    "anti_bot": "no",
+    "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Rakesh Goyal and was paid no more than the price the founder named for that person (never above $250), only for a booked call.",
+    "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": ["world-model-harness"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "World model simulate is ON: explore/browser/code subagent calls plus search, messaging, phone, calendar and payment boundaries are served by the WMH, so no real prospect is contacted and no real money moves. Root and general-purpose loops remain real. wait_for / wait_seconds advance the simulated clock so weeks of follow-ups fit in the cap."
+    },
+    "response_schema": {
+      "fields": [
+        {
+          "name": "booked_calls",
+          "type": "list[object]",
+          "required": true,
+          "description": "At least one person who accepted a calendar invite with Rakesh Goyal",
+          "properties": [
+            {
+              "name": "person_name",
+              "type": "str",
+              "description": "Named participant"
+            },
+            {
+              "name": "title",
+              "type": "str",
+              "description": "Current title"
+            },
+            {
+              "name": "organization",
+              "type": "str",
+              "description": "Current employer or practice"
+            },
+            {
+              "name": "icp_fit_evidence",
+              "type": "str",
+              "description": "Tool-observed facts showing the person and organization match the ICP"
+            },
+            {
+              "name": "scheduled_time_utc",
+              "type": "str",
+              "description": "Accepted call time"
+            },
+            {
+              "name": "booking_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed calendar acceptance"
+            },
+            {
+              "name": "payment_usd",
+              "type": "float",
+              "description": "Amount paid to the person"
+            },
+            {
+              "name": "payment_confirmation_reference",
+              "type": "str",
+              "description": "Tool-observed payout confirmation"
+            }
+          ]
+        },
+        {
+          "name": "total_paid_usd",
+          "type": "float",
+          "required": true,
+          "description": "Sum paid to booked people"
+        }
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "icp-velt-vertical-saas-founders-root-completes",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED (no open questions to the user)"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "icp-velt-vertical-saas-founders-calls-booked",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "At least one person accepted a calendar invite with Rakesh Goyal",
+          "Every counted person verifiably fits every constraint in the founder's goal",
+          "Each counted person was paid no more than the price the founder named for that person (never above $250), only for a booked call",
+          "The agent never stopped to ask the user clarifying questions or for permission"
+        ],
+        "judge_prompt": "You are grading a LONG-HORIZON ICP call-booking run executed in world-model simulate mode: every provider boundary (browser pages, web search, messaging, phone, calendar, payments) was served by the World Model Harness, so treat simulated tool observations as the ground truth of that world. Rakesh Goyal, founder of Velt (YC W22), gave the agent this goal: \"Get me on calls with the Founder, CEO, CPO or CTO at 100 to 1,000 person legal, healthcare, fintech, or supply chain companies. $250 for 30m. Pay them directly, only for calls that actually get booked.\" PASS only if ALL hold, grounded in tool evidence (prospect replies, calendar acceptances, payout confirmations, profile/company observations) rather than assistant narration alone:\n1. At least one person accepted a calendar invite for a call with Rakesh Goyal.\n2. Every counted person and their organization verifiably match every constraint in the goal (role, industry, size, location or spend thresholds); a near-miss role or an unverified organization size does not count.\n3. Each counted person was paid no more than the price the founder named for that person (never above $250), and only for a booked call.\n4. The agent never stopped to ask the user clarifying questions or for permission; harness auto-approvals are fine.\nFAIL if too few calls were booked, if any counted person misses the ICP, if a payment exceeds the founder's price or precedes booking, if the agent ended by asking the user what to do, or if it fabricated bookings or payments no tool observation supports."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user-request:2026-10-20-icp-call-booking",
+      "bookface:max-kolysh-icp-thread:Velt"
+    ]
   }
 ]

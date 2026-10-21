@@ -53,6 +53,25 @@ def anthropic_family(*, excluded: bool):
             os.environ[key] = previous
 
 
+def test_catalog_attachments_resolve_to_single_uploadable_paths():
+    """Every catalog attachment must reach the runner as one path per file.
+
+    raise-5m-rose-labs-brex lists its five pre-seed materials under
+    "attachment"; on the cloud the runner joined that list as one path and the
+    task errored after 39 s ("join() argument must be ... not 'list'")."""
+    from benchmarks.benchmark_tasks import all_tasks, get_task_by_name
+    from benchmarks.run_benchmark import TEST_ASSETS_DIR
+
+    for task in all_tasks():
+        assert task.attachment is None or isinstance(task.attachment, str), task.name
+        files = task.attachments or ([task.attachment] if task.attachment else [])
+        for name in files:
+            assert isinstance(name, str), (task.name, name)
+            assert os.path.exists(os.path.join(TEST_ASSETS_DIR, name)), (task.name, name)
+    fundraiser = get_task_by_name("raise-5m-rose-labs-brex")
+    assert len(fundraiser.attachments) == 5 and fundraiser.attachment is None
+
+
 def test_local_benchmark_rejects_disabled_trace_before_allocation():
     """A semantic capture override cannot launch a benchmark without its archive."""
     from benchmarks import local, local_worlds
@@ -1217,6 +1236,22 @@ def test_successful_llm_evidence_is_in_permanent_gate():
         timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_disposable_volume_ownership_is_in_permanent_gate():
+    """Disposable-volume backup ownership (exact mount, settled or restored
+    attachment, foreign-attachment refusal) is exercised on every deploy."""
+    repo_root = Path(__file__).resolve().parents[3]
+    for suite in ("cloudbench-disposable-volume.test.py", "cloudbench-disposable-volume-cli.test.py"):
+        result = subprocess.run(
+            [sys.executable, str(repo_root / "scripts/tests" / suite)],
+            cwd=repo_root,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
+        )
+        assert result.returncode == 0, suite + "\n" + result.stdout + result.stderr
 
 
 def test_cloudbench_codex_auth_is_in_permanent_gate():
@@ -23062,6 +23097,7 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
         ("test_autoscaler_runtime_handoff_is_in_permanent_gate", "autoscaler_runtime_handoff_permanent_gate"),
         ("test_boot_terminal_runtime_evidence_is_in_permanent_gate", "boot_terminal_runtime_evidence_permanent_gate"),
         ("test_cloudbench_codex_auth_is_in_permanent_gate", "cloudbench_codex_auth_permanent_gate"),
+        ("test_disposable_volume_ownership_is_in_permanent_gate", "disposable_volume_ownership_permanent_gate"),
         ("test_cloudbench_pool_vm_shapes_are_in_permanent_gate", "cloudbench_pool_vm_shapes_permanent_gate"),
         ("test_sms_runner_scoring_contract_is_in_permanent_gate", "sms_runner_scoring_contract_permanent_gate"),
         ("test_live_query_proof_rejects_zero_spend_tasks_before_provisioning", "live_query_proof_zero_spend_admission"),
@@ -23886,6 +23922,7 @@ async def run_all_tests():
             ("autoscaler_runtime_handoff_permanent_gate", test_autoscaler_runtime_handoff_is_in_permanent_gate),
             ("boot_terminal_runtime_evidence_permanent_gate", test_boot_terminal_runtime_evidence_is_in_permanent_gate),
             ("cloudbench_codex_auth_permanent_gate", test_cloudbench_codex_auth_is_in_permanent_gate),
+            ("disposable_volume_ownership_permanent_gate", test_disposable_volume_ownership_is_in_permanent_gate),
             ("cloudbench_pool_vm_shapes_permanent_gate", test_cloudbench_pool_vm_shapes_are_in_permanent_gate),
             ("sms_runner_scoring_contract_permanent_gate", test_sms_runner_scoring_contract_is_in_permanent_gate),
             (
@@ -25528,6 +25565,10 @@ async def run_all_tests():
     r.record(
         "code_agent_sdk_evidence_chips_count_as_grounded_steps",
         test_code_agent_sdk_evidence_chips_count_as_grounded_steps,
+    )
+    r.record(
+        "catalog_attachments_resolve_to_single_uploadable_paths",
+        test_catalog_attachments_resolve_to_single_uploadable_paths,
     )
 
     return r.all_passed

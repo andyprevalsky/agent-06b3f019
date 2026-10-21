@@ -1868,6 +1868,91 @@ async def test_disconnected_delete_seal_wait_rejects_owner_drift_and_has_a_deadl
     assert evidence["delete_seal_observation"]["snapshot"]["unsealed_tree_agent_ids"] == [CHILD]
 
 
+def test_native_world_retirement_retries_a_transient_unjoined_server_error(monkeypatch):
+    """Run 7 (2026-10-20): the first native DELETE after the 600s timeout returned
+    500 while ~90 cancelled predictions were still draining. The server keeps the
+    session fenced and accepts a fresh retirement, so a server/transport failure is
+    retried; a 4xx (unknown/foreign session) stays terminal."""
+    import httpx
+
+    def owned_task():
+        task = copy.deepcopy(bench.get_task_by_name("parallel-tool-calls"))
+        task._wmh_owned_session = {
+            "base_url": "http://native.test",
+            "model_name": "rose-test",
+            "session_id": "owned",
+            "root_agent_id": ROOT,
+            "engine": "experiential",
+        }
+        return task
+
+    receipt = {
+        "ended": "owned",
+        "engine": "experiential",
+        "session_id": "owned",
+        "session_scope_id": ROOT,
+        "revision": 3,
+        "state": {"raised": 0},
+        "history": [],
+        "usage": {"calls": 3},
+        "join_verified": True,
+    }
+    url = "http://native.test/world_models/rose-test/sessions/owned"
+
+    def status_error(code):
+        request = httpx.Request("DELETE", url)
+        return httpx.HTTPStatusError(f"{code}", request=request, response=httpx.Response(code, request=request))
+
+    def client_for(outcomes, calls):
+        class Client:
+            def __init__(self, base):
+                assert base == "http://native.test"
+
+            async def end_session(self, model, session_id):
+                calls.append((model, session_id))
+                outcome = outcomes.pop(0)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return outcome
+
+        return Client
+
+    sleeps = []
+
+    async def no_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(bench, "_NATIVE_RETIREMENT_SLEEP", no_sleep, raising=False)
+
+    calls = []
+    monkeypatch.setattr(
+        bench,
+        "WMHHttpClient",
+        client_for([status_error(500), httpx.ReadTimeout("slow", request=httpx.Request("DELETE", url)), receipt], calls),
+    )
+    task = owned_task()
+    assert asyncio.run(bench._retire_owned_native_world(task, ROOT)) == receipt
+    assert calls == [("rose-test", "owned")] * 3 and len(sleeps) == 2
+    assert task._wmh_retirement_receipt == receipt and getattr(task, "_wmh_retirement_error", None) is None
+
+    calls.clear()
+    monkeypatch.setattr(bench, "WMHHttpClient", client_for([status_error(409)], calls))
+    task = owned_task()
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(bench._retire_owned_native_world(task, ROOT))
+    assert calls == [("rose-test", "owned")] and task._wmh_retirement_error["join_verified"] is False
+
+    calls.clear()
+    attempts = getattr(bench, "_NATIVE_RETIREMENT_ATTEMPTS", 1)
+    persistent = [status_error(500) for _ in range(attempts + 1)]
+    monkeypatch.setattr(bench, "WMHHttpClient", client_for(persistent, calls))
+    task = owned_task()
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(bench._retire_owned_native_world(task, ROOT))
+    assert len(calls) == attempts > 1
+    assert task._wmh_retirement_error["cost_verified"] is False
+
+
 @async_case
 async def test_interrupt_during_archive_wait_keeps_run_record_and_exact_cleanup():
     """SIGINT during the diagnostic archive wait must not lose the evaluated run.

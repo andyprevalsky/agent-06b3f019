@@ -162,6 +162,12 @@ const lateExclusiveDomainNames = new Set([
   // contention from sibling domains cannot obscure their runtime contract.
   'browser-origin-injection-memory',
   'steel-injection',
+  // Its live Kernel/Steel auth-persist case closes a real session under the
+  // product's 6s signed-in-state harvest budget. In the shared pool sibling
+  // domains saturated the local DB (single queries at ~2s), the cookie write
+  // spent the budget and localStorage was never persisted (2026-10-20, 2/3
+  // coverage runs; it passes alone). Measure that contract uncontended.
+  'browser-provider',
   // Its feedback cases deliberately set a process-wide funded-key cooldown.
   // Keep that mutation after every other domain that may need the key.
   'codex-code',

@@ -677,6 +677,23 @@ class Incomplete(unittest.TestCase):
             self.assertRaises(ValueError),
         ):
             M["protocol"]()
+        # Only the one reviewed successor is accepted; any further current
+        # change to a pinned dispatch function still refuses recovery.
+        effects = Path(M["HERE"]) / "cloudbench-archived-reuse-effects.py"
+        changed = effects.read_bytes().replace(
+            b"NO_EFFECT_STATUSES:", b"NO_EFFECT_STATUSES and False:", 1
+        )
+        self.assertNotEqual(changed, effects.read_bytes())
+        original = Path.read_bytes
+        with (
+            mock.patch.object(
+                Path,
+                "read_bytes",
+                lambda path: changed if path == effects else original(path),
+            ),
+            self.assertRaisesRegex(ValueError, "dispatch protocol source changed"),
+        ):
+            M["protocol"]()
 
     def test_ack_reconcile_only_gets_under_joined_lease_and_never_replays_incomplete(
         self,
@@ -877,6 +894,29 @@ class Incomplete(unittest.TestCase):
                     value["deadline"],
                 )
             self.assertEqual(visible.posts, 0)
+            class RejectedLease(API):
+                @contextmanager
+                def lease(self, mid):
+                    calls.append(("rejected-lease", mid))
+                    raise M["H"]["NativeRejected"](
+                        "POST", "/machines/" + mid + "/lease", 429, "receipt"
+                    )
+                    yield
+
+            # A recorded 429 lease refusal holds the row without credit; it
+            # never escapes as an unknown error that aborts reconciliation.
+            calls.clear()
+            with self.assertRaisesRegex(ValueError, "no newly verified"):
+                M["reconcile"](
+                    lambda _: RejectedLease(),
+                    value,
+                    root / "rejected-lease-recovery",
+                    value["deadline"],
+                )
+            self.assertEqual(calls, [("rejected-lease", self.f.mid)])
+            self.assertFalse(
+                (root / "rejected-lease-recovery/request.json").exists()
+            )
             broken = root / "broken-recovery"
             broken.mkdir()
             with self.assertRaises(FileNotFoundError):

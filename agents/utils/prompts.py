@@ -562,6 +562,7 @@ MANDATORY DECOMPOSITION INVARIANTS:
 - Diamond: {{"1": ["0"], "2": ["0"], "3": ["1", "2"]}} (fork then join)
   Example: Gather requirements -> (Design frontend, Design backend) -> Integration
 - Causal handoff: Step 0 gather facts; Step 1 use those facts to draft; Step 2 review the draft -> tasks[1].depends_on=["0"], tasks[2].depends_on=["1"]
+- Per-item pipeline to a target: when the goal accumulates a quantity across uncertain items (leads, candidates, suppliers), use one spawn_general_purpose_agent_for_each task whose agent carries its item end to end (contact -> negotiate -> close), with the highest-probability items first and known items started immediately; a final task tallies results against the target. Do not split one item's lifecycle into stage-wide tasks that each wait for every item.
 - Retrieval-to-execution: Step 0 spawn_explore_agent retrieves the public target or route; Step 1 spawn_browser_agent executes the complete stateful flow -> tasks[1].depends_on=["0"]
 
 ## Planner Spawn Aliases

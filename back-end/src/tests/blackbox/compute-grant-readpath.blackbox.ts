@@ -18,6 +18,7 @@ import { prisma } from '../../providers/database';
 import {
   materializeGrantAsIntegration,
   buildGrantCredentialJson,
+  encryptGrantMaterial,
 } from '../../domains/compute-grants/repo';
 import {
   fetchComputePoolToken,
@@ -199,6 +200,96 @@ test('a pooled Claude setup-token is selectable without a refresh token', async 
     token.accessToken === 'sk-ant-oat01-POOLED',
     'pool reader returned the wrong Claude setup-token'
   );
+});
+
+/**
+ * The 2026-10-20 prod lease: a Mac keychain envelope (refreshable, 8h access
+ * token) whose own `expiresAt` was five days in the past was re-uploaded as
+ * CONNECTED and served to agents, so every Claude call got Anthropic 401
+ * "OAuth access token has expired" before failing over to GPT. The server
+ * never refreshes Claude grants (refresh is single-use and would revoke the
+ * user's local Claude Code login), so an envelope past its own expiry is
+ * provably unusable and must never be leased -- on the user, pool, or
+ * lineage path.
+ */
+async function insertExpiredKeychainEnvelope(userId: string, poolingEnabled: boolean) {
+  const json = JSON.stringify({
+    claudeAiOauth: {
+      accessToken: `sk-ant-oat01-EXPIRED-${userId}`,
+      refreshToken: 'sk-ant-ort01-keychain-refresh',
+      expiresAt: Date.now() - 5 * 24 * 3600 * 1000,
+      scopes: ['user:inference', 'user:profile', 'user:sessions:claude_code'],
+      subscriptionType: 'max',
+    },
+  });
+  return prisma.integration.create({
+    data: {
+      userId,
+      name: 'claude_code',
+      type: 'TOOL_SETUP',
+      status: 'CONNECTED',
+      isActive: true,
+      poolingEnabled,
+      accountId: `expired-${userId}`,
+      config: { encryptedCredentials: encryptGrantMaterial(json) },
+    },
+  });
+}
+
+test('a Claude envelope past its own expiresAt is never leased to an agent', async () => {
+  const userId = `${USER}-expired`;
+  const expired = await insertExpiredKeychainEnvelope(userId, false);
+  const direct = await fetchComputeTokenForUser(userId, { tokenType: 'claude' });
+  assert(
+    !JSON.stringify(direct ?? {}).includes('EXPIRED'),
+    'user path leased an access token past its own expiresAt'
+  );
+  const leased = await fetchComputeTokenForUser(userId, {
+    tokenType: 'claude',
+    lineageKey: `agent:${userId}`,
+    agentId: userId,
+    rootAgentId: userId,
+  });
+  assert(
+    !JSON.stringify(leased ?? {}).includes('EXPIRED'),
+    'lineage lease path leased an access token past its own expiresAt'
+  );
+  const pooled = await insertExpiredKeychainEnvelope(`${userId}-pool`, true);
+  const otherPoolRows = await prisma.integration.findMany({
+    where: { poolingEnabled: true, id: { not: pooled.id } },
+    select: { id: true },
+  });
+  const poolToken = await fetchComputePoolToken(
+    otherPoolRows.map((row) => row.id),
+    'claude'
+  );
+  assert(poolToken === null, 'pool path leased a refreshable envelope past its own expiresAt');
+  const row = await prisma.integration.findUnique({ where: { id: expired.id } });
+  assert(row !== null, 'skipping an expired envelope must not delete the account');
+  assert(row.status === 'EXPIRED', 'an expired envelope must be surfaced as needing reconnect');
+
+  // Retiring the dead row must not take the user's healthy account with it.
+  await materializeGrantAsIntegration({
+    userId,
+    provider: 'claude',
+    accountId: 'healthy-sibling',
+    accessToken: 'sk-ant-oat01-HEALTHY-SIBLING',
+    expiresInSeconds: 31_536_000,
+    poolingEnabled: false,
+  });
+  await prisma.integration.update({
+    where: { id: expired.id },
+    data: { status: 'CONNECTED', isActive: true, failureReason: null },
+  });
+  const sibling = await fetchComputeTokenForUser(userId, { tokenType: 'claude' });
+  assert(
+    sibling?.accessToken === 'sk-ant-oat01-HEALTHY-SIBLING',
+    'the healthy sibling account must be served once the expired row is skipped'
+  );
+  const healthy = await prisma.integration.findFirst({
+    where: { userId, name: 'claude_code', accountId: 'healthy-sibling' },
+  });
+  assert(healthy?.status === 'CONNECTED', 'retiring an expired row disabled a healthy sibling');
 });
 
 test('the credential envelope has the exact shape the reader expects', async () => {

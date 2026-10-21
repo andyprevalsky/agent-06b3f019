@@ -904,6 +904,11 @@ FLEET_PRIMARY_VM_MEMORY="${CLOUDBENCH_FLEET_PRIMARY_VM_MEMORY:-4096}"
 # bypass the 4GB pool and clone fresh with this shape.
 FLEET_BUNDLED_FRONTEND_VM_SIZE="${CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_SIZE:-shared-cpu-4x}"
 FLEET_BUNDLED_FRONTEND_VM_MEMORY="${CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_MEMORY:-8192}"
+# A --sim-on guest serves the native WMH itself: measured 2026-10-19 on the
+# 318k-observation model, serving holds ~30 GB steady (42 GB peak) and loads in
+# ~620 s on 8 vCPUs, beside the isolated stack.
+FLEET_SIM_VM_SIZE="${CLOUDBENCH_FLEET_SIM_VM_SIZE:-performance-8x}"
+FLEET_SIM_VM_MEMORY="${CLOUDBENCH_FLEET_SIM_VM_MEMORY:-65536}"
 FLEET_WORKER_VM_SIZE="${CLOUDBENCH_FLEET_WORKER_VM_SIZE:-performance-1x}"
 FLEET_WORKER_VM_MEMORY="${CLOUDBENCH_FLEET_WORKER_VM_MEMORY:-2048}"
 FLEET_WORKER_HEALTH_PORT="${CLOUDBENCH_WORKER_HEALTH_PORT:-3103}"
@@ -968,7 +973,9 @@ bench_needs_large_primary() {  # bench_needs_large_primary <task>
 }
 
 primary_vm_size_for_bench() {  # primary_vm_size_for_bench <task>
-    if bench_needs_large_primary "$1"; then
+    if [ "${INFRA_PROBE:-0}" != "1" ] && bench_simulates "$1"; then
+        printf '%s\n' "$FLEET_SIM_VM_SIZE"
+    elif bench_needs_large_primary "$1"; then
         printf '%s\n' "$FLEET_BUNDLED_FRONTEND_VM_SIZE"
     else
         printf '%s\n' "$FLEET_PRIMARY_VM_SIZE"
@@ -976,7 +983,9 @@ primary_vm_size_for_bench() {  # primary_vm_size_for_bench <task>
 }
 
 primary_vm_memory_for_bench() {  # primary_vm_memory_for_bench <task>
-    if bench_needs_large_primary "$1"; then
+    if [ "${INFRA_PROBE:-0}" != "1" ] && bench_simulates "$1"; then
+        printf '%s\n' "$FLEET_SIM_VM_MEMORY"
+    elif bench_needs_large_primary "$1"; then
         printf '%s\n' "$FLEET_BUNDLED_FRONTEND_VM_MEMORY"
     else
         printf '%s\n' "$FLEET_PRIMARY_VM_MEMORY"
@@ -1441,6 +1450,22 @@ if [ "$QUALIFY_WORKER" = 1 ]; then
         && [ -z "$PROVISION_POOL" ] && [ -z "$SIM_ON_CSV" ] && [ "${CLOUDBENCH_BOOT_TRANSPORT:-update}" = staged ] \
         || { echo "❌ --qualify-worker requires one REAL staged reusable task with autoscaling and teardown" >&2; exit 2; }
 fi
+# Begin fleet WMH defaults.
+# SIM guests serve the native experiential WMH by default, matching local runs.
+# Resolve once here so every run-bench-cloud child, autoscaled worker and the
+# execution provenance agree; run-bench-cloud keeps the same defaults and
+# validates them. WMH_ENGINE=legacy explicitly selects the legacy model.
+export WMH_ENGINE="${WMH_ENGINE:-experiential}"
+if [ "$WMH_ENGINE" = experiential ]; then
+    export WMH_MODEL_NAME="${WMH_MODEL_NAME:-rose-archive}"
+    export WMH_ROSE_POOL="${WMH_ROSE_POOL:-rose-wmh-gpt61}"
+    export WMH_EXECUTION_POLICY="${WMH_EXECUTION_POLICY:-rose-outcome-distribution-v4}"
+else
+    export WMH_MODEL_NAME="${WMH_MODEL_NAME:-rose-r2-archive-anthropic}"
+    export WMH_ROSE_POOL="${WMH_ROSE_POOL:-rose-1-ultra}"
+    export WMH_EXECUTION_POLICY="${WMH_EXECUTION_POLICY:-upstream}"
+fi
+# End fleet WMH defaults.
 
 # Validate the whole runnable batch before detaching, resolving Fly credentials,
 # or touching provider state. Besides rejecting typos without provisioning paid
@@ -1821,6 +1846,14 @@ FLY() {
 }
 
 is_sim_on() { case ",$SIM_ON_CSV," in *",$1,"*) return 0 ;; esac; return 1; }
+bench_simulates() {  # <task>; --sim-on or a catalog simulate task (the guest serves the WMH)
+    is_sim_on "$1" && return 0
+    local index
+    for index in "${!BENCHES[@]}"; do
+        [ "${BENCHES[$index]}" = "$1" ] && [ "${CATALOG_MODES[$index]:-}" = simulate ] && return 0
+    done
+    return 1
+}
 primary_clone_storage_mode() {
     local bench="$1" index
     [ "$FRESH_VOLUMES" = 1 ] || { printf snapshot; return; }
@@ -2567,7 +2600,7 @@ assert services['status'] == 'stopped' and type(count) is int and 1 <= count <= 
 cleanup_name = 'cloudbench-stack-cleanup-' + owner['run_token'] + '.status'
 expected = {'services.json', 'run.json', 'stack.log', cleanup_name, 'logs/backend.log',
             'logs/worker.log', *(f'logs/worker.{i}.log' for i in range(1, count))}
-assert set(manifest['files']) == expected
+assert set(manifest['files']) - {'wmh-serve-log.txt'} == expected
 assert {p.name for p in (root / 'logs').glob('worker*.log')} == {Path(p).name for p in expected if p.startswith('logs/worker')}
 cleanup = dict(line.split('=', 1) for line in read(root / cleanup_name).decode().splitlines())
 assert cleanup['state'] == 'clean' and cleanup['token'] == owner['run_token']
@@ -5882,7 +5915,7 @@ for name in expected:
 PYDISPOSED
 }
 
-fleet_disable_disposable_volume_snapshots() (  # <name> <Machine> <Volume>
+fleet_disable_disposable_volume_snapshots() (  # <name> <Machine> <Volume> [snapshot|fresh]
     [ "${DISPOSABLE_LIFECYCLE:-0}" = 1 ] || return 0
     fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" || return 1
     # Pass the exact source-owned mutation guards to bounded child shells.
@@ -5899,7 +5932,8 @@ fleet_disable_disposable_volume_snapshots() (  # <name> <Machine> <Volume>
         --name "$1" --machine "$2" --volume "$3" \
         --protected "${WARM_ID:-}" --protected "${WARM_VOLUME_ID:-}" \
         --protected "${SHARED_WARM_ID:-}" --protected "${SHARED_WARM_VOLUME_ID:-}" \
-        --protected "${PRIVATE_SOURCE_ID:-}" --protected "${PRIVATE_SOURCE_VOLUME_ID:-}"
+        --protected "${PRIVATE_SOURCE_ID:-}" --protected "${PRIVATE_SOURCE_VOLUME_ID:-}" \
+        ${4:+$([ "$4" = snapshot ] && printf -- --snapshot-restored)}
 )
 
 fleet_release_cleanup_capacity() {
@@ -11922,7 +11956,10 @@ if registry_raw:
     assert not contract['validate_task_matrix_binding'](provenance, matrix)
     values = provenance['config']['values']
     shapes = set()
-    for prefix in ('primary', 'bundled_frontend'):
+    # SIM primaries claim their own measured shape; provenance from before the
+    # SIM keys existed records only the primary and bundled-frontend shapes.
+    for prefix in ('primary', 'bundled_frontend', 'sim'):
+        if prefix == 'sim' and 'sim_vm_size' not in values: continue
         size, memory = values[prefix + '_vm_size'], values[prefix + '_vm_memory_mb']
         match = re.fullmatch('(shared-cpu|performance)-([1-9][0-9]*)x', size)
         assert match and memory.isdigit()
@@ -12901,6 +12938,25 @@ machine_creation_admission() {  # <target-ledger>; ordinary disposable lifecycle
     return 78
 }
 
+clone_storage_ready_seconds() {  # clone_storage_ready_seconds <snapshot|fresh>
+    # Provider storage-readiness budget for one accepted clone. A fresh volume
+    # is `created` on allocation; a 40GB volume restored from the donor snapshot
+    # stays RESTORING for about ten minutes. Measured 2026-10-19 on
+    # vs_ZPnK9baJYXkfpK036YB (3.5GB stored): 590-600s, >625s and <=909s, so
+    # the former shared 600s budget failed SIM clones at the provider median.
+    # Snapshot restores therefore get roughly twice the slowest observed
+    # restore. An explicit CLOUDBENCH_CLONE_STORAGE_READY_SECONDS still
+    # overrides both modes.
+    if [ -n "${CLOUDBENCH_CLONE_STORAGE_READY_SECONDS:-}" ]; then
+        printf '%s' "$CLOUDBENCH_CLONE_STORAGE_READY_SECONDS"
+        return 0
+    fi
+    case "$1" in
+        snapshot) printf '%s' "${CLOUDBENCH_CLONE_SNAPSHOT_RESTORE_SECONDS:-1800}" ;;
+        *) printf '600' ;;
+    esac
+}
+
 clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] [memory-mb] [snapshot-id] [snapshot|fresh]
     machine_creation_admission "$1" || return $?
     local DISPOSABLE_REAP=0
@@ -13216,7 +13272,7 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
             # volume destroy can keep billing. Keep the durable record
             # name-only until the exact forked volume is visible, then publish
             # machine + volume atomically before any path may destroy it.
-            storage_deadline=$((SECONDS + ${CLOUDBENCH_CLONE_STORAGE_READY_SECONDS:-600}))
+            storage_deadline=$((SECONDS + $(clone_storage_ready_seconds "$storage_mode")))
             target_volume=""
             while [ -z "$target_volume" ]; do
                 target_volume="$(machine_volume_id "$target_id")"
@@ -13311,7 +13367,7 @@ Error: snapshot storage entered terminal failed state"
                     echo "❌ clone $target_id became storage-ready without durable volume ownership" >&2
                     return 1
                 fi
-                if ! fleet_disable_disposable_volume_snapshots "$target_name" "$target_id" "$target_volume"; then
+                if ! fleet_disable_disposable_volume_snapshots "$target_name" "$target_id" "$target_volume" "$storage_mode"; then
                     echo "❌ new disposable Volume backup setting was not verified; retaining exact ownership for teardown" >&2
                     return 1
                 fi
@@ -14141,17 +14197,30 @@ normalize_current_pool_shape() {
             inventory="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 1
         fi
     fi
+    # An explicit admission already forbids normalization of a Machine. Read
+    # every pool row's admission proof in one process (one spawn per row cost
+    # ~10s at 447 rows), with the same key-presence test as before.
+    local -A explicit_ids=()
+    local explicit_id
+    while IFS= read -r explicit_id; do
+        [ -n "$explicit_id" ] && explicit_ids["$explicit_id"]=1
+    done < <(python3 - "$POOL_IDS_FILE" "$GIT_COMMON_DIR/cloudbench-pool-reuse" <<'PY' 2>/dev/null
+import json, sys
+from pathlib import Path
+proofs = Path(sys.argv[2])
+for raw in Path(sys.argv[1]).read_text().splitlines():
+    if not raw:
+        continue
+    try:
+        if 'explicit_idle' in json.load(open(proofs / (raw + '.json'))):
+            print(raw)
+    except Exception:
+        pass
+PY
+)
     while read -r id; do
         [ -n "$id" ] || continue
-        # An explicit admission already forbids normalization of this Machine.
-        # Check the same exclusion before parsing the full app inventory.
-        if python3 - "$GIT_COMMON_DIR/cloudbench-pool-reuse/$id.json" <<'PY' 2>/dev/null
-import json,sys
-assert 'explicit_idle' in json.load(open(sys.argv[1]))
-PY
-        then
-            continue
-        fi
+        [ -z "${explicit_ids[$id]+x}" ] || continue
         shape="$(printf '%s' "$inventory" | pool_machine_shape_from_json "$id")" || continue
         read -r state kind cpus memory <<< "$shape"
         [ "$state" = "stopped" ] || continue
@@ -16719,6 +16788,8 @@ PROVENANCE_CONFIG_ARGS=(
     --config-value "primary_vm_memory_mb=$FLEET_PRIMARY_VM_MEMORY"
     --config-value "bundled_frontend_vm_size=$FLEET_BUNDLED_FRONTEND_VM_SIZE"
     --config-value "bundled_frontend_vm_memory_mb=$FLEET_BUNDLED_FRONTEND_VM_MEMORY"
+    --config-value "sim_vm_size=$FLEET_SIM_VM_SIZE"
+    --config-value "sim_vm_memory_mb=$FLEET_SIM_VM_MEMORY"
     --config-value "worker_vm_size=$FLEET_WORKER_VM_SIZE"
     --config-value "worker_vm_memory_mb=$FLEET_WORKER_VM_MEMORY"
     --config-value "worker_health_port=$FLEET_WORKER_HEALTH_PORT"
@@ -16745,7 +16816,10 @@ PROVENANCE_CONFIG_ARGS=(
     --config-value "node_dependency_fingerprint=$CURRENT_NODE_FP"
     --config-value "python_dependency_fingerprint=$CURRENT_PY_FP"
     --config-value "per_child_max_concurrency=5"
-    --config-value "wmh_model_name=rose-r2-archive-anthropic"
+    --config-value "wmh_model_name=$WMH_MODEL_NAME"
+    --config-value "wmh_engine=$WMH_ENGINE"
+    --config-value "wmh_rose_pool=$WMH_ROSE_POOL"
+    --config-value "wmh_execution_policy=$WMH_EXECUTION_POLICY"
     --config-value "benchmark_fast_mode_cache=${BENCHMARK_FAST_MODE_CACHE:-}"
     --config-value "fast_mode_cache_disable_write_through=${FAST_MODE_CACHE_DISABLE_WRITE_THROUGH:-}"
     --config-value "benchmark_demo_cache_read_only=${BENCHMARK_DEMO_CACHE_READ_ONLY:-}"
@@ -17833,6 +17907,10 @@ PY
         echo "export CLOUDBENCH_BOOT=0"
         echo "export BACKEND_PORT=$(printf '%q' "$BOX_BACKEND_PORT")"
         echo "export WMH_PORT=$(printf '%q' "$BOX_WMH_PORT")"
+        # Simulated tool boundaries on autoscaled workers name the served model.
+        echo "export WMH_MODEL_NAME=$(printf '%q' "$WMH_MODEL_NAME")"
+        # ...and its execution policy, which partitions the fast cache like the primary's.
+        echo "export WMH_EXECUTION_POLICY=$(printf '%q' "$WMH_EXECUTION_POLICY")"
         echo "export HEALTH_PORT=$(printf '%q' "$FLEET_WORKER_HEALTH_PORT")"
         echo "export BENCH_SIMULATE=$(printf '%q' "$sim")"
         if [ "${BENCHMARK_DEMO_CACHE_READ_ONLY:-}" = 1 ]; then
