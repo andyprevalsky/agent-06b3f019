@@ -18,6 +18,7 @@ import { createKernelRecoverySession, releaseKernelRemoteSession } from './kerne
 import { createBrowserUseRecoverySession, releaseBrowserUseRemoteSession } from './browserUse';
 import { createTilionRecoverySession, releaseTilionRemoteSession } from './tilion';
 import { recoveryOriginStorageScript } from './recoveryOriginStorage';
+import { refreshTilionConnectUrl } from './tilionSessionIo';
 import { raceProbeAbort, sameSiteNavigationUrl } from './challengeRecoveryShared';
 import { restoredTunnelCandidate } from './challengeRecoveryTransport';
 import type { BrowserProviderName } from './types';
@@ -495,6 +496,7 @@ export const browserConfigSearchRuntimeDependencies: BrowserConfigSearchRuntimeD
   createSteel: createSteelRecoverySession,
   createBrowserUse: createBrowserUseRecoverySession,
   createTilion: createTilionRecoverySession,
+  refreshTilionConnectUrl,
   releaseKernel: releaseKernelRemoteSession,
   releaseSteel: releaseSteelRemoteSession,
   releaseBrowserUse: releaseBrowserUseRemoteSession,
