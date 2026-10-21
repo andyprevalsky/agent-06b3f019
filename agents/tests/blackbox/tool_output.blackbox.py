@@ -1,4 +1,5 @@
 """Offline storage-contract checks; agent dispatcher integration is separate."""
+import asyncio
 import json
 import uuid
 from contextlib import contextmanager
@@ -9,8 +10,12 @@ from _test_utils import BlackboxResult
 @contextmanager
 def fake_output_storage():
     """Faithful existing upload path, hard failure for any unmocked I/O."""
-    objects = {}
+    class StoredOutputs(dict):
+        uploads = 0
+    objects = StoredOutputs()
     async def upload(user_id, content, filename, mime_type, *, idempotency_key=None):
+        objects.uploads += 1
+        await asyncio.sleep(0)
         path = f"{user_id}/{uuid.uuid5(uuid.NAMESPACE_URL, idempotency_key)}_{filename}"
         objects[path] = content
         return {"storage_path": path}
@@ -18,7 +23,10 @@ def fake_output_storage():
         if path not in objects:
             raise FileNotFoundError("No output for this scope")
         return objects[path]
-    with patch("helpers.attachments.upload_to_storage", upload), patch("helpers.attachments.download_from_storage", download):
+    # Each fixture models a fresh storage/account universe; metadata must not
+    # leak references to an artifact held by a prior fixture.
+    from collections import OrderedDict
+    with patch("utils.tool_output._persisted_outputs", OrderedDict()), patch("utils.tool_output._pending_outputs", {}), patch("helpers.attachments.upload_to_storage", upload), patch("helpers.attachments.download_from_storage", download):
         yield objects
 
 
@@ -83,8 +91,97 @@ async def test_native_values_and_failure():
             raise AssertionError("Storage failure reported a successful preview")
 
 
+async def test_repeated_projection_is_stable_and_readable():
+    import re
+    from utils.tool_output import preview_tool_text, read_tool_output
+    owner = dict(user_id="repeat-user", agent_id="repeat-agent", session_id="repeat-session")
+    text = "x" * 150_000 + "TAIL"
+    with fake_output_storage() as objects:
+        first = await preview_tool_text(text, **owner)
+        first_bytes = dict(objects)
+        second = await preview_tool_text(text, **owner)
+        assert first == second, "Repeated unchanged projection changes the retrieval handle"
+        assert len(objects) == 1 and objects == first_bytes, "Repeated projection uploads duplicate artifacts"
+        output_id = re.search(r'output_id="([a-f0-9]{32})"', first).group(1)
+        page = await read_tool_output(**owner, output_id=output_id, offset=150_000)
+        assert page["content"] == "TAIL"
+
+
 async def run_all_tests():
     r = BlackboxResult()
+    await r.record_async("projection_identity_scope_expiry_and_failure", test_projection_identity_scope_expiry_and_failure)
+    await r.record_async("concurrent_projection_shares_upload", test_concurrent_projection_shares_upload)
+    await r.record_async("repeated_projection_is_stable_and_readable", test_repeated_projection_is_stable_and_readable)
     await r.record_async("scoped_output_roundtrip", test_scoped_output_roundtrip)
     await r.record_async("native_values_and_failure", test_native_values_and_failure)
-    return r
+    return r.summary()
+
+
+async def test_projection_identity_scope_expiry_and_failure():
+    import re
+    from utils.tool_output import preview_tool_text, read_tool_output, OUTPUT_TTL_SECONDS
+    owner = dict(user_id="u", agent_id="a", session_id="s")
+    text = "y" * 150_000 + "TAIL"
+    clock = [1000.0]
+    def identifier(preview):
+        return re.search(r'output_id="([a-f0-9]{32})"', preview).group(1)
+    with fake_output_storage() as objects, patch("utils.tool_output.time.time", side_effect=lambda: clock[0]):
+        first = await preview_tool_text(text, **owner)
+        initial_bytes = dict(objects)
+        clock[0] += 10
+        assert await preview_tool_text(text, **owner) == first
+        assert objects == initial_bytes and objects.uploads == 1
+        for field in owner:
+            changed_owner = {**owner, field: "OTHER"}
+            assert identifier(await preview_tool_text(text, **changed_owner)) != identifier(first)
+            try:
+                await read_tool_output(**changed_owner, output_id=identifier(first))
+            except FileNotFoundError:
+                pass
+            else:
+                raise AssertionError("New scope accessed original artifact")
+        changed = await preview_tool_text(text + "CHANGED", **owner)
+        assert identifier(changed) != identifier(first) and objects.uploads == 5
+        assert (await read_tool_output(**owner, output_id=identifier(first), offset=150_000))["content"] == "TAIL"
+        async def fail(*args, **kwargs):
+            raise OSError("fixture store failure")
+        with patch("helpers.attachments.upload_to_storage", fail):
+            assert await preview_tool_text(text, **owner) == first
+            try:
+                await preview_tool_text(text + "NEW_FAILURE", **owner)
+            except OSError:
+                pass
+            else:
+                raise AssertionError("Failed output was cached as success")
+        retry = await preview_tool_text(text + "NEW_FAILURE", **owner)
+        assert (await read_tool_output(**owner, output_id=identifier(retry), offset=150_000))["content"] == "TAILNEW_FAILURE"
+        clock[0] = 1000 + OUTPUT_TTL_SECONDS + 1
+        for _ in range(2):
+            try:
+                await read_tool_output(**owner, output_id=identifier(first))
+            except ValueError as error:
+                assert "expired" in str(error)
+            else:
+                raise AssertionError("Original expiry was extended")
+            renewed = await preview_tool_text(text, **owner)
+            assert identifier(renewed) != identifier(first)
+            assert (await read_tool_output(**owner, output_id=identifier(renewed), offset=150_000))["content"] == "TAIL"
+
+
+async def test_concurrent_projection_shares_upload():
+    import utils.tool_output as output
+    owner = dict(user_id="concurrent-user", agent_id="a")
+    text = "z" * 150_000
+    with fake_output_storage() as objects:
+        results = await asyncio.gather(*(output.preview_tool_text(text, **owner) for _ in range(5)))
+        assert len(set(results)) == 1 and objects.uploads == 1 and len(objects) == 1
+        assert not output._pending_outputs
+        async def fail(*args, **kwargs):
+            await asyncio.sleep(0)
+            raise OSError("shared upload failed")
+        with patch("helpers.attachments.upload_to_storage", fail):
+            errors = await asyncio.gather(*(output.preview_tool_text(text + "FAIL", **owner) for _ in range(5)), return_exceptions=True)
+        assert all(isinstance(error, OSError) for error in errors)
+        assert not output._pending_outputs and len(output._persisted_outputs) == 1
+        await output.preview_tool_text(text + "FAIL", **owner)
+        assert objects.uploads == 2

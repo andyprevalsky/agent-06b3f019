@@ -5,11 +5,13 @@ transport. This module never writes model previews back to the source record.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
 import time
 import uuid
+from collections import OrderedDict
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -19,6 +21,11 @@ READ_MAX_CHARS = 20_000
 OUTPUT_TTL_SECONDS = 24 * 60 * 60
 MAX_STORED_BYTES = 32 * 1024 * 1024
 _FILENAME = "retained-tool-output.json"
+# Process-local metadata only: no retained body, credentials, or model context.
+# Eviction/restart may create another artifact; warm rebuilds keep exact handles.
+MAX_PERSISTED_OUTPUTS = 1024
+_persisted_outputs: OrderedDict[tuple[tuple[str, str, str], str], tuple[str, float]] = OrderedDict()
+_pending_outputs: dict[tuple[tuple[str, str, str], str], asyncio.Future[str]] = {}
 
 
 class ReadToolOutputTool(BaseModel):
@@ -60,14 +67,45 @@ def _safe_text(text: str) -> str:
 async def _persist(text: str, owner: tuple[str, str, str]) -> str:
     from helpers.attachments import upload_to_storage
 
-    output_id = uuid.uuid4().hex
-    body = json.dumps({"owner": owner, "expires": time.time() + OUTPUT_TTL_SECONDS, "text": text}, ensure_ascii=False).encode("utf-8")
-    if len(body) > MAX_STORED_BYTES:
-        raise ValueError("Tool output exceeds retained storage limit; no preview was substituted")
-    result = await upload_to_storage(owner[0], body, _FILENAME, "application/json", idempotency_key=_storage_key(owner, output_id))
-    if result.get("storage_path") != _storage_path(owner, output_id):
-        raise OSError("Retained output storage did not confirm its scoped path")
-    return output_id
+    now = time.time()
+    key = (owner, hashlib.sha256(text.encode("utf-8")).hexdigest())
+    for expired_key, (_, expires) in list(_persisted_outputs.items()):
+        if expires <= now:
+            del _persisted_outputs[expired_key]
+    cached = _persisted_outputs.get(key)
+    if cached is not None:
+        _persisted_outputs.move_to_end(key)
+        return cached[0]
+    pending = _pending_outputs.get(key)
+    if pending is not None:
+        # A cancelled follower must not cancel the upload another caller owns.
+        return await asyncio.shield(pending)
+    pending = asyncio.get_running_loop().create_future()
+    # Retrieve failures even when the owning caller has no concurrent followers.
+    pending.add_done_callback(lambda future: None if future.cancelled() else future.exception())
+    _pending_outputs[key] = pending
+    try:
+        output_id = uuid.uuid4().hex
+        expires = now + OUTPUT_TTL_SECONDS
+        body = json.dumps({"owner": owner, "expires": expires, "text": text}, ensure_ascii=False).encode("utf-8")
+        if len(body) > MAX_STORED_BYTES:
+            raise ValueError("Tool output exceeds retained storage limit; no preview was substituted")
+        result = await upload_to_storage(owner[0], body, _FILENAME, "application/json", idempotency_key=_storage_key(owner, output_id))
+        if result.get("storage_path") != _storage_path(owner, output_id):
+            raise OSError("Retained output storage did not confirm its scoped path")
+        _persisted_outputs[key] = (output_id, expires)
+        while len(_persisted_outputs) > MAX_PERSISTED_OUTPUTS:
+            _persisted_outputs.popitem(last=False)
+        pending.set_result(output_id)
+        return output_id
+    except BaseException as error:
+        if isinstance(error, asyncio.CancelledError):
+            pending.cancel()
+        else:
+            pending.set_exception(error)
+        raise
+    finally:
+        _pending_outputs.pop(key, None)
 
 
 def _preview(text: str, output_id: str, limit: int) -> str:
