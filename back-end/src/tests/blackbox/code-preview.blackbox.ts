@@ -35,7 +35,6 @@ import { localSandboxFs } from '../../providers/codeSessions/sandboxFs';
 import { buildCodeAgentSystemPrompt } from '../../providers/codeAgentPrompt';
 import { installedRoseSkills } from '../../providers/roseSkills/skills';
 import {
-  CODE_PREVIEW_CLI_PATH,
   codePreviewToolFiles,
   e2bPreviewUrl,
   isRoseRepoUrl,
@@ -46,9 +45,10 @@ import {
   stopLocalCodePreview,
 } from '../../providers/codePreview/sandbox';
 import { CodePublishError, publishOwnedTask } from '../../providers/codePreview/service';
-import { prepareCodeSessionWorkspace } from '../../providers/codeSessionWorkspace';
 import { ROSE_DEV_USER_IDS, isRoseDevUser } from '../../utils/roseDevAccess';
 import { previewHandoffCases } from './code-preview-handoff.cases';
+import { rootPreviewCases } from './root-preview.cases';
+import { previewWorkspaceCases } from './code-preview-workspace.cases';
 import {
   HMR_EDIT_FILE,
   HMR_EDIT_ROUTE,
@@ -239,22 +239,7 @@ test('cloud preview: the sandbox public host for port 5173; paused sessions are 
   assert.equal(paused.data.preview_url, `https://5173-${sandboxId}.e2b.invalid/`);
 });
 
-test('dev sessions get the rose-preview CLI and env; other accounts get neither', async () => {
-  const agentId = await agentFor(DEV_USER);
-  const dev = await prepareCodeSessionWorkspace(DEV_USER, agentId, randomUUID(), 'claude');
-  assert.ok(dev, 'dev workspace prepared');
-  assert.ok(
-    dev.files.some((file) => file.path === CODE_PREVIEW_CLI_PATH),
-    'rose-preview installed'
-  );
-  assert.equal(dev.envs.ROSE_PREVIEW_PORT, '5173');
-  assert.match(dev.envs.ROSE_PREVIEW_BACKEND_URL ?? '', /^https?:\/\//);
-  assert.equal(dev.localEnvs?.ROSE_PREVIEW_PORT, '', 'same-host sessions pick a free port');
-  const otherAgent = await agentFor(OTHER_USER);
-  const other = await prepareCodeSessionWorkspace(OTHER_USER, otherAgent, randomUUID(), 'claude');
-  assert.ok(!(other?.files ?? []).some((file) => file.path === CODE_PREVIEW_CLI_PATH));
-  assert.equal(other?.envs.ROSE_PREVIEW_PORT, undefined);
-});
+previewWorkspaceCases({ devUser: DEV_USER, otherUser: OTHER_USER, agentFor });
 
 test('code-agent prompt: Rose-in-Rose shipping rule + apps-preview skill only for dev Rose sessions', () => {
   const rose = buildCodeAgentSystemPrompt({
@@ -666,4 +651,13 @@ test('publish pushes the work branch and opens one PR against the merge target; 
   );
   assert.equal(refused.status, 409, JSON.stringify(refused.data));
   assert.equal(refused.data.code, 'NOT_A_GITHUB_REPO');
+});
+
+rootPreviewCases({
+  devUser: DEV_USER,
+  otherUser: OTHER_USER,
+  agentFor,
+  codeSessionRow,
+  taskRow,
+  http,
 });

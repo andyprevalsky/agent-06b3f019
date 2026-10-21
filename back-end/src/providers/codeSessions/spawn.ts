@@ -3,6 +3,7 @@
  * domains) and the persistent CodeSession lifecycle.
  */
 import { Sandbox } from 'e2b';
+import { rootPreviewPath } from '../codePreview/rootPath';
 import { prisma } from '../database';
 import { createLogger } from '../logger';
 import { isLocalClaudeCodeSandboxId } from '../claudeCodeLocalSession';
@@ -140,6 +141,8 @@ export async function createWithCodeSession<
     session,
     fields: {
       code_session_id: codeSession?.id ?? null,
+      root_agent_id: codeSession?.rootAgentId ?? null,
+      root_preview_path: codeSession ? rootPreviewPath(codeSession.rootAgentId) : null,
       resumed_from: session.resumedFrom ?? 'new',
       cli_session_id: session.cliSessionId ?? null,
       branch: codeSession?.branch ?? null,
@@ -158,6 +161,9 @@ export async function createWithCodeSession<
 
 /** Session facts every create response (and so the tool's first trajectory entry) carries. */
 export interface CodeSessionSpawnFields {
+  /** Allocation-free stable entry prepared on the normal code-session spawn. */
+  root_agent_id: string | null;
+  root_preview_path: string | null;
   code_session_id: string | null;
   resumed_from: string;
   cli_session_id: string | null;

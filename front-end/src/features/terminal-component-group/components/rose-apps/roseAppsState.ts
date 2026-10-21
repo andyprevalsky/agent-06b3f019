@@ -34,6 +34,8 @@ export interface AgentBrowserTab {
 
 export interface RoseAppsValue {
   openApp: RoseApp | null;
+  browserMode: 'local' | 'remote';
+  setBrowserMode: (mode: 'local' | 'remote') => void;
   displayEntries: AgentDisplayEntry[];
   displaySelection: { agentId: string; id: string } | null;
   registerDisplays: (entries: AgentDisplayEntry[]) => void;

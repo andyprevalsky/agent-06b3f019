@@ -50,6 +50,8 @@ import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { cn } from '@/lib/utils';
 import type { Agent } from '../../hooks';
 import { AppDrawerShell } from './AppDrawerShell';
+import { BrowserModeTabs } from './BrowserModeTabs';
+import { LocalPreviewPane } from './LocalPreviewPane';
 import { BrowserSitesPanel } from './BrowserSitesPanel';
 import { addressParts } from './browserPageUrl';
 import { agentSiteLines } from './browserWorldView';
@@ -342,34 +344,43 @@ export function BrowserAppDrawer() {
         <Globe className="h-[18px] w-[18px] flex-none" strokeWidth={1.7} />
         Browser
       </div>
-      <BrowserTabs apps={apps} isRoot={isRoot} />
-      {activeTab !== null && <AgentSiteStates tab={activeTab} enabled={active} />}
-      <BrowserChrome
-        apps={apps}
-        activeTab={activeTab}
-        isRoot={isRoot}
-        sitesToggle={
-          roseDesktop && <SitesToggle pressed={sitesOpen} onClick={() => setSitesOpen((v) => !v)} />
-        }
-      />
-      {active && sitesOpen && (
-        <BrowserSitesPanel agentTitle={(agentId) => knownAgentTitle(apps.agents, agentId)} />
-      )}
-      <div className="flex min-h-0 flex-1 flex-col">
-        {isRoot && active && (
-          <RootTab reloadKey={apps.browserReloadKey} agentId={apps.selectedAgentId} />
-        )}
-        {waitingForPane && (
-          <div className={`flex flex-1 items-center justify-center text-xs ${MUTED}`}>
-            Opening agent…
+      <BrowserModeTabs />
+      {apps.browserMode === 'local' && apps.selectedAgentId !== null ? (
+        active && <LocalPreviewPane key={apps.selectedAgentId} agentId={apps.selectedAgentId} />
+      ) : (
+        <>
+          <BrowserTabs apps={apps} isRoot={isRoot} />
+          {activeTab !== null && <AgentSiteStates tab={activeTab} enabled={active} />}
+          <BrowserChrome
+            apps={apps}
+            activeTab={activeTab}
+            isRoot={isRoot}
+            sitesToggle={
+              roseDesktop && (
+                <SitesToggle pressed={sitesOpen} onClick={() => setSitesOpen((v) => !v)} />
+              )
+            }
+          />
+          {active && sitesOpen && (
+            <BrowserSitesPanel agentTitle={(agentId) => knownAgentTitle(apps.agents, agentId)} />
+          )}
+          <div className="flex min-h-0 flex-1 flex-col">
+            {isRoot && active && (
+              <RootTab reloadKey={apps.browserReloadKey} agentId={apps.selectedAgentId} />
+            )}
+            {waitingForPane && (
+              <div className={`flex flex-1 items-center justify-center text-xs ${MUTED}`}>
+                Opening agent…
+              </div>
+            )}
+            <div
+              ref={apps.setSlot}
+              data-testid="browser-drawer-slot"
+              className={cn('min-h-0 flex-1 flex-col', isRoot ? 'hidden' : 'flex')}
+            />
           </div>
-        )}
-        <div
-          ref={apps.setSlot}
-          data-testid="browser-drawer-slot"
-          className={cn('min-h-0 flex-1 flex-col', isRoot ? 'hidden' : 'flex')}
-        />
-      </div>
+        </>
+      )}
     </AppDrawerShell>
   );
 }

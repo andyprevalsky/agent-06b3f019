@@ -156,7 +156,15 @@ export function RoseAppsProvider({
 }: ProviderProps) {
   const displays = useAgentDisplays();
   const { selectDisplay } = displays;
-  const [openApp, setOpenApp] = useState<RoseApp | null>(null);
+  const localLink =
+    typeof window !== 'undefined' &&
+    new URLSearchParams(window.location.search).get('browser') === 'local';
+  const [browserMode, setBrowserMode] = useState<'local' | 'remote'>(
+    localLink ? 'local' : 'remote',
+  );
+  const [openApp, setOpenApp] = useState<RoseApp | null>(
+    publishLayout && localLink ? 'browser' : null,
+  );
   const [browserTabAgentId, setBrowserTabAgentId] = useState<string | null>(null);
   const [slot, setSlot] = useState<HTMLElement | null>(null);
   const [isResizing, setIsResizing] = useState(false);
@@ -217,6 +225,7 @@ export function RoseAppsProvider({
 
   const openAgentBrowser = useCallback(
     (agentId: string, taskId: string) => {
+      setBrowserMode('remote');
       focusTask(agentId, taskId);
       setBrowserTabAgentId(agentId);
       setOpenApp('browser');
@@ -246,15 +255,18 @@ export function RoseAppsProvider({
   const isTaskInDrawer = useCallback(
     (agentId: string | null, taskId: string) =>
       openApp === 'browser' &&
+      browserMode === 'remote' &&
       agentId !== null &&
       browserTabAgentId === agentId &&
       tabs.some((t) => t.agentId === agentId && t.taskId === taskId),
-    [browserTabAgentId, openApp, tabs],
+    [browserTabAgentId, browserMode, openApp, tabs],
   );
 
   const value = useMemo<RoseAppsValue>(
     () => ({
       openApp,
+      browserMode,
+      setBrowserMode,
       ...displays,
       openAgentDisplay,
       browserTabAgentId,
@@ -281,6 +293,7 @@ export function RoseAppsProvider({
     }),
     [
       openApp,
+      browserMode,
       displays,
       openAgentDisplay,
       browserTabAgentId,
