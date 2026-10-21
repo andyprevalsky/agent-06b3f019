@@ -26,8 +26,18 @@
  * dot with a 2px background-colored ring, and its tooltip names them.
  */
 
+import { useHoverOpen } from './useHoverOpen';
 import { useQuery } from '@tanstack/react-query';
-import { Globe, Monitor, Moon, Plug, Smartphone, Sun, type LucideIcon } from 'lucide-react';
+import {
+  ClipboardCheck,
+  Globe,
+  Monitor,
+  Moon,
+  Plug,
+  Smartphone,
+  Sun,
+  type LucideIcon,
+} from 'lucide-react';
 
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useRoseTheme } from '@/features/rose-theme';
@@ -50,6 +60,7 @@ function IconButton({
   pressed,
   color,
   onClick,
+  onHover,
   tooltip = label,
   alertDot = false,
   glowing = false,
@@ -61,11 +72,13 @@ function IconButton({
   pressed: boolean;
   color: string;
   onClick: () => void;
+  onHover?: () => void;
   tooltip?: string;
   alertDot?: boolean;
   glowing?: boolean;
   size: number;
 }) {
+  const hover = useHoverOpen(onHover);
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -75,8 +88,14 @@ function IconButton({
           aria-label={label}
           aria-pressed={pressed}
           data-displaying={glowing || undefined}
-          onClick={onClick}
-          className="relative grid cursor-pointer place-items-center focus-visible:outline-none"
+          onPointerEnter={hover.enter}
+          onPointerLeave={hover.cancel}
+          onPointerDown={hover.cancel}
+          onClick={() => {
+            hover.cancel();
+            onClick();
+          }}
+          className="relative grid flex-none cursor-pointer place-items-center focus-visible:outline-none"
           style={{
             width: size,
             height: size,
@@ -107,6 +126,7 @@ function IconButton({
 const APPS: { app: RoseApp; label: string; icon: LucideIcon }[] = [
   { app: 'display', label: 'Agent Display', icon: Monitor },
   { app: 'browser', label: 'Browser', icon: Globe },
+  { app: 'validation', label: 'Validation Criteria', icon: ClipboardCheck },
   { app: 'phone', label: 'Phone', icon: Smartphone },
   { app: 'integrations', label: 'Integrations', icon: Plug },
 ];
@@ -126,7 +146,7 @@ export function RoseAppIcons({ placement = 'corner' }: { placement?: 'corner' | 
   const theme = useRoseTheme();
   const isMobile = useIsMobile();
   const header = placement === 'header';
-  const fullDrawerOpen = apps?.openApp === 'browser' || apps?.openApp === 'display';
+  const fullDrawerOpen = ['browser', 'display', 'validation'].includes(apps?.openApp ?? '');
   if (apps === null || header !== isMobile) return null;
   return (
     <nav
@@ -134,7 +154,9 @@ export function RoseAppIcons({ placement = 'corner' }: { placement?: 'corner' | 
       data-testid="rose-app-icons"
       data-placement={placement}
       className={
-        header ? 'flex flex-none items-center' : 'fixed z-[90] hidden items-center md:flex'
+        header
+          ? 'flex min-w-0 items-center overflow-x-auto'
+          : 'fixed z-[90] hidden items-center md:flex'
       }
       style={
         header
@@ -180,7 +202,11 @@ function AppIconButtons({
   const idle = isDark ? IDLE_COLOR_DARK : IDLE_COLOR;
   return (
     <>
-      {APPS.filter(({ app }) => showDisplay || app !== 'display').map(({ app, label, icon }) => (
+      {APPS.filter(
+        ({ app }) =>
+          (showDisplay || app !== 'display') &&
+          (app !== 'validation' || apps.selectedAgentId !== null),
+      ).map(({ app, label, icon }) => (
         <IconButton
           key={app}
           testId={`rose-app-${app}`}
@@ -196,6 +222,9 @@ function AppIconButtons({
           }
           glowing={app === 'display' && hasDisplay}
           onClick={() => apps.toggleApp(app)}
+          onHover={() => {
+            if (apps.openApp !== app) apps.toggleApp(app);
+          }}
           alertDot={app === 'integrations' && reconnect.length > 0}
           tooltip={
             app === 'integrations' && reconnect.length > 0

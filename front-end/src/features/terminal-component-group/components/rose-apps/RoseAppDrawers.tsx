@@ -9,6 +9,7 @@
  *   null                                        -> all closed
  */
 
+import { ValidationCriteriaDrawer } from './ValidationCriteriaDrawer';
 import { AgentDisplayDrawer } from './AgentDisplayDrawer';
 import { BrowserAppDrawer } from './BrowserAppDrawer';
 import { PhoneApp } from './PhoneApp';
@@ -19,6 +20,7 @@ export function RoseAppDrawers() {
     <>
       <BrowserAppDrawer />
       <AgentDisplayDrawer />
+      <ValidationCriteriaDrawer />
       <RoseAppPanelDrawer />
       <PhoneApp />
     </>

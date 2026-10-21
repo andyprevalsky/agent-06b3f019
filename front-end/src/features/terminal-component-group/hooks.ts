@@ -23,6 +23,7 @@ export {
 } from '@/hooks/useAgentTree';
 export {
   useAgentContext,
+  AgentContext,
   type StreamingBubble,
   type StreamingPlan,
   type StreamingAttention,

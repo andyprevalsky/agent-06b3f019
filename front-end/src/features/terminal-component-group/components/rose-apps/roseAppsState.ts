@@ -17,6 +17,7 @@ import type { AgentDisplayEntry } from './agentDisplayEntries';
 export type RoseApp =
   | 'browser'
   | 'display'
+  | 'validation'
   | 'phone'
   | 'integrations'
   | 'benchmarks'

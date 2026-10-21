@@ -4,7 +4,8 @@
  *
  * WIDTH (UI ledger row 21, no dragging):
  *   [COLLAPSED 64px] --pointer enters--> [EXPANDED 236px, full titles]
- *   [EXPANDED] --pointer leaves (no open menu, no focused text input)--> [COLLAPSED]
+ *   [EXPANDED] --pointer leaves (non-Mac, no menu/input)--> [COLLAPSED]
+ *   Mac stays expanded after leaving; pointer within 8px of left edge collapses it.
  *   A right-click menu, the search box or an inline name input keeps it EXPANDED.
  *
  * LAYOUT (top → bottom, rows 17/30/57/59/63):
@@ -34,8 +35,8 @@
  * agent or code-agent row, Home and New Super Agent close it first.
  */
 
-import { Activity, Archive, Globe, Megaphone } from 'lucide-react';
-import { useState, type FocusEvent } from 'react';
+import { ArrowLeft, Activity, Archive, Globe, Megaphone } from 'lucide-react';
+import { useState } from 'react';
 
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useIsMobile } from '@/hooks/use-mobile';
@@ -72,24 +73,9 @@ import { useRoseCodeAgents } from './useRoseCodeAgents';
 import { useRoseSidebarProjects } from './useRoseSidebarProjects';
 import { useAccountProfileName } from './useAccountProfileName';
 
-const NO_ATTENTION: ReadonlySet<string> = new Set<string>();
+import { useSidebarExpansion } from './useSidebarExpansion';
 
-function useExpansion() {
-  const [hovered, setHovered] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [typing, setTyping] = useState(false);
-  const isTextInput = (el: EventTarget | null) => el instanceof HTMLInputElement;
-  return {
-    isExpanded: hovered || menuOpen || typing,
-    setMenuOpen,
-    surface: {
-      onMouseEnter: () => setHovered(true),
-      onMouseLeave: () => setHovered(false),
-      onFocus: (e: FocusEvent) => setTyping(isTextInput(e.target)),
-      onBlur: (e: FocusEvent) => setTyping(isTextInput(e.relatedTarget)),
-    },
-  };
-}
+const NO_ATTENTION: ReadonlySet<string> = new Set<string>();
 
 function useGroupedAgents(
   props: AppSidebarProps,
@@ -160,7 +146,7 @@ function RoseSidebarBar(props: AppSidebarProps) {
   const { onSelectAgent } = exits;
   const apps = useRoseApps();
   const notYet = useNotYet();
-  const expansion = useExpansion();
+  const expansion = useSidebarExpansion();
   const [query, setQuery] = useState('');
   const [isArchiveOpen, setIsArchiveOpen] = useState(false);
   const [archiveRefreshToken, setArchiveRefreshToken] = useState(0);
@@ -212,6 +198,15 @@ function RoseSidebarBar(props: AppSidebarProps) {
           transition: `width ${ROSE_BAR_DURATION_MS}ms ${ROSE_BAR_EASE}`,
         }}
       >
+        {expansion.sticky && isExpanded && (
+          <div
+            aria-hidden="true"
+            className="flex h-7 flex-none items-center px-[22px] text-muted-foreground"
+            data-testid="sidebar-collapse-hint"
+          >
+            <ArrowLeft className="h-5 w-5" strokeWidth={1.7} />
+          </div>
+        )}
         <RoseHomeRow isExpanded={isExpanded} onClick={exits.onCreateAgent} />
         <RoseNewAgentButton isExpanded={isExpanded} onClick={exits.onCreateAgent} />
         <RoseSearchRow isExpanded={isExpanded} value={query} onChange={setQuery} />
