@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import contextlib
+import copy
 import gzip
 import hashlib
 import json
@@ -2849,6 +2850,61 @@ def test_background_task_mid_run_message_static_checks():
     )
     ok, reason = _run_declared_static_check(browser, routed, _background_routing_fixture("browser", progress_after=0))
     assert not ok and "progress row" in reason
+
+
+def test_background_message_smoke_accepts_verified_same_task_resume_only():
+    """A child may finish while the root processes feedback, then wake at the same address."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    task = get_task_by_name("background-agent-message-smoke")
+    routed = next(
+        evaluator
+        for evaluator in task.evaluators
+        if evaluator["id"] == "smoke_follow_up_consumed_by_explore"
+    )
+    fixture = _background_routing_fixture("explore", after_completion=True)
+    old_feedback = fixture["_benchmark"]["mid_run_feedback"]["message"]
+    fixture["_benchmark"]["mid_run_feedback"]["message"] = task.mid_run_feedback["message"]
+    for row in fixture["messages"]:
+        if row.get("message") == old_feedback:
+            row["message"] = task.mid_run_feedback["message"]
+        if (row.get("metadata") or {}).get("agentMessage") is True:
+            row["message"] = "Forwarded marker: HTTP core document"
+        if (row.get("metadata") or {}).get("toolName") == "send_message_to_agent":
+            row["metadata"]["woke"] = True
+    progress = {
+        "role": "TOOL",
+        "message": "continuing after forwarded feedback",
+        "metadata": {"toolCallId": "toolu_01", "toolName": "spawn_agent", "toolStatus": "IN_PROGRESS"},
+    }
+    second_notification = _bg_notification("toolu_01", "explore")
+    second_notification["metadata"]["backgroundRun"] = 2
+    fixture["messages"].extend([progress, second_notification])
+    assert _run_declared_static_check(task, routed, fixture)[0]
+
+    # The first completion can be persisted after the inbox write but before
+    # the send result reports its wake. That first notification must not close
+    # the resumed run's progress window.
+    completion_after_inbox = copy.deepcopy(fixture)
+    rows = completion_after_inbox["messages"]
+    first_notice = next(i for i, row in enumerate(rows) if (row.get("metadata") or {}).get("agentNotification"))
+    notice = rows.pop(first_notice)
+    inbox_index = next(i for i, row in enumerate(rows) if (row.get("metadata") or {}).get("agentMessage"))
+    rows.insert(inbox_index + 1, notice)
+    assert _run_declared_static_check(task, routed, completion_after_inbox)[0]
+
+    no_wake = copy.deepcopy(fixture)
+    next(row for row in no_wake["messages"] if (row.get("metadata") or {}).get("woke"))["metadata"]["woke"] = False
+    assert not _run_declared_static_check(task, routed, no_wake)[0]
+
+    no_second_notification = copy.deepcopy(fixture)
+    no_second_notification["messages"].pop()
+    assert not _run_declared_static_check(task, routed, no_second_notification)[0]
+
+    no_progress = copy.deepcopy(fixture)
+    no_progress["messages"].pop(-2)
+    assert not _run_declared_static_check(task, routed, no_progress)[0]
 
 
 def test_toast_nopa_benchmark_uses_semantic_outcome_validation():
@@ -6107,6 +6163,30 @@ async def test_settled_tool_usage_returns_promptly_and_stays_bounded():
             fetch_usage=fetch_outage,
         )
     assert outage_reads == 3
+
+
+async def test_settled_tool_usage_waits_for_cost_after_early_calls_stabilize():
+    """Cost-limit failure must wait for a late browser row even with two early LLM calls."""
+    import benchmarks.run_benchmark as bench
+
+    early = {"llm_call_count": 2, "agent_count": 1, "total_cost_cents": 0}
+    late = {"llm_call_count": 2, "agent_count": 1, "total_cost_cents": 278.238875}
+    reads = 0
+
+    async def fetch_usage(_base_url: str, _agent_id: str) -> dict:
+        nonlocal reads
+        reads += 1
+        return dict(early if reads <= 2 else late)
+
+    usage = await bench._get_settled_tool_usage(
+        "http://localhost:55120",
+        "24f7a59e",
+        minimum_cost_cents=120,
+        retry_delay_seconds=0,
+        fetch_usage=fetch_usage,
+    )
+    assert reads == 4
+    assert usage["total_cost_cents"] == late["total_cost_cents"]
 
 
 def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
@@ -25533,6 +25613,10 @@ async def run_all_tests():
         test_background_task_mid_run_message_static_checks,
     )
     r.record(
+        "background_message_smoke_verified_resume",
+        test_background_message_smoke_accepts_verified_same_task_resume_only,
+    )
+    r.record(
         "toast_nopa_semantic_outcome_validation",
         test_toast_nopa_benchmark_uses_semantic_outcome_validation,
     )
@@ -25731,6 +25815,10 @@ async def run_all_tests():
     await r.record_async(
         "settled_tool_usage_prompt_and_bounded",
         test_settled_tool_usage_returns_promptly_and_stays_bounded,
+    )
+    await r.record_async(
+        "settled_tool_usage_late_cost_after_early_calls",
+        test_settled_tool_usage_waits_for_cost_after_early_calls_stabilize,
     )
     r.record(
         "agent_payment_requires_lifecycle_evidence",

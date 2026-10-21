@@ -3229,6 +3229,7 @@ async def _get_settled_tool_usage(
     base_url: str,
     agent_id: str,
     *,
+    minimum_cost_cents: float = 0.0,
     max_attempts: int = 10,
     retry_delay_seconds: float = 2,
     fetch_usage: Callable[[str, str], Awaitable[dict]] = get_tool_usage,
@@ -3242,13 +3243,17 @@ async def _get_settled_tool_usage(
     ``_get_initial_payment_lifecycle_with_retry`` — until the LLM call count stops growing
     and covers every agent in the tree (each agent makes at least one LLM call, and
     ``agent_count`` is derived from the busId tree rather than from the usage rows, so it is
-    an independent completeness signal).
+    an independent completeness signal). A cost-limited root can still have enough
+    early zero-cost calls to pass that count; require the terminal agent's known cost
+    floor as well, and wait for both call count and cost to stabilize.
     """
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least 1")
     best: Optional[dict] = None
     best_calls = -1
+    best_cost = -1.0
     previous_calls: Optional[int] = None
+    previous_cost: Optional[float] = None
     last_error: Optional[Exception] = None
     for attempt in range(1, max_attempts + 1):
         if attempt > 1:
@@ -3260,17 +3265,23 @@ async def _get_settled_tool_usage(
             print(f"    ⚠ Transient tree tool-usage read failed ({attempt}/{max_attempts}): {error}")
             continue
         calls = _as_nonnegative_int(usage.get("llm_call_count"))
-        if calls > best_calls:
-            best, best_calls = usage, calls
+        try:
+            cost = max(0.0, float(usage.get("total_cost_cents") or 0))
+        except (TypeError, ValueError):
+            cost = 0.0
+        if calls > best_calls or (calls == best_calls and cost > best_cost):
+            best, best_calls, best_cost = usage, calls, cost
         tree_covered = best_calls >= max(_as_nonnegative_int(usage.get("agent_count")), 1)
-        if previous_calls == calls and tree_covered:
+        if previous_calls == calls and previous_cost == cost and tree_covered and cost >= minimum_cost_cents:
             return best if best is not None else usage
         previous_calls = calls
+        previous_cost = cost
     if best is None:
         raise RuntimeError(f"Tree tool usage remained unavailable after {max_attempts} reads: {last_error}")
     print(
         f"    ⚠ Tree tool usage never settled after {max_attempts} reads "
-        f"(llm_call_count={best_calls}, agent_count={_as_nonnegative_int(best.get('agent_count'))})"
+        f"(llm_call_count={best_calls}, agent_count={_as_nonnegative_int(best.get('agent_count'))}, "
+        f"cost_cents={best_cost}, minimum_cost_cents={minimum_cost_cents})"
     )
     return best
 
@@ -14824,8 +14835,20 @@ async def _run_single_task_as_run_user(
         tokens_in = 0
         tokens_out = 0
         try:
-            usage = await _get_settled_tool_usage(base_url, agent_id)
-            cost_cents = usage.get("total_cost_cents", 0)
+            agent_cost_cents = max(
+                0.0,
+                float(agent.get("tree_cost_cents") or agent.get("tool_cost_cents") or 0),
+            )
+        except (TypeError, ValueError):
+            agent_cost_cents = 0.0
+        minimum_cost_cents = agent_cost_cents
+        if agent.get("status") == "COST_LIMIT_REACHED":
+            minimum_cost_cents = max(minimum_cost_cents, float(task.price_limit_cents or 0))
+        try:
+            usage = await _get_settled_tool_usage(
+                base_url, agent_id, minimum_cost_cents=minimum_cost_cents
+            )
+            cost_cents = max(float(usage.get("total_cost_cents") or 0), agent_cost_cents)
             cache_read_input_tokens = usage.get("cache_read_input_tokens", 0)
             cache_creation_input_tokens = usage.get("cache_creation_input_tokens", 0)
             llm_call_count = int(usage.get("llm_call_count") or 0)
@@ -14839,7 +14862,7 @@ async def _run_single_task_as_run_user(
                 tool_tokens_in = int(cache_read_input_tokens or 0) + int(cache_creation_input_tokens or 0)
         except Exception:
             # Fallback to agent-level cost fields
-            cost_cents = agent.get("tree_cost_cents", 0) or agent.get("tool_cost_cents", 0)
+            cost_cents = agent_cost_cents
 
         if task.expected_payment_lifecycle:
             try:

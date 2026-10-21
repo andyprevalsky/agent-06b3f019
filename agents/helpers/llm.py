@@ -23,6 +23,7 @@ from temporalio.exceptions import ApplicationError
 
 from config import load_config
 from helpers.activity_heartbeat import safe_heartbeat
+from helpers.agent_addressing import planned_task_name
 from helpers.attachments import (
     FilePointer,
     build_attachment_metadata_text,
@@ -118,6 +119,42 @@ MAX_STRUCTURED_PARSE_RETRIES = 2
 # ``default_api:grep``). That namespace is transport metadata, not part of the
 # agent's declared tool name.
 PROVIDER_TOOL_NAME_PREFIXES = ("default_api:",)
+
+
+def _repair_legacy_cached_spawn_names(
+    parsed_content: Dict[str, Any], *, from_fast_cache: bool,
+    cache_sequence_id: Optional[str],
+) -> int:
+    """Add stable addresses to old cached spawn calls lacking task_name.
+
+    This is a read-time compatibility repair: live malformed model output and
+    explicit invalid names still go through the normal schema validation.
+    """
+    if not from_fast_cache:
+        return 0
+    calls = parsed_content.get("tool_calls")
+    if not isinstance(calls, list):
+        return 0
+    used = {call.get("task_name") for call in calls if isinstance(call, dict)
+            and isinstance(call.get("task_name"), str)}
+    repaired = 0
+    for index, call in enumerate(calls):
+        if not isinstance(call, dict) or call.get("tool") != "spawn_agent" or call.get("task_name") is not None:
+            continue
+        stem = planned_task_name(call.get("goal"), index).rsplit("_", 1)[0]
+        identity = f"{cache_sequence_id or ''}:{call.get('tool_call_id') or ''}:{index}"
+        collision = 0
+        while True:
+            digest_input = identity if collision == 0 else f"{identity}:{collision}"
+            suffix = hashlib.sha256(digest_input.encode()).hexdigest()[:8]
+            name = f"{stem[:31].rstrip('_')}_{suffix}"
+            if name not in used:
+                break
+            collision += 1
+        call["task_name"] = name
+        used.add(name)
+        repaired += 1
+    return repaired
 
 
 class ResponseSchemaPersistenceError(RuntimeError):
@@ -3560,6 +3597,13 @@ async def call_llm_structured_streaming(
                     "Normalized provider-namespaced structured tool calls",
                     normalized_count=normalized_provider_tools,
                 )
+            repaired_cached_names = _repair_legacy_cached_spawn_names(
+                parsed_content,
+                from_fast_cache=bool((stream_usage or {}).get("from_fast_cache")),
+                cache_sequence_id=cache_sequence_id,
+            )
+            if repaired_cached_names:
+                logger.info("Repaired legacy cached spawn task names", count=repaired_cached_names)
 
             # Prepend explanation/reasoning to response so it shows in the same section.
             # Direct GPT/Codex mirrors claudeAuth here: visible reasoning summaries

@@ -796,6 +796,169 @@
     "fast_cache": "off"
   },
   {
+    "name": "background-agent-message-smoke",
+    "title": "Root Forwards A Mid-Run Message To A Background Agent",
+    "prompt": "Use exactly one explore agent to inspect the official RFC Editor pages for RFC 9110 and RFC 9111. For each document, return its RFC number, exact title, publication month and year, official source URL, and a note. Have that single explore agent do all research, and wait for it to finish before you answer.",
+    "timeout_seconds": 180,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "research",
+      "smoke"
+    ],
+    "price_limit_cents": 75,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "forbidden_tools": [
+      "message_person",
+      "call_phone_number",
+      "spawn_browser_agent",
+      "spawn_claude_code_agent"
+    ],
+    "response_schema": {
+      "fields": [
+        {
+          "name": "documents",
+          "type": "list[object]",
+          "required": true,
+          "minItems": 2,
+          "maxItems": 2,
+          "description": "RFC 9110 and RFC 9111 in numeric order",
+          "properties": [
+            {
+              "name": "rfc_number",
+              "type": "str",
+              "required": true,
+              "description": "RFC number"
+            },
+            {
+              "name": "title",
+              "type": "str",
+              "required": true,
+              "description": "Exact title on the official RFC Editor page"
+            },
+            {
+              "name": "published",
+              "type": "str",
+              "required": true,
+              "description": "Publication month and year"
+            },
+            {
+              "name": "source_url",
+              "type": "str",
+              "required": true,
+              "description": "Official RFC Editor URL"
+            },
+            {
+              "name": "note",
+              "type": "str",
+              "required": true,
+              "description": "Short note that can incorporate mid-run feedback without changing this schema"
+            }
+          ]
+        }
+      ]
+    },
+    "mid_run_feedback": {
+      "when": {
+        "background_task_active": "explore"
+      },
+      "message": "While that background research is still running, please forward this addition to it: every document note must contain the exact phrase \"Forwarded marker: HTTP core document\"."
+    },
+    "enforce_declared_evaluators": true,
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "description": "Fast deploy smoke proving that a root receives a follow-up while its background explore task is active, forwards it to the same task address, receives a continued or resumed response from that task, and incorporates the forwarded requirement.",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "web_search"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.rfc-editor.org/rfc/rfc9110",
+        "https://www.rfc-editor.org/rfc/rfc9111"
+      ],
+      "context_notes": "The runner posts the follow-up only after the root owns a RUNNING background explore task. Passing requires a root send_message_to_agent addressed to that task, a matching inbox row, at least one later explore progress row, and the exact marker in both final records. If the first run completes while the root processes the follow-up, a verified send_message_to_agent wake, second-run completion notification, and progress before that second completion prove delivery to the same resumed task."
+    },
+    "evaluators": [
+      {
+        "id": "smoke_feedback_while_explore_running",
+        "method": "static_check",
+        "criteria": [
+          "The follow-up is posted while the root's background explore task is running",
+          "The follow-up row is present in the root transcript"
+        ],
+        "checks": [
+          {
+            "type": "mid_run_feedback_background_task_active",
+            "agent_type": "explore"
+          }
+        ]
+      },
+      {
+        "id": "smoke_follow_up_consumed_by_explore",
+        "method": "static_check",
+        "criteria": [
+          "The root forwards the follow-up to the same explore task address",
+          "The task takes at least one explore step after its inbox row; a completed-first race requires a verified second run"
+        ],
+        "checks": [
+          {
+            "type": "background_task_message_routed",
+            "agent_type": "explore",
+            "marker_any": [
+              "forwarded marker",
+              "http core document"
+            ],
+            "min_task_rows_after_message": 1,
+            "allow_resume_after_completion": true
+          }
+        ]
+      },
+      {
+        "id": "smoke_final_response_incorporates_forwarded_message",
+        "method": "static_check",
+        "criteria": [
+          "Both final document records contain the exact forwarded marker"
+        ],
+        "checks": [
+          {
+            "type": "structured_output_signature",
+            "field": "documents",
+            "required": "Forwarded marker: HTTP core document",
+            "min_items": 2
+          }
+        ]
+      },
+      {
+        "id": "smoke_rfc_semantics",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The result contains exactly RFC 9110 (HTTP Semantics) and RFC 9111 (HTTP Caching)",
+          "Both use the official RFC Editor source and give June 2022 as publication month and year",
+          "The routing evidence proves the root forwarded the follow-up to the same explore task that was active when feedback arrived, and that task continued or resumed afterward",
+          "Both notes contain the exact forwarded marker, with no external communication"
+        ],
+        "judge_prompt": "Pass only if the final structured output contains exactly two records: RFC 9110 titled HTTP Semantics and RFC 9111 titled HTTP Caching, both published June 2022 with official rfc-editor.org URLs, and both notes contain the exact phrase 'Forwarded marker: HTTP core document'. Also require benchmark_state.background_task_routing and mid_run_feedback evidence showing the user follow-up arrived while the explore task was active, the root used send_message_to_agent to address that same task, its inbox received the message, and it produced at least one later progress row before completion. If the first run completed just before forwarding, require a verified wake and second completion notification for that same task. Fail if the root merely edits the final answer without delivering the message or if any external message is sent."
+      }
+    ],
+    "source": [
+      "plan:docs/plans/active/background-agents-a2a.md"
+    ],
+    "group": "pre-deploy",
+    "deploy_category": "harness",
+    "fast_cache": "off"
+  },
+  {
     "name": "explore-agent-mid-run-message",
     "title": "Mid-Run Feedback Routed To A Running Explore Agent",
     "prompt": "Compile a list of 8 venture funding rounds raised by AI-agent startups and announced in the last 12 months. For each round give the company, the amount raised, the announcement date, a one-sentence summary, and a source URL for the announcement.\n\nHave a single explore agent do all of the web research, and wait for it to finish before you answer.",

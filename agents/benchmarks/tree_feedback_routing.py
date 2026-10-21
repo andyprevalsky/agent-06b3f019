@@ -43,11 +43,12 @@ Two things live here, both benchmark-side (grading/driving), never harness code:
    - ``mid_run_feedback_background_task_active`` — the feedback was posted
      while a root background task of ``agent_type`` was running.
    - ``background_task_message_routed`` — after the feedback, the root's
-     send_message_to_agent addressed a running root background task of ``agent_type``
-     and the owner (root) stored the inbox row (``agentMessage`` +
-     ``recipientTaskId``) before that task's completion notification, with
-     >= ``min_task_rows_after_message`` of the task's progress rows after it
-     (the activity kept stepping, so its per-step inbox poll ran).
+     send_message_to_agent addressed its background task and the owner stored
+     the inbox row (``agentMessage`` + ``recipientTaskId``), with >=
+     ``min_task_rows_after_message`` subsequent task progress rows. By default
+     the inbox must precede completion. ``allow_resume_after_completion`` also
+     accepts a verified second run of that same task when it completed during
+     the root's response to the mid-run follow-up.
 
 Addresses: agents may be addressed by id, by the task id, by the tree-wide
 ``<owner>/<task id>`` form or by a Codex-style task path (``/root/research``).
@@ -713,6 +714,9 @@ def _check_background_task_message_routed(data: dict, check: dict) -> Tuple[bool
         return False, f"background_task_message_routed: agent_type must be one of {BACKGROUND_TASK_TYPES}"
     markers = [str(m).lower() for m in check.get("marker_any") or [] if str(m).strip()]
     min_after = int(check.get("min_task_rows_after_message", 0))
+    allow_resume = check.get("allow_resume_after_completion", False)
+    if not isinstance(allow_resume, bool):
+        return False, "background_task_message_routed: allow_resume_after_completion must be a boolean"
     messages = list(data.get("messages") or [])
     tasks = [t for t in background_tasks(messages) if t["agent_type"] == agent_type]
     if not tasks:
@@ -722,18 +726,18 @@ def _check_background_task_message_routed(data: dict, check: dict) -> Tuple[bool
     if feedback_index is None:
         return False, "Mid-run feedback row is missing from the root transcript"
 
-    send_targets: List[Tuple[int, set[str]]] = []
+    send_targets: List[Tuple[int, set[str], dict]] = []
     for index, row in enumerate(messages):
         metadata = _metadata(row) if isinstance(row, dict) else {}
         if metadata.get("toolName") == "send_message_to_agent" and metadata.get("toolStatus") == "FINISHED":
             send_targets.append(
-                (index, _address_forms(metadata.get("recipientTaskId"), metadata.get("toAgentAddress")))
+                (index, _address_forms(metadata.get("recipientTaskId"), metadata.get("toAgentAddress")), metadata)
             )
 
     problems: List[str] = []
     for task in tasks:
         addresses = _task_addresses(task)
-        sends = [i for i, forms in send_targets if i > feedback_index and forms & addresses]
+        sends = [(i, metadata) for i, forms, metadata in send_targets if i > feedback_index and forms & addresses]
         if not sends:
             problems.append(f"{task['background_task_id']}: no send_message_to_agent from the root addressed it after feedback")
             continue
@@ -750,10 +754,35 @@ def _check_background_task_message_routed(data: dict, check: dict) -> Tuple[bool
                 problems.append(f"{task['background_task_id']}: inbox row lacks any of {markers}")
                 continue
             notified = task["notification_index"]
-            if notified is not None and notified < index:
-                problems.append(f"{task['background_task_id']}: message stored after the task had completed")
+            resumed = False
+            woke_sends = [i for i, send_metadata in sends if i > index and send_metadata.get("woke") is True]
+            if allow_resume and notified is not None and woke_sends:
+                second_notification = next(
+                    (
+                        i
+                        for i in range(max(index, notified) + 1, len(messages))
+                        if isinstance(messages[i], dict)
+                        and (notice := _metadata(messages[i])).get("agentNotification") is True
+                        and notice.get("backgroundTaskId") == task["background_task_id"]
+                        and isinstance(notice.get("backgroundRun"), int)
+                        and notice["backgroundRun"] >= 2
+                        and any(send_index < i for send_index in woke_sends)
+                    ),
+                    None,
+                )
+                if second_notification is None:
+                    problems.append(f"{task['background_task_id']}: resumed task has no second completion notification")
+                    continue
+                end = second_notification
+                resumed = True
+            elif notified is not None and notified < index:
+                if not allow_resume:
+                    problems.append(f"{task['background_task_id']}: message stored after the task had completed")
+                    continue
+                problems.append(f"{task['background_task_id']}: message stored after the task had completed without a verified wake")
                 continue
-            end = notified if notified is not None else len(messages)
+            else:
+                end = notified if notified is not None else len(messages)
             type_tools = _TYPE_PROGRESS_TOOL_NAMES[agent_type]
             later = [
                 i
@@ -768,8 +797,9 @@ def _check_background_task_message_routed(data: dict, check: dict) -> Tuple[bool
                 )
                 continue
             return True, (
-                f"Root routed the feedback to running {agent_type} task {task['background_task_id']} "
-                f"(inbox row #{index}, {len(later)} progress row(s) before completion)"
+                f"Root routed the feedback to {'resumed' if resumed else 'running'} {agent_type} "
+                f"task {task['background_task_id']} (inbox row #{index}, "
+                f"{len(later)} progress row(s) before completion)"
             )
         if not any(p.startswith(task["background_task_id"]) for p in problems):
             problems.append(f"{task['background_task_id']}: no inbox row stored on the owner after feedback")

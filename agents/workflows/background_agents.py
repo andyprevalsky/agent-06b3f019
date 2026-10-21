@@ -564,6 +564,9 @@ class BackgroundAgentsMixin:
         record = self._background_tasks.get(task_id)
         if record is None:
             return
+        run = record.get("run")
+        if not isinstance(run, int) or run < 1:
+            run = 1
         self._background_finishing.add(task_id)
         outcome = self._background_outcomes.pop(task_id, {})
         if failed is None:
@@ -597,7 +600,6 @@ class BackgroundAgentsMixin:
         if record.get("agent_type") not in CHILD_WORKFLOW_AGENT_TYPES:
             await self._update_tree_state()  # the persisted tree state lists it as finished
 
-        run = self._background_run(task_id)
         key = f"{self.agent_id}:{task_id}:notification" + (f":run{run}" if run > 1 else "")
         if key not in self._background_notified:
             self._background_notified.add(key)

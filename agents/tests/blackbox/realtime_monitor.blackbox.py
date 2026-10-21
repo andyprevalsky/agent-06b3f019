@@ -50,6 +50,41 @@ def test_no_hanging_tool_calls_flags_assistant_after_open_tool():
     assert "unresolved tool web_search" in invariant.failure_reason
 
 
+def test_output_attachment_during_wait_is_not_parent_turn():
+    """A child artifact may arrive while the parent is still in wait_for."""
+    from benchmarks.realtime_monitor import NoHangingToolCallsInvariant
+
+    invariant = NoHangingToolCallsInvariant("agent-1")
+    waiting = _tool_record("agent-1", "IN_PROGRESS", "wait-1")
+    waiting["metadata"]["toolName"] = "wait_for"
+    invariant.handle_insert(waiting)
+    invariant.handle_insert(
+        {
+            "agentId": "agent-1",
+            "id": "child-artifact",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "role": "ASSISTANT",
+            "text": "",
+            "filePointer": {"mime_type": "image/png", "storage_path": "child/screenshot.png"},
+            "metadata": {"artifactOnly": True, "sourceToolCallId": "spawn-1"},
+        }
+    )
+    assert invariant.failure_reason is None
+    invariant.handle_insert(_assistant_record("agent-1", "2026-01-01T00:00:02Z"))
+    assert "unresolved tool wait_for" in (invariant.failure_reason or "")
+
+
+def test_attachment_marker_cannot_hide_authored_assistant_turn():
+    from benchmarks.realtime_monitor import NoHangingToolCallsInvariant
+
+    invariant = NoHangingToolCallsInvariant("agent-1")
+    invariant.handle_insert(_tool_record("agent-1", "IN_PROGRESS"))
+    message = _assistant_record("agent-1", metadata={"artifactOnly": True})
+    message["filePointer"] = {"mime_type": "image/png"}
+    invariant.handle_insert(message)
+    assert "unresolved tool web_search" in (invariant.failure_reason or "")
+
+
 def test_no_hanging_tool_calls_allows_finished_before_assistant():
     from benchmarks.realtime_monitor import NoHangingToolCallsInvariant
 
@@ -239,6 +274,8 @@ async def run_all_tests():
         "no_hanging_tool_calls_flags_assistant_after_open_tool",
         test_no_hanging_tool_calls_flags_assistant_after_open_tool,
     )
+    r.record("output_attachment_during_wait_is_not_parent_turn", test_output_attachment_during_wait_is_not_parent_turn)
+    r.record("attachment_marker_cannot_hide_authored_assistant_turn", test_attachment_marker_cannot_hide_authored_assistant_turn)
     r.record(
         "no_hanging_tool_calls_allows_finished_before_assistant",
         test_no_hanging_tool_calls_allows_finished_before_assistant,

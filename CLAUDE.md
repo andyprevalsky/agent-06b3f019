@@ -38,6 +38,7 @@ links. A file pointer never substitutes for the diff.
   reset it. A missing end stays UNRECORDED; an active benchmark shows RUNNING.
 - Show the live HTML scorecard inline in the answer, with readable text and a
   compact first view; keep QA screenshots private and never send image previews.
+- By default, publish every scorecard as HTML and place its Markdown visual link alone in a final-answer paragraph so boxes.dev embeds the UI; use text or code blocks only when embedding is unavailable.
 - Show **current-assignment tokens spent** and rolling **15-minute tokens/min**
   in worker and parent rows, replacing percentages and pp/min. Use actual
   timestamped harness counters (input + output, including cached input), with a

@@ -1,5 +1,31 @@
-from benchmarks.benchmark_tasks import get_task_by_name
+from benchmarks.benchmark_tasks import get_smoke_cap, get_task_by_name
 from benchmarks.run_benchmark import _benchmark_goal_for_task
+
+
+def test_background_agent_message_smoke_is_fast_and_proves_consumption():
+    task = get_task_by_name("background-agent-message-smoke")
+
+    assert "smoke" in task.tags
+    assert task.group == "pre-deploy"
+    assert task.deploy_category == "harness"
+    assert task.timeout_seconds == 180
+    assert get_smoke_cap(task.name) == 180
+    assert task.mid_run_feedback["when"] == {"background_task_active": "explore"}
+
+    checks = [
+        check
+        for evaluator in task.evaluators
+        if evaluator["method"] == "static_check"
+        for check in evaluator["checks"]
+    ]
+    routed = next(check for check in checks if check["type"] == "background_task_message_routed")
+    assert routed["agent_type"] == "explore"
+    assert routed["min_task_rows_after_message"] == 1
+    assert routed["allow_resume_after_completion"] is True
+    output = next(check for check in checks if check["type"] == "structured_output_signature")
+    assert output["field"] == "documents"
+    assert output["required"] == "Forwarded marker: HTTP core document"
+    assert output["min_items"] == 2
 
 
 def test_browser_event_ticket_counts_spawn_browser_agent_not_spawn_agent():

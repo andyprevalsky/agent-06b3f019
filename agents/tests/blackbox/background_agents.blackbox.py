@@ -180,6 +180,38 @@ async def test_background_spawn_returns_immediately_and_notifies_once():
         assert len(_notifications(harness)) == 1
 
 
+async def test_background_completion_notification_keeps_its_run_when_woken_during_tree_update():
+    """A wake during the first completion's await must not steal its notification key."""
+    harness = _Harness()
+    with _workflow_env(harness):
+        wf = _workflow(harness)
+        gate = asyncio.Event()
+        wf._execute_tool = _gated_executor(wf, harness, gate)
+        await wf._execute_tool_once("spawn_agent", dict(EXPLORE_ARGS), "toolu_1")
+        first_handle = wf._background_handles["toolu_1"]
+        wf._launch_background_task = lambda _task_id: None
+        woke = False
+
+        async def update_tree_and_wake():
+            nonlocal woke
+            if not woke:
+                woke = True
+                result = await wf._wake_background_task(
+                    "toolu_1", "Add the exact marker", message_id="message-1", sender="/root"
+                )
+                assert result == {"woke": True, "run": 2}
+
+        wf._update_tree_state = update_tree_and_wake
+        gate.set()
+        await first_handle
+        assert "toolu_1" in wf._background_tasks, "the second run was not retained"
+        await wf._finish_background_task("toolu_1", {"success": True}, summary="Marker included")
+        notes = _notifications(harness)
+        assert len(notes) == 2, notes
+        assert [row["metadata"].get("backgroundRun", 1) for row in notes] == [1, 2], notes
+        assert "Tokyo has" in notes[0]["text"] and "Marker included" in notes[1]["text"]
+
+
 async def test_background_rows_hidden_and_model_prefix_is_stable():
     from helpers.llm import build_llm_messages, convert_context_to_messages
 
@@ -2106,6 +2138,10 @@ async def run_all_tests():
     r = BlackboxResult()
     await r.record_async(
         "bg_spawn_returns_immediately_notifies_once", test_background_spawn_returns_immediately_and_notifies_once
+    )
+    await r.record_async(
+        "bg_notification_keeps_run_during_wake",
+        test_background_completion_notification_keeps_its_run_when_woken_during_tree_update,
     )
     await r.record_async("bg_rows_hidden_prefix_stable", test_background_rows_hidden_and_model_prefix_is_stable)
     await r.record_async(

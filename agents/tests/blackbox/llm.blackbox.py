@@ -21,6 +21,33 @@ from _test_utils import (
 os.environ.pop("CEREBRAS_API_KEY", None)
 
 
+def test_legacy_cached_spawn_names_are_stable_and_scoped():
+    from helpers.llm import _repair_legacy_cached_spawn_names
+    from helpers.agent_addressing import task_name_error
+
+    payload = {"tool_calls": [
+        {"tool": "spawn_agent", "goal": "Analyze one creator", "tool_call_id": "call-a"},
+        {"tool": "spawn_agent", "goal": "Analyze one creator", "tool_call_id": "call-b"},
+        {"tool": "spawn_agent", "goal": "Keep existing", "task_name": "existing_child"},
+    ]}
+    assert _repair_legacy_cached_spawn_names(
+        payload, from_fast_cache=True, cache_sequence_id="turn-1"
+    ) == 2
+    names = [call["task_name"] for call in payload["tool_calls"]]
+    assert len(set(names)) == 3
+    assert all(task_name_error(name) is None for name in names)
+    assert names[2] == "existing_child"
+    assert _repair_legacy_cached_spawn_names(
+        payload, from_fast_cache=True, cache_sequence_id="turn-1"
+    ) == 0
+
+    live = {"tool_calls": [{"tool": "spawn_agent", "goal": "Live child"}]}
+    assert _repair_legacy_cached_spawn_names(
+        live, from_fast_cache=False, cache_sequence_id="turn-1"
+    ) == 0
+    assert "task_name" not in live["tool_calls"][0]
+
+
 def test_prepare_schema_for_openai():
     """prepare_schema_for_openai returns strict OpenAI-ready JSON schema."""
     from pydantic import BaseModel, Field

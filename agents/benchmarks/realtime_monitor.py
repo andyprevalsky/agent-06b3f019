@@ -126,6 +126,12 @@ class NoHangingToolCallsInvariant:
 
         if role != "ASSISTANT" or not self._open_tools:
             return
+        # Child output files are attached to the parent transcript as empty
+        # ASSISTANT rows. They are artifacts, not a resumed model turn. Require
+        # the file pointer and empty text as well as the explicit marker so an
+        # authored assistant message cannot hide an unresolved tool call.
+        if metadata.get("artifactOnly") is True and record.get("filePointer") and not record.get("text"):
+            return
         if _is_dag_stream_assistant(metadata):
             return
 

@@ -6770,8 +6770,19 @@ proxy="$(cat {shlex.quote(str(proxy_pid))})"
 [ -e {shlex.quote(str(proxy_terminated))} ] || exit 99
 """
 
+    # Detached test launchers may ignore HUP/INT before pytest starts. Bash
+    # cannot install traps for signals inherited as ignored, so reset only the
+    # fixture shell's dispositions before exercising the supervisor's traps.
     result = subprocess.run(
-        ["bash", "-c", script],
+        [
+            sys.executable,
+            "-c",
+            "import os, signal, sys; "
+            "signal.signal(signal.SIGHUP, signal.SIG_DFL); "
+            "signal.signal(signal.SIGINT, signal.SIG_DFL); "
+            "os.execvp('bash', ['bash', '-c', sys.argv[1]])",
+            script,
+        ],
         text=True,
         capture_output=True,
         check=False,
