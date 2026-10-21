@@ -30,6 +30,7 @@ import {
 } from '@/features/terminal/config';
 import type { DripStyles } from '@/features/terminal/types';
 import { ROSE_DESKTOP_USER_IDS } from '@/lib/roseDesktop';
+import * as roseDesktopFlag from '@/lib/roseDesktop';
 
 const API_BASE = 'http://localhost:3001/api';
 const FRONT_END = process.cwd();
@@ -56,6 +57,7 @@ function mockSession(userId: string) {
 
 /** Renders the real Terminal signed in as a flagged (Rose Desktop) or stock account. */
 async function renderTerminal(roseDesktop: boolean, signedIn = true) {
+  if (!roseDesktop) vi.spyOn(roseDesktopFlag, 'isRoseDesktopUser').mockReturnValue(false);
   if (signedIn) mockSession(roseDesktop ? ROSE_DESKTOP_USER : STOCK_USER);
   else localStorage.clear();
   const result = renderWithProviders(<Terminal />);
@@ -77,6 +79,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   setViewport(1024, 768);
   localStorage.clear();
 });

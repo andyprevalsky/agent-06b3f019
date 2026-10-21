@@ -14,13 +14,14 @@
  *   Stock account: the stock mobile bar (brand left, hamburger right), no icons.
  * jsdom has no layout engine: widths are asserted from the declared sizes.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 
 import { appIconsInset } from '@/features/terminal-component-group/components/rose-apps/roseAppsLayout';
 import { ROSE_DESKTOP_USER_IDS } from '@/lib/roseDesktop';
+import * as roseDesktopFlag from '@/lib/roseDesktop';
 import Terminal from '@/pages/Terminal';
 
 import { server } from './msw/server';
@@ -95,6 +96,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   setViewport(1024, 768);
   localStorage.clear();
   document.documentElement.classList.remove('dark');
@@ -227,9 +229,10 @@ describe('Rose header on iPad (flag on, >= 768px)', () => {
   );
 });
 
-describe('stock account (flag off)', () => {
+describe('explicit legacy flag override', () => {
   it('keeps the stock mobile bar: brand left, hamburger right, no app icons', async () => {
     setViewport(390);
+    vi.spyOn(roseDesktopFlag, 'isRoseDesktopUser').mockReturnValue(false);
     await renderTerminal('test-user');
     expect(screen.queryByTestId('rose-mobile-header')).toBeNull();
     const banner = screen.getByRole('banner');
@@ -238,5 +241,15 @@ describe('stock account (flag off)', () => {
     expect(within(left).getByRole('button', { name: /Rose/ })).toBeInTheDocument();
     expect(within(right).getByRole('button', { name: 'Open menu' })).toHaveClass('h-9');
     expect(screen.queryByRole('navigation', { name: 'Apps' })).toBeNull();
+  });
+});
+
+describe('all-account rollout', () => {
+  it('gives an ordinary signed-in account the mobile app header', async () => {
+    setViewport(390);
+    await renderTerminal('ordinary-account');
+    expect(header()).toBeInTheDocument();
+    for (const label of APP_LABELS)
+      expect(screen.getByRole('button', { name: label })).toBeInTheDocument();
   });
 });

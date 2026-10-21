@@ -24,6 +24,7 @@ import { resetCodeAgentLocalState } from '@/features/terminal-component-group/ho
 import type { Message } from '@/lib/api';
 import type { CodeAgentListItem } from '@/lib/api/tree';
 import { ROSE_DESKTOP_USER_IDS } from '@/lib/roseDesktop';
+import * as roseDesktopFlag from '@/lib/roseDesktop';
 import Terminal from '@/pages/Terminal';
 
 import { chipMessage, eventsMessage, LIVE_EVENTS, msg } from './code-agent-steering.fixtures';
@@ -204,6 +205,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   window.history.replaceState({}, '', '/');
   localStorage.clear();
   document.documentElement.classList.remove('dark');
@@ -630,7 +632,8 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
 });
 
 describe('code-agent view (flag off)', () => {
-  it('the stock account never opens it, even from a deep link', async () => {
+  it('an explicitly disabled flag never opens it, even from a deep link', async () => {
+    vi.spyOn(roseDesktopFlag, 'isRoseDesktopUser').mockReturnValue(false);
     signInAs('test-user');
     window.history.replaceState({}, '', `/?agent-id=${OWNER}&code-agent=${TASK}`);
     renderWithProviders(<Terminal />);

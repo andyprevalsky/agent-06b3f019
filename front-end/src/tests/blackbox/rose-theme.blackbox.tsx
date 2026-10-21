@@ -644,12 +644,12 @@ describe('terminal wiring', () => {
     expect(localStorage.getItem(`rose-theme:${ROSE_THEME_USER}`)).toBe('light');
   });
 
-  it('a stock account with the same stored key stays light with the stock background', async () => {
+  it('an ordinary signed-in account restores its own dark choice', async () => {
     mockSession(OTHER_USER);
     storeDark(OTHER_USER);
     renderWithProviders(<Terminal />);
-    expect(await screen.findByTestId('terminal-small-tile-animation-canvas')).toBeVisible();
-    expect(screen.queryByTestId('rose-app-icons')).not.toBeInTheDocument();
-    expect(htmlIsDark()).toBe(false);
+    await screen.findByTestId('rose-app-icons');
+    await waitFor(() => expect(htmlIsDark()).toBe(true));
+    expect(await screen.findByTestId('terminal-small-tile-animation-canvas')).not.toBeVisible();
   });
 });

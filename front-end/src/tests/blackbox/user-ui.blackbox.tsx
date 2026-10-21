@@ -24,6 +24,7 @@ import {
   type UserUiManifest,
 } from '@/features/user-ui';
 import { ROSE_DESKTOP_USER_IDS } from '@/lib/roseDesktop';
+import * as roseDesktopFlag from '@/lib/roseDesktop';
 import AppSidebar from '@/features/terminal-component-group/components/AppSidebar';
 import Terminal from '@/pages/Terminal';
 
@@ -148,6 +149,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   window.IntersectionObserver = originalIntersectionObserver;
   document.documentElement.removeAttribute('style');
   localStorage.clear();
@@ -264,7 +266,8 @@ describe('removed whole-app settings (theme, background + fade, slots)', () => {
     expect(document.querySelector('iframe')).toBeNull();
   });
 
-  it('flag off: accounts without Rose Desktop never request the user UI and keep the stock chrome', async () => {
+  it('flag off: an explicit override never requests user UI and keeps stock chrome', async () => {
+    vi.spyOn(roseDesktopFlag, 'isRoseDesktopUser').mockReturnValue(false);
     const themeRequests = serveActive(LEGACY_MANIFEST);
     renderWithProviders(<Terminal />);
     const surface = await screen.findByTestId('query-input-surface');

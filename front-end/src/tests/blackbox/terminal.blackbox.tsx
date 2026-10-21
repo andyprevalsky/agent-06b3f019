@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, beforeEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
@@ -12,6 +12,12 @@ import {
   SIDEBAR_WIDTH_COLLAPSED,
   SIDEBAR_WIDTH_EXPANDED,
 } from '@/features/terminal-component-group/config';
+
+// Keep legacy renderer coverage explicit now that real accounts default to Rose UI.
+vi.mock('@/lib/roseDesktop', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/roseDesktop')>()),
+  isRoseDesktopUser: () => false,
+}));
 
 const API_BASE = 'http://localhost:3001/api';
 
@@ -221,7 +227,8 @@ describe('Terminal page', () => {
       );
     });
 
-    it('keeps legal links in the visible mobile layout', async () => {
+    it('keeps legal links on the signed-out mobile website', async () => {
+      localStorage.clear();
       setViewport(390, 844);
       const user = userEvent.setup();
 
@@ -341,15 +348,7 @@ describe('Terminal page', () => {
       await user.click(await screen.findByText('Test agent'));
 
       expect(await screen.findByText('Approval Required')).toBeInTheDocument();
-      const legalLinks = screen.getByTestId('terminal-legal-links');
-      expect(within(legalLinks).getByRole('link', { name: 'Privacy' })).toHaveAttribute(
-        'href',
-        '/privacy',
-      );
-      expect(within(legalLinks).getByRole('link', { name: 'Terms' })).toHaveAttribute(
-        'href',
-        '/terms',
-      );
+      expect(screen.queryByTestId('terminal-legal-links')).not.toBeInTheDocument();
       expect(screen.queryByPlaceholderText('Type your message...')).not.toBeInTheDocument();
       expect(screen.getByPlaceholderText('Add context (optional)...')).toBeInTheDocument();
 
