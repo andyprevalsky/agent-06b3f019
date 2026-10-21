@@ -116,7 +116,12 @@ function IconButton({
           )}
         </button>
       </TooltipTrigger>
-      <TooltipContent side="bottom" sideOffset={4} className="px-2 py-1 text-xs">
+      <TooltipContent
+        data-testid="rose-app-tooltip"
+        side="bottom"
+        sideOffset={4}
+        className="z-[90] px-2 py-1 text-xs"
+      >
         {tooltip}
       </TooltipContent>
     </Tooltip>

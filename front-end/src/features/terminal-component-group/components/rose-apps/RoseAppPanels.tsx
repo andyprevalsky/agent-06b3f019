@@ -21,16 +21,7 @@
  *   feedback     → FeedbackAppPanel (existing submitFeedback)
  */
 
-import {
-  Activity,
-  FlaskConical,
-  FolderGit2,
-  Loader2,
-  Megaphone,
-  Plug,
-  Settings as SettingsIcon,
-  type LucideIcon,
-} from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
 
 import SidebarCreditIndicator from '../SidebarCreditIndicator';
@@ -51,13 +42,13 @@ type PanelApp = Extract<
   'integrations' | 'benchmarks' | 'feedback' | 'health' | 'settings' | 'projects'
 >;
 
-const PANELS: Record<PanelApp, { title: string; icon: LucideIcon }> = {
-  projects: { title: 'Projects', icon: FolderGit2 },
-  integrations: { title: 'Integrations', icon: Plug },
-  benchmarks: { title: 'Benchmarks', icon: FlaskConical },
-  feedback: { title: 'Feedback', icon: Megaphone },
-  health: { title: 'Biz health', icon: Activity },
-  settings: { title: 'Settings', icon: SettingsIcon },
+const PANELS: Record<PanelApp, { title: string }> = {
+  projects: { title: 'Projects' },
+  integrations: { title: 'Integrations' },
+  benchmarks: { title: 'Benchmarks' },
+  feedback: { title: 'Feedback' },
+  health: { title: 'Biz health' },
+  settings: { title: 'Settings' },
 };
 
 function isPanelApp(app: RoseApp | null): app is PanelApp {
@@ -123,8 +114,10 @@ export function RoseAppPanelDrawer() {
     <AppDrawerShell open={open} label={`${meta?.title ?? 'App'} panel`} testId="rose-app-panel">
       {shown !== null && meta !== null && (
         <>
-          <div className="flex flex-none items-center gap-2.5 border-b border-gray-200/90 px-3.5 py-3 text-[13px] dark:border-white/[0.07]">
-            <meta.icon className="h-[18px] w-[18px] flex-none" strokeWidth={1.7} />
+          <div
+            data-testid="rose-app-panel-header"
+            className="flex h-14 flex-none items-center border-b border-gray-200/90 px-[18px] pr-12 text-sm dark:border-white/[0.07] md:pr-56"
+          >
             <b className="font-semibold">{meta.title}</b>
           </div>
           <div data-testid={`rose-app-panel-${shown}`} className="min-h-0 flex-1 overflow-y-auto">
