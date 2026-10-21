@@ -4,6 +4,7 @@ import type { ProxyGeoLocation } from '../geoip';
 import type { KernelRecoveryProxySpecificity } from './kernel';
 import type { KernelProxyType } from './kernelProxy';
 import type { BrowserProviderName } from './types';
+import type { TilionRecoveryProxyType } from './challengeRecoveryCandidates';
 
 export interface PreferredBrowserConfig {
   version: 1;
@@ -12,6 +13,7 @@ export interface PreferredBrowserConfig {
   kernelProxyType?: KernelProxyType;
   kernelSpecificity?: KernelRecoveryProxySpecificity;
   steelProxyMode?: 'managed' | 'fixed';
+  tilionProxyType?: TilionRecoveryProxyType;
   proxyLocation: ProxyGeoLocation;
   learnedAt: string;
 }
@@ -23,6 +25,7 @@ export function buildPreferredBrowserConfig(
     kernelProxyType?: KernelProxyType;
     kernelSpecificity?: KernelRecoveryProxySpecificity;
     steelProxyMode?: 'managed' | 'fixed';
+    tilionProxyType?: TilionRecoveryProxyType;
   },
   proxyLocation: ProxyGeoLocation
 ): PreferredBrowserConfig {
@@ -33,6 +36,7 @@ export function buildPreferredBrowserConfig(
     ...(config.kernelProxyType ? { kernelProxyType: config.kernelProxyType } : {}),
     ...(config.kernelSpecificity ? { kernelSpecificity: config.kernelSpecificity } : {}),
     ...(config.steelProxyMode ? { steelProxyMode: config.steelProxyMode } : {}),
+    ...(config.tilionProxyType ? { tilionProxyType: config.tilionProxyType } : {}),
     proxyLocation,
     learnedAt: new Date().toISOString(),
   };
@@ -46,7 +50,7 @@ export function compatiblePreferredBrowserConfig(
   const candidate = raw as Partial<PreferredBrowserConfig>;
   if (
     candidate.version !== 1 ||
-    !['kernel', 'steel', 'browser-use'].includes(String(candidate.provider))
+    !['kernel', 'steel', 'browser-use', 'tilion'].includes(String(candidate.provider))
   ) {
     return null;
   }
@@ -56,6 +60,13 @@ export function compatiblePreferredBrowserConfig(
   if (learnedLocation.city && learnedLocation.city !== requestedLocation.city) return null;
   if (candidate.provider === 'kernel' && !candidate.kernelProxyType) return null;
   if (candidate.provider === 'steel' && !candidate.steelProxyMode) return null;
+  if (
+    candidate.provider === 'tilion' &&
+    candidate.tilionProxyType !== 'residential' &&
+    candidate.tilionProxyType !== 'mobile'
+  ) {
+    return null;
+  }
   return candidate as PreferredBrowserConfig;
 }
 
