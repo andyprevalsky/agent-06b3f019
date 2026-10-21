@@ -79,6 +79,7 @@ function IconButton({
   size: number;
 }) {
   const hover = useHoverOpen(onHover);
+  const aboveQuerybox = useRoseApps()?.openApp === 'integrations';
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -120,7 +121,7 @@ function IconButton({
         data-testid="rose-app-tooltip"
         side="bottom"
         sideOffset={4}
-        className="z-[90] px-2 py-1 text-xs"
+        className={`${aboveQuerybox ? 'z-[102]' : 'z-[90]'} px-2 py-1 text-xs`}
       >
         {tooltip}
       </TooltipContent>
@@ -157,11 +158,11 @@ export function RoseAppIcons({ placement = 'corner' }: { placement?: 'corner' | 
       aria-label="Apps"
       data-testid="rose-app-icons"
       data-placement={placement}
-      className={
+      className={`${
         header
-          ? 'flex min-w-0 items-center overflow-x-auto'
-          : 'fixed z-[90] hidden items-center md:flex'
-      }
+          ? 'relative flex min-w-0 items-center overflow-x-auto'
+          : 'fixed hidden items-center md:flex'
+      } ${apps.openApp === 'integrations' ? 'z-[102]' : 'z-[90]'}`}
       style={header ? undefined : { top: 11, right: APP_ICON_EDGE, gap: APP_ICON_GAP }}
     >
       <AppIconButtons

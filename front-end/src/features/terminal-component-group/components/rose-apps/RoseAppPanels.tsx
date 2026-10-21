@@ -108,7 +108,12 @@ export function RoseAppPanelDrawer() {
   if (apps === null) return null;
   const meta = shown === null ? null : PANELS[shown];
   return (
-    <AppDrawerShell open={open} label={`${meta?.title ?? 'App'} panel`} testId="rose-app-panel">
+    <AppDrawerShell
+      open={open}
+      label={`${meta?.title ?? 'App'} panel`}
+      testId="rose-app-panel"
+      aboveQuerybox={shown === 'integrations'}
+    >
       {shown !== null && meta !== null && (
         <>
           <div
