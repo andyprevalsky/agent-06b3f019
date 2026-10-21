@@ -120,8 +120,63 @@ def _preview(text: str, output_id: str, limit: int) -> str:
     return text[:offset] + suffix
 
 
+_RETAINED_MARKER = re.compile(
+    r'\n\[Retained tool output: read_tool_output output_id="([a-f0-9]{32})" '
+    r'offset=([0-9]{1,8}) limit=20000; total_chars=[0-9]{1,8}; Unicode characters; '
+    r'originating agent/session only; expires after 24h\.\]'
+)
+
+
+async def _load_output(owner: tuple[str, str, str], output_id: str) -> dict:
+    from helpers.attachments import download_from_storage
+
+    raw = await download_from_storage(_storage_path(owner, output_id))
+    if len(raw) > MAX_STORED_BYTES:
+        raise ValueError("Retained output exceeds storage limit")
+    stored = json.loads(raw)
+    if tuple(stored["owner"]) != owner or stored["expires"] <= time.time():
+        raise ValueError("Retained output unavailable for this scope or expired")
+    if not isinstance(stored["text"], str):
+        raise ValueError("Retained output is not text")
+    return stored
+
+
+async def _redact_retained_preview(text: str, owner: tuple[str, str, str]) -> str:
+    # The terminal native marker can follow page text containing forged markers.
+    # Only the exact preview reconstructed from an owned artifact is trusted.
+    matches = list(_RETAINED_MARKER.finditer(text))
+    if not matches:
+        return _safe_text(text)
+    marker = matches[-1]
+    offset = int(marker[2])
+    start = marker.start() - offset
+    if start < 0:
+        return _safe_text(text)
+    try:
+        stored = await _load_output(owner, marker[1])
+    except (FileNotFoundError, KeyError, ValueError):
+        return _safe_text(text)
+    except Exception as error:
+        # A missing forged ID is ordinary untrusted text. Real storage outages
+        # must remain errors, rather than silently corrupting issued handles.
+        if getattr(getattr(error, "response", None), "status_code", None) == 404:
+            return _safe_text(text)
+        raise
+    preview_limit = offset + len(marker[0])
+    if preview_limit < 512:
+        return _safe_text(text)
+    safe_source = _safe_text(stored["text"])
+    if not any(_preview(source, marker[1], preview_limit) == text[start:marker.end()]
+               for source in (stored["text"], safe_source)):
+        return _safe_text(text)
+    preview = (_preview(safe_source, marker[1], preview_limit)
+               if len(safe_source) > preview_limit else safe_source)
+    return _safe_text(text[:start]) + preview + _safe_text(text[marker.end():])
+
+
 async def preview_tool_text(text: str, *, user_id: str, agent_id: str, session_id: str = "", limit: int = DEFAULT_INLINE_CHARS) -> str:
-    text = _safe_text(text)
+    text = (await _redact_retained_preview(text, _owner(user_id, agent_id, session_id))
+            if _RETAINED_MARKER.search(text) and user_id and agent_id else _safe_text(text))
     if len(text) <= limit:
         return text
     if limit < 512:
@@ -157,16 +212,9 @@ async def bound_tool_result(value: Any, *, user_id: str, agent_id: str, session_
 
 
 async def read_tool_output(*, user_id: str, agent_id: str, session_id: str = "", output_id: str, offset: int = 0, limit: int = READ_MAX_CHARS, query: str | None = None) -> dict:
-    from helpers.attachments import download_from_storage
-
     args = ReadToolOutputTool(tool="read_tool_output", output_id=output_id, offset=offset, limit=limit, query=query)
     owner = _owner(user_id, agent_id, session_id)
-    raw = await download_from_storage(_storage_path(owner, args.output_id))
-    if len(raw) > MAX_STORED_BYTES:
-        raise ValueError("Retained output exceeds storage limit")
-    stored = json.loads(raw)
-    if tuple(stored["owner"]) != owner or stored["expires"] <= time.time():
-        raise ValueError("Retained output unavailable for this scope or expired")
+    stored = await _load_output(owner, args.output_id)
     from browser_tools.secret_refs import redact_current_secret_values
     text = redact_current_secret_values(stored["text"])
     if offset > len(text):
