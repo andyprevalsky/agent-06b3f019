@@ -7,7 +7,8 @@ import {
   assertSchema,
   assert,
   createAnonymousSession,
-  createTestAgent,
+  trackedAgentIds,
+  withTransientDbRetry,
   deleteTestAgent,
   test,
   prisma,
@@ -19,8 +20,22 @@ test('POST /:id/messages — NUL characters in tool output persist without a 500
   // "\u0000Rose Labs …". Postgres text/jsonb cannot store U+0000, so every
   // retry of post_agent_message 500'd and the spawn_agent result was lost.
   const session = await createAnonymousSession('msg-nul-char');
-  const agentId = await createTestAgent(session.user.id, 'NUL character message test');
-  await prisma.agent.update({ where: { id: agentId }, data: { temporalWorkflowId: agentId } });
+  // Storage-only fixture: do not start a competing background chat writer.
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-nul-message-fixture', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: session.user.id,
+        goal: 'NUL character message test',
+        status: 'ACTIVE',
+        busId: agentId,
+        temporalWorkflowId: agentId,
+        verifier: { create: { type: 'FLOAT_LLM_JUDGE' } },
+      },
+    });
+  });
   const toolCallId = `nul-char-${randomUUID().slice(0, 8)}`;
   const payload = {
     message: 'variants of \u0000Rose Labs — 2026 Pre-Seed\u0000 deck',
