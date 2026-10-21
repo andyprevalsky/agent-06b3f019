@@ -44,11 +44,10 @@ import { tmpdir } from 'os';
 import { join, resolve } from 'path';
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
-import { killAgentCases } from './agent-graph-kill.cases';
 import { mintAgentGraphToken } from '../../providers/agentGraph/token';
 import { codeSessionTurnToken } from '../../providers/codeSessionTurns';
 import { deterministicMessageId } from '../../providers/messageIdempotency';
-import { testRoseAgentHasOneUiOnlySentReceipt } from './agent-graph-receipts.cases';
+import { testRoseAgentHasOneUiOnlySentReceipt, killCases } from './agent-graph-receipts.cases';
 import {
   testCodeAgentListIsNewestFirstPerRoot,
   testCodeAgentProviderInTreeAndBatchedList,
@@ -671,7 +670,6 @@ const cases: Array<[string, () => Promise<void>]> = [
       }),
   ],
   ...adversarialCases({ baseUrl: BASE_URL, apiKey: API_KEY }),
-  ...killAgentCases(BASE_URL, API_KEY, ids, userA, codeToken),
 ];
 
 async function main(): Promise<void> {
@@ -680,7 +678,7 @@ async function main(): Promise<void> {
   try {
     await seed();
     await seedAdversarial();
-    for (const [name, fn] of cases) {
+    for (const [name, fn] of cases.concat(killCases(BASE_URL, API_KEY, ids, userA, codeToken))) {
       try {
         await fn();
         process.stdout.write(`  ✅ ${name}\n`);

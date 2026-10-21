@@ -69,7 +69,7 @@ export async function testParentKillBoundary(
   }
 }
 
-export function killAgentCases(
+export function killCases(
   baseUrl: string,
   apiKey: string,
   ids: { R: string; R2: string; S1: string; C: string },
