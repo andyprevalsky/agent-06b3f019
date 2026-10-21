@@ -49,7 +49,7 @@ assert_safe_instruction_docs() {
 
 # Exercise discovery and rejection together, without touching repository instructions.
 test_instruction_scan_ownership() (
-  local fixture active output
+  local fixture active output line
   local -a active_files=(CLAUDE.md AGENTS.md .claude/commands/setup.md
     .claude/worktrees-guide.md docs/guides/setup.md)
   fixture=$(mktemp -d)
@@ -77,11 +77,18 @@ test_instruction_scan_ownership() (
   fi
   for active in "${active_files[@]}"; do
     printf '%s\n' 'npx prisma db push' > "$fixture/$active"
+    # Keep diagnostics larger than a pipe buffer: a matching first line must
+    # not make an early-exiting grep SIGPIPE the diagnostic producer.
+    if [ "$active" = docs/guides/setup.md ]; then
+      for ((line = 0; line < 2048; line++)); do
+        printf '%s\n' 'npx prisma db push' >> "$fixture/$active"
+      done
+    fi
     if output=$(assert_safe_instruction_docs "$fixture" 2>&1); then
       echo "instruction scanner accepted unsafe active file: $active" >&2
       exit 1
     fi
-    if ! printf '%s\n' "$output" | grep -Fq "$active:1:"; then
+    if ! grep -Fq "$active:1:" <<< "$output"; then
       echo "instruction scanner did not identify unsafe active file: $active" >&2
       exit 1
     fi

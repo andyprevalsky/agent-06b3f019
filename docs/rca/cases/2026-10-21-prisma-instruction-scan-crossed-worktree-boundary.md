@@ -112,3 +112,21 @@ production-code approval gate. No push, deploy, paid session, or shared DB reset
 ## Reusable lesson
 
 Prune independent workspace trees at the discovery boundary before applying root-relative instruction policies.
+
+## Follow-up: diagnostic assertion SIGPIPE during full deploy
+
+The parent's full structural run on `d240f75d9` reproduced a test-only race:
+`instruction scanner did not identify unsafe active file: docs/guides/setup.md`.
+Under `set -o pipefail`, `printf '%s\n' "$output" | grep -Fq "$active:1:"`
+can return 141 when grep exits on its first match before printf finishes writing
+the remaining diagnostic. The scanner had correctly rejected the unsafe file;
+the assertion misreported its own broken pipe as a missing path.
+
+The exact two-line diagnostic replay failed at iteration 37. A permanent large
+diagnostic fixture in the same existing test makes this deterministic: the
+baseline fails before SQL setup, while the candidate passes the unchanged
+fixture. Use `grep -Fq "$active:1:" <<< "$output"` to remove the pipe producer;
+all five active-file checks and remote URL guards remain unchanged. No runtime
+or protected-instruction changes are involved. Evidence:
+`.context/stuck-report/scanner-pipe/{pre-fix,pre-fix-full,post-fix-full}.log` and
+`final-verification.json`; the latter records five full-script passes.
