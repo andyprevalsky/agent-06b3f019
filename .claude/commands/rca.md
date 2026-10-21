@@ -6,6 +6,24 @@ description: "Root-cause a bug the RIGHT way: read the RCA methodology, then pro
 
 Use this whenever you are diagnosing ANY bug, flake, regression, or "why did X happen".
 
+## boxes.dev delegation (mandatory)
+
+When running on boxes.dev (`BOXES_DEVBOX=1`), always assign at least one
+sub-agent to the RCA investigation. Use the boxes.dev delegated-threads skill
+and a managed thread; do not substitute an unsupported provider-native thread.
+The coordinator remains responsible for the user conversation and final result.
+
+Give the investigator the reported symptom and runtime evidence, a bounded
+assignment, and the full methodology/archive/reproduction requirements below.
+Preserve the parent’s effective model, effort and speed according to CLAUDE.md.
+Use isolated files or a worktree; coordinate test resources and shared services.
+The child must return original failing evidence and the unchanged reproduction
+passing after the fix, or an explicit open observability gap. Delegation never
+substitutes for those gates. Review the result before reporting a cause or fix.
+Keep one deployment coordinator for the entire devbox; a child does not start a
+competing deployment. If managed delegation is unavailable, report the exact
+blocker and continue safe evidence collection without claiming delegation ran.
+
 ## Canonical human-approval format
 
 Whenever this workflow stops for agreement, implementation approval, or any
