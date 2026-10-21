@@ -68,8 +68,8 @@ from loop.activity_helper import call_temporal_activity_from_activity
 from providers.fast_cache.browser_use_cache import cached_browser_decision
 from providers.fast_cache.context import write_through_enabled_for_user
 from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
-from providers.rose.errors import BrowserModelOutputValidationError
 from providers.rose.browser_use import format_browser_state_for_tool
+from providers.rose.errors import BrowserModelOutputValidationError
 from providers.rose.types import ComputeTokenSource
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.attention_requests import REJECTION_SENTINEL
@@ -1058,6 +1058,8 @@ def _model_visible_browser_message(
                         payload[key] = value
         elif action_name and callable(action_result_redact):
             payload = action_result_redact(action_name, original)
+        from browser_tools.result_projection import preserve_output_protocol
+        payload = preserve_output_protocol(original, payload, action_name, redact, arguments=tool_arguments)
         return json_dumps_compact(payload)
 
     safe = redact(message)
@@ -3172,25 +3174,9 @@ def _browser_tool_arguments(unified_action: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _browser_tool_result_for_history(action_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
-    # formatted_state already embeds url/title/viewport/tabs/dom — keep only that
-    # for read_browser_state so the model is not billed twice for the same DOM.
-    if action_name == "read_browser_state" and result.get("formatted_state"):
-        return {
-            "success": result.get("success", True),
-            "message": result.get("message", ""),
-            "formatted_state": result["formatted_state"],
-            **({"auth_context": result["auth_context"]} if "auth_context" in result else {}),
-        }
-    clean: Dict[str, Any] = {}
-    for key, value in (result or {}).items():
-        if key in {"screenshot", "screenshot_b64", "base64"}:
-            continue
-        if key in {"dom_tree"}:
-            continue
-        clean[key] = value
-    if action_name == "screenshot" and (result.get("screenshot") or result.get("screenshot_b64")):
-        clean["screenshot_attached"] = True
-    return clean
+    from browser_tools.result_projection import browser_result_text_view
+    preview = getattr(result, "model_preview", None)
+    return preview if preview is not None else browser_result_text_view(action_name, result)
 
 
 def _append_browser_turn_messages(
@@ -8813,6 +8799,7 @@ async def _spawn_browser_agent_activity_v3_real(
             try:
                 before_actions = len(action_history)
                 result = await execute_action(*args, **kwargs)
+                model_preview = getattr(result, "model_preview", None)
                 if len(action_history) > before_actions:
                     result["action_step"] = action_history.last_action_step()
                 if MINTED_NEW_PASSWORD_REF in successful_secret_refs and credential_url:
@@ -8836,6 +8823,13 @@ async def _spawn_browser_agent_activity_v3_real(
                 else:
                     for refs in redaction_refs:
                         result = mask_secret_values(result, refs)
+                if model_preview is not None:
+                    from browser_tools.result_projection import BrowserModelResult
+                    if not hasattr(result, "__dict__"):
+                        result = BrowserModelResult(result)
+                    result.model_preview = model_preview
+                    if "action_step" in result:
+                        result.model_preview = {**model_preview, "action_step": result["action_step"]}
                 return result
             finally:
                 action_redaction_refs = None

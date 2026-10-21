@@ -25,6 +25,7 @@ import httpx
 import structlog
 from PIL import Image
 
+from browser_tools.result_projection import prepare_browser_result
 from browser_tools.schemas import (
     MAX_BROWSER_WAIT_MS,
     RequestPaymentCardBrowserTool,
@@ -47,9 +48,9 @@ from domains.spawn_browser_agent_v3.service_crypto import (
     auth_realm_matches_url,
     has_payment_card_secret_refs,
 )
-from utils.browser_result_limits import EVALUATE_RESULT_MAX_CHARS, cap_browser_result_text
 from utils.error_utils import extract_error_message
 from utils.purchase_approval import validate_image_url_for_page, validate_product_url_for_pages
+from utils.tool_output import read_tool_output
 
 if TYPE_CHECKING:
     from browser_tools.dom_service import ActionHistory, DOMService
@@ -845,6 +846,7 @@ _INTERACTION_ACTIONS = {
 _NAVIGATION_ACTIONS = {"goto", "navback", "wait", "switch_tab", "close_tab", "open_new_tab"}
 _INSPECTION_ACTIONS = {
     "read_browser_state",
+    "read_tool_output",
     "read_logs",
     "read_network_requests",
     "evaluate",
@@ -1531,6 +1533,13 @@ async def classify_evaluate_cdp_stall(
 
 
 async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
+    if context.action_name == "read_tool_output":
+        from helpers.tracing import current_agent_id
+        page = await read_tool_output(user_id=context.user_id, agent_id=current_agent_id() or "", session_id=context.session_id or "", **context.params)
+        result = {"success": True, **page}
+        await context.action_history.record_action(dom_service=context.dom_service, action="read_tool_output",
+            thinking=context.thinking, params=context.params, result=result)
+        return result
     if context.action_name == "read_browser_state":
         return await _execute_read_browser_state(context)
     if context.action_name == "read_logs":
@@ -1593,10 +1602,6 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
         from .service_crypto import mask_secret_values
 
         value = mask_secret_values(result.get("result", {}).get("value"), context.secret_refs)
-        # Keep native small values; large structured values become bounded JSON text.
-        value_text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-        if len(value_text) > EVALUATE_RESULT_MAX_CHARS:
-            value = cap_browser_result_text(value_text, EVALUATE_RESULT_MAX_CHARS)
         # CDP returns exceptionDetails when the expression throws; surface that
         # instead of a silent null/empty value (async fetch failures used to look
         # like successful empty objects).
@@ -1780,7 +1785,11 @@ async def execute_action(
         result = {"success": False, "error": error_text}
     if result.get("success") and successful_secret_refs is not None:
         successful_secret_refs.update(used)
-    safe_result = visible(result)
+    with secret_logging_context(refs):
+        safe_result = visible(result)
+    if action_name == "read_tool_output":
+        from browser_tools.result_projection import preserve_output_protocol
+        safe_result = preserve_output_protocol(result, safe_result, action_name, visible)
     completed_action_step = action_history.last_action_step() if action_execution_started else None
     attach_observation = action_name == "read_browser_state" or (
         auth_context_for_url is not None and not result.get("status")
@@ -1794,7 +1803,13 @@ async def execute_action(
         # rather than page data. Preserve its exact routing identity even if
         # a short secret happens to occur in the credential's public ID.
         safe_result["credential_ref"] = dict(used_credential)
-    return safe_result
+    from helpers.tracing import current_agent_id
+    try:
+        with secret_logging_context(refs):
+            return await prepare_browser_result(action_name, safe_result, user_id=user_id,
+                                                agent_id=current_agent_id() or "", session_id=session_id or "")
+    except Exception as error:
+        return {"success": False, "error": visible(f"Action result retention failed; action may have executed: {error}")}
 
 
 class _PrivateActionHistory:

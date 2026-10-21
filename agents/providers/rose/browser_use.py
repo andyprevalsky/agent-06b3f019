@@ -26,7 +26,6 @@ import structlog
 from providers.rose.schema import build_anthropic_tools_from_response_model
 from tools.prompts import attempt_completion_prompt
 from utils.browser_auth_contract import build_authentication_contract
-from utils.browser_result_limits import BROWSER_STATE_MAX_CHARS, cap_browser_result_text
 
 # Single source of truth for verifier rules. The browser prompt embeds the
 # same grading block as the main agent so attempt_completion semantics do not
@@ -914,7 +913,7 @@ def _format_browser_state_text(task: str, browser_state: Dict[str, Any]) -> str:
         f"{scroll_text}{tabs_text}{events_text}{popups_text}{block_text}"
         f"Interactive elements:\n{dom_tree}"
     )
-    return cap_browser_result_text(text, BROWSER_STATE_MAX_CHARS)
+    return text
 
 
 def build_browser_state_message_content(
