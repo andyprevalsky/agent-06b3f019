@@ -19,12 +19,15 @@ import {
   bestSpecificity,
   availableBrowserRecoveryCandidates,
   shouldPreferSteelForChallengeTarget,
+  tilionRecoveryAvailable,
 } from './challengeRecoveryCandidates';
 import type { FingerprintInjectionData } from './fingerprintInjection';
 import { announceBrowserSessionBinding } from './sessionBindingAnnounce';
 import {
   browserConfigSearchRuntimeDependencies,
   ChallengeConfigSearchExhaustedError,
+  createTilionRecoveryCandidate,
+  releaseRecoveryProviderSession,
   recoveryConfigKeyForSession,
   sameSiteNavigationUrl,
   type BrowserConfigSearchRuntimeDependencies,
@@ -100,7 +103,8 @@ export async function searchAndPromoteBrowserConfig(
       (input.recoveryReason ?? '').trim()
     ) || /\bERR_(?:TUNNEL|PROXY)_CONNECTION_(?:FAILED|REFUSED)\b/i.test(input.recoveryReason ?? '');
   const configs =
-    transportFailure && (current.provider === 'kernel' || current.provider === 'steel')
+    transportFailure &&
+    (current.provider === 'kernel' || current.provider === 'steel' || current.provider === 'tilion')
       ? alternateProviderFirst(candidates, current.provider)
       : candidates;
   const blacklist = applyConfigBlacklist(configs, input.blockedConfigKeys);
@@ -169,6 +173,19 @@ export async function searchAndPromoteBrowserConfig(
         }
         return { provider: 'browser-use', ...session };
       }
+      if (config.provider === 'tilion') {
+        const session = await createTilionRecoveryCandidate(
+          dependencies,
+          proxyLocation,
+          config.tilionProxyType ?? 'residential'
+        );
+        if (signal.aborted) {
+          await closeValidationBrowser(session);
+          await dependencies.releaseTilion(session.sessionId).catch(() => {});
+          throw new Error('lane_aborted');
+        }
+        return session;
+      }
       const session = await dependencies.createSteel({
         proxyLocation,
         proxyMode: config.steelProxyMode ?? 'managed',
@@ -210,6 +227,9 @@ export async function searchAndPromoteBrowserConfig(
       if (config.provider === 'browser-use' && !browserUseEnabled()) {
         throw new Error('Browser Use is disabled by BROWSER_AGENT_BROWSER_USE_ENABLED');
       }
+      if (config.provider === 'tilion' && !tilionRecoveryAvailable()) {
+        throw new Error('Tilion is disabled by BROWSER_AGENT_TILION_ENABLED or has no API key');
+      }
       const updated = await runTransactionWithRetry(async (tx) => {
         const replaced = await tx.browserSession.updateMany({
           where: { id: current.id, sessionId: current.sessionId },
@@ -241,21 +261,17 @@ export async function searchAndPromoteBrowserConfig(
         return true;
       });
       if (!updated) throw new Error(`Browser task ${input.taskId} changed during config search`);
+      // Tilion accepts one CDP client per session: the probe's client must be
+      // gone before the agent reattaches to the promoted winner.
+      if (session.provider === 'tilion') await closeValidationBrowser(session);
       await (dependencies.announceBinding ?? announceBrowserSessionBinding)({ id: current.id });
-      if (current.provider === 'kernel') {
-        await dependencies.releaseKernel(current.sessionId).catch(() => {});
-      } else if (current.provider === 'browser-use') {
-        await dependencies.releaseBrowserUse(current.sessionId).catch(() => {});
-      } else {
-        await dependencies.releaseSteel(current.sessionId).catch(() => {});
-      }
+      await releaseRecoveryProviderSession(dependencies, current.provider, current.sessionId).catch(
+        () => {}
+      );
     },
     release: async (_config, session) => {
       await closeValidationBrowser(session).catch(() => {});
-      if (session.provider === 'kernel') await dependencies.releaseKernel(session.sessionId);
-      else if (session.provider === 'browser-use')
-        await dependencies.releaseBrowserUse(session.sessionId);
-      else await dependencies.releaseSteel(session.sessionId);
+      await releaseRecoveryProviderSession(dependencies, session.provider, session.sessionId);
     },
   };
 

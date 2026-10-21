@@ -2,7 +2,7 @@ import type { ProxyGeoLocation } from '../geoip';
 import type { KernelRecoveryProxySpecificity } from './kernel';
 import type { KernelProxyType } from './kernelProxy';
 import type { BrowserProviderName } from './types';
-import { browserUseEnabled } from './config';
+import { browserProviderEnabled, browserUseEnabled } from './config';
 
 export interface BrowserRecoveryConfig {
   key: string;
@@ -13,7 +13,11 @@ export interface BrowserRecoveryConfig {
   /** Create the Kernel session without a managed/shared proxy exit. */
   omitManagedProxy?: boolean;
   steelProxyMode?: 'managed' | 'fixed';
+  /** Tilion paid exit type requested on create (`proxy_type`). */
+  tilionProxyType?: TilionRecoveryProxyType;
 }
+
+export type TilionRecoveryProxyType = 'residential' | 'mobile';
 
 /** A transport failure can affect a provider's whole proxy fleet, so try the
  * other provider's exits before spending time on more tiers of the same one.
@@ -114,6 +118,7 @@ export function recoverySearchPlan(options: {
  *
  * Probe order (sequential within each cookie lane):
  *   steel_fixed → kernel_mobile → kernel residential → steel_managed → kernel_isp
+ *   → tilion_residential → tilion_mobile
  *
  * Residential is one geo tier: city and state when available, else country.
  * Prefer-Steel (payment CDN) keeps this relative order among Steel entries only.
@@ -184,6 +189,20 @@ export function browserRecoveryCandidates(
       kernelProxyType: 'isp',
       kernelSpecificity: fallbackSpecificity,
     },
+    // Tilion places a residential/mobile exit from the full geo target and
+    // reports what landed, so one candidate per exit type covers every tier.
+    {
+      key: 'tilion_residential',
+      provider: 'tilion',
+      proxyMode: `residential_${fallbackSpecificity}`,
+      tilionProxyType: 'residential',
+    },
+    {
+      key: 'tilion_mobile',
+      provider: 'tilion',
+      proxyMode: `mobile_${fallbackSpecificity}`,
+      tilionProxyType: 'mobile',
+    },
   ];
   if (!options?.preferSteel) return candidates;
   // Kernel hard-blacklists Stripe Checkout on managed proxies AND on
@@ -195,13 +214,24 @@ export function browserRecoveryCandidates(
   return candidates.filter((candidate) => candidate.provider === 'steel');
 }
 
+/** Tilion kill switch plus credential: off or unkeyed means no new Tilion recovery session. */
+export function tilionRecoveryAvailable(): boolean {
+  return (
+    browserProviderEnabled('BROWSER_AGENT_TILION_ENABLED', true) &&
+    Boolean(process.env.TILION_API_KEY?.trim())
+  );
+}
+
 /** Do not spend a recovery lane on a provider that cannot be provisioned. */
 export function availableBrowserRecoveryCandidates(
   location: ProxyGeoLocation,
   options?: { preferSteel?: boolean }
 ): BrowserRecoveryConfig[] {
-  const candidates = browserRecoveryCandidates(location, options);
-  return browserUseEnabled() && process.env.BROWSER_USE_API_KEY?.trim()
-    ? candidates
-    : candidates.filter((candidate) => candidate.provider !== 'browser-use');
+  const browserUseReady = browserUseEnabled() && Boolean(process.env.BROWSER_USE_API_KEY?.trim());
+  const tilionReady = tilionRecoveryAvailable();
+  return browserRecoveryCandidates(location, options).filter(
+    (candidate) =>
+      (candidate.provider !== 'browser-use' || browserUseReady) &&
+      (candidate.provider !== 'tilion' || tilionReady)
+  );
 }

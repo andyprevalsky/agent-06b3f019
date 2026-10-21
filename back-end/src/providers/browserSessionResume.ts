@@ -19,7 +19,7 @@ import {
   type RotationStep,
 } from './browser/rotation';
 import { storedBrowserProvider } from './browser/types';
-import { browserUseEnabled } from './browser/config';
+import { browserProviderEnabled, browserUseEnabled } from './browser/config';
 
 export class ProxyRotationExhaustedError extends Error {
   constructor(public readonly cap: number) {
@@ -40,6 +40,18 @@ export class RotationSessionNotFoundError extends Error {
 }
 
 const log = createLogger('BrowserSessionResume');
+
+/** Tilion kill switch: off means no rotation step ever lands on a new Tilion session. */
+function tilionRotationAvailable(): boolean {
+  return browserProviderEnabled('BROWSER_AGENT_TILION_ENABLED', true);
+}
+
+const PROVIDER_DISPLAY_NAMES: Record<RotationStep['provider'], string> = {
+  kernel: 'Kernel',
+  steel: 'Steel',
+  'browser-use': 'Browser Use',
+  tilion: 'Tilion',
+};
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   let timeout: NodeJS.Timeout | undefined;
@@ -330,14 +342,25 @@ async function assembleResumeResponseWithTransport(taskId: string, result: Recre
   };
 }
 
-function buildRotationMessage(step: RotationStep, used: number, remaining: number): string {
+export function buildRotationMessage(
+  step: RotationStep,
+  used: number,
+  remaining: number,
+  previousProvider?: RotationStep['provider'] | 'local'
+): string {
   const left = `${remaining} rotation${remaining === 1 ? '' : 's'} remaining.`;
   if (step.recoveryAction === 'provider_switched' && step.provider === 'browser-use') {
     return `Switched to Browser Use with a new country-level residential proxy session (${used}/${ROTATION_CAP}). Login and cookies preserved. ${left}`;
   }
   if (step.recoveryAction === 'provider_switched') {
+    const from =
+      previousProvider === undefined || previousProvider === 'local'
+        ? 'Kernel'
+        : PROVIDER_DISPLAY_NAMES[previousProvider];
+    const to = PROVIDER_DISPLAY_NAMES[step.provider];
+    const tier = step.proxyType === 'mobile' ? 'mobile-carrier' : step.proxyType;
     return (
-      `Switched from Kernel to Steel with a fresh Steel residential IP ` +
+      `Switched from ${from} to ${to} with a fresh ${to} ${tier} IP ` +
       `(${used}/${ROTATION_CAP}) — browser and proxy infrastructure changed, same region. ` +
       `Login and cookies preserved. ${left}`
     );
@@ -351,14 +374,15 @@ function buildRotationMessage(step: RotationStep, used: number, remaining: numbe
   if (step.provider === 'browser-use') {
     return `Started a new Browser Use residential proxy session (${used}/${ROTATION_CAP}) in the same country. Login and cookies preserved. ${left}`;
   }
+  const provider = PROVIDER_DISPLAY_NAMES[step.provider];
   if (step.proxyType === 'mobile') {
     return (
-      `Rotated to a fresh Kernel mobile-carrier IP (${used}/${ROTATION_CAP}) — same region. ` +
+      `Rotated to a fresh ${provider} mobile-carrier IP (${used}/${ROTATION_CAP}) — same region. ` +
       `Login and cookies preserved. ${left}`
     );
   }
   return (
-    `Rotated to a fresh Kernel residential IP (${used}/${ROTATION_CAP}) — same region, ` +
+    `Rotated to a fresh ${provider} residential IP (${used}/${ROTATION_CAP}) — same region, ` +
     `login and cookies preserved. ${left}`
   );
 }
@@ -366,7 +390,8 @@ function buildRotationMessage(step: RotationStep, used: number, remaining: numbe
 /**
  * rotate_ip tool backend. Atomically advances the per-run rotation counter (keyed
  * to the stable BrowserSession row id), enforces the cap, selects the tier
- * (Kernel residential -> Kernel mobile -> Steel residential -> Browser Use residential),
+ * (Kernel residential -> Kernel mobile -> Steel residential -> Browser Use residential;
+ * Tilion residential -> Tilion mobile -> Kernel residential -> Steel residential),
  * recreates the session, and returns the resume-shaped response plus escalation
  * state the agent reasons over. Provider choice is server-owned, not model-owned.
  */
@@ -408,7 +433,12 @@ export async function rotateBrowserProxy(taskId: string, userId?: string, curren
   }
 
   const currentProvider = storedBrowserProvider(reserved[0]!.provider);
-  const step = selectRotationStep(rotationsUsed, currentProvider, browserUseEnabled());
+  const step = selectRotationStep(
+    rotationsUsed,
+    currentProvider,
+    browserUseEnabled(),
+    tilionRotationAvailable()
+  );
 
   log.info('Executing browser recovery rotation', {
     taskId,
@@ -465,7 +495,8 @@ export async function rotateBrowserProxy(taskId: string, userId?: string, curren
           selectRotationStep(
             rotationsUsed + 1,
             result.provider === 'local' ? 'steel' : result.provider,
-            browserUseEnabled()
+            browserUseEnabled(),
+            tilionRotationAvailable()
           )
         );
 
@@ -478,7 +509,12 @@ export async function rotateBrowserProxy(taskId: string, userId?: string, curren
     rotations_used: rotationsUsed,
     rotations_remaining: rotationsRemaining,
     next_recovery: nextRecovery,
-    rotation_message: buildRotationMessage(effectiveStep, rotationsUsed, rotationsRemaining),
+    rotation_message: buildRotationMessage(
+      effectiveStep,
+      rotationsUsed,
+      rotationsRemaining,
+      result.previousProvider
+    ),
     captcha_telemetry_before_rotation: captchaTelemetryBeforeRotation,
     // Steel exposes an in-flight flag. Kernel currently exposes terminal
     // outcomes only, so preserve unknown as null instead of reporting false.

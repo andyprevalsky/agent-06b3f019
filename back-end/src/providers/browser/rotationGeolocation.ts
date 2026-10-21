@@ -7,7 +7,9 @@ import type { ProxyGeoLocation } from '../geoip';
 // cached `residential:US:<state>:<city>` proxy answered 187.14.91.118 before and
 // after a residential rotation, 2026-10-07). So a rotation moves to another
 // large US state and drops the city. Outside the US both providers only key on
-// country; the rotation can only drop the city there.
+// country; the rotation can only drop the city there. A Tilion step that
+// recreates the session (mobile) uses the same rule; Tilion's in-place
+// `rotate-ip` keeps the session's placement and only changes the exit.
 //
 // The task picks where its walk through the list starts and the task's own
 // rotation count is the step, so the rotations of one task never repeat a state
