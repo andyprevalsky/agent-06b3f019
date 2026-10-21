@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import Any, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
@@ -27,3 +28,54 @@ def steel_cdp_connection_url(cdp_url: str) -> str:
     ]
     query.append(("apiKey", api_key))
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
+
+
+_TILION_DEFAULT_BASE_URL = "https://back.tilion.dev"
+_SECRET_QUERY_KEYS = frozenset({"token", "apikey", "api_key", "jwt"})
+
+
+def _tilion_hosts() -> set:
+    configured = urlsplit((os.environ.get("TILION_BASE_URL") or _TILION_DEFAULT_BASE_URL).strip())
+    hosts = {"back.tilion.dev"}
+    if configured.hostname:
+        hosts.add(configured.hostname.lower())
+    return hosts
+
+
+def is_tilion_cdp_url(cdp_url: str) -> bool:
+    """Tilion session CDP endpoint: ``wss://<tilion host>/v1/session/<id>/cdp?token=...``."""
+    parsed = urlsplit(cdp_url or "")
+    return (
+        parsed.scheme in {"ws", "wss"}
+        and (parsed.hostname or "").lower() in _tilion_hosts()
+        and parsed.path.startswith("/v1/session/")
+        and parsed.path.endswith("/cdp")
+    )
+
+
+def redact_cdp_url(cdp_url: str) -> str:
+    """Log-safe CDP URL: secret query values (Tilion ``token``, Steel ``apiKey``) are masked."""
+    parsed = urlsplit(cdp_url or "")
+    if not parsed.query:
+        return cdp_url or ""
+    query = [
+        (key, "REDACTED" if key.lower() in _SECRET_QUERY_KEYS else value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+    ]
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
+
+
+async def open_browser_cdp_connection(cdp_url: str, *, label: str = "") -> Tuple[str, Optional[Any]]:
+    """Return ``(url to connect local CDP clients to, multiplexer or None)``.
+
+    Tilion admits one CDP client per session, so its URL (token intact) is held
+    by one loopback multiplexer that browser-use and Playwright both attach to.
+    The caller owns the returned multiplexer and closes it with its DOMService.
+    Other providers connect directly, as before.
+    """
+    if not is_tilion_cdp_url(cdp_url):
+        return steel_cdp_connection_url(cdp_url), None
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
+
+    multiplexer = SingleCdpConnectionMultiplexer(cdp_url, label=label)
+    return await multiplexer.start(), multiplexer
