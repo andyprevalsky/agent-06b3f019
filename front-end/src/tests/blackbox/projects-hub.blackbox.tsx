@@ -22,7 +22,7 @@ beforeEach(() => {
 });
 function openProjects() {
   renderWithProviders(<ProjectsNavButton isExpanded />);
-  fireEvent.click(screen.getByRole('button', { name: 'Projects', exact: true }));
+  fireEvent.click(screen.getByRole('button', { name: /^Projects$/ }));
 }
 describe('Projects hub', () => {
   it('exposes repo and development environment settings from a visible Projects entry', async () => {
@@ -66,7 +66,7 @@ describe('Projects hub', () => {
     fireEvent.change(screen.getByRole('textbox', { name: 'Repository URL' }), {
       target: { value: 'https://github.com/example/new-site' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: /^Save$/ }));
     await waitFor(() =>
       expect(updates).toEqual([{ repoUrl: 'https://github.com/example/new-site' }]),
     );
