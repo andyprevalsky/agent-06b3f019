@@ -100,6 +100,23 @@ const prismaFake = {
   agent: {
     findUnique: async () => ({ proxyCountry: 'US', proxyState: 'TX', proxyCity: 'DALLAS' }),
   },
+  // pausedBrowserState statements from tilionState.ts, recognised by their SQL text.
+  $executeRaw: async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const sql = strings.join('?');
+    if (sql.includes('"pausedBrowserState" = ?::jsonb')) {
+      const hits = [...rows.values()].filter((r) => r.sessionId === values[1]);
+      for (const row of hits) row.pausedBrowserState = JSON.parse(String(values[0]));
+      return hits.length;
+    }
+    const key = sql.includes('"id" = ?') ? 'id' : 'sessionId';
+    const hits = [...rows.values()].filter((r) => r[key] === values[0]);
+    for (const row of hits) row.pausedBrowserState = null;
+    return hits.length;
+  },
+  $queryRaw: async (_strings: TemplateStringsArray, ...values: unknown[]) => {
+    const row = [...rows.values()].find((r) => r.id === values[0] && r.sessionId === values[1]);
+    return row ? [{ state: row.pausedBrowserState ?? null }] : [];
+  },
 };
 
 async function main(): Promise<void> {
@@ -163,7 +180,6 @@ async function main(): Promise<void> {
   const live = new Set<string>();
   const ended = new Set<string>();
   let deleteStatus: number[] = [];
-  let rotateChangesIp = true;
   const standardRoutes = () => {
     server.route('GET', /^\/v1\/regions$/, () => ({
       status: 200,
@@ -288,6 +304,7 @@ async function main(): Promise<void> {
     assert.match(session.debugUrl, /\/live-view\?token=/);
     assert.equal(rows.get('task-a')?.provider, 'tilion');
     assert.equal(rows.get('task-a')?.kernelProxySource, 'tilion_residential_state');
+    assert.equal(rows.get('task-a')?.proxyTier, 'residential', 'create records the exit tier');
 
     // Live Tilion (2026-10-21) refuses city AND state at once: keep the country
     // exit without paying for a state-only retry that would be refused too.
@@ -377,23 +394,13 @@ async function main(): Promise<void> {
       status: 200,
       body: { ok: true, action: 'press', error: null },
     }));
-    let exitIp = 1;
-    server.route('POST', /\/files\/fetch$/, (request) =>
-      String((request.body as { url: string }).url).includes('ipify')
-        ? {
-            status: 200,
-            body: {
-              content_base64: Buffer.from(JSON.stringify({ ip: `203.0.113.${exitIp}` })).toString(
-                'base64'
-              ),
-            },
-          }
-        : { status: 200, body: { size: 3, content_base64: Buffer.from('abc').toString('base64') } }
-    );
-    server.route('POST', /\/rotate-ip$/, () => {
-      exitIp += rotateChangesIp ? 1 : 0;
-      return { status: 200, body: { rotated: true, region: 'us-east-1', fresh_allocation: true } };
-    });
+    server.route('POST', /\/files\/fetch$/, () => ({
+      status: 200,
+      body: { size: 3, content_base64: Buffer.from('abc').toString('base64') },
+    }));
+    // rotate-ip answers in turn from this queue (fresh exit, stale exit, refusal).
+    const rotateReplies: Array<{ status: number; body: unknown }> = [];
+    server.route('POST', /\/rotate-ip$/, () => rotateReplies.shift() ?? { status: 500, body: {} });
     server.route('GET', /^\/v1\/sessions$/, () => ({
       status: 200,
       body: [fakeSessionRecord('sess_a'), fakeSessionRecord('sess_b')],
@@ -409,9 +416,8 @@ async function main(): Promise<void> {
       (await tilion.readTilionSessionFile(session.sessionId, fileUrl)).toString(),
       'abc'
     );
-    assert.deepEqual(await tilion.listTilionSessionFiles(session.sessionId), [
-      { path: fileUrl, size: 3 },
-    ]);
+    // Downloads are listed from the worker's ledger, not from backend memory.
+    assert.deepEqual(await tilion.listTilionSessionFiles(session.sessionId), []);
     await assert.rejects(
       tilion.readTilionSessionFile(session.sessionId, '/tmp/downloads/x'),
       /download URL/
@@ -429,6 +435,11 @@ async function main(): Promise<void> {
     rows.get('task-a')!.currentUrl = 'https://shop.test/cart';
     await tilion.closeTilionSession(session.sessionId, true);
     assert.equal(rows.get('task-a')?.status, 'PAUSED');
+    assert.notEqual(
+      rows.get('task-a')?.pausedBrowserState ?? null,
+      null,
+      'pause stores state on the row'
+    );
     assert.equal(live.has(session.sessionId), false);
 
     // ── B7: resume after the session ended carries state + URL ──────────────
@@ -445,6 +456,7 @@ async function main(): Promise<void> {
     assert.deepEqual(restored.visited, ['https://shop.test', 'https://shop.test/cart']);
     assert.equal(rows.get('task-a')?.sessionId, resumed.sessionId);
     assert.equal(rows.get('task-a')?.status, 'ACTIVE');
+    assert.equal(rows.get('task-a')?.pausedBrowserState, null, 'consumed snapshot cleared');
     assert(announced.some((w) => JSON.stringify(w) === JSON.stringify({ id: 'task-a' })));
 
     // Tilion expired the ACTIVE session itself (idle/ttl): resume still works.
@@ -486,20 +498,66 @@ async function main(): Promise<void> {
     assert.match(rotated.proxySource, /^tilion_mobile_/);
     await assert.rejects(tilion.rotateTilionSession('task-a', 'isp'), /no isp exit/);
 
-    // ── G2: residential rotate-ip in place only with a proven new exit IP ───
+    // ── B: a live Tilion session is never swapped for a blank browser ──────
+    rotateReplies.push({
+      status: 409,
+      body: { detail: { error: 'residential_rotation_unavailable', message: 'none' } },
+    });
+    await assert.rejects(
+      tilion.rotateTilionSession('task-a', 'residential'),
+      (error: unknown) => error instanceof tilion.TilionUncarriedStateError
+    );
+    assert.equal(rows.get('task-a')?.sessionId, rotated.sessionId, 'fail closed keeps the binding');
+    await assert.rejects(
+      tilion.rotateTilionSession('task-a', 'mobile'),
+      tilion.TilionUncarriedStateError
+    );
+
+    // ── G2: residential rotate-ip in place when Tilion allocates a fresh exit ──
+    rotateReplies.push({
+      status: 200,
+      body: {
+        session_id: rotated.sessionId,
+        rotated: true,
+        region: 'us-east-1',
+        fresh_allocation: true,
+      },
+    });
     const inPlace = await tilion.rotateTilionSession('task-a', 'residential');
     assert.equal(inPlace.sessionId, rotated.sessionId);
     assert.equal(inPlace.previousSessionId, rotated.sessionId, 'in place: caller must not release');
+    assert.deepEqual(inPlace.ipRotation, {
+      rotated: true,
+      freshAllocation: true,
+      region: 'us-east-1',
+    });
     assert.equal(rows.get('task-a')?.proxyTier, 'residential');
-    assert.equal(server.callsTo('POST', /\/rotate-ip$/).length, 1);
-    rotateChangesIp = false;
-    const unproven = await tilion.rotateTilionSession('task-a', 'residential');
+    assert.equal(rows.get('task-a')?.kernelProxySource, 'tilion_residential_rotated_us-east-1');
+    assert.equal(live.has(rotated.sessionId), true, 'in-place rotation keeps the session');
+
+    // fresh_allocation false is no proof: replacement with the worker's state.
+    rotateReplies.push({
+      status: 200,
+      body: {
+        session_id: rotated.sessionId,
+        rotated: true,
+        region: 'us-east-1',
+        fresh_allocation: false,
+      },
+    });
+    restored.cookies.length = 0;
+    const unproven = await tilion.rotateTilionSession('task-a', 'residential', {
+      carriedState: { cookies: [{ ...harvestedState.cookies[0], value: 'worker-2' }], origins: [] },
+    });
     assert.notEqual(
       unproven.sessionId,
       rotated.sessionId,
-      'same exit IP must fall back to replacement'
+      'stale exit must fall back to replacement'
     );
     assert.equal(unproven.previousSessionId, rotated.sessionId);
+    assert.equal(unproven.ipRotation, undefined);
+    assert.equal((restored.cookies[0] as { value: string }).value, 'worker-2');
+    assert.equal(server.callsTo('POST', /\/rotate-ip$/).length, 3);
     const finalSessionId = unproven.sessionId;
 
     // ── close failure keeps the row retryable ───────────────────────────────

@@ -1,7 +1,12 @@
 /**
- * In-place Tilion exit rotation (`POST rotate-ip`), accepted only with proof:
- * the exit IP read through the session's own browser must differ before and
- * after. Without proof the caller falls back to a replacement session.
+ * In-place Tilion exit rotation (`POST rotate-ip`) for the residential step.
+ * Works while the worker holds CDP (~80 ms live; CDP and storage kept). The
+ * proof of a new exit is the response itself: `rotated: true` with
+ * `fresh_allocation: true` means Tilion allocated a brand-new residential exit
+ * (API reference §8; observed live 2026-10-21 with a changed IP). Anything else
+ * (409 ip_rotation_unavailable / residential_rotation_unavailable /
+ * exit_ladder_exhausted, 503, fresh_allocation false) returns null and the
+ * caller replaces the session with the worker's carriedState.
  */
 import { prisma } from '../database';
 import { DEFAULT_GEOLOCATION, type ProxyGeoLocation } from '../geoip';
@@ -25,77 +30,71 @@ export async function agentLocation(agentId: string): Promise<ProxyGeoLocation> 
     : DEFAULT_GEOLOCATION;
 }
 
-const EXIT_IP_ECHO_URL = 'https://api.ipify.org?format=json';
-
-/** The session's exit IP, read through its own browser; null when it cannot be read now. */
-async function sessionExitIp(sessionId: string): Promise<string | null> {
-  try {
-    const result = await tilionRequest<{ content_base64?: string }>(
-      tilionSessionPath(sessionId, '/files/fetch'),
-      { method: 'POST', body: { url: EXIT_IP_ECHO_URL, max_bytes: 1024 }, timeoutMs: 30_000 }
-    );
-    const parsed = JSON.parse(Buffer.from(result?.content_base64 ?? '', 'base64').toString('utf8'));
-    return typeof parsed?.ip === 'string' ? parsed.ip : null;
-  } catch (error) {
-    // While the worker holds CDP, files/fetch answers 502 ExternalControlBusy.
-    log.info('Tilion exit IP unreadable; in-place rotation not provable', {
-      sessionId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return null;
-  }
+interface RotateIpResponse {
+  rotated?: boolean;
+  fresh_allocation?: boolean;
+  region?: string | null;
 }
 
-/**
- * `POST rotate-ip` keeps CDP, cookies and tabs, but counts only when the exit
- * IP is proven to change. Any missing proof returns null so the caller uses a
- * replacement session instead. Success returns `previousSessionId === sessionId`.
- */
 export async function rotateInPlace(taskId: string): Promise<TilionReplacementSession | null> {
   const row = await prisma.browserSession.findUniqueOrThrow({ where: { id: taskId } });
   if (row.provider !== 'tilion' || row.status !== 'ACTIVE' || !row.wsUrl || !row.debugUrl) {
     return null;
   }
-  const before = await sessionExitIp(row.sessionId);
-  if (before === null) return null;
+  let response: RotateIpResponse | null;
   try {
-    await tilionRequest(tilionSessionPath(row.sessionId, '/rotate-ip'), {
-      method: 'POST',
-      timeoutMs: 30_000,
-    });
+    // Not retried: a lost reply may already have moved the exit.
+    response = await tilionRequest<RotateIpResponse>(
+      tilionSessionPath(row.sessionId, '/rotate-ip'),
+      { method: 'POST', timeoutMs: 30_000, maxAttempts: 1 }
+    );
   } catch (error) {
     log.warn('Tilion rotate-ip refused; using a replacement session', {
+      taskId,
       sessionId: row.sessionId,
       error: error instanceof Error ? error.message : String(error),
     });
     return null;
   }
-  const after = await sessionExitIp(row.sessionId);
-  if (after === null || after === before) {
-    log.warn('Tilion rotate-ip did not prove a new exit IP; using a replacement session', {
+  const ipRotation = {
+    rotated: response?.rotated === true,
+    freshAllocation: response?.fresh_allocation === true,
+    region: typeof response?.region === 'string' ? response.region : null,
+  };
+  if (!ipRotation.rotated || !ipRotation.freshAllocation) {
+    log.warn('Tilion rotate-ip did not allocate a fresh exit; using a replacement session', {
+      taskId,
       sessionId: row.sessionId,
-      changed: after === null ? 'unknown' : false,
+      ...ipRotation,
     });
     return null;
   }
+  const source = `tilion_residential_rotated_${ipRotation.region ?? 'unknown'}`;
   const updated = await prisma.browserSession.updateMany({
     where: { id: taskId, sessionId: row.sessionId },
-    data: { proxyTier: 'residential' },
+    data: { proxyTier: 'residential', kernelProxySource: source },
   });
-  if (updated.count !== 1) return null;
-  log.info('Tilion rotate-ip changed the exit IP in place', { taskId, sessionId: row.sessionId });
-  // The worker still holds this session's only CDP socket: no validation client.
+  if (updated.count !== 1) {
+    throw new Error(`Browser task ${taskId} changed during in-place rotation`);
+  }
+  log.info('Tilion rotate-ip allocated a fresh residential exit in place', {
+    taskId,
+    sessionId: row.sessionId,
+    ...ipRotation,
+  });
+  // The worker keeps this session's only CDP socket: no validation client.
   return {
     provider: 'tilion',
     sessionId: row.sessionId,
     debugUrl: row.debugUrl,
     wsUrl: row.wsUrl,
     savedUrl: row.currentUrl || row.startUrl || undefined,
-    proxySource: row.kernelProxySource ?? 'tilion_residential_country',
+    proxySource: source,
     proxyLocation: await agentLocation(row.agentId),
     profileId: null,
     profileSource: 'tilion_rotated_in_place',
     previousSessionId: row.sessionId,
     previousProvider: 'tilion',
+    ipRotation,
   };
 }
