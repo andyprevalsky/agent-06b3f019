@@ -692,6 +692,7 @@ def _log_code_agent_event(
                 cached_input_pct=cached_pct,
                 output_tokens=usage.get("output_tokens") or 0,
                 reasoning_output_tokens=usage.get("reasoning_output_tokens") or 0,
+                **({"usage_scope": event["usage_scope"]} if isinstance(event.get("usage_scope"), str) else {}),
             )
             return
 
@@ -720,10 +721,14 @@ def is_codex_completed_turn_event(event: dict[str, Any]) -> bool:
         return False
     if event.get("raw_type") == "turn.completed":
         return True
+    if event.get("type") == "turn_ended" and event.get("raw_type") == "turn/completed":
+        return event.get("turn_outcome", event.get("status")) == "completed"
     return event.get("type") == "turn" and event.get("status") == "completed"
 
 
 def codex_completed_turn_event_key(event: dict[str, Any], fallback_index: int) -> str:
+    if isinstance(event.get("turn_id"), str):
+        return f"turn:{event['turn_id']}"
     timestamp = event.get("timestamp")
     if timestamp is None:
         return f"event:{fallback_index}"
@@ -936,6 +941,7 @@ async def _run_agentic_loop(
     # exit grace arms only once results catch up with turns.
     user_turns_seen = 0
     sdk_results_seen = 0
+    native_codex_terminal: dict[str, Any] | None = None
 
     def _mark_terminal_output_persisted() -> None:
         if terminal_output_persisted is not None:
@@ -981,8 +987,9 @@ async def _run_agentic_loop(
         # The ws-server resends its whole history on every (re)connect, so it
         # replaces everything seen so far instead of appending to it.
         nonlocal completed_codex_turns, in_flight_tool_count
-        nonlocal direct_chat_active, transcript, user_turns_seen, sdk_results_seen
+        nonlocal direct_chat_active, transcript, user_turns_seen, sdk_results_seen, native_codex_terminal
         code_events.clear()
+        native_codex_terminal = None
         direct_chat_active = False
         user_turns_seen = 0
         sdk_results_seen = 0
@@ -1000,7 +1007,7 @@ async def _run_agentic_loop(
     async def on_event(event: dict[str, Any]) -> None:
         nonlocal completed_codex_turns, last_output_time
         nonlocal in_flight_tool_count, sdk_result_at, logged_events
-        nonlocal direct_chat_active, user_turns_seen, sdk_results_seen
+        nonlocal direct_chat_active, user_turns_seen, sdk_results_seen, native_codex_terminal
         last_output_time = safe_time()
         code_events.append(event)
         usage_limit = usage_limit_from_event(event)
@@ -1010,6 +1017,20 @@ async def _run_agentic_loop(
         for record in transcript.feed(event, event_index):
             if event_index >= transcript_flushed:
                 transcript_pending[record["id"]] = record
+        if event.get("provider") == "codex":
+            if event.get("type") == "turn_started":
+                native_codex_terminal = None
+            elif event.get("type") == "user_turn" and (
+                native_codex_terminal is not None
+                and event.get("turn_id") != native_codex_terminal.get("turn_id")
+            ):
+                native_codex_terminal = None
+            elif (
+                event.get("type") == "turn_ended"
+                and event.get("raw_type") == "turn/completed"
+                and event.get("turn_outcome", event.get("status")) in {"completed", "failed", "interrupted"}
+            ):
+                native_codex_terminal = event
         if event.get("type") == "direct_chat":
             direct_chat_active = event.get("status") == "held"
             if not direct_chat_active and sdk_result_at is not None:
@@ -1191,6 +1212,16 @@ async def _run_agentic_loop(
                     )
                     action_summary.append(f"Sandbox resize requested: {resize.get('to')}")
                     raise CodeSessionResizeRequested(resize)
+
+            # Codex app-server deliberately stays alive between native turns.
+            # Its terminal lifecycle, rather than process exit or a silence
+            # timeout, completes this attachment. A later start invalidates it;
+            # a direct-chat hold keeps the attachment open until hand-back.
+            if code_provider == "codex" and native_codex_terminal is not None and not direct_chat_active:
+                outcome = native_codex_terminal.get("turn_outcome", native_codex_terminal.get("status"))
+                exit_code = 0 if outcome == "completed" else 1
+                action_summary.append(f"Codex native turn ended: {outcome}")
+                break
 
             # After the first SDK result, healthy CLIs exit in <1s. If the
             # process is still alive past the grace window (stdout may keep

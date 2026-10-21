@@ -3793,6 +3793,9 @@ async def _run_all_tests():
         test_log_code_agent_event_surfaces_claude_cli_rate_limit_and_api_retry,
     )
     r.record("codex_completed_turn_count", test_codex_completed_turn_count_counts_unique_turn_completed_events)
+    r.record("native_codex_usage_retains_session_scope", test_native_codex_usage_retains_session_scope)
+    await r.record_async("native_codex_terminal_finishes_idle_app_server", test_native_codex_terminal_event_finishes_idle_app_server)
+    await r.record_async("native_codex_terminal_respects_hold_and_newer_active_turn", test_native_codex_terminal_respects_hold_and_newer_active_turn)
     # spawn_claude_code_activity
     await r.record_async(
         "spawn_activity_resolves_claude_credential",
@@ -4492,7 +4495,9 @@ async def test_agent_message_to_running_code_agent_is_delivered_once_and_answere
         assert turns[1:] == [text], f"the CLI must read the agent turn exactly once, read {turns}"
         events = recorder.verified_events[0]
         user_turns = [event for event in events if event.get("type") == "user_turn"]
-        assert [(event.get("turn_id"), event.get("sender")) for event in user_turns] == [(turn_id, "agent")], user_turns
+        assert [(event.get("client_message_id"), event.get("sender")) for event in user_turns] == [(turn_id, "agent")], user_turns
+        started_turn_ids = {event.get("turn_id") for event in events if event.get("type") == "turn_started"}
+        assert user_turns[0].get("turn_id") in started_turn_ids, user_turns
         results = [event.get("text") for event in events if event.get("type") == "result"]
         assert results == ["answer is 42", "turn answered"], f"the monitor ended before the agent turn: {results}"
         finals = [event for event in events if event.get("type") == "final"]
@@ -5362,3 +5367,69 @@ async def test_cc_manager_closes_the_sandbox_when_the_last_attempt_times_out():
 
 if __name__ == "__main__":
     asyncio.run(run_all_tests())
+
+async def test_native_codex_terminal_event_finishes_idle_app_server():
+    """The live app-server turn/completed shape is terminal even while stdio stays open."""
+    from domains.spawn_claude_code_agent import service
+
+    for outcome, expected_code in (("completed", 0), ("failed", 1), ("interrupted", 1)):
+        class NativeTerminal(_FakeWsClient):
+            async def listen(self):
+                await self.on_event({"version": 1, "provider": "codex", "type": "turn_started", "turn_id": "game-turn"})
+                terminal = {"version": 1, "provider": "codex", "type": "turn_ended", "raw_type": "turn/completed", "turn_id": "game-turn", "status": outcome, "turn_outcome": outcome, "timestamp": "2026-10-21T00:05:19.295Z"}
+                await self.on_event(terminal)
+                await self.on_event({**terminal, "type": "final", "exit_code": expected_code})
+                await asyncio.Event().wait()
+
+        setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+        with (
+            patch.object(service, "ClaudeCodeWsClient", NativeTerminal),
+            patch.object(service, "save_code_transcript_batch", AsyncMock(return_value=True)),
+            patch("temporalio.activity.heartbeat"),
+        ):
+            result = await asyncio.wait_for(service._run_agentic_loop(**_loop_kwargs([], code_provider="codex")), timeout=1.0)
+        assert result[0] == expected_code, (outcome, result[0])
+        assert service.codex_completed_turn_count(result[-1]) == (1 if outcome == "completed" else 0)
+        teardown_mock()
+
+
+async def test_native_codex_terminal_respects_hold_and_newer_active_turn():
+    """A held session or a later native turn must outlive an earlier completion."""
+    from domains.spawn_claude_code_agent import service
+
+    for guard in ("held", "newer_turn"):
+        released = False
+        class NativeWithMoreWork(_FakeWsClient):
+            async def listen(self):
+                nonlocal released
+                if guard == "held":
+                    await self.on_event({"provider": "codex", "type": "direct_chat", "status": "held"})
+                await self.on_event({"provider": "codex", "type": "turn_ended", "raw_type": "turn/completed", "turn_id": "first", "status": "completed", "turn_outcome": "completed"})
+                if guard == "newer_turn":
+                    await self.on_event({"provider": "codex", "type": "turn_started", "turn_id": "second"})
+                    await self.on_event({"provider": "codex", "type": "user_turn", "turn_id": "second", "text": "continue"})
+                await asyncio.sleep(0.2)
+                released = True
+                if guard == "held":
+                    await self.on_event({"provider": "codex", "type": "direct_chat", "status": "released"})
+                else:
+                    await self.on_event({"provider": "codex", "type": "turn_ended", "raw_type": "turn/completed", "turn_id": "second", "status": "completed", "turn_outcome": "completed"})
+                await asyncio.Event().wait()
+        setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+        with (
+            patch.object(service, "ClaudeCodeWsClient", NativeWithMoreWork),
+            patch.object(service, "save_code_transcript_batch", AsyncMock(return_value=True)),
+            patch("temporalio.activity.heartbeat"),
+        ):
+            result = await asyncio.wait_for(service._run_agentic_loop(**_loop_kwargs([], code_provider="codex")), timeout=1.0)
+        assert released and result[0] == 0, (guard, released, result[0])
+        teardown_mock()
+
+
+def test_native_codex_usage_retains_session_scope():
+    from domains.spawn_claude_code_agent import service
+    logger = MagicMock()
+    with patch.object(service, "logger", logger):
+        service._log_code_agent_event({"provider": "codex", "type": "usage", "usage_scope": "session", "usage": {"input_tokens": 200, "output_tokens": 50, "cached_input_tokens": 150}}, agent_id="agent", task_id="task", sandbox_id="sandbox")
+    assert logger.info.call_args.kwargs["usage_scope"] == "session"
+    assert logger.info.call_args.kwargs["output_tokens"] == 50
