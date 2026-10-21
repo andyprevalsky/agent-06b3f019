@@ -157,7 +157,7 @@ async function main(): Promise<void> {
   process.env.TILION_BASE_URL = server.baseUrl;
   delete process.env.TILION_SESSION_TTL_SECONDS;
   delete process.env.TILION_IDLE_TIMEOUT_SECONDS;
-  process.env.TILION_CDP_OBSERVE = 'false';
+  delete process.env.TILION_CDP_OBSERVE;
 
   let created = 0;
   const live = new Set<string>();
@@ -178,7 +178,11 @@ async function main(): Promise<void> {
         status: 201,
         body: fakeSessionRecord(
           id,
-          geo?.city === 'dallas' ? { geo_applied: false, geo_unsupported: ['city'] } : {}
+          geo?.city === 'dallas'
+            ? { geo_applied: false, geo_unsupported: ['city'] }
+            : geo?.city === 'austin'
+              ? { geo_applied: false, geo_unsupported: ['city', 'state'] }
+              : {}
         ),
       };
     });
@@ -254,9 +258,9 @@ async function main(): Promise<void> {
     const creates = server.callsTo('POST', /^\/v1\/session$/);
     assert.equal(creates.length, 2, 'unsupported city must recreate with the state pin');
     const first = creates[0].body as Record<string, unknown>;
-    assert.equal(first.ttl, 3600);
+    assert.equal(first.ttl, 14_400);
     assert(Number(first.ttl) >= tilion.TILION_MIN_TTL_SECONDS);
-    assert.equal(first.idle_timeout, 600);
+    assert.equal(first.idle_timeout, 3600);
     assert.equal(first.cdp_observe, false);
     assert.equal(first.residential, true);
     assert.equal(first.proxy_type, 'residential');
@@ -284,6 +288,21 @@ async function main(): Promise<void> {
     assert.match(session.debugUrl, /\/live-view\?token=/);
     assert.equal(rows.get('task-a')?.provider, 'tilion');
     assert.equal(rows.get('task-a')?.kernelProxySource, 'tilion_residential_state');
+
+    // Live Tilion (2026-10-21) refuses city AND state at once: keep the country
+    // exit without paying for a state-only retry that would be refused too.
+    const createsBefore = server.callsTo('POST', /^\/v1\/session$/).length;
+    const countryOnly = await tilion.createTilionSessionWithContext(
+      'ctx-1',
+      'agent-1',
+      { country: 'US', state: 'TX', city: 'AUSTIN' },
+      undefined,
+      { taskId: 'task-country' }
+    );
+    assert.equal(server.callsTo('POST', /^\/v1\/session$/).length, createsBefore + 1);
+    assert.equal(countryOnly.proxySource, 'tilion_residential_country');
+    assert.deepEqual(countryOnly.proxyLocation, { country: 'US' });
+    await tilion.releaseTilionRemoteSession(countryOnly.sessionId);
 
     // keepValidationConnection hands the only client to the caller
     const kept = await tilion.createTilionSessionWithContext(
@@ -334,7 +353,7 @@ async function main(): Promise<void> {
     const health = await tilion.getTilionSessionHealth(session.sessionId);
     assert.equal(health.provider, 'tilion');
     assert.equal(health.status, 'ready');
-    assert.equal(health.timeoutMs, 3_600_000);
+    assert.equal(health.timeoutMs, 3_600_000, 'health reads the ttl Tilion reports');
     assert(health.ttlMs !== null && health.ttlMs > 0 && health.ttlMs <= 600_000);
     const liveUrl = await tilion.getTilionLiveViewUrl(session.sessionId);
     assert(

@@ -132,8 +132,10 @@ export class TilionSessionReleaseError extends Error {
 
 /** The browser activity budget (30 min) plus the 5 min margin the plan requires. */
 export const TILION_MIN_TTL_SECONDS = 35 * 60;
-const DEFAULT_TTL_SECONDS = 3600;
-const DEFAULT_IDLE_TIMEOUT_SECONDS = 600;
+// Live probe 2026-10-21: an attached but quiet CDP session ends at idle_timeout,
+// and ttl 43200 is accepted. Agents think between steps, so idle uses the maximum.
+const DEFAULT_TTL_SECONDS = 14_400;
+const DEFAULT_IDLE_TIMEOUT_SECONDS = 3600;
 
 function integerEnv(name: string, fallback: number, min: number, max: number): number {
   const raw = process.env[name]?.trim();
@@ -236,7 +238,9 @@ async function postSession(
     body: {
       ttl,
       idle_timeout: idleTimeout,
-      cdp_observe: browserProviderEnabled('TILION_CDP_OBSERVE', true),
+      // Live probe: cdp_observe solved neither reCAPTCHA v2 nor Turnstile and
+      // adds 100-250 ms per navigation, so it is opt-in.
+      cdp_observe: browserProviderEnabled('TILION_CDP_OBSERVE', false),
       residential: true,
       proxy_type: proxyType,
       ...(region ? { region } : {}),
@@ -259,8 +263,10 @@ async function createPlacedSession(
     if (honoured || specificity === 'country') return { record, specificity };
     // Tilion fell back to the country exit. A less specific pin can still beat it.
     const next = ladder[index + 1];
-    if (next === 'country') {
-      log.info('Tilion geo state unsupported; keeping country exit', {
+    // Tilion lists every field it could not honour; a rung it already refused
+    // (live 2026-10-21: city and state both unsupported) would only buy another browser.
+    if (next === 'country' || unsupported.includes(next)) {
+      log.info('Tilion geo pin unsupported; keeping country exit', {
         sessionId: record.session_id,
         unsupported,
       });
