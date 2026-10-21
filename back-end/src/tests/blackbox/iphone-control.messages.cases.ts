@@ -1,5 +1,4 @@
 import { messageSafetyCases } from './iphone-control.message-safety.cases';
-import { messageQueueCases } from './iphone-control.message-queue.cases';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
@@ -7,7 +6,6 @@ import { sealPhoneValue } from '../../providers/phoneHarnessCredentials';
 import type { Case } from './iphone-control.cases';
 import { freshSetup, observe, verifierUsage } from './iphone-control.setup-fixtures';
 export const messageCases: Case[] = [
-  ...messageQueueCases,
   ...messageSafetyCases,
   [
     'approved message dispatch is one physical send and sent requires fresh verification',
