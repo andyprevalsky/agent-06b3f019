@@ -1,3 +1,4 @@
+import { computeTokenAuthority } from './computeTokenAuthority';
 import { prisma, runTransactionWithRetry } from './database';
 
 /**
@@ -52,6 +53,7 @@ function strikesOf(config: unknown, now: number): number {
 export interface FoundryCooldownState {
   rateLimitedUntil: string | null;
   strikes: number;
+  remainingSeconds: number;
 }
 
 /** One indexed read for every (region, deployment) a route plan may try. */
@@ -76,6 +78,7 @@ export async function getFoundryDeploymentCooldowns(
     result[row.accountId] = {
       rateLimitedUntil: until !== null && until.getTime() > now ? until.toISOString() : null,
       strikes: strikesOf(row.config, now),
+      remainingSeconds: until === null ? 0 : Math.max(0, (until.getTime() - now) / 1000),
     };
   }
   return result;
@@ -145,6 +148,7 @@ export async function markFoundryDeploymentCooldown(
       rateLimitedUntil: until.toISOString(),
       strikes,
       cooldownSeconds: Math.round((untilMs - now) / 1000),
+      remainingSeconds: Math.max(0, (untilMs - now) / 1000),
     };
   });
 }
@@ -155,12 +159,112 @@ export async function markFoundryDeploymentServed(
   deployment: string
 ): Promise<{ reset: boolean }> {
   const accountId = foundryCooldownKey(region, deployment);
-  const { count } = await prisma.integration.updateMany({
-    where: {
-      ...identity(accountId),
-      OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lte: new Date() } }],
-    },
-    data: { config: { strikes: 0 } },
+  return runTransactionWithRetry(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`foundry-cooldown:${accountId}`}))`;
+    const { count } = await tx.integration.updateMany({
+      where: {
+        ...identity(accountId),
+        OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lte: new Date() } }],
+      },
+      data: { config: { strikes: 0 } },
+    });
+    return { reset: count > 0 };
   });
-  return { reset: count > 0 };
+}
+
+/** Use the same store in production, or forward straight to its authority in a guest.
+ * Never call the guest's own router (which would recursively route here).
+ */
+async function authorityRequest(path: string, body?: unknown, keys?: string[]): Promise<unknown> {
+  const authority = computeTokenAuthority();
+  if (authority === null) throw new Error('Authority is not configured');
+  const query = keys ? `?${new URLSearchParams({ keys: keys.join(',') })}` : '';
+  const response = await fetch(`${authority.url}/api/integrations/compute-code/${path}${query}`, {
+    method: body === undefined ? 'GET' : 'POST',
+    headers: { 'X-API-Key': authority.apiKey, 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(2000),
+  });
+  if (!response.ok) throw new Error(`Foundry authority returned ${response.status}`);
+  return response.json();
+}
+
+function validateState(value: unknown): FoundryCooldownState {
+  if (typeof value !== 'object' || value === null)
+    throw new Error('Invalid Foundry cooldown state');
+  const row = value as Record<string, unknown>;
+  if (
+    typeof row.strikes !== 'number' ||
+    !Number.isInteger(row.strikes) ||
+    row.strikes < 0 ||
+    typeof row.remainingSeconds !== 'number' ||
+    !Number.isFinite(row.remainingSeconds) ||
+    row.remainingSeconds < 0 ||
+    (row.rateLimitedUntil !== null &&
+      (typeof row.rateLimitedUntil !== 'string' ||
+        !Number.isFinite(Date.parse(row.rateLimitedUntil)))) ||
+    (row.remainingSeconds > 0 && row.rateLimitedUntil === null)
+  )
+    throw new Error('Invalid Foundry cooldown state');
+  return {
+    strikes: row.strikes,
+    remainingSeconds: row.remainingSeconds,
+    rateLimitedUntil: row.rateLimitedUntil as string | null,
+  };
+}
+
+export async function readSharedFoundryCooldowns(
+  keys: string[]
+): Promise<Record<string, FoundryCooldownState>> {
+  if (computeTokenAuthority() === null) return getFoundryDeploymentCooldowns(keys);
+  const payload = await authorityRequest('foundry-deployment/cooldown', undefined, keys);
+  if (
+    typeof payload !== 'object' ||
+    payload === null ||
+    !('cooldowns' in payload) ||
+    typeof payload.cooldowns !== 'object' ||
+    payload.cooldowns === null ||
+    Array.isArray(payload.cooldowns)
+  ) {
+    throw new Error('Invalid Foundry cooldown envelope');
+  }
+  return Object.fromEntries(
+    Object.entries(payload.cooldowns).map(([key, value]) => [key, validateState(value)])
+  );
+}
+
+export async function reportSharedFoundryRateLimit(
+  region: string,
+  deployment: string,
+  retryAfterSeconds?: number
+): Promise<void> {
+  if (computeTokenAuthority() === null) {
+    await markFoundryDeploymentCooldown(region, deployment, retryAfterSeconds);
+    return;
+  }
+  validateState(
+    await authorityRequest('token/rate-limited', {
+      type: 'foundry',
+      source: 'pool',
+      region,
+      deployment,
+      retryAfterSeconds,
+    })
+  );
+}
+
+export async function reportSharedFoundryServed(region: string, deployment: string): Promise<void> {
+  if (computeTokenAuthority() === null) {
+    await markFoundryDeploymentServed(region, deployment);
+    return;
+  }
+  const result = await authorityRequest('foundry-deployment/served', { region, deployment });
+  if (
+    typeof result !== 'object' ||
+    result === null ||
+    !('reset' in result) ||
+    typeof result.reset !== 'boolean'
+  ) {
+    throw new Error('Invalid Foundry reset acknowledgement');
+  }
 }

@@ -7,7 +7,7 @@ import { type AuthRequest, authenticate } from '../../providers/auth';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { InvalidFoundryCooldownRequest } from '../../providers/foundryDeploymentCooldown';
-import { computeTokenAuthority } from './config';
+import { computeTokenAuthority } from '../../providers/computeTokenAuthority';
 import * as service from './service';
 
 const router = Router({ mergeParams: true });

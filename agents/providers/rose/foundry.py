@@ -25,12 +25,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 import os
 import re
 import ssl
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, AsyncIterator, Dict, FrozenSet, List, Optional
 from urllib.parse import urlsplit
 
@@ -50,6 +51,7 @@ _cooldown_until: dict[tuple[str, str], float] = {}
 _auth_cooldown_until: dict[str, float] = {}
 # Escalation strikes per (region endpoint, deployment), mirrored from the backend.
 _strikes: dict[tuple[str, str], int] = {}
+_state_generation: dict[tuple[str, str], int] = {}
 # When this process last read each deployment's shared cooldown (monotonic).
 _shared_checked_at: dict[tuple[str, str], float] = {}
 _shared_reads: dict[tuple[tuple[str, str], ...], asyncio.Task] = {}
@@ -264,11 +266,7 @@ def _remember_local_rate_limit(key: tuple[str, str], hint: Optional[float]) -> f
         return _cooldown_until[key] - now
     strikes = _strikes.get(key, 0) + 1
     _strikes[key] = strikes
-    seconds = (
-        hint
-        if hint is not None
-        else _COOLDOWN_LADDER_S[min(strikes, len(_COOLDOWN_LADDER_S)) - 1]
-    )
+    seconds = hint if hint is not None else _COOLDOWN_LADDER_S[min(strikes, len(_COOLDOWN_LADDER_S)) - 1]
     _cooldown_until[key] = now + seconds
     return seconds
 
@@ -286,15 +284,37 @@ def _shared_key(key: tuple[str, str]) -> str:
     return f"{(urlsplit(key[0]).hostname or '').lower()}:{key[1]}"
 
 
-def _apply_shared_until(key: tuple[str, str], until: Optional[str]) -> None:
-    if not isinstance(until, str):
-        return
-    try:
-        remaining = (datetime.fromisoformat(until.replace("Z", "+00:00")) - datetime.now(timezone.utc)).total_seconds()
-    except ValueError:
-        return
+def _validated_shared_state(state: Any) -> tuple[int, float]:
+    if not isinstance(state, dict) or not {"strikes", "remainingSeconds", "rateLimitedUntil"} <= state.keys():
+        raise ValueError("Invalid shared cooldown state")
+    strikes, remaining, until = state.get("strikes"), state.get("remainingSeconds"), state.get("rateLimitedUntil")
+    if (
+        type(strikes) is not int
+        or strikes < 0
+        or type(remaining) not in (int, float)
+        or not math.isfinite(remaining)
+        or remaining < 0
+    ):
+        raise ValueError("Invalid shared cooldown counters")
+    if until is not None:
+        if not isinstance(until, str) or datetime.fromisoformat(until.replace("Z", "+00:00")).tzinfo is None:
+            raise ValueError("Invalid shared cooldown timestamp")
+    elif remaining > 0:
+        raise ValueError("Missing active cooldown timestamp")
+    return strikes, float(remaining)
+
+
+def _apply_shared_state(key: tuple[str, str], state: tuple[int, float]) -> None:
+    strikes, remaining = state
+    _strikes[key] = strikes
+    _cooldown_until.pop(key, None)
     if remaining > 0:
-        _cooldown_until[key] = max(_cooldown_until.get(key, 0.0), time.monotonic() + remaining)
+        _cooldown_until[key] = time.monotonic() + remaining
+
+
+def _advance_generation(key: tuple[str, str]) -> int:
+    _state_generation[key] = _state_generation.get(key, 0) + 1
+    return _state_generation[key]
 
 
 async def _refresh_shared_cooldowns(keys: list[tuple[str, str]]) -> None:
@@ -306,6 +326,7 @@ async def _refresh_shared_cooldowns(keys: list[tuple[str, str]]) -> None:
         return
 
     async def read() -> None:
+        generations = {key: _state_generation.get(key, 0) for key in stale}
         try:
             async with asyncio.timeout(_SHARED_RPC_TIMEOUT_S):
                 async with httpx.AsyncClient(timeout=_SHARED_RPC_TIMEOUT_S) as rpc:
@@ -316,12 +337,15 @@ async def _refresh_shared_cooldowns(keys: list[tuple[str, str]]) -> None:
                     )
             if response.status_code != 200:
                 raise RoseServerError(f"shared Foundry cooldown read returned {response.status_code}")
-            cooldowns = response.json().get("cooldowns") or {}
+            payload = response.json()
+            cooldowns = payload.get("cooldowns") if isinstance(payload, dict) else None
+            if not isinstance(cooldowns, dict):
+                raise ValueError("Missing shared cooldown envelope")
+            # Validate the whole response before mutating any local state.
+            validated = {name: _validated_shared_state(value) for name, value in cooldowns.items()}
             for key in stale:
-                state = cooldowns.get(_shared_key(key)) or {}
-                _strikes[key] = int(state.get("strikes") or 0)
-                _cooldown_until.pop(key, None)
-                _apply_shared_until(key, state.get("rateLimitedUntil"))
+                if _state_generation.get(key, 0) == generations[key]:
+                    _apply_shared_state(key, validated.get(_shared_key(key), (0, 0.0)))
         except Exception as exc:
             # With a configured authority, unknown shared state must not send
             # traffic to a deployment another worker may already have cooled.
@@ -329,7 +353,8 @@ async def _refresh_shared_cooldowns(keys: list[tuple[str, str]]) -> None:
             raise RoseServerError("Foundry shared cooldown authority unavailable") from exc
         checked = time.monotonic()
         for key in stale:
-            _shared_checked_at[key] = checked
+            if _state_generation.get(key, 0) == generations[key]:
+                _shared_checked_at[key] = checked
 
     task = _shared_reads.get(stale)
     if task is None:
@@ -344,7 +369,8 @@ async def _refresh_shared_cooldowns(keys: list[tuple[str, str]]) -> None:
 async def _report_rate_limit(region: FoundryRegion, deployment: str, hint: Optional[float]) -> None:
     """Cool the deployment here at once, then publish it for every other process."""
     key = (region.endpoint, deployment)
-    seconds = _remember_local_rate_limit(key, hint)
+    generation = _advance_generation(key)
+    _remember_local_rate_limit(key, hint)
     scope = _shared_scope()
     if scope is None:
         return
@@ -366,16 +392,11 @@ async def _report_rate_limit(region: FoundryRegion, deployment: str, hint: Optio
                 )
         if response.status_code != 200:
             raise RoseServerError(f"shared Foundry cooldown mark returned {response.status_code}")
-        state = response.json()
-        # The shared store owns escalation; adopt its strike count and expiry.
-        _strikes[key] = int(state.get("strikes") or _strikes.get(key, 0))
-        until = state.get("rateLimitedUntil")
-        if isinstance(until, str):
-            _cooldown_until.pop(key, None)
-            _apply_shared_until(key, until)
-            if key not in _cooldown_until:
-                _cooldown_until[key] = time.monotonic() + seconds
-        _shared_checked_at[key] = time.monotonic()
+        state = _validated_shared_state(response.json())
+        if _state_generation.get(key, 0) == generation:
+            _advance_generation(key)
+            _apply_shared_state(key, state)
+            _shared_checked_at[key] = time.monotonic()
     except Exception as exc:
         logger.warning("rose.foundry.shared_cooldown_mark_failed", error_type=type(exc).__name__)
         raise RoseServerError("Foundry shared cooldown authority unavailable") from exc
@@ -384,20 +405,32 @@ async def _report_rate_limit(region: FoundryRegion, deployment: str, hint: Optio
 async def _report_served(region: FoundryRegion, deployment: str) -> None:
     """A served request ends this deployment's escalation everywhere."""
     key = (region.endpoint, deployment)
-    if _strikes.pop(key, 0) <= 0:
+    if _strikes.get(key, 0) <= 0:
         return
+    generation = _advance_generation(key)
     scope = _shared_scope()
     if scope is None:
+        _strikes.pop(key, None)
         return
     try:
         async with asyncio.timeout(_SHARED_RPC_TIMEOUT_S):
             async with httpx.AsyncClient(timeout=_SHARED_RPC_TIMEOUT_S) as rpc:
-                await rpc.post(
+                response = await rpc.post(
                     f"{scope[0]}/api/integrations/compute-code/foundry-deployment/served",
                     headers={"X-API-Key": scope[1]},
                     json={"region": region.host.lower(), "deployment": deployment},
                 )
+        state = response.json()
+        if response.status_code != 200 or not isinstance(state, dict) or type(state.get("reset")) is not bool:
+            raise ValueError("Invalid shared cooldown reset acknowledgement")
+        if _state_generation.get(key, 0) == generation:
+            _advance_generation(key)
+            _shared_checked_at.pop(key, None)
+            if state["reset"]:
+                _strikes.pop(key, None)
+                _cooldown_until.pop(key, None)
     except Exception as exc:
+        _shared_checked_at.pop(key, None)
         logger.warning("rose.foundry.shared_cooldown_reset_failed", error_type=type(exc).__name__)
 
 
@@ -406,6 +439,7 @@ def _reset_foundry_cooldown_cache() -> None:
     _cooldown_until.clear()
     _auth_cooldown_until.clear()
     _strikes.clear()
+    _state_generation.clear()
     _shared_checked_at.clear()
     _shared_reads.clear()
 

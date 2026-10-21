@@ -5002,6 +5002,8 @@ async def test_gpt_api_key_credit_failure_cools_all_agent_requests_before_foundr
     )
 
     def handler(req):
+        if req.url.path.endswith("/foundry-deployment/cooldown"):
+            return httpx.Response(200, json={"cooldowns": {}})
         if str(req.url) == OPENAI_RESPONSES_API_URL:
             seen["openai"] += 1
             return httpx.Response(200, text=exhausted_sse)
@@ -5993,7 +5995,7 @@ async def test_cerebras_cooldown_rpc_is_bounded_and_cancellation_isolated():
     with patch("providers.rose.cerebras.httpx.AsyncClient", offline_client):
         try:
             first = asyncio.create_task(cb._cerebras_on_cooldown(scope, "offline-fake"))
-            await entered.wait()
+            await asyncio.wait_for(entered.wait(),2)
             sibling = asyncio.create_task(cb._cerebras_on_cooldown(scope, "offline-fake"))
             first.cancel()
             try:
@@ -6751,6 +6753,8 @@ async def test_client_foundry_skips_non_https_optional_region_and_keeps_serving(
     attempted: list[str] = []
 
     def handler(req):
+        if req.url.path.endswith("/foundry-deployment/cooldown"):
+            return httpx.Response(200, json={"cooldowns": {}})
         if req.url.host.endswith(".openai.azure.com"):
             attempted.append(f"{req.url.scheme}://{req.url.host}")
         if req.url.host == "a-4989-resource.openai.azure.com" and req.url.scheme == "https":
@@ -7040,6 +7044,8 @@ async def test_client_foundry_luna_backs_mini_and_speed_pools():
     cerebras_status = {"code": 200}
 
     def handler(req):
+        if req.url.path.endswith("/foundry-deployment/cooldown"):
+            return httpx.Response(200, json={"cooldowns": {}})
         host = req.url.host
         if host == "api.cerebras.ai":
             attempted.append("cerebras")
@@ -7132,6 +7138,8 @@ async def test_text_only_foundry_skipped_for_image_requests():
     openrouter_bodies: list[dict] = []
 
     def handler(req):
+        if req.url.path.endswith("/foundry-deployment/cooldown"):
+            return httpx.Response(200, json={"cooldowns": {}})
         if req.url.host == "a-4989-resource.openai.azure.com":
             attempted.append(f"foundry:{json.loads(req.content)['model']}")
             return httpx.Response(200, text=foundry_sse, headers={"Content-Type": "text/event-stream"})
@@ -9516,8 +9524,8 @@ async def test_foundry_rate_limit_cooldown_hint_ladder_and_shared_store():
             if request.url.path.endswith("/token/rate-limited"):
                 marks.append(json.loads(request.content))
                 until = (datetime.now(timezone.utc) + timedelta(seconds=900)).isoformat()
-                shared[shared_key] = {"rateLimitedUntil": until, "strikes": 2}
-                return httpx.Response(200, json={"ok": True, "rateLimitedUntil": until, "strikes": 2})
+                shared[shared_key] = {"rateLimitedUntil": until, "strikes": 2, "remainingSeconds": 900}
+                return httpx.Response(200, json={"ok": True, "rateLimitedUntil": until, "strikes": 2, "remainingSeconds": 900})
             raise AssertionError(f"unexpected backend call {request.url}")
 
         await run(shared_env, backend)
@@ -9550,6 +9558,160 @@ async def test_foundry_rate_limit_cooldown_hint_ladder_and_shared_store():
         assert unexpected_hits == [], unexpected_hits
     finally:
         foundry._reset_foundry_cooldown_cache()
+
+
+
+async def _check_foundry_shared_state_case(case):
+    import time
+    import types
+    from datetime import datetime, timedelta, timezone
+    from providers.rose import foundry as f
+
+    real = httpx.AsyncClient
+    key = ("https://r.example", "deployment")
+    region = types.SimpleNamespace(endpoint=key[0], host="r.example")
+    env = {"BACKEND_API_KEY": "fixture", "BACKEND_API_URL": "https://authority.example"}
+
+    def state(seconds=900):
+        return {
+            "strikes": 1,
+            "rateLimitedUntil": (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat(),
+            "remainingSeconds": seconds,
+        }
+
+    def client(handler):
+        return types.SimpleNamespace(AsyncClient=lambda **kw: real(**kw, transport=httpx.MockTransport(handler)))
+
+    with patch.object(f, "os", types.SimpleNamespace(getenv=lambda k, d=None: env.get(k, d))):
+        try:
+            if case == "overlap":
+                f._reset_foundry_cooldown_cache()
+                entered, release = asyncio.Event(), asyncio.Event()
+
+                async def delayed(req):
+                    if req.method == "GET":
+                        entered.set()
+                        await release.wait()
+                        return httpx.Response(200, json={"cooldowns": {}})
+                    return httpx.Response(200, json=state())
+
+                with patch.object(f, "httpx", client(delayed)):
+                    read = asyncio.create_task(f._refresh_shared_cooldowns([key]))
+                    await asyncio.wait_for(entered.wait(), 2)
+                    await f._report_rate_limit(region, key[1], 900)
+                    release.set()
+                    await read
+                    assert f._cooldown_until.get(key, 0) - time.monotonic() > 890, "old read erased acknowledged mark"
+            if case == "malformed":
+                for payload in (
+                    {},
+                    {"cooldowns": []},
+                    {
+                        "cooldowns": {
+                            "r.example:deployment": {"strikes": 1, "rateLimitedUntil": "bad", "remainingSeconds": 900}
+                        }
+                    },
+                ):
+                    f._reset_foundry_cooldown_cache()
+
+                    async def malformed(req):
+                        return httpx.Response(200, json=payload)
+
+                    with patch.object(f, "httpx", client(malformed)):
+                        try:
+                            await f._refresh_shared_cooldowns([key])
+                        except RoseServerError:
+                            pass
+                        else:
+                            raise AssertionError("malformed state accepted")
+                    assert key not in f._shared_checked_at
+                f._reset_foundry_cooldown_cache()
+                original_until = time.monotonic() + 900
+                f._cooldown_until[key] = original_until
+
+                async def partly_invalid(req):
+                    return httpx.Response(
+                        200, json={"cooldowns": {"r.example:deployment": state(0), "bad.example:deployment": {}}}
+                    )
+
+                with patch.object(f, "httpx", client(partly_invalid)):
+                    try:
+                        await f._refresh_shared_cooldowns([key])
+                    except RoseServerError:
+                        pass
+                    else:
+                        raise AssertionError("partly invalid state accepted")
+                assert f._cooldown_until[key] == original_until, "invalid response partially mutated cache"
+            if case == "reset":
+                f._reset_foundry_cooldown_cache()
+                calls = []
+
+                async def failed(req):
+                    calls.append(req.url.path)
+                    return httpx.Response(503)
+
+                f._strikes[key] = 2
+                with patch.object(f, "httpx", client(failed)):
+                    await f._report_served(region, key[1])
+                    await f._report_served(region, key[1])
+                assert len(calls) == 2 and f._strikes[key] == 2, "failed reset lost retry obligation"
+            if case == "new_mark":
+                f._strikes[key] = 2
+                entered, release = asyncio.Event(), asyncio.Event()
+
+                async def reset_then_mark(req):
+                    if req.url.path.endswith("/served"):
+                        entered.set()
+                        await release.wait()
+                        return httpx.Response(200, json={"reset": True})
+                    return httpx.Response(200, json=state())
+
+                with patch.object(f, "httpx", client(reset_then_mark)):
+                    reset = asyncio.create_task(f._report_served(region, key[1]))
+                    await asyncio.wait_for(entered.wait(), 2)
+                    await f._report_rate_limit(region, key[1], 900)
+                    release.set()
+                    await reset
+                assert f._cooldown_until.get(key, 0) - time.monotonic() > 890, "old reset erased new mark"
+            if case == "mark_order":
+                f._reset_foundry_cooldown_cache()
+                entered, release = asyncio.Event(), asyncio.Event()
+
+                async def out_of_order(req):
+                    seconds = json.loads(req.content)["retryAfterSeconds"]
+                    if seconds == 30:
+                        entered.set()
+                        await release.wait()
+                    return httpx.Response(200, json=state(seconds))
+
+                with patch.object(f, "httpx", client(out_of_order)):
+                    old = asyncio.create_task(f._report_rate_limit(region, key[1], 30))
+                    await asyncio.wait_for(entered.wait(), 2)
+                    await f._report_rate_limit(region, key[1], 900)
+                    release.set()
+                    await old
+                assert f._cooldown_until[key] - time.monotonic() > 890, "old mark acknowledgement shortened new mark"
+            if case == "clock":
+                f._reset_foundry_cooldown_cache()
+
+                class FastClock(datetime):
+                    @classmethod
+                    def now(cls, tz=None):
+                        return datetime.now(tz) + timedelta(seconds=3600)
+
+                async def healthy(req):
+                    return httpx.Response(200, json={"cooldowns": {"r.example:deployment": state(30)}})
+
+                with patch.object(f, "httpx", client(healthy)), patch.object(f, "datetime", FastClock):
+                    await f._refresh_shared_cooldowns([key])
+                assert f._cooldown_until[key] - time.monotonic() > 29, "worker clock shortened authority duration"
+        finally:
+            f._reset_foundry_cooldown_cache()
+
+
+async def test_foundry_shared_state_interleavings_and_validation():
+    for case in ("overlap", "malformed", "reset", "new_mark", "mark_order", "clock"):
+        await _check_foundry_shared_state_case(case)
 
 
 async def test_wmh_response_schema_binds_exact_candidate_call_ids():
@@ -9887,6 +10049,7 @@ async def run_all_tests():
         "foundry_rate_limit_cooldown_hint_ladder_shared",
         test_foundry_rate_limit_cooldown_hint_ladder_and_shared_store,
     )
+    await r.record_async("foundry_shared_state_interleavings", test_foundry_shared_state_interleavings_and_validation)
     r.record("all_pool_names_matches", test_all_pool_names_matches_registry)
     r.record("get_pool_unknown_raises", test_get_pool_unknown_raises)
     r.record(

@@ -1315,9 +1315,9 @@ def apply_compute_token_authority_env(env: dict[str, str]) -> None:
     url = (env.get("COMPUTE_TOKEN_AUTHORITY_URL") or "").strip() or COMPUTE_TOKEN_AUTHORITY_DEFAULT_URL
     api_key = (env.get("COMPUTE_TOKEN_AUTHORITY_API_KEY") or "").strip()
     if not api_key:
-        api_key = _dotenv_values(REPO_ROOT / "back-end" / ".env").get("BACKEND_API_KEY", "").strip()
-    if not api_key:
         api_key = (env.get("BACKEND_API_KEY") or "").strip()
+    if not api_key:
+        api_key = _dotenv_values(REPO_ROOT / "back-end" / ".env").get("BACKEND_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError(
             f"compute-token authority {url} needs BACKEND_API_KEY in back-end/.env "
