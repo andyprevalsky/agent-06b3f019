@@ -46,7 +46,7 @@
         border: 1px solid #273747;
         border-radius: 20px;
         overflow: hidden;
-        aspect-ratio: 16/10;
+        height: clamp(180px, 42vh, 420px);
         background: #05090c;
       }
       canvas,
@@ -130,7 +130,7 @@
           padding: 12px;
         }
         .stage {
-          aspect-ratio: 1;
+          height: clamp(160px, 36vh, 360px);
         }
         .controls {
           gap: 12px;

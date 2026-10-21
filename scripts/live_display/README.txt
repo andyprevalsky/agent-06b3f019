@@ -99,3 +99,23 @@ GPU service and a signed-in Rose session are available.
 
 Stop the exact server process when the display is no longer needed; do not
 leave an inference service running for a closed demonstration.
+
+Private Modal option
+--------------------
+The prepared `modal_service.py` uses the pinned StreamDiffusion source commit,
+SD-Turbo, a single L4, no minimum warm containers, a 15-second idle scale-down,
+and no public prediction endpoint. Modal account credentials remain in the
+server process, never in the generated display HTML.
+
+After the owning Modal workspace is active:
+  modal deploy scripts/live_display/modal_service.py
+  python scripts/live_display/server.py serve --state /workspace/live-display/state.json \
+    --public-url https://YOUR-EXISTING-DISPLAY-ORIGIN --write-html /workspace/live-display/studio.html \
+    --modal-app rose-live-display-streamdiffusion
+
+The bridge process needs the Modal Python SDK and its existing account
+credentials. A one-image GPU proof can run before deployment with:
+  modal run scripts/live_display/modal_service.py --output /tmp/watch.jpg
+
+A paused workspace is a blocking provider response. Do not silently use another
+account, public demo, CPU renderer, or prerecorded image as proof of GPU output.
