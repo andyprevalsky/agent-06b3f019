@@ -169,11 +169,11 @@ export function MessageListView(props: MessageListViewProps) {
     streamingBubbles,
     streamingTools,
   );
-  const thinkingStreamTokenCount = thinkingTokenCount(streamingMetricsBySubAgentId, subAgentId);
 
   return (
     <div ref={containerRef} className={`${containerClassName} mobile-disable-message-entry-spawn`}>
       <MessageListItems
+        groupAgentMessages
         filteredMessages={filteredMessages}
         webSearchGrouping={webSearchGrouping}
         currentAnimatingId={animation.currentAnimatingId}
@@ -209,7 +209,7 @@ export function MessageListView(props: MessageListViewProps) {
         visible={thinkingVisible}
         compact={compact}
         streaming={streaming}
-        streamingTokenCount={thinkingStreamTokenCount}
+        streamingTokenCount={thinkingTokenCount(streamingMetricsBySubAgentId, subAgentId)}
         animatedTokenCount={animatedTokenCount}
       />
       <div ref={scrollEndRef} />

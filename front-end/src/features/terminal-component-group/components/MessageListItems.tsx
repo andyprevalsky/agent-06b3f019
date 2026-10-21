@@ -53,7 +53,12 @@ import { DisplayMediaGroup } from './inline-media/DisplayMediaGroup';
 import { EMPTY_DISPLAY_MEDIA_GROUPING, groupDisplayMedia } from './inline-media/displayMediaGroups';
 import { EMPTY_WEB_SEARCH_GROUPING, type WebSearchTurnGrouping } from './webSearchTurnGroups';
 
+import { useAgentExchangeGroups } from './useAgentExchangeGroups';
+import { AgentExchangeGroup } from './AgentExchangeGroup';
+
 interface MessageListItemsProps {
+  /** Normal GP lists opt in; native code sessions preserve their existing rendering. */
+  groupAgentMessages?: boolean;
   filteredMessages: Message[];
   streamingMessageIds?: ReadonlySet<string>;
   currentAnimatingId: string | null;
@@ -73,7 +78,7 @@ interface MessageListItemsProps {
 
 type MessageListItemProps = Omit<
   MessageListItemsProps,
-  'filteredMessages' | 'webSearchGrouping'
+  'filteredMessages' | 'webSearchGrouping' | 'groupAgentMessages'
 > & {
   message: Message;
 };
@@ -272,6 +277,7 @@ function MessageListItem(props: MessageListItemProps) {
 export function MessageListItems({
   filteredMessages,
   webSearchGrouping = EMPTY_WEB_SEARCH_GROUPING,
+  groupAgentMessages = false,
   ...itemProps
 }: MessageListItemsProps) {
   const roseDesktop = useRoseDesktop();
@@ -283,9 +289,26 @@ export function MessageListItems({
     () => (roseDesktop ? groupDisplayMedia(visibleMessages) : EMPTY_DISPLAY_MEDIA_GROUPING),
     [visibleMessages, roseDesktop],
   );
+  const { groups: exchangeGroups, now } = useAgentExchangeGroups(
+    visibleMessages,
+    roseDesktop && groupAgentMessages,
+    itemProps.currentAnimatingId,
+    itemProps.onAnimationComplete,
+  );
   return (
     <>
       {visibleMessages.map((message) => {
+        const exchangeGroup = exchangeGroups.groupsByLeadId.get(message.message_id);
+        if (exchangeGroup)
+          return (
+            <AgentExchangeGroup
+              key={exchangeGroup.key}
+              group={exchangeGroup}
+              viewerId={itemProps.selectedAgentId}
+              now={now}
+            />
+          );
+        if (exchangeGroups.foldedIds.has(message.message_id)) return null;
         if (webSearchGrouping.hiddenMessageIds.has(message.message_id)) return null;
         if (displayGrouping.hiddenMessageIds.has(message.message_id)) return null;
         const displayItems = displayGrouping.groupsByLeadId.get(message.message_id);
