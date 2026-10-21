@@ -82,7 +82,8 @@ async function main() {
   const previous = process.env.CLOUD_IPHONE_ENABLED;
   try {
     const snapshot = async () => ({
-      init: (await initSession(userId, agentId, 'https://example.com')).user_settings,
+      // This fixture owns a seeded legacy physical binding; keep init on that binding.
+      init: (await initSession(userId, agentId, 'https://example.com', session.id)).user_settings,
       resume: (await resumeBrowserSession(session.id)).user_settings,
     });
     delete process.env.CLOUD_IPHONE_ENABLED;
