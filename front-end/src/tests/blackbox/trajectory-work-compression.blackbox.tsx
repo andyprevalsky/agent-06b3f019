@@ -79,6 +79,48 @@ describe('one ordered live trajectory carousel', () => {
       ),
     ).toEqual(['first', 'first-work', 'second', 'second-work']);
   });
+  it('folds the actual assistant Thought → work → Thought → work rows into four activities', () => {
+    const messages = [
+      msg(
+        {},
+        {
+          role: 'ASSISTANT',
+          message_id: 'assistant-thought-one',
+          text: 'First internal thought.',
+          timestamp: stamp(1),
+        },
+      ),
+      work('first-check'),
+      msg(
+        {},
+        {
+          role: 'ASSISTANT',
+          message_id: 'assistant-thought-two',
+          text: 'Second internal thought.',
+          timestamp: stamp(3),
+        },
+      ),
+      { ...work('second-check'), timestamp: stamp(4) },
+    ];
+    const rendered = renderWithProviders(view(messages));
+    expect(screen.getAllByTestId('trajectory-work-group')).toHaveLength(1);
+    expect(screen.queryByText('Thought')).toBeNull();
+    expect(screen.queryByText('First internal thought.')).toBeNull();
+    expect(screen.queryByTestId('trajectory-work-history')).toBeNull();
+    rendered.rerender(view(messages, 'COMPLETED'));
+    const group = screen.getByTestId('trajectory-work-group');
+    expect(group).toHaveTextContent('Worked for 29.0s');
+    expect(group).toHaveTextContent('4 activities');
+    fireEvent.click(within(group).getByRole('button'));
+    const history = screen.getByTestId('trajectory-work-history');
+    expect(within(history).getAllByTestId('trajectory-history-entry')).toHaveLength(4);
+    expect(
+      [...history.querySelectorAll('[data-message-id]')].map((el) =>
+        el.getAttribute('data-message-id'),
+      ),
+    ).toEqual(messages.map((message) => message.message_id));
+  });
+
   it.each(['ACTIVE', 'COMPLETED'])(
     'folds thoughts into worked history while keeping the plan outside for %s',
     async (status) => {
