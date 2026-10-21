@@ -47,6 +47,20 @@ passes. Initial test harness failures (missing fixture API key, strict MSW
 loopback handling, Phoenix frame serialization) are retained separately from
 the final causal red/green pair. No production data is written by this test.
 
+The exact reproduction command, run from `front-end/`, is:
+
+```sh
+NODE_OPTIONS=--max-old-space-size=768 /home/boxes/rose/node_modules/.bin/vitest run src/tests/structural/production-preview-realtime.test.ts --maxWorkers=1 --no-file-parallelism
+```
+
+Causal receipts: `/dev/shm/rose-websocket-rca/private-red.log` and
+`private-green.log`; unchanged local policy plus reproduction:
+`private-final.log` (5/5). The public-origin diagnostic is `join-origin.json`.
+Independent source/log review of b116a4821 by managed thread
+ph777c57rw0wrwz7ppdwphzhjd8gqz1m returned scoped PASS; it did not run tests.
+The reviewer correctly requires runtime verification that the named profile is
+actually activated, separate from its shared-definition contract test.
+
 ## Solution
 
 Provide a named production-API Vite preview config that explicitly selects
