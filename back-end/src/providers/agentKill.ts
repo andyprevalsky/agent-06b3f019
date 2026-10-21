@@ -33,6 +33,8 @@ import {
 const log = createLogger('AgentKill');
 
 export interface DeleteAgentOptions {
+  /** Retry unconfirmed cleanup of an already archived subtree. */
+  retryArchived?: boolean;
   /** Temporal terminate reason. Defaults to the UI-archive wording. */
   terminateReason?: string;
 }
@@ -97,22 +99,28 @@ async function deleteAgentRecursiveInternal(
   const sealed = await runTransactionWithRetry(async (tx) => {
     await lockAgentWorkflowGeneration(tx, agentId);
     const agent = await tx.agent.findFirst({
-      where: { id: agentId, deletedAt: null },
+      where: { id: agentId, ...(options.retryArchived === true ? {} : { deletedAt: null }) },
       select: {
+        deletedAt: true,
         temporalWorkflowId: true,
         parentAgentId: true,
-        children: { where: { deletedAt: null }, select: { id: true } },
+        children: {
+          ...(options.retryArchived === true ? {} : { where: { deletedAt: null } }),
+          select: { id: true },
+        },
       },
     });
     if (agent === null) {
       return null;
     }
-    await tx.agent.update({
-      where: { id: agentId },
-      data: { deletedAt: new Date() },
-    });
+    if (agent.deletedAt === null) {
+      await tx.agent.update({
+        where: { id: agentId },
+        data: { deletedAt: new Date() },
+      });
+    }
     const traceArchiveDeletionLease =
-      agent.parentAgentId === null && archiveEnabled()
+      agent.deletedAt === null && agent.parentAgentId === null && archiveEnabled()
         ? await enqueueTraceArchiveFinalization(tx, agentId)
         : null;
     const result: SealedAgentKill = {

@@ -14774,12 +14774,15 @@ async def _run_single_task_as_run_user(
         execution_result = await _run_with_agent_execution_backstop(
             base_url, agent_id, execute_agent, started_at=execution_started_at, task=task
         )
+        kill_evidence = None
+        if kill_fixture is not None:
+            from benchmarks.kill_agent_fixture import verify_and_cleanup
+            kill_evidence = await verify_and_cleanup(base_url, API_KEY, kill_fixture)
         if isinstance(execution_result, TaskResult):
             return execution_result
         data, approvals_triggered, approvals_resolved, early_fail_reason = execution_result
-        if kill_fixture is not None:
-            from benchmarks.kill_agent_fixture import verify_and_cleanup
-            data["kill_agent_benchmark"] = await verify_and_cleanup(base_url, API_KEY, kill_fixture)
+        if kill_evidence is not None:
+            data["kill_agent_benchmark"] = kill_evidence
         early_fail_reason = _annotate_needs_auth_failure(task, early_fail_reason, data)
         if realtime_monitor:
             await realtime_monitor.stop()

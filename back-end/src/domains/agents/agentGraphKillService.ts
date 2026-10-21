@@ -54,6 +54,7 @@ async function subtree(
 export async function killGraphAgent(caller: GraphCaller, targetId: string) {
   await assertDescendant(caller, targetId);
   await deleteAgentRecursive(targetId, {
+    retryArchived: true,
     terminateReason: `Stopped by parent agent ${caller.self.id}`,
   });
   // Include archived rows: repeated calls must verify the original operation, not pretend an absent row proves cleanup.

@@ -40,16 +40,24 @@ async def verify_and_cleanup(base_url, api_key, fixture):
     temporal = await Client.connect(config.temporal.address, **temporal_connect_options(
         config.temporal.address, config.temporal.namespace, config.temporal.api_key))
     observed = {}
+    result = {}
     async with httpx.AsyncClient(timeout=60) as client:
         try:
             for row in fixture["agents"]:
                 workflow_id = row.get("temporal_workflow_id") or row["agent_id"]
                 description = await temporal.get_workflow_handle(workflow_id).describe()
                 observed[row["label"]] = description.status.name
-            return {"ok": observed == {"target": "TERMINATED", "grandchild": "TERMINATED", "control": "RUNNING"},
+            result = {"ok": observed == {"target": "TERMINATED", "grandchild": "TERMINATED", "control": "RUNNING"},
                     "workflow_states": observed, "fixture": fixture}
         finally:
             for row in fixture["agents"]:
                 response = await client.delete(f"{base_url}/api/agents/{row['agent_id']}", headers={"X-API-Key": api_key})
                 if response.status_code not in {200, 204, 404}:
                     response.raise_for_status()
+    result["cleanup_states"] = {}
+    for row in fixture["agents"]:
+        description = await temporal.get_workflow_handle(row.get("temporal_workflow_id") or row["agent_id"]).describe()
+        result["cleanup_states"][row["label"]] = description.status.name
+    if any(state == "RUNNING" for state in result["cleanup_states"].values()):
+        raise RuntimeError("Owned benchmark workflow cleanup remains unconfirmed")
+    return result

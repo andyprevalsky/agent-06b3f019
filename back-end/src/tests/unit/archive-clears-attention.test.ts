@@ -31,6 +31,8 @@ let passed = 0;
 const failures: string[] = [];
 
 async function test(name: string, fn: () => Promise<void> | void): Promise<void> {
+  if (process.argv.includes('--kill-retry-only') && !name.startsWith('explicit kill retries'))
+    return;
   try {
     await fn();
     passed += 1;
@@ -454,6 +456,40 @@ async function main(): Promise<void> {
       else process.env.TRACE_ARCHIVE_ENABLED = priorArchiveEnabled;
       if (priorArchiveDir === undefined) delete process.env.TRACE_ARCHIVE_LOCAL_DIR;
       else process.env.TRACE_ARCHIVE_LOCAL_DIR = priorArchiveDir;
+    }
+  });
+
+  await test('explicit kill retries cleanup after archival and a transient failure', async () => {
+    const userId = `kill-retry-${randomUUID()}`;
+    const id = randomUUID();
+    const original = prisma.agentAttentionRequest.deleteMany.bind(prisma.agentAttentionRequest);
+    const previousArchive = process.env.TRACE_ARCHIVE_ENABLED;
+    process.env.TRACE_ARCHIVE_ENABLED = 'false';
+    try {
+      await prisma.user.create({ data: { userId, phone: `+1553${String(Date.now()).slice(-7)}` } });
+      await prisma.agent.create({ data: { id, userId, goal: 'kill retry', status: 'ACTIVE' } });
+      await prisma.agentAttentionRequest.create({
+        data: { userId, agentId: id, workflowId: id, question: 'retry fixture' },
+      });
+      let failed = false;
+      prisma.agentAttentionRequest.deleteMany = (async (...args: Parameters<typeof original>) => {
+        if (!failed) {
+          failed = true;
+          throw new Error('synthetic transient cleanup failure');
+        }
+        return original(...args);
+      }) as typeof prisma.agentAttentionRequest.deleteMany;
+      await assert.rejects(deleteAgentRecursive(id, { retryArchived: true }), /transient cleanup/);
+      assert.ok((await prisma.agent.findUniqueOrThrow({ where: { id } })).deletedAt);
+      assert.equal(await prisma.agentAttentionRequest.count({ where: { agentId: id } }), 1);
+      await deleteAgentRecursive(id, { retryArchived: true });
+      assert.equal(await prisma.agentAttentionRequest.count({ where: { agentId: id } }), 0);
+    } finally {
+      prisma.agentAttentionRequest.deleteMany = original;
+      await prisma.agent.deleteMany({ where: { id } });
+      await prisma.user.deleteMany({ where: { userId } });
+      if (previousArchive === undefined) delete process.env.TRACE_ARCHIVE_ENABLED;
+      else process.env.TRACE_ARCHIVE_ENABLED = previousArchive;
     }
   });
 
