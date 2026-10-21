@@ -49,6 +49,9 @@ export function trajectoryActivity(message: Message): TrajectoryActivity | null 
       kind: 'comms',
       label: `${a2a.from.label} → ${a2a.to.label} · ${a2a.text}`,
     };
+  // The message renderer displays plain assistant text as a synthetic Thought card.
+  if (message.role === 'ASSISTANT' && message.text.trim())
+    return { key: message.message_id, message, kind: 'thinking', label: 'Thinking' };
   const tool = metadata?.toolName;
   if (
     message.role !== 'TOOL' ||
