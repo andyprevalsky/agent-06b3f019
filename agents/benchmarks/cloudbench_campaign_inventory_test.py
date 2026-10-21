@@ -636,6 +636,9 @@ def seed_fixture(tmp_path, monkeypatch):
     # The 50-member cohort's default cleanup floors (51 x (256 + 32) MiB) would
     # tie these seed controls to ~15 GB of real host free space; size them like
     # the owning cleanup-ticket campaign controls instead.
+    # The copied root has no back-end/.env; name the fleet's browser provider so
+    # the provider-scoped Tilion capacity row does not bind this Kernel fixture.
+    monkeypatch.setenv("CLOUDBENCH_BROWSER_PROVIDER", "kernel")
     monkeypatch.setenv("CLOUDBENCH_CLEANUP_DISK_RESERVE_MB", "1")
     monkeypatch.setenv("CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB", "1")
     monkeypatch.setenv("CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB", "0")
