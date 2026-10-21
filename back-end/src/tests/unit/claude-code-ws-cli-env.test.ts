@@ -27,6 +27,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
+import { runInNewContext } from 'node:vm';
 
 const wsServerPath = resolve(
   __dirname,
@@ -162,4 +163,54 @@ test('ws-server launches the Claude Code CLI with its stream idle watchdog enabl
 test('ws-server forces the watchdog on even when the sandbox env disables it', async () => {
   const env = await captureCliEnv('inherited-off', { CLAUDE_ENABLE_STREAM_WATCHDOG: '0' });
   assert.equal(env.streamWatchdog, '1');
+});
+
+test('native Claude result codec preserves action identity and error evidence', () => {
+  const source = readFileSync(wsServerPath, 'utf8');
+  const start = source.indexOf('function emitClaudeMessage(message)');
+  const end = source.indexOf('async function runClaudeCli()', start);
+  assert.ok(start > 0 && end > start);
+  const events: Record<string, unknown>[] = [];
+  const emit = runInNewContext(`(${source.slice(start, end).trim()})`, {
+    appendEvent: (event: Record<string, unknown>) => events.push(event),
+  }) as (message: unknown) => void;
+  for (const isError of [false, true]) {
+    const result = { stdout: 'original tool output', exitCode: isError ? 1 : 0 };
+    emit({
+      type: 'user',
+      message: {
+        content: [{ type: 'tool_result', tool_use_id: 'native-call-17', is_error: isError }],
+      },
+      tool_use_result: result,
+    });
+    const event = events.at(-1);
+    assert.equal(event?.tool_use_id, 'native-call-17');
+    assert.equal(event?.is_error, isError);
+    assert.equal(event?.tool_use_result, result);
+  }
+  // A legacy/ambiguous payload remains explicitly unknown, never inferred success.
+  emit({ type: 'user', tool_use_result: { stdout: 'unbound output' } });
+  assert.equal(events.at(-1)?.tool_use_id, null);
+  assert.equal(events.at(-1)?.is_error, null);
+});
+
+test('native Claude batch retains every original block without assigning shared metadata', () => {
+  const source = readFileSync(wsServerPath, 'utf8');
+  const start = source.indexOf('function emitClaudeMessage(message)');
+  const end = source.indexOf('async function runClaudeCli()', start);
+  const events: Record<string, unknown>[] = [];
+  const emit = runInNewContext(`(${source.slice(start, end).trim()})`, {
+    appendEvent: (event: Record<string, unknown>) => events.push(event),
+  }) as (message: unknown) => void;
+  const blocks = [
+    { type: 'tool_result', tool_use_id: 'native-first', is_error: false, content: 'first output' },
+    { type: 'tool_result', tool_use_id: 'native-second', is_error: true, content: 'second error' },
+  ];
+  const shared = { stdout: 'ambiguous shared output' };
+  emit({ type: 'user', message: { content: blocks }, tool_use_result: shared });
+  const event = events.at(-1);
+  assert.deepEqual(event?.tool_results, blocks);
+  assert.equal(event?.tool_use_result, shared);
+  assert.equal(event?.tool_use_id, null);
+  assert.equal(event?.is_error, null);
 });

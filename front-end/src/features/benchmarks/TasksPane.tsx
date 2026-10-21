@@ -29,7 +29,14 @@ import type { HubTask } from '@/lib/api/benchmarksHub';
 import { createHubRunRequest } from '@/lib/api/benchmarksHub';
 import { TaskFlagIcons } from './TaskFlagIcons';
 
-const GROUPS = ['pre-deploy', 'daily', 'rose-bench', 'polar-bench', 'incomplete'] as const;
+const GROUPS = [
+  'pre-deploy',
+  'daily',
+  'rose-bench',
+  'process-bench',
+  'polar-bench',
+  'incomplete',
+] as const;
 
 function formatDuration(seconds: number | null): string {
   if (seconds === null) return '—';

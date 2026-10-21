@@ -1,0 +1,226 @@
+{
+  "version": 1,
+  "standing_workflow": "NEVER FORGET TO LET THE LEARNINGS FLOW. Confirmed task1/WHM failures and fixes update applicable process specs, generator/checks and negative/positive traces; Process Bench findings feed back to task1. Keep original outcomes immutable and never weaken requirements for a pass.",
+  "source_commit": "0ab5620a5",
+  "sources": [
+    "/project/whm-task1-82fa0515/parent-analysis/original-goal-vs-execution.json",
+    "/project/whm-task1-82fa0515/parent-analysis/janice-verifier-timing.json",
+    "/project/whm-task1-82fa0515/recovery-20261021/recovery-report.json"
+  ],
+  "confirmed_observations": [
+    {
+      "id": "authored-scope",
+      "observation": "Top-level plan retained the goal; populated subgoals reduced opportunity mapping to four existing relationships and continuous control to one bounded setup audit.",
+      "cases": [
+        "process-investor-outreach"
+      ],
+      "general_check": "Judge original process, not weaker generated plans; require all active steps.",
+      "regression": "missing-prerequisite"
+    },
+    {
+      "id": "contact-waterfall",
+      "observation": "Contact tried completion at turn 15 without definitive pass or exhausted follow-up; only initial email observed, no completed day4/day10/day21/LinkedIn/intake sequence.",
+      "cases": [
+        "process-investor-outreach"
+      ],
+      "general_check": "Enforce dependency order and lifecycle completion before final success.",
+      "regression": "premature-success"
+    },
+    {
+      "id": "decline-artifacts",
+      "observation": "Unsuccessful child schema required nonnullable SAFE/wire references. Overall run had six agents, three firms, two emails and zero settled dollars.",
+      "cases": [
+        "process-investor-outreach",
+        "process-contract-renewal",
+        "process-refund-exception"
+      ],
+      "general_check": "Valid declined/blocked subresult does not satisfy overall success; never invent absent artifacts.",
+      "regression": "test_legitimate_decline_and_inactive_branch_succeed_but_not_missing_settlement"
+    },
+    {
+      "id": "material-handoff",
+      "observation": "Parent had deck text, first browser child said attachment unavailable; combined create/share failed, then create, fill and share succeeded.",
+      "cases": [
+        "process-investor-outreach",
+        "process-customer-onboarding"
+      ],
+      "general_check": "Require actual input/material references and verified creation before downstream sharing/use.",
+      "regression": "bad-input"
+    },
+    {
+      "id": "clock-budget",
+      "observation": "Child cap was 25 iterations. Two wait_for calls totaled 1666.184 seconds; longest was 1280.431 seconds. Verifier call totals are not critical-path wall time.",
+      "cases": [
+        "process-investor-outreach",
+        "process-meeting-scheduling",
+        "process-incident-recovery"
+      ],
+      "general_check": "Keep business time distinct from wall time; require explicit business-day evidence.",
+      "regression": "backwards-clock",
+      "causal_status": "Shared-world-clock blocker remains unreconstructed. No timeout/cap cause or runtime fix is claimed without replay."
+    }
+  ],
+  "feedback_to_task1": "Apply original-scope and verified-material checks to populated subgoals; allow nullable absent investment artifacts on unsuccessful children; replay premature completion and shared-clock waits before claiming any task1 runtime fix. This feature does not change task1 or launch a fundraiser.",
+  "source_sha256": {
+    "/project/whm-task1-82fa0515/parent-analysis/original-goal-vs-execution.json": "2ad6f22b112cbc69586aebae1cd56bdb38c12d5a90a0f05be329417f5fc48cf4",
+    "/project/whm-task1-82fa0515/parent-analysis/janice-verifier-timing.json": "d8332a2f316ff561b979d06a0473cbbdad5f266d6a44d157ff65976eaa91af83",
+    "/project/whm-task1-82fa0515/recovery-20261021/recovery-report.json": "bf651afcf1b2aca787dd9d325d3501c8258fcd7d9c0f32a014c5b37a72c6346b"
+  },
+  "implementation_observations": [
+    {
+      "id": "native-result-correlation-and-status",
+      "verified_finding": "The initial checker accepted an unrelated native result ID and treated a non-interrupted exitCode=1 result as success. Matching native action/result identity and explicit success/error status are both required.",
+      "fix": "Preserve tool_use_id and is_error in the Claude codec; correlate exact native IDs and reject absent or failing status. The later duplicate-status consistency repair is recorded separately.",
+      "fix_source": [
+        "65b4e225defbc988b3f0dd0d3b7fe7b10da70694:agents/benchmarks/process_bench.py",
+        "65b4e225defbc988b3f0dd0d3b7fe7b10da70694:e2b-templates/claude-code/ws-server.mjs"
+      ],
+      "regressions": [
+        "agents/benchmarks/process_bench_test.py::test_native_claude_result_identity_and_status_fail_closed",
+        "agents/benchmarks/process_bench_test.py::test_supported_older_native_result_with_explicit_id_and_exit_code",
+        "back-end/src/tests/unit/claude-code-ws-cli-env.test.ts"
+      ],
+      "applies_to": "All process cases and any native tool-evidence checker.",
+      "evidence_status": "Deterministic counterexamples and codec unit tests verified. A live E2B sample separately confirmed correlated IDs and exposed the explicit string-error result shape recorded below.",
+      "feedback_to_task1": "Correlate original tool actions/results and preserve failure status before crediting work; this is not a diagnosed cause of the saved fundraiser outcome."
+    },
+    {
+      "id": "dependency-invocation-start-order",
+      "verified_finding": "Completion order alone can accept a dependent action that started before its prerequisite result existed.",
+      "fix": "Require each prerequisite result to precede the dependent invocation start, using original native event indices.",
+      "fix_source": [
+        "65b4e225defbc988b3f0dd0d3b7fe7b10da70694:agents/benchmarks/process_bench.py"
+      ],
+      "regressions": [
+        "agents/benchmarks/process_bench_test.py::test_action_started_before_prerequisite_result_fails"
+      ],
+      "applies_to": "All process dependencies.",
+      "evidence_status": "Deterministic overlapping-invocation regression verified.",
+      "feedback_to_task1": "Audit prerequisite completion before contact/material/approval action starts; do not claim this ordering defect occurred in task1 without its trace."
+    },
+    {
+      "id": "purchase-fixture-policy-facts",
+      "verified_finding": "The first real semantic judge rejected the nominally complete synthetic purchase trace because the request result lacked the LAB-7 cost center and $1,000 approval threshold needed to establish the $1,200 approval route.",
+      "fix": "Add those authored policy facts to the purchase request fixture and required input binding, keeping the semantic obligations and pass threshold. The complete trace then passes; an unperformed quote comparison still fails despite later completion receipts.",
+      "fix_source": [
+        "65b4e225defbc988b3f0dd0d3b7fe7b10da70694:front-end/public/test-assets/process-fixtures.json",
+        "65b4e225defbc988b3f0dd0d3b7fe7b10da70694:agents/benchmarks/tasks.json",
+        "65b4e225defbc988b3f0dd0d3b7fe7b10da70694:agents/benchmarks/fixtures/process-positive-inputs.json"
+      ],
+      "regressions": [
+        "agents/benchmarks/process_bench_test.py::live_judge_proof",
+        "agents/benchmarks/process_bench_test.py::test_canonical_evaluator_generation_and_tree_semantic_boundary"
+      ],
+      "applies_to_cases": [
+        "process-purchase-approval"
+      ],
+      "reusable_check": "Do not infer missing prerequisite or policy facts from downstream references or success prose.",
+      "receipts": [
+        {
+          "path": "/home/boxes/rose-process-bench/.context/process-bench/live-judge.jsonl",
+          "sha256": "24ffc8b76b8400687231999eabf39bab5a15f6e4b2c1181131da8fd750d33ebb"
+        },
+        {
+          "path": "/home/boxes/rose-process-bench/.context/process-bench/live-judge-65b4.jsonl",
+          "sha256": "99545f2dc7b02e4a398798a3b5e67d8a114cfc11ac2f37f25a9e83ca48bfb722"
+        }
+      ],
+      "evidence_status": "Initial live failure and subsequent complete-pass/unperformed-comparison-fail receipts retained.",
+      "feedback_to_task1": "Preserve required input/material facts through delegation and verify their use; the synthetic purchase finding does not establish a fundraiser runtime cause."
+    },
+    {
+      "id": "optional-task-contract-compatibility",
+      "verified_finding": "The owning benchmark suite exposed four existing SimpleNamespace evaluator callers without the newly optional process_spec/tags attributes.",
+      "fix": "Use absent-field defaults for unrelated legacy callers while retaining fail-closed validation for process-tagged callers missing a spec.",
+      "fix_source": [
+        "65b4e225defbc988b3f0dd0d3b7fe7b10da70694:agents/benchmarks/run_benchmark.py"
+      ],
+      "regressions": [
+        "agents/tests/blackbox/benchmark.blackbox.py::test_declared_judge_errors_are_not_evaluator_rejections",
+        "agents/tests/blackbox/benchmark.blackbox.py::test_declared_judge_rejudges_after_no_verdict",
+        "agents/tests/blackbox/benchmark.blackbox.py::test_declared_judge_without_verdict_is_judge_unavailable_error",
+        "agents/tests/blackbox/benchmark.blackbox.py::test_declared_judge_low_score_verdict_is_not_rejudged",
+        "agents/benchmarks/process_bench_test.py::test_missing_process_spec_cannot_disable_runtime_enforcement"
+      ],
+      "receipts": [
+        {
+          "path": "/home/boxes/rose-process-bench/.context/process-bench/five-legacy-evaluators.log",
+          "sha256": "15bc9b87c7f502472e9f67edddaaaa68c7f763c37494fbc3c984edf176fd9280"
+        }
+      ],
+      "applies_to": "Benchmark Task API evolution; not a domain obligation change.",
+      "evidence_status": "Five repetitions and the full owning agents coverage suite verified.",
+      "feedback_to_task1": "No task1 runtime cause or behavior fix is inferred."
+    },
+    {
+      "id": "native-sdk-explicit-string-error",
+      "verified_finding": "A real E2B Claude Bash success returned a dict with stdout and no exitCode; intentional exit 7 returned tool_use_result as a string, with the matching native tool_use_id and is_error=true. The initial dict-only checker rejected that supported error envelope.",
+      "fix": "Normalize only a native string result explicitly marked is_error=true into a nonzero result, preserving the original string as evidence. String success, missing status and unmatched IDs remain rejected.",
+      "source_provenance": {
+        "source_sha": "65b4e225defbc988b3f0dd0d3b7fe7b10da70694",
+        "source_sha256": "bf3b3f405af3719c4f665f282e2a2dfadec245c6bd8279e2e48bffac81bdebae",
+        "template_id": "kng6z68u1md05bfdhq47",
+        "observed_at": "2026-10-21T10:05:47.457Z",
+        "raw_receipt_sha256": "1d23b28d5be5f98e3d6ccec8af2acc0f708fb6c67620acb9362925b78d6dd2a4",
+        "native_absence_verified": true
+      },
+      "regression_fixture": "agents/benchmarks/fixtures/process-native-sdk-events.json",
+      "regressions": [
+        "agents/benchmarks/process_bench_test.py::test_observed_native_sdk_success_and_string_error",
+        "agents/benchmarks/process_bench_test.py::test_native_string_error_cannot_claim_success_or_wrong_identity"
+      ],
+      "applies_to": "All Claude process traces; error status is never completion proof.",
+      "evidence_status": "Actual pre-merge sandbox source hash matched the immutable codec and native absence was verified. Parser repair is validated by the regression named above; production overlay verification remains a separate deployment receipt.",
+      "feedback_to_task1": "Preserve original native result shape/status when auditing a trace. This does not establish the cause of a task1 failure or a task1 runtime fix.",
+      "fix_source": [
+        "agents/benchmarks/process_bench.py",
+        "agents/benchmarks/fixtures/process-native-sdk-events.json"
+      ]
+    },
+    {
+      "id": "ambiguous-native-batch-evidence",
+      "verified_finding": "Review and deterministic codec tests showed that multiple native tool_result blocks lost their individual IDs, error flags and content when only shared tool_use_result metadata was retained.",
+      "fix": "Preserve every original batch block and reject ambiguous batch association in static process checks. Do not zip shared metadata onto native IDs.",
+      "regressions": [
+        "back-end/src/tests/unit/claude-code-ws-cli-env.test.ts::native Claude batch retains every original block without assigning shared metadata",
+        "agents/benchmarks/process_bench_test.py::test_ambiguous_native_batch_cannot_credit_process_steps"
+      ],
+      "source_provenance": "PR #1566 review comment 4335539685 on 65b4e225defbc988b3f0dd0d3b7fe7b10da70694; deterministic regression, not an observed native batch sample.",
+      "evidence_status": "Single-result native compatibility observed; batch evidence retention tested deterministically. Valid batch association remains unsupported and fails closed.",
+      "feedback_to_task1": "Retain original multi-result evidence before attribution; no task1 occurrence or runtime fix inferred."
+    },
+    {
+      "id": "upstream-sdk-event-truncation",
+      "verified_finding": "The existing _build_code_event_context producer stores only the last 200 native events, while _persist_code_agent_judge_evidence records steps_taken from the full event list. A forbidden prefix can disappear before the benchmark receives the row.",
+      "fix": "Require an integer native steps_taken equal to retained event count before evaluating any process. Reject missing or truncated histories; do not expand the global planner context.",
+      "source_provenance": "65b4e225defbc988b3f0dd0d3b7fe7b10da70694:agents/domains/spawn_claude_code_agent/service.py:_build_code_event_context and _persist_code_agent_judge_evidence; repo.py:save_claude_code_message",
+      "regressions": [
+        "agents/benchmarks/process_bench_test.py::test_actual_producer_truncation_cannot_hide_earlier_forbidden_action",
+        "agents/benchmarks/process_bench_test.py::test_missing_or_invalid_native_event_count_fails_closed"
+      ],
+      "evidence_status": "Actual producer exercised deterministically with an earlier forbidden fixture edit and a complete-looking tail. Histories truncated upstream are rejected, not claimed complete.",
+      "feedback_to_task1": "Require complete original evidence when auditing long code-agent sessions; no saved task1 truncation occurrence or runtime cause is inferred.",
+      "independent_static_reproduction": {
+        "path": "/home/boxes/.devbox/desktop-attachments/rose-b9250d0f0727/ph7d34d1p9pak48wp0dcxj36jn8gpc1c/truncation-review-repro--1717c88ec2c4ef802deb.json",
+        "sha256": "be5a427ae24397cf283bfd43377483c1b5573512b6f95cc59a5caf3e26e98f9b",
+        "original_event_count": 221,
+        "retained_event_count": 200,
+        "full_static_result": "failed: prohibited bypass-approval",
+        "truncated_static_result": "passed:7 native steps",
+        "scope": "Confirms static false-positive after lost prefix; no claim about final semantic verdict."
+      }
+    },
+    {
+      "id": "native-status-type-and-consistency",
+      "verified_finding": "A boolean false exit code was accepted as numeric zero, and a nested native is_error=true was ignored when the outer status was false. Deterministic complete-trace and command parser counterexamples reproduced the false credit.",
+      "fix": "Require integer native exit codes, boolean error status and agreement between duplicate status fields. Preserve observed single-result success/error shapes.",
+      "regressions": [
+        "agents/benchmarks/process_bench_test.py::test_native_command_exit_code_requires_integer",
+        "agents/benchmarks/process_bench_test.py::test_native_result_rejects_conflicting_or_invalid_status"
+      ],
+      "source_provenance": "65b4e225defbc988b3f0dd0d3b7fe7b10da70694:agents/benchmarks/process_bench.py; private status-type-counterexample.json",
+      "evidence_status": "Deterministic counterexamples verified; no claim that the malformed native status shapes were observed in live SDK output.",
+      "feedback_to_task1": "Treat conflicting or malformed native result status as unknown, not completed work; no task1 occurrence or cause inferred."
+    }
+  ]
+}

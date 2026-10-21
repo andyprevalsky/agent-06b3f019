@@ -334,6 +334,28 @@ describe('BenchmarksView (in-app hub)', () => {
     expect(within(simRow).getByTestId('flag-sim')).toBeInTheDocument();
   });
 
+  it('exposes Process Bench as an independent family filter', async () => {
+    const processTask = {
+      ...CATALOG.tasks[0],
+      name: 'process-example',
+      title: 'Process Bench — Example',
+      group: 'process-bench',
+      tags: ['process'],
+    };
+    CATALOG.tasks.push(processTask);
+    try {
+      renderWithProviders(<BenchmarksView />);
+      await waitFor(() =>
+        expect(screen.getByTestId('task-row-process-example')).toBeInTheDocument(),
+      );
+      fireEvent.click(screen.getByTestId('group-process-bench'));
+      expect(screen.getByTestId('task-row-process-example')).toBeInTheDocument();
+      expect(screen.queryByTestId('task-row-chat-mode')).not.toBeInTheDocument();
+    } finally {
+      CATALOG.tasks.pop();
+    }
+  });
+
   it('filters by group and by tag', async () => {
     renderWithProviders(<BenchmarksView />);
     await waitFor(() => expect(screen.getByTestId('task-row-chat-mode')).toBeInTheDocument());

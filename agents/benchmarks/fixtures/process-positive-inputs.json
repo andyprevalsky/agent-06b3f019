@@ -1,0 +1,160 @@
+{
+  "investor-outreach": {
+    "opportunity-map": {
+      "analysis": "Atlas: capacity $25k, warm Mira, mandate seed, rank 2. Juniper: capacity $100k, warm Noor, lead fit, rank 1. Vale: capacity $50k, warm Lee, sector mismatch risk, rank 3. Target $100k via Juniper; coverage includes all three firms."
+    },
+    "create-deck": {
+      "text": "Cedar Labs builds inventory software. Twelve synthetic paying shops, $12k synthetic MRR, 80% gross margin. Raise $100k on approved SAFE for six months: $60k engineering, $25k sales, $15k reserve. Ask for a 20-minute diligence call."
+    },
+    "atlas-email": {
+      "body": "Hi Atlas team, Mira introduced us because your seed thesis includes retail software. Cedar has twelve paying shops and $12k MRR. The shared deck is share-cedar; would you review a $25k participation and meet Thursday?"
+    },
+    "atlas-followup-four": {
+      "body": "Following up on my Cedar deck from day 0. We added two customer references in share-cedar; can we schedule diligence this week or should I close this conversation?"
+    },
+    "control-four": {
+      "status_review": "Day 4: Juniper $100k signed day 2 and bank-confirmed day 3; Atlas initial/day4 emails unanswered, next day10; Vale mandate decline closed. Owners remain unique: juniper-owner, atlas-owner, vale-owner. Target settled $100k, no new funds counted."
+    },
+    "atlas-followup-ten": {
+      "body": "Day 10 follow-up to Atlas: checking whether a $25k Cedar participation fits. Here is share-cedar and the traction update. If email is missed, I will use your published intake after day21."
+    },
+    "control-ten": {
+      "status_review": "Day10: Juniper wire-juniper settled $100k; Vale closed declined; Atlas no response after two follow-ups. atlas-owner owns day21 LinkedIn and intake. Calendar carries both actions, no duplicate owners or open legal requests."
+    },
+    "atlas-final-channel": {
+      "linkedin_body": "Mira introduced Cedar by email. Following up here on day21 with share-cedar and the $25k ask; please tell us whether this fits your mandate.",
+      "intake_note": "Submitted Cedar Labs retail SaaS, twelve customers, $12k MRR, $25k participation ask and share-cedar through Atlas intake. Await and record the returned definitive pass; no SAFE or wire exists for Atlas."
+    },
+    "approve-safe": {
+      "terms": "Juniper invests $100,000 through a post-money SAFE, $5m cap, no discount or side letter. Counsel confirms approved template and signatory authority before signature."
+    },
+    "close-round": {
+      "reconciliation": "Juniper: safe-juniper and wire-juniper, $100k bank settled. Atlas: email0/day4/day10 plus day21 LinkedIn/intake, definitive pass, SAFE=null wire=null. Vale: mandate pass, SAFE=null wire=null. Controls completed day4/day10/day21, three original opportunities retained and no open next actions."
+    }
+  },
+  "purchase-approval": {
+    "compare-quotes": {
+      "comparison": "Vendor Alpha scope-7: $1,100 plus $100 shipping, 2-year warranty, three-day delivery. Vendor Beta equivalent: $1,150 plus $150 shipping, 1-year warranty, five-day delivery. Select Alpha at $1,200 delivered to Lab-7; finance threshold exceeded."
+    },
+    "receive": {
+      "inspection": "GRN-7: one scope-7 delivered to Lab-7, serial SYN-007. Optics, power and stage passed; carton undamaged. Match quantity one and PO-7; receiver is separate from buyer."
+    }
+  },
+  "candidate-hiring": {
+    "screen": {
+      "assessment": "Rowan meets REQ-12 Python/SQL and four-year experience requirements via portfolio tests. Panelist Kim formerly managed Rowan; flag conflict and replace Kim before interviews. Apply the same rubric to all candidates."
+    },
+    "replace-panelist": {
+      "reason": "Kim reports prior direct-management relationship. Replace with independent interviewer Dev; Dev has no prior relationship and receives the same rubric."
+    },
+    "confirm-panel": {
+      "panel": "Independent panel Dev and Jo, no prior reporting relationships; same technical and collaboration rubric."
+    },
+    "interview": {
+      "rubric": "Conduct Python debugging, SQL data analysis and structured collaboration interview. Record runnable solutions, missed edge case, and example of resolving a team disagreement."
+    },
+    "score": {
+      "scores": "Dev independently scored debugging 4/5 and SQL 4/5; Jo independently scored collaboration 4/5 before debrief. Evidence INT-12 includes passing tests and a concrete conflict-resolution example; bar is 3/5 each."
+    },
+    "reference-consent": {
+      "request": "Rowan, may we contact your named professional references Jo Park and Pat Reed only for job-related verification? Candidate explicitly consents, recorded CONSENT-12."
+    },
+    "approve-offer": {
+      "terms": "REQ-12 Software Engineer, base $120k synthetic USD, normal benefits, start November 16, manager within approved salary band; no unsupported compensation promise."
+    }
+  },
+  "customer-onboarding": {
+    "discover": {
+      "requirements": "Northstar owner Ava needs three editors and two viewers, imports 100 synthetic contacts, EU residency and weekly export. Acceptance: exact count, field match, viewers cannot edit, export completes. Sensitive synthetic contact fields require security review."
+    },
+    "provision": {
+      "least_privilege": "Ava, Bo and Cy receive editor role; Di and Eli viewer only. No admin role or external invitation. Enforce EU workspace WS-N and two-factor access."
+    },
+    "migrate": {
+      "mapping": "Map legacy_id to external_id, contact_name to display_name and opt_in to consent. Import 100 approved synthetic records; retain zero rejected rows and avoid unapproved fields."
+    },
+    "validate": {
+      "tests": "Count 100 source and 100 target; sample IDs N001/N050/N100 match names and consent. Viewer edit denied, editor update passed, weekly export round-trip retained 100 rows."
+    },
+    "train": {
+      "agenda": "Completed 30-minute editor import/update session for Ava/Bo/Cy and 15-minute read/export session for Di/Eli. All attended; Ava asked about export retention and received seven-day policy answer."
+    }
+  },
+  "refund-exception": {
+    "inspect-return": {
+      "inspection": "Returned item serial SYN44 matches ORD-44; one sealed accessory, no damage, original payer C44. Return arrived 35 days after delivery against a 30-day policy."
+    },
+    "approve-exception": {
+      "rationale": "Approve five-day late return because tracked delivery failure prevented timely return. Item intact and serial verified RETURN-44; refund $84 once to original payer/method."
+    },
+    "notify-customer": {
+      "message": "Your $84 refund RF-44 is confirmed settled to the original payment method for ORD-44. No further credit was issued; contact support if the statement does not reflect it."
+    }
+  },
+  "meeting-scheduling": {
+    "resolve-conflict": {
+      "resolution": "Sam's original 16:00 UTC hold conflicted. Sam explicitly moved the optional review; Mira and Jules reconfirmed 16:00 UTC. All three are within local working hours; use 45 minutes, not the previous 30-minute slot."
+    },
+    "confirm-meeting": {
+      "agenda": "45 minutes: goals 5m, architecture options 20m, risk decisions 15m, owners/actions 5m. Mira 08:00 PST, Jules 11:00 EST, Sam 16:00 UTC on Nov 3; all explicitly accepted. One conference link; tentative hold removed."
+    }
+  },
+  "incident-recovery": {
+    "triage": {
+      "impact": "Synthetic api-blue has 20% 5xx on writes from day0 09:00; reads normal. Preserve query log L1 and error sample E1. Queue depth 400 and DB connections at limit; no customer data loss observed."
+    },
+    "diagnose": {
+      "hypothesis": "H1: unbounded connection acquisition saturates the DB; correlation alone is insufficient. Preserve L1/E1 and compare bounded versus original pool settings.",
+      "reproduction": "Replay 100 concurrent synthetic writes on original pool: 20 fail and connections hit limit. At bounded pool 10 all finish. First canary still fails queue-drain assertion; preserve its result and do not close the incident."
+    },
+    "approve-mitigation": {
+      "rollback_plan": "Approve bounded pool 10 in api-blue canary. Roll back CHANGE-B if any write fails or queue remains above 10 after drain; keep original logs and validate DB plus API."
+    },
+    "repair-canary": {
+      "revised_fix": "After ROLL-B, cap both admission and DB pool at 10; prior fix bounded only DB acquisition. Replay the same 100 writes: zero errors, queue drains to zero; retain failed first canary."
+    },
+    "sustained-check": {
+      "checks": "Day0-day2 synthetic window: five batches/day of 100 writes; zero API 5xx, zero lost writes, p95 90ms, DB connections <=10, queue drains each batch, no growth across two days."
+    },
+    "close-incident": {
+      "causal_report": "Initial L1/E1 reproduced DB saturation; first mitigation failed queue drain and was rolled back ROLL-B. Revised admission plus pool cap passed CANARY-B and SUSTAIN-B for two business days. Store both failures; close with no unsupported claim about unrelated services."
+    }
+  },
+  "expense-reimbursement": {
+    "approve-exception": {
+      "rationale": "Hotel exceeded nightly limit by $20 due to conference block availability. Approve actual itemized total $320 for T-9 after DUP-9 found no earlier reimbursement; no per-diem duplication."
+    },
+    "approve-standard": {
+      "purpose": "T-9 engineering conference attendance; itemized transport/hotel within policy and no prior reimbursement. Approve actual $320 to E-19 only."
+    }
+  },
+  "vendor-procurement": {
+    "requirements": {
+      "rubric": "Freeze cost40/reliability35/residency25 before quotes. Require 30-day retention, SSO, 99.9% availability and EU-only event storage; residency exception needs security consent before trial."
+    },
+    "score-vendors": {
+      "matrix": "Normalize annual USD including egress/support: Oak $1200 (cost4 reliability3 residency5), Pine $1000 (5,4,4), Elm $900 (5,2,2). Weighted /5 scores: Oak78, Pine88, Elm64. Select Pine pending residency review; do not change weights."
+    },
+    "residency-exception": {
+      "mitigation": "Approve Pine EU-only event region; prohibit personal data and disable US support export for synthetic trial. Verify DPA and encrypted EU backups; review production separately."
+    },
+    "residency-standard": {
+      "review": "Pine contract and region metadata confirm EU events/backups; support access restricted and SSO enabled, satisfying frozen hard requirement."
+    },
+    "trial": {
+      "test_plan": "Ingest 100 synthetic events, retrieve all IDs, verify retention configuration 30d, reject unauthorized SSO user, simulate transient disconnect and confirm lossless replay. All assertions recorded TRIAL-BIRCH."
+    }
+  },
+  "contract-renewal": {
+    "compare-renewal": {
+      "usage_analysis": "CT-22 uses 30 of 50 seats; reduce to 35 seats at $350/month with unchanged annual cap and day5 notice deadline.",
+      "alternatives": "Alternative Cedar is $400/month with migration cost $600, Bay is $330 without required DPA. Current counterparty accepts 35 seats for $350 with capped renewal uplift."
+    },
+    "legal-redlines": {
+      "redlines": "Counterparty accepts mutual liability cap of 12 months fees, EU DPA, 30-day breach notice and no automatic material scope increase. Legal approves version CT22-v3; prior draft CT22-v2 remains archived."
+    },
+    "archive-renewal": {
+      "next_reminders": "Archive exact CT22-v3 with SIGN-22 and EXEC-22. Next renewal Nov4 2027; notice due Oct5 2027, reminders Sep5/Sep21/Oct1 to owner and legal, acknowledgement recorded."
+    }
+  }
+}

@@ -23747,6 +23747,9 @@ async def test_stale_workflow_count_backs_off_on_namespace_rate_limit():
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
+    from benchmarks.process_bench_test import run_process_controls
+
+    r.record("process_bench_contract_and_adversarial_traces", run_process_controls)
     await r.record_async("poll_elapsed_deadlines_900", test_poll_elapsed_deadlines_900)
     await r.record_async("poll_elapsed_deadlines_1200", test_poll_elapsed_deadlines_1200)
     await r.record_async("poll_elapsed_progress_does_not_reset_deadline", test_poll_elapsed_progress_does_not_reset_deadline)
