@@ -355,7 +355,7 @@ async function replaceSession(
   options: { keepValidationConnection?: boolean } = {}
 ): Promise<
   BrowserProviderResumeSession & {
-    previousSessionId: string;
+    previousSessionId: string | null;
     previousProvider: 'browser-use' | 'kernel' | 'steel';
   }
 > {
@@ -367,6 +367,7 @@ async function replaceSession(
   if (
     old.provider === 'browser-use' &&
     old.status === 'ACTIVE' &&
+    old.sessionId !== null &&
     !browserResumeScope()?.recovering() &&
     !browserResumeScope()?.sourceEnded()
   ) {

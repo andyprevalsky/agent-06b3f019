@@ -15,7 +15,7 @@ const log = createLogger('BrowserSession');
 
 type TaskInfoResponse = {
   task_id: string;
-  session_id: string;
+  session_id: string | null;
   debug_url: string | null;
   ws_url: string | null;
   status: string;
@@ -141,7 +141,7 @@ function buildTaskInfoResponse(
     passkeys: injection.passkeys,
     user_settings: injection.userSettings,
     browser_session_metadata: {
-      provider: session.sessionId.startsWith('local-') ? 'local' : provider,
+      provider: session.sessionId?.startsWith('local-') ? 'local' : provider,
       profile_id: profileId,
       ...(provider === 'steel' ? { steel_profile_id: profileId } : {}),
     },
@@ -189,6 +189,11 @@ async function applyLiveSessionAvailability(
     return response;
   }
 
+  if (session.sessionId === null) {
+    response.same_session_available = false;
+    response.same_session_unavailable_reason = 'unmaterialized';
+    return response;
+  }
   let health: BrowserSessionHealth;
   try {
     health = await getBrowserSessionHealth(session.sessionId);

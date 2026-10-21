@@ -281,6 +281,7 @@ export async function resizeBrowserViewport(
   }
 
   const provider = storedBrowserProvider(session.provider);
+  if (session.sessionId === null) throw new SessionNotFoundError();
   return resizeSessionViewport(session.sessionId, viewport, provider);
 }
 

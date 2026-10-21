@@ -161,7 +161,7 @@ export interface RecreatedSteelSession {
   proxyLocation: ProxyGeoLocation;
   steelProfileId: string | null;
   profileSource: string;
-  previousSessionId: string;
+  previousSessionId: string | null;
   previousProvider: BrowserProviderName;
   previousSessionReleased: boolean;
 }
@@ -342,9 +342,9 @@ async function recreateSessionWithinClaim(
     steelRecordedProfileId !== null &&
     oldSession.providerProfilePersist;
   let writerReleased = false;
-  if (finishWriter) {
+  if (finishWriter && oldSession.sessionId !== null) {
     await finishSteelProfileWriter(
-      { ...oldSession, providerProfileId: steelRecordedProfileId },
+      { ...oldSession, sessionId: oldSession.sessionId, providerProfileId: steelRecordedProfileId },
       dependencies
     );
     writerReleased = true;

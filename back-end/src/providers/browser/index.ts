@@ -425,7 +425,8 @@ export async function getBrowserCaptchaTelemetry(taskId: string) {
     where: { id: taskId },
     select: { provider: true, sessionId: true },
   });
-  if (session === null) throw new Error(`Browser task not found: ${taskId}`);
+  if (session === null || session.sessionId === null)
+    throw new Error(`Browser task has no physical session: ${taskId}`);
   if (session.provider === 'browser-use') {
     return {
       provider: 'browser-use' as const,
@@ -584,6 +585,10 @@ export async function closeAllActiveSessions(): Promise<number> {
     where: { status: 'ACTIVE' },
     select: { sessionId: true },
   });
-  await Promise.allSettled(sessions.map((session) => closeSession(session.sessionId)));
+  await Promise.allSettled(
+    sessions.flatMap((session) =>
+      session.sessionId === null ? [] : [closeSession(session.sessionId)]
+    )
+  );
   return sessions.length;
 }

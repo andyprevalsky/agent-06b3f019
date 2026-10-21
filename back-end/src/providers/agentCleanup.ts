@@ -12,7 +12,7 @@ import { closeLocalDeviceCodeSession } from './localDevices/session';
 const log = createLogger('Cleanup');
 
 export interface BrowserSessionReleaseDependencies {
-  findActiveSessions: (agentId: string) => Promise<Array<{ sessionId: string }>>;
+  findActiveSessions: (agentId: string) => Promise<Array<{ sessionId: string | null }>>;
   closeSession: (sessionId: string, pause: boolean) => Promise<void>;
 }
 
@@ -273,7 +273,7 @@ export async function releaseAgentBrowserSessions(
   const dependencies = { ...browserSessionReleaseDependencies(options.retire), ...overrides };
   let released = 0;
   const failures: unknown[] = [];
-  let activeBrowserSessions: Array<{ sessionId: string }>;
+  let activeBrowserSessions: Array<{ sessionId: string | null }>;
   try {
     activeBrowserSessions = await dependencies.findActiveSessions(agentId);
   } catch (error) {
@@ -288,6 +288,7 @@ export async function releaseAgentBrowserSessions(
   }
 
   for (const session of activeBrowserSessions) {
+    if (session.sessionId === null) continue;
     try {
       await dependencies.closeSession(session.sessionId, options.retire !== true);
       released += 1;

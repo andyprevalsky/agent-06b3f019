@@ -77,7 +77,7 @@ const defaultDeps: RootBrowserDeps = {
 
 function rootView(session: {
   id: string;
-  sessionId: string;
+  sessionId: string | null;
   status: string;
   provider: string;
   debugUrl: string | null;
@@ -151,7 +151,7 @@ export async function openRootBrowser(
   if (!browserWorldStateEnabled()) throw new Error('Browser world state is disabled');
   const rootAgentId = rootBrowserAgentId(userId);
   const existing = await repo.findActiveRootSession(userId, rootAgentId);
-  if (existing !== null) {
+  if (existing !== null && existing.sessionId !== null) {
     const live = await deps.isLive(existing.sessionId);
     if (live !== false) return rootView(existing);
     await deps.close(existing.sessionId).catch((error: unknown) => {
@@ -193,7 +193,7 @@ export async function closeRootBrowser(
   deps: RootBrowserDeps = defaultDeps
 ): Promise<{ world_state: WorldStateMergeReceipt | null }> {
   const existing = await repo.findActiveRootSession(userId, rootBrowserAgentId(userId));
-  if (existing === null) throw new RootBrowserNotOpenError();
+  if (existing === null || existing.sessionId === null) throw new RootBrowserNotOpenError();
   const { worldState } = await deps.close(existing.sessionId);
   return { world_state: worldState };
 }

@@ -201,7 +201,7 @@ export async function refreshAuthAssistanceSession(id: string, userId: string) {
     throw new BadRequestError('Browser context is not available for this request');
   const liveSteelSessionId = session.sessionId;
 
-  if (liveSteelSessionId.startsWith('local-')) {
+  if (liveSteelSessionId?.startsWith('local-')) {
     const liveViewUrl = interactiveDebugUrl(session.debugUrl);
     return {
       request: serializeRequest(request),
@@ -213,8 +213,8 @@ export async function refreshAuthAssistanceSession(id: string, userId: string) {
   }
 
   /* c8 ignore start -- non-local Steel health/resume path requires Steel SDK/session */
-  let sameSessionAvailable = session.status === 'ACTIVE';
-  if (sameSessionAvailable) {
+  let sameSessionAvailable = session.status === 'ACTIVE' && liveSteelSessionId !== null;
+  if (sameSessionAvailable && liveSteelSessionId !== null) {
     try {
       const health = await getBrowserSessionHealth(liveSteelSessionId);
       const hasEnoughTtl = health.ttlMs === null || health.ttlMs > REFRESH_TTL_BUFFER_MS;
@@ -229,7 +229,7 @@ export async function refreshAuthAssistanceSession(id: string, userId: string) {
     }
   }
 
-  if (sameSessionAvailable) {
+  if (sameSessionAvailable && liveSteelSessionId !== null) {
     const liveViewUrl = interactiveDebugUrl(session.debugUrl);
     return {
       request: serializeRequest(request),

@@ -251,6 +251,7 @@ export async function resumeBrowserSession(
     sourceEnded: () => sourceEnded,
     canFollow: async () => {
       const current = await read();
+      if (current.sessionId === null) return false;
       const health = await getBrowserSessionHealth(current.sessionId);
       if (health.status === null) throw new Error('Browser resume liveness is unknown');
       sourceEnded = !['active', 'live', 'running'].includes(health.status.toLowerCase());
@@ -270,7 +271,7 @@ export async function resumeBrowserSession(
       ) {
         throw new Error('Browser resume cannot follow a session under user control');
       }
-      if (!current.wsUrl || !current.debugUrl)
+      if (current.sessionId === null || !current.wsUrl || !current.debugUrl)
         throw new Error('Ready browser binding is incomplete');
       return assembleResumeResponseWithTransport(
         taskId,

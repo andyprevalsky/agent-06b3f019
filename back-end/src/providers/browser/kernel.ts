@@ -545,6 +545,7 @@ async function recreateKernelSession(
   // location would silently move the session back.
   const recordedLocation =
     opts.forceManagedProxyType === undefined &&
+    previousSessionId !== null &&
     managedKernelProxyFromSource(oldSession.kernelProxySource) !== undefined
       ? await recordedKernelProxyLocation(kernelClient(), previousSessionId)
       : undefined;
@@ -616,6 +617,7 @@ async function recreateKernelSession(
     // tolerates 404); on the rotate path it is still live and must be reaped.
     if (
       oldSession.provider === 'kernel' &&
+      previousSessionId !== null &&
       previousSessionId !== '' &&
       previousSessionId !== remote.sessionId
     ) {
