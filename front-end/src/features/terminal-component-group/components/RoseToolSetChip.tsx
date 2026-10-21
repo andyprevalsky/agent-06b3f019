@@ -138,11 +138,11 @@ function ToolRow({ tool }: { tool: RoseTool }) {
 }
 
 const CHIP_CLASS =
-  'inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-gradient-to-br from-[#FE7503]/5 via-[#E062CC]/5 to-[#7A6BEC]/5 text-[#E062CC] hover:from-[#FE7503]/10 hover:via-[#E062CC]/10 hover:to-[#7A6BEC]/10 transition-colors';
+  'inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-[#fff6fc] bg-gradient-to-br from-[#FE7503]/5 via-[#E062CC]/5 to-[#7A6BEC]/5 text-[#E062CC] hover:from-[#FE7503]/10 hover:via-[#E062CC]/10 hover:to-[#7A6BEC]/10 transition-colors';
 
 /** Same chip with the light `--border` (hsl(240 8% 88%)) fixed, so dark mode cannot restyle it. */
 const PINNED_CHIP_CLASS =
-  'inline-flex h-7 w-7 items-center justify-center rounded-md border border-[rgb(222,222,227)] bg-gradient-to-br from-[#FE7503]/5 via-[#E062CC]/5 to-[#7A6BEC]/5 text-[#E062CC] hover:from-[#FE7503]/10 hover:via-[#E062CC]/10 hover:to-[#7A6BEC]/10 transition-colors';
+  'inline-flex h-7 w-7 items-center justify-center rounded-md border border-[rgb(222,222,227)] bg-[#fff6fc] bg-gradient-to-br from-[#FE7503]/5 via-[#E062CC]/5 to-[#7A6BEC]/5 text-[#E062CC] hover:from-[#FE7503]/10 hover:via-[#E062CC]/10 hover:to-[#7A6BEC]/10 transition-colors';
 
 export default function RoseToolSetChip({ variant = 'chip' }: { variant?: 'chip' | 'pinned' }) {
   const [isOpen, setIsOpen] = useState(false);

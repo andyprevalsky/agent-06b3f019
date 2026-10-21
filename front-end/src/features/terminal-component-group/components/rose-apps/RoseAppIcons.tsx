@@ -27,7 +27,7 @@
  */
 
 import { useQuery } from '@tanstack/react-query';
-import { Globe, MonitorPlay, Moon, Plug, Smartphone, Sun, type LucideIcon } from 'lucide-react';
+import { Globe, Monitor, Moon, Plug, Smartphone, Sun, type LucideIcon } from 'lucide-react';
 
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useRoseTheme } from '@/features/rose-theme';
@@ -52,6 +52,7 @@ function IconButton({
   onClick,
   tooltip = label,
   alertDot = false,
+  glowing = false,
   size,
 }: {
   testId: string;
@@ -62,6 +63,7 @@ function IconButton({
   onClick: () => void;
   tooltip?: string;
   alertDot?: boolean;
+  glowing?: boolean;
   size: number;
 }) {
   return (
@@ -72,9 +74,17 @@ function IconButton({
           data-testid={testId}
           aria-label={label}
           aria-pressed={pressed}
+          data-displaying={glowing || undefined}
           onClick={onClick}
           className="relative grid cursor-pointer place-items-center focus-visible:outline-none"
-          style={{ width: size, height: size, color }}
+          style={{
+            width: size,
+            height: size,
+            color,
+            filter: glowing
+              ? 'drop-shadow(0 0 5px #9cddff) drop-shadow(0 0 11px #83cfff80)'
+              : undefined,
+          }}
         >
           <Icon className="h-[21px] w-[21px]" strokeWidth={1.7} />
           {alertDot && (
@@ -95,8 +105,8 @@ function IconButton({
 }
 
 const APPS: { app: RoseApp; label: string; icon: LucideIcon }[] = [
+  { app: 'display', label: 'Agent Display', icon: Monitor },
   { app: 'browser', label: 'Browser', icon: Globe },
-  { app: 'display', label: 'Agent Display', icon: MonitorPlay },
   { app: 'phone', label: 'Phone', icon: Smartphone },
   { app: 'integrations', label: 'Integrations', icon: Plug },
 ];
@@ -116,6 +126,7 @@ export function RoseAppIcons({ placement = 'corner' }: { placement?: 'corner' | 
   const theme = useRoseTheme();
   const isMobile = useIsMobile();
   const header = placement === 'header';
+  const fullDrawerOpen = apps?.openApp === 'browser' || apps?.openApp === 'display';
   if (apps === null || header !== isMobile) return null;
   return (
     <nav
@@ -125,7 +136,18 @@ export function RoseAppIcons({ placement = 'corner' }: { placement?: 'corner' | 
       className={
         header ? 'flex flex-none items-center' : 'fixed z-[90] hidden items-center md:flex'
       }
-      style={header ? undefined : { top: 11, right: APP_ICON_EDGE, gap: APP_ICON_GAP }}
+      style={
+        header
+          ? undefined
+          : fullDrawerOpen
+            ? {
+                top: 11,
+                left: 'calc(50% + 32px)',
+                transform: 'translateX(-50%)',
+                gap: APP_ICON_GAP,
+              }
+            : { top: 11, right: APP_ICON_EDGE, gap: APP_ICON_GAP }
+      }
     >
       <AppIconButtons
         apps={apps}
@@ -152,6 +174,9 @@ function AppIconButtons({
   size: number;
 }) {
   const reconnect = useReconnectNeeded();
+  const hasDisplay = apps.displayEntries.some(
+    (entry) => entry.agentId === apps.selectedAgentId && entry.items.length > 0,
+  );
   const idle = isDark ? IDLE_COLOR_DARK : IDLE_COLOR;
   return (
     <>
@@ -162,7 +187,14 @@ function AppIconButtons({
           label={label}
           icon={icon}
           pressed={apps.openApp === app}
-          color={apps.openApp === app ? APP_ACTIVE_COLOR : idle}
+          color={
+            app === 'display' && hasDisplay
+              ? '#9cddff'
+              : apps.openApp === app
+                ? APP_ACTIVE_COLOR
+                : idle
+          }
+          glowing={app === 'display' && hasDisplay}
           onClick={() => apps.toggleApp(app)}
           alertDot={app === 'integrations' && reconnect.length > 0}
           tooltip={

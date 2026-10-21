@@ -55,17 +55,21 @@ function panel() {
 }
 
 describe('Agent Display destination', () => {
-  it('sits beside Browser, opens output on demand and unmounts frames when closed', async () => {
+  it('comes first, glows for available output and unmounts frames when closed', async () => {
     const complete = vi.fn();
     renderWithProviders(<Scene messages={[output()]} complete={complete} />, {
       selectedAgentId: 'root',
     });
     const icons = within(screen.getByTestId('rose-app-icons')).getAllByRole('button');
     expect(icons.slice(0, 2).map((b) => b.getAttribute('aria-label'))).toEqual([
-      'Browser',
       'Agent Display',
+      'Browser',
     ]);
     expect(screen.queryByTestId('display-html-frame')).toBeNull();
+    const displayIcon = screen.getByTestId('rose-app-display');
+    await waitFor(() => expect(displayIcon).toHaveAttribute('data-displaying', 'true'));
+    expect(displayIcon).toHaveStyle({ color: '#9cddff' });
+    expect(displayIcon.querySelector('svg.lucide-monitor')).not.toBeNull();
     expect(complete).toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Agent Display' }));
     await waitFor(() => expect(within(panel()).getByTitle('game.html')).toBeInTheDocument());
@@ -96,6 +100,7 @@ describe('Agent Display destination', () => {
     renderWithProviders(<Scene messages={[]} />, { selectedAgentId: 'root' });
     fireEvent.click(screen.getByRole('button', { name: 'Agent Display' }));
     expect(within(panel()).getByText('No displays yet for this agent.')).toBeInTheDocument();
+    expect(screen.getByTestId('rose-app-display')).not.toHaveAttribute('data-displaying');
     expect(screen.queryByTestId('display-html-frame')).toBeNull();
   });
 

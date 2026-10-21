@@ -1,5 +1,4 @@
 /** A single active output frame, mounted only while Agent Display is open. */
-import { MonitorPlay } from 'lucide-react';
 import { DisplayMediaGroup } from '../inline-media/DisplayMediaGroup';
 import { AppDrawerShell } from './AppDrawerShell';
 import { useRoseApps } from './roseAppsState';
@@ -16,8 +15,10 @@ export function AgentDisplayDrawer() {
     ) ?? entries.at(-1);
   return (
     <AppDrawerShell open={open} label="Agent Display" testId="agent-display-drawer" variant="full">
-      <div className="flex min-h-14 flex-none items-center gap-2 px-[18px] pr-12 md:pr-56 text-sm font-semibold">
-        <MonitorPlay aria-hidden="true" className="h-[18px] w-[18px] flex-none" />
+      <div
+        data-testid="agent-display-header"
+        className="flex h-[56px] flex-none items-center px-[18px] pr-12 md:pr-56 text-sm font-semibold"
+      >
         Agent Display
       </div>
       {open && (

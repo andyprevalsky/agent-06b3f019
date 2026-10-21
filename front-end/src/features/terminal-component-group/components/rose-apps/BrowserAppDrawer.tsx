@@ -45,7 +45,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, Globe, RotateCw, type LucideIcon } from 'lucide-react';
+import { ArrowLeft, ArrowRight, RotateCw, type LucideIcon } from 'lucide-react';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { cn } from '@/lib/utils';
 import type { Agent } from '../../hooks';
@@ -340,8 +340,10 @@ export function BrowserAppDrawer() {
     activeAgentId !== apps.selectedAgentId;
   return (
     <AppDrawerShell open={open} label="Browser drawer" testId="browser-app-drawer" variant="full">
-      <div className="flex flex-none items-center gap-2.5 px-[18px] pb-3 pt-4 text-[15px] font-semibold">
-        <Globe className="h-[18px] w-[18px] flex-none" strokeWidth={1.7} />
+      <div
+        data-testid="browser-drawer-header"
+        className="flex h-[56px] flex-none items-center px-[18px] pr-12 md:pr-56 text-sm font-semibold"
+      >
         Browser
       </div>
       <BrowserModeTabs />

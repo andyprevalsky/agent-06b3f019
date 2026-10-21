@@ -244,7 +244,7 @@ function InputArea({
       data-testid="terminal-input-area"
       data-chat-mode={a.isChatMode ? 'true' : 'false'}
       className={cn(
-        'relative shrink-0 transition-opacity duration-300 ease-in-out md:pb-6',
+        'relative z-30 shrink-0 transition-opacity duration-300 ease-in-out md:pb-6',
         roseDesktop
           ? 'rose-mobile-query-area pb-[var(--mobile-querybox-gap)]'
           : 'pb-[calc(0.25rem+var(--safe-area-inset-bottom))]',
