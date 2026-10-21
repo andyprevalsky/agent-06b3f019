@@ -13,6 +13,7 @@ import {
   releaseTilionRemoteSession,
   TilionRateLimitError,
 } from '../../providers/browser/tilion';
+import { steelCdpConnectionUrl } from '../../providers/steel/urls';
 import { runLiveKernelSteelAuthPersist } from './browser-provider.auth-persist.live';
 import {
   assert,
@@ -117,10 +118,14 @@ export async function runLiveTilionChallengeRecovery(): Promise<void> {
         (recovered as { config_key?: unknown }).config_key
       )} replaced=${winner !== String(init.session_id)}`
     );
-    const carried = await withPage(String(recovered.ws_url), async (page) => {
-      await navigateKernelPage(page, 'https://example.com');
-      return page.evaluate(() => localStorage.getItem('rose_tilion_recovery'));
-    });
+    // The winner can be any provider; Steel needs its key added at this CDP boundary.
+    const carried = await withPage(
+      steelCdpConnectionUrl(String(recovered.ws_url)),
+      async (page) => {
+        await navigateKernelPage(page, 'https://example.com');
+        return page.evaluate(() => localStorage.getItem('rose_tilion_recovery'));
+      }
+    );
     assert(carried === 'carried', 'recover-challenge winner lost the worker storage_state');
     if (winner !== String(init.session_id)) {
       const replaced = await tilionApi('GET', `/v1/session/${String(init.session_id)}/status`);

@@ -415,10 +415,15 @@ export async function runLiveTilionProviderParity(): Promise<void> {
     assert(resumed.task_id === taskId, 'resume changed the stable task ID');
     assert(resumed.saved_url === 'https://example.com/resume-check', 'resume lost the saved URL');
     assert(resumed.browser_session_metadata?.provider === 'tilion', 'resume changed providers');
+    // Resume lands on a fresh Tilion session (a new exit), so the rotated exit itself
+    // cannot be kept; the exit TIER must be. The location label may change
+    // (tilion_residential_rotated_us → tilion_residential_country, reported to lane B).
+    const exitTier = (source: unknown) => /^tilion_(residential|mobile)_/.exec(String(source))?.[1];
     assert(
-      resumed.browser_session_metadata?.proxy_source ===
-        rotated.browser_session_metadata?.proxy_source,
-      `resume lost the rotated Tilion exit type: rotated=${String(
+      exitTier(resumed.browser_session_metadata?.proxy_source) !== undefined &&
+        exitTier(resumed.browser_session_metadata?.proxy_source) ===
+          exitTier(rotated.browser_session_metadata?.proxy_source),
+      `resume lost the rotated Tilion exit tier: rotated=${String(
         rotated.browser_session_metadata?.proxy_source
       )} resumed=${String(resumed.browser_session_metadata?.proxy_source)}`
     );
