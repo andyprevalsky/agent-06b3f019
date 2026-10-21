@@ -68,3 +68,29 @@ approve only that challenge, then verify the authenticated target account in the
 browser. Approval on the owner's personal phone does not satisfy cloud-phone
 approval. Keep policy readback, Gmail access, and target-site sign-in evidence as
 separate checkpoints. Do not claim full history sync or continuous SMS delivery.
+
+## Observed post-policy recovery and challenge delivery
+
+After the saved policy change, the retained Gmail account reached a populated
+inbox and its active account sheet confirmed the configured Google identity.
+A fresh isolated browser was then opened at the real Gmail website. The
+previous `/join` Rose URL returned 404 and the current Rose home login offered
+phone/email, so it was not misreported as a Google OAuth test. Google Gmail
+login accepted the saved password and offered approval on both the cloud
+Apple iPhone SE (3rd generation) and the personal iPhone. The cloud phone
+actually displayed a matching just-now Linux sign-in prompt for the intended
+account. Approval and browser continuation must be checked separately; device
+listing alone does not establish delivery.
+
+At the final checkpoint, the cloud phone displayed the just-now Google prompt
+for the fresh Linux browser. The operator selected Yes and the matching number
+through the protected USER broker. The browser then reached
+`https://mail.google.com/mail/u/0/`; its page title identified the exact configured
+account. This establishes operator-assisted fresh browser login via the cloud
+phone, not a complete autonomous-agent run. The safe ordered receipt is
+`.context/phone-harness/fresh-google-cloud-approval-result.json`.
+
+Reusable recovery rule: after selecting the number, inspect the originating
+browser until its actual authenticated result appears; the phone closing its
+prompt alone is insufficient. Do not reuse the challenge number, repeat input,
+or infer success from the broker's input acknowledgment.
