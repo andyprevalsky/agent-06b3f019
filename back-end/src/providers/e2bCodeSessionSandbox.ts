@@ -256,6 +256,17 @@ export async function recordE2bCodeSessionSandbox(
   if (codeSession !== null) await recordSandbox(codeSession.id, { sandboxKind: 'e2b', sandboxId });
 }
 
+/** Cleanup did not confirm a pause; retain the session lease for reconciliation. */
+export class CodeSessionPauseUnconfirmedError extends Error {
+  constructor(cause: unknown) {
+    super(
+      `Code session pause unconfirmed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause }
+    );
+    this.name = 'CodeSessionPauseUnconfirmedError';
+  }
+}
+
 /** A persistent session's sandbox is paused (never killed) on a failed start. */
 export async function releaseSandboxAfterFailedStart(
   sandbox: Sandbox,
@@ -266,12 +277,13 @@ export async function releaseSandboxAfterFailedStart(
     return;
   }
   try {
-    await sandbox.pause();
     await recordSandbox(codeSession.id, { sandboxKind: 'e2b', sandboxId: sandbox.sandboxId });
+    await sandbox.pause();
   } catch (error) {
     log.warn('Pausing the sandbox after a failed start failed', {
       error: error instanceof Error ? error.message : String(error),
     });
+    throw new CodeSessionPauseUnconfirmedError(error);
   }
   await markPaused(codeSession.id);
 }

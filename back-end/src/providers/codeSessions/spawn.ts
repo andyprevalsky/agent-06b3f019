@@ -20,7 +20,10 @@ import {
   resolveCodeSession,
   type CodeSessionRow,
 } from './store';
-import { CODE_SANDBOX_IDLE_TIMEOUT_MS } from '../e2bCodeSessionSandbox';
+import {
+  CODE_SANDBOX_IDLE_TIMEOUT_MS,
+  CodeSessionPauseUnconfirmedError,
+} from '../e2bCodeSessionSandbox';
 import { switchCodeSessionProvider } from './usageLimit';
 import { pendingResizeForTask, sizeView, type SizeView } from './sandboxResize';
 import type { SandboxSize } from './sandboxSize';
@@ -134,7 +137,9 @@ export async function createWithCodeSession<
   try {
     session = await create(codeSession, handoff);
   } catch (error) {
-    if (codeSession !== null) await markPaused(codeSession.id);
+    if (codeSession !== null && !(error instanceof CodeSessionPauseUnconfirmedError)) {
+      await markPaused(codeSession.id);
+    }
     throw error;
   }
   return {
