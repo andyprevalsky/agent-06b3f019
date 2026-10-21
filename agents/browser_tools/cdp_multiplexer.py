@@ -59,9 +59,7 @@ class _Client:
 
 
 async def _default_upstream_connect(url: str) -> Any:
-    return await websockets.connect(
-        url, max_size=None, ping_interval=20, ping_timeout=60, proxy=None
-    )
+    return await websockets.connect(url, max_size=None, ping_interval=20, ping_timeout=60, proxy=None)
 
 
 def _downstream_close_code(code: Optional[int]) -> int:
@@ -113,9 +111,7 @@ class SingleCdpConnectionMultiplexer:
             quiet = logging.getLogger(f"{__name__}.server")
             # browser-use probes the TCP port before its websocket handshake.
             quiet.setLevel(logging.CRITICAL)
-            self._server = await websockets.serve(
-                self._serve_client, "127.0.0.1", 0, max_size=None, logger=quiet
-            )
+            self._server = await websockets.serve(self._serve_client, "127.0.0.1", 0, max_size=None, logger=quiet)
             port = self._server.sockets[0].getsockname()[1]
             self._local_url = f"ws://127.0.0.1:{port}/devtools/browser/rose-single-cdp"
         return self._local_url

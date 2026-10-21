@@ -52,6 +52,7 @@ class FakeTilionGateway:
         self.max_concurrent = max(self.max_concurrent, self.active)
         try:
             async with websockets.connect(self.endpoint, max_size=None, proxy=None) as upstream:
+
                 async def up():
                     async for raw in downstream:
                         await upstream.send(raw)
@@ -93,7 +94,11 @@ async def _chromium():
         try:
             async with httpx.AsyncClient(trust_env=False) as client:
                 version = await client.get(f"http://127.0.0.1:{port}/json/version")
-            yield playwright, browser, version.json()["webSocketDebuggerUrl"]
+            payload = version.json()
+            assert "webSocketDebuggerUrl" in payload, (
+                f"/json/version on 127.0.0.1:{port} -> {version.status_code} {str(payload)[:300]}"
+            )
+            yield playwright, browser, payload["webSocketDebuggerUrl"]
         finally:
             await browser.close()
 
@@ -133,43 +138,43 @@ async def test_tilion_worker_attach_uses_one_upstream_socket():
 
     async with _chromium() as (playwright, _browser, endpoint):
         async with FakeTilionGateway(endpoint) as gateway:
-          with _tilion_env(gateway):
-            local_url, multiplexer = await open_browser_cdp_connection(gateway.cdp_url, label="test")
-            assert multiplexer is not None, "Tilion CDP URLs must be multiplexed"
-            assert local_url.startswith("ws://127.0.0.1:") and TILION_TOKEN not in local_url
-            service = DOMService(cdp_url=local_url, cdp_multiplexer=multiplexer)
-            pw_browser = None
-            try:
-                pw_browser_task = asyncio.create_task(playwright.chromium.connect_over_cdp(local_url))
-                await service.connect()
-                pw_browser = await pw_browser_task
-                assert service.single_cdp_client is True
-                pw_page = pw_browser.contexts[0].pages[0]
-                await pw_page.goto("data:text/html,<title>tilion-one-socket</title><button>hello</button>")
-                dom_page = await service.session.get_current_page()
-                assert dom_page is not None
-                state = await service.get_browser_state(include_screenshot=False)
-                # browser-use observed the page Playwright drove: one browser, two clients.
-                assert state.get("url", "").startswith("data:text/html,<title>tilion-one-socket"), state.get("url")
-                cdp_session = await service.session.get_or_create_cdp_session(focus=False)
-                evaluated = await cdp_session.cdp_client.send.Runtime.evaluate(
-                    params={"expression": "document.title='set-by-browser-use'", "returnByValue": True},
-                    session_id=cdp_session.session_id,
-                )
-                assert evaluated["result"]["value"] == "set-by-browser-use", evaluated
-                assert await pw_page.evaluate("document.title") == "set-by-browser-use"
-                png = await service.capture_viewport_png()
-                assert base64.b64decode(png)[:8] == b"\x89PNG\r\n\x1a\n"
-                assert gateway.rejected_4409 == 0, "a second CDP socket reached Tilion"
-                assert gateway.max_concurrent == 1
-                assert multiplexer.upstream_connections_opened == 1
-            finally:
-                if pw_browser is not None:
-                    await pw_browser.close()
-                await _stop_dom_service(service)
-            await asyncio.sleep(0.2)
-            assert gateway.active == 0, "worker teardown must release Tilion's single client slot"
-            assert gateway.rejected_4409 == 0
+            with _tilion_env(gateway):
+                local_url, multiplexer = await open_browser_cdp_connection(gateway.cdp_url, label="test")
+                assert multiplexer is not None, "Tilion CDP URLs must be multiplexed"
+                assert local_url.startswith("ws://127.0.0.1:") and TILION_TOKEN not in local_url
+                service = DOMService(cdp_url=local_url, cdp_multiplexer=multiplexer)
+                pw_browser = None
+                try:
+                    pw_browser_task = asyncio.create_task(playwright.chromium.connect_over_cdp(local_url))
+                    await service.connect()
+                    pw_browser = await pw_browser_task
+                    assert service.single_cdp_client is True
+                    pw_page = pw_browser.contexts[0].pages[0]
+                    await pw_page.goto("data:text/html,<title>tilion-one-socket</title><button>hello</button>")
+                    dom_page = await service.session.get_current_page()
+                    assert dom_page is not None
+                    state = await service.get_browser_state(include_screenshot=False)
+                    # browser-use observed the page Playwright drove: one browser, two clients.
+                    assert state.get("url", "").startswith("data:text/html,<title>tilion-one-socket"), state.get("url")
+                    cdp_session = await service.session.get_or_create_cdp_session(focus=False)
+                    evaluated = await cdp_session.cdp_client.send.Runtime.evaluate(
+                        params={"expression": "document.title='set-by-browser-use'", "returnByValue": True},
+                        session_id=cdp_session.session_id,
+                    )
+                    assert evaluated["result"]["value"] == "set-by-browser-use", evaluated
+                    assert await pw_page.evaluate("document.title") == "set-by-browser-use"
+                    png = await service.capture_viewport_png()
+                    assert base64.b64decode(png)[:8] == b"\x89PNG\r\n\x1a\n"
+                    assert gateway.rejected_4409 == 0, "a second CDP socket reached Tilion"
+                    assert gateway.max_concurrent == 1
+                    assert multiplexer.upstream_connections_opened == 1
+                finally:
+                    if pw_browser is not None:
+                        await pw_browser.close()
+                    await _stop_dom_service(service)
+                await asyncio.sleep(0.2)
+                assert gateway.active == 0, "worker teardown must release Tilion's single client slot"
+                assert gateway.rejected_4409 == 0
 
 
 async def test_multiplexer_releases_upstream_when_clients_leave_and_reattaches():
@@ -181,9 +186,10 @@ async def test_multiplexer_releases_upstream_when_clients_leave_and_reattaches()
             local_url = await multiplexer.start()
             try:
                 for round_number in (1, 2):
-                    async with websockets.connect(local_url, proxy=None) as one, websockets.connect(
-                        local_url, proxy=None
-                    ) as two:
+                    async with (
+                        websockets.connect(local_url, proxy=None) as one,
+                        websockets.connect(local_url, proxy=None) as two,
+                    ):
                         await one.send(json.dumps({"id": 7, "method": "Browser.getVersion"}))
                         await two.send(json.dumps({"id": 7, "method": "Target.getTargets"}))
                         first = json.loads(await asyncio.wait_for(one.recv(), 10))
@@ -251,7 +257,6 @@ async def test_tilion_cdp_url_detection_and_redaction():
             assert multiplexer is not None and multiplexer._upstream_url == url
         finally:
             await multiplexer.close()
-
 
 
 # ----- HTTP fixture site ----------------------------------------------------
@@ -342,10 +347,11 @@ async def test_tilion_download_lands_in_worker_ledger_not_static_assets():
             backend_calls.append("backend")
             raise AssertionError("Tilion downloads must not use backend file routes mid-run")
 
-        with patch("domains.spawn_browser_agent_v3.repo.upload_file_to_session", no_backend), patch(
-            "domains.spawn_browser_agent_v3.repo.download_session_file", no_backend
-        ), patch.object(browser_service, "list_session_files", no_backend), patch.object(
-            browser_service, "download_session_file", no_backend
+        with (
+            patch("domains.spawn_browser_agent_v3.repo.upload_file_to_session", no_backend),
+            patch("domains.spawn_browser_agent_v3.repo.download_session_file", no_backend),
+            patch.object(browser_service, "list_session_files", no_backend),
+            patch.object(browser_service, "download_session_file", no_backend),
         ):
             persister = await BrowserDownloadPersister.create(
                 browser_session=service.session,
@@ -513,8 +519,9 @@ async def test_tilion_screenshot_action_uses_worker_socket_not_rest():
     async def rest_forbidden(*_args, **_kwargs):
         raise AssertionError("REST screenshot/upload must not run while the worker holds Tilion CDP")
 
-    with patch("domains.spawn_browser_agent_v3.repo.take_browser_computer_screenshot", rest_forbidden), patch(
-        "domains.spawn_browser_agent_v3.repo.upload_file_to_session", rest_forbidden
+    with (
+        patch("domains.spawn_browser_agent_v3.repo.take_browser_computer_screenshot", rest_forbidden),
+        patch("domains.spawn_browser_agent_v3.repo.upload_file_to_session", rest_forbidden),
     ):
         result = await _execute_screenshot(
             session=None,
@@ -626,6 +633,83 @@ async def test_multiplexer_refreshes_expired_connect_token():
                     await multiplexer.close()
 
 
+async def test_resume_request_carries_worker_storage_state():
+    """Contract with lane A2: POST /resume accepts optional storage_state."""
+    from types import SimpleNamespace
+
+    from domains.spawn_browser_agent_v3 import repo
+
+    bodies: List[Dict[str, Any]] = []
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def post(self, url, *, headers, json):
+            assert url.endswith("/api/browser-session/resume")
+            bodies.append(json)
+            return httpx.Response(200, json={"session_id": "s", "ws_url": "wss://x"})
+
+    config = SimpleNamespace(backend=SimpleNamespace(api_url="http://backend", api_key="k"))
+    state = {
+        "cookies": [{"name": "sid", "value": "1", "domain": "example.com", "path": "/"}],
+        "origins": [{"origin": "https://example.com", "localStorage": [{"name": "a", "value": "b"}]}],
+        "current_url": "https://example.com/account",
+    }
+    with patch.object(repo.httpx, "AsyncClient", _Client):
+        await repo.resume_browser_session(config, "task-1", storage_state=state)
+        await repo.resume_browser_session(config, "task-1")
+    assert bodies[0] == {"task_id": "task-1", "force_fresh_profile": False, "storage_state": state}
+    assert bodies[1] == {"task_id": "task-1", "force_fresh_profile": False}
+
+
+async def test_tilion_press_key_uses_cdp_input_not_backend_computer_api():
+    from domains.spawn_browser_agent_v3.service_actions import _ActionContext, _execute_interaction_action
+
+    pressed: List[str] = []
+
+    class _Humanizer:
+        async def press_key(self, key):
+            pressed.append(key)
+
+    class _History:
+        async def record_action(self, **_kwargs):
+            return None
+
+    class _Dom:
+        single_cdp_client = True
+
+    async def rest_forbidden(*_args, **_kwargs):
+        raise AssertionError("Tilion fails /computer/press-key while the worker holds CDP")
+
+    fields = dict.fromkeys(_ActionContext.__dataclass_fields__)
+    fields.update(
+        dom_service=_Dom(),
+        action_history=_History(),
+        action_name="press_key",
+        params={"key": "Escape"},
+        thinking="",
+        session_id="tilion-keys",
+        user_id="user-1",
+        config=object(),
+        humanizer=_Humanizer(),
+        current_url="https://example.com",
+        write_lock_enabled=False,
+        system_name="rose",
+        current_auth_realm="",
+    )
+    with patch("domains.spawn_browser_agent_v3.repo.press_browser_computer_key", rest_forbidden):
+        result = await _execute_interaction_action(_ActionContext(**fields))
+    assert result == {"success": True, "message": ""}, result
+    assert pressed == ["Escape"]
+
+
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
@@ -643,6 +727,8 @@ async def run_all_tests():
         ("provider_name_sets_include_tilion", test_provider_name_sets_include_tilion),
         ("tilion_downloads_path_and_live_view_host", test_tilion_downloads_path_and_live_view_host),
         ("multiplexer_refreshes_expired_connect_token", test_multiplexer_refreshes_expired_connect_token),
+        ("resume_request_carries_worker_storage_state", test_resume_request_carries_worker_storage_state),
+        ("tilion_press_key_uses_cdp_input", test_tilion_press_key_uses_cdp_input_not_backend_computer_api),
     ]:
         await result.record_async(name, test)
     return result.all_passed
