@@ -43,6 +43,41 @@ For the resumed Polar campaign, retain `/benchmark`'s 20-task K=3, fastest-first
 comparable duration groups, 2-hour cap and user-go-before-next-20 scope; none of
 the repair, approval or continuation steps below grants a new batch launch.
 
+## Alignment and implementation (explicit user correction, October 21, 2026)
+
+Align proposed behavior with the user **one fix at a time**, then implement each
+agreed fix **in parallel** with independent agreed work. Sequential discussion
+is not a global implementation pause. Honor recorded agreement without asking
+again; only materially broader behavior needs further alignment. Keep one owner
+per edited boundary and reuse completed proof.
+
+For the aligned Polar repairs, preserve these contracts:
+
+- A real user pause **adds to the existing result**, preserving its text and
+  errors. A timeout stays a timeout; do not invent a pause, discard an earlier
+  result, or duplicate terminal summaries to satisfy an evaluator.
+- Actual final-answer/completion-card evidence belongs in the evaluator input
+  for **all benchmarks by default**, not only the failing Polar examples.
+  Preserve distinct existing assistant text and do not count duplicate summaries
+  as additional evidence. Restored evidence is not a proved task outcome.
+- Bound oversized **tool results across main, explore and browser agents** with
+  an inline preview and an agent-accessible way to retrieve the full remaining
+  content. Preserve existing tighter limits and use a generous fallback where
+  uncapped. Retain the full authorized result before truncation; a file path or
+  mock alone does not prove retrieval. Keep redaction and access boundaries and
+  full evaluator/archive evidence. Parallelize independent integrations using
+  **one shared helper and one paged read through existing attachments**; do not
+  add a second storage system, service or framework for this repair.
+
+The user authorized **one rerun of the same 60 copies with the same CLI**, in a
+benchmark sub-agent, **after all three agreed fixes are implemented and well
+tested**. Preserve the original 20 tasks, K=3, CLI settings and accepted baseline;
+write new run evidence separately. This authorizes that repeat even though its
+slots already have accepted baseline results. It does not authorize Batch 2,
+the next 20 or a changed workload. Resolve actual integration, backend-first,
+warm-source and admission prerequisites; do not invent additional approval gates.
+The parent retains 10-minute and start/no-queue/end CLI scorecards.
+
 ## The iteration loop
 
 1. **Run and monitor** the requested experiment on its frozen source. When

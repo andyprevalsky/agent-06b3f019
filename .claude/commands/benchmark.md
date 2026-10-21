@@ -52,6 +52,26 @@ continuation, an infra repair nor a completed review grants that go. Keep BU
 results separate and report benchmark costs and retry costs without inventing
 missing charges. Do not use Gmail, Calendar or Drive for this work.
 
+**Explicit same-cohort rerun authorization (October 21, 2026).** After the three
+aligned repairs (result-preserving real pause, actual final-answer evidence for
+all benchmarks, and bounded/retrievable tool results for main/explore/browser)
+are implemented and well tested, run the **same 60 with the same CLI in a
+benchmark sub-agent**. Align fixes one at a time, implement independent agreed
+fixes in parallel; see `/descend` for the retained behavior contracts. This is
+an explicit repeat of the original 20-task K=3 cohort, not Batch 2 or permission
+for the next 20. Preserve original settings, baseline grades and producer clocks;
+record the rerun separately. Existing backend-first, warm-source and admission
+requirements still apply; recorded authorization needs no duplicate permission.
+
+Actual final-answer/completion-card evidence must reach the evaluator for **all
+benchmarks by default**. Verify the real producer-to-evaluator path, preserving
+text/errors and distinct messages; a fixture-only pass or judge-only replay is
+not a benchmark outcome. Tool-result truncation must keep bounded previews plus
+retrievable full tails across main, explore and browser, using one shared helper
+and one paged read through existing attachments, with generous fallback limits
+where previously uncapped. Keep full authorized archive/evaluator evidence and
+existing redaction/access controls; do not expand this into a new storage system.
+
 Harness/eval candidates go only through main-chat approval, sorted by
 priority then affected-run count, showing **X of N**, overlapping memberships
 and the exact inline diff. Use `/descend`'s owning failure-clustering guidance
