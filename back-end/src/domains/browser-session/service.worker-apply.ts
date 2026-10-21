@@ -13,11 +13,10 @@
  *   worker: Network.setCookies(cookies); per origin: localStorage.setItem(entries)
  */
 import { canonicalAuthRealm, cookieDomainForStartUrl } from '../../providers/authRealm';
-import { cookieSelectionWhere } from '../../providers/browserCookies';
-import { prisma } from '../../providers/database';
 import { resolveBrowserAuthCredentialSource } from '../../providers/steel/injection';
 import { playwrightCookiesFromRows } from '../../providers/steel/injectionCookies';
 import { restorableLocalStorageOrigin } from '../../providers/steel/injectionState';
+import * as repo from './repo';
 
 export const WORKER_APPLY_REASON = 'single_cdp_client' as const;
 
@@ -45,19 +44,6 @@ function localStorageEntries(value: unknown): Array<{ key: string; value: string
   });
 }
 
-/** Same realm filter as injectUserData's origin tables (boundary-aware, no evilamazon.com). */
-function originRealmFilter(userId: string, authRealm: string) {
-  return {
-    userId,
-    OR: [
-      { origin: { endsWith: `://${authRealm}` } },
-      { origin: { contains: `://${authRealm}:` } },
-      { origin: { endsWith: `.${authRealm}` } },
-      { origin: { contains: `.${authRealm}:` } },
-    ],
-  };
-}
-
 export async function buildTilionWorkerApplyPayload(userId: string, targetUrl: string) {
   const url = /^https?:\/\//.test(targetUrl) ? targetUrl : `https://${targetUrl}`;
   const authRealm = canonicalAuthRealm(url);
@@ -71,21 +57,13 @@ export async function buildTilionWorkerApplyPayload(userId: string, targetUrl: s
   });
   const cookieRows =
     authSource.kind === 'cookie_bundle'
-      ? await prisma.cookie.findMany({
-          where: {
-            userId,
-            ...cookieSelectionWhere(cookieDomain),
-            browserSource: authSource.browserSource,
-            browserProfile: authSource.browserProfile,
-          },
+      ? await repo.findCookieBundleCookies(userId, cookieDomain, {
+          browserSource: authSource.browserSource,
+          browserProfile: authSource.browserProfile,
         })
       : [];
   const cookies = playwrightCookiesFromRows(cookieRows).filter((cookie) => cookie.name !== '');
-  const origins = await prisma.localStorageOrigin.findMany({
-    where: originRealmFilter(userId, authRealm),
-    select: { origin: true, entries: true, updatedAt: true },
-    orderBy: { updatedAt: 'asc' },
-  });
+  const origins = await repo.findRealmLocalStorageOrigins(userId, authRealm);
   // Oldest first so a newer row's value of a shared key wins, as in the CDP path.
   const byOrigin = new Map<string, Map<string, string>>();
   for (const row of origins) {
