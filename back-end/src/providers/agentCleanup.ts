@@ -59,7 +59,7 @@ const TERMINAL_BROWSER_RELEASE_LEASE_MS = 5 * 60 * 1000;
 const TERMINAL_BROWSER_RELEASE_MAX_BATCH_SIZE = 500;
 const TERMINAL_BROWSER_RELEASE_MAX_RUN_MS = 50_000;
 
-function browserSessionReleaseDependencies(): BrowserSessionReleaseDependencies {
+function browserSessionReleaseDependencies(retire = false): BrowserSessionReleaseDependencies {
   return {
     findActiveSessions: async (agentId: string) =>
       prisma.browserSession.findMany({
@@ -67,8 +67,9 @@ function browserSessionReleaseDependencies(): BrowserSessionReleaseDependencies 
           agentId,
           // ERROR is the durable retry marker written when a provider release
           // fails. Excluding it would turn the first transient provider outage
-          // into a permanent paid-browser leak.
-          status: { in: ['ACTIVE', 'PAUSED', 'ERROR'] },
+          // into a permanent paid-browser leak. A confirmed pause already
+          // released compute; revisit it only for explicit retirement.
+          status: { in: retire ? ['ACTIVE', 'PAUSED', 'ERROR'] : ['ACTIVE', 'ERROR'] },
         },
         select: { sessionId: true },
       }),
@@ -113,7 +114,7 @@ function terminalBrowserReleaseDependencies(): TerminalBrowserReleaseDependencie
         SELECT DISTINCT browser_session."agentId" AS "agentId"
         FROM "BrowserSession" AS browser_session
         INNER JOIN "Agent" AS agent ON agent.id = browser_session."agentId"
-        WHERE browser_session.status::text IN ('ACTIVE', 'PAUSED', 'ERROR')
+        WHERE browser_session.status::text IN ('ACTIVE', 'ERROR')
           AND agent.status::text IN ('COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED')
         ORDER BY browser_session."agentId" ASC
         LIMIT ${batchSize}
@@ -265,9 +266,11 @@ export async function runTerminalAgentBrowserReleaseReconcileWithLease(
  */
 export async function releaseAgentBrowserSessions(
   agentId: string,
-  overrides: Partial<BrowserSessionReleaseDependencies> = {}
+  overrides: Partial<BrowserSessionReleaseDependencies> = {},
+  // Deleting an agent explicitly retires its profiles; ordinary shutdown pauses.
+  options: { retire?: boolean } = {}
 ): Promise<number> {
-  const dependencies = { ...browserSessionReleaseDependencies(), ...overrides };
+  const dependencies = { ...browserSessionReleaseDependencies(options.retire), ...overrides };
   let released = 0;
   const failures: unknown[] = [];
   let activeBrowserSessions: Array<{ sessionId: string }>;
@@ -286,7 +289,7 @@ export async function releaseAgentBrowserSessions(
 
   for (const session of activeBrowserSessions) {
     try {
-      await dependencies.closeSession(session.sessionId, false);
+      await dependencies.closeSession(session.sessionId, options.retire !== true);
       released += 1;
       log.info(`Closed browser session ${session.sessionId}`);
     } catch (error) {
@@ -320,7 +323,7 @@ export async function cleanupAgentSessions(agentId: string): Promise<void> {
   }
 
   try {
-    await releaseAgentBrowserSessions(agentId);
+    await releaseAgentBrowserSessions(agentId, {}, { retire: true });
   } catch (error) {
     log.warn(`Failed to release browser sessions for agent ${agentId}`, {
       error: error instanceof Error ? error.message : String(error),
