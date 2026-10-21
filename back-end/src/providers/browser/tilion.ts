@@ -189,8 +189,10 @@ async function postSession(
   // Exact-cleanup evidence: the paid browser exists from here on. Logged before
   // any further await so a process dying during validation still leaves the id
   // (scripts/cloudbench-exact-session-cleanup.py matches this message + sessionId).
+  // Without an id the field is omitted, never printed as `sessionId=null`
+  // (which a parser could read as an id); exact cleanup then fails closed.
   log.info('Tilion session allocated', {
-    sessionId: record?.session_id ?? null,
+    ...(record?.session_id ? { sessionId: record.session_id } : {}),
     idempotencyKey,
     proxyType,
   });
