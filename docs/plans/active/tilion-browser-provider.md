@@ -47,8 +47,9 @@ managed env, bench guest secrets) need user approval; queued for /deploy.
 - Session `ttl`/`idle_timeout` from env (`TILION_SESSION_TTL_SECONDS`,
   `TILION_IDLE_TIMEOUT_SECONDS`), lifetime ≥ activity budget + 5 min; an
   expired session is recreated on resume with the same state and URL.
-- `cdp_observe` (vendor auto CAPTCHA solve, 0.5–3 s per navigation) is
-  configurable (`TILION_CDP_OBSERVE`); default chosen from lane E evidence.
+- `cdp_observe` (vendor auto CAPTCHA solve) is configurable (`TILION_CDP_OBSERVE`),
+  default off: it solved neither live demo and cost 100–250 ms per navigation.
+  Missing CAPTCHA solving stays an open issue (T1), not a resolved item.
 - Ownership: Tilion has no session tags and one account is shared by prod, dev
   and benchmarks. Cleanup/reaping acts only on session ids recorded in the
   local DB as ours and no longer ACTIVE. Never reap by account listing alone.
@@ -101,3 +102,19 @@ Tilion with verified FE links: browser smoke, `browser-biometrics-webdecoy`,
 `linkedin-data-download`, `browser-agent-amazon-passkey`, `browser-auth-*`
 sample (payment canary skipped by user); pass rate/latency/cost ≥ Kernel;
 Tilion live parity registered in /deploy.
+
+## Open issues (report at the end; a mitigation is not a resolution)
+
+- **T1 [critical] H1/H2**: Tilion CAPTCHA solving failed: cdp_observe auto-solve and REST /v1/solve did not solve the reCAPTCHA v2 demo (provider_failed) or the Cloudflare Turnstile demo (deadline). No per-session CAPTCHA telemetry.. Current handling: cdp_observe default off (+100-250 ms per navigation, no observed benefit); challenges go to our rotation ladder (Tilion -> Kernel -> Steel) or user handoff. Next: measure cdp_observe on vs off on the real challenge benchmarks (blue-bottle challenge recovery, eventim, webdecoy); raise a vendor ticket.
+- **T2 [high] G1**: Geo targeting is country-only: state, city and zip are geo_unsupported; region:'de' on a direct session still exited in the US. Current handling: fallback to country, geo_applied recorded.
+- **T3 [high] G3**: Timezone and locale never follow the exit geo (always America/New_York, en-US). Current handling: worker applies emulation over its CDP socket (lane C), needs live verification.
+- **T4 [high] G4**: Bot-detector: runtimeEnableLeak RED, platformMismatch YELLOW (claims Win32); WebDecoy score not yet measured on Tilion. Current handling: Runtime.enable leak is pre-existing on all providers via Playwright; mux adds none.
+- **T5 [medium] E1**: No recording API (replay_url field is always null). Current handling: provider-neutral screenshot replay (Kernel has native video replay).
+- **T6 [high] C2**: Only one CDP client per session (4409), and REST screenshot/act/files fail while CDP is attached (409 session_driven_by_client / 502 ExternalControlBusy), contrary to the docs ('waits'). Current handling: worker owns the only socket; the backend never connects mid-run.
+- **T7 [medium] I2**: No upload API; raw DOM.setFileInputFiles with a local path is a silent no-op; data: URLs blocked. Current handling: worker blob/https upload, needs live verification.
+- **T8 [medium] I3**: WebAuthn: virtual authenticator works, but WebAuthn.getCredentials is intermittently 'not enabled' and one credentials.* call hung. Current handling: bounded calls; needs a live passkey gate.
+- **T9 [high] K1**: 20 concurrent browsers, account-wide, shared by prod, dev and benchmarks; the 21st gets 429 with no Retry-After. Current handling: typed rate-limit error; bench capacity row (lane D).
+- **T10 [medium] B7/D2**: CDP connect and view tokens expire after 30 min; idle_timeout max 1 h kills quiet sessions (user takeover / approval waits). Current handling: fresh URL minted on every reattach/live-view fetch; resume recreates with carried state; the live-view iframe reloads every 25 min.
+- **T11 [medium] K2**: $500 credit wallet: service stops when spent (402); no per-session cost breakdown in /v1/usage. Current handling: typed 402; cost row estimated at 12c/hour.
+- **T12 [low] F1**: Tilion saved logins (/v1/auth) are account-wide, so they would leak across users. Current handling: never called; our per-user injection is used instead.
+- **T13 [high] A3**: Prod is pinned to BROWSER_PROVIDER=kernel on Render; Tilion is not the prod default until approved env writes land (Render, Fly, Codex cloud, boxes managed env, bench secrets). Current handling: queued for user approval at deploy.
