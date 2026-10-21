@@ -203,10 +203,12 @@ while True:
 assert expected["version"] == 1 and expected["run_token"] == run_token and expected["machine_id"] == machine
 files = expected["files"]
 required = {"services.json", "run.json", "stack.log", "logs/backend.log", f"cloudbench-stack-cleanup-{run_token}.status"}
+# Present only when the stack served a world model (its per-step server timing).
+OPTIONAL = "wmh-serve-log.txt"
 assert isinstance(files, dict) and required <= files.keys() and len(files) <= 1030
 total = 0
 for name, metadata in files.items():
-    assert name in required or re.fullmatch(r"logs/worker(?:\.[1-9][0-9]*)?\.log", name)
+    assert name in required or name == OPTIONAL or re.fullmatch(r"logs/worker(?:\.[1-9][0-9]*)?\.log", name)
     assert set(metadata) == {"bytes", "sha256"}
     assert type(metadata["bytes"]) is int and metadata["bytes"] >= 0
     assert re.fullmatch(r"[0-9a-f]{64}", metadata["sha256"])
@@ -235,7 +237,7 @@ for name, metadata in files.items():
 services = json.loads((pending / "services.json").read_text())
 count = services["env"]["worker_processes"]
 assert services["status"] == "stopped" and type(count) is int and 1 <= count <= 1024
-assert set(files) == required | {"logs/worker.log", *(f"logs/worker.{i}.log" for i in range(1, count))}
+assert set(files) - {OPTIONAL} == required | {"logs/worker.log", *(f"logs/worker.{i}.log" for i in range(1, count))}
 if options:
     collect_driver_log()
 assert manifest() == expected, "runtime evidence changed across collection"

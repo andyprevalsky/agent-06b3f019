@@ -7703,7 +7703,107 @@ async def test_client_rotates_compute_token_across_providers_before_waterfall():
     assert usage["gpt_token_rotated"] is True
     assert usage["compute_token_rotated"] is True
     assert usage["compute_token_used"]["type"] == "gpt"
-    assert usage["compute_token_used"]["accessToken"] == "fresh-gpt"
+    assert usage["compute_token_used"]["source"] == "pool"
+    assert usage["compute_token_used"]["poolTokenId"] == "pool-gpt"
+
+
+async def test_client_completion_never_serializes_compute_credentials():
+    """Leased compute credentials must never leave RoseClient in usage or dumps.
+
+    Prod 2026-10-14..20: every direct-auth `llm.context.dump_updated` event
+    carried the leased OAuth access token at
+    `output.usage.compute_token_used.accessToken` into ClickHouse fly_logs.
+    Downstream consumers only need the non-secret lease identity.
+    """
+    import tempfile
+
+    import helpers.observability as observability
+
+    expired_secret = "expired-claude-secret-access-token-0123456789"
+    fresh_secret = "fresh-gpt-secret-access-token-0123456789"
+    gpt_lines = []
+    gpt_lines += _ev(
+        "response.output_text.delta",
+        {"type": "response.output_text.delta", "delta": "rotated"},
+    )
+    gpt_lines += _ev(
+        "response.completed",
+        {
+            "type": "response.completed",
+            "response": {"usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4}},
+        },
+    )
+    gpt_body = "\n".join(gpt_lines)
+
+    async def mark_rate_limited(ctx, cooldown_seconds, rate_limited_until=None, failure_reason=None):
+        return True
+
+    async def fetch_fresh(user_id):
+        return GptAuthContext(
+            token=fresh_secret,
+            account_id="acct-fresh",
+            source="pool",
+            user_id=user_id,
+            pool_token_id="pool-gpt",
+            lineage_key="agent:lineage-1",
+            mark_rate_limited=mark_rate_limited,
+            fetch_fresh=None,
+            max_rotations=3,
+        )
+
+    def handler(req):
+        url = str(req.url)
+        if "api.anthropic.com" in url:
+            return httpx.Response(401, json={"error": {"message": "expired"}})
+        if "chatgpt.com/backend-api/codex/responses" in url:
+            return httpx.Response(200, text=gpt_body, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(500, text="waterfall should not be called")
+
+    set_mock_handler(handler)
+    old_dump_root = observability._DUMP_ROOT
+    old_is_prod = observability._IS_PRODUCTION
+    with tempfile.TemporaryDirectory() as tmp:
+        observability._DUMP_ROOT = Path(tmp) / "llm-dumps"
+        observability._IS_PRODUCTION = False
+        try:
+            chunks = []
+            async for chunk in RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "hi"}],
+                claude_auth=ClaudeAuthContext(
+                    token=expired_secret,
+                    source="pool",
+                    user_id="user-1",
+                    pool_token_id="pool-claude",
+                    lineage_key="agent:lineage-1",
+                    mark_rate_limited=mark_rate_limited,
+                    fetch_fresh=fetch_fresh,
+                    max_rotations=3,
+                ),
+                agent_id="agent-credential-dump",
+                call_site="test-credential-dump",
+            ):
+                chunks.append(chunk)
+            dumps = [p.read_text() for p in (Path(tmp) / "llm-dumps").rglob("*.json")]
+        finally:
+            observability._DUMP_ROOT = old_dump_root
+            observability._IS_PRODUCTION = old_is_prod
+
+    assert "".join(c.data.get("text", "") for c in chunks if c.kind == "content") == "rotated"
+    usage = next(c for c in chunks if c.kind == "usage").data
+    assert usage["compute_token_rotated"] is True
+    serialized_chunks = json.dumps([c.data for c in chunks], default=str)
+    assert dumps, "RoseClient must still write the local LLM dump"
+    for secret in (expired_secret, fresh_secret):
+        assert secret not in serialized_chunks, "completion stream serialized a compute credential"
+        for dump in dumps:
+            assert secret not in dump, "LLM dump persisted a compute credential"
+    assert usage["compute_token_used"] == {
+        "type": "gpt",
+        "source": "pool",
+        "poolTokenId": "pool-gpt",
+        "lineageKey": "agent:lineage-1",
+    }
 
 
 async def test_client_rotation_preserves_native_tool_contract_across_provider_types():
@@ -10127,6 +10227,10 @@ async def run_all_tests():
     await r.record_async(
         "client_compute_rotates_across_providers",
         test_client_rotates_compute_token_across_providers_before_waterfall,
+    )
+    await r.record_async(
+        "client_completion_never_serializes_compute_credentials",
+        test_client_completion_never_serializes_compute_credentials,
     )
     await r.record_async(
         "client_rotation_preserves_native_tool_contract",

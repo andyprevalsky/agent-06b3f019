@@ -4,6 +4,11 @@ import {
   markPoolTokenRateLimited,
   markUserTokenRateLimited,
 } from './claudeCredentials';
+import {
+  claudeEnvelopeExpiredAt,
+  isUsableClaudePoolEnvelope,
+  parseClaudeEnvelope,
+} from './claudeOauthEnvelope';
 import { markGptPoolTokenRateLimited, markGptUserTokenRateLimited } from './gptCredentials';
 import { createLogger } from './logger';
 export {
@@ -83,38 +88,22 @@ function decryptIntegrationCredentials(integration: IntegrationRow, decryptionKe
   return decryptCredentialEnvelope(encryptedCredentials, decryptionKey);
 }
 
-function parseClaudeAccessToken(credentialsJson: string): string | null {
-  try {
-    const parsed = JSON.parse(credentialsJson) as Record<string, unknown>;
-    const oauth = parsed.claudeAiOauth as Record<string, unknown> | undefined;
-    const accessToken = typeof oauth?.accessToken === 'string' ? oauth.accessToken : '';
-    return accessToken.length > 0 ? accessToken : null;
-  } catch {
-    return null;
-  }
-}
-
-function hasUsableClaudePoolEnvelope(credentialsJson: string): boolean {
-  try {
-    const parsed = JSON.parse(credentialsJson) as Record<string, unknown>;
-    const oauth = parsed.claudeAiOauth as Record<string, unknown> | undefined;
-    const accessToken = typeof oauth?.accessToken === 'string' ? oauth.accessToken : '';
-    const refreshToken = typeof oauth?.refreshToken === 'string' ? oauth.refreshToken : '';
-    const expiresAt = typeof oauth?.expiresAt === 'number' ? oauth.expiresAt : 0;
-    const scopes = Array.isArray(oauth?.scopes) ? oauth.scopes : [];
-    // Legacy browser OAuth envelopes can refresh. New cloud-minted Claude
-    // setup-tokens deliberately cannot: they are year-long inference grants and
-    // carry an empty refreshToken. Rejecting every empty refresh token silently
-    // made those healthy, explicitly-pooled accounts invisible to the pool.
-    const refreshable = refreshToken.length > 0;
-    const liveSetupToken =
-      refreshToken === '' &&
-      expiresAt > Date.now() &&
-      scopes.some((scope) => scope === 'user:inference');
-    return accessToken.startsWith('sk-ant-oat') && (refreshable || liveSetupToken);
-  } catch {
-    return false;
-  }
+/** Retire exactly this row: EXPIRED + needs-reconnect, never its sibling accounts. */
+async function retireExpiredClaudeIntegration(
+  integration: IntegrationRow,
+  source: 'user' | 'pool',
+  expiresAt: number
+): Promise<void> {
+  log.warn('Skipping Claude credential past its own expiresAt', {
+    integrationId: integration.id,
+    userId: integration.userId,
+    source,
+    expiredAt: new Date(expiresAt).toISOString(),
+  });
+  await markUserTokenRateLimited(integration.userId, {
+    failureReason: 'auth_error',
+    integrationId: integration.id,
+  });
 }
 
 function parseGptEnvelope(credentialsJson: string) {
@@ -154,12 +143,17 @@ async function rowToCredential(
   if (!decrypted) return null;
 
   if (type === 'claude') {
-    if (source === 'pool' && !hasUsableClaudePoolEnvelope(decrypted)) return null;
-    const accessToken = parseClaudeAccessToken(decrypted);
-    if (!accessToken) return null;
+    const envelope = parseClaudeEnvelope(decrypted);
+    if (!envelope) return null;
+    const expired = claudeEnvelopeExpiredAt(envelope, Date.now());
+    if (expired !== null) {
+      await retireExpiredClaudeIntegration(integration, source, expired);
+      return null;
+    }
+    if (source === 'pool' && !isUsableClaudePoolEnvelope(envelope)) return null;
     return {
       type,
-      accessToken,
+      accessToken: envelope.accessToken,
       source,
       userId: integration.userId,
       poolTokenId: source === 'pool' ? integration.id : undefined,

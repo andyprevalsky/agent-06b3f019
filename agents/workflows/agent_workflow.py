@@ -3958,6 +3958,7 @@ class AgentWorkflow:
                 if tool_name == "web_fetch":
                     extra_executor_kwargs.update(
                         {
+                            "compute_token_lineage_key": self.compute_token_lineage_key,
                             "claude_token": self._active_claude_token(),
                             "claude_token_source": self._active_claude_source(),
                             "claude_token_pool_id": self._active_claude_pool_id(),
@@ -4772,9 +4773,15 @@ class AgentWorkflow:
                 (token_used_type == "claude" and actual_model.endswith("-claude"))
                 or (token_used_type == "gpt" and actual_model.endswith("-gpt"))
             ):
-                if self._remember_compute_token(compute_token_used):
+                # Usage carries only the lease identity, never the credential.
+                # When RoseClient rotated to another lease inside the call,
+                # re-read the lineage-bound lease from the backend. Without a
+                # rotation the call used a credential this workflow supplied,
+                # so the cached token stays as it is.
+                if self.user_id and (claude_token_rotated or gpt_token_rotated):
+                    await self._refresh_compute_token(self.user_id, force=True, token_type=token_used_type)
                     workflow.logger.info(
-                        f"🔑 Workflow cached compute token updated from successful call "
+                        f"🔑 Workflow cached compute token re-read after in-call rotation "
                         f"(type={self.compute_token_provider}, source={compute_token_used.get('source')})"
                     )
 

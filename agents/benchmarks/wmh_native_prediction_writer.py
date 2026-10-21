@@ -5,6 +5,8 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import multiprocessing
+import os
 import time
 import uuid
 from contextlib import contextmanager
@@ -17,6 +19,30 @@ def prediction_path(root, session_id, prediction_id):
 
     owner_path(root, session_id, prediction_id)  # Existing exact safe-ID contract.
     return Path(root) / "native-predictions" / session_id / (prediction_id + ".json")
+
+
+def redaction_workers() -> int:
+    """Explicit bound for the served model's redaction processes (WMH_NATIVE_REDACTION_WORKERS)."""
+    configured = os.environ.get("WMH_NATIVE_REDACTION_WORKERS", "").strip()
+    if configured:
+        value = int(configured)
+        if not 1 <= value <= 64:
+            raise ValueError("WMH_NATIVE_REDACTION_WORKERS must be between 1 and 64")
+        return value
+    return max(1, min(4, os.cpu_count() or 1))
+
+
+def redaction_pool():
+    """A fixed-size spawned pool for redacting full prediction records.
+
+    Each record carries the whole request, so redaction is CPU-bound and grows
+    with the world's history. In the serving process every concurrent step's
+    redaction serialized on its GIL beside the event loop (SIM run 7: 90
+    concurrent steps). Only an entrypoint with a main guard may own one.
+    """
+    from concurrent.futures import ProcessPoolExecutor
+
+    return ProcessPoolExecutor(max_workers=redaction_workers(), mp_context=multiprocessing.get_context("spawn"))
 
 
 @contextmanager
@@ -33,15 +59,21 @@ def record_lock(path):
 class NativePredictionWriter:
     """One redacted writer/sink for existing final records and rejected provider attempts."""
 
-    def __init__(self, root, world_model_id, prompt_sha256):
+    def __init__(self, root, world_model_id, prompt_sha256, *, redactor=None):
         self.root = Path(root)
         self.world_model_id = world_model_id
         self.prompt_sha256 = prompt_sha256
+        # Optional process pool (redaction_pool); same upstream rules, off the GIL.
+        # A broken pool fails the write; it never skips redaction.
+        self.redactor = redactor
 
     def _write(self, path, record):
         from benchmarks.wmh_archive_io import atomic_json, redact_archive
 
-        safe, redactions = redact_archive(record)
+        if self.redactor is None:
+            safe, redactions = redact_archive(record)
+        else:
+            safe, redactions = self.redactor.submit(redact_archive, record).result()
         safe.update(world_model_id=self.world_model_id, prompt_sha256=self.prompt_sha256, redaction_count=redactions)
         atomic_json(path, safe)
         return {

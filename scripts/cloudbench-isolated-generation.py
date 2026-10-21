@@ -313,7 +313,9 @@ def main():
     sync_directory(data)
     os.environ["CLOUDBENCH_DATA_DIR"] = str(data)
     os.environ["CLOUDBENCH_REPO_DIR"] = str(data / "repo")
-    os.environ["CLOUDBENCH_WMH_DIR"] = str(data / "world-model")
+    # cloudbench-run.sh picks each WMH engine's directory under the data root
+    # (legacy world-model, native world-model-native); never pin one here.
+    os.environ.pop("CLOUDBENCH_WMH_DIR", None)
     os.environ["CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP"] = "1"
     os.environ["CLOUDBENCH_FRESH_VOLUME"] = "0"
     os.chdir("/")

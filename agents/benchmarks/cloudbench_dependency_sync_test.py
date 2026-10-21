@@ -1444,7 +1444,8 @@ def test_boot_update_capacity_pressure_waits_without_spending_regular_retries(
 
     Provider capacity pressure needs its own bounded wait budget. It must not
     consume the smaller retry budget that still fails genuine update errors
-    quickly.
+    quickly. An organization Machine-count limit is a permanent refusal, not
+    replacement-capacity pressure: it stops after one attempt.
     """
     cloud = CLOUD_SCRIPT.read_text()
     helper = _extract_fleet_function(cloud, "boot_update_with_capacity_recovery() {")
@@ -1457,6 +1458,10 @@ fake_update() {{
     count=$((count + 1))
     printf '%s\n' "$count" > "$COUNTER"
     if [ "${{FAILURE_KIND}}" = capacity ] && [ "$count" -le 12 ]; then
+        echo "Error: insufficient CPUs available to fulfill request on the current host" >&2
+        return 1
+    fi
+    if [ "${{FAILURE_KIND}}" = org-limit ]; then
         echo "Your organization has reached its machine limit" >&2
         return 1
     fi
@@ -1497,6 +1502,18 @@ boot_update_with_capacity_recovery "$1" fake_update
     )
     assert ordinary.returncode != 0
     assert counter.read_text().strip() == "2"
+
+    counter.unlink()
+    org_limit = subprocess.run(
+        ["bash", "-c", shell, "org-limit", str(update_log)],
+        env={**base_env, "FAILURE_KIND": "org-limit"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert org_limit.returncode != 0
+    assert counter.read_text().strip() == "1"
+    assert "no retry" in org_limit.stderr
 
     fleet = fleet_source_text()
     assert 'CLOUDBENCH_BOOT_UPDATE_CAPACITY_WAIT_SECONDS="$BOOT_UPDATE_CAPACITY_WAIT_SECONDS"' in fleet
@@ -2108,8 +2125,8 @@ def test_deploy_smoke_gate_uses_the_local_isolated_runner(monkeypatch) -> None:
     assert "scripts/run-predeploy-cloud" in step
     assert "Benchmarks → Runs" in step
     assert "ALL non-skipped Pre-Deploy smoke benchmarks must pass" in step
-    assert "deploy-approved smoke skip is a Claude Code benchmark" in step
-    assert "skippable by future deploys without additional human approval" in step
+    assert "deploy-approved credential skip is a Claude Code benchmark" in step
+    assert "These exceptions apply to future deploys without additional human approval" in step
     assert "select_predeploy_benches.py" in PREDEPLOY_LOCAL_SCRIPT.read_text()
     assert "PREDEPLOY_BENCH_CAP" in PREDEPLOY_LOCAL_SCRIPT.read_text()
     assert "select_predeploy_benches" in step or "category floor" in step.lower() or "hard cap" in step.lower()
@@ -2743,6 +2760,14 @@ exec {str(ROOT / "agents/venv/bin/python")!r} "$@"
     )
     (repo / "agents/benchmarks/tasks.json").write_text("{}\n")
     (data_dir / "world-model/build.manifest.json").write_text("{}\n")
+    # Cloud SIM defaults to the native engine: its guard needs the pointer and a
+    # pre-created native venv matching the ref's requirements.
+    (data_dir / "world-model/models/test-model/experiential.json").write_text("{}\n")
+    (repo / "agents/requirements-world-model.txt").write_text("fixture==1\n")
+    native_venv = repo / ".context/experiential-venv"
+    (native_venv / "bin").mkdir(parents=True)
+    (native_venv / "bin/python").symlink_to(sys.executable)
+    (native_venv / "requirements.sha256").write_text(hashlib.sha256(b"fixture==1\n").hexdigest() + "\n")
     (data_dir / "cloudbench-cache/victoria-seed.dump").write_text("fixture\n")
 
     write_executable(controls / "fetch.sh", "#!/usr/bin/env bash\nexit 0\n")
@@ -6311,9 +6336,12 @@ def test_autoscaler_retries_metrics_transport_until_first_capacity_observation()
     under the exact inventory/child lifecycle both before and after readiness;
     the independent task and overall release deadlines remain authoritative."""
     autoscaler = _extract_fleet_function(fleet_source_text(), "bench_autoscaler() {")
-    recovery = autoscaler.split('if ! fleet_job_running "$metrics_proxy_pid"; then', 1)[1].split(
-        "local desired want cur", 1
-    )[0]
+    # Both the shared relay and the per-task proxy re-enter the same recovery.
+    proxy_lost = (
+        "if { cloudbench_shared_relay_enabled && ! cloudbench_proxy_alive metrics_proxy_pid; } "
+        '|| { ! cloudbench_shared_relay_enabled && ! fleet_job_running "$metrics_proxy_pid"; }; then'
+    )
+    recovery = autoscaler.split(proxy_lost, 1)[1].split("local desired want cur", 1)[0]
 
     assert "until start_metrics_proxy 30; do" in autoscaler
     assert 'if [ -e "$out/autoscaler.ready" ]; then' in recovery
@@ -8316,6 +8344,8 @@ def test_cleanup_unconfirmed_pool_claim_survives_successor_fleet(tmp_path: Path)
             "pool_claim_owned_by_current() {",
             "pool_claim_cleanup_unconfirmed() {",
             "pool_machine_state_from_json() {",
+            "pool_machine_inventory_index() {",
+            "pool_machine_indexed_state() {",
             "pool_machine_state() {",
             "reconcile_pool() {",
             "claim_pool_machine() {",
@@ -8742,7 +8772,13 @@ exit 0
     assert cloner.index('fleet_registry_record_volume "$target_name" "$target_volume"') < cloner.index(
         'reap_volume "$target_volume"'
     )
-    assert cloner.index('reap_volume "$target_volume"') < cloner.index('fleet_registry_release_name "$target_name"')
+    # The exact-volume failure branch reaps before releasing its durable name.
+    # (An earlier release closes the pre-allocation source-wait path, where no
+    # provider call occurred and no volume exists.)
+    owned_volume_reap = cloner.index('reap_volume "$target_volume"')
+    owned_volume_branch_end = cloner.index("elif clone_failure_definitively_unallocated", owned_volume_reap)
+    owned_volume_release = cloner.index('fleet_registry_release_name "$target_name"', owned_volume_reap)
+    assert owned_volume_reap < owned_volume_release < owned_volume_branch_end
     volume_classification = cloner.index(
         'target_volume="$(clone_failure_owned_volume_id "$clone_status" "$clone_out")"'
     )
@@ -8780,6 +8816,7 @@ def test_failed_clone_captures_owned_volume_before_machine_name_reconciliation(
             "clone_failure_definitively_unallocated() {",
             "clone_failure_owned_volume_id() {",
             "fleet_clone_with_queue_admission() {",
+            "clone_storage_ready_seconds() {",
             "clone_machine_target() {",
         )
     ) + "\n" + _owned_volume_bundle(fleet)
@@ -8905,6 +8942,7 @@ def test_failed_clone_retains_exact_owner_when_delete_absence_is_unknown(
             "clone_failure_definitively_unallocated() {",
             "clone_failure_owned_volume_id() {",
             "fleet_clone_with_queue_admission() {",
+            "clone_storage_ready_seconds() {",
             "clone_machine_target() {",
         )
     ) + "\n" + _owned_volume_bundle(fleet)
@@ -9014,6 +9052,7 @@ def test_clone_retries_after_accepted_destroy_outlives_confirmation_window(
             "clone_failure_definitively_unallocated() {",
             "clone_failure_owned_volume_id() {",
             "fleet_clone_with_queue_admission() {",
+            "clone_storage_ready_seconds() {",
             "clone_machine_target() {",
         )
     ) + "\n" + _owned_volume_bundle(fleet) + "\n" + _disposable_volume_backup_function(fleet)
@@ -9930,7 +9969,7 @@ def test_execution_provenance_snapshot_stays_sealed_across_real_consumers(
         (
             "fleet",
             fleet_source,
-            'python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/$SCRIPT_SNAPSHOT_OWNER_HELPER" claim',
+            'python3 -I -S -B "$CLOUDBENCH_SCRIPT_SNAPSHOT/$SCRIPT_SNAPSHOT_OWNER_HELPER" claim',
         ),
         (
             "cloud child",
@@ -10497,10 +10536,13 @@ def test_cloud_fleet_provenance_is_staged_stamped_aggregated_and_validated() -> 
 
 
 def fleet_source_text() -> str:
+    # Inline the controller's sourced function libraries so fixtures can extract
+    # the exact production helpers wherever they now live.
     source = FLEET_SCRIPT.read_text()
-    marker = 'source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-inventory.sh"'
-    if marker in source:
-        source = source.replace(marker, (FLEET_SCRIPT.parent / "lib/cloudbench-inventory.sh").read_text())
+    for library in ("cloudbench-inventory.sh", "cloudbench-archived-reuse.sh"):
+        marker = f'source "${{CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}}/{library}"'
+        if marker in source:
+            source = source.replace(marker, (FLEET_SCRIPT.parent / "lib" / library).read_text())
     return source
 
 
@@ -10614,9 +10656,22 @@ def test_extracted_fleet_pid_identity_callers_include_birth_helpers() -> None:
     assert not missing, missing
 
 
+def _cloudbench_proxy_route_functions() -> str:
+    """Production route-liveness helpers; fixtures run the direct-tunnel mode."""
+    source = ENV_HELPER_SCRIPT.read_text()
+    return "unset CLOUDBENCH_SHARED_RELAY_AUTHORITY CLOUDBENCH_SHARED_RELAY_DIRECTORY\n" + "".join(
+        _extract_fleet_function(source, signature)
+        for signature in (
+            "cloudbench_shared_relay_enabled() {",
+            "cloudbench_proxy_alive() {",
+            "cloudbench_proxy_stop() {",
+        )
+    )
+
+
 def _cloudbench_incremental_log_functions() -> str:
     source = CLOUD_SCRIPT.read_text()
-    return "".join(
+    return _cloudbench_proxy_route_functions() + "".join(
         _extract_fleet_function(source, signature)
         for signature in (
             "read_bench_log() {",
@@ -10704,10 +10759,16 @@ def _terminate_test_owned_central_hubs(hub_context: Path, runs_root: Path) -> No
 
 
 def _fleet_primary_shape_helpers(source: str) -> str:
+    sim_on = next(line for line in source.splitlines() if line.startswith("is_sim_on() {")) + "\n" + _extract_fleet_function(
+        source, "bench_simulates() {"
+    )
     return """FLEET_PRIMARY_VM_MEMORY=${FLEET_PRIMARY_VM_MEMORY:-4096}
 FLEET_BUNDLED_FRONTEND_VM_SIZE=${FLEET_BUNDLED_FRONTEND_VM_SIZE:-shared-cpu-4x}
 FLEET_BUNDLED_FRONTEND_VM_MEMORY=${FLEET_BUNDLED_FRONTEND_VM_MEMORY:-8192}
-""" + "".join(
+FLEET_SIM_VM_SIZE=${FLEET_SIM_VM_SIZE:-performance-8x}
+FLEET_SIM_VM_MEMORY=${FLEET_SIM_VM_MEMORY:-65536}
+SIM_ON_CSV=${SIM_ON_CSV:-}
+""" + sim_on + "\n" + "".join(
         _extract_fleet_function(source, signature)
         for signature in (
             "bench_needs_large_primary() {",
@@ -10715,6 +10776,22 @@ FLEET_BUNDLED_FRONTEND_VM_MEMORY=${FLEET_BUNDLED_FRONTEND_VM_MEMORY:-8192}
             "primary_vm_memory_for_bench() {",
             "bench_uses_default_pool_shape() {",
             "shared_cpu_units_for_vm_size() {",
+        )
+    )
+
+
+def _fleet_capacity_guard(source: str) -> str:
+    """The admission guard plus the archived-reuse credit it subtracts."""
+    helper = next(line for line in source.splitlines() if line.startswith("archived_reuse_helper() { "))
+    return (
+        helper
+        + "\n"
+        + "".join(
+            _extract_fleet_function(source, signature)
+            for signature in (
+                "archived_reuse_capacity_credit() {",
+                "enforce_app_capacity_guard() {",
+            )
         )
     )
 
@@ -10788,6 +10865,7 @@ def _clone_machine_bundle(source: str) -> str:
             _extract_fleet_function(source, "clone_failure_owned_volume_id() {"),
             _extract_fleet_function(source, "fleet_clone_with_queue_admission() {"),
             _owned_volume_bundle(source),
+            _extract_fleet_function(source, "clone_storage_ready_seconds() {"),
             _extract_fleet_function(source, "clone_machine_target() {"),
         )
     )
@@ -11328,6 +11406,13 @@ def test_clone_volume_helper_sends_flyctl_clone_create_request(tmp_path: Path) -
             "compute": {"cpu_kind": "shared", "cpus": 2, "memory_mb": 4096, "kernel_args": ["x"]},
             "compute_image": "registry.fly.io/bench:warm@sha256:abc",
         }
+        # Fly answers a create that restores a large snapshot with 202 and a
+        # complete "restoring" volume body (observed 2026-10-19, 19 GB snapshot).
+        replies.append((202, json.dumps({"id": "vol_new2", "name": "cloudbench_t10_ord_85a7e2c", "region": "iad",
+                                         "state": "restoring"}).encode()))
+        assert run(*create) == {"outcome": "created", "id": "vol_new2", "name": "cloudbench_t10_ord_85a7e2c", "region": "iad"}
+        replies.append((202, b'{"id":"vol_x","name":"other","region":"iad"}'))
+        assert run(*create)["outcome"] == "ambiguous"
         replies.append((429, b'{"error":"rate limit exceeded"}'))
         assert run(*create) == {"outcome": "rejected", "status": 429, "message": "rate limit exceeded"}
         # An unreadable error body is not a complete 4xx response.
@@ -11501,7 +11586,8 @@ def test_fleet_provisions_clones_concurrently() -> None:
     assert fleet.index("PROVISION_PIDS=()", wait_all) < phase2
     phase1 = fleet[prov:wait_all]
     # each provision is a backgrounded subshell using its OWN per-bench ledger
-    assert 'clone_machine_target "$out/primary.ids"' in phase1
+    assert 'provision_primary_machine "$bench" "$out"' in phase1
+    assert 'clone_machine_target "$out/primary.ids"' in _extract_fleet_function(fleet, "provision_primary_machine() {")
     assert ") &" in phase1
     assert 'PROVISION_PIDS+=("$!")' in phase1
     # provisioning is decoupled from the run: Phase 1 never launches a child, so
@@ -11601,6 +11687,39 @@ done
         check=False,
         timeout=5,
     )
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
+def test_sim_on_primary_gets_the_measured_native_wmh_shape() -> None:
+    """A --sim-on guest serves the native WMH itself: ~30 GB steady (42 GB peak)
+    and a ~620 s load on 8 vCPUs (measured 2026-10-19). A 4 GB guest ran out of
+    memory and never answered /healthz. Only simulated tasks get the large
+    shape; infra probes and real tasks keep theirs."""
+    fleet = fleet_source_text()
+    assert 'FLEET_SIM_VM_SIZE="${CLOUDBENCH_FLEET_SIM_VM_SIZE:-performance-8x}"' in fleet
+    assert 'FLEET_SIM_VM_MEMORY="${CLOUDBENCH_FLEET_SIM_VM_MEMORY:-65536}"' in fleet
+    helpers = _fleet_primary_shape_helpers(fleet)
+    script = f"""set -eu
+CATALOG_BROWSER_REQUIRED_TASKS=()
+FLEET_PRIMARY_VM_SIZE=shared-cpu-2x
+SIM_ON_CSV=raise-5m-rose-labs-brex
+{helpers}
+[ "$(primary_vm_size_for_bench raise-5m-rose-labs-brex)" = performance-8x ]
+[ "$(primary_vm_memory_for_bench raise-5m-rose-labs-brex)" = 65536 ]
+! bench_uses_default_pool_shape raise-5m-rose-labs-brex
+[ "$(primary_vm_size_for_bench chat-mode)" = shared-cpu-2x ]
+[ "$(primary_vm_memory_for_bench chat-mode)" = 4096 ]
+# A bare run of a catalog simulate task (no --sim-on) serves the WMH too.
+SIM_ON_CSV=
+BENCHES=(raise-5m-rose-labs-brex chat-mode)
+CATALOG_MODES=(simulate real)
+[ "$(primary_vm_size_for_bench raise-5m-rose-labs-brex)" = performance-8x ]
+[ "$(primary_vm_memory_for_bench raise-5m-rose-labs-brex)" = 65536 ]
+[ "$(primary_vm_size_for_bench chat-mode)" = shared-cpu-2x ]
+INFRA_PROBE=1
+[ "$(primary_vm_size_for_bench raise-5m-rose-labs-brex)" = shared-cpu-2x ]
+"""
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False, timeout=5)
     assert result.returncode == 0, result.stderr + result.stdout
 
 
@@ -12840,6 +12959,7 @@ reap_volume vol_exact || reap_status=$?
             "registry_record_is_stale_phantom() {",
             "reap_registry_clones() {",
             "fleet_clone_with_queue_admission() {",
+            "clone_storage_ready_seconds() {",
             "clone_machine_target() {",
             "inventory_index_healthy() {",
             "inventory_machine_record_path() {",
@@ -13077,6 +13197,7 @@ def test_ambiguous_408_clone_absent_at_lookup_is_reaped_at_teardown(
             "clone_failure_definitively_unallocated() {",
             "clone_failure_owned_volume_id() {",
             "fleet_clone_with_queue_admission() {",
+            "clone_storage_ready_seconds() {",
             "clone_machine_target() {",
             "registry_record_machine_identity() {",
             "fleet_current_disposable_registry() {",
@@ -20237,6 +20358,9 @@ CLOUDBENCH_RUN_TOKEN=fixture
 STACK_CLEANUP_STATUS_FILE=/data/repo/.context/cloudbench/stack.status
 STACK_SEED_DUMP=/data/cloudbench-cache/victoria-seed.dump
 WMH_MODEL_NAME=fixture
+WMH_ENGINE=experiential
+WMH_ROSE_POOL=rose-wmh-gpt61
+WMH_EXECUTION_POLICY=rose-outcome-distribution-v4
 WMH_DIR=/data/world-model
 ROSE_EXCLUDE_ANTHROPIC_FAMILY=
 {stack_env}
@@ -20315,8 +20439,13 @@ wait "$WMH_PID" 2>/dev/null || true
     assert "--connect-timeout 1 --max-time 1" in result.stdout
 
 
-def test_wmh_health_wait_caps_untrusted_timeout_without_expanding_seq(tmp_path: Path) -> None:
-    """An extreme readiness timeout must fall back to the bounded default."""
+@pytest.mark.parametrize("engine,default", [("legacy", 180), ("experiential", 1200)])
+def test_wmh_health_wait_caps_untrusted_timeout_without_expanding_seq(
+    tmp_path: Path, engine: str, default: int
+) -> None:
+    """An extreme readiness timeout must fall back to the bounded default. The
+    native engine loads its full store before binding (measured ~620 s on 8
+    vCPUs), so its default covers that load; legacy keeps 180 s."""
     stack = STACK_SCRIPT.read_text()
     wmh = _extract_fleet_function(stack, "start_world_model_harness() {")
 
@@ -20341,6 +20470,7 @@ NAMES=()
 RUN_CONTEXT_DIR=.context/isolated
 WMH_BUILD_DIR=.context/model
 WMH_MODEL_NAME=fixture
+WMH_ENGINE={engine}
 WMH_PORT=39999
 WMH_HEALTH_TIMEOUT_SECONDS=999999999999999999999999999999999999999999999999999999999999
 BENCHMARK_MODE=true
@@ -20364,9 +20494,9 @@ wait "$WMH_PID" 2>/dev/null || true
     assert result.returncode == 0, result.stdout + result.stderr
     assert (
         "Invalid WMH_HEALTH_TIMEOUT_SECONDS="
-        "999999999999999999999999999999999999999999999999999999999999; using 180s" in result.stdout
+        f"999999999999999999999999999999999999999999999999999999999999; using {default}s" in result.stdout
     )
-    assert "attempts=180" in result.stdout
+    assert f"attempts={default}" in result.stdout
 
 
 def test_refresh_deps_mode_contract() -> None:
@@ -21498,7 +21628,12 @@ def test_detached_script_snapshot_transfer_covers_exit_death_timeout_and_waiter_
     assert error.returncode == 7, (error.stdout, error.stderr)
     assert not list(error_snapshots.glob("cloudbench-scripts.*"))
     assert not list(error_runs.glob("detached-*.owner"))
-    assert not list(error_runs.glob("detached-*.status"))
+    # A waited completion retires the ownership rendezvous but keeps the exact
+    # terminal receipt for the independent monitor (RCA
+    # 2026-10-05-cloudbench-detached-monitoring-missed-terminal-status).
+    error_statuses = list(error_runs.glob("detached-*.status"))
+    assert len(error_statuses) == 1
+    assert error_statuses[0].read_text() == "7\n"
 
     claimed_ready = tmp_path / "claimed-ready"
     claimed_release = tmp_path / "claimed-release"
@@ -22555,7 +22690,9 @@ printf 'SELECTED_PORT=%s\n' "$DASH_BASE"
         # its subshell captures the final rebound DASH_BASE for every agent URL.
         manifest = fleet.index("# benches.json was frozen")
         late_start = fleet.index("start_central_hub || exit 1", manifest)
-        aggregator = fleet.index("(\n    while :; do", late_start)
+        aggregator = fleet.index(
+            '(\n    exec env FLEET_DIR="$FLEET_DIR" UNIFIED_DIR="$UNIFIED_DIR" DASH_BASE="$DASH_BASE"', late_start
+        )
         assert late_start < aggregator
         assert fleet.index("require_central_hub_visibility || exit 1", late_start) < aggregator
         assert 'env FLEET_DIR="$FLEET_DIR" UNIFIED_DIR="$UNIFIED_DIR" DASH_BASE="$DASH_BASE"' in fleet[aggregator:]
@@ -22788,9 +22925,10 @@ def test_fleet_waits_for_warm_source_stopped_before_provisioning() -> None:
     assert wait_log < wait_helper < gate < park_at < fanout_at
     assert 'warm_stop_attempts="${CLOUDBENCH_WARM_STOP_ATTEMPTS:-60}"' in fleet
     assert 'warm_stop_sleep="${CLOUDBENCH_WARM_STOP_SLEEP_SECONDS:-5}"' in fleet
-    # Must re-list machines after the wait settles (not cache the first sample).
+    # Must re-list machines after the wait settles (not cache the first sample),
+    # through the shared admission inventory capture.
     relist_at = fleet.index(
-        'warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null || echo \'[]\')"',
+        "campaign_inventory_capture warm_json fleet_admission_machines_json || exit $?",
         wait_helper,
     )
     assert wait_helper < relist_at < park_at
@@ -23997,6 +24135,7 @@ def test_status_log_poll_is_incremental_when_full_log_exceeds_deadline(
         read_log = _extract_fleet_function(CLOUD_SCRIPT.read_text(), "read_bench_log() {")
         chunk = tmp_path / "bench-log.chunk"
         script = f"""set -u
+{_cloudbench_proxy_route_functions()}
 {read_log}
 STATUS_PROXY_PID=$$
 LOCAL_STATUS_PORT="$1"
@@ -24740,6 +24879,7 @@ start_leased_data_plane_proxy() {{
   touch {shlex.quote(str(restarted))}
   printf -v "$6" '%s' "$$"
 }}
+{_cloudbench_proxy_route_functions()}
 {transport}
 {ensure}
 ensure_status_proxy
@@ -24877,7 +25017,7 @@ def test_capacity_guard_reserves_machine_slots_for_boot_config_replacements(tmp_
         )
     )
     guard = (
-        _extract_fleet_function(fleet, "enforce_app_capacity_guard() {")
+        _fleet_capacity_guard(fleet)
         if "enforce_app_capacity_guard() {" in fleet
         else ""
     )
@@ -24943,7 +25083,7 @@ def test_single_task_capacity_reservations_scale_with_actual_fleet_width(tmp_pat
             "capacity_reserve_slots() {",
         )
     )
-    guard = _extract_fleet_function(fleet, "enforce_app_capacity_guard() {")
+    guard = _fleet_capacity_guard(fleet)
     machines = [
         {
             "id": f"active-{index}",
@@ -25022,7 +25162,7 @@ def test_capacity_guard_serializes_cross_workspace_reservations(tmp_path: Path) 
         if signature in fleet:
             support.append(_extract_fleet_function(fleet, signature))
     guard = (
-        _extract_fleet_function(fleet, "enforce_app_capacity_guard() {")
+        _fleet_capacity_guard(fleet)
         if "enforce_app_capacity_guard() {" in fleet
         else ""
     )
@@ -25098,7 +25238,7 @@ def test_capacity_guard_does_not_count_available_pool_machines_twice(tmp_path: P
         if signature in fleet:
             support.append(_extract_fleet_function(fleet, signature))
     guard = (
-        _extract_fleet_function(fleet, "enforce_app_capacity_guard() {")
+        _fleet_capacity_guard(fleet)
         if "enforce_app_capacity_guard() {" in fleet
         else ""
     )
@@ -25166,7 +25306,7 @@ def test_capacity_guard_reserves_bundled_frontend_shape_and_pool_eligibility(
             "capacity_reserve_slots() {",
         )
     )
-    guard = _extract_fleet_function(fleet, "enforce_app_capacity_guard() {")
+    guard = _fleet_capacity_guard(fleet)
     machines = [
         {
             "id": f"active-{index}",
@@ -25232,7 +25372,7 @@ def test_capacity_guard_never_subtracts_unclaimable_pool_ids(tmp_path: Path) -> 
             "capacity_reserve_slots() {",
         )
     )
-    guard = _extract_fleet_function(fleet, "enforce_app_capacity_guard() {")
+    guard = _fleet_capacity_guard(fleet)
     machines = [
         {
             "id": f"active-{index}",
@@ -25400,6 +25540,7 @@ def test_pool_shape_normalization_unexports_full_provider_inventory_buffers(
     pool_file.write_text("abcd\n")
     script = f"""set -u
 POOL_IDS_FILE={shlex.quote(str(pool_file))}
+GIT_COMMON_DIR={shlex.quote(str(tmp_path / "git-common"))}
 FLEET_PRIMARY_VM_SIZE=shared-cpu-2x
 FLEET_PRIMARY_VM_MEMORY=4096
 payload="$(python3 -c '
@@ -25440,58 +25581,81 @@ def test_startup_capacity_release_streams_full_provider_inventory_without_exec_s
     exceed macOS ARG_MAX, so Python never ran, the 46-slot startup reservation
     stayed live, and six mandatory dynamic workers were denied.
 
-    Provider inventory is unbounded process data. Exercise the production
-    release boundary with a valid inventory larger than this host's exec limit;
-    it must still prove all exact primaries started and release the reservation.
+    Provider inventory is unbounded process data. The release boundary now reads
+    each exact primary through the bounded Machines API helper; exercise it
+    against a loopback Machines API whose response is larger than this host's
+    exec limit. It must still prove all exact primaries started and release the
+    reservation.
     """
     fleet = fleet_source_text()
     release = _extract_fleet_function(fleet, "release_capacity_reservation_after_primary_start_accounted() {")
+    machine_ids = [f"{index:014x}" for index in range(42)]
     outputs = []
-    for index in range(42):
+    for index, machine_id in enumerate(machine_ids):
         output = tmp_path / f"bench-{index}"
         output.mkdir()
-        (output / "post-config-start.accepted").write_text(f"machine-{index}\n")
+        (output / "post-config-start.accepted").write_text(f"{machine_id}\n")
         outputs.append(output)
+    oversized = int(subprocess.run(["getconf", "ARG_MAX"], text=True, capture_output=True, check=True).stdout) + 65536
+    seen: list[str] = []
+
+    class MachinesApi(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            seen.append(self.path)
+            machine_id = self.path.rsplit("/", 1)[-1]
+            machine: dict[str, object] = {"id": machine_id, "state": "started"}
+            if machine_id == machine_ids[0]:
+                machine["events"] = ["x" * oversized]
+            body = json.dumps(machine).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), MachinesApi)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
     released = tmp_path / "released"
     benches = " ".join(f"bench-{index}" for index in range(42))
-    machine_ids = " ".join(f"machine-{index}" for index in range(42))
     child_outputs = " ".join(shlex.quote(str(output)) for output in outputs)
     script = f"""set -u
 CAPACITY_RESERVATION_PUBLISHED=1
 CAPACITY_RESERVATION_TOKEN=test-full-inventory
-CLOUDBENCH_CAPACITY_START_ACCOUNTING_SECONDS=1
+CLOUDBENCH_CAPACITY_START_ACCOUNTING_SECONDS=30
+CLOUDBENCH_SCRIPT_SNAPSHOT={shlex.quote(str(ROOT / "scripts"))}
 BENCHES=({benches})
-CHILD_MACHINE=({machine_ids})
+CHILD_MACHINE=({" ".join(machine_ids)})
 CHILD_OUT=({child_outputs})
 APP=fixture-bench-app
-FLY() {{
-  if [ "$1 $2" = "machines list" ]; then
-    python3 -c '
-import json, sys
-size = int(sys.argv[1])
-machines = [{{"id": f"machine-{{index}}", "state": "started"}} for index in range(42)]
-machines[0]["events"] = ["x" * size]
-print(json.dumps(machines))
-' "$(( $(getconf ARG_MAX) + 65536 ))"
-    return 0
-  fi
-  return 1
-}}
+FLY() {{ echo "unexpected full inventory list: $*" >&2; return 1; }}
 capacity_release_reservation() {{ touch {shlex.quote(str(released))}; }}
 {release}
 release_capacity_reservation_after_primary_start_accounted
 """
-    result = subprocess.run(
-        ["bash", "-c", script],
-        env={**os.environ, "inventory": "sentinel", "machines_json": "sentinel"},
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=10,
-    )
+    try:
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env={
+                **os.environ,
+                "inventory": "sentinel",
+                "machines_json": "sentinel",
+                "FLY_API_TOKEN": "Bearer synthetic-only-token",
+                "FLY_FLAPS_BASE_URL": f"http://127.0.0.1:{server.server_port}",
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
 
     assert result.returncode == 0, result.stderr
     assert released.exists()
+    assert sorted(seen) == sorted(f"/v1/apps/fixture-bench-app/machines/{machine_id}" for machine_id in machine_ids)
 
 
 def test_capacity_reservation_recovers_a_proven_dead_owner(tmp_path: Path) -> None:
@@ -31798,6 +31962,53 @@ clone_machine_target {shlex.quote(str(tmp_path / "owned.ids"))} "$WARM_ID" share
         assert "storage was not mountable" in result.stderr
 
 
+@pytest.mark.parametrize("storage_mode", ["snapshot", "fresh"])
+def test_snapshot_clone_storage_budget_covers_measured_restore(tmp_path: Path, storage_mode: str) -> None:
+    """A SIM clone restored from the donor snapshot stays RESTORING for about
+    ten minutes (measured 590-600s, >625s and <=909s on 2026-10-19). The
+    former shared 600s default failed `raise-5m-rose-labs-brex --sim-on` at
+    the provider median. Simulate the slowest observed restore through the
+    real clone path with default budgets: snapshot storage must be awaited,
+    while fresh storage keeps its original bounded 600s deadline."""
+    source = fleet_source_text()
+    provider = tmp_path / "provider.py"
+    provider.write_text("print('Machine feedface000002 has been created...')\n")
+    script = f"""set -uo pipefail
+APP=fixture-app
+REGION=iad
+WARM_ID=feedface000001
+SNAP_ID=vs_fixture
+FRESH_VOLUMES=1
+fleet_registry_record_name() {{ return 0; }}
+fleet_registry_record_id() {{ return 0; }}
+fleet_registry_release_name() {{ return 0; }}
+machine_storage_failed() {{ return 1; }}
+sleep() {{ :; }}
+export CLONE_VOLUME_CALLS={shlex.quote(str(tmp_path / "volume-calls"))}
+RESTORE_BEGAN=$SECONDS
+machine_storage_ready() {{
+  SECONDS=$((SECONDS + 150))
+  [ $((SECONDS - RESTORE_BEGAN)) -ge 910 ]
+}}
+{_clone_machine_bundle(source)}
+fly_with_timeout() {{ shift; {shlex.quote(sys.executable)} {shlex.quote(str(provider))}; }}
+clone_machine_target {shlex.quote(str(tmp_path / "owned.ids"))} "$WARM_ID" shared-cpu-2x 4096 "$SNAP_ID" {storage_mode}
+"""
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"CLOUDBENCH_CLONE_STORAGE_READY_SECONDS", "CLOUDBENCH_CLONE_SNAPSHOT_RESTORE_SECONDS"}
+    }
+    result = subprocess.run(["bash", "-c", "machine_creation_admission() { return 0; }\n" + script], env=env, text=True, capture_output=True, timeout=30)
+    assert (tmp_path / "owned.ids").read_text().split() == ["feedface000002"]
+    if storage_mode == "snapshot":
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "feedface000002"
+    else:
+        assert result.returncode == 1
+        assert "storage was not mountable" in result.stderr
+
+
 @pytest.mark.parametrize(
     "enabled,catalog,sim_on,allocated_source,expected",
     [
@@ -34876,6 +35087,7 @@ fresh_target_region_admission() {{ return 0; }}
 claim_pool_machine() {{ printf %s {shlex.quote(claim)}; return {claim_status}; }}
 {_extract_fleet_function(fleet, 'machine_creation_admission() {')}
 {_extract_fleet_function(fleet, 'clone_machine_target() {')}
+{_extract_fleet_function(fleet, 'archived_reuse_allocate() {')}
 {body}
 {invocation}
 '''], text=True, capture_output=True, timeout=5)
@@ -35162,7 +35374,12 @@ def test_normal_cli_forwards_owned_pool_reuse_policy(tmp_path: Path, args: list[
     (root / "scripts").mkdir(parents=True)
     (root / "agents/venv/bin").mkdir(parents=True)
     (root / ".claude/shared").mkdir(parents=True)
-    for name in ("run-bench", "cloudbench_catalog.py", "cloudbench-production-only-tasks.py"):
+    for name in (
+        "run-bench",
+        "cloudbench_catalog.py",
+        "cloudbench-production-only-tasks.py",
+        "cloudbench-shard-coordinator.py",
+    ):
         shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
     shutil.copy2(ROOT / ".claude/shared/benchmark-report-format.txt", root / ".claude/shared/benchmark-report-format.txt")
     for name in ("tasks.json", "polar_tasks.json"):
@@ -35185,7 +35402,7 @@ def test_pool_native_proof_binds_current_machine_version_and_config(tmp_path: Pa
     config = {
         'image': 'registry.fly.io/fixture-app@sha256:' + 'e' * 64,
         'init': {'cmd': ['bash', '/cloudbench-boot.sh']}, 'restart': {'policy': 'no'},
-        'env': {'REF': provenance['base_sha'], 'CLOUDBENCH_BARRIER_TOKEN': registry.name + '-0', 'PRIVATE_SENTINEL': 'never-disclose-config'},
+        'env': {'REF': provenance['base_sha'], 'CLOUDBENCH_RUN_TOKEN': registry.name + '-0', 'PRIVATE_SENTINEL': 'never-disclose-config'},
         'mounts': [{'volume': 'vol_fixture', 'path': '/data'}],
         'guest': {'cpu_kind': 'shared', 'cpus': 2, 'memory_mb': 4096},
     }
@@ -35194,7 +35411,7 @@ def test_pool_native_proof_binds_current_machine_version_and_config(tmp_path: Pa
     if fault == 'profile': config['guest']['memory_mb'] = 2048
     if fault == 'volume': config['mounts'][0]['volume'] = 'vol_foreign'
     if fault == 'controller-role': config['env']['GATE_REF'] = provenance['base_sha']
-    if fault == 'owner-token': config['env']['CLOUDBENCH_BARRIER_TOKEN'] = 'f' * 32 + '-0'
+    if fault == 'owner-token': config['env']['CLOUDBENCH_RUN_TOKEN'] = 'f' * 32 + '-0'
     if fault == 'wrong-id': machine['id'] = 'def456'
     requests = []
     class Handler(BaseHTTPRequestHandler):
@@ -35721,7 +35938,8 @@ def test_cold_primary_claim_intent_is_bound_before_boot(tmp_path: Path, fault: s
     matrix = tmp_path / 'matrix.json'
     matrix.write_text(json.dumps(contract['build_task_matrix'](['task=' + ('simulate' if fault == 'sim' else 'real')])))
     functions = ''.join(_extract_fleet_function(fleet_source_text(), name + '() {') for name in (
-        'pool_reuse_proof_file', 'primary_cold_bootstrap_requested', 'provision_primary_machine'))
+        'pool_reuse_proof_file', 'primary_cold_bootstrap_requested', 'archived_reuse_allocate',
+        'provision_primary_machine'))
     modify = {
         'missing-intent': 'rm "$out/cold-primary-bootstrap"',
         'linked-intent': 'mv "$out/cold-primary-bootstrap" "$out/original"; ln -s original "$out/cold-primary-bootstrap"',
@@ -35897,6 +36115,7 @@ MACHINE_STORAGE_ARGS=()
 WORKSPACE_VOLUME_ARGS=()
 GATE_EXPORT_FILES=()
 VOLUME_NAME=fixture-volume
+DISPOSABLE_AUTHORITY=""
 flyctl() {{ printf create >> {shlex.quote(str(calls))}; printf 'Machine ID: bbbbbbbbbbbbbb'; }}
 FLY() {{ flyctl "$@"; }}
 {function}

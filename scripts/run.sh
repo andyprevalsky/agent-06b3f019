@@ -2418,13 +2418,16 @@ start_world_model_harness() {
     # longer than 30 seconds before Uvicorn binds. Keep waiting while the owned
     # process is alive, with a bounded budget aligned to WMH inference startup.
     local health_timeout_default=180
-    local health_timeout_max=600
+    # The native WMH loads its full store before binding (measured ~620 s on
+    # 8 vCPUs for the 318k-observation model); the legacy server binds quickly.
+    local health_timeout_max=1800
+    [ "${WMH_ENGINE:-}" = experiential ] && health_timeout_default=1200
     local health_timeout="${WMH_HEALTH_TIMEOUT_SECONDS:-$health_timeout_default}"
     local health_timeout_max_digits=${#health_timeout_max}
     if ! [[ "$health_timeout" =~ ^[1-9][0-9]*$ ]] || \
         (( ${#health_timeout} > health_timeout_max_digits )) || \
         (( health_timeout > health_timeout_max )); then
-        echo "⚠️  Invalid WMH_HEALTH_TIMEOUT_SECONDS=$health_timeout; using 180s."
+        echo "⚠️  Invalid WMH_HEALTH_TIMEOUT_SECONDS=$health_timeout; using ${health_timeout_default}s."
         health_timeout=$health_timeout_default
     fi
     local ready=false

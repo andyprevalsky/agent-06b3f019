@@ -38,6 +38,7 @@ def exercise(
     expect_deadline: bool = False,
     forbidden_manifest: bool = False,
     socket_fault: str | None = None,
+    wmh_log: bool = False,
 ):
     token, machine = "test-run-1", "abcdef12345678"
     files = {
@@ -49,6 +50,8 @@ def exercise(
         "logs/worker.log": b"worker stopped\n",
         "logs/worker.1.log": b"worker one stopped\n",
     }
+    if wmh_log:
+        files["wmh-serve-log.txt"] = b"wmh_step_committed prediction_ms=10000\n"
     manifest = {
         "version": 1,
         "run_token": token,
@@ -256,8 +259,41 @@ def test_collectors_stop_on_clean_shutdown_without_run_result():
                  terminal_clean_without_seal=True)
 
 
+def guest_inventory_includes_optional_wmh_log():
+    """The guest seals the served WMH log when present, never through a link."""
+    import runpy
+
+    status = runpy.run_path(str(ROOT / "scripts/cloudbench-status-server.py"))
+    token = "test-run-1"
+    with tempfile.TemporaryDirectory() as directory:
+        context = Path(directory) / "repo/.context/cloudbench"
+        (context / "logs").mkdir(parents=True)
+        for name, text in {
+            "services.json": json.dumps({"status": "stopped", "env": {"worker_processes": 1}}),
+            "run.json": "{}", "stack.log": "stack\n", "logs/backend.log": "backend\n",
+            "logs/worker.log": "worker\n", f"cloudbench-stack-cleanup-{token}.status": f"state=clean\ntoken={token}\n",
+        }.items():
+            (context / name).write_text(text)
+        assert "wmh-serve-log.txt" not in status["runtime_evidence_context_paths"](context, token)
+        (context / "wmh-serve-log.txt").write_text("wmh_step_committed\n")
+        manifest = status["runtime_evidence_context_manifest"](context, token, "abcdef12345678")
+        assert manifest["files"]["wmh-serve-log.txt"]["bytes"] == len("wmh_step_committed\n")
+        (context / "wmh-serve-log.txt").unlink()
+        (context / "wmh-serve-log.txt").symlink_to(context / "stack.log")
+        try:
+            status["runtime_evidence_context_paths"](context, token)
+        except ValueError as error:
+            assert "unsafe runtime evidence" in str(error)
+        else:
+            raise AssertionError("a linked WMH log was admitted as runtime evidence")
+
+
 def exercise_read_transition(case: str):
-    if case == "seal-transition":
+    if case == "wmh-serve-log":
+        guest_inventory_includes_optional_wmh_log()
+        for recovery in (False, True):
+            exercise(seal_after=0, deadline=3, file_delay=0, recovery=recovery, wmh_log=True)
+    elif case == "seal-transition":
         for recovery in (False, True):
             exercise(
                 seal_after=1,
@@ -316,6 +352,7 @@ def exercise_read_transition(case: str):
 
 
 READ_TRANSITIONS = (
+    "wmh-serve-log",
     "seal-transition",
     "manifest-url",
     "manifest-timeout",

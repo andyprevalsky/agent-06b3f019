@@ -952,6 +952,10 @@ class DOMService:
             profile = BrowserProfile(
                 cdp_url=self.cdp_url,
                 is_local=False,  # Remote browser (Steel/Kernel)
+                # The provider owns the existing window and viewport. Host display
+                # detection must not resize every attached tab during reconnect.
+                headless=False,
+                no_viewport=True,
                 downloads_path=self.downloads_path,
             )
 
