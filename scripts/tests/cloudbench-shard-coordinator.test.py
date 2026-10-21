@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Owning regression for sharded benchmark controllers: planning, global barrier, merge."""
 from pathlib import Path
-import json, os, runpy, signal, tempfile, unittest
+import ast, copy, json, os, runpy, signal, subprocess, sys, tempfile, unittest
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
 C = runpy.run_path(str(ROOT / 'scripts/cloudbench-shard-coordinator.py'))
@@ -69,6 +70,88 @@ class World:
         return C['coordinate'](self.shards, self.spawn, self.root / 'coordination.json', sleep=self.sleep,
                                clock=lambda: float(self.n), poll_seconds=0, **kwargs)
 
+
+class ExplicitBudget(unittest.TestCase):
+    def test_generated_shard_argv_and_absolute_startup_budget(self):
+        tasks = TASKS[:20]
+        shard = dict(index=0, count=2, tasks=tasks[::2], task_indexes=list(range(0,20,2)),
+                     tasks_sha256=R['manifest_sha'](tasks[::2]), runs=3, group_run_id='budget-fixture',
+                     group_total=60, group_started_at=1000, manifest_sha256=R['manifest_sha'](tasks),
+                     task_timeout=7200, e2e_timeout=9300)
+        argv = R['campaign_argv'](tasks, 1000, shard)
+        self.assertEqual(argv[argv.index('--timeout')+1], '7200')
+        self.assertEqual(argv[argv.index('--e2e-timeout')+1], '9300')
+        self.assertEqual(argv[argv.index('--e2e-started-at')+1], '1000')
+        self.assertEqual(R['startup_deadline_epoch'](1000,7200,9300), 1900)
+        self.assertEqual(1000+9300-1900, 7200+1200)
+        S = runpy.run_path(str(ROOT/'scripts/cloudbench-original600-supervisor.py'))
+        self.assertEqual(S['shard_timeouts'](shard), (7200,9300))
+
+    def test_remote_deadline_does_not_restart_startup_clock(self):
+        campaign = runpy.run_path(str(ROOT/'scripts/run-bench-campaign.py'))
+        deadline = R['startup_deadline_epoch'](1000,7200,9300)
+        # Remote starts 800 seconds into the common admission clock, leaving 100.
+        value = campaign['startup_deadline_monotonic'](
+            {'RUN_BENCH_CAMPAIGN_STARTUP_DEADLINE_EPOCH':str(deadline)}, 1000,9300,
+            now_epoch=1800,now_monotonic=50)
+        self.assertEqual(value,150)
+        self.assertEqual(campaign['startup_deadline_monotonic']({},1000,9300,now_epoch=1800,now_monotonic=50),None)
+
+    def test_actual_remote_barrier_rechecks_absolute_deadline(self):
+        source = Path(os.environ.get('SAME_CLI_CAMPAIGN_SOURCE', str(ROOT/'scripts/run-bench-campaign.py'))).read_text()
+        tree = ast.parse(source)
+        functions = [copy.deepcopy(next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name))
+                     for name in ('abort_startup_cohort','release_ready_cohort')]
+        for fn in functions:
+            fn.body = [ast.Global(names=n.names) if isinstance(n,ast.Nonlocal) else n for n in fn.body]
+        for phase in ('early','expired','expires_during_external_release'):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                root=Path(directory);(root/'ready').mkdir()
+                child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(10)'])
+                try:
+                    clock=[899 if phase!='expired' else 900]
+                    job=dict(job_id='j1',_process=child)
+                    (root/'ready/j1.json').write_text(json.dumps(dict(cohort_id='c001',job_id='j1',controller_pid=child.pid,ready_at='now')))
+                    cohort=dict(status='waiting',cohort_id='c001',_jobs=[job],_directory=root,ready_count=1,failed_count=0,expected_count=1)
+                    def external_release(_):
+                        if phase=='expires_during_external_release': clock[0]=901
+                        return 'receipt'
+                    def write(path,value): Path(path).write_text(json.dumps(value))
+                    ns=dict(subprocess=subprocess,json=json,barrier_failure=False,first_failure=0,
+                            startup_expired=lambda:clock[0]>=900,observe_external_abort=lambda:False,
+                            publish_external_barrier=lambda *a:None,external_barrier=object(),
+                            external_barrier_release_id=external_release,utc_now=lambda:'now',
+                            write_json_atomic=write,summary_path=root/'summary.json',state={'external_barrier':{}})
+                    exec(compile(ast.fix_missing_locations(ast.Module(body=functions,type_ignores=[])),'actual-remote-barrier','exec'),ns)
+                    ns['release_ready_cohort'](cohort)
+                    self.assertEqual((root/'release.json').exists(),phase=='early')
+                    self.assertEqual((root/'abort.json').exists(),phase!='early')
+                finally:
+                    child.terminate();child.wait(timeout=5)
+
+
+    def test_original_explicit_7200_9300_is_preserved(self):
+        self.assertEqual(R['campaign_timeouts'](7200, 9300), (7200, 9300))
+        self.assertEqual(R['default_e2e_timeout'](7200), 10020)
+        self.assertEqual(R['gate_watchdog_seconds'](9300), 11100)
+
+    def test_barrier_deadline_aborts_and_joins_without_release(self):
+        with tempfile.TemporaryDirectory() as root:
+            world = World(root, [{0: ('ready', 0, None)}, {0: ('ready', 0, None)}])
+            record = world.run(scheduled_total=60, startup_deadline=0)
+            self.assertIsNone(record['released_at'])
+            self.assertEqual(record['terminate_cause'], 'startup_budget')
+            self.assertEqual(set(record['exit_codes'].values()), {143})
+            for shard in world.shards:
+                self.assertFalse((shard['out'] / 'global-release.json').exists())
+                self.assertTrue((shard['out'] / 'global-abort.json').exists())
+
+    def test_barrier_with_remaining_full_window_releases(self):
+        with tempfile.TemporaryDirectory() as root:
+            world = World(root, [{0: ('ready', 0, None), 2: ('released', 0, 0)}])
+            record = world.run(scheduled_total=60, startup_deadline=900)
+            self.assertEqual(record['released_at'], 0)
+            self.assertEqual(record['exit_codes'], {'0': 0})
 
 class Planning(unittest.TestCase):
     def test_original_600_on_performance_8x_uses_twenty_controllers_of_thirty_copies(self):

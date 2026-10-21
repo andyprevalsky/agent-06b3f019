@@ -28,6 +28,17 @@ from pathlib import Path
 from types import ModuleType
 
 
+def startup_deadline_monotonic(env, e2e_started_at, e2e_timeout, *, now_epoch, now_monotonic):
+    """Translate the supervisor's source-bound absolute startup fence once."""
+    value = env.get("RUN_BENCH_CAMPAIGN_STARTUP_DEADLINE_EPOCH")
+    if value is None:
+        return None
+    deadline = float(value)
+    if not math.isfinite(deadline) or e2e_timeout is None or not e2e_started_at < deadline < e2e_started_at + e2e_timeout:
+        raise ValueError("invalid bound startup deadline")
+    return now_monotonic + deadline - now_epoch
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -1159,6 +1170,12 @@ def main() -> int:
     e2e_started_at = args.e2e_started_at if args.e2e_started_at is not None else time.time()
     e2e_deadline = time.monotonic() + args.e2e_timeout - (time.time() - e2e_started_at) if args.e2e_timeout is not None else None
 
+    startup_deadline = startup_deadline_monotonic(os.environ, e2e_started_at, args.e2e_timeout,
+                                                  now_epoch=time.time(), now_monotonic=time.monotonic())
+
+    def startup_expired() -> bool:
+        return startup_deadline is not None and time.monotonic() >= startup_deadline
+
     def deadline_expired() -> bool:
         return e2e_deadline is not None and time.monotonic() >= e2e_deadline
 
@@ -1402,6 +1419,7 @@ def main() -> int:
     stop_signal = 0
     stop_requests = 0
     termination_requested = False
+    startup_timeout_exceeded = False
 
     def request_stop(signum: int, _frame: object) -> None:
         nonlocal stop_signal, stop_requests
@@ -1500,6 +1518,11 @@ def main() -> int:
             return
         if observe_external_abort():
             return
+        if startup_expired():
+            barrier_failure = True
+            first_failure = first_failure or 1
+            abort_startup_cohort(cohort, "startup budget exhausted; full task and post-task windows reserved")
+            return
         ready_count = 0
         failed_count = 0
         survivors = []
@@ -1560,6 +1583,11 @@ def main() -> int:
                 return
             state["external_barrier"]["release_id"] = release_id
             state["external_barrier"]["released_at"] = utc_now()
+        if startup_expired():
+            barrier_failure = True
+            first_failure = first_failure or 1
+            abort_startup_cohort(cohort, "startup budget exhausted before local release")
+            return
         cohort["released_at"] = utc_now()
         cohort["released_count"] = ready_count
         write_json_atomic(
@@ -1610,6 +1638,7 @@ def main() -> int:
         if (
             not stop_signal
             and not deadline_expired()
+            and not startup_expired()
             and args.concurrency > 1
             and not all_production_only
             and os.environ.get("CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY", "1") == "1"
@@ -1640,6 +1669,12 @@ def main() -> int:
                 )
             write_json_atomic(summary_path, state)
         while pending or active:
+            if not stop_signal and startup_expired() and not any(c.get("status") == "released" for c in cohorts):
+                startup_timeout_exceeded = True
+                state["startup_timeout_exceeded"] = True
+                if current_cohort:
+                    abort_startup_cohort(current_cohort, "startup budget exhausted before task launch")
+                request_stop(signal.SIGTERM, None)
             if deadline_expired() and not state["e2e_timeout_exceeded"]:
                 state["e2e_timeout_exceeded"] = True
                 request_stop(signal.SIGTERM, None)
@@ -1761,9 +1796,13 @@ def main() -> int:
                                         if not interrupted and (
                                             stop_signal
                                             or deadline_expired()
+                                            or startup_expired()
                                             or inventory_process.poll() is not None
                                             or external_abort_pending()
                                         ):
+                                            if startup_expired():
+                                                startup_timeout_exceeded = True
+                                                state["startup_timeout_exceeded"] = True
                                             result.terminate()
                                             interrupted = True
                                         try:
@@ -1882,10 +1921,14 @@ def main() -> int:
                                         if not terminated and (
                                             stop_signal
                                             or deadline_expired()
+                                            or startup_expired()
                                             or inventory_process is not None
                                             and inventory_process.poll() is not None
                                             or external_abort_pending()
                                         ):
+                                            if startup_expired():
+                                                startup_timeout_exceeded = True
+                                                state["startup_timeout_exceeded"] = True
                                             child.terminate()
                                             terminated = True
                                         try:
@@ -2054,7 +2097,7 @@ def main() -> int:
                 termination_requested = True
                 if current_cohort:
                     abort_startup_cohort(current_cohort, "user cancelled campaign")
-                if state["e2e_timeout_exceeded"]:
+                if state["e2e_timeout_exceeded"] or startup_timeout_exceeded:
                     # The explicit outer cutoff stops only the known controller
                     # leader. Its EXIT ownership path retains generous cleanup;
                     # no short internal KILL deadline is added.

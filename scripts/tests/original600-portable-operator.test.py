@@ -221,7 +221,7 @@ class Portable(unittest.TestCase):
                 # The host gate watchdog outlives the shard's TERM fence plus its cleanup.
                 self.assertGreater(RUNNER['gate_watchdog_seconds'](bound), bound)
                 with self.assertRaisesRegex(ValueError, 'e2e-timeout must cover'):
-                    RUNNER['campaign_timeouts'](window, int(bound) - 1 if bound > RUNNER['RUN_DEADLINE'] else window + 1)
+                    RUNNER['campaign_timeouts'](window, window + RUNNER['POST_TASK_ALLOWANCE'])
 
     def test_fragment_request_retains_transport_margin(self):
         # The old receiver's unused CLI trailer made this request 6,202 bytes.
@@ -1952,7 +1952,7 @@ class Portable(unittest.TestCase):
                                                ('rootless-ordinary', names[:3] + rootless, ['--catalog-eligibility', 'ordinary'], 'cloud-root'),
                                                ('timeout', names, ['--task-timeout', '30'], 'task-timeout must be 60'),
                                                ('timeout-over-2h', names, ['--task-timeout', '7201'], 'ask the user to choose a lower execution timeout'),
-                                               ('e2e', names, ['--task-timeout', '480', '--e2e-timeout', '2000'], 'e2e-timeout must cover'),
+                                               ('e2e', names, ['--task-timeout', '480', '--e2e-timeout', '1680'], 'e2e-timeout must cover'),
                                                ('continuation', names, ['--resume-admission', str(fx.state)], 'original 200-task manifest')]:
                 with self.subTest(label=label):
                     path = fx.inputs/('bad-'+label)

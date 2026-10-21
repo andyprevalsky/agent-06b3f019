@@ -322,7 +322,7 @@ def adopt_coordinate(shards, spawn, journal, *, stop_reason=None, poll_seconds=1
 
 def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='enabled',
                poll_seconds=1.0, clock=time.time, sleep=time.sleep, respawn=None,
-               stagger_seconds=0.0, max_attempts=MAX_SHARD_ATTEMPTS):
+               stagger_seconds=0.0, max_attempts=MAX_SHARD_ATTEMPTS, startup_deadline=None):
     """Run K runners to completion under one global barrier. Returns the coordination record.
 
     shards: [{'index': i, 'out': Path}], spawn(shard) -> Popen-like (poll/wait/send_signal/pid).
@@ -362,7 +362,8 @@ def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='ena
             barrier = {i: ((v or {}).get('barrier') or {}).get('status') for i, v in statuses.items()}
             infra = sum(int(((v or {}).get('infra') or {}).get('infra_true') or 0) for v in statuses.values())
             record['infra_true'] = infra
-            if decided is None and respawn is not None and not stop[0]:
+            startup_expired = startup_deadline is not None and clock() >= startup_deadline
+            if decided is None and respawn is not None and not stop[0] and not startup_expired:
                 for shard in shards:
                     i = shard['index']
                     terminal = runner_terminal_status(shard['out']) if exited[i] is not None else None
@@ -386,13 +387,14 @@ def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='ena
                                                   out=str(shard['out']), pid=process.pid))
                     record['shards'][str(i)] = dict(out=str(shard['out']), pid=process.pid)
                     save(journal, record)
+            startup_expired = startup_deadline is not None and clock() >= startup_deadline
             if decided is None:
                 failed = [i for i in runners if barrier[i] in FAILED_STATES or exited[i] is not None
                           or (statuses[i] or {}).get('state') in TERMINAL_SUPERVISOR]
-                if stop[0] or failed:
+                if stop[0] or failed or startup_expired:
                     decided = 'abort'
                     record.update(aborted_at=clock(), abort_reason=(
-                        'operator ' + stop[0] if stop[0] else 'shard %s failed before global release' % failed))
+                        'operator ' + stop[0] if stop[0] else 'startup budget exhausted before global release' if startup_expired else 'shard %s failed before global release' % failed))
                     decision = ('global-abort.json', dict(release_id=release_id, reason=record['abort_reason']))
                     save(journal, record)
                 elif all(barrier[i] in RELEASED_STATES for i in runners):
@@ -408,9 +410,9 @@ def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='ena
                     if target.is_dir() and not (target / decision[0]).exists():
                         write_once(target / decision[0], decision[1])
             threshold = infra_early_stop == 'enabled' and 20 * infra >= scheduled_total
-            if record['terminated_at'] is None and (stop[0] or threshold):
-                record.update(terminated_at=clock(), terminate_cause='signal' if stop[0] else 'threshold', terminate_reason=(
-                    'operator ' + stop[0] if stop[0] else 'infra %d/%d reached the 5%% threshold' % (infra, scheduled_total)))
+            if record['terminated_at'] is None and (stop[0] or threshold or (decided == 'abort' and startup_expired)):
+                record.update(terminated_at=clock(), terminate_cause='signal' if stop[0] else 'startup_budget' if decided == 'abort' and startup_expired else 'threshold', terminate_reason=(
+                    'operator ' + stop[0] if stop[0] else 'startup budget exhausted before global release' if decided == 'abort' and startup_expired else 'infra %d/%d reached the 5%% threshold' % (infra, scheduled_total)))
                 for process in runners.values():
                     if process.poll() is None:
                         process.send_signal(signal.SIGTERM)  # runner forwards TERM to its own supervisor only

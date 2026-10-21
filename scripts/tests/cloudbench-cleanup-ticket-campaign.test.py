@@ -44,7 +44,7 @@ class CampaignTickets(unittest.TestCase):
                 "cloudbench-provider-capacity.py",
                 "cloudbench-provider-limits.json",
             ):
-                shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+                shutil.copyfile(Path(os.environ["SAME_CLI_CAMPAIGN_SOURCE"]) if name == "run-bench-campaign.py" and os.environ.get("SAME_CLI_CAMPAIGN_SOURCE") else ROOT / "scripts" / name, scripts / name)
             if mode in ("ticket-prepare-fail", "ticket-assign-fail"):
                 # Fail only the campaign parent's in-process call, as a raced
                 # child exit or a ticket refusal would, keeping child CLIs real.
@@ -60,7 +60,7 @@ class CampaignTickets(unittest.TestCase):
                 shutil.copyfile(ROOT / "scripts/cloudbench-campaign-barrier.py", scripts / "cloudbench-campaign-barrier.py")
             if mode.startswith(("mutation", "relay")):
                 for name in ("cloudbench-campaign-mutation.py", "cloudbench-script-snapshot.py", "cloudbench-port-lease.py", "cloudbench-cohort-reconcile.py", "cloudbench-machine-readiness.py", "cloudbench-campaign-machines.py"):
-                    shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+                    shutil.copyfile(Path(os.environ["SAME_CLI_CAMPAIGN_SOURCE"]) if name == "run-bench-campaign.py" and os.environ.get("SAME_CLI_CAMPAIGN_SOURCE") else ROOT / "scripts" / name, scripts / name)
                 (scripts / "lib").mkdir()
                 for name in ("cloudbench-env.sh", "cloudbench-inventory.sh"):
                     shutil.copyfile(ROOT / "scripts/lib" / name, scripts / "lib" / name)
@@ -81,7 +81,7 @@ while not(p/'stop').exists():time.sleep(.01)
 """)
                 if mode.startswith("relay"):
                     for name in ("cloudbench-shared-relay.py", "run-bench-cloud", "run-bench-fleet"):
-                        shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+                        shutil.copyfile(Path(os.environ["SAME_CLI_CAMPAIGN_SOURCE"]) if name == "run-bench-campaign.py" and os.environ.get("SAME_CLI_CAMPAIGN_SOURCE") else ROOT / "scripts" / name, scripts / name)
                     if old_relay:
                         (scripts / "run-bench-campaign.py").write_bytes(subprocess.check_output(
                             ["git", "show", "ffe622243b8d704692fd3b69ab1d08eb1bb54040:scripts/run-bench-campaign.py"], cwd=ROOT))
@@ -202,7 +202,7 @@ if [ "${CLOUDBENCH_INFRA_CANARY_PREFLIGHT_ACTIVE:-0}" = 1 ]; then
  trap 'printf "CANARY_JOINED\n" >> "$FIXTURE_ROOT/events"; exit 143' TERM INT
  case "$FIXTURE_CANARY_MODE" in
   fail) exit 17 ;;
-  cancel|relay-cancel|external-abort-canary) while :; do sleep .05; done ;;
+  cancel|relay-cancel|external-abort-canary|startup-canary) while :; do sleep .05; done ;;
  esac
  printf 'CANARY_DONE\n' >> "$FIXTURE_ROOT/events"
  exit 0
@@ -374,6 +374,11 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                 "fixture-c",
                 "--forward-arg=--strict-barrier",
             ]
+            if mode.startswith("startup-"):
+                epoch=time.time()-(901 if mode=="startup-expired" else 898)
+                env["RUN_BENCH_CAMPAIGN_STARTUP_DEADLINE_EPOCH"]=str(epoch+9300-7200-1200)
+                argv.extend(["--e2e-started-at",str(epoch),"--e2e-timeout","9300",
+                             "--forward-arg=--timeout","--forward-arg=7200"])
             if mode == "explicit":
                 argv.extend(
                     [
@@ -423,6 +428,16 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                 if (root / "events").exists()
                 else []
             )
+            if mode.startswith("startup-"):
+                self.assertNotEqual(result.returncode,0,result.stdout+result.stderr+details)
+                self.assertNotIn("TASK_START",events)
+                self.assertFalse(list((root/".context/benchmarks/campaigns").glob("*/startup-cohorts/*/release.json")))
+                self.assertEqual(len(summaries),1)
+                self.assertTrue(json.loads(summaries[0].read_text())["startup_timeout_exceeded"])
+                if mode=="startup-canary":
+                    self.assertIn("CANARY_ENTER",events)
+                    self.assertIn("CANARY_JOINED",events)
+                return
             if mode.startswith("relay"):
                 if old_relay or mode in ("relay-foreign", "relay-source", "relay-cancel"):
                     self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr + details)
@@ -662,6 +677,12 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
             else:
                 self.assertIn("SEED_JOINED", observed)
                 self.assertNotIn("CANARY_ENTER", observed)
+
+    def test_explicit_startup_deadline_admits_no_late_task(self):
+        self.campaign_fixture(mode="startup-expired")
+
+    def test_explicit_startup_deadline_joins_active_canary(self):
+        self.campaign_fixture(mode="startup-canary")
 
     def test_external_barrier_holds_release_until_coordinator_release(self):
         self.campaign_fixture(mode="external-release")
