@@ -153,6 +153,8 @@ export interface BrowserConfigSearchRuntimeDependencies {
   releaseSteel: typeof releaseSteelRemoteSession;
   releaseBrowserUse: typeof releaseBrowserUseRemoteSession;
   releaseTilion: typeof releaseTilionRemoteSession;
+  /** Mint a fresh connect URL for the promoted Tilion winner (view/connect tokens last 1800 s). */
+  refreshTilionConnectUrl?: (sessionId: string) => Promise<string>;
   probe: typeof probeCandidateBrowser;
   /** Tell the live view about the promoted binding before the old session is released. */
   announceBinding?: typeof announceBrowserSessionBinding;

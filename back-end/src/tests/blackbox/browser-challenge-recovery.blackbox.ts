@@ -608,6 +608,7 @@ async function testKernelToTilionPromotionPersistsAndIsHonoured(): Promise<void>
     releaseSteel: async (sessionId) => void released.push(sessionId),
     releaseBrowserUse: async (sessionId) => void released.push(sessionId),
     releaseTilion: async (sessionId) => void released.push(sessionId),
+    refreshTilionConnectUrl: async (sessionId) => `wss://tilion.invalid/${sessionId}?token=fresh`,
     announceBinding: async () => undefined,
     probe: async (candidateSession) => {
       probedWsUrls.push(candidateSession.wsUrl);
@@ -631,6 +632,11 @@ async function testKernelToTilionPromotionPersistsAndIsHonoured(): Promise<void>
     );
     assert(result.provider === 'tilion', `winner provider: ${result.provider}`);
     assert(result.recovery_action === 'provider_switched', result.recovery_action);
+    const freshUrl = `wss://tilion.invalid/${result.session_id}?token=fresh`;
+    assert(
+      result.ws_url === freshUrl,
+      `promoted Tilion URL was not freshly minted: ${result.ws_url}`
+    );
     assert(
       JSON.stringify(tilionCreates.at(-1)) === JSON.stringify({ proxyType: 'mobile' }),
       `Tilion exit type not requested: ${JSON.stringify(tilionCreates)}`
@@ -645,6 +651,7 @@ async function testKernelToTilionPromotionPersistsAndIsHonoured(): Promise<void>
     const row = await prisma.browserSession.findUniqueOrThrow({ where: { id: run.session.id } });
     assert(row.provider === 'tilion', `persisted provider: ${row.provider}`);
     assert(row.sessionId === result.session_id, 'promoted session id not persisted');
+    assert(row.wsUrl === freshUrl, `persisted URL is not the fresh one: ${row.wsUrl}`);
     assert(row.kernelProxySource === null, 'Kernel proxy source survived the switch');
     const context = await prisma.browserContext.findUniqueOrThrow({
       where: { id: run.context.id },
