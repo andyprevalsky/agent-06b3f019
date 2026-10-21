@@ -3034,7 +3034,13 @@ async def test_native_autofill_real_model_synthetic_controls():
 def test_phone_setup_verification_targets_schema_and_isolation():
     import pytest
     from browser_tools.schemas import validate_browser_tool_args
-    targets = ["apple_account", "icloud_messages", "icloud_keychain", "icloud_contacts", "imessage", "receive_address", "portrait_lock", "device_passcode", "gmail", "runtime"]
+    targets = ["apple_account", "icloud_messages", "icloud_keychain", "icloud_contacts", "imessage", "receive_address", "portrait_lock", "device_passcode", "gmail", "google_passcode_exception", "runtime"]
+    from browser_tools.schemas import PhoneBrowserTool
+    schema = PhoneBrowserTool.model_json_schema()["properties"]
+    assert schema["evidenceOperationIds"].get("description") == "Use only for mode=setup and action=verify: 1..8 current observation IDs. Omit or null for block, defer, and all other modes."
+    assert schema["verificationTarget"].get("description") == "Use only for mode=setup and action=verify. Omit or null for block, defer, and all other modes."
+    with pytest.raises(ValueError):
+        validate_browser_tool_args("phone", {"mode": "setup", "action": "block", "reasonCode": "configuration_unavailable", "verificationTarget": "google_passcode_exception", "evidenceOperationIds": ["no_admin-read-1"]})
     before = json.dumps(BROWSER_USE_TOOLS, sort_keys=True)
     for target in targets:
         params = {"mode": "setup", "action": "verify", "evidenceOperationIds": ["owned-read"], "verificationTarget": target}
@@ -3050,9 +3056,12 @@ def test_phone_setup_verification_targets_schema_and_isolation():
     ):
         with pytest.raises(ValueError):
             validate_browser_tool_args("phone", params)
-    for proof_field in ("enabled", "orientation", "controlState", "requirementsVersion", "expectedGoogleAccountIdentifier", "expectedGoogleIdentity", "installed", "signedIn"):
+    for proof_field in ("enabled", "orientation", "controlState", "requirementsVersion", "expectedGoogleAccountIdentifier", "expectedGoogleIdentity", "installed", "signedIn", "googlePasscodeExceptionAllowed", "securityDisposition", "adminPermission"):
         with pytest.raises(ValueError):
             validate_browser_tool_args("phone", {"mode": "setup", "action": "verify", "verificationTarget": "portrait_lock", "evidenceOperationIds": ["read"], proof_field: True})
+    nullable_block = normalize_browser_use_tool_call({"name": "phone", "arguments": json.dumps({"mode": "setup", "action": "block", "reasonCode": "configuration_unavailable", "verificationTarget": None})})["params"]
+    omitted_block = normalize_browser_use_tool_call({"name": "phone", "arguments": json.dumps({"mode": "setup", "action": "block", "reasonCode": "configuration_unavailable"})})["params"]
+    assert nullable_block == omitted_block and "verificationTarget" not in nullable_block, "Declared nullable target must normalize like omission"
     legacy = validate_browser_tool_args("phone", {"mode": "setup", "action": "verify", "evidenceOperationIds": ["read"]})
     assert "verificationTarget" not in legacy, "Legacy default must remain omitted on the wire"
     assert not any(tool["name"] == "phone" for tool in build_browser_use_tools(["wait"]))
@@ -3063,8 +3072,8 @@ async def test_phone_setup_settings_actual_handler_observation():
     from types import SimpleNamespace
     from domains.spawn_browser_agent_v3 import handler as h
     from domains.spawn_browser_agent_v3.types import ClaudeTokenState
-    verification = {"requirementsVersion": 5, "checks": {"gmail": {"status": "unknown", "current": True}, "icloud_messages": {"status": "confirmed", "observedAt": "2026-10-19T00:00:00Z", "current": False}, "imessage": {"status": "unknown", "current": True}, "portrait_lock": {"status": "unknown", "current": True}}, "configurationReady": False, "operationalStatus": "degraded", "expectedReceiveAddress": "+15550000000"}
-    setup = {"identityVerified": True, "state": "in_progress", "attemptId": "owned-attempt", "revision": 7, "expectedGoogleAccountIdentifier": "synthetic-google@example.test", "verification": verification}
+    verification = {"requirementsVersion": 6, "checks": {"gmail": {"status": "unknown", "current": True}, "icloud_messages": {"status": "confirmed", "observedAt": "2026-10-19T00:00:00Z", "current": False}, "imessage": {"status": "unknown", "current": True}, "portrait_lock": {"status": "unknown", "current": True}}, "configurationReady": False, "operationalStatus": "degraded", "securityDisposition": "blocked", "expectedReceiveAddress": "+15550000000"}
+    setup = {"identityVerified": True, "state": "in_progress", "attemptId": "owned-attempt", "revision": 7, "expectedGoogleAccountIdentifier": "synthetic-google@example.test", "googlePasscodeExceptionAllowed": True, "verification": verification}
     captured = []
     def provider(request):
         captured.append(json.loads(request.content))
@@ -3090,6 +3099,18 @@ async def test_phone_setup_settings_actual_handler_observation():
         assert "never enterprise or provider policy" in wire
         assert "Do not change an existing passcode" in wire
         assert "Do not remove or weaken provider/MDM profiles" in wire
+        assert "current Gmail passcode conflict and provider-blocked passcode creation" in wire
+        assert "verified required admin privilege" in wire
+        assert "Open https://admin.google.com/ in the ordinary browser when not already at the" in wire
+        assert "user-authorized scope" in wire
+        assert "Admin privilege alone is not authorization" in wire
+        assert "preserve all other security settings" in wire
+        assert "policy exception is not proof that a device passcode is enabled" in wire
+        assert "googlePasscodeExceptionAllowed" in wire and "google_passcode_exception" in wire
+        assert "securityDisposition" in wire
+        assert "if this marker is absent or false, report setup" in wire
+        assert "Repeated unchanged reads" in wire and "cannot grant authorization" in wire
+        assert "does not prove admin policy authority or a policy write" in wire
         assert "configuration_unavailable" in wire and "passcode modification is restricted" in wire
         assert "never guess, reset, or bypass" in wire
         assert "private acknowledgment alone is not enabled-state proof" in wire
@@ -3115,6 +3136,19 @@ async def test_phone_setup_settings_actual_handler_observation():
         assert "Do not wait for configurationReady to sign in" in wire
         assert "latest successful operation is screen.text for the current interaction" in wire
         assert "Preserve the original authorized phone task" in wire
+        import hashlib
+        from domains.spawn_browser_agent_v3.phone import PHONE_GUIDANCE
+        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "9c830fa34b5b32887395809af480a9a7a25bcfcbb095848ef32bfba5481d1db8", "Ordinary enabled guide must match pre-exception HEAD bytes"
+        for marker in (None, False, "true"):
+            plain_setup = {key: value for key, value in setup.items() if key != "googlePasscodeExceptionAllowed"}
+            if marker is not None:
+                plain_setup["googlePasscodeExceptionAllowed"] = marker
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}):
+                await h._call_browser_use_with_rotation(rose_client=RoseClient(openrouter_key="synthetic"), task="Ordinary enabled phone task", dynamic_system_context="Original context", turn_messages=[], browser_state=_browser_state(), action_entries=[], config=SimpleNamespace(backend=SimpleNamespace(api_url="https://backend.test", api_key="synthetic")), user_id="enabled", agent_id="agent", iteration=1, token_state=ClaudeTokenState(), gpt_token=None, gpt_account_id=None, gpt_token_source=None, gpt_token_pool_id=None, browser_use_mode=None, browser_task_id="task", phone_observation={"enabled": True, "interaction": {"cursor": 12, "setup": plain_setup}})
+            systems = [message["content"] if isinstance(message["content"], str) else "".join(block.get("text", "") for block in message["content"]) for message in captured[-1]["messages"] if message["role"] == "system"]
+            assert any(("Original context\n\n" + PHONE_GUIDANCE).rstrip() in content for content in systems), "Provider may merge system messages but must preserve exact ordinary dynamic bytes"
+            assert not any("Open https://admin.google.com/" in content or "Admin privilege alone is not authorization" in content for content in systems)
+
     finally:
         teardown_mock()
 

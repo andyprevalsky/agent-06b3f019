@@ -22,8 +22,19 @@ function keys(body: Record<string, unknown>, allowed: string[]) {
 }
 export function profileBody(value: unknown) {
   const body = object(value);
-  keys(body, ['expectedProfileRevision', 'expectedAppleIdentity', 'expectedGoogleIdentity']);
+  keys(body, [
+    'expectedProfileRevision',
+    'expectedAppleIdentity',
+    'expectedGoogleIdentity',
+    'allowGooglePasscodeException',
+  ]);
+  if (
+    body.allowGooglePasscodeException !== undefined &&
+    typeof body.allowGooglePasscodeException !== 'boolean'
+  )
+    throw new IPhoneError(400, 'Invalid Google exception authorization');
   return {
+    allowGooglePasscodeException: body.allowGooglePasscodeException as boolean | undefined,
     revision: integer(body.expectedProfileRevision),
     identity: text(body.expectedAppleIdentity),
     ...(body.expectedGoogleIdentity === undefined

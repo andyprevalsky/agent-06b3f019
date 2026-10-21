@@ -148,3 +148,22 @@ test('device passcode is required before Gmail and absence cannot satisfy boot c
   delete (state.checks as Record<string, unknown>).device_passcode;
   assert.equal(verificationDto(state, context).configurationReady, false);
 });
+
+test('Google exception is an explicit current authorization alternative, never fake passcode enabled', () => {
+  const state = fixture();
+  delete (state.checks as Record<string, unknown>).device_passcode;
+  (state.checks as Record<string, unknown>).google_passcode_exception = { ...state.checks.gmail };
+  assert.equal(verificationDto(state, context).configurationReady, false);
+  const opted = { ...context, allowGooglePasscodeException: true };
+  const result = verificationDto(state, opted) as ReturnType<typeof verificationDto> & {
+    securityDisposition?: string;
+  };
+  assert.equal(result.configurationReady, true);
+  assert.equal(result.securityDisposition, 'authorized_google_exception');
+  assert.equal(result.checks.device_passcode.status, 'unknown');
+  (state.checks as Record<string, unknown>).google_passcode_exception = {
+    ...state.checks.gmail,
+    status: 'unknown',
+  };
+  assert.equal(verificationDto(state, opted).configurationReady, false);
+});

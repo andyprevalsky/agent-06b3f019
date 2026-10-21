@@ -2996,7 +2996,7 @@ async def _call_browser_use_with_rotation(
     replacement, and retry up to MAX_CLAUDE_TOKEN_ROTATIONS. If all rotations
     exhaust (or there's no token to start), fall through to the waterfall.
     """
-    from .phone import PHONE_GUIDANCE, phone_actions
+    from .phone import GOOGLE_POLICY_GUIDANCE, PHONE_GUIDANCE, phone_actions
     # Discovery belongs to the trusted profile-gated decision loop. Ordinary
     # browser calls must preserve their pre-phone request and cache inputs.
     phone_snapshot = phone_observation if isinstance(phone_observation, dict) and phone_observation.get("enabled") is True else {}
@@ -3005,6 +3005,10 @@ async def _call_browser_use_with_rotation(
     if phone_snapshot.get("enabled"):
         browser_state_for_llm["phone"] = phone_snapshot
         dynamic_system_context = dynamic_system_context + "\n\n" + PHONE_GUIDANCE
+        interaction = phone_snapshot.get("interaction")
+        setup = interaction.get("setup") if isinstance(interaction, dict) else None
+        if isinstance(setup, dict) and setup.get("googlePasscodeExceptionAllowed") is True:
+            dynamic_system_context += "\n\n" + GOOGLE_POLICY_GUIDANCE
     if extra_user_messages:
         browser_state_for_llm["_extra_user_messages"] = extra_user_messages
 

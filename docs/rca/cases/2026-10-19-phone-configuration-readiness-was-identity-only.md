@@ -151,6 +151,73 @@ Final persistence review also found that the existing setup-profile replacement 
 
 The archive searches for “Passcode modification not allowed” and “device passcode boot Gmail policy” found the existing readiness case as the relevant ongoing contract; unrelated matches were not treated as causal evidence. The case remains open for actual automatic boot and fresh Google browser-approval proof.
 
+### Authorized Google policy exception
+
+The user authorized relaxing the Google Workspace passcode requirement only
+when the current Gmail policy conflict meets the provider's prohibition on
+creating a passcode, and subsequently authorized Workspace-wide scope. This
+does not authorize removing the provider's management profile or modifying
+unrelated security settings. Requirements version 6 represents the alternative
+explicitly: an internal, default-false profile opt-in bound to the configured
+Google identity permits a separate `google_passcode_exception` proof. The
+actual `device_passcode` fact is not changed. All other required checks remain
+required, including Gmail. The exception verifier requires current usable
+Gmail with the exact active account; an account menu, remembered account, or a
+blocking Device Policy Alert cannot establish usable access. It proves an app
+access outcome, not administrator authority or a policy write.
+
+The pure owning regression failed 94/95 and the normal route regression failed
+93/95 before implementation. The expanded final normal control passes 96/96
+(run 1792540496-3821605-11846); the preceding eight-domain gate passes 8/8.
+Provider tests pass 95, layer checks 1685, and build/lint/format pass. Five
+canonical synthetic verifier controls pass, including blocking policy alerts,
+wrong-account and account-menu-only negatives. Exact records are in
+`google-passcode-exception-backend-full-result.json` and
+`google-policy-exception-semantic-result.json` under the local phone harness.
+
+This is not an end-to-end success claim. An earlier four-scenario planner run passed
+only two cases: no opt-in correctly blocks and usable Gmail selects the
+exception verification. The admin-navigation fixture omitted the returned browser state from the
+actual handler transcript and therefore cannot establish a product navigation
+failure; the no-admin case failed argument validation without archived raw
+arguments. The normal Rose gate passed 113/114;
+its existing saved-password scenario selected assistance instead of saved
+fill. These failures were retained while diagnosing the boundaries below; neither
+the three-decision limits nor final assertions were relaxed. The
+separate nullable verification-target contract repair has its own owning
+regression and is not claimed to explain every model validation failure.
+
+Final review separated the optional policy workflow from ordinary phone
+instructions. The original phone guidance now matches its pre-exception bytes;
+only an authoritative active setup opt-in adds the policy guidance. Missing,
+false and string-valued markers do not enable it. Actual request tests failed
+7/9 before this boundary and schema-description correction and passed 9/9
+afterward, preserving six disabled-path hashes. A captured no-admin model
+output supplied verification-only fields on a block action. These fields now
+explicitly advertise their existing mutual exclusion; the invalid combination
+is still rejected, rather than accepted or silently rewritten.
+
+Two control-fixture defects were corrected without changing product behavior:
+the actual handler transcript must include the executed browser-read result,
+and normalized navigation is `goto`, not `goto_url`. Offline proofs cover
+both. On the final source, all four unchanged scenario assertions passed
+within the same three-decision limit (seven total decisions), and normal Rose
+passed 114/114 in 13.4 seconds. The normal mock spawn/context gate also passed
+(776 and 49 cases). Logs are `google-policy-model-controls-gated.log`,
+`google-policy-full-rose-gated.log` and
+`google-policy-context-gate-normal.log`. Earlier failures remain recorded;
+one passing stochastic run is not a deterministic model guarantee. Local
+implementation validation is complete, while live admin and Gmail outcome
+remain blocked on user authentication.
+
+The live admin task used a separate browser-only worker and queue, leaving the
+original phone attention and vault untouched. It reached Google two-step
+verification but has not established Workspace administrator access or changed
+the policy. The earlier challenge expired; the currently observed challenge
+requires user approval. No production deployment or live Gmail-access outcome
+has been certified. This case remains open for autonomous boot and fresh
+cloud-phone approval proof.
+
 ## Human feedback
 
 The user requires default-off isolation of main trajectories and consistent first-use phone settings configuration, including Portrait Orientation Lock when absent. No claim that message counts prove completed history sync is authorized. Parent technical review is not additional human feedback.

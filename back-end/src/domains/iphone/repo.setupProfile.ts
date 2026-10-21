@@ -1,6 +1,11 @@
 import { IPhoneError, type IPhoneDevice } from './types';
 import * as leases from './repo';
-import { setupState, sealSetup, SETUP_OPERATIONS } from '../../providers/phoneSetupState';
+import {
+  setupState,
+  sealSetup,
+  SETUP_OPERATIONS,
+  type SetupState,
+} from '../../providers/phoneSetupState';
 import { lockAgentWorkflowGeneration } from '../../providers/workflowGeneration';
 import { isNativePhoneAttention } from '../../providers/nativePhoneAttention';
 
@@ -8,7 +13,8 @@ export async function configureSetup(
   userId: string,
   expectedRevision: number,
   identity: string,
-  googleIdentity?: string
+  googleIdentity?: string,
+  allowGooglePasscodeException?: boolean
 ) {
   return leases.transaction(async (tx) => {
     const [device] = await tx.$queryRaw<
@@ -49,10 +55,12 @@ export async function configureSetup(
     const state = setupState(device.setupEncrypted);
     if (state.profileRevision !== expectedRevision)
       throw new IPhoneError(409, 'Phone setup profile changed');
+    const allowed = profileExceptionAllowed(state, googleIdentity, allowGooglePasscodeException);
     const next = {
       version: 1 as const,
       profileRevision: state.profileRevision + 1,
       claimRevision: state.claimRevision,
+      ...(allowed ? { allowGooglePasscodeException: true } : {}),
       expectedAppleIdentity: identity,
       ...((googleIdentity ?? state.expectedGoogleIdentity) !== undefined
         ? { expectedGoogleIdentity: googleIdentity ?? state.expectedGoogleIdentity }
@@ -77,4 +85,16 @@ export async function configureSetup(
       },
     };
   });
+}
+
+function profileExceptionAllowed(
+  state: SetupState,
+  googleIdentity: string | undefined,
+  allow: boolean | undefined
+) {
+  const nextGoogleIdentity = googleIdentity ?? state.expectedGoogleIdentity;
+  const same = nextGoogleIdentity === state.expectedGoogleIdentity;
+  if (allow === true && (!same || nextGoogleIdentity === undefined || nextGoogleIdentity === ''))
+    throw new IPhoneError(409, 'Configure Google identity before authorizing an exception');
+  return same && (allow ?? state.allowGooglePasscodeException) === true;
 }

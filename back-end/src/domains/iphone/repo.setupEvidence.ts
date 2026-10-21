@@ -1,3 +1,4 @@
+import { requiresGoogleIdentity } from '../../providers/phoneSetupVerification';
 import { openPhoneValue, phoneCommandHash } from '../../providers/phoneHarnessCredentials';
 import { internalPhoneObservation } from './privacy';
 import { IPhoneError, type Transaction, type IPhoneDevice, type IPhoneLease } from './types';
@@ -49,7 +50,7 @@ export async function setupEvidence(
         device.privateInputEncrypted,
         {
           expectedAppleIdentity: state.expectedAppleIdentity,
-          ...(input.verificationTarget === 'gmail'
+          ...(requiresGoogleIdentity(input.verificationTarget)
             ? { expectedGoogleIdentity: state.expectedGoogleIdentity }
             : {}),
         }

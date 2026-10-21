@@ -22,6 +22,7 @@ export function setupDto(device: IPhoneDevice, state: SetupState, lease: IPhoneL
     providerEpoch: device.providerEpoch,
     expectedPhone: state.expectedPhone ?? null,
     expectedGoogleIdentity: state.expectedGoogleIdentity,
+    allowGooglePasscodeException: state.allowGooglePasscodeException,
     floorAt: state.attempt?.floorAt,
     floorCursor: state.attempt?.floorCursor,
   });
@@ -36,6 +37,9 @@ export function setupDto(device: IPhoneDevice, state: SetupState, lease: IPhoneL
     attemptId: active ? state.attempt!.id : null,
     revision: active ? state.attempt!.revision : state.claimRevision,
     profileRevision: state.profileRevision,
+    ...(active && state.allowGooglePasscodeException === true
+      ? { googlePasscodeExceptionAllowed: true }
+      : {}),
     identityVerified: state.verified?.profileRevision === state.profileRevision,
     ...(active && state.expectedGoogleIdentity !== undefined
       ? { expectedGoogleAccountIdentifier: state.expectedGoogleIdentity }

@@ -1,3 +1,4 @@
+import { requiresGoogleIdentity } from '../../providers/phoneSetupVerification';
 /** Logical setup journal claims share the physical slot, without performing phone IO. */
 import {
   lockNativePhoneDevice,
@@ -5,7 +6,7 @@ import {
 } from '../../providers/nativePhoneAttentionBinding';
 import { phoneCommandHash } from '../../providers/phoneHarnessCredentials';
 import { privacyState } from './privacy';
-import { type SetupInput } from '../../providers/phoneSetupState';
+import { type SetupInput, type SetupState } from '../../providers/phoneSetupState';
 import { assertSetupPhysicalKnown, setupEvidence } from './repo.setupEvidence';
 import { createSetupJournal } from './repo.setupJournal';
 import { ensureSetup } from './repo.setup';
@@ -53,19 +54,7 @@ export async function claimSetup(userId: string, taskId: string, input: SetupInp
       device.providerState === 'CLOSING'
     )
       throw new IPhoneError(409, 'Phone setup interaction changed');
-    if (
-      input.action === 'verify' &&
-      input.verificationTarget === 'gmail' &&
-      (state.expectedGoogleIdentity === undefined || state.expectedGoogleIdentity === '')
-    )
-      throw new IPhoneError(409, 'Phone Google setup profile is unavailable');
-    if (input.action === 'verify' && state.expectedAppleIdentity === undefined)
-      throw new IPhoneError(409, 'Phone setup profile is unavailable');
-    if (
-      input.verificationTarget === 'receive_address' &&
-      (state.expectedPhone === undefined || state.expectedPhone === null)
-    )
-      throw new IPhoneError(409, 'Phone receive address is unavailable');
+    assertSetupProfile(state, input);
     const proof =
       input.action === 'verify'
         ? await setupEvidence(tx, setup.device, holder, state, input)
@@ -122,4 +111,26 @@ async function setupHolder(
     false
   );
   return { task, device, holder, current };
+}
+
+function assertSetupProfile(state: SetupState, input: SetupInput) {
+  if (
+    input.action === 'verify' &&
+    requiresGoogleIdentity(input.verificationTarget) &&
+    (state.expectedGoogleIdentity === undefined || state.expectedGoogleIdentity === '')
+  )
+    throw new IPhoneError(409, 'Phone Google setup profile is unavailable');
+  if (
+    input.action === 'verify' &&
+    input.verificationTarget === 'google_passcode_exception' &&
+    state.allowGooglePasscodeException !== true
+  )
+    throw new IPhoneError(409, 'Google passcode exception is not authorized');
+  if (input.action === 'verify' && state.expectedAppleIdentity === undefined)
+    throw new IPhoneError(409, 'Phone setup profile is unavailable');
+  if (
+    input.verificationTarget === 'receive_address' &&
+    (state.expectedPhone === undefined || state.expectedPhone === null)
+  )
+    throw new IPhoneError(409, 'Phone receive address is unavailable');
 }

@@ -101,6 +101,7 @@ function currentConfigurationReady(device: IPhoneDevice, state: SetupState, now:
     providerEpoch: device.providerEpoch,
     expectedPhone: state.expectedPhone ?? null,
     expectedGoogleIdentity: state.expectedGoogleIdentity,
+    allowGooglePasscodeException: state.allowGooglePasscodeException,
     floorAt: state.attempt!.floorAt,
     floorCursor: state.attempt!.floorCursor,
     now,

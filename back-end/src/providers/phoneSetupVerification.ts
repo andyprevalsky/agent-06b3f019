@@ -1,5 +1,5 @@
 /** Bounded last-observed configuration facts; never perpetual device attestation. */
-export const SETUP_REQUIREMENTS_VERSION = 5;
+export const SETUP_REQUIREMENTS_VERSION = 6;
 export const SETUP_TARGETS = [
   'apple_account',
   'icloud_messages',
@@ -10,6 +10,7 @@ export const SETUP_TARGETS = [
   'portrait_lock',
   'device_passcode',
   'gmail',
+  'google_passcode_exception',
   'runtime',
 ] as const;
 export type SetupTarget = (typeof SETUP_TARGETS)[number];
@@ -36,7 +37,12 @@ export interface SetupChecks {
   requirementsVersion: number;
   checks: Partial<Record<SetupTarget, SetupProof>>;
 }
-export const CONFIG_TARGETS = SETUP_TARGETS.filter((target) => target !== 'runtime');
+export const CONFIG_TARGETS = SETUP_TARGETS.filter(
+  (target) => target !== 'runtime' && target !== 'google_passcode_exception'
+);
+export function requiresGoogleIdentity(target: SetupTarget | undefined) {
+  return target === 'gmail' || target === 'google_passcode_exception';
+}
 export function proofCurrent(
   proof: SetupProof | undefined,
   context: {
@@ -46,6 +52,7 @@ export function proofCurrent(
     providerEpoch: number;
     expectedPhone: string | null;
     expectedGoogleIdentity?: string;
+    allowGooglePasscodeException?: boolean;
     floorAt?: string;
     floorCursor?: number;
     now?: Date;
@@ -83,10 +90,19 @@ export function verificationDto(
       ];
     })
   );
+  const confirmed = (target: SetupTarget) =>
+    checks[target].current && checks[target].status === 'confirmed';
+  const securityDisposition = confirmed('device_passcode')
+    ? 'passcode_enabled'
+    : context.allowGooglePasscodeException === true &&
+        confirmed('google_passcode_exception') &&
+        context.expectedGoogleIdentity !== undefined &&
+        context.expectedGoogleIdentity !== ''
+      ? 'authorized_google_exception'
+      : 'blocked';
   const configurationReady =
-    CONFIG_TARGETS.every(
-      (target) => checks[target].current && checks[target].status === 'confirmed'
-    ) &&
+    CONFIG_TARGETS.every((target) => target === 'device_passcode' || confirmed(target)) &&
+    securityDisposition !== 'blocked' &&
     context.expectedPhone !== null &&
     context.expectedGoogleIdentity !== undefined &&
     context.expectedGoogleIdentity !== '';
@@ -113,6 +129,7 @@ export function verificationDto(
     requirementsVersion: SETUP_REQUIREMENTS_VERSION,
     checks,
     configurationReady,
+    securityDisposition,
     operationalStatus,
     ...(currentRuntime ? { runtime: currentRuntime } : {}),
   };

@@ -216,6 +216,38 @@ After setup or deferral, reassess the original goal and choose the next action;
 setup never automatically replays the interrupted input or replaces the task.
 """
 
+GOOGLE_POLICY_GUIDANCE = """For this explicitly opted-in account, the following Google policy exception is
+an authorized alternative to the generic setup block; provider MDM protections remain unchanged.
+Only for a current Gmail passcode conflict and provider-blocked passcode creation,
+Open https://admin.google.com/ in the ordinary browser when not already at the
+Admin console, then inspect the correct Workspace administering the server-configured
+Google account using protected saved-credential authentication.
+Require verified required admin privilege and explicit user-authorized scope.
+Admin privilege alone is not authorization. Only when the server-owned setup
+profile enables this exception may you relax that specific Workspace passcode
+requirement within the user-authorized scope, including Workspace-wide scope
+when explicitly authorized. Verify the full effective scope before changing it;
+preserve all other security settings, account policies, and unrelated OU inheritance.
+If admin privilege is absent, the Workspace is wrong, scope is uncertain, or the
+change exceeds authorization, remain blocked with configuration_unavailable.
+Read back the effective policy after an authorized change, then obtain fresh
+actual Gmail access evidence. A policy exception is not proof that a device passcode is enabled;
+only the backend's typed authorized alternative proof may satisfy boot readiness.
+The active owned setup.googlePasscodeExceptionAllowed marker is the authoritative
+profile opt-in. For an already observed current Gmail passcode conflict with
+provider-blocked creation, if this marker is absent or false, report setup
+action=block with reasonCode=configuration_unavailable. Repeated unchanged reads
+cannot grant authorization; do not inspect or change admin policy for this exception.
+After the authorized flow, use optional
+verificationTarget=google_passcode_exception with actual current broker evidence
+of usable Gmail for the exact configured Google account. A blocking policy alert,
+an account menu alone, or a remembered session is not usable-access proof.
+This outcome does not prove admin policy authority or a policy write. Inspect
+verification.securityDisposition: passcode_enabled, authorized_google_exception,
+or blocked. The exception leaves the actual device_passcode check unchanged;
+all other required configuration checks, including Gmail, must still be verified.
+"""
+
 
 def phone_profile_enabled(profile: dict) -> bool:
     """Pure eligibility marker from existing server-owned init/profile responses."""

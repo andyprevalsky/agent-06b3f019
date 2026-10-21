@@ -1,5 +1,10 @@
 import { settingsPurpose, settingsSchema, parseSettingsResult } from './phoneSetupPurpose';
-import type { SetupTarget, CheckStatus, SetupRuntime } from './phoneSetupVerification';
+import {
+  requiresGoogleIdentity,
+  type SetupTarget,
+  type CheckStatus,
+  type SetupRuntime,
+} from './phoneSetupVerification';
 import { phoneVerifierPricing } from './phoneVerifierPricing';
 /** Fixed identity purpose; observations are server-loaded data, never instructions. */
 import { createStreamingCompletion, StructuredOutputAccumulator } from './rose';
@@ -50,7 +55,7 @@ export const verifyPhoneSetup: SetupVerifier = async (input) => {
         content: JSON.stringify({
           expectedAppleIdentity: input.expectedAppleIdentity,
           observations: input.evidence,
-          ...(target === 'gmail'
+          ...(requiresGoogleIdentity(target)
             ? { expectedGoogleIdentity: input.expectedGoogleIdentity ?? null }
             : {}),
           ...(target !== 'apple_account'

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { test, mock } from 'node:test';
 import { StructuredOutputAccumulator } from '../../providers/rose/structuredOutput';
 import { settingsPurpose } from '../../providers/phoneSetupPurpose';
-import { SETUP_TARGETS } from '../../providers/phoneSetupVerification';
+import { SETUP_TARGETS, requiresGoogleIdentity } from '../../providers/phoneSetupVerification';
 import type { CompletionOptions, CompletionChunk } from '../../providers/rose/types';
 
 test('phone setup canonical Rose wrapper purpose, evidence, timeout and actual usage fail closed', async () => {
@@ -97,7 +97,7 @@ test('phone setup canonical Rose wrapper purpose, evidence, timeout and actual u
         ...input,
         verificationTarget,
         expectedReceiveAddress: '+19729777432',
-        ...(verificationTarget === 'gmail'
+        ...(requiresGoogleIdentity(verificationTarget)
           ? { expectedGoogleIdentity: 'google@example.invalid' }
           : {}),
       });
@@ -107,7 +107,7 @@ test('phone setup canonical Rose wrapper purpose, evidence, timeout and actual u
         expectedAppleIdentity: input.expectedAppleIdentity,
         observations: input.evidence,
         expectedReceiveAddress: '+19729777432',
-        ...(verificationTarget === 'gmail'
+        ...(requiresGoogleIdentity(verificationTarget)
           ? { expectedGoogleIdentity: 'google@example.invalid' }
           : {}),
       });
@@ -124,6 +124,11 @@ test('phone setup canonical Rose wrapper purpose, evidence, timeout and actual u
           )
         );
         assert.ok(settingsPurpose(verificationTarget).includes('future Google sign-in challenge'));
+      }
+      if (verificationTarget === 'google_passcode_exception') {
+        assert.ok(settingsPurpose(verificationTarget).includes('account menu alone'));
+        assert.ok(settingsPurpose(verificationTarget).includes('blocking Device Policy Alert'));
+        assert.ok(settingsPurpose(verificationTarget).includes('Never infer admin authority'));
       }
       if (verificationTarget === 'icloud_contacts') {
         assert.ok(

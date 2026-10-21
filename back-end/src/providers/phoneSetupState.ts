@@ -26,6 +26,7 @@ export interface SetupState {
   claimRevision: number;
   expectedAppleIdentity?: string;
   expectedGoogleIdentity?: string;
+  allowGooglePasscodeException?: boolean;
   attempt?: SetupAttempt;
   verified?: { at: string; profileRevision: number };
   verification?: SetupChecks;
@@ -69,6 +70,9 @@ export function setupState(encrypted: string | null): SetupState {
           typeof value.passcodeCreation.confirmed !== 'boolean' ||
           (value.passcodeCreation.acknowledged !== undefined &&
             typeof value.passcodeCreation.acknowledged !== 'boolean'))) ||
+      (value.allowGooglePasscodeException !== undefined &&
+        (typeof value.allowGooglePasscodeException !== 'boolean' ||
+          (value.allowGooglePasscodeException && !value.expectedGoogleIdentity))) ||
       (value.expectedGoogleIdentity !== undefined &&
         (typeof value.expectedGoogleIdentity !== 'string' ||
           value.expectedGoogleIdentity.trim() === '' ||
