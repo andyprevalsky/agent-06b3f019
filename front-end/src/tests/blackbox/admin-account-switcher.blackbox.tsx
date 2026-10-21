@@ -24,6 +24,7 @@ import { http, HttpResponse } from 'msw';
 import { AdminAccountSwitcher } from '@/features/admin-account-switcher';
 import { AdminSwitcherMount } from '@/features/app-wiring/components/AdminSwitcherMount';
 import { clearSession } from '@/lib/supabase';
+import * as roseDesktopFlag from '@/lib/roseDesktop';
 
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
@@ -362,7 +363,8 @@ describe('AdminSwitcherMount placement (Rose Desktop moves the switcher into Set
     );
   });
 
-  it('stock admin (Tamy, flag off): the floating pill keeps its exact classes', async () => {
+  it('an explicit flag-off override preserves the floating admin pill', async () => {
+    vi.spyOn(roseDesktopFlag, 'isRoseDesktopUser').mockReturnValue(false);
     signIn(TAMY_ID, '+12028803603');
     renderBothPlacements();
     const floating = await within(screen.getByTestId('top-right')).findByTestId(
@@ -373,6 +375,18 @@ describe('AdminSwitcherMount placement (Rose Desktop moves the switcher into Set
     expect(within(floating).getByTestId('admin-account-pill').className).toBe(
       'flex max-w-full min-w-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium shadow-lg backdrop-blur-md transition-colors border-border/60 bg-background/90 text-foreground',
     );
+  });
+
+  it('an ordinary admin uses Settings after the all-account rollout', async () => {
+    signIn(TAMY_ID, '+12028803603');
+    renderBothPlacements();
+    const inline = await within(screen.getByTestId('settings')).findByTestId(
+      'admin-account-switcher',
+    );
+    expect(inline).toHaveAttribute('data-variant', 'inline');
+    expect(
+      within(screen.getByTestId('top-right')).queryByTestId('admin-account-switcher'),
+    ).toBeNull();
   });
 
   it('a flagged account that is being impersonated keeps the floating exit', async () => {
