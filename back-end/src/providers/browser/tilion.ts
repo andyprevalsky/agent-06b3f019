@@ -57,6 +57,7 @@ import {
   type GeoSpecificity,
   landedLocation,
   regionForCountry,
+  storedTilionProxyType,
   tilionProxyType,
   type TilionProxyType,
   tilionSessionLifetime,
@@ -180,10 +181,15 @@ async function postSession(
       // Live probe: cdp_observe solved neither reCAPTCHA v2 nor Turnstile and
       // adds 100-250 ms per navigation, so it is opt-in.
       cdp_observe: browserProviderEnabled('TILION_CDP_OBSERVE', false),
-      residential: true,
-      proxy_type: proxyType,
+      // Direct egress has no exit geo: the region alone places the browser.
+      ...(proxyType === 'direct'
+        ? { residential: false }
+        : {
+            residential: true,
+            proxy_type: proxyType,
+            geo: geoForSpecificity(location, specificity),
+          }),
       ...(region ? { region } : {}),
-      geo: geoForSpecificity(location, specificity),
     },
   });
   // Exact-cleanup evidence: the paid browser exists from here on. Logged before
@@ -223,7 +229,7 @@ async function createPlacedSession(
     requested: geoSpecificities(location)[0],
     applied: 'country',
     requestedLocation: location,
-    geoApplied: record.geo_applied ?? null,
+    geoApplied: proxyType === 'direct' ? null : (record.geo_applied ?? null),
     geoUnsupported: record.geo_unsupported ?? [],
   };
   if (geoTargeting.requested !== 'country' || geoTargeting.geoApplied === false) {
@@ -306,7 +312,11 @@ export async function createTilionSessionWithContext(
   agentId: string,
   location: ProxyGeoLocation = DEFAULT_GEOLOCATION,
   startUrl?: string,
-  options?: { keepValidationConnection?: boolean; taskId?: string; proxyType?: KernelProxyType }
+  options?: {
+    keepValidationConnection?: boolean;
+    taskId?: string;
+    proxyType?: KernelProxyType | 'direct';
+  }
 ): Promise<BrowserProviderSession & { geoTargeting: TilionGeoTargeting }> {
   const proxyType = tilionProxyType(options?.proxyType ?? 'residential');
   const remote = await createRemote(location, proxyType);
@@ -358,7 +368,7 @@ export async function createTilionSessionWithContext(
 /** Row-free candidate for challenge recovery; the caller owns the browser and the release. */
 export async function createTilionRecoverySession(
   location: ProxyGeoLocation,
-  options: { proxyType?: KernelProxyType } = {}
+  options: { proxyType?: KernelProxyType | 'direct' } = {}
 ): Promise<{
   sessionId: string;
   debugUrl: string;
@@ -492,7 +502,7 @@ async function reattachLiveSession(
     if (updated.count !== 1) throw new Error(`Browser task ${old.id} changed during reattach`);
     await announceBrowserSessionBinding({ id: old.id });
     handedOff = true;
-    const proxyType: TilionProxyType = old.proxyTier === 'mobile' ? 'mobile' : 'residential';
+    const proxyType = storedTilionProxyType(old.proxyTier);
     return {
       ...(options.keepValidationConnection ? { validationBrowser: browser } : {}),
       provider: 'tilion',
@@ -566,7 +576,7 @@ async function replaceSession(
       : baseLocation;
   const proxyType: TilionProxyType =
     options.rotateTo ??
-    (previousProvider === 'tilion' && old.proxyTier === 'mobile' ? 'mobile' : 'residential');
+    (previousProvider === 'tilion' ? storedTilionProxyType(old.proxyTier) : 'residential');
 
   const remote = await createRemote(location, proxyType);
   let handedOff = false;
