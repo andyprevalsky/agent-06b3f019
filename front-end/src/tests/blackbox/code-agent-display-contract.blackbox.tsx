@@ -24,6 +24,7 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 
+import { UserUiFrame } from '@/features/user-ui';
 import ApprovalChip from '@/features/terminal-component-group/components/ApprovalChip';
 import { PinnedQuestionMount } from '@/features/terminal-component-group/components/PinnedQuestion';
 import { filterMessagesForSubAgent } from '@/features/terminal-component-group/components/useMessageFiltering';
@@ -383,13 +384,13 @@ describe('L-DISPLAY 2: inline media through the gallery', () => {
     expect(screen.getAllByTestId('inline-media')).toHaveLength(2);
   });
 
-  it('text/html frames file_pointer.usercontent_url in an allow-scripts sandbox, never storage', async () => {
+  it('text/html frames only usercontent_url with the display sandbox, never storage', async () => {
     serveSignedUrls();
     renderItems([htmlMessage(4, `${USERCONTENT}/usercontent/display/${ROOT_AGENT_ID}/game.html`)]);
     const frame = await screen.findByTitle('item-4.html');
     expect(frame.tagName).toBe('IFRAME');
-    // Exactly allow-scripts: no allow-same-origin, so the page gets an opaque origin.
-    expect(frame).toHaveAttribute('sandbox', 'allow-scripts');
+    // Display interactions do not grant same-origin access.
+    expect(frame).toHaveAttribute('sandbox', 'allow-scripts allow-pointer-lock allow-popups');
     expect(frame).toHaveAttribute(
       'src',
       `${USERCONTENT}/usercontent/display/${ROOT_AGENT_ID}/game.html`,
@@ -399,6 +400,67 @@ describe('L-DISPLAY 2: inline media through the gallery', () => {
     // The frame never asks for the storage URL.
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(attachmentUrlRequests()).toHaveLength(0);
+  });
+
+  it.each([
+    { kind: 'page', mime: 'text/html', source: 'display' },
+    { kind: 'bundle', mime: 'application/vnd.rose.bundle+json', source: 'pointer' },
+    { kind: 'model', mime: 'model/gltf-binary', source: 'display' },
+    { kind: 'pdf', mime: 'application/pdf', source: 'pointer' },
+  ])(
+    'frames $kind using the exact L-DISPLAY3 $source kind and usercontent URL',
+    ({ kind, mime, source }) => {
+      const row = mediaMessage(9, mime, kind);
+      row.metadata = {
+        ...row.metadata,
+        display: {
+          ...(row.metadata?.display as object),
+          ...(source === 'display' ? { media_kind: kind } : {}),
+        },
+      };
+      const url = `${USERCONTENT}/usercontent/display/${ROOT_AGENT_ID}/${kind}/index.html`;
+      const file_pointer = {
+        ...row.file_pointer!,
+        usercontent_url: url,
+        ...(source === 'pointer' ? { kind } : {}),
+      };
+      renderItems([{ ...row, file_pointer }]);
+      const frame = screen.getByTestId('display-html-frame');
+      expect(frame).toHaveAttribute('src', url);
+      expect(frame).toHaveAttribute('sandbox', 'allow-scripts allow-pointer-lock allow-popups');
+      expect(frame.getAttribute('sandbox')).not.toContain('allow-same-origin');
+      expect(frame).toHaveAttribute('referrerpolicy', 'no-referrer');
+      expect(screen.queryByTestId('inline-media')).toBeNull();
+      expect(attachmentUrlRequests()).toHaveLength(0);
+    },
+  );
+
+  it.each([
+    'javascript:alert(1)',
+    'data:text/html,<h1>no</h1>',
+    'blob:https://usercontent.rose.test/file',
+    '/relative-preview',
+  ])('does not frame an invalid usercontent URL: %s', async (url) => {
+    serveSignedUrls();
+    const row = mediaMessage(10, 'application/vnd.rose.bundle+json', 'json');
+    row.metadata = {
+      ...row.metadata,
+      display: { ...(row.metadata?.display as object), media_kind: 'bundle' },
+    };
+    const file_pointer = { ...row.file_pointer!, usercontent_url: url };
+    renderItems([{ ...row, file_pointer }]);
+    expect(await screen.findByTestId('display-html-link')).toHaveAttribute(
+      'href',
+      `${STORAGE}/signed/fp-10`,
+    );
+    expect(document.querySelector('iframe')).toBeNull();
+  });
+
+  it('keeps generic user UI frames at allow-scripts only', () => {
+    renderWithProviders(
+      <UserUiFrame src={`${USERCONTENT}/generic/index.html`} title="Generic UI" />,
+    );
+    expect(screen.getByTitle('Generic UI')).toHaveAttribute('sandbox', 'allow-scripts');
   });
 
   it('an older row without usercontent_url is a plain open/download link, never framed', async () => {

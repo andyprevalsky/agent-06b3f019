@@ -195,12 +195,13 @@ export interface PinnedQuestionDisplay {
 export interface DisplayMediaItem {
   file: FilePointer;
   mime_type: string;
+  media_kind?: 'page' | 'bundle' | 'model' | 'pdf' | 'image' | 'video';
   sha256?: string;
   /** Present on the first item of one display call only. */
   caption?: string;
   requester: RequestingAgent | null;
   /**
-   * text/html only: `file_pointer.usercontent_url`, served from the usercontent
+   * Published page/bundle/model/pdf: `file_pointer.usercontent_url`, served from the usercontent
    * origin. Older rows have none; their storage URL is never framed.
    */
   usercontent_url?: string;
@@ -608,6 +609,8 @@ export function parseDisplayMedia(message: Message): DisplayMediaItem | null {
   return {
     file: message.file_pointer,
     mime_type: str(display.mime_type) ?? message.file_pointer.mime_type,
+    media_kind:
+      parseDisplayKind(display.media_kind) ?? parseDisplayKind(rec(message.file_pointer)?.kind),
     sha256: str(display.sha256),
     caption: str(display.caption),
     requester: messageRequester(message.metadata),
@@ -615,9 +618,28 @@ export function parseDisplayMedia(message: Message): DisplayMediaItem | null {
   };
 }
 
-/** HTML media renders in a sandboxed cross-origin frame, never on the app origin. */
-export function isHtmlDisplayMedia(item: Pick<DisplayMediaItem, 'mime_type'>): boolean {
-  return item.mime_type.split(';')[0].trim().toLowerCase() === 'text/html';
+function parseDisplayKind(value: unknown): DisplayMediaItem['media_kind'] {
+  return value === 'page' ||
+    value === 'bundle' ||
+    value === 'model' ||
+    value === 'pdf' ||
+    value === 'image' ||
+    value === 'video'
+    ? value
+    : undefined;
+}
+
+/** Published display documents use their separate usercontent frame, never storage/app URLs. */
+export function isHtmlDisplayMedia(
+  item: Pick<DisplayMediaItem, 'mime_type' | 'media_kind'>,
+): boolean {
+  return (
+    item.media_kind === 'page' ||
+    item.media_kind === 'bundle' ||
+    item.media_kind === 'model' ||
+    item.media_kind === 'pdf' ||
+    item.mime_type.split(';')[0].trim().toLowerCase() === 'text/html'
+  );
 }
 
 export function isSendMessageToUserRow(metadata: Message['metadata']): boolean {
