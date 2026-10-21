@@ -51,6 +51,8 @@ def _offline_activity_edges():
             patch("socket.socket.connect_ex", deny),
             patch("domains.spawn_browser_agent_v3.handler.activity_drain_reason", AsyncMock(return_value=None)),
             patch("helpers.llm.check_progress", AsyncMock(side_effect=scripted_progress)),
+            # JEV model scheduling is covered by its owning suite, not OTP controls.
+            patch("helpers.jev_progress.predict_jev_progress", AsyncMock(return_value=None)),
             patch("domains.spawn_browser_agent_v3.repo.list_session_files", AsyncMock(return_value=[])),
             patch("domains.spawn_browser_agent_v3.service.list_session_files", AsyncMock(return_value=[])),
         ):
