@@ -2,10 +2,21 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { useRoseApps } from '../rose-apps/roseAppsState';
 import { createPortal } from 'react-dom';
+import { browserComposerTarget } from './browserComposer';
 
 type Geometry = { left: number; top: number; width: number; height: number };
 
-export function QueryInputLayer({ enabled, children }: { enabled: boolean; children: ReactNode }) {
+export function QueryInputLayer({
+  enabled,
+  children,
+  browserEligible = true,
+  ownerAgentId,
+}: {
+  enabled: boolean;
+  children: ReactNode;
+  browserEligible?: boolean;
+  ownerAgentId?: string;
+}) {
   const apps = useRoseApps();
   const browserOpen = apps?.openApp === 'browser';
   const raised = enabled && !browserOpen;
@@ -53,19 +64,9 @@ export function QueryInputLayer({ enabled, children }: { enabled: boolean; child
   }, [raised]);
 
   if (enabled && browserOpen) {
-    const target = apps?.browserComposerSlot;
+    const target = browserEligible ? browserComposerTarget(apps, ownerAgentId) : null;
     // Preserve the existing send/stop channel; only move it into its selected owner's pane.
-    if (
-      !target ||
-      target.dataset.agentId !== apps?.selectedAgentId ||
-      !apps?.tabs.some(
-        (tab) =>
-          tab.agentId === apps.browserTabAgentId &&
-          tab.agentId === target.dataset.agentId &&
-          tab.taskId === target.dataset.taskId,
-      )
-    )
-      return null;
+    if (!target) return null;
     return createPortal(
       <div
         data-testid="browser-query-input"

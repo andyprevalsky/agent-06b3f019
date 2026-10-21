@@ -165,7 +165,7 @@ function TrajectoryItems({
   const streamingMetricsBySubAgentId = metrics;
   return (
     <MessageListItems
-      groupAgentMessages
+      groupAgentMessages={subAgentId === undefined}
       compressWork={compressWork}
       workStatus={agent?.status}
       workEndedAt={agent?.updated_at}
@@ -231,7 +231,7 @@ export function MessageListView(props: MessageListViewProps) {
     onSendMessage,
   } = props;
 
-  const compressWork = useRoseDesktop();
+  const compressWork = useRoseDesktop() && subAgentId === undefined;
   const showMainBanners = showStatusBanners && subAgentId === undefined;
   const showAttention = shouldShowStreamingAttention(streaming.attention, subAgentId);
   const showWebPreview = showMainBanners && agent !== null && getClientSource() === 'WEB';

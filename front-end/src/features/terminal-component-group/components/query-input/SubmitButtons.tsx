@@ -31,6 +31,7 @@ interface SubmitOrStopButtonProps {
   onSubmit: () => void;
   onPause?: () => void;
   darkGlass?: boolean;
+  label?: string;
 }
 
 export function SubmitOrStopButton({
@@ -41,6 +42,7 @@ export function SubmitOrStopButton({
   onSubmit,
   onPause,
   darkGlass = false,
+  label,
 }: SubmitOrStopButtonProps) {
   const className = darkGlass ? 'rose-dark-glass' : undefined;
   return (
@@ -52,6 +54,7 @@ export function SubmitOrStopButton({
           disabled={disabled}
           hasUploadingAttachments={hasUploadingAttachments}
           onSubmit={onSubmit}
+          label={label}
         />
       ) : (
         <StopButton className={className} isPausing={isPausing} onPause={onPause} />
@@ -110,11 +113,13 @@ function SendButton({
   disabled,
   hasUploadingAttachments,
   onSubmit,
+  label,
 }: {
   className?: string;
   disabled: boolean;
   hasUploadingAttachments: boolean;
   onSubmit: () => void;
+  label?: string;
 }) {
   return (
     <Tooltip delayDuration={200}>
@@ -124,6 +129,7 @@ function SendButton({
           onClick={onSubmit}
           disabled={disabled || hasUploadingAttachments}
           size="md"
+          aria-label={label}
         >
           {hasUploadingAttachments ? (
             <Loader2 className="w-5 h-5 animate-spin" strokeWidth={2.5} />

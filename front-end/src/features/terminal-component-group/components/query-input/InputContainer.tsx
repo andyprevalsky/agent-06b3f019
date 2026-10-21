@@ -60,6 +60,7 @@ interface InputContainerProps {
   availableModels: Model[];
   showModelSelector: boolean;
   hideModelSelector?: boolean;
+  readOnlyModelLabel?: string;
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
   roseDesktop?: boolean;
   /** Rose Desktop dark mode: dark textarea + model chip. */
@@ -79,8 +80,6 @@ export function InputContainer(props: InputContainerProps) {
     placeholder,
     onSubmit,
     onFilesPicked,
-    onPause,
-    isPausing,
     textareaRef,
     roseDesktop = false,
     roseDark = false,
@@ -131,6 +130,7 @@ export function InputContainer(props: InputContainerProps) {
             />
           )}
           {props.sessionControls}
+          <ReadOnlyModelLabel label={props.readOnlyModelLabel} />
           {speed && (
             <SpeedToggle
               fastMode={speed.fastMode}
@@ -143,14 +143,23 @@ export function InputContainer(props: InputContainerProps) {
           canSubmit={props.canSubmit}
           disabled={disabled}
           hasUploadingAttachments={props.hasUploadingAttachments}
-          isPausing={isPausing}
+          isPausing={props.isPausing}
           onSubmit={onSubmit}
-          onPause={onPause}
+          onPause={props.onPause}
           darkGlass={roseDesktop}
+          label={props.readOnlyModelLabel ? 'Send' : undefined}
         />
       </div>
     </>
   );
+}
+
+function ReadOnlyModelLabel({ label }: { label?: string }) {
+  return label ? (
+    <span data-testid="browser-model-label" className="text-xs text-muted-foreground">
+      {label}
+    </span>
+  ) : null;
 }
 
 interface HiddenFileInputProps {

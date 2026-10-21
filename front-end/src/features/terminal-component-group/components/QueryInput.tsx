@@ -1,22 +1,10 @@
 /**
  * STATE MACHINE: QueryInput (top-level orchestrator)
  *
- * Composition (stock UI):
- *   TopBar (WriteLock, ToolSet, TestPrompts, FastMode, CostIndicator, ContextMeter, Settings)
- *   AttachmentList (chips)
- *   InputContainer (textarea + paperclip + model picker + submit/stop button)
- *
- * Composition (Rose Desktop flag, useRoseDesktop()):
- *   NubTab (Rose-gradient tab on the BACK of the box, flush with its left
- *     edge; see ToolbarNub.tsx) holding NubToolbar (lock, context files,
- *     budget, context %, settings, info).
- *   PinnedTools (top-left inside the box, always visible, stock styling that
- *     never changes in dark mode): RoseToolSetChip + SimulatorToggle (admin)
- *   AttachmentList
- *   InputContainer with: bare paperclip, model selector (short rose-flash /
- *     rose-ultra names, no info button), 3-state SpeedToggle at the
- *     selector's height, dark-only glass send.
- *   The host keeps 14px top clearance for the nub.
+ * Stock: top toolbar, attachments, textarea and model/send controls.
+ * Rose Desktop: nub toolbar, pinned tools, attachments, model/speed/send.
+ * Browser: existing owner-agent input, files and Send only; read-only model
+ *   label stays unknown until the browser task reports its actual model.
  *
  * Sub-state lives in hooks:
  *   - useAttachments     : attachment lifecycle + paste/drag
@@ -76,6 +64,8 @@ import {
   showsMarbleBackground,
 } from './query-input/dripStyles';
 import { DEFAULT_PENDING_PRICE_LIMIT_CENTS } from '../config';
+import { useRoseApps } from './rose-apps/roseAppsState';
+import { browserComposerTarget, BROWSER_MODEL_LABEL } from './query-input/browserComposer';
 import './query-input/roseQueryBox.css';
 
 export type { QueryInputProps };
@@ -96,15 +86,23 @@ export default function QueryInput(props: QueryInputProps) {
   const reveal = useToolbarReveal();
   const roseDesktop = useRoseDesktop();
   const roseDark = useRoseTheme().isDark;
+  const browser =
+    !!browserComposerTarget(useRoseApps(), props.agentId) &&
+    !!props.liftAboveApps &&
+    !directChannel;
 
   return (
-    <QueryInputLayer enabled={roseDesktop && !!props.liftAboveApps}>
+    <QueryInputLayer
+      enabled={roseDesktop && !!props.liftAboveApps}
+      browserEligible={!directChannel}
+      ownerAgentId={props.agentId}
+    >
       <div className="w-full md:px-0">
         <div
           data-testid="query-input-host"
-          className={cn('max-w-4xl mx-auto', roseDesktop && 'relative mt-[14px]')}
+          className={cn('max-w-4xl mx-auto', roseDesktop && !browser && 'relative mt-[14px]')}
         >
-          {roseDesktop && !directChannel && (
+          {roseDesktop && !directChannel && !browser && (
             <NubTab reveal={reveal}>
               <NubToolbar {...topBarProps} />
             </NubTab>
@@ -125,6 +123,7 @@ export default function QueryInput(props: QueryInputProps) {
               topBarProps={topBarProps}
               roseDesktop={roseDesktop}
               roseDark={roseDark}
+              browser={browser}
             />
           </QueryInputShell>
         </div>
@@ -172,6 +171,7 @@ interface QueryInputBodyProps extends QueryInputProps {
   roseDesktop: boolean;
   /** Rose Desktop dark mode: dark textarea + model chip. */
   roseDark: boolean;
+  browser: boolean;
 }
 
 function QueryInputBody(props: QueryInputBodyProps) {
@@ -195,42 +195,44 @@ function QueryInputBody(props: QueryInputBodyProps) {
     roseDesktop,
     roseDark,
     directChannel = false,
+    browser,
   } = props;
   const agentCompleted = agentDetail?.status === 'COMPLETED' || agentDetail?.status === 'FAILED';
   const speed =
-    roseDesktop && !directChannel && topBarProps.showFastMode
+    roseDesktop && !directChannel && !browser && topBarProps.showFastMode
       ? { fastMode: topBarProps.fastMode ?? false, onFastModeChange: topBarProps.onFastModeChange }
       : undefined;
   const toolbar = roseDesktop ? <PinnedTools {...topBarProps} /> : <TopBar {...topBarProps} />;
 
   return (
     <>
-      {!directChannel && toolbar}
+      {!directChannel && !browser && toolbar}
       <AttachmentList attachments={attachments.attachments} onRemove={attachments.remove} />
       <DragOverlay visible={attachments.isDragOver} />
       <InputContainer
         value={value}
         onChange={onChange}
         disabled={disabled}
-        placeholder={placeholder}
+        placeholder={browser ? 'Message Rose about this browser' : placeholder}
         onSubmit={handleSubmit}
         onFilesPicked={(files) => void attachments.processFiles(files)}
         agentCompleted={agentCompleted}
-        canSubmit={canSubmit}
-        onPause={onPause}
+        canSubmit={browser || canSubmit}
+        onPause={browser ? undefined : onPause}
         isPausing={isPausing}
         hasUploadingAttachments={attachments.hasUploading}
         selectedModel={selectedModel}
         onModelChange={onModelChange}
         availableModels={availableModels}
         showModelSelector={showModelSelector}
-        hideModelSelector={directChannel}
+        hideModelSelector={directChannel || browser}
+        readOnlyModelLabel={browser ? BROWSER_MODEL_LABEL : undefined}
         textareaRef={textareaRef}
         roseDesktop={roseDesktop}
         roseDark={roseDark}
         speed={speed}
         attachable
-        sessionControls={props.sessionControls}
+        sessionControls={browser ? undefined : props.sessionControls}
       />
     </>
   );

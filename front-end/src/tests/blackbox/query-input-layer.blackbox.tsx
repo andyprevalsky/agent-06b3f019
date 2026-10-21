@@ -73,6 +73,7 @@ it.each(['other-owner', 'other-task', 'root'])(
     document.body.append(slot);
     const value = {
       openApp: 'browser',
+      browserMode: 'remote',
       browserComposerSlot: slot,
       selectedAgentId: 'owner',
       browserTabAgentId: scenario === 'root' ? null : 'owner',
@@ -109,6 +110,7 @@ it('fences an old owner slot during A to B selection, then restores the normal c
   const value = (selected: string, target: HTMLElement, open = true) =>
     ({
       openApp: open ? 'browser' : null,
+      browserMode: 'remote',
       browserComposerSlot: target,
       selectedAgentId: selected,
       browserTabAgentId: selected,
