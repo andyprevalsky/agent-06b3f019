@@ -178,6 +178,20 @@ export async function assertInvalidFoundryInputs(
     assert.strictEqual(response.status, 400, 'invalid served input must fail closed');
     assert.deepStrictEqual(await cooldownRows(), beforeInvalid, 'invalid reset must not mutate');
   }
+  for (const body of [
+    { region: ['valid.example.test'], deployment: 'deployment' },
+    { region: 'valid.example.test', deployment: ['deployment'] },
+    { region: null, deployment: 'deployment' },
+    { region: 'valid.example.test', deployment: {} },
+  ]) {
+    const response = await fetch(`${baseUrl}/api/integrations/compute-code/token/rate-limited`, {
+      method: 'POST',
+      headers: { 'X-API-Key': AUTHORITY_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'foundry', source: 'pool', ...body }),
+    });
+    assert.strictEqual(response.status, 400, 'non-string Foundry mark input must fail closed');
+    assert.deepStrictEqual(await cooldownRows(), beforeInvalid, 'invalid mark must not mutate');
+  }
   const validAfterInvalid = await fetch(
     `${baseUrl}/api/integrations/compute-code/foundry-deployment/cooldown?keys=valid.example.test:deployment`,
     { headers: { 'X-API-Key': AUTHORITY_KEY } }

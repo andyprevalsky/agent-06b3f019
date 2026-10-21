@@ -277,8 +277,8 @@ router.post(
           failureReason: body.failureReason as string | undefined,
           credentialId: body.credentialId as string | undefined,
           model: body.model as string | undefined,
-          region: body.region as string | undefined,
-          deployment: body.deployment as string | undefined,
+          region: typeof body.region === 'string' ? body.region : undefined,
+          deployment: typeof body.deployment === 'string' ? body.deployment : undefined,
           retryAfterSeconds:
             typeof body.retryAfterSeconds === 'number' ? body.retryAfterSeconds : undefined,
         }

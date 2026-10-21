@@ -26,7 +26,7 @@ const SENTINEL_NAME = 'foundry_deployment_cooldown';
 export class InvalidFoundryCooldownRequest extends Error {}
 
 /** `<region host>:<deployment>`; never an endpoint path or a key. */
-function foundryCooldownKey(region: string, deployment: string): string {
+export function foundryCooldownKey(region: string, deployment: string): string {
   if (
     region.length > 253 ||
     !/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(region) ||

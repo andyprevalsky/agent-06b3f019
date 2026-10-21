@@ -14,6 +14,8 @@
 
 import { createHash } from 'node:crypto';
 import {
+  foundryCooldownKey,
+  InvalidFoundryCooldownRequest,
   readSharedFoundryCooldowns,
   reportSharedFoundryRateLimit,
   reportSharedFoundryServed,
@@ -249,15 +251,30 @@ export function __resetFoundryCooldowns(): void {
 }
 
 function retryHintSeconds(headers: Headers, message = ''): number | undefined {
-  for (const [name, scale] of [
-    ['retry-after-ms', 1000],
-    ['retry-after', 1],
-  ] as const) {
-    const value = Number(headers.get(name));
-    if (Number.isFinite(value) && value > 0) return value / scale;
+  const now = Date.now();
+  const accept = (seconds: number): number | undefined =>
+    Number.isFinite(seconds) &&
+    seconds > 0 &&
+    Number.isFinite(new Date(now + seconds * 1000).getTime())
+      ? seconds
+      : undefined;
+  const retryAfterMs = headers.get('retry-after-ms');
+  if (retryAfterMs !== null) {
+    const seconds = accept(Number(retryAfterMs) / 1000);
+    if (seconds !== undefined) return seconds;
+  }
+  const retryAfter = headers.get('retry-after')?.trim();
+  if (retryAfter) {
+    const numeric = Number(retryAfter);
+    const seconds = accept(
+      Number.isFinite(numeric) ? numeric : (Date.parse(retryAfter) - now) / 1000
+    );
+    if (seconds !== undefined) return seconds;
   }
   const match = /try again in\s*(\d+(?:\.\d+)?)\s*(ms|seconds?|s)/i.exec(message);
-  return match ? Number(match[1]) / (match[2].toLowerCase() === 'ms' ? 1000 : 1) : undefined;
+  return match
+    ? accept(Number(match[1]) / (match[2].toLowerCase() === 'ms' ? 1000 : 1))
+    : undefined;
 }
 
 export interface FoundryOptions {
@@ -315,7 +332,16 @@ export async function* foundryComplete(opts: FoundryOptions): AsyncIterable<Rose
   let skippedCooling = false;
   let attempt = 0;
 
-  const plan = foundryRoutePlan(regions, models, opts.routeKey);
+  const plan = foundryRoutePlan(regions, models, opts.routeKey).filter(({ region, deployment }) => {
+    try {
+      foundryCooldownKey(region.host.toLowerCase(), deployment);
+      return true;
+    } catch (error) {
+      if (error instanceof InvalidFoundryCooldownRequest) return false;
+      throw error;
+    }
+  });
+  if (plan.length === 0) throw new RoseInvalidRequest('Foundry has no valid deployment routes');
   let cooldowns: Awaited<ReturnType<typeof readSharedFoundryCooldowns>>;
   try {
     cooldowns = await readSharedFoundryCooldowns(
