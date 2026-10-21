@@ -230,6 +230,10 @@ export async function searchAndPromoteBrowserConfig(
       if (config.provider === 'tilion' && !tilionRecoveryAvailable()) {
         throw new Error('Tilion is disabled by BROWSER_AGENT_TILION_ENABLED or has no API key');
       }
+      // The worker reattaches with the returned URL; hand it a freshly minted one.
+      if (config.provider === 'tilion' && dependencies.refreshTilionConnectUrl) {
+        session.wsUrl = await dependencies.refreshTilionConnectUrl(session.sessionId);
+      }
       const updated = await runTransactionWithRetry(async (tx) => {
         const replaced = await tx.browserSession.updateMany({
           where: { id: current.id, sessionId: current.sessionId },

@@ -18,6 +18,7 @@ import { createKernelRecoverySession, releaseKernelRemoteSession } from './kerne
 import { createBrowserUseRecoverySession, releaseBrowserUseRemoteSession } from './browserUse';
 import { createTilionRecoverySession, releaseTilionRemoteSession } from './tilion';
 import { recoveryOriginStorageScript } from './recoveryOriginStorage';
+import { refreshTilionConnectUrl } from './tilionSessionIo';
 import { raceProbeAbort, sameSiteNavigationUrl } from './challengeRecoveryShared';
 import { restoredTunnelCandidate } from './challengeRecoveryTransport';
 import type { BrowserProviderName } from './types';
@@ -153,6 +154,8 @@ export interface BrowserConfigSearchRuntimeDependencies {
   releaseSteel: typeof releaseSteelRemoteSession;
   releaseBrowserUse: typeof releaseBrowserUseRemoteSession;
   releaseTilion: typeof releaseTilionRemoteSession;
+  /** Mint a fresh connect URL for the promoted Tilion winner (view/connect tokens last 1800 s). */
+  refreshTilionConnectUrl?: (sessionId: string) => Promise<string>;
   probe: typeof probeCandidateBrowser;
   /** Tell the live view about the promoted binding before the old session is released. */
   announceBinding?: typeof announceBrowserSessionBinding;
@@ -493,6 +496,7 @@ export const browserConfigSearchRuntimeDependencies: BrowserConfigSearchRuntimeD
   createSteel: createSteelRecoverySession,
   createBrowserUse: createBrowserUseRecoverySession,
   createTilion: createTilionRecoverySession,
+  refreshTilionConnectUrl,
   releaseKernel: releaseKernelRemoteSession,
   releaseSteel: releaseSteelRemoteSession,
   releaseBrowserUse: releaseBrowserUseRemoteSession,

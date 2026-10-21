@@ -44,12 +44,14 @@ import type {
 } from './types';
 
 import {
+  type StorageState,
   harvestBrowserState,
   rememberPausedState,
   restoreTilionBrowserState,
   takePausedState,
 } from './tilionState';
 import { forgetTilionSessionDownloads } from './tilionSessionIo';
+import { agentLocation, rotateInPlace } from './tilionRotateInPlace';
 
 export {
   captureTilionScreenshot,
@@ -64,7 +66,7 @@ export {
   recordTilionSessionDownload,
   uploadTilionSessionFile,
 } from './tilionSessionIo';
-export { restoreTilionBrowserState } from './tilionState';
+export { restoreTilionBrowserState, type StorageState as TilionCarriedState } from './tilionState';
 export {
   TilionApiError,
   TilionInsufficientCreditsError,
@@ -130,8 +132,10 @@ export class TilionSessionReleaseError extends Error {
 
 /** The browser activity budget (30 min) plus the 5 min margin the plan requires. */
 export const TILION_MIN_TTL_SECONDS = 35 * 60;
-const DEFAULT_TTL_SECONDS = 3600;
-const DEFAULT_IDLE_TIMEOUT_SECONDS = 600;
+// Live probe 2026-10-21: an attached but quiet CDP session ends at idle_timeout,
+// and ttl 43200 is accepted. Agents think between steps, so idle uses the maximum.
+const DEFAULT_TTL_SECONDS = 14_400;
+const DEFAULT_IDLE_TIMEOUT_SECONDS = 3600;
 
 function integerEnv(name: string, fallback: number, min: number, max: number): number {
   const raw = process.env[name]?.trim();
@@ -234,7 +238,9 @@ async function postSession(
     body: {
       ttl,
       idle_timeout: idleTimeout,
-      cdp_observe: browserProviderEnabled('TILION_CDP_OBSERVE', true),
+      // Live probe: cdp_observe solved neither reCAPTCHA v2 nor Turnstile and
+      // adds 100-250 ms per navigation, so it is opt-in.
+      cdp_observe: browserProviderEnabled('TILION_CDP_OBSERVE', false),
       residential: true,
       proxy_type: proxyType,
       ...(region ? { region } : {}),
@@ -257,8 +263,10 @@ async function createPlacedSession(
     if (honoured || specificity === 'country') return { record, specificity };
     // Tilion fell back to the country exit. A less specific pin can still beat it.
     const next = ladder[index + 1];
-    if (next === 'country') {
-      log.info('Tilion geo state unsupported; keeping country exit', {
+    // Tilion lists every field it could not honour; a rung it already refused
+    // (live 2026-10-21: city and state both unsupported) would only buy another browser.
+    if (next === 'country' || unsupported.includes(next)) {
+      log.info('Tilion geo pin unsupported; keeping country exit', {
         sessionId: record.session_id,
         unsupported,
       });
@@ -466,20 +474,6 @@ export async function closeTilionSession(
 
 // ── resume / rotate ──────────────────────────────────────────────────────────
 
-async function agentLocation(agentId: string): Promise<ProxyGeoLocation> {
-  const agent = await prisma.agent.findUnique({
-    where: { id: agentId },
-    select: { proxyCountry: true, proxyState: true, proxyCity: true },
-  });
-  return agent?.proxyCountry
-    ? {
-        country: agent.proxyCountry,
-        ...(agent.proxyState ? { state: agent.proxyState } : {}),
-        ...(agent.proxyCity ? { city: agent.proxyCity } : {}),
-      }
-    : DEFAULT_GEOLOCATION;
-}
-
 function storedProvider(value: string): BrowserProviderName {
   return value === 'kernel' || value === 'browser-use' || value === 'tilion' ? value : 'steel';
 }
@@ -541,6 +535,7 @@ async function replaceSession(
     forceFreshProfile?: boolean;
     keepValidationConnection?: boolean;
     rotateTo?: TilionProxyType;
+    carriedState?: StorageState;
   }
 ): Promise<TilionReplacementSession> {
   const old = await prisma.browserSession.findUniqueOrThrow({ where: { id: taskId } });
@@ -557,15 +552,20 @@ async function replaceSession(
     if (reattached !== null) return reattached;
   }
 
+  // A live Tilion session may hold the worker's CDP socket (the only client
+  // Tilion admits), so the backend never connects to it mid-run: the worker
+  // captures its state and passes it as `carriedState`. Other providers admit
+  // a second client and are harvested directly.
   const carried = options.forceFreshProfile
     ? null
-    : live
-      ? await harvestBrowserState({
-          provider: previousProvider,
-          sessionId: old.sessionId,
-          wsUrl: old.wsUrl,
-        })
-      : null;
+    : (options.carriedState ??
+      (live && previousProvider !== 'tilion'
+        ? await harvestBrowserState({
+            provider: previousProvider,
+            sessionId: old.sessionId,
+            wsUrl: old.wsUrl,
+          })
+        : null));
   const state = carried ?? (options.forceFreshProfile ? null : takePausedState(old.sessionId));
 
   const baseLocation = await agentLocation(old.agentId);
@@ -655,7 +655,12 @@ async function replaceSession(
  */
 export async function resumeTilionSession(
   taskId: string,
-  options: { forceFreshProfile?: boolean; keepValidationConnection?: boolean } = {}
+  options: {
+    forceFreshProfile?: boolean;
+    keepValidationConnection?: boolean;
+    /** Worker-captured cookies/localStorage/IndexedDB (Playwright storageState shape). */
+    carriedState?: StorageState;
+  } = {}
 ): Promise<TilionReplacementSession> {
   return replaceSession(taskId, options);
 }
@@ -669,95 +674,14 @@ export async function resumeTilionSession(
 export async function rotateTilionSession(
   taskId: string,
   proxyType: KernelProxyType,
-  options: { keepValidationConnection?: boolean } = {}
+  options: { keepValidationConnection?: boolean; carriedState?: StorageState } = {}
 ): Promise<TilionReplacementSession> {
   const rotateTo = tilionProxyType(proxyType);
   if (rotateTo === 'residential') {
-    const inPlace = await rotateInPlace(taskId, options);
+    const inPlace = await rotateInPlace(taskId);
     if (inPlace !== null) return inPlace;
   }
   return replaceSession(taskId, { ...options, rotateTo });
-}
-
-const EXIT_IP_ECHO_URL = 'https://api.ipify.org?format=json';
-
-/** The session's exit IP, read through its own browser; null when it cannot be read now. */
-async function sessionExitIp(sessionId: string): Promise<string | null> {
-  try {
-    const result = await tilionRequest<{ content_base64?: string }>(
-      tilionSessionPath(sessionId, '/files/fetch'),
-      { method: 'POST', body: { url: EXIT_IP_ECHO_URL, max_bytes: 1024 }, timeoutMs: 30_000 }
-    );
-    const parsed = JSON.parse(Buffer.from(result?.content_base64 ?? '', 'base64').toString('utf8'));
-    return typeof parsed?.ip === 'string' ? parsed.ip : null;
-  } catch (error) {
-    // While the worker holds CDP, files/fetch answers 502 ExternalControlBusy.
-    log.info('Tilion exit IP unreadable; in-place rotation not provable', {
-      sessionId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return null;
-  }
-}
-
-/**
- * `POST rotate-ip` keeps CDP, cookies and tabs, but counts only when the exit
- * IP is proven to change. Any missing proof returns null so the caller uses a
- * replacement session instead. Success returns `previousSessionId === sessionId`.
- */
-async function rotateInPlace(
-  taskId: string,
-  options: { keepValidationConnection?: boolean }
-): Promise<TilionReplacementSession | null> {
-  const row = await prisma.browserSession.findUniqueOrThrow({ where: { id: taskId } });
-  if (row.provider !== 'tilion' || row.status !== 'ACTIVE' || !row.wsUrl || !row.debugUrl) {
-    return null;
-  }
-  const before = await sessionExitIp(row.sessionId);
-  if (before === null) return null;
-  try {
-    await tilionRequest(tilionSessionPath(row.sessionId, '/rotate-ip'), {
-      method: 'POST',
-      timeoutMs: 30_000,
-    });
-  } catch (error) {
-    log.warn('Tilion rotate-ip refused; using a replacement session', {
-      sessionId: row.sessionId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return null;
-  }
-  const after = await sessionExitIp(row.sessionId);
-  if (after === null || after === before) {
-    log.warn('Tilion rotate-ip did not prove a new exit IP; using a replacement session', {
-      sessionId: row.sessionId,
-      changed: after === null ? 'unknown' : false,
-    });
-    return null;
-  }
-  const updated = await prisma.browserSession.updateMany({
-    where: { id: taskId, sessionId: row.sessionId },
-    data: { proxyTier: 'residential' },
-  });
-  if (updated.count !== 1) return null;
-  log.info('Tilion rotate-ip changed the exit IP in place', { taskId, sessionId: row.sessionId });
-  const validationBrowser = options.keepValidationConnection
-    ? await connectValidatedBrowser(row.wsUrl)
-    : null;
-  return {
-    ...(validationBrowser ? { validationBrowser } : {}),
-    provider: 'tilion',
-    sessionId: row.sessionId,
-    debugUrl: row.debugUrl,
-    wsUrl: row.wsUrl,
-    savedUrl: row.currentUrl || row.startUrl || undefined,
-    proxySource: row.kernelProxySource ?? 'tilion_residential_country',
-    proxyLocation: await agentLocation(row.agentId),
-    profileId: null,
-    profileSource: 'tilion_rotated_in_place',
-    previousSessionId: row.sessionId,
-    previousProvider: 'tilion',
-  };
 }
 
 // ── account listing ──────────────────────────────────────────────────────────
