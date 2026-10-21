@@ -59,7 +59,8 @@ DEFAULT_TASK_TIMEOUT=1200
 RUN_DEADLINE=5400
 # The e2e clock starts at admission, but a copy's execution window starts only after
 # the strict start barrier releases and its grade lands after that window. A bound
-# e2e must therefore cover three separate allowances (Eval Suite stage targets):
+# default e2e covers three separate allowances (Eval Suite stage targets).
+# Explicit shorter e2e retains task+post windows and spends only its remainder on startup:
 # Admission to barrier release: canary/preflight through full release (720) plus fleet
 # readiness (900). Polar batch 1 (2026-10-20) measured 1350.6 s.
 STARTUP_ALLOWANCE=720+900
@@ -126,8 +127,12 @@ def shard_placement_env(root,shard):
 def campaign_timeouts(task_timeout=DEFAULT_TASK_TIMEOUT,e2e_timeout=RUN_DEADLINE):
  """The bound per-task execution window and whole-campaign budget, in seconds."""
  need(type(task_timeout)is int and 60<=task_timeout<=MAX_TASK_TIMEOUT,TASK_TIMEOUT_REFUSAL)
- need(type(e2e_timeout)is int and task_timeout+E2E_ALLOWANCE<=e2e_timeout<=MAX_RUN_DEADLINE,'--e2e-timeout must cover the task timeout plus %ds startup to barrier release and %ds grading/release, and fit the %ds operator deadline'%(STARTUP_ALLOWANCE,POST_TASK_ALLOWANCE,MAX_RUN_DEADLINE))
+ need(type(e2e_timeout)is int and task_timeout+POST_TASK_ALLOWANCE<e2e_timeout<=MAX_RUN_DEADLINE,'--e2e-timeout must cover the task timeout plus %ds grading/release and positive startup time, and fit the %ds operator deadline'%(POST_TASK_ALLOWANCE,MAX_RUN_DEADLINE))
  return task_timeout,e2e_timeout
+def startup_deadline_epoch(epoch,task_timeout,e2e_timeout):
+ """Latest barrier release preserving the entire task and post-task windows."""
+ campaign_timeouts(task_timeout,e2e_timeout)
+ return epoch+e2e_timeout-task_timeout-POST_TASK_ALLOWANCE
 def shard_timeouts(shard):
  # One canonical encoding: a bound field is present only when it differs from the original value.
  need(shard.get('task_timeout')!=DEFAULT_TASK_TIMEOUT and shard.get('e2e_timeout')!=RUN_DEADLINE,'default timeouts are encoded by absence')
@@ -1026,7 +1031,7 @@ def self_test():
                                   (self.manifest(),dict(shard,manifest_sha256=TASK_NAMES_SHA),'invalid bound manifest hash'),(tasks,dict(shard,manifest_sha256='A'*64),'invalid bound manifest hash'),
                                   (tasks,dict(shard,task_timeout=1200),'encoded by absence'),(tasks,dict(shard,e2e_timeout=5400),'encoded by absence'),
                                   (tasks,dict(shard,task_timeout=59),'task-timeout'),(tasks,dict(shard,task_timeout=7201),'task-timeout'),(tasks,dict(shard,task_timeout=480.0),'task-timeout'),
-                                  (tasks,dict(shard,task_timeout=True),'task-timeout'),(tasks,dict(shard,e2e_timeout=3299),'e2e-timeout'),(tasks,dict(shard,e2e_timeout=10021),'e2e-timeout'),(tasks,dict(shard,task_timeout=7200,e2e_timeout=9300),'e2e-timeout must cover'),(tasks,dict(shard,task_timeout=7201,e2e_timeout=9300),'ask the user'),
+                                  (tasks,dict(shard,task_timeout=True),'task-timeout'),(tasks,dict(shard,e2e_timeout=1680),'e2e-timeout'),(tasks,dict(shard,e2e_timeout=10021),'e2e-timeout'),(tasks,dict(shard,task_timeout=7200,e2e_timeout=8400),'e2e-timeout must cover'),(tasks,dict(shard,task_timeout=7201,e2e_timeout=9300),'ask the user'),
                                   (tasks,dict(shard,group_total=71),'group total exceeds the bound manifest'),(tasks,dict(shard,task_indexes=list(range(2,70,3))),'ordered subset of the bound manifest')]:
     with self.subTest(message=message,value={k:value[k] for k in SHARD_OPTIONAL&set(value)}),self.assertRaisesRegex(ValueError,message):campaign_argv(manifest,epoch,value)
    self.assertEqual(campaign_timeouts(),(1200,5400));self.assertEqual(campaign_timeouts(2580,5400),(2580,5400));self.assertEqual(campaign_timeouts(7200,10020),(7200,10020))

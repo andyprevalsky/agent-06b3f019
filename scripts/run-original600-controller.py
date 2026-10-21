@@ -1401,6 +1401,8 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
                              tasks=[s['tasks'] for s in plan['shards']], runs=plan['shards'][0]['runs'],
                              **shard_bindings(args, runner))
     directory, started_at = open_admission(parent, None, binding, runner, False)
+    task_timeout, e2e_timeout = bound_timeouts(args, runner)
+    startup_deadline = runner['startup_deadline_epoch'](started_at, task_timeout, e2e_timeout)
     token = token_from_agents(runner['read'](args.agents_env))
     os.environ['FLY_API_TOKEN'] = token
     capture = runpy.run_path(str(root / 'scripts/cloudbench-original-volume-capture.py'))
@@ -1415,7 +1417,7 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
     ledger['record']('launch', directory.name, root=root, run_dir=str(directory), triggered_at=started_at, **fields)
     scorecard['print_instruction'](directory)
     try:  # nothing is allocated until coordinate() spawns the first runner
-        with runner['bounded'](min(110, admission_remaining(started_at + 5400))):
+        with runner['bounded'](min(110, admission_remaining(startup_deadline))):
             cap = capacity_snapshot(capture['Fly'], token, args.org, directory, args.extra_destroying_count)
         cap.update(qualified_reuse_count=0, new_machine_demand=demand, qualified_ids=[], new_controller_slots=controllers,
                    requested_original_primary_slots=copies, worker_headroom=args.worker_headroom)
@@ -1442,7 +1444,7 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
                              runtime_env=env, sibling_controller_slots=controllers - 1, scheduled_total=copies,
                              guest_env=guest_env)
             shard_objects[item['index']] = shard
-            shards.append(dict(index=item['index'], out=shard_dir / 'run', config=str(config),
+            shards.append(dict(index=item['index'], expected_count=len(shard['tasks'])*shard['runs'], out=shard_dir / 'run', config=str(config),
                                config_sha256=digest(runner['read'](config))))
         runner['save'](directory / 'shards.private.json', dict(plan=plan, runtime_env=env, group_run_id=group_id,
                        shards=[dict(s, out=str(s['out'])) for s in shards]))
@@ -1460,6 +1462,7 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
         runner_path = root / 'scripts/cloudbench-original600-runner.py'
 
         def spawn(shard):
+            admission_remaining(startup_deadline)
             env_vars = dict(os.environ, GITHUB_TOKEN=github, CLOUDBENCH_GATE_NAME_SUFFIX='s%02d' % shard['index'])
             with open(Path(shard['out']).parent / 'runner.private.log', 'xb') as log:
                 return subprocess.Popen([sys.executable, str(runner_path), '--config', shard['config'], '--config-sha256',
@@ -1474,7 +1477,7 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
             attempt_dir.mkdir(mode=0o700)
             bound = shard_objects[index]
             slots = coordinator['capacity_demand'](len(bound['tasks']) * bound['runs'], 1)
-            with runner['bounded'](min(110, admission_remaining(started_at + 5400))):
+            with runner['bounded'](min(110, admission_remaining(startup_deadline))):
                 fresh = capacity_snapshot(capture['Fly'], token, args.org, attempt_dir, args.extra_destroying_count,
                                           summary=True)
             fresh.update(qualified_reuse_count=0, new_machine_demand=slots, qualified_ids=[], new_controller_slots=1,
@@ -1486,7 +1489,7 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
             config = prepare(args, root, pins, runner, attempt_dir, fresh, started_at=started_at, shard=bound,
                              runtime_env=env, sibling_controller_slots=controllers - 1, scheduled_total=copies,
                              guest_env=guest_env)
-            replacement = dict(index=index, out=attempt_dir / 'run', config=str(config),
+            replacement = dict(index=index, expected_count=len(bound['tasks'])*bound['runs'], out=attempt_dir / 'run', config=str(config),
                                config_sha256=digest(runner['read'](config)))
             print(json.dumps(dict(status='SHARD_RETRY', shard=index, directory=str(attempt_dir))), flush=True)
             return replacement, spawn(replacement)
@@ -1495,6 +1498,7 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
         raise
 
     record = coordinator['coordinate'](shards, spawn, directory / 'coordination.json', scheduled_total=copies,
+                                       startup_deadline=startup_deadline,
                                        infra_early_stop=args.infra_early_stop, respawn=respawn,
                                        stagger_seconds=coordinator['DEFAULT_SPAWN_STAGGER_SECONDS'])
     exports = [scorecard['export_records'](Path(s['out']) / 'export') for s in shards]

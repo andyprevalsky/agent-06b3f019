@@ -270,6 +270,7 @@ class Shard(unittest.TestCase):
   script.write_text("import fcntl,signal,sys,time\nfrom pathlib import Path\np=Path(sys.argv[1]);f=(p/'startup-cohorts/parent.lock').open('w');fcntl.flock(f,fcntl.LOCK_EX)\ndef done(*a):\n (p/'ending').write_text('term');sys.exit(7)\nsignal.signal(signal.SIGTERM,done);(p/'ready').write_text('ready');time.sleep(.6);(p/'ending').write_text('natural')\n")
   original_popen=subprocess.Popen;children=[];campaigns=[]
   def spawn(*unused,**kwargs):
+   self.assertEqual(float(kwargs['env']['RUN_BENCH_CAMPAIGN_STARTUP_DEADLINE_EPOCH']), epoch+shard.get('e2e_timeout',5400)-shard.get('task_timeout',1200)-1200)
    cid=kwargs['env']['RUN_BENCH_CAMPAIGN_ID'];campaign=repo/'.context/benchmarks/campaigns'/cid;(campaign/'startup-cohorts/c001').mkdir(parents=True)
    value=shard_summary(shard,infra);value.update(campaign_id=cid,e2e_started_at_epoch=epoch)
    (campaign/'summary.json').write_text(json.dumps(value));(campaign/'startup-cohorts/c001/manifest.json').write_text(json.dumps(dict(cohort_id='c001',jobs={j['job_id']:None for j in value['jobs']},e2e_deadline_monotonic=time.monotonic()+5400)))
@@ -365,7 +366,7 @@ class BoundManifest(unittest.TestCase):
   for manifest,value,message in [(self.tasks,unbound,'original 200 tasks required'),(list(reversed(self.tasks)),self.shard(),'bound ordered tasks changed'),
                                  (self.tasks+[self.tasks[0]],self.shard(),'distinct ordered tasks'),(original,self.shard(manifest_sha256=S['ORIGINAL_TASK_NAMES_SHA256']),'invalid bound manifest hash'),
                                  (self.tasks,self.shard(task_timeout=1200),'encoded by absence'),(self.tasks,self.shard(task_timeout=30),'task timeout'),
-                                 (self.tasks,self.shard(e2e_timeout=2000),'e2e timeout'),(self.tasks,self.shard(e2e_timeout=10021),'e2e timeout'),(self.tasks,self.shard(task_timeout=7200,e2e_timeout=9300),'e2e timeout'),(self.tasks,self.shard(e2e_timeout=3299),'e2e timeout'),(self.tasks,self.shard(task_timeout=7201,e2e_timeout=9300),'task timeout'),(self.tasks,self.shard(group_total=71),'group total')]:
+                                 (self.tasks,self.shard(e2e_timeout=1680),'e2e timeout'),(self.tasks,self.shard(e2e_timeout=10021),'e2e timeout'),(self.tasks,self.shard(task_timeout=7200,e2e_timeout=8400),'e2e timeout'),(self.tasks,self.shard(e2e_timeout=1680),'e2e timeout'),(self.tasks,self.shard(task_timeout=7201,e2e_timeout=9300),'task timeout'),(self.tasks,self.shard(group_total=71),'group total')]:
    with self.subTest(message=message),self.assertRaisesRegex(ValueError,message):S['validate_shard'](value,manifest)
  def test_main_runs_the_bound_manifest_with_its_timeouts_and_refuses_original_options(self):
   with tempfile.TemporaryDirectory()as name:
