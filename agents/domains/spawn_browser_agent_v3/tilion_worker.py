@@ -88,9 +88,7 @@ async def set_staged_file_on_input(
         raise RuntimeError("File input has no backend node id")
     cdp_session = await browser_session.get_or_create_cdp_session(focus=False)
     send = cdp_session.cdp_client.send
-    resolved = await send.DOM.resolveNode(
-        params={"backendNodeId": backend_node_id}, session_id=cdp_session.session_id
-    )
+    resolved = await send.DOM.resolveNode(params={"backendNodeId": backend_node_id}, session_id=cdp_session.session_id)
     object_id = (resolved.get("object") or {}).get("objectId")
     if not object_id:
         raise RuntimeError("File input could not be resolved")

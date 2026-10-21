@@ -68,8 +68,8 @@ from loop.activity_helper import call_temporal_activity_from_activity
 from providers.fast_cache.browser_use_cache import cached_browser_decision
 from providers.fast_cache.context import write_through_enabled_for_user
 from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
-from providers.rose.errors import BrowserModelOutputValidationError
 from providers.rose.browser_use import format_browser_state_for_tool
+from providers.rose.errors import BrowserModelOutputValidationError
 from providers.rose.types import ComputeTokenSource
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.attention_requests import REJECTION_SENTINEL
@@ -128,12 +128,6 @@ from .config import (
 )
 from .credential_runtime import build_realm_credential_state, unknown_realm_credential_state
 from .download_persist import BrowserDownloadPersister
-from .tilion_worker import (
-    apply_worker_state as apply_tilion_worker_state,
-    release_session as release_tilion_session_files,
-    stage_upload as stage_tilion_upload,
-    worker_apply_payload as tilion_worker_apply_payload,
-)
 from .recording import (
     BrowserAgentRecorder,
     BrowserNetworkRecorder,
@@ -215,6 +209,18 @@ from .service_crypto import (
 from .state_prefetch import BrowserStatePrefetch
 from .step_timing import StepPhaseTimer
 from .streaming import BrowserStreamingRoseClient, BrowserThinkingStream
+from .tilion_worker import (
+    apply_worker_state as apply_tilion_worker_state,
+)
+from .tilion_worker import (
+    release_session as release_tilion_session_files,
+)
+from .tilion_worker import (
+    stage_upload as stage_tilion_upload,
+)
+from .tilion_worker import (
+    worker_apply_payload as tilion_worker_apply_payload,
+)
 from .types import ClaudeTokenState
 
 logger = structlog.get_logger()
@@ -2169,6 +2175,11 @@ def _updated_rotation_session_metadata(
     return updated
 
 
+def _cdp_multiplexer_kwargs(cdp_multiplexer: Optional[Any]) -> Dict[str, Any]:
+    """DOMService kwargs: only single-CDP-client sessions hand over a multiplexer."""
+    return {"cdp_multiplexer": cdp_multiplexer} if cdp_multiplexer is not None else {}
+
+
 def _fresh_connect_url_minter(config: Any, task_id: Optional[str]) -> Optional[Callable[[], Awaitable[Optional[str]]]]:
     """Mint a fresh provider CDP URL for an in-activity redial (Tilion tokens last 1800 s).
 
@@ -2230,7 +2241,7 @@ async def _reconnect_browser_stack_after_rotation(
     dom_service = DOMService(
         cdp_url=connection_cdp_url,
         downloads_path=browser_downloads_path_for_provider(provider),
-        cdp_multiplexer=cdp_multiplexer,
+        **_cdp_multiplexer_kwargs(cdp_multiplexer),
     )
     if hasattr(old_dom_service, "secret_redaction_state"):
         dom_service.restore_secret_redaction_state(old_dom_service.secret_redaction_state())
@@ -7891,7 +7902,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 downloads_path=browser_downloads_path_for_provider(
                     browser_session_metadata.get("provider")
                 ),
-                cdp_multiplexer=_cdp_multiplexer,
+                **_cdp_multiplexer_kwargs(_cdp_multiplexer),
             )
             if hasattr(_dom_service, "restore_secret_redaction_state"):
                 _dom_service.restore_secret_redaction_state(write_lock_resume_state or {})
