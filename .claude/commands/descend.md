@@ -119,6 +119,16 @@ whole release a prerequisite. An already active deployment may finish in
 parallel. Preserve the original benchmark contract, scoped approvals and normal
 production-release requirements.
 
+Use `scripts/run-bench` from the worktree containing the approved fixes; do not
+wait for production deployment to make local source available. `--local` runs
+that worktree's code. The default cloud path stages a verified workspace patch
+where supported; sharded runs such as the same-60 require a clean, pushed commit
+and check out that exact source on controllers and guests. Commit/push for cloud
+source transport is not deployment. Verify the executed source and preserve the
+original substrate, task arguments and budgets. A configured external authority
+is a separate runtime dependency: distinguish its missing API from missing
+local fixes, and do not bypass shared state or authentication to obtain a run.
+
 Parent sleep, user questions and scorecard edits do not pause active workers.
 Preparing a command, passing a diagnostic and completing an evidence packet are
 substeps; they do not reset the overall RCA scope or establish outcome progress.

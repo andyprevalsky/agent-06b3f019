@@ -2256,12 +2256,14 @@ def test_worktree_patch_includes_unpushed_commits_from_fetchable_base(
     subprocess.run(["git", "-C", str(repo), "config", "user.email", "bench@example.com"], check=True)
     subprocess.run(["git", "-C", str(repo), "config", "user.name", "Bench"], check=True)
     (repo / "tracked.txt").write_text("base\n")
-    subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+    (repo / "source_marker.py").write_text('print("base-source")\n')
+    subprocess.run(["git", "-C", str(repo), "add", "tracked.txt", "source_marker.py"], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-m", "base"], check=True, capture_output=True)
     base = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
     (repo / "tracked.txt").write_text("unpushed commit\n")
     subprocess.run(["git", "-C", str(repo), "commit", "-am", "local"], check=True, capture_output=True)
     (repo / "tracked.txt").write_text("working tree\n")
+    (repo / "source_marker.py").write_text('print("executed-local-worktree-change")\n')
     (repo / "untracked.txt").write_text("also shipped\n")
 
     patch = subprocess.run(
@@ -2274,6 +2276,16 @@ def test_worktree_patch_includes_unpushed_commits_from_fetchable_base(
     subprocess.run(["git", "-C", str(checkout), "apply", "--binary", "-"], input=patch, check=True)
     assert (checkout / "tracked.txt").read_text() == "working tree\n"
     assert (checkout / "untracked.txt").read_text() == "also shipped\n"
+
+    executed = subprocess.run(
+        [sys.executable, "-I", "-B", str(checkout / "source_marker.py")],
+        cwd=checkout,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=5,
+    )
+    assert executed.stdout == "executed-local-worktree-change\n"
 
 
 def test_fleet_patch_packages_clean_unpushed_head_from_fetchable_base(
