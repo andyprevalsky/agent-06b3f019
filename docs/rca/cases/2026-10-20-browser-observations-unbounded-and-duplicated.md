@@ -112,3 +112,59 @@ as unchanged-task outcome proof." No approval for the candidate is recorded.
 
 Bound model-visible browser observations at their producer and emit each value
 once, while proving task outcomes separately from boundary regressions.
+
+## Aligned retrievable-output follow-up (2026-10-21)
+
+The original hard-cut proposal above is superseded, not approved. User alignment:
+“And we should truncate like golden refs do (can golden refs expand the truncate?)”
+and then “tbh all tools should truncate, and have a way to read the rest of the
+results (for explore agent, main agent, browser agent).” The P5 lane owns the
+shared helper and browser integration; another isolated lane owns main/explore.
+No merged all-tools claim or unchanged-task outcome claim follows from this work.
+
+Shared helper `utils/tool_output.py` uses existing private attachment storage,
+not worker-local paths. `read_tool_output` has one reused Pydantic contract,
+opaque ID, Unicode-character offset/limit and optional literal search. Reads
+recompute the path from trusted user/agent/session ownership and verify the
+stored owner and 24-hour logical expiry. Readback is bounded at 20,000 characters
+and never spills itself. Physical object lifetime remains the existing attachment
+bucket policy. Each page currently downloads the complete stored artifact,
+bounded at 32 MiB of serialized storage; this is deliberately not a new service
+or index. Persistence failure returns an explicit failure rather than a preview
+that cannot be read. It does not prove the production bucket is reachable.
+
+The fallback inline limit is 100,000 Unicode characters, matching Hermes
+`tools/budget_config.py:13` (with its aggregate/context-window policies explicitly
+not adopted here). Native browser evaluate keeps a 20,000-character preview,
+formatted state 40,000. Full redacted results remain in canonical action receipts
+and separate storage; only the model serialization chooses a prepared preview.
+Small native values and screenshot attachments remain native. Readback addresses
+survive the later DOMService and transcript redaction passes without exempting
+page content from secret masking. No timeout or page-history retirement changes.
+
+The unchanged final browser regression fails with the old 557ca7592 service and
+formatter loaded from Git (missing readback handle), while the original 857211a2
+service prints 1,891,249 source chars / 3,782,525 prompt chars and fails the
+single-copy assertion. These are exact production-module overlays with fake CDP
+and fake existing storage, not full historical checkouts or paid Polar runs.
+A separate real DOMService regression first failed because its late projection
+lost the prepared preview; it then passes through the actual redactor and
+planner serialization. Registered tests and logs are under
+`/home/boxes/polar-p5/.context/p5-aligned/`. Final suite results and immutable
+source are in `/home/boxes/polar-600-resume/approvals/P5-RETRIEVABLE-OUTPUT-ALIGNED.md`.
+
+Golden sources actually opened: Claude `src/utils/toolResultStorage.ts:52-77,
+103-208` and `src/constants/toolLimits.ts:12` save full results above the 50,000
+character default and show a 2,000-byte preview; Read self-bounds. Hermes
+`tools/browser_tool_snapshot.py:33-108` saves a force-redacted snapshot and gives
+read_file line paging, but its stored copy itself can be capped. Hermes
+`tools/tool_result_storage.py:101-178` checks remote readability. Installed
+browser-use `tools/service.py:1913-1914` hard-cuts evaluate at 20k and therefore
+does not establish tail recovery. These differences are retained as limitations.
+
+Five mapped runtime spans represent five slots (3 FAIL, 1 PASS, 1 INFRA), not
+five failures fixed. Production storage access, merged main/explore coverage,
+legacy/simulated browser bypasses and pre-existing provider-side truncation need
+separate qualification. No claim is made to recover content already discarded
+upstream, bound total history or raw CDP memory, or improve the unchanged task
+outcomes. Freedom and protected instructions were untouched.
