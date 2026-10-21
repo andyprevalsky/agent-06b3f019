@@ -185,6 +185,23 @@ class TilionExactCleanupTest(MultiRootCleanupTest):
         manifest = cleanup.provider_manifest(self.args)
         self.assertIn("sess_dbrow0001", manifest["sessions"]["tilion"])
 
+    def test_allocation_log_owns_a_session_that_died_before_validation(self):
+        # The worker died after the create response, before any Created line.
+        text = "\n".join([
+            TILION_CREATE_OK,
+            "[Tilion] Tilion session allocated sessionId=sess_alloc0001 "
+            "idempotencyKey=rose-0f4c proxyType=residential",
+            json.dumps({"message": "Tilion exit placed at country level; narrower targeting unavailable",
+                        "sessionId": "sess_alloc0001"}),
+        ])
+        sessions, events, _ = cleanup.collect_session_evidence(text)
+        self.assertEqual(sessions["tilion"], ["sess_alloc0001"])
+        self.assertEqual(events, 3)
+        # A create response without an id is logged as null: still fail closed.
+        with self.assertRaises(cleanup.CleanupEvidenceError):
+            cleanup.collect_session_evidence(
+                TILION_CREATE_OK + "\n" + json.dumps({"message": "Tilion session allocated", "sessionId": None}))
+
     def test_create_without_exact_session_id_fails_closed(self):
         for line in (TILION_CREATE_OK,
                      "[Tilion] Tilion request failed before a response method=POST "

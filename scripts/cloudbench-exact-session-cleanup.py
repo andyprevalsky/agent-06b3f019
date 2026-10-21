@@ -41,6 +41,9 @@ RELEASED_STATUSES = {"kernel": {204, 404}, "steel": {200, 404}, "tilion": {204, 
 TILION_RELEASE_ATTEMPTS = 4
 TILION_RELEASE_RETRY_SECONDS = 2.0
 TILION_SESSION_MARKERS = (
+    # Logged right after every POST /v1/session response, before validation.
+    "Tilion session allocated",
+    "Tilion exit placed at country level; narrower targeting unavailable",
     "Created Tilion browser session",
     "Tilion geo pin unsupported; keeping country exit",
     "Tilion geo unsupported; recreating with a wider pin",
