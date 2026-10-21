@@ -42,7 +42,7 @@ describe('Local root preview binding', () => {
     expect(local).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByLabelText('Browser proxy location')).toHaveAttribute(
       'title',
-      'Traffic is routed through your local computer.',
+      'This preview loads through your computer’s browser.',
     );
     expect(screen.getByText('Select an agent to view its local code preview.')).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Open browser' })).toBeNull();

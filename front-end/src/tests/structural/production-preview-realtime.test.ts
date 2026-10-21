@@ -38,7 +38,10 @@ it('receives production private broadcasts in the production API preview, even t
     });
   });
   const client = new RealtimeClient(`ws://127.0.0.1:${address.port}/realtime/v1`, {
-    transport: WebSocket,
+    // Node ws implements the transport; its event target types differ from DOM types.
+    transport: WebSocket as unknown as NonNullable<
+      ConstructorParameters<typeof RealtimeClient>[1]
+    >['transport'],
     params: { apikey: 'offline-fixture-key' },
     encode: (message, callback) =>
       callback(

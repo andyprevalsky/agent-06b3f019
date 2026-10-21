@@ -54,7 +54,7 @@ export function BrowserProxyLocationChip({
   if (!proxySource && !locationLabel && !routing) return null;
   const routeLabel =
     routing === 'local'
-      ? 'Traffic is routed through your local computer.'
+      ? 'This preview loads through your computer’s browser.'
       : !proxySource && !locationLabel
         ? 'Remote browser proxy location is not available yet.'
         : undefined;

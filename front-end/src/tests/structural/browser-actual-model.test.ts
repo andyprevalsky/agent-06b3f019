@@ -4,6 +4,9 @@ import { latestBrowserActualModel } from '@/features/terminal-component-group/co
 
 const row = (task: string, model: unknown) =>
   ({
+    message_id: `model-${task}`,
+    timestamp: '2026-10-21T00:00:00Z',
+    text: '',
     role: 'TOOL',
     metadata: { task_id: task, auxiliary: { actual_model: model } },
   }) as Message;
@@ -26,7 +29,7 @@ it('does not infer a model from provider family or empty metadata', () => {
       [
         row('selected', null),
         row('selected', '  '),
-        { role: 'TOOL', metadata: { task_id: 'selected', is_claude: true } } as Message,
+        { ...row('selected', null), metadata: { task_id: 'selected', is_claude: true } } as Message,
       ],
       'selected',
     ),
