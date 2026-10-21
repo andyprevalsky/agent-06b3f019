@@ -34,6 +34,7 @@ import {
 import { assertAuthPersistFailedInitCustody } from './browser-provider.auth-persist.cleanup.support';
 import { runLiveProviderParity } from './browser-provider.live.support';
 import { runLiveCrossProviderCases } from './browser-provider.tilion-live-cases.support';
+import { runLiveTilionHarvest } from './browser-provider.tilion-harvest.live';
 import { assertKernelUnhealthyProxyRelaxesLocation } from './browser-provider-proxy-health.support';
 import { runOptionalLiveBrowserUseProvider } from './browser-provider.browser-use-live.support';
 import { tilionWiringCases } from './browser-provider.tilion-wiring.support';
@@ -545,6 +546,7 @@ async function main(): Promise<void> {
   }
 
   failed += await runOptionalLiveBrowserUseProvider();
+  failed += await runLiveTilionHarvest();
 
   if (process.env.RUN_BROWSER_USE_HANDOFF_LIVE === '1') {
     try {
