@@ -121,6 +121,8 @@ async function child(phase: string, dbFile: string, reportFile: string): Promise
     const page = {
       goto: async (url: string) => (report.visited as string[]).push(url),
       evaluate: async () => undefined,
+      // Playwright pages always expose frames; the harvest enumerates their origins.
+      frames: () => [],
     };
     const context = {
       pages: () => [page],

@@ -57,6 +57,8 @@ function fakeBrowser() {
       restored.visited.push(url);
     },
     evaluate: async () => undefined,
+    // Playwright pages always expose frames; the harvest enumerates their origins.
+    frames: () => [],
   };
   const context = {
     pages: () => [page],
