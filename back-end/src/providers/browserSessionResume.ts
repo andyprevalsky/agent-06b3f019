@@ -1,3 +1,5 @@
+import { browserResumeScope, withBrowserResumeLifecycle } from './steel/lifecycleClaim';
+import { inspectResumeCandidate } from './browser/resumeRecovery';
 import { withOwnedResumeTransport } from './browser/resumeTransport';
 /* c8 ignore start -- resumeBrowserSession requires Steel SDK */
 import { prisma } from './database';
@@ -7,6 +9,7 @@ import { canonicalAuthRealm } from './authRealm';
 import {
   closeSession,
   getBrowserCaptchaTelemetry,
+  getBrowserSessionHealth,
   getFingerprintInjectionData,
   injectUserData,
   resumeSession,
@@ -212,11 +215,73 @@ export async function resumeBrowserSession(
     forceFreshProfile: options.forceFreshProfile,
   });
 
-  const result = await resumeSession(taskId, {
-    ...options,
-    keepValidationConnection: true,
+  const read = () => prisma.browserSession.findUniqueOrThrow({ where: { id: taskId } });
+  const initial = await read();
+  if (
+    initial.controlState !== 'AGENT' &&
+    (initial.controlLeaseExpiresAt === null || initial.controlLeaseExpiresAt.getTime() > Date.now())
+  ) {
+    throw new Error('Browser resume cannot replace a session under user control');
+  }
+  const resume = async () => {
+    const current = await read();
+    if (
+      current.controlState !== 'AGENT' &&
+      (current.controlLeaseExpiresAt === null ||
+        current.controlLeaseExpiresAt.getTime() > Date.now())
+    ) {
+      throw new Error('Browser resume cannot replace a session under user control');
+    }
+    const result = await resumeSession(taskId, { ...options, keepValidationConnection: true });
+    return assembleResumeResponse(taskId, result);
+  };
+  if (initial.provider !== 'kernel' && initial.provider !== 'browser-use') return resume();
+  let sourceEnded = false;
+  return withBrowserResumeLifecycle(taskId, {
+    readBinding: read,
+    compatibility: options.forceFreshProfile ? 'fresh' : 'default',
+    reuseCompleted: !options.forceFreshProfile,
+    sourceEnded: () => sourceEnded,
+    canFollow: async () => {
+      const current = await read();
+      const health = await getBrowserSessionHealth(current.sessionId);
+      if (health.status === null) throw new Error('Browser resume liveness is unknown');
+      sourceEnded = !['active', 'live', 'running'].includes(health.status.toLowerCase());
+      return (
+        ['active', 'live', 'running'].includes(health.status.toLowerCase()) &&
+        (health.ttlMs === null || health.ttlMs > 60_000)
+      );
+    },
+    resume,
+    inspect: inspectResumeCandidate,
+    follow: async () => {
+      const current = await read();
+      if (
+        current.controlState !== 'AGENT' &&
+        (current.controlLeaseExpiresAt === null ||
+          current.controlLeaseExpiresAt.getTime() > Date.now())
+      ) {
+        throw new Error('Browser resume cannot follow a session under user control');
+      }
+      if (!current.wsUrl || !current.debugUrl)
+        throw new Error('Ready browser binding is incomplete');
+      return assembleResumeResponseWithTransport(
+        taskId,
+        {
+          provider: storedBrowserProvider(current.provider),
+          sessionId: current.sessionId,
+          wsUrl: current.wsUrl,
+          debugUrl: current.debugUrl,
+          savedUrl: current.currentUrl ?? current.startUrl ?? undefined,
+          proxySource: current.kernelProxySource ?? 'browser_use_residential_country',
+          proxyLocation: DEFAULT_GEOLOCATION,
+          profileId: current.providerProfileId,
+          profileSource: current.providerProfileSource ?? 'session_bound',
+        },
+        true
+      );
+    },
   });
-  return assembleResumeResponse(taskId, result);
 }
 
 type RecreatedSession = Awaited<ReturnType<typeof resumeSession>>;
@@ -233,7 +298,11 @@ async function assembleResumeResponse(taskId: string, result: RecreatedSession) 
   );
 }
 
-async function assembleResumeResponseWithTransport(taskId: string, result: RecreatedSession) {
+async function assembleResumeResponseWithTransport(
+  taskId: string,
+  result: RecreatedSession,
+  readOnly = false
+) {
   const session = await prisma.browserSession.findUnique({
     where: { id: taskId },
     include: { context: true },
@@ -256,9 +325,21 @@ async function assembleResumeResponseWithTransport(taskId: string, result: Recre
   const startUrl = session?.startUrl ?? null;
   const authRealm = canonicalAuthRealm(currentUrl ?? startUrl ?? '');
 
+  if (!readOnly && browserResumeScope()) {
+    if (
+      session?.controlState !== 'AGENT' &&
+      (session?.controlLeaseExpiresAt === null ||
+        session?.controlLeaseExpiresAt === undefined ||
+        session.controlLeaseExpiresAt.getTime() > Date.now())
+    ) {
+      throw new Error('Browser resume cannot hydrate a session under user control');
+    }
+    await browserResumeScope()?.beforeHydration(result.sessionId);
+  }
   if (session?.context.userId !== undefined) {
-    if (result.savedUrl !== undefined && result.savedUrl !== '') {
+    if (!readOnly && result.savedUrl !== undefined && result.savedUrl !== '') {
       try {
+        await browserResumeScope()?.assertOwned();
         injectionResult = await injectUserData(
           result.sessionId,
           session.context.userId,
@@ -273,6 +354,9 @@ async function assembleResumeResponseWithTransport(taskId: string, result: Recre
         // close — the caller only sees the exception, never the session id.
         // Close it (not pause: the resume failed, so there is no state worth
         // preserving) before rethrowing.
+        // Durable resume custody must retain an ambiguous hydration outcome.
+        // Only the older non-custodied path can safely use eager cleanup here.
+        if (browserResumeScope()) throw error;
         await closeSession(result.sessionId, false).catch((closeError) => {
           // Never let cleanup mask the original injection failure.
           log.error('Failed to close browser session after injection failure', {
@@ -295,6 +379,7 @@ async function assembleResumeResponseWithTransport(taskId: string, result: Recre
     userSettings = toUserSettings(user);
   }
 
+  if (!readOnly) await browserResumeScope()?.assertOwned();
   return {
     task_id: taskId,
     session_id: result.sessionId,
