@@ -1,5 +1,6 @@
 /** Ordered UI projection only: live comms and work share a single trajectory slot. */
 import type { Message } from '../hooks';
+import { isBrowserAgentResult } from './browserAgentResult';
 import {
   eventTimeMs,
   parseAgentToAgentMessage,
@@ -37,8 +38,8 @@ export function trajectoryActivity(message: Message): TrajectoryActivity | null 
     metadata?.toolName === 'spawn_claude_code_agent' ||
     metadata?.toolName === 'set_plan' ||
     metadata?.requestUserApproval ||
-    metadata?.error ||
-    /failed|error/i.test(String(metadata?.toolStatus ?? ''))
+    (!isBrowserAgentResult(message) &&
+      (metadata?.error || /failed|error/i.test(String(metadata?.toolStatus ?? ''))))
   )
     return null;
   const a2a = parseAgentToAgentMessage(message);

@@ -79,6 +79,39 @@ describe('one ordered live trajectory carousel', () => {
       ),
     ).toEqual(['first', 'first-work', 'second', 'second-work']);
   });
+  it.each(['FINISHED', 'ERROR'])(
+    'folds terminal Browser Agent %s results and keeps their card accessible in history',
+    async (toolStatus) => {
+      const browser = msg(
+        {
+          toolName: 'spawn_browser_agent',
+          toolCallId: 'browser-result',
+          task_id: 'browser-task',
+          action_type: 'task_complete',
+          toolStatus,
+          error: toolStatus === 'ERROR',
+        },
+        {
+          message_id: 'browser-result',
+          text: 'User rejected the approval request',
+          timestamp: stamp(3),
+        },
+      );
+      renderWithProviders(
+        view([work('before-browser'), browser, work('after-browser')], 'COMPLETED'),
+      );
+      const group = screen.getByTestId('trajectory-work-group');
+      expect(group).toHaveTextContent('3 activities');
+      expect(screen.queryByTestId('browser-agent-chip-header')).toBeNull();
+      fireEvent.click(within(group).getByRole('button'));
+      const history = screen.getByTestId('trajectory-work-history');
+      const browserHeader = await within(history).findByTestId('browser-agent-chip-header');
+      expect(browserHeader).toHaveTextContent('Browser Agent');
+      fireEvent.click(browserHeader);
+      expect(await within(history).findByText('User rejected the approval request')).toBeVisible();
+    },
+  );
+
   it('folds the actual assistant Thought → work → Thought → work rows into four activities', () => {
     const messages = [
       msg(
