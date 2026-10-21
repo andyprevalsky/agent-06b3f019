@@ -221,7 +221,7 @@ describe('one ordered live trajectory carousel', () => {
     expect(screen.getByText('Coordinate 20')).toBeInTheDocument();
     expect(screen.queryByText('Coordinate 0')).toBeNull();
   });
-  it('keeps human requests, questions, errors and results outside compressed history', () => {
+  it('keeps human requests, questions and results outside while internal failures fold', () => {
     const human = msg({}, { message_id: 'human', role: 'USER', text: 'Build the report' });
     const answer = msg(
       { toolName: 'send_message_to_user', isUserAttentionMessage: true },
@@ -237,13 +237,48 @@ describe('one ordered live trajectory carousel', () => {
     expect(screen.getAllByTestId('trajectory-work-group')).toHaveLength(2);
     expect(screen.getByText('Build the report')).toBeInTheDocument();
     expect(screen.getByText('Report ready')).toBeInTheDocument();
-    for (const id of ['human', 'final', 'failure'])
+    for (const id of ['human', 'final'])
       expect(
         document
           .querySelector(`[data-message-id="${id}"]`)
           ?.closest('[data-testid="trajectory-work-group"]'),
       ).toBeNull();
   });
+  it('folds Plan required into work while the actual plan stays visible outside', async () => {
+    const required = msg(
+      {
+        toolName: 'attempt_completion',
+        toolCallId: 'rejected-completion',
+        toolStatus: 'ERROR',
+        error: true,
+        title: '❌ Plan required',
+      },
+      {
+        message_id: 'plan-required',
+        text: 'You must call set_plan before attempt_completion in PLAN phase',
+        timestamp: stamp(3),
+      },
+    );
+    const plan = msg(
+      {
+        toolName: 'set_plan',
+        toolStatus: 'FINISHED',
+        data: { title: 'Actual execution plan', content: 'Build then check.', tasks: [] },
+      },
+      { message_id: 'actual-plan', timestamp: stamp(5) },
+    );
+    renderWithProviders(view([work('before-required'), required, work('after-required'), plan]));
+    const group = screen.getByTestId('trajectory-work-group');
+    expect(group).toHaveTextContent('3 activities');
+    expect(screen.queryByText('Plan required')).toBeNull();
+    const title = await screen.findByText('Actual execution plan');
+    expect(title.closest('[data-testid="trajectory-work-group"]')).toBeNull();
+    fireEvent.click(within(group).getByRole('button'));
+    expect(
+      await within(screen.getByTestId('trajectory-work-history')).findByText('Plan required'),
+    ).toBeVisible();
+  });
+
   it.each(['completion_summary', 'complete'])(
     'keeps canonical %s finals visible before and after terminal status',
     async (toolName) => {
@@ -280,8 +315,83 @@ describe('one ordered live trajectory carousel', () => {
       }
     },
   );
+  it('keeps a true batch failure after its separate user-facing report', () => {
+    const failure = msg(
+      { toolName: 'read_file', toolStatus: 'ERROR', error: true },
+      { message_id: 'failed-read', text: 'Read failed.', timestamp: stamp(1) },
+    );
+    const report = msg(
+      { toolName: 'send_message_to_user', toolStatus: 'FINISHED', isUserAttentionMessage: true },
+      {
+        message_id: 'failure-report',
+        text: 'The task ended after the read failed.',
+        timestamp: stamp(3),
+      },
+    );
+    renderWithProviders(view([failure, report], 'FAILED'));
+    const group = screen.getByTestId('trajectory-work-group');
+    expect(group).toHaveTextContent('Failed after 2.0s');
+    expect(
+      screen
+        .getByText('The task ended after the read failed.')
+        .closest('[data-testid="trajectory-work-group"]'),
+    ).toBeNull();
+  });
+  it('never assigns the following user-facing error to a completed thought batch', () => {
+    const thought = msg(
+      {},
+      {
+        role: 'ASSISTANT',
+        message_id: 'finished-thought',
+        text: 'Consider the next step.',
+        timestamp: stamp(1),
+      },
+    );
+    const response = msg(
+      {
+        toolName: 'send_message_to_user',
+        toolStatus: 'ERROR',
+        error: true,
+        isUserAttentionMessage: true,
+      },
+      {
+        message_id: 'outside-error',
+        text: 'A separate action needs your attention.',
+        timestamp: stamp(3),
+      },
+    );
+    renderWithProviders(view([thought, response]));
+    const group = screen.getByTestId('trajectory-work-group');
+    expect(group).toHaveTextContent('Worked for 2.0s');
+    expect(group).not.toHaveTextContent('Failed');
+    expect(
+      screen
+        .getByText('A separate action needs your attention.')
+        .closest('[data-testid="trajectory-work-group"]'),
+    ).toBeNull();
+  });
+  it.each(['ASSISTANT', 'TOOL'] as const)(
+    'does not label a completed %s thought failed because the overall agent failed',
+    (role) => {
+      const thought = msg(role === 'TOOL' ? { toolName: 'thought', toolStatus: 'FINISHED' } : {}, {
+        role,
+        text: 'A completed thought.',
+        timestamp: stamp(1),
+      });
+      renderWithProviders(view([thought], 'FAILED'));
+      expect(screen.getByTestId('trajectory-work-group')).toHaveTextContent('Worked for 29.0s');
+    },
+  );
   it.each(['PAUSED', 'FAILED'])('compresses %s work with honest outcome', (status) => {
-    renderWithProviders(view([comm('a'), work('b')], status));
+    const messages = [comm('a'), work('b')];
+    if (status === 'FAILED')
+      messages.push(
+        msg(
+          { toolName: 'read_file', toolStatus: 'ERROR', error: true },
+          { message_id: 'actual-failure', timestamp: stamp(3) },
+        ),
+      );
+    renderWithProviders(view(messages, status));
     const row = screen.getByTestId('trajectory-work-group');
     expect(row).toHaveTextContent(status === 'PAUSED' ? 'Interrupted after' : 'Failed after');
     expect(within(row).getByRole('button')).toBeEnabled();
