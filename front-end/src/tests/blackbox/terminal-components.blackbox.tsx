@@ -417,7 +417,12 @@ describe('QueryInput (blackbox)', () => {
         showModelSelector
         availableModels={[
           ...defaultProps.availableModels,
-          { id: 'rose-labs/rose-local', name: 'rose-local', provider: 'rose-labs', description: 'local' },
+          {
+            id: 'rose-labs/rose-local',
+            name: 'rose-local',
+            provider: 'rose-labs',
+            description: 'local',
+          },
         ]}
       />,
       { roseDesktop: true },
