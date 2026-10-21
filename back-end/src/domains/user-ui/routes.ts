@@ -1,3 +1,4 @@
+import { requireCredentialMintSession } from '../../providers/credentialMintAuth';
 /**
  * /api/user-ui — publish/activate/list a user's rose_user_ui versions,
  * GET /apps for the left-bar Apps section (Rose first for dev accounts, A2),
@@ -165,6 +166,7 @@ router.get(
 router.post(
   '/publish-token',
   withHybridAuth,
+  requireCredentialMintSession,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     const userId = requireUserId(req, res);
     if (userId === null) return;
@@ -190,10 +192,7 @@ export const usercontentRouter = Router();
  * permissive display CSP; isolation is the opaque sandboxed origin
  * (providers/agentTools/displayCsp.ts).
  */
-function sendDisplay(
-  res: Response,
-  file: { content: Buffer; contentType: string } | null
-): void {
+function sendDisplay(res: Response, file: { content: Buffer; contentType: string } | null): void {
   for (const [name, value] of Object.entries(displayResponseHeaders(file?.contentType))) {
     res.setHeader(name, value);
   }
