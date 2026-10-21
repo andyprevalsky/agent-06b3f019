@@ -71,9 +71,11 @@ async def test_tool_output_preview_and_readback_at_model_boundary():
         assert "blob.bin" in attachment_page["content"]
         assert attached[1]["file_pointer"]["storage_path"] == "u/blob.bin"
         # Fail closed on persistence failure, retaining the original context.
+        failed_context = copy.deepcopy(context)
+        failed_context[1]["text"] += " new uncached content"
         with patch("helpers.attachments.upload_to_storage", side_effect=OSError("storage failed")):
             try:
-                await build_llm_messages(context, "system", user_id="u", agent_id="a")
+                await build_llm_messages(failed_context, "system", user_id="u", agent_id="a")
             except OSError:
                 pass
             else:
@@ -92,6 +94,29 @@ async def test_tool_output_preview_and_readback_at_model_boundary():
         read_messages = await build_llm_messages(read_context, "system", user_id="u", agent_id="a")
         assert tail in next(m["content"] for m in read_messages if m["role"] == "tool")
     assert context == original, "Canonical evaluator/archive context must remain unchanged"
+
+
+async def test_repeated_main_tool_projection_reuses_artifact():
+    """Parent's real-builder probe: same context, same bytes and one upload."""
+    import copy
+    import re
+    from _test_utils import retained_tool_output_fixture
+    from helpers.llm import build_llm_messages
+    from tools.read_tool_output import read_tool_output_activity
+
+    context = [{"role": "TOOL", "text": "x" * 150000 + "TAIL", "metadata": {
+        "toolName": "web_search", "toolCallId": "same-call", "toolStatus": "FINISHED"}}]
+    original = copy.deepcopy(context)
+    with retained_tool_output_fixture() as objects:
+        first = await build_llm_messages(context, "System", user_id="repeat-user", agent_id="repeat-agent")
+        bytes_before = dict(objects)
+        second = await build_llm_messages(context, "System", user_id="repeat-user", agent_id="repeat-agent")
+        assert first == second, "Repeated unchanged model projection changes the handle/messages"
+        assert len(objects) == 1 and objects == bytes_before, "Repeated projection uploads duplicate artifacts"
+        output_id = re.search(r'output_id="([a-f0-9]{32})"', str(first))[1]
+        page = await read_tool_output_activity("repeat-user", "repeat-agent", "", {"output_id": output_id, "query": "TAIL"})
+        assert page["content"] == "TAIL"
+    assert context == original
 
 
 def test_prepare_schema_for_openai():
@@ -9558,6 +9583,7 @@ async def run_all_tests():
         test_structured_validation_retries_exclude_only_repeated_known_candidate,
     )
     await r.record_async("tool_output_preview_readback", test_tool_output_preview_and_readback_at_model_boundary)
+    await r.record_async("repeated_main_tool_projection", test_repeated_main_tool_projection_reuses_artifact)
     r.record("prepare_schema_for_openai", test_prepare_schema_for_openai)
     r.record("prepare_schema_for_openai_nested_and_array", test_prepare_schema_for_openai_nested_and_array)
     r.record("convert_context_to_messages", test_convert_context_to_messages)

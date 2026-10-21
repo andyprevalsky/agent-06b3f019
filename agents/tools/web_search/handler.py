@@ -31,7 +31,7 @@ from tools.web_search.config import (
     RETRY_MAX_ATTEMPTS,
     RETRY_MAX_INTERVAL_SECONDS,
 )
-from tools.web_search.service import execute_search
+from tools.web_search.service import execute_search, format_search_results
 
 if TYPE_CHECKING:
     from tools.web_search.types import ExecuteActivityCallable
@@ -50,6 +50,23 @@ _BILLED_PROVIDERS = {
 def _service_billing(result: Any) -> Optional[tuple[float, str]]:
     provider = result.get("provider", "parallel-ai") if isinstance(result, dict) else "parallel-ai"
     return _BILLED_PROVIDERS.get(provider)
+
+
+async def _project_received_excerpts(result: Any, *, user_id: Optional[str], agent_id: Optional[str], session_id: str) -> Any:
+    """Apply the old excerpt budget after retaining received text for this caller."""
+    if not isinstance(result, dict) or "_received_exa_results" not in result:
+        return result
+    from utils.tool_output import preview_tool_text
+
+    rows = []
+    for row in result["_received_exa_results"]:
+        # Very small internal budgets still need room for the readback protocol;
+        # the public tool uses 2,000 characters per result by default.
+        preview = await preview_tool_text("\n".join(row["excerpts"]), user_id=user_id or "", agent_id=agent_id or "",
+                                          session_id=session_id, limit=max(512, result["_excerpt_limit"]))
+        rows.append({**row, "excerpts": [preview]})
+    return {**{k: v for k, v in result.items() if k not in {"_received_exa_results", "_excerpt_limit"}},
+            "answer": format_search_results(rows)}
 
 
 def _safe_time() -> float:
@@ -77,6 +94,7 @@ class WebSearchManager(ToolManager):
         fast_mode_goal: Optional[str] = None,
         fast_mode_cache_write_enabled: bool = False,
         world_model_mode: str = "real",
+        session_id: str = "",
     ) -> dict[str, Any]:
         """Execute web search and post events via handle_tool_event.
 
@@ -132,7 +150,7 @@ class WebSearchManager(ToolManager):
                 activity_args.extend([None, None])
             # The cache write gate resolves this agent's tree root (a child under
             # a frozen DEMO root never writes) without changing world-model routing.
-            activity_args.append(agent_id)
+            activity_args.extend([agent_id, user_id, session_id])
             result = await execute_activity(
                 web_search_activity,
                 args=activity_args,
@@ -277,6 +295,8 @@ async def web_search_activity(
     agent_id: Optional[str] = None,
     world_model_mode: Optional[str] = None,
     fast_cache_agent_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    session_id: str = "",
 ) -> dict[str, Any]:
     """Activity: Perform a web search for quick facts and current information.
 
@@ -307,7 +327,7 @@ async def web_search_activity(
             else:
                 logger.info("fast_cache.web_search_hit", key=cache_key)
                 if isinstance(stored, dict):
-                    return {**stored, FAST_CACHE_HIT_FIELD: True}
+                    return await _project_received_excerpts({**stored, FAST_CACHE_HIT_FIELD: True}, user_id=user_id, agent_id=fast_cache_agent_id or agent_id, session_id=session_id)
                 return stored
         if stored is None:
             # Fast Mode read miss: soft-complete instead of live Parallel AI.
@@ -359,4 +379,4 @@ async def web_search_activity(
             cache_key, "web_search", fast_cache_normalize.goal_hash(fast_mode_goal), result, goal=fast_mode_goal
         )
         logger.info("fast_cache.web_search_stored", key=cache_key)
-    return result
+    return await _project_received_excerpts(result, user_id=user_id, agent_id=fast_cache_agent_id or agent_id, session_id=session_id)

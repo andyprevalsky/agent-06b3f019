@@ -750,6 +750,7 @@ async def spawn_explore_agent_activity(
                 fast_mode_goal=_explore_fast_mode_goal,
                 fast_mode_cache_write_enabled=_explore_fast_mode_write_enabled,
                 world_model_mode=world_model_mode,
+                session_id=task_id or "",
             )
         elif tool_name == "people_search":
             manager = PeopleSearchManager()

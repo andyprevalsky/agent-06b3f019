@@ -248,6 +248,7 @@ async def native_browser_start_source(timestamp: str, *, tool_call_id: str = "to
 def retained_tool_output_fixture():
     """Exercise the real shared retention helper without network or credentials."""
     import uuid
+    from collections import OrderedDict
     from unittest.mock import patch
 
     stored = {}
@@ -262,9 +263,9 @@ def retained_tool_output_fixture():
             raise ValueError("No retained output in this scope")
         return stored[path]
 
-    with (patch("helpers.attachments.upload_to_storage", side_effect=upload),
+    with (patch("utils.tool_output._persisted_outputs", OrderedDict()),
+          patch("utils.tool_output._pending_outputs", {}),
+          patch("helpers.attachments.upload_to_storage", side_effect=upload),
           patch("helpers.attachments.download_from_storage", side_effect=download),
           patch("httpx.AsyncClient.send", side_effect=AssertionError("Unexpected provider/network request"))):
         yield stored
-
-from contextlib import contextmanager

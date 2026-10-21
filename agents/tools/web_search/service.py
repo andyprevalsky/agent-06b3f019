@@ -246,6 +246,21 @@ async def execute_search(query: str, max_tokens: int = DEFAULT_MAX_TOKENS) -> Se
         if not raw_results:
             raise _unavailable_error(query, failures)
 
+    received_exa_results = None
+    if provider == "exa" and any(len("\n".join(r.get("excerpts", []))) > max_chars_per_result for r in raw_results):
+        import sys
+
+        from utils.tool_output import preview_tool_text
+
+        # Redact before the original enters Fast Mode's existing cache. No
+        # scoped handle is cached: each consumer projects under its own scope.
+        # A non-spilling preview applies the shared redaction policy only.
+        received_exa_results = []
+        for row in raw_results:
+            full_text = await preview_tool_text("\n".join(row.get("excerpts", [])), user_id="", agent_id="", limit=sys.maxsize)
+            received_exa_results.append({**row, "excerpts": [full_text]})
+        raw_results = [{**row, "excerpts": [row["excerpts"][0][:max_chars_per_result]]} for row in received_exa_results]
+
     answer = format_search_results(raw_results)
     sources = [r.get("url") for r in raw_results if r.get("url")]
 
@@ -255,6 +270,10 @@ async def execute_search(query: str, max_tokens: int = DEFAULT_MAX_TOKENS) -> Se
         "query": query,
         "provider": provider,
     }
+
+    if received_exa_results is not None:
+        result["_received_exa_results"] = received_exa_results
+        result["_excerpt_limit"] = max_chars_per_result
 
     logger.info(
         "Web search completed",
