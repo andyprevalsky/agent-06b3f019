@@ -384,7 +384,9 @@ async function replaceSession(
         ...(agent.proxyCity ? { city: agent.proxyCity } : {}),
       }
     : DEFAULT_GEOLOCATION;
-  const profile = await profileForContext(old.contextId, old.agentId);
+  const profile = old.logicalOwnerKey
+    ? { id: null, source: 'logical_checkpoint' }
+    : await profileForContext(old.contextId, old.agentId);
   const { session, browser } = await createRemote(location, profile.id);
   let handedOff = false;
   try {
@@ -396,7 +398,7 @@ async function replaceSession(
         sessionId: session.id,
         debugUrl: session.liveUrl,
         wsUrl: session.cdpUrl,
-        status: 'ACTIVE',
+        status: old.logicalOwnerKey ? 'PAUSED' : 'ACTIVE',
         closedAt: null,
         provider: 'browser-use',
         providerProfileId: profile.id,
@@ -408,7 +410,7 @@ async function replaceSession(
     if (replaced.count !== 1) throw new Error(`Browser task ${taskId} changed during replacement`);
     await announceBrowserSessionBinding({ id: taskId });
     const savedUrl = old.currentUrl || old.startUrl || undefined;
-    if (savedUrl) {
+    if (savedUrl && !old.logicalOwnerKey) {
       try {
         const context = browser.contexts()[0];
         const page = context.pages()[0] ?? (await context.newPage());

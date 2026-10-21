@@ -455,7 +455,8 @@ async function recreateSessionWithinClaim(
           throw new Error(`Session validation failed on attempt ${attempt}: ${validationFailure}`);
         }
 
-        await navigateToSavedUrl(wsUrl, savedUrl, connectSteelBrowser, validationBrowser);
+        if (!oldSession.logicalOwnerKey)
+          await navigateToSavedUrl(wsUrl, savedUrl, connectSteelBrowser, validationBrowser);
         await dependencies.verifyLifecycleOwnership?.();
         const mutate: SteelLifecycleMutation =
           dependencies.mutateLifecycle ?? (async (callback) => callback(prisma));
@@ -478,7 +479,7 @@ async function recreateSessionWithinClaim(
               sessionId: session.id,
               debugUrl,
               wsUrl,
-              status: 'ACTIVE',
+              status: oldSession.logicalOwnerKey ? 'PAUSED' : 'ACTIVE',
               closedAt: null,
               provider: 'steel',
               kernelProxySource: null,

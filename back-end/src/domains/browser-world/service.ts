@@ -1,3 +1,6 @@
+import { ensureLogicalBrowser } from '../../providers/browser/logicalSession';
+import { resumeBrowserSession } from '../../providers/browserSessionResume';
+import { prisma } from '../../providers/database';
 /**
  * Browser world service (plan row A6): the user's one browser template, split
  * by website and account, and the home browser that shows it.
@@ -72,7 +75,7 @@ const defaultDeps: RootBrowserDeps = {
       return null;
     }
   },
-  close: (sessionId) => closeSession(sessionId, false),
+  close: (sessionId) => closeSession(sessionId, true),
 };
 
 function rootView(session: {
@@ -149,6 +152,28 @@ export async function openRootBrowser(
   deps: RootBrowserDeps = defaultDeps
 ): Promise<RootBrowserView> {
   if (!browserWorldStateEnabled()) throw new Error('Browser world state is disabled');
+  if (deps === defaultDeps) {
+    const logical = await ensureLogicalBrowser(userId, rootBrowserAgentId(userId));
+    if (
+      logical.status === 'ACTIVE' &&
+      logical.sessionId !== null &&
+      (logical.controlState !== 'AGENT' || (await deps.isLive(logical.sessionId)) !== false)
+    ) {
+      const current = await repo.findRootSessionByTaskId(logical.id);
+      if (!current) throw new RootBrowserNotOpenError();
+      return rootView(current);
+    }
+    const startUrl = options.startUrl ?? (await defaultRootBrowserUrl(userId, options.agentId));
+    if (startUrl !== null && startUrl !== '' && logical.startUrl === null)
+      await prisma.browserSession.update({
+        where: { id: logical.id },
+        data: { startUrl, currentUrl: startUrl },
+      });
+    await resumeBrowserSession(logical.id);
+    const current = await repo.findRootSessionByTaskId(logical.id);
+    if (!current) throw new RootBrowserNotOpenError();
+    return rootView(current);
+  }
   const rootAgentId = rootBrowserAgentId(userId);
   const existing = await repo.findActiveRootSession(userId, rootAgentId);
   if (existing !== null && existing.sessionId !== null) {

@@ -231,6 +231,17 @@ def _stable_browser_task_id(agent_id: str, tool_call_id: str) -> str:
     )
 
 
+def _logical_browser_task_id(agent_id: str) -> str:
+    """One browser identity per GP; activity/tool IDs remain separate."""
+    return str(uuid_module.uuid5(uuid_module.NAMESPACE_URL, f"rose-browser-owner:{agent_id}"))
+
+
+def _owned_browser_task_id(agent_id: str, tool_call_id: str) -> str:
+    if not workflow.in_workflow() or workflow.patched("persistent-browser-owner-v1"):
+        return _logical_browser_task_id(agent_id)
+    return _stable_browser_task_id(agent_id, tool_call_id)
+
+
 def _browser_task_terminal_metadata(
     result: Any,
     started_task_id: Optional[str],
@@ -12389,12 +12400,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     # (approval / auth wait) without running the activity again.
                     result, parked_result = parked_result, None
                     was_cancelled = False
-                    known_task_id = result.get("task_id") or _stable_browser_task_id(agent_id, tool_call_id)
+                    known_task_id = result.get("task_id") or _owned_browser_task_id(agent_id, tool_call_id)
                     activity_task_id = known_task_id
                 else:
                     known_task_id = (
                         write_lock_resume_state.get("task_id") if isinstance(write_lock_resume_state, dict) else None
-                    ) or _stable_browser_task_id(agent_id, tool_call_id)
+                    ) or _owned_browser_task_id(agent_id, tool_call_id)
                     activity_args = [
                         user_id,
                         agent_id,

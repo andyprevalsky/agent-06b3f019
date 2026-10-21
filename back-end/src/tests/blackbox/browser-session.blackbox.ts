@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { runTest, type TestResult } from './browser-session-test-support';
+import { request, runTest, type TestResult } from './browser-session-test-support';
 /**
  * Black-box tests for /api/browser-session
  *
@@ -50,6 +50,7 @@ import { runBrowserInitDisconnectCases } from './browser-session-init-disconnect
 import { runBrowserPauseCheckpointCases } from './browser-session-pause-checkpoint.cases';
 import { runBrowserTerminalPauseCases } from './browser-session-terminal-pause.cases';
 import { runBrowserResumeCustodyCases } from './browser-session-resume-custody.cases';
+import { runLogicalBrowserCases } from './browser-session-logical.cases';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -71,27 +72,7 @@ interface TestContext {
 
 const ctx: TestContext = {};
 
-async function request(
-  url: string,
-  options: RequestInit = {}
-): Promise<{ status: number; data: unknown; headers: Headers }> {
-  const response = await fetch(url, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-  });
-  let data: unknown;
-  const ct = response.headers.get('content-type');
-  if (ct?.includes('application/json')) {
-    data = await response.json();
-  } else {
-    data = await response.text();
-  }
-  return { status: response.status, data, headers: response.headers };
-}
-
-function apiKeyHeaders(): Record<string, string> {
-  return { 'X-API-Key': API_KEY };
-}
+const apiKeyHeaders = (): Record<string, string> => ({ 'X-API-Key': API_KEY });
 
 function assertStatus(actual: number, expected: number, data: unknown): void {
   if (actual !== expected) {
@@ -598,8 +579,15 @@ async function testReproducibility_threeSequential() {
 // ==================== RUN ====================
 
 async function runAll() {
-  if (process.argv.includes('--resume-custody-only')) {
-    await runBrowserResumeCustodyCases();
+  if (
+    process.argv.includes('--logical-browser-only') ||
+    process.argv.includes('--resume-custody-only')
+  ) {
+    await (
+      process.argv.includes('--logical-browser-only')
+        ? runLogicalBrowserCases
+        : runBrowserResumeCustodyCases
+    )();
     await prisma.$disconnect();
     return;
   }
@@ -616,6 +604,7 @@ async function runAll() {
   await runBrowserPauseCheckpointCases();
   await runBrowserTerminalPauseCases();
   await runBrowserResumeCustodyCases();
+  await runLogicalBrowserCases();
   console.log('Browser Session Black-box Tests\n');
   console.log(`Testing against: ${BASE_URL}`);
   console.log(`Case concurrency: ${CASE_CONCURRENCY}\n`);

@@ -1,3 +1,5 @@
+import { KernelSessionValidationError, resetKernelSessionTabs } from './kernelTabs';
+export { resetKernelSessionTabs } from './kernelTabs';
 import { browserResumeScope } from '../steel/lifecycleClaim';
 import { kernelResumeTags } from './resumeRecovery';
 import { PermissionDeniedError, RateLimitError } from '@onkernel/sdk';
@@ -71,28 +73,8 @@ export {
 
 const log = createLogger('Kernel');
 
-class KernelSessionValidationError extends Error {}
-
 export async function cleanupBenchmarkKernelProfiles(): Promise<void> {
   await cleanupIsolatedKernelProfiles(kernelClient());
-}
-
-/**
- * Kernel profiles persist Chromium's open pages along with cookies and storage.
- * Replace restored pages with one clean bootstrap tab. Kernel destroys the
- * Playwright context when its final page closes, so creating the clean tab
- * first is required for the caller to reuse this validated connection for
- * credential injection.
- */
-export async function resetKernelSessionTabs(browser: Browser): Promise<number> {
-  const primaryContext = browser.contexts()[0];
-  if (primaryContext === undefined) {
-    throw new KernelSessionValidationError('Kernel browser has no context after CDP validation');
-  }
-  const pages = browser.contexts().flatMap((context) => context.pages());
-  await primaryContext.newPage();
-  await Promise.all(pages.map((page) => page.close({ runBeforeUnload: false })));
-  return pages.length;
 }
 
 type KernelProxySelection = {
@@ -567,6 +549,7 @@ async function recreateKernelSession(
     oldSession.agentId,
     proxyLocation,
     {
+      omitProfile: oldSession.logicalOwnerKey !== null,
       ...kernelRecreateProxySelection(
         oldSession.kernelProxySource,
         oldSession.proxyTier,
@@ -590,7 +573,7 @@ async function recreateKernelSession(
         sessionId: remote.sessionId,
         debugUrl: remote.debugUrl,
         wsUrl: remote.wsUrl,
-        status: 'ACTIVE',
+        status: oldSession.logicalOwnerKey ? 'PAUSED' : 'ACTIVE',
         closedAt: null,
         provider: 'kernel',
         kernelProxySource: remote.proxySource,
@@ -632,6 +615,7 @@ async function recreateKernelSession(
     const savedUrl = oldSession.currentUrl || oldSession.startUrl || undefined;
     if (
       savedUrl &&
+      !oldSession.logicalOwnerKey &&
       (opts.keepValidationConnection || (await validateSessionConnection(remote.wsUrl)))
     ) {
       const { chromium } = await import('playwright');

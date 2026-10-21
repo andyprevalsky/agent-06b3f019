@@ -1,3 +1,4 @@
+import { checkpointLogicalBrowser } from './checkpoint';
 import { prisma } from '../database';
 import { DEFAULT_GEOLOCATION, type ProxyGeoLocation } from '../geoip';
 import { createLogger } from '../logger';
@@ -236,31 +237,47 @@ export async function closeSession(
   currentUrl?: string,
   worldState: { signedInSites?: string[] } = {}
 ): Promise<{ worldState: WorldStateMergeReceipt | null }> {
-  await persistSignedInBrowserState(sessionId, { currentUrl }).catch((error) => {
-    log.warn('Failed to persist signed-in browser state before close', {
-      sessionId,
-      error: error instanceof Error ? error.message : String(error),
-    });
+  const logical = await prisma.browserSession.findUnique({
+    where: { sessionId },
+    select: { id: true, logicalOwnerKey: true },
   });
+  if (pause && logical?.logicalOwnerKey) await checkpointLogicalBrowser(sessionId);
+  const providerPause = pause && !logical?.logicalOwnerKey;
+  // A logical checkpoint is private state, not verified account evidence.
+  // Legacy harvesting must not publish it into a different browser account.
+  if (!logical?.logicalOwnerKey)
+    await persistSignedInBrowserState(sessionId, { currentUrl }).catch((error) => {
+      log.warn('Failed to persist signed-in browser state before close', {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
   // Root world state (A6): merge the sites this task forked while its browser
   // still exists. Best-effort and bounded; never blocks the provider release.
-  const merged = await mergeSessionWorldState(sessionId, {
-    signedInSites: worldState.signedInSites,
-  }).catch((error: unknown) => {
-    log.warn('Failed to merge browser world state before close', {
-      sessionId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return null;
-  });
+  const merged = logical?.logicalOwnerKey
+    ? null
+    : await mergeSessionWorldState(sessionId, {
+        signedInSites: worldState.signedInSites,
+      }).catch((error: unknown) => {
+        log.warn('Failed to merge browser world state before close', {
+          sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+      });
   const provider = await providerForSession(sessionId);
   if (provider === 'kernel') {
-    await closeKernelSession(sessionId, pause, currentUrl);
+    await closeKernelSession(sessionId, providerPause, currentUrl);
   } else if (provider === 'browser-use') {
-    await closeBrowserUseSession(sessionId, pause, currentUrl);
+    await closeBrowserUseSession(sessionId, providerPause, currentUrl);
   } else {
-    await closeSteelSession(sessionId, pause, currentUrl);
+    await closeSteelSession(sessionId, providerPause, currentUrl);
   }
+  if (pause && logical?.logicalOwnerKey)
+    await prisma.browserSession.update({
+      where: { id: logical.id },
+      data: { status: 'PAUSED', closedAt: null },
+    });
   return { worldState: merged };
 }
 
