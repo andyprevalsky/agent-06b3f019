@@ -16,6 +16,7 @@ export function useSidebarExpansion() {
   const closeArmed = useRef(false);
   const suppressOpen = useRef(false);
   const expandedRef = useRef(false);
+  const dragged = useRef(false);
   const dragStart = useRef<number | null>(null);
   const [hovered, setHovered] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -36,6 +37,8 @@ export function useSidebarExpansion() {
     };
     const drag = (event: globalThis.PointerEvent) => {
       if (dragStart.current !== null && event.clientX <= dragStart.current - 48) {
+        dragged.current = true;
+        event.preventDefault();
         collapse();
         dragStart.current = null;
       }
@@ -64,10 +67,17 @@ export function useSidebarExpansion() {
         if (!sticky || event.button !== 0) return;
         if (
           event.target instanceof Element &&
-          event.target.closest('button, input, textarea, a, [role="button"]')
+          event.target.closest('input, textarea, [contenteditable="true"]')
         )
           return;
+        dragged.current = false;
         dragStart.current = event.clientX;
+      },
+      onClickCapture: (event: ReactMouseEvent<HTMLElement>) => {
+        if (!dragged.current) return;
+        dragged.current = false;
+        event.preventDefault();
+        event.stopPropagation();
       },
       onMouseEnter: () => {
         if (sticky && suppressOpen.current) return;

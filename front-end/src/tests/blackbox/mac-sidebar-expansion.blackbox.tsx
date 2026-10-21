@@ -34,7 +34,8 @@ describe('Mac sidebar hover latch', () => {
 
   it('keeps sidebar controls usable and closes with a leftward drag', () => {
     vi.stubGlobal('navigator', Object.create(navigator, { platform: { value: 'MacIntel' } }));
-    renderWithProviders(<AppSidebar {...defaultProps()} />);
+    const create = vi.fn();
+    renderWithProviders(<AppSidebar {...defaultProps({ onCreateAgent: create })} />);
     const bar = screen.getByTestId('rose-sidebar');
     fireEvent.mouseEnter(bar);
     fireEvent.mouseMove(screen.getByRole('button', { name: 'Home' }), { clientX: 100 });
@@ -44,12 +45,19 @@ describe('Mac sidebar hover latch', () => {
       Object.defineProperties(e, { clientX: { value: x }, button: { value: 0 } });
       fireEvent(target as HTMLElement, e);
     };
-    pointer(bar, 'pointerdown', 200);
+    pointer(screen.getByRole('button', { name: 'Home' }), 'pointerdown', 200);
     pointer(window, 'pointermove', 170);
     expect(bar).toHaveAttribute('data-expanded', 'true');
     pointer(window, 'pointermove', 140);
     expect(bar).toHaveAttribute('data-expanded', 'false');
     pointer(window, 'pointerup', 140);
+    const home = screen.getByRole('button', { name: 'Home' });
+    fireEvent.click(home);
+    expect(create).not.toHaveBeenCalled();
+    pointer(home, 'pointerdown', 30);
+    pointer(window, 'pointerup', 30);
+    fireEvent.click(home);
+    expect(create).toHaveBeenCalledOnce();
   });
 
   it('closes when returning into the left zone over a row, without conflicting with initial entry', () => {
