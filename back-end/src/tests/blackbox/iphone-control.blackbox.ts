@@ -1,5 +1,5 @@
-import { phoneFixtureNumber } from './phone-fixture-users';
 #!/usr/bin/env tsx
+import { phoneFixtureNumber } from './phone-fixture-users';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
