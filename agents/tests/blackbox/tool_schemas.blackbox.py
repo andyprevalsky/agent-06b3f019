@@ -1229,6 +1229,7 @@ async def test_call_llm_activity_declares_tools_for_the_calling_account():
 async def run_all_tests():
     print("tool-schemas blackbox tests:")
     r = BlackboxResult()
+    r.record("desktop_display_json_arrays_preserve_validation", test_desktop_display_decodes_json_arrays_without_changing_stock_or_item_validation)
     r.record("tool_models_has_all_tools", test_tool_models_has_all_tools)
     r.record("plan_phase_tools_subset", test_plan_phase_tools_subset)
     r.record("execute_phase_tools_subset", test_execute_phase_tools_subset)
@@ -1335,3 +1336,22 @@ async def run_all_tests():
 
 if __name__ == "__main__":
     asyncio.run(run_all_tests())
+
+def test_desktop_display_decodes_json_arrays_without_changing_stock_or_item_validation():
+    from pydantic import ValidationError
+    from utils.tool_schemas import DisplayTool, DisplayRoseDesktopTool
+
+    typed = DisplayRoseDesktopTool.model_validate({"tool": "display", "paths": '["game.html"]', "urls": '["https://example.com/game.html"]', "options": '[{"label":"Play"}]', "caption": '["literal caption"]'})
+    assert typed.paths == ["game.html"]
+    assert typed.urls == ["https://example.com/game.html"]
+    assert typed.options[0].label == "Play"
+    assert typed.caption == '["literal caption"]'
+    for field, value in (("paths", "[1]"), ("urls", "[{}]"), ("options", "[{}]"), ("paths", '{"path":"game.html"}'), ("paths", "[invalid]"), ("paths", '"game.html"')):
+        with pytest.raises(ValidationError):
+            DisplayRoseDesktopTool.model_validate({"tool": "display", field: value})
+    with pytest.raises(ValidationError):
+        DisplayTool.model_validate({"tool": "display", "paths": '["game.html"]'})
+    assert DisplayRoseDesktopTool.model_validate({"tool": "display", "paths": ["game.html"]}).paths == ["game.html"]
+    assert DisplayRoseDesktopTool.model_validate({"tool": "display", "paths": None}).paths is None
+    schema = DisplayRoseDesktopTool.model_json_schema()
+    assert schema["properties"]["paths"]["anyOf"] == [{"items": {"type": "string"}, "type": "array"}, {"type": "null"}]

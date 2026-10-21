@@ -9588,6 +9588,7 @@ async def test_structured_validation_exhausted_candidate_preserves_typed_error()
 async def run_all_tests():
     print("llm blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("captured_desktop_display_native_json_array", test_captured_desktop_display_native_json_array_reaches_typed_action)
     await r.record_async(
         "structured_validation_exhausted_candidate_typed_error",
         test_structured_validation_exhausted_candidate_preserves_typed_error,
@@ -10258,3 +10259,25 @@ if __name__ == "__main__":
     # only ever misled direct invocation. Branch on the count, not the dict.
     _summary = asyncio.run(run_all_tests())
     raise SystemExit(0 if _summary["failed"] == 0 else 1)
+
+async def test_captured_desktop_display_native_json_array_reaches_typed_action():
+    """Exact root446016aa native arguments must preserve the intended display call."""
+    from helpers.llm import call_llm_structured_streaming, MAX_STRUCTURED_PARSE_RETRIES
+    from providers.rose.types import StreamChunk
+    from utils.tool_schemas import create_agent_action_model, ROSE_DESKTOP_TOOL_MODELS
+    import providers.fast_cache.rose_cache as cache
+
+    captured = {"id": "ea35eb045", "name": "display", "arguments": '{"paths": "[\\"game.html\\"]", "caption": "Neon Starfall: move with Arrow keys or WASD, shoot with Space, press Enter to start"}'}
+    calls = 0
+    async def native(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        yield StreamChunk(kind="metadata", data={"actual_model": "qwen-3.8-27b", "pool_name": "cerebras-direct"})
+        yield StreamChunk(kind="tool_call", data=captured)
+        yield StreamChunk(kind="usage", data={"prompt_tokens": 291, "completion_tokens": 179, "finish_reason": "tool_calls"})
+        yield StreamChunk(kind="done", data={})
+    model = create_agent_action_model(["display"], tool_registry=ROSE_DESKTOP_TOOL_MODELS)
+    with patch.object(cache, "cached_complete", native):
+        result, _usage, _detected = await call_llm_structured_streaming(messages=[{"role": "user", "content": "Make me a game"}], model="rose-labs/rose-1-flash", temperature=1, max_tokens=512, response_model=model, on_chunk=AsyncMock(), call_site="captured_display_regression", _parse_retry_attempt=MAX_STRUCTURED_PARSE_RETRIES, skip_cache_write=True)
+    assert result.tool_calls[0].paths == ["game.html"]
+    assert calls == 1, "the recorded display call should not need a provider retry"

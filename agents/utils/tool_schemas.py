@@ -831,6 +831,17 @@ class DisplayTool(BaseModel):
 class DisplayRoseDesktopTool(DisplayTool):
     """Show images, videos or HTML to the user inline, or pin a question with numbered options."""
 
+    @field_validator("paths", "urls", "options", mode="before")
+    @classmethod
+    def _decode_json_array(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+        return decoded if isinstance(decoded, list) else value
+
     caption: Optional[str] = Field(
         default=None,
         description=user_facing_text_description('Caption shown with the media; for placement "pinned", the question.'),
