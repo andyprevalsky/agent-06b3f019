@@ -1225,6 +1225,43 @@ check(
 );
 
 check(
+  'second-client',
+  'second CDP client while attached: direct vs residential (adapter create body), idle vs busy first client',
+  async (ctx) => {
+    const out: Json = {};
+    const variants: Array<[string, Json]> = [
+      ['direct', {}],
+      [
+        'residential',
+        { residential: true, proxy_type: 'residential', geo: { country: 'us' }, cdp_observe: true },
+      ],
+    ];
+    for (const [name, body] of variants) {
+      const created = await ctx.createSession({ idle_timeout: 120, ttl: 600, ...body });
+      if (!created.sessionId || !created.connectUrl) {
+        out[name] = summarizeCreate(created);
+        continue;
+      }
+      try {
+        const { browser, page } = await connectPlaywright(created.connectUrl);
+        await page.goto('https://example.com/', { waitUntil: 'domcontentloaded' });
+        const idle = await rawSocketOutcome(created.connectUrl, 6_000);
+        const busy = (async () => {
+          for (let i = 0; i < 30; i += 1) await page.evaluate(() => document.title);
+        })();
+        const whileBusy = await rawSocketOutcome(created.connectUrl, 6_000);
+        await busy;
+        out[name] = { idle, whileBusy, firstStillConnected: browser.isConnected() };
+        await browser.close();
+      } finally {
+        await ctx.release(created.sessionId);
+      }
+    }
+    return out;
+  }
+);
+
+check(
   'concurrency',
   'open up to the cap; next create gets 429 concurrency_limit; delete all',
   async (ctx) => {

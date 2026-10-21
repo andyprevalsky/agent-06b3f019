@@ -169,10 +169,16 @@ function credentialMetadataUrl(url: string): string {
   return parsed.toString();
 }
 
+/** Statuses the WHATWG Response constructor rejects with any body, even ''. */
+const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304]);
+
 function responseFromSerialized(serialized: SerializedResponse): globalThis.Response {
   const headers: Record<string, string> = { ...serialized.headers };
-  const body =
-    serialized.bodyEncoding === 'base64' ? Buffer.from(serialized.body, 'base64') : serialized.body;
+  const body = NULL_BODY_STATUSES.has(serialized.status)
+    ? null
+    : serialized.bodyEncoding === 'base64'
+      ? Buffer.from(serialized.body, 'base64')
+      : serialized.body;
 
   return new globalThis.Response(body, {
     status: serialized.status,

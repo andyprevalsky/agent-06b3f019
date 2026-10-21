@@ -73,10 +73,14 @@ function detailSlug(body: unknown): string | undefined {
   return undefined;
 }
 
-/** How Tilion treats a second raw CDP socket while one client is attached. */
+/**
+ * How Tilion treats a second raw CDP socket while one client is attached.
+ * Residential sessions close it with 4409 only after ~5.3 s (direct: ~0.26 s,
+ * tilion-probe `second-client`), so the window must be well past that.
+ */
 export function secondCdpClientOutcome(
   wsUrl: string,
-  holdMs = 5_000
+  holdMs = 15_000
 ): Promise<{ opened: boolean; closeCode: number | null; closeReason: string }> {
   return new Promise((resolve) => {
     const socket = new WebSocket(wsUrl);
