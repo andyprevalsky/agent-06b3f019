@@ -347,7 +347,7 @@ export function BrowserAppDrawer() {
         Browser
       </div>
       <BrowserModeTabs />
-      {apps.browserMode === 'local' && apps.selectedAgentId !== null ? (
+      {apps.browserMode === 'local' ? (
         active && <LocalPreviewPane key={apps.selectedAgentId} agentId={apps.selectedAgentId} />
       ) : (
         <>

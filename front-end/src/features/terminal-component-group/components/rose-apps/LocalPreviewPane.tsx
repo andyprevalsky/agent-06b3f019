@@ -35,16 +35,24 @@ function PreviewFrame({ view }: { view: RootPreviewView }) {
   );
 }
 
-export function LocalPreviewPane({ agentId }: { agentId: string }) {
+export function LocalPreviewPane({ agentId }: { agentId: string | null }) {
   const query = useQuery({
     queryKey: ['root-local-preview', agentId],
-    queryFn: () => fetchRootPreview(agentId),
+    queryFn: () => fetchRootPreview(agentId ?? ''),
+    enabled: agentId !== null,
     retry: false,
     staleTime: 0,
     refetchOnWindowFocus: false,
   });
   // Never retain a previous agent's preview while a new request is in flight.
   const view = query.data?.agent_id === agentId ? query.data : undefined;
+  if (agentId === null) {
+    return (
+      <section aria-label="Local code preview" className="p-4 text-sm text-muted-foreground">
+        <p>Select an agent to view its local code preview.</p>
+      </section>
+    );
+  }
   return (
     <section
       aria-label="Local code preview"

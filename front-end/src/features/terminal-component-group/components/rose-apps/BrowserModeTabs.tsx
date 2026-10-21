@@ -2,7 +2,7 @@ import { useRoseApps } from './roseAppsState';
 
 export function BrowserModeTabs() {
   const apps = useRoseApps();
-  if (!apps?.selectedAgentId) return null;
+  if (apps === null) return null;
   return (
     <div
       role="tablist"

@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { fireEvent, screen, waitFor } from '@testing-library/react';
 import { http, HttpResponse, delay } from 'msw';
+import { RoseAppIcons } from '@/features/terminal-component-group/components/rose-apps/RoseAppIcons';
+import { capturedRequests } from './msw/capture';
 import { LocalPreviewPane } from '@/features/terminal-component-group/components/rose-apps/LocalPreviewPane';
 import { BrowserModeTabs } from '@/features/terminal-component-group/components/rose-apps/BrowserModeTabs';
 import { server } from './msw/server';
@@ -27,6 +29,31 @@ function serve(target = 'https://preview-a.example/', status = 'running') {
   );
 }
 describe('Local root preview binding', () => {
+  it('keeps Local and Remote on Home without allocating or fetching an agent preview', async () => {
+    server.use(
+      http.get(`${API}/browser-world/root`, () => HttpResponse.json({ root: null, sites: [] })),
+    );
+    renderWithProviders(<RoseAppIcons />);
+    fireEvent.click(screen.getByRole('button', { name: 'Browser', exact: true }));
+    await screen.findByRole('button', { name: 'Open browser' });
+    const local = screen.getByRole('tab', { name: 'Local', exact: true });
+    const remote = screen.getByRole('tab', { name: 'Remote', exact: true });
+    fireEvent.click(local);
+    expect(local).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText('Select an agent to view its local code preview.')).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Open browser' })).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Stable link' })).toBeNull();
+    expect(screen.queryByTitle('Local root preview')).toBeNull();
+    expect(capturedRequests.some((request) => request.url.includes('/local-preview'))).toBe(false);
+    expect(
+      capturedRequests.some(
+        (request) => request.method === 'POST' && request.url.includes('/root/open'),
+      ),
+    ).toBe(false);
+    fireEvent.click(remote);
+    expect(remote).toHaveAttribute('aria-selected', 'true');
+    await screen.findByRole('button', { name: 'Open browser' });
+  });
   it('fails closed when the handoff target differs from the root preview', async () => {
     serve('https://other-root.example/');
     renderWithProviders(<LocalPreviewPane agentId="child" />);
