@@ -197,6 +197,20 @@ export function previewHandoffCases(ctx: PreviewHandoffCaseContext): void {
       headers: bearer(session),
     });
     assert.equal(preview.status, 200, `the preview session works: ${JSON.stringify(preview.data)}`);
+    const keysBefore = await prisma.roseApiKey.count({ where: { userId: ctx.devUser } });
+    for (const path of ['/api/api-keys', '/api/user-ui/publish-token']) {
+      const credential = await send(ctx.baseUrl, 'POST', path, {
+        headers: bearer(session),
+        body: { name: 'preview escalation attempt' },
+      });
+      assert.equal(credential.status, 403, `${path}: ${JSON.stringify(credential.data)}`);
+      assert.equal(credential.data.code, 'USER_SESSION_REQUIRED');
+    }
+    assert.equal(
+      await prisma.roseApiKey.count({ where: { userId: ctx.devUser } }),
+      keysBefore,
+      'the restricted session cannot create a durable API key'
+    );
     const again = await redeem(code, origin);
     assert.equal(again.status, 401, 'single-use');
     assert.equal(again.data.code, 'PREVIEW_HANDOFF_INVALID');
