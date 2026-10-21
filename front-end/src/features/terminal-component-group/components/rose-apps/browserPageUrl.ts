@@ -9,6 +9,7 @@
  */
 
 import type { Message } from '../../hooks';
+import { latestBrowserTaskValue } from './latestBrowserTaskValue';
 
 const URL_KEYS = ['current_url', 'final_url', 'target_url', 'url'] as const;
 
@@ -28,20 +29,17 @@ function urlIn(record: Record<string, unknown> | undefined): string | null {
 }
 
 export function latestBrowserPageUrl(messages: Message[], taskId: string): string | null {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const metadata = messages[i].metadata as Record<string, unknown> | undefined;
-    if (metadata?.task_id !== taskId) continue;
+  return latestBrowserTaskValue(messages, taskId, (metadata) => {
     const auxiliary = metadata.auxiliary;
-    const url =
-      urlIn(metadata) ??
+    return (
+      urlIn(metadata as Record<string, unknown>) ??
       urlIn(
         typeof auxiliary === 'object' && auxiliary !== null
           ? (auxiliary as Record<string, unknown>)
           : undefined,
-      );
-    if (url !== null) return url;
-  }
-  return null;
+      )
+    );
+  });
 }
 
 /** Split a URL into the bold host and the muted rest, as the address bar shows it. */
