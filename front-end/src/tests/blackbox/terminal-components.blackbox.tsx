@@ -2467,7 +2467,6 @@ describe('OpeningMessageDisplay (blackbox)', () => {
 
     expect(screen.getByText(OPENING_MESSAGES[0][0])).toBeInTheDocument();
     expect(screen.queryByTestId('opening-join-waitlist')).toBeNull();
-    expect(screen.getByTestId('terminal-opening-loader')).toHaveStyle({ opacity: 0.2 });
   });
 
   it('renders caption text for the final message (CTA is no longer the terminal frame)', () => {
@@ -2635,5 +2634,6 @@ describe('ChatScrollArea Join Waitlist auth-gating (blackbox)', () => {
   it('hides the Join Waitlist CTA when signed in with a real account', () => {
     renderChat({ isAuthenticated: true, isAnonymous: false });
     expect(screen.queryByTestId('opening-join-waitlist')).toBeNull();
+    expect(screen.getByTestId('terminal-opening-loader')).toHaveStyle({ opacity: 0.2 });
   });
 });
