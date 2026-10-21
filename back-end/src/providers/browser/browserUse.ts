@@ -294,6 +294,7 @@ export async function closeBrowserUseSession(
   const initialHash = initialStorageHashes.get(sessionId);
   let profileBefore: string | null = null;
   let unknownBaseline = false;
+  let checkpointConfirmed = false;
   if (row?.providerProfileId && row.wsUrl) {
     try {
       const { chromium } = await import('playwright');
@@ -301,6 +302,7 @@ export async function closeBrowserUseSession(
       try {
         const currentHash = await storageHash(browser);
         unknownBaseline = initialHash === undefined;
+        checkpointConfirmed = !unknownBaseline && currentHash === initialHash;
         if (unknownBaseline || currentHash !== initialHash) {
           const profile = await request<BrowserUseProfile>(
             `/profiles/${encodeURIComponent(row.providerProfileId)}`
@@ -320,6 +322,19 @@ export async function closeBrowserUseSession(
       });
     }
   }
+  // A grace period is not evidence that a profile was saved. If inspection
+  // failed, obtain a pre-stop version so pause can verify the provider save.
+  // Refuse to release a live browser when no checkpoint can be established.
+  if (pause && !checkpointConfirmed && !profileBefore) {
+    if (!row?.providerProfileId) {
+      throw new Error('Cannot pause Browser Use session without a persistent profile');
+    }
+    const profile = await request<BrowserUseProfile>(
+      `/profiles/${encodeURIComponent(row.providerProfileId)}`
+    );
+    profileBefore = profile.updatedAt;
+    if (!profileBefore) throw new Error('Cannot verify Browser Use profile before pause');
+  }
   let releaseError: unknown = null;
   let stopped = false;
   try {
@@ -332,11 +347,12 @@ export async function closeBrowserUseSession(
     try {
       if (profileBefore) {
         await waitForProfileSave(row.providerProfileId, profileBefore);
+        checkpointConfirmed = true;
       } else {
         await new Promise((resolve) => setTimeout(resolve, 5_000));
       }
     } catch (error) {
-      if (!unknownBaseline) releaseError = error;
+      if (pause || !unknownBaseline) releaseError = error;
       else
         log.warn('Browser Use profile save could not be confirmed after stop', {
           sessionId,
@@ -348,7 +364,15 @@ export async function closeBrowserUseSession(
   await prisma.browserSession.update({
     where: { sessionId },
     data: {
-      status: stopped ? (pause ? 'PAUSED' : 'CLOSED') : pause ? 'ACTIVE' : 'ERROR',
+      status: stopped
+        ? pause
+          ? checkpointConfirmed && releaseError === null
+            ? 'PAUSED'
+            : 'ERROR'
+          : 'CLOSED'
+        : pause
+          ? 'ACTIVE'
+          : 'ERROR',
       closedAt: stopped && !pause ? new Date() : null,
       currentUrl: currentUrl || undefined,
     },
