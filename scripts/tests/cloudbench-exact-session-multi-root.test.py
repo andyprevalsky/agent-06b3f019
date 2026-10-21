@@ -1,11 +1,17 @@
-"""A composite benchmark's two exact roots must be recoverable together."""
+"""A composite benchmark's two exact roots must be recoverable together.
+
+Also owns exact Tilion cleanup: one Tilion account is shared by prod, dev and
+benchmarks, so only exact session ids from this guest's evidence are released.
+"""
 
 import argparse
 import importlib.util
 import json
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location(
@@ -85,6 +91,183 @@ class MultiRootCleanupTest(unittest.TestCase):
         self.write_evidence()
         with self.assertRaisesRegex(cleanup.CleanupEvidenceError, "exact root agent"):
             cleanup.provider_manifest(self.args)
+
+
+TILION_A = "sess_3d245e56b86d4bc8ae32095b644117d4"
+TILION_B = "sess_6ac44536ab704d77b335f09ca281ada1"
+TILION_CREATE_OK = "[Tilion] Tilion request method=POST path=/v1/session status=201 attempt=1"
+
+
+class FakeResponse:
+    def __init__(self, status, body=b""):
+        self.status = status
+        self._body = body
+
+    def read(self, _limit):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def http_error(status, body=b"{}"):
+    error = urllib.error.HTTPError("https://back.tilion.dev", status, "x", {}, None)
+    error.read = lambda _limit: body
+    return error
+
+
+class TilionExactCleanupTest(MultiRootCleanupTest):
+    def setUp(self):
+        super().setUp()
+        self.env = Path(self.temp.name) / "backend.env"
+        self.env.write_text("TILION_API_KEY=tl_fake_cleanup_key\n")
+        self.args.backend_env = str(self.env)
+        self.args.agents_env = str(Path(self.temp.name) / "agents.env")
+        self.args.receipt = str(Path(self.temp.name).resolve() / "receipt.json")
+        replacements = {
+            "Created Kernel browser session sessionId=kernel_gate123": [
+                TILION_CREATE_OK,
+                f"[Tilion] Created Tilion browser session sessionId={TILION_A} proxyType=isp",
+            ],
+            "Created Kernel browser session sessionId=kernel_task123": [
+                TILION_CREATE_OK,
+                json.dumps({"level": "info", "component": "Tilion",
+                            "message": "Created Tilion browser session",
+                            "sessionId": TILION_B}),
+            ],
+        }
+        self.backend_lines = [
+            new for line in self.backend_lines for new in replacements.get(line, [line])
+        ]
+
+    def test_sealed_composite_run_covers_both_provider_sessions(self):
+        self.write_evidence()
+        manifest = cleanup.provider_manifest(self.args)
+        self.assertEqual(manifest["sessions"],
+                         {"kernel": [], "steel": [], "tilion": [TILION_A, TILION_B]})
+
+    def test_kernel_only_manifest_shape_is_unchanged(self):
+        sessions, _, _ = cleanup.collect_session_evidence(
+            "Created Kernel browser session sessionId=kernel_gate123\n")
+        self.assertEqual(sessions, {"kernel": ["kernel_gate123"], "steel": []})
+        self.assertEqual(cleanup.collect_session_evidence(""),
+                         ({"kernel": [], "steel": []}, 0, 0))
+
+    def test_every_adapter_marker_and_db_row_is_owner_evidence(self):
+        text = "\n".join([
+            TILION_CREATE_OK,
+            "[Tilion] Tilion geo unsupported; recreating with a wider pin sessionId=sess_geo00001",
+            "[Tilion] Tilion geo pin unsupported; keeping country exit sessionId=sess_geo00002",
+            "[Tilion] Tilion session failed validation; creating another sessionId=sess_val00001",
+            "Error: Tilion session sess_val00002 failed validation and cleanup",
+            "[Tilion] Failed to release Tilion session; retaining retryable local session state "
+            "sessionId=sess_rel00001",
+        ])
+        sessions, events, _ = cleanup.collect_session_evidence(text)
+        self.assertEqual(sessions["tilion"], sorted([
+            "sess_geo00001", "sess_geo00002", "sess_val00001", "sess_val00002", "sess_rel00001",
+        ]))
+        self.assertEqual(events, 6)
+        # A single-root run whose DB snapshot names a Tilion row the logs missed.
+        self.run["tasks"][0]["agent_id"] = GATE
+        self.run["tasks"][0]["logs"]["cloud_cleanup_evidence"] = {
+            "root_agent_id": GATE,
+            "before": {
+                "root_exists": True, "tree_agent_ids": [GATE, TASK],
+                "browser_sessions": [{"agent_id": TASK, "provider": "tilion",
+                                      "session_id": "sess_dbrow0001"}],
+            },
+        }
+        self.write_evidence()
+        manifest = cleanup.provider_manifest(self.args)
+        self.assertIn("sess_dbrow0001", manifest["sessions"]["tilion"])
+
+    def test_create_without_exact_session_id_fails_closed(self):
+        for line in (TILION_CREATE_OK,
+                     "[Tilion] Tilion request failed before a response method=POST "
+                     "path=/v1/session attempt=1"):
+            with self.subTest(line=line):
+                with self.assertRaisesRegex(cleanup.CleanupEvidenceError, "exact session id"):
+                    cleanup.collect_session_evidence(line + "\n")
+        # A refused create allocated nothing, but still counts against zero proofs.
+        sessions, events, _ = cleanup.collect_session_evidence(
+            "[Tilion] Tilion request method=POST path=/v1/session status=429 attempt=1\n")
+        self.assertEqual((sessions, events), ({"kernel": [], "steel": []}, 1))
+        # Reads and other session routes are not creates.
+        sessions, events, _ = cleanup.collect_session_evidence(
+            f"[Tilion] Tilion request method=POST path=/v1/session/{TILION_A}/view-token "
+            "status=200 attempt=1\n")
+        self.assertEqual(events, 0)
+
+    def test_release_deletes_only_the_exact_session_and_retries_503(self):
+        calls = []
+
+        def urlopen(request, timeout):
+            calls.append((request.get_method(), request.full_url,
+                          request.get_header("Authorization")))
+            status = responses.pop(0)
+            if status >= 400:
+                raise http_error(status)
+            return FakeResponse(status)
+
+        for sequence, expected in (([204], 204), ([404], 404), ([410], 410),
+                                   ([503, 503, 204], 204)):
+            with self.subTest(sequence=sequence):
+                calls.clear()
+                responses = list(sequence)
+                with mock.patch.object(cleanup.urllib.request, "urlopen", urlopen), \
+                        mock.patch.object(cleanup.time, "sleep") as sleep:
+                    status, _ = cleanup.provider_request("tilion", TILION_A, (self.env,))
+                self.assertEqual(status, expected)
+                self.assertEqual(sleep.call_count, len(sequence) - 1)
+                self.assertEqual(calls, [(
+                    "DELETE", f"https://back.tilion.dev/v1/session/{TILION_A}",
+                    "Bearer tl_fake_cleanup_key")] * len(sequence))
+
+        for sequence in ([503] * cleanup.TILION_RELEASE_ATTEMPTS, [401], [500]):
+            with self.subTest(sequence=sequence):
+                responses = list(sequence)
+                with mock.patch.object(cleanup.urllib.request, "urlopen", urlopen), \
+                        mock.patch.object(cleanup.time, "sleep"):
+                    with self.assertRaisesRegex(cleanup.CleanupEvidenceError, "Tilion exact"):
+                        cleanup.provider_request("tilion", TILION_A, (self.env,))
+                self.assertEqual(responses, [])
+
+    def test_missing_tilion_key_fails_before_any_request(self):
+        self.env.write_text("")
+        with mock.patch.object(cleanup.urllib.request, "urlopen") as urlopen, \
+                mock.patch.dict(cleanup.os.environ, {"TILION_API_KEY": ""}):
+            with self.assertRaisesRegex(cleanup.CleanupEvidenceError, "credential is missing"):
+                cleanup.provider_request("tilion", TILION_A, (self.env,))
+        urlopen.assert_not_called()
+
+    def test_cleanup_keeps_a_complete_receipt_per_session(self):
+        self.write_evidence()
+        manifest = cleanup.provider_manifest(self.args)
+        statuses = {TILION_A: 204, TILION_B: 410}
+
+        def urlopen(request, timeout):
+            status = statuses[request.full_url.rsplit("/", 1)[1]]
+            if status >= 400:
+                raise http_error(status)
+            return FakeResponse(status)
+
+        with mock.patch.object(cleanup.urllib.request, "urlopen", urlopen):
+            self.assertEqual(cleanup.cleanup_manifest_sessions(self.args, manifest), 0)
+        receipt = json.loads(Path(self.args.receipt).read_text())
+        self.assertEqual([(r["provider"], r["session_id"], r["http_status"])
+                          for r in receipt["results"]],
+                         [("tilion", TILION_A, 204), ("tilion", TILION_B, 410)])
+        self.assertTrue(cleanup.validate_provider_receipt(receipt, manifest))
+        receipt["results"][1]["http_status"] = 503
+        self.assertFalse(cleanup.validate_provider_receipt(receipt, manifest))
+        # Re-running with the stored receipt makes no provider call.
+        with mock.patch.object(cleanup.urllib.request, "urlopen") as again:
+            self.assertEqual(cleanup.cleanup_manifest_sessions(self.args, manifest), 0)
+        again.assert_not_called()
 
 
 if __name__ == "__main__":
