@@ -6,13 +6,14 @@
 
 import { WebSocketServer } from "ws";
 import { execFileSync, execSync, spawn } from "child_process";
-import { timingSafeEqual } from "crypto";
+import { randomUUID, timingSafeEqual } from "crypto";
 import {
   appendFileSync,
   copyFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
+  renameSync,
   readFileSync,
   writeFileSync,
 } from "fs";
@@ -96,7 +97,7 @@ const wss = new WebSocketServer({ port: PORT });
 
 wss.on("listening", () => {
   log("info", "Server listening", {
-    port: PORT,
+    port: wss.address().port,
     ...(process.env.ROSE_LOCAL_WS_READINESS_TOKEN
       ? { readinessToken: process.env.ROSE_LOCAL_WS_READINESS_TOKEN }
       : {}),
@@ -125,7 +126,18 @@ wss.on("connection", (ws, req) => {
     ws.send(JSON.stringify({ type: "buffer", data: outputBuffer }));
   }
   if (replay && eventBuffer.length > 0) {
-    ws.send(JSON.stringify({ type: "code_agent_events", data: eventBuffer }));
+    const rawCursor = new URL(
+      req?.url || "/",
+      "http://localhost",
+    ).searchParams.get("cursor");
+    const cursor =
+      rawCursor !== null && /^\d+$/.test(rawCursor) ? Number(rawCursor) : -1;
+    ws.send(
+      JSON.stringify({
+        type: "code_agent_events",
+        data: eventBuffer.filter((event) => event.seq > cursor),
+      }),
+    );
   }
   if (exitAnnounced) {
     log("info", "Served final buffer to reattaching client");
@@ -164,7 +176,36 @@ wss.on("connection", (ws, req) => {
           }),
         );
       } else if (msg.type === "user_turn") {
-        ws.send(JSON.stringify(handleUserTurn(msg)));
+        void handleUserTurn(msg)
+          .then((ack) => {
+            if (ws.readyState === 1) ws.send(JSON.stringify(ack));
+          })
+          .catch((error) => {
+            if (ws.readyState === 1)
+              ws.send(
+                JSON.stringify(turnAck(msg.id, "rejected", error.message)),
+              );
+          });
+      } else if (msg.type === "session_capabilities") {
+        if (!tokenMatches(msg.token))
+          ws.send(
+            JSON.stringify({
+              type: "session_capabilities_ack",
+              status: "rejected",
+              reason: "unauthorized",
+            }),
+          );
+        else
+          void sessionCapabilities().then((caps) => {
+            if (ws.readyState === 1)
+              ws.send(
+                JSON.stringify({
+                  type: "session_capabilities_ack",
+                  status: "delivered",
+                  ...caps,
+                }),
+              );
+          });
       } else if (msg.type === "hand_back") {
         ws.send(JSON.stringify(handleHandBack(msg)));
       }
@@ -205,6 +246,10 @@ function appendEvent(event) {
     version: 1,
     provider: "claude",
     timestamp: new Date().toISOString(),
+    seq: eventBuffer.length,
+    ...(activeTurn
+      ? { turn_id: activeTurn.id, turn_started_at: activeTurn.startedAt }
+      : {}),
     ...event,
   };
   eventBuffer.push(normalized);
@@ -253,6 +298,8 @@ async function shutdown(exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   log("info", "Starting graceful shutdown", { exitCode });
+  endNativeTurn("interrupted");
+  if (cliChild && !processExited) cliChild.kill("SIGTERM");
 
   announceExit(exitCode);
 
@@ -467,7 +514,9 @@ function prepareCodeSessionBranch(repoDir) {
     return null;
   }
   const result = { branch, base: base || null, source: null, error: null };
-  if (gitRun(["rev-parse", "--verify", "-q", `refs/heads/${branch}`], repoDir).ok) {
+  if (
+    gitRun(["rev-parse", "--verify", "-q", `refs/heads/${branch}`], repoDir).ok
+  ) {
     const current = gitRun(["symbolic-ref", "-q", "--short", "HEAD"], repoDir);
     if (current.out !== branch) {
       const switched = gitRun(["checkout", branch], repoDir);
@@ -476,18 +525,31 @@ function prepareCodeSessionBranch(repoDir) {
     result.source = "local";
   } else if (
     gitRun(
-      ["fetch", "-q", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`],
+      [
+        "fetch",
+        "-q",
+        "origin",
+        `+refs/heads/${branch}:refs/remotes/origin/${branch}`,
+      ],
       repoDir,
     ).ok
   ) {
-    const created = gitRun(["checkout", "-B", branch, `origin/${branch}`], repoDir);
+    const created = gitRun(
+      ["checkout", "-B", branch, `origin/${branch}`],
+      repoDir,
+    );
     if (!created.ok) result.error = created.out.slice(0, 300);
     result.source = "remote";
   } else {
     let start = null;
     if (base) {
       const fetched = gitRun(
-        ["fetch", "-q", "origin", `+refs/heads/${base}:refs/remotes/origin/${base}`],
+        [
+          "fetch",
+          "-q",
+          "origin",
+          `+refs/heads/${base}:refs/remotes/origin/${base}`,
+        ],
         repoDir,
       );
       if (fetched.ok) {
@@ -510,12 +572,17 @@ function prepareCodeSessionBranch(repoDir) {
       if (!created.ok) result.error = created.out.slice(0, 300);
     }
   }
-  result.current = gitRun(["symbolic-ref", "-q", "--short", "HEAD"], repoDir).out || null;
-  result.head = gitRun(["rev-parse", "-q", "--verify", "HEAD"], repoDir).out || null;
+  result.current =
+    gitRun(["symbolic-ref", "-q", "--short", "HEAD"], repoDir).out || null;
+  result.head =
+    gitRun(["rev-parse", "-q", "--verify", "HEAD"], repoDir).out || null;
   log(result.error ? "warn" : "info", "Code session branch prepared", result);
   try {
     mkdirSync(join(home, ".rose"), { recursive: true });
-    writeFileSync(join(home, ".rose", "code-session-branch.json"), JSON.stringify(result));
+    writeFileSync(
+      join(home, ".rose", "code-session-branch.json"),
+      JSON.stringify(result),
+    );
   } catch {
     // diagnostics only
   }
@@ -595,39 +662,108 @@ function detailFromToolInput(input, paths) {
 // Transcript tab) but never buffered: the complete `assistant` message that
 // follows is the durable record, and replaying every delta on reconnect would
 // multiply the history size.
+let streamMessageId = null;
+const streamBlocks = new Map();
 function emitStreamDelta(event) {
   if (!event || typeof event !== "object") return;
-  const delta = { version: 1, provider: "claude" };
   if (event.type === "message_start") {
-    delta.kind = "message_start";
-  } else if (event.type === "content_block_start") {
-    delta.kind = "block_start";
-    delta.index = event.index ?? null;
-    delta.block_type = event.content_block?.type || null;
-    if (event.content_block?.type === "tool_use") {
-      delta.tool = event.content_block.name || null;
-      delta.tool_use_id = event.content_block.id || null;
-    }
-  } else if (event.type === "content_block_delta") {
-    const d = event.delta || {};
-    if (d.type === "text_delta" && typeof d.text === "string") {
-      delta.kind = "text";
-      delta.text = d.text;
-    } else if (d.type === "thinking_delta" && typeof d.thinking === "string") {
-      delta.kind = "thinking";
-      delta.text = d.thinking;
-    } else {
-      return; // tool input JSON / signatures: the full message carries them
-    }
-    delta.index = event.index ?? null;
-  } else {
+    startNativeTurn();
+    streamMessageId = event.message?.id || randomUUID();
+    streamBlocks.clear();
+    emitNativeUsage(event.message?.usage);
+    broadcast("code_agent_delta", {
+      version: 1,
+      provider: "claude",
+      kind: "message_start",
+      turn_id: activeTurn?.id,
+    });
     return;
   }
-  broadcast("code_agent_delta", delta);
+  if (event.type === "message_delta") {
+    emitNativeUsage(event.usage);
+    return;
+  }
+  const key = `${streamMessageId || activeTurn?.id}:${event.index ?? 0}`;
+  if (event.type === "content_block_start") {
+    const block = event.content_block || {};
+    broadcast("code_agent_delta", {
+      version: 1,
+      provider: "claude",
+      kind: "block_start",
+      index: event.index,
+      block_type: block.type,
+      turn_id: activeTurn?.id,
+    });
+    streamBlocks.set(key, {
+      type: block.type,
+      completed: false,
+      text: block.text || block.thinking || "",
+    });
+    if (block.type === "tool_use")
+      appendEvent({
+        type: "tool_use",
+        tool: block.name,
+        tool_use_id: block.id,
+        input: block.input || {},
+        partial: true,
+      });
+    return;
+  }
+  if (event.type !== "content_block_delta") return;
+  const delta = event.delta || {};
+  const type =
+    delta.type === "text_delta"
+      ? "agent_message"
+      : delta.type === "thinking_delta"
+        ? "thinking"
+        : null;
+  if (!type) return;
+  const text = delta.text ?? delta.thinking;
+  if (typeof text !== "string") return;
+  const block = streamBlocks.get(key) || { text: "" };
+  block.text += text;
+  streamBlocks.set(key, block);
+  // Accumulated upserts are durable and replayable. A reconnect receives the
+  // same item id and latest text; the final assistant block replaces this row.
+  appendEvent({
+    type,
+    item_id: key,
+    text: block.text,
+    delta: text,
+    partial: true,
+  });
+  broadcast("code_agent_delta", {
+    version: 1,
+    provider: "claude",
+    kind: type === "thinking" ? "thinking" : "text",
+    text,
+    index: event.index,
+    item_id: key,
+    turn_id: activeTurn?.id,
+    seq: eventBuffer.length - 1,
+  });
+}
+
+// Claude emits each finalized block as a separate assistant envelope. Those
+// envelopes share one message id, so content[0] is not its native block index.
+function completedBlockId(messageId, part, fallbackIndex) {
+  for (const [key, block] of streamBlocks) {
+    if (
+      key.startsWith(`${messageId}:`) &&
+      block.type === part.type &&
+      !block.completed
+    ) {
+      block.completed = true;
+      return key;
+    }
+  }
+  return `${messageId}:${part.type}:${fallbackIndex}`;
 }
 
 function emitClaudeMessage(message) {
   if (message.type === "system" && message.subtype === "init") {
+    if (typeof message.model === "string" && message.model)
+      effectiveSettings.model = message.model;
     appendEvent({
       type: "session",
       raw_type: "system.init",
@@ -648,28 +784,34 @@ function emitClaudeMessage(message) {
   }
 
   if (message.type === "assistant") {
-    for (const part of message.message?.content || []) {
+    const content = message.message?.content || [];
+    const messageId = message.message?.id || streamMessageId || randomUUID();
+    for (const [partIndex, part] of content.entries()) {
       if (part?.type === "thinking" || part?.type === "redacted_thinking") {
         // Claude Code may omit the thinking text (empty string); the block
         // still marks where the model thought, for the transcript.
         const thinking = typeof part.thinking === "string" ? part.thinking : "";
         appendEvent({
           type: "thinking",
+          item_id: completedBlockId(messageId, part, partIndex),
           raw_type: `assistant.${part.type}`,
           text: thinking,
           redacted: part.type === "redacted_thinking" || !thinking,
         });
       }
     }
-    const text = textFromContent(message.message?.content);
-    if (text) {
-      appendEvent({
-        type: "agent_message",
-        raw_type: "assistant",
-        text,
-        usage: message.message?.usage || null,
-      });
-      appendOutput("stdout", `[Claude] ${text}\n`);
+    for (const [partIndex, part] of content.entries()) {
+      if (part?.type === "text" && typeof part.text === "string" && part.text) {
+        appendEvent({
+          type: "agent_message",
+          raw_type: "assistant",
+          item_id: completedBlockId(messageId, part, partIndex),
+          text: part.text,
+          partial: false,
+          usage: message.message?.usage || null,
+        });
+        appendOutput("stdout", `[Claude] ${part.text}\n`);
+      }
     }
     for (const part of message.message?.content || []) {
       if (part?.type === "tool_use") {
@@ -712,6 +854,7 @@ function emitClaudeMessage(message) {
   }
 
   if (message.type === "result") {
+    emitNativeUsage(message.usage, true);
     const isSuccess = message.subtype === "success";
     appendEvent({
       type: "result",
@@ -732,6 +875,14 @@ function emitClaudeMessage(message) {
         `[Claude result] ${(message.errors || []).join("\n")}\n`,
       );
     }
+    endNativeTurn(
+      isSuccess
+        ? "completed"
+        : message.subtype === "error_during_execution" &&
+            message.errors?.some((e) => /interrupt/i.test(e))
+          ? "interrupted"
+          : "failed",
+    );
     return;
   }
 
@@ -826,7 +977,181 @@ let cliStdinOpen = false;
 let pendingTurns = 0;
 let directHold = false;
 let directHoldTimer = null;
-const deliveredTurnIds = new Set();
+const deliveredTurnIds = new Map();
+const pendingDeliveries = new Map();
+const controlRequests = new Map();
+let controlSerial = Promise.resolve();
+let activeTurn = null;
+let effectiveSettings = {
+  model: CLAUDE_CODE_MODEL,
+  ...(process.env.CLAUDE_CODE_EFFORT
+    ? { effort: process.env.CLAUDE_CODE_EFFORT }
+    : {}),
+  speed: CLAUDE_CODE_FAST_MODE ? "fast" : "standard",
+};
+let modelCatalog = null;
+
+function startNativeTurn(id = randomUUID()) {
+  if (activeTurn) return activeTurn;
+  activeTurn = { id, startedAt: new Date().toISOString(), usage: new Map() };
+  appendEvent({
+    type: "turn_started",
+    turn_id: id,
+    turn_started_at: activeTurn.startedAt,
+  });
+  return activeTurn;
+}
+function emitNativeUsage(usage, final = false) {
+  if (!activeTurn || !usage || typeof usage !== "object") return;
+  const fields = {};
+  const mapping = {
+    output_tokens: "output_tokens",
+    input_tokens: "input_tokens",
+    cached_input_tokens: "cache_read_input_tokens",
+  };
+  const key = streamMessageId || activeTurn.id;
+  const previous = activeTurn.usage.get(key) || {};
+  for (const [target, source] of Object.entries(mapping)) {
+    const value = usage[source];
+    if (Number.isFinite(value) && value >= 0) previous[target] = value;
+  }
+  activeTurn.usage.set(key, previous);
+  for (const name of Object.keys(mapping)) {
+    const values = [...activeTurn.usage.values()]
+      .map((item) => item[name])
+      .filter((value) => Number.isFinite(value));
+    if (values.length)
+      fields[name] =
+        final && Number.isFinite(usage[mapping[name]])
+          ? usage[mapping[name]]
+          : values.reduce((sum, value) => sum + value, 0);
+  }
+  if (Object.keys(fields).length)
+    appendEvent({ type: "usage", usage_scope: "turn", ...fields });
+}
+
+function endNativeTurn(outcome) {
+  if (!activeTurn) return;
+  appendEvent({
+    type: "turn_ended",
+    turn_ended_at: new Date().toISOString(),
+    turn_outcome: outcome,
+  });
+  activeTurn = null;
+}
+function cliControl(request) {
+  if (!cliChild || !cliStdinOpen)
+    return Promise.reject(new Error("session_ended"));
+  const request_id = randomUUID();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      controlRequests.delete(request_id);
+      reject(new Error("settings_unconfirmed"));
+    }, 5000);
+    controlRequests.set(request_id, { resolve, reject, timer });
+    cliChild.stdin.write(
+      JSON.stringify({ type: "control_request", request_id, request }) + "\n",
+    );
+  });
+}
+function settleControl(message) {
+  if (message.type !== "control_response") return false;
+  const response = message.response || {};
+  const pending = controlRequests.get(response.request_id);
+  if (pending) {
+    controlRequests.delete(response.request_id);
+    clearTimeout(pending.timer);
+    if (response.subtype === "success")
+      pending.resolve(response.response || {});
+    else pending.reject(new Error("settings_rejected"));
+  }
+  return true;
+}
+async function sessionCapabilities() {
+  try {
+    const response = await cliControl({ subtype: "list_models" });
+    const models = Array.isArray(response) ? response : response.models;
+    if (Array.isArray(models)) modelCatalog = models;
+  } catch {
+    /* Older CLIs expose only their verified current configuration. */
+  }
+  const models = (modelCatalog || [])
+    .filter((m) => typeof m.value === "string")
+    .map((m) => ({
+      model: m.value,
+      label: m.displayName || m.value,
+      efforts: m.supportedEffortLevels || [],
+      speeds: m.supportsFastMode ? ["standard", "fast"] : ["standard"],
+    }));
+  if (!models.length)
+    models.push({
+      model: effectiveSettings.model,
+      label: effectiveSettings.model,
+      efforts: effectiveSettings.effort ? [effectiveSettings.effort] : [],
+      speeds: [effectiveSettings.speed],
+    });
+  return {
+    code_provider: "claude",
+    effective_settings: { ...effectiveSettings },
+    models,
+  };
+}
+async function applyTurnSettings(settings = {}) {
+  const changed = Object.entries(settings).filter(
+    ([key, value]) => value != null && value !== effectiveSettings[key],
+  );
+  if (!changed.length) return;
+  const caps = await sessionCapabilities();
+  const model = settings.model || effectiveSettings.model;
+  const option = caps.models.find((m) => m.model === model);
+  if (
+    !option ||
+    (settings.effort && !option.efforts.includes(settings.effort)) ||
+    (settings.speed && !option.speeds.includes(settings.speed))
+  )
+    throw new Error("unsupported_settings");
+  if (settings.model && settings.model !== effectiveSettings.model) {
+    await cliControl({ subtype: "set_model", model });
+    effectiveSettings.model = model;
+  }
+  const flags = {};
+  if (settings.effort != null) flags.effortLevel = settings.effort;
+  if (settings.speed != null) flags.fastMode = settings.speed === "fast";
+  if (Object.keys(flags).length) {
+    await cliControl({ subtype: "apply_flag_settings", settings: flags });
+    if (settings.effort != null) effectiveSettings.effort = settings.effort;
+    if (settings.speed != null) effectiveSettings.speed = settings.speed;
+  }
+}
+function stageTurnAttachments(id, attachments) {
+  if (!Array.isArray(attachments) || !attachments.length) return [];
+  if (attachments.length > 20 || !/^[A-Za-z0-9_-]{1,128}$/.test(id))
+    throw new Error("invalid_attachments");
+  const directory = join(home, "attachments", "direct", id);
+  mkdirSync(directory, { recursive: true });
+  let bytes = 0;
+  return attachments.map((attachment, index) => {
+    if (
+      typeof attachment.base64_data !== "string" ||
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+        attachment.base64_data,
+      )
+    )
+      throw new Error("invalid_attachments");
+    const data = Buffer.from(attachment.base64_data, "base64");
+    bytes += data.length;
+    if (data.length > 20 * 1024 * 1024 || bytes > 100 * 1024 * 1024)
+      throw new Error("attachments_too_large");
+    const name = String(attachment.name || "attachment")
+      .replace(/[^A-Za-z0-9._-]/g, "_")
+      .slice(0, 180);
+    const path = join(directory, `${index}-${name}`);
+    const temporaryPath = `${path}.${randomUUID()}.tmp`;
+    writeFileSync(temporaryPath, data, { mode: 0o600 });
+    renameSync(temporaryPath, path);
+    return path;
+  });
+}
 
 function userMessageLine(text) {
   return (
@@ -892,15 +1217,39 @@ function turnAck(id, status, reason) {
   return { type: "user_turn_ack", id, status, ...(reason ? { reason } : {}) };
 }
 
-function handleUserTurn(msg) {
+async function handleUserTurn(msg) {
+  const id = typeof msg.id === "string" ? msg.id : "";
+  if (!tokenMatches(msg.token)) return turnAck(id, "rejected", "unauthorized");
+  if (deliveredTurnIds.has(id))
+    return { ...deliveredTurnIds.get(id), status: "duplicate" };
+  if (pendingDeliveries.has(id))
+    return pendingDeliveries
+      .get(id)
+      .then((ack) =>
+        ack.status === "delivered" ? { ...ack, status: "duplicate" } : ack,
+      );
+  const promise = controlSerial.then(() => deliverNativeTurn(msg));
+  controlSerial = promise.catch(() => {});
+  pendingDeliveries.set(id, promise);
+  try {
+    return await promise;
+  } finally {
+    pendingDeliveries.delete(id);
+  }
+}
+async function deliverNativeTurn(msg) {
   const id = typeof msg.id === "string" ? msg.id : "";
   if (!tokenMatches(msg.token)) return turnAck(id, "rejected", "unauthorized");
   if (!id || id.length > MAX_TURN_ID_CHARS) {
     return turnAck(id, "rejected", "invalid_id");
   }
-  if (deliveredTurnIds.has(id)) return turnAck(id, "duplicate");
+  if (deliveredTurnIds.has(id))
+    return { ...deliveredTurnIds.get(id), status: "duplicate" };
   const text = typeof msg.text === "string" ? msg.text.replace(/\0/g, "") : "";
-  if (!text.trim() || text.length > MAX_TURN_TEXT_CHARS) {
+  if (
+    (!text.trim() && !msg.attachments?.length) ||
+    text.length > MAX_TURN_TEXT_CHARS
+  ) {
     return turnAck(id, "rejected", "invalid_text");
   }
   if (exitAnnounced || !cliStdinOpen || !cliChild) {
@@ -910,7 +1259,37 @@ function handleUserTurn(msg) {
   if (sender === "agent" && directHold) {
     return turnAck(id, "rejected", "relay_paused");
   }
-  deliveredTurnIds.add(id);
+  try {
+    await applyTurnSettings(msg.settings);
+  } catch (error) {
+    return turnAck(id, "rejected", error.message);
+  }
+  if (exitAnnounced || !cliStdinOpen)
+    return turnAck(id, "rejected", "session_ended");
+  let files;
+  try {
+    files = stageTurnAttachments(id, msg.attachments);
+  } catch (error) {
+    return turnAck(id, "rejected", error.message);
+  }
+  const mode = activeTurn ? "steer" : "start";
+  const turn = startNativeTurn();
+  pendingTurns += 1;
+  try {
+    await new Promise((resolve, reject) => {
+      cliChild.stdin.write(
+        userMessageLine(
+          text +
+            (files.length ? "\n\nAttached files:\n" + files.join("\n") : ""),
+        ),
+        (error) => (error ? reject(error) : resolve()),
+      );
+    });
+  } catch (error) {
+    pendingTurns = Math.max(0, pendingTurns - 1);
+    if (mode === "start" && activeTurn?.id === turn.id) endNativeTurn("failed");
+    return turnAck(id, "rejected", "session_ended");
+  }
   if (sender === "user") {
     clearDirectHoldTimer();
     if (!directHold) {
@@ -918,12 +1297,24 @@ function handleUserTurn(msg) {
       appendEvent({ type: "direct_chat", status: "held", sender });
     }
   }
-  appendEvent({ type: "user_turn", turn_id: id, sender, text });
+  appendEvent({
+    type: "user_turn",
+    turn_id: turn.id,
+    client_message_id: id,
+    sender,
+    text,
+    attachments: files,
+  });
   appendOutput("stdout", `[${sender === "user" ? "You" : "Agent"}] ${text}\n`);
-  pendingTurns += 1;
-  cliChild.stdin.write(userMessageLine(text));
   log("info", "Delivered user turn", { id, sender, chars: text.length });
-  return turnAck(id, "delivered");
+  const ack = {
+    ...turnAck(id, "delivered"),
+    effective_settings: { ...effectiveSettings },
+    delivery_mode: mode,
+    turn_id: turn.id,
+  };
+  deliveredTurnIds.set(id, ack);
+  return ack;
 }
 
 function handleHandBack(msg) {
@@ -1144,6 +1535,7 @@ async function runClaudeCli(startupReport = null) {
   cliChild = child;
   cliStdinOpen = true;
   pendingTurns = 1;
+  startNativeTurn();
   child.stdin.write(prompt);
 
   let stdoutRemainder = "";
@@ -1158,6 +1550,7 @@ async function runClaudeCli(startupReport = null) {
       if (!line.trim()) continue;
       try {
         const message = JSON.parse(line);
+        if (settleControl(message)) continue;
         if (message?.type === "result") {
           sawResult = true;
         }
@@ -1206,6 +1599,12 @@ async function runClaudeCli(startupReport = null) {
         appendEvent({ type: "stdout", text: stdoutRemainder });
       }
     }
+    endNativeTurn(code === 0 ? "completed" : "failed");
+    for (const pending of controlRequests.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("session_ended"));
+    }
+    controlRequests.clear();
     processExited = true;
     cliStdinOpen = false;
     if (directHoldTimer) clearTimeout(directHoldTimer);

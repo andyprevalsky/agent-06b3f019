@@ -26,9 +26,24 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 
 export type TurnAckStatus = 'delivered' | 'duplicate' | 'rejected' | 'unreachable';
 
+export interface CodeTurnSettings {
+  model?: string;
+  effort?: string;
+  speed?: 'standard' | 'fast' | 'ultrafast';
+}
+
+export interface CodeTurnAttachment {
+  name: string;
+  mime_type: string;
+  base64_data: string;
+}
+
 export interface TurnDelivery {
   status: TurnAckStatus;
   reason?: string;
+  effective_settings?: CodeTurnSettings;
+  delivery_mode?: 'steer' | 'start';
+  turn_id?: string;
 }
 
 /** Per-session write token; must match `code_session_turn_token` in agents. */
@@ -46,17 +61,19 @@ export function controlWsUrl(wsUrl: string): string {
   return url.toString();
 }
 
-interface AckMessage {
+interface AckMessage extends Omit<TurnDelivery, 'status'> {
   type?: string;
   id?: string;
   status?: string;
   reason?: string;
+  code_provider?: string;
+  models?: Array<{ model: string; label: string; efforts: string[]; speeds: string[] }>;
 }
 
 function sendAndAwaitAck(
   wsUrl: string,
-  payload: Record<string, string>,
-  ackType: 'user_turn_ack' | 'hand_back_ack',
+  payload: Record<string, unknown>,
+  ackType: 'user_turn_ack' | 'hand_back_ack' | 'session_capabilities_ack',
   timeoutMs: number
 ): Promise<AckMessage> {
   return new Promise((resolve, reject) => {
@@ -103,6 +120,8 @@ export async function deliverUserTurnToCodeSession(params: {
   turnId: string;
   text: string;
   sender?: 'user' | 'agent';
+  attachments?: CodeTurnAttachment[];
+  settings?: CodeTurnSettings;
   timeoutMs?: number;
   attempts?: number;
 }): Promise<TurnDelivery> {
@@ -114,6 +133,8 @@ export async function deliverUserTurnToCodeSession(params: {
     token: codeSessionTurnToken(taskId),
     text,
     sender: params.sender ?? 'user',
+    attachments: params.attachments,
+    settings: params.settings,
   };
   let lastError = '';
   for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -133,7 +154,13 @@ export async function deliverUserTurnToCodeSession(params: {
         reason: ack.reason,
         attempt: String(attempt),
       });
-      return { status, ...(ack.reason !== undefined ? { reason: ack.reason } : {}) };
+      return {
+        status,
+        ...(ack.reason !== undefined ? { reason: ack.reason } : {}),
+        ...(ack.effective_settings ? { effective_settings: ack.effective_settings } : {}),
+        ...(ack.delivery_mode ? { delivery_mode: ack.delivery_mode } : {}),
+        ...(ack.turn_id ? { turn_id: ack.turn_id } : {}),
+      };
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
       log.warn('Code session turn delivery attempt failed', {
@@ -169,4 +196,14 @@ export async function handBackCodeSession(params: {
     });
     return 'unreachable';
   }
+}
+
+/** Native provider catalog. The browser never infers capability tiers. */
+export async function readCodeSessionCapabilities(params: { wsUrl: string; taskId: string }) {
+  return sendAndAwaitAck(
+    params.wsUrl,
+    { type: 'session_capabilities', token: codeSessionTurnToken(params.taskId) },
+    'session_capabilities_ack',
+    DEFAULT_TIMEOUT_MS
+  );
 }

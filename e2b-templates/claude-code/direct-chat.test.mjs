@@ -1,0 +1,260 @@
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+import { test } from "node:test";
+const require = createRequire(import.meta.url);
+const WebSocket = require("ws");
+const serverPath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "ws-server.mjs",
+);
+const fake = String.raw`
+const {createInterface}=require('node:readline');
+const {existsSync}=require('node:fs');
+const send=m=>process.stdout.write(JSON.stringify(m)+'\n');
+let active=false,turn=0,body='',settings={model:'test-model',effort:'high',speed:'standard'};
+function piece(text) {body+=text;send({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text}}});}
+createInterface({input:process.stdin}).on('line',line=>{
+const msg=JSON.parse(line);
+if(msg.type==='control_request') {
+ let response={};let subtype='success';
+ if(msg.request.subtype==='list_models') response={models:[{value:'test-model',displayName:'Native test model',supportedEffortLevels:['low','high'],supportsFastMode:true}]};
+ else if(msg.request.subtype==='apply_flag_settings') Object.assign(settings,msg.request.settings);
+ else if(msg.request.subtype==='set_model') settings.model=msg.request.model;
+ else subtype='error';
+ send({type:'control_response',response:{request_id:msg.request_id,subtype,response}});return;
+}
+if(msg.type!=='user')return;
+if(!active){active=true;turn++;body='';send({type:'stream_event',event:{type:'message_start',message:{id:'msg-'+turn,usage:{input_tokens:11,output_tokens:1}}}});send({type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'text',text:''}}});}
+piece(msg.message.content.map(p=>p.text||'').join(''));
+if(turn===1) {
+ const tick=setInterval(()=>{if(existsSync(process.env.RELEASE_FILE)){clearInterval(tick);finish();}},10);
+ tick.unref();
+} else finish();
+});
+function finish(){if(!active)return;active=false;send({type:'stream_event',event:{type:'message_delta',usage:{output_tokens:5}}});send({type:'assistant',message:{id:'msg-'+turn,content:[{type:'text',text:body}]}});send({type:'result',subtype:'success',result:body,queued_turn_count:0});}
+`;
+async function connect(url) {
+  const ws = new WebSocket(url);
+  await new Promise((r, j) => {
+    ws.once("open", r);
+    ws.once("error", j);
+  });
+  return ws;
+}
+async function rpc(url, payload) {
+  const ws = await connect(url + "?replay=0");
+  try {
+    return await new Promise((r, j) => {
+      const timer = setTimeout(() => j(new Error("ack timeout")), 8000);
+      ws.on("message", (raw) => {
+        const m = JSON.parse(raw);
+        if (
+          m.type === "user_turn_ack" ||
+          m.type === "session_capabilities_ack"
+        ) {
+          clearTimeout(timer);
+          r(m);
+        }
+      });
+      ws.send(JSON.stringify(payload));
+    });
+  } finally {
+    ws.close();
+  }
+}
+async function until(predicate) {
+  for (let i = 0; i < 600; i++) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  throw new Error("event timeout");
+}
+test("Claude native steering, controls, attachments, lifecycle and durable replay", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rose-c18-claude-"));
+  mkdirSync(join(dir, "bin"));
+  mkdirSync(join(dir, "home"));
+  writeFileSync(join(dir, "fake.cjs"), fake);
+  writeFileSync(
+    join(dir, "bin", "claude"),
+    `#!/bin/sh\nexec '${process.execPath}' '${join(dir, "fake.cjs")}'\n`,
+    { mode: 0o755 },
+  );
+  const child = spawn(process.execPath, [serverPath], {
+    cwd: dir,
+    env: {
+      ...process.env,
+      PATH: join(dir, "bin") + ":" + process.env.PATH,
+      HOME: join(dir, "home"),
+      PORT: "0",
+      CLAUDE_CODE_GOAL: "initial",
+      CLAUDE_CODE_MODEL: "test-model",
+      ANTHROPIC_API_KEY: "fake",
+      CODE_SESSION_TURN_TOKEN: "test-token",
+      RELEASE_FILE: join(dir, "release"),
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let log = "";
+  child.stdout.on("data", (b) => {
+    log += b;
+  });
+  child.stderr.on("data", (b) => {
+    log += b;
+  });
+  let viewer;
+  try {
+    await until(() => log.includes("Server listening"));
+    const line = log
+      .split("\n")
+      .map((s) => {
+        try {
+          return JSON.parse(s);
+        } catch {
+          return {};
+        }
+      })
+      .find((m) => m.message === "Server listening");
+    // Port zero requests an ephemeral port; ws server reports its actual listener.
+    assert.ok(line.port > 0, log);
+    const url = "ws://127.0.0.1:" + line.port;
+    viewer = await connect(url);
+    const events = [];
+    viewer.on("message", (raw) => {
+      const m = JSON.parse(raw);
+      if (m.type === "code_agent_events") events.push(...m.data);
+      if (m.type === "code_agent_event") events.push(m.data);
+    });
+    await until(() => events.some((e) => e.type === "agent_message"));
+    const caps = await rpc(url, {
+      type: "session_capabilities",
+      token: "test-token",
+    });
+    assert.deepEqual(caps.models[0].efforts, ["low", "high"]);
+    assert.deepEqual(caps.models[0].speeds, ["standard", "fast"]);
+    const bad = await rpc(url, {
+      type: "user_turn",
+      token: "bad",
+      id: "bad-token",
+      text: "no",
+    });
+    assert.equal(bad.reason, "unauthorized");
+    const unsupported = await rpc(url, {
+      type: "user_turn",
+      token: "test-token",
+      id: "bad-speed",
+      text: "no",
+      settings: { speed: "ultrafast" },
+    });
+    assert.equal(unsupported.status, "rejected");
+    const payload = {
+      type: "user_turn",
+      token: "test-token",
+      id: "client-one",
+      text: "steer",
+      settings: { model: "test-model", effort: "low", speed: "fast" },
+      attachments: [
+        {
+          name: "../notes.txt",
+          mime_type: "text/plain",
+          base64_data: Buffer.from("exact attachment bytes").toString("base64"),
+        },
+      ],
+    };
+    const ack = await rpc(url, payload);
+    assert.equal(ack.status, "delivered");
+    assert.equal(ack.delivery_mode, "steer");
+    assert.equal(ack.effective_settings.effort, "low");
+    assert.equal(ack.effective_settings.speed, "fast");
+    const duplicate = await rpc(url, payload);
+    assert.equal(duplicate.status, "duplicate");
+    assert.equal(duplicate.turn_id, ack.turn_id);
+    const steer2 = await rpc(url, {
+      ...payload,
+      id: "client-two",
+      attachments: [],
+      text: "second steer",
+    });
+    assert.equal(steer2.turn_id, ack.turn_id);
+    await until(
+      () => events.filter((e) => e.type === "user_turn").length === 2,
+    );
+    const turns = events.filter((e) => e.type === "user_turn");
+    assert.deepEqual(
+      turns.map((e) => e.client_message_id),
+      ["client-one", "client-two"],
+    );
+    assert.equal(
+      readFileSync(turns[0].attachments[0], "utf8"),
+      "exact attachment bytes",
+    );
+    assert.ok(
+      turns[0].attachments[0].startsWith(
+        join(dir, "home", "attachments", "direct", "client-one"),
+      ),
+    );
+    writeFileSync(join(dir, "release"), "");
+    await until(() => events.some((e) => e.type === "turn_ended"));
+    const usage = events.filter(
+      (e) => e.type === "usage" && e.turn_id === ack.turn_id,
+    );
+    assert.equal(usage.at(-1).output_tokens, 5);
+    assert.equal(usage.at(-1).usage_scope, "turn");
+    const ended = events.find((e) => e.type === "turn_ended");
+    assert.equal(ended.turn_id, ack.turn_id);
+    assert.equal(ended.turn_outcome, "completed");
+    assert.ok(
+      Date.parse(ended.turn_ended_at) >= Date.parse(ended.turn_started_at),
+    );
+    const idle = await rpc(url, {
+      type: "user_turn",
+      token: "test-token",
+      id: "idle-next",
+      text: "next",
+    });
+    assert.equal(idle.delivery_mode, "start");
+    assert.notEqual(idle.turn_id, ack.turn_id);
+    await until(
+      () => events.filter((e) => e.type === "turn_ended").length === 2,
+    );
+    const streamed = events.filter(
+      (e) => e.type === "agent_message" && e.turn_id === ack.turn_id,
+    );
+    assert.ok(streamed.some((e) => e.partial));
+    assert.equal(new Set(streamed.map((e) => e.item_id)).size, 1);
+    assert.equal(streamed.at(-1).partial, false);
+    const cursor = events.at(-2).seq;
+    const replay = new WebSocket(url + "?cursor=" + cursor);
+    try {
+      const page = await new Promise((r, j) => {
+        const timer = setTimeout(() => j(new Error("replay timeout")), 1000);
+        replay.on("message", (raw) => {
+          const m = JSON.parse(raw);
+          if (m.type === "code_agent_events") {
+            clearTimeout(timer);
+            r(m.data);
+          }
+        });
+      });
+      assert.ok(page.length > 0);
+      assert.ok(page.every((e) => e.seq > cursor));
+    } finally {
+      replay.close();
+    }
+  } finally {
+    viewer?.close();
+    child.kill("SIGTERM");
+    await new Promise((r) => child.once("exit", r));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
