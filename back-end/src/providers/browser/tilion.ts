@@ -44,6 +44,7 @@ import type {
 } from './types';
 
 import {
+  type StorageState,
   harvestBrowserState,
   rememberPausedState,
   restoreTilionBrowserState,
@@ -65,7 +66,7 @@ export {
   recordTilionSessionDownload,
   uploadTilionSessionFile,
 } from './tilionSessionIo';
-export { restoreTilionBrowserState } from './tilionState';
+export { restoreTilionBrowserState, type StorageState as TilionCarriedState } from './tilionState';
 export {
   TilionApiError,
   TilionInsufficientCreditsError,
@@ -528,6 +529,7 @@ async function replaceSession(
     forceFreshProfile?: boolean;
     keepValidationConnection?: boolean;
     rotateTo?: TilionProxyType;
+    carriedState?: StorageState;
   }
 ): Promise<TilionReplacementSession> {
   const old = await prisma.browserSession.findUniqueOrThrow({ where: { id: taskId } });
@@ -544,15 +546,20 @@ async function replaceSession(
     if (reattached !== null) return reattached;
   }
 
+  // A live Tilion session may hold the worker's CDP socket (the only client
+  // Tilion admits), so the backend never connects to it mid-run: the worker
+  // captures its state and passes it as `carriedState`. Other providers admit
+  // a second client and are harvested directly.
   const carried = options.forceFreshProfile
     ? null
-    : live
-      ? await harvestBrowserState({
-          provider: previousProvider,
-          sessionId: old.sessionId,
-          wsUrl: old.wsUrl,
-        })
-      : null;
+    : (options.carriedState ??
+      (live && previousProvider !== 'tilion'
+        ? await harvestBrowserState({
+            provider: previousProvider,
+            sessionId: old.sessionId,
+            wsUrl: old.wsUrl,
+          })
+        : null));
   const state = carried ?? (options.forceFreshProfile ? null : takePausedState(old.sessionId));
 
   const baseLocation = await agentLocation(old.agentId);
@@ -642,7 +649,12 @@ async function replaceSession(
  */
 export async function resumeTilionSession(
   taskId: string,
-  options: { forceFreshProfile?: boolean; keepValidationConnection?: boolean } = {}
+  options: {
+    forceFreshProfile?: boolean;
+    keepValidationConnection?: boolean;
+    /** Worker-captured cookies/localStorage/IndexedDB (Playwright storageState shape). */
+    carriedState?: StorageState;
+  } = {}
 ): Promise<TilionReplacementSession> {
   return replaceSession(taskId, options);
 }
@@ -656,11 +668,11 @@ export async function resumeTilionSession(
 export async function rotateTilionSession(
   taskId: string,
   proxyType: KernelProxyType,
-  options: { keepValidationConnection?: boolean } = {}
+  options: { keepValidationConnection?: boolean; carriedState?: StorageState } = {}
 ): Promise<TilionReplacementSession> {
   const rotateTo = tilionProxyType(proxyType);
   if (rotateTo === 'residential') {
-    const inPlace = await rotateInPlace(taskId, options);
+    const inPlace = await rotateInPlace(taskId);
     if (inPlace !== null) return inPlace;
   }
   return replaceSession(taskId, { ...options, rotateTo });

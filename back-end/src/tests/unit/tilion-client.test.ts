@@ -240,10 +240,12 @@ async function main(): Promise<void> {
     if (previousEnv.base === undefined) delete process.env.TILION_BASE_URL;
     else process.env.TILION_BASE_URL = previousEnv.base;
   }
-  console.log('tilion-client: all assertions passed');
+  process.stdout.write('tilion-client: all assertions passed\n');
 }
 
 main().catch((error) => {
-  console.error(error);
+  process.stderr.write(
+    `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`
+  );
   process.exit(1);
 });

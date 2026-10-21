@@ -6,7 +6,6 @@
 import { prisma } from '../database';
 import { DEFAULT_GEOLOCATION, type ProxyGeoLocation } from '../geoip';
 import { createLogger } from '../logger';
-import { connectValidatedBrowser } from '../steel/sessionConnection';
 import type { TilionReplacementSession } from './tilion';
 import { tilionRequest, tilionSessionPath } from './tilionClient';
 
@@ -52,10 +51,7 @@ async function sessionExitIp(sessionId: string): Promise<string | null> {
  * IP is proven to change. Any missing proof returns null so the caller uses a
  * replacement session instead. Success returns `previousSessionId === sessionId`.
  */
-export async function rotateInPlace(
-  taskId: string,
-  options: { keepValidationConnection?: boolean }
-): Promise<TilionReplacementSession | null> {
+export async function rotateInPlace(taskId: string): Promise<TilionReplacementSession | null> {
   const row = await prisma.browserSession.findUniqueOrThrow({ where: { id: taskId } });
   if (row.provider !== 'tilion' || row.status !== 'ACTIVE' || !row.wsUrl || !row.debugUrl) {
     return null;
@@ -88,11 +84,8 @@ export async function rotateInPlace(
   });
   if (updated.count !== 1) return null;
   log.info('Tilion rotate-ip changed the exit IP in place', { taskId, sessionId: row.sessionId });
-  const validationBrowser = options.keepValidationConnection
-    ? await connectValidatedBrowser(row.wsUrl)
-    : null;
+  // The worker still holds this session's only CDP socket: no validation client.
   return {
-    ...(validationBrowser ? { validationBrowser } : {}),
     provider: 'tilion',
     sessionId: row.sessionId,
     debugUrl: row.debugUrl,
