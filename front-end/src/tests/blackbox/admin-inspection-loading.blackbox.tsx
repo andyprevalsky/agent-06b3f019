@@ -1,4 +1,4 @@
-import { act, screen, waitFor } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -178,7 +178,10 @@ it('keeps realtime browser inserts passive while selected detail is unresolved',
     );
     window.history.replaceState({}, '', `/?agent-id=agent-001&browser-id=${TASK_ID}`);
     insertBrowser('agent-001', 'owned-browser-init');
-    await screen.findByPlaceholderText('Type your message...');
+    const composer = await screen.findByTestId('browser-query-input');
+    expect(
+      within(composer).getByPlaceholderText('Message Rose about this browser'),
+    ).toBeInTheDocument();
     await waitFor(() =>
       expect(mutations).toEqual([`${API_BASE}/browser-session/task/${TASK_ID}/control`]),
     );

@@ -1399,7 +1399,7 @@ describe('BrowserStatusBar (blackbox)', () => {
       withAgentCtx(messages, <BrowserStatusBar taskId="task-proxy" browserUrl="about:blank" />),
     );
 
-    await user.hover(screen.getByLabelText('Browser proxy location'));
+    await user.hover(screen.getByRole('button', { name: 'Browser proxy location' }));
 
     await waitFor(() => {
       expect(screen.getAllByText('Proxy: Steel').length).toBeGreaterThan(0);
