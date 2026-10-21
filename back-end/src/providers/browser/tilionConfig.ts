@@ -9,7 +9,12 @@ import { tilionRequest } from './tilionClient';
 
 const log = createLogger('Tilion');
 
-export type TilionProxyType = 'residential' | 'mobile';
+/**
+ * Exit tiers. `direct` is Tilion's datacenter egress (`residential: false`):
+ * live 2026-10-21 residential exits refused CONNECT to payment hosts
+ * (net::ERR_TUNNEL_CONNECTION_FAILED) while direct sessions reached them.
+ */
+export type TilionProxyType = 'residential' | 'mobile' | 'direct';
 export type GeoSpecificity = 'city' | 'state' | 'country';
 
 /** The browser activity budget (30 min) plus the 5 min margin the plan requires. */
@@ -71,9 +76,16 @@ export function resetTilionRegionCacheForTests(): void {
   regionCache = null;
 }
 
-export function tilionProxyType(proxyType: KernelProxyType): TilionProxyType {
-  if (proxyType === 'residential' || proxyType === 'mobile') return proxyType;
-  throw new Error(`Tilion has no ${proxyType} exit; expected residential or mobile`);
+export function tilionProxyType(proxyType: KernelProxyType | 'direct'): TilionProxyType {
+  if (proxyType === 'residential' || proxyType === 'mobile' || proxyType === 'direct') {
+    return proxyType;
+  }
+  throw new Error(`Tilion has no ${proxyType} exit; expected residential, mobile or direct`);
+}
+
+/** The exit tier a Tilion row was created on (`proxyTier`), for resume/reattach. */
+export function storedTilionProxyType(proxyTier: string | null | undefined): TilionProxyType {
+  return proxyTier === 'mobile' || proxyTier === 'direct' ? proxyTier : 'residential';
 }
 
 export function geoSpecificities(location: ProxyGeoLocation): GeoSpecificity[] {
