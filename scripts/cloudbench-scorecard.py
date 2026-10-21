@@ -882,7 +882,7 @@ section{margin:0 0 14px}h2{font-size:12px;letter-spacing:.06em;text-transform:up
 .seg{display:block;height:100%}.seg.ok{background:var(--ok)}.seg.bad{background:var(--bad)}.seg.warn{background:var(--warn)}
 .seg.na{background:var(--na)}.seg.agent{background:var(--agent)}.seg.harness{background:var(--harness)}.seg.run{background:var(--run)}
 .legend{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:6px;font-size:13px;font-variant-numeric:tabular-nums}
-.legend span{white-space:nowrap}.note{font-size:12px;color:var(--muted);margin-top:4px}
+.legend span{white-space:nowrap}.note{font-size:12px;color:var(--muted);margin-top:4px;overflow-wrap:anywhere}
 .causes{display:grid;grid-template-columns:auto minmax(40px,90px) minmax(0,1fr);gap:3px 8px;align-items:center;font-size:13px}
 .causes .n{font-weight:700;text-align:right;font-variant-numeric:tabular-nums}.causes .t,.clip{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .causes .meter{height:6px;border-radius:3px;background:var(--line);overflow:hidden}.causes .meter i{display:block;height:100%}
