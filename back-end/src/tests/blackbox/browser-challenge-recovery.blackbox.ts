@@ -410,6 +410,8 @@ function fakeProviderOperations() {
   const steps: RotationStep[] = [];
   const injected: Array<{ sessionId: string; userId: string; url: string }> = [];
   const resumedFrom: string[] = [];
+  const replacements: string[] = [];
+  const closedValidation: string[] = [];
   let sequence = 0;
   const replace = async (taskId: string, provider: string, proxyTier: string | null) => {
     sequence += 1;
@@ -426,7 +428,15 @@ function fakeProviderOperations() {
         closedAt: null,
       },
     });
+    replacements.push(sessionId);
     return {
+      // Tilion accepts one CDP client: this create-time client must be closed
+      // before the route answers, or the worker's attach is refused with 4409.
+      validationBrowser: {
+        close: async () => {
+          closedValidation.push(sessionId);
+        },
+      } as unknown as Browser,
       provider: provider as 'kernel' | 'steel' | 'tilion',
       sessionId,
       debugUrl: row.debugUrl ?? '',
@@ -466,7 +476,7 @@ function fakeProviderOperations() {
     closeSession: async () => undefined,
     getBrowserCaptchaTelemetry: async () => null as never,
   };
-  return { dependencies, steps, injected, resumedFrom };
+  return { dependencies, steps, injected, resumedFrom, replacements, closedValidation };
 }
 
 async function testTilionToKernelSwitchPersistsThroughPauseResume(): Promise<void> {
@@ -541,7 +551,19 @@ async function testTilionToKernelSwitchPersistsThroughPauseResume(): Promise<voi
         fake.dependencies
       );
       assert(fourth.provider === 'steel', `rotation 4 provider: ${fourth.provider}`);
+
+      // A resume with no saved URL skips injection and still releases the client.
+      await prisma.browserSession.update({
+        where: { id: run.session.id },
+        data: { status: 'PAUSED', currentUrl: null, startUrl: null },
+      });
+      await resumeBrowserSession(run.session.id, {}, fake.dependencies);
     });
+    assert(
+      JSON.stringify(fake.closedValidation) === JSON.stringify(fake.replacements),
+      `validation clients left open: replaced ${JSON.stringify(fake.replacements)}, ` +
+        `closed ${JSON.stringify(fake.closedValidation)}`
+    );
     assert(
       JSON.stringify(fake.steps.map((step) => [step.provider, step.proxyType])) ===
         JSON.stringify([
@@ -553,7 +575,7 @@ async function testTilionToKernelSwitchPersistsThroughPauseResume(): Promise<voi
       `unexpected ladder: ${JSON.stringify(fake.steps)}`
     );
     assert(
-      JSON.stringify(fake.resumedFrom) === JSON.stringify(['kernel']),
+      JSON.stringify(fake.resumedFrom) === JSON.stringify(['kernel', 'steel']),
       `resume dispatched on ${JSON.stringify(fake.resumedFrom)}`
     );
   } finally {
