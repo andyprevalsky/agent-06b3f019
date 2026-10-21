@@ -122,3 +122,15 @@ explicit 10-minute user rule. The owning instruction test and a new real
 instruction, live-card footer and emitted contract now say 10 minutes; the
 rolling 15-minute token-rate window is unchanged and asserted separately.
 No launch scheduler, source/admission proof, timestamp or outcome changed.
+
+## Historical terminal threshold action
+
+The reconciled 60-terminal-job card still emitted an active-run stop action
+because _issues only checked infra_breached. The existing 60-job regression
+first failed that historical action, then passed after checking the positive
+producer end evidence and complete terminal membership with no queued,
+running or unobserved jobs. Such a card now reports threshold reached at
+termination and asks to preserve trigger/attempt evidence and verify normal
+exact-owner release. Missing end evidence or any active/unobserved member
+retains immediate exact-owned stop. No release is inferred, and the 3/60
+threshold, classifications, clocks and scheduler are untouched.

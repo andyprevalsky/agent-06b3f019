@@ -383,6 +383,19 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(len(exp['recovered_provenance']['observations']),60)
         self.assertFalse((run/'result.json').exists())
         self.assertIn('INFRA FAILURE 3',CARD['render_text'](data))
+        threshold_issue = CARD['_issues'](exp)[0]
+        self.assertIn('threshold reached at termination', threshold_issue['text'])
+        self.assertNotIn('stop the exact owned run', threshold_issue['action'])
+        self.assertIn('trigger and attempt evidence', threshold_issue['action'])
+        self.assertIn('exact-owner release', threshold_issue['action'])
+        # A timestamp alone, incomplete membership or active jobs must never
+        # suppress the immediate stop instruction for an active cohort.
+        for changes in ({'ended_at': None}, {'end_evidence': None}, {'progress': dict(exp['progress'], queued=1)},
+                        {'progress': dict(exp['progress'], in_progress=1)},
+                        {'progress': dict(exp['progress'], completed=59)},
+                        {'progress': dict(exp['progress'], unobserved=1)}):
+            active = dict(exp, **changes)
+            self.assertIn('stop the exact owned run', CARD['_issues'](active)[0]['action'])
         self.assertIn('Recovery SHA256',self.valid(data))
         with self.assertRaisesRegex(ValueError,'sidecar hash'):
             CARD['build'](run,recovered_results=path,recovered_sha256='0'*64)

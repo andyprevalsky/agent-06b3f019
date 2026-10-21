@@ -824,9 +824,17 @@ def counted_jobs(count: int, names: list[str]) -> str:
 def _issues(exp: dict) -> list[dict]:
     out = []
     if exp["infra_breached"]:
-        out.append({"severity": "red", "text": f"Infra stop threshold reached: {exp['infra_jobs']}/{exp['scheduled_total']} "
-                    f"unique jobs (stop at {exp['infra_threshold']}).", "owner": "parent",
-                    "action": "stop the exact owned run; /RCA each infra cluster"})
+        progress = exp.get("progress") or {}
+        terminal = (isinstance(exp.get("ended_at"), (int, float)) and exp["ended_at"] > 0
+                    and bool(exp.get("end_evidence")) and bool(exp.get("scheduled_total"))
+                    and progress.get("completed") == exp["scheduled_total"]
+                    and all(progress.get(key) == 0 for key in ("queued", "in_progress", "unobserved")))
+        label = "Infra threshold reached at termination" if terminal else "Infra stop threshold reached"
+        action = ("preserve trigger and attempt evidence; /RCA each infra cluster; verify normal exact-owner release"
+                  if terminal else "stop the exact owned run; /RCA each infra cluster")
+        threshold_label = "threshold" if terminal else "stop at"
+        out.append({"severity": "red", "text": f"{label}: {exp['infra_jobs']}/{exp['scheduled_total']} "
+                    f"unique jobs ({threshold_label} {exp['infra_threshold']}).", "owner": "parent", "action": action})
     elif exp.get("infra_jobs"):
         out.append({"severity": "amber", "text": f"{exp['infra_jobs']} infra-failed job(s) below the stop threshold.",
                     "owner": "parent", "action": "/RCA the first authentic failure now"})
