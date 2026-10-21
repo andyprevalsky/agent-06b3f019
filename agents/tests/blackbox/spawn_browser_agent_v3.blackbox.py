@@ -23670,22 +23670,25 @@ async def test_timed_out_browser_activity_leaves_the_tool_result_to_the_workflow
 
 
 async def test_requested_browser_cancel_still_posts_the_pause_result():
-    """A workflow-requested cancel (user pause) still closes the spawn toolCallId.
-
-    On pause the workflow abandons the activity (TRY_CANCEL) without posting a
-    result, so the activity's "Browser Session Cancelled" row is the only
-    terminal result for the call and must stay.
-    """
+    """Activity cancellation leaves the single pause owner at the workflow boundary."""
     from temporalio.activity import ActivityCancellationDetails
 
     outcome, terminal_writes, close_mock = await _run_browser_activity_cancelled_mid_step(
         ActivityCancellationDetails(cancel_requested=True)
     )
-    assert [(w.get("title"), w.get("message")) for w in terminal_writes] == [
-        ("Browser Session Cancelled", "Agent paused by user")
-    ], terminal_writes
+    assert terminal_writes == [], terminal_writes
     assert isinstance(outcome, dict) and outcome.get("status") == "cancelled", outcome
     close_mock.assert_awaited()
+
+
+async def test_missing_cancellation_cause_never_invents_user_pause():
+    from temporalio.activity import ActivityCancellationDetails
+    with patch("domains.spawn_browser_agent_v3.handler.activity.cancellation_details", return_value=None):
+        outcome, writes, close = await _run_browser_activity_cancelled_mid_step(
+            ActivityCancellationDetails(cancel_requested=True))
+    assert isinstance(outcome, dict) and outcome["message"] == "Browser activity cancelled"
+    assert writes == []
+    close.assert_awaited()
 
 
 def _make_validator_msg(role, text, ts, metadata=None):
@@ -24492,6 +24495,8 @@ async def test_manager_cancelled_browser_pause_event_is_task_complete():
             events.append(event)
 
     pause_event = events[-1]
+    assert "paused" not in pause_event.message.lower()
+    assert "userPauseRequested" not in pause_event.metadata
     assert pause_event.type == EventType.POST_MESSAGE
     assert pause_event.status == MessageStatus.ERROR
     assert pause_event.metadata == {
@@ -24503,7 +24508,7 @@ async def test_manager_cancelled_browser_pause_event_is_task_complete():
     }
 
 
-async def test_manager_cancelled_browser_pause_preserves_preallocated_task_id():
+async def test_manager_cancelled_browser_pause_preserves_preallocated_task_id(user_resumes=False, explicit_user=True):
     """TRY_CANCEL must not erase the browser task ownership key."""
     from domains.spawn_browser_agent_v3.handler import (
         SpawnBrowserAgentManagerV3,
@@ -24519,6 +24524,9 @@ async def test_manager_cancelled_browser_pause_preserves_preallocated_task_id():
 
         def cancel(self):
             self.cancelled = True
+            if user_resumes:
+                workflow_instance.is_paused = False
+                workflow_instance._user_pause_active = False
 
         def __await__(self):
             async def _cancelled():
@@ -24530,6 +24538,7 @@ async def test_manager_cancelled_browser_pause_preserves_preallocated_task_id():
         user_id="user-1",
         agent_id="11111111-1111-4111-8111-111111111111",
         is_paused=True,
+        _user_pause_active=explicit_user,
         write_lock_enabled=True,
         system_name="Rose",
     )
@@ -24563,7 +24572,16 @@ async def test_manager_cancelled_browser_pause_preserves_preallocated_task_id():
         "toolName": "spawn_browser_agent",
         "action_type": "task_complete",
         "task_id": expected_task_id,
+        **({"userPauseRequested": True} if explicit_user else {}),
     }
+
+
+async def test_pause_intent_survives_resume_while_cancellation_joins():
+    await test_manager_cancelled_browser_pause_preserves_preallocated_task_id(user_resumes=True)
+
+
+async def test_automatic_browser_pause_never_claims_user_intent():
+    await test_manager_cancelled_browser_pause_preserves_preallocated_task_id(explicit_user=False)
 
 
 class _SequencedActivityHandle:
@@ -31536,6 +31554,7 @@ async def run_all_tests():
         "requested_browser_cancel_still_posts_the_pause_result",
         test_requested_browser_cancel_still_posts_the_pause_result,
     )
+    await r.record_async("missing_cancellation_cause_never_invents_user_pause", test_missing_cancellation_cause_never_invents_user_pause)
     await r.record_async(
         "private_browser_pause_urls_use_protected_continuity",
         test_private_browser_pause_urls_use_protected_continuity,
@@ -31572,6 +31591,8 @@ async def run_all_tests():
         "manager_cancelled_pause_preserves_task_id",
         test_manager_cancelled_browser_pause_preserves_preallocated_task_id,
     )
+    await r.record_async("pause_intent_survives_resume_while_cancellation_joins", test_pause_intent_survives_resume_while_cancellation_joins)
+    await r.record_async("automatic_browser_pause_never_claims_user_intent", test_automatic_browser_pause_never_claims_user_intent)
     await r.record_async(
         "manager_restarts_drained_task_same_step_rolling_deploy",
         test_manager_restarts_drained_browser_task_from_same_step_on_rolling_deploy,

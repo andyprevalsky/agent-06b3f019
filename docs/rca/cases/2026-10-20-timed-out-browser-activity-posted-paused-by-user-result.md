@@ -26,7 +26,7 @@ sources:
   - agent fbc09c47-af40-4576-9f2b-4d3a2c287430
   - commit 0a2470cc6
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_timed_out_browser_activity_leaves_the_tool_result_to_the_workflow
-status: mitigated
+status: open
 ---
 
 ## Problem
@@ -72,28 +72,56 @@ writes [('Browser Session Cancelled', 'Agent paused by user')]; validator:
 
 ## Solution
 
-In the activity's CancelledError branch, read `activity.cancellation_details()`.
-Only a workflow-requested cancel (`cancel_requested`, or no details) posts
-`Browser Session Cancelled` and returns `status: cancelled`. Any other cause
-still closes the browser session, then re-raises so the workflow's own
-ActivityError result is the only tool result. Matches the Claude Code activity
-and claude-code-src `query.ts:1046`, which treats only an `interrupt` abort as a
-user interruption, and `query.ts:123` (`yieldMissingToolResultBlocks`), where the
-owning loop emits exactly one result per tool_use. Regressions:
-`test_timed_out_browser_activity_leaves_the_tool_result_to_the_workflow`
-(fail→pass) and control `test_requested_browser_cancel_still_posts_the_pause_result`
-(passes both sides) in the spawn-browser-agent-v3 blackbox domain.
+The activity returns neutral cancellation/cleanup ownership to the workflow and
+never emits a model-visible cancellation terminal. Timeout/shutdown still
+re-raise after cleanup. Missing SDK details preserve the neutral cleanup return;
+they do not establish user intent. Only the workflow's observed user pause sets
+`userPauseRequested` from explicit pause-signal state (not automatic budget/auth pauses); a pause followed by immediate resume retains that observation.
 
-10k agents: one in-memory read per cancelled activity; one fewer DB write and
-broadcast on timeouts. No new shared state.
+The backend annotates the existing result atomically under its existing
+agent-generation and per-tool locks. It keeps ID, original producer clocks,
+original content as a byte-identical prefix, error fields and structured output,
+adds `userPause: {reason: "user", recordedAt: ...}` plus a visible pause note,
+and creates a terminal only if none exists. Repeats are idempotent and a late
+cancelled-attempt write cannot replace the paused result. Existing terminal
+results take priority over progress rows. Ordinary tools retain latest-result
+semantics.
 
-Still open: why these browser activities ran the full 30 minutes (separate
-cluster), and outcome proof (exact Polar tasks rerun) pending approval.
+Same-ID broadcasts and timestamp-filtered polls deliver the annotation without
+moving the original result in conversation order. Both workflow/planner caches
+and the realtime UI accept this narrowly typed update and reject stale replay.
+The separate `recordedAt` clock advances delivery cursors, not outcome clocks.
+
+Opened golden references: `spawn_claude_code_agent/service.py` distinguishes
+cancellation causes; `claude-code-src/src/query.ts:123` supplies missing tool
+results. **Correction:** `query.ts:1044` skips the generic interruption message
+for reason `interrupt`; it does not justify a user-pause inference from a generic
+cancel request. None of these sources independently specifies Rose's new atomic
+annotation contract; the explicit user alignment does.
+
+Registered owning regressions cover neutral cancellation, actual user pause,
+pause/resume race, cleanup, preserved approvals, same-row error/content clocks,
+repeat pause, late writes, generation fences, real SQL polling, both transactional
+completion/pause orderings, planner/workflow refresh and realtime UI replay.
+The original read-only incident probe also runs against the repaired source.
+Local causal proof is distinct from Polar outcome proof.
+
+10k agents: existing lifecycle locks are reused, no global lock or provider call
+is added. The poll query now also considers the user-pause annotation clock;
+large-fleet throughput was not measured. Outcome proof and the reason the original
+tasks used the full 30 minutes remain open. Parent owns the authorized same-60
+rerun after all three clusters are integrated; this lane does not run it.
 
 ## Human feedback
 
-None recorded.
+User alignment: timeout must remain timeout; actual user pause is added to the
+existing result without losing its content/error or inserting a second terminal.
+Parent explicitly authorized continued implementation and the necessary shared
+persistence/update delivery work. No approval for benchmark launch is claimed by
+this lane.
 
 ## Reusable lesson
 
-Only a cancel the workflow requested may post a "paused/cancelled" tool result from inside an activity; on timeout or shutdown the workflow already owns that call's result.
+Transport cancellation is not user intent. Put pause ownership at the workflow
+which observed that intent, and make it an idempotent annotation of the owned
+result, preserving both its payload and position across durable and cached views.

@@ -266,7 +266,18 @@ export async function findMessages(agentId: string, since?: Date, browserToolCal
   return prisma.message.findMany({
     where: {
       agentId,
-      ...(since ? { timestamp: { gt: since } } : {}),
+      ...(since
+        ? {
+            AND: [
+              {
+                OR: [
+                  { timestamp: { gt: since } },
+                  { metadata: { path: ['userPause', 'recordedAt'], gt: since.toISOString() } },
+                ],
+              },
+            ],
+          }
+        : {}),
       ...(browserToolCallId === undefined
         ? {}
         : {

@@ -81,6 +81,7 @@ with workflow.unsafe.imports_passed_through():
     from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
     from helpers.wait_on_world_clock import _read_world_time_ms, _refresh_world_time_cursor
     from helpers.world_model_runtime import world_clock_activity
+    from loop.context_utils import refresh_user_pause
     from loop.dag_executor import (
         TaskDAG,
         execute_dag,
@@ -776,6 +777,7 @@ class AgentWorkflow:
         self.is_paused: bool = False
         # Authentication can pause itself while waiting for the user's reply.
         self._pause_signal_sequence: int = 0
+        self._user_pause_active: bool = False  # Explicit PAUSE signal, not budget/auth waits.
         self._paused_by_parent: bool = False  # Track if pause was inherited from parent
         # Orphan detection: every child must stop once Temporal confirms that its
         # parent chain is gone. Otherwise an active child can keep spending after a
@@ -1020,6 +1022,7 @@ class AgentWorkflow:
         self._deployment_validation = runtime.get("deployment_validation") is True
         self.last_message_check = self._restored_datetime(runtime.get("last_message_check"))
         self._paused_by_parent = runtime.get("paused_by_parent") is True
+        self._user_pause_active = runtime.get("user_pause_active") is True
         pause_sequence = runtime.get("pause_signal_sequence")
         if type(pause_sequence) is int and pause_sequence >= 0:
             self._pause_signal_sequence = pause_sequence
@@ -1296,6 +1299,7 @@ class AgentWorkflow:
                 "last_message_check": self._serialized_datetime(self.last_message_check),
                 "paused_by_parent": self._paused_by_parent,
                 "pause_signal_sequence": self._pause_signal_sequence,
+                "user_pause_active": self._user_pause_active,
                 "orphaned": self._orphaned,
                 "parent_query_failures": self._parent_query_failures_while_paused,
                 "has_new_messages": self._has_new_messages,
@@ -1421,6 +1425,7 @@ class AgentWorkflow:
         """Pause workflow execution."""
         workflow.logger.info("🔴 Received PAUSE signal")
         self._pause_signal_sequence = getattr(self, "_pause_signal_sequence", 0) + 1
+        self._user_pause_active = True
         self.is_paused = True
         await self._update_tree_state(status="PAUSED")
 
@@ -1453,6 +1458,7 @@ class AgentWorkflow:
                 return
             self._has_credits = True
         workflow.logger.info("🟢 Received RESUME signal")
+        self._user_pause_active = False
         self.is_paused = False
         self._paused_by_parent = False
         await self._update_tree_state(status="ACTIVE")
@@ -3786,6 +3792,7 @@ class AgentWorkflow:
                     message_id = msg.get("message_id") or msg.get("id")
                     if message_id:
                         if message_id in seen_message_ids:
+                            refresh_user_pause(self.context, msg)
                             continue
                         seen_message_ids.add(message_id)
                     else:

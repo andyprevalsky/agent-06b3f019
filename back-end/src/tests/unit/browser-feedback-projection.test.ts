@@ -43,7 +43,14 @@ async function main(): Promise<void> {
     {
       where: {
         agentId: 'parent',
-        timestamp: { gt: floor },
+        AND: [
+          {
+            OR: [
+              { timestamp: { gt: floor } },
+              { metadata: { path: ['userPause', 'recordedAt'], gt: floor.toISOString() } },
+            ],
+          },
+        ],
         OR: [
           { role: 'USER' },
           {
@@ -64,10 +71,20 @@ async function main(): Promise<void> {
   assert.deepEqual(
     query,
     {
-      where: { agentId: 'parent', timestamp: { gt: floor } },
+      where: {
+        agentId: 'parent',
+        AND: [
+          {
+            OR: [
+              { timestamp: { gt: floor } },
+              { metadata: { path: ['userPause', 'recordedAt'], gt: floor.toISOString() } },
+            ],
+          },
+        ],
+      },
       orderBy: { timestamp: 'asc' },
     },
-    'ordinary GET retains its existing query'
+    'ordinary GET includes in-place pause annotations while retaining producer timestamps'
   );
   await mock.module('../../providers/benchmarkHubStore', {
     namedExports: {
