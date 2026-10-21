@@ -52,7 +52,6 @@ import { useRoseApps } from '../rose-apps/roseAppsState';
 import { useAppView } from '../app-view/appViewState';
 import { useAgentRowActions } from '../useAgentRowActions';
 import { useSidebarSearch } from '../useSidebarSearch';
-import { ProjectsNavButton } from './ProjectsNavButton';
 import { DeleteProjectDialog } from './DeleteProjectDialog';
 import { groupAgentsByProject } from './groupAgentsByProject';
 import RoseAgentGroups from './RoseAgentGroups';
@@ -224,6 +223,9 @@ function RoseSidebarBar(props: AppSidebarProps) {
           <ScrollArea className="min-h-0 flex-1">
             <RoseAgentGroups
               grouped={grouped}
+              projectLoading={projects.projectQuery.isPending}
+              projectError={projects.projectQuery.isError}
+              onRetryProjects={() => void projects.projectQuery.refetch()}
               isExpanded={isExpanded}
               isFiltering={isFiltering}
               selectedAgentId={props.selectedAgentId}
@@ -242,7 +244,6 @@ function RoseSidebarBar(props: AppSidebarProps) {
             />
           </ScrollArea>
           <div className="flex flex-none flex-col pb-2">
-            <ProjectsNavButton isExpanded={isExpanded} />
             <RoseNavRow
               icon={<Megaphone className="h-5 w-5" strokeWidth={1.7} />}
               label="Feedback"

@@ -23,8 +23,7 @@ export type RoseApp =
   | 'benchmarks'
   | 'feedback'
   | 'health'
-  | 'settings'
-  | 'projects';
+  | 'settings';
 
 export interface AgentBrowserTab {
   agentId: string;
