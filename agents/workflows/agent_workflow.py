@@ -1428,7 +1428,8 @@ class AgentWorkflow:
         """Pause with producer-supplied cause; omitted cause preserves legacy user controls."""
         workflow.logger.info("🔴 Received PAUSE signal")
         self._pause_signal_sequence = getattr(self, "_pause_signal_sequence", 0) + 1
-        self._user_pause_active = cause == "user"
+        self._user_pause_active = cause == "user" or (self.is_paused and self._user_pause_active)
+        episode_cause = "user" if self._user_pause_active else cause
         self.is_paused = True
         await self._update_tree_state(status="PAUSED")
 
@@ -1436,7 +1437,7 @@ class AgentWorkflow:
         for child_wf_id in self._get_pending_child_workflow_ids():
             try:
                 handle = workflow.get_external_workflow_handle(child_wf_id)
-                await handle.signal("pause", cause)
+                await handle.signal("pause", episode_cause)
             except Exception as e:
                 workflow.logger.warning(f"Failed to cascade pause to child: {e}")
 

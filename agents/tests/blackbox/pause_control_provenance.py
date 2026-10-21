@@ -54,6 +54,71 @@ async def prove_signals(cases):
         assert ("User paused" in final.message) is expected
     return len(cases)
 
+async def prove_pause_episode_ordering():
+    """Exercise the real pause owner, child signals and cancellation consumer."""
+    sequences = [
+        ("user", "subscription"),
+        ("user", "unknown"),
+        ("subscription", "user"),
+        ("unknown", "user"),
+        ("user", "resume", "subscription"),
+        ("subscription", "unknown"),
+    ]
+    logger = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None)
+    for sequence in sequences:
+        parent, child = AgentWorkflow(), AgentWorkflow()
+        for wf in (parent, child):
+            wf.agent_id, wf.user_id, wf.goal = "episode-fixture", "user-fixture", "fixture"
+            wf._update_tree_state = AsyncMock()
+            wf._get_pending_child_workflow_ids = lambda: []
+        parent._get_pending_child_workflow_ids = lambda: ["child-fixture"]
+        forwarded = []
+
+        async def signal(name, *args):
+            forwarded.append((name, *args))
+            await getattr(child, name)(*args)
+
+        expected = False
+        with patch("workflows.agent_workflow.workflow.logger", logger), patch(
+            "workflows.agent_workflow.workflow.get_external_workflow_handle",
+            return_value=SimpleNamespace(signal=signal),
+        ):
+            for cause in sequence:
+                if cause == "resume":
+                    expected = False
+                    await parent.resume()
+                else:
+                    expected = expected or cause == "user"
+                    await parent.pause(cause)
+                assert parent._user_pause_active is expected, (
+                    "Automatic pause erased an actual user request during the same unresumed episode",
+                    sequence, cause,
+                )
+                assert child._user_pause_active is expected, ("child lost episode intent", sequence)
+            # A child that missed the earlier signal must also receive current episode intent.
+            if forwarded[-1][0] == "pause":
+                fresh_child = AgentWorkflow()
+                fresh_child._update_tree_state = AsyncMock()
+                fresh_child._get_pending_child_workflow_ids = lambda: []
+                await fresh_child.pause(*forwarded[-1][1:])
+                assert fresh_child._user_pause_active is expected, ("late child lost episode intent", sequence)
+
+        class Handle:
+            def done(self): return False
+            def cancel(self): pass
+            def __await__(self):
+                async def cancelled(): raise asyncio.CancelledError()
+                return cancelled().__await__()
+
+        for wf in (parent, child):
+            with patch("domains.spawn_browser_agent_v3.handler.workflow.start_activity", return_value=Handle()), \
+                 patch("domains.spawn_browser_agent_v3.handler.workflow.wait_condition", AsyncMock()):
+                events = [e async for e in SpawnBrowserAgentManagerV3().execute_tool(wf, {"goal": "fixture"}, "call")]
+            assert (events[-1].metadata.get("userPauseRequested") is True) is expected, sequence
+            assert ("User paused" in events[-1].message) is expected, sequence
+    print("EPISODE_ORDERING_PASS: 6 sequences, parent/child managers and late child propagation")
+
+
 async def prove_pause_replay(payload):
     from datetime import datetime
     from helpers import messages

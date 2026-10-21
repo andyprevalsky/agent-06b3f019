@@ -3064,6 +3064,11 @@ def _restore_workflow(original):
     m.workflow = original
 
 
+async def test_pause_episode_preserves_user_intent_across_automatic_signals():
+    from pause_control_provenance import prove_pause_episode_ordering
+    await prove_pause_episode_ordering()
+
+
 async def test_pause_intent_ends_with_recovered_episode():
     from unittest.mock import AsyncMock
     wf = _bare_workflow_instance()
@@ -11294,6 +11299,7 @@ async def run_all_tests():
     # Signal-handler + cost-tracking tests (fake workflow module)
     await r.record_async("wf_signal_pause", test_workflow_signal_pause_sets_paused_flag)
     await r.record_async("pause_intent_ends_with_recovered_episode", test_pause_intent_ends_with_recovered_episode)
+    await r.record_async("pause_episode_ordering", test_pause_episode_preserves_user_intent_across_automatic_signals)
     await r.record_async("wf_signal_pause_cascade", test_workflow_signal_pause_cascades_to_children)
     await r.record_async("wf_signal_resume", test_workflow_signal_resume_clears_paused_flag)
     await r.record_async(
