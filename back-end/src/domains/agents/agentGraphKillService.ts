@@ -81,10 +81,29 @@ export async function killGraphAgent(caller: GraphCaller, targetId: string) {
       'Agent archived; workflow or session cleanup is still unconfirmed'
     );
   }
+  const target = await prisma.agent.findFirstOrThrow({
+    where: { id: targetId, userId: caller.userId },
+    select: { parentAgentId: true },
+  });
+  const siblings = await prisma.agent.findMany({
+    where: {
+      userId: caller.userId,
+      parentAgentId: target.parentAgentId,
+      id: { not: targetId },
+      deletedAt: null,
+    },
+    select: { id: true, status: true },
+    orderBy: { id: 'asc' },
+    take: 21,
+  });
+  const remaining = siblings.slice(0, 20);
   return {
+    unchanged_siblings: remaining,
+    siblings_truncated: siblings.length > 20,
     agent_id: targetId,
     status: 'stopped',
     descendants_including_target: ids.length,
-    message: 'Agent and its descendants are stopped and archived.',
+    message: `Stopped and archived agent ${targetId} and ${Math.max(0, ids.length - 1)} descendant(s). No agents outside this subtree were targeted. Unchanged sibling agents: ${remaining.map((row) => `${row.id} (${row.status})`).join(', ') || 'none'}.`,
+    affected_agent_ids: ids,
   };
 }

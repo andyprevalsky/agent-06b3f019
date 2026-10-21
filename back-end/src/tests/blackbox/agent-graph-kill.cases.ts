@@ -48,6 +48,11 @@ export async function testParentKillBoundary(
       stopped.status === 200 && stopped.body.status === 'stopped',
       `stop failed: ${JSON.stringify(stopped)}`
     );
+    assert(stopped.body.message.includes(child), 'readable receipt must identify the target');
+    assert(
+      stopped.body.message.includes(sibling),
+      'readable receipt must identify preserved sibling state'
+    );
     assert(
       (await prisma.agent.count({
         where: { id: { in: [child, grandchild] }, deletedAt: { not: null } },
