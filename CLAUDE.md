@@ -833,6 +833,27 @@ When adding a benchmark to `tasks.json`, auto-attach it to this algorithm:
 
 One task name threads all three stores, so any eval is traceable end-to-end: definition (tasks.json) → pass history → latency profile → run record.
 
+## World Model Harness (WMH) model cache
+
+The native WMH model is built locally and cached, encrypted, in R2 so a fresh
+devbox restores it instead of rebuilding for hours:
+`python -m benchmarks.wmh_build_cache pull|push|status` (from `agents/`).
+Rebuild and push only on user request. The full run procedure is the
+`instantiate-whm` skill (`.claude/skills/instantiate-whm/SKILL.md`, section 6).
+
+Cloud SIM guests serve the same native model by default (`WMH_ENGINE=experiential`,
+`rose-archive`, `rose-wmh-gpt61`, `rose-outcome-distribution-v4`; set
+`WMH_ENGINE=legacy` for the old model). Publish it to the fleet donor in three
+steps: `bash scripts/run-bench-cloud --build-wmh` (builds natively on an owned,
+ledgered big machine forked from the donor snapshot, pushes the
+`rose-archive-serving` serving-only and `rose-archive-native` full caches, then
+destroys the machine and volume) → `bash scripts/run-bench-cloud --refresh-wmh`
+(restores that cache and the native venv on the donor volume, then snapshots it;
+the 2 GB donor never builds). Then run
+`scripts/run-bench <task> --sim-on <task>`. Each `--sim-on` guest is a `performance-8x`/64 GB machine: native serving holds
+~30 GB and loads for ~10 minutes before the task starts. Guests fail clearly if the native
+pointer or venv is missing; they never build or install at run time.
+
 ## Log Files
 
 Check these when errors occur:

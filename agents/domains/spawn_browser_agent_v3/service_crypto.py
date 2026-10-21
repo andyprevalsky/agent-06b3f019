@@ -1083,7 +1083,9 @@ def finalize_parked_payment_card_approval_history(
     if not isinstance(resume_state, dict):
         return resume_state
     ready = payment_card_ready_tool_result(last4)
-    ready_json = json.dumps(ready, separators=(",", ":"), ensure_ascii=False)
+
+    def completed_result(previous: Any) -> Dict[str, Any]:
+        return {**(previous if isinstance(previous, dict) else {}), **ready}
 
     history = resume_state.get("action_history")
     if isinstance(history, list):
@@ -1093,7 +1095,7 @@ def finalize_parked_payment_card_approval_history(
             if entry.get("action") != "request_payment_card":
                 continue
             if _is_awaiting_payment_card_approval_result(entry.get("result")):
-                entry["result"] = dict(ready)
+                entry["result"] = completed_result(entry["result"])
 
     simulated = resume_state.get("simulated_action_entries")
     if isinstance(simulated, list):
@@ -1103,7 +1105,7 @@ def finalize_parked_payment_card_approval_history(
             if entry.get("action") != "request_payment_card":
                 continue
             if _is_awaiting_payment_card_approval_result(entry.get("result")):
-                entry["result"] = dict(ready)
+                entry["result"] = completed_result(entry["result"])
 
     for turns_key in ("browser_turn_messages", "simulated_turn_messages"):
         turns = resume_state.get(turns_key)
@@ -1119,7 +1121,13 @@ def finalize_parked_payment_card_approval_history(
             if name not in {None, "", "request_payment_card"}:
                 continue
             if _tool_message_content_is_awaiting_payment_card(message.get("content")):
-                message["content"] = ready_json
+                try:
+                    previous = json.loads(message["content"])
+                except (TypeError, ValueError):
+                    previous = {}
+                message["content"] = json.dumps(
+                    completed_result(previous), separators=(",", ":"), ensure_ascii=False
+                )
                 message["name"] = "request_payment_card"
 
     return resume_state

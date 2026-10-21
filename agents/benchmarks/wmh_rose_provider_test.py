@@ -2258,3 +2258,79 @@ def test_provider_bridge_rejects_unbound_execution_before_provider_dispatch(desc
         assert response.status_code == 409 and provider.calls == 0
 
     asyncio.run(run())
+
+
+def test_wide_fanout_folds_each_wire_request_once_and_overlaps_inference(monkeypatch):
+    """SIM run 7: 90 concurrent steps queued behind repeated stream folds on the provider loop.
+
+    Every reader (call ids, base state, DEMO key, both validation boundaries)
+    folded the whole world stream again on the provider's single event loop.
+    Each prediction must now fold once, and N concurrent predictions must
+    cost about one inference latency, not N.
+    """
+    import time
+
+    from benchmarks.wmh_execution_policy import execution_policy
+    from benchmarks.wmh_outcomes import DISTRIBUTION_PROTOCOL
+    from providers.rose import RoseClient
+    from providers.rose.types import StreamChunk
+
+    inference_seconds, width, world_changes = 1.0, 32, 120
+    active = peak = 0
+
+    async def complete_once(self, **kwargs):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(inference_seconds)
+        active -= 1
+        yield StreamChunk(kind="metadata", data={"actual_model": "stub-model"})
+        yield StreamChunk(kind="content", data={"text": json.dumps(outcome_fixture())})
+        yield StreamChunk(kind="usage", data={"prompt_tokens": 1, "completion_tokens": 1})
+        yield StreamChunk(kind="done", data={})
+
+    folds = []
+    real_fold = wmh_rose_provider.fold_stream
+
+    def counted_fold(units, final):
+        folds.append(final)
+        return real_fold(units, final)
+
+    monkeypatch.setattr(RoseClient, "_complete_once", complete_once)
+    monkeypatch.setattr(wmh_rose_provider, "fold_stream", counted_fold)
+    provider = RoseWMHProvider(protocol=DISTRIBUTION_PROTOCOL, usage=RoseUsageAccumulator())
+
+    async def no_auth():
+        return None, None
+
+    monkeypatch.setattr(provider, "_lease_auth", no_auth)
+    system = execution_policy("rose-outcome-distribution-v1").text
+    history = [{"role": "user", "content": "go"}]
+    receipts = ["prior"]
+
+    def request(agent):
+        step = _stream_request(history, list(receipts))
+        step["candidate_response"]["tool_calls"][0]["arguments"]["agent_id"] = agent
+        return [Message(role="user", content=json.dumps(step))]
+
+    async def run():
+        # Grow one world stream the way committed steps do: one change unit each.
+        for n in range(world_changes):
+            history.extend(_native_history_batch(f"done-{n}"))
+            receipts.append(f"receipt {n} " + "x" * 400)
+            await provider._wire_messages(system, request("warm"), "wmh:session:world")
+        folds.clear()
+        started = time.monotonic()
+        await asyncio.gather(
+            *(
+                provider.complete_scoped("world", f"prediction-{n}", system, request(f"agent-{n}"), max_tokens=16384)
+                for n in range(width)
+            )
+        )
+        return time.monotonic() - started
+
+    elapsed = asyncio.run(run())
+    assert len(provider._streams._streams) == 1
+    assert peak == width, "concurrent predictions did not overlap inference"
+    assert len(folds) == width == len(set(folds)), f"{len(folds)} stream folds for {width} predictions"
+    assert elapsed < inference_seconds + 9, f"{width} concurrent predictions took {elapsed:.1f}s"

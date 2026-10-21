@@ -2,13 +2,27 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Every repository question below names its worktree explicitly. An inherited
+# GIT_DIR/GIT_COMMON_DIR (e.g. from a hook or another repo's tool shell) would
+# answer for a different repository and select its port registry instead.
+unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_PREFIX
 # shellcheck source=lib/local-pg-image.sh
 . "$SCRIPT_DIR/lib/local-pg-image.sh"
-DEFAULT_REGISTRY="${TMPDIR:-/tmp}/rose-deploy-worktree-ports-${UID}"
+# One registry per repository, independent of TMPDIR: concurrent deploys that
+# ran with different TMPDIR values (/tmp vs the documented Linux /var/tmp) used
+# to claim from separate registries and received the same base port.
+# Earlier TMPDIR-scoped registries keep reserving the ranges their live owners hold.
+# ROSE_DEPLOY_LEGACY_PORT_REGISTRIES (colon-separated) replaces that set, e.g. in tests.
+if [ -n "${ROSE_DEPLOY_LEGACY_PORT_REGISTRIES+x}" ]; then
+  IFS=: read -r -a LEGACY_REGISTRIES <<<"$ROSE_DEPLOY_LEGACY_PORT_REGISTRIES"
+else
+  LEGACY_REGISTRIES=("${TMPDIR:-/tmp}/rose-deploy-worktree-ports-${UID}" "/tmp/rose-deploy-worktree-ports-${UID}" "/var/tmp/rose-deploy-worktree-ports-${UID}")
+fi
 ORIGINAL_ARGS=("$@")
 WORKTREE=""
 SOURCE_WORKSPACE=""
-PORT_REGISTRY="$DEFAULT_REGISTRY"
+PORT_REGISTRY=""
 CHECK_ONLY=false
 SKIP_DEPENDENCIES=false
 SKIP_DATABASE=false
@@ -446,6 +460,10 @@ SOURCE_WORKSPACE="$(canonical_dir "$SOURCE_WORKSPACE")"
   exit 1
 }
 
+# The default registry lives in the repository's git common directory (shared
+# by every worktree), resolved from the target worktree rather than this script.
+DEFAULT_REGISTRY="$(git_common_dir "$WORKTREE")/rose-deploy-worktree-ports"
+[ -n "$PORT_REGISTRY" ] || PORT_REGISTRY="$DEFAULT_REGISTRY"
 mkdir -p "$WORKTREE/.context"
 # `shasum` is a macOS-ism; Linux hosts ship coreutils' sha256sum instead. Both
 # emit the same hex digest, so either satisfies the owner-lock identity.
@@ -466,9 +484,15 @@ fi
 if [ -n "${ROSE_DEPLOY_PREFLIGHT_TEST_PAUSE_AFTER_LOCK:-}" ]; then
   sleep "$ROSE_DEPLOY_PREFLIGHT_TEST_PAUSE_AFTER_LOCK"
 fi
+RESPECT_ARGS=()
+if [ "$PORT_REGISTRY" = "$DEFAULT_REGISTRY" ]; then
+  for legacy in ${LEGACY_REGISTRIES[@]+"${LEGACY_REGISTRIES[@]}"}; do
+    RESPECT_ARGS+=(--respect-registry "$legacy")
+  done
+fi
 BASE_PORT="$(python3 "$SCRIPT_DIR/deploy-worktree-port.py" claim \
   --registry "$PORT_REGISTRY" \
-  --owner "$WORKTREE")"
+  --owner "$WORKTREE" ${RESPECT_ARGS[@]+"${RESPECT_ARGS[@]}"})"
 WORKSPACE_BASENAME="$(printf '%s' "$(basename "$WORKTREE")" | tr -c '[:alnum:]_.-' '-')"
 WORKSPACE_NAME="${WORKSPACE_BASENAME:0:48}-${OWNER_HASH}"
 CONFIG="$WORKTREE/.context/deploy-worktree.env"

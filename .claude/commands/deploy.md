@@ -2417,6 +2417,41 @@ Retain the JSON output as the production migration report card. Any failed row,
 including fixture cleanup, blocks deploy completion and must be diagnosed and
 fixed before Step 13b.
 
+## Step 13w: Cloud WMH refresh + SIM smoke (skip unless WMH paths changed)
+
+Run only when the merged diff touches the World Model Harness:
+
+```bash
+WMH_PATHS='agents/benchmarks/world_model_harness.py agents/benchmarks/experiential_bridge.py
+agents/benchmarks/serve_world_model.py agents/benchmarks/build_experiential_world_model.py
+agents/benchmarks/wmh_ agents/vendor/world-model/ agents/requirements-world-model.txt
+scripts/setup-world-model.sh'
+git diff --name-only "$DEPLOY_MERGED_SHA^1" "$DEPLOY_MERGED_SHA" | grep -F -f <(tr ' ' '\n' <<<"$WMH_PATHS" | grep .)
+```
+
+Cloud SIM guests sync the run's ref, so serving-code changes reach them
+without a rebuild. Rebuild the cached model only when the build, vendored
+simulator or `requirements-world-model.txt` changed (guests refuse a stale
+native venv):
+
+1. `bash scripts/run-bench-cloud --build-wmh` (big owned machine; publishes
+   the `rose-archive-serving` R2 cache).
+2. `bash scripts/run-bench-cloud --refresh-wmh` (donor restores that cache and
+   the native venv, then snapshots).
+
+Always prove the merged WMH on the cloud with the unchanged task, then follow
+the `/benchmark` monitoring contract through resource release:
+
+```bash
+scripts/run-bench raise-5m-rose-labs-brex --sim-on raise-5m-rose-labs-brex
+```
+
+Pass = the guest serves the native model (`engine=experiential` in the run's
+execution provenance, WMH `/healthz` ready) and the task reaches a terminal
+verdict with simulated tool calls answered by the WMH. A WMH serve, guard or
+provisioning failure blocks completion: RCA and fix it, then rerun. A genuine
+task FAIL is reported, not retried into a pass.
+
 ## Step 13b: Production semantic frontend gate (no skip — always runs)
 
 After the changed runtime surfaces exercised by semantics are live (Fly,

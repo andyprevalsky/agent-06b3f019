@@ -73,6 +73,9 @@ export const KNOWN_TAGS = [
   // Long-horizon capability slice — months-long goals run under world-model
   // simulate with time skipping (see raise-5m-rose-labs-brex in tasks.json).
   'long-horizon',
+  // ICP call-booking slice — find a founder's ICP and book paid calls under
+  // world-model simulate (icp-* in tasks.json, from a real YC Bookface thread).
+  'ICP',
   // Ecommerce / real-world task category slices (see tasks.json).
   'ecommerce',
   'purchase',
