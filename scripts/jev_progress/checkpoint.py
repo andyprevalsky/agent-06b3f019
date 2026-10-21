@@ -5,6 +5,7 @@ from core import BINS, ETA, FORMATS, digest
 DEFAULT_CONFIG = {
     'version': 1,
     'filters': {'agent_kinds': ['normal_root', 'normal_child'], 'terminal_status': 'COMPLETED',
+                'require_success_evidence': True,
                 'require_terminal_tool_receipt': True, 'result_text_chars': 5000,
                 'exclude_seen_families': True, 'exclude_seen_normalized_goals': True},
     'protocol': {'model': 'jev-1.13.0', 'progress_anchors': BINS, 'eta_choices': ETA,
@@ -25,6 +26,11 @@ def validate(state):
     if saved.get('version') != 1 or saved.get('protocol') != DEFAULT_CONFIG['protocol']:
         raise ValueError('Research protocol changed: explicitly migrate the checkpoint before continuing')
     filters = saved['filters']
+    if not filters.get('require_success_evidence'):
+        raise ValueError('Success-only data cleanup migration required before continuing')
+    if any(t.get('success_evidence', {}).get('outcome') != 'SUCCEEDED'
+           for t in state.get('train_traces', [])):
+        raise ValueError('Training corpus contains unverified task-success outcomes')
     if (filters['terminal_status'] != 'COMPLETED' or not filters['require_terminal_tool_receipt']
             or not filters['exclude_seen_families'] or not filters['exclude_seen_normalized_goals']):
         raise ValueError('Completed-only and sealed evaluation filters cannot be weakened')

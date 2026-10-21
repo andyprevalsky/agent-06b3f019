@@ -11,19 +11,21 @@ Prerequisites:
   back-end/.env. Keys are never written to results.
 - A dataset folder containing train.jsonl.gz, test.jsonl.gz and
   traces.jsonl.gz in the format exported by this experiment. The current
-  dataset is .context/progress-jev-xp/training-10k; preserve its manifest.
+  dataset is .context/progress-jev-xp/training-success-v2; preserve its manifest.
+  Only final, positively verified successful tasks are eligible. The former
+  training-10k dataset is quarantined historical evidence, not training input.
 
 Run from the repository root:
   python3 scripts/tests/jev-progress-core.test.py
-  agents/venv/bin/python scripts/jev_progress/cli.py prepare --dataset .context/progress-jev-xp/training-10k --output .context/progress-jev-xp/optimization
-  agents/venv/bin/python scripts/jev_progress/cli.py evaluate --dataset .context/progress-jev-xp/training-10k --output .context/progress-jev-xp/optimization --cohort train
-  agents/venv/bin/python scripts/jev_progress/cli.py evaluate --dataset .context/progress-jev-xp/training-10k --output .context/progress-jev-xp/optimization --cohort validation
-  agents/venv/bin/python scripts/jev_progress/optimize.py --dataset .context/progress-jev-xp/training-10k --output .context/progress-jev-xp/optimization --iterations 8
+  agents/venv/bin/python scripts/jev_progress/cli.py prepare --dataset .context/progress-jev-xp/training-success-v2 --output .context/progress-jev-xp/optimization-success-v2
+  agents/venv/bin/python scripts/jev_progress/cli.py evaluate --dataset .context/progress-jev-xp/training-success-v2 --output .context/progress-jev-xp/optimization-success-v2 --cohort train
+  agents/venv/bin/python scripts/jev_progress/cli.py evaluate --dataset .context/progress-jev-xp/training-success-v2 --output .context/progress-jev-xp/optimization-success-v2 --cohort validation
+  agents/venv/bin/python scripts/jev_progress/optimize.py --dataset .context/progress-jev-xp/training-success-v2 --output .context/progress-jev-xp/optimization-success-v2 --iterations 8
 
 The core loop must pass before running optimization. Offline tests are also
 registered in scripts/run-deploy-structural-gates.py as jev-progress-core.
 The CLI errors command prints the actual worst measured development examples:
-  agents/venv/bin/python scripts/jev_progress/cli.py errors --dataset .context/progress-jev-xp/training-10k --output .context/progress-jev-xp/optimization --result .context/progress-jev-xp/optimization/train-baseline.json
+  agents/venv/bin/python scripts/jev_progress/cli.py errors --dataset .context/progress-jev-xp/training-success-v2 --output .context/progress-jev-xp/optimization-success-v2 --result .context/progress-jev-xp/optimization/train-baseline.json
 
 Family and identical-goal groups are kept intact when making a new validation
 slice from the original training set. The prior 2000-example test is sealed
@@ -34,7 +36,7 @@ with prefix-only elapsed time and tool counts; compact first-2/latest-8 events
 with the same derived fields. No model-generated summary or future data.
 
 Run the paired format ablation before freezing the final test prompt:
-  agents/venv/bin/python scripts/jev_progress/formats.py --dataset .context/progress-jev-xp/training-10k --output .context/progress-jev-xp/optimization
+  agents/venv/bin/python scripts/jev_progress/formats.py --dataset .context/progress-jev-xp/training-success-v2 --output .context/progress-jev-xp/optimization-success-v2
 
 Selection minimizes the equal-weight mean of baseline-normalized trace-macro
 progress MAE and baseline-normalized mean absolute log1p-seconds ETA error.
@@ -52,7 +54,7 @@ Transport retries only transient HTTP failures, at most three attempts.
 
 winner.json contains the selected prompt and its validation score.
 Freeze it before the optional final test evaluation:
-  agents/venv/bin/python scripts/jev_progress/cli.py evaluate --dataset .context/progress-jev-xp/training-10k --output .context/progress-jev-xp/optimization --cohort test --allow-test --prompt <frozen-prompt.json> --result <test-results.json>
+  agents/venv/bin/python scripts/jev_progress/cli.py evaluate --dataset .context/progress-jev-xp/training-success-v2 --output .context/progress-jev-xp/optimization-success-v2 --cohort test --allow-test --prompt <frozen-prompt.json> --result <test-results.json>
 
 Progress labels measure fraction of actual future-issued batches, not semantic
 goal completion. ETA uses the final verifier FINISHED time; browser/explore
@@ -94,7 +96,7 @@ DATABASE_URL, not the commonly injected local development DATABASE_URL.
 All SQL runs with default_transaction_read_only and a 25-second timeout.
 
 One-time bootstrap (fails if an existing research head is present):
-  agents/venv/bin/python scripts/jev_progress/weekly.py bootstrap --dataset .context/progress-jev-xp/training-10k --prompt .context/progress-jev-xp/optimization/winner.json
+  agents/venv/bin/python scripts/jev_progress/weekly.py bootstrap --dataset .context/progress-jev-xp/training-success-v2 --prompt .context/progress-jev-xp/optimization/winner.json
 Fresh devboxes need only this repository, dependencies and managed credentials:
   agents/venv/bin/python scripts/jev_progress/weekly.py run
 
@@ -152,3 +154,29 @@ Selects each round's best new candidate using validation before evaluating
 the frozen 2,000-case test. Never reads test scores into the optimizer; stores
 raw responses and scored results encrypted, and resumes completed reports.
 Re-run after the final round if it was not complete at the initial launch.
+
+Success-only cleanup (October 21, 2026)
+------------------------------------
+Active corpus: 7,002 training / 1,572 test prefixes, 1,509 successful traces.
+Retained development validation: 164 prefixes. Original assignments were
+preserved; no replacements or duration cutoffs. Removed 106 traces (11
+deployment interruptions, 58 mismatched final receipts, 37 browser/explore
+without positive task-success evidence). Old graphs and scores used a tainted
+corpus and are historical only. No browser/explore currently qualifies.
+
+Persistent success requires final own completion-call linkage, final verifier
+100% with verifierMessage, completed lifecycle, no deployment interruption,
+no superseding feedback and no plan-only completion. A browser teardown or
+explore loop stopping is not task success. Explicit success evidence remains
+outside every model prefix. Acquisition, dataset verification and saved-state
+validation enforce this policy. Cleaned checkpoint preserves watermark, prompt
+history, candidate numbering and group ownership. Old candidate scores are
+marked pre_cleanup_validation_metrics and must be rescored before selection.
+
+Reproduce the explicit dataset/checkpoint migration:
+  agents/venv/bin/python scripts/jev_progress/clean.py --source <old-dataset> --evidence <production-success-evidence.jsonl.gz> --output <new-dataset>
+  agents/venv/bin/python scripts/jev_progress/clean_checkpoint.py --dataset <new-dataset> --batch <finished-batch> --output <migration-receipt.json>
+  agents/venv/bin/python scripts/jev_progress/clean_scores.py --dataset <new-dataset> --batch <finished-batch> --old-test <old-test-report> --output <clean-report>
+These are versioned one-time operations. Do not rerun checkpoint migration or
+reset a dataset to work around the success gate. The normal continuation
+remains weekly.py run, restoring the cleaned durable checkpoint.

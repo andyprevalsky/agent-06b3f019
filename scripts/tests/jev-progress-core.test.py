@@ -22,9 +22,33 @@ from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 from types import SimpleNamespace
 import production
+from success import success_verdict
 
 
 class CoreTests(unittest.TestCase):
+    def test_task_success_is_not_lifecycle_completion(self):
+        trace={'trace_id':'a','kind':'normal_root','events':[{'role':'assistant','calls':[{'id':'c','name':'attempt_completion'}]}]}
+        evidence={'id':'a','status':'COMPLETED','text':'Done','metadata':{'toolCallId':'c','toolStatus':'FINISHED','verifierMessage':True,'title':'Progress: 100%'}}
+        self.assertTrue(success_verdict(trace,evidence)[0])
+        for patch in ({'text':'new code version deployed, retry this tool'}, {'metadata':{**evidence['metadata'],'title':'Progress: 50%'}}, {'metadata':{**evidence['metadata'],'toolCallId':'another'}}, {'metadata':{**evidence['metadata'],'verifierMessage':False}}, {'status':'FAILED'}):
+            self.assertFalse(success_verdict(trace,{**evidence,**patch})[0])
+        browser={'trace_id':'b','kind':'browser','events':[], 'terminal_receipt':{'metadata':{'task_id':'b','toolStatus':'FINISHED','action_type':'task_complete'}}}
+        self.assertFalse(success_verdict(browser,None)[0])
+
+    def test_fresh_pull_rejects_interrupted_completion(self):
+        agent={'id':'a','parentAgentId':None,'status':'COMPLETED','goal':'Do work','responseSchema':None,'updatedAt':'2026-01-02T00:00:00Z'}
+        messages=[{'id':'m1','agentId':'a','role':'ASSISTANT','timestamp':'2026-01-01T01:00:00Z','text':'','metadata':{'tool_calls':[{'id':'c','name':'attempt_completion'}]}},
+                  {'id':'m2','agentId':'a','role':'TOOL','timestamp':'2026-01-01T01:01:00Z','text':'Done','metadata':{'toolCallId':'c','toolName':'attempt_completion','toolStatus':'FINISHED','verifierMessage':True,'title':'Progress: 100%'}}]
+        with patch.object(production,'query',side_effect=[[agent],messages]):
+            traces,_=production.pull('2026-01-01T00:00:00Z','2026-01-03T00:00:00Z',set())
+        self.assertEqual(len(traces),1)
+        self.assertEqual(traces[0]['success_evidence']['outcome'],'SUCCEEDED')
+        messages[-1]['text']='new code version deployed, retry this tool'
+        with patch.object(production,'query',side_effect=[[agent],messages]):
+            traces,audit=production.pull('2026-01-01T00:00:00Z','2026-01-03T00:00:00Z',set())
+        self.assertEqual(traces,[])
+        self.assertEqual(audit['rejected_success_evidence'],{'deployment_interruption':1})
+
     def setUp(self):
         self.trace = {"trace_id": "a", "kind": "normal_root", "goal": "Read and report",
                       "output_schema": {"type": "string"}, "events": [
@@ -32,7 +56,8 @@ class CoreTests(unittest.TestCase):
                           {"role": "tool", "text": "visible", "call_id": "t"},
                           {"role": "assistant", "calls": [{"id": "c", "name": "attempt_completion"}], "text": "SECRET_FUTURE"},
                           {"role": "tool", "call_id": "c", "status": "FINISHED", "timestamp": "2026-01-01T00:01:00Z"}],
-                      "terminal_receipt": {"password": "SECRET_LABEL"}, "total_batches": 2}
+                      "terminal_receipt": {"password": "SECRET_LABEL"}, "total_batches": 2,
+                      "success_evidence": {"outcome": "SUCCEEDED"}}
         self.row = {"example_id": "row", "trace_id": "a", "cutoff_event_index": 1,
                     "target": {"observed_batches": 1, "remaining_batches": 1, "batch_progress": .5}}
         self.raw = {"model": "jev-1.13.0", "answers": {

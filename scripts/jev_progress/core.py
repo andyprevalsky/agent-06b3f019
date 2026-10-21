@@ -83,6 +83,7 @@ def balanced(rows, count):
 
 
 def prepare(dataset, output, frozen_split=None):
+    require_success_dataset(dataset)
     train = load_rows(dataset / "train.jsonl.gz")
     test = load_rows(dataset / "test.jsonl.gz")
     if {r["split_group"] for r in train} & {r["split_group"] for r in test}:
@@ -130,10 +131,17 @@ def prepare(dataset, output, frozen_split=None):
 
 
 def verify_dataset(dataset, cohorts):
+    require_success_dataset(dataset)
     for split in ("train", "test", "traces"):
         actual = hashlib.sha256((dataset / f"{split}.jsonl.gz").read_bytes()).hexdigest()
         if actual != cohorts[split + "_sha256"]:
             raise ValueError(f"{split} dataset changed after cohort freeze")
+
+
+def require_success_dataset(dataset):
+    if any(t.get('success_evidence', {}).get('outcome') != 'SUCCEEDED'
+           for t in load_rows(dataset / 'traces.jsonl.gz')):
+        raise ValueError('Dataset includes unverified success; use success-only-v2 cleanup')
 
 
 def clip(value, limit):

@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 from core import credential, digest
 from redaction import mask
+from success import success_verdict
 
 
 def query(sql):
@@ -82,8 +83,9 @@ def pull(since, until, seen_families, filters=None):
             if m['role'] == 'TOOL' and md.get('toolCallId') in calls[m['agentId']]:
                 events[m['agentId']].append({'id': m['id'], 'role': 'tool', 'timestamp': m['timestamp'],
                                             'text': (m.get('text') or '')[:filters['result_text_chars']], 'call_id': md['toolCallId'],
-                                            'status': md.get('toolStatus'), 'tool': md.get('toolName')})
+                                            'status': md.get('toolStatus'), 'tool': md.get('toolName'), 'metadata': md})
     traces = []
+    rejected_success = defaultdict(int)
     for a in candidates:
         history = sorted(events[a['id']], key=lambda e: (e['timestamp'], e['id']))
         turns = [e for e in history if e['role'] == 'assistant']
@@ -94,18 +96,32 @@ def pull(since, until, seen_families, filters=None):
                         in ('attempt_completion', 'attempt_completion_with_result')}
         if not any(e.get('call_id') in terminal_ids and e.get('status') in ('FINISHED', 'COMPLETED') for e in history):
             continue
-        traces.append(mask({'trace_id': a['id'], 'family_id': families[a['id']],
+        trace = {'trace_id': a['id'], 'family_id': families[a['id']],
                             'kind': 'normal_child' if a['parentAgentId'] else 'normal_root',
                             'goal': a['goal'], 'output_schema': a['responseSchema'], 'events': history,
                             'total_batches': len(turns), 'terminal_receipt': {'status': 'COMPLETED'},
-                            'source': 'read-only completed production Agent plus own persisted Message turns'}))
+                            'source': 'read-only successful production Agent plus own persisted Message turns'}
+        result = next((e for e in reversed(history) if e.get('call_id') in terminal_ids
+                       and e.get('status') in ('FINISHED', 'COMPLETED')), None)
+        ok, reason = success_verdict(trace, {**(result or {}), 'id': a['id'], 'status': a['status']})
+        if not ok:
+            rejected_success[reason] += 1
+            continue
+        trace['success_evidence'] = {'outcome': 'SUCCEEDED', 'basis': reason, 'message_id': result['id']}
+        # Verifier metadata is audit evidence, never model input.
+        for event in history:
+            event.pop('metadata', None)
+        traces.append(mask(trace))
     return traces, {'candidate_agents': len(candidates), 'usable_traces': len(traces),
                     'rejected_missing_turns_or_terminal': len(candidates)-len(traces),
+                    'rejected_success_evidence': dict(rejected_success),
                     'coverage_limitation': 'Fresh pull currently includes persistent root/child agents only. '
                     'Browser/explore require archived turn reconstruction; never fabricate their batches or ETA.'}
 
 
 def examples(traces):
+    if any(t.get('success_evidence', {}).get('outcome') != 'SUCCEEDED' for t in traces):
+        raise ValueError('Examples require successful tasks, not merely completed agents')
     rows = []
     for t in traces:
         issued = 0

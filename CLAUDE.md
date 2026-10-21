@@ -1447,6 +1447,38 @@ before merge. A fourth cycle blocks the deploy as review-unstable.
 
 ## JEV progress and ETA research checkpoint — October 21, 2026
 
+CURRENT DATA QUALITY OVERRIDE: user requires SUCCEEDED tasks, not merely
+COMPLETED lifecycles. Audit found a 142-hour label whose terminal result was
+"new code version deployed, retry this tool". The old 10k corpus/metrics are
+quarantined historical evidence. Active dataset is now
+`.context/progress-jev-xp/training-success-v2`: 7,002 train / 1,572 test prefixes,
+1,509 successful traces; retained development validation is 164 prefixes.
+Removed 106 traces: 11 deployment interruptions, 58 mismatched final receipts,
+37 browser/explore tasks without positive success evidence. Do not relabel
+unknowns as successes or remove a trace just because it ran a long time.
+Positive final own-call verifier 100% evidence is mandatory. No browser/explore
+currently meets the strict gate; report that coverage gap.
+
+The 35×5 batch finished all 175 candidates in 41.74 minutes before cleanup;
+its original winner was candidate-165 (joint ratio 0.990991). Its old scores
+are not clean-data claims. The durable checkpoint was explicitly migrated,
+preserving prompts, watermark, candidate history/numbering and split ownership,
+filtering train/validation rows, and invalidating old selection metrics.
+The existing prompt is carried forward, not declared the clean-data winner.
+Acquisition, dataset verification and continuation now fail closed without
+success evidence. See `success.py`, `clean.py`, `clean_checkpoint.py` and
+`clean_scores.py` under scripts/jev_progress. Local migration receipt:
+`.context/progress-jev-xp/training-success-v2/checkpoint.json`. Normal
+`weekly.py run` restores the cleaned state; never reset/bootstrap.
+
+The user subsequently authorized report-only per-iteration test evaluations.
+All five frozen, validation-selected candidates have clean-cohort results in
+`.context/progress-jev-xp/batch-35x5-clean-report/summary.json`. They use the
+same 1,572 successful test prefixes / 164 validation prefixes; test results
+never enter mutation or selection. Every progress update must include the
+updated graph, one value per iteration for average progress and ETA errors.
+
+
 Owner request: optimize BOTH progress and ETA in the same GEPA-style loop,
 including how incoming data is formatted, and refresh weekly from production.
 This is research; do not deploy prompts or change the sidebar automatically.

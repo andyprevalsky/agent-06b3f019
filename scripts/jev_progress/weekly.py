@@ -76,6 +76,8 @@ def write_rows(path, rows):
 
 def bootstrap(args, store):
     traces = load_rows(args.dataset / 'traces.jsonl.gz')
+    if any(t.get('success_evidence', {}).get('outcome') != 'SUCCEEDED' for t in traces):
+        raise ValueError('Bootstrap requires positive success evidence on every trace')
     train = load_rows(args.dataset / 'train.jsonl.gz')
     test = load_rows(args.dataset / 'test.jsonl.gz')
     training_ids = {r['trace_id'] for r in train}
