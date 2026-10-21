@@ -130,7 +130,6 @@ export function InputContainer(props: InputContainerProps) {
               roseDark={roseDark}
             />
           )}
-          {roseDesktop && paperclip}
           {props.sessionControls}
           {speed && (
             <SpeedToggle
@@ -138,6 +137,7 @@ export function InputContainer(props: InputContainerProps) {
               onFastModeChange={speed.onFastModeChange ?? (() => {})}
             />
           )}
+          {roseDesktop && paperclip}
         </div>
         <SubmitOrStopButton
           canSubmit={props.canSubmit}
