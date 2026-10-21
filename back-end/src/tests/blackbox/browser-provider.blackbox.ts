@@ -36,6 +36,7 @@ import { assertAuthPersistFailedInitCustody } from './browser-provider.auth-pers
 import { runLiveProviderParity } from './browser-provider.live.support';
 import { assertKernelUnhealthyProxyRelaxesLocation } from './browser-provider-proxy-health.support';
 import { runOptionalLiveBrowserUseProvider } from './browser-provider.browser-use-live.support';
+import { tilionWiringCases } from './browser-provider.tilion-wiring.support';
 import {
   createBrowserUseRecoverySession,
   browserUseProxyCountry,
@@ -70,13 +71,8 @@ const tests: Array<[string, () => void | Promise<void>]> = [
     'auth-persist failed-init cleanup discovers owned allocations and retains recovery custody',
     assertAuthPersistFailedInitCustody,
   ],
-  [
-    'Kernel is the default provider',
-    () =>
-      withProvider(undefined, () =>
-        assert(selectedBrowserProvider() === 'kernel', 'expected kernel')
-      ),
-  ],
+  // Tilion became the default for new sessions (docs/plans/active/tilion-browser-provider.md).
+  ...tilionWiringCases,
   [
     'Kernel is selected by one environment parameter',
     () =>

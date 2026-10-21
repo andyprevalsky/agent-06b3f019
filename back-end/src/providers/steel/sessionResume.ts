@@ -5,7 +5,7 @@ import { prisma } from '../database';
 import { type ProxyGeoLocation, DEFAULT_GEOLOCATION } from '../geoip';
 import { getProviderProfile, rememberProviderProfile } from '../browser/context';
 import { INVALIDATED_STEEL_PROFILE_SOURCE } from '../browser/profileBinding';
-import type { BrowserProviderName } from '../browser/types';
+import { storedBrowserProvider, type BrowserProviderName } from '../browser/types';
 import { SteelRateLimitError, type FingerprintData, log } from './types';
 import {
   MAX_SESSION_RETRIES,
@@ -312,12 +312,9 @@ async function recreateSessionWithinClaim(
   const steelRecordedProfileId = snapshot.recordedProfileId;
   const profile = snapshot.profile;
 
-  const previousProvider: BrowserProviderName =
-    oldSession.provider === 'kernel'
-      ? 'kernel'
-      : oldSession.provider === 'browser-use'
-        ? 'browser-use'
-        : 'steel';
+  // The superseded session is released through this provider, so a Tilion (or
+  // any recognised) row must keep its own name instead of collapsing to Steel.
+  const previousProvider: BrowserProviderName = storedBrowserProvider(oldSession.provider);
   const savedUrl = hasValue(oldSession.currentUrl)
     ? oldSession.currentUrl
     : hasValue(oldSession.startUrl)

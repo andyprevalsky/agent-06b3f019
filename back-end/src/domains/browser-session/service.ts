@@ -2,7 +2,6 @@
  * Browser-session domain service — business logic, no req/res.
  */
 
-import type { Browser } from 'playwright';
 import { type ProxyGeoLocation, DEFAULT_GEOLOCATION } from '../../providers/geoip';
 import { createLogger } from '../../providers/logger';
 import {
@@ -10,7 +9,6 @@ import {
   createSessionWithContext,
   closeSession,
   getSession,
-  injectUserData,
   uploadSessionFile,
   listFiles as listProviderFiles,
   readSessionFile,
@@ -25,8 +23,6 @@ import {
   ProxyRotationExhaustedError,
   RotationSessionNotFoundError,
 } from '../../providers/browserSessionResume';
-import { canonicalAuthRealm } from '../../providers/authRealm';
-import { getAuthOptions } from '../../providers/authOptions';
 import * as repo from './repo';
 import { storedBrowserProvider } from '../../providers/browser/types';
 import { validateBrowserKeySymbols } from './service.browser-input';
@@ -38,10 +34,7 @@ import {
   SessionNotFoundError,
 } from './service.local-storage';
 import { toUserSettings } from './service.serializers';
-import {
-  buildSessionCredentialPayload,
-  preserveSessionCredentialPayload,
-} from './service.credential-error';
+import { prepareInitSessionCredentials, prepareSessionCredentials } from './service.credentials';
 export { SessionCredentialInjectionError } from './service.credential-error';
 export type { SessionCredentialPayload } from './service.credential-error';
 export { getTaskInfo, getTaskOwnerUserId } from './service.task-info';
@@ -54,6 +47,7 @@ export {
 export { injectLocalStorage, SessionNotFoundError, SessionNoUserError };
 export { InvalidSessionFilePathError } from './service.file-path';
 export { CdpInjectionError, SessionNoWsUrlError } from './types';
+export { prepareSessionCredentials };
 
 const log = createLogger('BrowserSession');
 
@@ -107,55 +101,6 @@ export function buildBrowserSessionMetadata(
   };
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-export async function prepareSessionCredentials(
-  sessionId: string,
-  userId: string,
-  targetUrl: string,
-  options: { browser?: Browser } = {}
-) {
-  const session = await repo.findSessionBySessionId(sessionId);
-  if (session === null || session.context.userId !== userId) {
-    throw new SessionNotFoundError();
-  }
-
-  const authRealm = canonicalAuthRealm(targetUrl);
-  if (authRealm === '') {
-    throw new Error('Target URL must have an authentication realm');
-  }
-
-  const [authOptions, storedPasswords, passkeys] = await Promise.all([
-    getAuthOptions(userId, authRealm, {
-      steelContextId: session.provider === 'steel' ? (session.providerProfileId ?? null) : null,
-    }),
-    repo.findPasswords(userId),
-    repo.reservePasskeysForRealm(userId, authRealm),
-  ]);
-
-  const credentialPayload = buildSessionCredentialPayload(
-    authRealm,
-    authOptions,
-    storedPasswords,
-    passkeys
-  );
-  const injectionResult = await preserveSessionCredentialPayload(
-    () => injectUserData(sessionId, userId, targetUrl, options),
-    credentialPayload
-  );
-
-  return {
-    ...credentialPayload,
-    auth_credential_ref: injectionResult.cookies.credentialRef,
-    cookies_injected: injectionResult.cookies.injected,
-    cookies_count: injectionResult.cookies.cookieCount,
-    auth_source: injectionResult.cookies.authSource,
-    browser_state_injection: injectionResult,
-  };
-}
-
 /* c8 ignore start -- initSession, closeBrowserSession, resumeBrowserSession require Steel SDK */
 export async function initSession(userId: string, agentId: string, startUrl: string, id?: string) {
   log.info('Initializing browser session', {
@@ -200,20 +145,7 @@ export async function initSession(userId: string, agentId: string, startUrl: str
     ...(requiredSteelProfileId !== null ? { requiredSteelProfileId } : {}),
   });
 
-  let credentials: Awaited<ReturnType<typeof prepareSessionCredentials>>;
-  try {
-    credentials = await prepareSessionCredentials(session.sessionId, userId, startUrl, {
-      browser: session.validationBrowser ?? undefined,
-    });
-  } catch (error) {
-    await closeSession(session.sessionId, false).catch((cleanupError) => {
-      log.error('Failed to clean up browser after credential preparation error', {
-        sessionId: session.sessionId,
-        error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
-      });
-    });
-    throw error;
-  }
+  const credentials = await prepareInitSessionCredentials(session, userId, startUrl);
   const userSettings = toUserSettings(user);
 
   log.info('Including passwords in init response', { count: credentials.passwords.length });
