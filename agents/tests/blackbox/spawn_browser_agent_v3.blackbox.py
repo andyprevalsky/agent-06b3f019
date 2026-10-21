@@ -31732,12 +31732,14 @@ async def run_all_tests():
     await r.record_async("native_phone_auth_manager_rejection_preserves_target", test_native_phone_auth_manager_rejection_preserves_target)
     await r.record_async("native_phone_auth_generation_reattaches_exact_request", test_native_phone_auth_generation_reattaches_exact_request)
     await r.record_async("native_phone_auth_cancellation_preserves_exact_pending_request", test_native_phone_auth_cancellation_preserves_exact_pending_request)
+    await r.record_async("phone_supervisor_preserves_unknown_and_cancellation", test_phone_supervisor_preserves_unknown_and_cancellation)
     return r.all_passed
 
 
 
 
 async def test_phone_durable_http_contract():
+    teardown_mock()  # This case owns its explicit MockTransport, not a prior global route.
     from domains.spawn_browser_agent_v3.phone import execute_phone, observe_phone
     calls = []
     view = {'lease': None, 'cursor': 0, 'lastOperation': None}
@@ -31789,6 +31791,7 @@ async def test_phone_denied_before_dom_and_private_binding():
 
 
 async def test_phone_reattach_reacquire_and_stale_cursor():
+    teardown_mock()  # This case owns its explicit MockTransport, not a prior global route.
     import httpx
     from domains.spawn_browser_agent_v3.phone import execute_phone
     config = SimpleNamespace(backend=SimpleNamespace(api_url='https://backend.test', api_key='synthetic'))
@@ -31842,6 +31845,7 @@ async def test_phone_reattach_reacquire_and_stale_cursor():
 
 
 async def test_phone_model_observation_and_account_isolation():
+    teardown_mock()  # This case owns its explicit MockTransport, not a prior global route.
     import httpx
     from browser_tools.schemas import AVAILABLE_ACTIONS
     from domains.spawn_browser_agent_v3.handler import _call_browser_use_with_rotation
@@ -31879,6 +31883,7 @@ async def test_phone_model_observation_and_account_isolation():
 
 
 async def test_phone_revocation_and_safe_timeout():
+    teardown_mock()  # This case owns its explicit MockTransport, not a prior global route.
     import httpx
     from domains.spawn_browser_agent_v3.phone import execute_phone
     config = SimpleNamespace(backend=SimpleNamespace(api_url='https://backend.test', api_key='synthetic'))
@@ -32276,6 +32281,7 @@ async def test_native_phone_auth_cancellation_preserves_exact_pending_request():
 
 
 async def test_phone_setup_first_operation_and_seen_context():
+    teardown_mock()  # This case owns its explicit MockTransport, not a prior global route.
     import httpx
     from domains.spawn_browser_agent_v3.phone import execute_phone, observe_phone
     lease = {"id": "lease-setup", "status": "ACTIVE", "browserTaskId": "task-setup"}
@@ -32322,6 +32328,7 @@ async def test_phone_setup_first_operation_and_seen_context():
 
 
 async def test_phone_setup_actions_recovery_and_heartbeat():
+    teardown_mock()  # This case owns its explicit MockTransport, not a prior global route.
     import httpx
     from domains.spawn_browser_agent_v3 import phone
     lease = {"id": "lease-setup", "status": "ACTIVE", "browserTaskId": "task-setup"}
@@ -32396,6 +32403,7 @@ async def test_phone_setup_actions_recovery_and_heartbeat():
 
 
 async def test_phone_setup_failclosed_and_safe_errors():
+    teardown_mock()  # This case owns its explicit MockTransport, not a prior global route.
     import httpx
     from domains.spawn_browser_agent_v3.phone import execute_phone
     lease = {"id": "lease", "status": "ACTIVE", "browserTaskId": "task"}
@@ -32425,6 +32433,7 @@ async def test_phone_setup_failclosed_and_safe_errors():
 
 
 async def test_phone_setup_pending_receipt_and_ready_private_ref():
+    teardown_mock()  # This case owns its explicit MockTransport, not a prior global route.
     import httpx
     from domains.spawn_browser_agent_v3.phone import execute_phone
     from domains.spawn_browser_agent_v3.service_actions import execute_action
@@ -32502,6 +32511,7 @@ async def test_phone_off_browser_auth_pause_does_not_retain_phone():
 
 
 async def test_phone_auth_retain_uses_only_seen_owned_lease():
+    teardown_mock()  # This case owns its explicit MockTransport, not a prior global route.
     import httpx
     from domains.spawn_browser_agent_v3 import phone
     calls = []
@@ -32522,6 +32532,7 @@ async def test_phone_auth_retain_uses_only_seen_owned_lease():
 
 async def test_phone_saved_credential_wire_and_unknown_receipt():
     """Real Python HTTP boundary, synthetic broker only; never a saved secret."""
+    teardown_mock()  # This case owns its explicit MockTransport, not a prior global route.
     import httpx
     from domains.spawn_browser_agent_v3.phone import execute_phone
     calls, posts = [], []
@@ -32573,6 +32584,7 @@ async def test_phone_saved_credential_wire_and_unknown_receipt():
 
 async def test_phone_device_passcode_wire_and_unknown_receipt():
     """Real Python HTTP boundary, synthetic broker only; never a saved secret."""
+    teardown_mock()  # This case owns its explicit MockTransport, not a prior global route.
     import httpx
     from domains.spawn_browser_agent_v3.phone import execute_phone
     calls, posts = [], []
@@ -32644,6 +32656,7 @@ async def test_phone_saved_credential_rejects_model_secret_routing_args():
 
 
 async def test_phone_setup_settings_targets_transport_recovery_and_billing():
+    teardown_mock()  # This case owns its explicit MockTransport, not a prior global route.
     import httpx
     from domains.spawn_browser_agent_v3 import phone
     targets = ("apple_account", "icloud_messages", "icloud_keychain", "icloud_contacts", "imessage", "receive_address", "portrait_lock", "device_passcode", "gmail", "google_passcode_exception", "runtime")
@@ -32739,3 +32752,8 @@ async def test_parked_proof_requires_capture_and_disconnect():
     with pytest.raises(asyncio.CancelledError) as raised:
         await disconnect_browser_after_passkey_capture(dom, AsyncMock(), observe_parked_page=MagicMock(side_effect=control))
     assert raised.value is control
+
+
+async def test_phone_supervisor_preserves_unknown_and_cancellation():
+    from phone_supervisor_fixture import check_phone_supervisor_boundary
+    await check_phone_supervisor_boundary()
