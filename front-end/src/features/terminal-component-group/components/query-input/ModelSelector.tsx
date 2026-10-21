@@ -84,6 +84,7 @@ export function ModelSelector({
       >
         <PopoverTrigger asChild>
           <button
+            data-testid="query-model-selector"
             className={cn(
               'flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs shadow-sm transition-colors',
               showModelSelector

@@ -79,15 +79,8 @@ export function InputContainer(props: InputContainerProps) {
     placeholder,
     onSubmit,
     onFilesPicked,
-    agentCompleted,
-    canSubmit,
     onPause,
     isPausing,
-    hasUploadingAttachments,
-    selectedModel,
-    onModelChange,
-    availableModels,
-    showModelSelector,
     textareaRef,
     roseDesktop = false,
     roseDark = false,
@@ -96,6 +89,13 @@ export function InputContainer(props: InputContainerProps) {
   } = props;
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const paperclip = attachable && (
+    <PaperclipButton
+      bare={roseDesktop}
+      disabled={disabled || props.agentCompleted}
+      onClick={() => fileInputRef.current?.click()}
+    />
+  );
   return (
     <>
       <HiddenFileInput ref={fileInputRef} onPicked={onFilesPicked} />
@@ -110,25 +110,27 @@ export function InputContainer(props: InputContainerProps) {
           roseDark={roseDark}
         />
       </div>
-      <div className="flex items-center justify-between gap-3 px-3 pt-2 w-full">
+      <div
+        data-testid="query-input-controls"
+        className={
+          roseDesktop
+            ? 'flex items-end justify-between gap-3 pt-2 w-full'
+            : 'flex items-center justify-between gap-3 px-3 pt-2 w-full'
+        }
+      >
         <div className="flex items-center gap-1.5">
-          {attachable && (
-            <PaperclipButton
-              bare={roseDesktop}
-              disabled={disabled || agentCompleted}
-              onClick={() => fileInputRef.current?.click()}
-            />
-          )}
+          {!roseDesktop && paperclip}
           {!props.hideModelSelector && (
             <ModelSelector
-              selectedModel={selectedModel}
-              onModelChange={onModelChange}
-              availableModels={availableModels}
-              showModelSelector={showModelSelector}
+              selectedModel={props.selectedModel}
+              onModelChange={props.onModelChange}
+              availableModels={props.availableModels}
+              showModelSelector={props.showModelSelector}
               roseDesktop={roseDesktop}
               roseDark={roseDark}
             />
           )}
+          {roseDesktop && paperclip}
           {props.sessionControls}
           {speed && (
             <SpeedToggle
@@ -138,9 +140,9 @@ export function InputContainer(props: InputContainerProps) {
           )}
         </div>
         <SubmitOrStopButton
-          canSubmit={canSubmit}
+          canSubmit={props.canSubmit}
           disabled={disabled}
-          hasUploadingAttachments={hasUploadingAttachments}
+          hasUploadingAttachments={props.hasUploadingAttachments}
           isPausing={isPausing}
           onSubmit={onSubmit}
           onPause={onPause}

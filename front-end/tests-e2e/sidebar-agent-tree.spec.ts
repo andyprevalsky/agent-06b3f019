@@ -212,7 +212,7 @@ test('mobile drawer survives repeated close, Escape, selection and rotation with
     await expect(drawer).not.toBeVisible();
   }
   await menu.click();
-  await drawer.getByRole('heading', { name: 'Launch a product', exact: true }).click();
+  await drawer.getByTestId('rose-agent-row-launch-root').click();
   await expect(drawer).not.toBeVisible();
   await expect(page).toHaveURL(new RegExp('agent-id=' + ROOT));
   await menu.click();
@@ -247,3 +247,80 @@ test('ordinary mobile account has no public-site links and includes the new popu
   await goal.click({ timeout: 5000 });
   await expect(page.getByPlaceholder('Enter any goal')).toHaveValue('Get Rose Api Key');
 });
+
+test('dark mobile agents share browser animation and one-layer disclosure', async ({ page }) => {
+  await openSidebarPreview(page, 390);
+  await expect(page.locator('html')).toHaveClass(/dark/);
+  await page.getByRole('button', { name: 'Open menu', exact: true }).click();
+  const drawer = page.getByRole('dialog', { name: 'Menu', exact: true });
+  const root = drawer.getByTestId('rose-agent-row-launch-root');
+  await expect(root).toBeVisible();
+  const contrast = await root.evaluate((el) => {
+    const lum = (s: string) =>
+      (s.match(/[\d.]+/g) ?? [])
+        .slice(0, 3)
+        .map(Number)
+        .map((v) => v / 255)
+        .map((v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4))
+        .reduce((n, v, i) => n + v * [0.2126, 0.7152, 0.0722][i], 0);
+    let bg = 'rgb(255,255,255)';
+    for (let n: Element | null = el; n; n = n.parentElement) {
+      const c = getComputedStyle(n).backgroundColor;
+      if (c !== 'transparent' && c !== 'rgba(0, 0, 0, 0)') {
+        bg = c;
+        break;
+      }
+    }
+    const ratio = (c: string) =>
+      (Math.max(lum(c), lum(bg)) + 0.05) / (Math.min(lum(c), lum(bg)) + 0.05);
+    return {
+      text: ratio(getComputedStyle(el).color),
+      dots: ratio(getComputedStyle(el.querySelector('[data-letter] > span')!).backgroundColor),
+    };
+  });
+  expect(contrast.text).toBeGreaterThanOrEqual(4.5);
+  expect(contrast.dots).toBeGreaterThanOrEqual(3);
+  const dots = root.locator('[data-letter]');
+  const frame = await dots.innerHTML();
+  await expect(async () => expect(await dots.innerHTML()).not.toBe(frame)).toPass();
+  await drawer.getByRole('button', { name: 'Expand Launch a product', exact: true }).click();
+  await expect(drawer.getByTestId('rose-agent-row-research')).toBeVisible();
+  await expect(drawer.getByTestId('rose-agent-row-competitors')).toHaveCount(0);
+  await drawer.getByRole('button', { name: 'Expand Research audience', exact: true }).click();
+  await expect(drawer.getByTestId('rose-agent-row-competitors')).toBeVisible();
+  await expect(drawer.getByRole('button', { name: /Build landing page/ })).toBeVisible();
+  await page.screenshot({ path: '/tmp/rose-dark-mobile-agents.png' });
+  await drawer.getByRole('button', { name: 'Collapse Launch a product', exact: true }).click();
+  await expect(drawer.getByTestId('rose-agent-row-research')).toHaveCount(0);
+});
+for (const width of [320, 390, 1280]) {
+  test(`model picker is flush bottom left at ${width}px`, async ({ page }) => {
+    await openSidebarPreview(page, width);
+    await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
+    const chip = page.getByTestId('query-model-selector').filter({ visible: true }).last();
+    await expect(chip).toBeVisible();
+    const m = await chip.evaluate((el) => {
+      const shell = el.closest('[data-testid="query-input-surface"]')!;
+      const s = shell.getBoundingClientRect(),
+        c = el.getBoundingClientRect();
+      const row = shell
+          .querySelector('[data-testid="query-input-controls"]')!
+          .getBoundingClientRect(),
+        css = getComputedStyle(shell);
+      return {
+        left: c.left - s.left,
+        inset: parseFloat(css.paddingLeft) + parseFloat(css.borderLeftWidth),
+        bottom: row.bottom - c.bottom,
+        shellBottom: s.bottom - c.bottom,
+        bottomInset: parseFloat(css.paddingBottom) + parseFloat(css.borderBottomWidth),
+      };
+    });
+    expect(Math.abs(m.left - m.inset)).toBeLessThan(1);
+    expect(Math.abs(m.bottom)).toBeLessThan(1);
+    expect(Math.abs(m.shellBottom - m.bottomInset)).toBeLessThan(1);
+    await chip.click();
+    await expect(page.getByRole('dialog').last()).toBeVisible();
+    await page.keyboard.press('Escape');
+    if (width === 390) await page.screenshot({ path: '/tmp/rose-model-bottom-left.png' });
+  });
+}

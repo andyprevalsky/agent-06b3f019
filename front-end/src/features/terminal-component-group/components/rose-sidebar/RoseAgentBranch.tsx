@@ -7,6 +7,21 @@ import RoseAgentRow from './RoseAgentRow';
 import RoseCodeAgentRow from './RoseCodeAgentRow';
 import type { RoseAgentGroupsProps } from './RoseAgentGroups';
 
+export type RoseAgentBranchSidebar = Pick<
+  RoseAgentGroupsProps,
+  | 'isExpanded'
+  | 'selectedAgentId'
+  | 'selectedCodeAgentId'
+  | 'attentionAgentIds'
+  | 'onSelectAgent'
+  | 'actionsFor'
+  | 'onMenuOpenChange'
+  | 'codeAgentsFor'
+  | 'onOpenCodeAgent'
+  | 'observeRoot'
+  | 'visibleRootIds'
+>;
+
 function childAgent(root: Agent, node: TreeNode): Agent {
   return {
     ...root,
@@ -32,7 +47,7 @@ export default function RoseAgentBranch({
 }: {
   agent: Agent;
   indented: boolean;
-  sidebar: RoseAgentGroupsProps;
+  sidebar: RoseAgentBranchSidebar;
 }) {
   const visible = s.visibleRootIds?.has(agent.agent_id) ?? s.isExpanded;
   const subscribed = visible || s.selectedAgentId === agent.agent_id;

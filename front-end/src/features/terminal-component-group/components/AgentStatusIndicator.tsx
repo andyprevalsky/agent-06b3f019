@@ -73,6 +73,7 @@ const SLOT = 'flex h-3.5 w-3.5 flex-shrink-0 items-center justify-center';
  * not the row, not the list, not the sidebar.
  */
 function ActiveDots({ seed }: { seed?: string }) {
+  const { isDark } = useRoseTheme();
   const tick = useSyncExternalStore(subscribeToLetterPhase, getLetterPhase, getServerLetterPhase);
   // Same clock for every row, different point on it — see phaseOffsetFor.
   const frame = (tick + (seed === undefined ? 0 : phaseOffsetFor(seed))) % CYCLE_FRAMES;
@@ -88,7 +89,11 @@ function ActiveDots({ seed }: { seed?: string }) {
       {mask.map((lit, i) => (
         <span
           key={i}
-          className="h-[2px] w-[2px] rounded-full bg-gray-600"
+          className={
+            isDark
+              ? 'h-[2px] w-[2px] rounded-full bg-gray-600 dark:bg-[#d6d6d2]'
+              : 'h-[2px] w-[2px] rounded-full bg-gray-600'
+          }
           style={{ opacity: cellOpacity(lit, diagonalOf(i), localFrame) }}
         />
       ))}

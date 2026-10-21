@@ -48,6 +48,8 @@ import {
 import { cn } from '@/lib/utils';
 
 import SidebarAgentList from './SidebarAgentList';
+import { RoseMobileAgentList } from './rose-sidebar/RoseMobileAgentList';
+import { RoseNewAgentButton, RoseSearchRow } from './rose-sidebar/RoseSidebarChrome';
 import { SidebarCreateAgentButton, SidebarSearch } from './SidebarChrome';
 import { useAgentRowActions } from './useAgentRowActions';
 import { useSidebarSearch } from './useSidebarSearch';
@@ -225,25 +227,52 @@ export default function MobileAgentDrawer({
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
               {tab === 'agents' ? (
                 <>
-                  <SidebarCreateAgentButton isCollapsed={false} onCreateAgent={handleCreateAgent} />
-                  <SidebarSearch
-                    isCollapsed={false}
-                    value={searchQuery}
-                    onChange={setSearchQuery}
-                  />
-                  <SidebarAgentList
-                    agents={search.agents}
-                    isLoadingAgents={isLoadingAgents}
-                    selectedAgentId={selectedAgentId}
-                    onSelectAgent={handleSelectAgent}
-                    attentionAgentIds={attentionAgentIds}
-                    isCollapsed={false}
-                    query={searchQuery}
-                    contentMatchAgentIds={search.contentMatchAgentIds}
-                    isSearching={search.isSearching}
-                    searchError={search.searchError}
-                    {...handlers}
-                  />
+                  {roseHeader ? (
+                    <RoseNewAgentButton isExpanded onClick={handleCreateAgent} />
+                  ) : (
+                    <SidebarCreateAgentButton
+                      isCollapsed={false}
+                      onCreateAgent={handleCreateAgent}
+                    />
+                  )}
+                  {roseHeader ? (
+                    <RoseSearchRow isExpanded value={searchQuery} onChange={setSearchQuery} />
+                  ) : (
+                    <SidebarSearch
+                      isCollapsed={false}
+                      value={searchQuery}
+                      onChange={setSearchQuery}
+                    />
+                  )}
+                  {roseHeader ? (
+                    <RoseMobileAgentList
+                      agents={search.agents}
+                      selectedAgentId={selectedAgentId}
+                      onSelectAgent={handleSelectAgent}
+                      onClose={() => setOpen(false)}
+                      handlers={handlers}
+                      attentionAgentIds={attentionAgentIds}
+                      query={searchQuery}
+                      contentMatchAgentIds={search.contentMatchAgentIds}
+                      isLoading={isLoadingAgents}
+                      isSearching={search.isSearching}
+                      searchError={search.searchError}
+                    />
+                  ) : (
+                    <SidebarAgentList
+                      agents={search.agents}
+                      isLoadingAgents={isLoadingAgents}
+                      selectedAgentId={selectedAgentId}
+                      onSelectAgent={handleSelectAgent}
+                      attentionAgentIds={attentionAgentIds}
+                      isCollapsed={false}
+                      query={searchQuery}
+                      contentMatchAgentIds={search.contentMatchAgentIds}
+                      isSearching={search.isSearching}
+                      searchError={search.searchError}
+                      {...handlers}
+                    />
+                  )}
                 </>
               ) : (
                 <div className="flex-1 overflow-y-auto p-3">
