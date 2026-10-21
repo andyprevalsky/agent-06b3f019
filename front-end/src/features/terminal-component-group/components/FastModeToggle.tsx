@@ -12,7 +12,7 @@
  * [ON]
  *
  * State:
- * - enabled: boolean (controlled by parent; query-box scoped, session-only, never persisted client-side)
+ * - enabled: boolean (controlled by parent; query-box scoped, remembered per account on this device)
  *
  * UI: Zap icon only on the query box (label lives in aria-label + tooltip). The
  * Fast Mode *button* enables LLM provider speed (Anthropic speed=fast / OpenAI
@@ -38,6 +38,7 @@
 import { Zap } from 'lucide-react';
 import { useCallback } from 'react';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { useAuth } from '../hooks';
 import { cn } from '@/lib/utils';
 import {
   SPEED_LABELS,
@@ -87,8 +88,8 @@ export default function FastModeToggle({ enabled, onChange }: FastModeToggleProp
               : 'Turn on to use provider fast mode on LLM calls that support it.'}
           </p>
           <p className="text-muted-foreground">
-            Session-only; applies to the next agent you create. Demo prompt cache replay is separate
-            and does not use this button.
+            Remembered on this device; applies to the next agent you create. Demo prompt cache
+            replay is separate and does not use this button.
           </p>
         </div>
       </TooltipContent>
@@ -103,13 +104,14 @@ interface SpeedToggleProps {
 
 /** Rose Desktop 3-state speed square (normal → fast → ultra), Zap icon only. */
 export function SpeedToggle({ fastMode, onFastModeChange }: SpeedToggleProps) {
-  const level = speedLevelOf(fastMode, useUltraPreferred());
+  const { user } = useAuth({ passive: true });
+  const level = speedLevelOf(fastMode, useUltraPreferred(user?.id));
   const label = SPEED_LABELS[level];
   const handleClick = useCallback(() => {
     const next = nextSpeedLevel(level);
-    if (next !== 'normal') setUltraPreferred(next === 'ultra');
+    if (next !== 'normal') setUltraPreferred(next === 'ultra', user?.id);
     onFastModeChange(next !== 'normal');
-  }, [level, onFastModeChange]);
+  }, [level, onFastModeChange, user?.id]);
 
   return (
     <Tooltip delayDuration={0}>

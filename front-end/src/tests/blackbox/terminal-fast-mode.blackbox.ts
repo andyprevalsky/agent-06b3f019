@@ -7,6 +7,7 @@ import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { clearCaptures, capturedRequests } from './msw/capture';
 import { ADMIN_ACCOUNTS } from '@/lib/adminAccounts';
+import { resetQueryPreferencesMemory } from '@/lib/queryPreferences';
 import { resetFastModeSessionOverride } from '@/lib/fastModeSession';
 
 const mocks = vi.hoisted(() => {
@@ -105,6 +106,14 @@ function messageSendingArgs(overrides: Partial<Parameters<typeof useMessageSendi
     ...overrides,
   };
 }
+
+afterEach(() => {
+  resetQueryPreferencesMemory();
+  for (const cookie of document.cookie.split(';')) {
+    const key = cookie.trim().split('=')[0]!;
+    if (key.startsWith('rose-query-defaults%3A')) document.cookie = `${key}=;Max-Age=0;Path=/`;
+  }
+});
 
 describe('useTerminalAgents Fast Mode bridge', () => {
   beforeEach(() => {

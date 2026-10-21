@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 
 import { useAuth } from '@/features/auth';
+import { readQueryPreferences } from '@/lib/queryPreferences';
 import { getClientSource } from '@/lib/clientSource';
 import { isRoseDesktopUser } from '@/lib/roseDesktop';
 import { useAgentContext } from '@/features/agent-context';
@@ -60,6 +61,8 @@ export function defaultModelForAccount(auth: {
   user: { id?: string } | null;
 }): string {
   const user = auth.isFullySignedIn ? auth.user : null;
+  const saved = readQueryPreferences(user?.id).model;
+  if (saved) return saved;
   return !auth.isAnonymous && isRoseDesktopUser(user) ? ROSE_DESKTOP_DEFAULT_MODEL : DEFAULT_MODEL;
 }
 
@@ -73,7 +76,7 @@ function useContextSelectedAgentModel(
     ctx.selectedAgentId,
     ctx.agent?.agent_id,
     ctx.agent?.model,
-    messaging.setSelectedModel,
+    messaging.syncSelectedModel,
     isInitialLoadRef,
     defaultModel,
   );

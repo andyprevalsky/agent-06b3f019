@@ -4,11 +4,12 @@
  *   [NORMAL] --click--> [FAST] --click--> [ULTRA] --click--> [NORMAL]
  *
  * fast and ultra both send provider fast mode (the existing boolean the parent
- * owns); the fast-vs-ultra choice is a session-only preference kept here, never
- * persisted. It defaults to ultra, so an operator whose Fast Mode default is on
+ * owns); the fast-vs-ultra choice is remembered per account in browser/Electron storage. It defaults to ultra, so an operator whose Fast Mode default is on
  * starts on Ultrafast.
  */
 
+import { useQueryPreference } from '@/hooks/useQueryPreference';
+import { writeQueryPreferences } from '@/lib/queryPreferences';
 import { useSyncExternalStore } from 'react';
 
 export type SpeedLevel = 'normal' | 'fast' | 'ultra';
@@ -35,7 +36,11 @@ function getSnapshot(): boolean {
   return ultraPreferred;
 }
 
-export function setUltraPreferred(value: boolean): void {
+export function setUltraPreferred(value: boolean, userId?: string | null): void {
+  if (userId) {
+    writeQueryPreferences(userId, { ultraPreferred: value });
+    return;
+  }
   if (ultraPreferred === value) return;
   ultraPreferred = value;
   for (const listener of listeners) listener();
@@ -46,8 +51,10 @@ export function resetSpeedLevelSession(): void {
   setUltraPreferred(true);
 }
 
-export function useUltraPreferred(): boolean {
-  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+export function useUltraPreferred(userId?: string | null): boolean {
+  const session = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  const [saved] = useQueryPreference(userId, 'ultraPreferred', true);
+  return userId ? (saved ?? true) : session;
 }
 
 export function speedLevelOf(fastMode: boolean, ultra: boolean): SpeedLevel {

@@ -31,6 +31,8 @@ import type { ClientSource } from '@/lib/clientSource';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import * as amplitude from '@amplitude/analytics-browser';
 
+import { useQueryPreference } from '@/hooks/useQueryPreference';
+import { readQueryPreferences } from '@/lib/queryPreferences';
 import { useToast } from '@/hooks/use-toast';
 import { canUseFastMode, defaultsFastModeOn } from '@/lib/fastModeAccounts';
 import { getFastModeSessionOverride, setFastModeSessionOverride } from '@/lib/fastModeSession';
@@ -87,9 +89,25 @@ export function useMessageSending({
     return '';
   });
   const [isSendingMessage, setIsSendingMessage] = useState(false);
-  const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
-  const [pendingPriceLimitCents, setPendingPriceLimitCents] = useState(DEFAULT_PRICE_LIMIT_CENTS);
-  // Fast Mode aggressive cache — session-only; defaults on for allowlisted accounts.
+  const [selectedModel, syncSelectedModel] = useState(
+    () => readQueryPreferences(userId).model ?? DEFAULT_MODEL,
+  );
+  const [, rememberModel] = useQueryPreference(userId, 'model', DEFAULT_MODEL);
+  const [savedPriceLimitCents, setPendingPriceLimitCents] = useQueryPreference(
+    userId,
+    'priceLimitCents',
+    DEFAULT_PRICE_LIMIT_CENTS,
+  );
+  const pendingPriceLimitCents = savedPriceLimitCents ?? DEFAULT_PRICE_LIMIT_CENTS;
+  const [rememberedFastMode, rememberFastMode] = useQueryPreference(userId, 'fastMode', undefined);
+  const setSelectedModel = useCallback(
+    (model: string) => {
+      syncSelectedModel(model);
+      rememberModel(model);
+    },
+    [rememberModel],
+  );
+  // Provider speed defaults are remembered per account; actual agents remain authoritative.
   const [fastMode, setFastModeState] = useState(true);
   // World Model simulator — session-only, account-scoped, default off, never persisted client-side.
   const [simulatorMode, setSimulatorModeState] = useState(false);
@@ -111,6 +129,10 @@ export function useMessageSending({
   useEffect(() => {
     messageInputRef.current = messageInput;
   }, [messageInput]);
+
+  useEffect(() => {
+    fastModeUserOverrideRef.current = false;
+  }, [userId]);
 
   useEffect(() => {
     if (!userCanUseFastMode) {
@@ -141,8 +163,13 @@ export function useMessageSending({
       return;
     }
 
-    if (selectedAgentId !== null || fastModeUserOverrideRef.current) return;
-    const sessionOverride = getFastModeSessionOverride();
+    if (selectedAgentId !== null) return;
+    if (rememberedFastMode !== undefined) {
+      setFastModeState(rememberedFastMode);
+      return;
+    }
+    if (fastModeUserOverrideRef.current) return;
+    const sessionOverride = userId ? null : getFastModeSessionOverride();
     if (sessionOverride !== null) {
       setFastModeState(sessionOverride);
       return;
@@ -157,15 +184,20 @@ export function useMessageSending({
     user?.phone,
     userCanUseFastMode,
     userDefaultsFastModeOn,
+    rememberedFastMode,
     userId,
   ]);
 
-  const setFastMode = useCallback((enabled: boolean) => {
-    fastModeUserOverrideRef.current = true;
-    setFastModeSessionOverride(enabled);
-    setFastModeState(enabled);
-    if (enabled) setSimulatorModeState(false);
-  }, []);
+  const setFastMode = useCallback(
+    (enabled: boolean) => {
+      fastModeUserOverrideRef.current = true;
+      rememberFastMode(enabled);
+      setFastModeSessionOverride(enabled);
+      setFastModeState(enabled);
+      if (enabled) setSimulatorModeState(false);
+    },
+    [rememberFastMode],
+  );
 
   useEffect(() => {
     if (!userCanUseSimulator) {
@@ -187,7 +219,7 @@ export function useMessageSending({
 
   // Sync model from agent detail
   useEffect(() => {
-    if (agentDetail?.model) setSelectedModel(agentDetail.model);
+    if (agentDetail?.model) syncSelectedModel(agentDetail.model);
   }, [agentDetail?.model]);
 
   const handleSendMessage = useCallback(
@@ -360,6 +392,7 @@ export function useMessageSending({
     setIsSendingMessage,
     selectedModel,
     setSelectedModel,
+    syncSelectedModel,
     pendingPriceLimitCents,
     setPendingPriceLimitCents,
     fastMode,
