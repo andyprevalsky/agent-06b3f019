@@ -15,7 +15,6 @@ import type {
   CreateAgentPayload,
   InspectionContext,
 } from '@/lib/api';
-import type { RequestPaymentCardPayload } from '@/lib/realtime-types';
 import type { GateMetadata } from '@/features/terminal-component-group/components/attention-inbox/types';
 
 // ── View state ────────────────────────────────────────────────────────────
@@ -69,14 +68,7 @@ export type { BrowserPanelData } from '@/lib/browserPanelLifecycle';
 
 // ── Approval state ────────────────────────────────────────────────────────
 
-export interface PendingApproval {
-  attentionRequestId: string;
-  question: string;
-  imageUrl: string | null;
-  requestPaymentCard?: RequestPaymentCardPayload;
-  /** Raw `metadata.requestingAgent` of the requesting agent (parsed by ApprovalChip). */
-  requestingAgent?: unknown;
-}
+export type { PendingApproval } from '@/lib/pendingApproval';
 
 export interface PendingGate {
   attentionRequestId: string;

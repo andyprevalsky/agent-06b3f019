@@ -14,7 +14,7 @@ import { cn } from '@/lib/utils';
 
 import { useAgentContext } from '../../hooks';
 import { messageRequester } from '../../hooks/codeAgentContract';
-import { derivePendingApproval } from '@/features/terminal/hooks/derivations';
+import { derivePendingApproval } from '@/lib/pendingApproval';
 import ApprovalChip from '../ApprovalChip';
 import { CodeSessionMessages } from './CodeSessionMessages';
 import { CodeSessionComposer } from './CodeSessionComposer';

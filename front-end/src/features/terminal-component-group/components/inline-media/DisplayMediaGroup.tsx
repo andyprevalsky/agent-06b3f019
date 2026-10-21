@@ -25,8 +25,7 @@
 
 import { useRef, useState } from 'react';
 
-import { isAllowedUserContentUrl } from '@/features/user-ui';
-import { useUserViewBridge } from '@/features/user-ui/hooks/useUserViewBridge';
+import { isAllowedUserContentUrl, useUserViewBridge } from '@/features/user-ui';
 import { isHtmlDisplayMedia, type DisplayMediaItem } from '../../hooks/codeAgentContract';
 import { CodeAgentAttribution } from '../CodeAgentAttribution';
 import { InlineMediaGallery } from './InlineMediaGallery';

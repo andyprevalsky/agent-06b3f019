@@ -15,3 +15,4 @@ export {
   useUserUi,
 } from './hooks';
 export * from './components';
+export { useUserViewBridge } from './hooks/useUserViewBridge';
