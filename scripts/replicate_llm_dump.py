@@ -51,6 +51,7 @@ RoseClient = _rose.RoseClient
 RoseResponse = _rose.RoseResponse
 StructuredOutputAccumulator = _rose.StructuredOutputAccumulator
 gpt_auth_from_token = _rose.gpt_auth_from_token
+build_browser_use_messages = _browser_use.build_browser_use_messages
 normalize_browser_use_tool_call = _browser_use.normalize_browser_use_tool_call
 SYSTEM_PROMPT_DYNAMIC_BOUNDARY = _prompts.SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 build_planner_system_prompt = _prompts.build_planner_system_prompt
@@ -162,16 +163,26 @@ def browser_replay_inputs(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def gpt_auth_from_dump(data: dict[str, Any]) -> Any:
+REPLAY_USER_ID = os.environ.get("REPLAY_USER_ID", "1f85ff25-6e29-4c1b-8739-f917bd101a30")
+
+
+async def gpt_auth_from_dump(data: dict[str, Any]) -> Any:
+    """Lease a fresh GPT compute token when the dumped call used gptAuth.
+
+    Dumps record only the lease identity (type/source/pool id), never the
+    credential, so the replay leases through the supported compute-token path.
+    """
+    from helpers.llm import _build_compute_auth_context, fetch_compute_token_activity
+
     output = data.get("output") if isinstance(data.get("output"), dict) else {}
     usage = output.get("usage") if isinstance(output.get("usage"), dict) else {}
     token_used = usage.get("compute_token_used") if isinstance(usage.get("compute_token_used"), dict) else {}
-    if token_used.get("type") != "gpt" or not token_used.get("accessToken"):
+    if token_used.get("type") != "gpt":
         return None
-    return gpt_auth_from_token(
-        str(token_used.get("accessToken")),
-        account_id=token_used.get("accountId"),
-    )
+    lease = await fetch_compute_token_activity(REPLAY_USER_ID, token_type="gpt")
+    if not lease:
+        raise SystemExit("Dump used gptAuth but no GPT compute token could be leased for the replay")
+    return _build_compute_auth_context(lease, REPLAY_USER_ID, max_rotations=0)
 
 
 def _pool_from_dump(data: dict[str, Any]) -> str:
@@ -312,7 +323,7 @@ async def replay_browser_use(data: dict[str, Any], *, exact: bool) -> dict[str, 
     config = data.get("config") if isinstance(data.get("config"), dict) else {}
     call_site = f"replicate_{data.get('call_site') or 'browser_use'}"
     client = RoseClient()
-    gpt_auth = gpt_auth_from_dump(data)
+    gpt_auth = await gpt_auth_from_dump(data)
 
     if exact:
         # Replay the call as recorded: its pool, tools, sampling params and
@@ -495,7 +506,7 @@ async def replay_generic(data: dict[str, Any]) -> dict[str, Any]:
     # Replay on the transport the dump actually used. Falling through to the
     # OpenRouter waterfall silently swaps the provider, so a direct-auth
     # (claudeAuth/gptAuth) divergence cannot be reproduced at all.
-    gpt_auth = gpt_auth_from_dump(data)
+    gpt_auth = await gpt_auth_from_dump(data)
     if gpt_auth is not None:
         kwargs["gpt_auth"] = gpt_auth
     # Reasoning effort materially changes tool choice, so a replay that drops it
@@ -560,10 +571,6 @@ async def main_async(args: argparse.Namespace) -> int:
         result = await replay_generic(data)
 
     printable = json.loads(json.dumps(result, default=str))
-    usage = printable.get("usage") if isinstance(printable, dict) else None
-    token_used = usage.get("compute_token_used") if isinstance(usage, dict) else None
-    if isinstance(token_used, dict) and token_used.get("accessToken"):
-        token_used["accessToken"] = "[redacted]"
 
     # Human-friendly planner summary first when present.
     if isinstance(printable, dict) and printable.get("plan_summary"):

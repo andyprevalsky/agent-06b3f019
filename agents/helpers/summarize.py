@@ -858,6 +858,7 @@ async def summarize_and_filter_links(
     gpt_token_user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     cache_sequence_id: Optional[str] = None,
+    compute_token_lineage_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run one Haiku call that summarizes a fetched web page and curates which
     of the page's links are worth downloading.
@@ -939,6 +940,7 @@ Rules for files_to_download:
             agent_id=agent_id,
             user_id=claude_token_user_id or gpt_token_user_id,
             cache_sequence_id=cache_sequence_id,
+            compute_token_lineage_key=compute_token_lineage_key,
         )
 
         content_str = (result.get("content") or "").strip()
