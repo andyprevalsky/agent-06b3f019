@@ -1261,6 +1261,134 @@ check(
   }
 );
 
+/** Raw CDP client that records every reply and event, for gateway allow-list checks. */
+async function rawCdp(url: string) {
+  const ws = new WebSocket(url);
+  await new Promise<void>((resolve, reject) => {
+    ws.once('open', () => resolve());
+    ws.once('error', reject);
+  });
+  let nextId = 0;
+  const pending = new Map<number, (reply: Json) => void>();
+  const events: Json[] = [];
+  let closed: Json | null = null;
+  ws.on('message', (data) => {
+    const message = JSON.parse(String(data)) as Json;
+    if (typeof message.id === 'number' && pending.has(message.id)) {
+      pending.get(message.id)!(message);
+      pending.delete(message.id);
+    } else if (typeof message.method === 'string') {
+      events.push({ method: message.method, sessionId: message.sessionId ?? null });
+    }
+  });
+  ws.on('close', (code, reason) => {
+    closed = { code, reason: String(reason) };
+  });
+  const send = (method: string, params: Json = {}, sessionId?: string, timeoutMs = 15_000) =>
+    new Promise<Json>((resolve) => {
+      const id = ++nextId;
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        resolve({ timeout: timeoutMs });
+      }, timeoutMs);
+      pending.set(id, (reply) => {
+        clearTimeout(timer);
+        resolve(reply);
+      });
+      ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+    });
+  return { ws, send, events, closed: () => closed };
+}
+
+function cdpOutcome(reply: Json): Json {
+  if (reply.error) return { ok: false, error: reply.error };
+  if (reply.timeout) return { ok: false, timeoutMs: reply.timeout };
+  return { ok: true, result: redact(reply.result) };
+}
+
+check(
+  'cdp-target',
+  'Target.attachToBrowserTarget, setAutoAttach flatten, getTargets, attachToTarget flatten over one client',
+  async (ctx) => {
+    const out: Json = {};
+    for (const [name, body] of [
+      ['direct', {}],
+      ['residential', { residential: true, proxy_type: 'residential', geo: { country: 'us' } }],
+    ] as Array<[string, Json]>) {
+      const created = await ctx.createSession({ idle_timeout: 120, ttl: 600, ...body });
+      if (!created.sessionId || !created.connectUrl) {
+        out[name] = summarizeCreate(created);
+        continue;
+      }
+      const entry: Json = {};
+      try {
+        const cdp = await rawCdp(created.connectUrl);
+        const browserTarget = await cdp.send('Target.attachToBrowserTarget');
+        entry.attachToBrowserTarget = cdpOutcome(browserTarget);
+        const browserSession = (browserTarget.result as Json | undefined)?.sessionId as
+          string | undefined;
+        entry.setAutoAttachRoot = cdpOutcome(
+          await cdp.send('Target.setAutoAttach', {
+            autoAttach: true,
+            waitForDebuggerOnStart: false,
+            flatten: true,
+          })
+        );
+        if (browserSession) {
+          entry.setAutoAttachOnBrowserSession = cdpOutcome(
+            await cdp.send(
+              'Target.setAutoAttach',
+              { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
+              browserSession
+            )
+          );
+        }
+        const targets = await cdp.send('Target.getTargets');
+        entry.getTargets = cdpOutcome(targets);
+        const infos = ((targets.result as Json | undefined)?.targetInfos ?? []) as Json[];
+        const pageTarget = infos.find((info) => info.type === 'page');
+        entry.targetTypes = infos.map((info) => info.type);
+        if (pageTarget) {
+          const attached = await cdp.send('Target.attachToTarget', {
+            targetId: pageTarget.targetId,
+            flatten: true,
+          });
+          entry.attachToTarget = cdpOutcome(attached);
+          const pageSession = (attached.result as Json | undefined)?.sessionId as
+            string | undefined;
+          if (pageSession) {
+            entry.runtimeEvaluateOnPageSession = cdpOutcome(
+              await cdp.send(
+                'Runtime.evaluate',
+                { expression: 'location.href', returnByValue: true },
+                pageSession
+              )
+            );
+            entry.pageNavigateOnPageSession = cdpOutcome(
+              await cdp.send('Page.navigate', { url: 'https://example.com/' }, pageSession)
+            );
+          }
+        }
+        const created2 = await cdp.send('Target.createTarget', { url: 'about:blank' });
+        entry.createTarget = cdpOutcome(created2);
+        await sleep(1500);
+        entry.attachedToTargetEvents = cdp.events.filter(
+          (event) => event.method === 'Target.attachedToTarget'
+        ).length;
+        entry.eventMethods = [...new Set(cdp.events.map((event) => event.method))].slice(0, 20);
+        entry.socketClosed = cdp.closed();
+        cdp.ws.terminate();
+      } catch (error) {
+        entry.error = String(error).slice(0, 300);
+      } finally {
+        await ctx.release(created.sessionId);
+      }
+      out[name] = entry;
+    }
+    return out;
+  }
+);
+
 check(
   'concurrency',
   'open up to the cap; next create gets 429 concurrency_limit; delete all',
