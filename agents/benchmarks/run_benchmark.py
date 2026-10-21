@@ -2967,6 +2967,9 @@ async def create_agent(
     if write_lock_enabled is not None:
         body["write_lock_enabled"] = write_lock_enabled
 
+    if task.name == "kill-agent-subtree":
+        body["pause_state"] = True  # The owned target fixture is prepared before root reasoning.
+
     # A task-level declaration wins because live side-effect benchmarks must not
     # replay cached decisions. Tasks without a declaration retain the env A/B toggle.
     fast_mode_cache = _resolved_fast_mode_cache(task)
@@ -13665,6 +13668,11 @@ def _run_declared_static_check(
     benchmark_state = data.get("_benchmark", {})
     for check in evaluator.get("checks", []):
         check_type = check.get("type")
+        if check_type == "kill_agent_subtree":
+            evidence = data.get("kill_agent_benchmark") or {}
+            if evidence.get("ok") is not True:
+                return False, f"Kill subtree lifecycle not verified: {evidence}"
+            continue
         if check_type == "process_trace":
             from benchmarks.process_bench import check_process_trace, spec_hash
 
@@ -14688,6 +14696,11 @@ async def _run_single_task_as_run_user(
         agent_id = await create_agent(base_url, task)
         _register_task_root(task.name, agent_id, "graded")
         execution_started_at = asyncio.get_running_loop().time()
+        kill_fixture = None
+        if task.name == "kill-agent-subtree":
+            from benchmarks.kill_agent_fixture import prepare
+            kill_fixture = await prepare(base_url, agent_id, _current_benchmark_user_id(), API_KEY,
+                                         _local_benchmark_task_queue(base_url))
 
         async def execute_agent(snapshot: dict):
             nonlocal grep_fixture_manifest, last_snapshot
@@ -14764,6 +14777,9 @@ async def _run_single_task_as_run_user(
         if isinstance(execution_result, TaskResult):
             return execution_result
         data, approvals_triggered, approvals_resolved, early_fail_reason = execution_result
+        if kill_fixture is not None:
+            from benchmarks.kill_agent_fixture import verify_and_cleanup
+            data["kill_agent_benchmark"] = await verify_and_cleanup(base_url, API_KEY, kill_fixture)
         early_fail_reason = _annotate_needs_auth_failure(task, early_fail_reason, data)
         if realtime_monitor:
             await realtime_monitor.stop()

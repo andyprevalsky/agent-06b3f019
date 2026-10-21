@@ -17,6 +17,7 @@ from tools.prompts.display import PROMPT_ROSE_DESKTOP as display_rose_desktop_pr
 from tools.prompts.google_workspace_run import PROMPT as google_workspace_run_prompt
 from tools.prompts.grep import PROMPT as grep_prompt
 from tools.prompts.inspect_code import PROMPT as inspect_code_prompt
+from tools.prompts.kill_agent import PROMPT as kill_agent_prompt
 from tools.prompts.message_person import PROMPT as message_person_prompt
 from tools.prompts.people_search import PROMPT as people_search_prompt
 from tools.prompts.reasoning import PROMPT as reasoning_prompt
@@ -40,6 +41,7 @@ TOOL_PROMPTS: dict[str, str] = {
     "send_message_to_user_execute_phase": send_message_to_user_execute_phase_prompt,
     "display": display_prompt,
     "message_person": message_person_prompt,
+    "kill_agent": kill_agent_prompt,
     "call_phone_number": call_phone_number_prompt,
     # Research
     "grep": grep_prompt,

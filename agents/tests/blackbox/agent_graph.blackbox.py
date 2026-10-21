@@ -262,9 +262,32 @@ def test_payload_dataclasses_have_real_annotations():
     assert not any(isinstance(v, str) for v in agent_graph.QuestionRoute.__annotations__.values())
 
 
+async def test_kill_agent_is_wired_and_reports_real_result():
+    from domains.kill_agent import handler as h
+    from utils.tool_schemas import EXECUTE_PHASE_TOOLS, TOOL_MODELS
+    from unittest.mock import AsyncMock
+    from workflows.agent_workflow import TOOL_EXECUTORS
+    assert "kill_agent" in EXECUTE_PHASE_TOOLS
+    assert TOOL_MODELS["kill_agent"](tool="kill_agent", agent_id="child").agent_id == "child"
+    assert TOOL_EXECUTORS["kill_agent"] is h.kill_agent
+    events = []
+    async def record(event, *args):
+        events.append(event)
+    instance = SimpleNamespace(agent_id="parent", _handle_tool_event=record)
+    execute = AsyncMock(return_value={"ok": True, "status": "stopped", "message": "confirmed"})
+    with patch.object(h.workflow, "execute_activity", execute):
+        await h.kill_agent(instance, {"agent_id": "child"}, "kill-1")
+        assert execute.call_args.kwargs["args"] == ["parent", "child"]
+        assert events[-1].status.value == "FINISHED"
+        await h.kill_agent(instance, {"agent_id": "parent"}, "kill-2")
+        assert execute.await_count == 1
+        assert events[-1].status.value == "ERROR"
+
+
 async def run_all_tests():
     print("agent-graph blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("kill_agent_wiring_and_result", test_kill_agent_is_wired_and_reports_real_result)
     try:
         r.record("root_spawned_question_goes_to_user", test_root_spawned_code_agent_question_goes_to_user)
         r.record(

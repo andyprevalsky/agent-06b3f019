@@ -59,6 +59,7 @@ EXECUTE_PHASE_TOOLS = [
     "display",
     "call_phone_number",
     "message_person",
+    "kill_agent",
     "attempt_completion",
 ]
 
@@ -1373,6 +1374,15 @@ class SetPlanTool(BaseModel):
 # ============================================================================
 
 
+class KillAgentTool(BaseModel):
+    """Stop a descendant agent and all its child agents and sessions."""
+
+    tool: Literal["kill_agent"]
+    agent_id: str = Field(
+        description="Exact descendant agent ID to stop. This archives its entire subtree and stops its running work. Cannot target yourself, ancestors, siblings, or another user's agents."
+    )
+
+
 class AttemptCompletionTool(BaseModel):
     """Trigger completion for verified agent loops."""
 
@@ -1445,6 +1455,7 @@ TOOL_MODELS: ToolRegistry = {
     "send_message_to_user": SendMessageToUserTool,
     "send_message_to_user_execute_phase": SendMessageToUserExecutePhaseTool,
     "display": DisplayTool,
+    "kill_agent": KillAgentTool,
     "spawn_agent": SpawnAgentTool,
     "message_person": MessagePersonTool,
     # Plan phase tools

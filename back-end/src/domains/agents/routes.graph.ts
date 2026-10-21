@@ -30,6 +30,7 @@ import { asyncHandler } from '../../utils/asyncHandler';
 import * as graphService from './agentGraphService';
 import * as questionService from './agentGraphQuestionService';
 import * as sendService from './agentGraphSendService';
+import { killGraphAgent } from './agentGraphKillService';
 
 const log = createLogger('AgentGraphRoutes');
 const router = Router();
@@ -160,6 +161,18 @@ function caller(req: GraphRequest): graphService.GraphCaller {
   if (req.graphCaller === undefined) throw new Error('graphAuth did not resolve a caller');
   return req.graphCaller;
 }
+
+router.delete(
+  '/agents/:id',
+  graphAuth,
+  asyncHandler<GraphRequest>(async (req, res) => {
+    try {
+      res.json(await killGraphAgent(caller(req), req.params.id));
+    } catch (err) {
+      sendError(res, err);
+    }
+  })
+);
 
 router.get(
   '/agents',

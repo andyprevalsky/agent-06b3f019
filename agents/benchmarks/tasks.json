@@ -19415,5 +19415,44 @@
       "user:Process-Bench-2026-10-21",
       "trace:0ab5620a5 (synthetic regression only; private originals remain outside repository)"
     ]
+  },
+  {
+    "name": "kill-agent-subtree",
+    "title": "Root kills an owned agent subtree without touching its sibling",
+    "prompt": "An isolated cancellation fixture will provide a target agent ID and a control agent ID in the next user message. Use kill_agent to stop the target subtree, repeat the same kill to check idempotency, preserve the control agent, and finish with the actual result. Do not launch more agents or access external services.",
+    "timeout_seconds": 180,
+    "is_chat_mode": false,
+    "start_phase": "execute",
+    "expected_tools": [
+      "kill_agent"
+    ],
+    "min_tool_counts": {
+      "kill_agent": 2
+    },
+    "tags": [
+      "agent-graph",
+      "harness"
+    ],
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "fast_cache": "off",
+    "enforce_declared_evaluators": true,
+    "evaluators": [
+      {
+        "id": "kill-owned-subtree",
+        "method": "static_check",
+        "criteria": [
+          "Target and grandchild Temporal executions terminated, sibling still running before owned cleanup"
+        ],
+        "checks": [
+          {
+            "type": "kill_agent_subtree"
+          }
+        ]
+      }
+    ]
   }
 ]
