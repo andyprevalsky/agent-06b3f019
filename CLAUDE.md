@@ -1442,3 +1442,61 @@ before merge. A fourth cycle blocks the deploy as review-unstable.
 ## Ralph Instructions
 
 - If the next step is to check a log file, make sure to call the tool. NEVER ask the user to check a log file for you.
+
+## JEV progress and ETA research checkpoint — October 21, 2026
+
+Owner request: optimize BOTH progress and ETA in the same GEPA-style loop,
+including how incoming data is formatted, and refresh weekly from production.
+This is research; do not deploy prompts or change the sidebar automatically.
+Implementation and reproducible commands: `scripts/jev_progress/README.txt`.
+Offline gate: `python3 scripts/tests/jev-progress-core.test.py` (also registered
+in deploy structural gates). Do not put credentials or production traces in Git.
+
+Historical data: 8,000 training and 2,000 test prefixes from 1,615 completed
+traces. Development uses 256 training and 500 validation prefixes, grouped by
+root family AND normalized goal. Progress is fraction of actual issued tool
+batches, not semantic completion. ETA is time to the final own completion-tool
+receipt. Browser/explore histories lack reliable ETA labels. The historical
+sample is not a random census of production; repeated prefixes are correlated.
+
+Model: TypeSafe `jev-1.13.0`. Remaining-batch anchors: 0,1,2,3,5,8,13,21,34,55+;
+expected remaining batches produce progress = observed/(observed+remaining).
+ETA choices: every minute 1–59, every hour 1–23, every day 1–29, months 1–11
+(30-day approximation), and 1 year. Minimum one minute means zero-time cases
+cannot be represented exactly. Reflector: GPT-6.1-Sol, low reasoning. Objective:
+equal-weight mean of baseline-normalized trace-macro progress MAE and ETA
+mean absolute log1p-seconds error. Labels, bins and decoding remain frozen.
+
+Text mutations plus six paired format ablations chose the optimized prompt
+with a JSON-lines timeline, prefix-derived elapsed time and observed tool
+counts. Compact first-2/latest-8 history saved tokens but hurt accuracy.
+Final paired 2,000-case test (1,744 ETA labels): progress MAE 18.56→14.45pp;
+within ±10pp 38.0%→52.25%; empirical 65% band ±22.12→±17.57pp; empirical 95%
+band ±46.54→±48.52pp. These are coverage bands, NOT normal-distribution sigma.
+ETA log error 2.0435→2.0741 (worse), median relative error 98.89%→98.40%, mean
+absolute time error 18.18h→43.25h (outliers worse). No claim of ETA improvement.
+Long waits remain badly underestimated, and some 15–104 minute jobs are called
+one year. Some early prefixes are wrongly judged nearly finished. Do not use
+the reported test to select further mutations; new data must judge them.
+
+Durable restart: `agents/venv/bin/python scripts/jev_progress/weekly.py run --iterations 8`.
+The encrypted research state, training corpus, champion and evaluation receipts
+live under `jev-research/v1/` in the existing private R2 trace archive bucket;
+fresh devboxes do not depend on this box's `.context` directory. Credentials
+and required dependencies are listed in the README. The one-time bootstrap
+already ran; NEVER rerun bootstrap or reset the watermark to improve scores.
+Local detailed results: `.context/progress-jev-xp/optimization/test-report.json`.
+
+Every weekly run durably freezes the incoming prompt before a read-only
+production pull. Newly observed families with unseen normalized goals receive
+a permanent random 80/20 training/sealed split. All prefixes of the sealed 20%
+are evaluated with the frozen incoming prompt, recorded separately, and NEVER
+passed to reflection, validation, or candidate selection. Train only afterwards;
+the next week's unseen sample tests that candidate. Report sample sizes and
+coverage, failures and empty cohorts explicitly. Keep receipts append-only and
+advance state conditionally. This prevents test-driven selection under the
+protocol; it is not a security boundary against deliberately editing the code.
+Fresh collection currently covers verified completed persistent root/child
+agents only; archived browser/explore reconstruction remains a coverage gap.
+The historical development set retains those agent kinds. Do not pretend
+missing traces or timestamps were evaluated.

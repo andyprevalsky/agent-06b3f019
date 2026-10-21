@@ -543,6 +543,7 @@ their assertions or test counts:
 `bash scripts/tests/benchmark-sms-transport-mock.test.sh`,
 `bash scripts/tests/descend-command.test.sh`,
 `python3 scripts/tests/benchmark-live-results.test.py`,
+`python3 scripts/tests/jev-progress-core.test.py`,
 `python3 scripts/tests/cloudbench-provider-capacity.test.py`,
 `bash scripts/tests/campaign-hub-grouping.test.sh`,
 `bash scripts/tests/cloudbench-fetch-ref.test.sh`,
