@@ -6529,10 +6529,16 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
         and r.stop_metadata.get("runner") == "sms"
         and r.stop_metadata.get("owned_cleanup_verified") is True
     ]
-    if any(not r.agent_id and r.status != "SKIPPED" and r not in rootless_sms for r in results):
+    rootless_precreation = [
+        r for r in results
+        if not r.agent_id and r.status == "ERROR"
+        and isinstance(getattr(r, "stop_metadata", None), dict)
+        and r.stop_metadata.get("root_creation_attempted") is False
+    ]
+    if any(not r.agent_id and r.status != "SKIPPED" and r not in rootless_sms and r not in rootless_precreation for r in results):
         failures.append("owned cloud execution has an unknown root creation outcome")
     if not owned:
-        if failures or not rootless_sms:
+        if failures or not (rootless_sms or rootless_precreation):
             raise RuntimeError("; ".join(failures) or "owned cloud execution has no proven root allocation")
         return
     snapshots = {}
@@ -13932,6 +13938,7 @@ async def _run_single_task_as_run_user(
     start = time.time()
     start_time = datetime.now(timezone.utc)
     agent_id = ""
+    root_creation_attempted = False
     data: dict = {}
     last_snapshot: dict = {}
     archive_manifest_ref: Optional[str] = None
@@ -14088,6 +14095,7 @@ async def _run_single_task_as_run_user(
                 )
 
         if _effective_harness(task) == "codex":
+            root_creation_attempted = True
             from benchmarks.codex_runner import build_deps_from_module, run_codex_task
 
             fast_mode_cache = _resolved_fast_mode_cache(task)
@@ -14100,6 +14108,7 @@ async def _run_single_task_as_run_user(
                 fast_mode_cache_enabled=fast_mode_cache,
             )
 
+        root_creation_attempted = True
         agent_id = await create_agent(base_url, task)
         execution_started_at = asyncio.get_running_loop().time()
 
@@ -14851,6 +14860,7 @@ async def _run_single_task_as_run_user(
                 + (f" | Investigate: python agents/benchmarks/agent_latency.py {agent_id}" if agent_id else "")
                 + " | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>"
             ),
+            stop_metadata={"root_creation_attempted": root_creation_attempted},
             logs=logs,
             archive_manifest_ref=archive_manifest_ref,
             world_model_fidelity=world_model_fidelity,

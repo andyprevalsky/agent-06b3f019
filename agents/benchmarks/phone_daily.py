@@ -299,11 +299,26 @@ async def configure_daily_profile(base_url: str, user_id: str, backend_key: str,
     state = json.loads(result.stdout)
     if state.get('matches') is True:
         return {'configured': True}
+    async def apply(owned):
+        payload = {'expectedProfileRevision': state['profileRevision'], **profile}
+        # The server requires the Google identity to exist before granting its
+        # exception. Establish that identity first, then use the returned CAS.
+        if profile['allowGooglePasscodeException']:
+            payload['allowGooglePasscodeException'] = False
+        response = await owned.put(base_url.rstrip('/') + '/api/iphone/device/setup-profile', headers={'X-API-Key': backend_key, 'X-User-Id': user_id}, json=payload)
+        if response.status_code != 200:
+            raise PhoneDailyConfigurationError('Private profile CAS rejected')
+        if profile['allowGooglePasscodeException']:
+            revision = response.json().get('setup', {}).get('profileRevision')
+            if not isinstance(revision, int) or revision <= state['profileRevision']:
+                raise PhoneDailyConfigurationError('Private profile CAS receipt invalid')
+            payload.update(expectedProfileRevision=revision, allowGooglePasscodeException=True)
+            response = await owned.put(base_url.rstrip('/') + '/api/iphone/device/setup-profile', headers={'X-API-Key': backend_key, 'X-User-Id': user_id}, json=payload)
+            if response.status_code != 200:
+                raise PhoneDailyConfigurationError('Private profile exception CAS rejected')
     if client is None:
         async with httpx.AsyncClient(timeout=15, trust_env=False) as owned:
-            response = await owned.put(base_url.rstrip('/') + '/api/iphone/device/setup-profile', headers={'X-API-Key': backend_key, 'X-User-Id': user_id}, json={'expectedProfileRevision': state['profileRevision'], **profile})
+            await apply(owned)
     else:
-        response = await client.put(base_url.rstrip('/') + '/api/iphone/device/setup-profile', headers={'X-API-Key': backend_key, 'X-User-Id': user_id}, json={'expectedProfileRevision': state['profileRevision'], **profile})
-    if response.status_code != 200:
-        raise PhoneDailyConfigurationError('Private profile CAS rejected')
+        await apply(client)
     return {'configured': True}

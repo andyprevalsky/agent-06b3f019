@@ -232,3 +232,46 @@ def test_normal_runner_checks_unavailable_daily_prerequisite_before_agent_creati
             None, 'message-index', None, None, None,
         ))
     assert created == []
+
+
+def test_private_profile_authorizes_exception_only_after_identity_cas(tmp_path, monkeypatch):
+    import asyncio
+    import json
+    import subprocess
+    from types import SimpleNamespace
+
+    import httpx
+
+    from benchmarks import logs, phone_daily
+    path = tmp_path / 'profile.json'
+    path.write_text(json.dumps({'expectedAppleIdentity': 'apple@example.invalid', 'expectedGoogleIdentity': 'google@example.invalid', 'allowGooglePasscodeException': True}))
+    monkeypatch.setenv('PHONE_DAILY_PROFILE_FILE', str(path))
+    monkeypatch.setattr(logs, 'load_env_var', lambda *args: 'synthetic-key')
+    monkeypatch.setattr(subprocess, 'run', lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=json.dumps({'matches': False, 'profileRevision': 7})))
+    bodies = []
+    def handle(request):
+        body = json.loads(request.content)
+        bodies.append(body)
+        if len(bodies) == 1 and body['allowGooglePasscodeException']:
+            return httpx.Response(409, json={'error': 'Configure Google identity before authorizing an exception'})
+        assert body['expectedProfileRevision'] == 6 + len(bodies)
+        return httpx.Response(200, json={'setup': {'profileRevision': 7 + len(bodies)}})
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            assert await phone_daily.configure_daily_profile('http://127.0.0.1:3100', 'synthetic-user', 'synthetic-key', 'postgresql://postgres:postgres@127.0.0.1:5432/victoria_bench_synthetic', client=client) == {'configured': True}
+    asyncio.run(run())
+    assert [b['allowGooglePasscodeException'] for b in bodies] == [False, True]
+
+
+def test_batch_cleanup_accepts_only_proven_precreation_failure():
+    import asyncio
+
+    from benchmarks import run_benchmark as runner
+    from benchmarks.results import TaskResult
+
+    def result(metadata):
+        return TaskResult(name='browser-auth-doordash-cloud-iphone', passed=False, agent_id='', status='ERROR', progress_score=0, duration_seconds=0, cost_cents=0, message_count=0, failure_reason='fixture failed', stop_metadata=metadata)
+    asyncio.run(runner._finalize_owned_cloud_batch('http://127.0.0.1:3100', [result({'root_creation_attempted': False})], {}))
+    for metadata in ({}, {'root_creation_attempted': True}):
+        with pytest.raises(RuntimeError, match='unknown root creation'):
+            asyncio.run(runner._finalize_owned_cloud_batch('http://127.0.0.1:3100', [result(metadata)], {}))
