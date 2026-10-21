@@ -519,12 +519,13 @@ export async function runLiveTilionConcurrency(): Promise<void> {
 }
 
 /**
- * Every live Tilion case in the /deploy-run browser-provider domain, in order.
- * Returns the failure count so the domain runner keeps going after a failure.
+ * The live auth-handoff and Tilion cases of the /deploy-run browser-provider
+ * domain, in order. Returns the failure count so the runner keeps going.
  */
-export async function runLiveTilionCases(): Promise<number> {
+export async function runLiveCrossProviderCases(): Promise<number> {
   if (!process.env.TEST_BASE_URL) return 0;
   const cases: Array<[string, () => Promise<void>]> = [
+    ['live Kernel/Steel auth persist', () => runLiveKernelSteelAuthPersist('steel')],
     ['live Tilion provider parity', runLiveTilionProviderParity],
     ['live Kernel/Tilion auth persist', () => runLiveKernelSteelAuthPersist('tilion')],
     ['live Tilion concurrency cap', runLiveTilionConcurrency],
