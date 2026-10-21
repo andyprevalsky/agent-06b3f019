@@ -53,6 +53,7 @@ import { markPaused } from '../../providers/codeSessions/store';
 import { closeClaudeCodeSession } from '../../providers/e2bCloseSession';
 import { acquireCodeSessionSandbox } from '../../providers/e2bCodeSessionSandbox';
 import { testResumableCloseListsPaused } from './code-sessions-list.cases';
+import { registerFailedStartPauseCases } from './code-sessions-failed-start.cases';
 
 config();
 
@@ -587,3 +588,5 @@ test('keepalive extends an attached sandbox and its lease; retire deletes checkp
   assert.equal(retired.state, 'RETIRED');
   assert.equal(existsSync(manifestPath), false, 'retirement deletes stored checkpoints');
 });
+
+registerFailedStartPauseCases(userA, rootAgentId);
