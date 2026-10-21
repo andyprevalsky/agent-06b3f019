@@ -436,7 +436,7 @@ def main():
     should_stop({'trigger': False}, False, policy)
     env = dict(os.environ, RUN_BENCH_CAMPAIGN_ID=campaign_id)
     if shard is not None:
-        env["RUN_BENCH_CAMPAIGN_STARTUP_DEADLINE_EPOCH"] = str(epoch+e2e_timeout-task_timeout-POST_TASK_ALLOWANCE)
+        env["RUN_BENCH_CAMPAIGN_STARTUP_DEADLINE_EPOCH"] = str(epoch+e2e_timeout-task_timeout)
     destination = repo/'.context/stress200-host'/campaign_id
     destination.mkdir(mode=0o700, parents=True, exist_ok=False)
     save_once(destination/'infra-early-stop-policy.safe.json', encode(dict(infra_early_stop=policy, source_ref=ref, original_epoch=epoch, task_timeout_seconds=task_timeout, run_timeout_seconds=e2e_timeout)))

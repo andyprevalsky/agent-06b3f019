@@ -60,7 +60,7 @@ RUN_DEADLINE=5400
 # The e2e clock starts at admission, but a copy's execution window starts only after
 # the strict start barrier releases and its grade lands after that window. A bound
 # default e2e covers three separate allowances (Eval Suite stage targets).
-# Explicit shorter e2e retains task+post windows and spends only its remainder on startup:
+# Explicit e2e reserves the full task window; publication uses the remaining outer budget.
 # Admission to barrier release: canary/preflight through full release (720) plus fleet
 # readiness (900). Polar batch 1 (2026-10-20) measured 1350.6 s.
 STARTUP_ALLOWANCE=720+900
@@ -130,9 +130,9 @@ def campaign_timeouts(task_timeout=DEFAULT_TASK_TIMEOUT,e2e_timeout=RUN_DEADLINE
  need(type(e2e_timeout)is int and task_timeout+POST_TASK_ALLOWANCE<e2e_timeout<=MAX_RUN_DEADLINE,'--e2e-timeout must cover the task timeout plus %ds grading/release and positive startup time, and fit the %ds operator deadline'%(POST_TASK_ALLOWANCE,MAX_RUN_DEADLINE))
  return task_timeout,e2e_timeout
 def startup_deadline_epoch(epoch,task_timeout,e2e_timeout):
- """Latest barrier release preserving the entire task and post-task windows."""
+ """Latest barrier release preserving the full task window within the original e2e cap."""
  campaign_timeouts(task_timeout,e2e_timeout)
- return epoch+e2e_timeout-task_timeout-POST_TASK_ALLOWANCE
+ return epoch+e2e_timeout-task_timeout
 def shard_timeouts(shard):
  # One canonical encoding: a bound field is present only when it differs from the original value.
  need(shard.get('task_timeout')!=DEFAULT_TASK_TIMEOUT and shard.get('e2e_timeout')!=RUN_DEADLINE,'default timeouts are encoded by absence')

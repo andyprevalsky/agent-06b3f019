@@ -152,19 +152,19 @@ class ExplicitBudget(unittest.TestCase):
         self.assertEqual(argv[argv.index('--timeout')+1], '7200')
         self.assertEqual(argv[argv.index('--e2e-timeout')+1], '9300')
         self.assertEqual(argv[argv.index('--e2e-started-at')+1], '1000')
-        self.assertEqual(R['startup_deadline_epoch'](1000,7200,9300), 1900)
-        self.assertEqual(1000+9300-1900, 7200+1200)
+        self.assertEqual(R['startup_deadline_epoch'](1000,7200,9300), 3100)
+        self.assertEqual(1000+9300-3100, 7200)
         S = runpy.run_path(str(ROOT/'scripts/cloudbench-original600-supervisor.py'))
         self.assertEqual(S['shard_timeouts'](shard), (7200,9300))
 
     def test_remote_deadline_does_not_restart_startup_clock(self):
         campaign = runpy.run_path(str(ROOT/'scripts/run-bench-campaign.py'))
         deadline = R['startup_deadline_epoch'](1000,7200,9300)
-        # Remote starts 800 seconds into the common admission clock, leaving 100.
+        # Remote starts 800 seconds into the common admission clock, leaving 1300.
         value = campaign['startup_deadline_monotonic'](
             {'RUN_BENCH_CAMPAIGN_STARTUP_DEADLINE_EPOCH':str(deadline)}, 1000,9300,
             now_epoch=1800,now_monotonic=50)
-        self.assertEqual(value,150)
+        self.assertEqual(value,1350)
         self.assertEqual(campaign['startup_deadline_monotonic']({},1000,9300,now_epoch=1800,now_monotonic=50),None)
 
     def test_actual_remote_barrier_rechecks_absolute_deadline(self):
@@ -179,16 +179,17 @@ class ExplicitBudget(unittest.TestCase):
                 root=Path(directory);(root/'ready').mkdir()
                 child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(10)'])
                 try:
-                    clock=[899 if phase!='expired' else 900]
+                    deadline=R['startup_deadline_epoch'](1000,7200,9300)
+                    clock=[2351 if phase=='early' else deadline-1 if phase=='expires_during_external_release' else deadline]
                     job=dict(job_id='j1',_process=child)
                     (root/'ready/j1.json').write_text(json.dumps(dict(cohort_id='c001',job_id='j1',controller_pid=child.pid,ready_at='now')))
                     cohort=dict(status='waiting',cohort_id='c001',_jobs=[job],_directory=root,ready_count=1,failed_count=0,expected_count=1)
                     def external_release(_):
-                        if phase=='expires_during_external_release': clock[0]=901
+                        if phase=='expires_during_external_release': clock[0]=deadline+1
                         return 'receipt'
                     def write(path,value): Path(path).write_text(json.dumps(value))
                     ns=dict(subprocess=subprocess,json=json,barrier_failure=False,first_failure=0,
-                            startup_expired=lambda:clock[0]>=900,observe_external_abort=lambda:False,
+                            startup_expired=lambda:clock[0]>=deadline,observe_external_abort=lambda:False,
                             publish_external_barrier=lambda *a:None,external_barrier=object(),
                             external_barrier_release_id=external_release,utc_now=lambda:'now',
                             write_json_atomic=write,summary_path=root/'summary.json',state={'external_barrier':{}})
@@ -215,6 +216,28 @@ class ExplicitBudget(unittest.TestCase):
             for shard in world.shards:
                 self.assertFalse((shard['out'] / 'global-release.json').exists())
                 self.assertTrue((shard['out'] / 'global-abort.json').exists())
+
+    def test_original_observed_startup_releases_without_clipping_task_window(self):
+        # Original cloud run released at admission + 1350.573692s. Round up;
+        # execute the real coordinator, preserving the original 7200/9300 argv.
+        with tempfile.TemporaryDirectory() as root:
+            world = World(root, [{0: ('ready', 0, None), 1353: ('released', 0, 0)}], max_ticks=1400)
+            world.n = 1351
+            deadline = R['startup_deadline_epoch'](0,7200,9300)
+            record = world.run(scheduled_total=60, startup_deadline=deadline)
+            self.assertEqual(record['released_at'],1351)
+            self.assertEqual(record['exit_codes'],{'0':0})
+            self.assertGreaterEqual(9300-record['released_at'],7200)
+            self.assertEqual(9300-(record['released_at']+7200),749)
+
+    def test_no_release_after_full_task_window_no_longer_fits(self):
+        with tempfile.TemporaryDirectory() as root:
+            world = World(root, [{0: ('ready', 0, None)}], max_ticks=2200)
+            world.n = 2100
+            record = world.run(scheduled_total=60, startup_deadline=R['startup_deadline_epoch'](0,7200,9300))
+            self.assertIsNone(record['released_at'])
+            self.assertEqual(record['terminate_cause'],'startup_budget')
+            self.assertEqual(record['exit_codes'],{'0':143})
 
     def test_barrier_with_remaining_full_window_releases(self):
         with tempfile.TemporaryDirectory() as root:

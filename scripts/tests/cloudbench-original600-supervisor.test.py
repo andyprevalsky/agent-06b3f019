@@ -270,7 +270,7 @@ class Shard(unittest.TestCase):
   script.write_text("import fcntl,signal,sys,time\nfrom pathlib import Path\np=Path(sys.argv[1]);f=(p/'startup-cohorts/parent.lock').open('w');fcntl.flock(f,fcntl.LOCK_EX)\ndef done(*a):\n (p/'ending').write_text('term');sys.exit(7)\nsignal.signal(signal.SIGTERM,done);(p/'ready').write_text('ready');time.sleep(.6);(p/'ending').write_text('natural')\n")
   original_popen=subprocess.Popen;children=[];campaigns=[]
   def spawn(*unused,**kwargs):
-   self.assertEqual(float(kwargs['env']['RUN_BENCH_CAMPAIGN_STARTUP_DEADLINE_EPOCH']), epoch+shard.get('e2e_timeout',5400)-shard.get('task_timeout',1200)-1200)
+   self.assertEqual(float(kwargs['env']['RUN_BENCH_CAMPAIGN_STARTUP_DEADLINE_EPOCH']), epoch+shard.get('e2e_timeout',5400)-shard.get('task_timeout',1200))
    cid=kwargs['env']['RUN_BENCH_CAMPAIGN_ID'];campaign=repo/'.context/benchmarks/campaigns'/cid;(campaign/'startup-cohorts/c001').mkdir(parents=True)
    value=shard_summary(shard,infra);value.update(campaign_id=cid,e2e_started_at_epoch=epoch)
    (campaign/'summary.json').write_text(json.dumps(value));(campaign/'startup-cohorts/c001/manifest.json').write_text(json.dumps(dict(cohort_id='c001',jobs={j['job_id']:None for j in value['jobs']},e2e_deadline_monotonic=time.monotonic()+5400)))
