@@ -7,6 +7,8 @@ import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { resumeBrowserSession, SessionNotFoundError } from './service';
 import { resumeSessionSchema } from './types';
+import { respondIfCarriedStateRequired } from './routes.carried-state';
+import { carriedStateFromRequest } from './service.carried-state';
 
 const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
 const log = createLogger('BrowserSession');
@@ -18,14 +20,19 @@ export function registerBrowserResumeRoute(router: Router): void {
     auth,
     asyncHandler<HybridAuthRequest>(async (req, res: Response) => {
       try {
-        const { task_id, force_fresh_profile } = resumeSessionSchema.parse(req.body);
+        const { task_id, force_fresh_profile, storage_state } = resumeSessionSchema.parse(req.body);
         const userId = req.isInternal === true ? undefined : req.userId;
         if (req.isInternal !== true && (userId === undefined || userId === '')) {
           res.status(401).json({ error: 'Unauthorized' });
           return;
         }
 
-        const result = await resumeBrowserSession(task_id, userId, force_fresh_profile);
+        const result = await resumeBrowserSession(
+          task_id,
+          userId,
+          force_fresh_profile,
+          carriedStateFromRequest(storage_state)
+        );
         if (req.isInternal === true) {
           res.json({ success: true, ...result });
         } else {
@@ -36,6 +43,7 @@ export function registerBrowserResumeRoute(router: Router): void {
           res.status(404).json({ error: 'Session not found' });
           return;
         }
+        if (respondIfCarriedStateRequired(error, res)) return;
         if (error instanceof BrowserProviderRateLimitError) {
           log.warn('Browser provider rate limit hit during session resume', {
             provider: error.provider,
