@@ -273,6 +273,21 @@ async function run(): Promise<void> {
     shouldBypassOutboundReplay('https://analytics.eu.amplitude.com/api/2/funnels'),
     true
   );
+  // Tilion creates paid browsers: a replayed POST /v1/session returns a long-dead
+  // session id, which then fails CDP validation on every live blackbox create.
+  assert.strictEqual(shouldBypassOutboundReplay('https://back.tilion.dev/v1/session'), true);
+  const previousTilionBase = process.env.TILION_BASE_URL;
+  process.env.TILION_BASE_URL = 'https://tilion-staging.example.test/';
+  try {
+    assert.strictEqual(
+      shouldBypassOutboundReplay('https://tilion-staging.example.test/v1/sessions'),
+      true
+    );
+  } finally {
+    if (previousTilionBase === undefined) delete process.env.TILION_BASE_URL;
+    else process.env.TILION_BASE_URL = previousTilionBase;
+  }
+  assert.strictEqual(shouldBypassOutboundReplay('https://tilion.dev.example.test/'), false);
 
   const originalFetch = globalThis.fetch;
   const previousReplay = process.env.BLACKBOX_TEST_REPLAY_OUTBOUND;
