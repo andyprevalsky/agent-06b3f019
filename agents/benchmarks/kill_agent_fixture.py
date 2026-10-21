@@ -30,7 +30,7 @@ async def prepare(base_url, root_id, user_id, api_key, task_queue):
         target = fixture["agents"][0]["agent_id"]
         control = fixture["agents"][2]["agent_id"]
         response = await client.post(f"{base_url}/api/agents/{root_id}/messages", headers=headers,
-                                    json={"text": f"Stop target agent {target} using kill_agent. Repeat kill_agent on the same target to verify idempotency. Do not stop control agent {control}, yourself, or any other work. Then report the actual tool results and finish."})
+                                    json={"message": f"Stop target agent {target} using kill_agent. Repeat kill_agent on the same target to verify idempotency. Do not stop control agent {control}, yourself, or any other work. Then report the actual tool results and finish.", "role": "USER"})
         response.raise_for_status()
     return fixture
 

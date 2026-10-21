@@ -10,7 +10,6 @@
  *   GET  /api/agent-graph/question-route  { deliver_to, agent_id }
  *   POST /api/agent-graph/questions       route a code agent's question
  *   POST /api/agent-graph/token           refresh a code-session token
- *   GET  /api/agents/tree?busId=          `code_agents` alongside `agents`
  *
  * Fixture tree (user A):      R (root) ── C ── G      R2 (user B) ── S3
  *                             │           └ S1 (code, spawned by C)
@@ -18,7 +17,6 @@
  *                             └ S4 (code, spawned by R, live ws-server)
  *
  * Invariants covered:
- *   - list: the session's own tree only (code agents included, relations)
  *   - send code → Rose agent: one USER row on the target + one "sent" chip in
  *     the code agent's own timeline; retry with the same id → duplicate, no
  *     new rows; `parent` alias resolves to the spawner
