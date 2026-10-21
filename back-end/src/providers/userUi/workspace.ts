@@ -120,7 +120,7 @@ export async function prepareUserUiWorkspaceSafe(
 /** Write the workspace under a local HOME directory (local Claude Code fallback). */
 export async function writeUserUiWorkspaceToDir(homeDir: string, workspace: UserUiWorkspace) {
   const root = resolve(homeDir);
-  for (const file of workspace.files) {
+  for (const file of workspaceFilesWithCliPackage(workspace)) {
     const full = resolve(root, file.path);
     if (!full.startsWith(root + sep)) throw new Error(`refusing to write outside ${root}`);
     await mkdir(dirname(full), { recursive: true });
@@ -129,11 +129,22 @@ export async function writeUserUiWorkspaceToDir(homeDir: string, workspace: User
   for (const bin of cliBinPaths(workspace)) await chmod(join(root, bin), 0o755);
 }
 
+// Session HOME may be an ESM package (the Codex template is). Extensionless
+// CommonJS CLIs need their own package scope; explicit .mjs tools remain ESM.
+const CLI_PACKAGE_PATH = `${USER_UI_CLI_BIN_DIR}/package.json`;
+function workspaceFilesWithCliPackage(workspace: UserUiWorkspace): UserUiBundleFile[] {
+  if (cliBinPaths(workspace).length === 0) return workspace.files;
+  return [
+    ...workspace.files.filter((file) => file.path !== CLI_PACKAGE_PATH),
+    { path: CLI_PACKAGE_PATH, content: Buffer.from('{"type":"commonjs"}\n') },
+  ];
+}
+
 /** Every file installed under ~/.rose/bin (rose-ui, rose-agents, ...). */
 function cliBinPaths(workspace: UserUiWorkspace): string[] {
   return workspace.files
     .map((file) => file.path)
-    .filter((path) => path.startsWith(`${USER_UI_CLI_BIN_DIR}/`));
+    .filter((path) => path.startsWith(`${USER_UI_CLI_BIN_DIR}/`) && path !== CLI_PACKAGE_PATH);
 }
 
 interface SandboxFiles {
@@ -155,7 +166,7 @@ export async function writeUserUiWorkspaceToSandbox(
 ) {
   const home = homeDir.replace(/\/+$/, '');
   await sandbox.files.write(
-    workspace.files.map((file) => ({
+    workspaceFilesWithCliPackage(workspace).map((file) => ({
       path: `${home}/${file.path}`,
       data: toArrayBuffer(file.content),
     }))

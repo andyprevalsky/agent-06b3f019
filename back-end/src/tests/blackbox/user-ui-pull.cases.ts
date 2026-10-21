@@ -72,6 +72,10 @@ export function userUiPullCases(ctx: UserUiPullCaseContext) {
   };
   return [
     {
+      name: 'installed CLIs retain CommonJS under an ESM session HOME',
+      fn: installedCliPackageBoundaryCase,
+    },
+    {
       name: 'code-session workspace -- rose-ui CLI only; rose-ui pull (seed, active, --force) and publish from the pulled folder',
       fn: async () => {
         const userC = await ctx.anonymous();
@@ -202,4 +206,87 @@ export function userUiPullCases(ctx: UserUiPullCaseContext) {
       },
     },
   ];
+}
+
+/** Actual installed entrypoints must ignore an ESM package in the session HOME. */
+export async function installedCliPackageBoundaryCase(): Promise<void> {
+  const { dirname } = await import('path');
+  const { AGENT_GRAPH_CLI_SCRIPT } = await import('../../providers/agentGraph/cli');
+  const { userUiToolFiles } = await import('../../providers/userUi/seed');
+  const { writeUserUiWorkspaceToDir, writeUserUiWorkspaceToSandbox } =
+    await import('../../providers/userUi/workspace');
+  for (const kind of ['local', 'sandbox']) {
+    const home = mkdtempSync(join(tmpdir(), 'rose-cli-esm-home-'));
+    const ran: string[] = [];
+    try {
+      const parentPackage = JSON.stringify({ type: 'module', name: 'codex-code' });
+      writeFileSync(join(home, 'package.json'), parentPackage);
+      const workspace = {
+        files: [
+          ...userUiToolFiles(),
+          { path: '.rose/bin/rose-agents', content: Buffer.from(AGENT_GRAPH_CLI_SCRIPT) },
+          {
+            path: '.rose/bin/esm-probe.mjs',
+            content: Buffer.from('import fs from "node:fs"; console.log(typeof fs.readFileSync);'),
+          },
+        ],
+        envs: {},
+        source: { kind: 'seed' as const },
+      };
+      if (kind === 'local') await writeUserUiWorkspaceToDir(home, workspace);
+      else
+        await writeUserUiWorkspaceToSandbox(
+          {
+            files: {
+              write: async (entries) => {
+                for (const entry of entries) {
+                  mkdirSync(dirname(entry.path), { recursive: true });
+                  writeFileSync(entry.path, Buffer.from(entry.data));
+                }
+              },
+            },
+            commands: {
+              run: async (command) => {
+                ran.push(command);
+                return { exitCode: 0 };
+              },
+            },
+          },
+          home,
+          workspace
+        );
+      for (const cli of ['rose-ui', 'rose-agents']) {
+        const output = await execFileAsync(
+          process.execPath,
+          [join(home, '.rose/bin', cli), '--help'],
+          { env: { ...process.env, HOME: home } }
+        ).catch((error) => {
+          // rose-agents intentionally exits 2 after printing usage.
+          if (cli === 'rose-agents' && error.code === 2 && /^usage:/i.test(error.stderr))
+            return error;
+          throw error;
+        });
+        assert(
+          /usage:/i.test(output.stdout + output.stderr),
+          `${kind} ${cli} reaches its actual CLI parser`
+        );
+      }
+      const esm = await execFileAsync(process.execPath, [join(home, '.rose/bin/esm-probe.mjs')]);
+      assert(esm.stdout.trim() === 'function', 'explicit .mjs stays ESM');
+      assert(
+        readFileSync(join(home, 'package.json'), 'utf8') === parentPackage,
+        'parent package unchanged'
+      );
+      assert(
+        JSON.parse(readFileSync(join(home, '.rose/bin/package.json'), 'utf8')).type === 'commonjs',
+        'installed bin package boundary'
+      );
+      assert(
+        !ran.some((command) => command.includes('package.json')),
+        'package metadata is not chmodded'
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
 }
