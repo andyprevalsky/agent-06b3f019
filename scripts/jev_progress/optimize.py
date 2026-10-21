@@ -12,6 +12,7 @@ import time
 import urllib.request
 
 from core import FORMATS, credential, digest, evaluate, load_rows, request, save, verify_dataset
+from checkpoint import export_optimizer, warm_candidates
 
 
 def dominates(a, b):
@@ -102,6 +103,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--iterations", type=int, default=8)
     parser.add_argument("--start-at", type=int, default=1)
+    parser.add_argument("--warm-start", type=Path)
     args = parser.parse_args()
     output = args.output
     cohorts = json.loads((output / "cohorts.json").read_text())
@@ -116,6 +118,16 @@ def main():
     pool = [seed]
     winner = seed
     baseline_metrics = seed["validation"]["metrics"]
+    previous = json.loads(args.warm_start.read_text()) if args.warm_start else None
+    if previous:
+        for saved in warm_candidates(previous, seed['prompt']):
+            # Re-evaluate on the CURRENT development cohort, including new
+            # training families. Historical scores are provenance only.
+            train_result = evaluate(train, traces, saved['prompt'], output)
+            validation_result = evaluate(validation, traces, saved['prompt'], output)
+            if train_result['metrics']['failed'] or validation_result['metrics']['failed']:
+                raise RuntimeError('Warm-start candidate could not be rescored')
+            pool.append({**saved, 'train': train_result, 'validation': validation_result})
     # Resume with all measured previous candidates but re-rank under the newly
     # requested joint objective. Previously evaluated prompts are not mutated.
     for i in range(1, args.start_at):
@@ -129,7 +141,9 @@ def main():
     winner = min(pool, key=lambda c: joint_loss(c["validation"]["metrics"], baseline_metrics))
     started = time.time()
     stale = 0
+    next_iteration = args.start_at
     for i in range(args.start_at, args.iterations + 1):
+        next_iteration = i + 1
         frontier = [c for c in pool if not any(dominates(other["validation"]["metrics"], c["validation"]["metrics"])
                     for other in pool if other is not c)]
         parent = winner if i % 3 else min(frontier, key=lambda c: c["validation"]["metrics"]["eta_log_mae"])
@@ -161,6 +175,7 @@ def main():
             stale = 0
         else:
             stale += 1
+        save(output / 'optimizer-state.json', export_optimizer(pool, winner, next_iteration, previous))
         save(output / "winner.json", {"name": winner["name"], "prompt": winner["prompt"],
                                        "validation_metrics": winner["validation"]["metrics"]})
         status = {"iteration": i, "candidate": name, "promoted": promoted, "winner": winner["name"],
@@ -183,6 +198,8 @@ def main():
         save(output / "prompts/merged.json", merged)
         if joint_loss(result["metrics"], baseline_metrics) < joint_loss(winner["validation"]["metrics"], baseline_metrics):
             winner = {"name": "merged", "prompt": merged, "validation": result}
+            pool.append(winner)
+    save(output / 'optimizer-state.json', export_optimizer(pool, winner, next_iteration, previous))
     save(output / "winner.json", {"name": winner["name"], "prompt": winner["prompt"],
                                    "validation_metrics": winner["validation"]["metrics"]})
     save(output / "status.json", {"phase": "complete", "winner": winner["name"], "candidate_count": len(pool),

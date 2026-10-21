@@ -18,6 +18,7 @@ import sys
 from core import balanced, digest, evaluate, load_rows, prepare, save
 from production import examples, pull
 from store import Store
+from checkpoint import config, validate, export_optimizer
 
 
 def now():
@@ -93,14 +94,54 @@ def bootstrap(args, store):
              'split_salt': os.urandom(32).hex(), 'seen_families': sorted({t['family_id'] for t in traces}),
              'goals': goals, 'train_rows': train, 'train_traces': [t for t in traces if t['trace_id'] in training_ids],
              'history': [], 'policy': 'Frozen incoming champion; fresh unseen sealed families; no sealed labels in optimization.'}
+    state['config'] = config()
+    state['optimizer'] = {'schema': 1, 'next_iteration': 1, 'candidates': [], 'frontier': []}
+    state['development_split'] = None
     key = store.advance(state)
     save(args.output / 'bootstrap.json', {'state': key, 'watermark': state['watermark'], 'champion_sha256': digest(prompt)})
     print('BOOTSTRAPPED', key, state['watermark'], flush=True)
 
 
+def migrate(args, store):
+    """One-time adoption of an existing checkpoint, preserving its history."""
+    head, etag = store.head()
+    state = store.get(head['state'])
+    if 'config' in state:
+        raise ValueError('Already migrated; refusing to reset continuation state')
+    archive = store.get(args.experiment_key)['artifacts']
+    pool = []
+    for path, value in archive.items():
+        if not path.startswith('evaluations/') or not path.endswith('-validation.json'):
+            continue
+        name = path.removeprefix('evaluations/').removesuffix('-validation.json')
+        prompt = archive.get('prompts/' + name + '.json')
+        if prompt and not value['metrics']['failed']:
+            pool.append({'name': name, 'prompt': prompt, 'validation': value})
+    pool.append({'name': 'seed', 'prompt': archive['prompts/seed.json'],
+                 'validation': archive['validation-baseline.json']})
+    winner = next(c for c in pool if digest(c['prompt']) == state['champion_sha256'])
+    next_iteration = 1 + max([int(c['name'].split('-')[1]) for c in pool
+                              if c['name'].startswith('candidate-')] or [0])
+    state['optimizer'] = export_optimizer(pool, winner, next_iteration)
+    state['config'] = config()
+    state['development_split'] = {k: archive['cohorts.json'][k] for k in ('validation_groups', 'validation_ids')}
+    state['continuation_migration'] = {'previous_state': head['state'], 'experiment': args.experiment_key,
+                                       'timestamp': now(), 'watermark_unchanged': state['watermark']}
+    validate(state)
+    key = store.advance(state, etag)
+    save(args.output / 'continuation-migration.json', {'state': key, 'watermark': state['watermark'],
+                                                     'next_iteration': next_iteration})
+    print('CONTINUATION_MIGRATED', key, 'next_iteration', next_iteration, flush=True)
+
+
 def run(args, store):
     head, etag = store.head()
     state = store.get(head['state'])
+    saved_config = validate(state)
+    if args.iterations is not None:
+        if args.iterations < 1:
+            raise ValueError('Iterations must be positive')
+        saved_config['search']['iterations_per_run'] = args.iterations
     until = now()
     run_id = until.replace(':', '').replace('+', '_')
     output = args.output / run_id
@@ -109,9 +150,11 @@ def run(args, store):
     # Durable freeze exists before any production query. A fresh run must not
     # change this prompt after looking at its sealed labels or scores.
     freeze = {'run_id': run_id, 'from': state['watermark'], 'until': until,
-              'incoming_prompt': incoming, 'prompt_sha256': digest(incoming), 'previous_state': head['state']}
+              'incoming_prompt': incoming, 'prompt_sha256': digest(incoming), 'previous_state': head['state'],
+              'config': saved_config, 'config_sha256': digest(saved_config),
+              'next_iteration': state['optimizer']['next_iteration']}
     store.receipt(run_id + '-freeze', freeze)
-    fresh, acquisition = pull(state['watermark'], until, set(state['seen_families']))
+    fresh, acquisition = pull(state['watermark'], until, set(state['seen_families']), saved_config['filters'])
     sealed, new_train = partition(fresh, state)
     # Complete every prefix; report this event-weighted distribution explicitly.
     # Never choose test examples based on labels or the current model's errors.
@@ -139,7 +182,8 @@ def run(args, store):
         write_rows(dataset / 'test.jsonl.gz', [])
         write_rows(dataset / 'traces.jsonl.gz', state['train_traces'])
         experiment = output / 'optimization'
-        cohorts = prepare(dataset, experiment)
+        cohorts = prepare(dataset, experiment, frozen_split=state['development_split'])
+        state['development_split'] = {k: cohorts[k] for k in ('validation_groups', 'validation_ids')}
         save(experiment / 'prompts/seed.json', incoming)
         by_id = {t['trace_id']: t for t in state['train_traces']}
         for split in ('train', 'validation'):
@@ -148,12 +192,17 @@ def run(args, store):
             if result['metrics']['failed']:
                 raise RuntimeError('Development baseline failed; do not advance')
             save(experiment / (split + '-baseline.json'), result)
+        start = state['optimizer']['next_iteration']
+        save(experiment / 'warm-start.json', state['optimizer'])
         subprocess.run([sys.executable, str(Path(__file__).with_name('optimize.py')),
-                        '--dataset', str(dataset), '--output', str(experiment), '--iterations', str(args.iterations)], check=True)
+                        '--dataset', str(dataset), '--output', str(experiment), '--start-at', str(start),
+                        '--iterations', str(start + saved_config['search']['iterations_per_run'] - 1),
+                        '--warm-start', str(experiment / 'warm-start.json')], check=True)
         winner = json.loads((experiment / 'winner.json').read_text())
         state['champion'] = winner['prompt']
         state['champion_sha256'] = digest(winner['prompt'])
         state['last_validation'] = winner['validation_metrics']
+        state['optimizer'] = json.loads((experiment / 'optimizer-state.json').read_text())
         # Retain all measured proposals and reflection receipts durably.
         state['last_experiment'] = store.put({str(p.relative_to(experiment)): json.loads(p.read_text())
                                              for p in experiment.rglob('*.json')})
@@ -167,17 +216,20 @@ def run(args, store):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('command', choices=['bootstrap', 'run'])
+    p.add_argument('command', choices=['bootstrap', 'run', 'migrate'])
     p.add_argument('--output', type=Path, default=Path('.context/jev-weekly'))
     p.add_argument('--dataset', type=Path)
     p.add_argument('--prompt', type=Path)
-    p.add_argument('--iterations', type=int, default=8)
+    p.add_argument('--iterations', type=int, help='Explicitly override and persist the per-run budget')
+    p.add_argument('--experiment-key', help='Encrypted initial experiment object for one-time adoption')
     args = p.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     if args.command == 'bootstrap' and (args.dataset is None or args.prompt is None):
         p.error('bootstrap needs --dataset and --prompt')
+    if args.command == 'migrate' and not args.experiment_key:
+        p.error('migrate needs --experiment-key')
     store = Store()
-    bootstrap(args, store) if args.command == 'bootstrap' else run(args, store)
+    {'bootstrap': bootstrap, 'run': run, 'migrate': migrate}[args.command](args, store)
 
 
 if __name__ == '__main__':

@@ -82,7 +82,7 @@ def balanced(rows, count):
     return selected
 
 
-def prepare(dataset, output):
+def prepare(dataset, output, frozen_split=None):
     train = load_rows(dataset / "train.jsonl.gz")
     test = load_rows(dataset / "test.jsonl.gz")
     if {r["split_group"] for r in train} & {r["split_group"] for r in test}:
@@ -92,15 +92,15 @@ def prepare(dataset, output):
         groups[row["split_group"]].append(row)
     # Seed selection is independent of outcomes or model scores. Hold out the
     # smaller explore family; its only alternative owns >6k training examples.
-    validation_groups = set()
-    for kind in ("explore", "browser", "normal_root", "normal_child"):
+    validation_groups = set((frozen_split or {}).get('validation_groups', []))
+    for kind in (() if frozen_split is not None else ("explore", "browser", "normal_root", "normal_child")):
         if any(r["agent_kind"] == kind for g in validation_groups for r in groups[g]):
             continue
         available = [g for g in groups if g not in validation_groups
                      and any(r["agent_kind"] == kind for r in groups[g])]
         if len(available) > 1:
             validation_groups.add(min(available, key=lambda g: (len(groups[g]), digest(g))))
-    for group in sorted(groups, key=digest):
+    for group in ([] if frozen_split is not None else sorted(groups, key=digest)):
         if sum(len(groups[g]) for g in validation_groups) >= 500:
             break
         if len(groups[group]) < 1000:
@@ -109,8 +109,11 @@ def prepare(dataset, output):
     validation = [r for r in train if r["split_group"] in validation_groups]
     if {r["family_id"] for r in dev} & {r["family_id"] for r in validation}:
         raise ValueError("Family leakage")
+    validation_ids = ((frozen_split or {}).get('validation_ids') if frozen_split is not None else None)
+    if validation_ids is not None and not set(validation_ids) <= {r['example_id'] for r in validation}:
+        raise ValueError('Frozen validation examples are missing; refusing to repartition')
     manifest = {"schema": 1, "train_ids": [r["example_id"] for r in balanced(dev, 256)],
-                "validation_ids": [r["example_id"] for r in balanced(validation, 500)],
+                "validation_ids": validation_ids if validation_ids is not None else [r["example_id"] for r in balanced(validation, 500)],
                 "train_available": len(dev), "validation_available": len(validation),
                 "validation_groups": sorted(validation_groups),
                 "test_sha256": hashlib.sha256((dataset / "test.jsonl.gz").read_bytes()).hexdigest(),

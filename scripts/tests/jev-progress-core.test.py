@@ -4,11 +4,17 @@ import copy
 import sys
 import tempfile
 import unittest
+import json
+import gzip
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "jev_progress"))
 from core import SEED, BINS, FORMATS, request, decode, evaluate, summarize
 from optimize import dominates, joint_loss
 from weekly import partition, goal_key
+from checkpoint import config, validate, export_optimizer, warm_candidates
+from core import digest, prepare
+import optimize
 
 
 class CoreTests(unittest.TestCase):
@@ -103,6 +109,76 @@ class CoreTests(unittest.TestCase):
         state = {'split_salt': '00'*32, 'goals': {goal_key(t): 'sealed'}, 'seen_families': []}
         sealed, train = partition([t], state)
         self.assertEqual(sealed + train, [])
+
+    def test_continuation_survives_serialization_without_stale_selection_scores(self):
+        original = {'name': 'candidate-11', 'prompt': {**SEED, 'input_format': 'timeline'},
+                    'validation': {'metrics': {'trace_macro_mae_pp': 12, 'eta_log_mae': 2}}}
+        other = {'name': 'candidate-09', 'prompt': SEED,
+                 'validation': {'metrics': {'trace_macro_mae_pp': 20, 'eta_log_mae': 1}}}
+        state = {'champion': original['prompt'], 'champion_sha256': digest(original['prompt']),
+                 'watermark': '2026-10-21T00:00:00+00:00', 'config': config(),
+                 'optimizer': export_optimizer([original, other], original, 12)}
+        state['config']['filters']['result_text_chars'] = 1200
+        state['config']['search']['iterations_per_run'] = 3
+        restored = json.loads(json.dumps(state))
+        saved = validate(restored)
+        self.assertEqual(saved['filters']['result_text_chars'], 1200)
+        self.assertEqual(saved['search']['iterations_per_run'], 3)
+        self.assertEqual(restored['optimizer']['next_iteration'], 12)
+        candidates = warm_candidates(restored['optimizer'], original['prompt'])
+        self.assertEqual(candidates, [{'name': 'candidate-09', 'prompt': SEED}])
+        self.assertNotIn('validation_metrics', candidates[0])
+        restored['config']['protocol']['model'] = 'changed-model'
+        with self.assertRaises(ValueError):
+            validate(restored)
+        with self.assertRaises(ValueError):
+            validate({'champion': SEED})
+
+    def test_new_training_data_does_not_move_validation_boundary(self):
+        old = {'example_id': 'validation-old', 'split_group': 'v', 'family_id': 'v',
+               'agent_kind': 'normal_root', 'trace_id': 'v'}
+        dev = {**old, 'example_id': 'dev-old', 'split_group': 'd', 'family_id': 'd', 'trace_id': 'd'}
+        new = {**old, 'example_id': 'new', 'split_group': 'n', 'family_id': 'n', 'trace_id': 'n'}
+        frozen = {'validation_groups': ['v'], 'validation_ids': ['validation-old']}
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for name, rows in [('train', [old, dev, new]), ('test', []), ('traces', [])]:
+                with gzip.open(root / (name + '.jsonl.gz'), 'wt') as f:
+                    for row in rows:
+                        f.write(json.dumps(row)+'\n')
+            manifest = prepare(root, root / 'run', frozen_split=frozen)
+            self.assertEqual(manifest['validation_ids'], ['validation-old'])
+            self.assertEqual(set(manifest['train_ids']), {'dev-old', 'new'})
+
+    def test_optimizer_rescores_saved_candidates_instead_of_reusing_old_scores(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            data, output = root / 'data', root / 'run'
+            data.mkdir()
+            dev = {**self.row, 'agent_kind': 'normal_root', 'family_id': 'd', 'split_group': 'd'}
+            val = {**dev, 'example_id': 'val', 'family_id': 'v', 'split_group': 'v'}
+            for name, rows in [('train', [dev, val]), ('test', []), ('traces', [self.trace])]:
+                with gzip.open(data / (name + '.jsonl.gz'), 'wt') as f:
+                    for row in rows:
+                        f.write(json.dumps(row)+'\n')
+            prepare(data, output, {'validation_groups': ['v'], 'validation_ids': ['val']})
+            seed_result = {'metrics': {'failed': 0, 'trace_macro_mae_pp': 10, 'eta_log_mae': 2}, 'rows': []}
+            for split in ('train', 'validation'):
+                (output / (split + '-baseline.json')).write_text(json.dumps(seed_result))
+            old_prompt = {**SEED, 'progress': 'Retained candidate'}
+            warm = {'next_iteration': 12, 'frontier': [digest(old_prompt)], 'candidates': [
+                {'name': 'candidate-09', 'prompt': old_prompt,
+                 'validation_metrics': {'trace_macro_mae_pp': 0.01, 'eta_log_mae': 0.01}}]}
+            warm_path = root / 'warm.json'
+            warm_path.write_text(json.dumps(warm))
+            worse_now = {'metrics': {'failed': 0, 'trace_macro_mae_pp': 30, 'eta_log_mae': 5}, 'rows': []}
+            with patch.object(sys, 'argv', ['optimize.py', '--dataset', str(data), '--output', str(output),
+                                           '--warm-start', str(warm_path), '--start-at', '12', '--iterations', '11']), \
+                    patch.object(optimize, 'evaluate', return_value=worse_now) as evaluator:
+                optimize.main()
+            self.assertEqual(evaluator.call_count, 2)
+            self.assertEqual(json.loads((output/'winner.json').read_text())['name'], 'seed')
+            self.assertEqual(json.loads((output/'optimizer-state.json').read_text())['next_iteration'], 12)
 
 
 if __name__ == "__main__":

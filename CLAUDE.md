@@ -1479,13 +1479,23 @@ Long waits remain badly underestimated, and some 15–104 minute jobs are called
 one year. Some early prefixes are wrongly judged nearly finished. Do not use
 the reported test to select further mutations; new data must judge them.
 
-Durable restart: `agents/venv/bin/python scripts/jev_progress/weekly.py run --iterations 8`.
+Durable restart: `agents/venv/bin/python scripts/jev_progress/weekly.py run`.
 The encrypted research state, training corpus, champion and evaluation receipts
 live under `jev-research/v1/` in the existing private R2 trace archive bucket;
 fresh devboxes do not depend on this box's `.context` directory. Credentials
 and required dependencies are listed in the README. The one-time bootstrap
 already ran; NEVER rerun bootstrap or reset the watermark to improve scores.
 Local detailed results: `.context/progress-jev-xp/optimization/test-report.json`.
+
+Continuation is mandatory: restore the saved champion INCLUDING input format,
+acquisition filters, joint scoring protocol, per-run search budget, Pareto
+candidate pool, next mutation number, fixed validation IDs/groups, training
+corpus, seen-family/goal exclusions and production watermark. Do not restart
+from the generic seed, regenerate validation membership, or silently reset
+settings. Re-score retained Pareto candidates on current development data;
+historical scores are provenance, never fresh comparison scores. Protocol
+mismatches fail closed and require explicit migration. `--iterations N` is an
+explicit persisted budget change; omit it to continue the saved budget.
 
 Every weekly run durably freezes the incoming prompt before a read-only
 production pull. Newly observed families with unseen normalized goals receive

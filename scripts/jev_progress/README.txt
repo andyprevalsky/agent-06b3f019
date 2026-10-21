@@ -71,7 +71,18 @@ All SQL runs with default_transaction_read_only and a 25-second timeout.
 One-time bootstrap (fails if an existing research head is present):
   agents/venv/bin/python scripts/jev_progress/weekly.py bootstrap --dataset .context/progress-jev-xp/training-10k --prompt .context/progress-jev-xp/optimization/winner.json
 Fresh devboxes need only this repository, dependencies and managed credentials:
-  agents/venv/bin/python scripts/jev_progress/weekly.py run --iterations 8
+  agents/venv/bin/python scripts/jev_progress/weekly.py run
+
+Each run restores the champion (including input format), acquisition filters,
+fixed validation IDs and groups, retained Pareto prompts, next mutation number,
+joint scoring protocol, per-run budget, corpus, exclusions and watermark.
+Warm-start prompts are re-evaluated on current development data before selecting
+parents. Saved historical scores are never substituted for current scores.
+The optimizer writes optimizer-state.json after each completed mutation.
+--iterations N explicitly changes and persists the per-run budget; omit it to
+retain the last setting. Protocol mismatches fail closed, never reset to defaults.
+Existing v1 checkpoints require the one-time explicit migrate command with the
+encrypted initial experiment artifact. The current checkpoint is migrated.
 
 Encrypted durable state: s3://<R2_BUCKET_TRACE_ARCHIVE>/jev-research/v1/.
 Each run freezes and records the incoming champion before its read-only pull.

@@ -35,7 +35,10 @@ def literal(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def pull(since, until, seen_families):
+def pull(since, until, seen_families, filters=None):
+    if filters is None:
+        from checkpoint import config
+        filters = config()['filters']
     agents = query('SELECT row_to_json(a) FROM (SELECT id,"parentAgentId",status,goal,"responseSchema",'
                    '"updatedAt" FROM "Agent") a')
     by_id = {a['id']: a for a in agents}
@@ -55,7 +58,8 @@ def pull(since, until, seen_families):
     fresh = {families[a['id']] for a in agents if a['status'] == 'COMPLETED'
              and stamp(since) < stamp(a['updatedAt']) <= stamp(until)
              and families[a['id']] not in seen_families}
-    candidates = [a for a in agents if families[a['id']] in fresh and a['status'] == 'COMPLETED'
+    candidates = [a for a in agents if families[a['id']] in fresh and a['status'] == filters['terminal_status']
+                  and ('normal_child' if a['parentAgentId'] else 'normal_root') in filters['agent_kinds']
                   and stamp(a['updatedAt']) <= stamp(until) and a.get('goal')]
     events = defaultdict(list)
     for offset in range(0, len(candidates), 80):
@@ -74,7 +78,7 @@ def pull(since, until, seen_families):
             md = m.get('metadata') or {}
             if m['role'] == 'TOOL' and md.get('toolCallId') in calls[m['agentId']]:
                 events[m['agentId']].append({'id': m['id'], 'role': 'tool', 'timestamp': m['timestamp'],
-                                            'text': (m.get('text') or '')[:5000], 'call_id': md['toolCallId'],
+                                            'text': (m.get('text') or '')[:filters['result_text_chars']], 'call_id': md['toolCallId'],
                                             'status': md.get('toolStatus'), 'tool': md.get('toolName')})
     traces = []
     for a in candidates:
