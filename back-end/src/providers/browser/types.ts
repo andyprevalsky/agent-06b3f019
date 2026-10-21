@@ -1,14 +1,14 @@
 import type { Browser } from 'playwright';
 import type { ProxyGeoLocation } from '../geoip';
 
-export const BROWSER_PROVIDERS = ['steel', 'kernel', 'browser-use'] as const;
+export const BROWSER_PROVIDERS = ['steel', 'kernel', 'browser-use', 'tilion'] as const;
 
 export type BrowserProviderName = (typeof BROWSER_PROVIDERS)[number];
 
 export function storedBrowserProvider(value: string): BrowserProviderName {
   // BrowserSession.provider has no database constraint. Preserve the previous
-  // legacy fallback while recognizing Browser Use explicitly.
-  return value === 'kernel' || value === 'browser-use' ? value : 'steel';
+  // legacy fallback while recognizing Browser Use and Tilion explicitly.
+  return value === 'kernel' || value === 'browser-use' || value === 'tilion' ? value : 'steel';
 }
 
 export interface BrowserProviderSession {
