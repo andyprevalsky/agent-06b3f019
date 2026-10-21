@@ -5,6 +5,7 @@ import { prisma } from './database';
 import { createLogger } from './logger';
 import { cleanupAgentPurchaseCards } from './purchaseCleanup';
 import { closeSession } from './browser';
+import { withSteelLifecycleClaim } from './steel/lifecycleClaim';
 import { closeLocalClaudeCodeSession, isLocalClaudeCodeSandboxId } from './claudeCodeLocalSession';
 import { isLocalDeviceSandboxId } from './localDevices/hub';
 import { closeLocalDeviceCodeSession } from './localDevices/session';
@@ -76,19 +77,22 @@ function browserSessionReleaseDependencies(retire = false): BrowserSessionReleas
         },
         select: { id: true, sessionId: true },
       }),
-    retireUnmaterializedSession: async (agentId, taskId) => {
-      const retired = await prisma.browserSession.updateMany({
-        where: {
-          id: taskId,
-          agentId,
-          logicalOwnerKey: `agent:${agentId}`,
-          sessionId: null,
-          status: 'PAUSED',
-        },
-        data: { status: 'CLOSED', closedAt: new Date() },
-      });
-      return retired.count === 1;
-    },
+    retireUnmaterializedSession: (agentId, taskId) =>
+      withSteelLifecycleClaim(taskId, async (_assertOwned, _runNative, mutateOwned) =>
+        mutateOwned(async (transaction) => {
+          const retired = await transaction.browserSession.updateMany({
+            where: {
+              id: taskId,
+              agentId,
+              logicalOwnerKey: `agent:${agentId}`,
+              sessionId: null,
+              status: 'PAUSED',
+            },
+            data: { status: 'CLOSED', closedAt: new Date() },
+          });
+          return retired.count === 1;
+        })
+      ),
     closeSession: async (sessionId, pause) => {
       await closeSession(sessionId, pause);
     },

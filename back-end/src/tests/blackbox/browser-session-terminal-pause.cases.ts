@@ -16,6 +16,8 @@ export async function runBrowserTerminalPauseCases(): Promise<void> {
   let lazyStatus = 'PAUSED';
   let lazyNative: string | null = null;
   const retirements: unknown[] = [];
+  let nativeOutstanding = false;
+  const lifecycleClaims: string[] = [];
   const database = {
     browserSession: {
       findMany: async ({ where }: { where: { agentId: string; status: { in: string[] } } }) => {
@@ -56,6 +58,25 @@ export async function runBrowserTerminalPauseCases(): Promise<void> {
     if (parent?.filename === path) {
       if (id === './database') return { prisma: database };
       if (id === './logger') return { createLogger: () => ({ info() {}, warn() {} }) };
+      if (id === './steel/lifecycleClaim')
+        return {
+          withSteelLifecycleClaim: async (
+            taskId: string,
+            callback: (
+              assertOwned: unknown,
+              runNative: unknown,
+              mutateOwned: (mutate: (tx: typeof database) => Promise<unknown>) => Promise<unknown>
+            ) => Promise<unknown>
+          ) => {
+            lifecycleClaims.push(taskId);
+            if (nativeOutstanding) throw new Error('Browser lifecycle outcome remains unknown');
+            return callback(
+              () => {},
+              () => {},
+              (mutate: (tx: typeof database) => Promise<unknown>) => mutate(database)
+            );
+          },
+        };
       if (id === './browser')
         return {
           closeSession: async (sessionId: string, pause: boolean) => {
@@ -114,6 +135,17 @@ export async function runBrowserTerminalPauseCases(): Promise<void> {
     );
     assert.equal(lazyStatus, 'PAUSED');
     assert.deepEqual(releases, []);
+    lazyNative = null;
+    nativeOutstanding = true;
+    const updatesBefore = retirements.length;
+    await assert.rejects(
+      releaseAgentBrowserSessions('owner', {}, { retire: true }),
+      AggregateError
+    );
+    assert.equal(retirements.length, updatesBefore, 'unknown native create must fence retirement');
+    assert.equal(lazyStatus, 'PAUSED');
+    assert.deepEqual(lifecycleClaims, ['logical-task', 'logical-task', 'logical-task']);
+    nativeOutstanding = false;
     lazyOnly = false;
 
     const attempted: string[] = [];
