@@ -39,6 +39,11 @@ _ATTACH_TIMEOUT_SECONDS = 30.0
 # (Tilion documents browser.close() as a disconnect); never forward it to the
 # shared browser on behalf of one local client.
 _CLIENT_LOCAL_METHODS = frozenset({"Browser.close"})
+# Tilion's Chrome exposes its own UI surfaces (chrome://omnibox-popup.top-chrome)
+# as type "browser_ui" targets, already attached, in getTargets and auto-attach.
+# They are not the user's pages; no local client may see, select or drive them.
+# Only this type is hidden: iframes, workers and service workers stay visible.
+_HIDDEN_TARGET_TYPES = frozenset({"browser_ui"})
 
 
 class CdpMultiplexerUpstreamClosed(ConnectionError):
@@ -94,6 +99,8 @@ class SingleCdpConnectionMultiplexer:
         self._internal: Dict[int, asyncio.Future] = {}
         self._session_owner: Dict[str, _Client] = {}
         self._browser_session_owner: Dict[str, _Client] = {}
+        self._hidden_target_ids: Set[str] = set()
+        self._hidden_sessions: Set[str] = set()
         self._closed = False
         self.upstream_connections_opened = 0
         self.last_upstream_close: Optional[Tuple[Optional[int], str]] = None
@@ -162,6 +169,7 @@ class SingleCdpConnectionMultiplexer:
             self._pending.clear()
             self._session_owner.clear()
             self._browser_session_owner.clear()
+            self._hidden_sessions.clear()
             if upstream is not None:
                 with contextlib.suppress(Exception):
                     await upstream.close()
@@ -243,6 +251,11 @@ class SingleCdpConnectionMultiplexer:
                 child = (message.get("result") or {}).get("sessionId")
                 if child:
                     self._own_session(client, child)
+            if method == "Target.getTargets":
+                result = message.get("result") or {}
+                infos = result.get("targetInfos")
+                if isinstance(infos, list):
+                    result["targetInfos"] = [info for info in infos if not self._hide_target(info)]
             await self._send_to_client(client, message)
             return
 
@@ -260,12 +273,58 @@ class SingleCdpConnectionMultiplexer:
             return
         method = message.get("method")
         params = message.get("params") or {}
+        if await self._drop_hidden_target_event(session_id, method, params):
+            return
         if method == "Target.attachedToTarget" and params.get("sessionId"):
             self._own_session(client, params["sessionId"])
         await self._send_to_client(client, message)
         if method == "Target.detachedFromTarget" and params.get("sessionId"):
             self._session_owner.pop(params["sessionId"], None)
             client.child_sessions.discard(params["sessionId"])
+
+    def _hide_target(self, info: Any) -> bool:
+        if isinstance(info, dict) and info.get("type") in _HIDDEN_TARGET_TYPES:
+            if info.get("targetId"):
+                self._hidden_target_ids.add(str(info["targetId"]))
+            return True
+        return False
+
+    async def _drop_hidden_target_event(self, parent_session: str, method: Any, params: Dict[str, Any]) -> bool:
+        """Swallow events about browser_ui targets; release any auto-attached one."""
+        if method in ("Target.targetCreated", "Target.targetInfoChanged"):
+            return self._hide_target(params.get("targetInfo"))
+        if method in ("Target.targetDestroyed", "Target.targetCrashed"):
+            return str(params.get("targetId") or "") in self._hidden_target_ids
+        if method == "Target.detachedFromTarget":
+            hidden = str(params.get("sessionId") or "") in self._hidden_sessions
+            self._hidden_sessions.discard(str(params.get("sessionId") or ""))
+            return hidden
+        if method != "Target.attachedToTarget" or not self._hide_target(params.get("targetInfo")):
+            return False
+        child = str(params.get("sessionId") or "")
+        upstream = self._upstream
+        if child and upstream is not None:
+            self._hidden_sessions.add(child)
+            # Never leave it paused by waitForDebuggerOnStart, then let it go.
+            if params.get("waitingForDebugger"):
+                with contextlib.suppress(Exception):
+                    await upstream.send(
+                        json.dumps(
+                            {"id": next(self._ids), "method": "Runtime.runIfWaitingForDebugger", "sessionId": child}
+                        )
+                    )
+            with contextlib.suppress(Exception):
+                await upstream.send(
+                    json.dumps(
+                        {
+                            "id": next(self._ids),
+                            "method": "Target.detachFromTarget",
+                            "params": {"sessionId": child},
+                            "sessionId": parent_session,
+                        }
+                    )
+                )
+        return True
 
     def _own_session(self, client: _Client, session_id: str) -> None:
         self._session_owner[session_id] = client

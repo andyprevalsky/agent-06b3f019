@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import structlog
 
@@ -242,3 +243,94 @@ async def apply_worker_state(playwright_browser: Any, worker_apply: Dict[str, An
         local_storage_entries=applied_entries,
     )
     return {"cookies": len(cookies), "local_storage_entries": applied_entries}
+
+
+# ----- locale ---------------------------------------------------------------
+
+_LOCALE_RE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
+
+
+def accept_language_for_locale(locale: str) -> str:
+    """``de-DE`` -> ``de-DE,de``; Chromium adds the q-values (header ``de-DE,de;q=0.9``)."""
+    language = locale.split("-", 1)[0]
+    return locale if language == locale else f"{locale},{language}"
+
+
+def resolve_geo_locale(fingerprint_injection: Any, exit_geo_locale: Any) -> Dict[str, str]:
+    """Timezone and locale for a Tilion session: ``fingerprint_injection`` first,
+    then the backend's top-level ``exit_geo_locale``; each field independently."""
+    resolved: Dict[str, str] = {}
+    for source in (fingerprint_injection, exit_geo_locale):
+        if not isinstance(source, dict):
+            continue
+        for field in ("timezone", "locale"):
+            value = str(source.get(field) or "").strip()
+            if field not in resolved and value:
+                resolved[field] = value
+    if "locale" in resolved and not _LOCALE_RE.match(resolved["locale"]):
+        resolved.pop("locale")
+    return resolved
+
+
+async def apply_geo_locale_override(
+    page: Any, fingerprint_injection: Any, exit_geo_locale: Any = None
+) -> Dict[str, str]:
+    """Apply the session's timezone and locale on ``page`` over the worker's socket.
+
+    Tilion keeps every session on America/New_York + en-US whatever the exit
+    geo, and backend emulation dies with the backend's connection. Overrides are
+    per CDP session, so this runs for every page the worker attaches to
+    (session start, rotation reattach, and each new page; see
+    ``install_geo_locale_for_new_pages``). The locale sets ICU/JS
+    (``Emulation.setLocaleOverride``) and Accept-Language, re-sending the
+    backend's full user-agent override so its platform/client hints are kept.
+    With neither source set, nothing is sent.
+    """
+    resolved = resolve_geo_locale(fingerprint_injection, exit_geo_locale)
+    if not resolved:
+        return resolved
+    cdp_session = await page.context.new_cdp_session(page)
+
+    async def send(method: str, params: Optional[Dict[str, Any]] = None) -> None:
+        await asyncio.wait_for(cdp_session.send(method, params or {}), timeout=_APPLY_TIMEOUT_SECONDS)
+
+    if "timezone" in resolved:
+        await send("Emulation.setTimezoneOverride", {"timezoneId": resolved["timezone"]})
+    if "locale" in resolved:
+        locale = resolved["locale"]
+        user_agent_override = (
+            (fingerprint_injection or {}).get("userAgentOverride") if isinstance(fingerprint_injection, dict) else None
+        )
+        override = dict(user_agent_override or {})
+        if not override.get("userAgent"):
+            override["userAgent"] = await page.evaluate("navigator.userAgent")
+        override["acceptLanguage"] = accept_language_for_locale(locale)
+        await send("Emulation.setLocaleOverride", {"locale": locale})
+        await send("Network.enable")
+        await send("Network.setUserAgentOverride", override)
+    logger.info("[TilionFiles] Applied worker-side timezone/locale", **resolved)
+    return resolved
+
+
+def install_geo_locale_for_new_pages(context: Any, fingerprint_injection: Any, exit_geo_locale: Any = None) -> bool:
+    """Re-apply the timezone/locale on every new page (popup, new tab) of ``context``."""
+    if not resolve_geo_locale(fingerprint_injection, exit_geo_locale) or getattr(
+        context, "_rose_geo_locale_installed", False
+    ):
+        return False
+    pending: Set[asyncio.Task] = set()
+
+    async def apply(page: Any) -> None:
+        try:
+            await apply_geo_locale_override(page, fingerprint_injection, exit_geo_locale)
+        except Exception as error:
+            logger.warning("[TilionFiles] Timezone/locale override failed on new page", error=str(error)[:200])
+
+    def on_page(page: Any) -> None:
+        task = asyncio.create_task(apply(page))
+        pending.add(task)
+        task.add_done_callback(pending.discard)
+
+    context.on("page", on_page)
+    context._rose_geo_locale_installed = True
+    return True
