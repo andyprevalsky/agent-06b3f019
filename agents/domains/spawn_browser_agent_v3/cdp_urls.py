@@ -65,6 +65,20 @@ def redact_cdp_url(cdp_url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
 
 
+def redact_url_secrets(url: Optional[str]) -> Optional[str]:
+    """Mask the credential in a Tilion URL (live view / CDP ``?token=``) before
+    it is persisted or logged; other providers' URLs pass through unchanged
+    (their live views are displayed from the persisted URL).
+
+    The backend re-mints Tilion live-view URLs for display, so a persisted copy
+    never needs its token.
+    """
+    if not url:
+        return url
+    host = (urlsplit(url).hostname or "").lower()
+    return redact_cdp_url(url) if host in _tilion_hosts() else url
+
+
 async def open_browser_cdp_connection(
     cdp_url: str,
     *,

@@ -88,7 +88,7 @@ from .activity_heartbeat import (
     stop_browser_activity_heartbeat,
     wait_for_browser_work,
 )
-from .cdp_urls import open_browser_cdp_connection, redact_cdp_url
+from .cdp_urls import open_browser_cdp_connection, redact_cdp_url, redact_url_secrets
 from .challenge_recovery import (
     commit_cookie_removals,
     live_tab_looks_challenged,
@@ -216,6 +216,10 @@ from .tilion_worker import (
     durable_downloads as durable_tilion_downloads,
 )
 from .tilion_worker import (
+    is_single_cdp_client_provider,
+    tilion_emulation,
+)
+from .tilion_worker import (
     release_session as release_tilion_session_files,
 )
 from .tilion_worker import (
@@ -223,9 +227,6 @@ from .tilion_worker import (
 )
 from .tilion_worker import (
     stage_upload as stage_tilion_upload,
-)
-from .tilion_worker import (
-    tilion_emulation,
 )
 from .tilion_worker import (
     worker_apply_payload as tilion_worker_apply_payload,
@@ -2514,6 +2515,7 @@ async def _replace_browser_humanizer(
     input_page: Any,
     cursor_observer: Any,
     humanizer_factory: Any,
+    serial_cdp_keyboard: bool = False,
 ) -> Any:
     """Rebind synthesized input after a provider handoff without leaking idle work."""
     if current_humanizer is not None:
@@ -2521,7 +2523,13 @@ async def _replace_browser_humanizer(
             await current_humanizer.close()
     if not enabled:
         return None
-    rebound_humanizer = humanizer_factory(dom_page=dom_page, input_page=input_page, fast=False)
+    rebound_humanizer = humanizer_factory(
+        dom_page=dom_page,
+        input_page=input_page,
+        fast=False,
+        # Tilion drops pipelined Input.dispatchKeyEvent commands.
+        **({"serial_cdp_keyboard": True} if serial_cdp_keyboard else {}),
+    )
     await rebound_humanizer.initialize_cursor(start_pos=(640, 400))
     rebound_humanizer.set_cursor_observer(cursor_observer)
     rebound_humanizer.start_idle_movement()
@@ -6756,7 +6764,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
                         "status": "completed",
                         "success": True,
                         "message": context_message,
-                        "browser_url": browser_url,
+                        "browser_url": redact_url_secrets(browser_url),
                         "current_url": browser_state.get("url", ""),
                         "task_id": task_id,
                         "session_id": world_model_session_id,
@@ -7625,7 +7633,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 "user_declined_auth": True,
                 **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
                 "message": f"User declined to sign in to {auth_realm or 'the site'}.",
-                "browser_url": browser_url,
+                "browser_url": redact_url_secrets(browser_url),
                 "task_id": task_id,
                 "usage_items": [],
                 "execution_time_ms": 0,
@@ -8277,7 +8285,13 @@ async def _spawn_browser_agent_activity_v3_real(
             if not _env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True):
                 logger.info("\U0001f916 BrowserHumanizer disabled by env; using browser-use input events")
                 return None
-            _humanizer = BrowserHumanizer(dom_page=dom_page, input_page=input_page, fast=False)
+            _humanizer = BrowserHumanizer(
+                dom_page=dom_page,
+                input_page=input_page,
+                fast=False,
+                # Tilion drops pipelined Input.dispatchKeyEvent commands.
+                serial_cdp_keyboard=is_single_cdp_client_provider(browser_session_metadata.get("provider")),
+            )
             await _humanizer.initialize_cursor(start_pos=(640, 400))
             logger.info("\U0001f916 BrowserHumanizer initialized (browser-use for DOM, Playwright for input)")
             return _humanizer
@@ -9033,7 +9047,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             "session_id": session_id,
                             "cdp_url": cdp_url,
                             "task_id": task_id,
-                            "browser_url": browser_url,
+                            "browser_url": redact_url_secrets(browser_url),
                             "auth_realm": auth_realm,
                             "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
                             "usage_items": build_usage_items(
@@ -9737,6 +9751,7 @@ async def _spawn_browser_agent_activity_v3_real(
                                     provider=browser_session_metadata.get("provider"),
                                 )
                         humanizer = await _replace_browser_humanizer(
+                            serial_cdp_keyboard=is_single_cdp_client_provider(browser_session_metadata.get("provider")),
                             current_humanizer=humanizer,
                             enabled=_env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True),
                             dom_page=dom_page,
@@ -9941,7 +9956,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     "auth_realm": auth_realm or base_site,
                     "task_id": task_id,
                     "session_id": session_id,
-                    "browser_url": browser_url,
+                    "browser_url": redact_url_secrets(browser_url),
                     "cdp_url": cdp_url,
                     "handoff_mode": "same_steel_session_live_view",
                     "step_count": iteration,
@@ -10287,6 +10302,7 @@ async def _spawn_browser_agent_activity_v3_real(
                                 )
 
                         humanizer = await _replace_browser_humanizer(
+                            serial_cdp_keyboard=is_single_cdp_client_provider(browser_session_metadata.get("provider")),
                             current_humanizer=humanizer,
                             enabled=_env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True),
                             dom_page=dom_page,
@@ -10742,7 +10758,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             "success": True,
                             **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
                             "message": context_message,
-                            "browser_url": browser_url,
+                            "browser_url": redact_url_secrets(browser_url),
                             "task_id": task_id,
                             "usage_items": usage_items,
                             "execution_time_ms": execution_time_ms,
@@ -11030,6 +11046,7 @@ Based on this feedback, I need to continue working on the task and address the i
 
                         input_page = recycled_page
                         humanizer = await _replace_browser_humanizer(
+                            serial_cdp_keyboard=is_single_cdp_client_provider(browser_session_metadata.get("provider")),
                             current_humanizer=humanizer,
                             enabled=True,
                             dom_page=dom_page,
@@ -11772,7 +11789,7 @@ Based on this feedback, I need to continue working on the task and address the i
             "success": False,
             **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
             "message": context_message,
-            "browser_url": browser_url,
+            "browser_url": redact_url_secrets(browser_url),
             "usage_items": usage_items,
             "execution_time_ms": execution_time_ms,
             "structured_response": latest_structured_response,
@@ -11838,7 +11855,7 @@ Based on this feedback, I need to continue working on the task and address the i
             "status": "cancelled",
             "task_id": task_id,
             "session_id": session_id,
-            "browser_url": browser_url,
+            "browser_url": redact_url_secrets(browser_url),
             "message": "Browser agent cancelled by user",
             **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
         }

@@ -92,6 +92,42 @@ def is_staged_upload_path(path: str) -> bool:
     return str(path or "").startswith(TILION_STAGED_UPLOAD_PREFIX)
 
 
+_ARM_UPLOAD_RECEIPT_JS = """function(marker) {
+    const el = this;
+    const view = el.ownerDocument.defaultView;
+    const receipt = {size: -1, name: null, marker};
+    const record = (event) => {
+        if (event.target === el && el.files && el.files[0]) {
+            receipt.size = el.files[0].size;
+            receipt.name = el.files[0].name;
+        }
+    };
+    view.addEventListener('input', record, true);
+    view.addEventListener('change', record, true);
+    receipt.cleanup = () => {
+        view.removeEventListener('input', record, true);
+        view.removeEventListener('change', record, true);
+    };
+    el.__roseUploadReceipt = receipt;
+    el.setAttribute('data-rose-upload', marker);
+}"""
+
+_READ_UPLOAD_RECEIPT_JS = """function() {
+    const receipt = this.__roseUploadReceipt || {size: -1, name: null};
+    if (receipt.cleanup) receipt.cleanup();
+    delete this.__roseUploadReceipt;
+    this.removeAttribute('data-rose-upload');
+    // A site that replaces the input (cloneNode) copies the marker; clear it there too.
+    if (receipt.marker) {
+        for (const copy of this.ownerDocument.querySelectorAll(`[data-rose-upload="${receipt.marker}"]`)) {
+            copy.removeAttribute('data-rose-upload');
+        }
+    }
+    const now = this.files && this.files[0] ? this.files[0].size : -1;
+    return {size: receipt.size, name: receipt.name, now};
+}"""
+
+
 async def set_staged_file_on_input(
     *,
     input_page: Any,
@@ -113,31 +149,42 @@ async def set_staged_file_on_input(
     if not object_id:
         raise RuntimeError("File input could not be resolved")
     # callFunctionOn needs no Runtime.enable (an automation tell on Tilion).
+    # Mark the exact node for Playwright, and record the file the page itself
+    # receives: capture-phase input/change listeners on the input's window run
+    # before the site's handlers, which may read the file and reset the input
+    # (TinyPNG). The delivered file is what those events carried.
     await send.Runtime.callFunctionOn(
         params={
             "objectId": object_id,
-            "functionDeclaration": "function(m){this.setAttribute('data-rose-upload', m)}",
+            "functionDeclaration": _ARM_UPLOAD_RECEIPT_JS,
             "arguments": [{"value": marker}],
         },
         session_id=cdp_session.session_id,
     )
     selector = f'[data-rose-upload="{marker}"]'
+    delivered = False
     try:
         for frame in getattr(input_page, "frames", None) or [input_page.main_frame]:
             locator = frame.locator(selector)
             if await locator.count():
                 await locator.set_input_files(payload)
-                landed = await locator.evaluate("(el) => (el.files && el.files[0] ? el.files[0].size : -1)")
-                return int(landed)
-        raise RuntimeError("File input not found in any frame")
+                delivered = True
+                break
+        if not delivered:
+            raise RuntimeError("File input not found in any frame")
     finally:
-        await send.Runtime.callFunctionOn(
+        receipt = await send.Runtime.callFunctionOn(
             params={
                 "objectId": object_id,
-                "functionDeclaration": "function(){this.removeAttribute('data-rose-upload')}",
+                "functionDeclaration": _READ_UPLOAD_RECEIPT_JS,
+                "returnByValue": True,
             },
             session_id=cdp_session.session_id,
         )
+    value = (receipt.get("result") or {}).get("value") or {}
+    if value.get("name") == payload["name"] and int(value.get("size", -1)) >= 0:
+        return int(value["size"])
+    return int(value.get("now", -1))
 
 
 # ----- downloads ---------------------------------------------------------

@@ -143,7 +143,8 @@ class BrowserHumanizer:
         self,
         dom_page: Any,
         input_page: Any,
-        fast: bool = False
+        fast: bool = False,
+        serial_cdp_keyboard: bool = False,
     ):
         """
         Args:
@@ -154,6 +155,11 @@ class BrowserHumanizer:
         self.dom_page = dom_page
         self.input_page = input_page
         self.fast = fast
+        # Single-CDP-client providers (Tilion) drop pipelined
+        # Input.dispatchKeyEvent commands: no response and the keystroke is never
+        # delivered. Their keyboard transport awaits each event in order; the
+        # explicit CDP timestamps keep page-visible dwell/flight timing human.
+        self._serial_cdp_keyboard = serial_cdp_keyboard
         self._last_pos = (640, 400)  # Start at center-ish
         self._input_synthesis_enabled = _env_enabled("BROWSER_AGENT_HUMAN_INPUT_ENABLED", True)
         self._mouse_synthesis_enabled = self._input_synthesis_enabled and _env_enabled(
@@ -770,6 +776,13 @@ class BrowserHumanizer:
             self._idle_anchor = (x, y)
         logger.debug("Humanized double-click", x=x, y=y)
 
+    async def _dispatch_cdp_key(self, cdp_session: Any, pending: List[asyncio.Task], params: dict) -> None:
+        send = cdp_session.send("Input.dispatchKeyEvent", params)
+        if self._serial_cdp_keyboard:
+            await asyncio.wait_for(send, timeout=CDP_INPUT_DRAIN_TIMEOUT_SECONDS)
+        else:
+            pending.append(asyncio.create_task(send))
+
     async def _type_text_with_cdp_fire_and_drain(self, text: str) -> bool:
         if not self._cdp_keyboard_transport_enabled:
             return False
@@ -784,45 +797,36 @@ class BrowserHumanizer:
             for char in text:
                 timing = self._keycap.next(char)
                 key = " " if char == " " else "Enter" if char == "\n" else char
-                pending.append(
-                    asyncio.create_task(
-                        cdp_session.send(
-                            "Input.dispatchKeyEvent",
-                            {
-                                "type": "rawKeyDown",
-                                "key": key,
-                                "timestamp": timestamp,
-                            },
-                        )
-                    )
+                await self._dispatch_cdp_key(
+                    cdp_session,
+                    pending,
+                    {
+                        "type": "rawKeyDown",
+                        "key": key,
+                        "timestamp": timestamp,
+                    },
                 )
                 await asyncio.sleep(timing.dwell_s)
                 timestamp += timing.dwell_s
-                pending.append(
-                    asyncio.create_task(
-                        cdp_session.send(
-                            "Input.dispatchKeyEvent",
-                            {
-                                "type": "char",
-                                "key": key,
-                                "text": char,
-                                "unmodifiedText": char,
-                                "timestamp": timestamp,
-                            },
-                        )
-                    )
+                await self._dispatch_cdp_key(
+                    cdp_session,
+                    pending,
+                    {
+                        "type": "char",
+                        "key": key,
+                        "text": char,
+                        "unmodifiedText": char,
+                        "timestamp": timestamp,
+                    },
                 )
-                pending.append(
-                    asyncio.create_task(
-                        cdp_session.send(
-                            "Input.dispatchKeyEvent",
-                            {
-                                "type": "keyUp",
-                                "key": key,
-                                "timestamp": timestamp,
-                            },
-                        )
-                    )
+                await self._dispatch_cdp_key(
+                    cdp_session,
+                    pending,
+                    {
+                        "type": "keyUp",
+                        "key": key,
+                        "timestamp": timestamp,
+                    },
                 )
                 await asyncio.sleep(timing.interval_s)
                 timestamp += timing.interval_s
