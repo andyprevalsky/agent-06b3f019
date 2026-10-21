@@ -65,6 +65,7 @@ export function RoseMobileAgentList({
             <RoseAgentBranch
               key={agent.agent_id}
               agent={agent}
+              mobile
               indented={false}
               sidebar={{
                 isExpanded: true,

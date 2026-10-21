@@ -28,6 +28,8 @@ import RoseAgentRowMenu, { type RoseAgentMenuActions } from './RoseAgentRowMenu'
 
 interface RoseAgentRowProps {
   agent: Agent;
+  /** Mobile active agents use a static robot instead of the desktop letter animation. */
+  mobile?: boolean;
   activeAgentCount?: number;
   hasChildren?: boolean;
   childrenExpanded?: boolean;
@@ -48,6 +50,7 @@ interface RoseAgentRowProps {
 
 export default function RoseAgentRow({
   agent,
+  mobile = false,
   activeAgentCount = 0,
   hasChildren = false,
   childrenExpanded = false,
@@ -102,7 +105,11 @@ export default function RoseAgentRow({
                 data-testid="rose-agent-status"
                 className="inline-grid w-5 flex-none place-items-center"
               >
-                <AgentStatusIndicator status={runStatus} seed={agent.agent_id} />
+                {mobile && runStatus.state === 'active' ? (
+                  <Bot role="img" aria-label={runStatus.label} className="h-4 w-4" />
+                ) : (
+                  <AgentStatusIndicator status={runStatus} seed={agent.agent_id} />
+                )}
               </span>
             ) : (
               <span

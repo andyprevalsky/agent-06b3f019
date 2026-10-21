@@ -121,6 +121,9 @@ test('sidebar opens direct children only and badges active tree agents on the mi
   await expect(page.getByTestId('rose-agent-row-research')).toBeVisible();
   await expect(page.getByTestId('rose-agent-row-competitors')).toHaveCount(0);
   await expect(page.getByTestId('rose-code-agent-row-landing')).toHaveCount(0);
+  await expect(
+    sidebar.getByTestId('rose-agent-row-launch-root').locator('[data-letter]'),
+  ).toBeVisible();
   await page.screenshot({ path: '/tmp/rose-sidebar-first-layer.png' });
   await sidebar.getByRole('button', { name: 'Expand Research audience', exact: true }).click();
   await expect(page.getByTestId('rose-agent-row-competitors')).toBeVisible();
@@ -187,6 +190,7 @@ test('authenticated app smoothly enters dark mode and manual light toggle still 
   });
   await openSidebarPreview(page, 390);
   await expect(page.locator('html')).toHaveClass(/dark/);
+  await expect(page.getByTestId('terminal-opening-loader')).toHaveCSS('opacity', '0.2');
   await expect
     .poll(() =>
       page.evaluate(() => (window as unknown as { loginThemeDuration: string }).loginThemeDuration),
@@ -196,6 +200,7 @@ test('authenticated app smoothly enters dark mode and manual light toggle still 
   await page.getByRole('button', { name: 'Light mode', exact: true }).click();
   await expect(page.locator('html')).not.toHaveClass(/dark/);
   await expect(page.getByRole('button', { name: 'Dark mode', exact: true })).toBeVisible();
+  await expect(page.getByTestId('terminal-opening-loader')).toHaveCSS('opacity', '0.2');
 });
 
 test('mobile drawer survives repeated close, Escape, selection and rotation without trapping the app', async ({
@@ -248,7 +253,7 @@ test('ordinary mobile account has no public-site links and includes the new popu
   await expect(page.getByPlaceholder('Enter any goal')).toHaveValue('Get Rose Api Key');
 });
 
-test('dark mobile agents share browser animation and one-layer disclosure', async ({ page }) => {
+test('dark mobile agents use robots and retain one-layer disclosure', async ({ page }) => {
   await openSidebarPreview(page, 390);
   await expect(page.locator('html')).toHaveClass(/dark/);
   await page.getByRole('button', { name: 'Open menu', exact: true }).click();
@@ -275,19 +280,25 @@ test('dark mobile agents share browser animation and one-layer disclosure', asyn
       (Math.max(lum(c), lum(bg)) + 0.05) / (Math.min(lum(c), lum(bg)) + 0.05);
     return {
       text: ratio(getComputedStyle(el).color),
-      dots: ratio(getComputedStyle(el.querySelector('[data-letter] > span')!).backgroundColor),
+      robot: ratio(getComputedStyle(el.querySelector('svg.lucide-bot')!).color),
     };
   });
   expect(contrast.text).toBeGreaterThanOrEqual(4.5);
-  expect(contrast.dots).toBeGreaterThanOrEqual(3);
-  const dots = root.locator('[data-letter]');
-  const frame = await dots.innerHTML();
-  await expect(async () => expect(await dots.innerHTML()).not.toBe(frame)).toPass();
+  expect(contrast.robot).toBeGreaterThanOrEqual(3);
+  await expect(root.locator('svg.lucide-bot')).toBeVisible();
+  await expect(drawer.locator('[data-letter]')).toHaveCount(0);
   await drawer.getByRole('button', { name: 'Expand Launch a product', exact: true }).click();
   await expect(drawer.getByTestId('rose-agent-row-research')).toBeVisible();
   await expect(drawer.getByTestId('rose-agent-row-competitors')).toHaveCount(0);
   await drawer.getByRole('button', { name: 'Expand Research audience', exact: true }).click();
   await expect(drawer.getByTestId('rose-agent-row-competitors')).toBeVisible();
+  await expect(
+    drawer.getByTestId('rose-agent-row-research').locator('svg.lucide-bot'),
+  ).toBeVisible();
+  await expect(
+    drawer.getByTestId('rose-agent-row-competitors').locator('svg.lucide-bot'),
+  ).toBeVisible();
+  await expect(drawer.locator('[data-letter]')).toHaveCount(0);
   await expect(drawer.getByRole('button', { name: /Build landing page/ })).toBeVisible();
   await page.screenshot({ path: '/tmp/rose-dark-mobile-agents.png' });
   await drawer.getByRole('button', { name: 'Collapse Launch a product', exact: true }).click();
@@ -324,3 +335,33 @@ for (const width of [320, 390, 1280]) {
     if (width === 390) await page.screenshot({ path: '/tmp/rose-model-bottom-left.png' });
   });
 }
+
+test('mobile composer is twenty percent shorter and preserves typing and safe area', async ({
+  page,
+}) => {
+  await openSidebarPreview(page, 390);
+  await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
+  const box = page.getByTestId('query-input-surface').filter({ visible: true }).last();
+  await expect(box).toBeVisible();
+  const compact = (await box.boundingBox())!.height;
+  const legacy = await page.addStyleTag({
+    content:
+      '.rose-mobile-query-area [data-surface] {padding-top:12px!important} .rose-mobile-query-area [data-surface] textarea {height:72px!important;min-height:56px!important;padding-top:12px!important;padding-bottom:12px!important}',
+  });
+  const original = (await box.boundingBox())!.height;
+  await legacy.evaluate((el) => el.remove());
+  expect(compact / original).toBeGreaterThan(0.78);
+  expect(compact / original).toBeLessThan(0.82);
+  console.log('Mobile composer height:', { original, compact, ratio: compact / original });
+  await page.screenshot({ path: '/tmp/rose-mobile-compact-query.png' });
+  const textarea = box.getByRole('textbox');
+  await textarea.fill('A short goal');
+  await expect(textarea).toHaveValue('A short goal');
+  await textarea.press('Shift+Enter');
+  await textarea.press('a');
+  await expect(textarea).toHaveValue('A short goal\na');
+  await page.addStyleTag({ content: ':root {--safe-area-inset-bottom:34px!important}' });
+  expect(
+    await box.evaluate((el) => parseFloat(getComputedStyle(el).paddingBottom)),
+  ).toBeGreaterThanOrEqual(34 - 8 + 12);
+});

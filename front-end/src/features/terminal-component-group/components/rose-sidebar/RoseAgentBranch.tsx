@@ -43,10 +43,12 @@ function childStatus(agent: Agent): AgentRunStatus {
 export default function RoseAgentBranch({
   agent,
   indented,
+  mobile = false,
   sidebar: s,
 }: {
   agent: Agent;
   indented: boolean;
+  mobile?: boolean;
   sidebar: RoseAgentBranchSidebar;
 }) {
   const visible = s.visibleRootIds?.has(agent.agent_id) ?? s.isExpanded;
@@ -126,6 +128,7 @@ export default function RoseAgentBranch({
       <div key={id}>
         <RoseAgentRow
           agent={row}
+          mobile={mobile}
           isSelected={s.selectedCodeAgentId === null && s.selectedAgentId === id}
           isExpanded={s.isExpanded}
           indented={indented}
