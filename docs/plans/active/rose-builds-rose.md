@@ -345,7 +345,7 @@ Per the 2026-10-20 goal ("make intelligent guesses; keep critical ones for revie
   - Auth: `req.user.authMethod` (first `amr`); `generatePreviewHandoffSession` (8 h, not refreshable, `amr: preview_handoff`) with shared session-signing helpers; the publish token gains a `tsk` claim.
   - New public route `/api/preview-handoff/redeem` with its own CORS, mounted before global CORS.
   - FE: `main.tsx` boot order plus the new `lib/previewHandoff.ts`.
-  - Credential-mint follow-up **fixed** (4f1f19192): preview_handoff sessions get 403 before API-key or UI-publish-token minting; focused HTTP regression passes. Registered real handoff regression awaits combined runtime gate.
+  - Credential-mint follow-up **fixed** (4f1f19192): preview_handoff sessions get 403 before API-key or UI-publish-token minting; focused HTTP regression passes. Registered real handoff regression passed in the combined runtime gate (code-preview 13/13 at e853e57d3).
 
 
 ## Continuation checkpoint — 2026-10-21
@@ -355,8 +355,16 @@ with origin/main 857211a27. C18 includes the user-requested live thinking and
 measured tok/s states (provider counters only; unknown/reset hides the rate).
 Private backend :3901 and its sole worker were restarted on the combined source
 after verifying the exact private Temporal queue had zero running workflows.
-Original game/browser recordings and final frontend coverage are in progress in
-the UI owner thread. No production changes or pushes have occurred.
+Backend compile, seam lint, graph 19/19, requests 11/11 and preview 13/13 pass
+on the combined source (e853e57d3). Native completion consumer fix 3992d0596
+passed the unchanged causal repro five times and its owning domain; the original
+game rerun reached COMPLETED at 218.4 s. That run still failed the playable
+display criterion: two native display calls carried JSON-encoded string arrays
+and were rejected before dispatch. Its root was deleted and child CLOSED; the
+private backend and worker are stopped while the narrow input fix is prepared.
+Browser drawer recording passed. UI 53cc22d31 fixes two structural import-boundary
+failures from the broad frontend run; the final coverage rerun is in progress.
+No production changes or pushes have occurred.
 
 Deploy run `.context/deploy-runs/20261021-000333-3741584` is stopped at the
 required prompt and agent-behavior human-approval guards; trajectory-injection
