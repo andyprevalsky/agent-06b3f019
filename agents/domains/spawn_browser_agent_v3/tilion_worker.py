@@ -34,10 +34,14 @@ TILION_DOWNLOAD_PATH_PREFIX = "tilion-download://"
 # Matches download_persist._MAX_PERSIST_BYTES; Tilion files/fetch caps at 32 MiB.
 _MAX_FILE_BYTES = 25 * 1024 * 1024
 _MAX_SESSION_BYTES = 100 * 1024 * 1024
+_MAX_STAGED_BYTES = 50 * 1024 * 1024
+_SCREENSHOT_NAME = "screenshot.png"
+_KEPT_SCREENSHOTS = 3
 _APPLY_TIMEOUT_SECONDS = 30.0
 
 _staged_uploads: Dict[str, Dict[str, Dict[str, Any]]] = {}
 _downloads: Dict[str, Dict[str, Dict[str, Any]]] = {}
+_tilion_sessions: Set[str] = set()
 
 
 def is_single_cdp_client_provider(provider: Optional[str]) -> bool:
@@ -48,12 +52,27 @@ def is_single_cdp_client_provider(provider: Optional[str]) -> bool:
 
 
 def stage_upload(session_id: str, filename: str, content: bytes, mime_type: str) -> Dict[str, Any]:
-    """Keep upload bytes in the worker; return the session-file shape callers expect."""
+    """Keep upload bytes in the worker; return the session-file shape callers expect.
+
+    Bounded per session (worker RSS, 10k-agent rule): only the latest
+    ``_KEPT_SCREENSHOTS`` screenshots stay staged, and the oldest screenshots
+    are evicted before an upload is refused for exceeding ``_MAX_STAGED_BYTES``.
+    """
     if len(content) > _MAX_FILE_BYTES:
         raise ValueError(f"Upload {filename} exceeds {_MAX_FILE_BYTES} bytes")
     safe_name = os.path.basename(filename) or "upload.bin"
+    staged = _staged_uploads.setdefault(session_id, {})
+    screenshots = [path for path, item in staged.items() if item["name"] == _SCREENSHOT_NAME]
+    if safe_name == _SCREENSHOT_NAME:
+        for path in screenshots[: max(len(screenshots) - (_KEPT_SCREENSHOTS - 1), 0)]:
+            staged.pop(path, None)
+        screenshots = [path for path in screenshots if path in staged]
+    while sum(len(item["buffer"]) for item in staged.values()) + len(content) > _MAX_STAGED_BYTES and screenshots:
+        staged.pop(screenshots.pop(0), None)
+    if sum(len(item["buffer"]) for item in staged.values()) + len(content) > _MAX_STAGED_BYTES:
+        raise ValueError(f"Staged uploads for this browser session would exceed {_MAX_STAGED_BYTES} bytes")
     path = f"{TILION_STAGED_UPLOAD_PREFIX}{uuid.uuid4().hex}/{safe_name}"
-    _staged_uploads.setdefault(session_id, {})[path] = {
+    staged[path] = {
         "name": safe_name,
         "mimeType": mime_type or "application/octet-stream",
         "buffer": bytes(content),
@@ -125,7 +144,13 @@ async def set_staged_file_on_input(
 
 
 def register_download_session(session_id: str) -> None:
+    """Mark ``session_id`` as a live Tilion session (its file routes fail mid-run)."""
     _downloads.setdefault(session_id, {})
+    _tilion_sessions.add(session_id)
+
+
+def is_tilion_session(session_id: Optional[str]) -> bool:
+    return bool(session_id) and session_id in _tilion_sessions
 
 
 def owns_download_session(session_id: Optional[str]) -> bool:
@@ -138,45 +163,101 @@ def record_download(
     filename: str,
     content: bytes,
     mime_type: str,
+    file_pointer: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
+    """Record a Tilion download. With a durable ``file_pointer`` (attachment
+    storage) only the pointer is kept; otherwise the bytes, within budget."""
     if not content or len(content) > _MAX_FILE_BYTES:
         return None
     ledger = _downloads.setdefault(session_id, {})
     safe_name = os.path.basename(filename) or "download.bin"
     path = f"{TILION_DOWNLOAD_PATH_PREFIX}{safe_name}"
-    previous = ledger.get(path)
-    total = sum(len(item["content"]) for item in ledger.values()) - (len(previous["content"]) if previous else 0)
-    if total + len(content) > _MAX_SESSION_BYTES:
-        logger.warning(
-            "[TilionFiles] Session download budget exhausted; not keeping file",
-            session_id=session_id,
-            filename=safe_name,
-            size=len(content),
-        )
-        return None
+    if file_pointer is None:
+        held = sum(len(item["content"] or b"") for key, item in ledger.items() if key != path)
+        if held + len(content) > _MAX_SESSION_BYTES:
+            logger.warning(
+                "[TilionFiles] Session download budget exhausted; not keeping file",
+                session_id=session_id,
+                filename=safe_name,
+                size=len(content),
+            )
+            return None
     # Same basename overwrites, like a provider downloads directory.
-    ledger[path] = {"content": bytes(content), "mime_type": mime_type, "filename": safe_name}
-    return {"path": path, "size": len(content), "filename": safe_name, "mime_type": mime_type}
+    ledger[path] = {
+        "content": None if file_pointer is not None else bytes(content),
+        "size": len(content),
+        "mime_type": mime_type,
+        "filename": safe_name,
+        "file_pointer": file_pointer,
+    }
+    recorded = {"path": path, "size": len(content), "filename": safe_name, "mime_type": mime_type}
+    if file_pointer is not None:
+        recorded["storage_path"] = file_pointer.get("storage_path")
+    return recorded
 
 
 def list_downloads(session_id: str) -> List[Dict[str, Any]]:
     return [
-        {"path": path, "size": len(item["content"]), "filename": item["filename"]}
+        {"path": path, "size": item["size"], "filename": item["filename"]}
         for path, item in (_downloads.get(session_id) or {}).items()
     ]
 
 
 def read_download(session_id: str, path: str) -> Optional[Dict[str, Any]]:
     item = (_downloads.get(session_id) or {}).get(path)
-    if not item:
+    if not item or item["content"] is None:
         return None
     return {"content": item["content"], "filename": item["filename"], "mime_type": item["mime_type"]}
+
+
+def download_file_pointer(session_id: str, path: str) -> Optional[Dict[str, Any]]:
+    """The durable attachment-storage pointer of a recorded download, if any."""
+    item = (_downloads.get(session_id) or {}).get(path)
+    return dict(item["file_pointer"]) if item and item.get("file_pointer") else None
+
+
+def durable_downloads(session_id: Optional[str]) -> List[Dict[str, Any]]:
+    """Pointer-only entries for the resume context (write-lock/payment/auth pause)."""
+    return [
+        {
+            "path": path,
+            "size": item["size"],
+            "filename": item["filename"],
+            "mime_type": item["mime_type"],
+            "file_pointer": dict(item["file_pointer"]),
+        }
+        for path, item in (_downloads.get(session_id or "") or {}).items()
+        if item.get("file_pointer")
+    ]
+
+
+def restore_downloads(session_id: Optional[str], entries: Any) -> int:
+    """Re-register pointer-only downloads from a resume context."""
+    if not session_id or not isinstance(entries, list):
+        return 0
+    restored = 0
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("file_pointer"), dict):
+            continue
+        path = str(entry.get("path") or "")
+        if not path.startswith(TILION_DOWNLOAD_PATH_PREFIX):
+            continue
+        _downloads.setdefault(session_id, {})[path] = {
+            "content": None,
+            "size": int(entry.get("size") or 0),
+            "mime_type": str(entry.get("mime_type") or "application/octet-stream"),
+            "filename": str(entry.get("filename") or path[len(TILION_DOWNLOAD_PATH_PREFIX) :]),
+            "file_pointer": dict(entry["file_pointer"]),
+        }
+        restored += 1
+    return restored
 
 
 def move_session(previous_session_id: Optional[str], session_id: str) -> None:
     """Carry worker-held files across a rotation/recovery that replaced the session."""
     if not previous_session_id or previous_session_id == session_id:
         return
+    _tilion_sessions.discard(previous_session_id)
     for store in (_downloads, _staged_uploads):
         previous = store.pop(previous_session_id, None)
         if previous is not None:
@@ -185,6 +266,7 @@ def move_session(previous_session_id: Optional[str], session_id: str) -> None:
 
 def release_session(session_id: Optional[str]) -> None:
     if session_id:
+        _tilion_sessions.discard(session_id)
         _downloads.pop(session_id, None)
         _staged_uploads.pop(session_id, None)
 
@@ -272,65 +354,24 @@ def resolve_geo_locale(fingerprint_injection: Any, exit_geo_locale: Any) -> Dict
     return resolved
 
 
-async def apply_geo_locale_override(
-    page: Any, fingerprint_injection: Any, exit_geo_locale: Any = None
-) -> Dict[str, str]:
-    """Apply the session's timezone and locale on ``page`` over the worker's socket.
+def tilion_emulation(fingerprint_injection: Any, exit_geo_locale: Any) -> Optional[Dict[str, Any]]:
+    """Emulation the CDP multiplexer applies to every page/iframe a client attaches.
 
     Tilion keeps every session on America/New_York + en-US whatever the exit
-    geo, and backend emulation dies with the backend's connection. Overrides are
-    per CDP session, so this runs for every page the worker attaches to
-    (session start, rotation reattach, and each new page; see
-    ``install_geo_locale_for_new_pages``). The locale sets ICU/JS
-    (``Emulation.setLocaleOverride``) and Accept-Language, re-sending the
-    backend's full user-agent override so its platform/client hints are kept.
-    With neither source set, nothing is sent.
+    geo, and backend emulation dies with the backend's connection. Overrides
+    are per CDP session, so the multiplexer applies them on each new target
+    session (holding new targets until they land) and again on every re-attach
+    after an upstream redial. ``None`` when neither source sets anything.
     """
     resolved = resolve_geo_locale(fingerprint_injection, exit_geo_locale)
     if not resolved:
-        return resolved
-    cdp_session = await page.context.new_cdp_session(page)
-
-    async def send(method: str, params: Optional[Dict[str, Any]] = None) -> None:
-        await asyncio.wait_for(cdp_session.send(method, params or {}), timeout=_APPLY_TIMEOUT_SECONDS)
-
-    if "timezone" in resolved:
-        await send("Emulation.setTimezoneOverride", {"timezoneId": resolved["timezone"]})
+        return None
+    emulation: Dict[str, Any] = dict(resolved)
     if "locale" in resolved:
-        locale = resolved["locale"]
-        user_agent_override = (
-            (fingerprint_injection or {}).get("userAgentOverride") if isinstance(fingerprint_injection, dict) else None
-        )
-        override = dict(user_agent_override or {})
-        if not override.get("userAgent"):
-            override["userAgent"] = await page.evaluate("navigator.userAgent")
-        override["acceptLanguage"] = accept_language_for_locale(locale)
-        await send("Emulation.setLocaleOverride", {"locale": locale})
-        await send("Network.enable")
-        await send("Network.setUserAgentOverride", override)
-    logger.info("[TilionFiles] Applied worker-side timezone/locale", **resolved)
-    return resolved
-
-
-def install_geo_locale_for_new_pages(context: Any, fingerprint_injection: Any, exit_geo_locale: Any = None) -> bool:
-    """Re-apply the timezone/locale on every new page (popup, new tab) of ``context``."""
-    if not resolve_geo_locale(fingerprint_injection, exit_geo_locale) or getattr(
-        context, "_rose_geo_locale_installed", False
-    ):
-        return False
-    pending: Set[asyncio.Task] = set()
-
-    async def apply(page: Any) -> None:
-        try:
-            await apply_geo_locale_override(page, fingerprint_injection, exit_geo_locale)
-        except Exception as error:
-            logger.warning("[TilionFiles] Timezone/locale override failed on new page", error=str(error)[:200])
-
-    def on_page(page: Any) -> None:
-        task = asyncio.create_task(apply(page))
-        pending.add(task)
-        task.add_done_callback(pending.discard)
-
-    context.on("page", on_page)
-    context._rose_geo_locale_installed = True
-    return True
+        emulation["accept_language"] = accept_language_for_locale(resolved["locale"])
+    user_agent_override = (
+        fingerprint_injection.get("userAgentOverride") if isinstance(fingerprint_injection, dict) else None
+    )
+    if isinstance(user_agent_override, dict) and user_agent_override.get("userAgent"):
+        emulation["user_agent_override"] = dict(user_agent_override)
+    return emulation

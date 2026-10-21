@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import os
 import re
 from typing import Any, Dict, Optional, Set
@@ -263,8 +264,15 @@ async def persist_bytes_to_session_downloads(
     content: bytes,
     mime_type: str = "application/octet-stream",
     provider: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Write bytes into the session downloads root via the provider-neutral API."""
+    """Write bytes into the session downloads root via the provider-neutral API.
+
+    Tilion has no session file API usable while the worker holds CDP, so its
+    downloads go to the worker ledger and, given ``user_id``, straight to
+    attachment storage, which outlives the activity (write-lock return,
+    Temporal retry, another worker). The ledger then keeps only the pointer.
+    """
     from domains.spawn_browser_agent_v3.repo import upload_file_to_session
 
     if not content:
@@ -280,9 +288,29 @@ async def persist_bytes_to_session_downloads(
         return None
     safe_name = os.path.basename(filename) or "download.bin"
     if is_single_cdp_client_provider(resolve_browser_provider(provider)):
-        # Tilion has no session file API usable while the worker is attached;
-        # the worker's ledger is the session downloads root.
-        return record_download(session_id, filename=safe_name, content=content, mime_type=mime_type)
+        file_pointer = None
+        if user_id:
+            from helpers.attachments import upload_to_storage
+
+            try:
+                file_pointer = await upload_to_storage(
+                    user_id=user_id,
+                    file_content=content,
+                    filename=safe_name,
+                    mime_type=mime_type,
+                    # Activities are at-least-once: the same bytes map to one object.
+                    idempotency_key=f"tilion-download:{session_id}:{hashlib.sha256(content).hexdigest()}",
+                )
+            except Exception as error:
+                logger.warning(
+                    "[DownloadPersist] Durable copy of Tilion download failed; kept in worker memory",
+                    session_id=session_id,
+                    filename=safe_name,
+                    error=str(error)[:200],
+                )
+        return record_download(
+            session_id, filename=safe_name, content=content, mime_type=mime_type, file_pointer=file_pointer
+        )
     downloads_dir = browser_downloads_path_for_provider(provider)
     upload_directory = session_upload_directory_for_provider(provider)
     uploaded = await upload_file_to_session(
@@ -324,8 +352,10 @@ class BrowserDownloadPersister:
         agent_id: str = "",
         task_id: str = "",
         provider: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> None:
         self.browser_session = browser_session
+        self.user_id = user_id
         self.session_id = session_id
         self.config = config
         self.agent_id = agent_id
@@ -354,6 +384,7 @@ class BrowserDownloadPersister:
         agent_id: str = "",
         task_id: str = "",
         provider: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> Optional["BrowserDownloadPersister"]:
         if not session_id or config is None:
             return None
@@ -368,6 +399,7 @@ class BrowserDownloadPersister:
             agent_id=agent_id,
             task_id=task_id or "",
             provider=provider,
+            user_id=user_id,
         )
         try:
             await persister.start()
@@ -582,6 +614,7 @@ class BrowserDownloadPersister:
                 config=self.config,
                 provider=self.provider,
                 trust_download=True,
+                **({"user_id": self.user_id} if self.user_id else {}),
             )
         if result:
             self._persisted_keys.add(dedupe)
@@ -637,6 +670,7 @@ async def persist_navigation_download_via_page_fetch(
     config: Any,
     provider: Optional[str] = None,
     trust_download: bool = False,
+    user_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Credentialed in-page fetch + session write for goto ERR_ABORTED / CDP download fallback.
 
@@ -742,6 +776,7 @@ async def persist_navigation_download_via_page_fetch(
         content=file_bytes,
         mime_type=mime_type,
         provider=provider,
+        **({"user_id": user_id} if user_id else {}),
     )
     if not uploaded:
         return None
