@@ -22,6 +22,24 @@ export interface BrowserProviderSession {
   profileId: string | null;
   profileSource: string;
   validationBrowser: Browser | null;
+  /** Set when the created provider differs from the one first requested (visible fallback). */
+  providerSelection?: BrowserProviderSelection;
+  /** Requested vs applied exit placement, when the provider reports it (Tilion: country only). */
+  geoTargeting?: BrowserGeoTargeting;
+}
+
+export interface BrowserGeoTargeting {
+  requested: string;
+  applied: string;
+  requestedLocation: ProxyGeoLocation;
+  geoApplied: boolean | null;
+  geoUnsupported: string[];
+}
+
+export interface BrowserProviderSelection {
+  requestedProvider: BrowserProviderName;
+  /** e.g. `preferred_config_create_failed: <error>`, `tilion_kill_switch`. */
+  fallbackReason: string;
 }
 
 export interface BrowserProviderResumeSession {

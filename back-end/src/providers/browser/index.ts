@@ -11,7 +11,12 @@ import { rotateSession as rotateSteelSession } from '../steel/sessionResume';
 import { getFingerprintInjectionData } from '../steel/files';
 import { injectUserData } from '../steel/injection';
 import { compatiblePreferredBrowserConfig } from './challengeRecovery';
-import { browserUseEnabled, selectedBrowserProvider, tilionEnabled } from './config';
+import {
+  browserUseEnabled,
+  DEFAULT_BROWSER_PROVIDER,
+  selectedBrowserProvider,
+  tilionEnabled,
+} from './config';
 import { getOrCreateBrowserContext } from './context';
 import {
   closeBrowserUseSession,
@@ -45,6 +50,7 @@ import { providerForSession, providerForTask } from './sessionProvider';
 import {
   type BrowserProviderName,
   type BrowserProviderResumeSession,
+  type BrowserProviderSelection,
   type BrowserProviderSession,
   type BrowserSessionHealth,
 } from './types';
@@ -219,6 +225,10 @@ export async function createSessionWithContextUsingDependencies(
     return createForProvider('steel', null);
   }
 
+  let fallback: BrowserProviderSelection | undefined;
+  if (preferred !== null && preferred.provider === 'tilion' && !tilionEnabled()) {
+    fallback = { requestedProvider: 'tilion', fallbackReason: 'preferred_provider_kill_switch' };
+  }
   if (
     preferred !== null &&
     (preferred.provider !== 'browser-use' || browserUseEnabled()) &&
@@ -227,15 +237,41 @@ export async function createSessionWithContextUsingDependencies(
     try {
       return await createForProvider(preferred.provider, preferred);
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      fallback = {
+        requestedProvider: preferred.provider,
+        fallbackReason: `preferred_config_create_failed: ${message.slice(0, 200)}`,
+      };
       log.warn('Preferred browser config unavailable; falling back to deployment default', {
         contextId,
         preferredProvider: preferred.provider,
         preferredProxyMode: preferred.proxyMode,
-        error: error instanceof Error ? error.message : String(error),
+        error: message,
       });
     }
   }
-  return createForProvider(dependencies.defaultProvider(), null);
+  // A failure of the default provider propagates (typed by the adapter); never swallowed.
+  const defaultProvider = dependencies.defaultProvider();
+  if (fallback === undefined && defaultProvider === 'kernel' && tilionKillSwitchRedirect()) {
+    fallback = { requestedProvider: 'tilion', fallbackReason: 'tilion_kill_switch' };
+  }
+  const session = await createForProvider(defaultProvider, null);
+  if (fallback === undefined || fallback.requestedProvider === session.provider) return session;
+  log.warn('Browser session created on a fallback provider', {
+    contextId,
+    requestedProvider: fallback.requestedProvider,
+    actualProvider: session.provider,
+    fallbackReason: fallback.fallbackReason,
+  });
+  return { ...session, providerSelection: fallback };
+}
+
+/** BROWSER_PROVIDER asks for Tilion (explicitly or by default) but its kill switch is off. */
+function tilionKillSwitchRedirect(): boolean {
+  const configured = (process.env.BROWSER_PROVIDER ?? DEFAULT_BROWSER_PROVIDER)
+    .trim()
+    .toLowerCase();
+  return configured === 'tilion' && !tilionEnabled();
 }
 
 export async function closeSession(
