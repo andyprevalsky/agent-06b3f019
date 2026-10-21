@@ -169,7 +169,7 @@ export async function releaseBrowserUseRemoteSession(sessionId: string): Promise
   try {
     await retryWithBackoff(
       () =>
-        request<BrowserUseSession>(`/browsers/${encodeURIComponent(sessionId)}`, {
+        request<resumeRecovery.BrowserUseSession>(`/browsers/${encodeURIComponent(sessionId)}`, {
           method: 'PATCH',
           body: JSON.stringify({ action: 'stop' }),
         }),
@@ -455,7 +455,7 @@ export const resumeBrowserUseSession = replaceSession;
 export const rotateBrowserUseSession = replaceSession;
 
 export async function getBrowserUseSessionHealth(sessionId: string): Promise<BrowserSessionHealth> {
-  const session = await request<BrowserUseSession>(`/browsers/${encodeURIComponent(sessionId)}`);
+  const session = await request<resumeRecovery.BrowserUseSession>(`/browsers/${encodeURIComponent(sessionId)}`);
   const expiresAt = new Date(session.timeoutAt).getTime();
   const createdAt = new Date(session.startedAt).getTime();
   return {
