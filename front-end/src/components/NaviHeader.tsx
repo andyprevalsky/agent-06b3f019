@@ -26,6 +26,7 @@
  * [HIDDEN] <-- user authenticated (waitlist nav + CTA removed)
  */
 
+import { isStandaloneApp } from '@/lib/isStandaloneApp';
 import { isEarlyAccessEnabled } from '@/lib/utils';
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
@@ -67,7 +68,7 @@ const NaviHeader = () => {
   const { isAuthenticated, isAnonymous } = useAuth({ passive: true });
   // Only hide the waitlist CTA for a real signed-in account — anonymous
   // bootstrap sessions (every landing visitor) are NOT "logged in".
-  const showWaitlistCta = !(isAuthenticated && !isAnonymous);
+  const showWaitlistCta = !isStandaloneApp() && !(isAuthenticated && !isAnonymous);
 
   useEffect(() => {
     const featuresSection = document.getElementById('features');
@@ -111,57 +112,59 @@ const NaviHeader = () => {
           <span className="text-xl font-semibold tracking-tight">Rose</span>
         </Link>
 
-        <nav className="hidden md:flex items-center space-x-8">
-          <button
-            onClick={() => {
-              goToLandingSection('features', false);
-            }}
-            className="text-muted-foreground hover:text-foreground transition-colors"
-          >
-            Features
-          </button>
-          {showWaitlistCta && (
+        {showWaitlistCta && (
+          <nav className="hidden md:flex items-center space-x-8">
             <button
               onClick={() => {
-                const targetId = earlyAccess ? 'pre-order' : 'waitlist';
-                goToLandingSection(targetId, earlyAccess);
+                goToLandingSection('features', false);
               }}
               className="text-muted-foreground hover:text-foreground transition-colors"
             >
-              {earlyAccess ? 'Pre-order' : 'Join Waitlist'}
+              Features
             </button>
-          )}
-          <a
-            href="/research"
-            onClick={(event) => {
-              if (!openExternalFromElectron('/research')) return;
-              event.preventDefault();
-            }}
-            className="text-muted-foreground hover:text-foreground transition-colors"
-          >
-            Research
-          </a>
-          <a
-            href="/careers"
-            onClick={(event) => {
-              if (!openExternalFromElectron('/careers')) return;
-              event.preventDefault();
-            }}
-            className="text-muted-foreground hover:text-foreground transition-colors"
-          >
-            Careers
-          </a>
-          <a
-            href="/about"
-            onClick={(event) => {
-              if (!openExternalFromElectron('/about')) return;
-              event.preventDefault();
-            }}
-            className="text-muted-foreground hover:text-foreground transition-colors"
-          >
-            About
-          </a>
-        </nav>
+            {showWaitlistCta && (
+              <button
+                onClick={() => {
+                  const targetId = earlyAccess ? 'pre-order' : 'waitlist';
+                  goToLandingSection(targetId, earlyAccess);
+                }}
+                className="text-muted-foreground hover:text-foreground transition-colors"
+              >
+                {earlyAccess ? 'Pre-order' : 'Join Waitlist'}
+              </button>
+            )}
+            <a
+              href="/research"
+              onClick={(event) => {
+                if (!openExternalFromElectron('/research')) return;
+                event.preventDefault();
+              }}
+              className="text-muted-foreground hover:text-foreground transition-colors"
+            >
+              Research
+            </a>
+            <a
+              href="/careers"
+              onClick={(event) => {
+                if (!openExternalFromElectron('/careers')) return;
+                event.preventDefault();
+              }}
+              className="text-muted-foreground hover:text-foreground transition-colors"
+            >
+              Careers
+            </a>
+            <a
+              href="/about"
+              onClick={(event) => {
+                if (!openExternalFromElectron('/about')) return;
+                event.preventDefault();
+              }}
+              className="text-muted-foreground hover:text-foreground transition-colors"
+            >
+              About
+            </a>
+          </nav>
+        )}
 
         <div className="flex items-center space-x-3">
           {/* Mobile/Tablet CTA - shows below desktop (<lg) and fades in at Features */}

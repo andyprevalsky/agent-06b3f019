@@ -1,3 +1,6 @@
+/** STATE MACHINE: signed-in or installed app -> hidden; public website guest -> links. */
+import { useAuth } from '@/features/auth';
+import { isStandaloneApp } from '@/lib/isStandaloneApp';
 import { Link } from 'react-router-dom';
 
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
@@ -5,6 +8,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { ROSE_APP_DESCRIPTION } from '@/lib/googlePublicCopy';
 
 export function TerminalLegalFooter() {
+  const { isAuthenticated, isAnonymous } = useAuth({ passive: true });
+  if (isStandaloneApp() || (isAuthenticated && !isAnonymous)) return null;
   return (
     <footer
       data-testid="terminal-legal-links"

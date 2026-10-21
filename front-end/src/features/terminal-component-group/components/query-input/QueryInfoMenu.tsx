@@ -1,7 +1,8 @@
 /**
  * STATE MACHINE: QueryInfoMenu (legal links at the end of the Rose nub tab)
  *
- *   [CLOSED] --click/tap info icon--> [OPEN] (tiny menu: About · Privacy · Terms)
+ *   [SIGNED_IN] --> no public-site menu
+ *   [SIGNED_OUT/CLOSED] --click/tap info icon--> [OPEN] (tiny menu: About · Privacy · Terms)
  *   [OPEN]   --select a link | click outside | Esc--> [CLOSED]
  *
  * Rose Desktop only (the stock UI keeps its footer links). The trigger is a
@@ -10,9 +11,11 @@
  * events bubble through the React tree so the tab stays open while in use.
  */
 
+import { isStandaloneApp } from '@/lib/isStandaloneApp';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Info } from 'lucide-react';
+import { useAuth } from '@/features/auth';
 
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { ROSE_APP_DESCRIPTION } from '@/lib/googlePublicCopy';
@@ -26,6 +29,8 @@ export const QUERY_INFO_LINKS = [
 
 export function QueryInfoMenu() {
   const [open, setOpen] = useState(false);
+  const { isAuthenticated, isAnonymous } = useAuth({ passive: true });
+  if (isStandaloneApp() || (isAuthenticated && !isAnonymous)) return null;
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <NubTip label="About · Privacy · Terms">

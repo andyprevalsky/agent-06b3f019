@@ -16,7 +16,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef } from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { screen, within } from '@testing-library/react';
+import { screen, within, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
@@ -55,8 +55,9 @@ function mockSession(userId: string) {
 }
 
 /** Renders the real Terminal signed in as a flagged (Rose Desktop) or stock account. */
-async function renderTerminal(roseDesktop: boolean) {
-  mockSession(roseDesktop ? ROSE_DESKTOP_USER : STOCK_USER);
+async function renderTerminal(roseDesktop: boolean, signedIn = true) {
+  if (signedIn) mockSession(roseDesktop ? ROSE_DESKTOP_USER : STOCK_USER);
+  else localStorage.clear();
   const result = renderWithProviders(<Terminal />);
   await screen.findByPlaceholderText('Enter any goal');
   return result;
@@ -148,6 +149,50 @@ describe('mobile query box safe area (#11)', () => {
 // ─── #14 Research / Careers and the legal footer ────────────────────────────
 
 describe('top nav chrome and legal footer (#14, #66)', () => {
+  it.each([false, true])(
+    'installed mobile PWA hides public links before login (Rose=%s)',
+    async (rose) => {
+      setViewport(390, 844);
+      const matchMedia = window.matchMedia.bind(window);
+      const spy = vi.spyOn(window, 'matchMedia').mockImplementation((query) => ({
+        ...matchMedia(query),
+        matches: query === '(display-mode: standalone)' || matchMedia(query).matches,
+      }));
+      try {
+        await renderTerminal(rose, false);
+        for (const name of ['Research', 'Careers', 'About', 'Privacy', 'Terms']) {
+          expect(screen.queryByRole('button', { name })).not.toBeInTheDocument();
+          expect(screen.queryByRole('link', { name })).not.toBeInTheDocument();
+        }
+        expect(screen.queryByTestId('query-info-trigger')).not.toBeInTheDocument();
+        expect(screen.queryByTestId('terminal-legal-links')).not.toBeInTheDocument();
+      } finally {
+        spy.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    ['stock mobile', false, 390, 844],
+    ['stock desktop', false, 1280, 800],
+    ['Rose mobile', true, 390, 844],
+    ['Rose desktop', true, 1280, 800],
+  ] as const)(
+    'signed-in %s contains no public-site navigation or legal menu',
+    async (_label, rose, width, height) => {
+      setViewport(width, height);
+      await renderTerminal(rose);
+      await waitFor(() => {
+        for (const name of ['Research', 'Careers', 'About', 'Privacy', 'Terms']) {
+          expect(screen.queryByRole('button', { name })).not.toBeInTheDocument();
+          expect(screen.queryByRole('link', { name })).not.toBeInTheDocument();
+        }
+        expect(screen.queryByTestId('query-info-trigger')).not.toBeInTheDocument();
+        expect(screen.queryByTestId('terminal-legal-links')).not.toBeInTheDocument();
+      });
+    },
+  );
+
   it.each([
     ['desktop', 1280, 800],
     ['390px mobile', 390, 844],
@@ -167,9 +212,9 @@ describe('top nav chrome and legal footer (#14, #66)', () => {
   it.each([
     ['desktop', 1280, 800],
     ['390px mobile', 390, 844],
-  ])('stock keeps Research, Careers (desktop) and the legal footer on %s', async (l, w, h) => {
+  ])('signed-out stock keeps public links on %s', async (l, w, h) => {
     setViewport(w, h);
-    await renderTerminal(false);
+    await renderTerminal(false, false);
     expect(screen.getAllByRole('button', { name: 'Research' }).length).toBeGreaterThan(0);
     if (l === 'desktop') {
       expect(screen.getAllByRole('button', { name: 'Careers' }).length).toBeGreaterThan(0);

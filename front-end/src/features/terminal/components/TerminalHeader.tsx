@@ -7,7 +7,7 @@
  *                     app icons float top-right, the left rail is 64px)
  * [MOBILE  <  md] stock --> full-width FLUSH bar at y=0:
  *                        left   = brand (logo + Rose)
- *                        center = Research (stock only; Rose Desktop accounts have
+ *                        center = Research (signed-out stock only; signed-in accounts have
  *                                 no Research/Careers links — UI ledger #14)
  *                        right  = hamburger drawer (signed in) OR Login (signed out)
  * [MOBILE  <  md] Rose Desktop --> transparent row at y=0 (safe-area aware):
@@ -42,6 +42,7 @@
  * -> TerminalModals.loginModalOpen -> PhoneAuthModal -> useAuth.refreshAuthState
  */
 
+import { isStandaloneApp } from '@/lib/isStandaloneApp';
 import { useNavigate } from 'react-router-dom';
 import type { CSSProperties } from 'react';
 
@@ -149,10 +150,13 @@ function BrandButton({ onCreateNewAgent }: Pick<TerminalHeaderProps, 'onCreateNe
   );
 }
 
-function SiteNavButtons({ clientSource }: Pick<TerminalHeaderProps, 'clientSource'>) {
+function SiteNavButtons({
+  clientSource,
+  isSignedIn,
+}: Pick<TerminalHeaderProps, 'clientSource' | 'isSignedIn'>) {
   const navigate = useNavigate();
   const roseDesktop = useRoseDesktop();
-  if (clientSource !== 'WEB' || roseDesktop) return null;
+  if (clientSource !== 'WEB' || roseDesktop || isSignedIn || isStandaloneApp()) return null;
 
   return (
     <nav className="flex items-center gap-3 whitespace-nowrap">
@@ -251,7 +255,7 @@ function MobileHeaderBar(props: TerminalHeaderProps) {
         <BrandButton onCreateNewAgent={onCreateNewAgent} />
       </div>
       <div className="justify-self-center">
-        <SiteNavButtons clientSource={clientSource} />
+        <SiteNavButtons clientSource={clientSource} isSignedIn={isSignedIn} />
       </div>
       <div className="flex items-center justify-self-end">
         <MobileAgentDrawer

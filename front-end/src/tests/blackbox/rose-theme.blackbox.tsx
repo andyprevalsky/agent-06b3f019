@@ -145,11 +145,12 @@ afterEach(() => {
 });
 
 describe('light mode is unchanged (markup frozen before dark mode existed)', () => {
-  it('desktop background renders the stock markup byte-for-byte', () => {
+  it('desktop background renders the stock markup byte-for-byte', async () => {
     renderWithProviders(themed(backgroundElement()));
+    await screen.findByTestId('terminal-small-tile-animation-canvas', {}, { timeout: 15000 });
     expect(themedMarkup()).toBe(readLightMarkup('backgroundDesktop'));
     expect(htmlIsDark()).toBe(false);
-  });
+  }, 20000);
 
   it('mobile background renders the stock markup byte-for-byte', () => {
     setViewport(MOBILE_VIEWPORT.width, MOBILE_VIEWPORT.height);
@@ -162,14 +163,16 @@ describe('light mode is unchanged (markup frozen before dark mode existed)', () 
     expect(headerPillMarkup(screen.getByTestId('themed'))).toBe(readLightMarkup('headerDesktop'));
   });
 
-  it('without a theme provider (shared/benchmark views) everything is stock', () => {
+  it('without a theme provider (shared/benchmark views) everything is stock', async () => {
     const { container } = renderWithProviders(backgroundElement());
+    await screen.findByTestId('terminal-small-tile-animation-canvas');
     expect(`${container.innerHTML}\n`).toBe(readLightMarkup('backgroundDesktop'));
   });
 
   it('toggling dark then back to light restores the exact stock markup', async () => {
     const user = userEvent.setup();
     renderWithProviders(themed(backgroundElement()));
+    await screen.findByTestId('terminal-small-tile-animation-canvas');
     await user.click(screen.getByTestId('theme-toggle'));
     expect(themedMarkup()).not.toBe(readLightMarkup('backgroundDesktop'));
     await user.click(screen.getByTestId('theme-toggle'));
@@ -255,6 +258,7 @@ describe('theme toggle', () => {
     const user = userEvent.setup();
     storeDark(ROSE_THEME_USER);
     renderWithProviders(themed(backgroundElement()), { roseDesktop: false });
+    await screen.findByTestId('terminal-small-tile-animation-canvas');
     expect(screen.getByTestId('theme-toggle')).toHaveAttribute('data-dark', 'false');
     expect(htmlIsDark()).toBe(false);
 
@@ -268,8 +272,9 @@ describe('theme toggle', () => {
 describe('dark background', () => {
   beforeEach(() => storeDark(ROSE_THEME_USER));
 
-  it('hides the small tile animation + dot canvas and drops the intro tile overlay', () => {
+  it('hides the small tile animation + dot canvas and drops the intro tile overlay', async () => {
     renderWithProviders(themed(backgroundElement()));
+    await screen.findByTestId('terminal-small-tile-animation-canvas');
     expect(htmlIsDark()).toBe(true);
     const tiles = screen.getByTestId('terminal-small-tile-animation-canvas');
     expect(tiles).toHaveAttribute('hidden');
@@ -478,8 +483,9 @@ describe('dark Popular Goals pills (mock button[class*="border"])', () => {
 });
 
 describe('instant theme switch (row 72)', () => {
-  it('every desktop layer switches in the commit that flips html.dark, both ways', () => {
+  it('every desktop layer switches in the commit that flips html.dark, both ways', async () => {
     renderWithProviders(themed(backgroundElement()));
+    await screen.findByTestId('terminal-small-tile-animation-canvas');
     const tiles = () => screen.getByTestId('terminal-small-tile-animation-canvas');
     const flow = () =>
       screen.getByTestId('terminal-grid-energy-layer').querySelector('g.grid-energy-pill-flow');
@@ -507,13 +513,14 @@ describe('instant theme switch (row 72)', () => {
     expect(headerPillMarkup(screen.getByTestId('themed'))).toBe(readLightMarkup('headerDesktop'));
   });
 
-  it('the tile dot canvas draws nothing in dark and repaints its light dots in the commit that leaves dark', () => {
+  it('the tile dot canvas draws nothing in dark and repaints its light dots in the commit that leaves dark', async () => {
     const canvas = installFakeCanvas();
     const fillsAtLayout: Array<{ isDark: boolean; fills: string[] }> = [];
     const onLayout = (isDark: boolean) => {
       fillsAtLayout.push({ isDark, fills: [...canvas.fillStyleAtFill] });
     };
     renderWithProviders(themed(withLayoutPhaseProbe(backgroundElement(), onLayout)));
+    await screen.findByTestId('terminal-small-tile-animation-canvas');
     expect(new Set(canvas.fillStyleAtFill)).toEqual(new Set([LIGHT_DOT]));
 
     canvas.fillStyleAtFill.length = 0;
@@ -619,7 +626,7 @@ describe('terminal wiring', () => {
     renderWithProviders(<Terminal />);
     await screen.findByTestId('rose-app-icons');
     await waitFor(() => expect(htmlIsDark()).toBe(true));
-    expect(screen.getByTestId('terminal-small-tile-animation-canvas')).not.toBeVisible();
+    expect(await screen.findByTestId('terminal-small-tile-animation-canvas')).not.toBeVisible();
   });
 
   it("the top-right Dark mode icon drives the terminal's RoseThemeProvider", async () => {

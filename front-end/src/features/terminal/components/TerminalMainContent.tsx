@@ -11,9 +11,10 @@
  * (--rose-apps-nav-visibility).
  * Rose Desktop accounts get no top-right nav links at all (UI ledger #14, #66:
  * no Research, Careers or Download — the app icons sit there instead); the
- * stock website keeps Research, Careers and Download.
+ * signed-out stock website keeps Research, Careers and Download.
  */
 
+import { isStandaloneApp } from '@/lib/isStandaloneApp';
 import { useNavigate } from 'react-router-dom';
 
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -79,7 +80,9 @@ export function MainContent(props: MainContentProps) {
           isWideView(props.currentView) ? 'max-w-none' : 'max-w-5xl',
         )}
       >
-        {props.agents.clientSource === 'WEB' && <DesktopNavLinks />}
+        {props.agents.clientSource === 'WEB' && (
+          <DesktopNavLinks signedIn={props.agents.isAuthenticated && !props.agents.isAnonymous} />
+        )}
         <TerminalViewContent {...props} />
       </div>
     </main>
@@ -145,7 +148,7 @@ function TerminalViewContent(props: MainContentProps) {
   );
 }
 
-function DesktopNavLinks() {
+function DesktopNavLinks({ signedIn }: { signedIn: boolean }) {
   const navigate = useNavigate();
   const roseDesktop = useRoseDesktop();
   if (roseDesktop) return null;
@@ -156,18 +159,22 @@ function DesktopNavLinks() {
         visibility: 'var(--rose-apps-nav-visibility, visible)' as React.CSSProperties['visibility'],
       }}
     >
-      <button
-        onClick={() => navigate('/research')}
-        className="px-3 py-1.5 bg-navi-white text-navi-black text-xs font-medium rounded-full border border-border hover:bg-navi-white/80 transition-colors shadow-sm"
-      >
-        Research
-      </button>
-      <button
-        onClick={() => navigate('/careers')}
-        className="px-3 py-1.5 bg-navi-white text-navi-black text-xs font-medium rounded-full border border-border hover:bg-navi-white/80 transition-colors shadow-sm"
-      >
-        Careers
-      </button>
+      {!signedIn && !isStandaloneApp() && (
+        <>
+          <button
+            onClick={() => navigate('/research')}
+            className="px-3 py-1.5 bg-navi-white text-navi-black text-xs font-medium rounded-full border border-border hover:bg-navi-white/80 transition-colors shadow-sm"
+          >
+            Research
+          </button>
+          <button
+            onClick={() => navigate('/careers')}
+            className="px-3 py-1.5 bg-navi-white text-navi-black text-xs font-medium rounded-full border border-border hover:bg-navi-white/80 transition-colors shadow-sm"
+          >
+            Careers
+          </button>
+        </>
+      )}
       <a
         href="/download"
         target="_blank"

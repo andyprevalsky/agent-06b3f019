@@ -39,6 +39,7 @@ export default defineConfig(() => {
       proxy,
     },
     plugins: [react()],
+    build: { manifest: true },
     // Animation assets -> Vite JSON strings -> JSON.parse -> unchanged frame renderer.
     // Native JSON parsing avoids compiling millions of array literals at startup.
     json: {
