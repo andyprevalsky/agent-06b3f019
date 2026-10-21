@@ -15,11 +15,11 @@ import {
 } from './challengeRecoveryLaneSearch';
 import { buildPreferredBrowserConfig, closeValidationBrowser } from './challengeRecoverySupport';
 import {
-  alternateProviderFirst,
   bestSpecificity,
   availableBrowserRecoveryCandidates,
   shouldPreferSteelForChallengeTarget,
   tilionRecoveryAvailable,
+  transportFailureOrder,
 } from './challengeRecoveryCandidates';
 import type { FingerprintInjectionData } from './fingerprintInjection';
 import { announceBrowserSessionBinding } from './sessionBindingAnnounce';
@@ -105,7 +105,7 @@ export async function searchAndPromoteBrowserConfig(
   const configs =
     transportFailure &&
     (current.provider === 'kernel' || current.provider === 'steel' || current.provider === 'tilion')
-      ? alternateProviderFirst(candidates, current.provider)
+      ? transportFailureOrder(candidates, current.provider, sessionAvoidConfigKey)
       : candidates;
   const blacklist = applyConfigBlacklist(configs, input.blockedConfigKeys);
   const searchableConfigs = blacklist.configs;

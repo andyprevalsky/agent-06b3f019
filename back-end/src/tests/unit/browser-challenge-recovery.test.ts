@@ -48,6 +48,7 @@ function testCandidateMatrix(): void {
       // Tilion exits come after the existing catalog so Kernel/Steel order is unchanged.
       'tilion_residential',
       'tilion_mobile',
+      'tilion_direct',
     ]
   );
   const previousKey = process.env.BROWSER_USE_API_KEY;
