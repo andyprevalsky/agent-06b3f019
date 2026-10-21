@@ -1524,6 +1524,19 @@ is not a JEV estimate. Evidence: `.context/jev-integration-audit/report.txt`.
 The research DB helper now wraps queries in explicit BEGIN READ ONLY / ROLLBACK;
 startup PGOPTIONS alone was not reliable through the production connection.
 
+Isolated OpenRouter comparison (2026-10-21): pinned
+deepseek/deepseek-v4.1-flash-1017, reasoning disabled, same frozen JEV-tuned
+instructions and 500 validation prefixes (43 traces; 171 ETA labels).
+All 500 valid: progress MAE JEV 14.99pp vs DeepSeek 18.46pp; within 10pp
+44.4% vs 38.6%; ETA log error 1.726 vs 1.673; combined normalized error
+1.0522 (DeepSeek 5.22% worse). ETA median relative error 102.55% vs 99.32%.
+JEV had one 1-year ETA outlier, DeepSeek none; mean absolute ETA error was
+51.47h vs 13.07m. These validation results are not a new held-out test or
+a DeepSeek-tuned comparison. OpenRouter reported $0.52584 for all 500 cases;
+median request latency 0.995s. Keep JEV as research incumbent. Reproduce with
+scripts/jev_progress/general_model.py. Encrypted receipt:
+jev-research/v1/objects/79300ede5bad8ebe3195cd648a1a97601557038cbc36552c59a1b2e4fd670f37.
+
 Every weekly run durably freezes the incoming prompt before a read-only
 production pull. Newly observed families with unseen normalized goals receive
 a permanent random 80/20 training/sealed split. All prefixes of the sealed 20%

@@ -136,3 +136,12 @@ claim fresh browser/explore coverage. Those require further archive recovery;
 the historical dataset does contain both, with no reliable ETA labels.
 This is a protocol against test-driven selection, not a security boundary
 against an operator deliberately editing code or accessing sealed artifacts.
+
+Isolated general-model comparison through OpenRouter (OPENROUTER_API_KEY):
+  agents/venv/bin/python scripts/jev_progress/general_model.py --experiment <optimization-folder> --dataset <dataset-folder> --output <comparison-folder>
+Defaults to pinned deepseek/deepseek-v4.1-flash-1017 with reasoning disabled.
+Uses the frozen JEV validation IDs, input formatter, questions and decoding.
+The JSON adapter preserves the returned model and rejects a model mismatch.
+--limit is a transport pilot only; use all cases for the paired comparison.
+Results include actual provider-reported cost, latency and separate/joint
+metrics; this does not mutate the incumbent or touch the held-out test.

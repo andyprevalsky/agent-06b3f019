@@ -55,6 +55,7 @@ class CoreTests(unittest.TestCase):
         raw["model"] = "another-model"
         with self.assertRaises(ValueError):
             decode(raw, self.row, self.trace)
+        self.assertEqual(decode(raw,self.row,self.trace,expected_model='another-model')['predicted_progress'],.5)
 
     def test_every_input_format_is_prefix_only(self):
         for fmt in FORMATS:

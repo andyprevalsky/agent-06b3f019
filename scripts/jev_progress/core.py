@@ -214,7 +214,7 @@ def eta_truth(row, trace):
     return max(ends) - now if ends and now is not None and max(ends) >= now else None
 
 
-def decode(raw, row, trace):
+def decode(raw, row, trace, expected_model="jev-1.13.0"):
     answer = raw["answers"]["remaining_batches"]
     probs = answer["probabilities"]
     if set(probs) != {str(i) for i in range(len(BINS))}:
@@ -226,7 +226,7 @@ def decode(raw, row, trace):
     observed = sum(e["role"] == "assistant" for e in trace["events"][:row["cutoff_event_index"] + 1])
     predicted = observed / (observed + remaining) if observed + remaining else 0
     choice = raw["answers"]["eta"]["choice"]
-    if choice not in ETA or raw.get("model") != "jev-1.13.0":
+    if choice not in ETA or raw.get("model") != expected_model:
         raise ValueError("Wrong ETA choice or model version")
     actual_eta = eta_truth(row, trace)
     return {"example_id": row["example_id"], "trace_id": row["trace_id"],
@@ -278,7 +278,7 @@ def summarize(rows, total):
                                    (r.get("usage") or {}).get("output_tokens", 0) for r in valid)}
 
 
-def evaluate(rows, traces, prompt, output, workers=12, transport=api, request_builder=request, cache_dir=None):
+def evaluate(rows, traces, prompt, output, workers=12, transport=api, request_builder=request, cache_dir=None, decoder=decode):
     prompt_hash = digest(prompt)
     key = credential("TYPESAFE_API_KEY") if transport is api else "offline"
     cache = None if cache_dir is False else Path(cache_dir or os.environ.get('JEV_CACHE_DIR', str(output / 'cache')))
@@ -295,14 +295,14 @@ def evaluate(rows, traces, prompt, output, workers=12, transport=api, request_bu
             raw, latency = transport(body, key)
             stored = {"raw": raw, "latency": latency, "request_hash": digest(body)}
             # Validate before marking response reusable; malformed output never becomes a hit.
-            decode(raw, row, trace)
+            decoder(raw, row, trace)
             if path is not None:
                 cache.mkdir(exist_ok=True, parents=True)
                 temporary = path.with_name(path.name + f'.{threading.get_ident()}.tmp')
                 with gzip.open(temporary, "wt") as stream:
                     json.dump(stored, stream)
                 temporary.replace(path)
-        result = decode(stored["raw"], row, trace)
+        result = decoder(stored["raw"], row, trace)
         return {**result, "ok": True, "cache_hit": cached, "request_hash": stored["request_hash"],
                 "usage": stored["raw"].get("usage"), "latency_seconds": stored["latency"], "prompt_hash": prompt_hash}
     results = []
