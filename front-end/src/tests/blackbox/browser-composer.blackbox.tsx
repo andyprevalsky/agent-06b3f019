@@ -155,6 +155,6 @@ it('keeps the native code composer usable on its original direct channel in Brow
   expect(box.getByPlaceholderText('Message Codex directly…')).toHaveValue('native draft');
   expect(box.queryByText('Model unavailable')).toBeNull();
   expect(box.queryByPlaceholderText('Message Rose about this browser')).toBeNull();
-  fireEvent.click(box.getByRole('button', { name: 'Send' }));
+  fireEvent.keyDown(box.getByRole('textbox'), { key: 'Enter' });
   expect(nativeSubmit).toHaveBeenCalledOnce();
 });
