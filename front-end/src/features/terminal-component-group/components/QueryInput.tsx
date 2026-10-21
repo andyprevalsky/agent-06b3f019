@@ -65,7 +65,7 @@ import {
 } from './query-input/dripStyles';
 import { DEFAULT_PENDING_PRICE_LIMIT_CENTS } from '../config';
 import { useRoseApps } from './rose-apps/roseAppsState';
-import { browserComposerTarget, BROWSER_MODEL_LABEL } from './query-input/browserComposer';
+import { browserComposerTarget, browserComposerModel } from './query-input/browserComposer';
 import './query-input/roseQueryBox.css';
 
 export type { QueryInputProps };
@@ -86,10 +86,9 @@ export default function QueryInput(props: QueryInputProps) {
   const reveal = useToolbarReveal();
   const roseDesktop = useRoseDesktop();
   const roseDark = useRoseTheme().isDark;
+  const apps = useRoseApps();
   const browser =
-    !!browserComposerTarget(useRoseApps(), props.agentId) &&
-    !!props.liftAboveApps &&
-    !directChannel;
+    !!browserComposerTarget(apps, props.agentId) && !!props.liftAboveApps && !directChannel;
 
   return (
     <QueryInputLayer
@@ -124,6 +123,7 @@ export default function QueryInput(props: QueryInputProps) {
               roseDesktop={roseDesktop}
               roseDark={roseDark}
               browser={browser}
+              browserModelLabel={browser ? browserComposerModel(apps, props.agentId) : undefined}
             />
           </QueryInputShell>
         </div>
@@ -172,6 +172,7 @@ interface QueryInputBodyProps extends QueryInputProps {
   /** Rose Desktop dark mode: dark textarea + model chip. */
   roseDark: boolean;
   browser: boolean;
+  browserModelLabel?: string;
 }
 
 function QueryInputBody(props: QueryInputBodyProps) {
@@ -226,7 +227,7 @@ function QueryInputBody(props: QueryInputBodyProps) {
         availableModels={availableModels}
         showModelSelector={showModelSelector}
         hideModelSelector={directChannel || browser}
-        readOnlyModelLabel={browser ? BROWSER_MODEL_LABEL : undefined}
+        readOnlyModelLabel={props.browserModelLabel}
         textareaRef={textareaRef}
         roseDesktop={roseDesktop}
         roseDark={roseDark}

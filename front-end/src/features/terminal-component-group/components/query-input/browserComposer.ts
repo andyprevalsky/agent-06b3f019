@@ -20,7 +20,12 @@ export function browserComposerTarget(apps: RoseAppsValue | null, agentId?: stri
   return target;
 }
 
-// BrowserDecisionStreamer consumes actual_model but publishes only provider-family
-// booleans. Neither those flags nor the owner agent's model identify this task's
-// actual model, so do not manufacture a model name from the root selection.
-export const BROWSER_MODEL_LABEL = 'Model unavailable';
+/** A missing producer field must stay unknown, not inherit a root-model choice. */
+export function browserComposerModel(apps: RoseAppsValue | null, agentId?: string): string {
+  const target = browserComposerTarget(apps, agentId);
+  return (
+    apps?.tabs.find(
+      (tab) => tab.agentId === target?.dataset.agentId && tab.taskId === target?.dataset.taskId,
+    )?.actualModel ?? 'Model unavailable'
+  );
+}

@@ -102,6 +102,7 @@ function useAgentTabs(agents: Agent[], selectedAgentId: string | null) {
       if (
         existing.live === tab.live &&
         (existing.pageUrl ?? null) === (tab.pageUrl ?? null) &&
+        (existing.actualModel ?? null) === (tab.actualModel ?? null) &&
         JSON.stringify(existing.browserSessionMetadata ?? null) ===
           JSON.stringify(tab.browserSessionMetadata ?? null)
       ) {

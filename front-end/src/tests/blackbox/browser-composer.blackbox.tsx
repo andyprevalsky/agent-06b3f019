@@ -68,6 +68,36 @@ it('shows only text, files, Send and an honest read-only model label in the owne
   expect(onPause).not.toHaveBeenCalled();
 });
 
+it('pins the reported Browser task model instead of the owner model', () => {
+  renderWithProviders(
+    <RoseAppsContext.Provider
+      value={browser({
+        tabs: [
+          {
+            agentId: 'owner',
+            taskId: 'browser-task',
+            live: true,
+            actualModel: 'browser-actual-model',
+          },
+        ],
+      })}
+    >
+      <QueryInput
+        liftAboveApps
+        agentId="owner"
+        value=""
+        onChange={vi.fn()}
+        onSubmit={vi.fn()}
+        selectedModel="root-selected-model"
+      />
+    </RoseAppsContext.Provider>,
+  );
+  const box = within(screen.getByTestId('browser-query-input'));
+  expect(box.getByText('browser-actual-model')).toBeVisible();
+  expect(box.queryByText('root-selected-model')).toBeNull();
+  expect(box.queryByRole('combobox')).toBeNull();
+});
+
 it('keeps the root composer controls when the Browser drawer is closed', () => {
   renderWithProviders(
     <RoseAppsContext.Provider value={browser({ openApp: null })}>

@@ -32,6 +32,8 @@ export interface AgentBrowserTab {
   live: boolean;
   /** Page the agent's browser is on (address bar, UI ledger row 74); null = unknown yet. */
   pageUrl?: string | null;
+  /** Latest model reported by this browser task, never the owner model selection. */
+  actualModel?: string | null;
   browserSessionMetadata?: BrowserSessionMetadata | null;
 }
 
