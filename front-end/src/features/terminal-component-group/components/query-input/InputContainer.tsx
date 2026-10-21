@@ -118,7 +118,7 @@ export function InputContainer(props: InputContainerProps) {
             : 'flex items-center justify-between gap-3 px-3 pt-2 w-full'
         }
       >
-        <div className="flex items-center gap-1.5">
+        <div className={roseDesktop ? 'flex items-end gap-1.5' : 'flex items-center gap-1.5'}>
           {!roseDesktop && paperclip}
           {!props.hideModelSelector && (
             <ModelSelector
