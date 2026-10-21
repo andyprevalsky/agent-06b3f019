@@ -12,6 +12,8 @@ When running on boxes.dev (`BOXES_DEVBOX=1`), always assign at least one
 sub-agent to the RCA investigation. Use the boxes.dev delegated-threads skill
 and a managed thread; do not substitute an unsupported provider-native thread.
 The coordinator remains responsible for the user conversation and final result.
+A worker already delegated under that RCA satisfies this requirement; it does
+not recursively create another child solely to satisfy the delegation rule.
 
 Give the investigator the reported symptom and runtime evidence, a bounded
 assignment, and the full methodology/archive/reproduction requirements below.
