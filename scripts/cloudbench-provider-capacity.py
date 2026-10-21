@@ -7,13 +7,19 @@ unlimited fallback) the cap is
 
     floor(limit * (1 - production_reserve_fraction) / per_bench_peak)
 
-and the overall cap is the minimum across enforced providers. Informational
+and the overall cap is the minimum across enforced providers that apply to the
+fleet's browser provider. A row with `browser_provider` (Tilion: one 20-browser
+pilot account) binds only fleets on that provider; every other row binds all
+fleets. The browser provider is `--browser-provider`, else
+CLOUDBENCH_BROWSER_PROVIDER, else BROWSER_PROVIDER in back-end/.env (the bench
+env contract later requires it to equal production). When none is a known
+provider, every row binds (fail closed). Informational
 providers (exhaustion falls back and recovers) never refuse a run; they are
 printed as notes once the requested width exceeds their own cap.
 
 Usage:
-    cloudbench-provider-capacity.py check --benches N   # exit 0, or 78 + refusal
-    cloudbench-provider-capacity.py cap [--json]        # print the cap
+    cloudbench-provider-capacity.py check --benches N [--browser-provider P]  # exit 0, or 78 + refusal
+    cloudbench-provider-capacity.py cap [--json] [--browser-provider P]       # print the cap
 
 There is no bypass: raising the cap means recording new provider limits in
 scripts/cloudbench-provider-limits.json in a reviewed change.
@@ -37,6 +43,10 @@ SCHEMA = "cloudbench-provider-limits-v1"
 CANONICAL_REGISTRY = Path(__file__).resolve().with_name("cloudbench-provider-limits.json")
 CANONICAL_LABEL = "scripts/cloudbench-provider-limits.json"
 REGISTRY_ENV = "CLOUDBENCH_PROVIDER_LIMITS_FILE"
+BROWSER_PROVIDER_ENV = "CLOUDBENCH_BROWSER_PROVIDER"
+BACKEND_ENV_FILE = Path(__file__).resolve().parents[1] / "back-end" / ".env"
+BROWSER_PROVIDERS = ("tilion", "kernel", "steel", "browser-use")
+MAX_ENV_BYTES = 1024 * 1024
 EXIT_REFUSED = 78  # EX_CONFIG: provider configuration cannot serve this width.
 EXIT_INVALID = 2
 MAX_REGISTRY_BYTES = 256 * 1024
@@ -81,8 +91,17 @@ def _number_text(value: int | Decimal) -> str:
 
 
 def _provider(row: object, field: str, keys: set[str], reserve: Fraction) -> dict:
-    if not isinstance(row, dict) or set(row) != keys:
-        raise RegistryError(f"provider limit registry: {field} must have exactly {sorted(keys)}")
+    optional = {"browser_provider", "demand_measurement"} if keys == _ENFORCED_KEYS else set()
+    scoped = isinstance(row, dict) and "browser_provider" in row and "browser_provider" in optional
+    expected = keys | (optional & set(row)) if isinstance(row, dict) else keys
+    if not isinstance(row, dict) or set(row) != expected:
+        raise RegistryError(f"provider limit registry: {field} must have exactly {sorted(keys)}"
+                            + (" (enforced rows may add browser_provider, demand_measurement)"
+                               if keys == _ENFORCED_KEYS else ""))
+    if scoped and row["browser_provider"] not in BROWSER_PROVIDERS:
+        raise RegistryError(f"provider limit registry: {field}.browser_provider must be one of {list(BROWSER_PROVIDERS)}")
+    if "demand_measurement" in row:
+        _text(row["demand_measurement"], field + ".demand_measurement")
     provider_id = _text(row["id"], field + ".id")
     if not re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,63}", provider_id):
         raise RegistryError(f"provider limit registry: {field}.id must be a lowercase slug")
@@ -156,6 +175,47 @@ def load_registry(path: Path | None = None) -> dict:
                 cap=min(row["cap"] for row in rows))
 
 
+def dotenv_value(path: Path, key: str) -> str | None:
+    """Last-wins dotenv read of one key; None when the file or key is absent."""
+    try:
+        if path.is_symlink():
+            path = path.resolve(strict=True)
+        if not path.is_file() or path.stat().st_size > MAX_ENV_BYTES:
+            return None
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    found = None
+    for line in lines:
+        match = re.fullmatch(r"\s*(?:export\s+)?" + re.escape(key) + r"=(.*)", line)
+        if match is None:
+            continue
+        value = match.group(1).strip()
+        if value[:1] in {'"', "'"} and value.find(value[0], 1) > 0:
+            value = value[1:value.find(value[0], 1)]
+        else:
+            value = value.split(" #", 1)[0].strip()
+        found = value
+    return found
+
+
+def resolve_browser_provider(explicit: str | None = None) -> str | None:
+    """The fleet's browser provider, or None (every row binds) when unknown."""
+    for candidate in (explicit, os.environ.get(BROWSER_PROVIDER_ENV),
+                      dotenv_value(BACKEND_ENV_FILE, "BROWSER_PROVIDER")):
+        if candidate:
+            value = candidate.strip().lower()
+            return value if value in BROWSER_PROVIDERS else None
+    return None
+
+
+def for_browser_provider(registry: dict, browser_provider: str | None) -> dict:
+    """Rows that bind this fleet: unscoped rows, plus rows scoped to its provider."""
+    rows = [row for row in registry["enforced"]
+            if browser_provider is None or row.get("browser_provider") in (None, browser_provider)]
+    return dict(registry, enforced=rows, cap=min(row["cap"] for row in rows), browser_provider=browser_provider)
+
+
 def _reject_constant(name: str) -> None:
     raise ValueError(f"non-finite constant {name}")
 
@@ -167,7 +227,8 @@ def _limit_text(row: dict) -> str:
 
 def _provider_line(row: dict, measurement_id: str) -> str:
     return (f"{row['name']}: {_limit_text(row)} ({row['credential_env']}) → max {row['cap']} concurrent benches "
-            f"(peak {_number_text(row['per_bench_peak'])} {row['per_bench_peak_unit']}, measured {measurement_id})")
+            f"(peak {_number_text(row['per_bench_peak'])} {row['per_bench_peak_unit']}, "
+            f"{row.get('demand_measurement') or 'measured ' + measurement_id})")
 
 
 def _percent(reserve: Fraction) -> str:
@@ -200,12 +261,13 @@ def informational_notes(registry: dict, benches: int) -> list[str]:
             if row["cap"] < benches]
 
 
-def check(benches: int, *, stream=None, registry: dict | None = None) -> int:
+def check(benches: int, *, stream=None, registry: dict | None = None,
+          browser_provider: str | None = None) -> int:
     """Return 0 when `benches` simultaneous benches fit, else EXIT_REFUSED after printing why."""
     stream = stream or sys.stderr
     if isinstance(benches, bool) or not isinstance(benches, int) or benches < 0:
         raise ValueError("simultaneous bench count must be a nonnegative integer")
-    registry = registry or load_registry()
+    registry = for_browser_provider(registry or load_registry(), resolve_browser_provider(browser_provider))
     if not registry["canonical"]:
         print(f"⚠️  provider limits from {REGISTRY_ENV}={registry['path']} (validated; not the reviewed "
               f"{CANONICAL_LABEL})", file=stream, flush=True)
@@ -223,7 +285,8 @@ def _table(registry: dict) -> dict:
         return dict(id=item["id"], name=item["name"], limit=_limit_text(item), credential_env=item["credential_env"],
                     per_bench_peak=f"{_number_text(item['per_bench_peak'])} {item['per_bench_peak_unit']}",
                     max_concurrent_benches=item["cap"])
-    return dict(max_concurrent_benches=registry["cap"], production_reserve=_percent(registry["reserve"]),
+    return dict(max_concurrent_benches=registry["cap"], browser_provider=registry.get("browser_provider"),
+                production_reserve=_percent(registry["reserve"]),
                 measurement=registry["measurement"]["id"], registry=str(registry["path"]),
                 enforced=[row(item) for item in registry["enforced"]],
                 informational=[dict(row(item), fallback=item["fallback"]) for item in registry["informational"]])
@@ -236,13 +299,16 @@ def main(argv: list[str] | None = None) -> int:
     checking.add_argument("--benches", required=True, type=int, help="global simultaneous bench count")
     capping = commands.add_parser("cap", help="print the provider concurrency cap")
     capping.add_argument("--json", action="store_true", help="print every provider's cap as JSON")
+    for command in (checking, capping):
+        command.add_argument("--browser-provider", choices=BROWSER_PROVIDERS,
+                             help="fleet browser provider (default: CLOUDBENCH_BROWSER_PROVIDER, then back-end/.env)")
     args = parser.parse_args(argv)
     try:
         if args.command == "check":
             if args.benches < 0:
                 parser.error("--benches must be a nonnegative integer")
-            return check(args.benches)
-        registry = load_registry()
+            return check(args.benches, browser_provider=args.browser_provider)
+        registry = for_browser_provider(load_registry(), resolve_browser_provider(args.browser_provider))
         print(json.dumps(_table(registry), indent=2) if args.json else registry["cap"])
         return 0
     except RegistryError as error:

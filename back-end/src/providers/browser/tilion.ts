@@ -167,11 +167,12 @@ async function postSession(
 ): Promise<TilionSessionRecord> {
   const { ttl, idleTimeout } = tilionSessionLifetime();
   const region = await regionForCountry(location.country);
-  return tilionRequest<TilionSessionRecord>('/v1/session', {
+  // One key per logical create: a retried request after a lost reply returns
+  // the same session instead of paying for a second browser.
+  const idempotencyKey = `rose-${randomUUID()}`;
+  const record = await tilionRequest<TilionSessionRecord>('/v1/session', {
     method: 'POST',
-    // One key per logical create: a retried request after a lost reply returns
-    // the same session instead of paying for a second browser.
-    idempotencyKey: `rose-${randomUUID()}`,
+    idempotencyKey,
     retryOnTimeout: true,
     body: {
       ttl,
@@ -185,6 +186,17 @@ async function postSession(
       geo: geoForSpecificity(location, specificity),
     },
   });
+  // Exact-cleanup evidence: the paid browser exists from here on. Logged before
+  // any further await so a process dying during validation still leaves the id
+  // (scripts/cloudbench-exact-session-cleanup.py matches this message + sessionId).
+  // Without an id the field is omitted, never printed as `sessionId=null`
+  // (which a parser could read as an id); exact cleanup then fails closed.
+  log.info('Tilion session allocated', {
+    ...(record?.session_id ? { sessionId: record.session_id } : {}),
+    idempotencyKey,
+    proxyType,
+  });
+  return record;
 }
 
 /**

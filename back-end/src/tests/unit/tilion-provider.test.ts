@@ -21,6 +21,14 @@ type Row = Record<string, unknown> & { id: string; sessionId: string };
 const rows = new Map<string, Row>();
 const announced: unknown[] = [];
 let validationFails = 0;
+// Exact-cleanup evidence: every created session id must be logged before CDP validation.
+const logLines: string[] = [];
+const validatedBeforeAllocationLog: string[] = [];
+function allocationLogged(sessionId: string): boolean {
+  return logLines.some(
+    (line) => line.includes('Tilion session allocated') && line.includes(`sessionId=${sessionId}`)
+  );
+}
 let cdpConnects = 0;
 const restored: { cookies: unknown[]; scripts: number; visited: string[] } = {
   cookies: [],
@@ -120,10 +128,18 @@ const prismaFake = {
 };
 
 async function main(): Promise<void> {
+  const writeOut = process.stdout.write.bind(process.stdout);
+  process.stdout.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
+    logLines.push(String(chunk));
+    return (writeOut as (...args: unknown[]) => boolean)(chunk, ...rest);
+  }) as typeof process.stdout.write;
   await mock.module('../../providers/database', { namedExports: { prisma: prismaFake } });
   await mock.module('../../providers/steel/sessionConnection', {
     namedExports: {
-      connectValidatedBrowser: async () => {
+      connectValidatedBrowser: async (wsUrl: string) => {
+        const sessionId =
+          /\/session\/([^/]+)\//.exec(wsUrl)?.[1] ?? /\/(sess_[^/]+)\//.exec(wsUrl)?.[1];
+        if (sessionId && !allocationLogged(sessionId)) validatedBeforeAllocationLog.push(sessionId);
         if (validationFails > 0) {
           validationFails -= 1;
           return null;
@@ -576,6 +592,19 @@ async function main(): Promise<void> {
     process.env.TILION_SESSION_TTL_SECONDS = '1800';
     assert.throws(() => tilion.tilionSessionLifetime(), /TILION_SESSION_TTL_SECONDS/);
     delete process.env.TILION_SESSION_TTL_SECONDS;
+
+    // ── every create logged its id before validation, including failed ones ──
+    assert.deepEqual(
+      validatedBeforeAllocationLog,
+      [],
+      'CDP validation ran before the id was logged'
+    );
+    const allocated = logLines.filter((line) => line.includes('Tilion session allocated')).length;
+    assert.equal(allocated, server.callsTo('POST', /^\/v1\/session$/).length);
+    assert(
+      allocationLogged('sess_' + '0'.repeat(31) + '4'),
+      'a session that failed validation was not logged'
+    );
 
     // ── never the account-wide saved logins ─────────────────────────────────
     assert.equal(server.requests.filter((r) => r.path.startsWith('/v1/auth')).length, 0);

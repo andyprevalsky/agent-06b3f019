@@ -1817,7 +1817,7 @@ class Portable(unittest.TestCase):
             tasks = json.loads((ROOT/'scripts/tests/fixtures/original600-tasks.json').read_text())
             facts = dict(app='navi-whisper-lux-bench', image_ref='registry.fly.io/fixture@sha256:'+'a'*64,
                          protected_machines=[RUNNER['WARM_MACHINE_ID'], 'm2', 'm3', 'm4'], protected_volumes=['v1'])
-            for flag, data in [('facts', facts), ('agents-env', 'FLY_API_TOKEN=FlyV1 fixture\n'), ('backend-env', 'COMPLETE=fixture\nGITHUB_TOKEN=fixture_github\n'),
+            for flag, data in [('facts', facts), ('agents-env', 'FLY_API_TOKEN=FlyV1 fixture\n'), ('backend-env', 'COMPLETE=fixture\nBROWSER_PROVIDER=kernel\nGITHUB_TOKEN=fixture_github\n'),
                                ('tasks', tasks), ('snapshot-inventory', fixture['inventory']), ('warm-deps', fixture['warm_deps'])]:
                 args += ['--'+flag, str(private(inputs/flag, data))]
             gh=fakebin/'gh';gh.write_text('#!/bin/sh\nexit 1\n');gh.chmod(0o700)
@@ -1883,13 +1883,13 @@ class Portable(unittest.TestCase):
             self.assertNotEqual(invalid.returncode, 0)
             self.assertFalse(marker.exists())
             self.assertEqual(list(state.iterdir()), [])
-            (inputs/'backend-env').write_text('COMPLETE=fixture\n')
+            (inputs/'backend-env').write_text('COMPLETE=fixture\nBROWSER_PROVIDER=kernel\n')
             missing=subprocess.run(args,cwd='/',env=env,capture_output=True,text=True,timeout=10)
             self.assertNotEqual(missing.returncode,0,'missing explicit launcher credential must fail during CHECK')
             self.assertIn('GitHub credential unavailable',missing.stderr)
             self.assertFalse(marker.exists())
             self.assertEqual(list(state.iterdir()),[])
-            (inputs/'backend-env').write_text('COMPLETE=fixture\nGITHUB_TOKEN=fixture_github\n')
+            (inputs/'backend-env').write_text('COMPLETE=fixture\nBROWSER_PROVIDER=kernel\nGITHUB_TOKEN=fixture_github\n')
             # Same public command must refuse changed committed source before a provider call.
             with (root/'scripts/cloudbench-shared-relay.py').open('a') as f:
                 f.write('\n# altered fixture\n')
@@ -1961,6 +1961,14 @@ class Portable(unittest.TestCase):
                 self.assertEqual(json.loads(result.stdout), dict(status='REFUSED_PROVIDER_RATE_LIMITS', source_ref=fx.args[3],
                                                                  copies=600, max_concurrent_benches=70, provider_calls=0))
                 self.assertNotIn('CHECKED_NOT_LAUNCHED', result.stdout)
+            # A Tilion backend env binds the 20-browser pilot (16 after the production reserve).
+            (fx.inputs/'backend-env').write_text('COMPLETE=fixture\nBROWSER_PROVIDER=tilion\nGITHUB_TOKEN=fixture_github\n')
+            tilion = subprocess.run(fx.args, cwd='/', env=fx.env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(tilion.returncode, 78, tilion.stderr)
+            self.assertIn('maximum 16.', tilion.stderr)
+            self.assertIn('  - Tilion browser sessions: 20 concurrent browsers, pilot plan', tilion.stderr)
+            self.assertEqual(json.loads(tilion.stdout)['max_concurrent_benches'], 16)
+            (fx.inputs/'backend-env').write_text('COMPLETE=fixture\nBROWSER_PROVIDER=kernel\nGITHUB_TOKEN=fixture_github\n')
             # No Fly API read, no flyctl invocation (not even version), no GitHub read, no state.
             self.assertEqual(requests, [])
             self.assertFalse(fx.marker.exists())

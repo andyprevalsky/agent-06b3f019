@@ -210,7 +210,13 @@ from .state_prefetch import BrowserStatePrefetch
 from .step_timing import StepPhaseTimer
 from .streaming import BrowserStreamingRoseClient, BrowserThinkingStream
 from .tilion_worker import (
+    apply_geo_locale_override as apply_tilion_geo_locale,
+)
+from .tilion_worker import (
     apply_worker_state as apply_tilion_worker_state,
+)
+from .tilion_worker import (
+    install_geo_locale_for_new_pages as install_tilion_geo_locale_for_new_pages,
 )
 from .tilion_worker import (
     release_session as release_tilion_session_files,
@@ -2209,6 +2215,7 @@ async def _reconnect_browser_stack_after_rotation(
     provider: Optional[str] = None,
     config: Any = None,
     task_id: Optional[str] = None,
+    exit_geo_locale: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Tear down the current CDP/Playwright stack and reattach to `new_cdp_url`.
 
@@ -2281,6 +2288,12 @@ async def _reconnect_browser_stack_after_rotation(
 
             with contextlib.suppress(Exception):
                 await apply_fingerprint_injection(pw_page, fingerprint_injection)
+        if getattr(dom_service, "single_cdp_client", False) is True:
+            # Tilion stays on New York/en-US whatever the exit geo; overrides
+            # are per CDP session, so re-apply on reattach and on new pages.
+            with contextlib.suppress(Exception):
+                await apply_tilion_geo_locale(pw_page, fingerprint_injection, exit_geo_locale)
+            install_tilion_geo_locale_for_new_pages(pw_context, fingerprint_injection, exit_geo_locale)
     except BaseException:
         # Best-effort, like the disconnect below. Unsuppressed, a failure here
         # replaces the original attach error (so the caller never learns why the
@@ -7630,6 +7643,7 @@ async def _spawn_browser_agent_activity_v3_real(
         # ===== PHASE 1: SESSION INIT =====
         t_session = time.monotonic()
         session_worker_apply: Optional[Dict[str, Any]] = None
+        session_exit_geo_locale: Optional[Dict[str, Any]] = None
         fingerprint_injection = None
         user_profile = {}
         # Current backends return auth_options from the same realm-preparation
@@ -7745,6 +7759,7 @@ async def _spawn_browser_agent_activity_v3_real(
             session_passkeys = session_info.get("passkeys", [])
             session_auth_options = session_info.get("auth_options")
             session_worker_apply = tilion_worker_apply_payload(session_info)
+            session_exit_geo_locale = session_info.get("exit_geo_locale")
             session_credential_ref = session_info.get("credential_ref") or session_info.get("auth_credential_ref")
             browser_session_metadata = session_info.get("browser_session_metadata") or {}
             user_profile, auth_realm = _resume_context_from_session_info(session_info, auth_realm)
@@ -7825,6 +7840,7 @@ async def _spawn_browser_agent_activity_v3_real(
             session_passkeys = session_data.get("passkeys", [])
             session_auth_options = session_data.get("auth_options")
             session_worker_apply = tilion_worker_apply_payload(session_data)
+            session_exit_geo_locale = session_data.get("exit_geo_locale")
             session_credential_ref = session_data.get("credential_ref") or session_data.get("auth_credential_ref")
             browser_session_metadata = session_data.get("browser_session_metadata") or {}
             user_profile = session_data.get("user_settings") or {}
@@ -7960,6 +7976,21 @@ async def _spawn_browser_agent_activity_v3_real(
 
                 if _botsigged_diagnostics_enabled(start_url):
                     await _install_botsigged_diagnostics(_pw_page, agent_id=agent_id, task_id=task_id)
+
+                if getattr(_dom_service, "single_cdp_client", False) is True:
+                    # Tilion stays on New York/en-US whatever the exit geo; apply
+                    # the backend's timezone/locale over the worker's own socket,
+                    # on this page and on every page opened later.
+                    try:
+                        await apply_tilion_geo_locale(_pw_page, fingerprint_injection, session_exit_geo_locale)
+                    except Exception as locale_error:
+                        logger.warning(
+                            "\u26a0\ufe0f Failed to apply Tilion timezone/locale - browser stays New York/en-US",
+                            error=extract_error_message(locale_error),
+                        )
+                    install_tilion_geo_locale_for_new_pages(
+                        _pw_context, fingerprint_injection, session_exit_geo_locale
+                    )
 
                 t = time.monotonic()
                 fingerprint_injection_enabled = _env_enabled("BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED", True)
@@ -9649,6 +9680,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             old_driver_pid=playwright_driver_pid,
                             fingerprint_injection=replacement.get("fingerprint_injection")
                             or pending_fingerprint_injection,
+                            exit_geo_locale=replacement.get("exit_geo_locale") or session_exit_geo_locale,
                             agent_id=agent_id,
                             provider=pending_browser_session_metadata.get("provider"),
                             config=config,
@@ -10157,6 +10189,7 @@ async def _spawn_browser_agent_activity_v3_real(
                                 old_playwright_instance=playwright_instance,
                                 old_driver_pid=playwright_driver_pid,
                                 fingerprint_injection=fingerprint_injection,
+                                exit_geo_locale=session_exit_geo_locale,
                                 agent_id=agent_id,
                                 provider=promoted_metadata.get("provider")
                                 or config_result.get("provider"),
