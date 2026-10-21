@@ -208,13 +208,15 @@ function RoseSidebarBar(props: AppSidebarProps) {
               insetForBackArrow={expansion.sticky && isExpanded}
             />
             {expansion.sticky && isExpanded && (
-              <div
-                aria-hidden="true"
+              <button
+                type="button"
+                aria-label="Collapse agent sidebar"
+                onClick={expansion.close}
                 className="absolute left-[22px] top-1/2 -translate-y-1/2 text-muted-foreground"
                 data-testid="sidebar-collapse-hint"
               >
                 <ArrowLeft className="h-5 w-5" strokeWidth={1.7} />
-              </div>
+              </button>
             )}
           </div>
           <RoseNewAgentButton isExpanded={isExpanded} onClick={exits.onCreateAgent} />

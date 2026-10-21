@@ -1,106 +1,32 @@
-/** Mac desktop hover stays open until the pointer returns to the window's left edge. */
-import {
-  useEffect,
-  useRef,
-  useState,
-  type FocusEvent,
-  type PointerEvent,
-  type MouseEvent as ReactMouseEvent,
-} from 'react';
-import { ROSE_BAR_EXPANDED_WIDTH } from './roseSidebarLayout';
+/** Mac hover opens and latches; the back button closes. Other desktops retain ordinary hover. */
+import { useRef, useState, type FocusEvent } from 'react';
 
 export function useSidebarExpansion() {
   const sticky =
     (window as typeof window & { api?: { isElectron?: boolean } }).api?.isElectron === true ||
     /^Mac/.test(navigator.platform);
-  const closeArmed = useRef(false);
-  const suppressOpen = useRef(false);
-  const expandedRef = useRef(false);
-  const dragged = useRef(false);
-  const dragStart = useRef<number | null>(null);
+  const suppressHover = useRef(false);
   const [hovered, setHovered] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [typing, setTyping] = useState(false);
-  useEffect(() => {
-    if (!sticky) return;
-    const collapse = () => {
-      setHovered(false);
-      expandedRef.current = false;
-      closeArmed.current = false;
-      suppressOpen.current = true;
-    };
-    const collapseAtEdge = (event: MouseEvent) => {
-      const inZone = event.clientX <= window.innerWidth * 0.18;
-      if (!inZone) suppressOpen.current = false;
-      if (
-        expandedRef.current &&
-        event.clientX > Math.max(ROSE_BAR_EXPANDED_WIDTH, window.innerWidth * 0.18)
-      )
-        closeArmed.current = true;
-      if (closeArmed.current && inZone) collapse();
-    };
-    const drag = (event: globalThis.PointerEvent) => {
-      if (dragStart.current !== null && event.clientX <= dragStart.current - 48) {
-        dragged.current = true;
-        event.preventDefault();
-        collapse();
-        dragStart.current = null;
-      }
-    };
-    const end = () => {
-      dragStart.current = null;
-    };
-    window.addEventListener('mousemove', collapseAtEdge);
-    window.addEventListener('pointermove', drag);
-    window.addEventListener('pointerup', end);
-    window.addEventListener('pointercancel', end);
-    return () => {
-      window.removeEventListener('mousemove', collapseAtEdge);
-      window.removeEventListener('pointermove', drag);
-      window.removeEventListener('pointerup', end);
-      window.removeEventListener('pointercancel', end);
-    };
-  }, [sticky]);
   const isTextInput = (el: EventTarget | null) => el instanceof HTMLInputElement;
   return {
     sticky,
     isExpanded: hovered || menuOpen || typing,
     setMenuOpen,
+    close: () => {
+      suppressHover.current = true;
+      setHovered(false);
+      setMenuOpen(false);
+      setTyping(false);
+    },
     surface: {
-      onPointerDown: (event: PointerEvent<HTMLElement>) => {
-        if (!sticky || event.button !== 0) return;
-        if (
-          event.target instanceof Element &&
-          event.target.closest('input, textarea, [contenteditable="true"]')
-        )
-          return;
-        dragged.current = false;
-        dragStart.current = event.clientX;
-      },
-      onClickCapture: (event: ReactMouseEvent<HTMLElement>) => {
-        if (!dragged.current) return;
-        dragged.current = false;
-        event.preventDefault();
-        event.stopPropagation();
-      },
       onMouseEnter: () => {
-        if (sticky && suppressOpen.current) return;
-        if (!expandedRef.current) closeArmed.current = false;
-        expandedRef.current = true;
-        setHovered(true);
+        if (!suppressHover.current) setHovered(true);
       },
-      onMouseLeave: (event: ReactMouseEvent<HTMLElement>) => {
-        // During width animation, the pointer may briefly outrun the painted edge.
-        // Only leaving both the drawer and the close zone arms return-to-close.
-        if (sticky)
-          closeArmed.current =
-            expandedRef.current &&
-            (event.clientX > Math.max(ROSE_BAR_EXPANDED_WIDTH, window.innerWidth * 0.18) ||
-              event.clientX <= 0);
-        else {
-          expandedRef.current = false;
-          setHovered(false);
-        }
+      onMouseLeave: () => {
+        suppressHover.current = false;
+        if (!sticky) setHovered(false);
       },
       onFocus: (e: FocusEvent) => setTyping(isTextInput(e.target)),
       onBlur: (e: FocusEvent) => setTyping(isTextInput(e.relatedTarget)),
