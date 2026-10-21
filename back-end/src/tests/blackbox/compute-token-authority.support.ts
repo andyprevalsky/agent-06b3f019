@@ -144,3 +144,44 @@ export async function foundryCall(
   assert.strictEqual(response.status, 200, `${route} returned ${response.status}: ${text}`);
   return JSON.parse(text) as Record<string, unknown>;
 }
+
+export async function assertInvalidFoundryInputs(
+  baseUrl: string,
+  cooldownRows: () => Promise<unknown>
+): Promise<void> {
+  const beforeInvalid = await cooldownRows();
+  const invalidKeys = [
+    '',
+    Array.from({ length: 65 }, (_, i) => `limit.example.test:deployment-${i}`).join(','),
+    'bad host:deployment',
+  ];
+  for (const keys of invalidKeys) {
+    const response = await fetch(
+      `${baseUrl}/api/integrations/compute-code/foundry-deployment/cooldown?keys=${encodeURIComponent(keys)}`,
+      { headers: { 'X-API-Key': AUTHORITY_KEY } }
+    );
+    assert.strictEqual(response.status, 400, `invalid cooldown keys: ${keys}`);
+    assert.deepStrictEqual(await cooldownRows(), beforeInvalid, 'invalid read must not mutate');
+  }
+  for (const body of [
+    { region: 42, deployment: 'deployment' },
+    { region: 'valid.example.test', deployment: 'bad deployment' },
+  ]) {
+    const response = await fetch(
+      `${baseUrl}/api/integrations/compute-code/foundry-deployment/served`,
+      {
+        method: 'POST',
+        headers: { 'X-API-Key': AUTHORITY_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }
+    );
+    assert.strictEqual(response.status, 400, 'invalid served input must fail closed');
+    assert.deepStrictEqual(await cooldownRows(), beforeInvalid, 'invalid reset must not mutate');
+  }
+  const validAfterInvalid = await fetch(
+    `${baseUrl}/api/integrations/compute-code/foundry-deployment/cooldown?keys=valid.example.test:deployment`,
+    { headers: { 'X-API-Key': AUTHORITY_KEY } }
+  );
+  assert.strictEqual(validAfterInvalid.status, 200);
+  console.log('PASS invalid cooldown read/reset inputs fail closed without mutation');
+}

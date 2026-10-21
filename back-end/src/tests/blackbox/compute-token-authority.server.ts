@@ -45,6 +45,7 @@ app.post('/test-foundry', async (req, res) => {
   const hits: string[] = [];
   const visible: string[] = [];
   let reports = 0;
+  let resets = 0;
   let fallbackRequests = 0;
   for (const name of FOUNDRY_REGION_ENV_NAMES) delete process.env[name];
   process.env.AZURE_FOUNDRY_ENDPOINT = 'https://foundry-cta.example.test';
@@ -86,6 +87,13 @@ app.post('/test-foundry', async (req, res) => {
     }
     const authority = process.env.COMPUTE_TOKEN_AUTHORITY_URL;
     if (authority && String(input).startsWith(authority + '/api/integrations/compute-code/')) {
+      if (req.body.resetFailure && String(input).endsWith('/foundry-deployment/served')) {
+        resets++;
+        if (req.body.resetFailure === 'throw') throw new Error('fixture reset unavailable');
+        return req.body.resetFailure === 'malformed'
+          ? new Response('{}', { status: 200 })
+          : new Response('', { status: 500 });
+      }
       if (req.body.reportFailure && String(input).endsWith('/token/rate-limited')) {
         reports++;
         if (req.body.reportFailure === 'throw') throw new Error('fixture authority unavailable');
@@ -117,9 +125,9 @@ app.post('/test-foundry', async (req, res) => {
         if (typeof content === 'string') visible.push(content);
       }
     }
-    res.json({ hits, reports, visible, fallbackRequests });
+    res.json({ hits, reports, resets, visible, fallbackRequests });
   } catch (error) {
-    res.status(500).json({ error: String(error), hits, reports, visible, fallbackRequests, isRoseServerError: error instanceof RoseServerError });
+    res.status(500).json({ error: String(error), hits, reports, resets, visible, fallbackRequests, isRoseServerError: error instanceof RoseServerError });
   } finally {
     global.fetch = original;
     for (const [name, value] of Object.entries(originalEnv)) {

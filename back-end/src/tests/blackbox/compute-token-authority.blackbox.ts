@@ -26,6 +26,7 @@ import {
   fetchLease,
   post,
   foundryCall,
+  assertInvalidFoundryInputs,
 } from './compute-token-authority.support';
 
 async function main() {
@@ -160,6 +161,13 @@ async function main() {
     );
     console.log('PASS invalid internal keys cannot read or mutate authority');
 
+    const cooldownRows = () => authorityDb.integration.findMany({
+      where: { name: 'foundry_deployment_cooldown' },
+      orderBy: { id: 'asc' },
+    });
+    await assertInvalidFoundryInputs(authority.baseUrl, cooldownRows);
+
+
     // A served reset must join the same per-deployment lock as a mark.
     let resetSettled = false;
     let pendingReset: Promise<unknown> | undefined;
@@ -270,6 +278,67 @@ async function main() {
     assert.strictEqual(reopened.status, 200, JSON.stringify(reopenedBody));
     assert.strictEqual(reopenedBody.hits[0], cooledDeployment, 'expiry must reopen the same route');
     console.log('PASS TypeScript guest/authority consumers share cooldown and observe expiry');
+
+    const prepareExpiredRoutes = async () => {
+      for (const deployment of ['gpt-6-sol-a', 'gpt-6-sol-b']) {
+        await foundryCall(guestA.baseUrl, 'token/rate-limited', {
+          type: 'foundry', source: 'pool', region: 'foundry-cta.example.test', deployment,
+        });
+      }
+      await authorityDb.integration.updateMany({
+        where: { name: 'foundry_deployment_cooldown' },
+        data: { rateLimitedUntil: new Date(Date.now() - 1000) },
+      });
+    };
+    for (const resetFailure of ['malformed', '500', 'throw']) {
+      await prepareExpiredRoutes();
+      const before = await cooldownRows();
+      const response = await tsInvoke(guestA.baseUrl, GUEST_KEY, { resetFailure });
+      const result = await response.json() as {
+        hits: string[]; visible: string[]; resets: number; fallbackRequests: number;
+      };
+      assert.strictEqual(response.status, 200, JSON.stringify(result));
+      assert.deepStrictEqual(result.visible, ['ok'], 'reset failure must retain the successful answer');
+      assert.strictEqual(result.hits.length, 1, 'reset failure must not replay provider output');
+      assert.strictEqual(result.fallbackRequests, 0);
+      assert.strictEqual(result.resets, 1);
+      assert.deepStrictEqual(await cooldownRows(), before, 'failed reset must retain shared strikes');
+      for (const guest of clients.slice(1)) {
+        assert.strictEqual(await guest.integration.count({
+          where: { name: 'foundry_deployment_cooldown' },
+        }), 0, 'remote reset failure must not create guest-local authority state');
+      }
+    }
+    await prepareExpiredRoutes();
+    const beforeLocalReset = await cooldownRows();
+    const localResponse = await tsInvoke(authority.baseUrl, AUTHORITY_KEY);
+    const localResult = await localResponse.json() as { hits: string[]; visible: string[]; fallbackRequests: number };
+    assert.strictEqual(localResponse.status, 200, JSON.stringify(localResult));
+    assert.deepStrictEqual(localResult.visible, ['ok']);
+    assert.strictEqual(localResult.hits.length, 1);
+    assert.strictEqual(localResult.fallbackRequests, 0);
+    const resetAccount = `foundry-cta.example.test:${localResult.hits[0]}`;
+    const afterLocalReset = await cooldownRows();
+    const resetRow = afterLocalReset.find(row => row.accountId === resetAccount);
+    assert(resetRow);
+    assert.strictEqual((resetRow.config as { strikes: number }).strikes, 0);
+    assert.deepStrictEqual(resetRow.rateLimitedUntil,
+      beforeLocalReset.find(row => row.accountId === resetAccount)?.rateLimitedUntil);
+    assert(resetRow.rateLimitedUntil && resetRow.rateLimitedUntil.getTime() <= Date.now());
+    const localResetRead = await fetch(
+      `${authority.baseUrl}/api/integrations/compute-code/foundry-deployment/cooldown?keys=${encodeURIComponent(resetAccount)}`,
+      { headers: { 'X-API-Key': AUTHORITY_KEY } }
+    );
+    assert.strictEqual(localResetRead.status, 200);
+    const localResetWire = await localResetRead.json() as { cooldowns: Record<string, { rateLimitedUntil: string | null; remainingSeconds: number; strikes: number }> };
+    assert.deepStrictEqual(localResetWire.cooldowns[resetAccount], { rateLimitedUntil: null, remainingSeconds: 0, strikes: 0 });
+    assert.deepStrictEqual(
+      afterLocalReset.filter(row => row.accountId !== resetAccount),
+      beforeLocalReset.filter(row => row.accountId !== resetAccount),
+      'local successful reset must not change another deployment'
+    );
+    console.log('PASS successful output survives failed reset and direct-store success resets only its deployment');
+
 
     // 4. Cooldown length: provider hint, else 30 s, 60 s, 300 s; no in-window escalation.
     const target = { region: 'ladder.example.test', deployment: `ladder-${suffix}` };
