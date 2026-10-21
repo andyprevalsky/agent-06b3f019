@@ -49,6 +49,7 @@ import { prisma } from '../../providers/database';
 import { mintAgentGraphToken } from '../../providers/agentGraph/token';
 import { codeSessionTurnToken } from '../../providers/codeSessionTurns';
 import { deterministicMessageId } from '../../providers/messageIdempotency';
+import { testRoseAgentHasOneUiOnlySentReceipt } from './agent-graph-receipts.cases';
 import {
   testCodeAgentListIsNewestFirstPerRoot,
   testCodeAgentProviderInTreeAndBatchedList,
@@ -96,11 +97,10 @@ async function call(
 }
 
 function expectStatus(res: Res, status: number, label: string): void {
-  if (res.status !== status) {
-    throw new Error(
-      `${label}: expected ${status}, got ${res.status} ${JSON.stringify(res.data).slice(0, 400)}`
-    );
-  }
+  assert(
+    res.status === status,
+    `${label}: expected ${status}, got ${res.status} ${JSON.stringify(res.data).slice(0, 400)}`
+  );
 }
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -487,7 +487,18 @@ process.stdin.on('data', (chunk) => {
   buffer += chunk;
   const lines = buffer.split('\n');
   buffer = lines.pop();
-  for (const line of lines) if (line.trim()) queue.push(JSON.parse(line));
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    const message = JSON.parse(line);
+    if (message.type === 'control_request') {
+      emit({ type: 'control_response', response: {
+        subtype: 'success', request_id: message.request_id,
+        response: message.request.subtype === 'initialize' ? { models: [{
+          value: 'sonnet', supportedEffortLevels: ['medium'], supportsFastMode: true,
+        }] } : {},
+      } });
+    } else queue.push(message);
+  }
   void drain();
 });
 process.stdin.on('end', () => {
@@ -628,6 +639,11 @@ async function testRootMessagesRunningCodeAgentOnce(): Promise<void> {
 const cases: Array<[string, () => Promise<void>]> = [
   ['list is scoped to the tree and includes code agents', testListIsScopedToTheTree],
   ['code agent messages a Rose agent once', testCodeAgentMessagesRoseAgentOnce],
+  [
+    'Rose agent sent receipt is UI-only and idempotent',
+    () =>
+      testRoseAgentHasOneUiOnlySentReceipt({ baseUrl: BASE_URL, apiKey: API_KEY, ids, run: RUN }),
+  ],
   ['scope is the own tree (cross-tree 404)', testScopeIsTheOwnTree],
   ['token scope, expiry and refresh', testTokenScopeAndExpiry],
   ['question routing by spawner', testQuestionRoutingBySpawner],

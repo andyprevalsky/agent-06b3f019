@@ -18,6 +18,7 @@ import { deterministicMessageId } from '../../providers/messageIdempotency';
 import { deliverUserTurnToCodeSession, type TurnDelivery } from '../../providers/codeSessionTurns';
 import { takeSendBudget } from '../../providers/agentGraph/sendBudget';
 import { createLogger } from '../../providers/logger';
+import { isRoseDesktopUser } from '../../utils/roseDesktop';
 import * as messageService from './agentMessageService';
 import * as graphRepo from './repoGraph';
 import {
@@ -331,6 +332,21 @@ export async function sendGraphMessage(
       text: input.text,
       a2a,
       direction: 'sent',
+    });
+  } else if (isRoseDesktopUser(caller.userId)) {
+    // A delivery receipt for the user's activity view, never another model turn.
+    // Include the recipient so reusing a client id across targets stays distinct.
+    await createMessage({
+      agentId: caller.self.id,
+      role: 'TOOL',
+      text: input.text,
+      metadata: {
+        a2a: { ...a2a, direction: 'sent' },
+        idempotencyKey: `${key}:to:${target.id}:sent`,
+        title,
+        action_type: 'agent_message',
+        excludeFromModel: true,
+      },
     });
   }
 
