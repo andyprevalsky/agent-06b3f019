@@ -2,9 +2,9 @@ import { isRoseRepoUrl } from './codePreview/preview';
 import { installedRoseSkills, roseSkillsTableOfContents } from './roseSkills/skills';
 
 /** Rose Desktop accounts: every Rose skill in the table of contents (C17). */
-export const CODE_AGENT_INSTRUCTIONS_VERSION = '2026-10-20.code-agent-rose-skills.v7';
+export const CODE_AGENT_INSTRUCTIONS_VERSION = '2026-10-21.code-agent-rose-skills.v8';
 /** Every other account: the same contract with the stock skill set. */
-export const CODE_AGENT_STOCK_INSTRUCTIONS_VERSION = '2026-10-20.code-agent-skills.v7';
+export const CODE_AGENT_STOCK_INSTRUCTIONS_VERSION = '2026-10-21.code-agent-skills.v8';
 export const CODEX_HARNESS_INSTRUCTIONS_VERSION = '2026-08-25.codex-rose-harness.v1';
 
 export const CODE_AGENT_ATTACHMENTS_DIR = '/home/user/attachments';
@@ -37,14 +37,14 @@ export function codeAgentSkillLines(roseDesktop: boolean): string[] {
   return toc.length > 0 ? [...toc, ''] : [];
 }
 
-/** Rose-in-Rose (A1): the one shipping constraint that overrides the merge rules. */
+/** Rose uses its existing deploy coordinator and repository release workflow. */
 function roseRepoLines(args: BuildCodeAgentPromptArgs): string[] {
   if (args.roseDesktop !== true) return [];
   if (args.roseRepo !== true && !isRoseRepoUrl(args.githubRepoUrl)) return [];
   return [
     '',
     'Rose itself:',
-    '- The checkout in ~/workspace is Rose itself. Ship a change as a pull request (`gh pr create`) against your merge target. Never merge it, never push to main and never deploy: Rose ships only through `/deploy`.',
+    '- The checkout in ~/workspace is Rose itself. To publish changes to all agents, follow its existing `/deploy` workflow and coordinate with the release owner. Preserve all required checks and approvals; do not stop at an open pull request and call it published.',
   ];
 }
 
@@ -86,6 +86,8 @@ export function buildCodeAgentSystemPrompt(args: BuildCodeAgentPromptArgs = {}):
     '- Prefer direct, verifiable commands over prose-only claims.',
     '- Finish only after the requested artifacts exist and have been checked.',
     '- Surface real configuration or credential failures directly.',
+    '- You must complete the applicable branch-join or deploy skill and verify its receipt before reporting work as published; a local commit or open PR is not sufficient.',
+    '- For top-level publication to all agents, read the deploy skill and follow the repository release workflow to its shared GitHub branch; create a repo-local deploy skill if missing. Independent sub-agents stack their own branch/worktree on the parent commit and use branch-join to the immediate parent branch. Internal coding workers share this worktree with coordinated edits and Git operations.',
     '- If task text says to use Claude Code or a code agent, treat that as this current Rose Labs code-agent session. Do not launch a separate claude/Claude Code CLI, run claude login, or start any interactive authentication flow.',
     ...repoLines,
     ...roseRepoLines(args),
@@ -157,6 +159,8 @@ export function buildLocalCodeAgentSystemPrompt(args: { roseDesktop?: boolean } 
     '- Prefer direct, verifiable commands over prose-only claims.',
     '- Finish only after the requested work exists and has been checked.',
     '- Surface real configuration or credential failures directly.',
+    '- You must complete the applicable branch-join or deploy skill and verify its receipt before reporting work as published; a local commit or open PR is not sufficient.',
+    '- For top-level publication to all agents, read the deploy skill and follow the repository release workflow to its shared GitHub branch; create a repo-local deploy skill if missing. Independent sub-agents stack their own branch/worktree on the parent commit and use branch-join to the immediate parent branch. Internal coding workers share this worktree with coordinated edits and Git operations.',
     '- If task text says to use Claude Code or a code agent, treat that as this current Rose Labs code-agent session. Do not launch a separate claude/Claude Code CLI, run claude login, or start any interactive authentication flow.',
   ].join('\n');
 }

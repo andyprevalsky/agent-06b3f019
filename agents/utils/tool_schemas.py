@@ -995,8 +995,8 @@ _SPAWN_TYPE_CODE_ROSE_DESKTOP = (
     "'code' starts a coding agent using Claude Code or Codex CLI in a persistent sandbox, selected by "
     "available credentials and configuration. Delegate all code writing to it. Its sandbox holds the "
     "user's Rose app UI (rose_user_ui): it edits and publishes changes to how Rose looks or behaves for "
-    "the user, and it can publish a game, app or visual it builds as an inline view, which you show "
-    "with send_message_to_user's inline_view; "
+    "the user. For a game, app, chart or visual the user asks to see, have it publish the result "
+    "in Agent Display using rose display and return the display receipt; a file path alone does not show it. "
 )
 _SPAWN_TYPE_REST = (
     "'general_purpose' starts a full autonomous agent for "
@@ -1088,7 +1088,7 @@ class SpawnAgentTool(BaseModel):
         default="cloud",
         description=(
             "Optional when type='code': 'local' runs the coding agent on the user's Mac in a folder they "
-            "shared (only for agents started from the Rose Mac app), 'cloud' (default) runs it in a sandbox."
+            "shared (requires an owned connected Mac; multiple Macs require explicit device selection), 'cloud' (default) runs it in a sandbox."
         ),
     )
     start_phase: Optional[Literal["PLAN", "EXECUTE"]] = Field(
@@ -1266,7 +1266,7 @@ class SpawnAgentToolNoGP(BaseModel):
         default="cloud",
         description=(
             "Optional when type='code': 'local' runs the coding agent on the user's Mac in a folder they "
-            "shared (only for agents started from the Rose Mac app), 'cloud' (default) runs it in a sandbox."
+            "shared (requires an owned connected Mac; multiple Macs require explicit device selection), 'cloud' (default) runs it in a sandbox."
         ),
     )
     context_gates: Optional[Dict[str, bool]] = Field(

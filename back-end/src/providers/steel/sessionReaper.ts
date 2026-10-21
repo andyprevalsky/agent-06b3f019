@@ -78,7 +78,7 @@ async function heldSteelSessionIds(candidates: string[]): Promise<Set<string>> {
     where: { sessionId: { in: candidates }, status: { in: ['ACTIVE', 'PAUSED'] } },
     select: { sessionId: true },
   });
-  return new Set(rows.map((row) => row.sessionId));
+  return new Set(rows.flatMap((row) => (row.sessionId === null ? [] : [row.sessionId])));
 }
 
 function defaultDependencies(): SteelReaperDependencies {

@@ -1,3 +1,4 @@
+import { iphoneCapability } from '../../providers/phoneAccountPolicy';
 import type { SerializedPasskey, SerializedPassword, UserSettings } from './types';
 
 export function serializePasskeys(
@@ -40,6 +41,8 @@ export function serializePasswords(
 
 export function toUserSettings(
   user: {
+    userId: string;
+    isAnonymous: boolean;
     name: string | null;
     email: string | null;
     phone: string | null;
@@ -58,6 +61,7 @@ export function toUserSettings(
 ): UserSettings | null {
   if (user === null) return null;
   return {
+    ...iphoneCapability(user),
     name: user.name,
     email: user.email,
     phone: user.phone,

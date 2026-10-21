@@ -1694,6 +1694,10 @@ async def execute_action(
     password_origins: Optional[Dict[str, str]] = None,
     credential_refs_by_secret_ref: Optional[Dict[str, Dict[str, str]]] = None,
     user_id: str = "",
+    agent_id: str = "",
+    browser_task_id: str = "",
+    tool_call_id_decision: str = "",
+    phone_snapshot: Optional[Dict[str, Any]] = None,
     current_url: str = "",
     trusted_page_urls: Optional[List[str]] = None,
     write_lock_enabled: bool = True,
@@ -1707,7 +1711,31 @@ async def execute_action(
     successful_secret_refs: Optional[set[str]] = None,
 ) -> Dict[str, Any]:
     """Resolve private values and report successful use privately to the caller."""
+    if successful_secret_refs is not None:
+        successful_secret_refs.clear()
+    if action.get("action") == "phone":
+        # No browser URL can authorize a phone app password. Refuse before
+        # resolving anything, logging arguments, or touching the provider.
+        params = action.get("params") or {}
+        refs = dict(secret_refs or {})
+        if referenced_secret_refs(params, refs) or mask_secret_values(params, refs) != params:
+            return {"success": False, "error": "Verified phone app/account binding required for private references"}
+        from .phone import execute_phone
+        try:
+            with secret_logging_context(refs):
+                result = await execute_phone(
+                    params, config=config, user_id=user_id, agent_id=agent_id,
+                    task_id=browser_task_id, decision_id=tool_call_id_decision,
+                    snapshot=phone_snapshot,
+                )
+        except Exception:
+            # A phone timeout is an unconfirmed physical outcome, never a CDP
+            # renderer stall. Do not log transport/input exception contents.
+            result = {"success": False, "status": "UNKNOWN", "error": "Phone outcome unconfirmed; inspect owned receipt"}
+        return mask_secret_values(result, refs)
     execution = locals().copy()
+    for key in ("agent_id", "browser_task_id", "tool_call_id_decision", "phone_snapshot"):
+        execution.pop(key)
     execution.pop("successful_secret_refs")
     previous_action_step = None
     action_execution_started = False

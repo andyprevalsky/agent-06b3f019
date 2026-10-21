@@ -33,6 +33,7 @@ import { fileURLToPath } from 'node:url';
 import { after, before, test } from 'node:test';
 import express from 'express';
 import WebSocket from 'ws';
+import { directTurnSchema } from '../../domains/claude-code/types';
 import { prisma } from '../../providers/database';
 import { codeSessionTurnToken } from '../../providers/codeSessionTurns';
 
@@ -364,4 +365,13 @@ test('direct turns reject foreign attachments before any storage read or deliver
   assert.equal(response.status, 400);
   assert.equal(((await response.json()) as { code: string }).code, 'INVALID_ATTACHMENT');
   assert.deepEqual(await sandboxUserTurns(), beforeTurns);
+});
+
+// Provider catalog tier IDs must survive the HTTP boundary unchanged.
+test('direct-turn validation accepts the advertised native priority tier and rejects invented tiers', () => {
+  const turn = { client_message_id: 'native-priority-tier', text: 'continue', speed: 'priority' };
+  const parsed = directTurnSchema.safeParse(turn);
+  assert.equal(parsed.success, true, JSON.stringify(parsed));
+  if (parsed.success) assert.equal(parsed.data.speed, 'priority');
+  assert.equal(directTurnSchema.safeParse({ ...turn, speed: 'invented-tier' }).success, false);
 });

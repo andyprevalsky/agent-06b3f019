@@ -19,12 +19,19 @@ import textwrap
 import threading
 import time as time_module
 from io import BytesIO
+from contextvars import ContextVar
+from functools import wraps
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+from browser_activity_queue_cases import (
+    test_browser_activity_queue_lifecycle,
+    test_browser_activity_timeout_fence_survives_continuation,
+)
 
 from _test_utils import (
     BlackboxResult,
@@ -36,6 +43,23 @@ from _test_utils import (
 )
 
 AGENTS_ROOT = Path(__file__).resolve().parents[2]
+
+
+_legacy_browser_history_fixture = ContextVar("legacy_browser_history_fixture", default=False)
+
+
+def _both_browser_history_variants(test):
+    """Run archive-boundary fixtures with old replay and current GP identities."""
+    @wraps(test)
+    async def run():
+        for legacy in (True, False):
+            token = _legacy_browser_history_fixture.set(legacy)
+            try:
+                await test()
+                print(f"PASS {test.__name__} history={'legacy' if legacy else 'current'}")
+            finally:
+                _legacy_browser_history_fixture.reset(token)
+    return run
 
 
 def test_browser_use_captcha_wait_does_not_rotate_before_solver_window():
@@ -247,7 +271,7 @@ def test_stateful_browser_activity_has_one_thirty_minute_attempt():
     assert ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES == 30
     assert MAX_ACTIVITY_ATTEMPTS == 1
 
-    execute_source = inspect.getsource(SpawnBrowserAgentManagerV3.execute_tool)
+    execute_source = inspect.getsource(SpawnBrowserAgentManagerV3._execute_tool)
     assert "browser_start_to_close_timeout_minutes" in execute_source
     assert "timedelta(minutes=browser_timeout_minutes)" in execute_source
     assert "RetryPolicy(maximum_attempts=MAX_ACTIVITY_ATTEMPTS)" in execute_source
@@ -259,7 +283,7 @@ def test_browser_spawn_goal_uses_tool_call_goal_verbatim():
 
     from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
 
-    source = inspect.getsource(SpawnBrowserAgentManagerV3.execute_tool)
+    source = inspect.getsource(SpawnBrowserAgentManagerV3._execute_tool)
     assert 'goal = tool_call.get("goal", "")' in source
     assert "_browser_spawn_goal_from_parent" not in source
     assert "BENCHMARK EXECUTION CONTRACT" not in source
@@ -9497,7 +9521,7 @@ def test_real_browser_path_attributes_every_token_to_its_actual_model():
         for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "build_usage_items"
     ]
-    assert len(build_calls) == 6, f"expected 6 build_usage_items call sites including native input failure, found {len(build_calls)}"
+    assert len(build_calls) == 7, f"expected 7 build_usage_items call sites including native input failure and native auth pause, found {len(build_calls)}"
     for build_call in build_calls:
         forwarded = [ast.unparse(a) for a in build_call.args] + [
             *(ast.unparse(k.value) for k in build_call.keywords),
@@ -16152,7 +16176,7 @@ def test_passkey_usage_dedupe_survives_every_browser_activity_resume_boundary():
     from domains.spawn_browser_agent_v3 import handler
 
     activity_source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
-    manager_source = inspect.getsource(handler.SpawnBrowserAgentManagerV3.execute_tool)
+    manager_source = inspect.getsource(handler.SpawnBrowserAgentManagerV3._execute_tool)
     drain_resume_source = inspect.getsource(handler._drain_resume_state)
 
     assert activity_source.count('"recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids)') == 4
@@ -21378,7 +21402,7 @@ async def test_spawn_browser_activity_ends_cleanly_when_the_user_declines_auth_a
 
 
 @_in_browser_activity_context
-async def test_spawn_browser_activity_auth_assistance_resume_reuses_backend_refreshed_session():
+async def test_spawn_browser_activity_auth_assistance_resume_reuses_backend_refreshed_session(await_owner_cleanup=False):
     """A handoff refresh may replace the provider session while keeping the browser task stable."""
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
@@ -21433,6 +21457,7 @@ async def test_spawn_browser_activity_auth_assistance_resume_reuses_backend_refr
                 is_resume=True,
                 output_schema={"fields": [{"name": "result", "type": "string"}]},
                 use_claude_mode=False,
+                await_owner_cleanup=await_owner_cleanup,
                 write_lock_resume_state={
                     "approval_type": "auth_assistance",
                     "task_id": "task-1",
@@ -21456,6 +21481,30 @@ async def test_spawn_browser_activity_auth_assistance_resume_reuses_backend_refr
     resume_mock.assert_not_awaited()
     assert connected_cdp_urls == ["ws://refreshed-by-auth-page"]
     assert session_info["resume_mode"] == "backend_refreshed_session"
+
+
+async def test_browser_activity_waits_for_owned_cleanup():
+    cleanup_started, release_cleanup = asyncio.Event(), asyncio.Event()
+
+    def schedule(**_kwargs):
+        async def cleanup():
+            cleanup_started.set()
+            await release_cleanup.wait()
+        return asyncio.create_task(cleanup())
+
+    with patch("domains.spawn_browser_agent_v3.handler._schedule_browser_cleanup", side_effect=schedule):
+        activity_task = asyncio.create_task(
+            test_spawn_browser_activity_auth_assistance_resume_reuses_backend_refreshed_session(
+                await_owner_cleanup=True
+            )
+        )
+        try:
+            await asyncio.wait_for(cleanup_started.wait(), timeout=5)
+            await asyncio.sleep(0)
+            assert not activity_task.done(), "activity acknowledged before its owned cleanup"
+        finally:
+            release_cleanup.set()
+            await activity_task
 
 @_in_browser_activity_context
 async def test_spawn_browser_activity_auth_assistance_resume_falls_back_when_live_session_expired():
@@ -21883,7 +21932,7 @@ class _FakeAsyncPlaywright:
 
 
 @_in_browser_activity_context
-async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks", approval_type="manual_pause", generated_schema=None, selected_gpt_token=None, real_schema_generator=False, schema_failure=None, pending_action=None, initial_poll_failure=False):
+async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks", approval_type="manual_pause", generated_schema=None, selected_gpt_token=None, real_schema_generator=False, schema_failure=None, pending_action=None, initial_poll_failure=False, native_auth=False, off_phone_action=False, browser_auth_pause=False, approved_message_intent=None):
     from contextlib import ExitStack
 
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
@@ -21904,7 +21953,10 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         "credential_ref": {"kind": "steel_session", "id": "steel-auth-1"},
         "same_session_available": True,
     }
+    if native_auth:
+        session_info["user_settings"] = {"iphoneCapability": {"enabled": True}}
     close_mock = AsyncMock()
+    propagation_mock = AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0})
     create_auth_mock = AsyncMock()
     restart_mock = AsyncMock(
         return_value={
@@ -21953,6 +22005,17 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         {"action": {"action": "request_user_assistance_for_authentication", "thinking": "", "params": {}}, "usage": {}, "mode": "waterfall"},
         {"action": {"action": "attempt_completion", "thinking": "The signed-in page confirms completion.", "params": {"reasoning": "confirmed"}}, "usage": {}, "mode": "waterfall"},
     ]
+    if browser_auth_pause:
+        actor_responses[1] = copy.deepcopy(actor_responses[0])
+        create_auth_mock.return_value = {"id": "browser-attention"}
+    native_request = AsyncMock(return_value={"success": True, "request_info": _native_phone_auth_fixture()[1]})
+    if native_auth:
+        actor_responses[0] = {
+            "action": {"action": "request_user_assistance_for_authentication", "params": {"targetKind": "iphone", "criticalReason": "password"}},
+            "tool_call_id": "native-decision", "_phone_snapshot": _native_phone_auth_fixture()[2], "usage": {},
+        }
+    if off_phone_action:
+        actor_responses[0] = {"action": {"action": "phone", "params": {"mode": "status"}}, "tool_call_id": "stale-phone", "_phone_snapshot": {"enabled": True}, "usage": {}}
     captured_turns = []
     captured_system_context = []
     decision_order = []
@@ -21993,7 +22056,15 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         if initial_poll_failure and input_poll_calls == 1:
             raise TimeoutError("resume input backend unavailable")
         return [await native_browser_start_source("2026-10-14T17:21:35.438+00:00"), *correction_rows]
+    fetched_session = AsyncMock(return_value=session_info)
+    async def bind_message(config, bound_user, bound_task, queue):
+        fetched_session.assert_awaited_once()
+        assert bound_user == "user-1" and bound_task == "task-1" and queue == approved_message_intent
+        assert actor_call.await_count == 0, "Message binding happened after the first model decision"
+    message_binding = AsyncMock(side_effect=bind_message)
     patch_targets = [
+        *([patch("domains.spawn_browser_agent_v3.handler.bind_approved_message", message_binding)] if approved_message_intent else []),
+        *([patch("domains.spawn_browser_agent_v3.phone.request_native_phone_authentication", native_request)] if native_auth else []),
         *([
             patch("domains.spawn_browser_agent_v3.handler._prepare_pending_write_lock_action", pending_preparation),
             patch("domains.spawn_browser_agent_v3.handler.execute_action", pending_execution),
@@ -22015,7 +22086,7 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         patch("domains.spawn_browser_agent_v3.handler.prepare_browser_auth", preparation),
         patch(
             "domains.spawn_browser_agent_v3.handler.fetch_session_info",
-            AsyncMock(return_value=session_info),
+            fetched_session,
         ),
         patch(
             "domains.spawn_browser_agent_v3.handler.fetch_recent_otps",
@@ -22046,7 +22117,7 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         ),
         patch(
             "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
-            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+            propagation_mock,
         ),
         patch("domains.spawn_browser_agent_v3.handler.close_browser_session", close_mock),
         patch(
@@ -22070,6 +22141,8 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
     ]
 
     with ExitStack() as stack:
+        if native_auth:
+            stack.enter_context(patch("domains.spawn_browser_agent_v3.phone.observe_phone", AsyncMock(return_value=_native_phone_auth_fixture()[2])))
         for patch_target in patch_targets:
             stack.enter_context(patch_target)
         result = await spawn_browser_agent_activity_v3(
@@ -22082,6 +22155,7 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
             output_schema={"fields": [{"name": "result", "type": "string"}]},
             use_claude_mode=False,
             gpt_token=selected_gpt_token,
+            **({"approved_message_intent": approved_message_intent} if approved_message_intent else {}),
             gpt_account_id="fixture-gpt-account" if selected_gpt_token else None,
             gpt_token_source="user" if selected_gpt_token else None,
             write_lock_resume_state={
@@ -22095,6 +22169,37 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         from domains.spawn_browser_agent_v3.handler import drain_background_browser_cleanups
         await drain_background_browser_cleanups(timeout=1)
 
+    if approved_message_intent:
+        message_binding.assert_awaited_once()
+    if browser_auth_pause:
+        assert result["status"] == "awaiting_auth_assistance"
+        assert result["request_id"] == "browser-attention"
+        assert auth_boundary_calls == ["restart", "create_assistance"]
+        return result
+    if off_phone_action:
+        assert result["status"] == "completed" and result["success"]
+        restart_mock.assert_not_awaited()
+        create_auth_mock.assert_not_awaited()
+        assert "Phone unavailable for this decision" in str(actor_call.captured_turns)
+        return result
+    if native_auth:
+        assert result["status"] == "awaiting_auth_assistance"
+        assert result["auth_target"] == _native_phone_auth_fixture()[0]
+        assert result["critical_reason"] == "password"
+        assert result["request_id"] == "attention-1"
+        assert result["usage_items"], "native auth pause lost actual model usage"
+        assert result["session_id"] == "session-1"
+        native_request.assert_awaited_once()
+        assert native_request.await_args.kwargs["decision_id"] == "native-decision"
+        assert native_request.await_args.kwargs["snapshot"] == _native_phone_auth_fixture()[2]
+        restart_mock.assert_not_awaited()
+        reconnect_mock.assert_not_awaited()
+        create_auth_mock.assert_not_awaited()
+        close_mock.assert_not_awaited()
+        propagation_mock.assert_not_awaited()
+        assert auth_boundary_calls == []
+        assert result["action_history"][-1]["action"] == "request_user_assistance_for_authentication"
+        return result
     if schema_failure:
         assert result["status"] != "completed", "schema failure accepted completion under the unacknowledged previous contract"
         assert result.get("structured_response") is None, "schema failure returned structured output from the previous contract"
@@ -24331,6 +24436,8 @@ async def test_manager_cancelled_browser_pause_preserves_preallocated_task_id():
         return handle
 
     with (
+        patch("domains.spawn_browser_agent_v3.handler.workflow.in_workflow", return_value=True),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.patched", return_value=False),
         patch(
             "domains.spawn_browser_agent_v3.handler.workflow.start_activity",
             side_effect=fake_start_activity,
@@ -24658,9 +24765,13 @@ async def test_manager_generation_handoff_terminal_falls_back_to_preallocated_ta
     result_without_task_id = {
         key: value for key, value in _AWAITING_PURCHASE_WRITE_APPROVAL.items() if key != "task_id"
     }
-    workflow_instance, events, raised = await _run_manager_with_parked_activity(
-        result_without_task_id, approval_error=GenerationHandoffRequested("navi-agent-tasks@new")
-    )
+    with (
+        patch("domains.spawn_browser_agent_v3.handler.workflow.in_workflow", return_value=True),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.patched", return_value=False),
+    ):
+        workflow_instance, events, raised = await _run_manager_with_parked_activity(
+            result_without_task_id, approval_error=GenerationHandoffRequested("navi-agent-tasks@new")
+        )
 
     assert isinstance(raised, GenerationHandoffRequested)
     assert events[-1].metadata["action_type"] == "task_complete"
@@ -25840,6 +25951,7 @@ async def test_manager_write_approval_after_hour_wait_resumes_and_finishes():
     assert final_event.message == "Purchase completed."
     assert final_event.metadata["structured_response"] == {"purchase_complete": True}
 
+@_both_browser_history_variants
 async def test_manager_payment_card_approval_uses_registered_activity_names_and_resumes():
     await _drive_browser_write_pause_archive_boundary(pause=False, payment=True, pause_between_mint_retries=True)
     from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
@@ -26716,7 +26828,11 @@ async def _drive_browser_write_pause_archive_boundary(
     from workflows.agent_workflow import AgentWorkflow
 
     root, tool = "00000000-0000-4000-8000-000000000088", "owned-write-tool"
-    task_id = browser._stable_browser_task_id(root, tool)
+    legacy_history = _legacy_browser_history_fixture.get()
+    task_id = (
+        browser._stable_browser_task_id(root, tool)
+        if legacy_history else browser._logical_browser_task_id(root)
+    )
     rows, starts, paused_starts, mints = [], [], [], []
     parked, changed = asyncio.Event(), asyncio.Event()
     opening_persisted = asyncio.Event()
@@ -26910,6 +27026,8 @@ async def _drive_browser_write_pause_archive_boundary(
         return logs
 
     with (
+        patch.object(browser.workflow, "in_workflow", return_value=True),
+        patch.object(browser.workflow, "patched", return_value=not legacy_history),
         patch("helpers.httpx_capture._mock_handler", persisted),
         patch("httpx.AsyncClient", side_effect=client),
         patch("config.load_config", return_value=config),
@@ -27187,6 +27305,7 @@ async def _drive_browser_write_pause_archive_boundary(
             assert not (asyncio.all_tasks() - previous_tasks), "owned approval/pause await survived manager exit"
 
 
+@_both_browser_history_variants
 async def test_manager_write_pause_seals_persisted_browser_for_archive():
     """PAUSE ends the manager's deferred write resume with a durable terminal."""
     await _drive_browser_write_pause_archive_boundary(pause=False)
@@ -27260,6 +27379,7 @@ async def test_manager_abandoned_payment_resumes_close_exact_browser_task():
         assert events[-1] is terminals[0]
 
 
+@_both_browser_history_variants
 async def test_manager_payment_pause_seals_persisted_browser_for_archive():
     """A real PAUSE must finish the pending payment browser before archival."""
     await _drive_browser_write_pause_archive_boundary(pause=True, payment=True)
@@ -27273,6 +27393,7 @@ async def test_manager_payment_pause_seals_persisted_browser_for_archive():
     )
 
 
+@_both_browser_history_variants
 async def test_manager_payment_pause_preserves_approval_and_interruptions():
     await _drive_browser_write_pause_archive_boundary(pause=False, payment=True, pause_on_approval=True)
     await _drive_browser_write_pause_archive_boundary(pause=False, payment=True)
@@ -27289,11 +27410,13 @@ async def test_manager_payment_pause_preserves_approval_and_interruptions():
         )
 
 
+@_both_browser_history_variants
 async def test_manager_explicit_pause_seals_auth_browser_for_archive():
     """An explicit PAUSE after auth's own pause must end that exact resume."""
     await _drive_browser_write_pause_archive_boundary(pause=True, auth=True)
 
 
+@_both_browser_history_variants
 async def test_manager_auth_pause_preserves_assistance_and_handoff():
     await _drive_browser_write_pause_archive_boundary(pause=False, auth=True)
     await _drive_browser_write_pause_archive_boundary(pause=True, auth=True, concurrent_approval=True)
@@ -31506,6 +31629,9 @@ async def run_all_tests():
         "manager_payment_gate_subscription_checkout_failure_still_raises_gate",
         test_manager_payment_gate_subscription_checkout_failure_still_raises_gate,
     )
+    await r.record_async("browser_activity_queue_lifecycle", test_browser_activity_queue_lifecycle)
+    await r.record_async("browser_activity_cleanup_ack", test_browser_activity_waits_for_owned_cleanup)
+    await r.record_async("browser_activity_timeout_continuation", test_browser_activity_timeout_fence_survives_continuation)
     await r.record_async(
         "manager_terminal_scope_and_pending_resumes",
         test_manager_terminal_scope_and_pending_resumes,
@@ -31649,7 +31775,1023 @@ async def run_all_tests():
     )
     await r.record_async("browser_verifier_preserves_native_target_attempt_receipts", test_browser_verifier_preserves_native_target_attempt_receipts)
     await r.record_async("browser_verifier_target_attempt_survives_admission_and_provider_bodies", test_browser_verifier_target_attempt_survives_admission_and_provider_bodies)
+    await r.record_async("phone_off_rotation_has_no_discovery_or_input_change", test_phone_off_rotation_has_no_discovery_or_input_change)
+    await r.record_async("phone_off_actual_activity_never_observes_phone", test_phone_off_actual_activity_never_observes_phone)
+    await r.record_async("phone_off_stale_model_action_cannot_dispatch", test_phone_off_stale_model_action_cannot_dispatch)
+    await r.record_async("phone_off_browser_auth_pause_does_not_retain_phone", test_phone_off_browser_auth_pause_does_not_retain_phone)
+    await r.record_async("phone_auth_retain_uses_only_seen_owned_lease", test_phone_auth_retain_uses_only_seen_owned_lease)
+    await r.record_async("phone_setup_settings_targets_transport", test_phone_setup_settings_targets_transport_recovery_and_billing)
+    await r.record_async("phone_setup_first_operation_and_seen_context", test_phone_setup_first_operation_and_seen_context)
+    await r.record_async("phone_setup_actions_recovery_and_heartbeat", test_phone_setup_actions_recovery_and_heartbeat)
+    await r.record_async("phone_setup_failclosed_and_safe_errors", test_phone_setup_failclosed_and_safe_errors)
+    await r.record_async("phone_setup_pending_receipt_and_ready_private_ref", test_phone_setup_pending_receipt_and_ready_private_ref)
+    await r.record_async("phone_saved_credential_wire_and_unknown_receipt", test_phone_saved_credential_wire_and_unknown_receipt)
+    await r.record_async("phone_device_passcode_wire_and_unknown_receipt", test_phone_device_passcode_wire_and_unknown_receipt)
+    await r.record_async("phone_saved_credential_rejects_model_secret_routing_args", test_phone_saved_credential_rejects_model_secret_routing_args)
+    await r.record_async("phone_durable_http_contract", test_phone_durable_http_contract)
+    await r.record_async("phone_denied_before_dom_and_private_binding", test_phone_denied_before_dom_and_private_binding)
+    await r.record_async("phone_reattach_reacquire_and_stale_cursor", test_phone_reattach_reacquire_and_stale_cursor)
+    await r.record_async("phone_model_observation_and_account_isolation", test_phone_model_observation_and_account_isolation)
+    await r.record_async("phone_revocation_and_safe_timeout", test_phone_revocation_and_safe_timeout)
+    await r.record_async("phone_live_completion_records_real_results", test_phone_live_completion_records_real_results_for_existing_verifier)
+    await r.record_async("phone_captured_verifier_same_client", test_phone_captured_verifier_replays_same_foundry_client_offline)
+    await r.record_async("native_phone_auth_http_identity_recovery", test_native_phone_auth_http_identity_recovery)
+    await r.record_async("native_phone_auth_denials_and_safe_errors", test_native_phone_auth_denials_and_safe_errors)
+    await r.record_async("native_phone_auth_manager_exact_resume", test_native_phone_auth_manager_exact_resume)
+    await r.record_async("native_phone_auth_no_outbound_intent", test_native_phone_auth_does_not_forward_excluded_outbound_intent)
+    await r.record_async("native_phone_auth_actual_activity_before_browser_recovery", test_native_phone_auth_actual_activity_before_browser_recovery)
+    await r.record_async("native_phone_auth_manager_rejection_preserves_target", test_native_phone_auth_manager_rejection_preserves_target)
+    await r.record_async("native_phone_auth_generation_reattaches_exact_request", test_native_phone_auth_generation_reattaches_exact_request)
+    await r.record_async("native_phone_auth_cancellation_preserves_exact_pending_request", test_native_phone_auth_cancellation_preserves_exact_pending_request)
+    await r.record_async("phone_supervisor_preserves_unknown_and_cancellation", test_phone_supervisor_preserves_unknown_and_cancellation)
     return r.all_passed
+
+
+
+
+async def test_phone_durable_http_contract():
+    teardown_mock()  # This case owns its explicit MockTransport, not a prior global route.
+    from domains.spawn_browser_agent_v3.phone import execute_phone, observe_phone
+    calls = []
+    view = {'lease': None, 'cursor': 0, 'lastOperation': None}
+    def backend(request):
+        calls.append((request.method, request.url.path, json.loads(request.content) if request.content else None))
+        if request.url.path.endswith('/capability'):
+            return httpx.Response(200, json={'enabled': True})
+        if '/interactions/' in request.url.path:
+            if request.method == 'POST':
+                view['lease'] = {'id': 'lease', 'status': 'ACTIVE'}
+            return httpx.Response(200, json=view)
+        if request.url.path.endswith('/heartbeat'):
+            return httpx.Response(200, json={})
+        if request.url.path.endswith('/operations'):
+            body = json.loads(request.content)
+            assert body['expectedCursor'] == 0
+            view['cursor'] = 1
+            view['lastOperation'] = {'id': body['operationId'], 'status': 'UNKNOWN', 'operation': body['operation'], 'cursor': 1}
+            raise httpx.ReadTimeout('synthetic')
+        if '/operations/' in request.url.path:
+            return httpx.Response(200, json={'operation': view['lastOperation']})
+        raise AssertionError(request.url.path)
+    import httpx
+    config = SimpleNamespace(backend=SimpleNamespace(api_url='https://backend.test', api_key='synthetic'))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        snapshot = await observe_phone(config, 'user', 'task', client=client)
+        kwargs = dict(config=config, user_id='user', agent_id='agent', task_id='task', decision_id='call', snapshot=snapshot, client=client)
+        result = await execute_phone({'mode': 'operation', 'operation': 'input.tap', 'args': {'x': 1, 'y': 2}}, **kwargs)
+        assert result['operation']['status'] == 'UNKNOWN'
+        recovered = await observe_phone(config, 'user', 'task', client=client)
+        assert recovered['interaction']['lastOperation']['status'] == 'UNKNOWN'
+        assert sum(path.endswith('/operations') for _, path, _ in calls) == 1
+        acquire = next(body for method, path, body in calls if method == 'POST' and '/interactions/' in path)
+        assert acquire['requestKey']
+        assert 'agentId' not in acquire
+
+
+async def test_phone_denied_before_dom_and_private_binding():
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+    from domains.spawn_browser_agent_v3.phone import observe_phone
+    import httpx
+    config = SimpleNamespace(backend=SimpleNamespace(api_url='https://backend.test', api_key='synthetic'))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(503))) as client:
+        assert (await observe_phone(config, 'u', 't', client=client))['enabled'] is False
+    result = await execute_action(SimpleNamespace(), SimpleNamespace(), {'action': 'phone', 'params': {'mode': 'operation', 'operation': 'input.text', 'args': {'text': 'secret_ref:password'}}}, config=config, user_id='u', agent_id='a', browser_task_id='t', tool_call_id_decision='c', phone_snapshot={'enabled': True}, secret_refs={'secret_ref:password': 'CANARY-PASSWORD'})
+    assert not result['success']
+    assert 'binding' in result['error'].lower()
+    assert 'CANARY-PASSWORD' not in json.dumps(result)
+
+
+async def test_phone_reattach_reacquire_and_stale_cursor():
+    teardown_mock()  # This case owns its explicit MockTransport, not a prior global route.
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import execute_phone
+    config = SimpleNamespace(backend=SimpleNamespace(api_url='https://backend.test', api_key='synthetic'))
+    acquired, submitted = [], []
+    lease = {'id': 'old', 'status': 'ACTIVE'}
+    def backend(request):
+        body = json.loads(request.content) if request.content else {}
+        if request.url.path.endswith('/capability'):
+            return httpx.Response(200, json={'enabled': True})
+        if '/interactions/' in request.url.path:
+            if request.method == 'POST':
+                acquired.append(body['requestKey'])
+            return httpx.Response(200, json={'lease': lease, 'cursor': 7})
+        if request.url.path.endswith('/release'):
+            return httpx.Response(200, json={'lease': {**lease, 'status': 'RELEASED'}})
+        if request.url.path.endswith('/operations'):
+            submitted.append(body)
+            return httpx.Response(409, json={'error': 'stale_cursor'})
+        raise AssertionError(request.url.path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        kwargs = dict(config=config,user_id='u',agent_id='a',task_id='t',decision_id='same',client=client,
+                      snapshot={'enabled': True,'interaction': {'lease': lease.copy(),'cursor': 3}})
+        command = {'mode': 'operation','operation': 'input.tap','args': {'x': 2,'y': 1}}
+        first = await execute_phone(command, **kwargs)
+        second = await execute_phone({**command, 'args': {'y': 1,'x': 2}}, **kwargs)
+        assert first['_httpStatus'] == second['_httpStatus'] == 409
+        assert submitted[0] == submitted[1]
+        assert submitted[0]['expectedCursor'] == 3, 'must not replace deciding cursor with current 7'
+        assert acquired[0] == acquired[1]
+        await execute_phone({**command, 'args': {'x': 999, 'y': 1}}, **kwargs)
+        assert submitted[-1]['operationId'] == submitted[0]['operationId'], 'same intent changed payload must conflict under same ID'
+        kwargs['decision_id'] = ''
+        await execute_phone({'mode':'operation','operation':'input.text','args':{'s':'000123'}}, **kwargs)
+        fallback_id = submitted[-1]['operationId']
+        fallback_acquire = acquired[-1]
+        await execute_phone({'mode':'operation','operation':'input.text','args':{'s':'999999'}}, **kwargs)
+        assert submitted[-1]['operationId'] == fallback_id
+        assert acquired[-1] == fallback_acquire
+        kwargs['decision_id'] = 'same'
+        assert (await execute_phone({'mode':'release'}, **kwargs))['success']
+        lease.update(id='new')
+        kwargs.update(decision_id='next', snapshot={'enabled':True,'interaction':{'lease':{'id':'old','status':'RELEASED'},'cursor':3}})
+        await execute_phone(command, **kwargs)
+        assert acquired[-1] != acquired[0]
+        assert submitted[-1]['expectedCursor'] == 0
+        assert submitted[-1]['operationId'] != submitted[0]['operationId']
+        before = len(acquired)
+        kwargs['snapshot']['interaction']['lease'] = lease.copy()
+        await execute_phone({'mode':'status'}, **kwargs)
+        assert len(acquired) == before, 'status must not allocate'
+
+
+async def test_phone_model_observation_and_account_isolation():
+    teardown_mock()  # This case owns its explicit MockTransport, not a prior global route.
+    import httpx
+    from browser_tools.schemas import AVAILABLE_ACTIONS
+    from domains.spawn_browser_agent_v3.handler import _call_browser_use_with_rotation
+    from domains.spawn_browser_agent_v3.phone import observe_phone
+    from domains.spawn_browser_agent_v3.types import ClaudeTokenState
+    original = list(AVAILABLE_ACTIONS)
+    real_client = httpx.AsyncClient
+    last = {'id': 'persisted-op', 'status':'UNKNOWN','cursor':9,'operation':'input.text','result':None}
+    def backend(request):
+        enabled = request.headers['x-user-id'] == 'enabled'
+        if request.url.path.endswith('/capability'):
+            return httpx.Response(200,json={'enabled':enabled})
+        return httpx.Response(200,json={'lease':{'id':'owned','status':'ACTIVE'},'cursor':10,'lastOperation':{'id':'read','cursor':10,'status':'SUCCEEDED','operation':'screen.text'},'pendingOperation':last})
+    def transport_client(*args, **kwargs):
+        return real_client(transport=httpx.MockTransport(backend))
+    clients = [_FakeRoseClient([{'tool_call_id':'streamed'}]), _FakeRoseClient([{}])]
+    async def call(index, user_id):
+        return await _call_browser_use_with_rotation(rose_client=clients[index],task='task',dynamic_system_context='',turn_messages=[],browser_state={},action_entries=[],config=_fake_config(),user_id=user_id,agent_id='trusted',iteration=1,token_state=ClaudeTokenState(),gpt_token=None,gpt_account_id=None,gpt_token_source=None,gpt_token_pool_id=None,browser_use_mode=None,browser_task_id='task', phone_observation=(await observe_phone(_fake_config(), user_id, 'task')) if user_id == 'enabled' else None)
+    with patch.object(httpx, 'AsyncClient', transport_client):
+        enabled, disabled = await asyncio.gather(call(0,'enabled'),call(1,'disabled'))
+    assert AVAILABLE_ACTIONS == original
+    assert 'phone' in clients[0].calls[0]['available_actions']
+    assert 'phone' not in clients[1].calls[0]['available_actions']
+    assert clients[0].calls[0]['browser_state']['phone']['interaction']['pendingOperation'] == last
+    assert enabled['_phone_snapshot']['interaction']['cursor'] == 10
+    assert '_phone_snapshot' not in disabled
+    assert 'Phone Harness 0.3.2' in clients[0].calls[0]['dynamic_system_context']
+    # The cloud tool takes raw provider operations, not the upstream CLI's
+    # Python helpers; the decision must receive usable argument vocabulary.
+    guidance = clients[0].calls[0]['dynamic_system_context']
+    assert 'apps.launch' in guidance and '"name": "Settings"' in guidance
+    assert 'input.tap' in guidance and 'screen.bounds' in guidance
+    assert 'input.text' in guidance and '"s"' in guidance
+    assert 'Phone Harness' not in clients[1].calls[0]['dynamic_system_context']
+
+
+async def test_phone_revocation_and_safe_timeout():
+    teardown_mock()  # This case owns its explicit MockTransport, not a prior global route.
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import execute_phone
+    config = SimpleNamespace(backend=SimpleNamespace(api_url='https://backend.test', api_key='synthetic'))
+    paths=[]
+    def backend(request):
+        paths.append(request.url.path)
+        return httpx.Response(200, json={'enabled':False})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        result=await execute_phone({'mode':'operation','operation':'input.tap'},config=config,user_id='u',agent_id='a',task_id='t',decision_id='call',snapshot={'enabled':True},client=client)
+    assert not result['success']
+    assert paths == ['/api/iphone/capability']
+    # Phone exception stays a tool outcome and cannot escape as a CDP timeout.
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+    with patch('domains.spawn_browser_agent_v3.phone.execute_phone', side_effect=asyncio.TimeoutError('CANARY-PASSWORD')):
+        result = await execute_action(SimpleNamespace(), SimpleNamespace(), {'action':'phone','params':{'mode':'status'}},config=config,user_id='u',agent_id='a',browser_task_id='t',tool_call_id_decision='c',phone_snapshot={'enabled':True})
+    assert not result['success']
+    assert 'CANARY' not in json.dumps(result)
+
+
+async def test_phone_live_completion_records_real_results_for_existing_verifier():
+    """Replay 20:09:54 launch/read/release/attempt/status/attempt boundary.
+
+    The actor's tool transcript had the receipts; the first verifier saw
+    `Browser Agent Execution Log (0 actions shown ...)` and returned score 0.
+    Exercise the actual activity-local action wrapper, not a replacement logger.
+    """
+    from domains.spawn_browser_agent_v3 import handler, service
+    from browser_tools.dom_service import ActionHistory
+    tree=ast.parse(Path(handler.__file__).read_text())
+    boundary=next(node for node in ast.walk(tree) if isinstance(node,ast.AsyncFunctionDef) and node.name=='_execute_action')
+    factory=ast.parse('def factory():\n    action_redaction_refs = None\n').body[0]
+    factory.body.extend([boundary,ast.Return(value=ast.Name(id='_execute_action',ctx=ast.Load()))])
+    code=ast.fix_missing_locations(ast.Module(body=[factory],type_ignores=[]))
+    history=ActionHistory()
+    ns=dict(handler.__dict__)
+    ns.update(secret_refs={'pwd:fixture':'CANARY-PRIVATE-PASSWORD'},dom_service=SimpleNamespace(),
+              action_history=history,_auth_context_for_url=AsyncMock(),current_url='https://phone-harness.com/cloud',
+              config=_fake_config(),user_id='user',agent_id='agent',task_id='task',
+              _redact_activity_value=lambda value:value)
+    exec(compile(code,handler.__file__,'exec'),ns)
+    execute=ns['factory']()
+    launch={'success':True,'operation':{'id':'a249778ec961bec36e73002e5a8afeea8a1ecbe8632688f10f2ab8cb64deeacb','cursor':1,'operation':'apps.launch','status':'SUCCEEDED','errorCode':None,'result':'com.apple.Preferences'}}
+    ocr={'success':True,'operation':{'id':'f48d35b86fe8a7246c3d2789a9c2192297fbd6184661dd84573fa889bf72665b','cursor':2,'operation':'screen.text','status':'SUCCEEDED','errorCode':None,'result':[{'text':'Paired Computers','confidence':1,'x':376,'y':86,'w':284,'h':32,'source':'pixels'}]}}
+    released={'success':True,'phone':{'lease':{'id':'e69479bd-cf9c-4f88-b82e-9a9264a24ca2','status':'RELEASED'}}}
+    actions=[{'mode':'operation','operation':'apps.launch','args':{'name':'Settings','fresh':False}},
+             {'mode':'operation','operation':'screen.text','args':{'min_confidence':0.3}},
+             {'mode':'release','args':{}},None,{'mode':'status','args':{}},None]
+    results=[launch,ocr,released,released]
+    with patch('domains.spawn_browser_agent_v3.phone.execute_phone',AsyncMock(side_effect=results)),patch.object(service,'list_session_files',AsyncMock(return_value=[])):
+        for params in actions:
+            if params is not None:
+                await execute(ns['dom_service'],history,{'action':'phone','params':params},config=ns['config'],user_id='user',agent_id='agent',browser_task_id='task',tool_call_id_decision='captured',phone_snapshot={'enabled':True})
+            else:
+                context=await service.build_browser_verifier_context(goal='Report the actual cloud phone heading and release',current_url='https://phone-harness.com/cloud',browser_state={'dom_tree':'Phone Harness Cloud marketing page'},action_history=history,config=ns['config'],session_id='browser')
+                recorded=next(row['text'] for row in context if row.get('metadata',{}).get('toolName')=='action_history')
+                assert launch['operation']['id'] in recorded, 'successful phone launch lost before completion verifier'
+                assert 'Paired Computers' in recorded and "'status': 'RELEASED'" in recorded
+                assert 'CANARY-PRIVATE-PASSWORD' not in str(context)
+    assert [row['action'] for row in history.get_entries()]==['phone']*4
+    # Exercise the recording boundary with a private value, not only absence
+    # checks against the nonsecret captured launch/read sequence above.
+    private_action={'action':'phone','thinking':'CANARY-PRIVATE-PASSWORD','params':{'mode':'operation','operation':'input.text','args':{'s':'CANARY-PRIVATE-PASSWORD'}}}
+    with patch('domains.spawn_browser_agent_v3.phone.execute_phone',AsyncMock(return_value={'success':False,'error':'CANARY-PRIVATE-PASSWORD'})):
+        await execute(ns['dom_service'],history,private_action,config=ns['config'],user_id='user',agent_id='agent',browser_task_id='task',tool_call_id_decision='private-boundary',phone_snapshot={'enabled':True})
+    assert 'CANARY-PRIVATE-PASSWORD' not in str(history.get_entries())
+
+
+async def test_phone_captured_verifier_replays_same_foundry_client_offline():
+    """Keep the captured rejection; a replay must never fabricate a passing judge.
+
+    The permanent reduced fixture preserves the captured missing-history
+    condition without depending on private workspace files. The full request,
+    including its unrelated screenshot, has a separate recorded RCA replay.
+    """
+    import httpx
+    from providers.rose import RoseClient
+    from _test_utils import set_mock_handler
+    captured={
+        'messages':[{'role':'user','content':'Goal: Report actual phone heading and release. TOOL_RESULT {"tool_name":"action_history","result":"Browser Agent Execution Log (0 actions shown - URL transitions, tool inputs/outputs):\\n\\n"}'}],
+        'response_format':None,
+        'output':{'content':'{"output":{"visible_heading":"","screen_text":"","phone_released":false},"reasoning":"There is no phone-tool result confirming a Settings launch, no screen.text OCR result from the cloud iPhone, and no result confirming its release.","score":0.0}'},
+    }
+    from helpers.llm import _build_verifier_response_model
+    properties=((captured.get('response_format') or {}).get('json_schema',{}).get('schema',{}).get('properties',{}).get('output',{}).get('properties',{}))
+    schema={'fields':[{'name':name,'type':'bool' if field['type']=='boolean' else 'str','description':field.get('description','')} for name,field in properties.items()]} if properties else None
+    response_model=_build_verifier_response_model(schema)
+    if properties:
+        assert response_model.model_json_schema()['properties']['output']['$ref']
+    frozen=captured['output']['content']
+    sse='event: response.output_text.delta\ndata: '+json.dumps({'type':'response.output_text.delta','delta':frozen})+'\n\nevent: response.completed\ndata: '+json.dumps({'type':'response.completed','response':{'usage':{'input_tokens':5154,'output_tokens':311,'total_tokens':5465}}})+'\n\ndata: [DONE]\n\n'
+    calls=[]
+    def transport(request):
+        assert request.url.host=='phone-rca.openai.azure.com', 'offline replay must not escape synthetic Foundry endpoint'
+        calls.append(json.loads(request.content))
+        return httpx.Response(200,text=sse,headers={'content-type':'text/event-stream'})
+    set_mock_handler(transport)
+    try:
+        with patch.dict(os.environ,{'GPT_API_KEY':'','ANTHROPIC_API_KEY':'','CEREBRAS_API_KEY':'','AZURE_FOUNDRY_ENDPOINT':'https://phone-rca.openai.azure.com','AZURE_FOUNDRY_API_KEY':'synthetic','AZURE_FOUNDRY_DEPLOYMENTS':'gpt-6-sol'}):
+            chunks=[chunk async for chunk in RoseClient(openrouter_key='synthetic').complete(
+                pool='rose-1-ultra',messages=captured['messages'],response_model=response_model,
+                max_tokens=16000,temperature=0.3,deadline_s=180,ttft_timeout_s=60,
+                idle_timeout_s=90,effort='xhigh',provider_fast_mode=False,
+                skip_cache_write=False,dump_context=False,call_site='verifier_browser',
+                request_id=captured['output'].get('request_id','captured-reduced'),
+            )]
+        content = "".join(str(chunk.data.get("text") or "") for chunk in chunks if chunk.kind == "content")
+        assert json.loads(content)["score"] == 0.0
+        assert len(calls) == 1
+        assert "0 actions shown" in json.dumps(calls[0])
+    finally:
+        teardown_mock()
+
+
+def _native_phone_auth_fixture():
+    target = {"kind": "iphone", "browserTaskId": "task-1", "leaseId": "lease-1"}
+    receipt = {
+        "request": {
+            "id": "attention-1",
+            "agentId": "agent-1",
+            "userId": "user-1",
+            "target": target,
+            "criticalReason": "password",
+        },
+        "handoff": {
+            "type": "manual_step",
+            "liveViewUrl": None,
+            "steelSessionId": None,
+            "target": target,
+            "criticalReason": "password",
+        },
+    }
+    snapshot = {
+        "enabled": True,
+        "interaction": {
+            "cursor": 7,
+            "lease": {"id": "lease-1", "status": "ACTIVE", "browserTaskId": "task-1", "attentionRequestId": None},
+        },
+    }
+    return target, receipt, snapshot
+
+
+async def test_native_phone_auth_http_identity_recovery():
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import request_native_phone_authentication
+
+    target, receipt, snapshot = _native_phone_auth_fixture()
+    calls = []
+    lost = False
+
+    def backend(request):
+        calls.append((request.method, request.url.path, json.loads(request.content) if request.content else None))
+        if request.url.path.endswith("/capability"):
+            return httpx.Response(200, json={"enabled": True})
+        if request.method == "POST":
+            if lost:
+                raise httpx.ReadError("CANARY-PRIVATE-TRANSPORT", request=request)
+            return httpx.Response(201, json={**receipt, "private": "CANARY-PRIVATE-RESPONSE"})
+        if "/interactions/" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "lease": {"id": "lease-1", "attentionRequestId": "attention-1", "browserTaskId": "task-1"},
+                    "cursor": 7,
+                },
+            )
+        assert request.url.path.endswith("/auth-assistance/attention-1")
+        return httpx.Response(200, json=receipt)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        args = dict(
+            config=_fake_config(),
+            user_id="user-1",
+            agent_id="agent-1",
+            task_id="task-1",
+            decision_id="decision-1",
+            snapshot=snapshot,
+            critical_reason="password",
+            client=client,
+        )
+        first = await request_native_phone_authentication(**args)
+        lost = True
+        second = await request_native_phone_authentication(**args)
+        restarted_snapshot = copy.deepcopy(snapshot)
+        restarted_snapshot["interaction"]["lease"]["attentionRequestId"] = "attention-1"
+        before_restart_posts = sum(c[0] == "POST" for c in calls)
+        restarted = await request_native_phone_authentication(**{**args, "decision_id": "new-worker-decision", "snapshot": restarted_snapshot})
+        assert restarted["success"] and restarted["request_info"] == first["request_info"]
+        assert sum(c[0] == "POST" for c in calls) == before_restart_posts, "restart recreated an already reserved attention"
+    assert first["success"] and second["success"]
+    assert first["request_info"] == second["request_info"]
+    assert first["request_info"]["request"]["target"] == target
+    assert "CANARY" not in json.dumps(first)
+    posts = [c[2] for c in calls if c[0] == "POST"]
+    assert len(posts) == 2 and posts[0] == posts[1]
+    body = posts[0]
+    assert body["targetKind"] == "iphone" and body["mode"] == "manual_step" and body["authRealm"] == "iphone"
+    assert body["browserTaskId"] == "task-1" and body["expectedCursor"] == 7
+    assert set(body) == {
+        "agentId",
+        "authRealm",
+        "mode",
+        "targetKind",
+        "browserTaskId",
+        "criticalReason",
+        "requestKey",
+        "expectedCursor",
+    }
+    assert body["requestKey"] and not any(c[0] == "POST" and "/iphone/" in c[1] for c in calls)
+
+
+async def test_native_phone_auth_denials_and_safe_errors():
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import request_native_phone_authentication
+
+    _, receipt, snapshot = _native_phone_auth_fixture()
+    status = 409
+    calls = []
+
+    def backend(request):
+        calls.append((request.method, request.url.path))
+        if request.url.path.endswith("/capability"):
+            return httpx.Response(200, json={"enabled": True})
+        if request.method == "POST":
+            return httpx.Response(status, json={"error": "CANARY-PRIVATE-ERROR"})
+        if "/interactions/" in request.url.path:
+            return httpx.Response(200, json={"lease": {"id": "lease-1", "attentionRequestId": "attention-1"}})
+        return httpx.Response(
+            200, json={**receipt, "request": {**receipt["request"], "criticalReason": "verification_code"}}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        args = dict(
+            config=_fake_config(),
+            user_id="user-1",
+            agent_id="agent-1",
+            task_id="task-1",
+            decision_id="d",
+            snapshot=snapshot,
+            critical_reason="password",
+            client=client,
+        )
+        rejected = await request_native_phone_authentication(**args)
+        assert not rejected["success"] and len([c for c in calls if c[0] == "POST"]) == 1
+        assert not any("/interactions/" in c[1] for c in calls)
+        status = 500
+        wrong = await request_native_phone_authentication(**args)
+        assert not wrong["success"] and "CANARY" not in json.dumps(wrong)
+        calls.clear()
+        assert not (await request_native_phone_authentication(**{**args, "snapshot": {"enabled": False}}))["success"]
+        assert calls == []
+        queued = copy.deepcopy(snapshot)
+        queued["interaction"]["lease"]["status"] = "WAITING"
+        assert not (await request_native_phone_authentication(**{**args, "snapshot": queued}))["success"]
+        assert calls == [], "queued phone fabricated authentication attention"
+
+
+async def _exercise_native_phone_auth_manager(signal="__AUTH_ASSISTANCE_COMPLETED__", handoff=False, cancel=False, outbound_intent=False):
+    from domains.spawn_browser_agent_v3 import handler as h
+
+    target, receipt, _ = _native_phone_auth_fixture()
+    first = {
+        "status": "awaiting_auth_assistance",
+        "request_id": "attention-1",
+        "auth_realm": "iphone",
+        "base_site": "Cloud iPhone",
+        "auth_assistance_request": receipt,
+        "auth_target": target,
+        "critical_reason": "password",
+        "task_id": "task-1",
+        "session_id": "browser-session",
+        "browser_url": "https://browser.test",
+        "cdp_url": "ws://browser",
+        "step_count": 3,
+    }
+
+    class Handle:
+        def __init__(self, value):
+            self.value = value
+
+        def done(self):
+            return True
+
+        def __await__(self):
+            async def result():
+                return self.value
+
+            return result().__await__()
+
+    instance = SimpleNamespace(
+        user_id="user-1",
+        agent_id="agent-1",
+        is_paused=False,
+        write_lock_enabled=True,
+        system_name="Rose",
+        _signal_responses={},
+        _update_tree_state=AsyncMock(),
+    )
+    calls = []
+    tool_call = {"goal": "Inspect actual phone screen"}
+    if outbound_intent:
+        tool_call["approvedMessageIntent"] = {"queueId": "excluded-outbound-intent"}
+
+    def start(*args, **kwargs):
+        import inspect
+        inspect.signature(h.spawn_browser_agent_activity_v3).bind(*kwargs["args"])
+        calls.append(kwargs)
+        return Handle(
+            first
+            if len(calls) == 1
+            else {"status": "completed", "success": True, "message": "observed result", "output_files": []}
+        )
+
+    async def wait(predicate, *args, **kwargs):
+        if not instance.is_paused:
+            assert predicate()
+            return
+        assert not predicate()
+        if cancel:
+            raise asyncio.CancelledError()
+        if handoff:
+            from helpers.generation_handoff import GenerationHandoffRequested
+            raise GenerationHandoffRequested("next-worker-generation")
+        instance._signal_responses["foreign-attention"] = "__AUTH_ASSISTANCE_COMPLETED__"
+        assert not predicate()
+        instance._signal_responses["attention-1"] = signal
+        assert predicate()
+
+    if handoff:
+        from workflows.agent_workflow import AgentWorkflow
+        instance._tool_parking_enabled = True
+        instance._active_tool_calls = {"tool-1": ("spawn_browser_agent", {"goal": "Inspect actual phone screen"})}
+        instance._pending_tool_resumes = []
+        instance._park_pending_tool = AgentWorkflow._park_pending_tool.__get__(instance)
+    with (
+        patch.object(h.workflow, "start_activity", side_effect=start),
+        patch.object(h.workflow, "wait_condition", wait),
+        patch.object(h.workflow, "logger", MagicMock()),
+    ):
+        events = []
+        try:
+            async for event in h.SpawnBrowserAgentManagerV3().execute_tool(instance, tool_call, "tool-1"):
+                events.append(event)
+        except BaseException as error:
+            if cancel:
+                assert isinstance(error, asyncio.CancelledError)
+                assert len(calls) == 1 and instance.is_paused
+                assert instance._signal_responses == {}
+                native_event = next(event for event in events if (getattr(event, "metadata", None) or {}).get("requestUserAuthentication"))
+                assert native_event.metadata["requestUserAuthentication"]["requestId"] == "attention-1"
+                assert native_event.metadata["requestUserAuthentication"]["target"] == target
+                return
+            from helpers.generation_handoff import GenerationHandoffRequested
+            assert isinstance(error, GenerationHandoffRequested) and error.parked
+            assert handoff and len(calls) == 1
+            parked = instance._pending_tool_resumes[0]
+            assert parked["resume"]["parked_result"]["auth_target"] == target
+            assert parked["resume"]["parked_result"]["request_id"] == "attention-1"
+            instance._tool_resume_hints = {"tool-1": parked["resume"]}
+            instance._take_tool_resume = AgentWorkflow._take_tool_resume.__get__(instance)
+            handoff = False
+            async for event in h.SpawnBrowserAgentManagerV3().execute_tool(instance, tool_call, "tool-1"):
+                events.append(event)
+    assert not cancel, "cancelled native wait fabricated a resume"
+    resumed = calls[1]["args"][12]
+    assert resumed["auth_target"] == target and resumed["critical_reason"] == "password"
+    assert resumed["approval_type"] == (h.AUTH_ASSISTANCE_DECLINED if signal == "__REJECTED__" else "native_auth_assistance")
+    assert calls[1]["args"][5] == "browser-session" and calls[1]["args"][6] == "ws://browser"
+    native = [e.metadata for e in events if (getattr(e, "metadata", None) or {}).get("requestUserAuthentication")]
+    assert len(native) == 2
+    for meta in native:
+        assert meta["requestUserAuthentication"]["target"] == target
+        assert meta["authAssistance"]["target"] == target
+        assert meta["requestUserAuthentication"]["criticalReason"] == "password"
+        assert meta["requestUserAuthentication"]["steelSessionId"] is None
+    assert "foreign-attention" in instance._signal_responses
+    assert "attention-1" not in instance._signal_responses
+
+
+async def test_native_phone_auth_manager_exact_resume():
+    await _exercise_native_phone_auth_manager()
+
+
+async def test_native_phone_auth_does_not_forward_excluded_outbound_intent():
+    await _exercise_native_phone_auth_manager(outbound_intent=True)
+
+
+async def test_native_phone_auth_manager_rejection_preserves_target():
+    await _exercise_native_phone_auth_manager(signal="__REJECTED__")
+
+
+async def test_native_phone_auth_generation_reattaches_exact_request():
+    await _exercise_native_phone_auth_manager(handoff=True)
+
+
+
+
+async def test_native_phone_auth_actual_activity_before_browser_recovery():
+    result = await _exercise_browser_resume_user_input(native_auth=True)
+    assert not result.get("success"), "A handoff must not claim task or login completion"
+
+
+async def test_native_phone_auth_cancellation_preserves_exact_pending_request():
+    await _exercise_native_phone_auth_manager(cancel=True)
+
+
+async def test_phone_setup_first_operation_and_seen_context():
+    teardown_mock()  # This case owns its explicit MockTransport, not a prior global route.
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import execute_phone, observe_phone
+    lease = {"id": "lease-setup", "status": "ACTIVE", "browserTaskId": "task-setup"}
+    setup = {"attemptId": "attempt-setup", "revision": 1, "state": "in_progress", "expectedAccountIdentifier": "synthetic-account@example.test"}
+    view = {"lease": None, "cursor": 0, "setup": None, "lastOperation": None}
+    calls, physical, receipts = [], [], {}
+    def backend(request):
+        body = json.loads(request.content) if request.content else {}
+        calls.append((request.method, request.url.path, body))
+        if request.url.path.endswith("/capability"):
+            return httpx.Response(200, json={"enabled": True, "setupState": "not_started"})
+        if "/interactions/" in request.url.path:
+            if request.method == "POST":
+                view.update(lease=lease, setup=setup)
+            return httpx.Response(200, json=view)
+        if request.url.path.endswith("/heartbeat"):
+            return httpx.Response(200, json={})
+        if request.url.path.endswith("/operations"):
+            oid = body["operationId"]
+            if oid not in receipts:
+                allowed = body.get("setupAttemptId") == setup["attemptId"] and body.get("setupRevision") == setup["revision"]
+                if allowed:
+                    physical.append(body)
+                receipts[oid] = {"operation": {"id": oid, "status": "SUCCEEDED" if allowed else "FAILED", "errorCode": None if allowed else "phone_setup_required", "operation": body["operation"], "cursor": 1, "result": "actual synthetic observation" if allowed else None}, "setup": setup}
+            return httpx.Response(200, json=receipts[oid])
+        raise AssertionError(request.url.path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        common = dict(config=_fake_config(), user_id="user", agent_id="agent", task_id="task-setup", client=client)
+        initial = await observe_phone(_fake_config(), "user", "task-setup", client=client)
+        command = {"mode": "operation", "operation": "apps.launch", "args": {"name": "Calculator"}}
+        first = await execute_phone(command, **common, decision_id="first", snapshot=initial)
+        assert first["operation"]["errorCode"] == "phone_setup_required" and physical == []
+        seen = await observe_phone(_fake_config(), "user", "task-setup", client=client)
+        assert seen["interaction"]["setup"] == setup, (seen, setup, calls)
+        second = await execute_phone(command, **common, decision_id="next", snapshot=seen)
+        assert second["success"] and len(physical) == 1
+        submitted = [b for method, path, b in calls if method == "POST" and path.endswith("/operations")]
+        assert "setupAttemptId" not in submitted[0] and "setupRevision" not in submitted[0], "acquisition silently adopted unseen setup"
+        assert submitted[1]["setupAttemptId"] == "attempt-setup" and submitted[1]["setupRevision"] == 1
+        again = await execute_phone(command, **common, decision_id="first", snapshot=initial)
+        assert again["operation"] == first["operation"] and len(physical) == 1
+        assert submitted[0]["operationId"] != submitted[1]["operationId"]
+        assert "expectedAccountIdentifier" not in json.dumps(submitted)
+
+
+async def test_phone_setup_actions_recovery_and_heartbeat():
+    teardown_mock()  # This case owns its explicit MockTransport, not a prior global route.
+    import httpx
+    from domains.spawn_browser_agent_v3 import phone
+    lease = {"id": "lease-setup", "status": "ACTIVE", "browserTaskId": "task-setup"}
+    setup = {"required": True, "attemptId": "attempt-setup", "revision": 2, "state": "in_progress"}
+    view = {"lease": lease, "cursor": 7, "setup": setup}
+    snapshot = {"enabled": True, "interaction": copy.deepcopy(view)}
+    calls, receipts, intents = [], {}, {}
+    lost, paid = False, []
+    heartbeat = asyncio.Event()
+    usage = {"billedBy": "backend", "usageRecordId": "usage-owned", "model": "synthetic-verifier", "promptTokens": 31, "completionTokens": 9, "totalCostCents": 2}
+    original_sleep = asyncio.sleep
+    async def quick_sleep(seconds):
+        assert seconds == 30
+        await original_sleep(0)
+    async def backend(request):
+        body = json.loads(request.content) if request.content else {}
+        calls.append((request.method, request.url.path, body))
+        if request.url.path.endswith("/capability"):
+            return httpx.Response(200, json={"enabled": True})
+        if request.url.path.endswith("/heartbeat"):
+            heartbeat.set()
+            return httpx.Response(200, json={})
+        if request.url.path.endswith("/setup"):
+            assert request.extensions["timeout"]["read"] == 105
+            assert body["attemptId"] == "attempt-setup" and body["expectedRevision"] == 2 and body["expectedCursor"] == 7
+            key = body["requestKey"]
+            if key in intents and intents[key] != body:
+                return httpx.Response(409, json={"error": "different_payload"})
+            intents[key] = body
+            if key not in receipts:
+                if body["action"] == "verify":
+                    paid.append(key)
+                    await heartbeat.wait()
+                operation = {"id": key, "status": "SUCCEEDED", "errorCode": None, "operation": "setup." + body["action"]}
+                receipts[key] = {"operation": operation, "setup": {**setup, "lastRequest": {"requestKey": key, "operationId": key, "action": body["action"], "status": "SUCCEEDED", "errorCode": None}}, "usage": usage}
+            if lost:
+                raise httpx.ReadError("CANARY-PRIVATE-TRANSPORT", request=request)
+            return httpx.Response(200, json=receipts[key])
+        if "/operations/" in request.url.path:
+            return httpx.Response(200, json=receipts[request.url.path.rsplit("/", 1)[1]])
+        if "/interactions/" in request.url.path:
+            return httpx.Response(200, json=view)
+        raise AssertionError(request.url.path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        common = dict(config=_fake_config(), user_id="user", agent_id="agent", task_id="task-setup", snapshot=snapshot, client=client)
+        params = {"mode": "setup", "action": "verify", "evidenceOperationIds": ["read-1", "read-2"]}
+        with patch.object(phone.asyncio, "sleep", quick_sleep):
+            first = await phone.execute_phone(params, **common, decision_id="stable-decision")
+            lost = True
+            restarted = await phone.execute_phone(params, **common, decision_id="stable-decision")
+        assert first["success"] and restarted["success"]
+        assert first["operation"]["id"] == restarted["operation"]["id"] and len(paid) == 1
+        assert first["usage"] == usage, "backend billing receipt lost or rewritten"
+        assert "usage_items" not in first, "backend-paid usage must not be charged again as Python usage"
+        posts = [b for method, path, b in calls if method == "POST" and path.endswith("/setup")]
+        assert len(posts) == 2 and posts[0] == posts[1]
+        assert set(posts[0]) == {"action", "attemptId", "expectedRevision", "expectedCursor", "requestKey", "evidenceOperationIds"}
+        assert posts[0]["evidenceOperationIds"] == ["read-1", "read-2"]
+        assert not any(method == "POST" and "/interactions/" in path and not path.endswith("/setup") for method, path, _ in calls)
+        assert "CANARY" not in json.dumps(restarted)
+        changed = await phone.execute_phone({**params, "evidenceOperationIds": ["other-read"]}, **common, decision_id="stable-decision")
+        assert not changed["success"] and changed["_httpStatus"] == 409 and len(paid) == 1
+        last_body = next(b for method, path, b in reversed(calls) if method == "POST" and path.endswith("/setup"))
+        assert last_body["requestKey"] == posts[0]["requestKey"], "payload changed the public intent identity"
+        lost = False
+        for action, reason in (("defer", "user_constraint"), ("block", "unsupported")):
+            result = await phone.execute_phone({"mode": "setup", "action": action, "reasonCode": reason}, **common, decision_id="decision-" + action)
+            assert result["success"]
+            body = next(b for method, path, b in reversed(calls) if method == "POST" and path.endswith("/setup"))
+            assert body["action"] == action and body["reasonCode"] == reason
+            assert "evidenceOperationIds" not in body
+
+
+async def test_phone_setup_failclosed_and_safe_errors():
+    teardown_mock()  # This case owns its explicit MockTransport, not a prior global route.
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import execute_phone
+    lease = {"id": "lease", "status": "ACTIVE", "browserTaskId": "task"}
+    setup = {"attemptId": "attempt", "revision": 1, "state": "in_progress"}
+    snapshot = {"enabled": True, "interaction": {"lease": lease, "cursor": 4, "setup": setup}}
+    calls = []
+    status = 409
+    def backend(request):
+        calls.append((request.method, request.url.path))
+        if request.url.path.endswith("/capability"):
+            return httpx.Response(200, json={"enabled": True})
+        return httpx.Response(status, json={"error": "CANARY-PRIVATE-ERROR"})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        common = dict(config=_fake_config(), user_id="user", agent_id="agent", task_id="task", snapshot=snapshot, client=client, decision_id="decision")
+        params = {"mode": "setup", "action": "defer", "reasonCode": "user_constraint"}
+        rejected = await execute_phone(params, **common)
+        assert not rejected["success"] and rejected.get("_httpStatus") == 409
+        assert sum(method == "POST" for method, _ in calls) == 1
+        assert "CANARY" not in json.dumps(rejected)
+        status = 500
+        uncertain = await execute_phone(params, **common)
+        assert not uncertain["success"] and "CANARY" not in json.dumps(uncertain)
+        for bad in ({"enabled": False}, {"enabled": True, "interaction": {"lease": {**lease, "status": "WAITING"}, "setup": setup, "cursor": 4}}, {"enabled": True, "interaction": {"lease": lease, "cursor": 4}}, {**snapshot, "interaction": {**snapshot["interaction"], "pendingOperation": {"status": "UNKNOWN"}}}):
+            calls.clear()
+            result = await execute_phone(params, **{**common, "snapshot": bad})
+            assert not result["success"] and not any(method == "POST" for method, _ in calls)
+
+
+async def test_phone_setup_pending_receipt_and_ready_private_ref():
+    teardown_mock()  # This case owns its explicit MockTransport, not a prior global route.
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import execute_phone
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+    lease = {"id": "lease", "status": "ACTIVE", "browserTaskId": "task"}
+    snapshot = {"enabled": True, "interaction": {"lease": lease, "cursor": 8, "setup": {"attemptId": "attempt", "revision": 3, "state": "verifying"}}}
+    calls, key = [], None
+    def backend(request):
+        nonlocal key
+        calls.append((request.method, request.url.path))
+        if request.url.path.endswith("/capability"):
+            return httpx.Response(200, json={"enabled": True})
+        if request.url.path.endswith("/setup"):
+            key = json.loads(request.content)["requestKey"]
+            raise httpx.ReadTimeout("CANARY-PRIVATE-TIMEOUT", request=request)
+        if "/operations/" in request.url.path:
+            return httpx.Response(404)
+        return httpx.Response(200, json={**snapshot["interaction"], "setup": {**snapshot["interaction"]["setup"], "lastRequest": {"requestKey": key, "operationId": key, "action": "verify", "status": "RUNNING", "errorCode": None}}})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        result = await execute_phone({"mode": "setup", "action": "verify", "evidenceOperationIds": ["read"]}, config=_fake_config(), user_id="user", agent_id="agent", task_id="task", decision_id="decision", snapshot=snapshot, client=client)
+    assert not result["success"] and result["operation"]["id"] == key and result["operation"]["status"] == "RUNNING"
+    assert sum(method == "POST" for method, _ in calls) == 1 and "CANARY" not in json.dumps(result)
+    ready = {**snapshot, "interaction": {**snapshot["interaction"], "setup": {"required": False, "state": "ready"}}}
+    private = await execute_action(SimpleNamespace(), SimpleNamespace(), {"action": "phone", "params": {"mode": "operation", "operation": "input.text", "args": {"s": "pwd:fixture"}}}, config=_fake_config(), user_id="user", agent_id="agent", browser_task_id="task", tool_call_id_decision="private", phone_snapshot=ready, secret_refs={"pwd:fixture": "CANARY-PRIVATE-PASSWORD"})
+    assert not private["success"] and "binding" in private["error"].lower()
+    assert "CANARY-PRIVATE-PASSWORD" not in json.dumps(private)
+
+
+async def test_phone_off_rotation_has_no_discovery_or_input_change():
+    from domains.spawn_browser_agent_v3 import handler as h
+    from domains.spawn_browser_agent_v3.types import ClaudeTokenState
+    from browser_tools.schemas import AVAILABLE_ACTIONS
+    state = {"url": "https://example.test", "title": "Page"}
+    client = _FakeRoseClient([{"tool_call_id": "old-decision"}])
+    from domains.spawn_browser_agent_v3 import phone
+    with patch.object(phone, "observe_phone", AsyncMock(return_value={"enabled": False})) as observe, patch.object(phone, "with_phone_heartbeat", AsyncMock(wraps=phone.with_phone_heartbeat)) as heartbeat:
+        result = await h._call_browser_use_with_rotation(rose_client=client, task="Original task", dynamic_system_context="Original context", turn_messages=[], browser_state=state, action_entries=[], config=_fake_config(), user_id="ordinary", agent_id="agent", iteration=1, token_state=ClaudeTokenState(), gpt_token=None, gpt_account_id=None, gpt_token_source=None, gpt_token_pool_id=None, browser_use_mode=None, browser_task_id="task")
+    observe.assert_not_awaited()
+    heartbeat.assert_not_awaited()
+    assert result == {"tool_call_id": "old-decision"}
+    kwargs = client.calls[0]
+    assert kwargs["browser_state"] == state and kwargs["dynamic_system_context"] == "Original context"
+    assert kwargs["available_actions"] == [name for name in AVAILABLE_ACTIONS if name != "phone"]
+    assert kwargs["cache_namespace"] == "browser-task:task:browser_use"
+
+
+@_in_browser_activity_context
+async def test_phone_off_actual_activity_never_observes_phone():
+    from domains.spawn_browser_agent_v3 import phone, handler
+    with patch.object(phone, "observe_phone", AsyncMock(side_effect=AssertionError("off activity observed phone"))) as observe, patch.object(phone, "with_phone_heartbeat", AsyncMock(side_effect=AssertionError("off activity heartbeat"))) as heartbeat, patch.object(handler, "cached_browser_decision", wraps=handler.cached_browser_decision) as cache:
+        await _exercise_browser_resume_user_input()
+    observe.assert_not_awaited()
+    heartbeat.assert_not_awaited()
+    assert cache.call_count
+    for call in cache.call_args_list:
+        request = call.kwargs["request"]
+        assert set(request) == {"task", "dynamic_system_context", "turn_messages", "browser_state", "action_entries", "config"}
+        assert "iphoneCapability" not in json.dumps(request) and "Dedicated cloud iPhone" not in json.dumps(request)
+        assert "phone" not in request["browser_state"]
+
+
+@_in_browser_activity_context
+async def test_phone_off_stale_model_action_cannot_dispatch():
+    with patch("domains.spawn_browser_agent_v3.phone.execute_phone", AsyncMock(side_effect=AssertionError("off action dispatched"))) as execute:
+        await _exercise_browser_resume_user_input(off_phone_action=True)
+    execute.assert_not_awaited()
+
+
+@_in_browser_activity_context
+async def test_phone_off_browser_auth_pause_does_not_retain_phone():
+    from domains.spawn_browser_agent_v3 import phone
+    with patch.object(phone, "observe_phone", AsyncMock(return_value={"enabled": False})) as observe, patch.object(phone, "retain_phone_for_auth", wraps=phone.retain_phone_for_auth) as retain:
+        await _exercise_browser_resume_user_input(browser_auth_pause=True)
+    retain.assert_not_awaited()
+    observe.assert_not_awaited()
+
+
+async def test_phone_auth_retain_uses_only_seen_owned_lease():
+    teardown_mock()  # This case owns its explicit MockTransport, not a prior global route.
+    import httpx
+    from domains.spawn_browser_agent_v3 import phone
+    calls = []
+    def backend(request):
+        calls.append((request.method, request.url.path, json.loads(request.content)))
+        assert request.headers["x-user-id"] == "user"
+        return httpx.Response(403, json={"error": "revoked"})
+    real_client = httpx.AsyncClient
+    def client(*args, **kwargs):
+        return real_client(transport=httpx.MockTransport(backend))
+    with patch.object(httpx, "AsyncClient", client), patch.object(phone, "observe_phone", AsyncMock(side_effect=AssertionError("retain discovered phone"))) as observe:
+        await phone.retain_phone_for_auth(_fake_config(), "user", "task", "attention")
+        assert calls == []
+        await phone.retain_phone_for_auth(_fake_config(), "user", "task", "attention", snapshot={"enabled": True, "interaction": {"lease": {"id": "lease", "status": "ACTIVE", "browserTaskId": "task"}}})
+    observe.assert_not_awaited()
+    assert calls == [("POST", "/api/iphone/leases/lease/awaiting-auth", {"attentionRequestId": "attention"})]
+
+
+async def test_phone_saved_credential_wire_and_unknown_receipt():
+    """Real Python HTTP boundary, synthetic broker only; never a saved secret."""
+    teardown_mock()  # This case owns its explicit MockTransport, not a prior global route.
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import execute_phone
+    calls, posts = [], []
+    lease = {"id": "saved-lease", "status": "ACTIVE", "browserTaskId": "saved-task"}
+    setup = {"attemptId": "saved-attempt", "revision": 4, "state": "in_progress"}
+    snapshot = {"enabled": True, "interaction": {"lease": lease, "cursor": 8, "setup": setup}}
+    outcome = "filled"
+    receipt = None
+    def backend(request):
+        nonlocal receipt
+        body = json.loads(request.content) if request.content else {}
+        calls.append((request.method, request.url.path, body))
+        if request.url.path.endswith("/capability"):
+            return httpx.Response(200, json={"enabled": True})
+        if "/interactions/" in request.url.path:
+            return httpx.Response(200, json={"lease": lease, "cursor": 99, "setup": {**setup, "revision": 99}})
+        if request.url.path.endswith("/operations"):
+            posts.append(body)
+            assert body["operation"] == "credentials.fill_saved" and body["args"] == {}
+            assert body["expectedCursor"] == 8 and body["setupAttemptId"] == "saved-attempt" and body["setupRevision"] == 4
+            receipt = {"operation": {"id": body["operationId"], "operation": "credentials.fill_saved", "status": "UNKNOWN" if outcome == "unknown" else "FAILED" if outcome == "unavailable" else "SUCCEEDED", "errorCode": "phone_credential_unavailable" if outcome == "unavailable" else None, "result": {"success": True, "private": True, "credentialStatus": "filled"} if outcome == "filled" else None}}
+            if outcome == "unknown":
+                raise httpx.ReadTimeout("SYNTHETIC-PRIVATE-ERROR-CANARY", request=request)
+            return httpx.Response(200, json=receipt)
+        if request.method == "GET" and "/operations/" in request.url.path:
+            assert request.url.path.endswith(receipt["operation"]["id"])
+            return httpx.Response(200, json=receipt)
+        if request.url.path.endswith("/heartbeat"):
+            return httpx.Response(200, json={})
+        raise AssertionError(request.url.path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        kwargs = dict(config=_fake_config(), user_id="synthetic-user", agent_id="agent", task_id="saved-task", decision_id="stable-fill", snapshot=snapshot, client=client)
+        for outcome in ("filled", "filled", "unavailable", "unknown"):
+            kwargs["decision_id"] = "stable-" + outcome
+            before = len(posts)
+            result = await execute_phone({"mode": "operation", "operation": "credentials.fill_saved", "args": {}}, **kwargs)
+            assert len(posts) == before + 1
+            assert "SYNTHETIC-PRIVATE-ERROR-CANARY" not in json.dumps(result)
+            if outcome == "unknown":
+                assert not result["success"] and result["operation"]["status"] == "UNKNOWN"
+            elif outcome == "unavailable":
+                assert not result["success"] and result["operation"]["errorCode"] == "phone_credential_unavailable"
+            else:
+                assert result["operation"]["result"]["credentialStatus"] == "filled"
+        assert posts[0] == posts[1], "Same logical intent changed its submitted command identity"
+        assert len({body["operationId"] for body in posts}) == 3
+        assert not any("auth-assistance" in path for _, path, _ in calls)
+
+
+async def test_phone_device_passcode_wire_and_unknown_receipt():
+    """Real Python HTTP boundary, synthetic broker only; never a saved secret."""
+    teardown_mock()  # This case owns its explicit MockTransport, not a prior global route.
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import execute_phone
+    calls, posts = [], []
+    lease = {"id": "saved-lease", "status": "ACTIVE", "browserTaskId": "saved-task"}
+    setup = {"attemptId": "saved-attempt", "revision": 4, "state": "in_progress"}
+    snapshot = {"enabled": True, "interaction": {"lease": lease, "cursor": 8, "setup": setup}}
+    outcome = "created"
+    receipt = None
+    def backend(request):
+        nonlocal receipt
+        body = json.loads(request.content) if request.content else {}
+        calls.append((request.method, request.url.path, body))
+        if request.url.path.endswith("/capability"):
+            return httpx.Response(200, json={"enabled": True})
+        if "/interactions/" in request.url.path:
+            return httpx.Response(200, json={"lease": lease, "cursor": 99, "setup": {**setup, "revision": 99}})
+        if request.url.path.endswith("/operations"):
+            posts.append(body)
+            assert body["operation"] == "credentials.fill_device_passcode" and body["args"] == {}
+            assert body["expectedCursor"] == 8 and body["setupAttemptId"] == "saved-attempt" and body["setupRevision"] == 4
+            receipt = {"operation": {"id": body["operationId"], "operation": "credentials.fill_device_passcode", "status": "UNKNOWN" if outcome == "unknown" else "FAILED" if outcome == "unavailable" else "RUNNING" if outcome == "pending" else "SUCCEEDED", "errorCode": "phone_passcode_binding_required" if outcome == "unavailable" else None, "result": {"success": outcome in ("created", "acknowledged", "confirmed"), "private": True, "passcodeStatus": outcome} if outcome in ("created", "acknowledged", "confirmed", "pending", "unknown", "unavailable") else None}}
+            if outcome == "unknown":
+                raise httpx.ReadTimeout("SYNTHETIC-PRIVATE-ERROR-CANARY", request=request)
+            return httpx.Response(200, json=receipt)
+        if request.method == "GET" and "/operations/" in request.url.path:
+            assert request.url.path.endswith(receipt["operation"]["id"])
+            return httpx.Response(200, json=receipt)
+        if request.url.path.endswith("/heartbeat"):
+            return httpx.Response(200, json={})
+        raise AssertionError(request.url.path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        kwargs = dict(config=_fake_config(), user_id="synthetic-user", agent_id="agent", task_id="saved-task", decision_id="stable-fill", snapshot=snapshot, client=client)
+        for outcome in ("created", "created", "acknowledged", "confirmed", "pending", "unavailable", "unknown"):
+            kwargs["decision_id"] = "stable-" + outcome
+            before = len(posts)
+            result = await execute_phone({"mode": "operation", "operation": "credentials.fill_device_passcode", "args": {}}, **kwargs)
+            assert len(posts) == before + 1
+            assert "SYNTHETIC-PRIVATE-ERROR-CANARY" not in json.dumps(result)
+            if outcome == "unknown":
+                assert not result["success"] and result["operation"]["status"] == "UNKNOWN"
+            elif outcome == "unavailable":
+                assert not result["success"] and result["operation"]["errorCode"] == "phone_passcode_binding_required"
+            else:
+                assert result["operation"]["result"]["passcodeStatus"] == outcome
+        assert posts[0] == posts[1], "Same logical intent changed its submitted command identity"
+        assert len({body["operationId"] for body in posts}) == 6
+        assert not any("auth-assistance" in path for _, path, _ in calls)
+
+
+async def test_phone_saved_credential_rejects_model_secret_routing_args():
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import execute_phone
+    mutations = []
+    def backend(request):
+        if request.url.path.endswith("/capability"):
+            return httpx.Response(200, json={"enabled": True})
+        if "/interactions/" in request.url.path:
+            return httpx.Response(200, json={"lease": {"id": "lease", "status": "ACTIVE"}})
+        mutations.append(request.url.path)
+        return httpx.Response(200, json={"operation": {"status": "SUCCEEDED"}})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        for name in ("password", "passcode", "code", "credentialId", "credentialRef", "realm", "account", "x"):
+            for operation in ("credentials.fill_saved", "credentials.fill_device_passcode"):
+                result = await execute_phone({"mode": "operation", "operation": operation, "args": {name: "SYNTHETIC-CANARY"}}, config=_fake_config(), user_id="u", agent_id="a", task_id="t", decision_id="d", snapshot={"enabled": True, "interaction": {"cursor": 0}}, client=client)
+                assert not result["success"], "Model supplied secret arguments reached execution"
+            assert not result["success"], "Model supplied credential/routing arguments reached execution"
+            assert "SYNTHETIC-CANARY" not in json.dumps(result)
+        assert mutations == [], "Invalid saved-credential arguments reached physical command submission"
+
+
+async def test_phone_setup_settings_targets_transport_recovery_and_billing():
+    teardown_mock()  # This case owns its explicit MockTransport, not a prior global route.
+    import httpx
+    from domains.spawn_browser_agent_v3 import phone
+    targets = ("apple_account", "icloud_messages", "icloud_keychain", "icloud_contacts", "imessage", "receive_address", "portrait_lock", "device_passcode", "gmail", "google_passcode_exception", "runtime")
+    lease = {"id": "settings-lease", "status": "ACTIVE", "browserTaskId": "settings-task"}
+    verification = {"requirementsVersion": 6, "checks": {"gmail": {"status": "unknown", "current": True}, "icloud_messages": {"status": "confirmed", "current": False}, "imessage": {"status": "disabled", "current": True}, "portrait_lock": {"status": "unknown", "current": True}}, "configurationReady": False, "operationalStatus": "degraded", "expectedReceiveAddress": "+15550000000"}
+    setup = {"attemptId": "settings-attempt", "revision": 5, "identityVerified": True, "state": "in_progress", "verification": verification}
+    view = {"lease": lease, "cursor": 11, "setup": setup}
+    snapshot = {"enabled": True, "interaction": copy.deepcopy(view)}
+    posts, receipts, submitted, paid = [], {}, {}, []
+    usage = {"billedBy": "backend", "usageRecordId": "backend-settings-usage", "model": "synthetic-verifier", "promptTokens": 20, "completionTokens": 4, "totalCostCents": 1}
+    def backend(request):
+        body = json.loads(request.content) if request.content else {}
+        if request.url.path.endswith("/capability"):
+            return httpx.Response(200, json={"enabled": True})
+        if request.url.path.endswith("/setup"):
+            posts.append(body)
+            key = body["requestKey"]
+            if key in submitted and submitted[key] != body:
+                return httpx.Response(409, json={"error": "changed_verification_payload"})
+            submitted[key] = body
+            assert body["expectedCursor"] == 11 and body["attemptId"] == "settings-attempt" and body["expectedRevision"] == 5
+            target = body.get("verificationTarget", "apple_account")
+            if key not in receipts:
+                paid.append(key)
+                receipts[key] = {"operation": {"id": key, "operation": "setup.verify", "status": "SUCCEEDED", "result": {"verificationTarget": target}}, "setup": setup, "usage": usage}
+            if target == "runtime":
+                raise httpx.ReadTimeout("SYNTHETIC-PRIVATE-ERROR", request=request)
+            return httpx.Response(200, json=receipts[key])
+        if "/operations/" in request.url.path:
+            return httpx.Response(200, json=receipts[request.url.path.rsplit("/", 1)[1]])
+        if "/interactions/" in request.url.path:
+            return httpx.Response(200, json=view)
+        if request.url.path.endswith("/heartbeat"):
+            return httpx.Response(200, json={})
+        raise AssertionError(request.url.path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        common = dict(config=_fake_config(), user_id="user", agent_id="agent", task_id="settings-task", snapshot=snapshot, client=client)
+        for target in targets:
+            params = {"mode": "setup", "action": "verify", "verificationTarget": target, "evidenceOperationIds": ["owned-read"]}
+            before = len(posts)
+            result = await phone.execute_phone(params, **common, decision_id="verify-" + target)
+            assert result["success"] and len(posts) == before + 1
+            assert posts[-1]["verificationTarget"] == target
+            assert result["setup"]["verification"] == verification and result["setup"]["identityVerified"] is True
+            assert result["setup"]["verification"]["configurationReady"] is False, "Partial proof was promoted to ready in Python"
+            assert result["usage"] == usage and "usage_items" not in result
+            assert "SYNTHETIC-PRIVATE-ERROR" not in json.dumps(result)
+        result = await phone.execute_phone({"mode": "setup", "action": "verify", "verificationTarget": "icloud_messages", "evidenceOperationIds": ["owned-read"]}, **common, decision_id="verify-icloud_messages")
+        assert result["success"] and len(paid) == 11, "Exact intent retry rebilled"
+        conflict = await phone.execute_phone({"mode": "setup", "action": "verify", "verificationTarget": "imessage", "evidenceOperationIds": ["owned-read"]}, **common, decision_id="verify-icloud_messages")
+        assert not conflict["success"] and conflict["_httpStatus"] == 409 and len(paid) == 11
+        assert posts[-1]["requestKey"] == posts[-2]["requestKey"], "Target entered the public decision ID instead of backend HMAC payload"
+        legacy = await phone.execute_phone({"mode": "setup", "action": "verify", "evidenceOperationIds": ["owned-read"]}, **common, decision_id="legacy")
+        assert legacy["success"] and "verificationTarget" not in posts[-1]
+
 
 if __name__ == "__main__":
     asyncio.run(run_all_tests())
@@ -31690,3 +32832,8 @@ async def test_parked_proof_requires_capture_and_disconnect():
     with pytest.raises(asyncio.CancelledError) as raised:
         await disconnect_browser_after_passkey_capture(dom, AsyncMock(), observe_parked_page=MagicMock(side_effect=control))
     assert raised.value is control
+
+
+async def test_phone_supervisor_preserves_unknown_and_cancellation():
+    from phone_supervisor_fixture import check_phone_supervisor_boundary
+    await check_phone_supervisor_boundary()

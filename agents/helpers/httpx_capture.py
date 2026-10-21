@@ -186,7 +186,15 @@ class _CapturingTransport(httpx.AsyncBaseTransport):
                 request.url.path.rstrip("/"),
             )
         )
-        if credential_exchange:
+        # Match Express's case-insensitive mount without changing the request.
+        phone_path = request.url.path.lower()
+        phone_private = phone_path == "/api/iphone" or phone_path.startswith("/api/iphone/")
+        metadata_only = credential_exchange or phone_private
+        if phone_private:
+            # Never retain opaque task/lease/operation IDs, query, origin,
+            # credentials, or even a response preview for phone traffic.
+            url = "https://private.invalid/api/iphone"
+        elif credential_exchange:
             url = str(request.url.copy_with(query=None, fragment=None, username="", password=""))
 
         # Skip localhost/loopback capture when NOT using a mock handler
@@ -196,7 +204,7 @@ class _CapturingTransport(httpx.AsyncBaseTransport):
         # they are test-controlled.
         if (
             _mock_handler is None
-            and not credential_exchange
+            and not metadata_only
             and ("localhost" in url or "127.0.0.1" in url or "0.0.0.0" in url)
         ):
             return await self._wrapped.handle_async_request(request)
@@ -209,11 +217,11 @@ class _CapturingTransport(httpx.AsyncBaseTransport):
         # Serialize request
         method = request.method
         headers = dict(request.headers)
-        redacted_headers = {} if credential_exchange else {k: _redact_header(k, v) for k, v in headers.items()}
+        redacted_headers = {} if metadata_only else {k: _redact_header(k, v) for k, v in headers.items()}
 
         request_body: str | None = None
         body_bytes = b""
-        if not credential_exchange:
+        if not metadata_only:
             try:
                 body_bytes = request.content
             except httpx.RequestNotRead:
@@ -245,7 +253,7 @@ class _CapturingTransport(httpx.AsyncBaseTransport):
             # a process-wide singleton requires the dynamic check.)
             active = httpx.MockTransport(_mock_handler) if _mock_handler is not None else self._wrapped
             response = await active.handle_async_request(request)
-            if credential_exchange:
+            if metadata_only:
                 entry["durationMs"] = int((time.monotonic() - start) * 1000)
                 entry["responseStatus"] = response.status_code
                 with _lock:
@@ -287,9 +295,13 @@ class _CapturingTransport(httpx.AsyncBaseTransport):
 
         except Exception as e:
             entry["durationMs"] = int((time.monotonic() - start) * 1000)
-            entry["error"] = "Credential exchange failed" if credential_exchange else str(e)
+            entry["error"] = "Private phone request failed" if phone_private else "Credential exchange failed" if credential_exchange else str(e)
             with _lock:
                 _captures.append(entry)
+            if phone_private:
+                if isinstance(e, httpx.RequestError):
+                    raise type(e)("Private phone request failed") from None
+                raise RuntimeError("Private phone request failed") from None
             raise
 
     async def aclose(self) -> None:

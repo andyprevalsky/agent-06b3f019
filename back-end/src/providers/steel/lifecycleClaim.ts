@@ -357,7 +357,7 @@ const RESUME_WAIT_MS = 30_000;
 const keyFor = (taskId: string) => `steel-browser-task-lifecycle:${taskId}`;
 type Native = { id: string; status: string };
 type Request = {
-  source: string;
+  source: string | null;
   provider: string;
   requestId: string;
   ownershipIdentity: string;
@@ -380,7 +380,7 @@ const scope = new AsyncLocalStorage<Scope>();
 export const browserResumeScope = () => scope.getStore();
 
 export interface ResumeLifecycleDependencies<T> {
-  readBinding(): Promise<{ sessionId: string; status: string }>;
+  readBinding(): Promise<{ sessionId: string | null; status: string }>;
   resume(): Promise<T>;
   follow(): Promise<T>;
   compatibility: string;

@@ -15,22 +15,46 @@ and a retry resumes it where it stopped.
 
 - You work on your own branch. Your instructions name it and its merge
   target.
-- A new agent's branch is cut from the project's default branch and merges
-  into it. A sub-agent's branch is cut from its parent's branch and merges
-  back into it.
+- Each independent agent has its own Git branch and worktree. A top-level
+  agent branches from the project's shared default branch. A sub-agent's
+  branch is stacked on its parent's exact current commit and its PR targets
+  that parent branch. Record the fork commit; do not substitute the remote
+  default branch for the parent's in-progress work.
+- When the parent advances, integrate its new head through the repo workflow
+  and revalidate before joining. Internal coding helpers that share a worktree
+  also share its checked-out branch; independent branches need separate worktrees.
 
-## Commits and merges
+## Commits and network publication
 
 - Commit locally whenever a unit of work is complete. Commits are your
-  checkpoints.
-- Merge into your merge target when other agents or the user need your
-  changes. Otherwise keep the work on your branch.
-- You decide when to commit, push and merge, based on the task.
-- If a rebase or merge is required, resolve it before finishing.
+  checkpoints; a local commit is not publication to the network.
+- Independent sub-agents of sub-agents use the branch-join skill to join the
+  immediate parent branch. Internal coding workers share the owning coding
+  agent's worktree and coordinate edits instead of merging separate branches.
+- To publish top-level changes to all agents in the network, use the repository's own deploy skill
+  to integrate the validated change into GitHub `main` (or the repository's
+  configured shared default branch).
+- Read the installed deploy skill for discovery and fallback creation when
+  the repository has no deploy skill. Do not substitute a direct push for the
+  repository's tests, reviews, approvals, and deployment process.
+- Coordinate with the current deploy owner instead of racing another agent's
+  release. Preserve other agents' changes and resolve integration conflicts.
+- Return the verified merged commit, branch, checks, and deployment outcome to
+  the parent. An open PR, local merge, or push to your private branch is not a
+  network publication. Running agents adopt the published revision at a safe
+  synchronization point; do not overwrite their dirty worktrees.
 <!-- rose-desktop -->
-- When your instructions say the checkout is Rose itself, never merge, push
-  to main or deploy: open a pull request instead (apps-preview skill).
+- When the checkout is Rose itself, use its existing `/deploy` workflow and
+  whole-devbox coordinator. Do not create a competing deploy skill or bypass
+  its required checks and outstanding approvals.
 <!-- /rose-desktop -->
+
+## Publication completion
+
+You must complete the applicable branch-join or deploy skill before reporting
+work as published. Follow its pre-publication gates, perform the authorized
+merge through that workflow, and verify its destination. Return its receipt;
+a local commit, skill read, open PR, or unverified success message is not enough.
 
 ## Usage limits
 

@@ -15,5 +15,7 @@ PROMPT = _INTRO_AND_USAGE
 PROMPT_ROSE_DESKTOP = (
     _INTRO_AND_USAGE
     + """
-- placement "pinned" asks a question with numbered `options`. Use it only when you cannot proceed without the choice. If you are the root agent or the root started you, it is pinned above the user's input box and the answer is the tool result; otherwise the agent that started you gets the question and answers by message."""
+- placement "pinned" asks a question with numbered `options`. Use it only when you cannot proceed without the choice. If you are the root agent or the root started you, it is pinned above the user's input box and the answer is the tool result; otherwise the agent that started you gets the question and answers by message.
+- The tool is named display; Agent Display is the panel where the user views interactive outputs. Do not look for a separate agent_display tool.
+- Use display for a requested game, chart, live HTML or 3D visual. Ask a code agent to create and check it, call rose display on the result, and return the delivery receipt. You can also call display with an existing accessible file or public URL yourself. A file path in a message alone does not publish it to Agent Display."""
 )

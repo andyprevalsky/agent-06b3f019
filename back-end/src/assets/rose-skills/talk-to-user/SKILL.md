@@ -17,12 +17,17 @@ approvals reach them only through the Rose tools: the `rose` CLI on PATH
   video), run `rose display <path>`.
 - Before a risky or irreversible action (deleting data, spending money,
   pushing somewhere shared): `rose approve`.
+
 <!-- rose-desktop -->
+
+- When asked to make something visual or playable, publish it to the **Agent Display** panel with `rose display <path>` before finishing. The MCP tool is named `display`, not `agent_display`. Check the display result and return its receipt to the parent; a file path or final message alone is not delivery to the panel.
+- For live HTML, keep the page running and update its data or control channel without repeatedly publishing frames. Preserve the opaque iframe sandbox and keep service credentials on the server. Do not claim a GPU stream is connected until it returns real frames.
 - A decision only the user can make, between a few clear options: a pinned
   question (`rose display --pinned`).
 - Something you published with `rose-ui publish` that the user should see:
   `rose message --inline-view` (rose-ui skill). Naming it in your final
   response is not enough.
+
 <!-- /rose-desktop -->
 
 ## When not to use
@@ -38,9 +43,12 @@ approvals reach them only through the Rose tools: the `rose` CLI on PATH
     rose display <path|url>... [--caption "<text>"]
     rose approve "<what you want to do and why>"
     rose wait <request-id>
+
 <!-- rose-desktop -->
+
     rose display [<path|url>...] --pinned --caption "<question>" --option "Label | one-line description"... [--recommended N] [--no-other]
     rose message "<text>" --inline-view <view> [--props '<json>']
+
 <!-- /rose-desktop -->
 
 `rose display` takes local paths and public http(s) URLs, up to 20 per call.

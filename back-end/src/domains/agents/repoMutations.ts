@@ -1,3 +1,4 @@
+import { createLogicalBrowserInTransaction } from '../../providers/browser/logicalSession';
 /**
  * Agents domain repo mutations — create, update, delete operations.
  */
@@ -178,6 +179,8 @@ export async function createAgentTransaction(params: CreateAgentParams) {
       },
     });
 
+    await createLogicalBrowserInTransaction(tx, params.userId, newAgent.id);
+
     await tx.verifier.create({
       data: {
         agentId: newAgent.id,
@@ -269,6 +272,9 @@ export async function createAgentBatchTransaction(items: BatchCreateAgentParams[
         ...optionalAgentCreateFields(params),
       })),
     });
+
+    for (const item of items)
+      await createLogicalBrowserInTransaction(tx, item.userId, item.agentId);
 
     await tx.verifier.createMany({
       data: items.map((params) => ({

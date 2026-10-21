@@ -136,3 +136,10 @@ export async function forgetRootSite(userId: string, site: string): Promise<bool
     return true;
   });
 }
+
+export function updateRootSessionUrl(taskId: string, startUrl: string) {
+  return prisma.browserSession.update({
+    where: { id: taskId },
+    data: { startUrl, currentUrl: startUrl },
+  });
+}

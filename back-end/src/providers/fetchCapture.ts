@@ -25,6 +25,7 @@
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
+import { isPhoneHarnessExchange, credentialMetadataUrl } from './fetchCapturePrivacy';
 import { resolve } from 'path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
@@ -150,6 +151,7 @@ export function outboundReplayCacheKey(url: string, method: string, body: string
 
 function isCredentialExchange(url: string): boolean {
   try {
+    if (isPhoneHarnessExchange(url)) return true;
     const path = new URL(url).pathname.replace(/\/+$/, '');
     return (
       path === '/oauth/token' ||
@@ -161,12 +163,6 @@ function isCredentialExchange(url: string): boolean {
   } catch {
     return false;
   }
-}
-
-function credentialMetadataUrl(url: string): string {
-  const parsed = new URL(url);
-  for (const field of ['search', 'hash', 'username', 'password'] as const) parsed[field] = '';
-  return parsed.toString();
 }
 
 function responseFromSerialized(serialized: SerializedResponse): globalThis.Response {

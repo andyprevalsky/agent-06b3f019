@@ -1,14 +1,14 @@
+import { initLegacySession } from './service.init-legacy';
+import { resumeOwnedBrowserSession } from './service.control';
+import { ensureLogicalBrowser } from '../../providers/browser/logicalSession';
 /**
  * Browser-session domain service — business logic, no req/res.
  */
 
 import type { Browser } from 'playwright';
-import { type ProxyGeoLocation, DEFAULT_GEOLOCATION } from '../../providers/geoip';
+import { type ProxyGeoLocation } from '../../providers/geoip';
 import { createLogger } from '../../providers/logger';
 import {
-  getOrCreateContext,
-  createSessionWithContext,
-  closeSession,
   getSession,
   injectUserData,
   uploadSessionFile,
@@ -18,7 +18,6 @@ import {
   captureScreenshot,
   pressSessionKeys,
   type BrowserViewport,
-  getFingerprintInjectionData,
 } from '../../providers/browser';
 import {
   rotateBrowserProxy,
@@ -32,13 +31,11 @@ import * as repo from './repo';
 import { storedBrowserProvider } from '../../providers/browser/types';
 import { validateBrowserKeySymbols } from './service.browser-input';
 import { validateSessionFilePath } from './service.file-path';
-import { findRequiredSteelProfileForStart } from './service.profile-binding';
 import {
   injectLocalStorage,
   SessionNoUserError,
   SessionNotFoundError,
 } from './service.local-storage';
-import { toUserSettings } from './service.serializers';
 import {
   buildSessionCredentialPayload,
   preserveSessionCredentialPayload,
@@ -144,6 +141,28 @@ export async function prepareSessionCredentials(
     storedPasswords,
     passkeys
   );
+  if (session.logicalOwnerKey !== null) {
+    return {
+      ...credentialPayload,
+      auth_credential_ref: null,
+      cookies_injected: false,
+      cookies_count: 0,
+      auth_source: 'none' as const,
+      browser_state_injection: {
+        cookies: {
+          injected: false,
+          cookieCount: 0,
+          authSource: 'none' as const,
+          credentialRef: null,
+        },
+        fingerprint: { injected: false },
+        indexedDB: { injected: false, originCount: 0 },
+        localStorage: { injected: false, originCount: 0 },
+        permissions: { injected: false, grantCount: 0 },
+        cacheStorage: { injected: false, originCount: 0 },
+      },
+    };
+  }
   const injectionResult = await preserveSessionCredentialPayload(
     () => injectUserData(sessionId, userId, targetUrl, { ...options, onCookiesReady }),
     credentialPayload
@@ -161,94 +180,18 @@ export async function prepareSessionCredentials(
 
 /* c8 ignore start -- initSession, closeBrowserSession, resumeBrowserSession require Steel SDK */
 export async function initSession(userId: string, agentId: string, startUrl: string, id?: string) {
-  log.info('Initializing browser session', {
-    agentId,
-    startUrl: startUrl !== '' ? startUrl : 'none',
-  });
-  // Phase 1: Fetch session-independent data in parallel. Realm-scoped
-  // credentials are collected by the same preparation boundary used for JIT
-  // navigation after the provider session exists.
-  const [agent, contextId, user, fingerprintInjection, requiredSteelProfileId] = await Promise.all([
-    repo.findAgentProxy(agentId),
-    getOrCreateContext(userId),
-    repo.findUserSettings(userId),
-    getFingerprintInjectionData(userId),
-    findRequiredSteelProfileForStart(userId, startUrl),
-  ]);
-
-  const proxyGeo: ProxyGeoLocation =
-    agent !== null &&
-    agent !== undefined &&
-    agent.proxyCountry !== null &&
-    agent.proxyCountry !== ''
-      ? {
-          country: agent.proxyCountry,
-          ...(agent.proxyState !== null && agent.proxyState !== ''
-            ? { state: agent.proxyState }
-            : {}),
-          ...(agent.proxyCity !== null && agent.proxyCity !== '' ? { city: agent.proxyCity } : {}),
-        }
-      : DEFAULT_GEOLOCATION;
-
-  log.info('Using proxy location', {
-    city: proxyGeo.city ?? 'unknown',
-    state: proxyGeo.state ?? 'unknown',
-    country: proxyGeo.country,
-  });
-
-  // Phase 2: Create the session while retaining its validation CDP connection.
-  const session = await createSessionWithContext(contextId, agentId, proxyGeo, startUrl, {
-    keepValidationConnection: true,
-    taskId: id,
-    ...(requiredSteelProfileId !== null ? { requiredSteelProfileId } : {}),
-  });
-
-  let credentials: Awaited<ReturnType<typeof prepareSessionCredentials>>;
-  try {
-    credentials = await prepareSessionCredentials(session.sessionId, userId, startUrl, {
-      browser: session.validationBrowser ?? undefined,
+  const logical = await ensureLogicalBrowser(userId, agentId);
+  if (id !== undefined && id !== logical.id)
+    return initLegacySession(userId, agentId, startUrl, id, {
+      prepare: prepareSessionCredentials,
+      metadata: buildBrowserSessionMetadata,
     });
-  } catch (error) {
-    await closeSession(session.sessionId, false).catch((cleanupError) => {
-      log.error('Failed to clean up browser after credential preparation error', {
-        sessionId: session.sessionId,
-        error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
-      });
-    });
-    throw error;
-  }
-  const userSettings = toUserSettings(user);
-
-  log.info('Including passwords in init response', { count: credentials.passwords.length });
-  if (credentials.passkeys.length > 0) {
-    log.info('Including passkeys in init response', {
-      count: credentials.passkeys.length,
-      realm: credentials.auth_realm,
-    });
-  }
-
-  return {
-    task_id: session.taskId,
-    context_id: contextId,
-    session_id: session.sessionId,
-    debug_url: session.debugUrl,
-    ws_url: session.wsUrl,
-    browser_session_metadata: buildBrowserSessionMetadata(
-      session,
-      credentials.browser_state_injection
-    ),
-    cookies_injected: credentials.cookies_injected,
-    cookies_count: credentials.cookies_count,
-    auth_source: credentials.auth_source,
-    auth_credential_ref: credentials.auth_credential_ref,
-    auth_options: credentials.auth_options,
-    auth_realm: credentials.auth_realm,
-    fingerprint_injected: credentials.browser_state_injection.fingerprint.injected,
-    fingerprint_injection: fingerprintInjection,
-    passwords: credentials.passwords,
-    passkeys: credentials.passkeys,
-    user_settings: userSettings,
-  };
+  await repo.updateLogicalSessionUrls(
+    logical.id,
+    logical.startUrl ?? startUrl,
+    logical.currentUrl ?? startUrl
+  );
+  return resumeOwnedBrowserSession(logical.id, userId);
 }
 
 // ---------------------------------------------------------------------------
@@ -281,6 +224,7 @@ export async function resizeBrowserViewport(
   }
 
   const provider = storedBrowserProvider(session.provider);
+  if (session.sessionId === null) throw new SessionNotFoundError();
   return resizeSessionViewport(session.sessionId, viewport, provider);
 }
 

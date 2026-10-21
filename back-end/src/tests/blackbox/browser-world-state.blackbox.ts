@@ -33,6 +33,7 @@ import {
   type RootBrowserDeps,
 } from '../../domains/browser-world/service';
 import { keepBestCases } from './browser-world-state.keep-best.cases';
+import { rejectUnverifiedAccountPromotion } from './browser-world-state.verified-boundary.cases';
 import {
   api,
   assert,
@@ -399,6 +400,11 @@ async function rootRoutesValidateBeforeTouchingAProvider(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  if (process.argv.includes('--verified-boundary-only')) {
+    await rejectUnverifiedAccountPromotion();
+    console.log('PASS legacy hints cannot promote verified browser credentials');
+    return;
+  }
   process.stdout.write('Browser World State Black-box Tests\n');
   // /prepare-auth runs in this process and would mint a real inbox and phone
   // number for each fixture user that has no saved login. Mock the provider
@@ -416,6 +422,7 @@ async function main(): Promise<void> {
       'the home browser opens from the template and merges on close',
       homeBrowserOpensFromTheTemplateAndMergesOnClose,
     ],
+    ['legacy hints cannot promote verified credentials', rejectUnverifiedAccountPromotion],
     ...keepBestCases,
   ];
   let failed = 0;

@@ -60,8 +60,8 @@ async def check_neighbor_controls(config):
     from providers.rose.browser_use import build_browser_use_tools
     from providers.rose.errors import BrowserModelOutputValidationError
     from helpers.workflow_generation import WorkflowGenerationSealed
-    async def call(dom):
-        return await handler._call_browser_use_with_rotation(rose_client=RoseClient(),task="Inspect current page",dynamic_system_context="",turn_messages=[],browser_state={},action_entries=[],config=config,user_id="u1",agent_id="a1",iteration=1,token_state=ClaudeTokenState(),gpt_token=None,gpt_account_id=None,gpt_token_source=None,gpt_token_pool_id=None,browser_use_mode=None,dom_service=dom)
+    async def call(dom, phone_observation=None):
+        return await handler._call_browser_use_with_rotation(rose_client=RoseClient(),task="Inspect current page",dynamic_system_context="",turn_messages=[],browser_state={},action_entries=[],config=config,user_id="u1",agent_id="a1",iteration=1,token_state=ClaudeTokenState(),gpt_token=None,gpt_account_id=None,gpt_token_source=None,gpt_token_pool_id=None,browser_use_mode=None,dom_service=dom,phone_observation=phone_observation)
     public=DOMService("ws://fixture/no-connect");private=DOMService("ws://fixture/no-connect");private.mark_secret_used()
     resumed=DOMService("ws://fixture/no-connect");resumed.restore_secret_redaction_state(private.secret_redaction_state())
     requests=[]
@@ -70,8 +70,10 @@ async def check_neighbor_controls(config):
         return RoseResponse(tool_calls=[{"id":"real-provider-id","name":"wait","arguments":'{"time_ms":1}'}],actual_model="gpt-6-sol-gpt")
     with patch.object(RoseClient,"collect",new=collect),patch("helpers.observability.dump_llm_context"):
         for dom in (None,public,resumed): await call(dom)
-    assert requests[0]["tools"] == requests[1]["tools"] == build_browser_use_tools(AVAILABLE_ACTIONS)
+        await call(private,{"enabled":True,"interaction":{}})
+    assert requests[0]["tools"] == requests[1]["tools"] == build_browser_use_tools([action for action in AVAILABLE_ACTIONS if action != "phone"])
     assert requests[2]["tools"] == [x for x in requests[1]["tools"] if x["name"] != "screenshot"]
+    assert requests[3]["tools"] == build_browser_use_tools([action for action in AVAILABLE_ACTIONS if action != "screenshot"])
     assert resumed.secret_values_used is True and public.secret_values_used is False
     private._session=SimpleNamespace()
     capture=AsyncMock(side_effect=AssertionError("Private capture must never be invoked"))

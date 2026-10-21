@@ -49,6 +49,6 @@ When your instructions say the checkout in ~/workspace is Rose itself:
 
 - Its front-end preview runs from front-end/ and talks to Rose as the user. A
   cloud session starts it for you; `rose-preview start` starts or restarts it.
-- Publishing a Rose change means pushing your branch and opening a pull
-  request (`gh pr create`) against your merge target. Never merge it, never
-  push to main and never deploy: Rose ships only through `/deploy`.
+- Publishing a Rose change to the agent network uses the existing `/deploy`
+  workflow, coordinated with its release owner. Follow the deploy skill; an
+  open pull request is not yet publication. Preserve its checks and approvals.

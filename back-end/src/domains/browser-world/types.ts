@@ -45,7 +45,7 @@ export interface BrowserTaskLinks {
 
 export interface RootBrowserView extends BrowserTaskLinks {
   task_id: string;
-  session_id: string;
+  session_id: string | null;
   status: string;
   provider: string;
   live_view_url: string | null;
@@ -67,7 +67,7 @@ export interface ForkView {
 
 export interface AgentBrowserTaskView extends BrowserTaskLinks {
   task_id: string;
-  session_id: string;
+  session_id: string | null;
   status: string;
   live_view_url: string | null;
   sites: ForkView[];

@@ -1,5 +1,6 @@
 /** Independent-process proof of the production resume ledger and provider create paths. */
 import assert from 'node:assert/strict';
+import { runBrowserLazyRetirementCustodyCase } from './browser-session-lazy-retirement.cases';
 import { retryWithBackoff } from '../../providers/retry';
 import { fork, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -8,6 +9,7 @@ import { prisma } from '../../providers/database';
 
 type Outcome = { ok: boolean; sessionId?: string; error?: string; pid: number };
 export async function runBrowserResumeCustodyCases() {
+  await runBrowserLazyRetirementCustodyCase();
   const url = new URL(process.env.DATABASE_URL ?? '');
   assert(['localhost', '127.0.0.1'].includes(url.hostname), 'custody fixtures require local DB');
   // The normal blackbox runner selects a local victoria_<workspace> database.
@@ -29,6 +31,8 @@ export async function runBrowserResumeCustodyCases() {
       'stale-binding',
       'fresh-sequential',
       'fresh-concurrent',
+      'logical-empty',
+      'logical-pause',
     ]) {
       const owner = `custody-${randomUUID()}`;
       const children = new Set<ChildProcess>();
@@ -36,6 +40,8 @@ export async function runBrowserResumeCustodyCases() {
         hydrations = 0,
         stops = 0;
       let candidateStops = 0;
+      let restores = 0;
+      let legacyHarvests = 0;
       let metadata: Record<string, string> = {};
       let nativeVisible = true;
       let profileReads = 0;
@@ -93,6 +99,20 @@ export async function runBrowserResumeCustodyCases() {
               data: { controlState: 'USER', controlLeaseExpiresAt: new Date(Date.now() + 60000) },
             });
           res.end(JSON.stringify({ status: nativeDead ? 'stopped' : 'active', ttlMs: null }));
+        } else if (req.url === '/restore') {
+          const restoring = await prisma.browserSession.findUniqueOrThrow({
+            where: { id: session.id },
+          });
+          if (restoring.status !== 'PAUSED') {
+            res.statusCode = 500;
+            res.end('{}');
+            return;
+          }
+          restores++;
+          res.end('{}');
+        } else if (req.url === '/legacy-harvest') {
+          legacyHarvests++;
+          res.end('{}');
         } else if (req.url === '/hydrate') {
           hydrations++;
           if (scenario === 'hydration-unknown') {
@@ -117,7 +137,13 @@ export async function runBrowserResumeCustodyCases() {
         data: {
           contextId: context.id,
           agentId: owner,
-          sessionId: `old-${owner}`,
+          sessionId: scenario.startsWith('logical-') ? null : `old-${owner}`,
+          ...(scenario.startsWith('logical-')
+            ? {
+                logicalOwnerKey: `agent:${owner}`,
+                baselineCheckpointRef: 'browser-checkpoint:empty:v1',
+              }
+            : {}),
           status: 'PAUSED',
           provider,
           currentUrl: 'https://example.com',
@@ -143,6 +169,7 @@ export async function runBrowserResumeCustodyCases() {
                 CONDUCTOR_WORKSPACE_NAME: owner,
                 CUSTODY_PROVIDER: provider,
                 CUSTODY_FRESH: fresh ? '1' : '0',
+                CUSTODY_LOGICAL_PAUSE: scenario === 'logical-pause' ? '1' : '0',
                 CUSTODY_STALE: scenario === 'stale-binding' ? '1' : '0',
                 KERNEL_PROXY_ENABLED: 'false',
                 BROWSER_USE_API_KEY: 'offline',
@@ -188,7 +215,9 @@ export async function runBrowserResumeCustodyCases() {
       };
       try {
         let results: Outcome[];
-        if (scenario === 'concurrent') results = await Promise.all([run(), run()]);
+        if (scenario === 'concurrent' || scenario === 'logical-empty')
+          results = await Promise.all([run(), run()]);
+        else if (scenario === 'logical-pause') results = [await run()];
         else if (scenario === 'fresh-concurrent')
           results = await Promise.all([run(true), run(true)]);
         else if (scenario === 'fresh-sequential') results = [await run(true), await run(true)];
@@ -227,7 +256,21 @@ export async function runBrowserResumeCustodyCases() {
             }
           }
         }
-        if (scenario === 'provider-ended' || scenario === 'fresh-sequential') {
+        if (scenario.startsWith('logical-')) {
+          assert(
+            results.every((r) => r.ok),
+            JSON.stringify(results)
+          );
+          assert.equal(creates, 1);
+          assert.equal(restores, 1);
+          assert.equal(hydrations, 0);
+          assert.equal(legacyHarvests, 0);
+          if (scenario === 'logical-pause')
+            assert.equal(
+              (await prisma.browserSession.findUniqueOrThrow({ where: { id: session.id } })).status,
+              'PAUSED'
+            );
+        } else if (scenario === 'provider-ended' || scenario === 'fresh-sequential') {
           assert(
             results.every((r) => r.ok),
             JSON.stringify({ provider, scenario, results })
@@ -257,14 +300,14 @@ export async function runBrowserResumeCustodyCases() {
           )
             assert(results.every((r) => r.ok && r.sessionId === nativeId));
         }
-        if (scenario !== 'fresh-sequential')
+        if (scenario !== 'fresh-sequential' && scenario !== 'logical-pause')
           assert.equal(candidateStops, 0, 'recovery must adopt exact native, not stop/recreate');
         const ledger = await prisma.toolSideEffect.findUnique({ where: { operationKey: key } });
         assert(
           !JSON.stringify(ledger).includes('fixture.invalid'),
           'ledger must not persist credential-bearing URLs'
         );
-        outcomes.push({ provider, scenario, creates, hydrations, stops, results });
+        outcomes.push({ provider, scenario, creates, hydrations, restores, stops, results });
       } finally {
         for (const child of children) child.kill('SIGTERM');
         await prisma.toolSideEffect.deleteMany({ where: { operationKey: key } });

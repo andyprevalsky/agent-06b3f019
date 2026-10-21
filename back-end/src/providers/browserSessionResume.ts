@@ -1,6 +1,8 @@
+import { restoreLogicalBrowserCheckpoint } from './browser/checkpoint';
 import { browserResumeScope, withBrowserResumeLifecycle } from './steel/lifecycleClaim';
 import { inspectResumeCandidate } from './browser/resumeRecovery';
 import { withOwnedResumeTransport } from './browser/resumeTransport';
+import { iphoneCapability } from './phoneAccountPolicy';
 /* c8 ignore start -- resumeBrowserSession requires Steel SDK */
 import { prisma } from './database';
 import { DEFAULT_GEOLOCATION } from './geoip';
@@ -72,6 +74,7 @@ export interface SerializedPassword {
 }
 
 export interface UserSettings {
+  iphoneCapability?: { enabled: true };
   name: string | null;
   email: string | null;
   phone: string | null;
@@ -135,14 +138,19 @@ function serializePasskeys(
   }));
 }
 
-function toUserSettings(user: UserSettings | null): UserSettings | null {
-  return user;
+type SettingsAccount = UserSettings & { userId: string; isAnonymous: boolean };
+function toUserSettings(user: SettingsAccount | null): UserSettings | null {
+  if (user === null) return null;
+  const { userId, isAnonymous, ...settings } = user;
+  return { ...settings, ...iphoneCapability({ userId, isAnonymous, phone: user.phone }) };
 }
 
-async function findUserSettings(userId: string): Promise<UserSettings | null> {
+async function findUserSettings(userId: string): Promise<SettingsAccount | null> {
   return prisma.user.findUnique({
     where: { userId },
     select: {
+      userId: true,
+      isAnonymous: true,
       name: true,
       email: true,
       phone: true,
@@ -217,6 +225,10 @@ export async function resumeBrowserSession(
 
   const read = () => prisma.browserSession.findUniqueOrThrow({ where: { id: taskId } });
   const initial = await read();
+  if (initial.logicalOwnerKey !== null && initial.status === 'CLOSED')
+    throw new Error('Retired logical browser cannot resume');
+  if (initial.logicalOwnerKey !== null && initial.provider === 'steel')
+    throw new Error('Logical Steel browser restore requires durable hydration custody');
   if (
     initial.controlState !== 'AGENT' &&
     (initial.controlLeaseExpiresAt === null || initial.controlLeaseExpiresAt.getTime() > Date.now())
@@ -225,6 +237,8 @@ export async function resumeBrowserSession(
   }
   const resume = async () => {
     const current = await read();
+    if (current.logicalOwnerKey !== null && current.status === 'CLOSED')
+      throw new Error('Retired logical browser cannot resume');
     if (
       current.controlState !== 'AGENT' &&
       (current.controlLeaseExpiresAt === null ||
@@ -232,7 +246,11 @@ export async function resumeBrowserSession(
     ) {
       throw new Error('Browser resume cannot replace a session under user control');
     }
-    const result = await resumeSession(taskId, { ...options, keepValidationConnection: true });
+    const result = await resumeSession(taskId, {
+      ...options,
+      forceFreshProfile: current.logicalOwnerKey ? true : options.forceFreshProfile,
+      keepValidationConnection: true,
+    });
     return assembleResumeResponse(taskId, result);
   };
   if (initial.provider !== 'kernel' && initial.provider !== 'browser-use') return resume();
@@ -244,6 +262,7 @@ export async function resumeBrowserSession(
     sourceEnded: () => sourceEnded,
     canFollow: async () => {
       const current = await read();
+      if (current.sessionId === null) return false;
       const health = await getBrowserSessionHealth(current.sessionId);
       if (health.status === null) throw new Error('Browser resume liveness is unknown');
       sourceEnded = !['active', 'live', 'running'].includes(health.status.toLowerCase());
@@ -263,7 +282,7 @@ export async function resumeBrowserSession(
       ) {
         throw new Error('Browser resume cannot follow a session under user control');
       }
-      if (!current.wsUrl || !current.debugUrl)
+      if (current.sessionId === null || !current.wsUrl || !current.debugUrl)
         throw new Error('Ready browser binding is incomplete');
       return assembleResumeResponseWithTransport(
         taskId,
@@ -336,8 +355,18 @@ async function assembleResumeResponseWithTransport(
     }
     await browserResumeScope()?.beforeHydration(result.sessionId);
   }
+  if (!readOnly && session?.logicalOwnerKey) {
+    if (!result.validationBrowser)
+      throw new Error('Logical browser restore requires validated transport');
+    await restoreLogicalBrowserCheckpoint(taskId, result.validationBrowser);
+  }
   if (session?.context.userId !== undefined) {
-    if (!readOnly && result.savedUrl !== undefined && result.savedUrl !== '') {
+    if (
+      !readOnly &&
+      !session.logicalOwnerKey &&
+      result.savedUrl !== undefined &&
+      result.savedUrl !== ''
+    ) {
       try {
         await browserResumeScope()?.assertOwned();
         injectionResult = await injectUserData(
@@ -380,6 +409,14 @@ async function assembleResumeResponseWithTransport(
   }
 
   if (!readOnly) await browserResumeScope()?.assertOwned();
+  if (!readOnly && session?.logicalOwnerKey) {
+    const ready = await prisma.browserSession.updateMany({
+      where: { id: taskId, sessionId: result.sessionId, status: 'PAUSED' },
+      data: { status: 'ACTIVE' },
+    });
+    if (ready.count !== 1) throw new Error('Logical browser lost readiness ownership');
+  }
+
   return {
     task_id: taskId,
     session_id: result.sessionId,

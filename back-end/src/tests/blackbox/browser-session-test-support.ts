@@ -20,3 +20,21 @@ export async function runTest(name: string, fn: () => Promise<void>): Promise<Te
     };
   }
 }
+
+export async function request(
+  url: string,
+  options: RequestInit = {}
+): Promise<{ status: number; data: unknown; headers: Headers }> {
+  const response = await fetch(url, {
+    ...options,
+    headers: { 'Content-Type': 'application/json', ...options.headers },
+  });
+  let data: unknown;
+  const ct = response.headers.get('content-type');
+  if (ct?.includes('application/json')) {
+    data = await response.json();
+  } else {
+    data = await response.text();
+  }
+  return { status: response.status, data, headers: response.headers };
+}

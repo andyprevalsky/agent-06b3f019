@@ -87,10 +87,7 @@ PLANNER_TASK_IDX_DESCRIPTION = (
     "The 0-based array index of this task, encoded as a string. "
     "This must equal the task's position in tasks and is included only to make dependency lookups easy."
 )
-PLANNER_TASK_GOAL_DESCRIPTION = (
-    "Self-contained task brief for the spawned agent. "
-    + SELF_CONTAINED_GOAL_RULE.strip()
-)
+PLANNER_TASK_GOAL_DESCRIPTION = "Self-contained task brief for the spawned agent. " + SELF_CONTAINED_GOAL_RULE.strip()
 PLANNER_TASK_TOOL_NAME_DESCRIPTION = (
     "The tool to execute for this task. When using spawn_agent for a task, alias it with "
     "one of the planner spawn aliases; raw spawn_agent with no type alias is not allowed."
@@ -100,8 +97,12 @@ PLANNER_TASK_DEPENDS_ON_DESCRIPTION = (
     "Use an empty list only when the task can start immediately without another task's output, artifact, "
     "state, credentials, or decision."
 )
-PLANNER_RESPONSE_DEPENDENCIES_GRAPH_DESCRIPTION = "Explicit dependency DAG as list entries that mirror tasks[i].depends_on."
-PLANNER_DEPENDENCY_TASK_IDX_DESCRIPTION = "The task index this dependency entry describes, 0-based and encoded as a string."
+PLANNER_RESPONSE_DEPENDENCIES_GRAPH_DESCRIPTION = (
+    "Explicit dependency DAG as list entries that mirror tasks[i].depends_on."
+)
+PLANNER_DEPENDENCY_TASK_IDX_DESCRIPTION = (
+    "The task index this dependency entry describes, 0-based and encoded as a string."
+)
 PLANNER_DEPENDENCY_DEPENDS_ON_DESCRIPTION = (
     "0-based task indices, as strings, that must complete before task_idx. "
     "Use an empty list only when the task can start immediately without another task's output, artifact, "
@@ -190,6 +191,34 @@ human attention, social credibility, or monetary capital. Behave like a world-cl
 - Prefer wait_for(condition=...) over recursive general-purpose agents for polling tasks
 
 {HOW_YOU_ARE_GRADED_PROMPT.strip()}
+
+# Presenting results as Rose scorecards
+
+Return substantive user-facing results as highly styled, concise Rose scorecards.
+Lead with the outcome, then the key metrics or findings, evidence, open issues and
+next action. Keep detailed evidence expandable and the summary self-contained.
+Brief acknowledgements and clarification questions can remain plain text.
+Never invent scores, metrics, trends or completed checks to fill a card.
+
+Use our repository as the visual source of truth:
+- https://github.com/Rose-Ai-Labs/rose/blob/main/front-end/src/index.css
+- https://github.com/Rose-Ai-Labs/rose/blob/main/.claude/shared/report-display-format.md
+Preserve Rose typography, theme tokens, restrained gradients, readable contrast,
+consistent spacing and status colors with text labels. Cards must work in light
+and dark themes and at 360px width without horizontal scrolling.
+
+Use these five references for craft, while retaining Rose's own identity:
+- Linear: calm hierarchy and compact metric groups: https://linear.app/insights
+- Vercel: precise status and diagnostic detail: https://vercel.com/products/observability
+- Stripe: clear quantitative charts and tables: https://stripe.com/sigma
+- Mercury: generous spacing and financial summaries: https://mercury.com/insights
+- Ramp: actionable summaries and evidence drill-downs: https://ramp.com/reporting
+These are design references, not evidence for task results; do not fetch them on
+every reply or copy their branding. Publish the finished HTML card using the
+available display/publishing tool, with working evidence links and no remote
+scripts or trackers. Never paste HTML source into a chat message. Keep messages
+from other agents coherent with the ongoing conversation instead of forwarding
+raw tool output. Presentation never replaces verification or delays a blocker.
 
 # Your Environment
 
@@ -291,7 +320,8 @@ def _format_output_field_contract(field: Dict[str, Any]) -> str:
     if isinstance(properties, list) and properties:
         nested = ", ".join(
             f"{item['name']}: {_format_output_field_contract(item)}"
-            for item in properties if isinstance(item, dict) and item.get("name")
+            for item in properties
+            if isinstance(item, dict) and item.get("name")
         )
         parts.append(f"properties={{{nested}}}")
     return ", ".join(parts)
@@ -455,7 +485,10 @@ def build_verifier_prompt(response_schema: dict = None) -> str:
         return _VERIFIER_STATIC_PROMPT + SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
     fields_desc = "\n".join(
-        [f"  - {f['name']} ({_format_output_field_contract(f)}, {'required' if f.get('required', True) else 'optional'}): {f.get('description', '')}" for f in response_schema["fields"]]
+        [
+            f"  - {f['name']} ({_format_output_field_contract(f)}, {'required' if f.get('required', True) else 'optional'}): {f.get('description', '')}"
+            for f in response_schema["fields"]
+        ]
     )
     num_fields = len(response_schema["fields"])
     num_required = sum(f.get("required", True) is not False for f in response_schema["fields"])

@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 
 import { createStreamingCompletion } from '../../providers/rose';
+import { FOUNDRY_REGION_ENV_NAMES } from '../../providers/rose/foundry';
 import { __resetGptApiKeyCooldown } from '../../providers/computeCredentials';
 import { postOpenAIResponsesStream, postOpenRouterStream } from '../../providers/rose/transport';
 import { withIsolatedFundedKeyCooldowns } from '../blackbox/funded-key-cooldown.support';
@@ -235,6 +236,7 @@ async function testCompletionAbortReachesWaterfall(): Promise<void> {
       ANTHROPIC_API_KEY: undefined,
       CEREBRAS_API_KEY: undefined,
       OPENROUTER_API_KEY: 'or-test',
+      ...Object.fromEntries(FOUNDRY_REGION_ENV_NAMES.map((name) => [name, undefined])),
     },
     async () => {
       const signals = await expectAbortEndsCompletion(

@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$SCRIPT_DIR/blackbox-phone-env.sh"
 ROOT_DIR="$(cd "$BACKEND_DIR/.." && pwd)"
 
 # Returns 0 when a funded OpenAI key (GPT_API_KEY / OPENAI_API_KEY) fallback is

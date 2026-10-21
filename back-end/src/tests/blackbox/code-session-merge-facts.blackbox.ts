@@ -17,9 +17,14 @@ import {
   CODE_AGENT_INSTRUCTIONS_VERSION,
   CODE_AGENT_STOCK_INSTRUCTIONS_VERSION,
   buildCodeAgentSystemPrompt,
+  buildLocalCodeAgentSystemPrompt,
 } from '../../providers/codeAgentPrompt';
 import { resolveMergeFacts } from '../../providers/codeSessions/mergeFacts';
-import { installedRoseSkills, roseSkillsTableOfContents } from '../../providers/roseSkills/skills';
+import {
+  installedRoseSkills,
+  roseSkillsTableOfContents,
+  roseSkillWorkspaceFiles,
+} from '../../providers/roseSkills/skills';
 
 const savedGithubApi = process.env.GITHUB_API_BASE_URL;
 
@@ -117,9 +122,9 @@ test('code-agent prompt: branch facts in the prompt, commit and merge rules in t
   assert.ok(skill, 'code-session is a stock skill');
   const text = skill.files.find((file) => file.path === 'SKILL.md')?.content.toString('utf8') ?? '';
   assert.match(text, /Commit locally whenever a unit of work is complete/);
-  assert.match(text, /Merge into your merge target when other agents or the user need your/);
-  assert.match(text, /You decide when to commit, push and merge/);
-  assert.match(text, /If a rebase or merge is required, resolve it before finishing/);
+  assert.match(text, /use the branch-join skill to join the/);
+  assert.match(text, /publish[\s\S]*repository's own deploy skill/);
+  assert.match(text, /Preserve other agents' changes and resolve integration conflicts/);
   assert.match(text, /Never start over\./, 'usage-limit behaviour');
   assert.doesNotMatch(text, /Rose itself/, 'stock code-session has no Rose-in-Rose rule');
   const flaggedText =
@@ -127,7 +132,7 @@ test('code-agent prompt: branch facts in the prompt, commit and merge rules in t
       .find((entry) => entry.name === 'code-session')
       ?.files.find((file) => file.path === 'SKILL.md')
       ?.content.toString('utf8') ?? '';
-  assert.match(flaggedText, /checkout is Rose itself, never merge, push\s+to main or deploy/);
+  assert.match(flaggedText, /checkout is Rose itself, use its existing `\/deploy` workflow/);
 
   const template = readFileSync(
     join(process.cwd(), '..', 'e2b-templates', 'claude-code', 'CLAUDE.md'),
@@ -165,7 +170,14 @@ test('code-agent prompt: a byte-stable skills table of contents per account grou
   assert.ok(flagged.includes(`\n${flaggedToc}\n`), 'flagged prompt lists every skill');
   assert.deepEqual(
     installedRoseSkills(false).map((skill) => skill.name),
-    ['agent-graph', 'code-session', 'talk-to-user']
+    [
+      'agent-graph',
+      'branch-join',
+      'change-environment-size',
+      'code-session',
+      'deploy',
+      'talk-to-user',
+    ]
   );
   for (const name of ['apps-preview', 'rose-ui']) {
     assert.ok(flagged.includes(`\n- ${name}: `), `flagged TOC lists ${name}`);
@@ -210,5 +222,98 @@ test('code-agent prompt: a byte-stable skills table of contents per account grou
   assert.ok(template.includes(`\n${stockToc}\n`), 'template CLAUDE.md lists the stock skills');
   for (const term of ['pinned', 'inline_view', 'rose-ui']) {
     assert.ok(!template.includes(term), `template CLAUDE.md mentions ${term}`);
+  }
+});
+
+test('network publication reaches every harness and routes through the repository deploy skill', () => {
+  for (const roseDesktop of [false, true]) {
+    const skills = installedRoseSkills(roseDesktop);
+    const deploy = skills.find((skill) => skill.name === 'deploy');
+    assert.ok(deploy, 'every code agent receives the deploy skill');
+    const text =
+      deploy.files.find((file) => file.path === 'SKILL.md')?.content.toString('utf8') ?? '';
+    assert.match(text, /repository.s own deploy skill/i);
+    assert.match(text, /\.agents\/skills\/deploy\/SKILL\.md/);
+    assert.match(text, /main/);
+    assert.match(text, /verified merged commit/i);
+    assert.match(text, /never force-push/i);
+    assert.match(text, /running agents.*safe/i);
+    for (const prefix of ['.rose/skills', '.claude/skills', '.agents/skills']) {
+      assert.ok(
+        roseSkillWorkspaceFiles(skills).some((file) => file.path === `${prefix}/deploy/SKILL.md`)
+      );
+    }
+    for (const prompt of [
+      buildCodeAgentSystemPrompt({ roseDesktop }),
+      buildLocalCodeAgentSystemPrompt({ roseDesktop }),
+    ]) {
+      assert.match(prompt, /publication to all agents/i);
+      assert.match(prompt, /deploy skill/i);
+    }
+    const rosePrompt = buildCodeAgentSystemPrompt({ roseDesktop, roseRepo: true });
+    assert.doesNotMatch(rosePrompt, /Never merge it/);
+  }
+});
+
+test('nested agents join parent branches while internal coding workers share the owning worktree', () => {
+  for (const roseDesktop of [false, true]) {
+    const skills = installedRoseSkills(roseDesktop);
+    const join = skills.find((skill) => skill.name === 'branch-join');
+    assert.ok(join);
+    const text =
+      join.files.find((file) => file.path === 'SKILL.md')?.content.toString('utf8') ?? '';
+    assert.match(text, /repository's own branch-join skill/);
+    assert.match(text, /If no branch-join skill exists, create/);
+    assert.match(text, /\.agents\/skills\/branch-join\/SKILL\.md/);
+    assert.match(text, /Do not run the\s+deploy workflow/);
+    assert.match(text, /publish to `main`, or perform a production rollout/);
+    assert.match(text, /same worktree/);
+    assert.match(text, /stacked on the parent/);
+    assert.match(text, /PR base is the parent branch/);
+    assert.match(text, /nonoverlapping files or serialize overlapping edits/);
+    for (const prefix of ['.rose/skills', '.claude/skills', '.agents/skills']) {
+      assert.ok(
+        roseSkillWorkspaceFiles(skills).some(
+          (file) => file.path === `${prefix}/branch-join/SKILL.md`
+        )
+      );
+    }
+    assert.match(
+      buildCodeAgentSystemPrompt({ roseDesktop }),
+      /sub-agents stack their own branch\/worktree/
+    );
+    assert.match(
+      buildLocalCodeAgentSystemPrompt({ roseDesktop }),
+      /Internal coding workers share this worktree/
+    );
+  }
+});
+
+test('publication requires the applicable skill and a verifiable completion receipt', () => {
+  for (const roseDesktop of [false, true]) {
+    const skills = installedRoseSkills(roseDesktop);
+    for (const name of ['deploy', 'branch-join']) {
+      const text =
+        skills
+          .find((skill) => skill.name === name)
+          ?.files.find((file) => file.path === 'SKILL.md')
+          ?.content.toString('utf8') ?? '';
+      assert.match(text, /Publication is allowed only through this skill/);
+      for (const required of [
+        'source commit',
+        'target branch',
+        'resulting commit',
+        'check results',
+      ]) {
+        assert.ok(text.includes(required), `${name} requires ${required}`);
+      }
+      assert.match(text, /Do not claim\s+publication/);
+    }
+    for (const prompt of [
+      buildCodeAgentSystemPrompt({ roseDesktop }),
+      buildLocalCodeAgentSystemPrompt({ roseDesktop }),
+    ]) {
+      assert.match(prompt, /must complete the applicable branch-join or deploy skill/);
+    }
   }
 });

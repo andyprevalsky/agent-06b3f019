@@ -50,6 +50,7 @@ import { previewHandoffCases } from './code-preview-handoff.cases';
 import { rootPreviewCases } from './root-preview.cases';
 import { previewWorkspaceCases } from './code-preview-workspace.cases';
 import {
+  assertPublicationPolicy,
   HMR_EDIT_FILE,
   HMR_EDIT_ROUTE,
   HMR_EDIT_TEXT,
@@ -248,8 +249,8 @@ test('code-agent prompt: Rose-in-Rose shipping rule + apps-preview skill only fo
   });
   assert.match(rose, /^- apps-preview: Use /m, 'the table of contents lists apps-preview');
   assert.match(rose, /^- The checkout in ~\/workspace is Rose itself\./m);
-  assert.match(rose, /pull request \(`gh pr create`\)/i);
-  assert.match(rose, /never merge/i);
+  assert.match(rose, /follow its existing `\/deploy` workflow/i);
+  assert.match(rose, /Preserve all required checks and approvals/);
   assert.match(rose, /\/deploy/);
   const plain = buildCodeAgentSystemPrompt({
     githubRepoUrl: 'https://github.com/Rose-Ai-Labs/rose',
@@ -270,8 +271,7 @@ test('code-agent prompt: Rose-in-Rose shipping rule + apps-preview skill only fo
   assert.ok(text, 'apps-preview skill installed for dev accounts');
   assert.match(text, /rose-preview start \[--dir <app dir>\]/);
   assert.match(text, /apps\/<slug>\//);
-  assert.match(text, /opening a pull\s+request \(`gh pr create`\)/);
-  assert.match(text, /Never merge it, never\s+push to main and never deploy/);
+  assertPublicationPolicy(text);
   assert.ok(!installedRoseSkills(false).some((entry) => entry.name === 'apps-preview'));
 });
 

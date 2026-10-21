@@ -1,5 +1,5 @@
 /** Descendant-only agent control; lifecycle mutation stays in the canonical kill path. */
-import { prisma } from '../../providers/database';
+import * as repo from './agentGraphKillRepo';
 import { deleteAgentRecursive } from '../../providers/agentKill';
 import { getTemporalClient } from '../../providers/temporal';
 import { AgentGraphError, type GraphCaller } from './agentGraphService';
@@ -13,10 +13,10 @@ async function assertDescendant(caller: GraphCaller, targetId: string): Promise<
   while (current !== null && !seen.has(current) && seen.size < 64) {
     if (current === caller.self.id) return;
     seen.add(current);
-    const row: { parentAgentId: string | null } | null = await prisma.agent.findFirst({
-      where: { id: current, userId: caller.userId },
-      select: { parentAgentId: true },
-    });
+    const row: { parentAgentId: string | null } | null = await repo.findKillParent(
+      current,
+      caller.userId
+    );
     if (row === null) break;
     current = row.parentAgentId;
   }
@@ -31,19 +31,13 @@ async function subtree(
   let pending = [targetId];
   const seen = new Set<string>();
   while (pending.length > 0) {
-    const rows = await prisma.agent.findMany({
-      where: { userId, id: { in: pending } },
-      select: { id: true, temporalWorkflowId: true },
-    });
+    const rows = await repo.findKillRows(pending, userId);
     for (const row of rows)
       if (!seen.has(row.id)) {
         seen.add(row.id);
         out.push(row);
       }
-    const children = await prisma.agent.findMany({
-      where: { userId, parentAgentId: { in: pending } },
-      select: { id: true },
-    });
+    const children = await repo.findKillChildren(pending, userId);
     pending = children.map((row) => row.id).filter((id) => !seen.has(id));
     if (out.length + pending.length > 10_000)
       throw new AgentGraphError(409, 'Subtree exceeds the stop-operation bound');
@@ -60,10 +54,7 @@ export async function killGraphAgent(caller: GraphCaller, targetId: string) {
   // Include archived rows: repeated calls must verify the original operation, not pretend an absent row proves cleanup.
   const rows = await subtree(targetId, caller.userId);
   const ids = rows.map((row) => row.id);
-  const resources = await Promise.all([
-    prisma.browserSession.count({ where: { agentId: { in: ids }, status: { not: 'CLOSED' } } }),
-    prisma.claudeCodeSession.count({ where: { agentId: { in: ids }, status: { not: 'CLOSED' } } }),
-  ]);
+  const resources = await repo.countKillResources(ids);
   let running = 0;
   for (const row of rows) {
     if (row.temporalWorkflowId === null || row.temporalWorkflowId === '') continue;
@@ -81,21 +72,8 @@ export async function killGraphAgent(caller: GraphCaller, targetId: string) {
       'Agent archived; workflow or session cleanup is still unconfirmed'
     );
   }
-  const target = await prisma.agent.findFirstOrThrow({
-    where: { id: targetId, userId: caller.userId },
-    select: { parentAgentId: true },
-  });
-  const siblings = await prisma.agent.findMany({
-    where: {
-      userId: caller.userId,
-      parentAgentId: target.parentAgentId,
-      id: { not: targetId },
-      deletedAt: null,
-    },
-    select: { id: true, status: true },
-    orderBy: { id: 'asc' },
-    take: 21,
-  });
+  const target = await repo.requireKillParent(targetId, caller.userId);
+  const siblings = await repo.findKillSiblings(targetId, caller.userId, target.parentAgentId);
   const remaining = siblings.slice(0, 20);
   return {
     unchanged_siblings: remaining,

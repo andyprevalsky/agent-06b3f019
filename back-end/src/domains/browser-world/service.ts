@@ -1,3 +1,5 @@
+import { ensureLogicalBrowser } from '../../providers/browser/logicalSession';
+import { resumeBrowserSession } from '../../providers/browserSessionResume';
 /**
  * Browser world service (plan row A6): the user's one browser template, split
  * by website and account, and the home browser that shows it.
@@ -72,12 +74,12 @@ const defaultDeps: RootBrowserDeps = {
       return null;
     }
   },
-  close: (sessionId) => closeSession(sessionId, false),
+  close: (sessionId) => closeSession(sessionId, true),
 };
 
 function rootView(session: {
   id: string;
-  sessionId: string;
+  sessionId: string | null;
   status: string;
   provider: string;
   debugUrl: string | null;
@@ -149,9 +151,28 @@ export async function openRootBrowser(
   deps: RootBrowserDeps = defaultDeps
 ): Promise<RootBrowserView> {
   if (!browserWorldStateEnabled()) throw new Error('Browser world state is disabled');
+  if (deps === defaultDeps) {
+    const logical = await ensureLogicalBrowser(userId, rootBrowserAgentId(userId));
+    if (
+      logical.status === 'ACTIVE' &&
+      logical.sessionId !== null &&
+      (logical.controlState !== 'AGENT' || (await deps.isLive(logical.sessionId)) !== false)
+    ) {
+      const current = await repo.findRootSessionByTaskId(logical.id);
+      if (!current) throw new RootBrowserNotOpenError();
+      return rootView(current);
+    }
+    const startUrl = options.startUrl ?? (await defaultRootBrowserUrl(userId, options.agentId));
+    if (startUrl !== null && startUrl !== '' && logical.startUrl === null)
+      await repo.updateRootSessionUrl(logical.id, startUrl);
+    await resumeBrowserSession(logical.id);
+    const current = await repo.findRootSessionByTaskId(logical.id);
+    if (!current) throw new RootBrowserNotOpenError();
+    return rootView(current);
+  }
   const rootAgentId = rootBrowserAgentId(userId);
   const existing = await repo.findActiveRootSession(userId, rootAgentId);
-  if (existing !== null) {
+  if (existing !== null && existing.sessionId !== null) {
     const live = await deps.isLive(existing.sessionId);
     if (live !== false) return rootView(existing);
     await deps.close(existing.sessionId).catch((error: unknown) => {
@@ -193,7 +214,7 @@ export async function closeRootBrowser(
   deps: RootBrowserDeps = defaultDeps
 ): Promise<{ world_state: WorldStateMergeReceipt | null }> {
   const existing = await repo.findActiveRootSession(userId, rootBrowserAgentId(userId));
-  if (existing === null) throw new RootBrowserNotOpenError();
+  if (existing === null || existing.sessionId === null) throw new RootBrowserNotOpenError();
   const { worldState } = await deps.close(existing.sessionId);
   return { world_state: worldState };
 }

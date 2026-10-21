@@ -383,6 +383,7 @@ async def test_cross_realm_goto_continues_guest_navigation_when_optional_prep_fa
 
 async def test_navigation_and_state_results_bind_auth_to_observed_destination() -> None:
     from unittest.mock import patch
+    from types import SimpleNamespace
     from domains.spawn_browser_agent_v3.service_actions import execute_action
     from domains.spawn_browser_agent_v3.handler import _browser_tool_result_for_history
 
@@ -1814,4 +1815,210 @@ async def run_all_tests():
         "passkey_auth_reload_skips_foreign_host_and_same_href",
         test_passkey_auth_reload_skips_foreign_host_and_same_href,
     )
+    await runner.record_async("phone_private_refs_require_app_binding_and_never_resolve", test_phone_private_refs_require_app_binding_and_never_resolve)
+    await runner.record_async("phone_canary_never_reaches_stream_dump_or_resume_turns", test_phone_canary_never_reaches_stream_dump_or_resume_turns)
+    for name, test in (
+        ("phone_split_stream_is_private_and_responsive", test_phone_split_stream_is_private_and_responsive),
+        ("phone_stream_encoded_and_numeric_boundaries", test_phone_stream_encoded_and_numeric_boundaries),
+        ("phone_stream_long_progress_remains_incremental", test_phone_stream_long_progress_remains_incremental),
+        ("phone_stream_restart_discards_pending_and_finish_flushes", test_phone_stream_restart_discards_pending_and_finish_flushes),
+        ("phone_stream_concurrent_credentials_are_task_local", test_phone_stream_concurrent_credentials_are_task_local),
+    ):
+        await runner.record_async(name, test)
     return runner.all_passed
+
+
+async def test_phone_private_refs_require_app_binding_and_never_resolve():
+    from unittest.mock import patch
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+    from browser_tools.secret_refs import mask_secret_values
+    refs = {'pwd:phone-fixture': 'CANARY-PHONE-PASSWORD'}
+    for text in ('pwd:phone-fixture', '{{secret:pwd:phone-fixture}}', 'CANARY-PHONE-PASSWORD'):
+        with patch('domains.spawn_browser_agent_v3.phone.execute_phone') as provider:
+            action={'action':'phone','params':{'mode':'operation','operation':'input.text','args':{'text':text}}}
+            result=await execute_action(SimpleNamespace(),SimpleNamespace(),action,secret_refs=refs,password_origins={'pwd:phone-fixture':'https://same.test'},current_url='https://same.test',user_id='u',agent_id='a',browser_task_id='t',phone_snapshot={'enabled':True})
+            assert not result['success'] and 'binding' in result['error'].lower()
+            provider.assert_not_called()
+            assert 'CANARY-PHONE-PASSWORD' not in str(result)
+            assert 'CANARY-PHONE-PASSWORD' not in str(mask_secret_values(action,refs))
+
+
+async def test_phone_canary_never_reaches_stream_dump_or_resume_turns():
+    import json
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+    from types import SimpleNamespace
+    from browser_tools.secret_refs import secret_logging_context
+    from domains.spawn_browser_agent_v3.streaming import BrowserThinkingStream
+    from domains.spawn_browser_agent_v3.handler import _append_browser_turn_messages
+    from helpers import observability
+    from providers.rose import StreamChunk
+    canary='CANARY-PHONE-PRIVATE-TEXT'
+    refs={'pwd:phone-fixture':canary}
+    action={'action':'phone','params':{'mode':'operation','operation':'input.text','args':{'text':canary}}}
+    emitted=[]
+    async def publish(**kwargs): emitted.append(kwargs)
+    with tempfile.TemporaryDirectory() as directory, secret_logging_context(refs, fresh=True):
+        with patch('domains.spawn_browser_agent_v3.streaming.stream_assistant_chunk',side_effect=publish), patch('domains.spawn_browser_agent_v3.streaming.stream_tool_event',side_effect=publish):
+            stream=BrowserThinkingStream(agent_id='a',task_id='t',iteration=1)
+            await stream.on_chunk(StreamChunk(kind='tool_call', data={'id':'call','name':'phone','arguments':action['params']}))
+        turns=[]
+        _append_browser_turn_messages(turns,unified_action=action,result={'success':False,'error':canary},tool_call_id='call')
+        with patch.object(observability,'_DUMP_ROOT',Path(directory)), patch.object(observability,'_IS_PRODUCTION',False), patch.object(observability,'archive_json',return_value=None):
+            path=observability.dump_llm_context('phone-canary',[],agent_id='synthetic',output=action)
+        assert path
+        assert canary not in Path(path).read_text()
+        with patch.object(observability, 'archive_json', return_value=None):
+            observability.update_llm_dump(path, output={'late': canary})
+        assert canary not in Path(path).read_text(), 'late dump updates must obey the same policy'
+        assert canary not in json.dumps(emitted)
+        assert canary not in json.dumps(turns), 'resume transcript must already be masked'
+
+
+async def _capture_phone_stream(exercise):
+    """Keep the actual assistant helper; intercept only its network queue."""
+    from unittest.mock import patch
+
+    records = []
+
+    async def queue(channel, event, record):
+        assert event == "ASSISTANT_STREAM"
+        records.append(dict(record))
+
+    with patch("helpers.messages._queue_realtime_record", side_effect=queue):
+        await exercise(records)
+
+
+async def test_phone_split_stream_is_private_and_responsive():
+    from browser_tools.secret_refs import secret_logging_context
+    from domains.spawn_browser_agent_v3.streaming import BrowserThinkingStream
+    from providers.rose import StreamChunk
+
+    canary = "SYNTHETIC-PHONE-SPLIT-PRIVATE"
+
+    async def exercise(records):
+        with secret_logging_context({"pwd:phone-split": canary}, fresh=True):
+            stream = BrowserThinkingStream(agent_id="synthetic", task_id="split", iteration=1)
+            await stream.on_chunk(StreamChunk(kind="content", data={"text": "Ordinary progress. "}))
+            assert "".join(r["delta"] for r in records) == "Ordinary progress. ", "ordinary output must stream immediately"
+            for i, char in enumerate(canary):
+                await stream.on_chunk(StreamChunk(kind="reasoning" if i % 2 else "content", data={"text": char}))
+                assert canary not in "".join(r["delta"] for r in records), "split canary reached assembled realtime output"
+            await stream.on_chunk(StreamChunk(kind="content", data={"text": " Done."}))
+            await stream.finish()
+            output = "".join(r["delta"] for r in records)
+            assert output == "Ordinary progress. {{secret:pwd:phone-split}} Done.", output
+            assert records[-1]["done"] and records[-1]["clear_on_done"]
+            assert [r["sequence"] for r in records] == list(range(len(records)))
+
+    await _capture_phone_stream(exercise)
+
+
+async def test_phone_stream_restart_discards_pending_and_finish_flushes():
+    from browser_tools.secret_refs import secret_logging_context
+    from domains.spawn_browser_agent_v3.streaming import BrowserThinkingStream
+    from providers.rose import StreamChunk
+
+    canary = "SYNTHETIC-ABANDONED-PRIVATE"
+
+    async def exercise(records):
+        with secret_logging_context({"pwd:restart": canary}, fresh=True):
+            stream = BrowserThinkingStream(agent_id="synthetic", task_id="restart", iteration=1)
+            await stream.on_chunk(StreamChunk(kind="reasoning", data={"text": "Ready. " + canary[:12]}))
+            old_id = stream.stream_id
+            await stream.on_chunk(StreamChunk(kind="restart", data={}))
+            old = [r for r in records if r["stream_id"] == old_id]
+            assert "".join(r["delta"] for r in old) == "Ready. ", "abandoned secret prefix must never be flushed"
+            assert old[-1]["done"]
+            await stream.on_chunk(StreamChunk(kind="content", data={"text": "Retry complete. " + canary}))
+            await stream.finish()
+            count = len(records)
+            await stream.finish()
+            await stream.on_chunk(StreamChunk(kind="content", data={"text": "ignored"}))
+            assert len(records) == count
+            new = [r for r in records if r["stream_id"] == stream.stream_id]
+            assert "".join(r["delta"] for r in new) == "Retry complete. {{secret:pwd:restart}}"
+            assert new[-1]["done"]
+            # An incomplete prefix that is ordinary text is retained until finish.
+            tail = BrowserThinkingStream(agent_id="synthetic", task_id="tail", iteration=1)
+            await tail.on_chunk(StreamChunk(kind="content", data={"text": "SYN"}))
+            await tail.finish()
+            assert "".join(r["delta"] for r in records if r["stream_id"] == tail.stream_id) == "SYN"
+
+    await _capture_phone_stream(exercise)
+
+
+async def test_phone_stream_concurrent_credentials_are_task_local():
+    import asyncio
+    from browser_tools.secret_refs import secret_logging_context
+    from domains.spawn_browser_agent_v3.streaming import BrowserThinkingStream
+    from providers.rose import StreamChunk
+
+    async def exercise(records):
+        barrier = asyncio.Barrier(2)
+
+        async def run(task, private, public):
+            with secret_logging_context({"pwd:" + task: private}, fresh=True):
+                stream = BrowserThinkingStream(agent_id="synthetic", task_id=task, iteration=1)
+                await stream.on_chunk(StreamChunk(kind="content", data={"text": public + " " + private[:10]}))
+                await barrier.wait()
+                await stream.on_chunk(StreamChunk(kind="reasoning", data={"text": private[10:]}))
+                await stream.finish()
+                output = "".join(r["delta"] for r in records if r["stream_id"] == stream.stream_id)
+                assert private not in output, "task-local split secret leaked"
+                assert output == public + " {{secret:pwd:" + task + "}}", output
+
+        await asyncio.gather(run("a", "PRIVATE-ALPHA-CANARY", "PRIVATE-BETA-CANARY"), run("b", "PRIVATE-BETA-CANARY", "PRIVATE-ALPHA-CANARY"))
+
+    await _capture_phone_stream(exercise)
+
+
+async def test_phone_stream_encoded_and_numeric_boundaries():
+    import json
+    from html import escape
+    from urllib.parse import quote, quote_plus
+    from browser_tools.secret_refs import secret_logging_context
+    from domains.spawn_browser_agent_v3.streaming import BrowserThinkingStream
+    from providers.rose import StreamChunk
+
+    canary = "SYNTHETIC-quote-'\"/é +"
+    refs = {"pwd:encoded": canary, "card_cvv": "234",
+            "card_number": "4111111111111111", "card_expiry": "12/31"}
+    forms = [canary, escape(canary), quote(canary, safe=""), quote_plus(canary),
+             json.dumps(canary, ensure_ascii=True)[1:-1],
+             json.dumps(canary, ensure_ascii=False)[1:-1].replace("/", "\\/")]
+    cases = [(form, "{{secret:pwd:encoded}}") for form in forms]
+    cases += [("cvv234", "cvv{{secret:card_cvv}}"), ("1234", "1234"),
+              ("4111-1111 1111-1111", "{{secret:card_number}}"),
+              ("12 / 31", "{{secret:card_expiry}}"),
+              ("{{secret:pwd:encoded}}", "{{secret:pwd:encoded}}")]
+
+    async def exercise(records):
+        with secret_logging_context(refs, fresh=True):
+            for index, (text, expected) in enumerate(cases):
+                stream = BrowserThinkingStream(agent_id="synthetic", task_id=str(index), iteration=1)
+                for char in text:
+                    await stream.on_chunk(StreamChunk(kind="content", data={"text": char}))
+                await stream.finish()
+                output = "".join(r["delta"] for r in records if r["stream_id"] == stream.stream_id)
+                assert output == expected, (text, output, expected)
+
+    await _capture_phone_stream(exercise)
+
+
+async def test_phone_stream_long_progress_remains_incremental():
+    from browser_tools.secret_refs import secret_logging_context
+    from domains.spawn_browser_agent_v3.streaming import BrowserThinkingStream
+    from providers.rose import StreamChunk
+
+    async def exercise(records):
+        with secret_logging_context({"pwd:progress": "SYNTHETIC-PROGRESS-PRIVATE"}, fresh=True):
+            stream = BrowserThinkingStream(agent_id="synthetic", task_id="long-progress", iteration=1)
+            for _ in range(10000):
+                await stream.on_chunk(StreamChunk(kind="content", data={"text": "Progress. "}))
+                assert records[-1]["delta"] == "Progress. ", "ordinary progress must not accumulate until finish"
+            await stream.finish()
+            assert "".join(r["delta"] for r in records) == "Progress. " * 10000
+
+    await _capture_phone_stream(exercise)

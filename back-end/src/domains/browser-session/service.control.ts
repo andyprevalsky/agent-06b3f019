@@ -55,7 +55,7 @@ export async function getBrowserControlState(taskId: string, userId?: string) {
 
 export interface BrowserLiveView {
   taskId: string;
-  sessionId: string;
+  sessionId: string | null;
   debugUrl: string | null;
   status: string;
   /** false: closed or provider reports it ended; null: provider health unknown. */
@@ -108,7 +108,7 @@ export async function getBrowserLiveView(
     debugUrl: session.debugUrl,
     status: session.status,
     live:
-      session.status === ACTIVE
+      session.status === ACTIVE && session.sessionId !== null
         ? await providerLiveness(session.sessionId, deps.health ?? getBrowserSessionHealth)
         : false,
     asOf,

@@ -394,7 +394,7 @@ def test_general_purpose_faulty_tool_retry_warns_recursion():
     assert "circumvent faulty tools" not in MAIN_SYSTEM_PROMPT
 
 
-def test_code_agent_advertises_rose_user_ui_and_inline_views():
+def test_code_agent_advertises_rose_user_ui_and_agent_display():
     """Rose Desktop root and planner learn that coding and Rose-app changes belong to a code agent.
 
     The code sandbox holds the user's rose_user_ui and its `rose-ui publish`
@@ -402,7 +402,7 @@ def test_code_agent_advertises_rose_user_ui_and_inline_views():
     roselabs.ai to change the user's Rose background, and a game was returned
     only as a file. Execute-phase tools see the `type` description; the planner
     also sees the spawn_agent prompt. Both must advertise the capability, and
-    the inline_view argument must say it shows code-agent work. These are Rose
+    the display tool must remain declared and name the Agent Display panel. These are Rose
     Desktop surfaces (utils.rose_desktop), so the flagged variants carry them.
     """
     from domains.set_plan.service import get_planner_tools_description
@@ -422,8 +422,8 @@ def test_code_agent_advertises_rose_user_ui_and_inline_views():
         "Delegate all code writing to it",
         "user's Rose app UI (rose_user_ui)",
         "how Rose looks or behaves for the user",
-        "as an inline view",
-        "send_message_to_user's inline_view",
+        "in Agent Display",
+        "rose display",
     ):
         assert phrase in type_desc, f"spawn_agent type description lost {phrase!r}"
 
@@ -431,10 +431,17 @@ def test_code_agent_advertises_rose_user_ui_and_inline_views():
     for phrase in (
         "give it all code writing",
         "user's Rose app UI",
-        "publish that as an inline view and return the view name",
-        "add a send_message_to_user_execute_phase task that shows the view via inline_view",
+        "show it in Agent Display using rose display",
+        "return the display receipt",
     ):
         assert phrase in code_line, f"spawn_agent prompt code line lost {phrase!r}"
+    from tools.prompts.display import PROMPT_ROSE_DESKTOP as display_prompt
+
+    assert "tool is named display" in display_prompt
+    assert "Agent Display" in display_prompt
+    from utils.tool_schemas import EXECUTE_PHASE_TOOLS
+
+    assert "display" in EXECUTE_PHASE_TOOLS
     assert "Anthropic's Claude Code" not in code_line, "code agents also run Codex CLI"
 
     planner_tools = get_planner_tools_description(rose_desktop=True)
@@ -968,8 +975,9 @@ def test_check_progress_is_canonical_verifier_entrypoint():
 
 def test_browser_use_v3_actions_in_catalog():
     """Every action listed in the v3 system prompt must exist in BROWSER_USE_TOOLS."""
-    from browser_tools.schemas import AVAILABLE_ACTIONS
     from providers.rose.browser_use import BROWSER_USE_TOOLS
+
+    from browser_tools.schemas import AVAILABLE_ACTIONS
 
     missing = set(AVAILABLE_ACTIONS) - set(BROWSER_USE_TOOLS.keys())
     assert not missing, (
@@ -998,8 +1006,9 @@ def test_browser_use_catalog_matches_v3_actions_or_is_exempt():
     it in the v3 executor (preferred) or add it to the exempt set with a
     code comment explaining why.
     """
-    from browser_tools.schemas import AVAILABLE_ACTIONS
     from providers.rose.browser_use import BROWSER_USE_TOOLS
+
+    from browser_tools.schemas import AVAILABLE_ACTIONS
 
     catalog_only = set(BROWSER_USE_TOOLS.keys()) - set(AVAILABLE_ACTIONS) - _BROWSER_CATALOG_ONLY
     assert not catalog_only, (
@@ -1654,8 +1663,9 @@ def test_no_all_caps_underlined_section_labels_in_prompts():
     asciidoc/RST convention that escaped from the historical prompt files;
     removed during the audit.
     """
-    from domains.spawn_browser_agent_v3.service import get_browser_system_prompt
     from providers.rose.browser_use import build_browser_use_system_prompt
+
+    from domains.spawn_browser_agent_v3.service import get_browser_system_prompt
     from utils.prompts import (
         EXPLORE_AGENT_SYSTEM_PROMPT,
         build_planner_system_prompt,
@@ -1777,8 +1787,9 @@ def test_system_prompt_boundary_marker_present():
     only included here so a regression that adds dynamic data without a
     boundary trips this test.
     """
-    from domains.spawn_browser_agent_v3.service import get_browser_system_prompt
     from providers.rose.browser_use import build_browser_use_system_prompt
+
+    from domains.spawn_browser_agent_v3.service import get_browser_system_prompt
     from utils.prompts import (
         SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
         build_planner_system_prompt,
@@ -1843,8 +1854,9 @@ def test_all_caps_marker_count_under_limit():
     limit is generous to allow legitimate correctness gates without forcing
     a constant grooming chore.
     """
-    from domains.spawn_browser_agent_v3.service import get_browser_system_prompt
     from providers.rose.browser_use import build_browser_use_system_prompt
+
+    from domains.spawn_browser_agent_v3.service import get_browser_system_prompt
     from utils.prompts import (
         EXPLORE_AGENT_SYSTEM_PROMPT,
         build_planner_system_prompt,
@@ -2102,8 +2114,9 @@ def test_output_schema_states_attempt_completion_takes_no_arguments():
 
 def test_browser_prompt_says_commit_click_requests_approval():
     """The browser prompt states that the commit click is the approval request."""
-    from browser_tools.schemas import AVAILABLE_ACTIONS
     from providers.rose.browser_use import build_browser_use_system_prompt
+
+    from browser_tools.schemas import AVAILABLE_ACTIONS
 
     prompt = build_browser_use_system_prompt(AVAILABLE_ACTIONS)
     assert "Clicking the commit control is how approval is requested; no tool requests it." in prompt, (
@@ -2389,7 +2402,7 @@ async def run_all_tests():
     # 22. Code agents advertise rose_user_ui + inline views to root and planner
     r.record(
         "code_agent_advertises_rose_user_ui_and_inline_views",
-        test_code_agent_advertises_rose_user_ui_and_inline_views,
+        test_code_agent_advertises_rose_user_ui_and_agent_display,
     )
 
     # 23. Rose Desktop gate: stock accounts get no new-UI prompt text

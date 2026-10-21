@@ -1,3 +1,4 @@
+import { iphoneCapability } from '../../providers/phoneAccountPolicy';
 /**
  * User-settings domain service — business logic for user settings CRUD.
  */
@@ -31,6 +32,8 @@ const DEFAULT_SETTINGS: UserSettingsResponse = {
 
 /** Map a Prisma user record to the response shape (GET includes phone + onboarding). */
 function toGetResponse(user: {
+  userId: string;
+  isAnonymous: boolean;
   name: string | null;
   email: string | null;
   phone: string | null;
@@ -49,6 +52,7 @@ function toGetResponse(user: {
   voicePreferenceId: string | null;
 }): UserSettingsResponse {
   return {
+    ...iphoneCapability(user),
     name: user.name,
     email: user.email,
     phone: user.phone,

@@ -5,6 +5,8 @@ import path from 'node:path';
 const providerPath = path.resolve(__dirname, '../../providers/browser/browserUse.ts');
 const resumePath = path.resolve(__dirname, '../../providers/browserSessionResume.ts');
 const kernelPath = path.resolve(__dirname, '../../providers/browser/kernel.ts');
+const checkpointPath = path.resolve(__dirname, '../../providers/browser/checkpoint.ts');
+const indexPath = path.resolve(__dirname, '../../providers/browser/index.ts');
 const recoveryPath = path.resolve(__dirname, '../../providers/browser/resumeRecovery.ts');
 const local = createRequire(providerPath);
 const { prisma } = local('../database');
@@ -14,8 +16,13 @@ const browser = {
   contexts: () => [
     {
       storageState: async () => ({ cookies: [], origins: [] }),
-      pages: () => [{ goto: async () => {}, close: async () => {} }],
-      newPage: async () => ({ goto: async () => {}, close: async () => {} }),
+      setStorageState: async () => request('/restore', { method: 'POST' }),
+      pages: () => [{ url: () => 'about:blank', goto: async () => {}, close: async () => {} }],
+      newPage: async () => ({
+        url: () => 'about:blank',
+        goto: async () => {},
+        close: async () => {},
+      }),
     },
   ],
   close: async () => {},
@@ -36,6 +43,12 @@ const kernel = {
   },
 };
 Module._load = function (id, parent, isMain) {
+  if (parent?.filename === indexPath && id === './sessionAuthPersist')
+    return { persistSignedInBrowserState: () => request('/legacy-harvest') };
+  if (parent?.filename === indexPath && id === './worldState')
+    return { mergeSessionWorldState: () => request('/legacy-harvest') };
+  if (parent?.filename === checkpointPath && id === '../steel/sessionConnection')
+    return { connectValidatedBrowser: async () => browser };
   if (parent?.filename === resumePath && id === './browser')
     return {
       resumeSession: async (taskId, options) => {
@@ -88,7 +101,15 @@ Module._load = function (id, parent, isMain) {
     const result = await local(resumePath).resumeBrowserSession(process.argv[2], {
       forceFreshProfile: process.env.CUSTODY_FRESH === '1',
     });
-    process.send?.({ ok: true, sessionId: result.session_id, pid: process.pid });
+    if (process.env.CUSTODY_LOGICAL_PAUSE === '1')
+      await local(indexPath).closeSession(result.session_id, true);
+    const state = await prisma.browserSession.findUniqueOrThrow({ where: { id: process.argv[2] } });
+    process.send?.({
+      ok: true,
+      sessionId: result.session_id,
+      status: state.status,
+      pid: process.pid,
+    });
   } catch (error) {
     process.send?.({ ok: false, error: error.message, pid: process.pid });
   } finally {

@@ -1,5 +1,5 @@
 export { browserUseProxyCountry } from './resumeRecovery';
-import { allocateBrowserUseSession, type BrowserUseSession } from './resumeRecovery';
+import * as resumeRecovery from './resumeRecovery';
 import { browserResumeScope } from '../steel/lifecycleClaim';
 /** Browser Use Cloud V4 sessions, exposed through the same CDP contract as Steel and Kernel. */
 import { createHash, randomUUID } from 'node:crypto';
@@ -141,8 +141,8 @@ export async function cleanupBenchmarkBrowserUseProfiles(): Promise<void> {
 async function createRemote(
   location: ProxyGeoLocation,
   profileId: string | null
-): Promise<{ session: BrowserUseSession; browser: Browser }> {
-  const session = await allocateBrowserUseSession(location, profileId);
+): Promise<{ session: resumeRecovery.BrowserUseSession; browser: Browser }> {
+  const session = await resumeRecovery.allocateBrowserUseSession(location, profileId);
   try {
     if (!session.id || !session.cdpUrl || !session.liveUrl) {
       throw new Error('Browser Use create response omitted id, cdpUrl, or liveUrl');
@@ -169,7 +169,7 @@ export async function releaseBrowserUseRemoteSession(sessionId: string): Promise
   try {
     await retryWithBackoff(
       () =>
-        request<BrowserUseSession>(`/browsers/${encodeURIComponent(sessionId)}`, {
+        request<resumeRecovery.BrowserUseSession>(`/browsers/${encodeURIComponent(sessionId)}`, {
           method: 'PATCH',
           body: JSON.stringify({ action: 'stop' }),
         }),
@@ -355,7 +355,7 @@ async function replaceSession(
   options: { keepValidationConnection?: boolean } = {}
 ): Promise<
   BrowserProviderResumeSession & {
-    previousSessionId: string;
+    previousSessionId: string | null;
     previousProvider: 'browser-use' | 'kernel' | 'steel';
   }
 > {
@@ -367,6 +367,7 @@ async function replaceSession(
   if (
     old.provider === 'browser-use' &&
     old.status === 'ACTIVE' &&
+    old.sessionId !== null &&
     !browserResumeScope()?.recovering() &&
     !browserResumeScope()?.sourceEnded()
   ) {
@@ -383,19 +384,21 @@ async function replaceSession(
         ...(agent.proxyCity ? { city: agent.proxyCity } : {}),
       }
     : DEFAULT_GEOLOCATION;
-  const profile = await profileForContext(old.contextId, old.agentId);
+  const profile = old.logicalOwnerKey
+    ? { id: null, source: 'logical_checkpoint' }
+    : await profileForContext(old.contextId, old.agentId);
   const { session, browser } = await createRemote(location, profile.id);
   let handedOff = false;
   try {
     await rememberInitialStorage(session.id, browser);
     await browserResumeScope()?.assertOwned();
     const replaced = await prisma.browserSession.updateMany({
-      where: { id: taskId, sessionId: old.sessionId },
+      where: resumeRecovery.replacementBinding(taskId, old),
       data: {
         sessionId: session.id,
         debugUrl: session.liveUrl,
         wsUrl: session.cdpUrl,
-        status: 'ACTIVE',
+        status: old.logicalOwnerKey ? 'PAUSED' : 'ACTIVE',
         closedAt: null,
         provider: 'browser-use',
         providerProfileId: profile.id,
@@ -407,7 +410,7 @@ async function replaceSession(
     if (replaced.count !== 1) throw new Error(`Browser task ${taskId} changed during replacement`);
     await announceBrowserSessionBinding({ id: taskId });
     const savedUrl = old.currentUrl || old.startUrl || undefined;
-    if (savedUrl) {
+    if (savedUrl && !old.logicalOwnerKey) {
       try {
         const context = browser.contexts()[0];
         const page = context.pages()[0] ?? (await context.newPage());
@@ -452,7 +455,7 @@ export const resumeBrowserUseSession = replaceSession;
 export const rotateBrowserUseSession = replaceSession;
 
 export async function getBrowserUseSessionHealth(sessionId: string): Promise<BrowserSessionHealth> {
-  const session = await request<BrowserUseSession>(`/browsers/${encodeURIComponent(sessionId)}`);
+  const session = await request<resumeRecovery.BrowserUseSession>(`/browsers/${encodeURIComponent(sessionId)}`);
   const expiresAt = new Date(session.timeoutAt).getTime();
   const createdAt = new Date(session.startedAt).getTime();
   return {

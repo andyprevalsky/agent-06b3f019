@@ -5,6 +5,7 @@ import { prisma } from './database';
 import { createLogger } from './logger';
 import { cleanupAgentPurchaseCards } from './purchaseCleanup';
 import { closeSession } from './browser';
+import { withSteelLifecycleClaim } from './steel/lifecycleClaim';
 import { closeLocalClaudeCodeSession, isLocalClaudeCodeSandboxId } from './claudeCodeLocalSession';
 import { isLocalDeviceSandboxId } from './localDevices/hub';
 import { closeLocalDeviceCodeSession } from './localDevices/session';
@@ -12,8 +13,11 @@ import { closeLocalDeviceCodeSession } from './localDevices/session';
 const log = createLogger('Cleanup');
 
 export interface BrowserSessionReleaseDependencies {
-  findActiveSessions: (agentId: string) => Promise<Array<{ sessionId: string }>>;
+  findActiveSessions: (
+    agentId: string
+  ) => Promise<Array<{ id?: string; sessionId: string | null }>>;
   closeSession: (sessionId: string, pause: boolean) => Promise<void>;
+  retireUnmaterializedSession: (agentId: string, taskId: string) => Promise<boolean>;
 }
 
 interface ActiveCodeSession {
@@ -71,8 +75,24 @@ function browserSessionReleaseDependencies(retire = false): BrowserSessionReleas
           // released compute; revisit it only for explicit retirement.
           status: { in: retire ? ['ACTIVE', 'PAUSED', 'ERROR'] : ['ACTIVE', 'ERROR'] },
         },
-        select: { sessionId: true },
+        select: { id: true, sessionId: true },
       }),
+    retireUnmaterializedSession: (agentId, taskId) =>
+      withSteelLifecycleClaim(taskId, async (_assertOwned, _runNative, mutateOwned) =>
+        mutateOwned(async (transaction) => {
+          const retired = await transaction.browserSession.updateMany({
+            where: {
+              id: taskId,
+              agentId,
+              logicalOwnerKey: `agent:${agentId}`,
+              sessionId: null,
+              status: 'PAUSED',
+            },
+            data: { status: 'CLOSED', closedAt: new Date() },
+          });
+          return retired.count === 1;
+        })
+      ),
     closeSession: async (sessionId, pause) => {
       await closeSession(sessionId, pause);
     },
@@ -273,7 +293,7 @@ export async function releaseAgentBrowserSessions(
   const dependencies = { ...browserSessionReleaseDependencies(options.retire), ...overrides };
   let released = 0;
   const failures: unknown[] = [];
-  let activeBrowserSessions: Array<{ sessionId: string }>;
+  let activeBrowserSessions: Array<{ id?: string; sessionId: string | null }>;
   try {
     activeBrowserSessions = await dependencies.findActiveSessions(agentId);
   } catch (error) {
@@ -289,6 +309,17 @@ export async function releaseAgentBrowserSessions(
 
   for (const session of activeBrowserSessions) {
     try {
+      if (session.sessionId === null) {
+        if (options.retire === true) {
+          if (
+            session.id === undefined ||
+            !(await dependencies.retireUnmaterializedSession(agentId, session.id))
+          )
+            throw new Error('Unmaterialized browser binding changed during retirement');
+          released += 1;
+        }
+        continue;
+      }
       await dependencies.closeSession(session.sessionId, options.retire !== true);
       released += 1;
       log.info(`Closed browser session ${session.sessionId}`);

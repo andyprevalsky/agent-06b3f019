@@ -23,6 +23,7 @@ import { createLogger } from '../logger';
 import { signedInRealmsForBrowserSession } from './sessionAuthPersist';
 import {
   assessSiteCredentials,
+  assertLegacyBrowserAccount,
   DEFAULT_TEMPLATE_ACCOUNT,
   decideKeepBest,
   expiryIsLater,
@@ -270,6 +271,7 @@ async function mergeOneAccount(
   plan: SitePlan,
   deadlineAtMs?: number
 ): Promise<SiteMergeReceipt> {
+  assertLegacyBrowserAccount(plan.account);
   const { userId } = context;
   const nowSeconds = Math.floor(context.nowMs / 1000);
   return runTransactionWithRetry(
@@ -487,6 +489,7 @@ export async function mergeHarvestedSites(params: {
     const incoming = assessSiteCredentials(params.cookies, site, nowSeconds);
     const siteHeads = heads.filter((head) => head.site === site);
     const account = fork?.account ?? accountHolding(siteHeads, incoming.fingerprint);
+    assertLegacyBrowserAccount(account);
     const plan: SitePlan = { site, account, incoming, fork, hasEvidence: evidence.has(site) };
     const head = siteHeads.find((entry) => entry.account === account);
     const quiet = quietOutcome(plan, head);

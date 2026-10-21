@@ -13,6 +13,7 @@ import {
 } from './service';
 import { createAttentionRequestSchema, respondSchema } from './types';
 import { AttentionWorkflowTargetOwnershipError } from '../../providers/attentionWorkflowTargets';
+import { NativePhoneAttentionError } from '../../providers/nativePhoneAttention';
 
 const log = createLogger('Attention');
 const router = Router();
@@ -22,6 +23,10 @@ function errMsg(error: unknown): string {
 }
 
 function mapError(error: unknown, res: Response): void {
+  if (error instanceof NativePhoneAttentionError) {
+    res.status(error.status).json({ error: error.message });
+    return;
+  }
   if (
     error instanceof AttentionUserMessageForbiddenError ||
     error instanceof AttentionWorkflowTargetOwnershipError
@@ -160,6 +165,7 @@ router.post(
         error instanceof ForbiddenError ||
         error instanceof AttentionUserMessageConflictError ||
         error instanceof AttentionUserMessageForbiddenError ||
+        error instanceof NativePhoneAttentionError ||
         error instanceof AttentionWorkflowTargetOwnershipError
       ) {
         mapError(error, res);
