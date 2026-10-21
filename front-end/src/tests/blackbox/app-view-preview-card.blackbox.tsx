@@ -118,7 +118,11 @@ describe('trajectory live preview card', () => {
     fireEvent.click(await within(chip).findByRole('button', { name: 'Open app preview' }));
     const view = await screen.findByTestId('app-view-screen');
     expect(within(view).getByRole('heading', { name: 'Preview' })).toBeInTheDocument();
-    expect(within(view).getByPlaceholderText('Message Codex directly…')).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId('query-input-layer')).getByPlaceholderText(
+        'Message Codex directly…',
+      ),
+    ).toBeInTheDocument();
   });
 
   it('off screen: the card holds no frame and makes no handoff call', async () => {

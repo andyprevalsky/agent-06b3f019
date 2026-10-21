@@ -119,7 +119,7 @@ it('keeps the composer read-only until selected detail establishes ownership, th
     await user.click(await screen.findByText('Test agent'));
     expect(await screen.findByPlaceholderText('Type your message...')).toBeInTheDocument();
     expect(
-      screen.getByTestId('terminal-input-area').querySelector('svg.lucide-square'),
+      screen.getByTestId('query-input-layer').querySelector('svg.lucide-square'),
     ).toBeInTheDocument();
   } finally {
     detail.release();
