@@ -123,6 +123,7 @@ function useDrawerTabRegistration(
   taskId: string,
   live: boolean,
   messages: Message[],
+  { browserSessionMetadata }: ReturnType<typeof useBrowserStatusBarState>,
 ) {
   const pageUrl = useMemo(() => latestBrowserPageUrl(messages, taskId), [messages, taskId]);
   const apps = useRoseApps();
@@ -131,8 +132,8 @@ function useDrawerTabRegistration(
   const missing = agentId !== null && apps?.tabs.some((t) => t.agentId === agentId) !== true;
   useEffect(() => {
     if (agentId === null || !register) return;
-    register({ agentId, taskId, live, pageUrl });
-  }, [agentId, live, missing, pageUrl, register, taskId]);
+    register({ agentId, taskId, live, pageUrl, browserSessionMetadata });
+  }, [agentId, live, missing, pageUrl, register, taskId, browserSessionMetadata]);
   useEffect(() => {
     if (agentId === null || !unregister) return undefined;
     return () => unregister(agentId, taskId);
@@ -198,7 +199,7 @@ function BrowserStatusBarImpl(props: BrowserStatusBarProps) {
   const handleControlAction = controlActionFor(ui, vm.pendingAuthAssistance, controlState, {
     isDisconnected,
   });
-  const drawer = useDrawerTabRegistration(agentId, taskId, ui.isLive, messages);
+  const drawer = useDrawerTabRegistration(agentId, taskId, ui.isLive, messages, vm);
 
   const drawerPane =
     ui.isInDrawer && drawer.slot !== null

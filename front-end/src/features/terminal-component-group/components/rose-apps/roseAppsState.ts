@@ -5,6 +5,7 @@
  */
 
 import { createContext, useContext } from 'react';
+import type { BrowserSessionMetadata } from '../browser-status-bar/types';
 import type { Agent } from '../../hooks';
 import type { AgentDisplayEntry } from './agentDisplayEntries';
 
@@ -31,6 +32,7 @@ export interface AgentBrowserTab {
   live: boolean;
   /** Page the agent's browser is on (address bar, UI ledger row 74); null = unknown yet. */
   pageUrl?: string | null;
+  browserSessionMetadata?: BrowserSessionMetadata | null;
 }
 
 export interface RoseAppsValue {
@@ -50,6 +52,8 @@ export interface RoseAppsValue {
   drawerWidth: number;
   isResizing: boolean;
   slot: HTMLElement | null;
+  browserComposerSlot: HTMLElement | null;
+  setBrowserComposerSlot: (element: HTMLElement | null) => void;
   /** Bumped by the Browser drawer's Reload button; the live view remounts on change. */
   browserReloadKey: number;
   reloadBrowser: () => void;

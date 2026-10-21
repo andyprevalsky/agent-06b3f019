@@ -99,7 +99,12 @@ function useAgentTabs(agents: Agent[], selectedAgentId: string | null) {
       if (existing === undefined) return [...prev, tab];
       // Another browser of the same agent owns the tab; keep the focused task.
       if (existing.taskId !== tab.taskId) return prev;
-      if (existing.live === tab.live && (existing.pageUrl ?? null) === (tab.pageUrl ?? null)) {
+      if (
+        existing.live === tab.live &&
+        (existing.pageUrl ?? null) === (tab.pageUrl ?? null) &&
+        JSON.stringify(existing.browserSessionMetadata ?? null) ===
+          JSON.stringify(tab.browserSessionMetadata ?? null)
+      ) {
         return prev;
       }
       return prev.map((t) => (t.agentId === tab.agentId ? tab : t));
@@ -116,7 +121,7 @@ function useAgentTabs(agents: Agent[], selectedAgentId: string | null) {
       const existing = prev.find((t) => t.agentId === agentId);
       if (existing === undefined) return [...prev, { agentId, taskId, live: true }];
       if (existing.taskId === taskId) return prev;
-      return prev.map((t) => (t.agentId === agentId ? { ...t, taskId } : t));
+      return prev.map((t) => (t.agentId === agentId ? { agentId, taskId, live: true } : t));
     });
   }, []);
 
@@ -169,6 +174,7 @@ export function RoseAppsProvider({
   );
   const [browserTabAgentId, setBrowserTabAgentId] = useState<string | null>(null);
   const [slot, setSlot] = useState<HTMLElement | null>(null);
+  const [browserComposerSlot, setBrowserComposerSlot] = useState<HTMLElement | null>(null);
   const [isResizing, setIsResizing] = useState(false);
   const [browserReloadKey, setBrowserReloadKey] = useState(0);
   const reloadBrowser = useCallback(() => setBrowserReloadKey((k) => k + 1), []);
@@ -278,6 +284,8 @@ export function RoseAppsProvider({
       drawerWidth,
       isResizing,
       slot,
+      browserComposerSlot,
+      setBrowserComposerSlot,
       browserReloadKey,
       reloadBrowser,
       toggleApp,
@@ -306,6 +314,8 @@ export function RoseAppsProvider({
       drawerWidth,
       isResizing,
       slot,
+      browserComposerSlot,
+      setBrowserComposerSlot,
       browserReloadKey,
       reloadBrowser,
       toggleApp,

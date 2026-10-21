@@ -1,3 +1,7 @@
+import {
+  RoseAppsContext,
+  type RoseAppsValue,
+} from '@/features/terminal-component-group/components/rose-apps/roseAppsState';
 import { act, render, screen } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { QueryInputLayer } from '@/features/terminal-component-group/components/query-input/QueryInputLayer';
@@ -58,4 +62,77 @@ it('keeps the portaled composer aligned when a parent gate moves its unchanged-s
   expect(document.activeElement).toBe(input);
   unmount();
   expect(disconnect).toHaveBeenCalledOnce();
+});
+
+it.each(['other-owner', 'other-task', 'root'])(
+  'hides the floating composer rather than moving an unrelated channel: %s',
+  (scenario) => {
+    const slot = document.createElement('div');
+    slot.dataset.agentId = scenario === 'other-owner' ? 'sibling' : 'owner';
+    slot.dataset.taskId = scenario === 'other-task' ? 'stale-task' : 'task';
+    document.body.append(slot);
+    const value = {
+      openApp: 'browser',
+      browserComposerSlot: slot,
+      selectedAgentId: 'owner',
+      browserTabAgentId: scenario === 'root' ? null : 'owner',
+      tabs: [{ agentId: 'owner', taskId: 'task', live: true }],
+    } as unknown as RoseAppsValue;
+    try {
+      render(
+        <RoseAppsContext.Provider value={value}>
+          <QueryInputLayer enabled>
+            <input aria-label="Message" />
+          </QueryInputLayer>
+        </RoseAppsContext.Provider>,
+      );
+      expect(screen.queryByRole('textbox')).toBeNull();
+      expect(screen.queryByTestId('query-input-layer')).toBeNull();
+      expect(slot.childElementCount).toBe(0);
+    } finally {
+      slot.remove();
+    }
+  },
+);
+
+it('fences an old owner slot during A to B selection, then restores the normal composer on close', () => {
+  const a = document.createElement('div'),
+    b = document.createElement('div');
+  for (const [slot, owner] of [
+    [a, 'a'],
+    [b, 'b'],
+  ] as const) {
+    slot.dataset.agentId = owner;
+    slot.dataset.taskId = owner;
+    document.body.append(slot);
+  }
+  const value = (selected: string, target: HTMLElement, open = true) =>
+    ({
+      openApp: open ? 'browser' : null,
+      browserComposerSlot: target,
+      selectedAgentId: selected,
+      browserTabAgentId: selected,
+      tabs: [{ agentId: selected, taskId: selected, live: true }],
+    }) as unknown as RoseAppsValue;
+  const tree = (state: RoseAppsValue) => (
+    <RoseAppsContext.Provider value={state}>
+      <QueryInputLayer enabled>
+        <input aria-label="Message" value="saved draft" readOnly />
+      </QueryInputLayer>
+    </RoseAppsContext.Provider>
+  );
+  const ui = render(tree(value('a', a)));
+  expect(a).toContainElement(screen.getByRole('textbox'));
+  ui.rerender(tree(value('b', a)));
+  expect(screen.queryByRole('textbox')).toBeNull();
+  ui.rerender(tree(value('b', b)));
+  expect(a.childElementCount).toBe(0);
+  expect(b).toContainElement(screen.getByRole('textbox'));
+  ui.rerender(tree(value('b', b, false)));
+  expect(b.childElementCount).toBe(0);
+  expect(screen.getByTestId('query-input-layer')).toContainElement(screen.getByRole('textbox'));
+  expect(screen.getByRole('textbox')).toHaveValue('saved draft');
+  ui.unmount();
+  a.remove();
+  b.remove();
 });

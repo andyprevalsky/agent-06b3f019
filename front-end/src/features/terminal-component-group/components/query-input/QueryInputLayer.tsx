@@ -1,16 +1,20 @@
 /** Keep the composer at its layout position while escaping the app panel stacking context. */
 import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useRoseApps } from '../rose-apps/roseAppsState';
 import { createPortal } from 'react-dom';
 
 type Geometry = { left: number; top: number; width: number; height: number };
 
 export function QueryInputLayer({ enabled, children }: { enabled: boolean; children: ReactNode }) {
+  const apps = useRoseApps();
+  const browserOpen = apps?.openApp === 'browser';
+  const raised = enabled && !browserOpen;
   const anchor = useRef<HTMLDivElement>(null);
   const layer = useRef<HTMLDivElement>(null);
   const [geometry, setGeometry] = useState<Geometry | null>(null);
 
   useLayoutEffect(() => {
-    if (!enabled) return;
+    if (!raised) return;
     const update = () => {
       if (!anchor.current || !layer.current) return;
       const bounds = anchor.current.getBoundingClientRect();
@@ -46,8 +50,32 @@ export function QueryInputLayer({ enabled, children }: { enabled: boolean; child
       window.visualViewport?.removeEventListener('resize', update);
       window.visualViewport?.removeEventListener('scroll', update);
     };
-  }, [enabled]);
+  }, [raised]);
 
+  if (enabled && browserOpen) {
+    const target = apps?.browserComposerSlot;
+    // Preserve the existing send/stop channel; only move it into its selected owner's pane.
+    if (
+      !target ||
+      target.dataset.agentId !== apps?.selectedAgentId ||
+      !apps?.tabs.some(
+        (tab) =>
+          tab.agentId === apps.browserTabAgentId &&
+          tab.agentId === target.dataset.agentId &&
+          tab.taskId === target.dataset.taskId,
+      )
+    )
+      return null;
+    return createPortal(
+      <div
+        data-testid="browser-query-input"
+        className="[&_[data-testid=query-input-host]]:mt-0 [&_textarea]:!max-h-[96px] [&_textarea]:!min-h-[40px]"
+      >
+        {children}
+      </div>,
+      target,
+    );
+  }
   if (!enabled) return <>{children}</>;
   return (
     <>

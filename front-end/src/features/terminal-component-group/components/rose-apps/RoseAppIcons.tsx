@@ -70,7 +70,8 @@ function IconButton({
   size: number;
 }) {
   const hover = useHoverOpen(onHover);
-  const aboveQuerybox = useRoseApps()?.openApp === 'integrations';
+  const openApp = useRoseApps()?.openApp;
+  const aboveQuerybox = openApp === 'integrations' || openApp === 'browser';
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -152,7 +153,7 @@ export function RoseAppIcons({ placement = 'corner' }: { placement?: 'corner' | 
         header
           ? 'relative flex min-w-0 items-center overflow-x-auto'
           : 'fixed hidden items-center md:flex'
-      } ${apps.openApp === 'integrations' ? 'z-[102]' : 'z-[90]'}`}
+      } ${apps.openApp === 'integrations' || apps.openApp === 'browser' ? 'z-[102]' : 'z-[90]'}`}
       style={header ? undefined : { top: 11, right: APP_ICON_EDGE, gap: APP_ICON_GAP }}
     >
       <AppIconButtons

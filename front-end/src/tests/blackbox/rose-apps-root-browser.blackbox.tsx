@@ -21,6 +21,7 @@ import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 
 import BrowserStatusBar from '@/features/terminal-component-group/components/BrowserStatusBar';
+import { BrowserSitesPanel } from '@/features/terminal-component-group/components/rose-apps/BrowserSitesPanel';
 import { RoseAppIcons } from '@/features/terminal-component-group/components/rose-apps/RoseAppIcons';
 import {
   agentSiteLines,
@@ -387,7 +388,7 @@ describe('Browser drawer: agent world state and Root sites (A6)', () => {
   beforeEach(() => mockSession());
   afterEach(() => localStorage.clear());
 
-  it("shows the shown agent's per-site state under its tab, as plain text", async () => {
+  it('does not add a separate per-site row or fetch agent world state in the compact drawer', async () => {
     server.use(
       http.get(`${WORLD}/agents/:agentId`, ({ params }) =>
         HttpResponse.json({
@@ -413,31 +414,17 @@ describe('Browser drawer: agent world state and Root sites (A6)', () => {
     await user.click(screen.getByTitle('Preview').parentElement!);
     const drawer = screen.getByTestId('browser-app-drawer');
     await waitFor(() => expect(drawer).toHaveAttribute('data-state', 'open'));
-    const states = await within(drawer).findByTestId('browser-agent-sites');
-    const lines = [...states.children] as HTMLElement[];
-    expect(lines.map((el) => el.textContent)).toEqual([
-      'forked github.com',
-      'merged login for google.com',
-      'x.com stale',
-      'signed out of y.com',
-      'no login on z.com',
-    ]);
-    expect(lines.map((el) => el.dataset.muted)).toEqual(['false', 'false', 'true', 'true', 'true']);
-    for (const el of [states, ...lines]) expect(el.className).not.toMatch(WRAPPER_CLASS);
-    // Another task of the same agent is not the shown one.
-    expect(within(drawer).queryByText('forked other.com')).toBeNull();
-    // Only the shown agent is read, once.
+    expect(within(drawer).queryByTestId('browser-agent-sites')).toBeNull();
+    expect(within(drawer).queryByRole('button', { name: 'Sites' })).toBeNull();
     await settle();
-    expect(worldRequests().filter((r) => r.includes('/agents/'))).toEqual([
-      'GET /api/browser-world/agents/agent-a',
-    ]);
+    expect(worldRequests().filter((r) => r.includes('/agents/'))).toEqual([]);
 
     // The Root tab hides the agent's state.
     await user.click(within(drawer).getByTestId('browser-tab-root'));
     expect(within(drawer).queryByTestId('browser-agent-sites')).toBeNull();
   });
 
-  it('Sites lists Root sites only when shown; forgetting one confirms, then DELETEs it', async () => {
+  it('the standalone Sites panel retains confirmation and deletion without adding a drawer toolbar', async () => {
     const deleted: string[] = [];
     server.use(
       http.get(`${WORLD}/sites`, () =>
@@ -462,15 +449,12 @@ describe('Browser drawer: agent world state and Root sites (A6)', () => {
     await settle();
     expect(worldRequests()).not.toContain('GET /api/browser-world/sites');
 
-    const toggle = within(drawer).getByRole('button', { name: 'Sites' });
-    expect(toggle).toHaveAttribute('aria-pressed', 'false');
-    expect(toggle.className).not.toMatch(WRAPPER_CLASS);
-    await user.click(toggle);
-    expect(toggle).toHaveAttribute('aria-pressed', 'true');
-    const github = await within(drawer).findByTestId('browser-site-github.com');
+    expect(within(drawer).queryByRole('button', { name: 'Sites' })).toBeNull();
+    const panel = renderWithProviders(<BrowserSitesPanel agentTitle={() => null} />);
+    const github = await screen.findByTestId('browser-site-github.com');
     expect(github).toHaveTextContent('github.com');
     expect(github).toHaveTextContent('12 cookies · 5 min ago · by Root');
-    expect(within(drawer).getByTestId('browser-site-google.com')).toHaveTextContent(
+    expect(screen.getByTestId('browser-site-google.com')).toHaveTextContent(
       '1 cookie · 5 min ago · by an agent',
     );
 
@@ -485,11 +469,11 @@ describe('Browser drawer: agent world state and Root sites (A6)', () => {
       within(within(github).getByRole('group')).getByRole('button', { name: 'Forget' }),
     );
     await waitFor(() => expect(deleted).toEqual(['github.com']));
-    await waitFor(() => expect(within(drawer).queryByTestId('browser-site-github.com')).toBeNull());
-    expect(within(drawer).getByTestId('browser-site-google.com')).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByTestId('browser-site-github.com')).toBeNull());
+    expect(screen.getByTestId('browser-site-google.com')).toBeInTheDocument();
 
-    await user.click(toggle);
-    expect(within(drawer).queryByTestId('browser-sites-panel')).toBeNull();
+    panel.unmount();
+    expect(screen.queryByTestId('browser-sites-panel')).toBeNull();
   });
 
   it('flag off: even an opened drawer reads no browser world and offers no Sites', async () => {
