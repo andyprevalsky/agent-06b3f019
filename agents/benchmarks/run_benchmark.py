@@ -4177,19 +4177,17 @@ SEMANTIC_OUTPUT_EXPECTATIONS: Dict[str, Dict[str, Any]] = {
 
 def _extract_agent_structured_output(messages: List[dict], root_agent_data: Optional[dict]) -> str:
     """The agent's POPULATED output — the response schema it generated plus the completion-summary
-    structured outputs it filled in — serialized for semantic judging. Deliberately excludes
-    free-form assistant prose: the populated output schema is the contract we judge against."""
-    populated_outputs: List[dict] = []
-    for msg in messages:
-        meta = msg.get("metadata") or {}
-        summary = meta.get("completionSummary")
-        if not summary:
-            continue
-        for out in summary.get("outputs") or []:
-            populated_outputs.append({"key": out.get("key"), "value": out.get("value")})
-    response_schema = ((root_agent_data or {}).get("agent") or {}).get("response_schema")
-    blob = {"generated_response_schema": response_schema, "populated_outputs": populated_outputs}
-    return json.dumps(blob, default=str, indent=2)
+    structured outputs it filled in, with the actual final completion card. Unrelated
+    assistant prose is excluded; task-specific expected fields remain unchanged."""
+    from benchmarks.completion_evidence import completion_messages, completion_payload
+
+    cards = [completion_payload(message) for message in completion_messages(messages)]
+    populated_outputs = [output for card in cards for output in (card.get("outputs") if isinstance(card.get("outputs"), list) else []) if isinstance(output, dict)]
+    agent = (root_agent_data or {}).get("agent") or {}
+    blob = {"generated_response_schema": agent.get("response_schema"),
+            "populated_outputs": populated_outputs, "completion_cards": cards,
+            "structured_output": agent.get("structured_output", agent.get("structuredOutput"))}
+    return json.dumps(blob, default=str, ensure_ascii=False)
 
 
 async def _judge_output_recovers_expected_fields(
@@ -4226,7 +4224,8 @@ async def _judge_output_recovers_expected_fields(
                         "the output honestly reports no data for it."
                     ),
                 },
-                {"role": "TOOL", "text": f"AGENT POPULATED OUTPUT:\n{agent_output_blob[:8000]}"},
+                {"role": "TOOL", "text": f"AGENT POPULATED OUTPUT:\n{agent_output_blob}",
+                 "metadata": {"benchmark_final_evidence": True}},
             ],
             verifier_system_prompt=verifier_prompt,
             response_schema=expected_schema,
@@ -9538,7 +9537,9 @@ def _run_grep_fixture(action: str, *args: str) -> dict:
 
 
 def _message_text(message: dict) -> str:
-    return str(message.get("text") or message.get("message") or message.get("content") or "")
+    from benchmarks.completion_evidence import completion_message_text
+
+    return completion_message_text(message)
 
 
 def _tool_messages(messages: List[dict], tool_name: str) -> List[dict]:
@@ -11788,7 +11789,10 @@ def _declared_evaluator_evidence(data: dict) -> list[dict]:
             return evidence
     slim = dict(data)
     slim["_semantic_evaluator_tree"] = None
-    evidence = _apply_compact_benchmark_state(build_single_turn_evidence(slim), compact_state)
+    evidence = [row for row in build_single_turn_evidence(slim)
+                if row.get("metadata", {}).get("evidence_type") != "final_completion"]
+    _append_completion_card(evidence, data, None)
+    evidence = _apply_compact_benchmark_state(evidence, compact_state)
     evidence = _append_structured_output_evidence(evidence, data)
     if not single_turn_evidence_exceeds_budget(evidence):
         return evidence
@@ -11802,7 +11806,9 @@ def _declared_evaluator_evidence(data: dict) -> list[dict]:
     evidence = pack_grounding_priority_rows(data, base_rows=evidence)
     if not single_turn_evidence_exceeds_budget(evidence):
         return evidence
-    return _append_structured_output_evidence([{"benchmark_state": compact_state}], data)
+    # Preserve full final cards even when they alone exceed the single-turn
+    # budget; the caller then selects its existing agentic evidence path.
+    return _append_structured_output_evidence(_apply_compact_benchmark_state(compact_only, compact_state), data)
 
 
 _AGENTIC_JUDGE_OUTPUT_SCHEMA: dict[str, Any] = {
@@ -12174,6 +12180,11 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
                     "metadata": {"evidence_type": "doordash_food_plan_cart_itemization"},
                 }
             )
+    from benchmarks.semantic_evaluator_evidence import single_turn_evidence_exceeds_budget
+    if single_turn_evidence_exceeds_budget(evidence):
+        # Include supplemental rows in the same transport budget decision.
+        judged = await _call_declared_agentic_llm_judge(task, evaluator, data)
+        return {**judged, "evidence_mode": "agentic_llm_judge"}
     agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
     judge_user_id = agent.get("userId") or agent.get("user_id") or _current_benchmark_user_id()
     claude_auth = await _benchmark_judge_claude_auth_kwargs(judge_user_id)
@@ -12190,6 +12201,7 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
                 {
                     "role": "TOOL",
                     "text": evidence_text,
+                    "metadata": {"benchmark_final_evidence": True},
                 },
             ],
             verifier_system_prompt=verifier_prompt,
@@ -13158,21 +13170,9 @@ def _final_completion_summaries(data: dict) -> list[dict]:
 
 
 def _completion_cards_from_messages(messages: list) -> list[dict]:
-    summaries: list[dict] = []
-    for message in messages or []:
-        if not isinstance(message, dict):
-            continue
-        metadata = message.get("metadata")
-        if not isinstance(metadata, dict):
-            continue
-        completion = metadata.get("completionSummary")
-        if (
-            metadata.get("toolName") == "completion_summary"
-            and str(metadata.get("toolStatus") or "").upper() == "FINISHED"
-            and isinstance(completion, dict)
-        ):
-            summaries.append(completion)
-    return summaries
+    from benchmarks.completion_evidence import completion_card, completion_messages
+
+    return [completion_card(message["metadata"]) for message in completion_messages(messages)]
 
 
 def _task_declares_static_check(task: BenchmarkTask, check_type: str) -> bool:
@@ -14182,6 +14182,7 @@ async def _run_declared_evaluators(
                     evidence_mode = "agentic_llm_judge"
                 else:
                     judged = await _call_declared_llm_judge(task, evaluator, data, evidence=evidence)
+                evidence_mode = str(judged.get("evidence_mode") or evidence_mode)
                 score = float(judged.get("score", 0.0))
                 reasoning = str(judged.get("reasoning") or "Judge returned no reasoning")
                 usage = judged.get("usage")

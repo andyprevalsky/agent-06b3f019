@@ -12624,7 +12624,6 @@ def _scripted_judge_provider(verdict_from_invocation: int | None, score: float =
     import benchmarks.run_benchmark as bench
     import helpers.llm as llm
     from providers.rose.client import _reset_anthropic_api_key_cooldown_cache
-    from _test_utils import setup_mock_fn, teardown_mock
 
     real_check_progress = llm.check_progress
     probe = SimpleNamespace(invocations=0, openrouter_calls=0, call_sites=[], sleeps=AsyncMock())
@@ -12664,10 +12663,24 @@ def _scripted_judge_provider(verdict_from_invocation: int | None, score: float =
             return httpx.Response(429, json={"error": {"message": "Rate limit exceeded", "code": 429}})
         return httpx.Response(404, json={"error": f"No mock for {url}"})
 
+    # Install at send, before the capture harness's transport-level mock. A
+    # strict offline send guard otherwise prevents that mock from ever seeing
+    # requests: the no-verdict case passes accidentally, but recovery cannot.
+    # This boundary still builds real HTTPX requests and runs the real Rose
+    # waterfall/SSE parser. It never calls a network-capable client/transport.
+    mock_transport = httpx.MockTransport(handler)
+
+    async def mocked_send(_client, request, **kwargs):
+        response = await mock_transport.handle_async_request(request)
+        response.request = request
+        if not kwargs.get("stream", False):
+            await response.aread()
+        return response
+
     _reset_anthropic_api_key_cooldown_cache()
-    setup_mock_fn(handler)
     try:
         with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(httpx.AsyncClient, "send", mocked_send))
             stack.enter_context(patch.object(llm, "check_progress", counting_check_progress))
             stack.enter_context(patch.object(bench, "_benchmark_judge_claude_auth_kwargs", AsyncMock(return_value={})))
             stack.enter_context(patch.object(bench, "_benchmark_judge_gpt_auth_kwargs", AsyncMock(return_value={})))
@@ -12675,7 +12688,6 @@ def _scripted_judge_provider(verdict_from_invocation: int | None, score: float =
             stack.enter_context(patch("temporalio.activity.heartbeat"))
             yield probe
     finally:
-        teardown_mock()
         _reset_anthropic_api_key_cooldown_cache()
 
 
@@ -12812,10 +12824,12 @@ async def test_semantic_output_judge_without_verdict_is_judge_unavailable():
             raise AssertionError(f"no-verdict semantic judge was scored: {outcome}")
     assert probe.invocations == 1 + len(bench.BENCHMARK_JUDGE_NO_VERDICT_RETRY_DELAYS_S), probe.invocations
     assert set(probe.call_sites) == {"semantic_output_field_recovery_judge"}, probe.call_sites
+    assert probe.openrouter_calls >= probe.invocations  # actual scripted 429s, not blocked HTTP
 
     with _scripted_judge_provider(verdict_from_invocation=2, output={"receipt_id": "tp_c505"}) as probe:
         assert await bench._judge_output_recovers_expected_fields("agent-1", blob, schema, "receipt-task") is None
     assert probe.invocations == 2, probe.invocations
+    assert probe.openrouter_calls >= probe.invocations  # scripted recovery reached the SSE parser
 
 
 async def test_declared_judge_low_score_verdict_is_not_rejudged():
@@ -19352,6 +19366,7 @@ async def test_user_data_prod_grep_final_answer_semantic_judge():
             "role": "ASSISTANT",
             "text": "here is my summary",
             "metadata": {
+                "toolName": "completion_summary", "toolStatus": "FINISHED",
                 "completionSummary": {
                     "outputs": [
                         {
@@ -19372,8 +19387,8 @@ async def test_user_data_prod_grep_final_answer_semantic_judge():
 
     blob = _extract_agent_structured_output(messages, root_data)
     assert "provider_audit" in blob and "documents/claude/session.json" in blob
-    # The extractor judges the populated output schema, not free-text prose.
-    assert "here is my summary" not in blob
+    # Preserve nonempty text on the same completed card as well as its outputs.
+    assert "here is my summary" in blob
 
     schema = SEMANTIC_OUTPUT_EXPECTATIONS["user-data-prod-grep"]
     # The expectation is a response_schema the verifier must POPULATE before scoring.
@@ -19384,6 +19399,7 @@ async def test_user_data_prod_grep_final_answer_semantic_judge():
     def _assert_populate_then_score(**kwargs):
         assert kwargs["response_schema"] == schema  # verifier must populate THIS schema
         assert "grounded tool evidence" in kwargs["verifier_system_prompt"]  # approved verifier
+        assert kwargs["context"][1]["metadata"]["benchmark_final_evidence"] is True
         return {"score": 1.0, "reasoning": "all four recoverable", "output": {"chatgpt_evidence": "no data"}}
 
     with patch("helpers.llm.check_progress", new=AsyncMock(side_effect=_assert_populate_then_score)):
@@ -19413,6 +19429,7 @@ async def test_user_data_prod_grep_final_answer_semantic_judge():
     receipt_messages = [
         {
             "metadata": {
+                "toolName": "completion_summary", "toolStatus": "FINISHED",
                 "completionSummary": {
                     "outputs": [{"key": "order", "value": {"confirmation": "tp_c505", "paid": 43.96}}]
                 }
@@ -23735,6 +23752,60 @@ async def test_poll_elapsed_stall_and_chat():
                           [(10000-2900,20000+41)])
 
 
+async def test_polar_judge_sees_final_completion_summary():
+    """The polar judge must receive the final answer the product shows the user.
+
+    Polar batch 1 (2026-10-20): agent 25c02595 (polar-odysseys-7cc602f23977 K2)
+    finished with a ``completion_summary`` card whose message text is empty and
+    whose answer lives in ``metadata.completionSummary`` (summary + outputs),
+    which is exactly what the FE CompletionSummaryCard renders. The polar
+    action history dropped it, so the R4 judge reported "the trajectory ends
+    with verifier and completion actions ... not a final user-facing summary".
+    The fixture is that run's Hub transcript (Kernel live-view tokens redacted).
+    """
+    import gzip
+
+    from benchmarks.polar_evaluator import run_polar_evaluator
+
+    fixture = Path(__file__).resolve().parents[2] / "benchmarks/fixtures/polar/hub_transcript_25c02595.json.gz"
+    data = json.loads(gzip.decompress(fixture.read_bytes()))
+    finals = [
+        m["metadata"]["completionSummary"]
+        for m in data["messages"]
+        if (m.get("metadata") or {}).get("isFinalSummary") is True
+    ]
+    assert len(finals) == 1 and finals[0]["summary"]
+    card = finals[0]
+    # Precondition: the answer is only in metadata, as the agent posted it.
+    final_rows = [m for m in data["messages"] if (m.get("metadata") or {}).get("isFinalSummary") is True]
+    assert final_rows[0]["text"] == ""
+
+    prompts: list[str] = []
+
+    async def capture_judge(messages, **_kwargs):
+        prompts.append(messages[1]["content"][0]["text"])
+        return 'Thoughts: captured\nStatus: "success"'
+
+    evaluator = {
+        "method": "polar",
+        "rubrics": [{"id": "R4", "requirement": "Return a concise final summary.", "verification": "Final response."}],
+    }
+    await run_polar_evaluator(task_prompt=data["agent"]["goal"], evaluator=evaluator, data=data, judge_llm=capture_judge)
+    assert len(prompts) == 1
+    history = prompts[0].split("Full Action History:\n", 1)[1].split("\n\nScreenshots attached below:", 1)[0]
+    last_step = history.rsplit("\n265. ", 1)[-1]
+    # The final step is the completion card, presented as the agent's response.
+    assert last_step.startswith("Response: " + card["summary"]), last_step[:400]
+    assert "completion_summary" in last_step and "status=FINISHED" in last_step
+    for output in card["outputs"]:
+        assert output["label"] in last_step
+        for value in output["value"].values():
+            assert json.dumps(value, ensure_ascii=False) in last_step, (output["key"], value)
+    # The empty IN_PROGRESS card and the verifier rows are unchanged.
+    assert "\n264. Action: completion_summary | status=IN_PROGRESS\n" in history
+    assert history.count(card["summary"]) == 1
+
+
 async def test_stale_workflow_count_backs_off_on_namespace_rate_limit():
     """Guest stale cleanup must not multiply visibility load on a throttled namespace.
 
@@ -23792,15 +23863,108 @@ async def test_stale_workflow_count_backs_off_on_namespace_rate_limit():
     assert len(calls) == 1 and sleeps == [], (calls, sleeps)
 
 
+def test_all_benchmark_judges_preserve_complete_final_cards():
+    """Final cards are actual agent evidence, independent of evaluator family."""
+    from benchmarks.semantic_evaluator_evidence import build_single_turn_evidence, build_agentic_evidence
+    from benchmarks.run_benchmark import _declared_evaluator_evidence, _extract_agent_structured_output, _message_text
+    from benchmarks.polar_evaluator import build_polar_trajectory
+
+    outputs = [{"key": f"field-{i}", "label": f"Field {i}", "value": {"n": i}} for i in range(205)]
+    summary = "  Actual final answer " + "x" * 13000 + " END-OF-FINAL  "
+    card = {"summary": summary, "outputs": outputs}
+    final = {"id": "final-root", "role": "TOOL", "text": "existing final prose", "metadata": {
+        "toolName": "completion_summary", "toolStatus": "FINISHED", "toolCallId": "root-card",
+        "completionSummary": card,
+    }}
+    child = {"id": "final-child", "role": "TOOL", "text": "", "metadata": {
+        "toolName": "completion_summary", "toolStatus": "FINISHED", "toolCallId": "child-card",
+        "completionSummary": {"summary": "child final answer", "outputs": [{"key": "ok", "value": False}]},
+    }}
+    pending = {"role": "TOOL", "text": "still working", "metadata": {
+        "toolName": "completion_summary", "toolStatus": "IN_PROGRESS", "completionSummary": {"summary": "NOT FINAL"},
+    }}
+    data = {"agent": {"agent_id": "root", "structured_output": {"real": 0}}, "messages": [pending, final, dict(final)],
+            "_semantic_evaluator_tree": {"child": {"parent_agent_id": "root", "messages": [child]}}}
+    original = json.dumps(data, sort_keys=True)
+    with patch("socket.socket.connect", side_effect=AssertionError("external traffic forbidden")), \
+         patch("httpx.AsyncClient.send", side_effect=AssertionError("HTTP forbidden")):
+        for evidence in (build_single_turn_evidence(data), _declared_evaluator_evidence(data)):
+            cards = [row for row in evidence if row.get("metadata", {}).get("evidence_type") == "final_completion"]
+            assert len(cards) == 2
+            payloads = [json.loads(row["text"]) for row in cards]
+            assert payloads[0]["summary"] == summary
+            assert payloads[0]["outputs"] == outputs
+            assert payloads[0]["message_text"] == "existing final prose"
+            assert payloads[1]["summary"] == "child final answer"
+            assert "NOT FINAL" not in json.dumps(evidence)
+        bundle = build_agentic_evidence(data)
+        assert len(bundle["completion_cards"]) == 2
+        assert bundle["completion_cards"][0]["summary"] == summary
+        assert bundle["completion_cards"][0]["outputs"] == outputs
+        assert "existing final prose" in json.dumps(bundle)
+        populated = json.loads(_extract_agent_structured_output(data["messages"], data))
+        assert populated["completion_cards"][0]["summary"] == summary
+        assert populated["structured_output"] == {"real": 0}
+        assert "END-OF-FINAL" in _message_text(final)
+        history, _ = build_polar_trajectory(data)
+        assert history.count("END-OF-FINAL") == 1
+        assert "Field 204" in history and "existing final prose" in history
+        assert "NOT FINAL" not in history
+    assert json.dumps(data, sort_keys=True) == original
+    from benchmarks.completion_evidence import completion_messages, tree_completion_messages
+    # Identical content is legitimate when identities differ or are unavailable.
+    anonymous = dict(final)
+    anonymous.pop("id")
+    distinct = dict(final, id="another-final")
+    assert len(completion_messages([final, final, dict(final), distinct, anonymous, anonymous])) == 4
+    assert build_polar_trajectory({"messages": [final, final]})[0].count("END-OF-FINAL") == 1
+    same_text = dict(final, text=summary)
+    assert _message_text(same_text).count("END-OF-FINAL") == 1
+    ordered = {"agent": {"agent_id": "root"},
+               "messages": [dict(final, created_at="2026-10-20T02:00:00Z")],
+               "_semantic_evaluator_tree": {"child": {"messages": [dict(child, created_at="2026-10-20T01:00:00Z")]}}}
+    assert [source for source, _ in tree_completion_messages(ordered)] == ["child", "root"]
+    from helpers.llm import build_verifier_context_messages
+    for site in ("benchmark_declared_evaluator", "semantic_output_field_recovery_judge"):
+        size = 200000 if site == "benchmark_declared_evaluator" else 330000
+        transport_text = "begin " + "x" * size + " complete-final-end"
+        rendered = build_verifier_context_messages([
+            {"role": "TOOL", "text": transport_text, "metadata": {"benchmark_final_evidence": True}}
+        ], "unchanged system", call_site=site)
+        assert transport_text in json.dumps(rendered)
+    from benchmarks.semantic_evaluator_evidence import single_turn_evidence_exceeds_budget
+    assert single_turn_evidence_exceeds_budget([{"text": '"' * 100000}])
+    # The registered dispatch keeps an oversized final card intact for its existing agentic path.
+    import benchmarks.run_benchmark as bench
+    oversized = {"agent": {"agent_id": "root"}, "messages": [dict(final, metadata={
+        **final["metadata"], "completionSummary": {"summary": "x" * 330000, "outputs": outputs}
+    })]}
+    async def route_oversized():
+        with patch.object(bench, "_call_declared_agentic_llm_judge", new=AsyncMock(return_value={"score": 0.0})) as judge, \
+             patch.object(bench, "_call_declared_llm_judge", new=AsyncMock(side_effect=AssertionError("must use complete attachment"))):
+            passed, _, result = await bench._run_declared_evaluators(_required_ecommerce_judge_task(), oversized)
+            assert not passed  # Providing evidence is never itself a task PASS.
+            assert result[0]["evidence_mode"] == "agentic_llm_judge"
+            assert judge.call_args.args[2] is oversized
+            assert len(build_agentic_evidence(oversized)["completion_cards"][0]["summary"]) == 330000
+    asyncio.run(route_oversized())
+    # Transcript slimming must not discard child completion evidence.
+    with patch("benchmarks.semantic_evaluator_evidence.single_turn_evidence_exceeds_budget", side_effect=[True, True, False]):
+        slimmed = _declared_evaluator_evidence(data)
+    assert len([row for row in slimmed if row.get("metadata", {}).get("evidence_type") == "final_completion"]) == 2
+
+
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
+    r.record("all_benchmark_judges_complete_final_cards", test_all_benchmark_judges_preserve_complete_final_cards)
     await r.record_async("poll_elapsed_deadlines_900", test_poll_elapsed_deadlines_900)
     await r.record_async("poll_elapsed_deadlines_1200", test_poll_elapsed_deadlines_1200)
     await r.record_async("poll_elapsed_progress_does_not_reset_deadline", test_poll_elapsed_progress_does_not_reset_deadline)
     await r.record_async("poll_elapsed_disabled_polar", test_poll_elapsed_disabled_polar)
     await r.record_async("poll_elapsed_payment_budget", test_poll_elapsed_payment_budget)
     await r.record_async("poll_elapsed_stall_and_chat", test_poll_elapsed_stall_and_chat)
+    await r.record_async("polar_judge_sees_final_completion_summary", test_polar_judge_sees_final_completion_summary)
     r.record("controller_v39_full_native_pair", test_controller_v39_full_native_pair)
     r.record("controller_v39_cleanup_all_uid_writers", test_controller_v39_cleanup_all_uid_writers)
     r.record("controller_v39_receipt_bound_runtime", test_controller_v39_receipt_bound_runtime)

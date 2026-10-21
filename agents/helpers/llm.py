@@ -1065,7 +1065,15 @@ def build_verifier_context_messages(
             # generic 12k tool cap here head+tails that card and fails the judge
             # even when the agent completed correctly.
             dumped = "TOOL_RESULT " + json.dumps(tool_payload, ensure_ascii=False, default=str)
-            if str(call_site or "") == "benchmark_declared_evaluator":
+            if metadata.get("benchmark_final_evidence") is True and call_site in {
+                "benchmark_declared_evaluator", "semantic_output_field_recovery_judge"
+            }:
+                # Benchmark evidence is normalized/budgeted by its owner. Do not
+                # re-truncate the actual final card while wrapping it for transport.
+                if call_site == "benchmark_declared_evaluator" and len(dumped) > 320_000:
+                    raise ValueError("Full benchmark evidence exceeds single-turn budget; use agentic evidence")
+                tool_text, truncated = dumped, False
+            elif str(call_site or "") == "benchmark_declared_evaluator":
                 # Evidence builders already bound content (~320k), but
                 # json.dumps(tool_payload) re-serializes and can exceed that.
                 # Cap across ALL declared-evaluator TOOL rows (e.g. DoorDash
