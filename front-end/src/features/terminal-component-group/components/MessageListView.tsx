@@ -26,6 +26,8 @@
  */
 import type { AgentDetail, Message, StreamingBubble, StreamingTool } from '../hooks';
 import { getClientSource } from '@/lib/clientSource';
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
+import { withLiveTrajectory } from './trajectoryLiveMessages';
 import type { ExploreStep, FeedbackData, WaitForCheck } from '../types';
 import {
   buildStreamingMetricsBySubAgentId,
@@ -134,6 +136,78 @@ function tailTools(tools: Map<string, StreamingTool>, grouping: WebSearchTurnGro
   );
 }
 
+function TrajectoryItems({
+  props,
+  metrics,
+  compressWork,
+}: {
+  props: MessageListViewProps;
+  metrics: ReturnType<typeof buildStreamingMetricsBySubAgentId>;
+  compressWork: boolean;
+}) {
+  const {
+    agent,
+    filteredMessages,
+    webSearchGrouping,
+    streaming,
+    animation,
+    selectedAgentId,
+    onSendMessage,
+    compact,
+    onSubmitFeedback,
+    onNavigateToAgent,
+    exploreStepMap,
+    waitForCheckMap,
+    thinkingVisible,
+    subAgentId,
+    animatedTokenCount,
+  } = props;
+  const streamingMetricsBySubAgentId = metrics;
+  return (
+    <MessageListItems
+      groupAgentMessages
+      compressWork={compressWork}
+      workStatus={agent?.status}
+      workEndedAt={agent?.updated_at}
+      activityIndicator={
+        thinkingVisible && (
+          <ThinkingIndicators
+            visible={thinkingVisible}
+            compact
+            streaming={streaming}
+            streamingTokenCount={thinkingTokenCount(streamingMetricsBySubAgentId, subAgentId)}
+            animatedTokenCount={animatedTokenCount}
+          />
+        )
+      }
+      filteredMessages={
+        compressWork
+          ? withLiveTrajectory(
+              filteredMessages,
+              tailTools(streaming.tools, webSearchGrouping),
+              thinkingVisible,
+              streaming.streamStartedAtMs,
+              agent?.status,
+            )
+          : filteredMessages
+      }
+      webSearchGrouping={webSearchGrouping}
+      currentAnimatingId={animation.currentAnimatingId}
+      onAnimationComplete={animation.handleAnimationComplete}
+      onNavigateToAgent={onNavigateToAgent}
+      selectedAgentId={selectedAgentId}
+      onSendMessage={onSendMessage}
+      compact={compact}
+      onSubmitFeedback={onSubmitFeedback}
+      exploreStepMap={exploreStepMap}
+      waitForCheckMap={waitForCheckMap}
+      streamingPlanCharCount={streaming.plan?.char_count}
+      streamingPlanStartedAtMs={streaming.plan?.startedAtMs}
+      streamingMetricsBySubAgentId={streamingMetricsBySubAgentId}
+    />
+  );
+}
+
 export function MessageListView(props: MessageListViewProps) {
   const {
     containerRef,
@@ -148,20 +222,16 @@ export function MessageListView(props: MessageListViewProps) {
     selectedAgentId,
     filteredMessages,
     webSearchGrouping,
-    exploreStepMap,
-    waitForCheckMap,
     streaming,
     streamingBubbles,
     streamingTools,
-    animation,
     animatedTokenCount,
     onAddCredits,
     onIncreaseCostLimit,
-    onNavigateToAgent,
-    onSubmitFeedback,
     onSendMessage,
   } = props;
 
+  const compressWork = useRoseDesktop();
   const showMainBanners = showStatusBanners && subAgentId === undefined;
   const showAttention = shouldShowStreamingAttention(streaming.attention, subAgentId);
   const showWebPreview = showMainBanners && agent !== null && getClientSource() === 'WEB';
@@ -172,22 +242,10 @@ export function MessageListView(props: MessageListViewProps) {
 
   return (
     <div ref={containerRef} className={`${containerClassName} mobile-disable-message-entry-spawn`}>
-      <MessageListItems
-        groupAgentMessages
-        filteredMessages={filteredMessages}
-        webSearchGrouping={webSearchGrouping}
-        currentAnimatingId={animation.currentAnimatingId}
-        onAnimationComplete={animation.handleAnimationComplete}
-        onNavigateToAgent={onNavigateToAgent}
-        selectedAgentId={selectedAgentId}
-        onSendMessage={onSendMessage}
-        compact={compact}
-        onSubmitFeedback={onSubmitFeedback}
-        exploreStepMap={exploreStepMap}
-        waitForCheckMap={waitForCheckMap}
-        streamingPlanCharCount={streaming.plan?.char_count}
-        streamingPlanStartedAtMs={streaming.plan?.startedAtMs}
-        streamingMetricsBySubAgentId={streamingMetricsBySubAgentId}
+      <TrajectoryItems
+        props={props}
+        metrics={streamingMetricsBySubAgentId}
+        compressWork={compressWork}
       />
       {subAgentId === undefined && <CodeAgentWaitStatus />}
       {chatActionsVisible && (
@@ -204,9 +262,11 @@ export function MessageListView(props: MessageListViewProps) {
         <StreamingAttentionBubble attention={streaming.attention} onSendMessage={onSendMessage} />
       )}
       {showWebPreview && agent !== null && <WebPreviewBanner agentId={agent.agent_id} />}
-      <StreamingTools tools={tailTools(streaming.tools, webSearchGrouping)} compact={compact} />
+      {!compressWork && (
+        <StreamingTools tools={tailTools(streaming.tools, webSearchGrouping)} compact={compact} />
+      )}
       <ThinkingIndicators
-        visible={thinkingVisible}
+        visible={thinkingVisible && !compressWork}
         compact={compact}
         streaming={streaming}
         streamingTokenCount={thinkingTokenCount(streamingMetricsBySubAgentId, subAgentId)}

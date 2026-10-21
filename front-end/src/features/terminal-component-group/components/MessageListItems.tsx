@@ -26,12 +26,11 @@
  *   pinned question (display.placement 'pinned') → not inline; PinnedQuestionMount shows it
  *   metadata.a2a (USER or TOOL agent_message row) → AgentToAgentRow, never a user bubble
  */
-import { useEffect, useMemo } from 'react';
+import { useEffect, type ReactNode } from 'react';
 import { InlineUserView, parseInlineViewMetadata } from '@/features/user-ui';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 
 import MessageBubble from './MessageBubble';
-import { dedupeCodeDisplays } from '../hooks/codeDisplayIdentity';
 import type { Message } from '../hooks';
 import type { ExploreStep, FeedbackData, WaitForCheck } from '../types';
 import {
@@ -48,18 +47,22 @@ import {
 } from '../hooks/codeAgentContract';
 import { AgentToAgentRow } from './AgentToAgentRow';
 import { CodeAgentAttribution } from './CodeAgentAttribution';
-import { EMPTY_DISPLAY_MEDIA_GROUPING, groupDisplayMedia } from './inline-media/displayMediaGroups';
 import { EMPTY_WEB_SEARCH_GROUPING, type WebSearchTurnGrouping } from './webSearchTurnGroups';
 
 import { DisplayMediaListItem } from './rose-apps/AgentDisplayMessage';
-import { useDisplayDestination } from './rose-apps/useDisplayDestination';
 
-import { useAgentExchangeGroups } from './useAgentExchangeGroups';
+import type { useAgentExchangeGroups } from './useAgentExchangeGroups';
 import { AgentExchangeGroup } from './AgentExchangeGroup';
+import { TrajectoryWorkGroup } from './TrajectoryWorkGroup';
+import { useMessageListProjection } from './useMessageListProjection';
 
 interface MessageListItemsProps {
   /** GP lists opt in; native sessions can supply one projection across chunks. */
   groupAgentMessages?: boolean;
+  compressWork?: boolean;
+  workStatus?: string;
+  workEndedAt?: string;
+  activityIndicator?: ReactNode;
   agentExchangeProjection?: ReturnType<typeof useAgentExchangeGroups> & { viewerId?: string };
   filteredMessages: Message[];
   streamingMessageIds?: ReadonlySet<string>;
@@ -238,7 +241,19 @@ function MessageListItem(props: MessageListItemProps) {
     return (
       <AgentToAgentListItem
         message={message}
-        a2a={a2a}
+        a2a={
+          props.compressWork
+            ? {
+                ...a2a,
+                direction:
+                  a2a.from.id === props.selectedAgentId
+                    ? 'sent'
+                    : a2a.to.id === props.selectedAgentId
+                      ? 'received'
+                      : undefined,
+              }
+            : a2a
+        }
         shouldType={message.message_id === props.currentAnimatingId}
         onTypingComplete={props.onAnimationComplete}
       />
@@ -250,78 +265,71 @@ function MessageListItem(props: MessageListItemProps) {
 export function MessageListItems({
   filteredMessages,
   webSearchGrouping = EMPTY_WEB_SEARCH_GROUPING,
-  groupAgentMessages = false,
   agentExchangeProjection,
   ...itemProps
 }: MessageListItemsProps) {
-  const roseDesktop = useRoseDesktop();
-  const visibleMessages = useMemo(
-    () => (roseDesktop ? dedupeCodeDisplays(filteredMessages) : filteredMessages),
-    [filteredMessages, roseDesktop],
-  );
-  const openDisplay = useDisplayDestination(
-    visibleMessages,
-    itemProps.selectedAgentId,
-    roseDesktop,
-  );
-  const displayGrouping = useMemo(
-    () => (roseDesktop ? groupDisplayMedia(visibleMessages) : EMPTY_DISPLAY_MEDIA_GROUPING),
-    [visibleMessages, roseDesktop],
-  );
-  const localExchanges = useAgentExchangeGroups(
-    visibleMessages,
-    roseDesktop && groupAgentMessages,
-    itemProps.currentAnimatingId,
-    itemProps.onAnimationComplete,
-  );
+  const { visibleMessages, openDisplay, displayGrouping, localExchanges, workGroups } =
+    useMessageListProjection({
+      ...itemProps,
+      filteredMessages,
+      groupAgentMessages: itemProps.groupAgentMessages ?? false,
+      compressWork: itemProps.compressWork ?? false,
+    });
   const { groups: exchangeGroups, now } = agentExchangeProjection ?? localExchanges;
-  return (
-    <>
-      {visibleMessages.map((message) => {
-        const exchangeGroup = exchangeGroups.groupsByLeadId.get(message.message_id);
-        if (exchangeGroup)
-          return (
-            <AgentExchangeGroup
-              key={exchangeGroup.key}
-              group={exchangeGroup}
-              viewerId={agentExchangeProjection?.viewerId ?? itemProps.selectedAgentId}
-              now={now}
-            />
-          );
-        if (exchangeGroups.foldedIds.has(message.message_id)) return null;
-        if (webSearchGrouping.hiddenMessageIds.has(message.message_id)) return null;
-        if (displayGrouping.hiddenMessageIds.has(message.message_id)) return null;
-        const displayItems = displayGrouping.groupsByLeadId.get(message.message_id);
-        if (displayItems) {
-          return (
-            <DisplayMediaListItem
-              key={message.message_id}
-              message={message}
-              items={displayItems}
-              onOpen={openDisplay ? () => openDisplay(message) : undefined}
-              agentId={itemProps.selectedAgentId || undefined}
-              shouldType={message.message_id === itemProps.currentAnimatingId}
-              onTypingComplete={itemProps.onAnimationComplete}
-            />
-          );
-        }
-        const group = webSearchGrouping.groupsByLeadId.get(message.message_id);
-        if (group) {
-          return (
-            <WebSearchGroupItem
-              key={`web-search-group:${group.key}`}
-              group={group}
-              currentAnimatingId={itemProps.currentAnimatingId}
-              onAnimationComplete={itemProps.onAnimationComplete}
-              agentId={itemProps.selectedAgentId || undefined}
-              compact={itemProps.compact}
-            />
-          );
-        }
-        return (
-          <MessageListItem key={getMessageRenderKey(message)} message={message} {...itemProps} />
-        );
-      })}
-    </>
-  );
+  return visibleMessages.map((message) => {
+    const workGroup = workGroups.groupsByLeadId.get(message.message_id);
+    if (workGroup)
+      return (
+        <TrajectoryWorkGroup
+          key={workGroup.key}
+          group={workGroup}
+          indicator={itemProps.activityIndicator}
+          renderMessage={(row) => (
+            <MessageListItem message={row} {...itemProps} currentAnimatingId={null} />
+          )}
+        />
+      );
+    if (workGroups.foldedIds.has(message.message_id)) return null;
+    const exchangeGroup = exchangeGroups.groupsByLeadId.get(message.message_id);
+    if (exchangeGroup)
+      return (
+        <AgentExchangeGroup
+          key={exchangeGroup.key}
+          group={exchangeGroup}
+          viewerId={agentExchangeProjection?.viewerId ?? itemProps.selectedAgentId}
+          now={now}
+        />
+      );
+    if (exchangeGroups.foldedIds.has(message.message_id)) return null;
+    if (webSearchGrouping.hiddenMessageIds.has(message.message_id)) return null;
+    if (displayGrouping.hiddenMessageIds.has(message.message_id)) return null;
+    const displayItems = displayGrouping.groupsByLeadId.get(message.message_id);
+    if (displayItems) {
+      return (
+        <DisplayMediaListItem
+          key={message.message_id}
+          message={message}
+          items={displayItems}
+          onOpen={openDisplay ? () => openDisplay(message) : undefined}
+          agentId={itemProps.selectedAgentId || undefined}
+          shouldType={message.message_id === itemProps.currentAnimatingId}
+          onTypingComplete={itemProps.onAnimationComplete}
+        />
+      );
+    }
+    const group = webSearchGrouping.groupsByLeadId.get(message.message_id);
+    if (group) {
+      return (
+        <WebSearchGroupItem
+          key={`web-search-group:${group.key}`}
+          group={group}
+          currentAnimatingId={itemProps.currentAnimatingId}
+          onAnimationComplete={itemProps.onAnimationComplete}
+          agentId={itemProps.selectedAgentId || undefined}
+          compact={itemProps.compact}
+        />
+      );
+    }
+    return <MessageListItem key={getMessageRenderKey(message)} message={message} {...itemProps} />;
+  });
 }
