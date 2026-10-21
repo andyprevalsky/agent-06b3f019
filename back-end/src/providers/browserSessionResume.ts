@@ -41,6 +41,23 @@ export class RotationSessionNotFoundError extends Error {
 
 const log = createLogger('BrowserSessionResume');
 
+/** Provider operations behind resume/rotate_ip, injectable for persistence tests. */
+export interface BrowserSessionResumeDependencies {
+  resumeSession: typeof resumeSession;
+  rotateProxy: typeof rotateProxy;
+  injectUserData: typeof injectUserData;
+  closeSession: typeof closeSession;
+  getBrowserCaptchaTelemetry: typeof getBrowserCaptchaTelemetry;
+}
+
+const defaultResumeDependencies: BrowserSessionResumeDependencies = {
+  resumeSession,
+  rotateProxy,
+  injectUserData,
+  closeSession,
+  getBrowserCaptchaTelemetry,
+};
+
 /** Tilion kill switch: off means no rotation step ever lands on a new Tilion session. */
 function tilionRotationAvailable(): boolean {
   return browserProviderEnabled('BROWSER_AGENT_TILION_ENABLED', true);
@@ -217,18 +234,19 @@ async function reservePasskeysForRealm(userId: string, authRealm: string) {
 
 export async function resumeBrowserSession(
   taskId: string,
-  options: { forceFreshProfile?: boolean } = {}
+  options: { forceFreshProfile?: boolean } = {},
+  dependencies: BrowserSessionResumeDependencies = defaultResumeDependencies
 ) {
   log.info('Resuming browser task', {
     taskId,
     forceFreshProfile: options.forceFreshProfile,
   });
 
-  const result = await resumeSession(taskId, {
+  const result = await dependencies.resumeSession(taskId, {
     ...options,
     keepValidationConnection: true,
   });
-  return assembleResumeResponse(taskId, result);
+  return assembleResumeResponse(taskId, result, dependencies);
 }
 
 type RecreatedSession = Awaited<ReturnType<typeof resumeSession>>;
@@ -239,13 +257,21 @@ type RecreatedSession = Awaited<ReturnType<typeof resumeSession>>;
  * Shared by resume and rotate_ip — both hand back an identical response shape,
  * including when rotate_ip crosses between provider-specific profiles.
  */
-async function assembleResumeResponse(taskId: string, result: RecreatedSession) {
+async function assembleResumeResponse(
+  taskId: string,
+  result: RecreatedSession,
+  dependencies: BrowserSessionResumeDependencies
+) {
   return withOwnedResumeTransport(result, () =>
-    assembleResumeResponseWithTransport(taskId, result)
+    assembleResumeResponseWithTransport(taskId, result, dependencies)
   );
 }
 
-async function assembleResumeResponseWithTransport(taskId: string, result: RecreatedSession) {
+async function assembleResumeResponseWithTransport(
+  taskId: string,
+  result: RecreatedSession,
+  dependencies: BrowserSessionResumeDependencies
+) {
   const session = await prisma.browserSession.findUnique({
     where: { id: taskId },
     include: { context: true },
@@ -271,7 +297,7 @@ async function assembleResumeResponseWithTransport(taskId: string, result: Recre
   if (session?.context.userId !== undefined) {
     if (result.savedUrl !== undefined && result.savedUrl !== '') {
       try {
-        injectionResult = await injectUserData(
+        injectionResult = await dependencies.injectUserData(
           result.sessionId,
           session.context.userId,
           result.savedUrl,
@@ -285,7 +311,7 @@ async function assembleResumeResponseWithTransport(taskId: string, result: Recre
         // close — the caller only sees the exception, never the session id.
         // Close it (not pause: the resume failed, so there is no state worth
         // preserving) before rethrowing.
-        await closeSession(result.sessionId, false).catch((closeError) => {
+        await dependencies.closeSession(result.sessionId, false).catch((closeError) => {
           // Never let cleanup mask the original injection failure.
           log.error('Failed to close browser session after injection failure', {
             taskId,
@@ -395,7 +421,12 @@ export function buildRotationMessage(
  * recreates the session, and returns the resume-shaped response plus escalation
  * state the agent reasons over. Provider choice is server-owned, not model-owned.
  */
-export async function rotateBrowserProxy(taskId: string, userId?: string, currentUrl?: string) {
+export async function rotateBrowserProxy(
+  taskId: string,
+  userId?: string,
+  currentUrl?: string,
+  dependencies: BrowserSessionResumeDependencies = defaultResumeDependencies
+) {
   // Reserve one rotation atomically. UPDATE ... RETURNING both enforces the cap
   // under concurrent calls and returns the exact ladder position this request
   // reserved. User calls also constrain the write to their BrowserContext; an
@@ -450,7 +481,7 @@ export async function rotateBrowserProxy(taskId: string, userId?: string, curren
   });
 
   const captchaTelemetryBeforeRotation = await withTimeout(
-    getBrowserCaptchaTelemetry(taskId),
+    dependencies.getBrowserCaptchaTelemetry(taskId),
     3_000
   ).catch((error) => {
     log.warn('Failed to read CAPTCHA telemetry before browser rotation', {
@@ -468,7 +499,7 @@ export async function rotateBrowserProxy(taskId: string, userId?: string, curren
 
   let result: Awaited<ReturnType<typeof rotateProxy>>;
   try {
-    result = await rotateProxy(taskId, step, {
+    result = await dependencies.rotateProxy(taskId, step, {
       keepValidationConnection: true,
     });
   } catch (error) {
@@ -481,7 +512,7 @@ export async function rotateBrowserProxy(taskId: string, userId?: string, curren
     });
     throw error;
   }
-  const response = await assembleResumeResponse(taskId, result);
+  const response = await assembleResumeResponse(taskId, result, dependencies);
   const rotationsRemaining = ROTATION_CAP - rotationsUsed;
   const effectiveStep: RotationStep = {
     provider: result.provider === 'local' ? 'steel' : result.provider,
