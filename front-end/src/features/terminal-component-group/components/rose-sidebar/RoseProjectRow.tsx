@@ -79,6 +79,7 @@ function InlineNameInput({
   return (
     <input
       ref={ref}
+      data-project-name-editor="true"
       aria-label={label}
       value={value}
       onChange={(e) => {

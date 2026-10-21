@@ -203,6 +203,10 @@ export default function MobileAgentDrawer({
       <SheetContent
         side={roseHeader ? 'left' : 'right'}
         onCloseAutoFocus={handleCloseAutoFocus}
+        onEscapeKeyDown={(event) => {
+          if (event.target instanceof HTMLInputElement && event.target.dataset.projectNameEditor)
+            event.preventDefault();
+        }}
         className="flex w-screen max-w-none flex-col p-0 pt-[var(--safe-area-inset-top)]"
       >
         <SheetTitle className="sr-only">Menu</SheetTitle>

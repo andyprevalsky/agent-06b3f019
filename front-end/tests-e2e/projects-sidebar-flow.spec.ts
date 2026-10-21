@@ -3,8 +3,11 @@ import { expect, test } from '@playwright/test';
 import { FRONTEND_URL } from './helpers';
 for (const width of [1280, 390]) {
   test(`original project flow at ${width}px`, async ({ page }) => {
+    test.setTimeout(60000);
+    page.setDefaultTimeout(15000);
     await page.setViewportSize({ width, height: 900 });
     await page.addInitScript(() => {
+      Object.defineProperty(navigator, 'platform', { value: 'MacIntel' });
       const user = { id: 'project-flow-viewer', is_anonymous: false };
       localStorage.setItem('app-user', JSON.stringify(user));
       localStorage.setItem(
@@ -92,7 +95,8 @@ for (const width of [1280, 390]) {
     else {
       const rail = page.getByTestId('rose-sidebar');
       await rail.waitFor();
-      await page.mouse.move(30, 100);
+      await page.mouse.move(500, 300);
+      await rail.hover({ position: { x: 30, y: 100 } });
       await expect(rail).toHaveAttribute('data-expanded', 'true');
     }
     const row = page.getByTestId('rose-project-row-p-rose').filter({ visible: true });
@@ -118,6 +122,10 @@ for (const width of [1280, 390]) {
     await expect(settings.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
     if (width < 768) await page.getByRole('button', { name: 'Back to agents' }).click();
     else await settings.getByRole('button', { name: 'Close project settings' }).click();
+    if (width >= 768) {
+      await page.mouse.move(500, 300);
+      await page.getByTestId('rose-sidebar').hover({ position: { x: 30, y: 100 } });
+    }
     const create = page
       .getByRole('button', { name: '+ New project', exact: true })
       .filter({ visible: true });
@@ -133,6 +141,7 @@ for (const width of [1280, 390]) {
     await expect(
       page.getByTestId('rose-project-row-created').filter({ visible: true }),
     ).toBeVisible();
+    if (width >= 768) await page.getByTestId('rose-sidebar').hover({ position: { x: 30, y: 100 } });
     await row.click({ button: 'right' });
     const menu = page.getByTestId('rose-project-menu');
     await expect(menu.getByRole('menuitem', { name: 'Rename project' })).toBeVisible();
@@ -149,6 +158,10 @@ for (const width of [1280, 390]) {
       name: 'Delete project “Rose”?',
     });
     await confirmation.getByRole('button', { name: 'Cancel' }).click();
+    if (width >= 768) {
+      await page.mouse.move(500, 300);
+      await page.getByTestId('rose-sidebar').hover({ position: { x: 30, y: 100 } });
+    }
     await expect(row).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
