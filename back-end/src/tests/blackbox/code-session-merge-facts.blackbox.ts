@@ -263,8 +263,10 @@ test('nested agents join parent branches while internal coding workers share the
     const text =
       join.files.find((file) => file.path === 'SKILL.md')?.content.toString('utf8') ?? '';
     assert.match(text, /repository's own branch-join skill/);
-    assert.match(text, /If no branch-join skill exists, use the deploy skill/);
-    assert.match(text, /do not perform a main-branch/);
+    assert.match(text, /If no branch-join skill exists, create/);
+    assert.match(text, /\.agents\/skills\/branch-join\/SKILL\.md/);
+    assert.match(text, /Do not run the\s+deploy workflow/);
+    assert.match(text, /publish to `main`, or perform a production rollout/);
     assert.match(text, /same worktree/);
     assert.match(text, /stacked on the parent/);
     assert.match(text, /PR base is the parent branch/);

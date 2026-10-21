@@ -17,11 +17,10 @@ Resolve the actual GitHub remote and configured default branch; use `main`
 when that is the shared branch. Join an existing deploy coordinator instead
 of creating a competing release. Rose already has `/deploy`; use it.
 
-When the branch-join skill falls back here, run the repository workflow in
-parent-branch join mode: use the explicitly assigned parent branch, reuse its
-checks, and omit main publication and production rollout. If the repo's deploy
-workflow cannot target a parent branch, create a branch-join adapter around
-its checks rather than running a main-only deployment.
+Branch joining is a separate operation. If the repository lacks a branch-join
+skill, create one using its Git rules and relevant validation commands; do not
+run this deploy workflow as the fallback. Only the top-level publication owner
+uses deploy to publish the integrated result to the shared branch.
 
 Intermediate work can merge into a parent's branch. Network-wide publication
 means the validated changes reach the shared GitHub branch through that

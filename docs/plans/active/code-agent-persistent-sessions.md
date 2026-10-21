@@ -173,8 +173,9 @@ and receipt, not a concatenation of the child's entire native conversation.
 ### Code and E2B snapshots
 
 Independent sub-agents of sub-agents join their immediate parent's branch via
-the repo-defined branch-join skill. If absent, use the deploy skill's checks in
-explicit parent-target join mode, without main publication or rollout. Internal
+the repo-defined branch-join skill. If absent, create a repo-local branch-join
+skill from the repo's Git rules and validation commands. Relevant deploy checks
+may be reused, but do not run the deployment workflow as a fallback. Internal
 coding workers share their owning code agent's worktree by default, with file
 ownership and serialized Git operations; there is no branch merge between them.
 

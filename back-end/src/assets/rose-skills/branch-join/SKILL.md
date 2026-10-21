@@ -15,12 +15,13 @@ Never switch a shared worktree to a competing agent's branch.
 Read the repository's own branch-join skill if it has one, then follow its
 checks, conflict handling, and merge workflow.
 
-If no branch-join skill exists, use the deploy skill with **parent-branch join**
-as the operation and the immediate parent's branch as the explicit target.
-Reuse its discovery and validation process, but do not perform a main-branch
-merge or production rollout. If that workflow only supports `main`, add a
-repo-local branch-join adapter using its validation commands and the correct
-parent target; do not invent an unsupported deploy CLI flag.
+If no branch-join skill exists, create a repo-local
+`.agents/skills/branch-join/SKILL.md` from its actual Git rules and validation
+commands. Reuse relevant checks documented by the deploy skill when useful,
+but keep this operation limited to the explicit parent branch. Do not run the
+deploy workflow, publish to `main`, or perform a production rollout as a
+fallback. The new skill must name the parent target, conflict handling,
+validation commands, and how to verify the resulting parent commit.
 
 Commit the assigned changes, coordinate with the parent, and merge against its
 current head. Resolve conflicts without discarding parent or sibling work.
