@@ -22,6 +22,7 @@ import { cn } from '@/lib/utils';
 
 import LeftPanelShell from './LeftPanelShell';
 import { ProjectEnvFilesSection } from './ProjectEnvFilesSection';
+import { ProjectOnboardingSection } from './ProjectOnboardingSection';
 import { ROSE_ACTIVE_COLOR } from './roseSidebarLayout';
 import { useProjectSettingsForm, type ProjectDraft } from './useProjectSettingsForm';
 
@@ -196,6 +197,7 @@ export default function RoseProjectSettingsPanel({
       <h2 className="mb-0.5 text-[17px] font-semibold">{project.name}</h2>
       <p className={MUTED}>Project settings</p>
       <CodeRepoSection draft={form.draft} setField={form.setField} project={project} />
+      <ProjectOnboardingSection project={project} />
       <StartupSection
         draft={form.draft}
         setField={form.setField}

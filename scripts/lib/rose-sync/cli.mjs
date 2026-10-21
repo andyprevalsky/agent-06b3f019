@@ -4,12 +4,13 @@
  *   rose-sync status   [--dir D] [--include P]... [--json]
  *   rose-sync push     [--dir D] [--project NAME|ID] [--include P]... [--setup CMD]...
  *                      [--no-prune] [--json]
+ *   rose-sync onboard  [--dir D] [--project NAME|ID]  import keys and configure setup
  *   rose-sync seed-rose [--dir D] [--json]     create/refresh the "Rose" project
  *                                              (startup script + six env files), then push
  *
  * Auth (one of):
  *   ROSE_TOKEN=<user JWT>
- *   ROSE_API_KEY=<backend API key> ROSE_USER_ID=<user id>
+ *   ROSE_API_KEY=<personal API key> (shared backend keys also need ROSE_USER_ID)
  * Backend: --api URL or ROSE_API_URL (default https://navi-j9a9.onrender.com).
  *
  * Everything secret is encrypted HERE with the backend's public key
@@ -26,6 +27,13 @@ import {
 import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { captureCheckout, checkoutRoot, dotenvNames } from "./capture.mjs";
+import {
+  configureOnboarding,
+  isRoseRepository,
+  requireCapturedFiles,
+  sameRepository,
+  verifyOnboarding,
+} from "./onboarding.mjs";
 
 const DEFAULT_API = "https://navi-j9a9.onrender.com";
 export const ROSE_PROJECT_ENV_FILES = [
@@ -100,11 +108,14 @@ function apiClient(opts) {
   const headers = { "Content-Type": "application/json" };
   if (process.env.ROSE_TOKEN)
     headers.Authorization = `Bearer ${process.env.ROSE_TOKEN}`;
-  else if (process.env.ROSE_API_KEY && process.env.ROSE_USER_ID) {
+  else if (process.env.ROSE_API_KEY) {
     headers["X-API-Key"] = process.env.ROSE_API_KEY;
-    headers["X-User-Id"] = process.env.ROSE_USER_ID;
+    if (process.env.ROSE_USER_ID)
+      headers["X-User-Id"] = process.env.ROSE_USER_ID;
   } else {
-    throw new Error("Set ROSE_TOKEN, or ROSE_API_KEY and ROSE_USER_ID");
+    throw new Error(
+      "Set ROSE_TOKEN or your personal ROSE_API_KEY (shared backend keys also require ROSE_USER_ID)",
+    );
   }
   return async function call(method, path, body) {
     const res = await fetch(`${base}${path}`, {
@@ -314,7 +325,7 @@ export async function main(argv) {
     print(opts, summary, humanSummary(summary));
     return 0;
   }
-  if (opts.command === "push" || opts.command === "seed-rose") {
+  if (["push", "seed-rose", "onboard"].includes(opts.command)) {
     const call = apiClient(opts);
     let project;
     let capture;
@@ -325,20 +336,69 @@ export async function main(argv) {
         include: opts.include,
         setup: opts.setup,
       });
+      if (opts.command === "onboard") {
+        if (isRoseRepository(capture.manifest.git.remoteUrl)) {
+          capture = captureCheckout(dir, {
+            include: [...opts.include, ...ROSE_PROJECT_ENV_FILES],
+            setup: opts.setup,
+          });
+          requireCapturedFiles(capture, ROSE_PROJECT_ENV_FILES);
+        }
+        configureOnboarding(capture);
+      }
       project = await resolveProject(call, opts, capture.root);
     }
+    if (opts.command === "onboard") {
+      if (!sameRepository(capture.manifest.git.remoteUrl, project.repoUrl))
+        throw new Error(
+          "The working checkout does not match this project's repository",
+        );
+      const declared = await call(
+        "GET",
+        `/api/projects/${project.id}/env-files`,
+      );
+      requireCapturedFiles(
+        capture,
+        declared.envFiles
+          .filter((file) => !file.hasContent)
+          .map((file) => file.path),
+      );
+      if (
+        !project.startupScript &&
+        isRoseRepository(capture.manifest.git.remoteUrl)
+      ) {
+        project = await call("PUT", `/api/projects/${project.id}`, {
+          startupScript: readFileSync(
+            join(capture.root, ROSE_STARTUP_SCRIPT_PATH),
+            "utf8",
+          ),
+        });
+      }
+    }
     const result = await pushCapture(call, project.id, capture, opts.prune);
+    const onboarding =
+      opts.command === "onboard"
+        ? await verifyOnboarding(call, project.id, capture)
+        : undefined;
     const summary = summarize(capture);
     print(
       opts,
-      { projectId: project.id, ...result, capture: summary },
+      {
+        projectId: project.id,
+        ...result,
+        capture: summary,
+        ...(onboarding ? { onboarding } : {}),
+      },
       `${humanSummary(summary)}\nsynced to project ${result.project.name} (${project.id}) revision ${result.revision}: ` +
-        `${result.written.length} written, ${result.unchanged.length} unchanged, ${result.deleted.length} removed`,
+        `${result.written.length} written, ${result.unchanged.length} unchanged, ${result.deleted.length} removed` +
+        (onboarding
+          ? `\nDevelopment environment configured. ${onboarding.verification}`
+          : ""),
     );
     return 0;
   }
   process.stdout.write(
-    "usage: rose-sync status|push|seed-rose [--dir D] [--project NAME|ID] [--include PATH]... " +
+    "usage: rose-sync status|push|onboard|seed-rose [--dir D] [--project NAME|ID] [--include PATH]... " +
       "[--setup CMD]... [--no-prune] [--api URL] [--json]\n",
   );
   return opts.command === "help" ? 0 : 2;

@@ -28,6 +28,7 @@ import { asyncHandler } from '../../utils/asyncHandler';
 import * as envFiles from './envFileService';
 import * as service from './service';
 import * as sync from './syncService';
+import { projectSyncClientFiles } from '../../providers/projects/syncClient';
 import {
   createEnvFileSchema,
   createProjectSchema,
@@ -115,6 +116,13 @@ router.put(
     if (body === null) return;
     const result = await service.upsertProjectByName(userId, body);
     res.status(result.created ? 201 : 200).json(result.project);
+  })
+);
+
+router.get(
+  '/sync-client',
+  handle(async (_req, res) => {
+    res.json({ files: projectSyncClientFiles() });
   })
 );
 
