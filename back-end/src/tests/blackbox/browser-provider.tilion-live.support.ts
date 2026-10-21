@@ -16,16 +16,12 @@ import { randomUUID } from 'node:crypto';
 import { chromium, type Browser, type Page } from 'playwright';
 import WebSocket from 'ws';
 import { prisma } from '../../providers/database';
-import { DEFAULT_GEOLOCATION } from '../../providers/geoip';
 import { buildPreferredBrowserConfig } from '../../providers/browser/challengeRecovery';
 import {
-  createTilionRecoverySession,
   listLiveTilionSessionIds,
   releaseTilionRemoteSession,
-  TilionRateLimitError,
 } from '../../providers/browser/tilion';
 import { retryWithBackoff } from '../../providers/retry';
-import { runLiveKernelSteelAuthPersist } from './browser-provider.auth-persist.live';
 import {
   assert,
   type BrowserApiResponse,
@@ -33,14 +29,15 @@ import {
   retryBackendFetch,
 } from './browser-provider.helpers';
 
-const LOCATION = { country: 'US', state: 'CA', city: 'San Francisco' } as const;
+export const LOCATION = { country: 'US', state: 'CA', city: 'San Francisco' } as const;
 const EXIT_IP_URL = 'https://api.ipify.org?format=json';
+const DOWNLOAD_URL = 'https://www.w3.org/TR/2003/REC-PNG-20031110/iso_8859-1.txt';
 
 function tilionBase(): string {
   return (process.env.TILION_BASE_URL?.trim() || 'https://back.tilion.dev').replace(/\/+$/, '');
 }
 
-async function tilionApi(
+export async function tilionApi(
   method: string,
   route: string,
   body?: unknown
@@ -105,7 +102,7 @@ export function secondCdpClientOutcome(
   });
 }
 
-async function withPage<T>(wsUrl: string, fn: (page: Page, browser: Browser) => Promise<T>) {
+export async function withPage<T>(wsUrl: string, fn: (page: Page, browser: Browser) => Promise<T>) {
   const browser = await chromium.connectOverCDP(wsUrl, { timeout: 60_000 });
   try {
     const context = browser.contexts()[0];
@@ -339,31 +336,57 @@ export async function runLiveTilionProviderParity(): Promise<void> {
       'Tilion health validation failed'
     );
 
-    // I: files round-trip and screenshots, with no CDP client attached.
-    const expectedContent = 'tilion-provider-file-parity';
+    // I: Tilion admits one CDP client, so uploads are worker-owned: the backend
+    // refuses them with a typed 409 and the worker sets the bytes over its own CDP.
     const form = new FormData();
-    form.append('file', new Blob([expectedContent], { type: 'text/plain' }), 'tilion-parity.txt');
-    const uploadResponse = await retryBackendFetch(
+    form.append('file', new Blob(['tilion-parity'], { type: 'text/plain' }), 'tilion-parity.txt');
+    const refusedUpload = await retryBackendFetch(
       `${baseUrl}/api/browser-session/${liveSessionId}/files`,
       { method: 'POST', headers: { 'x-api-key': apiKey }, body: form }
     );
-    const upload = (await uploadResponse.json()) as BrowserApiResponse;
+    const refusal = (await refusedUpload.json()) as { error?: string; provider?: string };
     assert(
-      uploadResponse.ok && typeof upload.path === 'string',
-      `Tilion file upload failed: HTTP ${uploadResponse.status} ${JSON.stringify(upload)}`
+      refusedUpload.status === 409 &&
+        refusal.error === 'worker_owned' &&
+        refusal.provider === 'tilion',
+      `Tilion backend upload was not a typed worker_owned refusal: HTTP ${refusedUpload.status} ${JSON.stringify(refusal)}`
     );
-    const listResponse = await get(`/${liveSessionId}/files/list`);
-    const listing = (await listResponse.json()) as { files?: Array<{ path: string }> };
+    const uploaded = await withPage(String(rotated.ws_url), async (page) => {
+      await navigateKernelPage(page, 'https://example.com');
+      await page.evaluate(() => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.id = 'rose-tilion-upload';
+        document.body.appendChild(input);
+      });
+      await page.setInputFiles('#rose-tilion-upload', {
+        name: 'tilion-parity.txt',
+        mimeType: 'text/plain',
+        buffer: Buffer.from('tilion-provider-file-parity'),
+      });
+      return page.evaluate(async () => {
+        const file = (document.getElementById('rose-tilion-upload') as HTMLInputElement).files?.[0];
+        return file ? { name: file.name, text: await file.text() } : null;
+      });
+    });
     assert(
-      listResponse.ok && listing.files?.some((file) => file.path === upload.path),
-      'Tilion uploaded file was not listed'
+      uploaded?.name === 'tilion-parity.txt' && uploaded.text === 'tilion-provider-file-parity',
+      `worker-path CDP upload did not reach the page: ${JSON.stringify(uploaded)}`
+    );
+    // Downloads are addressed by URL and fetched through the session's own browser.
+    const listResponse = await get(`/${liveSessionId}/files/list`);
+    const listing = (await listResponse.json()) as { files?: unknown[] };
+    assert(listResponse.ok && Array.isArray(listing.files), 'Tilion file listing failed');
+    const expected = Buffer.from(
+      await (await fetch(DOWNLOAD_URL, { signal: AbortSignal.timeout(30_000) })).arrayBuffer()
     );
     const contentResponse = await get(
-      `/${liveSessionId}/files/content?path=${encodeURIComponent(String(upload.path))}`
+      `/${liveSessionId}/files/content?path=${encodeURIComponent(DOWNLOAD_URL)}`
     );
+    const content = Buffer.from(await contentResponse.arrayBuffer());
     assert(
-      contentResponse.ok && (await contentResponse.text()) === expectedContent,
-      'Tilion file download did not round-trip'
+      contentResponse.ok && expected.length > 1_000 && content.equals(expected),
+      `Tilion download by URL did not match: HTTP ${contentResponse.status} ${content.length}/${expected.length} bytes`
     );
     const traversal = await get(`/${liveSessionId}/files/content?path=../etc/passwd`);
     assert(traversal.status === 400, 'Tilion session file traversal was not rejected');
@@ -392,10 +415,17 @@ export async function runLiveTilionProviderParity(): Promise<void> {
     assert(resumed.task_id === taskId, 'resume changed the stable task ID');
     assert(resumed.saved_url === 'https://example.com/resume-check', 'resume lost the saved URL');
     assert(resumed.browser_session_metadata?.provider === 'tilion', 'resume changed providers');
+    // Resume lands on a fresh Tilion session (a new exit), so the rotated exit itself
+    // cannot be kept; the exit TIER must be. The location label may change
+    // (tilion_residential_rotated_us → tilion_residential_country, reported to lane B).
+    const exitTier = (source: unknown) => /^tilion_(residential|mobile)_/.exec(String(source))?.[1];
     assert(
-      resumed.browser_session_metadata?.proxy_source ===
-        rotated.browser_session_metadata?.proxy_source,
-      'resume lost the rotated Tilion exit type'
+      exitTier(resumed.browser_session_metadata?.proxy_source) !== undefined &&
+        exitTier(resumed.browser_session_metadata?.proxy_source) ===
+          exitTier(rotated.browser_session_metadata?.proxy_source),
+      `resume lost the rotated Tilion exit tier: rotated=${String(
+        rotated.browser_session_metadata?.proxy_source
+      )} resumed=${String(resumed.browser_session_metadata?.proxy_source)}`
     );
     const keptAfterResume = await withPage(String(resumed.ws_url), async (page) => {
       await navigateKernelPage(page, 'https://example.com');
@@ -420,7 +450,14 @@ export async function runLiveTilionProviderParity(): Promise<void> {
     // Rotation 2 (last: it replaces the live session and needs the worker's carried
     // state): a Tilion mobile exit, then the ladder leaves for Kernel.
     const ipBeforeMobile = await readExitIpWithRetry(String(recreated.ws_url));
-    const mobile = await post('/rotate-proxy', { task_id: taskId });
+    // The worker would capture this over its own socket; a live Tilion row must not be
+    // replaced without it (TilionUncarriedStateError).
+    const carriedState = await withPage(String(recreated.ws_url), async (page, browser) => {
+      await navigateKernelPage(page, 'https://example.com');
+      await page.evaluate(() => localStorage.setItem('rose_tilion_parity', 'carried'));
+      return browser.contexts()[0]!.storageState();
+    });
+    const mobile = await post('/rotate-proxy', { task_id: taskId, storage_state: carriedState });
     assert(
       mobile.provider === 'tilion' &&
         mobile.proxy_tier === 'mobile' &&
@@ -444,6 +481,11 @@ export async function runLiveTilionProviderParity(): Promise<void> {
     liveSessionId = String(mobile.session_id);
     const mobileWsUrl = String(mobile.ws_url);
     const mobileIp = await readExitIpWithRetry(mobileWsUrl, ipBeforeMobile);
+    const carriedAfterMobile = await withPage(mobileWsUrl, async (page) => {
+      await navigateKernelPage(page, 'https://example.com');
+      return page.evaluate(() => localStorage.getItem('rose_tilion_parity'));
+    });
+    assert(carriedAfterMobile === 'carried', 'mobile replacement lost the carried localStorage');
     console.log(
       `[tilion rotate_ip] exit IP ladder: ${ipBefore} -> ${ipAfter} -> mobile ${mobileIp}`
     );
@@ -468,87 +510,4 @@ export async function runLiveTilionProviderParity(): Promise<void> {
     await prisma.user.deleteMany({ where: { userId } });
     assert(leaked.length === 0, `Tilion sessions still live after parity: ${leaked.join(', ')}`);
   }
-}
-
-/**
- * K1: the create past the account cap is a typed rate-limit error. The Tilion
- * account is shared with production, so filling it is opt-in
- * (RUN_TILION_CONCURRENCY_LIVE=1) and holds the cap for only a few seconds.
- */
-export async function runLiveTilionConcurrency(): Promise<void> {
-  if (process.env.RUN_TILION_CONCURRENCY_LIVE !== '1') {
-    console.log('SKIP live Tilion concurrency cap (set RUN_TILION_CONCURRENCY_LIVE=1)');
-    return;
-  }
-  const usage = await tilionApi('GET', '/v1/usage');
-  const cap = Number((usage.body as { concurrency_limit?: number } | null)?.concurrency_limit);
-  assert(
-    Number.isInteger(cap) && cap > 0,
-    `Tilion usage has no concurrency_limit: ${usage.status}`
-  );
-  const opened: string[] = [];
-  try {
-    const live = await listLiveTilionSessionIds();
-    const toOpen = cap - live.length;
-    assert(toOpen > 0, `Tilion account already at its cap (${live.length}/${cap})`);
-    const created = await Promise.allSettled(
-      Array.from({ length: toOpen }, () =>
-        tilionApi('POST', '/v1/session', { idle_timeout: 60, ttl: 300 })
-      )
-    );
-    for (const result of created) {
-      const id =
-        result.status === 'fulfilled'
-          ? (result.value.body as { session_id?: string })?.session_id
-          : undefined;
-      if (id) opened.push(id);
-    }
-    // Production code path: the adapter's create must surface the typed error.
-    let refusal: unknown;
-    try {
-      const session = await createTilionRecoverySession(DEFAULT_GEOLOCATION);
-      opened.push(session.sessionId);
-      await session.validationBrowser?.close().catch(() => undefined);
-    } catch (error) {
-      refusal = error;
-    }
-    assert(
-      refusal instanceof TilionRateLimitError && refusal.slug === 'concurrency_limit',
-      `create past the cap (${opened.length}/${cap} open) was not a typed concurrency_limit: ${String(refusal)}`
-    );
-  } finally {
-    await Promise.allSettled(opened.map((id) => releaseTilionRemoteSession(id)));
-  }
-  const live = new Set(await listLiveTilionSessionIds());
-  assert(
-    opened.every((id) => !live.has(id)),
-    'Tilion concurrency sessions are still live after release'
-  );
-  console.log(
-    `PASS live Tilion concurrency cap (${cap} live, next create typed concurrency_limit)`
-  );
-}
-
-/**
- * The live auth-handoff and Tilion cases of the /deploy-run browser-provider
- * domain, in order. Returns the failure count so the runner keeps going.
- */
-export async function runLiveCrossProviderCases(): Promise<number> {
-  if (!process.env.TEST_BASE_URL) return 0;
-  const cases: Array<[string, () => Promise<void>]> = [
-    ['live Kernel/Steel auth persist', () => runLiveKernelSteelAuthPersist('steel')],
-    ['live Tilion provider parity', runLiveTilionProviderParity],
-    ['live Kernel/Tilion auth persist', () => runLiveKernelSteelAuthPersist('tilion')],
-    ['live Tilion concurrency cap', runLiveTilionConcurrency],
-  ];
-  let failed = 0;
-  for (const [label, run] of cases) {
-    try {
-      await run();
-    } catch (error) {
-      failed++;
-      console.error(`FAIL ${label}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  return failed;
 }

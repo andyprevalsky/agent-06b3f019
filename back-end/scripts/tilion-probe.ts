@@ -1390,6 +1390,50 @@ check(
 );
 
 check(
+  'storage-harvest',
+  'context.storageState() after leaving the origin that set localStorage; tab URL after files/fetch',
+  async (ctx) => {
+    const created = await ctx.createSession({ idle_timeout: 120, ttl: 600 });
+    if (!created.sessionId || !created.connectUrl) return { create: summarizeCreate(created) };
+    const out: Json = {};
+    const origins = (state: { origins: Array<{ origin: string }> }) =>
+      state.origins.map((origin) => origin.origin);
+    try {
+      let { browser, page } = await connectPlaywright(created.connectUrl);
+      await page.goto('https://example.com/', { waitUntil: 'domcontentloaded' });
+      await page.evaluate(() => localStorage.setItem('rose_probe', 'set'));
+      out.onSameOrigin = origins(await browser.contexts()[0].storageState());
+      await page.goto('https://www.iana.org/help/example-domains', {
+        waitUntil: 'domcontentloaded',
+      });
+      out.afterLeavingOrigin = origins(await browser.contexts()[0].storageState());
+      await page.goto('https://example.com/', { waitUntil: 'domcontentloaded' });
+      await browser.close();
+      // Control: a fresh client (what the backend harvest is) with nothing in between.
+      ({ browser, page } = await connectPlaywright(created.connectUrl));
+      out.freshClientNoFetch = origins(await browser.contexts()[0].storageState());
+      out.freshClientPageSeesKey = await page.evaluate(() => localStorage.getItem('rose_probe'));
+      await browser.close();
+      // A REST files/fetch while no client is attached: does it move the visible tab?
+      const fetched = await api('POST', `/v1/session/${created.sessionId}/files/fetch`, {
+        url: 'https://www.w3.org/TR/2003/REC-PNG-20031110/iso_8859-1.txt',
+      });
+      out.filesFetchStatus = fetched.status;
+      ({ browser, page } = await connectPlaywright(created.connectUrl));
+      out.tabUrlAfterFilesFetch = browser
+        .contexts()[0]
+        .pages()
+        .map((p) => p.url());
+      out.afterFilesFetch = origins(await browser.contexts()[0].storageState());
+      await browser.close();
+    } finally {
+      await ctx.release(created.sessionId);
+    }
+    return out;
+  }
+);
+
+check(
   'concurrency',
   'open up to the cap; next create gets 429 concurrency_limit; delete all',
   async (ctx) => {
