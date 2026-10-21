@@ -84,7 +84,7 @@ async def test_native_values_and_failure():
 
 
 async def run_all_tests():
-    r = BlackboxResult("tool-output")
+    r = BlackboxResult()
     await r.record_async("scoped_output_roundtrip", test_scoped_output_roundtrip)
     await r.record_async("native_values_and_failure", test_native_values_and_failure)
     return r
