@@ -155,3 +155,13 @@ planner consumer refreshes it without adding a terminal or moving its clock.
 The same final tests fail on 50f9dc499a1f2940fb7464a6d955ea1659dadb67 and pass
 with these repairs. Receipts and exact commands are in the source-bound P2
 handoff. Outcome proof remains open; no benchmark or provider run was performed.
+
+### Final integration fixture isolation (2026-10-21)
+
+The combined owning-registration selection passed its assertions but its strict
+network guard recorded six unmocked calls from the cancellation fixture: four
+browser-control reads and two ancillary realtime broadcasts. The fixture now
+supplies explicit agent-owned browser control and an in-memory realtime sink.
+No cancellation/result/cleanup assertion or production behavior changed. The
+integration retains the blocked first receipt and qualifies the same combined
+selection again rather than reporting the unsealed assertion pass as green.
