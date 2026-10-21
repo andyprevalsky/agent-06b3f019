@@ -1,4 +1,5 @@
 #!/usr/bin/env tsx
+import { phoneFixtureNumber } from './phone-fixture-users';
 import { config } from 'dotenv';
 import { randomUUID } from 'crypto';
 import { prisma } from '../../providers/database';
@@ -35,7 +36,9 @@ async function request(
 async function user(phone?: string) {
   const userId = `iphone-blackbox-${randomUUID()}`;
   users.push(userId);
-  await prisma.user.create({ data: { userId, phone } });
+  await prisma.user.create({
+    data: { userId, phone: phone === '+19729777432' ? phoneFixtureNumber() : phone },
+  });
   return userId;
 }
 test('unauthenticated capability is rejected', async () => {

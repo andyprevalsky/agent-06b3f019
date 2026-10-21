@@ -1,3 +1,4 @@
+import { phoneFixtureNumber } from './phone-fixture-users';
 #!/usr/bin/env tsx
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -27,7 +28,7 @@ async function mountedRoute(): Promise<void> {
       data: (await response.json()) as { lease?: { id: string; status: string } },
     };
   };
-  await prisma.user.create({ data: { userId, phone: '+19729777432' } });
+  await prisma.user.create({ data: { userId, phone: phoneFixtureNumber() } });
   try {
     assert.equal(
       (await request('/device', { providerDeviceId: `fixture-${randomUUID()}` }, 'PUT')).status,

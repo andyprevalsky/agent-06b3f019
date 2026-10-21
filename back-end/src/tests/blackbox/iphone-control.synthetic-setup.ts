@@ -38,7 +38,8 @@ export async function syntheticConfiguration(userId: string, leaseId: string) {
       floorCursor: 0,
       floorAt: new Date().toISOString(),
     };
-  state.expectedPhone = '+19729777432';
+  state.expectedPhone =
+    (await prisma.user.findUniqueOrThrow({ where: { userId } })).phone ?? undefined;
   state.expectedGoogleIdentity ??= 'fixture-google@example.invalid';
   if (state.verification === undefined)
     state.verification = {

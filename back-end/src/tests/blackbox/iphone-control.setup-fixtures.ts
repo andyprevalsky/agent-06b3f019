@@ -92,7 +92,7 @@ export async function proveSettings(
       ...(includeIdentity ? ['apple_account'] : []),
     ]) {
       h.observationResult = {
-        text: `Explicit synthetic ${verificationTarget} On/enabled and signed in ${f.identity}; selected receive address +19729777432`,
+        text: `Explicit synthetic ${verificationTarget} On/enabled and signed in ${f.identity}; selected receive address ${f.phone}`,
       };
       const evidence = await observe(h, f);
       const response = await setupPost(h, f, {
