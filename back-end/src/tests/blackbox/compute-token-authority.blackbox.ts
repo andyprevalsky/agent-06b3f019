@@ -335,6 +335,32 @@ async function main() {
     const guestB = await startBackend('guest B', urls.guestB, decryptionKey, guestEnv);
     children.push(guestB.child);
 
+    // A served reset must join the same per-deployment lock as a mark.
+    let resetSettled = false;
+    let pendingReset: Promise<unknown> | undefined;
+    await authorityDb.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'foundry-cooldown:serialization.example.test:deployment'}))`;
+      pendingReset = foundryCall(guestA.baseUrl, 'foundry-deployment/served', {
+        region: 'serialization.example.test',
+        deployment: 'deployment',
+      }).then((value) => {
+        resetSettled = true;
+        return value;
+      });
+      let waiting = false;
+      for (let i = 0; i < 100 && !waiting && !resetSettled; i++) {
+        const rows = await authorityDb.$queryRaw<
+          Array<{ waiting: boolean }>
+        >`SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted AND objid::bigint=(hashtext(${'foundry-cooldown:serialization.example.test:deployment'})::bigint & 4294967295)) AS waiting`;
+        waiting = rows[0].waiting;
+        if (!waiting) await delay(20);
+      }
+      assert.strictEqual(resetSettled, false, 'served reset bypassed the mark transaction lock');
+      assert(waiting, 'backend reset must be observed waiting on the exact deployment lock');
+    });
+    await pendingReset;
+    console.log('PASS real backend reset serializes with mark lock');
+
     // 1. Capacity is one budget across guests.
     const perGuest = GPT_LINEAGE_CAPACITY / 2 + 1;
     const lineages: Array<{ base: string; key: string; status: number }> = [];
@@ -411,6 +437,24 @@ async function main() {
       `warmed worker ignored shared cooldown: ${JSON.stringify(warmedB)}`
     );
 
+    for (const [base, key] of [
+      [guestB.baseUrl, GUEST_KEY],
+      [authority.baseUrl, AUTHORITY_KEY],
+    ]) {
+      const response = await fetch(`${base}/test-foundry`, {
+        method: 'POST',
+        headers: { 'X-API-Key': key, 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      const result = (await response.json()) as { hits: string[] };
+      assert.strictEqual(response.status, 200, JSON.stringify(result));
+      assert(result.hits.length > 0, 'fixture must exercise its mocked Azure transport');
+      assert(
+        !result.hits.includes(workerA.first),
+        'TypeScript consumer bypassed shared Python cooldown'
+      );
+    }
+
     // Expiry reopens exactly the same deployment in a fresh worker process.
     await authorityDb.integration.updateMany({
       where: {
@@ -474,6 +518,41 @@ async function main() {
     assert.strictEqual(readBody.cooldowns[accountId]?.strikes, 1);
     assert(readBody.cooldowns[accountId]?.rateLimitedUntil !== null, 'guest B reads the cooldown');
     console.log('PASS Foundry cooldown uses the provider hint, else 30/60/300 s, reset on serve');
+    // Reverse direction: a backend consumer's rejection cools Python workers.
+    await authorityDb.integration.updateMany({
+      where: { name: 'foundry_deployment_cooldown' },
+      data: { rateLimitedUntil: new Date(Date.now() - 1000) },
+    });
+    const tsResponse = await fetch(`${guestA.baseUrl}/test-foundry`, {
+      method: 'POST',
+      headers: { 'X-API-Key': GUEST_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reject: true }),
+    });
+    const tsResult = (await tsResponse.json()) as { hits: string[] };
+    assert.strictEqual(tsResponse.status, 200, JSON.stringify(tsResult));
+    assert.strictEqual(
+      tsResult.hits.length,
+      2,
+      'TypeScript must report rate limit then use another deployment'
+    );
+    const pythonAfterTs = runFoundryWorker(guestB.baseUrl, 'observe');
+    assert(
+      !pythonAfterTs.hits.includes(tsResult.hits[0]),
+      'Python bypassed TypeScript shared cooldown'
+    );
+    const tsMark = await authorityDb.integration.findFirst({
+      where: {
+        name: 'foundry_deployment_cooldown',
+        accountId: `foundry-cta.example.test:${tsResult.hits[0]}`,
+      },
+    });
+    assert(
+      tsMark?.rateLimitedUntil && tsMark.rateLimitedUntil.getTime() - Date.now() > 890000,
+      'TypeScript must preserve provider 900-second advice'
+    );
+    console.log(
+      'PASS TypeScript and Python share cooldowns bidirectionally and preserve long hints'
+    );
   } finally {
     for (const child of children) child.kill('SIGTERM');
     await Promise.all(

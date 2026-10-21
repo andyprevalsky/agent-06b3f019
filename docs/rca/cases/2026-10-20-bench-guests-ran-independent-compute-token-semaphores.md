@@ -112,3 +112,12 @@ None recorded.
 ## Reusable lesson
 
 When an isolated environment copies a shared credential, route the credential's lease and cooldown state to one shared authority instead of copying that state too.
+
+
+### 2026-10-21 environment precedence correction
+
+The completion lane changed local authority-key derivation to honor the explicit
+injected authority key first, then injected BACKEND_API_KEY, then back-end/.env.
+The existing local-start regression fails against the previous helper and passes
+with the corrected precedence. The explicit diagnostic opt-out still clears both
+authority exports. No production setting was written or deployed.

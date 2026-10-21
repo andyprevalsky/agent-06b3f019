@@ -103,3 +103,29 @@ authority for every benchmark guest and production worker.
 ## Reusable lesson
 
 Keep a rate-limit cooldown next to the shared quota it describes, and treat a rejection without retry advice as an escalating unknown, never as a 1 s hint.
+
+
+### 2026-10-21 completion after independent review
+
+The follow-up owner reproduced stale read/mark overlap, invalid HTTP-200 state,
+failed reset acknowledgements, and worker/authority clock skew against the
+31eaccdb6 source. The existing Rose regression now exercises those interleavings,
+including reset/new-mark and out-of-order mark responses. Cache writes are
+per-deployment generation-fenced, responses are validated before cache mutation,
+failed resets retain retry state, and monotonic deadlines use authority-provided
+remaining duration rather than comparing host clocks.
+
+The TypeScript Foundry consumer now uses the same shared state: a production
+backend uses its existing Prisma store; a guest backend calls the configured
+authority directly. There is no second database pool or recursive guest endpoint.
+The real-backend authority regression exercises Python-to-TypeScript and
+TypeScript-to-Python propagation with sealed mock Azure transport, including
+900-second provider advice. The original TypeScript module fails that regression
+by requesting a deployment already cooled by Python. The original backend reset
+also fails the new advisory-lock regression: it completes while the mark's exact
+per-deployment lock is held. The fixed reset joins that same lock.
+
+The scope was explicitly clarified by the user to include all benchmark Azure
+consumers. Backend-first rollout remains mandatory. These are causal fixtures;
+no unchanged Polar task, live provider load, or deployed outcome was tested.
+The case remains open for that outcome proof.

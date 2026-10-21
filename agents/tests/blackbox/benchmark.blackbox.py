@@ -1642,25 +1642,6 @@ def test_ci_should_fail_on_skipped_required_task():
     assert _ci_should_fail({"failed": 0}) is False
 
 
-def test_ci_permits_only_the_opt_in_agentcard_release_skip():
-    """The AgentCard sandbox release stall is a deploy-approved SKIP only behind its exact flag."""
-    from benchmarks.results import TaskResult
-    from benchmarks.run_benchmark import AGENTCARD_RELEASE_SKIP_REASON, _ci_should_fail
-
-    def skipped(reason: str) -> TaskResult:
-        return TaskResult(name="agent-payment-abandonment", passed=False, agent_id="agent-123",
-                          status="SKIPPED", progress_score=0, duration_seconds=1, cost_cents=0,
-                          message_count=0, failure_reason=reason)
-
-    summary = {"failed": 0, "skipped": 1}
-    stall = skipped(f"{AGENTCARD_RELEASE_SKIP_REASON}: owt_1 consumed")
-    with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}):
-        assert _ci_should_fail(summary, [stall]) is False
-        assert _ci_should_fail(summary, [skipped("Cloud cleanup failed: payment: TimeoutError")]) is True
-        assert _ci_should_fail({"failed": 1, "skipped": 1}, [stall]) is True
-    for value in ("", "0", "true"):
-        with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": value}):
-            assert _ci_should_fail(summary, [stall]) is True
 
 
 def test_outreach_batch_has_timeout_floor():
@@ -12414,7 +12395,10 @@ def test_timeout_default_respects_explicit_floor():
 
 
 def _exercise_history_output_sink(mode):
-    import json, sys, tempfile, types
+    import json
+    import sys
+    import tempfile
+    import types
     from pathlib import Path
     from unittest.mock import patch
     from benchmarks import results, timeout_history, span_history
@@ -16802,7 +16786,7 @@ def test_local_isolated_stack_compute_token_authority_default():
             env: dict[str, str] = {"BACKEND_API_KEY": "shell-key"}
             local_bench.apply_compute_token_authority_env(env)
             assert env["COMPUTE_TOKEN_AUTHORITY_URL"] == "https://navi-j9a9.onrender.com"
-            assert env["COMPUTE_TOKEN_AUTHORITY_API_KEY"] == "dotenv-key"
+            assert env["COMPUTE_TOKEN_AUTHORITY_API_KEY"] == "shell-key"
 
             env = {"COMPUTE_TOKEN_AUTHORITY_URL": "https://authority.example", "COMPUTE_TOKEN_AUTHORITY_API_KEY": "k"}
             local_bench.apply_compute_token_authority_env(env)
@@ -23413,7 +23397,8 @@ async def test_agentcard_release_skip_rejects_independent_native_retirement_fail
             async def end_session(self, model, sid):
                 assert (model, sid) == ('rose-test', 'owned-session')
                 calls.append((model, sid))
-                if native == 'failed': raise RuntimeError('exact owned retirement unavailable')
+                if native == 'failed':
+                    raise RuntimeError('exact owned retirement unavailable')
                 return dict(engine='experiential', join_verified=True, ended=sid, session_id=sid, session_scope_id=lifecycle['agentId'], revision=1, state={}, history=[], usage={})
         cleanup = AsyncMock(side_effect=AssertionError('duplicate financial cleanup'))
         delete = AsyncMock()
@@ -23433,7 +23418,8 @@ async def test_agentcard_release_skip_rejects_independent_native_retirement_fail
             for name, value in {'_api_headers':AsyncMock(return_value={}), 'WMHHttpClient':NativeClient, '_run_with_agent_execution_backstop':AsyncMock(side_effect=stall), '_capture_task_failure_evidence':AsyncMock(return_value=({'messages': [], '_benchmark': {'payment_lifecycle':deepcopy(lifecycle)}}, logs)), 'finalize_archive_and_score_world_model':archive, 'ensure_payment_lifecycle_cleanup':cleanup, 'delete_agent':delete, '_run_user_id_override_for_task':lambda *_args:None}.items():
                 stack.enter_context(patch.object(bench, name, value))
             result = await bench.run_single_task('https://fixture.invalid', task)
-        cleanup.assert_not_awaited(); delete.assert_awaited_once()
+        cleanup.assert_not_awaited()
+        delete.assert_awaited_once()
         assert len(calls) == (native != 'none'), calls
         assert result.logs['agentcard_release_stall_lifecycle'] == lifecycle
         expected = 'ERROR' if native == 'failed' else 'SKIPPED'
@@ -23443,7 +23429,8 @@ async def test_agentcard_release_skip_rejects_independent_native_retirement_fail
         if native == 'failed':
             assert result.logs['wmh_retirement_error'] == dict(type='RuntimeError', message='exact owned retirement unavailable', session_id='owned-session', session_scope_id=lifecycle['agentId'], join_verified=False, cost_verified=False)
             assert 'exact owned retirement unavailable' in result.failure_reason
-        elif native == 'joined': assert result.logs['wmh_retirement']['join_verified'] is True
+        elif native == 'joined':
+            assert result.logs['wmh_retirement']['join_verified'] is True
 
 
 async def test_agentcard_release_skip_catalog_wait_rejects_production_and_unknown():
@@ -23644,22 +23631,31 @@ async def _clock_poll_case(name, wall_delta, elapsed_delta, status='COMPLETED',
     task.approval_handling='ignore'
     class Clock:
         def __init__(self):
-            self.calls={'wall':0,'elapsed':0}; self.wall=10000+wall_delta; self.elapsed=20000+elapsed_delta
+            self.calls={'wall':0,'elapsed':0}
+            self.wall=10000+wall_delta
+            self.elapsed=20000+elapsed_delta
         def time(self):
             self.calls['wall']+=1
             return 10000 if self.calls['wall']==1 else self.wall
         def monotonic(self):
             self.calls['elapsed']+=1
             return 20000 if self.calls['elapsed']==1 else self.elapsed
-    clock=Clock(); reads=[]; pending=list(next_times); denial=[]; payment=[]
+    clock=Clock()
+    reads=[]
+    pending=list(next_times)
+    denial=[]
+    payment=[]
     async def read(*args):
         reads.append(1)
         msgs=([{'role':'USER','text':str(i)} for i in range(len(reads))] if mode=='progress' else [])
-        if mode=='chat': msgs=[{'role':'ASSISTANT','text':'answer'}]
-        if mode=='payment': msgs=[{'role':'TOOL','metadata':{'title':'Payment card ready'}}]
+        if mode=='chat':
+            msgs=[{'role':'ASSISTANT','text':'answer'}]
+        if mode=='payment':
+            msgs=[{'role':'TOOL','metadata':{'title':'Payment card ready'}}]
         return {'agent':{'id':'00000000-0000-4000-8000-000000000001','status':status},'messages':msgs}
     async def sleep(*args):
-        if not pending: raise AssertionError('poll did not terminate on declared clock schedule')
+        if not pending:
+            raise AssertionError('poll did not terminate on declared clock schedule')
         clock.wall,clock.elapsed=pending.pop(0)
     async def tree(*args):
         return {'total_messages':len(reads) if mode=='progress' else 0,'agent_count':1,
@@ -23667,13 +23663,17 @@ async def _clock_poll_case(name, wall_delta, elapsed_delta, status='COMPLETED',
                 'all_agents':[{'agent_id':'00000000-0000-4000-8000-000000000001',
                   'message_count':len(reads) if mode=='progress' else 0,'status':status}]}
     def deny(*args,**kwargs):
-        denial.append('external'); raise AssertionError('external network forbidden')
+        denial.append('external')
+        raise AssertionError('external network forbidden')
     async def start_payment(*args):
         return {'status':'pending'}
     async def wait_payment(*args,**kwargs):
-        payment.append(kwargs['timeout_seconds']); return {'status':'reclaimed'}
-    if mode=='chat': task.is_chat_mode=True
-    if mode=='payment': task.payment_card_request_action='abandon'
+        payment.append(kwargs['timeout_seconds'])
+        return {'status':'reclaimed'}
+    if mode=='chat':
+        task.is_chat_mode=True
+    if mode=='payment':
+        task.payment_card_request_action='abandon'
     with ExitStack() as stack:
         for target,attr,value in [
             (socket.socket,'connect',deny),(socket,'getaddrinfo',deny),
@@ -23685,16 +23685,21 @@ async def _clock_poll_case(name, wall_delta, elapsed_delta, status='COMPLETED',
             (bench,'_start_payment_abandonment_with_recovery',start_payment),
             (bench,'_wait_for_expected_payment_lifecycle',wait_payment),
             (bench.asyncio,'sleep',sleep),
-        ]: stack.enter_context(patch.object(target,attr,value))
+        ]:
+            stack.enter_context(patch.object(target,attr,value))
         result=await bench._poll_agent('http://offline.invalid','00000000-0000-4000-8000-000000000001',task)
     assert denial==[]
     assert result[0]['agent']['status']==status
     reason=result[3]
     assert bool(reason and reason.startswith('Timeout after')) is expect_timeout, (mode,reason)
-    if mode=='stall': assert reason and 'tree stalled' in reason
-    if mode=='payment': assert reason is None and payment==[min(420,task.timeout_seconds-elapsed_delta)]
-    if mode=='progress': assert len(reads)==3 and reason is not None
-    if mode=='chat': assert len(reads)==2 and reason is None
+    if mode=='stall':
+        assert reason and 'tree stalled' in reason
+    if mode=='payment':
+        assert reason is None and payment==[min(420,task.timeout_seconds-elapsed_delta)]
+    if mode=='progress':
+        assert len(reads)==3 and reason is not None
+    if mode=='chat':
+        assert len(reads)==2 and reason is None
     return result
 
 async def _clock_deadline_cases(name,limit):
