@@ -63,7 +63,8 @@ export function compatiblePreferredBrowserConfig(
   if (
     candidate.provider === 'tilion' &&
     candidate.tilionProxyType !== 'residential' &&
-    candidate.tilionProxyType !== 'mobile'
+    candidate.tilionProxyType !== 'mobile' &&
+    candidate.tilionProxyType !== 'direct'
   ) {
     return null;
   }
