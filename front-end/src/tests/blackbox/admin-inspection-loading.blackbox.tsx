@@ -172,12 +172,13 @@ it('keeps realtime browser inserts passive while selected detail is unresolved',
     await screen.findByText(/Read-only account inspection/);
     expect(mutations).toEqual([]);
     await selectOwnedRun();
-    await screen.findByPlaceholderText('Type your message...');
+    await screen.findByTestId('terminal-input-area');
     await waitFor(() =>
       expect(realtime.subscribeToAgent).toHaveBeenLastCalledWith('agent-001', expect.anything()),
     );
     window.history.replaceState({}, '', `/?agent-id=agent-001&browser-id=${TASK_ID}`);
     insertBrowser('agent-001', 'owned-browser-init');
+    await screen.findByPlaceholderText('Type your message...');
     await waitFor(() =>
       expect(mutations).toEqual([`${API_BASE}/browser-session/task/${TASK_ID}/control`]),
     );

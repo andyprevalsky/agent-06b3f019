@@ -2192,7 +2192,7 @@ describe('BrowserStatusBar (blackbox)', () => {
     expect(await screen.findByRole('button', { name: 'Take control' })).toBeInTheDocument();
   });
 
-  it('fullscreen with disconnected session shows Disconnected state + Take Control overlay button', async () => {
+  it('fullscreen with disconnected session shows the reconnect Take Control overlay', async () => {
     const messages: Message[] = [
       {
         message_id: 'm-disc',
@@ -2219,8 +2219,11 @@ describe('BrowserStatusBar (blackbox)', () => {
     const hdrButtons = within(header).getAllByRole('button');
     await user.click(hdrButtons[hdrButtons.length - 2]);
 
-    // Fullscreen "Disconnected" header label + overlay "Take Control" button
-    await waitFor(() => expect(screen.getByText('Disconnected')).toBeInTheDocument());
+    // Disconnected sessions expose the reconnect overlay, not an active-session control.
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /^Take Control$/ })).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole('button', { name: /^Take control$/ })).toBeNull();
     expect(screen.getByText('Take Control')).toBeInTheDocument();
   });
 
@@ -2252,7 +2255,7 @@ describe('BrowserStatusBar (blackbox)', () => {
     const hdrButtons = within(header.closest('div')!.parentElement!).getAllByRole('button');
     await user.click(hdrButtons[hdrButtons.length - 2]);
     const oldIframe = await screen.findByTitle('Browser');
-    expect(screen.getByText('Disconnected')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Take Control$/ })).toBeInTheDocument();
 
     const replacement: Message = {
       message_id: 'replacement-session',
@@ -2281,8 +2284,8 @@ describe('BrowserStatusBar (blackbox)', () => {
     const newIframe = await screen.findByTitle('Browser');
     expect(newIframe).not.toBe(oldIframe);
     expect(newIframe).toHaveAttribute('src', 'https://steel.example/live/new?interactive=false');
-    expect(screen.getByText('Active')).toBeInTheDocument();
-    expect(screen.queryByText('Disconnected')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Take control$/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Take Control$/ })).toBeNull();
   });
 
   it('resumes a disconnected fullscreen session instead of completing stale auth assistance', async () => {
@@ -2413,7 +2416,7 @@ describe('BrowserStatusBar (blackbox)', () => {
       'true',
     );
     expect(within(drawer).getByTestId('browser-agent-pane')).toBeInTheDocument();
-    expect(within(drawer).getByText('Active')).toBeInTheDocument();
+    expect(within(drawer).getByRole('button', { name: /^Take control$/ })).toBeInTheDocument();
 
     // No close X on desktop (UI ledger row 67): Escape / the Browser icon close it.
     await user.keyboard('{Escape}');

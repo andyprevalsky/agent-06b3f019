@@ -1,6 +1,7 @@
 import { createElement } from 'react';
 import { act, fireEvent, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import ApprovalChip from '@/features/terminal-component-group/components/ApprovalChip';
 import { MessageListItems } from '@/features/terminal-component-group/components/MessageListItems';
 import type { Message } from '@/lib/api';
 import { msg, WithAgent } from './code-agent-steering.fixtures';
@@ -134,22 +135,33 @@ describe('quiet agent coordination in a human turn', () => {
       { text: 'Please approve deployment' },
     );
     renderWithProviders(
-      projection([
-        human('one'),
-        exchange('question', { kind: 'question' }),
-        q,
-        approval,
-        exchange('answer'),
-        human('two'),
-        exchange('new'),
-      ]),
+      createElement(
+        'div',
+        null,
+        projection([
+          human('one'),
+          exchange('question', { kind: 'question' }),
+          q,
+          approval,
+          exchange('answer'),
+          human('two'),
+          exchange('new'),
+        ]),
+        createElement(ApprovalChip, {
+          pendingApproval: { attentionRequestId: 'approval', question: approval.text },
+        }),
+      ),
     );
     expect(screen.getAllByTestId('agent-exchange-group')).toHaveLength(2);
     expect(screen.queryByText('Private exchange question')).toBeNull();
     expect(screen.getByText('Which color do you want?')).toBeInTheDocument();
-    const approvalRow = document.querySelector(`[data-message-id="${approval.message_id}"]`);
+    // ApprovalChip owns the visible control; the transcript must not add an empty spacer.
+    expect(document.querySelector(`[data-message-id="${approval.message_id}"]`)).toBeNull();
+    const approvalRow = screen.getByText('Please approve deployment');
     expect(approvalRow).toBeInTheDocument();
-    expect(approvalRow?.closest('[data-testid="agent-exchange-group"]')).toBeNull();
+    expect(approvalRow.closest('[data-testid="agent-exchange-group"]')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Accept' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reject' })).toBeInTheDocument();
   });
   it('counts directed identities and leaves code-only exchanges untouched', () => {
     renderWithProviders(

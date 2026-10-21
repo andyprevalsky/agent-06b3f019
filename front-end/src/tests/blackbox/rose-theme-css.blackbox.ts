@@ -346,9 +346,7 @@ describe('subtle dark dividers (Andy: separators white .07, outer borders <= .10
       'border-b border-[#f0f1f4] dark:border-white/[0.07]',
     );
     expect(text('rose-apps/RoseAppPanels.tsx')).toContain('dark:border-white/[0.07]');
-    expect(text('rose-apps/BrowserAppDrawer.tsx')).toContain(
-      'border-b border-gray-200/90 px-[18px] dark:border-white/[0.07]',
-    );
+    expect(text('rose-apps/BrowserAppDrawer.tsx')).toContain('border-b border-border px-[18px]');
   });
 
   it('the theme tokens behind border-border / border-input are the subtle greys', () => {
