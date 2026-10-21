@@ -2,10 +2,8 @@
 import nodeAssert from 'node:assert/strict';
 import type { Response } from 'express';
 import { TilionUncarriedStateError } from '../../providers/browser/tilion';
-import {
-  carriedStateFromRequest,
-  respondIfCarriedStateRequired,
-} from '../../domains/browser-session/service.carried-state';
+import { carriedStateFromRequest } from '../../domains/browser-session/service.carried-state';
+import { respondIfCarriedStateRequired } from '../../domains/browser-session/routes.carried-state';
 import { resumeSessionSchema, rotateProxySchema } from '../../domains/browser-session/types';
 
 function fakeResponse() {

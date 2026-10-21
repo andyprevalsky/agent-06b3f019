@@ -5,7 +5,8 @@
  * POST /api/browser-session/rotate-proxy - Advance the IP/provider recovery ladder
  */
 
-import { carriedStateFromRequest, respondIfCarriedStateRequired } from './service.carried-state';
+import { respondIfCarriedStateRequired } from './routes.carried-state';
+import { carriedStateFromRequest } from './service.carried-state';
 import { type Response, type Router } from 'express';
 import { ZodError } from 'zod';
 import { type AuthRequest, authenticate } from '../../providers/auth';

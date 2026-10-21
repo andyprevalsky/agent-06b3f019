@@ -7,7 +7,8 @@ import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { resumeBrowserSession, SessionNotFoundError } from './service';
 import { resumeSessionSchema } from './types';
-import { carriedStateFromRequest, respondIfCarriedStateRequired } from './service.carried-state';
+import { respondIfCarriedStateRequired } from './routes.carried-state';
+import { carriedStateFromRequest } from './service.carried-state';
 
 const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
 const log = createLogger('BrowserSession');
