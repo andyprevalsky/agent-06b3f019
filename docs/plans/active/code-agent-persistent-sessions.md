@@ -124,9 +124,10 @@ the requested next contract; it does not claim the current runtime enforces it.
   base revision, and its own thread/workspace identity. A browser fork also
   records origin and authenticated account; a code fork records repo base SHA.
 - Normal child work is isolated. The parent continues working while children
-  run. Children submit results to their **direct parent**, never directly to a
-  grandparent, default branch, or another sibling. Verified browser credentials
-  are the explicit exception: they use the account-wide distribution plane below.
+  run. Normal child collaboration submits results to the **direct parent**,
+  not a grandparent or sibling. Top-level network publication is a separate
+  coordinated deploy operation below. Verified browser credentials use the
+  account-wide distribution plane rather than parent integration.
 - Existing “New agent in this branch” is an explicit collaborative mode, not
   the default: threads stay separate and one writer lease serializes shared
   workspace mutation. It must not silently give concurrent agents the same
@@ -135,6 +136,19 @@ the requested next contract; it does not claim the current runtime enforces it.
   verified checkpoint or supported provider fork as an optimization, with a
   restore fallback. Do not assume native snapshot/fork is enabled for an E2B
   account or compatible with the installed SDK.
+
+### Stacked Git branches (clarified 2026-10-21)
+
+Each independent agent has one branch in its own worktree, based on the exact
+parent commit captured at fork. Its PR targets the parent's branch; top-level
+work targets the shared default branch. Branch names use a suffix such as
+`rose/feature--child-abc123` so a ref is not both a file and a directory.
+Record child branch, parent branch, and fork SHA. Parent changes are integrated
+into the child with conflict resolution and affected validation before join.
+If the parent lands on the shared branch first, retarget/rebase the remaining
+stack through the repository's workflow. Internal helpers sharing an owning
+code agent's worktree share its branch; give them separate worktrees if they
+need independent branches. Sharing a filesystem is not a branch-merge strategy.
 
 ### Submit, validate, merge, acknowledge
 
@@ -157,6 +171,21 @@ and exclusions. Parent timeline shows a concise result with links to the child
 and receipt, not a concatenation of the child's entire native conversation.
 
 ### Code and E2B snapshots
+
+Independent sub-agents of sub-agents join their immediate parent's branch via
+the repo-defined branch-join skill. If absent, use the deploy skill's checks in
+explicit parent-target join mode, without main publication or rollout. Internal
+coding workers share their owning code agent's worktree by default, with file
+ownership and serialized Git operations; there is no branch merge between them.
+
+Network publication is a distinct top-level operation: when changes must be available to
+all agents, the code agent follows the repository's own deploy skill to merge
+the validated result into GitHub `main` (or its configured shared branch).
+If no repo-local deploy skill exists, it creates one from that repository's
+actual checks and release configuration. For Rose, use the existing `/deploy`
+coordinator and required gates. Parent-branch integration alone is not network
+publication; a shared-branch merge alone is not proof every running agent has
+adopted it. Return the verified commit and synchronize consumers at safe points.
 
 - Versioned code uses a three-way Git merge from the recorded fork SHA into
   the direct parent's branch. Verify repo/user identity and declared changes;

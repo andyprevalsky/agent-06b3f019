@@ -28,8 +28,10 @@ export const ROSE_SKILL_HARNESS_DIRS = ['.claude/skills', '.agents/skills'] as c
 /** The skills every account gets; Rose Desktop accounts get all of them. */
 export const STOCK_ROSE_SKILLS: readonly string[] = [
   'agent-graph',
+  'branch-join',
   'change-environment-size',
   'code-session',
+  'deploy',
   'talk-to-user',
 ];
 export const ROSE_SKILL_FILE = 'SKILL.md';
