@@ -229,7 +229,7 @@ describe('top-right app icons', () => {
     const device = within(phone).getByTestId('rose-phone-device');
     expect([...phone.children]).toEqual([device]);
     expect(device.style.boxShadow).toContain('rgba(0,0,0,.35)');
-    expect(device).toHaveTextContent('Coming soon');
+    expect(device).toHaveTextContent('Select an agent to view its phone.');
     expect(within(phone).queryAllByRole('button')).toHaveLength(0);
     expect(screen.getByTestId('rose-app-panel')).toHaveAttribute('data-state', 'closed');
     // One app at a time: opening Integrations hides the phone.

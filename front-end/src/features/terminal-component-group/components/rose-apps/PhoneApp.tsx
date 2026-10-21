@@ -4,9 +4,10 @@
  *   Rose Desktop flag off, or openApp !== 'phone' --> not rendered
  *   openApp === 'phone' --> [SHOWN] just the iPhone, floating 24px from the
  *                           window's right edge, vertically centered; no
- *                           header, background, card or controls
- *   [SHOWN] screen: a calm "Coming soon" waiting screen (the phone harness is
- *           built in its own devbox). It makes no requests at all.
+ *                           surrounding header, background or card
+ *   [SHOWN] no owned phone interaction -> explicit empty state, no requests.
+ *   [OWNED TASK] authenticated broker read -> private frame/control; API absence
+ *           remains unavailable. Closing unmounts the reader and revokes frames.
  *   [SHOWN] --its icon again | Escape--> not rendered
  */
 
@@ -17,22 +18,7 @@ import { useIsMobile } from '@/hooks/use-mobile';
 
 import { PHONE_EDGE_GAP } from './roseAppsLayout';
 import { useRoseApps } from './roseAppsState';
-
-export const PHONE_COMING_SOON_TITLE = 'Coming soon';
-export const PHONE_COMING_SOON_TEXT = 'Rose will be able to use your iPhone here.';
-
-function ComingSoonScreen() {
-  return (
-    <div
-      data-testid="phone-screen"
-      className="relative flex h-full w-full flex-col items-center justify-center gap-2.5 overflow-hidden rounded-[36px] bg-[#0d0d0f] px-[34px] text-center"
-    >
-      <div className="absolute left-1/2 top-2.5 h-7 w-24 -translate-x-1/2 rounded-2xl bg-black" />
-      <p className="text-[17px] font-semibold text-[#f2f2ef]">{PHONE_COMING_SOON_TITLE}</p>
-      <p className="text-[13px] leading-[1.45] text-[#a3a39d]">{PHONE_COMING_SOON_TEXT}</p>
-    </div>
-  );
-}
+import { PhoneAppScreen } from './PhoneAppScreen';
 
 export function PhoneApp() {
   const apps = useRoseApps();
@@ -66,10 +52,10 @@ export function PhoneApp() {
       )}
       <div
         data-testid="rose-phone-device"
-        className="relative h-[630px] w-[300px] rounded-[46px] bg-[#1c1c1e] p-[11px]"
+        className="relative h-[min(630px,calc(100dvh-110px))] min-h-[360px] w-[min(300px,calc(100vw-24px))] rounded-[46px] bg-[#1c1c1e] p-[11px]"
         style={{ boxShadow: '0 0 0 2px #2b2b2b, 0 30px 70px rgba(0,0,0,.35)' }}
       >
-        <ComingSoonScreen />
+        <PhoneAppScreen />
       </div>
     </div>
   );
