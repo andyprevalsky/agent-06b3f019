@@ -111,6 +111,14 @@ The parent retains 10-minute and start/no-queue/end CLI scorecards.
    Leave unrelated RCA lanes moving. Repeat this loop until the requested goal
    passes, then finish the normal deployment, durable publication and owned cleanup.
 
+Between bug-fix sessions, run the affected owning tests, then rerun the same
+original authorized benchmark. A full `/deploy` is not required between fixes.
+If the benchmark actually depends on changed deployed code, satisfy only that
+necessary deployed prerequisite before the rerun; do not automatically make the
+whole release a prerequisite. An already active deployment may finish in
+parallel. Preserve the original benchmark contract, scoped approvals and normal
+production-release requirements.
+
 Parent sleep, user questions and scorecard edits do not pause active workers.
 Preparing a command, passing a diagnostic and completing an evidence packet are
 substeps; they do not reset the overall RCA scope or establish outcome progress.
