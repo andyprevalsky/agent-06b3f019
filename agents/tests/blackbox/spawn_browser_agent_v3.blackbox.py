@@ -6811,8 +6811,17 @@ async def test_browser_observation_survives_action_persistence_without_planner_d
                      write_lock_resume_state={"secret_redaction_refs": {"pwd:synthetic": "secret-plaintext"}}, action_name="read_browser_state", auth_runtime_state=SimpleNamespace(mark_credential_ref=lambda _: None),
                      save_browser_action_message=repo.save_browser_action_message, agent_id="ag1", title_done="read_browser_state", task_id="t1",
                      current_url="https://private-user:private-password@example.com/login?token=private-token#private-fragment",
+                     current_model="fixture-actual-browser-model",
                      MessageStatus=MessageStatus, browser_url="https://viewer.invalid", tool_call_id_action="read-1", iteration=5,
                      MAX_ITERATIONS=250, coords_for_cursor=None)
+    model_assignments = [node for node in ast.walk(tree)
+                         if isinstance(node, ast.Assign)
+                         and any(isinstance(target, ast.Name) and target.id == "current_model" for target in node.targets)
+                         and isinstance(node.value, ast.Call)]
+    assert len(model_assignments) == 1, "Publish the model from the actual decision result"
+    model_assignment = ast.fix_missing_locations(ast.Module(body=model_assignments, type_ignores=[]))
+    namespace["llm_result"] = {"actual_model": "fixture-actual-browser-model"}
+    exec(compile(model_assignment, "<real-decision-model>", "exec"), namespace)
     exec(compile(module, "<real-action-persistence>", "exec"), namespace)
     with patch("config.load_config", return_value=_fake_config()):
         await namespace["persist"]()
@@ -6825,6 +6834,7 @@ async def test_browser_observation_survives_action_persistence_without_planner_d
     assert body["metadata"]["task_id"] == "t1" and body["metadata"]["toolCallId"] == "read-1"
     assert body["message"] == "Browser state captured."
     assert body["metadata"]["auxiliary"].get("current_url") == "https://example.com/login"
+    assert body["metadata"]["auxiliary"].get("actual_model") == "fixture-actual-browser-model"
     for private_part in ("private-user", "private-password", "private-token", "private-fragment"):
         assert private_part not in json.dumps(body)
     row = {"role": "TOOL", "text": body["message"], "metadata": body["metadata"]}
@@ -6845,11 +6855,12 @@ async def test_browser_observation_survives_action_persistence_without_planner_d
         assert control["metadata"]["credential_ref"] == ref and marked == [ref]
     for observed_url in ("", "about:blank", "javascript:alert(1)"):
         setup_mock({"/api/agents/": {"status": 200, "json": {"ok": True}}})
-        namespace.update(current_url=observed_url, coords_for_cursor={"x": 12, "y": 34})
+        namespace.update(current_url=observed_url, current_model=None, coords_for_cursor={"x": 12, "y": 34})
         with patch("config.load_config", return_value=_fake_config()):
             await namespace["persist"]()
         empty = json.loads(assert_captured_call(index=len(get_captured_requests()) - 1, url_contains="/api/agents/ag1/messages", method="POST")["requestBody"])
         assert "current_url" not in empty["metadata"]["auxiliary"], "Never invent a page URL"
+        assert "actual_model" not in empty["metadata"]["auxiliary"], "Never guess the decision model"
         assert empty["metadata"]["auxiliary"]["coordinates"] == {"x": 12, "y": 34}
         assert empty["metadata"]["task_id"] == "t1"
 
@@ -23954,7 +23965,8 @@ async def test_private_browser_pause_urls_use_protected_continuity():
                         "type": "text", "text": "[image omitted from Temporal resume]",
                     }
         if pause in {"drain", "max_steps"}:
-            action_saves = [call.kwargs for call in save_action.await_args_list if call.kwargs.get("auxiliary")]
+            action_saves = [call.kwargs for call in save_action.await_args_list
+                            if "coordinates" in (call.kwargs.get("auxiliary") or {})]
             assert action_saves
             for saved in action_saves:
                 assert saved["auxiliary"]["coordinates"] == {"x": 234, "y": 234}

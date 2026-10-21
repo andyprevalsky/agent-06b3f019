@@ -7205,6 +7205,11 @@ async def _spawn_browser_agent_activity_v3_real(
                 **(kwargs.get("auxiliary") or {}),
                 "current_url": _redact_url_query(current_url),
             }
+        if isinstance(current_model, str) and current_model.strip():
+            kwargs["auxiliary"] = {
+                **(kwargs.get("auxiliary") or {}),
+                "actual_model": current_model.strip(),
+            }
         for key in ("title", "message", "extra_metadata", "auxiliary"):
             if key in kwargs:
                 kwargs[key] = _redact_activity_value(kwargs[key])
@@ -7325,6 +7330,7 @@ async def _spawn_browser_agent_activity_v3_real(
 
     browser_url = None
     current_url = ""
+    current_model = None
     latest_structured_response: Optional[Dict[str, Any]] = None
     config = load_config()
     start_time = safe_time()
@@ -9464,6 +9470,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     llm_from_fast_cache=bool((llm_result.get("usage") or {}).get("from_fast_cache")),
                 )
                 llm_result = {**llm_result, "_thinking_stream_id": browser_stream.stream_id}
+                current_model = llm_result.get("actual_model")
                 # Track waterfall fall-through so subsequent iterations skip claudeAuth.
                 if llm_result.get("mode") != "claude" and browser_use_mode == "claude":
                     browser_use_mode = None
