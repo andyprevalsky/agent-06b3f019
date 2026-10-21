@@ -1,5 +1,10 @@
+import { createNative, readNative } from './service.native';
+import type { NativePhoneInput } from '../../providers/nativePhoneAttention';
 import { canonicalAuthRealm } from '../../providers/authRealm';
-import { completeAuthAssistanceForUser } from '../../providers/authAssistanceCompletion';
+import {
+  completeAuthAssistanceForUser,
+  type AuthAssistanceCompletionDependencies,
+} from '../../providers/authAssistanceCompletion';
 import { createLogger } from '../../providers/logger';
 import { notifyAuthAssistance } from '../../providers/smsSupervisor/outboundEvents';
 import { getBrowserSessionHealth } from '../../providers/browser';
@@ -79,6 +84,7 @@ export async function createAuthAssistanceRequest(
   userId: string,
   input: CreateAuthAssistanceInput
 ) {
+  if (input.targetKind === 'iphone') return createNative(userId, input as NativePhoneInput);
   const agent = await repo.findAgentForUser(input.agentId, userId);
   if (agent === null) throw new NotFoundError('Agent not found');
 
@@ -140,6 +146,8 @@ export async function createAuthAssistanceRequest(
 }
 
 export async function getAuthAssistanceRequest(id: string, userId: string) {
+  const native = await readNative(id, userId);
+  if (native !== null) return native;
   const request = await repo.findRequestById(id);
   if (request === null) throw new NotFoundError('Auth assistance request not found');
   if (request.userId !== userId) throw new ForbiddenError('Not authorized');
@@ -163,6 +171,8 @@ export async function getAuthAssistanceRequest(id: string, userId: string) {
 }
 
 export async function refreshAuthAssistanceSession(id: string, userId: string) {
+  const native = await readNative(id, userId, true);
+  if (native !== null) return native;
   const request = await repo.findRequestById(id);
   if (request === null) throw new NotFoundError('Auth assistance request not found');
   if (request.userId !== userId) throw new ForbiddenError('Not authorized');
@@ -249,8 +259,19 @@ export async function refreshAuthAssistanceSession(id: string, userId: string) {
   /* c8 ignore stop */
 }
 
-export async function completeAuthAssistanceRequest(id: string, userId: string) {
-  const result = await completeAuthAssistanceForUser(id, userId);
+export async function completeAuthAssistanceRequest(
+  id: string,
+  userId: string,
+  userMessage?: string,
+  dependencies?: Partial<AuthAssistanceCompletionDependencies>
+) {
+  const result = await completeAuthAssistanceForUser(
+    id,
+    userId,
+    new Date(),
+    dependencies,
+    userMessage
+  );
 
   if (result.status === 'not_found') throw new NotFoundError('Auth assistance request not found');
   if (result.status === 'forbidden') throw new ForbiddenError('Not authorized');
@@ -259,7 +280,7 @@ export async function completeAuthAssistanceRequest(id: string, userId: string) 
   }
 
   return {
-    request: serializeRequest(result.request),
+    request: (await readNative(id, userId))?.request ?? serializeRequest(result.request),
     completed: true,
     alreadyCompleted: result.status === 'already_completed',
   };

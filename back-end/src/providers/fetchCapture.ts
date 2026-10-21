@@ -150,6 +150,7 @@ export function outboundReplayCacheKey(url: string, method: string, body: string
 
 function isCredentialExchange(url: string): boolean {
   try {
+    if (isPhoneHarnessExchange(url)) return true;
     const path = new URL(url).pathname.replace(/\/+$/, '');
     return (
       path === '/oauth/token' ||
@@ -163,8 +164,26 @@ function isCredentialExchange(url: string): boolean {
   }
 }
 
+/** Phone grants and text input are private, stateful operations, including screen reads. */
+function isPhoneHarnessExchange(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const path = url.pathname.toLowerCase();
+    if (
+      (url.protocol === 'https:' || url.protocol === 'http:') &&
+      (path === '/api/iphone' || path.startsWith('/api/iphone/'))
+    )
+      return true;
+    const configured = process.env.PHONE_HARNESS_API_URL ?? 'https://api.phone-harness.com';
+    return url.protocol === 'https:' && url.origin === new URL(configured).origin;
+  } catch {
+    return false;
+  }
+}
+
 function credentialMetadataUrl(url: string): string {
   const parsed = new URL(url);
+  if (isPhoneHarnessExchange(url)) return `${parsed.origin}/phone-harness-private`;
   for (const field of ['search', 'hash', 'username', 'password'] as const) parsed[field] = '';
   return parsed.toString();
 }

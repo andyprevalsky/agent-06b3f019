@@ -121,7 +121,7 @@ export const directTurnSchema = z
     reasoning_effort: z
       .enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'])
       .optional(),
-    speed: z.enum(['standard', 'fast', 'ultrafast']).optional(),
+    speed: z.enum(['standard', 'fast', 'ultrafast', 'priority']).optional(),
     tool_call_id: z.string().min(1).max(256).optional(),
     user_id: z.string().uuid().optional(), // internal callers only (API key)
   })

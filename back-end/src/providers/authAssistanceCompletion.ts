@@ -1,3 +1,5 @@
+import { isNativePhoneAttention } from './nativePhoneAttention';
+import { completeNativePhoneAttention } from './nativePhoneAttentionCompletion';
 import { runTransactionWithRetry } from './database';
 import { resumeAgentWorkflow } from './agentResume';
 import { createMessage } from './messages';
@@ -112,7 +114,13 @@ export async function completeAuthAssistanceForUser(
       where: { id },
       include: {
         attentionRequest: {
-          select: { workflowId: true, userResponse: true, userId: true, agentId: true },
+          select: {
+            workflowId: true,
+            userResponse: true,
+            userId: true,
+            agentId: true,
+            metadata: true,
+          },
         },
       },
     });
@@ -126,6 +134,18 @@ export async function completeAuthAssistanceForUser(
       request.attentionRequest.agentId !== request.agentId
     ) {
       return { status: 'forbidden' as const };
+    }
+    if (isNativePhoneAttention(request.attentionRequest.metadata)) {
+      await deps.beforeCompletionClaim();
+      return completeNativePhoneAttention(
+        tx,
+        id,
+        userId,
+        request.agentId,
+        now,
+        userMessage,
+        request.completedAt !== null
+      );
     }
     if (request.completedAt !== null) {
       await lockAgentWorkflowGeneration(tx, request.agentId);

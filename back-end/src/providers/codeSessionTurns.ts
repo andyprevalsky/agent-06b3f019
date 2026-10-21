@@ -29,7 +29,7 @@ export type TurnAckStatus = 'delivered' | 'duplicate' | 'rejected' | 'unreachabl
 export interface CodeTurnSettings {
   model?: string;
   effort?: string;
-  speed?: 'standard' | 'fast' | 'ultrafast';
+  speed?: 'standard' | 'fast' | 'ultrafast' | 'priority';
 }
 
 export interface CodeTurnAttachment {
