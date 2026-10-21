@@ -67,7 +67,16 @@ function testTilionCandidates(): void {
     browserRecoveryCandidates(LOCATION, { preferSteel: true }).every((c) => c.provider === 'steel')
   );
 
-  withEnv({ TILION_API_KEY: 'test-key', BROWSER_AGENT_TILION_ENABLED: undefined }, () =>
+  // Tilion mobile is not served on our account (409 proxy_type_unavailable): off by default.
+  withEnv(
+    {
+      TILION_API_KEY: 'test-key',
+      BROWSER_AGENT_TILION_ENABLED: undefined,
+      TILION_MOBILE_ENABLED: undefined,
+    },
+    () => assert.deepStrictEqual(tilionKeys(), ['tilion_residential'])
+  );
+  withEnv({ TILION_API_KEY: 'test-key', TILION_MOBILE_ENABLED: 'true' }, () =>
     assert.deepStrictEqual(tilionKeys(), ['tilion_residential', 'tilion_mobile'])
   );
   withEnv({ TILION_API_KEY: 'test-key', BROWSER_AGENT_TILION_ENABLED: 'false' }, () =>
