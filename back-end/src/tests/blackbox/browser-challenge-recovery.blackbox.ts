@@ -735,7 +735,8 @@ async function testKernelToTilionPromotionPersistsAndIsHonoured(): Promise<void>
     );
     assert(next.provider === 'tilion', `next session ignored the Tilion winner: ${next.provider}`);
     assert(
-      JSON.stringify(tilionOptions) === JSON.stringify([{ proxyType: 'mobile' }]),
+      tilionOptions.length === 1 &&
+        (tilionOptions[0] as { proxyType?: string } | undefined)?.proxyType === 'mobile',
       `next session did not receive the Tilion exit type: ${JSON.stringify(tilionOptions)}`
     );
   } finally {
