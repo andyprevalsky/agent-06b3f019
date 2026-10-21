@@ -34,6 +34,10 @@ import {
 import { runLiveKernelSteelAuthPersist } from './browser-provider.auth-persist.live';
 import { assertAuthPersistFailedInitCustody } from './browser-provider.auth-persist.cleanup.support';
 import { runLiveProviderParity } from './browser-provider.live.support';
+import {
+  runLiveTilionConcurrency,
+  runLiveTilionProviderParity,
+} from './browser-provider.tilion-live.support';
 import { assertKernelUnhealthyProxyRelaxesLocation } from './browser-provider-proxy-health.support';
 import { runOptionalLiveBrowserUseProvider } from './browser-provider.browser-use-live.support';
 import {
@@ -586,6 +590,24 @@ async function main(): Promise<void> {
       console.error(
         `FAIL live Kernel/Steel auth persist: ${error instanceof Error ? error.message : String(error)}`
       );
+    }
+  }
+
+  // Tilion is the default provider: its live parity, a Kernel→Tilion→Kernel
+  // auth handoff and the (opt-in) account-cap case run in the same live domain.
+  if (process.env.TEST_BASE_URL) {
+    const tilionLive: Array<[string, () => Promise<void>]> = [
+      ['live Tilion provider parity', runLiveTilionProviderParity],
+      ['live Kernel/Tilion auth persist', () => runLiveKernelSteelAuthPersist('tilion')],
+      ['live Tilion concurrency cap', runLiveTilionConcurrency],
+    ];
+    for (const [label, run] of tilionLive) {
+      try {
+        await run();
+      } catch (error) {
+        failed++;
+        console.error(`FAIL ${label}: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
   }
 
