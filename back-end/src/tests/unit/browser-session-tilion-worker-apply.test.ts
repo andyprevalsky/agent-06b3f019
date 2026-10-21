@@ -5,6 +5,7 @@
  * only CDP client). The payload must carry the same selected cookie bundle and
  * realm-scoped localStorage the CDP path would inject, and claim nothing injected.
  */
+import '../blackbox/assertLocalDatabase';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { chromium } from 'playwright';
