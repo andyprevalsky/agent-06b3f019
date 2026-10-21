@@ -24,6 +24,7 @@
 import {
   Activity,
   FlaskConical,
+  FolderGit2,
   Loader2,
   Megaphone,
   Plug,
@@ -38,6 +39,7 @@ import { FeedbackAppPanel } from './FeedbackAppPanel';
 import { DRAWER_DURATION_MS } from './roseAppsLayout';
 import { useRoseApps, type RoseApp } from './roseAppsState';
 
+const ProjectsHub = lazy(() => import('../rose-sidebar/ProjectsHub'));
 const IntegrationsPage = lazy(() => import('@/pages/Integrations'));
 const BenchmarksPage = lazy(() => import('@/pages/Benchmarks'));
 const SettingsPage = lazy(() => import('@/pages/Settings'));
@@ -46,10 +48,11 @@ const AccountSwitcherPage = lazy(() => import('@/pages/AccountSwitcher'));
 
 type PanelApp = Extract<
   RoseApp,
-  'integrations' | 'benchmarks' | 'feedback' | 'health' | 'settings'
+  'integrations' | 'benchmarks' | 'feedback' | 'health' | 'settings' | 'projects'
 >;
 
 const PANELS: Record<PanelApp, { title: string; icon: LucideIcon }> = {
+  projects: { title: 'Projects', icon: FolderGit2 },
   integrations: { title: 'Integrations', icon: Plug },
   benchmarks: { title: 'Benchmarks', icon: FlaskConical },
   feedback: { title: 'Feedback', icon: Megaphone },
@@ -94,6 +97,7 @@ function SettingsBody({ onLogout }: { onLogout?: () => void }) {
 
 function PanelBody({ app }: { app: PanelApp }): ReactNode {
   const apps = useRoseApps();
+  if (app === 'projects') return <ProjectsHub />;
   if (app === 'integrations') return <IntegrationsPage />;
   if (app === 'benchmarks') return <BenchmarksPage onOpenAgent={apps?.openAgent} />;
   if (app === 'feedback') return <FeedbackAppPanel />;

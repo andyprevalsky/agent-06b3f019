@@ -137,6 +137,7 @@ function TerminalLayout(props: TerminalLayoutProps) {
           onSelectAgent={props.agents.handleSelectAgent}
           publishLayout={roseDesktop}
           onLogout={() => void props.agents.handleLogout()}
+          onCreateAgentInProject={props.agents.handleCreateNewAgentInProject}
         >
           <AppViewProvider userId={props.agents.user?.id ?? null}>
             <CodeAgentViewProvider

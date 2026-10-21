@@ -181,21 +181,27 @@ export default function RoseProjectSettingsPanel({
   project,
   barExpanded,
   onClose,
+  embedded = false,
 }: {
   project: Project;
   barExpanded: boolean;
   onClose: () => void;
+  embedded?: boolean;
 }) {
   const form = useProjectSettingsForm(project);
-  return (
-    <LeftPanelShell
-      label="Project settings"
-      testId="rose-project-settings"
-      barExpanded={barExpanded}
-      onClose={onClose}
-    >
+  const content = (
+    <>
       <h2 className="mb-0.5 text-[17px] font-semibold">{project.name}</h2>
       <p className={MUTED}>Project settings</p>
+      <label className={FIELD_ROW}>
+        <span>Project name</span>
+        <input
+          aria-label="Project name"
+          value={form.draft.name}
+          onChange={(e) => form.setField('name', e.target.value)}
+          className="min-w-0 bg-transparent text-right outline-none"
+        />
+      </label>
       <CodeRepoSection draft={form.draft} setField={form.setField} project={project} />
       <ProjectOnboardingSection project={project} />
       <StartupSection
@@ -220,6 +226,18 @@ export default function RoseProjectSettingsPanel({
           {form.isSaving ? 'Saving…' : 'Save'}
         </button>
       </div>
+    </>
+  );
+  return embedded ? (
+    <div data-testid="project-settings-content">{content}</div>
+  ) : (
+    <LeftPanelShell
+      label="Project settings"
+      testId="rose-project-settings"
+      barExpanded={barExpanded}
+      onClose={onClose}
+    >
+      {content}
     </LeftPanelShell>
   );
 }

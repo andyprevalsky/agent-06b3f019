@@ -71,6 +71,7 @@ interface ProviderProps {
   publishLayout?: boolean;
   /** Sign out, offered at the bottom of the Settings panel. */
   onLogout?: () => void;
+  onCreateAgentInProject?: (project: import('@/lib/api/projects').Project) => void;
 }
 
 /** Publish the Rose Desktop layout variables on <html> while mounted. */
@@ -153,6 +154,7 @@ export function RoseAppsProvider({
   onSelectAgent,
   publishLayout = false,
   onLogout,
+  onCreateAgentInProject,
 }: ProviderProps) {
   const displays = useAgentDisplays();
   const { selectDisplay } = displays;
@@ -284,6 +286,7 @@ export function RoseAppsProvider({
       selectBrowserTab,
       openAgent,
       onLogout,
+      onCreateAgentInProject,
       setSlot,
       setDrawerWidth,
       setIsResizing,
@@ -311,6 +314,7 @@ export function RoseAppsProvider({
       selectBrowserTab,
       openAgent,
       onLogout,
+      onCreateAgentInProject,
       setDrawerWidth,
       registerAndSwitch,
       unregisterAgentBrowser,

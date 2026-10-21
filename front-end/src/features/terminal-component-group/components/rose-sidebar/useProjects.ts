@@ -38,14 +38,17 @@ function envFilesKey(projectId: string) {
 
 const NO_PROJECTS: Project[] = [];
 
-export function useProjects(): Project[] {
-  const query = useQuery({
+export function useProjectsQuery() {
+  return useQuery({
     queryKey: PROJECTS_QUERY_KEY,
     queryFn: fetchProjects,
     staleTime: 60_000,
     retry: false,
   });
-  return query.data ?? NO_PROJECTS;
+}
+
+export function useProjects(): Project[] {
+  return useProjectsQuery().data ?? NO_PROJECTS;
 }
 
 function useProjectsCache() {

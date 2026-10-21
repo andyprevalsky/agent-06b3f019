@@ -23,7 +23,8 @@ export type RoseApp =
   | 'benchmarks'
   | 'feedback'
   | 'health'
-  | 'settings';
+  | 'settings'
+  | 'projects';
 
 export interface AgentBrowserTab {
   agentId: string;
@@ -61,6 +62,7 @@ export interface RoseAppsValue {
   openAgent: (agentId: string) => void;
   /** Sign out (Settings panel); undefined when the host has no session. */
   onLogout?: () => void;
+  onCreateAgentInProject?: (project: import('@/lib/api/projects').Project) => void;
   setSlot: (el: HTMLElement | null) => void;
   setDrawerWidth: (width: number) => void;
   setIsResizing: (resizing: boolean) => void;
