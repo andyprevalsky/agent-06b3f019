@@ -5,8 +5,8 @@
  *   requester is a code agent → "<agent> · via display" attribution line
  *   caption (first item only)  → text above the media
  *   images / videos            → ONE InlineMediaGallery (single or strip)
- *   text/html with file_pointer.usercontent_url (cross-origin http(s)):
- *       [FRAME] sandbox="allow-scripts" on the usercontent origin
+ *   page/bundle/model/pdf or text/html with file_pointer.usercontent_url (cross-origin http(s)):
+ *       [FRAME] sandbox="allow-scripts allow-pointer-lock allow-popups" on the usercontent origin
  *       [FRAME] --rose:resize--> height clamped 200..900px
  *   text/html without one (older rows) or a same-origin/invalid one → DisplayHtmlLink:
  *       [SIGNING] --signed URL--> [LINK] plain open/download link (never framed)
@@ -15,17 +15,18 @@
  * SYSTEM CONTEXT:
  *   MessageListItems (groupDisplayMedia) → DisplayMediaGroup
  *     → InlineMediaGallery → DocumentPreviewDrawer
- *     → UserUiFrame (features/user-ui: never same-origin, no allow-same-origin)
+ *     → display-specific iframe + shared resize bridge (never allow-same-origin)
  *
  * HTML is framed ONLY from the backend's usercontent URL (a separate origin
- * that serves display HTML for exactly this frame); UserUiFrame refuses any
+ * that serves display HTML for exactly this frame); the URL guard refuses any
  * same-origin URL, and the opaque sandbox keeps the page away from app
  * cookies, storage and the session. The storage URL is a download, not a page.
  */
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 
-import { isAllowedUserContentUrl, UserUiFrame } from '@/features/user-ui';
+import { isAllowedUserContentUrl } from '@/features/user-ui';
+import { useUserViewBridge } from '@/features/user-ui/hooks/useUserViewBridge';
 import { isHtmlDisplayMedia, type DisplayMediaItem } from '../../hooks/codeAgentContract';
 import { CodeAgentAttribution } from '../CodeAgentAttribution';
 import { InlineMediaGallery } from './InlineMediaGallery';
@@ -74,19 +75,29 @@ function DisplayHtmlLink({ item, agentId }: { item: DisplayMediaItem; agentId?: 
 }
 
 function DisplayHtmlFrame({ item, agentId }: { item: DisplayMediaItem; agentId?: string }) {
+  const frameRef = useRef<HTMLIFrameElement>(null);
   const [height, setHeight] = useState(HTML_FRAME_DEFAULT_HEIGHT);
   const src = item.usercontent_url;
-  if (!src || !isAllowedUserContentUrl(src)) {
+  const allowed = !!src && isAllowedUserContentUrl(src);
+  useUserViewBridge({
+    frameRef,
+    src: allowed ? src : null,
+    onResize: (next) => setHeight(clampHeight(next)),
+  });
+  if (!allowed) {
     return <DisplayHtmlLink item={item} agentId={agentId} />;
   }
   return (
-    <UserUiFrame
+    <iframe
+      ref={frameRef}
       src={src}
       title={item.file.original_filename}
-      testId="display-html-frame"
-      onResize={(next) => setHeight(clampHeight(next))}
+      data-testid="display-html-frame"
+      data-user-ui-frame="true"
+      sandbox="allow-scripts allow-pointer-lock allow-popups"
+      referrerPolicy="no-referrer"
       className="w-full rounded-lg bg-white"
-      style={{ height }}
+      style={{ height, border: 0, colorScheme: 'normal' }}
     />
   );
 }
