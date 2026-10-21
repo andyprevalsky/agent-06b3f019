@@ -125,7 +125,8 @@ the requested next contract; it does not claim the current runtime enforces it.
   records origin and authenticated account; a code fork records repo base SHA.
 - Normal child work is isolated. The parent continues working while children
   run. Children submit results to their **direct parent**, never directly to a
-  grandparent, default branch, global browser template, or another sibling.
+  grandparent, default branch, or another sibling. Verified browser credentials
+  are the explicit exception: they use the account-wide distribution plane below.
 - Existing “New agent in this branch” is an explicit collaborative mode, not
   the default: threads stay separate and one writer lease serializes shared
   workspace mutation. It must not silently give concurrent agents the same
@@ -180,31 +181,77 @@ and receipt, not a concatenation of the child's entire native conversation.
   artifact fails closed. Excluded large files must be reported, not silently
   treated as successfully transferred.
 
-### Browsers and external world state
+### Browsers: persistent sessions plus account-wide credential distribution
 
-Browser execution state has no generic three-way merge. Fork an isolated
-context from an allowed parent authentication baseline. Merge back these
-separate categories:
+Updated user direction, 2026-10-21: every general-purpose thread gets a stable
+logical browser session branched from Home/main. This does not require keeping
+an idle browser process running for every thread. Initialize its baseline and
+ownership at thread creation; materialize its isolated context when first used.
+The logical session survives worker shutdown and provider-session replacement.
 
-| Child result | Parent treatment |
+**Lifecycle:** active -> checkpointing -> paused -> resuming -> active. Every
+normal shutdown, cancellation, completion, and idle release requests pause,
+not deletion. Persist resumable profile/state, tabs/URLs, action cursor, and
+confirmed action receipts before acknowledging a successful pause. Never label
+a failed save as a durable pause. If the provider cannot suspend a process,
+release compute only after a verified state checkpoint and later reconstruct
+it under the same logical session ID; report reconstruction separately from
+native resume. Actual crash/hard-kill cannot run a shutdown handler: periodic
+and action-boundary checkpoints plus recovery reconciliation bound that loss.
+
+The next authorized browser command automatically resumes the existing logical
+session and waits for readiness, rather than making a fresh unrelated browser
+or asking the user to resume manually. Concurrent resume requests coalesce.
+Before the next action, refresh its credential versions and reconcile any
+previous action whose outcome is unknown. Incoming credentials alone must not
+wake every paused browser or incur compute across the network. Explicit user
+retirement/deletion remains separate from ordinary shutdown.
+
+**Credentials:** successful logins propagate across the user's whole browser
+network, including Home/main, parents, children, siblings, and future sessions.
+This supersedes hierarchical credential merge-down. Use one encrypted credential
+registry keyed by user + auth realm + actual account identity, with monotonic
+versions and revocations. A verified login writes a coherent credential bundle
+and publishes its version immediately. No plaintext credentials appear in bus
+events, model messages, logs, or ordinary merge receipts.
+
+Each matching session receives the version, then fetches it through an
+authorized channel. Idle active contexts apply at once; an in-flight action
+finishes under its lease before applying at a safe boundary. Paused sessions
+retain the pending version and apply it on resume. Do not navigate, reload,
+replace tabs, or change another account merely to distribute a login. A thread
+intentionally using another account stays on that account until explicitly
+switched. Home receives matching updates even when it is not an ancestor.
+
+A login must prove the expected account with an authenticated site response;
+page text or new cookies alone are not sufficient. Broadcast only the minimum
+allowed cookies/storage for that realm, preserving domain/path/partition scope.
+Treat refresh-token rotation as a serialized credential operation: use a broker
+or single refresh owner where tokens are one-use or a new login revokes others.
+Device-bound/session-bound credentials may not be transferable; record that
+limitation and obtain a supported login rather than claiming every context is
+signed in. A stale child cannot overwrite a newer version. Explicit user logout
+revokes the applicable account bundle; an accidental child logout or expired
+cookie must not sign the entire network out.
+
+Current close-time keep-best harvesting is useful groundwork, but it does not
+implement immediate verified fan-out, session subscriptions, coherent storage
+updates, or rotation ownership. These remain required runtime work.
+
+Other browser outputs have their own treatment:
+
+| Child result | Parent/network treatment |
 |---|---|
-| Findings, URLs, screenshots, downloaded files | Attach immutable evidence/artifacts to the parent with provenance. Open a resulting page when requested; do not replace the parent's tabs or history. |
-| Cookies/local storage/IndexedDB needed for the task | Origin-and-account-scoped candidates; compare with fork base/current parent, validate account identity and session health, apply only allowed keys while the affected context is quiescent. Conflicts stay explicit. |
-| Purchases, sends, edits, submissions, other remote mutations | Already affected the external service: record confirmed remote IDs/status, never replay as a “merge.” Use service idempotency keys where available; uncertain results require reconciliation before retry. |
-| DOM, JS heap, sockets, in-flight requests, cursor/focus | Do not merge. Re-open/navigate/reconnect in the parent's own context if needed. |
+| Findings, URLs, screenshots, downloaded files | Attach immutable evidence/artifacts to the parent with provenance; open a result page when requested without replacing existing tabs. |
+| Verified reusable authentication | Publish once to the account-wide credential registry; matching sessions consume the new version without a hierarchy merge. |
+| Purchases, sends, edits, submissions, other remote mutations | Already affected the service: keep confirmed remote IDs/status; never replay as a merge. Use service idempotency keys or reconcile before retrying an uncertain outcome. |
+| DOM, JS heap, sockets, in-flight requests, cursor/focus | Keep local to the owning browser. Restore/reconnect when supported; never merge across concurrent sessions. |
 
 Acquire a scoped lease before conflicting external mutations (account/site/
-resource); read-only research can run concurrently. An approval covers the
-actual action, not an unrestricted child or merge. Preserve user-owned tabs,
-manual activity, and protected software such as Freedom. Logout, account
-switch, and auth rotation are explicit identity-sensitive operations, not
-“newest cookie wins.” Unsupported browser state is reported as unsupported.
-
-The present keep-best credential policy may help select a healthy login, but
-its direct user-template promotion is **not** the parent-first contract.
-Child candidates must reach their parent first; only the root's explicit
-credential-persistence policy may promote to a user-level browser template.
-Do not claim a browser snapshot includes or reverses external server state.
+resource); read-only research can run concurrently. Preserve user-owned tabs,
+manual activity, and Freedom. Browser snapshots do not contain or undo external
+server state. Hierarchical integration remains necessary for code/files and
+parent decisions, but not for propagating verified reusable logins.
 
 ### Evidence, lifecycle, and required acceptance
 
@@ -222,15 +269,21 @@ Required proofs before calling this implemented:
 2. Duplicate delivery, stale base, parent crash between apply and ACK, corrupted
    checkpoint, and failed combined validation never produce a false merged
    receipt or repeat an external action.
-3. Browser same-account findings merge; another account's auth is rejected;
-   fresh parent credentials survive a stale child; logout and IndexedDB
-   conflicts do not silently replace them. User tabs and Freedom remain intact.
+3. A verified child login reaches matching Home, parent, sibling, active and
+   paused sessions exactly once; future sessions start with the latest version.
+   Foreign users/accounts are excluded, stale versions cannot replace fresh
+   ones, rotation is serialized, and nontransferable credentials are explicit.
+   Tabs and Freedom remain intact; distribution does not wake paused compute.
 4. Child send/submit succeeds but ACK is lost: reconciliation finds the remote
    action once, without sending/submitting again. Unknown outcomes stay unknown.
-5. E2B pause/resume failure restores verified files and conversation identity,
+5. Browser normal shutdown durably pauses; next action auto-resumes the same
+   logical session, with concurrent resumes coalesced and pending credentials
+   applied. Hard-kill recovery reports the last checkpoint and reconciles
+   unknown actions. Provider reconstruction is not reported as native resume.
+6. E2B pause/resume failure restores verified files and conversation identity,
    recreates services explicitly, and never merges a child's live process
    memory into the parent. Large omitted files are visible in the receipt.
-6. Grandchild merges into child, then child into parent; parent code, browser
+7. Grandchild merges into child, then child into parent; parent code, browser
    artifacts, receipt history, and root preview retain the correct identities.
 
 Provider references (capabilities must be checked against our pinned versions):
