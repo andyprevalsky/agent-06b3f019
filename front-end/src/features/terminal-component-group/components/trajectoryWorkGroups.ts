@@ -34,6 +34,7 @@ export function trajectoryActivity(message: Message): TrajectoryActivity | null 
     metadata?.isUserAttentionMessage ||
     metadata?.isFinalSummary ||
     metadata?.completionSummary ||
+    metadata?.toolName === 'spawn_claude_code_agent' ||
     metadata?.requestUserApproval ||
     metadata?.error ||
     /failed|error/i.test(String(metadata?.toolStatus ?? ''))
