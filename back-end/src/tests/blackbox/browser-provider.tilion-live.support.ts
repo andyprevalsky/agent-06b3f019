@@ -25,6 +25,7 @@ import {
   TilionRateLimitError,
 } from '../../providers/browser/tilion';
 import { retryWithBackoff } from '../../providers/retry';
+import { runLiveKernelSteelAuthPersist } from './browser-provider.auth-persist.live';
 import {
   assert,
   type BrowserApiResponse,
@@ -152,11 +153,11 @@ export async function assertLiveTilionVendorContract(): Promise<void> {
   const created = await tilionApi('POST', '/v1/session', { idle_timeout: 120, ttl: 600 });
   const record = created.body as { session_id?: string; connect_url?: string | null };
   assert(created.status === 201 && record.session_id, `Tilion create HTTP ${created.status}`);
-  const sessionId = record.session_id;
+  const sessionId = String(record.session_id);
   let released = false;
   try {
-    assert(record.connect_url, 'Tilion create returned no connect_url (raw CDP not enabled?)');
-    const connectUrl = record.connect_url;
+    const connectUrl = String(record.connect_url ?? '');
+    assert(connectUrl !== '', 'Tilion create returned no connect_url (raw CDP not enabled?)');
     await withPage(connectUrl, async (page, browser) => {
       await navigateKernelPage(page, 'https://example.com');
       const second = await secondCdpClientOutcome(connectUrl);
@@ -230,10 +231,12 @@ export async function runLiveTilionProviderParity(): Promise<void> {
   await prisma.browserContext.create({
     data: {
       userId,
-      preferredBrowserConfig: buildPreferredBrowserConfig(
-        { provider: 'tilion', proxyMode: 'residential_country', tilionProxyType: 'residential' },
-        LOCATION
-      ),
+      preferredBrowserConfig: {
+        ...buildPreferredBrowserConfig(
+          { provider: 'tilion', proxyMode: 'residential_country', tilionProxyType: 'residential' },
+          LOCATION
+        ),
+      },
     },
   });
   await prisma.agent.create({
@@ -513,4 +516,27 @@ export async function runLiveTilionConcurrency(): Promise<void> {
   console.log(
     `PASS live Tilion concurrency cap (${cap} live, next create typed concurrency_limit)`
   );
+}
+
+/**
+ * Every live Tilion case in the /deploy-run browser-provider domain, in order.
+ * Returns the failure count so the domain runner keeps going after a failure.
+ */
+export async function runLiveTilionCases(): Promise<number> {
+  if (!process.env.TEST_BASE_URL) return 0;
+  const cases: Array<[string, () => Promise<void>]> = [
+    ['live Tilion provider parity', runLiveTilionProviderParity],
+    ['live Kernel/Tilion auth persist', () => runLiveKernelSteelAuthPersist('tilion')],
+    ['live Tilion concurrency cap', runLiveTilionConcurrency],
+  ];
+  let failed = 0;
+  for (const [label, run] of cases) {
+    try {
+      await run();
+    } catch (error) {
+      failed++;
+      console.error(`FAIL ${label}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return failed;
 }
