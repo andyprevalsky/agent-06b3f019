@@ -12420,8 +12420,6 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
                     activity_args.append(world_model_mode if world_model_mode != "real" else None)
                     activity_args.append(getattr(workflow_instance, "model", None))
-                    if tool_call.get("approvedMessageIntent"):
-                        activity_args.append(tool_call["approvedMessageIntent"])
                     async with span(
                         "browser_activity_wait",
                         agent_id=agent_id,

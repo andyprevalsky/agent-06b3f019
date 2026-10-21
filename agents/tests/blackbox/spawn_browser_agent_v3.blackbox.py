@@ -31728,6 +31728,7 @@ async def run_all_tests():
     await r.record_async("native_phone_auth_http_identity_recovery", test_native_phone_auth_http_identity_recovery)
     await r.record_async("native_phone_auth_denials_and_safe_errors", test_native_phone_auth_denials_and_safe_errors)
     await r.record_async("native_phone_auth_manager_exact_resume", test_native_phone_auth_manager_exact_resume)
+    await r.record_async("native_phone_auth_no_outbound_intent", test_native_phone_auth_does_not_forward_excluded_outbound_intent)
     await r.record_async("native_phone_auth_actual_activity_before_browser_recovery", test_native_phone_auth_actual_activity_before_browser_recovery)
     await r.record_async("native_phone_auth_manager_rejection_preserves_target", test_native_phone_auth_manager_rejection_preserves_target)
     await r.record_async("native_phone_auth_generation_reattaches_exact_request", test_native_phone_auth_generation_reattaches_exact_request)
@@ -32140,7 +32141,7 @@ async def test_native_phone_auth_denials_and_safe_errors():
         assert calls == [], "queued phone fabricated authentication attention"
 
 
-async def _exercise_native_phone_auth_manager(signal="__AUTH_ASSISTANCE_COMPLETED__", handoff=False, cancel=False):
+async def _exercise_native_phone_auth_manager(signal="__AUTH_ASSISTANCE_COMPLETED__", handoff=False, cancel=False, outbound_intent=False):
     from domains.spawn_browser_agent_v3 import handler as h
 
     target, receipt, _ = _native_phone_auth_fixture()
@@ -32182,8 +32183,13 @@ async def _exercise_native_phone_auth_manager(signal="__AUTH_ASSISTANCE_COMPLETE
         _update_tree_state=AsyncMock(),
     )
     calls = []
+    tool_call = {"goal": "Inspect actual phone screen"}
+    if outbound_intent:
+        tool_call["approvedMessageIntent"] = {"queueId": "excluded-outbound-intent"}
 
     def start(*args, **kwargs):
+        import inspect
+        inspect.signature(h.spawn_browser_agent_activity_v3).bind(*kwargs["args"])
         calls.append(kwargs)
         return Handle(
             first
@@ -32219,7 +32225,7 @@ async def _exercise_native_phone_auth_manager(signal="__AUTH_ASSISTANCE_COMPLETE
     ):
         events = []
         try:
-            async for event in h.SpawnBrowserAgentManagerV3().execute_tool(instance, {"goal": "Inspect actual phone screen"}, "tool-1"):
+            async for event in h.SpawnBrowserAgentManagerV3().execute_tool(instance, tool_call, "tool-1"):
                 events.append(event)
         except BaseException as error:
             if cancel:
@@ -32239,7 +32245,7 @@ async def _exercise_native_phone_auth_manager(signal="__AUTH_ASSISTANCE_COMPLETE
             instance._tool_resume_hints = {"tool-1": parked["resume"]}
             instance._take_tool_resume = AgentWorkflow._take_tool_resume.__get__(instance)
             handoff = False
-            async for event in h.SpawnBrowserAgentManagerV3().execute_tool(instance, {"goal": "Inspect actual phone screen"}, "tool-1"):
+            async for event in h.SpawnBrowserAgentManagerV3().execute_tool(instance, tool_call, "tool-1"):
                 events.append(event)
     assert not cancel, "cancelled native wait fabricated a resume"
     resumed = calls[1]["args"][12]
@@ -32259,6 +32265,10 @@ async def _exercise_native_phone_auth_manager(signal="__AUTH_ASSISTANCE_COMPLETE
 
 async def test_native_phone_auth_manager_exact_resume():
     await _exercise_native_phone_auth_manager()
+
+
+async def test_native_phone_auth_does_not_forward_excluded_outbound_intent():
+    await _exercise_native_phone_auth_manager(outbound_intent=True)
 
 
 async def test_native_phone_auth_manager_rejection_preserves_target():
