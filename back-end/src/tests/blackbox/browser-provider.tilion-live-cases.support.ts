@@ -97,8 +97,9 @@ export async function runLiveTilionChallengeRecovery(): Promise<void> {
     });
     current = String(init.session_id);
     assert(init.browser_session_metadata?.provider === 'tilion', 'recovery init was not Tilion');
+    // Like the worker: state is captured on the page that hit the challenge.
     const storageState = await withPage(String(init.ws_url), async (page, browser) => {
-      await navigateKernelPage(page, 'https://example.com');
+      await navigateKernelPage(page, RECOVERY_URL);
       await page.evaluate(() => localStorage.setItem('rose_tilion_recovery', 'carried'));
       return browser.contexts()[0]!.storageState();
     });
@@ -122,7 +123,7 @@ export async function runLiveTilionChallengeRecovery(): Promise<void> {
     const carried = await withPage(
       steelCdpConnectionUrl(String(recovered.ws_url)),
       async (page) => {
-        await navigateKernelPage(page, 'https://example.com');
+        await navigateKernelPage(page, RECOVERY_URL);
         return page.evaluate(() => localStorage.getItem('rose_tilion_recovery'));
       }
     );
