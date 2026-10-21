@@ -19,6 +19,8 @@ import textwrap
 import threading
 import time as time_module
 from io import BytesIO
+from contextvars import ContextVar
+from functools import wraps
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -41,6 +43,23 @@ from _test_utils import (
 )
 
 AGENTS_ROOT = Path(__file__).resolve().parents[2]
+
+
+_legacy_browser_history_fixture = ContextVar("legacy_browser_history_fixture", default=False)
+
+
+def _both_browser_history_variants(test):
+    """Run archive-boundary fixtures with old replay and current GP identities."""
+    @wraps(test)
+    async def run():
+        for legacy in (True, False):
+            token = _legacy_browser_history_fixture.set(legacy)
+            try:
+                await test()
+                print(f"PASS {test.__name__} history={'legacy' if legacy else 'current'}")
+            finally:
+                _legacy_browser_history_fixture.reset(token)
+    return run
 
 
 def test_browser_use_captcha_wait_does_not_rotate_before_solver_window():
@@ -25932,6 +25951,7 @@ async def test_manager_write_approval_after_hour_wait_resumes_and_finishes():
     assert final_event.message == "Purchase completed."
     assert final_event.metadata["structured_response"] == {"purchase_complete": True}
 
+@_both_browser_history_variants
 async def test_manager_payment_card_approval_uses_registered_activity_names_and_resumes():
     await _drive_browser_write_pause_archive_boundary(pause=False, payment=True, pause_between_mint_retries=True)
     from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
@@ -26808,7 +26828,11 @@ async def _drive_browser_write_pause_archive_boundary(
     from workflows.agent_workflow import AgentWorkflow
 
     root, tool = "00000000-0000-4000-8000-000000000088", "owned-write-tool"
-    task_id = browser._stable_browser_task_id(root, tool)
+    legacy_history = _legacy_browser_history_fixture.get()
+    task_id = (
+        browser._stable_browser_task_id(root, tool)
+        if legacy_history else browser._logical_browser_task_id(root)
+    )
     rows, starts, paused_starts, mints = [], [], [], []
     parked, changed = asyncio.Event(), asyncio.Event()
     opening_persisted = asyncio.Event()
@@ -27002,6 +27026,8 @@ async def _drive_browser_write_pause_archive_boundary(
         return logs
 
     with (
+        patch.object(browser.workflow, "in_workflow", return_value=True),
+        patch.object(browser.workflow, "patched", return_value=not legacy_history),
         patch("helpers.httpx_capture._mock_handler", persisted),
         patch("httpx.AsyncClient", side_effect=client),
         patch("config.load_config", return_value=config),
@@ -27279,6 +27305,7 @@ async def _drive_browser_write_pause_archive_boundary(
             assert not (asyncio.all_tasks() - previous_tasks), "owned approval/pause await survived manager exit"
 
 
+@_both_browser_history_variants
 async def test_manager_write_pause_seals_persisted_browser_for_archive():
     """PAUSE ends the manager's deferred write resume with a durable terminal."""
     await _drive_browser_write_pause_archive_boundary(pause=False)
@@ -27352,6 +27379,7 @@ async def test_manager_abandoned_payment_resumes_close_exact_browser_task():
         assert events[-1] is terminals[0]
 
 
+@_both_browser_history_variants
 async def test_manager_payment_pause_seals_persisted_browser_for_archive():
     """A real PAUSE must finish the pending payment browser before archival."""
     await _drive_browser_write_pause_archive_boundary(pause=True, payment=True)
@@ -27365,6 +27393,7 @@ async def test_manager_payment_pause_seals_persisted_browser_for_archive():
     )
 
 
+@_both_browser_history_variants
 async def test_manager_payment_pause_preserves_approval_and_interruptions():
     await _drive_browser_write_pause_archive_boundary(pause=False, payment=True, pause_on_approval=True)
     await _drive_browser_write_pause_archive_boundary(pause=False, payment=True)
@@ -27381,11 +27410,13 @@ async def test_manager_payment_pause_preserves_approval_and_interruptions():
         )
 
 
+@_both_browser_history_variants
 async def test_manager_explicit_pause_seals_auth_browser_for_archive():
     """An explicit PAUSE after auth's own pause must end that exact resume."""
     await _drive_browser_write_pause_archive_boundary(pause=True, auth=True)
 
 
+@_both_browser_history_variants
 async def test_manager_auth_pause_preserves_assistance_and_handoff():
     await _drive_browser_write_pause_archive_boundary(pause=False, auth=True)
     await _drive_browser_write_pause_archive_boundary(pause=True, auth=True, concurrent_approval=True)
