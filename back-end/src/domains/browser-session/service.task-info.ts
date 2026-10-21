@@ -9,6 +9,12 @@ import { BROWSER_SESSION_MIN_REMAINING_MS } from '../../providers/steel/sessionL
 import { steelPublicCdpUrl } from '../../providers/steel/urls';
 import { storedBrowserProvider } from '../../providers/browser/types';
 import { refreshTilionConnectUrl } from '../../providers/browser/tilion';
+import {
+  exitGeoLocale,
+  withExitGeoLocale,
+  type ExitGeoLocale,
+} from '../../providers/browser/exitGeoLocale';
+import { DEFAULT_GEOLOCATION } from '../../providers/geoip';
 import * as repo from './repo';
 import { serializePasskeys, serializePasswords, toUserSettings } from './service.serializers';
 
@@ -32,6 +38,8 @@ type TaskInfoResponse = {
     profile_id: string | null;
     steel_profile_id?: string | null;
   };
+  /** Tilion only: timezone/locale of the exit country (Tilion does not localise its exit). */
+  exit_geo_locale?: ExitGeoLocale | null;
   same_session_available?: boolean;
   same_session_unavailable_reason?: string;
   browser_session_health?: BrowserSessionHealth;
@@ -246,6 +254,21 @@ export async function getTaskInfo(taskId: string, options: { validateLive?: bool
   const response = buildTaskInfoResponse(session, currentUrl, startUrl, authRealm, injection);
   if (session.provider === 'tilion' && session.status === 'ACTIVE' && response.ws_url !== null) {
     response.ws_url = await freshTilionConnectUrl(session.sessionId, response.ws_url);
+  }
+  if (session.provider === 'tilion') {
+    // Same country initSession placed the exit in (agent proxy, else the default).
+    const agent = await repo.findAgentProxy(session.agentId);
+    const country = agent?.proxyCountry;
+    const exit = exitGeoLocale(
+      country !== null && country !== undefined && country !== ''
+        ? country
+        : DEFAULT_GEOLOCATION.country
+    );
+    response.exit_geo_locale = exit;
+    response.fingerprint_injection = withExitGeoLocale(
+      response.fingerprint_injection as { timezone: string | null } | null,
+      exit
+    );
   }
 
   return options.validateLive === true ? applyLiveSessionAvailability(response, session) : response;

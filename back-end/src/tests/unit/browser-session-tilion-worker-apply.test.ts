@@ -15,7 +15,7 @@ import {
   WORKER_APPLY_REASON,
 } from '../../domains/browser-session/service.worker-apply';
 import { injectLocalStorage } from '../../domains/browser-session/service.local-storage';
-import { prepareSessionCredentials } from '../../domains/browser-session/service';
+import { getTaskInfo, prepareSessionCredentials } from '../../domains/browser-session/service';
 
 const REALM = `tilion-${randomUUID().slice(0, 8)}.example`;
 const LIVE_EXPIRY_CHROME =
@@ -121,9 +121,11 @@ async function run(): Promise<void> {
     assert.equal(injection.cookies.authSource, 'cookie_bundle');
     assert.equal(injection.cookies.cookieCount, 1);
 
-    await prisma.agent.create({ data: { id: agentId, userId, goal: 'tilion worker apply' } });
+    await prisma.agent.create({
+      data: { id: agentId, userId, goal: 'tilion worker apply', proxyCountry: 'GB' },
+    });
     const context = await prisma.browserContext.create({ data: { userId } });
-    await prisma.browserSession.create({
+    const row = await prisma.browserSession.create({
       data: {
         sessionId,
         agentId,
@@ -147,8 +149,13 @@ async function run(): Promise<void> {
     assert.equal(injected.injected, false);
     assert.equal(injected.reason, WORKER_APPLY_REASON);
     assert.ok('worker_apply' in injected);
-    const row = await prisma.browserSession.findUniqueOrThrow({ where: { sessionId } });
-    assert.equal(row.injectedOrigins, null, 'nothing was injected, so nothing is recorded');
+    const after = await prisma.browserSession.findUniqueOrThrow({ where: { sessionId } });
+    assert.equal(after.injectedOrigins, null, 'nothing was injected, so nothing is recorded');
+
+    // Task info: Tilion's exit is localised to the agent's proxy country, not New York.
+    const info = await getTaskInfo(row.id);
+    assert.equal(info?.exit_geo_locale?.timezone, 'Europe/London');
+    assert.equal(info?.exit_geo_locale?.locale, 'en-GB');
     assert.equal(cdpConnects, 0, 'no backend CDP connection to a Tilion session');
   } finally {
     chromium.connectOverCDP = connect;
@@ -159,7 +166,7 @@ async function run(): Promise<void> {
 run()
   .then(async () => {
     await prisma.$disconnect();
-    process.stdout.write('PASS browser-session tilion worker_apply unit (2 cases)\n');
+    process.stdout.write('PASS browser-session tilion worker_apply unit (3 cases)\n');
   })
   .catch(async (error) => {
     process.stderr.write(`FAIL browser-session tilion worker_apply unit ${String(error)}\n`);

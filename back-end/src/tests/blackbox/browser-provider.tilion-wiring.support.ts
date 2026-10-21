@@ -15,6 +15,7 @@ import { respondToTilionRefusal } from '../../domains/browser-session/routes.fil
 import { buildBrowserSessionMetadata } from '../../domains/browser-session/service';
 import { buildPreferredBrowserConfig } from '../../providers/browser/challengeRecoverySupport';
 import { TilionRateLimitError } from '../../providers/browser/tilion';
+import { exitGeoLocale, withExitGeoLocale } from '../../providers/browser/exitGeoLocale';
 import type { Response } from 'express';
 import {
   selectedBrowserProvider,
@@ -505,6 +506,51 @@ export async function assertProviderFallbackIsVisibleAndDefaultFailureSurfaces()
   });
 }
 
+/** Tilion reports New York/en-US for every exit; the worker gets the exit country's instead. */
+export async function assertTilionExitGeoLocaleAndTargetingAreExposed(): Promise<void> {
+  nodeAssert.deepEqual(exitGeoLocale('gb'), {
+    country: 'GB',
+    timezone: 'Europe/London',
+    locale: 'en-GB',
+    source: 'exit_country',
+  });
+  nodeAssert.equal(exitGeoLocale('UK')?.timezone, 'Europe/London');
+  nodeAssert.equal(exitGeoLocale('ZZ'), null, 'unknown countries never invent a zone');
+  const fingerprint = { timezone: 'America/Los_Angeles', initScript: 'x' };
+  nodeAssert.deepEqual(withExitGeoLocale(fingerprint, exitGeoLocale('DE')), {
+    timezone: 'Europe/Berlin',
+    initScript: 'x',
+    locale: 'de-DE',
+  });
+  nodeAssert.equal(withExitGeoLocale(null, exitGeoLocale('DE')), null);
+  nodeAssert.equal(withExitGeoLocale(fingerprint, null), fingerprint);
+
+  const metadata = buildBrowserSessionMetadata(
+    {
+      ...fakeSession('tilion'),
+      geoTargeting: {
+        requested: 'city',
+        applied: 'country',
+        requestedLocation: { country: 'US', state: 'CA', city: 'San Francisco' },
+        geoApplied: true,
+        geoUnsupported: ['city', 'state'],
+      },
+    },
+    NO_INJECTION
+  );
+  nodeAssert.deepEqual(metadata.geo_targeting, {
+    requested: 'city',
+    applied: 'country',
+    requested_location: { country: 'US', state: 'CA', city: 'San Francisco' },
+    geo_applied: true,
+    geo_unsupported: ['city', 'state'],
+  });
+  nodeAssert.equal(
+    'geo_targeting' in buildBrowserSessionMetadata(fakeSession('kernel'), NO_INJECTION),
+    false
+  );
+}
+
 /** Registered by browser-provider.blackbox.ts (one list keeps that file under max-lines). */
 export const tilionWiringCases: Array<[string, () => Promise<void>]> = [
   ['Tilion is the default provider', assertTilionIsTheDefaultProvider],
@@ -528,5 +574,9 @@ export const tilionWiringCases: Array<[string, () => Promise<void>]> = [
   [
     'provider fallback is visible in session metadata; default failures surface typed',
     assertProviderFallbackIsVisibleAndDefaultFailureSurfaces,
+  ],
+  [
+    'Tilion exit-country timezone/locale and geo targeting reach the worker',
+    assertTilionExitGeoLocaleAndTargetingAreExposed,
   ],
 ];
