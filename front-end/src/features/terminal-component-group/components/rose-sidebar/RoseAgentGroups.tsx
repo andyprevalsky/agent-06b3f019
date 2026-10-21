@@ -49,6 +49,10 @@ export interface RoseProjectActions {
 
 export interface RoseAgentGroupsProps {
   grouped: GroupedAgents;
+  mobile?: boolean;
+  projectLoading?: boolean;
+  projectError?: boolean;
+  onRetryProjects?: () => void;
   isExpanded: boolean;
   isFiltering: boolean;
   selectedAgentId: string | null;
@@ -90,7 +94,13 @@ function AgentRows({
   return (
     <>
       {agents.map((agent) => (
-        <RoseAgentBranch key={agent.agent_id} agent={agent} indented={indented} sidebar={props} />
+        <RoseAgentBranch
+          key={agent.agent_id}
+          agent={agent}
+          indented={indented}
+          mobile={props.mobile}
+          sidebar={props}
+        />
       ))}
     </>
   );
@@ -137,6 +147,19 @@ export default function RoseAgentGroups(props: RoseAgentGroupsProps) {
       <div data-testid="rose-group-home" className="flex flex-col">
         <AgentRows agents={grouped.home} indented={false} props={props} />
       </div>
+      {isExpanded && props.projectLoading && (
+        <p role="status" className="px-5 py-2 text-xs text-muted-foreground">
+          Loading projects…
+        </p>
+      )}
+      {isExpanded && props.projectError && (
+        <div role="alert" className="px-5 py-2 text-xs text-destructive">
+          Could not load projects.{' '}
+          <button type="button" onClick={props.onRetryProjects} className="font-semibold underline">
+            Retry projects
+          </button>
+        </div>
+      )}
       {projectGroups.map(({ project, agents }) => (
         <Fragment key={project.id}>
           {!isExpanded && agents.length > 0 && firstAgentGroup !== project.id && <GroupDivider />}

@@ -111,6 +111,9 @@ ROOT_DIR="${CLOUDBENCH_FLEET_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && p
 cd "$ROOT_DIR" || exit 1
 # shellcheck source=lib/cloudbench-env.sh
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-env.sh"
+# Every guest refuses bench-app secrets lacking the committed guest namespace,
+# whichever launcher (or older checkout) staged them; a launcher may bind its own.
+CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE="${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-$(cloudbench_expected_guest_temporal_namespace "$APP")}"
 # shellcheck source=lib/cloudbench-github-token.sh
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-github-token.sh"
 CLOUDBENCH_CATALOG_SCRIPT="${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench_catalog.py"
@@ -1834,6 +1837,11 @@ _inject_secrets_locked() {
     else
         echo "   guest Temporal namespace: unchanged from agents/.env (no .env.benchmark-temporal override)"
     fi
+    if ! cloudbench_require_staged_guest_temporal_namespace "$APP" "$guest_temporal_override" \
+            "$agents_src" "$backend_src"; then
+        [ -z "$guest_env_dir" ] || rm -rf "$guest_env_dir"
+        exit 1
+    fi
     agents_b64="$(base64 < "$agents_src" | tr -d '\n')"
     backend_b64="$(base64 < "$backend_src" | tr -d '\n')"
     agents_sha="$(cloudbench_env_sha256 "$agents_src")"
@@ -3110,6 +3118,10 @@ REMOTE_PY_FP=\$(cloudbench_manifest_fingerprint '$REMOTE_REPO' \"\${CLOUDBENCH_P
 echo \"::DEPS-REMOTE-REF::\$REMOTE_REF\"
 echo \"::DEPS-REMOTE-NODE::\$REMOTE_NODE_FP\"
 echo \"::DEPS-REMOTE-PY::\$REMOTE_PY_FP\"
+# The donor is stopped by signal and snapshotted next; write back the synced
+# checkout and dependency trees first (see the native WMH refresh flush).
+sync -f '$REMOTE_REPO'
+sync
 echo '::DEPS-REFRESH-DONE::'"
     DEPS_LOG="$(mktemp)"
     ssh_exec "$mid" "$DEPS_CMD" 2>&1 | grep -av '^Connecting to' | tee "$DEPS_LOG" | sed 's/^/   /'
@@ -3305,10 +3317,15 @@ gosu rose env HOME=/home/rose UV_PYTHON_INSTALL_DIR='$REMOTE_UV_PYTHON' UV_CACHE
 cd agents
 # A streaming pull stages beside its target and needs the cache's full size free
 # there (the previous tree stays until the swap): fail before pulling otherwise.
+# An optional third path counts as free: the caller would delete it first.
 wmh_require_room() {
-    local need avail
+    local need avail reclaim=0
     need=\$(PYTHONDONTWRITEBYTECODE=1 venv/bin/python -u -m benchmarks.wmh_build_cache status --name \"\$1\" | venv/bin/python -c 'import json, sys; print(int(json.load(sys.stdin)[\"plaintext_bytes\"]))') || { echo \"cannot read the published size of WMH cache \$1\" >&2; return 1; }
     avail=\$(df -PB1 \"\$(dirname \"\$2\")\" | awk 'NR == 2 { print \$4 }')
+    if [ -n \"\${3:-}\" ]; then
+        reclaim=\$(du -sB1 \"\$3\" | awk 'NR == 1 { print \$1 }') && [ -n \"\$reclaim\" ] || { echo \"cannot measure \$3\" >&2; return 1; }
+        avail=\$((\${avail:-0} + reclaim))
+    fi
     if ! [ \"\$avail\" -ge \$((need + 1073741824)) ] 2>/dev/null; then
         echo \"insufficient donor disk for WMH cache \$1: needs \$need bytes + 1 GiB margin beside \$2, \${avail:-unknown} bytes free\" >&2
         return 1
@@ -3332,7 +3349,18 @@ else
     echo 'restored legacy WMH model $WMH_LEGACY_MODEL_NAME at $REMOTE_WMH'
 fi
 rm -rf '$REMOTE_WMH_NATIVE.incoming' '$REMOTE_WMH_NATIVE.incoming'.replaced-* '$REMOTE_WMH_NATIVE.previous'
-wmh_require_room '$WMH_CACHE_NAME' '$REMOTE_WMH_NATIVE.incoming'
+# A previous native tree (~16 GB) and its staged replacement do not both fit a
+# 40 GB donor volume. This maintenance donor serves nothing and its snapshot is
+# published only on success (fleets keep forking the previous snapshot until
+# then), so drop the previous tree when the staged pull would not fit. Prove the
+# drop frees enough first: a refresh that cannot fit keeps the previous tree.
+if ! wmh_require_room '$WMH_CACHE_NAME' '$REMOTE_WMH_NATIVE.incoming'; then
+    [ -e '$REMOTE_WMH_NATIVE' ] || exit 1
+    wmh_require_room '$WMH_CACHE_NAME' '$REMOTE_WMH_NATIVE.incoming' '$REMOTE_WMH_NATIVE'
+    echo 'dropping the previous native WMH tree at $REMOTE_WMH_NATIVE to make room for its replacement'
+    rm -rf '$REMOTE_WMH_NATIVE'
+    wmh_require_room '$WMH_CACHE_NAME' '$REMOTE_WMH_NATIVE.incoming'
+fi
 PYTHONDONTWRITEBYTECODE=1 venv/bin/python -u -m benchmarks.wmh_build_cache pull --build-dir '$REMOTE_WMH_NATIVE.incoming' --name '$WMH_CACHE_NAME' --force
 [ -f '$REMOTE_WMH_NATIVE.incoming/models/$WMH_MODEL_NAME/experiential.json' ] || { rm -rf '$REMOTE_WMH_NATIVE.incoming'; echo 'restored cache $WMH_CACHE_NAME lacks models/$WMH_MODEL_NAME/experiential.json' >&2; exit 1; }
 [ -f '$REMOTE_WMH_NATIVE.incoming/build.manifest.json' ] || { rm -rf '$REMOTE_WMH_NATIVE.incoming'; echo 'restored cache $WMH_CACHE_NAME lacks build.manifest.json' >&2; exit 1; }
@@ -3340,6 +3368,10 @@ chown -R rose:rose '$REMOTE_WMH_NATIVE.incoming'
 if [ -e '$REMOTE_WMH_NATIVE' ]; then mv '$REMOTE_WMH_NATIVE' '$REMOTE_WMH_NATIVE.previous'; fi
 mv '$REMOTE_WMH_NATIVE.incoming' '$REMOTE_WMH_NATIVE'
 rm -rf '$REMOTE_WMH_NATIVE.previous'
+# The donor is stopped and snapshotted right after this; flush every restored
+# byte first (2026-10-20 an unflushed blob tail was snapshotted truncated).
+sync -f '$REMOTE_WMH_NATIVE'
+sync
 echo '::WMH-REFRESH-DONE::'
 ls -la '$REMOTE_WMH/models' '$REMOTE_WMH_NATIVE/models' 2>/dev/null || true
 df -h /data 2>/dev/null || true"

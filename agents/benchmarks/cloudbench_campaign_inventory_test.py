@@ -642,6 +642,13 @@ def seed_fixture(tmp_path, monkeypatch):
     # The publisher's Machines list uses its direct HTTP transport; this offline
     # fixture controls only that boundary with an empty app inventory.
     (root / "scripts/cloudbench-campaign-machines.py").write_text("import sys\nsys.stdout.buffer.write(b'[]')\n")
+    # These controls run the real host seed GET (cloudbench-seed-get.sh -> tsx)
+    # through the checkout's installed Node trees. An unprovisioned worktree used
+    # to fail six cases with a bare FileNotFoundError on the missing seed probe.
+    assert any((ROOT / tree / "node_modules/.bin/tsx").exists() for tree in (".", "back-end")), (
+        f"seed preflight controls need this checkout's Node dependencies: no tsx under {ROOT}/node_modules "
+        "or back-end/node_modules; install them or run scripts/prepare-deploy-worktree.sh"
+    )
     (root / "node_modules").symlink_to(ROOT / "node_modules", target_is_directory=True)
     (root / "back-end/node_modules").symlink_to(ROOT / "back-end/node_modules", target_is_directory=True)
     for command in (

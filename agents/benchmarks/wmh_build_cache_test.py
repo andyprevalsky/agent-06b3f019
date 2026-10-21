@@ -266,3 +266,40 @@ def test_push_never_replaces_a_cache_of_the_other_kind(tmp_path: Path) -> None:
     assert bucket.objects == before, "a refused push must not upload any part"
     republished = wmh_build_cache.push(full, name="rose-archive-native", store=store, part_bytes=4096, log=_quiet)
     assert wmh_build_cache.read_manifest("rose-archive-native", store=store) == republished
+
+
+def test_pull_makes_every_restored_file_durable_before_the_swap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """2026-10-20: a donor stopped and was snapshotted right after a 19.5 GB
+    restore; one blob's unflushed tail was lost (truncated at a page boundary).
+    Every restored file and directory is fsynced before the tree is swapped in,
+    and the parent directory after the swap."""
+    import os
+
+    bucket = _FakeBucket()
+    source = _build_dir(tmp_path / "src")
+    wmh_build_cache.push(source, store=(bucket, "b"), part_bytes=4096, log=_quiet)
+    synced: list[tuple[int, int]] = []
+    renames: list[int] = []
+    real_fsync, real_rename = os.fsync, Path.rename
+
+    def recording_fsync(fd: int) -> None:
+        info = os.fstat(fd)
+        synced.append((info.st_dev, info.st_ino))
+        real_fsync(fd)
+
+    def recording_rename(self: Path, target):  # type: ignore[no-untyped-def]
+        renames.append(len(synced))
+        return real_rename(self, target)
+
+    monkeypatch.setattr(os, "fsync", recording_fsync)
+    monkeypatch.setattr(Path, "rename", recording_rename)
+    target = tmp_path / "dst" / "world-model-native"
+    wmh_build_cache.pull(target, store=(bucket, "b"), log=_quiet)
+    restored = [path for path in target.rglob("*") if path.is_file()]
+    assert restored
+    before_swap = set(synced[: renames[-1]])
+    for path in [*restored, *(p for p in target.rglob("*") if p.is_dir()), target]:
+        info = path.stat()
+        assert (info.st_dev, info.st_ino) in before_swap, f"{path} was not fsynced before the swap"
+    parent = target.parent.stat()
+    assert (parent.st_dev, parent.st_ino) in set(synced[renames[-1]:]), "the swapped-in parent was not fsynced"

@@ -43,7 +43,16 @@ import json, os, pathlib, subprocess, sys, time
 
 # stream-json input: the task prompt is the first JSON line; the ws-server
 # keeps stdin open until every written turn has its result.
-sys.stdin.readline()
+for line in sys.stdin:
+    incoming = json.loads(line)
+    if incoming.get("type") == "control_request":
+        print(json.dumps({"type": "control_response", "response": {
+            "request_id": incoming["request_id"], "subtype": "success", "response": {"models": []}
+        }}), flush=True)
+        continue
+    break
+else:
+    sys.exit(0)
 gate = pathlib.Path(os.environ["STUB_GATE"])
 home = pathlib.Path(os.environ["HOME"])
 argv = sys.argv[1:]

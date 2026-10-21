@@ -30,7 +30,6 @@ import { FeedbackAppPanel } from './FeedbackAppPanel';
 import { DRAWER_DURATION_MS } from './roseAppsLayout';
 import { useRoseApps, type RoseApp } from './roseAppsState';
 
-const ProjectsHub = lazy(() => import('../rose-sidebar/ProjectsHub'));
 const IntegrationsPage = lazy(() => import('@/pages/Integrations'));
 const BenchmarksPage = lazy(() => import('@/pages/Benchmarks'));
 const SettingsPage = lazy(() => import('@/pages/Settings'));
@@ -39,11 +38,10 @@ const AccountSwitcherPage = lazy(() => import('@/pages/AccountSwitcher'));
 
 type PanelApp = Extract<
   RoseApp,
-  'integrations' | 'benchmarks' | 'feedback' | 'health' | 'settings' | 'projects'
+  'integrations' | 'benchmarks' | 'feedback' | 'health' | 'settings'
 >;
 
 const PANELS: Record<PanelApp, { title: string }> = {
-  projects: { title: 'Projects' },
   integrations: { title: 'Integrations' },
   benchmarks: { title: 'Benchmarks' },
   feedback: { title: 'Feedback' },
@@ -88,7 +86,6 @@ function SettingsBody({ onLogout }: { onLogout?: () => void }) {
 
 function PanelBody({ app }: { app: PanelApp }): ReactNode {
   const apps = useRoseApps();
-  if (app === 'projects') return <ProjectsHub />;
   if (app === 'integrations') return <IntegrationsPage />;
   if (app === 'benchmarks') return <BenchmarksPage onOpenAgent={apps?.openAgent} />;
   if (app === 'feedback') return <FeedbackAppPanel />;

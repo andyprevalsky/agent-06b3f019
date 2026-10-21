@@ -1412,6 +1412,10 @@ def main() -> int:
     signal.signal(signal.SIGTERM, request_stop)
     started = time.monotonic()
     next_heartbeat = started + 10
+    raw_margin = os.environ.get("CLOUDBENCH_CAMPAIGN_HOLDOUT_MARGIN_SECONDS", "300")
+    if not raw_margin.isdigit() or int(raw_margin) < 1:
+        raise ValueError("CLOUDBENCH_CAMPAIGN_HOLDOUT_MARGIN_SECONDS must be a positive integer")
+    holdout_margin_seconds = float(raw_margin)
     first_failure = 0
     barrier_failure = False
     current_cohort: dict[str, object] | None = None
@@ -1494,6 +1498,68 @@ def main() -> int:
                 job["_aborted_by_campaign"] = True
         publish_external_barrier(cohort, status)
 
+    def exclude_startup_holdouts(
+        cohort: dict[str, object],
+        survivors: list[dict[str, object]],
+        ready_deadlines: list[tuple[float, float]],
+    ) -> bool:
+        """Exclude live never-ready members before a ready copy's deadline.
+
+        Each fleet excludes its own holdout only after its per-box window,
+        measured from its own barrier start, while a ready copy gives up at the
+        same window from *its* barrier start. A member that reached its barrier
+        later (a SIM clone restore, a slow allocation) is therefore excluded only
+        after every ready copy has expired, failing the whole cohort (#16,
+        2026-10-20: 39/40 ready, 40/40 failed). The holdout is an infrastructure
+        failure; it leaves through its controller's own TERM teardown.
+        """
+        if not ready_deadlines:
+            return False
+        holdouts = [
+            job
+            for job in survivors
+            if not (cohort["_directory"] / "ready" / f"{job['job_id']}.json").is_file()
+        ]
+        if not holdouts:
+            return False
+        earliest, started = min(ready_deadlines)
+        # Never spend more than a quarter of that copy's own startup budget.
+        margin = min(holdout_margin_seconds, max(0.0, (earliest - started) / 4))
+        if time.time() < earliest - margin:
+            return False
+        excluded = cohort.setdefault("holdouts_excluded", [])
+        for job in holdouts:
+            job["startup_failed_before_release"] = True
+            job["startup_holdout_excluded"] = True
+            excluded.append(
+                {
+                    "job_id": job["job_id"],
+                    "task": job["task"],
+                    "excluded_at": utc_now(),
+                    "earliest_ready_deadline": earliest,
+                    "margin_seconds": margin,
+                }
+            )
+            print(
+                f"⚠️ campaign startup {cohort['cohort_id']}: excluding holdout {job['job_id']} "
+                f"task={job['task']} (not ready {margin:.0f}s before the earliest ready copy's deadline)"
+            )
+            log = Path(str(job["log"]))
+            try:
+                tail = log.read_text(errors="replace").splitlines()[-15:]
+            except OSError:
+                tail = []
+            for line in tail:
+                print(f"   ┆ {job['job_id']} {line[:240]}")
+            process = job["_process"]
+            if isinstance(process, subprocess.Popen) and process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+        write_json_atomic(summary_path, state)
+        return True
+
     def release_ready_cohort(cohort: dict[str, object]) -> None:
         nonlocal barrier_failure, first_failure
         if cohort["status"] != "waiting":
@@ -1503,6 +1569,7 @@ def main() -> int:
         ready_count = 0
         failed_count = 0
         survivors = []
+        ready_deadlines: list[tuple[float, float]] = []
         for job in cohort["_jobs"]:
             if job.get("startup_failed_before_release"):
                 failed_count += 1
@@ -1525,6 +1592,11 @@ def main() -> int:
                 )
             ready_count += 1
             job["startup_ready_at"] = receipt["ready_at"]
+            deadline = receipt.get("deadline")
+            if isinstance(deadline, (int, float)) and not isinstance(deadline, bool) and math.isfinite(deadline):
+                ready_deadlines.append((float(deadline), float(job.get("_started_epoch") or deadline)))
+        if exclude_startup_holdouts(cohort, survivors, ready_deadlines):
+            return
         if (
             cohort["ready_count"] != ready_count
             or cohort["failed_count"] != failed_count
@@ -2010,6 +2082,7 @@ def main() -> int:
                 job["controller_pid"] = process.pid
                 job["_log_handle"] = log_handle
                 job["_started_monotonic"] = time.monotonic()
+                job["_started_epoch"] = time.time()
                 job["started_at"] = utc_now()
                 job["status"] = "running"
                 active[process.pid] = job

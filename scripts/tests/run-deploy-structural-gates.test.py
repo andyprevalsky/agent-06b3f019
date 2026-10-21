@@ -1042,6 +1042,53 @@ else: print('origin/fixture')
 
 
 
+class LinuxGateExportIdleBoundTests(unittest.TestCase):
+    """An export-mode gate guest must not idle forever after its result.
+
+    2026-10-20 two sharded #16 gate controllers idled ~8.5 h after their host
+    operator died: the guest ran `while :; do sleep 60; done` after GATE_RESULT.
+    The bound must still cover the host's whole export window (TIMEOUT_S).
+    """
+
+    GATE = ROOT / "scripts" / "run-cloudbench-controller-gate"
+
+    def _guest_tail(self, timeout_s: int) -> str:
+        source = self.GATE.read_text()
+        block = re.search(r'^  if \[ "\$EXPORT_HOST" = 1 \]; then\n    # Export mode keeps.*?^  else\n', source, re.M | re.S)
+        self.assertIsNotNone(block, "the gate must keep its bounded export idle block")
+        grace = re.search(r"^GATE_EXPORT_LAUNCH_GRACE_S=(\d+)$", source, re.M).group(1)
+        recovery = re.search(r"^GATE_EXPORT_RECOVERY_S=(\d+)$", source, re.M).group(1)
+        generator = (f"EXPORT_HOST=1 TIMEOUT_S={timeout_s} GATE_EXPORT_LAUNCH_GRACE_S={grace} "
+                     f"GATE_EXPORT_RECOVERY_S={recovery}\n" + block.group(0) + "  :\nfi\n")
+        return subprocess.check_output(["bash", "-c", generator], text=True, timeout=30)
+
+    def _idle(self, timeout_s: int, result_at: int) -> tuple[int, int]:
+        # Simulated clock: each sleep advances the guest's SECONDS instead of waiting.
+        script = (f"SECONDS={result_at}\nsleep() {{ SECONDS=$((SECONDS + $1)); }}\n"
+                  + self._guest_tail(timeout_s))
+        out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        until = int(re.search(r"GATE_EXPORT_IDLE_UNTIL elapsed_s=(\d+)", out.stdout).group(1))
+        expired = int(re.search(r"GATE_EXPORT_IDLE_EXPIRED elapsed_s=(\d+)", out.stdout).group(1))
+        self.assertGreaterEqual(expired, until)
+        self.assertLess(expired, until + 60)
+        return until, expired
+
+    def test_idle_ends_after_the_host_export_window(self) -> None:
+        until, _ = self._idle(7200, result_at=600)
+        self.assertEqual(until, 7200 + 900)
+
+    def test_a_late_result_still_gets_a_bounded_recovery_window(self) -> None:
+        until, _ = self._idle(7200, result_at=30000)
+        self.assertEqual(until, 30000 + 3600)
+
+    def test_the_bound_never_ends_inside_the_host_deadline(self) -> None:
+        for timeout_s, result_at in ((5400, 0), (5400, 5399), (60, 30)):
+            until, _ = self._idle(timeout_s, result_at)
+            self.assertGreater(until, timeout_s)
+            self.assertNotIn("while :; do sleep 60; done", self._guest_tail(timeout_s))
+
+
 class LinuxControllerExportTests(unittest.TestCase):
     def _fixture(self):
         temporary = tempfile.TemporaryDirectory(prefix="controller-original-export-")

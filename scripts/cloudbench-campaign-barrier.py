@@ -64,6 +64,9 @@ def main() -> int:
                     "job_id": job_id,
                     "controller_pid": args.controller_pid,
                     "ready_at": time.time(),
+                    # The campaign excludes a peer that is still not ready
+                    # before the earliest ready copy's own deadline expires.
+                    "deadline": args.deadline,
                 }
             )
         )

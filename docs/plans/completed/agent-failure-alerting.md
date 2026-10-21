@@ -1,11 +1,11 @@
 # Agent Failure Alerting + Auto-RCA
 
-> **Superseded RCA leg (2026-10-20).** The GitHub Actions auto-RCA described
-> below (`repository_dispatch` → `auto-rca*.yml` → `scripts/auto-rca-tool`) is
-> retired. The `#errors` card now drives a Rose RCA agent through the backend
-> `slack-auto-rca` domain (`/api/webhooks/slack/auto-rca`; criterion C10 in
-> `docs/plans/active/rose-builds-rose.md`). The alerting surfaces, throttling and
-> `/health/deep` sections still describe current behavior.
+> **2026-10-20 update — agent failures moved off this path.** Root-agent failures
+> no longer post to Slack or dispatch a GitHub Auto RCA; `report_failure_activity`
+> only logs. Every real prod agent run that is not COMPLETED 24 hours after it
+> started gets one Report Bug `/rca` from the backend's hourly stuck-agent job
+> (`back-end/src/domains/agents/stuckAgentBugReportService.ts`). Chat, SMS,
+> WhatsApp, and backend-crash alerts below are unchanged.
 
 ## Goal
 

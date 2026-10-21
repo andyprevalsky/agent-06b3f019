@@ -17,12 +17,18 @@ import { useCallback, useState } from 'react';
 import { useToast } from '@/hooks/use-toast';
 import { DuplicateProjectNameError, type Project } from '@/lib/api/projects';
 
-import { useCreateProject, useDeleteProject, useProjects, useUpdateProject } from './useProjects';
+import {
+  useCreateProject,
+  useDeleteProject,
+  useProjectsQuery,
+  useUpdateProject,
+} from './useProjects';
 import type { RoseProjectActions } from './RoseAgentGroups';
 
 export function useRoseSidebarProjects(onCreateAgentInProject: (project: Project) => void) {
   const { toast } = useToast();
-  const projects = useProjects();
+  const projectQuery = useProjectsQuery();
+  const projects = projectQuery.data ?? [];
   const createMutation = useCreateProject();
   const updateMutation = useUpdateProject();
   const deleteMutation = useDeleteProject();
@@ -68,7 +74,7 @@ export function useRoseSidebarProjects(onCreateAgentInProject: (project: Project
       } catch (err) {
         if (err instanceof DuplicateProjectNameError) return err.message;
         fail('Could not create project');
-        return null;
+        return 'Could not create project. Try again.';
       }
     },
   };
@@ -78,6 +84,7 @@ export function useRoseSidebarProjects(onCreateAgentInProject: (project: Project
 
   return {
     projects,
+    projectQuery,
     openProject,
     closeProjectSettings: () => setSettingsProjectId(null),
     renamingProjectId,

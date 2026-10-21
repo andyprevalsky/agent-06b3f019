@@ -19,13 +19,43 @@ for raw in Path(path).read_text().splitlines():
     if not line or line.startswith("#") or "=" not in line:
         continue
     key, value = line.split("=", 1)
-    if key.strip() != wanted:
+    key = key.strip()
+    if key.startswith("export") and key[6:7].isspace():  # dotenv's `export KEY=value`
+        key = key[6:].strip()
+    if key != wanted:
         continue
     value = value.strip()
     if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
         value = value[1:-1]
     print(value)
     break
+PY
+}
+
+# Number of distinct values assigned to <key> in a dotenv file (`KEY=` or
+# `export KEY=`). Repeated identical assignments count once.
+cloudbench_env_distinct_value_count() {  # <path> <key>
+  python3 - "$1" "$2" <<'PY'
+from pathlib import Path
+import sys
+
+path, wanted = sys.argv[1:3]
+values = set()
+for raw in Path(path).read_text().splitlines():
+    line = raw.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    key = key.strip()
+    if key.startswith("export") and key[6:7].isspace():
+        key = key[6:].strip()
+    if key != wanted:
+        continue
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1]
+    values.add(value)
+print(len(values))
 PY
 }
 
@@ -362,8 +392,10 @@ cloudbench_select_central_hub_port() {  # <preferred-port> <expected-runs-root>
 # Default location: beside the real (symlink-resolved) agents/.env, else the
 # main checkout's agents/.env.benchmark-temporal for a linked Git worktree. Set
 # CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE=<path> to choose another file (which must
-# then exist) or =off to stage the controller's settings unchanged. No file at
-# the default locations keeps the historical byte-identical staging.
+# then exist) or =off to stage the controller's settings unchanged. No file (or
+# =off) stages the controller's bytes, which
+# cloudbench_require_staged_guest_temporal_namespace refuses for any app with a
+# committed guest namespace unless they already carry it.
 cloudbench_guest_temporal_override_file() {  # [agents-env]; prints path or nothing
   local explicit="${CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE-}" agents_env="${1:-agents/.env}" candidate common
   [ "$explicit" = off ] && return 0
@@ -467,16 +499,60 @@ print(replacements["TEMPORAL_NAMESPACE"])
 PY
 }
 
-# cloudbench_require_guest_temporal_namespace <agents-env> <backend-env> <expected>
-# A guest decodes the shared bench-app AGENTS_ENV_B64/BACKEND_ENV_B64 secrets,
-# which only a maintenance op (--refresh-secrets/--setup/image-activate) stages.
-# A launcher that bound a guest-only namespace (the original600 operator) passes
-# it here so stale secrets fail before any Temporal worker, instead of silently
-# running every guest on the controller/production namespace. Empty = no check.
-cloudbench_require_guest_temporal_namespace() {
-  local agents_env="$1" backend_env="$2" expected="${3:-}" path actual
+# Committed guest Temporal namespace per bench app. The namespace name is not a
+# secret (the address and API key stay in the private override), so every host
+# and fresh checkout agrees on what the shared bench-app secrets must carry.
+# 2026-10-19: a host without the override restaged the bench app with the
+# production namespace and the next launch's guests refused to start.
+cloudbench_expected_guest_temporal_namespace() {  # <app>; prints namespace or nothing
+  case "${1:-}" in
+    navi-whisper-lux-bench) printf '%s\n' rose-labs-bench.tch2n ;;
+  esac
+}
+
+# cloudbench_require_staged_guest_temporal_namespace <app> <override-or-empty> <agents-env> <backend-env>
+# Refuses, before any secret is staged, guest copies whose TEMPORAL_NAMESPACE is
+# not the app's committed guest namespace. Apps without one are unchecked.
+cloudbench_require_staged_guest_temporal_namespace() {
+  local app="$1" override="$2" agents_env="$3" backend_env="$4" expected path actual count
+  expected="$(cloudbench_expected_guest_temporal_namespace "$app")"
   [ -n "$expected" ] || return 0
   for path in "$agents_env" "$backend_env"; do
+    # cloudbench_env_value reads the first assignment while guest dotenv loaders
+    # apply the last, so conflicting repeats could pass this check and still run
+    # the guest on another namespace. Identical repeats are harmless.
+    count="$(cloudbench_env_distinct_value_count "$path" TEMPORAL_NAMESPACE 2>/dev/null)" || count=""
+    if [ "$count" != 0 ] && [ "$count" != 1 ]; then
+      echo "❌ Refusing to stage $app guest secrets: $(basename "$path") assigns ${count:-an unreadable number of} different TEMPORAL_NAMESPACE values; keep one value, then retry." >&2
+      return 1
+    fi
+    actual="$(cloudbench_env_value "$path" TEMPORAL_NAMESPACE 2>/dev/null)" || actual=""
+    [ "$actual" = "$expected" ] && continue
+    if [ -z "$override" ]; then
+      echo "❌ Refusing to stage $app guest secrets: guests must use Temporal namespace $expected, but no guest Temporal override was found, so they would get this controller's TEMPORAL_NAMESPACE=${actual:-<unset>}. Install the private 0600 agents/.env.benchmark-temporal (CLOUDBENCH_GUEST_TEMPORAL_ADDRESS/_NAMESPACE/_API_KEY) beside the real agents/.env, or point CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE at it, then retry." >&2
+    else
+      echo "❌ Refusing to stage $app guest secrets: the guest Temporal override $override yields TEMPORAL_NAMESPACE=${actual:-<unset>} in $(basename "$path"), but $app guests must use $expected. Fix CLOUDBENCH_GUEST_TEMPORAL_NAMESPACE in that file, then retry." >&2
+    fi
+    return 1
+  done
+}
+
+# cloudbench_require_guest_temporal_namespace <agents-env> <backend-env> <expected>
+# A guest decodes the shared bench-app AGENTS_ENV_B64/BACKEND_ENV_B64 secrets,
+# which only a maintenance op (--refresh-secrets/--setup/--refresh-wmh) stages.
+# run-bench-cloud binds the app's committed guest namespace by default (a
+# launcher such as the original600 operator may bind its own), so stale secrets
+# fail before any Temporal worker instead of silently running every guest on the
+# controller/production namespace. Empty = no check (apps without one).
+cloudbench_require_guest_temporal_namespace() {
+  local agents_env="$1" backend_env="$2" expected="${3:-}" path actual count
+  [ -n "$expected" ] || return 0
+  for path in "$agents_env" "$backend_env"; do
+    count="$(cloudbench_env_distinct_value_count "$path" TEMPORAL_NAMESPACE 2>/dev/null)" || count=""
+    if [ "$count" != 0 ] && [ "$count" != 1 ]; then
+      echo "FATAL: guest $(basename "$path") assigns ${count:-an unreadable number of} different TEMPORAL_NAMESPACE values; the loaded value is ambiguous. Restage the bench app secrets with one value." >&2
+      return 1
+    fi
     actual="$(cloudbench_env_value "$path" TEMPORAL_NAMESPACE 2>/dev/null)" || actual=""
     if [ "$actual" != "$expected" ]; then
       echo "FATAL: guest $(basename "$path") TEMPORAL_NAMESPACE=${actual:-<unset>} differs from the launcher's guest namespace $expected; the bench app secrets predate the guest override. Restage them: bash scripts/run-bench-cloud --refresh-secrets" >&2

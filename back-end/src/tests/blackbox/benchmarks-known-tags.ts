@@ -8,6 +8,7 @@
  */
 export const KNOWN_TAGS = [
   'basic',
+  'process',
   'chat',
   'smoke',
   'approval',

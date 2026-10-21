@@ -1,7 +1,7 @@
 /**
  * Pure grouping for the Rose Desktop left bar (UI ledger row 57):
  * Home (root project) agents first, then one group per project in the order the
- * Projects API returns them. An agent whose `project_id` is missing, null or
+ * Projects API returns them, with Rose first. An agent whose `project_id` is missing, null or
  * not a known project belongs to Home.
  */
 
@@ -31,6 +31,10 @@ export function groupAgentsByProject(agents: Agent[], projects: Project[]): Grou
   }
   return {
     home,
-    projects: projects.map((project) => ({ project, agents: byProject.get(project.id) ?? [] })),
+    projects: [...projects]
+      .sort(
+        (a, b) => Number(b.name.toLowerCase() === 'rose') - Number(a.name.toLowerCase() === 'rose'),
+      )
+      .map((project) => ({ project, agents: byProject.get(project.id) ?? [] })),
   };
 }

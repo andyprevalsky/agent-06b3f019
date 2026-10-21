@@ -149,7 +149,14 @@ export async function computeTaskStats(): Promise<Map<string, TaskStats>> {
 const READY_STATUSES = new Set(['ready']);
 
 /** Canonical catalog-group tokens the Benchmarks page filters + renders on. */
-const CATALOG_GROUPS = ['pre-deploy', 'daily', 'rose-bench', 'polar-bench', 'incomplete'] as const;
+const CATALOG_GROUPS = [
+  'pre-deploy',
+  'daily',
+  'rose-bench',
+  'process-bench',
+  'polar-bench',
+  'incomplete',
+] as const;
 
 /**
  * Normalize a stored `group` label (from tasks.json) to a canonical token.
@@ -179,6 +186,7 @@ function normalizeStoredGroup(raw: unknown): string | null {
 function deriveTaskGroup(status: string | null, bench: string | null, tags: string[]): string {
   if (status !== null && !READY_STATUSES.has(status)) return 'incomplete';
   if (tags.includes('smoke')) return 'pre-deploy';
+  if (tags.includes('process')) return 'process-bench';
   if (tags.includes('polar-bench')) return 'polar-bench';
   if (bench === 'rose-bench') return 'rose-bench';
   return 'daily';

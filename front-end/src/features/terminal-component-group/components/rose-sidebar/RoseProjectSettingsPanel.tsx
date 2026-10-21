@@ -64,8 +64,10 @@ function CodeRepoSection({
             className={cn(MONO, 'min-w-0 flex-1 bg-transparent text-right outline-none')}
           />
         ) : (
-          <span className="flex items-center gap-3">
-            <span className={MONO}>{draft.repoUrl ?? 'No repository'}</span>
+          <span className="flex min-w-0 flex-1 items-center justify-end gap-3">
+            <span className={cn(MONO, 'min-w-0 break-all')}>
+              {draft.repoUrl ?? 'No repository'}
+            </span>
             <button
               type="button"
               onClick={() => setEditingUrl(true)}

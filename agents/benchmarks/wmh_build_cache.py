@@ -229,6 +229,35 @@ def _safe_extract(tar: tarfile.TarFile, target: Path) -> None:
         tar.extract(member, root)
 
 
+def _fsync_directory(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_tree(root: Path) -> None:
+    """Make an extracted tree durable before it is swapped in.
+
+    A restore is usually followed by a Machine stop and a volume snapshot.
+    2026-10-20 the donor stopped seconds after a 19.5 GB restore; ext4 had not
+    written back the tail of one 5.9 GB blob, so the snapshot held it truncated
+    at a page boundary and every SIM guest failed the native artifact digest.
+    """
+    for directory, _subdirs, files in os.walk(root):
+        for filename in files:
+            path = Path(directory) / filename
+            if path.is_symlink():
+                continue
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        _fsync_directory(Path(directory))
+
+
 def pull(
     build_dir: Path,
     *,
@@ -283,11 +312,13 @@ def pull(
         writer.join()
         if failure:
             raise failure[0]
+        _fsync_tree(extract_dir)
         if build_dir.exists():
             replaced = build_dir.with_name(build_dir.name + f".replaced-{int(time.time())}")
             build_dir.rename(replaced)
             log(f"[wmh-build-cache] moved previous build directory to {replaced}")
         extract_dir.rename(build_dir)
+        _fsync_directory(build_dir.parent)
     log(f"[wmh-build-cache] restored {name} ({manifest['indexed_bundles']} bundles) into {build_dir}")
     return manifest
 

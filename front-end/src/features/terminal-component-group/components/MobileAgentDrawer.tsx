@@ -48,7 +48,6 @@ import {
 import { cn } from '@/lib/utils';
 
 import SidebarAgentList from './SidebarAgentList';
-import { ProjectsNavButton } from './rose-sidebar/ProjectsNavButton';
 import { RoseMobileAgentList } from './rose-sidebar/RoseMobileAgentList';
 import { RoseNewAgentButton, RoseSearchRow } from './rose-sidebar/RoseSidebarChrome';
 import { SidebarCreateAgentButton, SidebarSearch } from './SidebarChrome';
@@ -231,7 +230,6 @@ export default function MobileAgentDrawer({
                   {roseHeader ? (
                     <>
                       <RoseNewAgentButton isExpanded onClick={handleCreateAgent} />
-                      <ProjectsNavButton isExpanded onOpen={() => setOpen(false)} />
                     </>
                   ) : (
                     <SidebarCreateAgentButton

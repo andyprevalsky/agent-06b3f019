@@ -1,6 +1,8 @@
+import { CHAT_ONLY_TOOL_NAMES } from '../../providers/realAgentRuns';
 import type { RootAgentRunUsageRecord } from './types';
 
-export const CHAT_ONLY_TOOL_NAMES = ['chat_router', 'chat_generator'] as const;
+export { CHAT_ONLY_TOOL_NAMES };
+
 const CHAT_ONLY_TOOL_NAME_SET = new Set<string>(CHAT_ONLY_TOOL_NAMES);
 
 export interface CostTelemetrySourceRow {

@@ -39,6 +39,97 @@ if [ -n "$GATE_NAME_SUFFIX" ] && ! [[ "$GATE_NAME_SUFFIX" =~ ^[a-z0-9-]{1,12}$ ]
   echo "invalid CLOUDBENCH_GATE_NAME_SUFFIX: expected [a-z0-9-]{1,12}" >&2; exit 2
 fi
 gate_machine_name() { printf 'cloudbench-gate-%s-%s%s\n' "${GATE_REF:0:8}" "$STAMP" "${GATE_NAME_SUFFIX:+-$GATE_NAME_SUFFIX}"; }
+# Every flyctl call here is bounded. On 2026-10-20 a detached `flyctl machine
+# run` sat in futex_wait for 17 min after printing "Machine started" while the
+# Machine itself was healthy. On a deadline only the exact flyctl child this
+# shell started is signalled: TERM, then KILL after 5 s.
+FLY_CHILD_PID=""
+fly_stop_exact() {
+  local pid="$1" _
+  kill -TERM "$pid" 2>/dev/null || return 0
+  for _ in $(seq 1 25); do kill -0 "$pid" 2>/dev/null || return 0; sleep 0.2; done
+  kill -KILL "$pid" 2>/dev/null || true
+}
+# fly_bounded <seconds> <flyctl args...>: flyctl's own status, or 124 when the
+# deadline stopped it. Callers keep their existing failure handling.
+fly_bounded() {
+  local deadline=$((SECONDS + $1 + 1)) pid rc=0; shift
+  flyctl "$@" &
+  pid=$!; FLY_CHILD_PID=$pid
+  if [ "$BASH_SUBSHELL" -gt 0 ]; then
+    # In a command substitution or pipeline the parent's EXIT cleanup cannot see
+    # FLY_CHILD_PID and its traps are not inherited, while the background flyctl
+    # ignores SIGINT. This subshell stops its own exact child on any exit.
+    trap 'if [ -n "$FLY_CHILD_PID" ]; then fly_stop_exact "$FLY_CHILD_PID"; fi' EXIT
+    trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+  fi
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "⚠️  flyctl $1 exceeded its bound; stopped exact pid $pid" >&2
+      fly_stop_exact "$pid"; rc=124; break
+    fi
+    sleep 0.2
+  done
+  if [ "$rc" = 124 ]; then wait "$pid" 2>/dev/null || true; else wait "$pid" || rc=$?; fi
+  FLY_CHILD_PID=""
+  return "$rc"
+}
+# fly_machine_run_bounded <log> <machine run args...>: streams flyctl's output
+# and keeps it in <log>, where the caller reads the Machine ID. Before the ID
+# line flyctl gets CLOUDBENCH_GATE_RUN_BEFORE_ID_S (default 900); a Machine it
+# may have created is then found by its unique name (fly_machine_id_from_run_log)
+# so cleanup still destroys or retains it. Once the ID is printed the Machine
+# exists, so flyctl gets CLOUDBENCH_GATE_RUN_AFTER_ID_S (default 600) to finish
+# its start wait, and CLOUDBENCH_GATE_RUN_AFTER_START_S (default 30) once it
+# reports "Machine started". SECONDS ticks once a second, so each deadline adds
+# one to give the full window. The caller already tolerates a non-zero exit.
+fly_machine_run_bounded() {
+  local log="$1" pid rc=0 printed=0 complete id_deadline="" start_deadline=""; shift
+  local before_id="${CLOUDBENCH_GATE_RUN_BEFORE_ID_S:-900}"
+  local after_id="${CLOUDBENCH_GATE_RUN_AFTER_ID_S:-600}" after_start="${CLOUDBENCH_GATE_RUN_AFTER_START_S:-30}"
+  local pre_id_deadline=$((SECONDS + before_id + 1))
+  flyctl machine run "$@" > "$log" 2>&1 &
+  pid=$!; FLY_CHILD_PID=$pid
+  while kill -0 "$pid" 2>/dev/null; do
+    complete="$(wc -l < "$log" | tr -d ' ')"
+    if [ "$complete" -gt "$printed" ]; then sed -n "$((printed + 1)),${complete}p" "$log"; printed="$complete"; fi
+    if [ -z "$id_deadline" ] && grep -qiE 'Machine ID: [0-9a-f]+' "$log"; then id_deadline=$((SECONDS + after_id + 1)); fi
+    if [ -z "$id_deadline" ] && [ "$SECONDS" -ge "$pre_id_deadline" ]; then
+      echo "⚠️  flyctl machine run printed no Machine ID within ${before_id}s; stopped exact pid $pid" >&2
+      fly_stop_exact "$pid"; rc=124; break
+    fi
+    if [ -z "$start_deadline" ] && [ -n "$id_deadline" ] && grep -q 'Machine started' "$log"; then start_deadline=$((SECONDS + after_start + 1)); fi
+    if { [ -n "$id_deadline" ] && [ "$SECONDS" -ge "$id_deadline" ]; } || { [ -n "$start_deadline" ] && [ "$SECONDS" -ge "$start_deadline" ]; }; then
+      echo "⚠️  flyctl machine run still running after it reported the Machine ID; stopped exact pid $pid" >&2
+      fly_stop_exact "$pid"; rc=124; break
+    fi
+    sleep 0.2
+  done
+  if [ "$rc" = 124 ]; then wait "$pid" 2>/dev/null || true; else wait "$pid" || rc=$?; fi
+  FLY_CHILD_PID=""
+  tail -n +"$((printed + 1))" "$log"
+  return "$rc"
+}
+# fly_machine_id_from_run_log <log> <machine-name>: the Machine ID flyctl
+# printed, else the ID of the one Machine with this run's unique name (flyctl
+# can stop or fail before printing it). Prints nothing when neither exists.
+fly_machine_id_from_run_log() {
+  local log="$1" name="$2" id=""
+  [ -n "$log" ] && [ -f "$log" ] && id="$(grep -oiE 'Machine ID: [0-9a-f]+' "$log" | tail -1 | awk '{print $3}' || true)"
+  if [ -z "$id" ] && [ -n "$name" ]; then
+    id="$(fly_bounded 60 machines list -a "$APP" --json 2>/dev/null | NAME="$name" python3 -c '
+import json, os, sys
+try:
+    rows = json.load(sys.stdin)
+except ValueError:
+    rows = []
+ids = [m.get("id", "") for m in rows if isinstance(m, dict) and m.get("name") == os.environ["NAME"]]
+if len(ids) == 1:
+    print(ids[0])
+' || true)"
+  fi
+  printf '%s' "$id"
+}
 python3 -I -B "$ROOT_DIR/scripts/cloudbench-operator-preflight.py" --require-flyctl
 DISPOSABLE_AUTHORITY=""
 if [ "${1:-}" = "--disposable-controller" ]; then
@@ -183,6 +274,10 @@ fi
 # The multi-workstream suite alone took 30–42 min on shared-cpu-4x (2026-10-06),
 # so the ten suites need more than the former 40 min; 2400s timed out mid-suite.
 TIMEOUT_S="${CLOUDBENCH_GATE_TIMEOUT_S:-5400}"
+case "$TIMEOUT_S" in ''|*[!0-9]*) echo "invalid CLOUDBENCH_GATE_TIMEOUT_S" >&2; exit 2 ;; esac
+# Export-mode guest idle bound after GATE_RESULT (see the gate script below).
+GATE_EXPORT_LAUNCH_GRACE_S=900
+GATE_EXPORT_RECOVERY_S=3600
 REPO_URL="${CLOUDBENCH_GATE_REPO_URL:-https://github.com/Rose-Ai-Labs/rose.git}"
 
 # shellcheck disable=SC2016  # the pytest -k expression is quoted for the remote shell
@@ -259,7 +354,7 @@ fi
 
 IMAGE_REF="${WARM_IMAGE_REF:-}"
 if [ -z "$IMAGE_REF" ]; then
-  IMAGE_REF="$(flyctl machines list -a "$APP" --json 2>/dev/null | python3 -c '
+  IMAGE_REF="$(fly_bounded 120 machines list -a "$APP" --json 2>/dev/null | python3 -c '
 import json, sys, re
 images = {m["config"]["image"] for m in json.load(sys.stdin) if "cloudbench-warm" in m["config"].get("image", "")}
 # Tags are cloudbench-warm[-local]-YYYYMMDD-HHMMSS; the newest date wins.
@@ -295,8 +390,15 @@ GATE_EXPORT_HELPER=""; GATE_EXPORT_CALLER=""
 GATE_EXPORT_FILES=()
 GATE_SCRIPT="$(mktemp -t cloudbench-gate.XXXXXX)"
 MACHINE_ID=""
+RUN_LOG=""
 cleanup() {
-  rm -f "$GATE_SCRIPT" "${GATE_TOKEN_FILE:-}" "${CLOUDBENCH_GATE_SELF_COPY:-}" "${GATE_EXPORT_HELPER:-}"
+  if [ -n "$FLY_CHILD_PID" ]; then fly_stop_exact "$FLY_CHILD_PID"; fi
+  # Interrupted inside the post-ID window: the Machine exists and its ID is only
+  # in RUN_LOG. Recover it so the Machine is destroyed or reported retained.
+  if [ -z "$MACHINE_ID" ] && [ -n "$RUN_LOG" ] && [ -f "$RUN_LOG" ]; then
+    MACHINE_ID="$(fly_machine_id_from_run_log "$RUN_LOG" "${MACHINE_NAME:-}")"
+  fi
+  rm -f "$GATE_SCRIPT" "$RUN_LOG" "${GATE_TOKEN_FILE:-}" "${CLOUDBENCH_GATE_SELF_COPY:-}" "${GATE_EXPORT_HELPER:-}"
   if [ -n "$WORKSPACE_VOLUME_INTENT" ]; then
     echo "GATE_WORKSPACE_VOLUME_RETAINED id=${WORKSPACE_VOLUME_ID:-unresolved} intent=$WORKSPACE_VOLUME_INTENT" >&2
   fi
@@ -309,10 +411,7 @@ cleanup() {
   if [ -n "$MACHINE_ID" ]; then
     # A destroy of a machine still pulling its image can hang; bound it so an
     # interrupted gate exits promptly (the machine is --rm and times out anyway).
-    flyctl machine destroy "$MACHINE_ID" -a "$APP" --force >/dev/null 2>&1 &
-    local destroy_pid=$!
-    for _ in $(seq 1 45); do kill -0 "$destroy_pid" 2>/dev/null || break; sleep 1; done
-    kill "$destroy_pid" 2>/dev/null || true
+    fly_bounded 45 machine destroy "$MACHINE_ID" -a "$APP" --force >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
@@ -509,7 +608,18 @@ REMOTE_EXPORT_PENDING
   echo '# stream. Stay alive until the controller has copied the full step logs out'
   echo '# (it touches /tmp/gate/fetched); --rm destroys the machine on exit.'
   if [ "$EXPORT_HOST" = 1 ]; then
-    echo 'while :; do sleep 60; done'
+    # Export mode keeps the guest up for the host's export downloads and for
+    # cloudbench-resume-controller-export.py after a dead host, but never
+    # forever: 2026-10-20 two sharded gates idled ~8.5 h after their host died.
+    # Every host download is bounded by its own deadline (TIMEOUT_S after
+    # `machine run`; the guest started within 6 s of it in both measured shard
+    # launches), so TIMEOUT_S + 900 s never shortens a healthy export. A command
+    # that outlives that still leaves a dead-host recovery hour after its result.
+    printf 'gate_idle_until=$((%s + %s)); [ $((SECONDS + %s)) -le "$gate_idle_until" ] || gate_idle_until=$((SECONDS + %s))\n' \
+      "$TIMEOUT_S" "$GATE_EXPORT_LAUNCH_GRACE_S" "$GATE_EXPORT_RECOVERY_S" "$GATE_EXPORT_RECOVERY_S"
+    echo 'echo "GATE_EXPORT_IDLE_UNTIL elapsed_s=$gate_idle_until"'
+    echo 'while [ "$SECONDS" -lt "$gate_idle_until" ]; do sleep 30; done'
+    echo 'echo "GATE_EXPORT_IDLE_EXPIRED elapsed_s=$SECONDS"'
   else
     echo 'if [ "$overall" -ne 0 ]; then for _ in $(seq 1 900); do [ -e /tmp/gate/fetched ] && break; sleep 1; done; fi'
   fi
@@ -536,7 +646,7 @@ PY_WORKSPACE_INTENT
 )"
   VOLUME_CREATE_STATUS=0
   controller_machine_creation_admission || exit $?
-  flyctl volumes create "$WORKSPACE_VOLUME_NAME" --app "$APP" --region "$REGION" --size "$WORKSPACE_VOLUME_SIZE_GB" --vm-size "$VM_SIZE" --vm-memory "$VM_MEMORY" --json --yes > "$GATE_EXPORT_LOCAL_DIR/workspace-volume-create.private.json" 2> "$GATE_EXPORT_LOCAL_DIR/workspace-volume-create.stderr.private.log" || VOLUME_CREATE_STATUS=$?
+  fly_bounded 300 volumes create "$WORKSPACE_VOLUME_NAME" --app "$APP" --region "$REGION" --size "$WORKSPACE_VOLUME_SIZE_GB" --vm-size "$VM_SIZE" --vm-memory "$VM_MEMORY" --json --yes > "$GATE_EXPORT_LOCAL_DIR/workspace-volume-create.private.json" 2> "$GATE_EXPORT_LOCAL_DIR/workspace-volume-create.stderr.private.log" || VOLUME_CREATE_STATUS=$?
   python3 -I -B - "$GATE_EXPORT_LOCAL_DIR/workspace-volume-create.private.json" "$GATE_EXPORT_LOCAL_DIR/workspace-volume-create.stderr.private.log" <<'PY_SYNC_NATIVE'
 import os,sys
 for path in sys.argv[1:]:
@@ -571,8 +681,7 @@ RUN_LOG="$(mktemp -t cloudbench-gate-run.XXXXXX)"
 # flyctl's own start wait is shorter than a cold 2 GB image pull and then exits
 # non-zero even though the machine comes up; the machine id in its output is
 # what matters, and the loop below is the real wait.
-set +e
-flyctl machine run "$IMAGE_REF" \
+fly_machine_run_bounded "$RUN_LOG" "$IMAGE_REF" \
   -a "$APP" --region "$REGION" --name "$MACHINE_NAME" \
   --vm-size "$VM_SIZE" --vm-memory "$VM_MEMORY" \
   --restart no "${MACHINE_LIFETIME_ARGS[@]}" "${MACHINE_STORAGE_ARGS[@]}" "${WORKSPACE_VOLUME_ARGS[@]}" --detach \
@@ -581,9 +690,10 @@ flyctl machine run "$IMAGE_REF" \
   --file-local "/tmp/gate-github-token=$GATE_TOKEN_FILE" \
   -e "GATE_REF=$GATE_REF" -e "GATE_REPO_URL=$REPO_URL" -e "GATE_NODE_VERSION=$GATE_NODE_VERSION" \
   -e "CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE=$KEEP_FIXTURE_ON_FAILURE" \
-  "/tmp/gate.sh" 2>&1 | tee "$RUN_LOG"
-set -e
-MACHINE_ID="$(grep -oiE 'Machine ID: [0-9a-f]+' "$RUN_LOG" | tail -1 | awk '{print $3}')"
+  "/tmp/gate.sh" || true
+MACHINE_ID="$(fly_machine_id_from_run_log "$RUN_LOG" "$MACHINE_NAME")"
+MACHINE_ID_FROM_NAME=0
+if [ -n "$MACHINE_ID" ] && ! grep -qiE 'Machine ID: [0-9a-f]+' "$RUN_LOG"; then MACHINE_ID_FROM_NAME=1; fi
 if [ "$EXPORT_HOST" = 1 ]; then
   cp "$RUN_LOG" "$GATE_EXPORT_LOCAL_DIR/create.private.log"
   python3 -I -B - "$GATE_EXPORT_LOCAL_DIR/host-identity.private.json" "$MACHINE_ID" "$APP" "$GATE_REF" "$IMAGE_REF" <<'PY_EXPORT_ID'
@@ -595,6 +705,8 @@ PY_EXPORT_ID
 fi
 rm -f "$RUN_LOG" "$GATE_TOKEN_FILE"
 [ -n "$MACHINE_ID" ] || { echo "❌ Could not read the gate machine id" >&2; exit 1; }
+# flyctl never reported this Machine; fail closed so cleanup destroys or retains it.
+[ "$MACHINE_ID_FROM_NAME" = 0 ] || { echo "❌ flyctl machine run reported no Machine ID; found Machine $MACHINE_ID by its exact name and cleaning it up" >&2; exit 1; }
 if [ -n "$DISPOSABLE_AUTHORITY" ]; then
   disposable_controller seal --authority "$DISPOSABLE_AUTHORITY" --directory "$GATE_EXPORT_LOCAL_DIR" --workspace "$GATE_EXPORT_LOCAL_DIR/workspace-volume.ownership.json" --machine "$MACHINE_ID" --name "$MACHINE_NAME" --image "$IMAGE_REF"
 fi
@@ -610,7 +722,7 @@ echo "📄 full machine log: $MACHINE_LOG"
 while [ $SECONDS -lt $deadline ]; do
   sleep 20
   # Fly returns about the last 100 lines per call; merge every poll into one file.
-  flyctl logs -a "$APP" --machine "$MACHINE_ID" --no-tail 2>/dev/null >> "$MACHINE_LOG" || true
+  fly_bounded 120 logs -a "$APP" --machine "$MACHINE_ID" --no-tail 2>/dev/null >> "$MACHINE_LOG" || true
   dedupe_machine_log
   logs="$(cat "$MACHINE_LOG")"
   steps="$(printf '%s\n' "$logs" | grep -oE 'GATE_(START|STEP|STEP_START|RESULT)[^"]*' | sed 's/\\n$//' || true)"
@@ -621,7 +733,7 @@ while [ $SECONDS -lt $deadline ]; do
   fi
   result="$(printf '%s\n' "$steps" | grep -oE 'GATE_RESULT exit=[0-9]+' | tail -1 || true)"
   [ -n "$result" ] && break
-  state="$(flyctl machines list -a "$APP" --json 2>/dev/null | MID="$MACHINE_ID" python3 -c '
+  state="$(fly_bounded 60 machines list -a "$APP" --json 2>/dev/null | MID="$MACHINE_ID" python3 -c '
 import json, os, sys
 machines = json.load(sys.stdin)
 print(next((m.get("state", "") for m in machines if m.get("id") == os.environ["MID"]), "destroyed"))
@@ -630,7 +742,7 @@ print(next((m.get("state", "") for m in machines if m.get("id") == os.environ["M
   if [ "$state" = "destroyed" ] || [ "$state" = "stopped" ]; then
     # The command exited before its result line reached the log stream; read once more.
     sleep 10
-    flyctl logs -a "$APP" --machine "$MACHINE_ID" --no-tail 2>/dev/null >> "$MACHINE_LOG" || true
+    fly_bounded 120 logs -a "$APP" --machine "$MACHINE_ID" --no-tail 2>/dev/null >> "$MACHINE_LOG" || true
     dedupe_machine_log
     logs="$(cat "$MACHINE_LOG")"
     result="$(printf '%s\n' "$logs" | grep -oE 'GATE_RESULT exit=[0-9]+' | tail -1 || true)"
@@ -654,7 +766,7 @@ if [ -z "$result" ]; then
   running_step="$(gate_running_step "$MACHINE_LOG")"
   if [ "$running_step" -gt 0 ]; then
     step_log="${MACHINE_LOG%.log}-step-$running_step.partial.log"
-    if flyctl ssh sftp get -a "$APP" --machine "$MACHINE_ID" "/tmp/gate/step-$running_step.log" "$step_log" >/dev/null 2>&1 \
+    if fly_bounded 300 ssh sftp get -a "$APP" --machine "$MACHINE_ID" "/tmp/gate/step-$running_step.log" "$step_log" >/dev/null 2>&1 \
       && [ -s "$step_log" ]; then
       echo "   suite #$running_step was still running; its partial output: $step_log ($(wc -l < "$step_log") lines)" >&2
     fi
@@ -708,7 +820,7 @@ else
   for n in $(printf '%s\n' $failed_steps | sort -un); do
     step_log="${MACHINE_LOG%.log}-step-$n.log"
     rm -f "$step_log"
-    if flyctl ssh sftp get -a "$APP" --machine "$MACHINE_ID" "/tmp/gate/step-$n.log" "$step_log" >/dev/null 2>&1 \
+    if fly_bounded 300 ssh sftp get -a "$APP" --machine "$MACHINE_ID" "/tmp/gate/step-$n.log" "$step_log" >/dev/null 2>&1 \
       && [ -s "$step_log" ]; then
       echo "   failed suite #$n full output: $step_log ($(wc -l < "$step_log") lines)" >&2
     else
@@ -716,7 +828,7 @@ else
     fi
   done
   if [ "$EXPORT_HOST" != 1 ]; then
-    flyctl ssh console -a "$APP" --machine "$MACHINE_ID" -C "touch /tmp/gate/fetched" >/dev/null 2>&1 || true
+    fly_bounded 120 ssh console -a "$APP" --machine "$MACHINE_ID" -C "touch /tmp/gate/fetched" >/dev/null 2>&1 || true
   fi
 fi
 if [ "$EXPORT_HOST" = 1 ]; then
