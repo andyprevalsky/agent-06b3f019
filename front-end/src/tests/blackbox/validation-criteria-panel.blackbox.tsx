@@ -3,8 +3,14 @@ import { describe, expect, it, vi, afterEach } from 'vitest';
 import { AgentContext } from '@/features/agent-context';
 import type { AgentContextValue } from '@/features/agent-context/types';
 import { RoseAppsProvider } from '@/features/terminal-component-group';
+import { useRoseApps } from '@/features/terminal-component-group/components/rose-apps/roseAppsState';
 import { RoseAppIcons } from '@/features/terminal-component-group/components/rose-apps/RoseAppIcons';
 import { renderWithProviders } from './test-wrapper';
+
+function CriteriaOpener() {
+  const apps = useRoseApps();
+  return <button onClick={() => apps?.toggleApp('validation')}>Open criteria for test</button>;
+}
 
 function scene(id: string | null, criteria: string | null, detailId = id) {
   const context = {
@@ -18,6 +24,7 @@ function scene(id: string | null, criteria: string | null, detailId = id) {
     <AgentContext.Provider value={context}>
       <RoseAppsProvider selectedAgentId={id}>
         <RoseAppIcons />
+        <CriteriaOpener />
       </RoseAppsProvider>
     </AgentContext.Provider>
   );
@@ -30,11 +37,12 @@ function hover(button: HTMLElement, pointerType = 'mouse') {
 afterEach(() => vi.useRealTimers());
 
 describe('Validation Criteria toolbar panel', () => {
-  it('appears only on an agent and shows its real verifier, never another agent’s criteria', () => {
+  it('keeps the icon absent and preserves real verifier ownership when opened programmatically', () => {
     const view = renderWithProviders(scene(null, null));
     expect(screen.queryByRole('button', { name: 'Validation Criteria' })).toBeNull();
     view.rerender(scene('a', 'Verify the build and keyboard controls.'));
-    fireEvent.click(screen.getByRole('button', { name: 'Validation Criteria' }));
+    expect(screen.queryByRole('button', { name: 'Validation Criteria' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Open criteria for test' }));
     expect(screen.getByTestId('validation-criteria-text')).toHaveTextContent(
       'Verify the build and keyboard controls.',
     );
@@ -49,23 +57,16 @@ describe('Validation Criteria toolbar panel', () => {
     expect(screen.queryByText('No validation criteria have been set for this agent.')).toBeNull();
   });
 
-  it('opens on deliberate mouse hover, keeps the active panel open and supports click close', () => {
-    vi.useFakeTimers();
-    renderWithProviders(scene('a', 'Actual criteria'));
-    const button = screen.getByRole('button', { name: 'Validation Criteria' });
-    hover(button);
-    act(() => vi.advanceTimersByTime(249));
-    expect(screen.queryByTestId('validation-criteria-text')).toBeNull();
-    act(() => vi.advanceTimersByTime(1));
-    expect(screen.getByTestId('validation-criteria-text')).toBeInTheDocument();
-    hover(button);
-    act(() => vi.advanceTimersByTime(250));
-    expect(button).toHaveAttribute('aria-pressed', 'true');
-    fireEvent.click(button);
-    expect(button).toHaveAttribute('aria-pressed', 'false');
-    hover(button, 'touch');
-    act(() => vi.advanceTimersByTime(500));
-    expect(button).toHaveAttribute('aria-pressed', 'false');
+  it('keeps the same five app controls on Home and selected agents', () => {
+    const view = renderWithProviders(scene(null, null));
+    const labels = () =>
+      within(screen.getByRole('navigation', { name: 'Apps' }))
+        .getAllByRole('button')
+        .map((button) => button.getAttribute('aria-label'));
+    const expected = ['Agent Display', 'Browser', 'Phone', 'Integrations', 'Dark mode'];
+    expect(labels()).toEqual(expected);
+    view.rerender(scene('a', 'Actual criteria'));
+    expect(labels()).toEqual(expected);
   });
 
   it('cancels brief hovers and opens the other app panels without toggling theme', () => {

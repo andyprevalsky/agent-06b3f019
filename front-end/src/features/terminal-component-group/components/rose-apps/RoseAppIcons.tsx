@@ -28,16 +28,7 @@
 
 import { useHoverOpen } from './useHoverOpen';
 import { useQuery } from '@tanstack/react-query';
-import {
-  ClipboardCheck,
-  Globe,
-  Monitor,
-  Moon,
-  Plug,
-  Smartphone,
-  Sun,
-  type LucideIcon,
-} from 'lucide-react';
+import { Globe, Monitor, Moon, Plug, Smartphone, Sun, type LucideIcon } from 'lucide-react';
 
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useRoseTheme } from '@/features/rose-theme';
@@ -79,6 +70,7 @@ function IconButton({
   size: number;
 }) {
   const hover = useHoverOpen(onHover);
+  const aboveQuerybox = useRoseApps()?.openApp === 'integrations';
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -120,7 +112,7 @@ function IconButton({
         data-testid="rose-app-tooltip"
         side="bottom"
         sideOffset={4}
-        className="z-[90] px-2 py-1 text-xs"
+        className={`${aboveQuerybox ? 'z-[102]' : 'z-[90]'} px-2 py-1 text-xs`}
       >
         {tooltip}
       </TooltipContent>
@@ -131,7 +123,6 @@ function IconButton({
 const APPS: { app: RoseApp; label: string; icon: LucideIcon }[] = [
   { app: 'display', label: 'Agent Display', icon: Monitor },
   { app: 'browser', label: 'Browser', icon: Globe },
-  { app: 'validation', label: 'Validation Criteria', icon: ClipboardCheck },
   { app: 'phone', label: 'Phone', icon: Smartphone },
   { app: 'integrations', label: 'Integrations', icon: Plug },
 ];
@@ -157,11 +148,11 @@ export function RoseAppIcons({ placement = 'corner' }: { placement?: 'corner' | 
       aria-label="Apps"
       data-testid="rose-app-icons"
       data-placement={placement}
-      className={
+      className={`${
         header
-          ? 'flex min-w-0 items-center overflow-x-auto'
-          : 'fixed z-[90] hidden items-center md:flex'
-      }
+          ? 'relative flex min-w-0 items-center overflow-x-auto'
+          : 'fixed hidden items-center md:flex'
+      } ${apps.openApp === 'integrations' ? 'z-[102]' : 'z-[90]'}`}
       style={header ? undefined : { top: 11, right: APP_ICON_EDGE, gap: APP_ICON_GAP }}
     >
       <AppIconButtons
@@ -195,11 +186,7 @@ function AppIconButtons({
   const idle = isDark ? IDLE_COLOR_DARK : IDLE_COLOR;
   return (
     <>
-      {APPS.filter(
-        ({ app }) =>
-          (showDisplay || app !== 'display') &&
-          (app !== 'validation' || apps.selectedAgentId !== null),
-      ).map(({ app, label, icon }) => (
+      {APPS.filter(({ app }) => showDisplay || app !== 'display').map(({ app, label, icon }) => (
         <IconButton
           key={app}
           testId={`rose-app-${app}`}

@@ -236,6 +236,14 @@ describe('top-right app icons', () => {
     await user.click(screen.getByTestId('rose-app-integrations'));
     expect(screen.queryByTestId('rose-phone')).toBeNull();
     expect(screen.getByTestId('rose-app-panel')).toHaveAttribute('data-state', 'open');
+    expect(screen.getByTestId('rose-app-panel').className).toContain('z-[101]');
+    const icons = screen.getByTestId('rose-app-icons');
+    expect(icons.className).toContain('z-[102]');
+    expect(icons.style.right).toBe('16px');
+    expect(icons.style.top).toBe('11px');
+    await user.click(screen.getByTestId('rose-app-browser'));
+    expect(icons.className).toContain('z-[90]');
+    expect(screen.getByTestId('browser-app-drawer').className).toContain('z-[66]');
   });
 
   it('Dark mode is a toggle (moon → sun, label swaps) that drives RoseThemeProvider and opens no panel', async () => {

@@ -78,3 +78,5 @@ export async function testRoseAgentHasOneUiOnlySentReceipt(ctx: {
   });
   assert(deniedRows === 0, 'failed sends do not fabricate activity receipts');
 }
+
+export { killCases } from './agent-graph-kill.cases';

@@ -96,12 +96,14 @@ export function AppDrawerShell({
   label,
   testId,
   variant = 'panel',
+  aboveQuerybox = false,
   children,
 }: {
   open: boolean;
   label: string;
   testId: string;
   variant?: DrawerVariant;
+  aboveQuerybox?: boolean;
   children?: ReactNode;
 }) {
   const apps = useRoseApps();
@@ -128,7 +130,8 @@ export function AppDrawerShell({
       data-state={open ? 'open' : 'closed'}
       data-variant={variant}
       className={cn(
-        'fixed z-[66] flex flex-col overflow-hidden bg-white text-[hsl(240_15%_8%)] dark:bg-[#262624] dark:text-[#ecece8]',
+        'fixed flex flex-col overflow-hidden bg-white text-[hsl(240_15%_8%)] dark:bg-[#262624] dark:text-[#ecece8]',
+        aboveQuerybox ? 'z-[101]' : 'z-[66]',
         'border-l border-gray-200/95 shadow-[-12px_0_40px_rgba(20,20,40,0.08)] dark:border-white/[0.09]',
         isMobile && 'inset-0 pt-[var(--safe-area-inset-top)]',
         !open && 'pointer-events-none',
