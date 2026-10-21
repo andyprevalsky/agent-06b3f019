@@ -22,6 +22,14 @@ export interface BrowserProviderSession {
   profileId: string | null;
   profileSource: string;
   validationBrowser: Browser | null;
+  /** Set when the created provider differs from the one first requested (visible fallback). */
+  providerSelection?: BrowserProviderSelection;
+}
+
+export interface BrowserProviderSelection {
+  requestedProvider: BrowserProviderName;
+  /** e.g. `preferred_config_create_failed: <error>`, `tilion_kill_switch`. */
+  fallbackReason: string;
 }
 
 export interface BrowserProviderResumeSession {

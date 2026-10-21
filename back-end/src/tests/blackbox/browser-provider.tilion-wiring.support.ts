@@ -12,6 +12,9 @@ import {
   BrowserOperationWorkerOwnedError,
 } from '../../providers/browser';
 import { respondToTilionRefusal } from '../../domains/browser-session/routes.files';
+import { buildBrowserSessionMetadata } from '../../domains/browser-session/service';
+import { buildPreferredBrowserConfig } from '../../providers/browser/challengeRecoverySupport';
+import { TilionRateLimitError } from '../../providers/browser/tilion';
 import type { Response } from 'express';
 import {
   selectedBrowserProvider,
@@ -381,6 +384,127 @@ export async function assertTilionUploadIsWorkerOwned(): Promise<void> {
   }
 }
 
+const NO_INJECTION = {
+  cookies: { injected: false, cookieCount: 0, authSource: 'none' },
+  localStorage: { originCount: 0 },
+  indexedDB: { originCount: 0 },
+  permissions: { grantCount: 0 },
+  cacheStorage: { originCount: 0 },
+};
+
+/** Benchmarks must tell a Tilion run from a silent fallback; the default's failure must surface. */
+export async function assertProviderFallbackIsVisibleAndDefaultFailureSurfaces(): Promise<void> {
+  const location = { country: 'US' };
+  const tilionPreference = buildPreferredBrowserConfig(
+    { provider: 'tilion', proxyMode: 'tilion_mobile', tilionProxyType: 'mobile' },
+    location
+  );
+  const create = (calls: string[], failTilion: Error | null, preferred: unknown) => ({
+    ...creationDependencies(calls, preferred),
+    defaultProvider: () => 'kernel' as const,
+    createTilion: async () => {
+      calls.push('tilion');
+      if (failTilion !== null) throw failTilion;
+      return fakeSession('tilion');
+    },
+  });
+
+  await withEnv(TILION_ENV, async () => {
+    // Preferred Tilion create fails → existing fallback to the default, now recorded.
+    const calls: string[] = [];
+    const session = await createSessionWithContextUsingDependencies(
+      'context-1',
+      'agent-1',
+      location,
+      undefined,
+      { taskId: 'task-1' },
+      create(calls, new Error('validation cleanup failed'), tilionPreference)
+    );
+    nodeAssert.equal(session.provider, 'kernel');
+    nodeAssert.equal(session.providerSelection?.requestedProvider, 'tilion');
+    nodeAssert.match(
+      session.providerSelection?.fallbackReason ?? '',
+      /^preferred_config_create_failed: validation cleanup failed/
+    );
+    const metadata = buildBrowserSessionMetadata(session, NO_INJECTION);
+    nodeAssert.equal(metadata.provider, 'kernel');
+    nodeAssert.equal(metadata.requested_provider, 'tilion');
+    nodeAssert.match(String(metadata.provider_fallback_reason), /preferred_config_create_failed/);
+
+    // A run that lands on what it asked for reports no fallback.
+    const direct = await createSessionWithContextUsingDependencies(
+      'context-1',
+      'agent-1',
+      location,
+      undefined,
+      {},
+      create([], null, tilionPreference)
+    );
+    const directMetadata = buildBrowserSessionMetadata(direct, NO_INJECTION);
+    nodeAssert.equal(directMetadata.provider, 'tilion');
+    nodeAssert.equal(directMetadata.requested_provider, 'tilion');
+    nodeAssert.equal(directMetadata.provider_fallback_reason, null);
+  });
+
+  // Kill switch: BROWSER_PROVIDER defaults to Tilion but new work lands on Kernel, visibly.
+  await withEnv({ ...TILION_ENV, BROWSER_AGENT_TILION_ENABLED: 'false' }, async () => {
+    const session = await createSessionWithContextUsingDependencies(
+      'context-1',
+      'agent-1',
+      location,
+      undefined,
+      {},
+      { ...creationDependencies([], tilionPreference), defaultProvider: selectedBrowserProvider }
+    );
+    nodeAssert.equal(session.provider, 'kernel');
+    nodeAssert.equal(session.providerSelection?.requestedProvider, 'tilion');
+    nodeAssert.equal(session.providerSelection?.fallbackReason, 'preferred_provider_kill_switch');
+    const noPreference = await createSessionWithContextUsingDependencies(
+      'context-1',
+      'agent-1',
+      location,
+      undefined,
+      {},
+      creationDependencies([])
+    );
+    nodeAssert.equal(noPreference.providerSelection?.fallbackReason, 'tilion_kill_switch');
+  });
+
+  // The DEFAULT provider failing is never swallowed: the typed adapter error propagates.
+  await withEnv(TILION_ENV, async () => {
+    const capacity = new TilionRateLimitError({
+      status: 429,
+      slug: 'concurrency_limit',
+      message: 'concurrency limit reached',
+      retryable: true,
+      requestId: null,
+      retryAfterMs: null,
+      detail: null,
+      method: 'POST',
+      path: '/v1/session',
+    });
+    const calls: string[] = [];
+    await nodeAssert.rejects(
+      createSessionWithContextUsingDependencies(
+        'context-1',
+        'agent-1',
+        location,
+        undefined,
+        {},
+        {
+          ...creationDependencies(calls),
+          createTilion: async () => {
+            calls.push('tilion');
+            throw capacity;
+          },
+        }
+      ),
+      (error: unknown) => error === capacity
+    );
+    nodeAssert.deepEqual(calls, ['tilion'], 'no silent retry on another provider');
+  });
+}
+
 /** Registered by browser-provider.blackbox.ts (one list keeps that file under max-lines). */
 export const tilionWiringCases: Array<[string, () => Promise<void>]> = [
   ['Tilion is the default provider', assertTilionIsTheDefaultProvider],
@@ -400,5 +524,9 @@ export const tilionWiringCases: Array<[string, () => Promise<void>]> = [
   [
     'Tilion uploads are worker-owned and refused with a typed error',
     assertTilionUploadIsWorkerOwned,
+  ],
+  [
+    'provider fallback is visible in session metadata; default failures surface typed',
+    assertProviderFallbackIsVisibleAndDefaultFailureSurfaces,
   ],
 ];

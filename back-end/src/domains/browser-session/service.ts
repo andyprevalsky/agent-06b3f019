@@ -61,6 +61,7 @@ async function requireSessionOwner(sessionId: string, userId?: string): Promise<
 
 interface BrowserSessionMetadataInput {
   provider: string;
+  providerSelection?: { requestedProvider: string; fallbackReason: string };
   proxySource: string;
   proxyLocation: ProxyGeoLocation;
   profileId: string | null;
@@ -81,6 +82,9 @@ export function buildBrowserSessionMetadata(
 ) {
   return {
     provider: session.provider,
+    // Benchmarks and the worker tell a real run on the requested provider from a fallback.
+    requested_provider: session.providerSelection?.requestedProvider ?? session.provider,
+    provider_fallback_reason: session.providerSelection?.fallbackReason ?? null,
     proxy_source: session.proxySource,
     proxy_location: session.proxyLocation,
     profile_id: session.profileId,
