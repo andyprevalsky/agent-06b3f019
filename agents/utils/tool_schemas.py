@@ -1087,7 +1087,7 @@ class SpawnAgentTool(BaseModel):
         default="cloud",
         description=(
             "Optional when type='code': 'local' runs the coding agent on the user's Mac in a folder they "
-            "shared (only for agents started from the Rose Mac app), 'cloud' (default) runs it in a sandbox."
+            "shared (requires an owned connected Mac; multiple Macs require explicit device selection), 'cloud' (default) runs it in a sandbox."
         ),
     )
     start_phase: Optional[Literal["PLAN", "EXECUTE"]] = Field(
@@ -1265,7 +1265,7 @@ class SpawnAgentToolNoGP(BaseModel):
         default="cloud",
         description=(
             "Optional when type='code': 'local' runs the coding agent on the user's Mac in a folder they "
-            "shared (only for agents started from the Rose Mac app), 'cloud' (default) runs it in a sandbox."
+            "shared (requires an owned connected Mac; multiple Macs require explicit device selection), 'cloud' (default) runs it in a sandbox."
         ),
     )
     context_gates: Optional[Dict[str, bool]] = Field(
