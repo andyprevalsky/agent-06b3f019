@@ -18,14 +18,37 @@ export interface RotationStep {
  * then changes browser/proxy infrastructure to Steel and Browser Use. Browser
  * Use only has country-level proxy selection; a new session requests a new
  * residential exit but the provider does not guarantee a distinct IP.
+ *
+ * A Tilion run gets a fresh Tilion residential exit, then a Tilion mobile exit,
+ * then switches to Kernel residential and finally Steel. The position is the
+ * run's rotation count and the provider is the one the run is on now, so once
+ * a Tilion run has switched to Kernel its next step follows the Kernel ladder
+ * (Steel at position 4 while Browser Use is disabled). With the Tilion kill
+ * switch off a Tilion run never rotates into another Tilion session: it leaves
+ * for Kernel at the same tier, and Kernel's ladder takes over from there.
  */
 export function selectRotationStep(
   rotationsUsed: number,
   currentProvider: BrowserProviderName,
-  browserUseAvailable = true
+  browserUseAvailable = true,
+  tilionAvailable = true
 ): RotationStep {
   if (!Number.isInteger(rotationsUsed) || rotationsUsed < 1 || rotationsUsed > ROTATION_CAP) {
     throw new RangeError(`Rotation position must be between 1 and ${ROTATION_CAP}`);
+  }
+
+  if (currentProvider === 'tilion') {
+    if (rotationsUsed <= 2) {
+      const proxyType: KernelProxyType = rotationsUsed === 1 ? 'residential' : 'mobile';
+      return tilionAvailable
+        ? { provider: 'tilion', proxyType, recoveryAction: 'ip_rotated' }
+        : { provider: 'kernel', proxyType, recoveryAction: 'provider_switched' };
+    }
+    return {
+      provider: rotationsUsed === 3 ? 'kernel' : 'steel',
+      proxyType: 'residential',
+      recoveryAction: 'provider_switched',
+    };
   }
 
   if (currentProvider === 'browser-use') {
@@ -69,5 +92,7 @@ export function rotationStepLabel(step: RotationStep): string {
     return `switch_provider_to_${step.provider.replace('-', '_')}`;
   if (step.provider === 'browser-use') return 'rotate_browser_use_residential_session';
   if (step.provider === 'steel') return 'rotate_steel_residential_ip';
+  if (step.provider === 'tilion')
+    return step.proxyType === 'mobile' ? 'rotate_tilion_mobile_ip' : 'rotate_tilion_residential_ip';
   return step.proxyType === 'mobile' ? 'rotate_kernel_mobile_ip' : 'rotate_kernel_residential_ip';
 }

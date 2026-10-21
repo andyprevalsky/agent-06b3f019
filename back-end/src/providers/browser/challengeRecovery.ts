@@ -16,6 +16,7 @@ import {
 } from './challengeClassifierNetwork';
 import { createKernelRecoverySession, releaseKernelRemoteSession } from './kernel';
 import { createBrowserUseRecoverySession, releaseBrowserUseRemoteSession } from './browserUse';
+import { createTilionRecoverySession, releaseTilionRemoteSession } from './tilion';
 import { recoveryOriginStorageScript } from './recoveryOriginStorage';
 import { raceProbeAbort, sameSiteNavigationUrl } from './challengeRecoveryShared';
 import { restoredTunnelCandidate } from './challengeRecoveryTransport';
@@ -30,13 +31,17 @@ export {
   paymentCdnFocusedCandidates,
   recoverySearchPlan,
   shouldPreferSteelForChallengeTarget,
+  tilionRecoveryAvailable,
   type BrowserRecoveryConfig,
+  type TilionRecoveryProxyType,
 } from './challengeRecoveryCandidates';
 import {
   bestSpecificity,
   availableBrowserRecoveryCandidates,
   shouldPreferSteelForChallengeTarget,
+  tilionRecoveryAvailable,
   type BrowserRecoveryConfig,
+  type TilionRecoveryProxyType,
 } from './challengeRecoveryCandidates';
 
 export {
@@ -132,13 +137,24 @@ export interface SuccessfulRecoveryCandidate {
   probe: CandidateProbeResult;
 }
 
+type TilionRecoverySession = Awaited<ReturnType<typeof createTilionRecoverySession>>;
+
 export interface BrowserConfigSearchRuntimeDependencies {
   createKernel: typeof createKernelRecoverySession;
   createSteel: typeof createSteelRecoverySession;
   createBrowserUse: typeof createBrowserUseRecoverySession;
+  createTilion: (
+    location: ProxyGeoLocation,
+    options: { proxyType: TilionRecoveryProxyType }
+  ) => Promise<TilionRecoverySession>;
+  /** Opens the candidate's only CDP client when Tilion create did not hand one back. */
+  connectTilionValidation?: (wsUrl: string) => Promise<Browser>;
   releaseKernel: typeof releaseKernelRemoteSession;
   releaseSteel: typeof releaseSteelRemoteSession;
   releaseBrowserUse: typeof releaseBrowserUseRemoteSession;
+  releaseTilion: typeof releaseTilionRemoteSession;
+  /** Mint a fresh connect URL for the promoted Tilion winner (view/connect tokens last 1800 s). */
+  refreshTilionConnectUrl?: (sessionId: string) => Promise<string>;
   probe: typeof probeCandidateBrowser;
   /** Tell the live view about the promoted binding before the old session is released. */
   announceBinding?: typeof announceBrowserSessionBinding;
@@ -432,19 +448,63 @@ export async function probeCandidateBrowser(
   };
 }
 
+/**
+ * Create a Tilion recovery candidate whose probe owns the session's single CDP
+ * client (a second client is refused with close 4409). The create-time
+ * validation client is reused; otherwise the probe opens the only one. A
+ * failed connect releases the paid session before rethrowing.
+ */
+export async function createTilionRecoveryCandidate(
+  dependencies: Pick<
+    BrowserConfigSearchRuntimeDependencies,
+    'createTilion' | 'connectTilionValidation' | 'releaseTilion'
+  >,
+  location: ProxyGeoLocation,
+  proxyType: TilionRecoveryProxyType
+): Promise<RecoveryCandidateSession> {
+  const created = await dependencies.createTilion(location, { proxyType });
+  const { validationBrowser, ...session } = created;
+  if (validationBrowser !== null) {
+    return { provider: 'tilion', ...session, validationBrowser };
+  }
+  try {
+    const connect =
+      dependencies.connectTilionValidation ??
+      (async (wsUrl: string) => (await import('playwright')).chromium.connectOverCDP(wsUrl));
+    return { provider: 'tilion', ...session, validationBrowser: await connect(session.wsUrl) };
+  } catch (error) {
+    await dependencies.releaseTilion(session.sessionId).catch(() => {});
+    throw error;
+  }
+}
+
+/** Release an ephemeral or superseded recovery session on its own provider. */
+export async function releaseRecoveryProviderSession(
+  dependencies: BrowserConfigSearchRuntimeDependencies,
+  provider: string,
+  sessionId: string
+): Promise<void> {
+  if (provider === 'kernel') await dependencies.releaseKernel(sessionId);
+  else if (provider === 'browser-use') await dependencies.releaseBrowserUse(sessionId);
+  else if (provider === 'tilion') await dependencies.releaseTilion(sessionId);
+  else await dependencies.releaseSteel(sessionId);
+}
+
 export const browserConfigSearchRuntimeDependencies: BrowserConfigSearchRuntimeDependencies = {
   createKernel: createKernelRecoverySession,
   createSteel: createSteelRecoverySession,
   createBrowserUse: createBrowserUseRecoverySession,
+  createTilion: createTilionRecoverySession,
   releaseKernel: releaseKernelRemoteSession,
   releaseSteel: releaseSteelRemoteSession,
   releaseBrowserUse: releaseBrowserUseRemoteSession,
+  releaseTilion: releaseTilionRemoteSession,
   probe: probeCandidateBrowser,
   announceBinding: announceBrowserSessionBinding,
 };
 
 /**
- * Probe one cookie/storage variant on an ephemeral Kernel/Steel session.
+ * Probe one cookie/storage variant on an ephemeral Kernel/Steel/Tilion session.
  *
  * Used by the agent cookie-probe wave so isolation experiments never open
  * ``new_context`` windows on the live debug desktop.
@@ -533,6 +593,15 @@ export async function probeCookieVariant(
         provider: 'browser-use',
         ...(await dependencies.createBrowserUse(proxyLocation)),
       };
+    } else if (config.provider === 'tilion') {
+      if (!tilionRecoveryAvailable()) {
+        throw new Error('Tilion is disabled by BROWSER_AGENT_TILION_ENABLED or has no API key');
+      }
+      session = await createTilionRecoveryCandidate(
+        dependencies,
+        proxyLocation,
+        config.tilionProxyType ?? 'residential'
+      );
     } else {
       const created = await dependencies.createSteel({
         proxyLocation,
@@ -569,13 +638,10 @@ export async function probeCookieVariant(
     return { clean, configKey: config.key, latencyMs: probe.latencyMs };
   } finally {
     if (session) {
-      if (session.provider === 'kernel') {
-        await dependencies.releaseKernel(session.sessionId).catch(() => {});
-      } else if (session.provider === 'browser-use') {
-        await dependencies.releaseBrowserUse(session.sessionId).catch(() => {});
-      } else {
-        await dependencies.releaseSteel(session.sessionId).catch(() => {});
-      }
+      if (session.provider === 'tilion') await closeValidationBrowser(session);
+      await releaseRecoveryProviderSession(dependencies, session.provider, session.sessionId).catch(
+        () => {}
+      );
     }
   }
 }
