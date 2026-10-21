@@ -418,7 +418,9 @@ export async function runLiveTilionProviderParity(): Promise<void> {
     assert(
       resumed.browser_session_metadata?.proxy_source ===
         rotated.browser_session_metadata?.proxy_source,
-      'resume lost the rotated Tilion exit type'
+      `resume lost the rotated Tilion exit type: rotated=${String(
+        rotated.browser_session_metadata?.proxy_source
+      )} resumed=${String(resumed.browser_session_metadata?.proxy_source)}`
     );
     const keptAfterResume = await withPage(String(resumed.ws_url), async (page) => {
       await navigateKernelPage(page, 'https://example.com');
@@ -450,7 +452,7 @@ export async function runLiveTilionProviderParity(): Promise<void> {
       await page.evaluate(() => localStorage.setItem('rose_tilion_parity', 'carried'));
       return browser.contexts()[0]!.storageState();
     });
-    const mobile = await post('/rotate-proxy', { task_id: taskId, carried_state: carriedState });
+    const mobile = await post('/rotate-proxy', { task_id: taskId, storage_state: carriedState });
     assert(
       mobile.provider === 'tilion' &&
         mobile.proxy_tier === 'mobile' &&

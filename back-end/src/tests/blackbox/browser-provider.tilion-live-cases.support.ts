@@ -27,6 +27,8 @@ import {
   withPage,
 } from './browser-provider.tilion-live.support';
 
+const RECOVERY_URL = 'https://en.wikipedia.org/wiki/Web_browser';
+
 /** User, agent and a Tilion-pinned browser context for one live case. */
 async function createTilionPinnedFixture(label: string) {
   const userId = `tilion-${label}-${randomUUID()}`;
@@ -101,9 +103,12 @@ export async function runLiveTilionChallengeRecovery(): Promise<void> {
     });
     const recovered = await post('/recover-challenge', {
       task_id: String(init.task_id),
-      current_url: 'https://example.com/',
+      // A real article: the recovery gate judges whether the target content came back,
+      // and rejects a placeholder page such as example.com as "not the target".
+      current_url: RECOVERY_URL,
       storage_state: storageState,
-      recovery_reason: 'live Tilion parity: exercise the worker recovery path',
+      recovery_reason:
+        'The article page returned an access-denied interstitial instead of its text',
     });
     const winner = String(recovered.session_id);
     current = winner;
