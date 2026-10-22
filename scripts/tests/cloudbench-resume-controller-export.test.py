@@ -1074,7 +1074,12 @@ class ExportResume(unittest.TestCase):
         self.export = self.out / "export"
         self.export.mkdir(parents=True, mode=0o700)
         self.mid = "a" * 14
-        self.collector = ROOT / "scripts/cloudbench-controller-export.py"
+        # verify_stage reads the collector as a private current-owner file, as in
+        # the controller's own umask-077 checkout; a shared checkout may be 0644.
+        self.collector = self.root / "source/scripts/cloudbench-controller-export.py"
+        self.collector.parent.mkdir(parents=True)
+        self.collector.write_bytes((ROOT / "scripts/cloudbench-controller-export.py").read_bytes())
+        self.collector.chmod(0o600)
         self.caller = {"pid": 99, "birth": "fixture-gone", "host": "fixture"}
         self.record = {
             "machine_id": self.mid,
@@ -1497,6 +1502,68 @@ class ExportResume(unittest.TestCase):
                 0,
             )
         self.assertEqual(json.loads(output.getvalue())["provider_calls"], 0)
+
+
+class CollectorWriterObservation(unittest.TestCase):
+    """writers() under same-UID process churn (gate flake, 2026-10-21).
+
+    An exiting or exec-ing task briefly has a root-owned /proc entry, so an
+    unprivileged scan gets EACCES on its fd list. The production collector is
+    root; the deploy-gate fixtures run it unprivileged with /proc bounded to
+    their own UID, as this test does.
+    """
+
+    def setUp(self):
+        self.collector = runpy.run_path(str(ROOT / "scripts/cloudbench-controller-export.py"),
+                                        run_name="collector_under_test")
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.owned = Path(self.temp.name) / "owned"
+        self.owned.mkdir()
+        original = Path.iterdir
+
+        def same_uid_proc(path):
+            if str(path) != "/proc":
+                return original(path)
+            selected = []
+            for process in original(path):
+                try:
+                    if process.name.isdecimal() and process.stat().st_uid == os.getuid():
+                        selected.append(process)
+                except FileNotFoundError:
+                    continue
+            return iter(selected)
+
+        patcher = mock.patch.object(Path, "iterdir", same_uid_proc)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def child(self, code, cwd):
+        process = subprocess.Popen([sys.executable, "-I", "-c", code], cwd=cwd)
+        self.addCleanup(lambda: (process.kill(), process.wait()))
+        time.sleep(0.5)
+        return process
+
+    def test_exiting_same_uid_tasks_never_abort_and_real_writers_are_found(self):
+        writer = self.child("import time; time.sleep(60)", self.owned)
+        churn = subprocess.Popen(["bash", "-c", "while :; do for i in $(seq 40); do (exec true) & done; wait; done"],
+                                 cwd=self.temp.name)
+        self.addCleanup(lambda: (churn.kill(), churn.wait()))
+        deadline = time.monotonic() + 6
+        scans = 0
+        while time.monotonic() < deadline:
+            found = self.collector["writers"]([self.owned], {os.getpid(), churn.pid})
+            self.assertIn(writer.pid, [row["pid"] for row in found])
+            scans += 1
+        self.assertGreater(scans, 20)
+
+    @unittest.skipIf(os.geteuid() == 0, "root observes every task; there is no unreadable writer")
+    def test_live_unobservable_writer_still_fails_closed(self):
+        # PR_SET_DUMPABLE=0 makes a live same-UID process's /proc entry root-owned.
+        self.child("import ctypes, time; ctypes.CDLL(None).prctl(4, 0, 0, 0, 0); time.sleep(60)", self.owned)
+        with mock.patch.dict(self.collector["task_paths"].__globals__, TASK_REOBSERVE_ATTEMPTS=3):
+            with self.assertRaisesRegex(ValueError, "cannot observe controller writer ownership"):
+                self.collector["writers"]([self.owned], {os.getpid()})
 
 
 class CleanupClock(unittest.TestCase):
