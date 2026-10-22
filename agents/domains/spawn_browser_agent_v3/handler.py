@@ -42,7 +42,7 @@ from browser_tools.secret_refs import (
     secret_placeholder,
 )
 from config import load_config
-from domains.spawn_browser_agent_v3.browser_activity_queue import (
+from domains.spawn_browser_agent_v3.service_activity_queue import (
     await_owned_browser_cleanup,
     browser_activity_queue_enabled,
     browser_activity_turn,

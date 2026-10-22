@@ -117,7 +117,7 @@ async def run_browser_activity_queue_case(*, patched=True, cancel=False, timedou
 
 
 async def test_browser_activity_queue_lifecycle():
-    from domains.spawn_browser_agent_v3.browser_activity_queue import await_owned_browser_cleanup
+    from domains.spawn_browser_agent_v3.service_activity_queue import await_owned_browser_cleanup
 
     await run_browser_activity_queue_case()
     await run_browser_activity_queue_case(cancel=True)
