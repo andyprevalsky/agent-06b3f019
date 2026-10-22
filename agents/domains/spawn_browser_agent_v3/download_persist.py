@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import os
 import re
@@ -372,6 +373,7 @@ class BrowserDownloadPersister:
         self._tasks: Set[asyncio.Task] = set()
         self._pending_by_guid: Dict[str, Dict[str, Any]] = {}
         self._persisted_keys: Set[str] = set()
+        self._materializing: Dict[str, asyncio.Future] = {}
         # Files this browser activity downloaded, newest last (bounded), so the
         # agent's browser state can show them mid-run on every provider.
         self._downloaded_files: List[Dict[str, Any]] = []
@@ -581,22 +583,48 @@ class BrowserDownloadPersister:
         return [dict(item) for item in self._downloaded_files]
 
     async def _materialize_chrome_download(self, *, meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Materialize one Chrome download exactly once.
+
+        Chrome reports a download twice (downloadWillBegin and the completed
+        downloadProgress), and both schedule this. The key is reserved before
+        any await: a second event for the same download waits for the attempt
+        in flight and only tries again if that attempt produced nothing.
+        """
         if self._closed:
             return None
         url = str(meta.get("url") or "")
         filename = str(meta.get("suggested_filename") or "download.bin")
-        dedupe = f"{meta.get('guid')}|{url}|{filename}"
-        if dedupe in self._persisted_keys:
-            return None
-
-        if self.provider == "browser-use":
-            result = await wait_for_browser_use_download(
-                self.config, self.session_id, filename
-            )
+        # Guid-keyed: the completed event may carry a different file name.
+        dedupe = str(meta.get("guid") or "") or f"{url}|{filename}"
+        while True:
+            if dedupe in self._persisted_keys:
+                return None
+            in_flight = self._materializing.get(dedupe)
+            if in_flight is None:
+                break
+            with contextlib.suppress(Exception):
+                await asyncio.shield(in_flight)
+        attempt: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._materializing[dedupe] = attempt
+        result: Optional[Dict[str, Any]] = None
+        try:
+            result = await self._materialize_chrome_download_once(meta=meta, url=url, filename=filename)
             if result:
                 self._persisted_keys.add(dedupe)
                 self._note_downloaded_file(result, filename)
             return result
+        finally:
+            self._materializing.pop(dedupe, None)
+            if not attempt.done():
+                attempt.set_result(result)
+
+    async def _materialize_chrome_download_once(
+        self, *, meta: Dict[str, Any], url: str, filename: str
+    ) -> Optional[Dict[str, Any]]:
+        if self.provider == "browser-use":
+            return await wait_for_browser_use_download(
+                self.config, self.session_id, filename
+            )
 
         # Do NOT skip solely because a same-basename file already exists in the
         # session. TinyPNG (and similar) upload the source as rs.jpeg under the
@@ -636,8 +664,6 @@ class BrowserDownloadPersister:
                 **({"user_id": self.user_id} if self.user_id else {}),
             )
         if result:
-            self._persisted_keys.add(dedupe)
-            self._note_downloaded_file(result, filename)
             logger.info(
                 "[DownloadPersist] Materialized Chrome download into session downloads",
                 agent_id=self.agent_id,

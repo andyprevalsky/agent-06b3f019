@@ -15410,6 +15410,64 @@ async def test_browser_use_oversized_page_fetch_only_blocks_missing_native_downl
     assert len(expressions) == 1 and listing.await_count == 1
 
 
+async def test_download_persister_materializes_one_download_once_under_concurrent_events():
+    """A1 (agent 85ec29b8): every download was materialised and uploaded TWICE,
+    because Chrome's downloadWillBegin and completed downloadProgress both
+    scheduled a materialize and the dedupe key was recorded only after the
+    awaits. The key is reserved first (guid-keyed; the completed event may carry
+    a different file name), and a failed first attempt still lets the second run."""
+    from domains.spawn_browser_agent_v3.download_persist import BrowserDownloadPersister
+
+    cdp_client, browser_session = _make_download_persister_cdp_harness()
+    fetches = []
+    gate = asyncio.Event()
+    outcomes = []
+
+    async def slow_page_fetch(*, session, url, session_id, config, provider=None, trust_download=False):
+        fetches.append(url)
+        await gate.wait()  # both events arrive while the first fetch is in flight
+        outcome = outcomes.pop(0) if outcomes else "ok"
+        if outcome == "fail":
+            return None
+        return {"path": "/tmp/downloads/out.zip", "size": 8, "filename": "out.zip", "mime_type": "application/zip"}
+
+    for first_outcome, expected_fetches in (("ok", 1), ("fail", 2)):
+        fetches.clear()
+        outcomes[:] = [first_outcome]
+        gate.clear()
+        # The completed event adds filePath to the shared meta; the provider file
+        # read is unavailable here, so both attempts fall through to the page fetch.
+        with patch(
+            "domains.spawn_browser_agent_v3.repo.download_session_file", new=AsyncMock(return_value=None)
+        ), patch(
+            "domains.spawn_browser_agent_v3.download_persist.persist_navigation_download_via_page_fetch",
+            new=slow_page_fetch,
+        ):
+            persister = await BrowserDownloadPersister.create(
+                browser_session=browser_session,
+                session_id="kernel-sess",
+                config=_fake_config(),
+                provider="kernel",
+            )
+            assert persister is not None
+            handlers = cdp_client.register.Browser.handlers
+            handlers["downloadWillBegin"](
+                {"guid": f"guid-{first_outcome}", "url": "https://example.com/out.zip", "suggestedFilename": "out.zip"},
+                "cdp-sess",
+            )
+            handlers["downloadProgress"](
+                {"guid": f"guid-{first_outcome}", "state": "completed", "filePath": "/tmp/downloads/out (1).zip"},
+                "cdp-sess",
+            )
+            await asyncio.sleep(0.05)
+            assert len(fetches) == 1, ("the second event must wait for the attempt in flight", fetches)
+            gate.set()
+            await asyncio.gather(*list(persister._tasks), return_exceptions=True)
+            assert len(fetches) == expected_fetches, (first_outcome, fetches)
+            assert [item["name"] for item in persister.downloaded_files()] == ["out.zip"]
+            await persister.close()
+
+
 async def test_materialize_prefers_provider_file_path_before_page_fetch():
     """CDP filePath should be read via provider Files API before page-fetch fallback."""
     from domains.spawn_browser_agent_v3.download_persist import BrowserDownloadPersister
@@ -30897,6 +30955,10 @@ async def run_all_tests():
     await r.record_async(
         "materialize_prefers_provider_file_path",
         test_materialize_prefers_provider_file_path_before_page_fetch,
+    )
+    await r.record_async(
+        "download_persister_one_upload_under_concurrent_events",
+        test_download_persister_materializes_one_download_once_under_concurrent_events,
     )
     r.record(
         "dom_service_defaults_downloads_path_from_env",
