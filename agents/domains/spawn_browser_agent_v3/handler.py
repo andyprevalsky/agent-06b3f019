@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import functools
 import gc
 import html as html_module
 import importlib
@@ -26,6 +27,7 @@ import uuid as uuid_module
 import weakref
 from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import structlog
 import structlog.contextvars
@@ -91,6 +93,7 @@ from .activity_heartbeat import (
 )
 from .cdp_urls import open_browser_cdp_connection, redact_cdp_url, redact_url_secrets
 from .challenge_recovery import (
+    cited_first_party_transport_failure,
     commit_cookie_removals,
     live_tab_looks_challenged,
     page_looks_challenged,
@@ -2821,6 +2824,83 @@ def _captcha_solver_wait_complete(
     if provider == "browser-use" and elapsed_seconds < 10:
         return False
     return saw_active_solver or inactive_polls >= 3
+
+
+def _challenge_patience_seconds() -> float:
+    """BROWSER_CHALLENGE_PATIENCE_SECONDS: how long to let a provider's own
+    challenge auto-solve run before recover-challenge/rotation. 0 (default) = off."""
+    try:
+        return max(0.0, float(os.getenv("BROWSER_CHALLENGE_PATIENCE_SECONDS", "0") or 0))
+    except ValueError:
+        return 0.0
+
+
+def _challenge_patience_poll_seconds() -> float:
+    try:
+        return max(0.5, float(os.getenv("BROWSER_CHALLENGE_PATIENCE_POLL_SECONDS", "5") or 5))
+    except ValueError:
+        return 5.0
+
+
+async def _page_heuristically_challenged(page: Any) -> bool:
+    """The existing cheap detector (page_looks_challenged) on the live tab; unknown = challenged."""
+    try:
+        title, body_text, html = await asyncio.wait_for(
+            asyncio.gather(page.title(), page.locator("body").inner_text(timeout=2_000), page.content()),
+            timeout=15,
+        )
+    except Exception:
+        return True
+    return page_looks_challenged(
+        status=None, title=str(title)[:1_000], body_text=str(body_text)[:20_000], html=str(html)[:100_000]
+    )
+
+
+async def _challenge_patience_wait(
+    *,
+    page: Any,
+    patience_seconds: float,
+    poll_seconds: float,
+    still_challenged: Callable[[], Awaitable[bool]],
+) -> Dict[str, Any]:
+    """Poll the live tab for up to ``patience_seconds`` while the provider's own
+    auto-solve runs. Cheap heuristic polls; the existing LLM page classifier
+    (``still_challenged``) confirms a clear before recovery is skipped."""
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    polls = 0
+    while True:
+        remaining = patience_seconds - (loop.time() - started)
+        if remaining <= 0:
+            break
+        browser_activity_checkpoint("Waiting for the provider challenge auto-solve")
+        await asyncio.sleep(min(poll_seconds, remaining))
+        polls += 1
+        if await _page_heuristically_challenged(page):
+            continue
+        if not await still_challenged():
+            return {"cleared": True, "waited_seconds": round(loop.time() - started, 1), "polls": polls}
+    return {"cleared": False, "waited_seconds": round(loop.time() - started, 1), "polls": polls}
+
+
+async def _live_tab_still_challenged_after_patience(
+    page: Any, *, provider_exit_rejected: bool, network_recorder: Any, recovery_reason: Any
+) -> bool:
+    """The existing LLM page classifier, after the patience wait.
+
+    A provider-exit rejection is old network evidence, so it is judged on a
+    fresh load of the page without that evidence.
+    """
+    if provider_exit_rejected:
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(page.reload(wait_until="domcontentloaded"), timeout=30)
+        return await live_tab_looks_challenged(page)
+    return await live_tab_looks_challenged(page, network_recorder=network_recorder, recovery_reason=recovery_reason)
+
+
+def _log_antibot_event(event: str, episode: Dict[str, Any]) -> None:
+    """One greppable line per challenge episode ('antibot.episode') or unresolved end ('antibot.stuck')."""
+    logger.info(event, **{key: value for key, value in episode.items() if not key.startswith("_")})
 
 
 async def _wait_for_provider_captcha_solver(
@@ -7236,6 +7316,9 @@ async def _spawn_browser_agent_activity_v3_real(
 
     private_browser_runtime: Dict[str, Any] = {}
     durable_browser_runtime: Dict[str, Any] = {}
+    # The latest challenge episode whose recovery did not resolve it (antibot.stuck);
+    # defined before any early exit so the activity's finally can always read it.
+    antibot_unresolved: Dict[str, Any] = {}
     if write_lock_resume_state:
         hydrated_resume = dict(await hydrate_resume_context(
             agent_id=agent_id, resume_state=write_lock_resume_state
@@ -10231,6 +10314,22 @@ async def _spawn_browser_agent_activity_v3_real(
                         "recovery_action": "skipped_clean_page",
                         "current_url": current_url,
                     }
+                    _log_antibot_event(
+                        "antibot.episode",
+                        {
+                            "agent_id": agent_id,
+                            "task_id": task_id,
+                            "host": urlparse(current_url or "").hostname or "",
+                            "detector": "llm_classifier",
+                            "recovery_reason": str(recovery_reason or "")[:200],
+                            "waited_seconds": 0.0,
+                            "cleared": True,
+                            "recovery_invoked": False,
+                            "recovery_outcome": "skipped_clean_page",
+                            "provider": browser_session_metadata.get("provider"),
+                        },
+                    )
+                    antibot_unresolved.clear()
                     await _finalize_browser_recovery_action_result(
                         action_result=action_result,
                         dom_service=dom_service,
@@ -10245,6 +10344,87 @@ async def _spawn_browser_agent_activity_v3_real(
                         browser_stream=browser_stream,
                     )
                     continue
+
+                antibot_episode: Dict[str, Any] = {
+                    "agent_id": agent_id,
+                    "task_id": task_id,
+                    "host": urlparse(current_url or "").hostname or "",
+                    "detector": (
+                        "provider_exit_rejected"
+                        if provider_exit_rejected
+                        else "transport_failure"
+                        if cited_first_party_transport_failure(
+                            current_url or "", browser_network_recorder, recovery_reason
+                        )
+                        else "llm_classifier"
+                    ),
+                    "recovery_reason": str(recovery_reason or "")[:200],
+                    "waited_seconds": 0.0,
+                    "cleared": False,
+                    "recovery_invoked": False,
+                    "provider": browser_session_metadata.get("provider"),
+                }
+                patience_seconds = _challenge_patience_seconds()
+                if patience_seconds > 0 and input_page is not None:
+                    patience_page = input_page
+                    patience = await _challenge_patience_wait(
+                        page=patience_page,
+                        patience_seconds=patience_seconds,
+                        poll_seconds=_challenge_patience_poll_seconds(),
+                        still_challenged=functools.partial(
+                            _live_tab_still_challenged_after_patience,
+                            patience_page,
+                            provider_exit_rejected=provider_exit_rejected,
+                            network_recorder=browser_network_recorder,
+                            recovery_reason=recovery_reason,
+                        ),
+                    )
+                    antibot_episode.update(
+                        waited_seconds=patience["waited_seconds"], cleared=patience["cleared"]
+                    )
+                    if patience["cleared"]:
+                        current_url = _private_browser_runtime_url(
+                            dom_service, getattr(patience_page, "url", "") or current_url
+                        )
+                        cleared_message = (
+                            f"The challenge cleared after waiting {patience['waited_seconds']:g}s"
+                            " for the browser's own auto-solve; no recovery was needed. Continue the task."
+                        )
+                        await _save_browser_action_message(
+                            agent_id=agent_id,
+                            title="Challenge cleared while waiting",
+                            task_id=task_id,
+                            message=cleared_message,
+                            status=MessageStatus.FINISHED,
+                            browser_url=browser_url,
+                            action_type="browser_challenge_recovery",
+                            tool_call_id=recovery_call_id,
+                            extra_metadata={"recoveryStage": "cleared_after_patience", "resumeUrl": current_url},
+                        )
+                        action_result = {
+                            "success": True,
+                            "message": cleared_message,
+                            "recovery_action": "cleared_after_patience",
+                            "current_url": current_url,
+                        }
+                        antibot_episode["recovery_outcome"] = "cleared_after_patience"
+                        _log_antibot_event("antibot.episode", antibot_episode)
+                        antibot_unresolved.clear()
+                        await _finalize_browser_recovery_action_result(
+                            action_result=action_result,
+                            dom_service=dom_service,
+                            action_history=action_history,
+                            thinking=thinking,
+                            recovery_reason=recovery_reason,
+                            browser_turn_messages=browser_turn_messages,
+                            task_prompt=task_prompt,
+                            browser_state={},
+                            unified_action=unified_action,
+                            recovery_call_id=recovery_call_id,
+                            browser_stream=browser_stream,
+                        )
+                        continue
+                antibot_episode["recovery_invoked"] = True
 
                 progress_titles = {
                     "capture_browser_state": "Capturing browser state",
@@ -10695,6 +10875,18 @@ async def _spawn_browser_agent_activity_v3_real(
                             from_fast_cache=bool(classifier_usage.get("from_fast_cache")),
                             cache_sequence_id=classifier_usage.get("cache_sequence_id"),
                         )
+
+                antibot_episode["recovery_outcome"] = (
+                    str(action_result.get("recovery_action") or "recovered")
+                    if action_result.get("success")
+                    else f"failed: {str(action_result.get('error') or '')[:160]}"
+                )
+                _log_antibot_event("antibot.episode", antibot_episode)
+                if action_result.get("success"):
+                    antibot_unresolved.clear()
+                else:
+                    antibot_unresolved.clear()
+                    antibot_unresolved.update(antibot_episode)
 
                 await _finalize_browser_recovery_action_result(
                     action_result=action_result,
@@ -12274,6 +12466,9 @@ Based on this feedback, I need to continue working on the task and address the i
             if browser_download_persister is not None:
                 with contextlib.suppress(Exception):
                     await browser_download_persister.close()
+            if antibot_unresolved:
+                # The task ended while its last challenge was still unresolved.
+                _log_antibot_event("antibot.stuck", {**antibot_unresolved, "final_url_host": urlparse(current_url or "").hostname or ""})
             # Worker-held Tilion uploads/downloads end with the activity that
             # extracted them; keep worker RSS bounded.
             release_tilion_session_files(session_id)
