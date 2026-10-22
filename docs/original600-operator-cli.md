@@ -565,6 +565,14 @@ python3 -S scripts/cloudbench-resume-controller-export.py \
   --run-directory "$EXISTING_RUN_DIRECTORY"
 ```
 
+If the live owner's gate returned export-pending without downloading
+`export/launch.json` (for example, its watchdog expired while the host was
+suspended), `--check` cannot bind the launch. Fetch that record once with
+`--fetch-launch` (no `--dead-owner`), then use `--download-verified` when the
+remote export already completed. After the original deadline, pass one private
+`controller-export-cleanup-window-v1` window (at most one hour, zero credit) via
+`--cleanup-window` to each command. The live runner still owns cleanup.
+
 After the local check passes, use `--observe` for a read-only readiness check.
 A pending result retains the exact writer list without consuming an export
 intent; observe again only as needed. Once READY, replace the mode with `--run`

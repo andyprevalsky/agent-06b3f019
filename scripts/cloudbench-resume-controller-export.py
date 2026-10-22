@@ -1522,15 +1522,24 @@ def dead_owner_helper_argv(state, argv):
 
 
 def fetch_launch(state, fly=None):
-    """Dead gate: one owned read of the remote launch record into export/, as the gate's first download."""
-    need(state.get("dead_owner") is True, "launch fetch is dead-owner recovery only")
+    """One owned read of the remote launch record into export/, as the gate's first download.
+
+    A dead gate never reached its downloads. A live runner's joined gate can also return
+    export-pending without the record, e.g. when its watchdog expired across a host suspend."""
+    dead = state.get("dead_owner") is True
     validate_normal(state)
     out = Path(state["out"])
     export = out / "export"
+    if not dead:
+        log = read(out / "gate.private.log")
+        need(
+            ("GATE_EXPORT_PENDING machine=" + state["machine_id"]).encode() in log and b"GATE_RESULT exit=" in log,
+            "live gate did not positively return export pending",
+        )
     target = export / "launch.json"
     need(not os.path.lexists(target), "export launch record already present")
     need(not (export / "disposable-export.verified.json").exists(), "export already verified")
-    journal = out / "dead-owner-launch-fetch"
+    journal = out / ("dead-owner-launch-fetch" if dead else "live-owner-launch-fetch")
     journal.mkdir(mode=0o700)  # once only
     save(journal / "intent.json", {"machine": state["machine_id"], "source_ref": state["source_ref"]})
     fly = fly or runpy.run_path(str(HERE / "cloudbench-original-volume-capture.py"))["Fly"](
@@ -1797,7 +1806,7 @@ def main(argv=None):
     mode.add_argument(
         "--fetch-launch",
         action="store_true",
-        help="Dead owner only: fetch the remote launch record the killed gate never downloaded.",
+        help="Fetch the remote launch record a dead gate, or a live owner's export-pending gate, never downloaded.",
     )
     mode.add_argument(
         "--release",
@@ -1805,12 +1814,14 @@ def main(argv=None):
         help="Dead owner only: after the verified export, run the runner's own controller cleanup.",
     )
     args = parser.parse_args(argv)
-    need(not (args.fetch_launch or args.release) or args.dead_owner, "--fetch-launch/--release require --dead-owner")
+    need(not args.release or args.dead_owner, "--release requires --dead-owner")
     if args.fetch_launch or args.release:
-        need(args.cleanup_window is not None and args.cleanup_deadline_epoch is None, "dead-owner window required")
+        if args.dead_owner:
+            need(args.cleanup_window is not None and args.cleanup_deadline_epoch is None, "dead-owner window required")
         state = normal_state(
             args.config, args.config_sha256, Path(args.run_directory).absolute(),
-            cleanup_window=args.cleanup_window, dead_owner=True,
+            cleanup_window=args.cleanup_window, dead_owner=args.dead_owner,
+            **({"cleanup_deadline_epoch": args.cleanup_deadline_epoch} if args.cleanup_deadline_epoch is not None else {}),
         )
         lock = os.open(
             Path(state["out"]) / "controller-export-recovery.lock",

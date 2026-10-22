@@ -1066,6 +1066,38 @@ class ExportResume(unittest.TestCase):
                 M["fetch_launch"](state, api)
             self.assertFalse((self.export / "launch.json").exists())
 
+    def test_live_owner_export_pending_gate_launch_record_is_fetched_once(self):
+        # 2026-10-22 SAME60: the live runner's gate watchdog expired across a devbox
+        # suspend, so it returned export-pending without downloading launch.json.
+        state = self.dead_state()
+        del state["dead_owner"]
+        (self.export / "launch.json").unlink()
+        workspace = write(self.export / "workspace-volume.ownership.json", {"volume_id": "vol_fixture"})
+        record = dict(self.record, image="fixture-image", workspace_ownership_sha256=M["sha"](workspace.read_bytes()),
+                      caller=dict(self.caller, pid=state["caller"]["gate_pid"], birth="gate"))
+        write(self.export / "caller.json", record["caller"])
+        state["machine"] = dict(state["machine"], config={"image": "fixture-image"})
+        self.value["state"]["machine"] = state["machine"]
+        api = self.api()
+        self.payloads["launch.json"] = json.dumps(record).encode()
+        log = self.out / "gate.private.log"
+        log.write_bytes(b"GATE_RESULT exit=1\n")
+        log.chmod(0o600)
+        with (
+            mock.patch.dict(M["fetch_launch"].__globals__, dict(validate_normal=lambda _s: True)),
+            mock.patch.object(M["subprocess"], "check_output", return_value=self.collector.read_bytes()),
+        ):
+            with self.assertRaisesRegex(ValueError, "did not positively return export pending"):
+                M["fetch_launch"](state, api)
+            self.assertFalse((self.out / "live-owner-launch-fetch").exists())
+            log.write_bytes(("GATE_EXPORT_PENDING machine=%s; host retained, no release credit\nGATE_RESULT exit=1\n" % self.mid).encode())
+            receipt = M["fetch_launch"](state, api)
+            self.assertEqual(receipt["launch_sha256"], M["sha"]((self.export / "launch.json").read_bytes()))
+            self.assertTrue((self.out / "live-owner-launch-fetch/complete.json").is_file())
+            self.assertFalse((self.out / "dead-owner-launch-fetch").exists())
+            with self.assertRaisesRegex(ValueError, "already present"):
+                M["fetch_launch"](state, api)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
