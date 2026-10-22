@@ -28,7 +28,7 @@ import base64
 import hashlib
 import os
 import re
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 from urllib.parse import unquote, urlparse
 
 import structlog
@@ -336,6 +336,9 @@ async def persist_bytes_to_session_downloads(
     }
 
 
+_MAX_LISTED_DOWNLOADS = 20
+
+
 class BrowserDownloadPersister:
     """Materialize Chrome Downloads into the provider session root via Browser.download* CDP.
 
@@ -369,6 +372,9 @@ class BrowserDownloadPersister:
         self._tasks: Set[asyncio.Task] = set()
         self._pending_by_guid: Dict[str, Dict[str, Any]] = {}
         self._persisted_keys: Set[str] = set()
+        # Files this browser activity downloaded, newest last (bounded), so the
+        # agent's browser state can show them mid-run on every provider.
+        self._downloaded_files: List[Dict[str, Any]] = []
         # Track which CDP client the Browser.download* handlers are bound to.
         # A lifetime boolean would skip re-register after transition_browser
         # swaps the client (proxy rotation / Steel auth restart).
@@ -562,6 +568,18 @@ class BrowserDownloadPersister:
             )
         self._schedule_materialize(meta)
 
+    def _note_downloaded_file(self, result: Dict[str, Any], filename: str) -> None:
+        name = os.path.basename(str(result.get("filename") or result.get("path") or "")) or filename
+        size = result.get("size")
+        # Same basename replaces, as in the session downloads root.
+        self._downloaded_files = [item for item in self._downloaded_files if item["name"] != name]
+        self._downloaded_files.append({"name": name, "size": int(size) if isinstance(size, int) else None})
+        del self._downloaded_files[:-_MAX_LISTED_DOWNLOADS]
+
+    def downloaded_files(self) -> List[Dict[str, Any]]:
+        """Name and size of each file this activity downloaded, oldest first."""
+        return [dict(item) for item in self._downloaded_files]
+
     async def _materialize_chrome_download(self, *, meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if self._closed:
             return None
@@ -577,6 +595,7 @@ class BrowserDownloadPersister:
             )
             if result:
                 self._persisted_keys.add(dedupe)
+                self._note_downloaded_file(result, filename)
             return result
 
         # Do NOT skip solely because a same-basename file already exists in the
@@ -618,6 +637,7 @@ class BrowserDownloadPersister:
             )
         if result:
             self._persisted_keys.add(dedupe)
+            self._note_downloaded_file(result, filename)
             logger.info(
                 "[DownloadPersist] Materialized Chrome download into session downloads",
                 agent_id=self.agent_id,

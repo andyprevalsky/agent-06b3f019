@@ -956,6 +956,7 @@ def _browser_state_action_result(state: Dict[str, Any]) -> Dict[str, Any]:
         "dom_tree": state.get("dom_tree", ""),
         "recent_events": state.get("recent_events"),
         "closed_popups": state.get("closed_popups"),
+        "downloaded_files": state.get("downloaded_files"),
     }
 
 
@@ -965,7 +966,10 @@ async def _execute_read_browser_state(context: _ActionContext) -> Dict[str, Any]
     # DOM walk is pure duplicate cost. URL/title-only observes have no dom_tree.
     state = context.prefetched_browser_state
     if not isinstance(state, dict) or "dom_tree" not in state:
+        downloads = (state or {}).get("downloaded_files") if isinstance(state, dict) else None
         state = await context.dom_service.get_browser_state(include_screenshot=False)
+        if downloads:
+            state = {**state, "downloaded_files": downloads}
     result = _browser_state_action_result(state)
     await context.action_history.record_action(
         dom_service=context.dom_service,
