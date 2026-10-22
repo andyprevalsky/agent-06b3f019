@@ -173,6 +173,13 @@ class SingleCdpConnectionMultiplexer:
         # followed by a read-back on a remaining session of the same target.
         self._session_target: Dict[str, str] = {}
         self._override_holder: Dict[Tuple[str, str], str] = {}
+        # Send an exclusive override to a target once: skip it while another of
+        # our sessions claims it, or after the target refused it 'already in
+        # effect' (another holder, e.g. the provider's persona or the opener's
+        # renderer). Cleared when our holder detaches (re-apply) or the target dies.
+        self._override_claim: Dict[Tuple[str, str], str] = {}
+        self._override_refused: Set[Tuple[str, str]] = set()
+        self.emulation_refused = 0
         self.overrides_reapplied = 0
         self._closed = False
         self.upstream_connections_opened = 0
@@ -250,6 +257,8 @@ class SingleCdpConnectionMultiplexer:
             self._webauthn_armed_by_session.clear()
             self._session_target.clear()
             self._override_holder.clear()
+            self._override_claim.clear()
+            self._override_refused.clear()
             self._wants_debugger_wait.clear()
             self._browser_user_agent = None
             if upstream is not None:
@@ -314,6 +323,8 @@ class SingleCdpConnectionMultiplexer:
         self._webauthn_armed_by_session.clear()
         self._session_target.clear()
         self._override_holder.clear()
+        self._override_claim.clear()
+        self._override_refused.clear()
         for client in list(self._clients):
             with contextlib.suppress(Exception):
                 await client.websocket.close(code=_downstream_close_code(code), reason=reason[:120])
@@ -387,6 +398,7 @@ class SingleCdpConnectionMultiplexer:
         await self._send_to_client(client, message)
         if method == "Target.targetDestroyed" and params.get("targetId"):
             self._webauthn_armed_targets.discard(str(params["targetId"]))
+            self._forget_target_overrides(str(params["targetId"]))
         if method == "Target.detachedFromTarget" and params.get("sessionId"):
             self._reapply_overrides_after_detach([str(params["sessionId"])])
             armed_target = self._webauthn_armed_by_session.pop(str(params["sessionId"]), None)
@@ -473,10 +485,11 @@ class SingleCdpConnectionMultiplexer:
             self._webauthn_armed_by_session[session_id] = target_id
             commands.append(("WebAuthn.enable", {"enableUI": False}))
             commands.append(("WebAuthn.addVirtualAuthenticator", {"options": _EMPTY_AUTHENTICATOR}))
-        if self._emulation.get("timezone"):
-            commands.append(("Emulation.setTimezoneOverride", {"timezoneId": self._emulation["timezone"]}))
-        if self._emulation.get("locale"):
-            commands.append(("Emulation.setLocaleOverride", {"locale": self._emulation["locale"]}))
+        for method in _EXCLUSIVE_OVERRIDES:
+            params = self._override_params(method)
+            if params is None or not self._claim_override(target_id, method, session_id):
+                continue
+            commands.append((method, params))
         user_agent_override = await self._user_agent_override()
         if user_agent_override:
             # Emulation (not Network) variant: no Network.enable, so no event
@@ -517,13 +530,18 @@ class SingleCdpConnectionMultiplexer:
             except Exception as error:
                 response = {"error": {"message": f"no reply: {type(error).__name__}"}}
             if "error" in response:
-                # Chrome keeps one timezone/locale override per renderer; another
-                # client's session (or the opener's) may already hold it. That is
-                # only fine if the document still ends up in the wanted locale.
+                message_text = str((response.get("error") or {}).get("message") or response["error"])
+                if method in _EXCLUSIVE_OVERRIDES and "already in effect" in message_text:
+                    # Expected: one holder per target/renderer. Do not resend to it.
+                    self.emulation_refused += 1
+                    if target_id:
+                        self._override_refused.add((target_id, method))
+                        if self._override_claim.get((target_id, method)) == child:
+                            self._override_claim.pop((target_id, method), None)
+                    logger.debug("[CdpMux] %s already held for target %s", method, target_id[:12] or child[:12])
+                    continue
                 self.emulation_failures += 1
-                logger.info("[CdpMux] %s not applied on %s: %s", method, child[:12], str(response["error"])[:160])
-                if method == "Emulation.setLocaleOverride":
-                    await self._verify_child_locale(child)
+                logger.info("[CdpMux] %s not applied on %s: %s", method, child[:12], message_text[:160])
             elif method in _EXCLUSIVE_OVERRIDES and target_id:
                 self._override_holder[(target_id, method)] = child
         if sent:
@@ -552,6 +570,25 @@ class SingleCdpConnectionMultiplexer:
                 actual,
             )
 
+    def _claim_override(self, target_id: str, method: str, session_id: str) -> bool:
+        """True when this session should send the exclusive override to its target."""
+        if not target_id:
+            return True
+        key = (target_id, method)
+        if key in self._override_refused:
+            return False
+        claimer = self._override_claim.get(key)
+        if claimer is not None and claimer != session_id and claimer in self._session_target:
+            return False
+        self._override_claim[key] = session_id
+        return True
+
+    def _forget_target_overrides(self, target_id: str) -> None:
+        for method in _EXCLUSIVE_OVERRIDES:
+            self._override_claim.pop((target_id, method), None)
+            self._override_refused.discard((target_id, method))
+            self._override_holder.pop((target_id, method), None)
+
     def _override_params(self, method: str) -> Optional[Dict[str, Any]]:
         if method == "Emulation.setTimezoneOverride" and self._emulation.get("timezone"):
             return {"timezoneId": self._emulation["timezone"]}
@@ -571,6 +608,8 @@ class SingleCdpConnectionMultiplexer:
             for method in _EXCLUSIVE_OVERRIDES:
                 if self._override_holder.get((target_id, method)) == session:
                     self._override_holder.pop((target_id, method), None)
+                    self._override_refused.discard((target_id, method))
+                    self._override_claim.pop((target_id, method), None)
                     orphaned.append((target_id, method))
         if not orphaned:
             return
@@ -600,6 +639,7 @@ class SingleCdpConnectionMultiplexer:
                 else:
                     self.overrides_reapplied += 1
                     self._override_holder[(target_id, method)] = survivor
+                    self._override_claim[(target_id, method)] = survivor
                     logger.info("[CdpMux] Re-applied %s on %s after its holder detached", method, survivor[:12])
                 if method == "Emulation.setLocaleOverride":
                     await self._verify_child_locale(survivor)

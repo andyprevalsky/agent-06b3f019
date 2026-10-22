@@ -17,7 +17,7 @@ import socket
 import subprocess
 import tempfile
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from unittest.mock import patch
 
 import httpx
@@ -1305,6 +1305,15 @@ async def test_multiplexer_reapplies_overrides_when_their_holder_detaches():
     async with _chromium(full=True) as (_playwright, _browser, endpoint):
         async with FakeTilionGateway(endpoint) as gateway:
             multiplexer = SingleCdpConnectionMultiplexer(gateway.cdp_url, emulation=emulation, arm_webauthn=False)
+            sent_overrides: List[Tuple[str, str]] = []
+            send_session_command = multiplexer._send_session_command
+
+            async def recording_send(session_id, method, params):
+                if method in ("Emulation.setLocaleOverride", "Emulation.setTimezoneOverride"):
+                    sent_overrides.append((session_id, method))
+                return await send_session_command(session_id, method, params)
+
+            multiplexer._send_session_command = recording_send
             local_url = await multiplexer.start()
             try:
                 async with (
@@ -1338,6 +1347,15 @@ async def test_multiplexer_reapplies_overrides_when_their_holder_detaches():
                             "Runtime.evaluate", {"expression": locale, "returnByValue": True}, other_session
                         )
                         assert before["result"]["value"] == "de-DE", before
+                        # Hygiene: both clients attached the page, but each exclusive
+                        # override went to it once (no 'already in effect' churn).
+                        page_sessions = {mine["sessionId"], theirs["sessionId"]}
+                        page_sends = [method for session, method in sent_overrides if session in page_sessions]
+                        assert sorted(page_sends) == [
+                            "Emulation.setLocaleOverride",
+                            "Emulation.setTimezoneOverride",
+                        ], sent_overrides
+                        assert multiplexer.emulation_failures == 0, multiplexer.emulation_failures
                         await holder_client.send("Target.detachFromTarget", {"sessionId": holder})
                         for _ in range(50):
                             if multiplexer.overrides_reapplied >= 2:
