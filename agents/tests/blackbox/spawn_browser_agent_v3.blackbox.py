@@ -4811,6 +4811,155 @@ async def test_browser_humanizer_single_cdp_client_types_keys_serially():
         humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS = original_drain
 
 
+async def test_browser_humanizer_single_cdp_client_keys_never_overlap_idle_drift():
+    """Tilion drops a key event while ANY Input event is in flight on the same CDP
+    session (A1, live 2026-10-22: idle mouseMoved every 45-85 ms overlapped
+    type_text/press_key -> empty field, keyboard transport invalidated). With
+    serial_cdp_keyboard, typing holds the movement lock so idle drift skips."""
+    import browser_tools.humanizer as humanizer_module
+    from browser_tools.humanizer import BrowserHumanizer
+
+    class SameSessionInputGateway:
+        """A key arriving while any Input.* is in flight is dropped (never answered)."""
+
+        def __init__(self):
+            self.in_flight = 0
+            self.delivered = []
+            self.mouse_events = 0
+
+        async def send(self, method, payload):
+            if method == "Input.dispatchKeyEvent" and self.in_flight:
+                await asyncio.Event().wait()  # dropped
+            self.in_flight += 1
+            try:
+                await asyncio.sleep(0.004)
+                if method == "Input.dispatchMouseEvent":
+                    self.mouse_events += 1
+                elif payload.get("type") == "char":
+                    self.delivered.append(payload["text"])
+                return {}
+            finally:
+                self.in_flight -= 1
+
+    def humanizer_for(gateway):
+        class FakeContext:
+            async def new_cdp_session(self, page):
+                return gateway
+
+        page = SimpleNamespace(
+            keyboard=SimpleNamespace(),
+            mouse=SimpleNamespace(),
+            viewport_size={"width": 1280, "height": 800},
+            context=FakeContext(),
+        )
+        humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True, serial_cdp_keyboard=True)
+        humanizer._keycap = SimpleNamespace(next=lambda char: SimpleNamespace(dwell_s=0.002, interval_s=0.002))
+        humanizer._idle_mouse_enabled = True
+        humanizer._cdp_mouse_transport_enabled = True
+        humanizer._keyboard_synthesis_enabled = True
+        return humanizer
+
+    async def drift(humanizer, stop):
+        while not stop.is_set():  # idle drift at a tiny cadence
+            await humanizer._idle_mouse_step()
+            await asyncio.sleep(0.001)
+
+    original_drain = humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS
+    humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS = 1.0
+    try:
+        gateway = SameSessionInputGateway()
+        humanizer = humanizer_for(gateway)
+        stop = asyncio.Event()
+        drifter = asyncio.create_task(drift(humanizer, stop))
+        await asyncio.sleep(0.05)
+        moves_before = gateway.mouse_events
+        assert moves_before > 0, "idle drift must really dispatch mouse events"
+        await humanizer.type_text("you@example.com")
+        assert "".join(gateway.delivered) == "you@example.com"
+        assert humanizer._cdp_keyboard_transport_enabled, "CDP keyboard stays enabled"
+        await asyncio.sleep(0.05)
+        assert gateway.mouse_events > moves_before, "idle drift resumes after typing"
+
+        # Control: the same typing without the movement lock loses keys to drift.
+        control_gateway = SameSessionInputGateway()
+        control = humanizer_for(control_gateway)
+        control_drifter = asyncio.create_task(drift(control, stop := asyncio.Event()))
+        await asyncio.sleep(0.05)
+        try:
+            await control._type_text_with_cdp_fire_and_drain("you@example.com")
+            raise AssertionError("keys overlapping idle drift should be dropped on this gateway model")
+        except asyncio.TimeoutError:
+            pass
+        stop.set()
+        for task in (drifter, control_drifter):
+            task.cancel()
+        await asyncio.gather(drifter, control_drifter, return_exceptions=True)
+    finally:
+        humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS = original_drain
+
+
+async def test_browser_humanizer_single_cdp_client_typing_excludes_idle_mouse_drift():
+    """Tilion drops a key event that arrives while any other Input event is in flight on the
+    same CDP session (live 2026-10-22: same-session mouseMoved overlap lost keys; other
+    sessions did not). Idle drift sends mouseMoved on the humanizer's session every
+    45-85 ms, so with serial_cdp_keyboard typing must exclude it."""
+    import browser_tools.humanizer as humanizer_module
+    from browser_tools.humanizer import BrowserHumanizer
+
+    class SameSessionInputGateway:
+        """Models Tilion: a key event sent while any Input event is unanswered is never answered or delivered."""
+
+        def __init__(self):
+            self.in_flight = 0
+            self.delivered = []
+            self.mouse_moves = 0
+
+        async def send(self, method, payload):
+            if method == "Input.dispatchKeyEvent" and self.in_flight:
+                await asyncio.Event().wait()
+            self.in_flight += 1
+            try:
+                await asyncio.sleep(0.05 if method == "Input.dispatchMouseEvent" else 0.005)
+                if method == "Input.dispatchMouseEvent":
+                    self.mouse_moves += 1
+                elif payload.get("type") == "char":
+                    self.delivered.append(payload["text"])
+                return {}
+            finally:
+                self.in_flight -= 1
+
+    gateway = SameSessionInputGateway()
+
+    class FakeContext:
+        async def new_cdp_session(self, page):
+            return gateway
+
+    async def no_playwright_mouse(*_args, **_kwargs):
+        raise AssertionError("idle drift must use the CDP transport in this test")
+
+    page = SimpleNamespace(
+        keyboard=SimpleNamespace(),
+        mouse=SimpleNamespace(move=no_playwright_mouse),
+        viewport_size={"width": 1280, "height": 800},
+        context=FakeContext(),
+    )
+    humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True, serial_cdp_keyboard=True)
+    humanizer._keycap = SimpleNamespace(next=lambda char: SimpleNamespace(dwell_s=0.01, interval_s=0.02))
+    original_drain = humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS
+    humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS = 1.0
+    try:
+        humanizer.start_idle_movement()
+        await asyncio.sleep(0.3)
+        assert gateway.mouse_moves > 0, "idle drift did not run"
+        text = "benchmark-human@example.com"
+        await asyncio.wait_for(humanizer.type_text(text), timeout=10)
+        assert "".join(gateway.delivered) == text
+        assert humanizer._cdp_keyboard_transport_enabled
+    finally:
+        humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS = original_drain
+        await humanizer.close()
+
+
 async def test_browser_humanizer_cdp_idle_mouse_failure_enables_fallback():
     from browser_tools.humanizer import BrowserHumanizer
 
@@ -31166,6 +31315,14 @@ async def run_all_tests():
     await r.record_async(
         "browser_humanizer_single_cdp_client_types_keys_serially",
         test_browser_humanizer_single_cdp_client_types_keys_serially,
+    )
+    await r.record_async(
+        "browser_humanizer_single_cdp_client_keys_never_overlap_idle_drift",
+        test_browser_humanizer_single_cdp_client_keys_never_overlap_idle_drift,
+    )
+    await r.record_async(
+        "browser_humanizer_single_cdp_client_typing_excludes_idle_mouse_drift",
+        test_browser_humanizer_single_cdp_client_typing_excludes_idle_mouse_drift,
     )
     await r.record_async(
         "browser_network_recording_captures_body",

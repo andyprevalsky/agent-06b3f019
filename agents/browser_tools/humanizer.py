@@ -14,6 +14,7 @@ capture duplicate cursor layers.
 """
 
 import asyncio
+import contextlib
 import inspect
 import math
 import os
@@ -852,7 +853,19 @@ class BrowserHumanizer:
             raise
         return True
 
+    async def _keyboard_exclusive(self):
+        """Hold the movement lock while keys are dispatched on a single-CDP-client
+        provider: idle drift skips its step while the lock is held, so no mouse
+        event is in flight next to a key event (Tilion drops such key events)."""
+        if self._serial_cdp_keyboard:
+            return self._movement_lock
+        return contextlib.nullcontext()
+
     async def type_text(self, text: str) -> None:
+        async with await self._keyboard_exclusive():
+            await self._type_text_unlocked(text)
+
+    async def _type_text_unlocked(self, text: str) -> None:
         """Human-like typing at current focus.
 
         Features:
@@ -897,6 +910,10 @@ class BrowserHumanizer:
         logger.debug("Humanized typing complete", chars=len(text))
 
     async def press_key(self, key: str) -> None:
+        async with await self._keyboard_exclusive():
+            await self._press_key_unlocked(key)
+
+    async def _press_key_unlocked(self, key: str) -> None:
         """Press a single key (Enter, Tab, Escape, etc.)."""
         if not self._keyboard_synthesis_enabled:
             await asyncio.sleep(random.uniform(0.02, 0.06))

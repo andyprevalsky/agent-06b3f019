@@ -13,6 +13,7 @@ import gc
 import html as html_module
 import importlib
 import inspect
+import io
 import json
 import math
 import os
@@ -2183,6 +2184,63 @@ def _updated_rotation_session_metadata(
     if isinstance(replacement, dict):
         updated.update(replacement)
     return updated
+
+
+class BrowserSupervisorCapExceeded(asyncio.TimeoutError):
+    """The supervisor's own action cap expired (the action did not finish)."""
+
+    def __init__(self, timeout_seconds: float, cancelled: bool):
+        super().__init__(f"browser action exceeded the {timeout_seconds:g}s supervisor cap")
+        self.timeout_seconds = timeout_seconds
+        self.cancelled = cancelled
+
+
+class BrowserActionRaisedTimeout(RuntimeError):
+    """A TimeoutError the action raised itself (e.g. the humanizer's CDP input
+    drain): an input/transport failure, not the supervisor cap."""
+
+
+_BLOCKED_ACTION_STACK_CHARS = 4096
+_CANCELLED_ACTION_DRAIN_SECONDS = 5.0
+
+
+async def _await_browser_action_within_cap(
+    action_task: "asyncio.Task[Any]",
+    *,
+    timeout: float,
+    log_context: Dict[str, Any],
+    drain_seconds: float = _CANCELLED_ACTION_DRAIN_SECONDS,
+) -> Any:
+    """Await ``action_task`` under the supervisor cap.
+
+    At the cap, log where the action is blocked (its awaiting stack) before
+    cancelling it, then wait at most ``drain_seconds`` for the cancellation.
+    Raises ``BrowserSupervisorCapExceeded`` for the cap; a TimeoutError raised
+    by the action itself becomes ``BrowserActionRaisedTimeout`` so it is handled
+    as an action error, not as a supervisor timeout. The evaluate deadline
+    (``BrowserEvaluateDeadlineExceeded``) keeps its own timeout semantics.
+    """
+    from domains.spawn_browser_agent_v3.service_actions import BrowserEvaluateDeadlineExceeded
+
+    done, _ = await asyncio.wait({action_task}, timeout=timeout)
+    if not done:
+        stack = io.StringIO()
+        action_task.print_stack(file=stack)
+        logger.error(
+            "Browser action blocked at supervisor cap",
+            cap_seconds=timeout,
+            blocked_stack=stack.getvalue()[-_BLOCKED_ACTION_STACK_CHARS:],
+            **log_context,
+        )
+        action_task.cancel()
+        await asyncio.wait({action_task}, timeout=drain_seconds)
+        raise BrowserSupervisorCapExceeded(timeout, cancelled=action_task.cancelled())
+    try:
+        return action_task.result()
+    except asyncio.TimeoutError as error:
+        if isinstance(error, BrowserEvaluateDeadlineExceeded):
+            raise
+        raise BrowserActionRaisedTimeout(extract_error_message(error) or type(error).__name__) from error
 
 
 def _cdp_multiplexer_kwargs(cdp_multiplexer: Optional[Any]) -> Dict[str, Any]:
@@ -10972,9 +11030,16 @@ Based on this feedback, I need to continue working on the task and address the i
                     )
             )
             try:
-                result = await asyncio.wait_for(
+                result = await _await_browser_action_within_cap(
                     action_task,
                     timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
+                    log_context={
+                        "agent_id": agent_id,
+                        "task_id": task_id,
+                        "session_id": session_id,
+                        "iteration": iteration,
+                        "action_name": action_name,
+                    },
                 )
             except asyncio.TimeoutError:
                 from domains.spawn_browser_agent_v3.service_actions import BrowserEvaluateDeadlineExceeded
