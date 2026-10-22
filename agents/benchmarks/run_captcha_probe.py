@@ -13,6 +13,8 @@ Pending questions and approvals end the run; nothing is ever approved.
 Usage (from agents/, venv active, local stack running):
     python benchmarks/run_captcha_probe.py --base-url http://localhost:3001 google-search \
         --worker-log navi-worker-log.txt [--backend-log ../back-end/backend-logs.log] [--cap-minutes 30]
+    Isolated run-bench stacks run several workers: pass the log directory with
+    --log-dir <ctx>/logs (reads worker*.log and backend*.log), or repeat --worker-log / use a glob.
     python benchmarks/run_captcha_probe.py --list
 """
 
@@ -165,6 +167,29 @@ def tree_agent_ids(root_id: str, payloads: Iterable[Any], exclude: Iterable[str]
 # ── live run ─────────────────────────────────────────────────────────────────
 
 
+def log_paths(worker_logs: Iterable[str], backend_logs: Iterable[str], log_dir: str = "") -> List[Path]:
+    """Every log file to scan. Each pattern may be a glob; ``log_dir`` adds its worker*/backend* logs.
+
+    A multi-worker stack writes worker.log plus worker.1..N.log, and the episode for a
+    probe lands in whichever worker ran its activity, so all of them must be read."""
+    patterns = [pattern for pattern in [*worker_logs, *backend_logs] if pattern]
+    if log_dir:
+        patterns += [str(Path(log_dir) / "worker*.log"), str(Path(log_dir) / "backend*.log")]
+    found: List[Path] = []
+    for pattern in patterns:
+        matches = sorted(Path().glob(pattern)) if not Path(pattern).is_absolute() else sorted(
+            Path(pattern).parent.glob(Path(pattern).name)
+        )
+        if not matches and not any(char in pattern for char in "*?["):
+            raise SystemExit(f"log file not found: {pattern}")
+        for match in matches:
+            if match.is_file() and match not in found:
+                found.append(match)
+    if not found:
+        raise SystemExit("no worker/backend logs found; pass --log-dir or --worker-log")
+    return found
+
+
 def _agent_payload(data: Any) -> Dict[str, Any]:
     """GET /api/agents/:id body as one dict with status and messages, across response shapes."""
     if not isinstance(data, dict):
@@ -275,7 +300,7 @@ async def run_probe(args: argparse.Namespace, probe: Dict[str, Any]) -> Dict[str
             await client.delete(f"{base}/api/agents/{agent_id}", headers=headers)
     ids = tree_agent_ids(agent_id, [messages], [args.user_id])
     lines: List[str] = []
-    for path in filter(None, [args.worker_log, args.backend_log]):
+    for path in log_paths(args.worker_log, args.backend_log, args.log_dir):
         with open(path, errors="replace") as handle:
             lines.extend(handle)
     events = collect_antibot_events(lines, ids)
@@ -303,13 +328,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--base-url", default="http://localhost:3001")
     parser.add_argument("--frontend-url", default="", help="FE origin for links and {frontend_url} goals (default: base URL)")
-    parser.add_argument("--worker-log", default="navi-worker-log.txt")
-    parser.add_argument("--backend-log", default="")
+    parser.add_argument("--worker-log", action="append", default=[], help="repeatable; globs allowed")
+    parser.add_argument("--backend-log", action="append", default=[], help="repeatable; globs allowed")
+    parser.add_argument("--log-dir", default="", help="stack log directory: reads worker*.log and backend*.log")
     parser.add_argument("--cap-minutes", type=float, default=30.0)
     parser.add_argument("--poll-seconds", type=float, default=10.0)
     parser.add_argument("--user-id", default=DEFAULT_USER_ID)
     parser.add_argument("--include-held", action="store_true", help="run a probe marked hold")
     args = parser.parse_args(argv)
+    if not args.worker_log and not args.log_dir:
+        args.worker_log = ["navi-worker-log.txt"]
     probes = load_probes()
     if args.list or not args.probe:
         for probe in probes.values():
