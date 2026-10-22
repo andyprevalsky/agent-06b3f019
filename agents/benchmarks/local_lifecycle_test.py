@@ -1312,3 +1312,131 @@ if __name__ == "__main__":
     else:
         raise ValueError(mode)
     raise SystemExit(rc)
+
+
+def test_local_stack_reconcile_resolves_pending_receipt_only_when_nothing_is_left():
+    import socket
+
+    local = load_local()
+    from benchmarks import local_cleanup_reconcile as reconcile
+
+    root = REPO / ".context/test-runs"
+    root.mkdir(parents=True, exist_ok=True)
+
+    def fixture(owner_alive=False):
+        folder = Path(tempfile.mkdtemp(prefix="local-stack-reconcile-", dir=root))
+        run_id = folder.name
+        owner_process = subprocess.Popen(["sleep", "300"])
+        identity = IDENTITY["current_identity"](owner_process.pid)
+        if not owner_alive:
+            owner_process.kill()
+            owner_process.wait()
+        owner = {
+            "version": 1,
+            "run_id": run_id,
+            "pid": owner_process.pid,
+            "token": f"tok-{run_id}",
+            "native_identity": identity,
+            "birth": "fixture-birth",
+        }
+        atomic(folder / "local-stack-owner.json", owner)
+        pending = (
+            f"version=2\ntoken={owner['token']}\nstate=pending\nstack_pid={owner['pid']}\n"
+            f"stack_birth=fixture-birth\nstack_native_identity={identity}\n"
+        )
+        (folder / "local-stack-cleanup.status").write_text(pending)
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        atomic(
+            folder / "services.json",
+            {
+                "ports": {"backend": port, "local_db": 5432, "wmh": 0},
+                "database": {"name": f"victoria_bench_{run_id}", "owned_by_run_sh": True, "use_system_postgres": True},
+            },
+        )
+        stack = local.ServiceStack(run_id, folder, folder / "services.json", folder / "services.log", True)
+        return stack, owner, owner_process, pending, port
+
+    def absent(database):
+        return None
+
+    # The supported CLI form selects no benchmark and requires the exact stack.
+    cli = local.parse_args(["--run-id", "a2-probe", "--reconcile-cleanup"])
+    assert cli.reconcile_cleanup and cli.run_id == "a2-probe" and not cli.tasks
+    for bad in (["--reconcile-cleanup"], ["chat-mode", "--run-id", "x", "--reconcile-cleanup"]):
+        try:
+            local.parse_args(bad)
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError(f"accepted {bad}")
+
+    # Owner gone and nothing left: a clean receipt the normal reader accepts.
+    stack, owner, _, _, port = fixture()
+    result = reconcile.reconcile_stack_cleanup(local, stack, database_present=absent)
+    assert result.state == "clean", result.failures
+    fields = dict(line.split("=", 1) for line in (stack.context_dir / "local-stack-cleanup.status").read_text().splitlines())
+    assert fields["state"] == "clean" and fields["token"] == owner["token"]
+    assert fields["stack_pid"] == str(owner["pid"]) and fields["stack_native_identity"] == owner["native_identity"]
+    assert fields["reconciled_from_state"] == "pending" and fields["reconciled_ports"] == f"free:{port}"
+    assert fields["reconciled_database"] == f"absent:victoria_bench_{stack.run_id}"
+    local.stop_services(stack=stack)  # no longer "cleanup remains unverified"
+    assert reconcile.reconcile_stack_cleanup(local, stack, database_present=absent).state == "already_clean"
+
+    def assert_stays_pending(stack, pending, expected, db=absent, owner_alive=False):
+        result = reconcile.reconcile_stack_cleanup(local, stack, database_present=db)
+        assert result.state == "pending" and any(expected in failure for failure in result.failures), result.failures
+        assert (stack.context_dir / "local-stack-cleanup.status").read_text() == pending
+        if owner_alive:
+            return  # stop_services would legitimately signal the live owner
+        try:
+            local.stop_services(stack=stack)
+        except RuntimeError as error:
+            assert "--reconcile-cleanup" in str(error)
+        else:
+            raise AssertionError("a pending receipt was accepted")
+
+    # Owner still running.
+    stack, _, owner_process, pending, _ = fixture(owner_alive=True)
+    try:
+        assert_stays_pending(stack, pending, "is still running", owner_alive=True)
+    finally:
+        owner_process.kill()
+        owner_process.wait()
+
+    # A leftover process still carrying the stack token.
+    stack, owner, _, pending, _ = fixture()
+    leftover = subprocess.Popen(["sleep", "300"], env={**os.environ, "RUN_STACK_CLEANUP_TOKEN": owner["token"]})
+    try:
+        assert_stays_pending(stack, pending, str(leftover.pid))
+    finally:
+        leftover.kill()
+        leftover.wait()
+
+    # A leftover process running from the stack's run dir.
+    stack, _, _, pending, _ = fixture()
+    leftover = subprocess.Popen(["sleep", "300"], cwd=stack.context_dir)
+    try:
+        assert_stays_pending(stack, pending, str(leftover.pid))
+    finally:
+        leftover.kill()
+        leftover.wait()
+
+    # A recorded service port still listening.
+    stack, _, _, pending, port = fixture()
+    with socket.socket() as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", port))
+        listener.listen()
+        assert_stays_pending(stack, pending, f"[{port}]")
+
+    # The recorded database still exists, or its absence cannot be proven.
+    stack, _, _, pending, _ = fixture()
+    assert_stays_pending(stack, pending, "database still exists", db=lambda database: "system database x")
+
+    def unreachable(database):
+        raise RuntimeError("connection refused")
+
+    stack, _, _, pending, _ = fixture()
+    assert_stays_pending(stack, pending, "database absence unverifiable", db=unreachable)
