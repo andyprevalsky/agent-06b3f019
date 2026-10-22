@@ -1639,6 +1639,106 @@ async def test_multiplexer_gives_up_on_a_busy_slot_after_its_backoff():
                 await multiplexer.close()
 
 
+class SlowInputGateway(DropOverlappingKeysGateway):
+    """Tilion's drop rule plus a slow provider: every Input reply arrives ``delay`` s late."""
+
+    def __init__(self, endpoint: str, delay: float) -> None:
+        super().__init__(endpoint)
+        self.delay = delay
+        self.max_inflight_mouse = 0
+
+    async def _handle(self, downstream):
+        self.active += 1
+        self.accepted += 1
+        try:
+            async with websockets.connect(self.endpoint, max_size=None, proxy=None) as upstream:
+                input_ids: set = set()
+                mouse_inflight: set = set()
+
+                async def up():
+                    async for raw in downstream:
+                        message = json.loads(raw)
+                        method = str(message.get("method") or "")
+                        session = message.get("sessionId")
+                        if method.startswith("Input."):
+                            inflight = self._inflight.setdefault(session, set())
+                            if method == "Input.dispatchKeyEvent" and inflight:
+                                self.dropped_keys += 1
+                                continue
+                            inflight.add(message.get("id"))
+                            input_ids.add((session, message.get("id")))
+                            if method == "Input.dispatchMouseEvent":
+                                mouse_inflight.add((session, message.get("id")))
+                                self.max_inflight_mouse = max(self.max_inflight_mouse, len(mouse_inflight))
+                        await upstream.send(raw)
+
+                async def answer_late(raw, key):
+                    await asyncio.sleep(self.delay)
+                    self._inflight.get(key[0], set()).discard(key[1])
+                    mouse_inflight.discard(key)
+                    with contextlib.suppress(Exception):
+                        await downstream.send(raw)
+
+                async def down():
+                    async for raw in upstream:
+                        message = json.loads(raw)
+                        key = (message.get("sessionId"), message.get("id"))
+                        if key in input_ids:
+                            input_ids.discard(key)
+                            asyncio.create_task(answer_late(raw, key))
+                            continue
+                        await downstream.send(raw)
+
+                tasks = [asyncio.create_task(up()), asyncio.create_task(down())]
+                try:
+                    await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            self.active -= 1
+
+
+async def test_multiplexer_pipelines_mouse_and_isolates_keys_on_a_slow_provider():
+    """Lane D f2cb5283: serialising every Input made humanizer idle drift outrun a
+    slow provider, so clicks queued behind moves and expired ('no coordinates',
+    'not answered'). Mouse events pipeline; only keys are isolated."""
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
+
+    async with _chromium() as (playwright, _browser, endpoint):
+        async with SlowInputGateway(endpoint, delay=0.2) as gateway:
+            multiplexer = SingleCdpConnectionMultiplexer(gateway.cdp_url, arm_webauthn=False)
+            browser = await playwright.chromium.connect_over_cdp(await multiplexer.start())
+            try:
+                context = browser.contexts[0]
+                page = context.pages[0] if context.pages else await context.new_page()
+                await page.set_content('<input id="field" autofocus>')
+                await page.focus("#field")
+                session = await context.new_cdp_session(page)
+                started = time.monotonic()
+                moves = [
+                    session.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 10 + step, "y": 10})
+                    for step in range(20)
+                ]
+                await asyncio.wait_for(asyncio.gather(*moves), timeout=30)
+                elapsed = time.monotonic() - started
+                assert elapsed < 2.0, f"20 mouse moves took {elapsed:.1f}s: serialised behind a 0.2s provider"
+                assert gateway.max_inflight_mouse > 1, "mouse moves did not pipeline"
+                # Keys stay isolated: interleaved with moves, every key lands and none is dropped.
+                sends = []
+                for index, char in enumerate("abcde"):
+                    sends.append(session.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 40 + index, "y": 10}))
+                    sends.append(session.send("Input.dispatchKeyEvent", {"type": "char", "text": char}))
+                await asyncio.wait_for(asyncio.gather(*sends), timeout=30)
+                assert await page.evaluate("document.getElementById('field').value") == "abcde"
+                assert gateway.dropped_keys == 0, gateway.dropped_keys
+                assert multiplexer.input_unanswered == 0
+            finally:
+                await browser.close()
+                await multiplexer.close()
+
+
 async def test_multiplexer_holds_new_targets_until_emulation_lands():
     """A client that does NOT wait for the debugger (browser-use) still gets
     popups whose first script sees the emulation: the multiplexer holds new
@@ -2549,6 +2649,7 @@ async def run_all_tests():
             test_multiplexer_serialises_input_per_session_so_keys_are_not_dropped,
         ),
         ("multiplexer_fails_unanswered_input", test_multiplexer_fails_unanswered_input_instead_of_hanging),
+        ("multiplexer_pipelines_mouse_isolates_keys", test_multiplexer_pipelines_mouse_and_isolates_keys_on_a_slow_provider),
         ("playwright_survives_expired_input", test_playwright_survives_an_expired_input_and_its_late_reply),
         ("multiplexer_redials_late_freed_slot", test_multiplexer_redials_when_the_slot_frees_late),
         ("multiplexer_gives_up_on_busy_slot", test_multiplexer_gives_up_on_a_busy_slot_after_its_backoff),

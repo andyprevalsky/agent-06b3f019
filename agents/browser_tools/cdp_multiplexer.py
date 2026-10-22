@@ -63,9 +63,10 @@ _EMULATION_COMMAND_TIMEOUT_SECONDS = 5.0
 _EXCLUSIVE_OVERRIDES = ("Emulation.setTimezoneOverride", "Emulation.setLocaleOverride")
 # Tilion drops (never answers, never delivers) a key event sent while another
 # Input event is unanswered on the same CDP session (live 2026-10-21/22, T37).
-# Input commands are therefore forwarded one at a time per session, for every
-# client; one the provider leaves unanswered is failed back to its client
-# after this bound instead of hanging it (Playwright awaits input forever).
+# Key events are therefore isolated per session (see _forward_input_in_order);
+# mouse events still pipeline. Any Input the provider leaves unanswered is
+# failed back to its client after this bound instead of hanging it (Playwright
+# awaits input forever).
 _INPUT_ANSWER_TIMEOUT_SECONDS = 10.0
 # Empty authenticator the multiplexer installs so an unarmed WebAuthn ceremony
 # rejects instead of opening the native chooser (see arm_webauthn).
@@ -174,7 +175,8 @@ class SingleCdpConnectionMultiplexer:
         # Per-session Input serialisation: the tail future resolves when the
         # last Input command queued on that session is answered or expired.
         self._input_answer_timeout = input_answer_timeout
-        self._input_tail: Dict[str, asyncio.Future] = {}
+        self._input_tail: Dict[str, asyncio.Future] = {}  # last key event per session
+        self._input_inflight: Dict[str, Dict[int, asyncio.Future]] = {}
         self._input_done: Dict[int, Tuple[asyncio.Future, Optional[asyncio.TimerHandle]]] = {}
         # Upstream session of each in-flight Input command: an expiry error must
         # carry it, because flat-session clients route replies by sessionId (a
@@ -784,29 +786,52 @@ class SingleCdpConnectionMultiplexer:
         await upstream.send(json.dumps(message))
 
     async def _forward_input_in_order(self, upstream: Any, message_id: int, message: Dict[str, Any]) -> None:
-        """Forward an Input command only after the previous Input on its session is settled."""
+        """Isolate key events on their CDP session, exactly as Tilion's drop rule needs.
+
+        Tilion drops a key event sent while another Input event is unanswered on
+        the same session (A1 live). So a key waits for every Input already in
+        flight on its session, and any Input sent while a key is in flight or
+        queued waits for that key. Mouse events after mouse events pipeline as
+        they always did: serialising them too (T37 first cut) let humanizer idle
+        drift outrun a ~100 ms provider round trip, queue clicks behind hundreds
+        of moves and expire them (webdecoy checkbox, lane D f2cb5283).
+        """
         session_id = str(message["sessionId"])
-        previous = self._input_tail.get(session_id)
-        done: asyncio.Future = asyncio.get_running_loop().create_future()
-        self._input_tail[session_id] = done
-        done.add_done_callback(
-            lambda _: self._input_tail.pop(session_id, None) if self._input_tail.get(session_id) is done else None
-        )
+        is_key = message.get("method") == "Input.dispatchKeyEvent"
+        loop = asyncio.get_running_loop()
+        done: asyncio.Future = loop.create_future()
+        inflight = self._input_inflight.setdefault(session_id, {})
+        if is_key:
+            waits = [future for future in inflight.values() if not future.done()]
+            self._input_tail[session_id] = done
+        else:
+            key = self._input_tail.get(session_id)
+            waits = [key] if key is not None and not key.done() else []
+        inflight[message_id] = done
+
+        def settled(_: asyncio.Future) -> None:
+            inflight.pop(message_id, None)
+            if not inflight:
+                self._input_inflight.pop(session_id, None)
+            if self._input_tail.get(session_id) is done:
+                self._input_tail.pop(session_id, None)
+
+        done.add_done_callback(settled)
         self._input_done[message_id] = (done, None)
         self._input_session[message_id] = session_id
-        if previous is None or previous.done():
+        if not waits:
             await self._send_input(upstream, message_id, message)
             return
-        task = asyncio.create_task(self._send_input_after(previous, upstream, message_id, message))
+        task = asyncio.create_task(self._send_input_after(waits, upstream, message_id, message))
         self._background.add(task)
         task.add_done_callback(self._background.discard)
 
     async def _send_input_after(
-        self, previous: asyncio.Future, upstream: Any, message_id: int, message: Dict[str, Any]
+        self, waits: List[asyncio.Future], upstream: Any, message_id: int, message: Dict[str, Any]
     ) -> None:
-        # The previous command settles within its own answer bound (answered or expired).
+        # Each awaited command settles within its own answer bound (answered or expired).
         with contextlib.suppress(Exception):
-            await asyncio.shield(previous)
+            await asyncio.gather(*(asyncio.shield(future) for future in waits), return_exceptions=True)
         if message_id not in self._pending or self._upstream is not upstream:
             self._finish_input(message_id)
             return
@@ -869,6 +894,7 @@ class SingleCdpConnectionMultiplexer:
         for message_id in list(self._input_done):
             self._finish_input(message_id)
         self._input_tail.clear()
+        self._input_inflight.clear()
         self._input_session.clear()
         self._expired_inputs.clear()
 
