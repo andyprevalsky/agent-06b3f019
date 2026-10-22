@@ -66,8 +66,13 @@ _EXCLUSIVE_OVERRIDES = ("Emulation.setTimezoneOverride", "Emulation.setLocaleOve
 # Key events are therefore isolated per session (see _forward_input_in_order);
 # mouse events still pipeline. Any Input the provider leaves unanswered is
 # failed back to its client after this bound instead of hanging it (Playwright
-# awaits input forever).
+# awaits input forever). A late mouse event is usually still delivered: a page
+# whose renderer is starved (e.g. FCaptcha's PoW workers) acks input, DOM and
+# Runtime calls only once its main thread frees, so clients must treat this
+# error as "sent, ack late" for mouse input and must not re-send it.
 _INPUT_ANSWER_TIMEOUT_SECONDS = 10.0
+# Stable text of that error reply; the humanizer keys its skip-and-continue on it.
+UNANSWERED_INPUT_MARKER = "was not answered by the browser provider"
 # Empty authenticator the multiplexer installs so an unarmed WebAuthn ceremony
 # rejects instead of opening the native chooser (see arm_webauthn).
 _EMPTY_AUTHENTICATOR = {
@@ -880,7 +885,7 @@ class SingleCdpConnectionMultiplexer:
             "id": original_id,
             "error": {
                 "code": -32000,
-                "message": f"{method} was not answered by the browser provider within "
+                "message": f"{method} {UNANSWERED_INPUT_MARKER} within "
                 f"{self._input_answer_timeout:g}s (dropped input event)",
             },
         }

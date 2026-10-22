@@ -24,6 +24,7 @@ from typing import Any, Callable, List, Optional, Tuple
 
 import structlog
 
+from browser_tools.cdp_multiplexer import UNANSWERED_INPUT_MARKER
 from browser_tools.input_synthesis import (
     IDLE_MOUSE_RADIUS_PX,
     KeycapTimingSynthesizer,
@@ -38,6 +39,20 @@ logger = structlog.get_logger()
 
 FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
 CDP_INPUT_DRAIN_TIMEOUT_SECONDS = float(os.getenv("BROWSER_AGENT_CDP_INPUT_DRAIN_TIMEOUT_SECONDS", "15"))
+# Idle drift pauses this long after a mouse event's ack came back late, then resumes.
+IDLE_MOUSE_LATE_ACK_BACKOFF_SECONDS = 2.0
+
+
+def _is_late_mouse_ack(exc: BaseException) -> bool:
+    """The CDP multiplexer gave up waiting for the provider's ack of a mouse event.
+
+    The browser still delivers the event once its renderer frees up (a starved
+    main thread acks input late, it does not drop it), so the sample counts as
+    sent: re-sending it through Playwright would duplicate it out of order, and
+    dropping the CDP transport or idle drift would leave the rest of the run
+    without human-like motion.
+    """
+    return UNANSWERED_INPUT_MARKER in str(exc)
 
 
 def _env_enabled(name: str, default: bool = True) -> bool:
@@ -48,9 +63,7 @@ def _env_enabled(name: str, default: bool = True) -> bool:
 
 
 def generate_bezier_points(
-    start: Tuple[float, float],
-    end: Tuple[float, float],
-    steps: int = 40
+    start: Tuple[float, float], end: Tuple[float, float], steps: int = 40
 ) -> List[Tuple[float, float]]:
     """Generate points along a cubic Bezier curve.
 
@@ -94,14 +107,8 @@ def generate_bezier_points(
 
         # Cubic Bezier formula
         mt = 1 - t
-        x = (mt ** 3 * x1 +
-             3 * mt ** 2 * t * cp1_x +
-             3 * mt * t ** 2 * cp2_x +
-             t ** 3 * x2)
-        y = (mt ** 3 * y1 +
-             3 * mt ** 2 * t * cp1_y +
-             3 * mt * t ** 2 * cp2_y +
-             t ** 3 * y2)
+        x = mt**3 * x1 + 3 * mt**2 * t * cp1_x + 3 * mt * t**2 * cp2_x + t**3 * x2
+        y = mt**3 * y1 + 3 * mt**2 * t * cp1_y + 3 * mt * t**2 * cp2_y + t**3 * y2
 
         points.append((x, y))
 
@@ -186,7 +193,9 @@ class BrowserHumanizer:
         self._idle_mouse_enabled = self._input_synthesis_enabled and _env_enabled(
             "BROWSER_AGENT_IDLE_MOUSE_ENABLED", True
         )
-        self._idle_mouse_radius_px = max(0.5, float(os.getenv("BROWSER_AGENT_IDLE_MOUSE_RADIUS_PX", str(IDLE_MOUSE_RADIUS_PX))))
+        self._idle_mouse_radius_px = max(
+            0.5, float(os.getenv("BROWSER_AGENT_IDLE_MOUSE_RADIUS_PX", str(IDLE_MOUSE_RADIUS_PX)))
+        )
         self._idle_anchor = self._last_pos
         self._idle_handle: Optional[asyncio.TimerHandle] = None
         self._idle_task: Optional[asyncio.Task] = None
@@ -464,10 +473,13 @@ class BrowserHumanizer:
                 await asyncio.sleep(sample.delay_s)
 
             if pending:
-                await asyncio.wait_for(
-                    asyncio.gather(*pending),
+                results = await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True),
                     timeout=CDP_INPUT_DRAIN_TIMEOUT_SECONDS,
                 )
+                for result in results:
+                    if isinstance(result, BaseException) and not _is_late_mouse_ack(result):
+                        raise result
         except asyncio.CancelledError:
             for task in pending:
                 if not task.done():
@@ -487,7 +499,20 @@ class BrowserHumanizer:
 
         return True
 
-    async def _dispatch_mouse_position(self, x: int, y: int) -> None:
+    async def _playwright_mouse(self, action: str, *args: float, **kwargs: Any) -> bool:
+        """Playwright mouse action; False when its ack came back late (still delivered)."""
+        try:
+            await getattr(self.input_page.mouse, action)(*args, **kwargs)
+        except Exception as exc:
+            if not _is_late_mouse_ack(exc):
+                raise
+            logger.debug("Playwright mouse ack came back late", action=action)
+            return False
+        return True
+
+    async def _dispatch_mouse_position(self, x: float, y: float) -> bool:
+        """Move the pointer; False when the provider acked late (the move still lands)."""
+        acked = True
         cdp_session = await self._get_cdp_session() if self._cdp_mouse_transport_enabled else None
         if cdp_session is not None:
             try:
@@ -495,20 +520,24 @@ class BrowserHumanizer:
                     "Input.dispatchMouseEvent",
                     {
                         "type": "mouseMoved",
-                        "x": int(x),
-                        "y": int(y),
+                        "x": x,
+                        "y": y,
                         "button": "none",
                         "buttons": 0,
                         "timestamp": time.time(),
                     },
                 )
             except Exception as exc:
-                await self._invalidate_cdp_session(cdp_session)
-                logger.debug("CDP mouse dispatch failed; using Playwright fallback", error=str(exc))
-                await self.input_page.mouse.move(int(x), int(y))
+                if _is_late_mouse_ack(exc):
+                    acked = False
+                else:
+                    await self._invalidate_cdp_session(cdp_session)
+                    logger.debug("CDP mouse dispatch failed; using Playwright fallback", error=str(exc))
+                    acked = await self._playwright_mouse("move", x, y)
         else:
-            await self.input_page.mouse.move(int(x), int(y))
+            acked = await self._playwright_mouse("move", x, y)
         await self._publish_cursor(int(x), int(y))
+        return acked
 
     async def _dispatch_mouse_button(self, x: float, y: float, *, pressed: bool) -> bool:
         """Press or release the left button at exact coordinates via CDP.
@@ -545,6 +574,10 @@ class BrowserHumanizer:
             )
             return True
         except Exception as exc:
+            if _is_late_mouse_ack(exc):
+                # Delivered once the renderer frees; a Playwright fallback would press twice.
+                logger.debug("CDP mouse button ack came back late", pressed=pressed)
+                return True
             await self._invalidate_cdp_session(cdp_session)
             logger.debug("CDP mouse button dispatch failed", error=str(exc), pressed=pressed)
             return False
@@ -561,8 +594,11 @@ class BrowserHumanizer:
                 screen=self._viewport_size(),
                 radius_px=self._idle_mouse_radius_px,
             )
-            await self._dispatch_mouse_position(sample.x, sample.y)
+            acked = await self._dispatch_mouse_position(sample.x, sample.y)
             self._last_pos = (sample.x, sample.y)
+            if not acked:
+                logger.debug("Idle mouse ack came back late; backing off")
+                return IDLE_MOUSE_LATE_ACK_BACKOFF_SECONDS
             return sample.delay_s
 
     async def initialize_cursor(self, start_pos: Tuple[int, int] = (640, 400)) -> None:
@@ -572,19 +608,13 @@ class BrowserHumanizer:
             start_pos: Initial cursor position (default: center of 1280x800 viewport)
         """
         # Move mouse to start position
-        await self.input_page.mouse.move(start_pos[0], start_pos[1])
+        await self._playwright_mouse("move", start_pos[0], start_pos[1])
         self._last_pos = start_pos
         self._idle_anchor = start_pos
         await self._publish_cursor(start_pos[0], start_pos[1])
         logger.info(f"🎯 Cursor initialized at {start_pos}")
 
-    async def click_at_coords(
-        self,
-        x: int,
-        y: int,
-        pre_hover: bool = False,
-        overshoot: bool = False
-    ) -> None:
+    async def click_at_coords(self, x: int, y: int, pre_hover: bool = False, overshoot: bool = False) -> None:
         """Human-like mouse movement to coords, then click.
 
         Args:
@@ -619,9 +649,9 @@ class BrowserHumanizer:
                 overshoot_dist = random.randint(20, 34)
                 overshoot_x = x + int(overshoot_dist * math.cos(angle))
                 overshoot_y = y + int(overshoot_dist * math.sin(angle))
-                await self.input_page.mouse.move(overshoot_x, overshoot_y)
+                await self._playwright_mouse("move", overshoot_x, overshoot_y)
                 await asyncio.sleep(random.uniform(0.03, 0.07))
-                await self.input_page.mouse.move(x, y)
+                await self._playwright_mouse("move", x, y)
                 await self._notify_cursor_observer(x, y)
                 await asyncio.sleep(random.uniform(0.02, 0.05))
                 logger.debug("Overshoot", target=(x, y), overshoot=(overshoot_x, overshoot_y))
@@ -633,12 +663,11 @@ class BrowserHumanizer:
             # settled cursor and the release drifts again, with sub-pixel offsets.
             # "Unnaturally accurate click precision" (last-move == down == up,
             # pixel-perfect) is a vision-AI bot tell; real fingers micro-move.
-            mouse = self.input_page.mouse
             down_x = x + random.gauss(0, 0.7)
             down_y = y + random.gauss(0, 0.7)
             up_x = down_x + random.gauss(0, 0.4)
             up_y = down_y + random.gauss(0, 0.4)
-            await mouse.move(down_x, down_y)
+            await self._playwright_mouse("move", down_x, down_y)
 
             # The press must stay inside the sampled human dwell AND the release
             # must land a hair off the press. Doing both through Playwright is
@@ -654,13 +683,13 @@ class BrowserHumanizer:
             dwell_seconds = synthesize_click_delay_ms() / 1000
             pressed_via_cdp = await self._dispatch_mouse_button(down_x, down_y, pressed=True)
             if not pressed_via_cdp:
-                await mouse.down()
+                await self._playwright_mouse("down")
             await asyncio.sleep(dwell_seconds)
             if not pressed_via_cdp or not await self._dispatch_mouse_button(up_x, up_y, pressed=False):
                 # Fallback (or a CDP session lost mid-click): release in place.
                 # Keeping the press short matters more than the sub-pixel offset,
                 # and an unreleased button would wedge every later interaction.
-                await mouse.up()
+                await self._playwright_mouse("up")
 
             self._last_pos = (x, y)
             self._idle_anchor = (x, y)
@@ -692,11 +721,10 @@ class BrowserHumanizer:
             await self._move_to_unlocked(int(start_x), int(start_y))
             await asyncio.sleep(random.uniform(0.04, 0.1))
 
-            mouse = self.input_page.mouse
             pressed = await self._dispatch_mouse_button(float(start_x), float(start_y), pressed=True)
             if not pressed:
-                await mouse.move(int(start_x), int(start_y))
-                await mouse.down()
+                await self._playwright_mouse("move", int(start_x), int(start_y))
+                await self._playwright_mouse("down")
 
             for i in range(1, step_count + 1):
                 t = i / step_count
@@ -717,31 +745,28 @@ class BrowserHumanizer:
                             },
                         )
                     except Exception as exc:
+                        if _is_late_mouse_ack(exc):
+                            await self._notify_cursor_observer(int(x), int(y))
+                            continue
                         await self._invalidate_cdp_session(cdp_session)
                         logger.debug("CDP drag move failed; Playwright fallback", error=str(exc))
-                        await mouse.move(int(x), int(y))
+                        await self._playwright_mouse("move", int(x), int(y))
                         pressed = False
                 else:
-                    await mouse.move(int(x), int(y))
+                    await self._playwright_mouse("move", int(x), int(y))
                 await self._notify_cursor_observer(int(x), int(y))
                 await asyncio.sleep(random.uniform(0.008, 0.02))
 
             if not await self._dispatch_mouse_button(float(end_x), float(end_y), pressed=False):
-                await mouse.move(int(end_x), int(end_y))
-                await mouse.up()
+                await self._playwright_mouse("move", int(end_x), int(end_y))
+                await self._playwright_mouse("up")
 
             self._last_pos = (int(end_x), int(end_y))
             self._idle_anchor = (int(end_x), int(end_y))
         self._suppress_idle(0.35)
         logger.debug("Humanized drag", start=(start_x, start_y), end=(end_x, end_y), steps=step_count)
 
-    async def click_for_input(
-        self,
-        x: int,
-        y: int,
-        width: int,
-        height: int
-    ) -> None:
+    async def click_for_input(self, x: int, y: int, width: int, height: int) -> None:
         """Click in the right portion of an input field.
 
         Humans typically click towards the end of text in input fields,
@@ -756,11 +781,7 @@ class BrowserHumanizer:
         # Click in middle 30-70% of height
         input_y = y + int(height * random.uniform(0.30, 0.70))
 
-        logger.debug(
-            "Input mode click",
-            element=(x, y, width, height),
-            click_pos=(input_x, input_y)
-        )
+        logger.debug("Input mode click", element=(x, y, width, height), click_pos=(input_x, input_y))
 
         await self.click_at_coords(input_x, input_y)
 
@@ -770,8 +791,7 @@ class BrowserHumanizer:
             await self._move_to_unlocked(x, y)
             await asyncio.sleep(random.uniform(0.02, 0.05))
 
-            mouse = self.input_page.mouse
-            await mouse.click(x, y, click_count=2, delay=synthesize_click_delay_ms())
+            await self._playwright_mouse("click", x, y, click_count=2, delay=synthesize_click_delay_ms())
 
             self._last_pos = (x, y)
             self._idle_anchor = (x, y)
@@ -840,8 +860,7 @@ class BrowserHumanizer:
                     )
                 except asyncio.TimeoutError as exc:
                     raise asyncio.TimeoutError(
-                        "CDP keyboard input drain timed out after "
-                        f"{CDP_INPUT_DRAIN_TIMEOUT_SECONDS:g}s"
+                        f"CDP keyboard input drain timed out after {CDP_INPUT_DRAIN_TIMEOUT_SECONDS:g}s"
                     ) from exc
         except BaseException:
             for task in pending:
@@ -952,8 +971,6 @@ class BrowserHumanizer:
         if at_coords and at_coords != self._last_pos:
             await self._move_to(x, y)
 
-        mouse = self.input_page.mouse
-
         # Break scroll into smaller chunks for natural feel
         remaining = abs(delta_y)
         direction = 1 if delta_y > 0 else -1
@@ -962,7 +979,7 @@ class BrowserHumanizer:
             # Variable chunk size (100-200px per "wheel tick")
             chunk = min(remaining, random.randint(80, 180))
 
-            await mouse.wheel(0, direction * chunk)
+            await self._playwright_mouse("wheel", 0, direction * chunk)
             remaining -= chunk
 
             # Small delay between scroll ticks
@@ -1023,9 +1040,8 @@ class BrowserHumanizer:
                 self._idle_anchor = (x, y)
                 return
 
-            mouse = self.input_page.mouse
             for sample in samples:
-                await mouse.move(sample.x, sample.y)
+                await self._playwright_mouse("move", sample.x, sample.y)
                 await self._publish_cursor(sample.x, sample.y)
                 await asyncio.sleep(sample.delay_s)
             self._last_pos = (x, y)
@@ -1048,9 +1064,8 @@ class BrowserHumanizer:
         duration_ms = int(max(100, min(400, distance * 0.8)))
         step_delay = duration_ms / 1000 / len(jittered_points)
 
-        mouse = self.input_page.mouse
         for point_x, point_y in jittered_points:
-            await mouse.move(point_x, point_y)
+            await self._playwright_mouse("move", point_x, point_y)
             await self._publish_cursor(point_x, point_y)
 
             # Micro-pause (5% chance)

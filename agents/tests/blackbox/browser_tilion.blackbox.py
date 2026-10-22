@@ -1728,13 +1728,55 @@ async def test_multiplexer_pipelines_mouse_and_isolates_keys_on_a_slow_provider(
                 # Keys stay isolated: interleaved with moves, every key lands and none is dropped.
                 sends = []
                 for index, char in enumerate("abcde"):
-                    sends.append(session.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 40 + index, "y": 10}))
+                    sends.append(
+                        session.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 40 + index, "y": 10})
+                    )
                     sends.append(session.send("Input.dispatchKeyEvent", {"type": "char", "text": char}))
                 await asyncio.wait_for(asyncio.gather(*sends), timeout=30)
                 assert await page.evaluate("document.getElementById('field').value") == "abcde"
                 assert gateway.dropped_keys == 0, gateway.dropped_keys
                 assert multiplexer.input_unanswered == 0
             finally:
+                await browser.close()
+                await multiplexer.close()
+
+
+async def test_humanizer_treats_late_mouse_acks_as_sent_on_a_starved_renderer():
+    """Lane D 21a307a9: FCaptcha's PoW workers starve the provider's renderer, which
+    then acks input >10s late (it does not drop it). The mux fails the ack back;
+    the humanizer then re-sent each move through Playwright, dropped its CDP
+    transport, disabled idle drift for the rest of the run and failed clicks.
+    A late mouse ack is a sent sample: the click completes with one press and
+    drift keeps going."""
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
+    from browser_tools.humanizer import BrowserHumanizer
+
+    async with _chromium() as (playwright, _browser, endpoint):
+        async with SlowInputGateway(endpoint, delay=1.2) as gateway:
+            multiplexer = SingleCdpConnectionMultiplexer(gateway.cdp_url, arm_webauthn=False, input_answer_timeout=0.4)
+            browser = await playwright.chromium.connect_over_cdp(await multiplexer.start())
+            humanizer = None
+            try:
+                context = browser.contexts[0]
+                page = context.pages[0] if context.pages else await context.new_page()
+                await page.set_content(
+                    "<body style='margin:0;height:600px'><script>window.downs=0;window.moves=0;"
+                    "addEventListener('mousedown',()=>downs++);addEventListener('mousemove',()=>moves++)</script></body>"
+                )
+                humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True)
+                humanizer.start_idle_movement()
+                await asyncio.sleep(2.0)
+                assert multiplexer.input_unanswered > 0, "the provider never acked late"
+                assert humanizer._idle_mouse_enabled, "a late idle ack disabled drift for the rest of the run"
+                assert humanizer._cdp_mouse_transport_enabled, "a late ack dropped the CDP mouse transport"
+                await asyncio.wait_for(humanizer.click_at_coords(200, 150), timeout=30)
+                assert humanizer._cdp_mouse_transport_enabled
+                await asyncio.sleep(1.6)  # every late event lands
+                assert await page.evaluate("window.downs") == 1, "late press/release was sent twice"
+                assert await page.evaluate("window.moves") > 0
+            finally:
+                if humanizer is not None:
+                    await humanizer.close()
                 await browser.close()
                 await multiplexer.close()
 
@@ -2649,7 +2691,11 @@ async def run_all_tests():
             test_multiplexer_serialises_input_per_session_so_keys_are_not_dropped,
         ),
         ("multiplexer_fails_unanswered_input", test_multiplexer_fails_unanswered_input_instead_of_hanging),
-        ("multiplexer_pipelines_mouse_isolates_keys", test_multiplexer_pipelines_mouse_and_isolates_keys_on_a_slow_provider),
+        (
+            "multiplexer_pipelines_mouse_isolates_keys",
+            test_multiplexer_pipelines_mouse_and_isolates_keys_on_a_slow_provider,
+        ),
+        ("humanizer_late_mouse_acks_are_sent", test_humanizer_treats_late_mouse_acks_as_sent_on_a_starved_renderer),
         ("playwright_survives_expired_input", test_playwright_survives_an_expired_input_and_its_late_reply),
         ("multiplexer_redials_late_freed_slot", test_multiplexer_redials_when_the_slot_frees_late),
         ("multiplexer_gives_up_on_busy_slot", test_multiplexer_gives_up_on_a_busy_slot_after_its_backoff),
