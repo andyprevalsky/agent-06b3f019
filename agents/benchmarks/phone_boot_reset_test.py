@@ -76,6 +76,7 @@ def test_reset_journal_tamper_fails_closed(tmp_path):
 
 def test_boot_preflight_requires_scoped_unused_verified_reset(tmp_path, monkeypatch):
     from benchmarks import phone_daily
+    monkeypatch.setattr(phone_daily, 'load_daily_profile', lambda: {'allowGooglePasscodeException': False})
     path = tmp_path / 'reset.json'
     now = __import__('time').time()
     reset.save(path, {'version': 1, 'deviceId': 'device', 'userId': 'owner', 'submittedAt': now - 20,
@@ -101,3 +102,42 @@ def test_boot_catalog_requires_judge_and_separates_provider_preparation():
     assert 'Do not reset or erase' in task.prompt
     assert 'passcode before Gmail' in task.prompt
     assert task.evaluators
+
+
+def test_benchmark_preparation_resets_once_then_stops_at_provider_gate(tmp_path):
+    path = tmp_path / 'reset.json'
+    calls = []
+    states = iter(['available', 'resetting', 'available'])
+    async def provider(action, device):
+        calls.append(action)
+        return {'state': next(states)} if action == 'observe' else {'accepted': True}
+    async def sleep(_):
+        pass
+    async def run():
+        with pytest.raises(reset.ResetBlocked, match='provider must re-enable passcodes'):
+            await reset.prepare(path, 'device', 'owner', 'device', 'run', call=provider, sleep=sleep)
+        assert reset.load(path)['phase'] == 'awaiting_provider_passcodes'
+        reset.report_provider_ready(path)
+        assert (await reset.prepare(path, 'device', 'owner', 'device', 'run', call=provider))['claimedBy'] == 'run'
+    asyncio.run(run())
+    assert calls.count('reset') == 1
+
+
+def test_authorized_google_exception_resumes_boot_without_false_passcode_report(tmp_path):
+    path = tmp_path / 'reset.json'
+    calls = []
+    states = iter(['available', 'resetting', 'available'])
+    async def provider(action, device):
+        calls.append(action)
+        return {'state': next(states)} if action == 'observe' else {'accepted': True}
+    async def sleep(_):
+        pass
+    data = asyncio.run(reset.prepare(path, 'device', 'owner', 'device', 'run', call=provider,
+                                     sleep=sleep, allow_google_exception=True))
+    assert data['claimedBy'] == 'run'
+    assert data['providerPasscodesReportedRestored'] is False
+    assert data['googleExceptionAuthorized'] is True
+    assert calls.count('reset') == 1
+    with pytest.raises(reset.ResetBlocked):
+        reset.validate_for_boot(path, 'device', 'owner', 'run')
+    assert reset.validate_for_boot(path, 'device', 'owner', 'run', allow_google_exception=True)

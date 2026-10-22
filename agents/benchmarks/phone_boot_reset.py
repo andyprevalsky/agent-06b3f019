@@ -54,12 +54,17 @@ def load(path):
         raise ResetBlocked('Reset journal missing or invalid') from None
 
 
-async def provider(action, device):
+async def provider(action, device, *, owner=None, database_url=None):
     """Use the existing backend provider client, never expose provider output."""
     root = Path(__file__).resolve().parents[2]
+    env = dict(os.environ)
+    if owner:
+        env['BENCHMARK_RUN_USER_ID'] = owner
+    if database_url:
+        env.update(DATABASE_URL=database_url, DIRECT_URL=database_url)
     proc = await asyncio.create_subprocess_exec(
         'node', '--import', 'tsx', str(root / 'agents/benchmarks/phone_boot_reset.provider.ts'),
-        cwd=root / 'back-end', stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        cwd=root / 'back-end', env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     try:
         stdout, _ = await asyncio.wait_for(
@@ -126,16 +131,16 @@ def report_provider_ready(path):
     return data
 
 
-def validate_for_boot(path, device, owner, run_id, *, claim=False):
+def validate_for_boot(path, device, owner, run_id, *, claim=False, allow_google_exception=False):
     if claim:
         with Path(path).with_suffix('.lock').open('w') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            data = validate_for_boot(path, device, owner, run_id)
+            data = validate_for_boot(path, device, owner, run_id, allow_google_exception=allow_google_exception)
             data['claimedBy'] = run_id
             save(path, data)
             return data
     data = load(path)
-    if not run_id or data.get('version') != 1 or data['deviceId'] != device or data['userId'] != owner or data['phase'] != 'ready' or data.get('providerPasscodesReportedRestored') is not True:
+    if not run_id or data.get('version') != 1 or data['deviceId'] != device or data['userId'] != owner or data['phase'] != 'ready' or not (data.get('providerPasscodesReportedRestored') is True or (allow_google_exception and data.get('googleExceptionAuthorized') is True)):
         raise ResetBlocked('Fresh boot reset/provider prerequisite does not match this run')
     if data['availableAt'] is None or data['resettingObservedAt'] is None:
         raise ResetBlocked('Reset transition was not observed')
@@ -144,6 +149,36 @@ def validate_for_boot(path, device, owner, run_id, *, claim=False):
     if data['claimedBy'] not in (None, run_id):
         raise ResetBlocked('Reset belongs to a different benchmark run')
     return data
+
+
+async def prepare(path, device, owner, confirmation, run_id, *, call=provider,
+                  sleep=asyncio.sleep, allow_google_exception=False):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.with_suffix('.lock').open('w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if not path.exists():
+            await start(path, device, owner, confirmation, call=call)
+        data = load(path)
+        if data['deviceId'] != device or data['userId'] != owner or data['claimedBy'] not in (None, run_id):
+            raise ResetBlocked('Reset journal belongs to another owner/device/run')
+        deadline = time.monotonic() + 600
+        while data['availableAt'] is None:
+            data = await observe(path, call=call)
+            if data['availableAt'] is not None:
+                break
+            if time.monotonic() >= deadline:
+                raise ResetBlocked('Reset completion unconfirmed; observe the same journal, never reset again')
+            await sleep(5)
+        if allow_google_exception:
+            data.update(phase='ready', googleExceptionAuthorized=True)
+            save(path, data)
+        elif not data['providerPasscodesReportedRestored']:
+            path.with_suffix('.provider-request.txt').write_text(
+                f"Hi Shawn, cloud iPhone {device} completed its API reset. Please re-enable passcodes. Thanks.\n")
+            raise ResetBlocked('Reset complete; provider must re-enable passcodes before this boot path')
+    return validate_for_boot(path, device, owner, run_id, claim=True,
+                             allow_google_exception=allow_google_exception)
 
 
 def main():
@@ -158,7 +193,7 @@ def main():
     with args.journal.with_suffix('.lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if args.action == 'start':
-            result = asyncio.run(start(args.journal, args.device, args.owner, args.confirm_erases_device))
+            result = asyncio.run(start(args.journal, args.device, args.owner, args.confirm_erases_device, call=lambda action, device: provider(action, device, owner=args.owner)))
         elif args.action == 'observe':
             result = asyncio.run(observe(args.journal))
         else:

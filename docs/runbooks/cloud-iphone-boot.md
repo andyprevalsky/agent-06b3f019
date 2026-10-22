@@ -227,3 +227,19 @@ as a substitute.
 This protocol is implemented and tested with synthetic provider responses. A
 fresh physical reset and unattended boot have **not** been certified by those
 unit tests. The DoorDash retry still waits for the separate Tillion integration.
+
+### Authorized reset-at-start run
+
+The user authorized a fresh reset at benchmark startup on 2026-10-22. Set
+`PHONE_DAILY_RESET_AT_START=1`, `PHONE_DAILY_RESET_CONFIRM_DEVICE` to the exact
+configured device ID, and a new `PHONE_DAILY_RESET_JOURNAL` path for that intended
+reset. The normal full-boot fixture sends one reset before agent creation, polls
+the same journal through resetting/available, and claims it for this run. A retry
+uses that same journal and never erases the phone again.
+
+The already authorized Google Workspace exception is a valid preparation branch:
+when the trusted private profile explicitly enables it, provider passcode
+restoration is not required to start boot. Do not claim passcodes were restored.
+The agent must still prove actual usable Gmail and the backend must verify the
+exception; a historical Admin save alone is not a boot PASS. Only profiles without
+that explicit authorization remain blocked for provider passcode restoration.

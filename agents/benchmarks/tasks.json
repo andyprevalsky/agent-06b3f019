@@ -10009,7 +10009,7 @@
 {
   "name": "phone-daily-full-boot",
   "title": "Fresh unattended cloud iPhone boot",
-  "prompt": "Complete the dedicated cloud iPhone boot setup after the test fixture has verified a provider API reset and the provider has restored passcode support. Do not reset or erase the phone yourself. Use connected saved credentials securely before requesting critical user-only authentication. Verify intended Apple identity, iCloud Messages, Keychain and Contacts, iMessage, intended receive address, portrait lock, device passcode before Gmail (or only the explicitly authorized alternative), and installed usable Gmail for the intended Google account. Use current matching Messages codes autonomously; never stale or unrelated codes. Preserve provider management. Do not infer ready from a click or password fill. If passcode creation is still prohibited, report the provider prerequisite as blocked rather than claiming readiness. Report actual blockers and release your owned phone when finished.",
+  "prompt": "Complete the dedicated cloud iPhone boot setup after the test fixture has verified a provider API reset. Use the existing explicitly authorized Google Workspace exception when applicable; do not require provider passcode restoration for that authorized path. Do not reset or erase the phone yourself. Use connected saved credentials securely before requesting critical user-only authentication. Verify intended Apple identity, iCloud Messages, Keychain and Contacts, iMessage, intended receive address, portrait lock, device passcode before Gmail (or only the explicitly authorized alternative), and installed usable Gmail for the intended Google account. Use current matching Messages codes autonomously; never stale or unrelated codes. Preserve provider management. Do not infer ready from a click or password fill. If passcode creation is still prohibited, report the provider prerequisite as blocked rather than claiming readiness. Report actual blockers and release your owned phone when finished.",
   "timeout_seconds": 900,
   "price_limit_cents": 300,
   "is_chat_mode": false,
@@ -10036,7 +10036,7 @@
   "min_steps": {
     "browser": 1
   },
-  "description": "Fresh boot after an explicit provider reset; provider-assisted passcode restoration is reported separately from agent boot. Requires signed, observed reset transition and unused run-bound journal before allocation.",
+  "description": "Fresh boot after an explicit provider reset; Any provider-assisted passcode restoration is reported separately; the authorized Google exception does not require it. Requires signed, observed reset transition and unused run-bound journal before allocation.",
   "environment": {
     "mode": "live",
     "live_fixtures": [
@@ -10055,7 +10055,7 @@
     "live_targets": [
       "dedicated owner cloud iPhone"
     ],
-    "context_notes": "Explicit operator reset fixture only; no model reset command. Require observed resetting then available and provider passcode-restoration report. Report is not enabled-passcode proof: verify actual Settings during boot. Preserve provider management; do not send provider messages automatically. No full historical download required."
+    "context_notes": "Explicit operator reset fixture only; no model reset command. Require observed resetting then available. Require provider passcode-restoration report only if the profile has no authorized Google exception. Report is not enabled-passcode proof: verify actual Settings during boot. Preserve provider management; do not send provider messages automatically. No full historical download required."
   },
   "enforce_declared_evaluators": true,
   "evaluators": [

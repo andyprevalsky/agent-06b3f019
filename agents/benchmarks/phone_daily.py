@@ -95,9 +95,15 @@ def preflight_daily(task_name: str, base_url: str, user_id: str) -> None:
         try:
             if os.environ.get('BENCHMARK_ISOLATED_RUN', '').lower() not in {'1', 'true'}:
                 raise ResetBlocked('Isolated run required')
+            if (os.environ.get('PHONE_DAILY_RESET_AT_START') == '1'
+                and os.environ.get('PHONE_DAILY_RESET_CONFIRM_DEVICE') == os.environ.get('PHONE_HARNESS_DEVICE_ID')
+                and os.environ.get('PHONE_DAILY_RESET_JOURNAL')
+                and os.environ.get('BENCHMARK_CONTEXT_DIR')):
+                return
             validate_for_boot(os.environ.get('PHONE_DAILY_RESET_JOURNAL', ''),
                               os.environ.get('PHONE_HARNESS_DEVICE_ID'), user_id,
-                              os.environ.get('BENCHMARK_CONTEXT_DIR', ''))
+                              os.environ.get('BENCHMARK_CONTEXT_DIR', ''),
+                              allow_google_exception=load_daily_profile()['allowGooglePasscodeException'])
             return
         except ResetBlocked:
             raise PhoneDailyConfigurationError('phone_daily_configuration_unavailable: verified reset and provider passcode restoration required') from None
@@ -124,7 +130,8 @@ def evaluate_daily(task_name: str, base_url: str = "", user_id: str = "", root_a
         from benchmarks.phone_boot_reset import validate_for_boot
         receipt = validate_for_boot(os.environ.get('PHONE_DAILY_RESET_JOURNAL', ''),
                                     os.environ.get('PHONE_HARNESS_DEVICE_ID'), user_id,
-                                    os.environ.get('BENCHMARK_CONTEXT_DIR', ''))
+                                    os.environ.get('BENCHMARK_CONTEXT_DIR', ''),
+                                    allow_google_exception=load_daily_profile()['allowGooglePasscodeException'])
         if receipt['claimedBy'] != os.environ.get('BENCHMARK_CONTEXT_DIR', ''):
             raise PhoneDailyConfigurationError('Reset journal was not claimed by this run')
         proof = collect_boot_audit(base_url, user_id, root_agent_id, database_url, mode='boot', reset_available_at=receipt['availableAt'])
@@ -213,9 +220,11 @@ async def apply_daily_fixture(task_name: str, base_url: str, user_id: str, backe
     import httpx
     preflight_daily(task_name, base_url, user_id)
     if TASK_KINDS[task_name] == 'boot':
-        from benchmarks.phone_boot_reset import validate_for_boot
-        validate_for_boot(os.environ['PHONE_DAILY_RESET_JOURNAL'], os.environ['PHONE_HARNESS_DEVICE_ID'],
-                          user_id, os.environ['BENCHMARK_CONTEXT_DIR'], claim=True)
+        from benchmarks.phone_boot_reset import prepare, provider
+        await prepare(os.environ['PHONE_DAILY_RESET_JOURNAL'], os.environ['PHONE_HARNESS_DEVICE_ID'],
+                      user_id, os.environ.get('PHONE_DAILY_RESET_CONFIRM_DEVICE'), os.environ['BENCHMARK_CONTEXT_DIR'],
+                      call=lambda action, device: provider(action, device, owner=user_id, database_url=database_url),
+                      allow_google_exception=load_daily_profile()['allowGooglePasscodeException'])
     async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
         response = await client.put(base_url.rstrip('/') + '/api/iphone/device',
             headers={'X-API-Key': backend_key, 'X-User-Id': user_id},
