@@ -61,7 +61,7 @@ second explore task did consume the message. The mutable notification identity
 race is a new boundary. The repository's RCA process feedback was also read.
 The biometrics cost path remains a separate open observation.
 
-## Reproduction and repair
+## Solution
 
 The new owning blackbox launches a real background task, makes its first
 completion's tree update wake the same finished task, and then finishes run 2.
@@ -87,3 +87,16 @@ The complete local deploy-smoke selector passed: the 11-task batch returned
 batch returned 1/1. Both isolated stacks published durable run bundles and
 completed owned-resource cleanup. The heavy matched anti-regression campaign
 remains subject to the user's review checkpoint.
+
+## Human feedback
+
+The user asked for every failing check to be iterated until it passed, with no
+change to validation criteria, and for the heavy anti-regression campaign to
+stay behind their review checkpoint. No prompt change or new approval gate was
+requested for this repair.
+
+## Reusable lesson
+
+Capture a completing run's identity before any await that can let a concurrent
+wake replace the shared task record; never re-read mutable per-task state to
+label an outcome that was produced earlier.
