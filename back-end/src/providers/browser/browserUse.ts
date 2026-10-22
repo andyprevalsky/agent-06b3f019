@@ -20,6 +20,7 @@ import {
   type BrowserSessionHealth,
   type BrowserFileInfo,
 } from './types';
+import { captureContextStorage } from './contextStorageCapture';
 
 const log = createLogger('BrowserUse');
 const profileCreationByContext = new Map<string, Promise<{ id: string; source: string }>>();
@@ -40,7 +41,9 @@ type BrowserUseProfile = { updatedAt: string };
 async function storageHash(browser: Browser): Promise<string> {
   const context = browser.contexts()[0];
   if (!context) throw new Error('Browser Use session has no CDP context');
-  const state = await context.storageState();
+  // A fresh client only sees origins it watched navigate; the agent drove this
+  // session, so read every open page/frame origin (localStorage + IndexedDB).
+  const state = await captureContextStorage(context);
   const cookies = [...state.cookies].sort((a, b) =>
     `${a.domain}/${a.path}/${a.name}`.localeCompare(`${b.domain}/${b.path}/${b.name}`)
   );
