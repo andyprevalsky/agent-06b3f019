@@ -572,6 +572,9 @@ suspended), `--check` cannot bind the launch. Fetch that record once with
 remote export already completed. After the original deadline, pass one private
 `controller-export-cleanup-window-v1` window (at most one hour, zero credit) via
 `--cleanup-window` to each command. The live runner still owns cleanup.
+Export recovery streams each member with a pty-free `flyctl ssh console -C
+'cat -- <path>'` in 16 MiB writes. `ssh sftp get` wrote 32 KiB blocks, which the
+`/project` FUSE run directory absorbed at under 2 MB/s.
 
 After the local check passes, use `--observe` for a read-only readiness check.
 A pending result retains the exact writer list without consuming an export
