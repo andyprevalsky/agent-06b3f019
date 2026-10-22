@@ -5,8 +5,9 @@
  * a non-Tilion replacement must restore it (lane E live: "Kernel switch lost
  * the carried Tilion localStorage"). Registered by browser-challenge-recovery.blackbox.ts.
  */
+import { prisma } from '../../providers/database';
 import { rotateBrowserProxy } from '../../providers/browserSessionResume';
-import type { TilionCarriedState } from '../../providers/browser/tilion';
+import { TilionUncarriedStateError, type TilionCarriedState } from '../../providers/browser/tilion';
 import {
   assert,
   fakeProviderOperations,
@@ -96,5 +97,62 @@ export function registerTilionCarryCases(test: RegisterTest): void {
   test(
     'a Tilion -> Kernel and -> Steel switch restores the worker-carried storage_state',
     testTilionSwitchToKernelAndSteelRestoresCarriedState
+  );
+
+  /** No request-level state: a live Tilion row cannot switch off Tilion; a paused one carries its snapshot. */
+  async function testSwitchOffTilionFailsClosedLiveAndCarriesPausedSnapshot(): Promise<void> {
+    const run = await seedRun('tilion', 'residential');
+    const fake = fakeProviderOperations();
+    const restored: TilionCarriedState[] = [];
+    fake.dependencies.restoreCarriedState = async (_browser, state) => {
+      restored.push(state);
+      return { cookies: state.cookies.length, origins: 0 };
+    };
+    try {
+      await withEnv(TILION_DEFAULT_ENV, async () => {
+        const rotate = () =>
+          rotateBrowserProxy(run.session.id, run.owner.userId, undefined, {}, fake.dependencies);
+        assert((await rotate()).provider === 'tilion', 'rotation 1 stays on Tilion in place');
+
+        // Rotation 2 switches to Kernel while the Tilion browser is still live.
+        fake.dependencies.tilionSessionLive = async () => true;
+        let refused: unknown = null;
+        await rotate().catch((error: unknown) => {
+          refused = error;
+        });
+        assert(refused instanceof TilionUncarriedStateError, `live switch: ${String(refused)}`);
+        const afterRefusal = await prisma.browserSession.findUniqueOrThrow({
+          where: { id: run.session.id },
+        });
+        assert(afterRefusal.provider === 'tilion', 'refused switch replaced the browser');
+        assert(afterRefusal.proxyRotationCount === 1, 'refused switch kept its rotation');
+
+        // Paused: the durable snapshot is the state source for the Kernel replacement.
+        await prisma.browserSession.update({
+          where: { id: run.session.id },
+          data: { status: 'PAUSED', pausedBrowserState: WORKER_STATE as unknown as object },
+        });
+        fake.dependencies.tilionSessionLive = async () => false;
+        const switched = await rotate();
+        assert(switched.provider === 'kernel', `paused switch: ${switched.provider}`);
+        assert(
+          restored.length === 1 &&
+            restored[0]!.cookies[0]?.value === 'three-items' &&
+            restored[0]!.origins[0]?.localStorage[0]?.value === 'kept',
+          `paused snapshot not restored: ${JSON.stringify(restored)}`
+        );
+        const after = await prisma.browserSession.findUniqueOrThrow({
+          where: { id: run.session.id },
+        });
+        assert(after.pausedBrowserState === null, 'consumed paused snapshot was not cleared');
+      });
+    } finally {
+      await run.cleanup();
+    }
+  }
+
+  test(
+    'switching off Tilion fails closed while live and carries the paused snapshot',
+    testSwitchOffTilionFailsClosedLiveAndCarriesPausedSnapshot
   );
 }

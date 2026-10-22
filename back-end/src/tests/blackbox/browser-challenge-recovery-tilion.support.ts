@@ -148,6 +148,8 @@ export function fakeProviderOperations() {
     },
     closeSession: async () => undefined,
     getBrowserCaptchaTelemetry: async () => null as never,
+    // The fake Tilion session has ended remotely unless a case says otherwise.
+    tilionSessionLive: async () => false,
   };
   return {
     dependencies,

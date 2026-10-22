@@ -21,7 +21,8 @@ import {
   type RotationStep,
 } from './browser/rotation';
 import type { TilionCarriedState } from './browser/tilion';
-import { restoreTilionBrowserState } from './browser/tilionState';
+import { clearPausedState, restoreTilionBrowserState } from './browser/tilionState';
+import { carryForTilionSwitch } from './browserSwitchCarry';
 import { storedBrowserProvider } from './browser/types';
 import { browserProviderEnabled, browserUseEnabled } from './browser/config';
 
@@ -54,6 +55,8 @@ export interface BrowserSessionResumeDependencies {
   getBrowserCaptchaTelemetry: typeof getBrowserCaptchaTelemetry;
   /** Writes worker-carried state into a non-Tilion replacement (defaults to the real restore). */
   restoreCarriedState?: typeof restoreTilionBrowserState;
+  /** Whether a Tilion session is still running (defaults to Tilion /status). */
+  tilionSessionLive?: (sessionId: string) => Promise<boolean>;
 }
 
 /**
@@ -580,9 +583,22 @@ export async function rotateBrowserProxy(
 
   let result: Awaited<ReturnType<typeof rotateProxy>>;
   let rotationFallbackReason: string | null = null;
+  let effectiveCarry = carry;
+  let carryFromPausedState = false;
+  const prepareSwitchOffTilion = async (target: RotationStep) => {
+    if (currentProvider !== 'tilion' || target.provider === 'tilion') return;
+    const prepared = await carryForTilionSwitch(
+      taskId,
+      effectiveCarry,
+      dependencies.tilionSessionLive
+    );
+    effectiveCarry = prepared.carry;
+    carryFromPausedState = carryFromPausedState || prepared.fromPausedState;
+  };
   try {
     try {
-      result = await dependencies.rotateProxy(taskId, step, replacementOptions(carry));
+      await prepareSwitchOffTilion(step);
+      result = await dependencies.rotateProxy(taskId, step, replacementOptions(effectiveCarry));
     } catch (error) {
       // Tilion could not serve this exit (e.g. mobile: 409 proxy_type_unavailable).
       // The reserved rotation still owes the agent a new IP: take the next rung now.
@@ -598,7 +614,8 @@ export async function rotateBrowserProxy(
         to: rotationStepLabel(fallback),
         reason: rotationFallbackReason,
       });
-      result = await dependencies.rotateProxy(taskId, fallback, replacementOptions(carry));
+      await prepareSwitchOffTilion(fallback);
+      result = await dependencies.rotateProxy(taskId, fallback, replacementOptions(effectiveCarry));
     }
   } catch (error) {
     // A transient provider failure did not deliver a new IP, so return its
@@ -610,7 +627,14 @@ export async function rotateBrowserProxy(
     });
     throw error;
   }
-  const response = await assembleResumeResponse(taskId, result, dependencies, carry.carriedState);
+  const response = await assembleResumeResponse(
+    taskId,
+    result,
+    dependencies,
+    effectiveCarry.carriedState
+  );
+  // The paused snapshot belonged to the replaced Tilion session; it is consumed.
+  if (carryFromPausedState) await clearPausedState({ taskId });
   const rotationsRemaining = ROTATION_CAP - rotationsUsed;
   const effectiveStep: RotationStep = {
     provider: result.provider === 'local' ? 'steel' : result.provider,

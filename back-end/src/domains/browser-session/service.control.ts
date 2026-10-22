@@ -1,9 +1,5 @@
 import { getBrowserSessionHealth } from '../../providers/browser';
-import {
-  getTilionLiveViewUrl,
-  isTilionSessionEndedError,
-  type TilionCarriedState,
-} from '../../providers/browser/tilion';
+import { getTilionLiveViewUrl, isTilionSessionEndedError } from '../../providers/browser/tilion';
 import { resumeBrowserSession as resumeBrowserSessionProvider } from '../../providers/browserSessionResume';
 import { createLogger } from '../../providers/logger';
 import * as repo from './repo';
@@ -150,14 +146,13 @@ async function freshTilionLiveViewUrl(
 export async function resumeOwnedBrowserSession(
   taskId: string,
   userId?: string,
-  forceFreshProfile = false,
-  carry: { carriedState?: TilionCarriedState } = {}
+  forceFreshProfile = false
 ) {
   const session = await repo.findSessionByTaskId(taskId);
   if (session === null || (userId !== undefined && session.context.userId !== userId)) {
     throw new SessionNotFoundError();
   }
-  return resumeBrowserSessionProvider(taskId, { forceFreshProfile, ...carry });
+  return resumeBrowserSessionProvider(taskId, { forceFreshProfile });
 }
 
 export async function setBrowserControlState(

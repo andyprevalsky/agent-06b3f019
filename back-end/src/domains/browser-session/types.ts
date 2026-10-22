@@ -33,8 +33,6 @@ const storageStateSchema = z
 export const resumeSessionSchema = z.object({
   task_id: z.string().uuid(), // Use stable task ID instead of session_id
   force_fresh_profile: z.boolean().optional().default(false),
-  /** Worker-captured state of a LIVE Tilion session (it holds the only CDP client). */
-  storage_state: storageStateSchema.optional(),
 });
 
 export const browserControlSchema = z.object({
@@ -46,8 +44,6 @@ export const browserControlSchema = z.object({
 export const rotateProxySchema = z.object({
   task_id: z.string().uuid(),
   current_url: z.string().min(1).max(8192).optional(),
-  /** Worker-captured state of a LIVE Tilion session; required by Tilion to replace it. */
-  storage_state: storageStateSchema.optional(),
 });
 
 const httpPublicUrlSchema = z

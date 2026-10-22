@@ -6,7 +6,6 @@
  */
 
 import { respondIfCarriedStateRequired } from './routes.carried-state';
-import { carriedStateFromRequest } from './service.carried-state';
 import { type Response, type Router } from 'express';
 import { ZodError } from 'zod';
 import { type AuthRequest, authenticate } from '../../providers/auth';
@@ -38,13 +37,12 @@ export function registerBrowserRotationRoute(router: Router): void {
     authenticate,
     asyncHandler(async (req: AuthRequest, res: Response) => {
       try {
-        const { task_id, current_url, storage_state } = rotateProxySchema.parse(req.body);
+        const { task_id, current_url } = rotateProxySchema.parse(req.body);
 
         const result = await rotateBrowserProxy(
           task_id,
           req.isInternal === true ? undefined : req.user?.id,
-          current_url,
-          carriedStateFromRequest(storage_state)
+          current_url
         );
 
         res.json({ success: true, ...result });
