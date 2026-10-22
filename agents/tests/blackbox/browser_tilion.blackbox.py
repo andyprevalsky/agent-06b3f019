@@ -1656,7 +1656,7 @@ async def test_tilion_downloads_survive_provider_switch_and_pause():
 
     handler_source = (Path(__file__).resolve().parents[2] / "domains/spawn_browser_agent_v3/handler.py").read_text()
     assert '"tilion_downloads": durable_tilion_downloads(session_id)' in handler_source
-    assert 'restore_tilion_downloads(session_id, private_browser_runtime.get("tilion_downloads"))' in handler_source
+    assert 'restore_tilion_downloads(session_id, durable_browser_runtime.get("tilion_downloads"))' in handler_source
     assert "user_id=user_id," in handler_source[handler_source.index("BrowserDownloadPersister.create(") :][:400]
 
 
@@ -2071,6 +2071,64 @@ async def test_document_images_count_as_rendered_through_the_worker_socket():
         assert gateway.withheld_ids, "the fixture really withheld the reply"
 
 
+async def test_pause_context_carries_downloads_and_image_provenance_without_secrets():
+    """A write-lock/payment/auth pause resumes in a new activity (maybe another
+    worker). private_browser_runtime is persisted only with secret bindings, so
+    the Tilion download pointers and rendered-image provenance travel in
+    durable_browser_runtime on EVERY pause, through the real resume store."""
+    from browser_tools.dom_service import DOMService
+    from domains.spawn_browser_agent_v3.handler import _browser_resume_continuity_state
+    from domains.spawn_browser_agent_v3.resume_store import hydrate_resume_context, persist_resume_context
+
+    durable = {
+        "tilion_downloads": [
+            {
+                "path": "tilion-download://receipt.pdf",
+                "size": 12,
+                "filename": "receipt.pdf",
+                "mime_type": "application/pdf",
+                "file_pointer": {"storage_path": "user-1/receipt.pdf", "original_filename": "receipt.pdf"},
+            }
+        ],
+        "rendered_image_urls": [f"https://images.example/{index}.png" for index in range(450)][-400:],
+    }
+
+    from browser_tools.dom_service import ActionHistory
+
+    history = ActionHistory()
+    history.bind_dom_service(DOMService(cdp_url="ws://unused.invalid/devtools/browser/h"))
+    state = _browser_resume_continuity_state(
+        action_history=history,
+        visited_urls=["https://shop.example/event"],
+        verifier_checkpoints=[],
+        private_runtime_state={"current_url": "https://shop.example/checkout"},
+        durable_runtime_state=durable,
+    )
+    assert "private_browser_runtime" not in state, "precondition: no secrets, no private runtime"
+    persisted = await persist_resume_context(agent_id="agent-1", task_id="task-1", state=state)
+    resumed = dict(await hydrate_resume_context(agent_id="agent-1", resume_state=json.loads(json.dumps(persisted))))
+    carried = resumed.pop("durable_browser_runtime")
+    assert carried == durable
+
+    from domains.spawn_browser_agent_v3 import tilion_worker
+
+    assert tilion_worker.restore_downloads("resumed-session", carried["tilion_downloads"]) == 1
+    assert tilion_worker.download_file_pointer("resumed-session", "tilion-download://receipt.pdf")
+    tilion_worker.release_session("resumed-session")
+    service = DOMService(cdp_url="ws://unused.invalid/devtools/browser/x")
+    service.restore_rendered_image_state(carried["rendered_image_urls"])
+    assert service.rendered_image_state() == durable["rendered_image_urls"]
+    service.restore_rendered_image_state([f"https://images.example/extra-{i}.png" for i in range(10)])
+    assert len(service.rendered_image_state()) == 400, "bounded at 400"
+
+    from pathlib import Path
+
+    handler_source = (Path(__file__).resolve().parents[2] / "domains/spawn_browser_agent_v3/handler.py").read_text()
+    assert handler_source.count("durable_runtime_state={") == 1
+    assert 'dom_service.restore_rendered_image_state(durable_browser_runtime.get("rendered_image_urls"))' in handler_source
+    assert '"rendered_image_urls": (' in handler_source
+
+
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
@@ -2106,6 +2164,7 @@ async def run_all_tests():
         ("multiplexer_reapplies_detached_overrides", test_multiplexer_reapplies_overrides_when_their_holder_detaches),
         ("tilion_live_view_token_redacted", test_tilion_live_view_token_is_redacted_before_persisting),
         ("document_images_count_as_rendered", test_document_images_count_as_rendered_through_the_worker_socket),
+        ("pause_context_carries_provenance", test_pause_context_carries_downloads_and_image_provenance_without_secrets),
         (
             "supervisor_cap_logs_stack_and_classifies",
             test_supervisor_cap_logs_blocked_stack_and_classifies_action_timeouts,
