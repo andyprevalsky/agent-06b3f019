@@ -1,0 +1,359 @@
+{
+  "version": 1,
+  "source": "rose-captcha-sites.csv (39 production CAPTCHA sites)",
+  "probes": [
+    {
+      "name": "google-search",
+      "site": "google.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.google.com/search?q=OpenAI+official+website and read the live results page. Report exactly one non-ad organic result: its title and URL. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "Google results page with organic (non-ad) result titles and URLs visible; the URL is /search, not /sorry/index",
+      "where_captcha_hit": "Search results (/search → /sorry/index), accounts.google.com sign-in",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "stripe-test-payment",
+      "site": "checkout.stripe.com (from roselabs.ai/test_payment)",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to {frontend_url}/test_payment. Add exactly these 3 products to the cart: Aurora Notebook, Ceramic Mug and Canvas Tote. Click Place order and wait for the Stripe hosted checkout page (checkout.stripe.com) to load. Do NOT request a payment card and do NOT enter card details or pay. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "Stripe hosted checkout (checkout.stripe.com) showing the order total and an interactive card/payment form",
+      "where_captcha_hit": "Stripe hosted checkout page, right after Place order",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "webdecoy-fcaptcha",
+      "site": "webdecoy.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://webdecoy.com/product/fcaptcha-demo/. This live demo is a CAPTCHA test: interact like a person, tick the FCaptcha checkbox, then submit the invisible-mode demo form (it is a demo form; submitting it is the step being tested). Report the verification result the page shows. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "webdecoy demo shows the FCaptcha checkbox verified (success/human result) and/or the invisible-mode form submitted with a passing verdict",
+      "where_captcha_hit": "Demo page (the CAPTCHA is the test)",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "blue-bottle-order-online",
+      "site": "order.online (Blue Bottle)",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Order flow at Blue Bottle Coffee Ferry Building, San Francisco, via its online ordering site (order.online, reached from bluebottlecoffee.com). Pickup, guest checkout. Add one 16oz iced vanilla bean shakerato with oat milk (almond if oat is unavailable) to the cart and open the checkout page. Do NOT request a payment card and do NOT pay. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "order.online checkout page for Blue Bottle Ferry Building with the shakerato in the cart and an order total shown",
+      "where_captcha_hit": "Store/menu page, checkout page (blocked api.js script), bluebottlecoffee.com homepage, order tracking",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "eventim-1015-folsom",
+      "site": "eventim.us / 1015.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Start at https://1015.com/, open the Eventim ticket link for any upcoming show that still sells tickets, choose one cheapest general-admission ticket and continue to checkout.eventim.us. Do NOT request a payment card and do NOT pay. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "checkout.eventim.us (or the Eventim event page) showing the show, one GA ticket and its price",
+      "where_captcha_hit": "1015.com homepage, wl.eventim.us WAF form (wafform.aspx) on the event link, event page, checkout.eventim.us",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "doordash-store",
+      "site": "doordash.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Use DoorDash (https://www.doordash.com) with my saved session and saved San Francisco address. Search for a convenience store (for example 7-Eleven or CVS) delivering to that address, open the store page, search it for \"USB-C cable\" and open one product. Do NOT add to cart or check out. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "DoorDash store page or product page loaded with item names and prices for the saved address (not a login/challenge page)",
+      "where_captcha_hit": "Homepage, store page, search, identity.doordash.com login/signup, order help page",
+      "account_needed": true,
+      "hold": false
+    },
+    {
+      "name": "amc-metreon-seatmap",
+      "site": "amctheatres.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.amctheatres.com open AMC Metreon 16 (San Francisco) showtimes for next Friday, pick any standard showing starting between 7:00 PM and 9:00 PM, and open its seat selection for 1 adult ticket. Do NOT select payment or buy. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "AMC seat map for the chosen Metreon 16 showtime loaded with seats and the adult ticket price visible",
+      "where_captcha_hit": "Homepage, movie/showtimes page, graph.amctheatres.com API during seat selection",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "hotels-com-kabuki",
+      "site": "hotels.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.hotels.com search Hotel Kabuki, San Francisco, check-in next Saturday, check-out the following Sunday, 1 room, 1 adult. Open the Hotel Kabuki listing and its room choices. Do NOT reserve. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "hotels.com search results or Hotel Kabuki property page showing room types with nightly prices for those dates",
+      "where_captcha_hit": "Homepage, Hotel-Search results",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "bing-search",
+      "site": "bing.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.bing.com/search?q=OpenAI+official+website and read the live results page. Report exactly one non-ad organic result: its title and URL. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "Bing results page with organic result titles and URLs visible",
+      "where_captcha_hit": "Search results, image search",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "amazon-beanie-cart",
+      "site": "amazon.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.amazon.com with my saved session, search for \"black beanie\", open one product under $35 and add it to the cart, then open the cart page. Do NOT click Buy Now or Proceed to checkout. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "Amazon cart page (or product page with Add to Cart confirmation) showing the black beanie and its price, signed in",
+      "where_captcha_hit": "Search, product page, sign-in, /ap/cvf verification, cart",
+      "account_needed": true,
+      "hold": false
+    },
+    {
+      "name": "x-login-home",
+      "site": "x.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://x.com/home using my saved X session (sign in through the normal login page only if the session is not active). Do NOT post, like, follow or send anything. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "x.com/home timeline visible for the signed-in account (tweets and the post composer visible), not the login/challenge page",
+      "where_captcha_hit": "Login",
+      "account_needed": true,
+      "hold": false
+    },
+    {
+      "name": "pubmed-article",
+      "site": "pubmed.ncbi.nlm.nih.gov / pmc",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://pubmed.ncbi.nlm.nih.gov/?term=eating+disorders+onset+adolescence, open the first article result, then open its free full text on PMC (pmc.ncbi.nlm.nih.gov) if available. Report the article title, journal and year. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "A PubMed abstract page and/or PMC full-text article page loaded with title, authors and journal",
+      "where_captcha_hit": "Article pages",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "cars-com-search",
+      "site": "cars.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.cars.com search used SUVs and minivans within 50 miles of ZIP 55401 (Minneapolis, MN), max price $50,000. Report the first 3 listings (year, make, model, price, mileage). Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "cars.com search results page with vehicle listings and prices for the Minneapolis area",
+      "where_captcha_hit": "Search results",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "opentable-prospect",
+      "site": "opentable.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.opentable.com find Prospect, 300 Spear Street, San Francisco, and check availability for a party of 2 this Friday around 7:00 PM. Report the available time slots. Do NOT book. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "OpenTable restaurant page for Prospect showing available reservation time slots (or an explicit no-availability message from the booking widget)",
+      "where_captcha_hit": "Restaurant page, booking availability API",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "linkedin-data-export-page",
+      "site": "linkedin.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. With my saved LinkedIn session, go to https://www.linkedin.com/mypreferences/d/download-my-data (sign in through the normal login page only if needed). Report the export options shown. Do NOT click Request archive. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "LinkedIn \"Download your data\" settings page loaded for the signed-in account (not /checkpoint/challengesV2 or the login page)",
+      "where_captcha_hit": "Login, then /checkpoint/challengesV2",
+      "account_needed": true,
+      "hold": false
+    },
+    {
+      "name": "target-ipad-air",
+      "site": "target.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.target.com search for \"iPad Air M3\", open the cheapest listed iPad Air M3 product page and report its configurations and prices. Do NOT add to cart. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "Target product page for an iPad Air M3 with the price visible",
+      "where_captcha_hit": "Search, category page, product page, cart",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "chatgpt-signup",
+      "site": "chatgpt.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://chatgpt.com and start creating a new account: click Sign up and enter the email address captcha-probe-chatgpt@roselabs.ai. The account-creation step is the step being tested. Continue only until the page asks for a password or an email verification code, then stop. Do NOT set up payment or upgrade. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "ChatGPT/OpenAI signup flow advanced past the email entry to the password or email-verification-code step",
+      "where_captcha_hit": "Homepage / signup",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "netflix-mystery",
+      "site": "netflix.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.netflix.com/browse/genre/9994 (Netflix mystery TV, public pages; do not sign in) and report 5 mystery series titles shown, opening one title page. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "Netflix public genre or title page loaded with show titles (not a bot-check page); a sign-in wall on a public page counts as reached only if the page itself loaded",
+      "where_captcha_hit": "Homepage, title page, login redirect",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "proton-signup",
+      "site": "proton.me",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://account.proton.me/mail/signup?plan=free. Create a free Proton Mail account: username captchaprobe followed by 6 random digits, any strong password. Creating the account is the step being tested: submit, complete the human verification, and stop at the next step after verification (or report the verification outcome). Do NOT add payment or recovery details. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "Proton signup passed human verification: the next step after verification (account setup, display name, recovery or welcome) is shown",
+      "where_captcha_hit": "Signup (human verification)",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "uber-login",
+      "site": "uber.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. With my Uber session, open https://m.uber.com/ and the ride request screen from 88 Howard Street, San Francisco, CA 94105 to 425 Mission Street, San Francisco, CA 94105. Do NOT request a ride. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "Uber ride request screen with ride options and prices for that route, signed in",
+      "where_captcha_hit": "Login",
+      "account_needed": true,
+      "hold": true,
+      "hold_reason": "no injectable uber.com credential in the local seed (needs human login)"
+    },
+    {
+      "name": "apple-uk-macbook-pro",
+      "site": "apple.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.apple.com/uk/shop/buy-mac/macbook-pro report the price of the 14-inch and 16-inch base configurations. Do NOT add to bag. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "Apple UK store buy page for MacBook Pro with configurations and GBP prices",
+      "where_captcha_hit": "Store buy page, product/spec pages",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "nvidia-geforce-now-account",
+      "site": "nvidia.custhelp.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. With my NVIDIA session, open https://nvidia.custhelp.com/app/home and then the GeForce NOW membership/account page. Do NOT cancel anything. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "NVIDIA support portal / account page showing the GeForce NOW membership, signed in",
+      "where_captcha_hit": "Support portal home, ask, chat and account pages",
+      "account_needed": true,
+      "hold": true,
+      "hold_reason": "no saved NVIDIA login in the local seed"
+    },
+    {
+      "name": "ticketmaster-nyc",
+      "site": "ticketmaster.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.ticketmaster.com search for events in New York, NY next weekend (Friday to Sunday). Report 3 events with venue, date and time. Do NOT buy. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "Ticketmaster search results listing events with venues and dates",
+      "where_captcha_hit": "Search",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "kokkari-menu",
+      "site": "kokkari.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://kokkari.com, open its dinner menu and its reservation page. Report two vegetarian dishes with prices and how reservations are made. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "kokkari.com menu page with dishes, and the reservation page or booking widget loaded",
+      "where_captcha_hit": "Menu and reservation pages",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "foreign-cinema-menu",
+      "site": "foreigncinema.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://foreigncinema.com, open its menu and its reservation page. Report two vegetarian dishes and how reservations are made. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "foreigncinema.com menu page with dishes, and the reservation page or booking widget loaded",
+      "where_captcha_hit": "Homepage, reservation page",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "wunderground-forecast",
+      "site": "wunderground.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.wunderground.com/forecast/us/md/baltimore and report the current temperature and the 3-day forecast. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "Weather Underground Baltimore forecast page with current conditions and forecast values",
+      "where_captcha_hit": "Forecast pages",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "lulus-emerald-dress",
+      "site": "lulus.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.lulus.com, search for \"emerald green dress\", open one product page and report its price and whether size 12 is available. Do NOT add to bag. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "Lulus product listing and a product page with price and size options",
+      "where_captcha_hit": "Product listing",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "sabbaticalhomes-sf",
+      "site": "sabbaticalhomes.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.sabbaticalhomes.com, search for homes for rent in San Francisco, CA for the next full calendar month, and open one listing. Report its monthly price. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "sabbaticalhomes.com search results and a listing page with a monthly price",
+      "where_captcha_hit": "Homepage, listing pages",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "openreview-neurips2022",
+      "site": "openreview.net",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://openreview.net/group?id=NeurIPS.cc/2022/Conference and search accepted papers for the author name \"Yuri\". Report the first 3 paper titles. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "OpenReview NeurIPS 2022 venue/search page with paper titles listed",
+      "where_captcha_hit": "Search page and API",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "hulu-the-pitt",
+      "site": "hulu.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.hulu.com/search?q=The%20Pitt (or search Hulu for \"The Pitt\") and open the show page for The Pitt. Report what the page says about availability. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "Hulu show page or search result for The Pitt loaded",
+      "where_captcha_hit": "Show page",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "reddit-thread",
+      "site": "reddit.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.reddit.com/r/applehelp/ and open the top thread about a MacBook not charging or a similar device fix. Report the thread title and the top answer. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "A reddit thread page with the post and comments visible",
+      "where_captcha_hit": "Thread page",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "asus-b650e-i",
+      "site": "asus.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.asus.com and open the official product page for the ROG Strix B650E-I Gaming WiFi motherboard. Report its form factor and memory support. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "ASUS product page for ROG Strix B650E-I Gaming WiFi with specs",
+      "where_captcha_hit": "Homepage",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "usga-handicap-rules",
+      "site": "usga.org",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.usga.org and open the Rules of Handicapping page. Report what the maximum Handicap Index is. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "usga.org Rules of Handicapping content page loaded",
+      "where_captcha_hit": "Content pages",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "apa-databases",
+      "site": "apa.org",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.apa.org/pubs/databases and list the APA research databases shown (for example PsycINFO, PsycARTICLES, PsycTESTS) with one-line descriptions. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "apa.org databases portal page listing the databases",
+      "where_captcha_hit": "Database portal",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "weather-gov-forecast",
+      "site": "weather.gov",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://forecast.weather.gov/MapClick.php?lat=39.2904&lon=-76.6122 (Baltimore, MD) and report tonight and tomorrow's forecast. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "weather.gov forecast page for Baltimore with the 7-day forecast",
+      "where_captcha_hit": "Forecast page",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "tinypng-upload",
+      "site": "tinypng.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://tinypng.com and upload any small PNG image you can generate or download (for example https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_272x92dp.png saved first) to compress it. Report the compression result shown. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "tinypng.com showing the uploaded image compressed with the size reduction",
+      "where_captcha_hit": "Homepage (upload)",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "toast-nopa-fish",
+      "site": "toasttab.com (Nopa Fish)",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to Nopa Fish (Ferry Building, San Francisco) on its Toast online ordering site (toasttab.com), open the menu and add 1 rocky fish sandwich to the cart, then open the cart. Do NOT check out or pay. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "Toast ordering page for Nopa Fish with the menu and the rocky fish sandwich in the cart",
+      "where_captcha_hit": "Ordering page",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "indeed-signup",
+      "site": "indeed.com",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.indeed.com and start creating a job-seeker account with the email address captcha-probe-indeed@roselabs.ai. Creating the account is the step being tested: continue until Indeed asks for a verification code or password, then stop. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "Indeed signup advanced past the email step to a verification-code or password step",
+      "where_captcha_hit": "Signup",
+      "account_needed": false,
+      "hold": false
+    },
+    {
+      "name": "ds160-start",
+      "site": "ceac.state.gov (US visa DS-160)",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://ceac.state.gov/genniv/, select the location \"Mexico, Mexico City\", solve the page's CAPTCHA and click Start an Application. Stop at the page that shows the Application ID and the security question; report the Application ID. Do NOT fill in or submit the application. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "DS-160 page showing an Application ID and/or the security question step after Start an Application",
+      "where_captcha_hit": "Start page",
+      "account_needed": false,
+      "hold": false
+    }
+  ]
+}
