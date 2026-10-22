@@ -2440,6 +2440,82 @@ async def test_srcset_urls_with_commas_are_recorded_whole():
         assert gateway.rejected_4409 == 0
 
 
+_SLOW_SW = """self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
+self.addEventListener('fetch', (event) => {
+  if (event.request.mode !== 'navigate') return;
+  event.respondWith(new Promise((resolve) => setTimeout(
+    () => resolve(new Response('<html>late</html>', {headers: {'Content-Type': 'text/html'}})), 30000)));
+});"""
+
+
+async def test_recovery_storage_capture_is_bounded_when_a_visited_origin_has_a_service_worker():
+    """Google /sorry (agent 84a6cb53): challenge recovery failed with 'Browser storage
+    capture timed out after 15s'. Playwright's storage_state reads visited origins that
+    are no longer open by navigating a hidden page to each; that origin's service worker
+    answers the navigation, so the real page loads (live Tilion: youtube 37 s). Capture
+    must stay within its bound and still carry cookies plus open-origin localStorage and
+    IndexedDB, read in place."""
+    from aiohttp import web
+
+    from domains.spawn_browser_agent_v3.handler import _capture_rotation_storage_state
+
+    page_b = """<script>localStorage.setItem('b', '1');
+navigator.serviceWorker.register('/sw.js').then(() => navigator.serviceWorker.ready)
+  .then(() => { document.title = 'sw-ready'; });</script>"""
+    page_a = """<script>localStorage.setItem('session', 'kept');
+const open = indexedDB.open('auth', 1);
+open.onupgradeneeded = () => open.result.createObjectStore('tokens', {keyPath: 'id'});
+open.onsuccess = () => { const tx = open.result.transaction('tokens', 'readwrite');
+  tx.objectStore('tokens').put({id: 't1', value: 'v1'}); tx.oncomplete = () => { document.title = 'a-ready'; }; };</script>"""
+
+    async def page(request):
+        body = page_b if request.host.startswith("localhost") else page_a
+        response = web.Response(content_type="text/html", text=body)
+        response.set_cookie("sid", "abc")
+        return response
+
+    async def worker(_request):
+        return web.Response(content_type="application/javascript", text=_SLOW_SW)
+
+    app = web.Application()
+    app.router.add_get("/sw.js", worker)
+    app.router.add_get("/{tail:.*}", page)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    previous = os.environ.get("BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS")
+    os.environ["BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS"] = "6"
+    try:
+        emulation = {"timezone": "America/Los_Angeles", "locale": "en-US"}
+        async with _tilion_worker_stack(emulation) as (_service, pw_browser, gateway):
+            tab = pw_browser.contexts[0].pages[0]
+            await tab.goto(f"http://localhost:{port}/b", wait_until="domcontentloaded")
+            await tab.wait_for_function("document.title === 'sw-ready'", timeout=15_000)
+            await tab.goto(f"http://127.0.0.1:{port}/a", wait_until="domcontentloaded")
+            await tab.wait_for_function("document.title === 'a-ready'", timeout=15_000)
+            started = time.monotonic()
+            state = await asyncio.wait_for(_capture_rotation_storage_state(tab), 20)
+            elapsed = time.monotonic() - started
+            assert elapsed < 7.5, f"capture took {elapsed:.1f}s against a 6s bound"
+            assert any(cookie["name"] == "sid" for cookie in state["cookies"]), state["cookies"]
+            origin = next(entry for entry in state["origins"] if entry["origin"] == f"http://127.0.0.1:{port}")
+            assert {"name": "session", "value": "kept"} in origin["localStorage"], origin
+            database = origin["indexedDB"][0]
+            store = database["stores"][0]
+            assert (database["name"], store["name"], store["keyPath"]) == ("auth", "tokens", "id"), database
+            assert store["records"][0]["value"] == {"id": "t1", "value": "v1"}, store
+            assert gateway.rejected_4409 == 0
+    finally:
+        if previous is None:
+            os.environ.pop("BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS", None)
+        else:
+            os.environ["BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS"] = previous
+        await runner.cleanup()
+
+
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
@@ -2487,6 +2563,10 @@ async def run_all_tests():
         ("pause_context_carries_provenance", test_pause_context_carries_downloads_and_image_provenance_without_secrets),
         ("downloaded_files_visible_mid_run", test_downloaded_files_are_visible_to_the_agent_mid_run),
         ("srcset_urls_with_commas_recorded_whole", test_srcset_urls_with_commas_are_recorded_whole),
+        (
+            "recovery_storage_capture_bounded_with_service_worker",
+            test_recovery_storage_capture_is_bounded_when_a_visited_origin_has_a_service_worker,
+        ),
         (
             "supervisor_cap_logs_stack_and_classifies",
             test_supervisor_cap_logs_blocked_stack_and_classifies_action_timeouts,

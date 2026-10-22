@@ -26,7 +26,7 @@ import traceback
 import uuid as uuid_module
 import weakref
 from datetime import datetime, timedelta, timezone
-from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 import structlog
@@ -2081,24 +2081,119 @@ def _rotation_storage_capture_timeout_seconds(raw_timeout: Any) -> float:
     return min(timeout_seconds, 60.0)
 
 
+# Collects one document's own origin storage in the same shape as Playwright's
+# storage_state origins entry ({origin, localStorage, indexedDB}), read in place.
+_OPEN_ORIGIN_STORAGE_SCRIPT = """async () => {
+  if (!/^https?:$/.test(location.protocol) || !location.origin || location.origin === "null") return null;
+  const localStorageItems = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const name = localStorage.key(i);
+      localStorageItems.push({ name, value: localStorage.getItem(name) });
+    }
+  } catch {}
+  const request = (r) => new Promise((resolve, reject) => {
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  });
+  const databases = [];
+  try {
+    for (const info of (indexedDB.databases ? await indexedDB.databases() : [])) {
+      if (!info.name) continue;
+      const db = await new Promise((resolve, reject) => {
+        const open = indexedDB.open(info.name);
+        open.onsuccess = () => resolve(open.result);
+        open.onerror = () => reject(open.error);
+        open.onblocked = () => reject(new Error("blocked"));
+        open.onupgradeneeded = () => { open.transaction.abort(); reject(new Error("missing")); };
+      });
+      try {
+        const stores = [];
+        for (const name of Array.from(db.objectStoreNames)) {
+          const store = db.transaction(name, "readonly").objectStore(name);
+          const [keys, values] = await Promise.all([request(store.getAllKeys()), request(store.getAll())]);
+          const entry = { name, autoIncrement: store.autoIncrement, records: keys.map((key, i) => ({ key, value: values[i] })) };
+          if (store.keyPath !== null) entry.keyPath = store.keyPath;
+          stores.push(entry);
+        }
+        databases.push({ name: db.name, version: db.version, stores });
+      } finally {
+        db.close();
+      }
+    }
+  } catch {}
+  return { origin: location.origin, localStorage: localStorageItems, indexedDB: databases };
+}"""
+
+
+async def _capture_open_origin_storage_state(context: Any, frame_timeout_seconds: float) -> Dict[str, Any]:
+    """Cookies plus storage of every origin open in an existing frame, read in place.
+
+    Uses only targets that already exist: no page is created or navigated, so a
+    provider with per-target setup or a slow exit (Tilion) cannot stall it.
+    """
+    state: Dict[str, Any] = {"cookies": await context.cookies(), "origins": []}
+    seen: Set[str] = set()
+    for page in list(getattr(context, "pages", []) or []):
+        for frame in list(getattr(page, "frames", []) or []):
+            try:
+                entry = await asyncio.wait_for(frame.evaluate(_OPEN_ORIGIN_STORAGE_SCRIPT), frame_timeout_seconds)
+            except Exception:
+                continue
+            if not isinstance(entry, dict) or not entry.get("origin") or entry["origin"] in seen:
+                continue
+            seen.add(entry["origin"])
+            if entry.get("localStorage") or entry.get("indexedDB"):
+                state["origins"].append(entry)
+    return state
+
+
 async def _capture_rotation_storage_state(page: Optional[Any]) -> Optional[Dict[str, Any]]:
     """Capture browser auth/storage before rotate_ip replaces the remote browser.
 
     Provider profiles persist within one provider. Capturing Playwright storage
     lets Kernel-to-Steel and Steel-to-Browser-Use recoveries retain the same
     cookies, localStorage, and IndexedDB across providers.
+
+    Two passes share one bound. First, cookies plus every open frame's storage
+    read in place. Then Playwright's storage_state, which also covers visited
+    origins that are no longer open. It reads those by navigating a hidden page
+    to each one. Fetch interception is meant to stop that load, but an origin's
+    service worker answers the navigation itself, so the real page loads (live
+    Tilion 2026-10-22: www.youtube.com took 37 s through the residential exit).
+    When that pass exceeds the bound, the in-place state is carried instead of
+    failing recovery.
     """
     if page is None or getattr(page, "context", None) is None:
         return None
     timeout_seconds = _rotation_storage_capture_timeout_seconds(
         os.getenv("BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS", "15")
     )
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    open_state: Optional[Dict[str, Any]] = None
+    try:
+        open_state = await asyncio.wait_for(
+            _capture_open_origin_storage_state(page.context, min(5.0, timeout_seconds / 3)),
+            timeout=timeout_seconds / 2,
+        )
+    except Exception as exc:
+        logger.warning("Failed to capture open-origin browser storage before IP rotation", error=str(exc)[:200])
     try:
         return await asyncio.wait_for(
             page.context.storage_state(indexed_db=True),
-            timeout=timeout_seconds,
+            timeout=max(0.0, deadline - loop.time()),
         )
     except asyncio.TimeoutError:
+        if open_state is not None:
+            logger.warning(
+                "Visited-origin storage capture exceeded its bound; carrying cookies and open-origin storage",
+                timeout_seconds=timeout_seconds,
+                capture_scope="cookies_open_origin_localstorage_indexeddb",
+                cookies=len(open_state["cookies"]),
+                origins=[entry["origin"] for entry in open_state["origins"]][:20],
+            )
+            return open_state
         logger.warning(
             "Timed out capturing browser storage before IP rotation",
             timeout_seconds=timeout_seconds,
@@ -2109,7 +2204,7 @@ async def _capture_rotation_storage_state(page: Optional[Any]) -> Optional[Dict[
         )
     except Exception as exc:
         logger.warning("Failed to capture browser storage before IP rotation", error=str(exc))
-        return None
+        return open_state
 
 
 def _rotation_storage_restore_script(storage_state: Dict[str, Any]) -> str:
