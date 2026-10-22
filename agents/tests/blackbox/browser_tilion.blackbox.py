@@ -2926,6 +2926,114 @@ async def test_worker_logs_never_carry_raw_browser_urls():
     assert not offenders, offenders
 
 
+async def test_recovery_storage_capture_carries_cookies_from_a_cpu_starved_provider_browser():
+    """T99 (lulus 6747a6cb on a PerimeterX page): 'Failed to capture browser cookies' x3, then
+    'Browser storage capture timed out after 15s'. On a CPU-starved provider browser the
+    browser-level cookie read answers late (Tilion: 12-26 s on PoW pages). It was cut at 5 s
+    to leave room for the full pass, which then also missed the bound. Here every
+    Storage.getCookies reply arrives 9 s late: the full pass (which reads cookies too) and the
+    cookie read must share the whole bound and carry the cookies; a later capture whose live
+    read misses entirely carries the cached jar."""
+    from aiohttp import web
+
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
+    from domains.spawn_browser_agent_v3.handler import _capture_rotation_storage_state
+
+    class SlowCookieUpstream:
+        """Real upstream socket; replies to Storage.getCookies are held for ``delay`` seconds."""
+
+        def __init__(self, ws, delay):
+            self.ws, self.delay, self.cookie_ids, self.queue = ws, delay, set(), asyncio.Queue()
+            self.pump = asyncio.ensure_future(self._pump())
+
+        async def send(self, raw):
+            message = json.loads(raw)
+            if message.get("method") == "Storage.getCookies":
+                self.cookie_ids.add(message["id"])
+            await self.ws.send(raw)
+
+        async def _deliver_later(self, raw):
+            await asyncio.sleep(self.delay)
+            await self.queue.put(raw)
+
+        async def _pump(self):
+            try:
+                async for raw in self.ws:
+                    message = json.loads(raw)
+                    if message.get("id") in self.cookie_ids:
+                        asyncio.ensure_future(self._deliver_later(raw))
+                    else:
+                        await self.queue.put(raw)
+            finally:
+                await self.queue.put(None)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raw = await self.queue.get()
+            if raw is None:
+                raise StopAsyncIteration
+            return raw
+
+        async def close(self):
+            self.pump.cancel()
+            await self.ws.close()
+
+        def __getattr__(self, name):
+            return getattr(self.ws, name)
+
+    async def page(_request):
+        response = web.Response(content_type="text/html", text="<title>Access to this page has been denied</title>px")
+        response.set_cookie("_px3", "abc")
+        return response
+
+    app = web.Application()
+    app.router.add_get("/{tail:.*}", page)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    previous = os.environ.get("BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS")
+    os.environ["BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS"] = "12"
+    holder = {}
+
+    async def connect(url):
+        holder["upstream"] = SlowCookieUpstream(await websockets.connect(url, max_size=None, proxy=None), 9.0)
+        return holder["upstream"]
+
+    try:
+        async with _chromium() as (playwright, _browser, endpoint):
+            multiplexer = SingleCdpConnectionMultiplexer(
+                endpoint, upstream_connect=connect, emulation={"timezone": "America/Los_Angeles"}, slot_confirm_seconds=0
+            )
+            pw_browser = await playwright.chromium.connect_over_cdp(await multiplexer.start())
+            try:
+                tab = await pw_browser.contexts[0].new_page()
+                await tab.goto(f"http://127.0.0.1:{port}/", wait_until="domcontentloaded")
+                started = time.monotonic()
+                state = await asyncio.wait_for(_capture_rotation_storage_state(tab), 30)
+                elapsed = time.monotonic() - started
+                assert elapsed < 12.5, f"capture took {elapsed:.1f}s against a 12s bound"
+                assert any(cookie["name"] == "_px3" for cookie in state["cookies"]), state
+                # The provider gets slower still: the live read misses; the cached jar is carried.
+                holder["upstream"].delay = 30.0
+                started = time.monotonic()
+                state = await asyncio.wait_for(_capture_rotation_storage_state(tab), 30)
+                assert time.monotonic() - started < 12.5
+                assert any(cookie["name"] == "_px3" for cookie in state["cookies"]), state
+            finally:
+                await pw_browser.close()
+                await multiplexer.close()
+    finally:
+        if previous is None:
+            os.environ.pop("BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS", None)
+        else:
+            os.environ["BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS"] = previous
+        await runner.cleanup()
+
+
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
@@ -2986,6 +3094,10 @@ async def run_all_tests():
         (
             "recovery_storage_capture_bounded_with_service_worker",
             test_recovery_storage_capture_is_bounded_when_a_visited_origin_has_a_service_worker,
+        ),
+        (
+            "recovery_storage_capture_cookies_from_starved_browser",
+            test_recovery_storage_capture_carries_cookies_from_a_cpu_starved_provider_browser,
         ),
         (
             "recovery_storage_capture_carries_cookies_when_frames_busy",

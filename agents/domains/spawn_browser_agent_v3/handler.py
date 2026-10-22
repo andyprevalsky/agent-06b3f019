@@ -2179,38 +2179,66 @@ async def _capture_rotation_storage_state(page: Optional[Any]) -> Optional[Dict[
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_seconds
     context = page.context
-    # Cookies come from the browser (Storage.getCookies), not from any page, so a
-    # wedged challenge page cannot block them; they are kept whatever happens next.
-    cookies: Optional[List[Dict[str, Any]]] = None
+    # All three reads start at once and share the whole bound. Cookies come from the
+    # browser (Storage.getCookies), not from any page, so a wedged challenge page
+    # cannot block them; but on a CPU-starved provider browser (Tilion on a
+    # PerimeterX/PoW page) even that read can take 10 s or more, so it may not be
+    # cut short to leave room for the full pass (lulus 6747a6cb: the cookie read
+    # bounded at 5 s timed out three times, while the full pass, which reads the
+    # same cookies, finished within the bound twice).
+    async def read_cookies() -> Any:
+        return await context.cookies()
+
+    async def read_full_state() -> Any:
+        return await context.storage_state(indexed_db=True)
+
+    cookies_task = asyncio.ensure_future(read_cookies())
+    frames_task = asyncio.ensure_future(_capture_open_origin_frames(context, min(5.0, timeout_seconds / 3)))
+    full_task = asyncio.ensure_future(read_full_state())
+    tasks = (cookies_task, frames_task, full_task)
     try:
-        cookies = await asyncio.wait_for(context.cookies(), timeout=timeout_seconds / 3)
-    except Exception as exc:
-        logger.warning("Failed to capture browser cookies before IP rotation", error=f"{type(exc).__name__}: {exc}"[:200])
-    origins: List[Dict[str, Any]] = []
-    if cookies is not None:
-        try:
-            origins = await _capture_open_origin_frames(context, min(5.0, timeout_seconds / 3))
-        except Exception as exc:
-            logger.warning("Failed to capture open-origin browser storage before IP rotation", error=f"{type(exc).__name__}: {exc}"[:200])
-    try:
-        return await asyncio.wait_for(
-            context.storage_state(indexed_db=True),
-            timeout=max(0.0, deadline - loop.time()),
+        await asyncio.wait({full_task}, timeout=max(0.0, deadline - loop.time()))
+        if full_task.done() and not full_task.cancelled() and full_task.exception() is None:
+            state = full_task.result()
+            _remember_rotation_cookies(context, state.get("cookies"))
+            return state
+        full_error = (
+            full_task.exception()
+            if full_task.done() and not full_task.cancelled()
+            else asyncio.TimeoutError()
         )
-    except Exception as exc:
-        timed_out = isinstance(exc, asyncio.TimeoutError)
+        await asyncio.wait({cookies_task, frames_task}, timeout=max(0.0, deadline - loop.time()))
+        cookies: Optional[List[Dict[str, Any]]] = None
+        cookie_source = "live"
+        if cookies_task.done() and not cookies_task.cancelled() and cookies_task.exception() is None:
+            cookies = cookies_task.result()
+            _remember_rotation_cookies(context, cookies)
+        else:
+            error = cookies_task.exception() if cookies_task.done() and not cookies_task.cancelled() else asyncio.TimeoutError()
+            logger.warning("Failed to capture browser cookies before IP rotation", error=f"{type(error).__name__}: {error}"[:200])
+            cached = None
+            with contextlib.suppress(TypeError):
+                cached = _ROTATION_COOKIE_CACHE.get(context)
+            if cached is not None:
+                cookies, captured_at = cached
+                cookie_source = f"cached {loop.time() - captured_at:.0f}s ago"
+        origins: List[Dict[str, Any]] = []
+        if frames_task.done() and not frames_task.cancelled() and frames_task.exception() is None:
+            origins = frames_task.result()
+        timed_out = isinstance(full_error, asyncio.TimeoutError)
         if cookies is not None:
             logger.warning(
                 "Full browser storage capture did not finish; carrying cookies and the open-origin storage that answered",
                 timeout_seconds=timeout_seconds,
-                reason="timeout" if timed_out else f"{type(exc).__name__}: {exc}"[:200],
+                reason="timeout" if timed_out else f"{type(full_error).__name__}: {full_error}"[:200],
                 capture_scope="cookies_open_origin_localstorage_indexeddb" if origins else "cookies_only",
+                cookie_source=cookie_source,
                 cookies=len(cookies),
                 origins=[entry["origin"] for entry in origins][:20],
             )
             return {"cookies": cookies, "origins": origins}
         if not timed_out:
-            logger.warning("Failed to capture browser storage before IP rotation", error=str(exc))
+            logger.warning("Failed to capture browser storage before IP rotation", error=str(full_error))
             return None
         logger.warning(
             "Timed out capturing browser storage before IP rotation",
@@ -2220,6 +2248,22 @@ async def _capture_rotation_storage_state(page: Optional[Any]) -> Optional[Dict[
         raise BrowserStorageCaptureTimeoutError(
             f"Browser storage capture timed out after {timeout_seconds:g}s before challenge recovery."
         )
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+            task.add_done_callback(lambda finished: finished.cancelled() or finished.exception())
+
+
+# Last cookie jar read from each browser context, so a capture whose live read
+# misses its bound still carries the session's cookies (slightly older).
+_ROTATION_COOKIE_CACHE: "weakref.WeakKeyDictionary[Any, Tuple[List[Dict[str, Any]], float]]" = weakref.WeakKeyDictionary()
+
+
+def _remember_rotation_cookies(context: Any, cookies: Any) -> None:
+    if isinstance(cookies, list):
+        with contextlib.suppress(TypeError):
+            _ROTATION_COOKIE_CACHE[context] = (cookies, asyncio.get_running_loop().time())
 
 
 def _rotation_storage_restore_script(storage_state: Dict[str, Any]) -> str:
