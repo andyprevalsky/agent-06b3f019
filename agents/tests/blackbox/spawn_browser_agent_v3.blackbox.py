@@ -11418,9 +11418,10 @@ def test_humanized_click_presses_and_releases_via_cdp_without_post_click_move():
 
     # No move may follow the release: it would race click-triggered navigation.
     assert "mouse.move(up_x, up_y)" not in source, "post-click move reintroduces the navigation race"
+    assert '_playwright_mouse("move", up_x, up_y)' not in source, "post-click move reintroduces the navigation race"
 
     # A lost CDP session must still release, or the button wedges every later click.
-    assert "await mouse.up()" in source, "fallback release missing"
+    assert 'await self._playwright_mouse("up")' in source, "fallback release missing"
 
 def test_network_recorder_query_requests_filters_and_shapes():
     """BrowserNetworkRecorder.query_requests backs read_network_requests: newest-first
