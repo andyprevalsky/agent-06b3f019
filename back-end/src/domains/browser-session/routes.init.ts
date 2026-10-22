@@ -1,3 +1,4 @@
+import { SteelProfileAuthMigrationError } from '../../providers/browser/steelProfileAuthMigration';
 import { type RequestHandler, type Router } from 'express';
 import { type HybridAuthRequest } from '../../providers/hybridAuth';
 import { BrowserProviderRateLimitError } from '../../providers/browser';
@@ -61,6 +62,14 @@ export function registerBrowserInitRoute(router: Router, auth: RequestHandler): 
             error: 'browser_provider_rate_limit',
             provider: error.provider,
             message: 'Browser session rate limit exceeded. Retry after delay.',
+          });
+          return;
+        }
+        if (error instanceof SteelProfileAuthMigrationError) {
+          res.status(409).json({
+            error: 'steel_profile_auth_migration_failed',
+            auth_realm: error.authRealm,
+            message: error.message,
           });
           return;
         }

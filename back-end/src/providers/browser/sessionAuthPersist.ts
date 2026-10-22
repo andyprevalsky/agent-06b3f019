@@ -50,7 +50,7 @@ export const CLOUD_PERSISTENT_BROWSER_PROFILE = 'cloud_persistent';
 type LocalStorageEntry = { name: string; value: string };
 type OriginLocalStorage = { origin: string; localStorage: LocalStorageEntry[] };
 type HarvestContext = Pick<BrowserContext, 'pages' | 'newPage' | 'newCDPSession'>;
-type HarvestBudget = { remainingMs: () => number; spent: () => boolean };
+export type HarvestBudget = { remainingMs: () => number; spent: () => boolean };
 
 export type PersistSignedInBrowserStateResult = {
   persisted: boolean;
@@ -172,7 +172,7 @@ async function writeWithinBudget(
   await withTimeout(write(), budget.remainingMs(), message);
 }
 
-async function persistHarvestedCookies(
+export async function persistHarvestedCookies(
   userId: string,
   browserSource: string,
   cookies: Cookie[],
@@ -258,7 +258,7 @@ async function persistHarvestedCookies(
   return { cookieCount, realmCount };
 }
 
-async function persistHarvestedLocalStorage(
+export async function persistHarvestedLocalStorage(
   userId: string,
   origins: OriginLocalStorage[],
   budget: HarvestBudget
