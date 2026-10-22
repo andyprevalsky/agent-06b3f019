@@ -2670,6 +2670,110 @@ async def test_recovery_storage_capture_carries_cookies_when_challenge_frames_ar
         await runner.cleanup()
 
 
+async def test_multiplexer_names_a_session_silenced_by_a_busy_challenge_renderer():
+    """T83 (google 84a6cb53, opentable f9ccfb4e): one agent's CDP went silent for 60 s on a
+    challenge page (browser-use Page.enable unanswered; the mux's attach-time commands to new
+    targets unanswered in ~30 s cycles). A renderer busy running challenge JS answers nothing on
+    the pages it hosts, while the browser and other renderers keep answering. The multiplexer
+    must not let that silence spread to other sessions (no head-of-line blocking), and must name
+    the silent session, its target and the pending method, then report its recovery."""
+    from aiohttp import web
+
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
+
+    async def page(request):
+        if request.path == "/challenge":
+            body = (
+                "<title>Just a moment...</title><script>document.title = 'busy';"
+                "setTimeout(() => { const end = Date.now() + 6000; while (Date.now() < end) {} }, 300);</script>"
+            )
+        else:
+            body = "<title>other</title>ok"
+        response = web.Response(content_type="text/html", text=body)
+        response.set_cookie("cf_clearance", "abc")
+        return response
+
+    app = web.Application()
+    app.router.add_get("/{tail:.*}", page)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    records: List[str] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record.getMessage())
+
+    mux_logger = logging.getLogger("browser_tools.cdp_multiplexer")
+    handler = Capture(level=logging.WARNING)
+    mux_logger.addHandler(handler)
+    try:
+        async with _chromium() as (playwright, _browser, endpoint):
+            multiplexer = SingleCdpConnectionMultiplexer(
+                endpoint,
+                emulation={"timezone": "America/Los_Angeles", "locale": "en-US"},
+                silence_threshold=2.0,
+                silence_check_interval=0.25,
+            )
+            local_url = await multiplexer.start()
+            pw_browser = await playwright.chromium.connect_over_cdp(local_url)
+            try:
+                context = pw_browser.contexts[0]
+                challenge = await context.new_page()
+                other = await context.new_page()
+                await other.goto(f"http://localhost:{port}/other")
+                await challenge.goto(f"http://127.0.0.1:{port}/challenge", wait_until="domcontentloaded")
+                await challenge.wait_for_function("document.title === 'busy'", timeout=10_000)
+                await asyncio.sleep(0.6)
+                stuck = asyncio.ensure_future(challenge.evaluate("document.title"))
+                # While that renderer is busy, other sessions and the browser keep answering.
+                for _ in range(3):
+                    started = time.monotonic()
+                    assert await asyncio.wait_for(other.evaluate("1 + 1"), 2) == 2
+                    assert any(cookie["name"] == "cf_clearance" for cookie in await asyncio.wait_for(context.cookies(), 2))
+                    assert time.monotonic() - started < 1.5, "a busy renderer blocked other sessions"
+                    await asyncio.sleep(0.8)
+                deadline = time.monotonic() + 10
+                while not any("silent for" in line for line in records) and time.monotonic() < deadline:
+                    await asyncio.sleep(0.2)
+                silent = [line for line in records if "silent for" in line]
+                assert silent, records
+                assert "/challenge" in silent[0] and "Runtime." in silent[0], silent[0]
+                assert multiplexer.silent_sessions >= 1
+                assert await asyncio.wait_for(stuck, 15) == "busy"
+                deadline = time.monotonic() + 5
+                while not any("answered again" in line for line in records) and time.monotonic() < deadline:
+                    await asyncio.sleep(0.2)
+                assert multiplexer.silence_recoveries >= 1, records
+                assert multiplexer.loop_stalls == 0, "a busy renderer is not a worker event-loop stall"
+            finally:
+                await pw_browser.close()
+                await multiplexer.close()
+    finally:
+        mux_logger.removeHandler(handler)
+        await runner.cleanup()
+
+
+async def test_multiplexer_reports_a_worker_event_loop_stall():
+    """T83 candidate (d): several agents share one worker process; a blocked event loop silences
+    every session at once. The watchdog names that case apart from a silent renderer."""
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
+
+    multiplexer = SingleCdpConnectionMultiplexer(
+        "ws://127.0.0.1:9/unused", silence_check_interval=0.1, loop_stall_threshold=0.5
+    )
+    await multiplexer.start()
+    try:
+        await asyncio.sleep(0.2)
+        time.sleep(1.0)  # the worker's loop blocked by synchronous work
+        await asyncio.sleep(0.3)
+        assert multiplexer.loop_stalls == 1
+    finally:
+        await multiplexer.close()
+
+
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
@@ -2703,6 +2807,8 @@ async def run_all_tests():
             test_multiplexer_serialises_input_per_session_so_keys_are_not_dropped,
         ),
         ("multiplexer_fails_unanswered_input", test_multiplexer_fails_unanswered_input_instead_of_hanging),
+        ("multiplexer_names_silent_busy_renderer", test_multiplexer_names_a_session_silenced_by_a_busy_challenge_renderer),
+        ("multiplexer_reports_event_loop_stall", test_multiplexer_reports_a_worker_event_loop_stall),
         ("multiplexer_pipelines_mouse_isolates_keys", test_multiplexer_pipelines_mouse_and_isolates_keys_on_a_slow_provider),
         ("playwright_survives_expired_input", test_playwright_survives_an_expired_input_and_its_late_reply),
         ("multiplexer_redials_late_freed_slot", test_multiplexer_redials_when_the_slot_frees_late),
