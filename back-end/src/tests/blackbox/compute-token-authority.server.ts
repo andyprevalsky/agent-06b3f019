@@ -132,17 +132,15 @@ app.post('/test-foundry', async (req, res) => {
     }
     res.json({ hits, reports, resets, visible, fallbackRequests });
   } catch (error) {
-    res
-      .status(500)
-      .json({
-        error: String(error),
-        hits,
-        reports,
-        resets,
-        visible,
-        fallbackRequests,
-        isRoseServerError: error instanceof RoseServerError,
-      });
+    res.status(500).json({
+      error: String(error),
+      hits,
+      reports,
+      resets,
+      visible,
+      fallbackRequests,
+      isRoseServerError: error instanceof RoseServerError,
+    });
   } finally {
     global.fetch = original;
     for (const [name, value] of Object.entries(originalEnv)) {
