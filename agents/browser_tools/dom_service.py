@@ -195,6 +195,9 @@ def browser_downloads_path_for_provider(provider: Optional[str] = None) -> str:
     return KERNEL_DOWNLOADS_PATH
 
 
+# Per-activity memory of rendered image URLs (receipt image provenance).
+_MAX_REMEMBERED_IMAGE_URLS = 400
+
 _IMAGE_ATTR_KEYS = (
     "currentSrc",
     "current-src",
@@ -779,6 +782,10 @@ class DOMService:
         self._session = None
         self._selector_map: Dict[int, Any] = {}
         self._runtime_current_url = ""
+        # Image URLs rendered by any page this browser activity observed, oldest
+        # first. A receipt image is often copied on the product/event page and
+        # submitted from checkout, which does not render it. Bounded per activity.
+        self._rendered_image_urls: Dict[str, None] = {}
         # Execution bindings may change realms. Retain every prior value only
         # for output redaction, scoped to this browser activity/session.
         self._secret_redaction_refs: Dict[str, str] = {}
@@ -2366,6 +2373,7 @@ class DOMService:
         viewport_width = geometry["viewport_width"]
         viewport_height = geometry["viewport_height"]
         page_stats = self._extract_page_statistics(state)
+        self._remember_rendered_image_urls(state)
         media_candidates = _extract_media_candidates_from_dom_state(
             state.dom_state,
             page_url=state.url or "",
@@ -2425,8 +2433,19 @@ class DOMService:
                 visible["id"] = original["id"]
         return safe_result
 
+    def _remember_rendered_image_urls(self, state: Any) -> List[str]:
+        """Record the images ``state`` renders; return them in page order."""
+        urls = _extract_image_urls_from_dom_state(state.dom_state, page_url=state.url or "")
+        for url in urls:
+            self._rendered_image_urls.pop(url, None)
+            self._rendered_image_urls[url] = None
+        while len(self._rendered_image_urls) > _MAX_REMEMBERED_IMAGE_URLS:
+            self._rendered_image_urls.pop(next(iter(self._rendered_image_urls)))
+        return urls
+
     async def get_page_image_urls(self) -> List[str]:
-        """Every image URL rendered on the current page, read from a fresh DOM snapshot."""
+        """Image URLs this browser activity actually rendered: the current page from a
+        fresh DOM snapshot first, then images rendered by pages observed earlier."""
         if self.secret_values_used:
             return []
         if not self._session:
@@ -2435,7 +2454,8 @@ class DOMService:
         state = await self._session.get_browser_state_summary(include_screenshot=False)
         if state.dom_state and state.dom_state.selector_map:
             self._selector_map = state.dom_state.selector_map
-        return _extract_image_urls_from_dom_state(state.dom_state, page_url=state.url or "")
+        current = self._remember_rendered_image_urls(state)
+        return list(dict.fromkeys([*current, *reversed(self._rendered_image_urls)]))
 
     def _extract_page_statistics(self, state) -> Dict[str, int]:
         """Extract page statistics from DOM tree like browser-use does."""

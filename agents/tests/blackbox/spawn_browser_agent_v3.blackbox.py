@@ -20514,6 +20514,87 @@ def test_extract_image_urls_from_dom_state_is_uncapped_and_keeps_every_srcset_ca
     assert len(urls) == len(set(urls)) == 19
     assert _extract_image_urls_from_dom_state(SimpleNamespace(_root=None), page_url="https://shop.example/") == []
 
+async def test_receipt_image_rendered_on_an_earlier_page_of_the_activity_validates():
+    """Eventim (agent 2cf378ca, 2026-10-21): the event page renders the seetickets image,
+    the checkout page that requests the card does not. A receipt image copied exactly from
+    an image this browser activity rendered must validate; an unrendered URL must not."""
+    from browser_tools.dom_service import DOMService
+    from utils.purchase_approval import validate_image_url_for_page
+
+    event_page = "https://wl.eventim.us/event/yaego/707562?afflky=1015Folsom"
+    checkout_page = "https://checkout.eventim.us/?afflky=1015Folsom"
+    event_image = (
+        "https://prod-images.seetickets.us/eyJidWNrZXQiOiJwcm9kLXNpaC5zZWV0aWNrZXRzdXNhLnVzIiwia2V5IjoiMDBhYTY4YzMtZWU0"
+        "Ni00YjYxLTk1YTEtNmI3MmZiN2IyYjYzIiwiZWRpdHMiOnt9fQ=="
+    )
+    event_image_600 = (
+        "https://prod-images.seetickets.us/eyJidWNrZXQiOiJwcm9kLXNpaC5zZWV0aWNrZXRzdXNhLnVzIiwia2V5IjoiMDBhYTY4YzMtZWU0"
+        "Ni00YjYxLTk1YTEtNmI3MmZiN2IyYjYzIiwiZWRpdHMiOnsicmVzaXplIjp7IndpZHRoIjo2MDB9LCJqcGVnIjp7InF1YWxpdHkiOjYwfSwicG5n"
+        "Ijp7ImNvbXByZXNzaW9uTGV2ZWwiOjksInF1YWxpdHkiOjYwfSwid2VicCI6eyJxdWFsaXR5Ijo2MH19fQ=="
+    )
+    checkout_logo = "https://checkout.eventim.us/assets/eventim-logo.png"
+
+    def img(src):
+        return SimpleNamespace(
+            original_node=SimpleNamespace(tag_name="img", attributes={"src": src, "alt": "yaego"}, snapshot_node=None),
+            children=[],
+            should_display=True,
+        )
+
+    def state(url, images):
+        root = SimpleNamespace(
+            original_node=SimpleNamespace(tag_name="body", attributes={}),
+            children=[img(src) for src in images],
+        )
+        return SimpleNamespace(
+            url=url,
+            title="",
+            dom_state=SimpleNamespace(_root=root, selector_map={}),
+            recent_events=None,
+            closed_popup_messages=None,
+        )
+
+    states = [state(event_page, [event_image, event_image_600]), state(checkout_page, [checkout_logo])]
+
+    class FakeSession:
+        async def get_browser_state_summary(self, include_screenshot=False):
+            return states[0]
+
+    service = DOMService(cdp_url="ws://unused.invalid/devtools/browser/x")
+    service._session = FakeSession()
+    service._page_geometry = lambda _state: {
+        "viewport_width": 1280,
+        "viewport_height": 800,
+        "scroll_x": 0,
+        "scroll_y": 0,
+        "pages_above": 0.0,
+        "pages_below": 0.0,
+        "total_pages": 1.0,
+    }
+    service._serialized_dom_tree = lambda *_args: ""
+    service._summarized_tabs = lambda _state: []
+
+    # The model reads the event page (where it copies the image URL)...
+    observed = await service.get_browser_state(include_screenshot=False)
+    assert event_image in [candidate["url"] for candidate in observed.get("media_candidates", [])]
+    # ...then requests the card on checkout, which renders only a logo.
+    states.pop(0)
+    rendered = await service.get_page_image_urls()
+
+    assert validate_image_url_for_page(event_image, rendered, checkout_page) == event_image
+    assert validate_image_url_for_page(event_image_600, rendered, checkout_page) == event_image_600
+    # The rule is unchanged for anything this browser never rendered: one drifted
+    # character, or an asset from nowhere, is still rejected.
+    drifted = event_image[:-6] + "Ab9fQ=="
+    for never_rendered in (drifted, "https://prod-images.seetickets.us/eyJmYWtlIjp0cnVlfQ=="):
+        try:
+            validate_image_url_for_page(never_rendered, rendered, checkout_page)
+        except ValueError as error:
+            assert "image_url must be copied exactly" in str(error)
+        else:
+            raise AssertionError(f"never-rendered image accepted: {never_rendered}")
+
+
 async def test_dom_service_get_page_image_urls_reads_fresh_snapshot_without_screenshot():
     from browser_tools.dom_service import DOMService
 
@@ -31185,6 +31266,10 @@ async def run_all_tests():
     await r.record_async(
         "dom_service_get_page_image_urls_fresh_snapshot",
         test_dom_service_get_page_image_urls_reads_fresh_snapshot_without_screenshot,
+    )
+    await r.record_async(
+        "receipt_image_rendered_on_an_earlier_page_validates",
+        test_receipt_image_rendered_on_an_earlier_page_of_the_activity_validates,
     )
     r.record(
         "write_lock_notification_prompt_media_candidates",
