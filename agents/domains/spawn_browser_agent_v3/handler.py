@@ -2317,6 +2317,9 @@ async def _reconnect_browser_stack_after_rotation(
     )
     if hasattr(old_dom_service, "secret_redaction_state"):
         dom_service.restore_secret_redaction_state(old_dom_service.secret_redaction_state())
+    if hasattr(old_dom_service, "rendered_image_state"):
+        # A receipt image seen before the switch stays valid provenance after it.
+        dom_service.restore_rendered_image_state(old_dom_service.rendered_image_state())
     pw_instance = None
     pw_browser = None
     driver_pid = None

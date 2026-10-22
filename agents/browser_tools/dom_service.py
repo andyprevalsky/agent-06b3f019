@@ -197,6 +197,24 @@ def browser_downloads_path_for_provider(provider: Optional[str] = None) -> str:
 
 # Per-activity memory of rendered image URLs (receipt image provenance).
 _MAX_REMEMBERED_IMAGE_URLS = 400
+# document.images read per state observation: browser-use's snapshot tree
+# prunes far-below-viewport <img>s that the page really rendered.
+_DOCUMENT_IMAGES_TIMEOUT_SECONDS = 3.0
+_MAX_DOCUMENT_IMAGES_PER_READ = 200
+_DOCUMENT_IMAGES_JS = f"""(() => {{
+  const out = [];
+  for (const el of Array.from(document.images).slice(0, {_MAX_DOCUMENT_IMAGES_PER_READ})) {{
+    const src = el.getAttribute('src');
+    if (src) out.push(src);
+    if (el.currentSrc) out.push(el.currentSrc);
+    const srcset = el.getAttribute('srcset');
+    if (srcset) for (const part of srcset.split(',')) {{
+      const candidate = part.trim().split(/\\s+/)[0];
+      if (candidate) out.push(candidate);
+    }}
+  }}
+  return {{base: document.baseURI, urls: out}};
+}})()"""
 
 _IMAGE_ATTR_KEYS = (
     "currentSrc",
@@ -2374,6 +2392,7 @@ class DOMService:
         viewport_height = geometry["viewport_height"]
         page_stats = self._extract_page_statistics(state)
         self._remember_rendered_image_urls(state)
+        await self._remember_document_images()
         media_candidates = _extract_media_candidates_from_dom_state(
             state.dom_state,
             page_url=state.url or "",
@@ -2433,6 +2452,57 @@ class DOMService:
                 visible["id"] = original["id"]
         return safe_result
 
+    async def _remember_document_images(self) -> List[str]:
+        """Record ``document.images`` (src, currentSrc, srcset) of the focused page.
+
+        One bounded Runtime.evaluate over this service's own CDP session (the
+        worker's single socket on Tilion; no Runtime.enable). Never fails a
+        state read: errors and timeouts record nothing.
+        """
+        get_cdp_session = getattr(self._session, "get_or_create_cdp_session", None)
+        if not callable(get_cdp_session):
+            return []
+        try:
+            cdp_session = await asyncio.wait_for(get_cdp_session(focus=False), timeout=_DOCUMENT_IMAGES_TIMEOUT_SECONDS)
+            evaluated = await asyncio.wait_for(
+                cdp_session.cdp_client.send.Runtime.evaluate(
+                    params={"expression": _DOCUMENT_IMAGES_JS, "returnByValue": True},
+                    session_id=cdp_session.session_id,
+                ),
+                timeout=_DOCUMENT_IMAGES_TIMEOUT_SECONDS,
+            )
+        except Exception as error:
+            logger.debug(f"document.images read skipped: {type(error).__name__}: {str(error)[:120]}")
+            return []
+        value = ((evaluated or {}).get("result") or {}).get("value") if isinstance(evaluated, dict) else None
+        if not isinstance(value, dict) or not isinstance(value.get("urls"), list):
+            return []
+        base = str(value.get("base") or "")
+        urls: Dict[str, None] = {}
+        for raw_url in value["urls"][: 3 * _MAX_DOCUMENT_IMAGES_PER_READ]:
+            if isinstance(raw_url, str):
+                url = _resolve_http_image_url(raw_url, base)
+                if url:
+                    urls.setdefault(url, None)
+        resolved = list(urls)
+        self.restore_rendered_image_state(resolved)
+        return resolved
+
+    def rendered_image_state(self) -> List[str]:
+        """Image URLs this activity has seen rendered, oldest first, for a replacement DOMService."""
+        return list(self._rendered_image_urls)
+
+    def restore_rendered_image_state(self, urls: Any) -> None:
+        """Carry receipt-image provenance across a session switch (rotation, challenge
+        recovery): the image was rendered by this activity's browser even if the
+        current session generation never loaded that page."""
+        for url in urls or []:
+            if isinstance(url, str) and url:
+                self._rendered_image_urls.pop(url, None)
+                self._rendered_image_urls[url] = None
+        while len(self._rendered_image_urls) > _MAX_REMEMBERED_IMAGE_URLS:
+            self._rendered_image_urls.pop(next(iter(self._rendered_image_urls)))
+
     def _remember_rendered_image_urls(self, state: Any) -> List[str]:
         """Record the images ``state`` renders; return them in page order."""
         urls = _extract_image_urls_from_dom_state(state.dom_state, page_url=state.url or "")
@@ -2455,6 +2525,7 @@ class DOMService:
         if state.dom_state and state.dom_state.selector_map:
             self._selector_map = state.dom_state.selector_map
         current = self._remember_rendered_image_urls(state)
+        current += await self._remember_document_images()
         return list(dict.fromkeys([*current, *reversed(self._rendered_image_urls)]))
 
     def _extract_page_statistics(self, state) -> Dict[str, int]:
