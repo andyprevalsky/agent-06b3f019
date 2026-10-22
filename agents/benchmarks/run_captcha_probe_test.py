@@ -2,11 +2,21 @@
 
 import json
 
+import argparse
+import asyncio
+
+from benchmarks import run_captcha_probe as probe_module
 from benchmarks.run_captcha_probe import (
+    _fe_link,
+    build_judge_evidence,
     collect_antibot_events,
+    compact_transcript,
     decide_verdict,
+    grade,
     load_probes,
+    load_saved_run,
     log_paths,
+    save_run,
     summarize_events,
     tree_agent_ids,
 )
@@ -86,6 +96,7 @@ def test_cleared_wall_with_post_wall_evidence_passes():
     assert decide_verdict(judged, _summary(CLEARED_LOG), "agent COMPLETED") == {
         "verdict": "PASSED_CAPTCHA",
         "reason": "price visible",
+        "confidence": "low",  # the judge stated none
     }
 
 
@@ -102,9 +113,12 @@ def test_judge_failed_verdict_is_kept():
 def test_non_captcha_stop_is_inconclusive_with_its_reason():
     judged = {"verdict": "INCONCLUSIVE", "reason": "agent asked which theater to use before navigating"}
     decided = decide_verdict(judged, _summary([]), "pending question/approval (not approved): Which theater?")
-    assert decided == {"verdict": "INCONCLUSIVE", "reason": "agent asked which theater to use before navigating"}
+    assert (decided["verdict"], decided["reason"]) == (
+        "INCONCLUSIVE",
+        "agent asked which theater to use before navigating",
+    )
     no_reason = decide_verdict({"verdict": "INCONCLUSIVE"}, _summary([]), "cap reached")
-    assert no_reason == {"verdict": "INCONCLUSIVE", "reason": "cap reached"}
+    assert (no_reason["verdict"], no_reason["reason"]) == ("INCONCLUSIVE", "cap reached")
 
 
 def test_invalid_judge_reply_is_inconclusive_not_a_pass():
@@ -158,3 +172,197 @@ def test_stack_log_dir_finds_run_bench_and_run_sh_logs(tmp_path):
     (checkout / "agents" / "navi-worker-log.txt").write_text("")
     (checkout / "back-end" / "backend-logs.log").write_text("")
     assert [path.name for path in log_paths([], [], str(checkout))] == ["navi-worker-log.txt", "backend-logs.log"]
+
+
+# ── judge input: a terse final answer must not starve the judge ──────────────
+
+SNAPSHOT = (
+    "Current URL: https://www.bing.com/search?q=OpenAI+official+website\nTitle: OpenAI official website - Search\n"
+    + "Results:\n1. OpenAI https://openai.com/ - official site\n2. OpenAI - Wikipedia https://en.wikipedia.org/wiki/OpenAI\n" * 3
+)
+
+
+def _browser(index: int, text: str, tool: str = "spawn_browser_agent", url: str = "", title: str = "") -> dict:
+    return {
+        "role": "TOOL",
+        "message": text,
+        "metadata": {"toolName": tool, "browser_url": url, "title": title, "action_type": "step"},
+    }
+
+
+def _terse_run():
+    root = [
+        {"role": "USER", "message": "go to bing and report one result"},
+        {"role": "TOOL", "message": "Browser agent finished", "metadata": {"toolName": "spawn_browser_agent"}},
+        {"role": "ASSISTANT", "message": "Done."},
+    ]
+    children = [_browser(i, f"clicked element {i}", url="https://www.bing.com/search?q=x") for i in range(75)]
+    children.append(
+        _browser(75, SNAPSHOT, tool="read_browser_state", url="https://www.bing.com/search?q=OpenAI+official+website", title="OpenAI official website - Search")
+    )
+    return root, children
+
+
+def test_old_window_dropped_the_root_final_answer_new_input_keeps_it():
+    root, children = _terse_run()
+    old = compact_transcript(root + children)  # the old window: root first, children after
+    assert not any(item["text"].endswith("Done.") for item in old)
+    evidence = build_judge_evidence(root, children)
+    assert evidence["agent_final_answer"] == "Done."
+    assert evidence["browser_tabs_at_end_most_recent_last"][-1] == {
+        "url": "https://www.bing.com/search?q=OpenAI+official+website",
+        "title": "OpenAI official website - Search",
+    }
+    last = evidence["last_browser_observations"][-1]
+    assert last["tool"] == "read_browser_state" and "https://openai.com/ - official site" in last["text"]
+
+
+def test_long_snapshots_are_truncated_not_dropped():
+    root, children = _terse_run()
+    children[-1]["message"] = "HEADER " + "x" * 20000 + " FINAL: AMC seat map with prices loaded"
+    text = build_judge_evidence(root, children)["last_browser_observations"][-1]["text"]
+    assert len(text) < 4100 and text.startswith("HEADER") and text.endswith("prices loaded")
+
+
+def test_grade_gives_the_judge_the_final_state_and_reports_confidence():
+    root, children = _terse_run()
+    seen = {}
+
+    async def fake_judge(probe, observed, summary, end_reason, user_id):
+        seen["observed"] = json.dumps(observed)
+        return {"verdict": "PASSED_CAPTCHA", "reason": "organic results listed", "evidence_seen": "openai.com result", "confidence": "high", "_model": "fake"}
+
+    probe = load_probes()["bing-search"]
+    result = asyncio.run(grade(probe, root, children, _summary([]), "agent COMPLETED", USER, judge=fake_judge))
+    assert "Done." in seen["observed"] and "openai.com/ - official site" in seen["observed"]
+    assert (result["verdict"], result["confidence"]) == ("PASSED_CAPTCHA", "high")
+    assert result["judge_input"] == {"final_answer_chars": 5, "tabs": 2, "observations": 1}
+
+
+def test_confidence_is_lowered_for_overrides_and_missing_evidence():
+    stuck = _summary(STUCK_LOG)
+    overridden = decide_verdict({"verdict": "INCONCLUSIVE", "reason": "x", "confidence": "high"}, stuck, "agent COMPLETED")
+    assert (overridden["verdict"], overridden["confidence"]) == ("FAILED_CAPTCHA", "medium")
+    no_evidence = decide_verdict({"verdict": "PASSED_CAPTCHA", "reason": "said so", "evidence_seen": "", "confidence": "high"}, _summary([]), "agent COMPLETED")
+    assert no_evidence["confidence"] == "low"
+    assert decide_verdict({"verdict": "FAILED_CAPTCHA", "reason": "x"}, _summary([]), "e")["confidence"] == "low"
+
+
+def test_saved_transcripts_round_trip_and_raw_agent_records_load(tmp_path):
+    root, children = _terse_run()
+    path = save_run(str(tmp_path), {"probe": "bing-search", "agent_id": "1a9cff33-ad45", "end_reason": "agent COMPLETED", "antibot": {"episodes": 0}, "root_messages": root, "child_messages": children})
+    loaded = load_saved_run(str(path))
+    assert loaded["probe"] == "bing-search" and loaded["root"] == root and len(loaded["children"]) == 76
+    flat = tmp_path / "agent.json"
+    flat.write_text(json.dumps({"agent": {"id": ROOT, "messages": root + children}}))
+    from_flat = load_saved_run(str(flat))
+    assert [m["message"] for m in from_flat["root"]][-1] == "Done." and len(from_flat["children"]) == 76
+    bench = tmp_path / "bench.json"
+    bench.write_text(json.dumps({"agent": {"id": ROOT, "messages": root}, "_benchmark": {"tree": {ROOT: {"messages": root}, BROWSER: {"messages": children}}}}))
+    assert len(load_saved_run(str(bench))["children"]) == 76
+
+
+def test_rejudge_regrades_a_saved_transcript_without_running_anything(tmp_path, capsys, monkeypatch):
+    root, children = _terse_run()
+    path = save_run(str(tmp_path), {"probe": "bing-search", "agent_id": "1a9cff33-ad45", "end_reason": "agent COMPLETED", "antibot": _summary([]), "root_messages": root, "child_messages": children})
+
+    async def fake_judge(probe, observed, summary, end_reason, user_id):
+        assert observed["agent_final_answer"] == "Done."
+        return {"verdict": "PASSED_CAPTCHA", "reason": "r", "evidence_seen": "results", "confidence": "medium", "_model": "fake"}
+
+    monkeypatch.setattr(probe_module, "_judge", fake_judge)
+    assert probe_module.main(["--rejudge", str(path)]) == 0
+    line = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert (line["probe"], line["verdict"], line["confidence"], line["rejudged"]) == ("bing-search", "PASSED_CAPTCHA", "medium", True)
+
+
+def test_frontend_link_uses_the_frontend_port():
+    args = argparse.Namespace(base_url="http://localhost:3001/", frontend_url="")
+    assert _fe_link(args, "abc") == "http://localhost:3002/?agent-id=abc"
+    args.frontend_url = "http://localhost:5050/"
+    assert _fe_link(args, "abc") == "http://localhost:5050/?agent-id=abc"
+
+
+# ── rows shaped like the real stack: text is empty, the content is in metadata ───────────────
+
+PAGE = "Current URL: https://www.ticketmaster.com/search?q=new+york\n3 events: Knicks vs Nets, Wicked, Hamilton\n" * 4
+
+
+def _real_rows():
+    root = [
+        {"role": "USER", "text": "search ticketmaster", "metadata": {}},
+        {"role": "TOOL", "text": "", "metadata": {"toolName": "spawn_browser_agent", "toolStatus": "FINISHED", "summary": "Reached the results page with 3 events."}},
+        {"role": "ASSISTANT", "text": "", "metadata": {"sendMessageToUser": "Found 3 events: Knicks vs Nets, Wicked, Hamilton.", "toolCallId": "tc-1"}},
+    ]
+    children = [
+        {"role": "TOOL", "text": "", "metadata": {"toolName": "scroll", "action_type": "scroll", "browser_url": "https://www.ticketmaster.com/search?q=new+york", "title": "Search"}}
+        for _ in range(70)
+    ]
+    children.append(
+        {
+            "role": "TOOL",
+            "text": "",
+            "metadata": {
+                "toolName": "read_browser_state",
+                "browser_url": "https://www.ticketmaster.com/search?q=new+york",
+                "title": "Ticketmaster search results",
+                "output": PAGE,
+                "auxiliary": {"screenshot": "data:image/png;base64," + "A" * 5000},
+                "screenshot": "A" * 4000,
+                "sessionToken": "must-not-appear-token",
+                "toolCallId": "tc-obs",
+            },
+        }
+    )
+    return root, children
+
+
+def test_metadata_only_rows_reach_the_judge():
+    root, children = _real_rows()
+    evidence = build_judge_evidence(root, children)
+    assert evidence["agent_final_answer"].endswith("Knicks vs Nets, Wicked, Hamilton.") or "sendMessageToUser: Found 3 events" in evidence["agent_final_answer"]
+    assert "Reached the results page with 3 events." in json.dumps(evidence["root_recent_tool_results"])
+    observation = evidence["last_browser_observations"][-1]
+    assert observation["tool"] == "read_browser_state" and "3 events: Knicks vs Nets" in observation["text"]
+    assert evidence["browser_tabs_at_end_most_recent_last"][-1]["title"] == "Search" or observation["title"] == "Ticketmaster search results"
+    dumped = json.dumps(evidence)
+    assert "base64" not in dumped and "must-not-appear-token" not in dumped and "tc-obs" not in dumped
+    assert "3 events" in compact_transcript(root + children)[-1]["text"]
+
+
+def test_exported_agent_tree_and_probe_name_from_filename(tmp_path):
+    """A lane export: the agent tree with a message list per agent; the probe name comes from the file name."""
+    root, children = _real_rows()
+    export = tmp_path / "ticketmaster-nyc.2.json"
+    export.write_text(
+        json.dumps(
+            {
+                "root_agent_id": ROOT,
+                "agents": [
+                    {"id": BROWSER, "parentId": ROOT, "messages": children},
+                    {"id": ROOT, "parentId": None, "messages": root},
+                ],
+            }
+        )
+    )
+    loaded = load_saved_run(str(export), load_probes())
+    assert loaded["probe"] == "ticketmaster-nyc" and loaded["antibot"] is None
+    assert loaded["root"] == root and loaded["children"] == children
+    keyed = tmp_path / "keyed.json"
+    keyed.write_text(json.dumps({"probe_name": "bing-search", "tree": {ROOT: {"messages": root}, BROWSER: {"messages": children, "parent": ROOT}}}))
+    assert load_saved_run(str(keyed))["probe"] == "bing-search" and len(load_saved_run(str(keyed))["children"]) == 71
+
+
+def test_rejudge_reports_when_no_log_facts_were_available(tmp_path, capsys, monkeypatch):
+    root, children = _real_rows()
+    export = tmp_path / "ticketmaster-nyc.1.json"
+    export.write_text(json.dumps({"agents": [{"id": ROOT, "messages": root}, {"id": BROWSER, "parentId": ROOT, "messages": children}]}))
+
+    async def fake_judge(probe, observed, summary, end_reason, user_id):
+        assert "3 events: Knicks vs Nets" in json.dumps(observed)
+        return {"verdict": "PASSED_CAPTCHA", "reason": "r", "evidence_seen": "3 events", "confidence": "high", "_model": "fake"}
+
+    monkeypatch.setattr(probe_module, "_judge", fake_judge)
+    assert probe_module.main(["--rejudge", str(export)]) == 0
+    line = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert (line["probe"], line["verdict"], line["antibot_source"]) == ("ticketmaster-nyc", "PASSED_CAPTCHA", "none")
