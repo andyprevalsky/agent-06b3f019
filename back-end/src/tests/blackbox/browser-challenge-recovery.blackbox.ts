@@ -13,6 +13,7 @@ import {
   searchAndPromoteBrowserConfig,
   type BrowserConfigSearchRuntimeDependencies,
 } from '../../providers/browser/challengeRecovery';
+import { registerSameProviderCases } from './browser-challenge-recovery-same-provider.cases';
 import { registerTilionSwitchCases } from './browser-challenge-recovery-tilion.cases';
 import { registerTilionTransportCases } from './browser-challenge-recovery-tilion-transport.cases';
 import { registerTilionCarryCases } from './browser-challenge-recovery-tilion-carry.cases';
@@ -339,6 +340,7 @@ test(
 );
 
 registerTilionSwitchCases(test);
+registerSameProviderCases(test);
 registerTilionTransportCases(test);
 registerTilionCarryCases(test);
 

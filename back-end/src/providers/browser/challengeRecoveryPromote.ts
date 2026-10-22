@@ -18,6 +18,7 @@ import {
   bestSpecificity,
   availableBrowserRecoveryCandidates,
   shouldPreferSteelForChallengeTarget,
+  lockCandidatesToProvider,
   tilionRecoveryAvailable,
   transportFailureOrder,
 } from './challengeRecoveryCandidates';
@@ -97,7 +98,11 @@ export async function searchAndPromoteBrowserConfig(
   const preferSteel = shouldPreferSteelForChallengeTarget(input.targetUrl, {
     requirePaymentCdn: false,
   });
-  const candidates = availableBrowserRecoveryCandidates(proxyLocation, { preferSteel });
+  const candidates = lockCandidatesToProvider(
+    availableBrowserRecoveryCandidates(proxyLocation, { preferSteel }),
+    current.provider,
+    { taskId: input.taskId, phase: 'config_search' }
+  );
   const transportFailure =
     /^(?:critical third-party resource blocked|first-party request blocked by proxy tunnel)$/i.test(
       (input.recoveryReason ?? '').trim()

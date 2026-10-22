@@ -16,7 +16,10 @@ import {
   isTilionExitUnavailableError,
   ROTATION_CAP,
   rungAfterTilionUnavailable,
+  nextRecoveryLabel,
+  recoverySameProviderOnly,
   rotationStepLabel,
+  sameProviderRotationStep,
   selectRotationStep,
   type RotationStep,
 } from './browser/rotation';
@@ -25,23 +28,16 @@ import { restoreTilionBrowserState } from './browser/tilionState';
 import { storedBrowserProvider } from './browser/types';
 import { browserProviderEnabled, browserUseEnabled } from './browser/config';
 
-export class ProxyRotationExhaustedError extends Error {
-  constructor(public readonly cap: number) {
-    super(
-      `PROXY_ROTATION_EXHAUSTED: rotated ${cap} times and the target is still blocking ` +
-        `our proxy pool for this session. Do not rotate again — try a different approach ` +
-        `or report the target as unreachable.`
-    );
-    this.name = 'ProxyRotationExhaustedError';
-  }
-}
-
-export class RotationSessionNotFoundError extends Error {
-  constructor(taskId: string) {
-    super(`Browser task not found: ${taskId}`);
-    this.name = 'RotationSessionNotFoundError';
-  }
-}
+export {
+  ProxyRotationExhaustedError,
+  RotationSessionNotFoundError,
+  SameProviderRotationExhaustedError,
+} from './browserRotationErrors';
+import {
+  ProxyRotationExhaustedError,
+  RotationSessionNotFoundError,
+  SameProviderRotationExhaustedError,
+} from './browserRotationErrors';
 
 const log = createLogger('BrowserSessionResume');
 
@@ -545,12 +541,33 @@ export async function rotateBrowserProxy(
   }
 
   const currentProvider = storedBrowserProvider(reserved[0]!.provider);
-  const step = selectRotationStep(
+  const ladderStep = selectRotationStep(
     rotationsUsed,
     currentProvider,
     browserUseEnabled(),
     tilionRotationAvailable()
   );
+  const providerLocked = recoverySameProviderOnly();
+  const availability = { browserUse: browserUseEnabled(), tilion: tilionRotationAvailable() };
+  const lockedStep = providerLocked
+    ? sameProviderRotationStep(ladderStep, currentProvider, availability)
+    : ladderStep;
+  if (providerLocked) {
+    log.info(
+      `recovery provider-locked (BROWSER_RECOVERY_SAME_PROVIDER_ONLY): ladder ${rotationStepLabel(ladderStep)} -> ${
+        lockedStep ? rotationStepLabel(lockedStep) : 'no_same_provider_rung_left'
+      }`,
+      { taskId, rotationsUsed, currentProvider }
+    );
+  }
+  if (lockedStep === null) {
+    await prisma.browserSession.updateMany({
+      where: { id: taskId, proxyRotationCount: { gt: 0 } },
+      data: { proxyRotationCount: { decrement: 1 } },
+    });
+    throw new SameProviderRotationExhaustedError(currentProvider, rotationsUsed);
+  }
+  const step = lockedStep;
 
   log.info('Executing browser recovery rotation', {
     taskId,
@@ -587,7 +604,15 @@ export async function rotateBrowserProxy(
       // Tilion could not serve this exit (e.g. mobile: 409 proxy_type_unavailable).
       // The reserved rotation still owes the agent a new IP: take the next rung now.
       if (step.provider !== 'tilion' || !isTilionExitUnavailableError(error)) throw error;
-      const fallback = rungAfterTilionUnavailable(rotationsUsed, browserUseEnabled());
+      const ladderFallback = rungAfterTilionUnavailable(rotationsUsed, browserUseEnabled());
+      // Provider-locked: a Tilion exit that cannot be served falls back to a Tilion
+      // residential replacement, never another provider; none left -> typed result.
+      const fallback = providerLocked
+        ? step.proxyType === 'residential'
+          ? null
+          : sameProviderRotationStep(ladderFallback, 'tilion', availability)
+        : ladderFallback;
+      if (fallback === null) throw new SameProviderRotationExhaustedError('tilion', rotationsUsed);
       rotationFallbackReason = `tilion_${step.proxyType}_unavailable: ${
         error instanceof Error ? error.message.slice(0, 200) : String(error)
       }`;
@@ -620,13 +645,11 @@ export async function rotateBrowserProxy(
   const nextRecovery =
     rotationsRemaining === 0
       ? 'rotation_budget_exhausted'
-      : rotationStepLabel(
-          selectRotationStep(
-            rotationsUsed + 1,
-            result.provider === 'local' ? 'steel' : result.provider,
-            browserUseEnabled(),
-            tilionRotationAvailable()
-          )
+      : nextRecoveryLabel(
+          rotationsUsed + 1,
+          result.provider === 'local' ? 'steel' : result.provider,
+          providerLocked,
+          availability
         );
 
   return {
