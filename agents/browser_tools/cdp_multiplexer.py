@@ -54,6 +54,16 @@ _EMULATION_COMMAND_TIMEOUT_SECONDS = 5.0
 # client; one the provider leaves unanswered is failed back to its client
 # after this bound instead of hanging it (Playwright awaits input forever).
 _INPUT_ANSWER_TIMEOUT_SECONDS = 10.0
+# Empty authenticator the multiplexer installs so an unarmed WebAuthn ceremony
+# rejects instead of opening the native chooser (see arm_webauthn).
+_EMPTY_AUTHENTICATOR = {
+    "protocol": "ctap2",
+    "transport": "internal",
+    "hasResidentKey": True,
+    "hasUserVerification": True,
+    "isUserVerified": True,
+    "automaticPresenceSimulation": True,
+}
 
 
 class CdpMultiplexerUpstreamClosed(ConnectionError):
@@ -98,6 +108,7 @@ class SingleCdpConnectionMultiplexer:
         refresh_url: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
         emulation: Optional[Dict[str, Any]] = None,
         input_answer_timeout: float = _INPUT_ANSWER_TIMEOUT_SECONDS,
+        arm_webauthn: bool = True,
         label: str = "",
     ) -> None:
         self._upstream_url = upstream_url
@@ -122,6 +133,24 @@ class SingleCdpConnectionMultiplexer:
         # Applied on every page/iframe session any client attaches, before the
         # target runs its first script (see _apply_emulation_then_forward).
         self._emulation = {key: value for key, value in (emulation or {}).items() if value}
+        # WebAuthn with the native UI off plus an EMPTY internal virtual
+        # authenticator on every page/iframe target before its first script.
+        # Without it a page the worker never armed opens Chrome's passkey
+        # chooser, which on a single-client provider (Tilion) cannot be
+        # dismissed by Escape, is not a CDP target and is not in the live view.
+        # enable alone is not enough: with no authenticator credentials.get
+        # still waits; with an empty one it rejects NotAllowedError at once.
+        # Internal, not usb: an extra usb authenticator makes Chrome reject
+        # assertions from DOMService's seeded internal one (local, 2026-10-22).
+        # DOMService then hits "one internal authenticator per environment" and
+        # its existing recovery (disable + enable + add on its session) takes
+        # over; seeded assertions resolve. Once per target.
+        self._arm_webauthn = arm_webauthn
+        self._webauthn_armed_targets: Set[str] = set()
+        # Chrome drops a session's WebAuthn environment when that session
+        # detaches, so forget the target then and let the next attach re-arm it.
+        self._webauthn_armed_by_session: Dict[str, str] = {}
+        self._hold_new_targets = bool(self._emulation) or arm_webauthn
         self._wants_debugger_wait: Dict[Tuple[_Client, str], bool] = {}
         self._background: Set[asyncio.Task] = set()
         self._browser_user_agent: Optional[str] = None
@@ -133,6 +162,7 @@ class SingleCdpConnectionMultiplexer:
         self._input_tail: Dict[str, asyncio.Future] = {}
         self._input_done: Dict[int, Tuple[asyncio.Future, Optional[asyncio.TimerHandle]]] = {}
         self.input_unanswered = 0
+        self.locale_mismatches = 0
         self._closed = False
         self.upstream_connections_opened = 0
         self.last_upstream_close: Optional[Tuple[Optional[int], str]] = None
@@ -205,6 +235,8 @@ class SingleCdpConnectionMultiplexer:
             self._session_owner.clear()
             self._browser_session_owner.clear()
             self._hidden_sessions.clear()
+            self._webauthn_armed_targets.clear()
+            self._webauthn_armed_by_session.clear()
             self._wants_debugger_wait.clear()
             self._browser_user_agent = None
             if upstream is not None:
@@ -265,6 +297,8 @@ class SingleCdpConnectionMultiplexer:
         self._fail_pending_input()
         self._session_owner.clear()
         self._browser_session_owner.clear()
+        self._webauthn_armed_targets.clear()
+        self._webauthn_armed_by_session.clear()
         for client in list(self._clients):
             with contextlib.suppress(Exception):
                 await client.websocket.close(code=_downstream_close_code(code), reason=reason[:120])
@@ -328,7 +362,7 @@ class SingleCdpConnectionMultiplexer:
                         str(params["sessionId"]), "Runtime.runIfWaitingForDebugger", {}
                     )
                     resumed.add_done_callback(lambda done: done.cancelled() or done.exception())
-            if self._emulation and target_type in _EMULATED_TARGET_TYPES:
+            if self._hold_new_targets and target_type in _EMULATED_TARGET_TYPES:
                 released: asyncio.Future = asyncio.get_running_loop().create_future()
                 client.outbox.put_nowait(released)
                 task = asyncio.create_task(self._apply_emulation_then_release(client, session_id, message, released))
@@ -336,7 +370,12 @@ class SingleCdpConnectionMultiplexer:
                 task.add_done_callback(self._background.discard)
                 return
         await self._send_to_client(client, message)
+        if method == "Target.targetDestroyed" and params.get("targetId"):
+            self._webauthn_armed_targets.discard(str(params["targetId"]))
         if method == "Target.detachedFromTarget" and params.get("sessionId"):
+            armed_target = self._webauthn_armed_by_session.pop(str(params["sessionId"]), None)
+            if armed_target is not None:
+                self._webauthn_armed_targets.discard(armed_target)
             self._session_owner.pop(params["sessionId"], None)
             client.child_sessions.discard(params["sessionId"])
 
@@ -411,8 +450,13 @@ class SingleCdpConnectionMultiplexer:
             override["userAgent"] = self._browser_user_agent
         return override
 
-    async def _send_emulation(self, session_id: str) -> List[Tuple[str, asyncio.Future]]:
+    async def _send_emulation(self, session_id: str, target_id: str = "") -> List[Tuple[str, asyncio.Future]]:
         commands = []
+        if self._arm_webauthn and target_id and target_id not in self._webauthn_armed_targets:
+            self._webauthn_armed_targets.add(target_id)
+            self._webauthn_armed_by_session[session_id] = target_id
+            commands.append(("WebAuthn.enable", {"enableUI": False}))
+            commands.append(("WebAuthn.addVirtualAuthenticator", {"options": _EMPTY_AUTHENTICATOR}))
         if self._emulation.get("timezone"):
             commands.append(("Emulation.setTimezoneOverride", {"timezoneId": self._emulation["timezone"]}))
         if self._emulation.get("locale"):
@@ -429,9 +473,12 @@ class SingleCdpConnectionMultiplexer:
     ) -> None:
         params = message.get("params") or {}
         child = str(params["sessionId"])
+        target_id = str((params.get("targetInfo") or {}).get("targetId") or "")
         sent: List[Tuple[str, asyncio.Future]] = []
         try:
-            sent = await asyncio.wait_for(self._send_emulation(child), timeout=_EMULATION_COMMAND_TIMEOUT_SECONDS)
+            sent = await asyncio.wait_for(
+                self._send_emulation(child, target_id), timeout=_EMULATION_COMMAND_TIMEOUT_SECONDS
+            )
         except Exception as error:
             self.emulation_failures += 1
             logger.warning("[CdpMux] Emulation for new target not sent; releasing it anyway: %s", str(error)[:200])
@@ -452,12 +499,38 @@ class SingleCdpConnectionMultiplexer:
             except Exception as error:
                 response = {"error": {"message": f"no reply: {type(error).__name__}"}}
             if "error" in response:
-                # Chrome keeps one timezone/locale override per target; another
-                # client's session may already hold it.
+                # Chrome keeps one timezone/locale override per renderer; another
+                # client's session (or the opener's) may already hold it. That is
+                # only fine if the document still ends up in the wanted locale.
                 self.emulation_failures += 1
                 logger.info("[CdpMux] %s not applied on %s: %s", method, child[:12], str(response["error"])[:160])
+                if method == "Emulation.setLocaleOverride":
+                    await self._verify_child_locale(child)
         if sent:
             self.emulation_applied += 1
+
+    async def _verify_child_locale(self, child: str) -> None:
+        """Read back the document's Intl locale after a rejected override; log a mismatch as an error."""
+        wanted = str(self._emulation.get("locale") or "")
+        try:
+            future = await self._send_session_command(
+                child,
+                "Runtime.evaluate",
+                {"expression": "Intl.DateTimeFormat().resolvedOptions().locale", "returnByValue": True},
+            )
+            response = await asyncio.wait_for(future, timeout=_EMULATION_COMMAND_TIMEOUT_SECONDS)
+        except Exception as error:
+            logger.warning("[CdpMux] Could not read back locale on %s: %s", child[:12], str(error)[:120])
+            return
+        actual = str(((response.get("result") or {}).get("result") or {}).get("value") or "")
+        if actual and wanted and actual.lower() != wanted.lower():
+            self.locale_mismatches += 1
+            logger.error(
+                "[CdpMux] Locale override not in effect on %s: wanted %s, document reports %s",
+                child[:12],
+                wanted,
+                actual,
+            )
 
     def _own_session(self, client: _Client, session_id: str) -> None:
         self._session_owner[session_id] = client
@@ -523,7 +596,7 @@ class SingleCdpConnectionMultiplexer:
         if method.startswith("Input."):
             await self._forward_input_in_order(upstream, message_id, message)
             return
-        if method == "Target.setAutoAttach" and self._emulation:
+        if method == "Target.setAutoAttach" and self._hold_new_targets:
             # Hold every new target until its emulation lands; remember whether
             # this client resumes targets itself or the multiplexer must.
             params = dict(message.get("params") or {})
