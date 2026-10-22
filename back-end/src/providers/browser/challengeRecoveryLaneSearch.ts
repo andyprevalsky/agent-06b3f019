@@ -356,3 +356,107 @@ export async function runParallelBrowserConfigSearch(
     { avoidConfigKey: options.avoidConfigKey }
   );
 }
+
+/** Default cap on live candidate sessions per recovery for a concurrency-capped provider. */
+export const TILION_MAX_PARALLEL_RECOVERY_PROBES_DEFAULT = 2;
+
+/**
+ * Live candidate sessions one recovery may hold at once on a provider whose
+ * account caps concurrent sessions (Tilion: 20 shared by every run), or null
+ * when the provider is not capped. Parallel storage lanes each open their own
+ * candidate, so without this one recovery opened 5 Tilion sessions (T85).
+ * BROWSER_RECOVERY_TILION_MAX_PARALLEL_PROBES overrides the default of 2.
+ */
+export function maxParallelRecoveryProbes(provider: string): number | null {
+  if (provider !== 'tilion') return null;
+  const raw = Number(process.env.BROWSER_RECOVERY_TILION_MAX_PARALLEL_PROBES);
+  return Number.isInteger(raw) && raw >= 1 ? raw : TILION_MAX_PARALLEL_RECOVERY_PROBES_DEFAULT;
+}
+
+class ProbeSlots {
+  private active = 0;
+  private readonly waiters: Array<() => void> = [];
+
+  constructor(readonly limit: number) {}
+
+  async acquire(signal: AbortSignal): Promise<void> {
+    if (signal.aborted) throw new Error('lane_aborted');
+    if (this.active < this.limit) {
+      this.active += 1;
+      return;
+    }
+    await new Promise<void>((resolve, reject) => {
+      const grant = () => {
+        signal.removeEventListener('abort', onAbort);
+        this.active += 1;
+        resolve();
+      };
+      const onAbort = () => {
+        const index = this.waiters.indexOf(grant);
+        if (index >= 0) this.waiters.splice(index, 1);
+        reject(new Error('lane_aborted'));
+      };
+      this.waiters.push(grant);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  release(): void {
+    this.active = Math.max(0, this.active - 1);
+    this.waiters.shift()?.();
+  }
+}
+
+/**
+ * Bound live candidate sessions per capped provider for one recovery. A slot is
+ * taken before create and freed when that candidate is released or promoted
+ * (the promoted session becomes the task's own); uncapped providers pass through.
+ */
+export function withProviderProbeLimits(
+  dependencies: ConfigSearchDependencies
+): ConfigSearchDependencies {
+  const slotsByProvider = new Map<string, ProbeSlots>();
+  const holding = new WeakSet<RecoveryCandidateSession>();
+  const slotsFor = (provider: string): ProbeSlots | null => {
+    const limit = maxParallelRecoveryProbes(provider);
+    if (limit === null) return null;
+    let slots = slotsByProvider.get(provider);
+    if (!slots) {
+      slots = new ProbeSlots(limit);
+      slotsByProvider.set(provider, slots);
+    }
+    return slots;
+  };
+  const free = (session: RecoveryCandidateSession) => {
+    if (!holding.has(session)) return;
+    holding.delete(session);
+    slotsFor(session.provider)?.release();
+  };
+  return {
+    ...dependencies,
+    create: async (config, signal) => {
+      const slots = slotsFor(config.provider);
+      if (slots === null) return dependencies.create(config, signal);
+      await slots.acquire(signal);
+      try {
+        const session = await dependencies.create(config, signal);
+        holding.add(session);
+        return session;
+      } catch (error) {
+        slots.release();
+        throw error;
+      }
+    },
+    release: async (config, session) => {
+      try {
+        await dependencies.release(config, session);
+      } finally {
+        free(session);
+      }
+    },
+    promote: async (winner) => {
+      await dependencies.promote(winner);
+      free(winner.session);
+    },
+  };
+}

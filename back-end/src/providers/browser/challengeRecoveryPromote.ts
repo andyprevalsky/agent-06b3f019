@@ -11,6 +11,7 @@ import type {
 import {
   applyConfigBlacklist,
   runLaneConfigSearch,
+  withProviderProbeLimits,
   type ConfigSearchDependencies,
 } from './challengeRecoveryLaneSearch';
 import { buildPreferredBrowserConfig, closeValidationBrowser } from './challengeRecoverySupport';
@@ -302,14 +303,19 @@ export async function searchAndPromoteBrowserConfig(
 
   let winner: Awaited<ReturnType<typeof runLaneConfigSearch>>;
   try {
-    winner = await runLaneConfigSearch(searchableConfigs, lanes, searchDependencies, {
-      avoidConfigKey: sessionAvoidConfigKey,
-      blockedConfigKeys: blacklist.blacklistExpired ? [] : input.blockedConfigKeys,
-      // Two transport-dead provider candidates get 90s each. The full search
-      // stops at 210s, leaving 90s under the worker's 300s HTTP read deadline
-      // for promotion, old-session release, and the response.
-      ...(transportFailure ? { candidateDeadlineMs: 90_000, searchDeadlineMs: 210_000 } : {}),
-    });
+    winner = await runLaneConfigSearch(
+      searchableConfigs,
+      lanes,
+      withProviderProbeLimits(searchDependencies),
+      {
+        avoidConfigKey: sessionAvoidConfigKey,
+        blockedConfigKeys: blacklist.blacklistExpired ? [] : input.blockedConfigKeys,
+        // Two transport-dead provider candidates get 90s each. The full search
+        // stops at 210s, leaving 90s under the worker's 300s HTTP read deadline
+        // for promotion, old-session release, and the response.
+        ...(transportFailure ? { candidateDeadlineMs: 90_000, searchDeadlineMs: 210_000 } : {}),
+      }
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new ChallengeConfigSearchExhaustedError(message, [...failedConfigKeys]);
