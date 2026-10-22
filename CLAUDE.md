@@ -866,6 +866,8 @@ When adding a benchmark to `tasks.json`, auto-attach it to this algorithm:
 
 **Every completed run is recorded — pass or fail, local or prod.** `BenchmarkRun.save()` writes the full run record (message transcripts + logs) to `runs/*.json`, appends every attempt to the attempts ledger, and full LLM trajectories land in `.llm-dumps/<agent_id>/` (always-on locally; prod goes to ClickHouse).
 
+**A branch deploy commits only its most recent runs to benchmark history (standing user rule, October 22, 2026).** Fix-and-rerun iterations leave superseded attempts in `agents/benchmarks/history/*.jsonl`; failures of code that never merged must not land on main. Before committing ledger rows from a branch, run `python3 scripts/benchmark-history-latest-only.py --base origin/main --write`. It keeps each task's most recent branch run (its latest attempt plus concurrent copies that overlap it), even when that run failed, and drops earlier attempts with their duration and span rows. Rows already on main are never touched. `--check` must pass before the ledger commit. Full run records in `runs/*.json` remain local evidence. Main/daily runs stay append-only. Regression: `scripts/tests/benchmark-history-latest-only.test.py` (deploy structural gates).
+
 **⛔ Never rename an existing task `name`.** The name is the primary key across all history stores; a rename orphans pass history and latency baselines:
 
 - **Attempts ledger:** `agents/benchmarks/history/task_attempts.jsonl` — one line per _completed_ run (pass AND fail) with status, duration, cost, failure_reason. Written by `benchmarks/timeout_history.py:record_attempt()`. This is the run-stats record (attempt counts, failure rates).
