@@ -59,6 +59,9 @@ Decide from the evidence only (final browser pages, tool results, anti-bot log e
 - INCONCLUSIVE: the agent never reached the CAPTCHA point for a reason that is NOT a challenge
   (for example it asked a question, needed a login or payment approval, chose a different site,
   crashed, or ran out of time before navigating there). Give that reason.
+When the task itself says its end is a pending payment-card request or a pending approval at a final
+confirm click, that pending request for the task's order or booking IS the post-wall point: grade
+PASSED_CAPTCHA when it was raised past the wall, and FAILED_CAPTCHA if a wall blocked before it.
 Assistant claims without page/tool evidence do not count.
 
 The evidence object holds: agent_final_answer (may be terse; it is not proof either way),
