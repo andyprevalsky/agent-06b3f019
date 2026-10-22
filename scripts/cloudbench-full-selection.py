@@ -9,9 +9,10 @@ measured CLI capacity, the tasks most relevant to this branch's changes are
 kept: a task scores one point per changed file whose path triggers one of its
 deploy categories. Ties keep smoke tasks first, then catalog order.
 
-Capacity is the sharded operator's own native admission: free Fly organization
-Machine slots (`capacity_snapshot`, read-only) must cover copies + controllers
-+ canaries (`capacity_demand` over `plan_shards`). Names go to stdout, one per
+Capacity is the sharded operator's own admission: simultaneous copies stay
+within the provider rate-limit registry cap (`cloudbench-provider-capacity.py`),
+and free Fly organization Machine slots (`capacity_snapshot`, read-only) must
+cover copies + controllers + canaries (`capacity_demand` over `plan_shards`). Names go to stdout, one per
 line; the selection report goes to stderr.
 """
 from __future__ import annotations
@@ -68,15 +69,20 @@ def relevance(task, changed_files: Sequence[str], spb) -> int:
     )
 
 
-def max_tasks_within(free_slots: int, runs: int, tasks: Sequence[str], coordinator) -> int:
-    """Largest prefix of `tasks` whose sharded plan fits the free native slots."""
+def max_tasks_within(free_slots: int, max_copies: int, runs: int, tasks: Sequence[str], coordinator) -> int:
+    """Largest prefix of `tasks` within the provider copy cap whose sharded plan fits the free slots."""
     best = 0
     for count in range(1, len(tasks) + 1):
         plan = coordinator["plan_shards"](list(tasks[:count]), runs)
-        if coordinator["capacity_demand"](plan["copies"], plan["controllers"]) > free_slots:
+        if plan["copies"] > max_copies or coordinator["capacity_demand"](plan["copies"], plan["controllers"]) > free_slots:
             break
         best = count
     return best
+
+
+def provider_copy_cap() -> int:
+    """Maximum concurrent benches the provider rate-limit registry admits."""
+    return int(runpy.run_path(str(ROOT / "scripts/cloudbench-provider-capacity.py"))["load_registry"]()["cap"])
 
 
 def operator_eligible(repo_root: Path = ROOT) -> set[str]:
@@ -114,6 +120,7 @@ def select_full(
     free_slots: Callable[[], int],
     report=sys.stderr,
     admitted: Callable[[], set[str]] = operator_eligible,
+    copy_cap: Callable[[], int] = provider_copy_cap,
 ) -> list[str]:
     spb = _predeploy()
     coordinator = runpy.run_path(str(ROOT / "scripts/cloudbench-shard-coordinator.py"))
@@ -128,12 +135,14 @@ def select_full(
         key=lambda t: (-relevance(t, changed_files, spb), not t.is_smoke, order[t.name]),
     )
     names = [t.name for t in ranked]
+    cap = copy_cap()
     slots = free_slots()
-    capacity = max_tasks_within(slots, runs, names, coordinator)
+    capacity = max_tasks_within(slots, cap, runs, names, coordinator)
     selected = names[:capacity]
     print(
         f"FULL: {len(eligible)} cloud task(s) passed their last {PASS_STREAK} runs; "
-        f"k={runs}; capacity {capacity} task(s) ({slots} free Machine slots)",
+        f"k={runs}; capacity {capacity} task(s) ({cap} concurrent benches provider cap, "
+        f"{slots} free Machine slots)",
         file=report,
     )
     if excluded:
@@ -145,7 +154,9 @@ def select_full(
             file=report,
         )
     if not selected:
-        raise SystemExit(f"FULL: no capacity for even one task at k={runs} ({slots} free Machine slots)")
+        raise SystemExit(
+            f"FULL: no capacity for even one task at k={runs} ({cap} provider cap, {slots} free Machine slots)"
+        )
     return selected
 
 

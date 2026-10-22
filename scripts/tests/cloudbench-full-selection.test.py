@@ -45,10 +45,10 @@ class FullSelectionTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def select(self, free_slots, changed=(), runs=2):
+    def select(self, free_slots, changed=(), runs=2, copy_cap=70):
         report = io.StringIO()
         names = FULL["select_full"](self.catalog, self.attempts, runs, list(changed), lambda: free_slots, report,
-                                    lambda: self.admitted)
+                                    lambda: self.admitted, lambda: copy_cap)
         return names, report.getvalue()
 
     def test_selects_every_cloud_task_whose_last_three_runs_passed(self):
@@ -76,6 +76,13 @@ class FullSelectionTests(unittest.TestCase):
         slots = coordinator["capacity_demand"](plan["copies"], plan["controllers"])
         self.assertEqual(len(self.select(slots, runs=1)[0]), 2)
         self.assertLess(len(self.select(slots, runs=2)[0]), 2)
+
+    def test_provider_copy_cap_binds_before_free_slots(self):
+        changed = ["agents/domains/request_payment_card/handler.py"]
+        names, report = self.select(1000, changed, runs=2, copy_cap=3)
+        self.assertEqual(names, ["pay-shop"])  # 2 tasks x 2 copies would exceed 3 concurrent benches
+        self.assertIn("capacity 1 task(s) (3 concurrent benches provider cap, 1000 free Machine slots)", report)
+        self.assertEqual(len(self.select(1000, runs=2, copy_cap=4)[0]), 2)
 
     def test_no_capacity_fails_closed(self):
         with self.assertRaises(SystemExit):
