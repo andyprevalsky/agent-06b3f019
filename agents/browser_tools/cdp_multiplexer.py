@@ -48,6 +48,12 @@ _HIDDEN_TARGET_TYPES = frozenset({"browser_ui"})
 # emulation. Workers have no Emulation domain.
 _EMULATED_TARGET_TYPES = frozenset({"page", "iframe"})
 _EMULATION_COMMAND_TIMEOUT_SECONDS = 5.0
+# Tilion drops (never answers, never delivers) a key event sent while another
+# Input event is unanswered on the same CDP session (live 2026-10-21/22, T37).
+# Input commands are therefore forwarded one at a time per session, for every
+# client; one the provider leaves unanswered is failed back to its client
+# after this bound instead of hanging it (Playwright awaits input forever).
+_INPUT_ANSWER_TIMEOUT_SECONDS = 10.0
 
 
 class CdpMultiplexerUpstreamClosed(ConnectionError):
@@ -91,6 +97,7 @@ class SingleCdpConnectionMultiplexer:
         upstream_connect: Optional[UpstreamConnect] = None,
         refresh_url: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
         emulation: Optional[Dict[str, Any]] = None,
+        input_answer_timeout: float = _INPUT_ANSWER_TIMEOUT_SECONDS,
         label: str = "",
     ) -> None:
         self._upstream_url = upstream_url
@@ -120,6 +127,12 @@ class SingleCdpConnectionMultiplexer:
         self._browser_user_agent: Optional[str] = None
         self.emulation_applied = 0
         self.emulation_failures = 0
+        # Per-session Input serialisation: the tail future resolves when the
+        # last Input command queued on that session is answered or expired.
+        self._input_answer_timeout = input_answer_timeout
+        self._input_tail: Dict[str, asyncio.Future] = {}
+        self._input_done: Dict[int, Tuple[asyncio.Future, Optional[asyncio.TimerHandle]]] = {}
+        self.input_unanswered = 0
         self._closed = False
         self.upstream_connections_opened = 0
         self.last_upstream_close: Optional[Tuple[Optional[int], str]] = None
@@ -188,6 +201,7 @@ class SingleCdpConnectionMultiplexer:
             self._upstream, self._reader = None, None
             self._fail_internal(CdpMultiplexerUpstreamClosed(1000, "released"))
             self._pending.clear()
+            self._fail_pending_input()
             self._session_owner.clear()
             self._browser_session_owner.clear()
             self._hidden_sessions.clear()
@@ -248,6 +262,7 @@ class SingleCdpConnectionMultiplexer:
         self._upstream, self._reader = None, None
         self._fail_internal(CdpMultiplexerUpstreamClosed(code, reason))
         self._pending.clear()
+        self._fail_pending_input()
         self._session_owner.clear()
         self._browser_session_owner.clear()
         for client in list(self._clients):
@@ -263,6 +278,7 @@ class SingleCdpConnectionMultiplexer:
                 if not future.done():
                     future.set_result(message)
                 return
+            self._finish_input(message_id)
             pending = self._pending.pop(message_id, None)
             if pending is None:
                 return
@@ -504,6 +520,9 @@ class SingleCdpConnectionMultiplexer:
         message["id"] = message_id
         if not message.get("sessionId"):
             message["sessionId"] = client.browser_session_id
+        if method.startswith("Input."):
+            await self._forward_input_in_order(upstream, message_id, message)
+            return
         if method == "Target.setAutoAttach" and self._emulation:
             # Hold every new target until its emulation lands; remember whether
             # this client resumes targets itself or the multiplexer must.
@@ -513,6 +532,82 @@ class SingleCdpConnectionMultiplexer:
                 params["waitForDebuggerOnStart"] = True
             message["params"] = params
         await upstream.send(json.dumps(message))
+
+    async def _forward_input_in_order(self, upstream: Any, message_id: int, message: Dict[str, Any]) -> None:
+        """Forward an Input command only after the previous Input on its session is settled."""
+        session_id = str(message["sessionId"])
+        previous = self._input_tail.get(session_id)
+        done: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._input_tail[session_id] = done
+        done.add_done_callback(
+            lambda _: self._input_tail.pop(session_id, None) if self._input_tail.get(session_id) is done else None
+        )
+        self._input_done[message_id] = (done, None)
+        if previous is None or previous.done():
+            await self._send_input(upstream, message_id, message)
+            return
+        task = asyncio.create_task(self._send_input_after(previous, upstream, message_id, message))
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    async def _send_input_after(
+        self, previous: asyncio.Future, upstream: Any, message_id: int, message: Dict[str, Any]
+    ) -> None:
+        # The previous command settles within its own answer bound (answered or expired).
+        with contextlib.suppress(Exception):
+            await asyncio.shield(previous)
+        if message_id not in self._pending or self._upstream is not upstream:
+            self._finish_input(message_id)
+            return
+        with contextlib.suppress(Exception):
+            await self._send_input(upstream, message_id, message)
+
+    async def _send_input(self, upstream: Any, message_id: int, message: Dict[str, Any]) -> None:
+        entry = self._input_done.get(message_id)
+        if entry is not None:
+            timer = asyncio.get_running_loop().call_later(self._input_answer_timeout, self._expire_input, message_id)
+            self._input_done[message_id] = (entry[0], timer)
+        await upstream.send(json.dumps(message))
+
+    def _finish_input(self, message_id: int) -> None:
+        entry = self._input_done.pop(message_id, None)
+        if entry is None:
+            return
+        done, timer = entry
+        if timer is not None:
+            timer.cancel()
+        if not done.done():
+            done.set_result(None)
+
+    def _expire_input(self, message_id: int) -> None:
+        """The provider never answered: fail the command back to its client and let the next one go."""
+        pending = self._pending.pop(message_id, None)
+        self._finish_input(message_id)
+        if pending is None:
+            return
+        client, original_id, method = pending
+        self.input_unanswered += 1
+        logger.warning(
+            "[CdpMux] %s not answered by the provider within %gs; failing it to the client (label=%s)",
+            method,
+            self._input_answer_timeout,
+            self._label,
+        )
+        client.outbox.put_nowait(
+            {
+                "id": original_id,
+                "error": {
+                    "code": -32000,
+                    "message": f"{method} was not answered by the browser provider within "
+                    f"{self._input_answer_timeout:g}s (dropped input event)",
+                },
+            }
+        )
+
+    def _fail_pending_input(self) -> None:
+        for message_id in list(self._input_done):
+            self._finish_input(message_id)
+        self._input_tail.clear()
 
     async def _release_client(self, client: _Client) -> None:
         self._browser_session_owner.pop(client.browser_session_id, None)
