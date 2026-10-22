@@ -30,6 +30,12 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+# Run as `python benchmarks/run_captcha_probe.py` from agents/: put agents/ on sys.path so the
+# judge can import helpers/ and providers/ without PYTHONPATH.
+_AGENTS_DIR = str(Path(__file__).resolve().parents[1])
+if _AGENTS_DIR not in sys.path:
+    sys.path.insert(0, _AGENTS_DIR)
+
 SITES_PATH = Path(__file__).with_name("captcha_probe_sites.json")
 DEFAULT_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 TERMINAL_STATUSES = {"COMPLETED", "FAILED", "OUT_OF_CREDITS", "COST_LIMIT_REACHED"}
