@@ -449,18 +449,33 @@ export async function runLiveTilionProviderParity(): Promise<void> {
       assert((await page.title()) === 'Example Domain', 'recreated Tilion session is not drivable');
     });
 
-    // Rotation 2 (last: it replaces the live session and needs the worker's carried
-    // state). Tilion serves no mobile exits on our account (probe --only mobile-exit),
-    // so the ladder is Tilion residential in place -> Kernel mobile -> Steel.
+    // Rotation 2 (last). Tilion serves no mobile exits on our account (probe --only
+    // mobile-exit), so the ladder is Tilion residential in place -> Kernel mobile -> Steel.
     const ipBeforeMobile = await readExitIpWithRetry(String(recreated.ws_url));
-    // The worker would capture this over its own socket; a live Tilion row must not be
-    // replaced without it (TilionUncarriedStateError).
-    const carriedState = await withPage(String(recreated.ws_url), async (page, browser) => {
+    await withPage(String(recreated.ws_url), async (page) => {
       await navigateKernelPage(page, 'https://example.com');
       await page.evaluate(() => localStorage.setItem('rose_tilion_parity', 'carried'));
-      return browser.contexts()[0]!.storageState();
     });
-    const mobile = await post('/rotate-proxy', { task_id: taskId, storage_state: carriedState });
+    // A LIVE Tilion row holds state only its browser has; replacing it without that
+    // state is refused with a typed 409 (and the reserved rotation is returned).
+    const refusedRotation = await retryBackendFetch(`${baseUrl}/api/browser-session/rotate-proxy`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ task_id: taskId }),
+    });
+    const refusedBody = (await refusedRotation.json()) as { error?: string };
+    assert(
+      refusedRotation.status === 409 && refusedBody.error === 'carried_state_required',
+      `live Tilion rotation without state was not a typed refusal: HTTP ${refusedRotation.status} ${JSON.stringify(refusedBody)}`
+    );
+    // The durable path: pause harvests the browser into the row, then the switch
+    // to Kernel must restore that paused state.
+    await post('/close', {
+      session_id: liveSessionId,
+      pause: true,
+      current_url: 'https://example.com/',
+    });
+    const mobile = await post('/rotate-proxy', { task_id: taskId });
     kernelProfileId = mobile.browser_session_metadata?.profile_id ?? undefined;
     assert(
       mobile.provider === 'kernel' &&
@@ -489,7 +504,7 @@ export async function runLiveTilionProviderParity(): Promise<void> {
       await navigateKernelPage(page, 'https://example.com');
       return page.evaluate(() => localStorage.getItem('rose_tilion_parity'));
     });
-    assert(carriedAfterMobile === 'carried', 'Kernel switch lost the carried Tilion localStorage');
+    assert(carriedAfterMobile === 'carried', 'Kernel switch lost the paused Tilion localStorage');
     console.log(
       `[tilion rotate_ip] exit IP ladder: ${ipBefore} -> ${ipAfter} -> kernel mobile ${mobileIp}`
     );
