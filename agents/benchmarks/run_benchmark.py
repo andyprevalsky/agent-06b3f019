@@ -16793,10 +16793,13 @@ async def main_async(args):
     # Live report card: a standardized progress snapshot emitted to stdout + the run's
     # context dir once per second (and once, forced, at the end). Purely observational —
     # every emit is wrapped so it can never break a benchmark run.
-    from benchmarks.report_card import Infra, ReportCardEmitter, RunState, TaskCard
+    from benchmarks.report_card import Infra, ReportCardEmitter, RunState, TaskCard, clean_source_sha
 
     _report_emitter = ReportCardEmitter(os.environ.get("BENCHMARK_CONTEXT_DIR", ".context"))
     _report_start = time.monotonic()
+    _report_started_at = time.time()
+    _report_source_sha = clean_source_sha(Path(__file__).resolve().parents[2])
+    _report_finished_at: list[float] = []
     _wmh_evidence = _WMHEvidenceSnapshot()
     # name -> FIFO of live agent ids so k-repeats of the same task name each keep
     # their own deep link instead of overwriting one shared slot.
@@ -16832,6 +16835,7 @@ async def main_async(args):
                     duration_s=r.duration_seconds,
                     cost_usd=(r.cost_cents / 100.0) if r.cost_cents is not None else None,
                     agent_url=durable_agent_frontend_url(r.agent_id) if r.agent_id else None,
+                    agent_id=r.agent_id or None,
                     outcome_sha256=_outcome_signatures.get(r.agent_id),
                     llm_call_count=r.llm_call_count,
                     tree_agent_count=r.tree_agent_count,
@@ -16853,16 +16857,24 @@ async def main_async(args):
                     name=task.name,
                     status="running",
                     agent_url=durable_agent_frontend_url(live_agent_id) if live_agent_id else None,
+                    agent_id=live_agent_id or None,
                     world_model_mode=task_world_model_modes.get(task.name),
                 )
             )
         elapsed = time.monotonic() - _report_start
+        total_tasks = len(tasks) + len(skipped_claude_tasks)
+        if not _report_finished_at and len(per_task) >= total_tasks \
+                and all(t.status in ("passed", "failed", "skipped") for t in per_task):
+            _report_finished_at.append(time.time())  # first snapshot with every verdict recorded
         wmh_usage = _wmh_evidence.refresh()
         return RunState(
             run_id=run.run_id,
             elapsed_s=elapsed,
             world_model_mode=os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real"),
-            total_tasks=len(tasks) + len(skipped_claude_tasks),
+            total_tasks=total_tasks,
+            source_sha=_report_source_sha,
+            started_at=_report_started_at,
+            finished_at=_report_finished_at[0] if _report_finished_at else None,
             task_names=[t.name for t in tasks] + [t.name for t in skipped_claude_tasks],
             per_task=per_task,
             # WMH grounding cost + tokens are only known when a WMH is served

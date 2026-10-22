@@ -106,6 +106,11 @@ def money(value: float) -> str:
     return f"${value:,.2f}"
 
 
+def agent_id_of(url) -> str | None:
+    match = re.search(r"[?&]agent-id=([0-9a-fA-F-]{8,})", str(url or ""))
+    return match.group(1) if match else None
+
+
 def short_ref(ref) -> str:
     return ref[:9] if isinstance(ref, str) and ref else "UNRECORDED"
 
@@ -379,10 +384,14 @@ def load_fleet(run_dir: Path) -> dict:
     code = str(card.get("code") or "")
     match = re.search(r"@([0-9a-f]{7,40})", code)
     exp["source_ref"] = match.group(1) if match else None
+    if local and exp["source_ref"] is None and re.fullmatch(r"[0-9a-f]{7,40}", str(card.get("source_sha") or "")):
+        exp["source_ref"] = card["source_sha"]  # Local producer records the checkout HEAD it ran.
     exp["task_ref"] = ((card.get("execution_provenance") or {}).get("base_sha"))
     starts = [read_epoch(p) for p in run_dir.glob("*/bench-e2e.started-epoch")]
     starts = [s for s in starts if s]
     exp["triggered_at"] = min(starts) if starts else epoch_of(card.get("timestamp"))
+    if local and exp["triggered_at"] is None:
+        exp["triggered_at"] = epoch_of(card.get("started_at"))
     if local and exp["triggered_at"] is None:
         try:
             exp["triggered_at"] = float(run_dir.name.split("-", 1)[0])
@@ -423,7 +432,8 @@ def load_fleet(run_dir: Path) -> dict:
             "status": ("passed" if verdict else "failed") if finished else stage_status.get(task.get("lifecycle_stage"), "queued"),
             "task_status": verdict, "infra_failure": False if verdict else None,
             "exec_s": task.get("duration_s"), "cost_usd": task.get("cost_usd"),
-            "agent_id": task.get("agent_id") or local_task.get("agent_id"),
+            "agent_id": task.get("agent_id") or local_task.get("agent_id") or agent_id_of(task.get("agent_url")),
+            "agent_url": task.get("agent_url"),
             "reason": reason_key(task.get("failure_reason") or local_task.get("failure_reason")),
             "released": (local_released if local else True if (isinstance(lifecycle, dict) and lifecycle.get("status") == "verified") else None),
             "cache_hit": (card.get("cost") or {}).get("fast_cache_hit_rate") if not local else (
@@ -434,6 +444,9 @@ def load_fleet(run_dir: Path) -> dict:
             if (task_dir / "bench-e2e.finished-epoch").exists() and (task_dir / "bench-e2e.started-epoch").exists() else None,
         })
     exp["rows"], exp["rows_source"] = rows, "report-card.json"
+    if local:  # A local run is small: list every task with its recorded agent and FE link.
+        exp["task_links"] = [{"task": r["task"], "outcome": classify(r), "agent_id": r["agent_id"],
+                              "agent_url": r["agent_url"]} for r in rows]
     teardown = read_epoch(run_dir / "teardown-ownership/provider-teardown-verified.epoch")
     finishes = [read_epoch(p) for p in run_dir.glob("*/bench-e2e.finished-epoch")]
     finishes = [f for f in finishes if f]
@@ -460,6 +473,8 @@ def load_fleet(run_dir: Path) -> dict:
                 exp["end_evidence"] = "run.json and local cleanup receipts"
             else:
                 exp["state"], exp["state_reason"] = "INCOMPLETE", "results recorded; local cleanup pending"
+                if epoch_of(card.get("finished_at")):
+                    exp["ended_at"], exp["end_evidence"] = epoch_of(card["finished_at"]), "report-card.json finished_at"
     else:
         lifecycle_item(exp, "pending", "Owned resources released", "lifecycle.json pending")
     return finish_experiment(exp)
@@ -1039,8 +1054,13 @@ def render_html(card: dict) -> str:
                  f"Stop at {threshold}/{total} unique infra-failed jobs (5% of scheduled)." if threshold
                  else "Stop at 5% of the original scheduled total; scheduled total UNRECORDED.")
     source = f' Source: {e(exp["rows_source"])}.' if exp.get("rows_source") else ""
+    links = "".join(
+        f'<div class="note"><span class="{CATEGORY_CLASS.get(t["outcome"], "run")}">{e(t["outcome"])}</span> {e(t["task"])} · '
+        + (e(t["agent_url"]) if t.get("agent_url")  # text, not href: cards load nothing remote
+           else e(t["agent_id"]) + " · FE link UNRECORDED" if t.get("agent_id") else "agent UNRECORDED") + '</div>'
+        for t in exp.get("task_links") or [])
     out.append(f'<section data-section="outcomes"><h2>Outcomes</h2>{_bar(o, total)}'
-               f'<div class="legend">{"".join(legend)}</div><div class="note">{e(stop_note)}{source}</div></section>')
+               f'<div class="legend">{"".join(legend)}</div><div class="note">{e(stop_note)}{source}</div>{links}</section>')
     # Failure causes
     reasons = exp.get("reasons") or []
     if reasons:
@@ -1211,6 +1231,10 @@ def render_text(card: dict) -> str:
         lines.append(f'Stop at {exp["infra_threshold"]}/{total} unique infra-failed jobs (5%)')
     for cat, text, count in exp.get("reasons") or []:
         lines.append(f"  {count:>4} {cat}: {text}")
+    if exp.get("task_links"):
+        lines.append("TASKS")
+        lines += [f'  {t["outcome"]} {t["task"]} · ' + (t.get("agent_url") or (f'{t["agent_id"]} · FE link UNRECORDED'
+                  if t.get("agent_id") else "agent UNRECORDED")) for t in exp["task_links"]]
     cost = exp.get("cost") or {}
     lines.append("Cost " + (f'{money(cost["metered_usd"])} metered ({cost["n"]}/{cost["of"]})' if cost.get("metered_usd") is not None else "UNMETERED")
                  + (" · " + "/".join(cost["unmetered"]) + " UNMETERED" if cost.get("unmetered") else ""))
