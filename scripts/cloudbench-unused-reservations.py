@@ -262,12 +262,15 @@ def inventory_pointer_members(manifest, config):
 
 # Reviewed collectors whose cleanup-reserve exclusion semantics are identical; the
 # second only adds pre-snapshot flushing and bounded strict snapshot repetition, the
-# third drains exiting writers (all threads) within a bounded window first.
+# third drains exiting writers (all threads) within a bounded window first, and the
+# fourth only re-observes a briefly unreadable (exiting/exec-ing) task before
+# failing closed.
 RESERVE_COLLECTOR_SHA256S = frozenset(
     {
         "ff7681d3eefde5df2c678cb0f900b66cb2427cf39180c0ed9a5c28e7dd721c1b",
         "8a004d2f194f90229fd4e96306866c3c91502d434b3b535e2f44eddaee3daf19",
         "87b52cfc31b70d582ed274e184c0b7a6b50267639e2019e21a1e8ead251a55ff",
+        "0a8145906c6a5ab0e719eb70b6413d9bfe5f05f485afc8a05b56581e503f22aa",
     }
 )
 

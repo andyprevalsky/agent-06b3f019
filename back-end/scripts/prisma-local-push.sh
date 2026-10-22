@@ -31,4 +31,17 @@ fi
 # block the unique User.phone index; normalize them on this same local target.
 bash "$(dirname "${BASH_SOURCE[0]}")/normalize-local-user-phones.sh" "$DIRECT_URL" >/dev/null
 
-exec npx prisma db push "$@"
+npx prisma db push "$@"
+
+# db push ignores the hand-written workflow/trajectory functions and triggers
+# that migrations install, so a database built only by this wrapper silently
+# diverges from prod (workflow-terminal-cleanup failed on such a database).
+# Apply them to the exact target just pushed: host psql on DIRECT_URL, never a
+# DB_CONTAINER from the caller's environment that may hold another database.
+if ! command -v psql >/dev/null 2>&1; then
+  echo "Prisma push succeeded, but host psql is required to apply the workflow DDL to $(
+    node -e 'const u=new URL(process.argv[1]);process.stdout.write(u.host+u.pathname)' "$DIRECT_URL")" >&2
+  exit 1
+fi
+env -u DB_CONTAINER ROSE_USE_SYSTEM_PG=true DATABASE_URL="$DIRECT_URL" DIRECT_URL="$DIRECT_URL" \
+  bash "$(dirname "${BASH_SOURCE[0]}")/apply-local-workflow-ddl.sh"
