@@ -48,6 +48,10 @@ _HIDDEN_TARGET_TYPES = frozenset({"browser_ui"})
 # emulation. Workers have no Emulation domain.
 _EMULATED_TARGET_TYPES = frozenset({"page", "iframe"})
 _EMULATION_COMMAND_TIMEOUT_SECONDS = 5.0
+# Overrides Chrome keeps once per target, owned by the session that set it and
+# lost when that session detaches ("Another ... override is already in effect"
+# for every other session). Re-applied on a surviving session when the holder goes.
+_EXCLUSIVE_OVERRIDES = ("Emulation.setTimezoneOverride", "Emulation.setLocaleOverride")
 # Tilion drops (never answers, never delivers) a key event sent while another
 # Input event is unanswered on the same CDP session (live 2026-10-21/22, T37).
 # Input commands are therefore forwarded one at a time per session, for every
@@ -163,6 +167,13 @@ class SingleCdpConnectionMultiplexer:
         self._input_done: Dict[int, Tuple[asyncio.Future, Optional[asyncio.TimerHandle]]] = {}
         self.input_unanswered = 0
         self.locale_mismatches = 0
+        # Chrome keeps one locale override per target, owned by the session that
+        # set it; it ends when that session detaches. Track the holder so its
+        # detach (browser-use session churn, client release, rotation) is
+        # followed by a read-back on a remaining session of the same target.
+        self._session_target: Dict[str, str] = {}
+        self._override_holder: Dict[Tuple[str, str], str] = {}
+        self.overrides_reapplied = 0
         self._closed = False
         self.upstream_connections_opened = 0
         self.last_upstream_close: Optional[Tuple[Optional[int], str]] = None
@@ -237,6 +248,8 @@ class SingleCdpConnectionMultiplexer:
             self._hidden_sessions.clear()
             self._webauthn_armed_targets.clear()
             self._webauthn_armed_by_session.clear()
+            self._session_target.clear()
+            self._override_holder.clear()
             self._wants_debugger_wait.clear()
             self._browser_user_agent = None
             if upstream is not None:
@@ -299,6 +312,8 @@ class SingleCdpConnectionMultiplexer:
         self._browser_session_owner.clear()
         self._webauthn_armed_targets.clear()
         self._webauthn_armed_by_session.clear()
+        self._session_target.clear()
+        self._override_holder.clear()
         for client in list(self._clients):
             with contextlib.suppress(Exception):
                 await client.websocket.close(code=_downstream_close_code(code), reason=reason[:120])
@@ -373,6 +388,7 @@ class SingleCdpConnectionMultiplexer:
         if method == "Target.targetDestroyed" and params.get("targetId"):
             self._webauthn_armed_targets.discard(str(params["targetId"]))
         if method == "Target.detachedFromTarget" and params.get("sessionId"):
+            self._reapply_overrides_after_detach([str(params["sessionId"])])
             armed_target = self._webauthn_armed_by_session.pop(str(params["sessionId"]), None)
             if armed_target is not None:
                 self._webauthn_armed_targets.discard(armed_target)
@@ -474,6 +490,8 @@ class SingleCdpConnectionMultiplexer:
         params = message.get("params") or {}
         child = str(params["sessionId"])
         target_id = str((params.get("targetInfo") or {}).get("targetId") or "")
+        if target_id:
+            self._session_target[child] = target_id
         sent: List[Tuple[str, asyncio.Future]] = []
         try:
             sent = await asyncio.wait_for(
@@ -506,6 +524,8 @@ class SingleCdpConnectionMultiplexer:
                 logger.info("[CdpMux] %s not applied on %s: %s", method, child[:12], str(response["error"])[:160])
                 if method == "Emulation.setLocaleOverride":
                     await self._verify_child_locale(child)
+            elif method in _EXCLUSIVE_OVERRIDES and target_id:
+                self._override_holder[(target_id, method)] = child
         if sent:
             self.emulation_applied += 1
 
@@ -531,6 +551,62 @@ class SingleCdpConnectionMultiplexer:
                 wanted,
                 actual,
             )
+
+    def _override_params(self, method: str) -> Optional[Dict[str, Any]]:
+        if method == "Emulation.setTimezoneOverride" and self._emulation.get("timezone"):
+            return {"timezoneId": self._emulation["timezone"]}
+        if method == "Emulation.setLocaleOverride" and self._emulation.get("locale"):
+            return {"locale": self._emulation["locale"]}
+        return None
+
+    def _reapply_overrides_after_detach(self, sessions: List[str], after: Optional[Awaitable[Any]] = None) -> None:
+        """A session holding a target's timezone/locale override detached: the
+        override ended with it. Re-apply it on a surviving session of that target
+        (after the detach completes, or Chrome still refuses it) and read back."""
+        orphaned: List[Tuple[str, str]] = []
+        for session in sessions:
+            target_id = self._session_target.pop(session, None)
+            if target_id is None:
+                continue
+            for method in _EXCLUSIVE_OVERRIDES:
+                if self._override_holder.get((target_id, method)) == session:
+                    self._override_holder.pop((target_id, method), None)
+                    orphaned.append((target_id, method))
+        if not orphaned:
+            return
+
+        async def reapply() -> None:
+            if after is not None:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(after, timeout=_EMULATION_COMMAND_TIMEOUT_SECONDS)
+            for target_id, method in orphaned:
+                survivor = next((s for s, t in self._session_target.items() if t == target_id), None)
+                params = self._override_params(method)
+                if survivor is None or params is None:
+                    continue
+                try:
+                    future = await self._send_session_command(survivor, method, params)
+                    response = await asyncio.wait_for(future, timeout=_EMULATION_COMMAND_TIMEOUT_SECONDS)
+                except Exception as error:
+                    response = {"error": {"message": f"not sent: {type(error).__name__}"}}
+                if "error" in response:
+                    logger.error(
+                        "[CdpMux] %s holder for target %s detached and re-apply on %s failed: %s",
+                        method,
+                        target_id[:12],
+                        survivor[:12],
+                        str(response["error"])[:160],
+                    )
+                else:
+                    self.overrides_reapplied += 1
+                    self._override_holder[(target_id, method)] = survivor
+                    logger.info("[CdpMux] Re-applied %s on %s after its holder detached", method, survivor[:12])
+                if method == "Emulation.setLocaleOverride":
+                    await self._verify_child_locale(survivor)
+
+        task = asyncio.create_task(reapply())
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
 
     def _own_session(self, client: _Client, session_id: str) -> None:
         self._session_owner[session_id] = client
@@ -690,16 +766,22 @@ class SingleCdpConnectionMultiplexer:
             self._pending.pop(message_id, None)
         if self._clients:
             if client.browser_session_id and self._upstream is not None:
+                detached: Optional[asyncio.Future] = None
                 with contextlib.suppress(Exception):
+                    message_id = next(self._ids)
+                    detached = asyncio.get_running_loop().create_future()
+                    self._internal[message_id] = detached
                     await self._upstream.send(
                         json.dumps(
                             {
-                                "id": next(self._ids),
+                                "id": message_id,
                                 "method": "Target.detachFromTarget",
                                 "params": {"sessionId": client.browser_session_id},
                             }
                         )
                     )
+                # Its child sessions go with it and get no detach event downstream.
+                self._reapply_overrides_after_detach(list(client.child_sessions), after=detached)
             return
         # Last local client gone: release the provider's single client slot.
         await self._close_upstream()

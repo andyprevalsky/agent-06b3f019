@@ -1294,6 +1294,78 @@ async def test_multiplexer_webauthn_arming_keeps_seeded_passkeys_working():
                 await multiplexer.close()
 
 
+async def test_multiplexer_reapplies_overrides_when_their_holder_detaches():
+    """G3: Chrome keeps one timezone/locale override per target, owned by the
+    session that set it, and drops it when that session detaches (browser-use
+    session churn, client release, rotation). The page then reverted to en-US on
+    reload. The multiplexer re-applies the override on a surviving session."""
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
+
+    emulation = {"timezone": "Asia/Tokyo", "locale": "de-DE"}
+    async with _chromium(full=True) as (_playwright, _browser, endpoint):
+        async with FakeTilionGateway(endpoint) as gateway:
+            multiplexer = SingleCdpConnectionMultiplexer(gateway.cdp_url, emulation=emulation, arm_webauthn=False)
+            local_url = await multiplexer.start()
+            try:
+                async with (
+                    websockets.connect(local_url, max_size=None, proxy=None) as first_socket,
+                    websockets.connect(local_url, max_size=None, proxy=None) as second_socket,
+                ):
+                    first, second = _RawCdpClient(first_socket), _RawCdpClient(second_socket)
+                    try:
+                        auto = {"autoAttach": True, "waitForDebuggerOnStart": False, "flatten": True}
+                        await first.send("Target.setAutoAttach", auto)
+                        await second.send("Target.setAutoAttach", auto)
+                        created = await first.send("Target.createTarget", {"url": "about:blank"})
+                        mine = await first.attached(lambda p: p["targetInfo"]["targetId"] == created["targetId"])
+                        theirs = await second.attached(lambda p: p["targetInfo"]["targetId"] == created["targetId"])
+                        holder = None
+                        for _ in range(50):
+                            holder = multiplexer._override_holder.get(
+                                (created["targetId"], "Emulation.setLocaleOverride")
+                            )
+                            if holder:
+                                break
+                            await asyncio.sleep(0.1)
+                        assert holder in (mine["sessionId"], theirs["sessionId"]), holder
+                        holder_client, other, other_session = (
+                            (first, second, theirs["sessionId"])
+                            if holder == mine["sessionId"]
+                            else (second, first, mine["sessionId"])
+                        )
+                        locale = "Intl.DateTimeFormat().resolvedOptions().locale"
+                        before = await other.send(
+                            "Runtime.evaluate", {"expression": locale, "returnByValue": True}, other_session
+                        )
+                        assert before["result"]["value"] == "de-DE", before
+                        await holder_client.send("Target.detachFromTarget", {"sessionId": holder})
+                        for _ in range(50):
+                            if multiplexer.overrides_reapplied >= 2:
+                                break
+                            await asyncio.sleep(0.1)
+                        await other.send("Page.reload", {}, other_session)
+                        await asyncio.sleep(0.5)
+                        after = await other.send(
+                            "Runtime.evaluate",
+                            {
+                                "expression": "[Intl.DateTimeFormat().resolvedOptions().locale,"
+                                " Intl.DateTimeFormat().resolvedOptions().timeZone]",
+                                "returnByValue": True,
+                            },
+                            other_session,
+                        )
+                        assert after["result"]["value"] == ["de-DE", "Asia/Tokyo"], (
+                            after["result"]["value"],
+                            multiplexer.overrides_reapplied,
+                        )
+                        assert multiplexer.locale_mismatches == 0
+                    finally:
+                        await first.close()
+                        await second.close()
+            finally:
+                await multiplexer.close()
+
+
 async def test_multiplexer_holds_new_targets_until_emulation_lands():
     """A client that does NOT wait for the debugger (browser-use) still gets
     popups whose first script sees the emulation: the multiplexer holds new
@@ -1765,6 +1837,7 @@ async def run_all_tests():
         ("multiplexer_fails_unanswered_input", test_multiplexer_fails_unanswered_input_instead_of_hanging),
         ("multiplexer_arms_webauthn_popups", test_multiplexer_arms_webauthn_so_unarmed_popups_reject_instead_of_hanging),
         ("multiplexer_webauthn_keeps_seeded_passkeys", test_multiplexer_webauthn_arming_keeps_seeded_passkeys_working),
+        ("multiplexer_reapplies_detached_overrides", test_multiplexer_reapplies_overrides_when_their_holder_detaches),
         ("tilion_live_view_token_redacted", test_tilion_live_view_token_is_redacted_before_persisting),
     ]:
         await result.record_async(name, test)
