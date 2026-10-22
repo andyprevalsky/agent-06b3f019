@@ -202,16 +202,47 @@ _MAX_REMEMBERED_IMAGE_URLS = 400
 _DOCUMENT_IMAGES_TIMEOUT_SECONDS = 3.0
 _MAX_DOCUMENT_IMAGES_PER_READ = 200
 _DOCUMENT_IMAGES_JS = f"""(() => {{
+  // HTML srcset parsing: a candidate URL is a run of non-whitespace and may
+  // contain commas; candidates are separated by the comma after descriptors.
+  const srcsetUrls = (text) => {{
+    const urls = [];
+    let i = 0;
+    const n = text.length;
+    const space = (c) => /\\s/.test(c);
+    while (i < n) {{
+      while (i < n && (space(text[i]) || text[i] === ',')) i++;
+      if (i >= n) break;
+      const start = i;
+      while (i < n && !space(text[i])) i++;
+      let url = text.slice(start, i);
+      if (url.endsWith(',')) {{
+        url = url.replace(/,+$/, '');
+      }} else {{
+        let depth = 0;
+        while (i < n) {{
+          const c = text[i];
+          if (c === '(') depth++;
+          else if (c === ')' && depth) depth--;
+          else if (c === ',' && !depth) break;
+          i++;
+        }}
+        i++;
+      }}
+      if (url) urls.push(url);
+    }}
+    return urls;
+  }};
   const out = [];
   for (const el of Array.from(document.images).slice(0, {_MAX_DOCUMENT_IMAGES_PER_READ})) {{
     const src = el.getAttribute('src');
     if (src) out.push(src);
     if (el.currentSrc) out.push(el.currentSrc);
     const srcset = el.getAttribute('srcset');
-    if (srcset) for (const part of srcset.split(',')) {{
-      const candidate = part.trim().split(/\\s+/)[0];
-      if (candidate) out.push(candidate);
-    }}
+    if (srcset) out.push(...srcsetUrls(srcset));
+  }}
+  const sources = Array.from(document.querySelectorAll('picture source[srcset]'));
+  for (const source of sources.slice(0, {_MAX_DOCUMENT_IMAGES_PER_READ})) {{
+    out.push(...srcsetUrls(source.getAttribute('srcset') || ''));
   }}
   return {{base: document.baseURI, urls: out}};
 }})()"""
@@ -230,17 +261,54 @@ _IMAGE_ATTR_KEYS = (
 )
 
 
+def _srcset_candidates(value: str) -> List[Tuple[str, str]]:
+    """``(url, descriptor)`` pairs per the HTML srcset parsing algorithm.
+
+    A candidate URL is a run of non-whitespace and may itself contain commas
+    (image-resizing paths such as ``/cdn-cgi/image/fit=contain,width=600/...``);
+    candidates are separated by the comma after the descriptors. Splitting the
+    whole attribute on every comma produced junk URLs and dropped the real ones.
+    """
+    candidates: List[Tuple[str, str]] = []
+    text = value or ""
+    index, length = 0, len(text)
+    while index < length:
+        while index < length and (text[index].isspace() or text[index] == ","):
+            index += 1
+        if index >= length:
+            break
+        start = index
+        while index < length and not text[index].isspace():
+            index += 1
+        url = text[start:index]
+        descriptor = ""
+        if url.endswith(","):
+            url = url.rstrip(",")
+        else:
+            depth, descriptor_start = 0, index
+            while index < length:
+                char = text[index]
+                if char == "(":
+                    depth += 1
+                elif char == ")" and depth:
+                    depth -= 1
+                elif char == "," and not depth:
+                    break
+                index += 1
+            descriptor = text[descriptor_start:index].strip()
+            index += 1
+        if url:
+            candidates.append((url, descriptor))
+    return candidates
+
+
 def _best_url_from_srcset(value: str) -> Optional[str]:
     candidates: List[Tuple[float, str]] = []
-    for part in value.split(","):
-        tokens = part.strip().split()
-        if not tokens:
-            continue
-        url = tokens[0].strip()
+    for url, descriptor in _srcset_candidates(value):
         weight = 0.0
-        if len(tokens) > 1:
-            descriptor = tokens[-1].strip().lower()
-            match = re.match(r"^(\d+(?:\.\d+)?)(w|x)$", descriptor)
+        tokens = descriptor.lower().split()
+        if tokens:
+            match = re.match(r"^(\d+(?:\.\d+)?)(w|x)$", tokens[-1])
             if match:
                 weight = float(match.group(1))
         candidates.append((weight, url))
@@ -464,7 +532,7 @@ def _extract_image_urls_from_dom_state(dom_state: Any, *, page_url: str) -> List
                 if not value:
                     continue
                 if key in {"srcset", "data-srcset"}:
-                    raw_urls = [part.split()[0] for part in value.split(",") if part.split()]
+                    raw_urls = [url for url, _descriptor in _srcset_candidates(value)]
                 elif key == "data-a-dynamic-image":
                     raw_urls = _urls_from_dynamic_image_attr(value)
                 else:
