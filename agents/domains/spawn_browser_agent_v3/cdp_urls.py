@@ -6,12 +6,23 @@ import os
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+# Pure, dependency-free redaction lives in utils (importable from every layer);
+# re-exported here for existing callers.
+from utils.url_redaction import redact_cdp_url, redact_url_secrets
+from utils.url_redaction import tilion_hosts as _tilion_hosts
+
+__all__ = [
+    "is_tilion_cdp_url",
+    "open_browser_cdp_connection",
+    "redact_cdp_url",
+    "redact_url_secrets",
+    "steel_cdp_connection_url",
+]
+
 
 def steel_cdp_connection_url(cdp_url: str) -> str:
     """Materialize a persisted Steel CDP URL without exposing its API key upstream."""
-    configured = urlsplit(
-        (os.environ.get("STEEL_CONNECT_URL") or "wss://connect.steel.dev").rstrip("/")
-    )
+    configured = urlsplit((os.environ.get("STEEL_CONNECT_URL") or "wss://connect.steel.dev").rstrip("/"))
     parsed = urlsplit(cdp_url)
     steel_hosts = {configured.netloc, "connect.steel.dev", "connect.steelbrowser.com"}
     if parsed.netloc not in steel_hosts:
@@ -21,25 +32,9 @@ def steel_cdp_connection_url(cdp_url: str) -> str:
     if not api_key:
         raise RuntimeError("STEEL_API_KEY is required to connect to a Steel CDP session")
 
-    query = [
-        (key, value)
-        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
-        if key.lower() != "apikey"
-    ]
+    query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key.lower() != "apikey"]
     query.append(("apiKey", api_key))
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
-
-
-_TILION_DEFAULT_BASE_URL = "https://back.tilion.dev"
-_SECRET_QUERY_KEYS = frozenset({"token", "apikey", "api_key", "jwt"})
-
-
-def _tilion_hosts() -> set:
-    configured = urlsplit((os.environ.get("TILION_BASE_URL") or _TILION_DEFAULT_BASE_URL).strip())
-    hosts = {"back.tilion.dev"}
-    if configured.hostname:
-        hosts.add(configured.hostname.lower())
-    return hosts
 
 
 def is_tilion_cdp_url(cdp_url: str) -> bool:
@@ -51,32 +46,6 @@ def is_tilion_cdp_url(cdp_url: str) -> bool:
         and parsed.path.startswith("/v1/session/")
         and parsed.path.endswith("/cdp")
     )
-
-
-def redact_cdp_url(cdp_url: str) -> str:
-    """Log-safe CDP URL: secret query values (Tilion ``token``, Steel ``apiKey``) are masked."""
-    parsed = urlsplit(cdp_url or "")
-    if not parsed.query:
-        return cdp_url or ""
-    query = [
-        (key, "REDACTED" if key.lower() in _SECRET_QUERY_KEYS else value)
-        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
-    ]
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
-
-
-def redact_url_secrets(url: Optional[str]) -> Optional[str]:
-    """Mask the credential in a Tilion URL (live view / CDP ``?token=``) before
-    it is persisted or logged; other providers' URLs pass through unchanged
-    (their live views are displayed from the persisted URL).
-
-    The backend re-mints Tilion live-view URLs for display, so a persisted copy
-    never needs its token.
-    """
-    if not url:
-        return url
-    host = (urlsplit(url).hostname or "").lower()
-    return redact_cdp_url(url) if host in _tilion_hosts() else url
 
 
 async def open_browser_cdp_connection(

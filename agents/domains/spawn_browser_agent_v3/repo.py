@@ -13,7 +13,6 @@ from typing import Any, Dict, List, Optional
 import httpx
 import structlog
 
-from domains.spawn_browser_agent_v3.cdp_urls import redact_url_secrets
 from domains.spawn_browser_agent_v3.config import (
     EXTRACT_LLM_MAX_TOKENS,
     EXTRACT_LLM_MODEL,
@@ -30,6 +29,7 @@ from helpers.workflow_generation import (
 )
 from tools.base import MessageStatus
 from utils.error_utils import extract_error_message
+from utils.url_redaction import redact_url_secrets
 
 logger = structlog.get_logger()
 
