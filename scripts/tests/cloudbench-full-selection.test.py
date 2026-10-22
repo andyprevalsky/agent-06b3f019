@@ -39,20 +39,23 @@ class FullSelectionTests(unittest.TestCase):
         rows += [attempt("flaky", True, 1), attempt("flaky", False, 2), attempt("flaky", True, 3)]
         rows += [attempt("short-history", True, 1), attempt("short-history", True, 2)]
         self.attempts.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        # The sharded operator's cloud-root rule refuses rootless SMS tasks.
+        self.admitted = {"smoke-chat", "pay-shop", "flaky", "short-history", "local-gate", "unfinished", "prod-only"}
 
     def tearDown(self):
         self.tmp.cleanup()
 
     def select(self, free_slots, changed=(), runs=2):
         report = io.StringIO()
-        names = FULL["select_full"](self.catalog, self.attempts, runs, list(changed), lambda: free_slots, report)
+        names = FULL["select_full"](self.catalog, self.attempts, runs, list(changed), lambda: free_slots, report,
+                                    lambda: self.admitted)
         return names, report.getvalue()
 
     def test_selects_every_cloud_task_whose_last_three_runs_passed(self):
         names, report = self.select(1000)
-        self.assertEqual(sorted(names), ["pay-shop", "smoke-chat", "sms-open"])
-        self.assertIn("3 cloud task(s) passed their last 3 runs; k=2; capacity 3", report)
-        for excluded in ("local-gate", "unfinished", "prod-only"):
+        self.assertEqual(sorted(names), ["pay-shop", "smoke-chat"])
+        self.assertIn("2 cloud task(s) passed their last 3 runs; k=2; capacity 2", report)
+        for excluded in ("local-gate", "unfinished", "prod-only", "sms-open"):
             self.assertIn(excluded, report)
 
     def test_capacity_keeps_the_tasks_most_relevant_to_the_changes(self):
@@ -69,10 +72,10 @@ class FullSelectionTests(unittest.TestCase):
 
     def test_capacity_accounts_for_k_copies(self):
         coordinator = runpy.run_path(str(ROOT / "scripts/cloudbench-shard-coordinator.py"))
-        plan = coordinator["plan_shards"](["a", "b", "c"], 1)
+        plan = coordinator["plan_shards"](["a", "b"], 1)
         slots = coordinator["capacity_demand"](plan["copies"], plan["controllers"])
-        self.assertEqual(len(self.select(slots, runs=1)[0]), 3)
-        self.assertLess(len(self.select(slots, runs=2)[0]), 3)
+        self.assertEqual(len(self.select(slots, runs=1)[0]), 2)
+        self.assertLess(len(self.select(slots, runs=2)[0]), 2)
 
     def test_no_capacity_fails_closed(self):
         with self.assertRaises(SystemExit):

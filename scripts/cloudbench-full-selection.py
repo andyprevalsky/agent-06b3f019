@@ -2,7 +2,8 @@
 """Resolve `run-bench full`: every cloud benchmark whose last 3 runs passed, at k copies.
 
 Eligibility reuses the predeploy selector's cloud rules (ready status, not
-production-only, not local-only). History is every recorded attempt in the
+production-only, not local-only) and the sharded operator's own cloud-root
+manifest rule (no rootless SMS, Mac relay or unassigned phone tasks). History is every recorded attempt in the
 attempts ledger, newest last. When eligible tasks x k copies exceed the
 measured CLI capacity, the tasks most relevant to this branch's changes are
 kept: a task scores one point per changed file whose path triggers one of its
@@ -78,6 +79,16 @@ def max_tasks_within(free_slots: int, runs: int, tasks: Sequence[str], coordinat
     return best
 
 
+def operator_eligible(repo_root: Path = ROOT) -> set[str]:
+    """Names the sharded operator admits in a manifest (its `eligible_pool` cloud-root rule)."""
+    sys.path.insert(0, str(repo_root / "scripts"))
+    try:
+        sample = runpy.run_path(str(repo_root / "scripts/fleet_infra_sample.py"))
+        return set(sample["eligible_pool"](repo_root, None, require_cloud_root=True))
+    finally:
+        sys.path.remove(str(repo_root / "scripts"))
+
+
 def measure_free_slots(agents_env: Path) -> int:
     operator = runpy.run_path(str(ROOT / "scripts/run-original600-controller.py"))
     capture = runpy.run_path(str(ROOT / "scripts/cloudbench-original-volume-capture.py"))
@@ -102,12 +113,14 @@ def select_full(
     changed_files: Sequence[str],
     free_slots: Callable[[], int],
     report=sys.stderr,
+    admitted: Callable[[], set[str]] = operator_eligible,
 ) -> list[str]:
     spb = _predeploy()
     coordinator = runpy.run_path(str(ROOT / "scripts/cloudbench-shard-coordinator.py"))
     passed = last_runs_passed(attempts)
     tasks = spb.load_tasks(catalog)
-    eligible = [t for t in tasks if t.name in passed and spb._eligible(t, "cloud")]
+    allowed = admitted()
+    eligible = [t for t in tasks if t.name in passed and spb._eligible(t, "cloud") and t.name in allowed]
     excluded = sorted(passed - {t.name for t in eligible})
     order = {t.name: i for i, t in enumerate(tasks)}
     ranked = sorted(
@@ -124,7 +137,7 @@ def select_full(
         file=report,
     )
     if excluded:
-        print(f"FULL: not cloud-eligible (status/local-only/production-only): {', '.join(excluded)}", file=report)
+        print(f"FULL: not cloud-eligible (status/local-only/production-only/rootless): {', '.join(excluded)}", file=report)
     if len(selected) < len(names):
         print(
             f"FULL: capacity binds; kept the {len(selected)} most relevant to {len(changed_files)} changed file(s); "

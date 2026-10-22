@@ -3211,11 +3211,12 @@ class RunBenchShardedRouting(unittest.TestCase):
 
     def test_full_runs_last_three_pass_cloud_tasks_at_k2_all_at_once(self):
         catalog = json.loads((ROOT/'agents/benchmarks/tasks.json').read_text())
-        cloud = [t['name'] for t in catalog if t.get('status', 'ready') == 'ready'
-                 and not t.get('production_only') and 'local-only' not in (t.get('tags') or [])][:21]
         with self.checkout() as fx:
             (fx.root/'agents/benchmarks/select_predeploy_benches.py').write_bytes(
                 (ROOT/'agents/benchmarks/select_predeploy_benches.py').read_bytes())
+            admitted = runpy.run_path(str(fx.root/'scripts/cloudbench-full-selection.py'))['operator_eligible'](fx.root)
+            cloud = [t['name'] for t in catalog if t['name'] in admitted and not t.get('production_only')
+                     and 'local-only' not in (t.get('tags') or [])][:21]
             attempts = Path(fx.root.parent, 'attempts.jsonl')
             rows = [dict(task=name, passed=True, timestamp=f'2026-10-2{day}T00:00:00+00:00')
                     for name in cloud for day in (1, 2, 3)]
