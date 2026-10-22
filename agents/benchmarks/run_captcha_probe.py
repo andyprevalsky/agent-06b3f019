@@ -804,7 +804,7 @@ def _first_path(base: Path, value: Any) -> Optional[Path]:
 def assemble_entries(manifest_paths: Iterable[str], run_dir: Path) -> tuple:
     """Entries and copied stack receipts from lane manifests.
 
-    Manifest rows: {probe, agent_id, result_file, final_regrade_file?, original_run_result_file?,
+    A manifest is a list of rows (or {"entries": [rows]}); rows: {probe, agent_id, result_file, final_regrade_file?, original_run_result_file?,
     transcript_file? | substitute_transcript_file?, source_sha?, stack_run_id?, receipts?}.
     The verdict is the last verdict line of final_regrade_file (else result_file); agent id,
     duration and FE link come from the run's own result line; the time window from the transcript.
@@ -817,7 +817,8 @@ def assemble_entries(manifest_paths: Iterable[str], run_dir: Path) -> tuple:
         manifest = Path(manifest_path)
         base = manifest.parent
         lane = base.name
-        for row in json.loads(manifest.read_text()):
+        rows = json.loads(manifest.read_text())
+        for row in rows.get("entries", []) if isinstance(rows, dict) else rows:
             probe = str(row["probe"])
             verdict_file = _first_path(base, row.get("final_regrade_file")) or _first_path(base, row.get("result_file"))
             verdict = _last_verdict_line(verdict_file, probe) if verdict_file else None

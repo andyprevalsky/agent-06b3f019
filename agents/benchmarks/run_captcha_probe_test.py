@@ -483,6 +483,16 @@ def test_assemble_builds_one_scorecard_run_context_from_lane_evidence(tmp_path):
     assert (run_dir / "sources/F/stack-f/local-stack-cleanup.status").read_text() == "token=t\nstate=clean\n"
 
 
+def test_assemble_accepts_a_manifest_with_entries(tmp_path):
+    lane = tmp_path / "D"
+    _write(lane / "r.json", json.dumps({"probe": "proton-signup", "verdict": "FAILED_CAPTCHA", "agent_id": "1abb9bc3", "duration_s": 841.0}))
+    _write(lane / "manifest.json", {"entries": [{"probe": "proton-signup", "result_file": "r.json"}], "missing": []})
+    entries, stacks = probe_module.assemble_entries([str(lane / "manifest.json")], tmp_path / "out")
+    assert [(e["probe"], e["verdict"], e["agent_id"], e["provenance"]["lane"]) for e in entries] == [
+        ("proton-signup", "FAILED_CAPTCHA", "1abb9bc3", "D")]
+    assert stacks == []
+
+
 def test_assemble_rejects_a_manifest_row_without_a_recorded_verdict(tmp_path):
     lane = tmp_path / "A2"
     _write(lane / "x.out", "no json here\n")
