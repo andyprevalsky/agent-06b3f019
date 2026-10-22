@@ -256,6 +256,10 @@ Image builds:
 Selections:
   daily | pre-deploy | rose-bench | polar-bench | incomplete
   or one or more exact benchmark task names
+  full               Every cloud task whose last 3 recorded runs passed, at -k 2
+                     by default with all copies at once. When that exceeds the
+                     measured Fly capacity, keeps the tasks most relevant to
+                     this branch's changes (scripts/cloudbench-full-selection.py)
   stability-proof    Run random ready-catalog slices sequentially; ordinary
                      benchmark failures advance and any INFRA outcome aborts
 
@@ -339,6 +343,7 @@ EOF
 }
 
 RUNS=1
+RUNS_EXPLICIT=0
 CONCURRENCY=1
 CONCURRENCY_EXPLICIT=0
 RETRY_INFRA=0
@@ -355,10 +360,10 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         -k|--runs)
             [ "$#" -ge 2 ] || { echo "❌ $1 requires a positive integer" >&2; exit 2; }
-            RUNS="$2"; CAMPAIGN_REQUESTED=1; shift 2
+            RUNS="$2"; RUNS_EXPLICIT=1; CAMPAIGN_REQUESTED=1; shift 2
             ;;
         -k=*|--runs=*)
-            RUNS="${1#*=}"; CAMPAIGN_REQUESTED=1; shift
+            RUNS="${1#*=}"; RUNS_EXPLICIT=1; CAMPAIGN_REQUESTED=1; shift
             ;;
         --concurrency)
             [ "$#" -ge 2 ] || { echo "❌ --concurrency requires a positive integer" >&2; exit 2; }
@@ -479,11 +484,31 @@ fi
 [ "${#SELECTORS[@]}" -gt 0 ] || { usage >&2; exit 2; }
 
 CATALOG_PATH="${RUN_BENCH_CATALOG_UNDER_TEST:-$ROOT_DIR/agents/benchmarks/tasks.json}"
-RESOLVED_OUTPUT="$("$PY" -u "$ROOT_DIR/scripts/cloudbench_catalog.py" \
-    resolve "$CATALOG_PATH" "${SELECTORS[@]}")" || {
-    echo "❌ benchmark selection failed" >&2
-    exit 2
-}
+FULL_SELECTION=0
+for selector in "${SELECTORS[@]}"; do
+    [ "$selector" = full ] && FULL_SELECTION=1
+done
+if [ "$FULL_SELECTION" -eq 1 ]; then
+    [ "${#SELECTORS[@]}" -eq 1 ] || { echo "❌ full selects its own tasks; run it alone" >&2; exit 2; }
+    [ "$RUNS_EXPLICIT" -eq 1 ] || RUNS=2
+    CAMPAIGN_REQUESTED=1
+    if ! command -v flyctl >/dev/null 2>&1 && [ -x "$HOME/.fly/bin/flyctl" ]; then
+        export PATH="$HOME/.fly/bin:$PATH"
+    fi
+    FULL_ARGS=(--catalog "$CATALOG_PATH" --runs "$RUNS")
+    [ -z "${RUN_BENCH_FULL_FREE_SLOTS_UNDER_TEST:-}" ] || FULL_ARGS+=(--free-slots "$RUN_BENCH_FULL_FREE_SLOTS_UNDER_TEST")
+    [ -z "${RUN_BENCH_FULL_ATTEMPTS_UNDER_TEST:-}" ] || FULL_ARGS+=(--attempts "$RUN_BENCH_FULL_ATTEMPTS_UNDER_TEST")
+    RESOLVED_OUTPUT="$("$PY" -u "$ROOT_DIR/scripts/cloudbench-full-selection.py" "${FULL_ARGS[@]}")" || {
+        echo "❌ full benchmark selection failed" >&2
+        exit 2
+    }
+else
+    RESOLVED_OUTPUT="$("$PY" -u "$ROOT_DIR/scripts/cloudbench_catalog.py" \
+        resolve "$CATALOG_PATH" "${SELECTORS[@]}")" || {
+        echo "❌ benchmark selection failed" >&2
+        exit 2
+    }
+fi
 RESOLVED_TASKS=()
 while IFS= read -r task; do
     [ -n "$task" ] && RESOLVED_TASKS+=("$task")
@@ -492,6 +517,10 @@ done <<< "$RESOLVED_OUTPUT"
     echo "❌ benchmark selection resolved no tasks" >&2
     exit 2
 }
+# full runs every selected copy at once, so wide selections take the sharded route.
+if [ "$FULL_SELECTION" -eq 1 ] && [ "$CONCURRENCY_EXPLICIT" -eq 0 ]; then
+    CONCURRENCY=$(( ${#RESOLVED_TASKS[@]} * RUNS ))
+fi
 EXPLICIT_TIMEOUT=""
 for ((timeout_arg=0; timeout_arg<${#FLEET_ARGS[@]}; timeout_arg++)); do
     if [ "${FLEET_ARGS[$timeout_arg]}" = --timeout ]; then

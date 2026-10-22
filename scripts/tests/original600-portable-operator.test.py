@@ -3209,6 +3209,36 @@ class RunBenchShardedRouting(unittest.TestCase):
             self.assertIn('nothing was launched', result.stderr)
             fx.env.pop('OPERATOR_EXIT')
 
+    def test_full_runs_last_three_pass_cloud_tasks_at_k2_all_at_once(self):
+        catalog = json.loads((ROOT/'agents/benchmarks/tasks.json').read_text())
+        cloud = [t['name'] for t in catalog if t.get('status', 'ready') == 'ready'
+                 and not t.get('production_only') and 'local-only' not in (t.get('tags') or [])][:21]
+        with self.checkout() as fx:
+            (fx.root/'agents/benchmarks/select_predeploy_benches.py').write_bytes(
+                (ROOT/'agents/benchmarks/select_predeploy_benches.py').read_bytes())
+            attempts = Path(fx.root.parent, 'attempts.jsonl')
+            rows = [dict(task=name, passed=True, timestamp=f'2026-10-2{day}T00:00:00+00:00')
+                    for name in cloud for day in (1, 2, 3)]
+            rows.append(dict(task=cloud[-1], passed=False, timestamp='2026-10-24T00:00:00+00:00'))
+            attempts.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+            fx.env.update(RUN_BENCH_FULL_ATTEMPTS_UNDER_TEST=str(attempts), RUN_BENCH_FULL_FREE_SLOTS_UNDER_TEST='1000')
+            result, ops, fleets = fx.run('full', '--check')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((len(ops), fleets), (1, []))
+            self.assertEqual(self.option(ops[0], '--repetitions'), '2')
+            self.assertEqual(self.option(ops[0], '--label'), 'full')
+            self.assertEqual(sorted(json.loads(fx.manifest.read_text())), sorted(cloud[:-1]))
+            self.assertIn('FULL: 20 cloud task(s) passed their last 3 runs; k=2', result.stderr)
+            self.assertIn('sharded controller operator: 40 simultaneous copies exceed', result.stdout)
+
+            fx.env['RUN_BENCH_FULL_FREE_SLOTS_UNDER_TEST'] = '0'
+            result, ops, _ = fx.run('full', '--check')
+            self.assertEqual((result.returncode, ops), (2, []))
+            self.assertIn('full benchmark selection failed', result.stderr)
+            result, ops, _ = fx.run('full', cloud[0], '--check')
+            self.assertEqual((result.returncode, ops), (2, []))
+            self.assertIn('full selects its own tasks; run it alone', result.stderr)
+
     def test_wide_runs_select_ordinary_catalog_eligibility_and_live_acceptance_opts_in(self):
         names = ['raise-5m-rose-labs-brex'] + polar_names(7)
         with self.checkout() as fx:

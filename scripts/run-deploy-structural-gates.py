@@ -109,6 +109,10 @@ GATES = (
         ("python3", "scripts/tests/benchmark-history-latest-only.test.py"),
     ),
     Gate(
+        "cloudbench-full-selection",
+        ("python3", "scripts/tests/cloudbench-full-selection.test.py"),
+    ),
+    Gate(
         "live-agent-display",
         ("python3", "-m", "unittest", "discover", "-s", "scripts/live_display", "-p", "test_*.py"),
     ),
