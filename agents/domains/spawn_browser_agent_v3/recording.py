@@ -33,9 +33,9 @@ import httpx
 import structlog
 
 import helpers.trace_archive as trace_archive
-from domains.spawn_browser_agent_v3.cdp_urls import redact_url_secrets
 from helpers.trace_archive import archive_bytes, archive_enabled, archive_files
 from helpers.tracing import current_root_agent_id
+from utils.url_redaction import redact_url_secrets
 
 logger = structlog.get_logger()
 
