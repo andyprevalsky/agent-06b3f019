@@ -4096,7 +4096,29 @@ def record(line):
     return text
 
 
-record(sys.stdin.readline())
+def read_user_line():
+    # Next user-message line; native settings control requests are answered like the real CLI.
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            return line
+        if not line.strip():
+            continue
+        incoming = json.loads(line)
+        if incoming.get("type") != "control_request":
+            return line
+        subtype = incoming["request"]["subtype"]
+        models = []
+        if subtype == "initialize":
+            models = [{"value": sys.argv[sys.argv.index("--model") + 1] if "--model" in sys.argv else "stub",
+                       "supportedEffortLevels": [], "supportsFastMode": False}]
+        emit({"type": "control_response",
+              "response": {"request_id": incoming["request_id"],
+                           "subtype": "success" if subtype in ("initialize", "apply_flag_settings", "set_model") else "error",
+                           "response": {"models": models} if subtype == "initialize" else {}}})
+
+
+record(read_user_line())
 
 
 def wait_for(name):
@@ -4113,7 +4135,7 @@ wait_for("exit")
 emit({"type": "result", "subtype": "success", "result": "answer is 42", "usage": {}})
 # Later turns (direct chat / agent-graph messages): answer each, exit on EOF.
 while True:
-    line = sys.stdin.readline()
+    line = read_user_line()
     if not line:
         break
     text = record(line)
