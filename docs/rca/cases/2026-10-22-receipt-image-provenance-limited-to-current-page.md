@@ -18,6 +18,7 @@ tags:
   - purchase-approval
   - checkout
 sources:
+  - agent fe68bf12-2a1e-4b85-bf57-d67322480225
   - agent 2cf378ca-0771-4d46-b3ca-a89582d9a85e
   - commit 4ee9390b9
 repro: test_receipt_image_rendered_on_an_earlier_page_of_the_activity_validates (handed to lane C for agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py)
@@ -66,6 +67,22 @@ DOMService; no shared state. A resumed activity starts empty, which is the old,
 stricter behaviour. The model-visible error text still says "current page";
 changing it is an approval-gated text edit, queued. Outcome gate (exact
 benchmark) pending; status stays open until it passes.
+
+### 2026-10-22 recurrence: provenance lost on a session switch
+
+The first fix (activity-wide memory on the DOMService) held within one browser
+session but not across a switch. Agent fe68bf12 (af169f352): the event page
+rendered the seetickets `edits:{}` image on the residential Tilion session
+(~00:49:52-00:50:09); challenge recovery promoted a tilion_direct session at
+00:53:26; `request_payment_card` ran at 00:54:55 on checkout. The model had copied
+the URL from a `read_network_requests` result. `_reconnect_browser_stack_after_rotation`
+(used by rotate_ip and challenge recovery) builds a new DOMService and copies only
+the secret-redaction state, so the remembered images were dropped. Fix sent to
+lane C: `DOMService.rendered_image_state()` / `restore_rendered_image_state()`
+(same 400 cap), and the rebind carries them. Regression through the real rebind
+fails on af169f352 with the production error and passes 5/5 patched. Separate gap
+found locally: the tracker reads browser-use's pruned snapshot tree, so `<img>`s
+far below the viewport are not recorded (9 of 12 on the eventim listing page).
 
 ## Human feedback
 
