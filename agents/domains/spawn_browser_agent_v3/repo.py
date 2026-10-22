@@ -826,7 +826,9 @@ async def create_user_auth_assistance_request(
         "authRealm": auth_realm,
         "browserSessionId": browser_session_id,
         "steelSessionId": steel_session_id,
-        "browserUrl": browser_url,
+        # Tilion: the backend mints the handoff live view server-side (A2), so
+        # the worker never sends the live-view token.
+        "browserUrl": redact_url_secrets(browser_url),
         "currentUrl": current_url,
         "mode": mode,
     }

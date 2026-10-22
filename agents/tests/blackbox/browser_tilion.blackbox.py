@@ -1406,6 +1406,40 @@ async def test_tilion_live_view_token_is_redacted_before_persisting():
         assert posted and posted[0]["metadata"]["browser_url"] == redact_url_secrets(live_view)
         assert TILION_TOKEN not in json.dumps(posted)
 
+        # Auth-assistance handoff: the backend mints the live view (A2 6ee00fe4e).
+        from types import SimpleNamespace
+
+        handoffs: List[Dict[str, Any]] = []
+
+        class _AsyncClient:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc):
+                return False
+
+            async def post(self, url, *, headers, json):
+                handoffs.append(json)
+                return httpx.Response(201, json={"id": "aa-1"})
+
+        config = SimpleNamespace(backend=SimpleNamespace(api_url="http://backend", api_key="k"))
+        with patch.object(repo.httpx, "AsyncClient", _AsyncClient):
+            await repo.create_user_auth_assistance_request(
+                config,
+                agent_id="agent-1",
+                user_id="user-1",
+                auth_realm="example.com",
+                browser_session_id="task-1",
+                steel_session_id=TILION_SESSION,
+                browser_url=live_view,
+                current_url="https://example.com/login",
+            )
+        assert handoffs[0]["browserUrl"] == redact_url_secrets(live_view)
+        assert TILION_TOKEN not in json.dumps(handoffs)
+
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[2] / "domains/spawn_browser_agent_v3"
