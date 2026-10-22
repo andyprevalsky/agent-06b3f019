@@ -44,7 +44,14 @@ agent clicks and calls done, and fails when it tries to confirm the download fir
 Local repro (real Chromium behind the real mux, provider tilion, real DOMService and
 BrowserDownloadPersister, Playwright clicks a local download link): the ledger holds
 `rs.png` (1108 bytes) while the formatted browser state the agent reads does not list it.
-Not yet confirmed: a passing Kernel trajectory from lane F showing the agent just calls done.
+Run evidence (lane F, agent 85ec29b8): the download click's tool result was
+`{"success":true,"message":"","action_step":14}`; the step context had no downloads section
+and no `tilion-download` path; `chrome://downloads/` was refused at 01:12:42 with
+"Refusing unsafe navigation ... only public HTTP(S) pages may be opened"; the file had been
+persisted and uploaded (149852 bytes) at 01:11:28. Kernel history for this task is 1/4 passes
+(2026-08-20, no transcripts), consistent with a provider-neutral gap. Side finding: each
+download was materialised and uploaded twice (two `Materialized` lines per guid), because the
+guid dedupe key is added only after the awaits, so near-simultaneous events race.
 
 ## Solution
 
