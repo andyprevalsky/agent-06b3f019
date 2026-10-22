@@ -32,7 +32,10 @@ export const TILION_DEFAULT_ENV = {
   BROWSER_AGENT_TILION_ENABLED: undefined,
   BROWSER_AGENT_BROWSER_USE_ENABLED: undefined,
   TILION_API_KEY: 'fake-tilion-key',
+  TILION_MOBILE_ENABLED: undefined,
 };
+// Tilion mobile is off by default (not served on our account); its promoted path behind the flag.
+export const TILION_MOBILE_ENV = { ...TILION_DEFAULT_ENV, TILION_MOBILE_ENABLED: 'true' };
 
 export async function seedRun(provider: string, proxyTier: string | null = null) {
   // Direct fixture rows: these cases exercise provider persistence, not HTTP auth.

@@ -20,12 +20,7 @@ const srcDir = path.resolve(__dirname, '../..');
  * Reviewed files whose provider comparisons only special-case other providers
  * while Tilion takes a correct provider-generic path. Each needs a reason.
  */
-const REVIEWED_GENERIC: ReadonlyMap<string, string> = new Map([
-  [
-    'providers/browserSessionResume.ts',
-    'rotation messages: Steel/Browser Use have bespoke copy; Tilion uses PROVIDER_DISPLAY_NAMES',
-  ],
-]);
+const REVIEWED_GENERIC: ReadonlyMap<string, string> = new Map<string, string>([]);
 
 const COMPARISON =
   /[pP]rovider\)?\s*[!=]==\s*'(browser-use|kernel|steel)'|'(browser-use|kernel|steel)'\s*[!=]==\s*[\w.]*[pP]rovider\b/g;

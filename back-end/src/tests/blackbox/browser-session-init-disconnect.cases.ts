@@ -311,15 +311,21 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
         if (scenario === 'close-failure') throw new Error('fixture provider close unavailable');
       };
       // An unrelated native request must not satisfy this scenario's close observation.
-      await observed(new Promise<void>((resolve, reject) => {
-        const unrelated = httpRequest({ hostname: '127.0.0.1', port: address.port, path: '/', method: 'HEAD' }, (response) => {
-          response.resume();
-          response.once('end', resolve);
-          response.once('error', reject);
-        });
-        unrelated.once('error', reject);
-        unrelated.end();
-      }), 'unrelated-head');
+      await observed(
+        new Promise<void>((resolve, reject) => {
+          const unrelated = httpRequest(
+            { hostname: '127.0.0.1', port: address.port, path: '/', method: 'HEAD' },
+            (response) => {
+              response.resume();
+              response.once('end', resolve);
+              response.once('error', reject);
+            }
+          );
+          unrelated.once('error', reject);
+          unrelated.end();
+        }),
+        'unrelated-head'
+      );
       const client = httpRequest({
         hostname: '127.0.0.1',
         port: address.port,

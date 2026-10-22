@@ -1,3 +1,4 @@
+import { tilionMobileEnabled } from './rotation';
 import type { ProxyGeoLocation } from '../geoip';
 import type { KernelRecoveryProxySpecificity } from './kernel';
 import type { KernelProxyType } from './kernelProxy';
@@ -140,7 +141,7 @@ export function recoverySearchPlan(options: {
  *
  * Probe order (sequential within each cookie lane):
  *   steel_fixed → kernel_mobile → kernel residential → steel_managed → kernel_isp
- *   → tilion_residential → tilion_mobile → tilion_direct
+ *   → tilion_residential → tilion_mobile (only with TILION_MOBILE_ENABLED) → tilion_direct
  *
  * Residential is one geo tier: city and state when available, else country.
  * Prefer-Steel (payment CDN) keeps this relative order among Steel entries only.
@@ -260,6 +261,8 @@ export function availableBrowserRecoveryCandidates(
   return browserRecoveryCandidates(location, options).filter(
     (candidate) =>
       (candidate.provider !== 'browser-use' || browserUseReady) &&
-      (candidate.provider !== 'tilion' || tilionReady)
+      (candidate.provider !== 'tilion' || tilionReady) &&
+      // Tilion mobile is not served on our account (409 proxy_type_unavailable).
+      (candidate.key !== 'tilion_mobile' || tilionMobileEnabled())
   );
 }
