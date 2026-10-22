@@ -661,11 +661,12 @@ async def test_context_overflow_keeps_in_flight_background_browser_running_and_n
         assert len(_notifications(harness)) == 1
 
 
-async def test_agent_rows_are_never_user_feedback():
+async def test_agent_rows_are_user_feedback_only_from_ancestors():
+    """Agent rows are never user instructions; a parent's task update still refreshes the output schema."""
     from helpers.background_agents import model_agent_row_text
     from helpers.llm import convert_context_to_messages
     from loop.dag_executor import latest_real_user_instruction
-    from loop.run_agent import _real_user_requirement_keys
+    from loop.run_agent import _real_user_requirement_keys, _requirement_keys
 
     agent_message = {
         "role": "USER",
@@ -689,6 +690,7 @@ async def test_agent_rows_are_never_user_feedback():
         "timestamp": (_BASE + timedelta(seconds=1)).isoformat(),
     }
     assert _real_user_requirement_keys([agent_message, notification]) == set()
+    assert _requirement_keys([agent_message, notification]) == {("id", "m-1")}, "only the parent's update"
     assert latest_real_user_instruction([agent_message, notification]) is None
     rendered = convert_context_to_messages([agent_message])
     assert rendered[-1] == {
@@ -717,7 +719,10 @@ async def test_agent_rows_are_never_user_feedback():
         assert wf._response_schema_feedback == []
         wf.context = [agent_message, notification]
         wf._admit_durable_response_schema_feedback()
-        assert wf._response_schema_feedback == [] and wf._response_schema_revision == revision
+        assert wf._response_schema_feedback == ["Use the Shinjuku hotel instead."], wf._response_schema_feedback
+        assert wf._response_schema_revision == revision + 1
+        wf._admit_durable_response_schema_feedback()  # admitted once
+        assert wf._response_schema_revision == revision + 1
 
 
 async def test_foreground_paths_never_background():
@@ -2268,7 +2273,9 @@ async def run_all_tests():
         "context_overflow_keeps_background_browser_running",
         test_context_overflow_keeps_in_flight_background_browser_running_and_notifies_once,
     )
-    await r.record_async("agent_rows_never_user_feedback", test_agent_rows_are_never_user_feedback)
+    await r.record_async(
+        "agent_rows_feedback_only_from_ancestors", test_agent_rows_are_user_feedback_only_from_ancestors
+    )
     await r.record_async("foreground_paths_never_background", test_foreground_paths_never_background)
     await r.record_async(
         "dag_planned_spawn_background_dependent_sees_result",

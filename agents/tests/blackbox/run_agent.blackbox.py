@@ -1384,10 +1384,10 @@ async def test_parent_agent_task_update_supersedes_verdict_but_other_agent_rows_
     The verifier treats an ancestor's agentMessage as a later requirement. One
     that lands while check_progress runs was not judged, so the verdict must be
     superseded. Sibling chatter, child notifications and task-addressed inbox rows
-    are not requirements for this agent; they keep the verdict. Response-schema
-    feedback still never counts agent rows (_real_user_requirement_keys).
+    are not requirements for this agent; they keep the verdict. The same rows are
+    response-schema feedback (_requirement_keys); user-only keys exclude them.
     """
-    from loop.run_agent import _real_user_requirement_keys, _run_verifier
+    from loop.run_agent import _real_user_requirement_keys, _requirement_keys, _run_verifier
 
     def agent_row(row_id, metadata):
         return {
@@ -1469,7 +1469,95 @@ async def test_parent_agent_task_update_supersedes_verdict_but_other_agent_rows_
         poll_messages=AsyncMock(return_value=[dict(parent_update)]),
     )
     assert judged.get("superseded_by_user_feedback") is not True, judged
-    assert _real_user_requirement_keys([parent_update]) == set(), "agent rows are never response-schema feedback"
+    assert _real_user_requirement_keys([parent_update]) == set(), "user-only keys exclude agent rows"
+    assert _requirement_keys([parent_update]) == {("id", "parent-update")}, "a parent's task update is a requirement"
+    for name, arriving, expect_requirement in cases:
+        assert bool(_requirement_keys([arriving])) is expect_requirement, name
+
+
+class _FakeInterrupts:
+    """The workflow's DAG interrupt hook: wake counter + user/agent-message filter."""
+
+    def __init__(self):
+        self._seq = 0
+        self._changed = asyncio.Event()
+        self.pending = False
+
+    def seq(self):
+        return self._seq
+
+    async def wait(self, seq):
+        while self._seq == seq:
+            self._changed.clear()
+            await self._changed.wait()
+
+    def message_pending(self):
+        return self.pending
+
+    def wake(self, *, message: bool):
+        self.pending = self.pending or message
+        self._seq += 1
+        self._changed.set()
+
+
+async def test_verifier_is_interrupted_by_a_new_user_or_agent_message():
+    """A user/agent message cancels the running check; other wakes (child completions) do not."""
+    from loop.run_agent import VERIFIER_INTERRUPTED_MESSAGE, _run_verifier
+
+    def verifier_kwargs(execute, posts, interrupts):
+        async def post(text, role, metadata):
+            posts.append((text, role, metadata))
+
+        return dict(
+            execute_activity=execute,
+            context=[{"id": "goal", "role": "USER", "text": "Book a Tokyo hotel", "timestamp": "2026-10-22T10:00:00Z"}],
+            verifier_prompt_generator=AsyncMock(return_value="Verify the booking"),
+            model="test-model",
+            agent_id="agent-hotels",
+            task_id=None,
+            post_message=post,
+            tool_call_id="toolu_done",
+            interrupts=interrupts,
+        )
+
+    # A message mid-check: the activity is cancelled and the attempt closes as superseded.
+    interrupts, posts, started, cancelled = _FakeInterrupts(), [], asyncio.Event(), []
+
+    async def slow_check(_activity, **_kwargs):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    running = asyncio.create_task(_run_verifier(**verifier_kwargs(slow_check, posts, interrupts)))
+    await asyncio.wait_for(started.wait(), 1)
+    interrupts.wake(message=False)  # a child completed: not new input, keep verifying
+    await asyncio.sleep(0.01)
+    assert not running.done() and not cancelled
+    interrupts.wake(message=True)
+    result = await asyncio.wait_for(running, 1)
+    assert cancelled == [True], "the verifier activity is cancelled"
+    assert result["superseded_by_user_feedback"] is True and result["interrupted_by_message"] is True, result
+    assert result["score"] == 0.0 and result["usage"] == {}, result
+    finished = [m for _t, _r, m in posts if m["toolStatus"] == "FINISHED"]
+    assert len(finished) == 1 and finished[0]["toolCallId"] == "toolu_done", posts
+    assert finished[0]["interrupted"] is True and finished[0]["supersededByUserFeedback"] is True
+    assert posts[-1][0] == VERIFIER_INTERRUPTED_MESSAGE
+
+    # A message already pending: the check never starts.
+    interrupts, posts = _FakeInterrupts(), []
+    interrupts.pending = True
+    never = AsyncMock(side_effect=AssertionError("verifier must not start"))
+    result = await _run_verifier(**verifier_kwargs(never, posts, interrupts))
+    assert result["interrupted_by_message"] is True and never.await_count == 0
+
+    # No new input: the verdict is returned unchanged.
+    interrupts, posts = _FakeInterrupts(), []
+    done = AsyncMock(return_value={"score": 1.0, "reasoning": "Hotel booked", "usage": {}})
+    result = await _run_verifier(**verifier_kwargs(done, posts, interrupts))
+    assert result["score"] == 1.0 and not result.get("interrupted_by_message"), result
 
 
 async def test_keyed_feedback_revision_supersedes_verdict_without_user_row():
@@ -4063,6 +4151,10 @@ async def run_all_tests():
     await r.record_async(
         "parent_agent_task_update_supersedes_verdict",
         test_parent_agent_task_update_supersedes_verdict_but_other_agent_rows_do_not,
+    )
+    await r.record_async(
+        "verifier_interrupted_by_new_message",
+        test_verifier_is_interrupted_by_a_new_user_or_agent_message,
     )
     await r.record_async(
         "keyed_feedback_revision_versions_verdict", test_keyed_feedback_revision_supersedes_verdict_without_user_row

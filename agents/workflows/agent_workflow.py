@@ -98,7 +98,9 @@ with workflow.unsafe.imports_passed_through():
         plan_superseded_by_new_user_instruction,
     )
     from loop.run_agent import (
+        _is_requirement_agent_row,
         _real_user_requirement_keys,
+        _requirement_keys,
         _run_verifier,
         _verifier_superseded_by_user_feedback,
         run_agent,
@@ -1621,7 +1623,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             return
         self._response_schema_task_base = messages[latest_index]["text"]
         for message in messages[: latest_index + 1]:
-            keys = _real_user_requirement_keys([message])
+            keys = _requirement_keys([message])
             self._response_schema_task_baseline_rows.update(keys)
             self._response_schema_feedback_rows.update(keys)
             event_id = self._response_schema_attention_event_id(message)
@@ -1638,7 +1640,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     self._response_schema_feedback_rows.update(_real_user_requirement_keys([first_user]))
                 self._response_schema_baseline_initialized = True
         for message in messages:
-            keys = _real_user_requirement_keys([message])
+            keys = _requirement_keys([message])
             if not keys or not isinstance(message.get("text"), str):
                 continue
             event_id = self._response_schema_attention_event_id(message)
@@ -1658,10 +1660,10 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 del self._response_schema_pending_signals[text]
 
     def _admit_durable_response_schema_feedback(self) -> None:
-        """Queue real USER rows once, including rows polled before their signal."""
+        """Queue requirement rows once (real USER rows and ancestor task updates), including rows polled before their signal."""
         self._bind_response_schema_feedback_rows(self.context)
         for message in self.context:
-            keys = _real_user_requirement_keys([message])
+            keys = _requirement_keys([message])
             text = message.get("text")
             event_id = self._response_schema_attention_event_id(message)
             if (
@@ -2856,6 +2858,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 fast_mode_cache_enabled=self.fast_mode_cache_enabled,
                 fast_mode_goal=self.fast_cache_goal,
                 fast_mode_step=0,
+                interrupts=self._dag_hooks(),
             )
 
             # Route verifier cost through _on_tokens so this LLM call doesn't
@@ -3007,7 +3010,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 continue
             if (message.get("metadata") or {}).get("hidden"):
                 continue
-            if is_agent_authored_user_metadata(message.get("metadata")):
+            # A task update from an ancestor agent changes requirements like a user correction.
+            if is_agent_authored_user_metadata(message.get("metadata")) and not _is_requirement_agent_row(message):
                 continue
             text = message.get("text")
             if not isinstance(text, str) or not text.strip():
@@ -3560,6 +3564,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 }
             run_agent_kwargs["get_requirement_revision"] = lambda: self._response_schema_revision
             run_agent_kwargs["get_pending_background_status"] = self._pending_background_status_text
+            run_agent_kwargs["verifier_interrupts"] = self._dag_hooks()
             run_agent_kwargs["sync_environment_context"] = self._sync_environment_context
             run_agent_kwargs["get_environment_tail"] = self._environment_tail_seed
             self._relaunch_background_tasks()

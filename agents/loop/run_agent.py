@@ -200,6 +200,9 @@ async def run_agent(
     # Factual status of this agent's still-running background agents, appended
     # to the completion verifier's evidence (None when nothing is pending).
     get_pending_background_status: Optional[Callable[[], Optional[str]]] = None,
+    # The workflow's DAG interrupt hook: a user / agent message cancels a running
+    # attempt_completion verifier (None: verify to the end).
+    verifier_interrupts: Optional[Any] = None,
     # Environment context (helpers/environment_context.py). Before each turn's
     # poll: append the persisted <environment> row when it differs from the last
     # one in ``context`` (the poll then loads it). Per LLM call: the seed for the
@@ -2304,6 +2307,7 @@ async def run_agent(
                             get_pending_background_status() if get_pending_background_status else None
                         ),
                         authored_result=(tool_args.get("result") if isinstance(tool_args, dict) else None),
+                        interrupts=verifier_interrupts,
                     )
                 except Exception as error:
                     if any(
@@ -2830,33 +2834,35 @@ def _real_user_requirement_keys(context: List[Dict]) -> set:
     return keys
 
 
-def _verifier_requirement_keys(context: List[Dict]) -> set:
-    """Rows that can change what the verifier judges against.
+def _is_requirement_agent_row(message: Dict) -> bool:
+    """A task update from an agent above this one that this agent's model sees.
 
-    Real user rows plus task updates from an ancestor agent: the verifier reads
-    those as ``TASK_UPDATE_FROM_PARENT_AGENT`` lines that change requirements
-    (helpers.llm). Response-schema feedback stays ``_real_user_requirement_keys``
-    (agent rows are never user feedback); sibling chatter, child notifications
-    and task-addressed inbox rows are not requirements for this agent.
+    The verifier reads it as ``TASK_UPDATE_FROM_PARENT_AGENT`` (helpers.llm) and
+    it refreshes the output schema like a user correction. Sibling chatter,
+    child notifications and task-addressed inbox rows are not requirements.
     """
+    metadata = message.get("metadata") or {}
+    return (
+        (message.get("role") or "").upper() == "USER"
+        and isinstance(metadata, dict)
+        and not metadata.get("hidden")
+        and metadata.get("agentMessage") is True
+        and not is_excluded_from_model(message)
+        and _is_from_ancestor_agent(metadata)
+    )
+
+
+def _requirement_keys(context: List[Dict]) -> set:
+    """Rows that change what this agent must deliver: real user rows plus ancestor task updates."""
     keys = _real_user_requirement_keys(context)
     for message in context:
-        metadata = message.get("metadata") or {}
-        if (
-            (message.get("role") or "").upper() != "USER"
-            or not isinstance(metadata, dict)
-            or metadata.get("hidden")
-            or metadata.get("agentMessage") is not True
-            or is_excluded_from_model(message)
-            or not _is_from_ancestor_agent(metadata)
-        ):
-            continue
-        message_id = message.get("message_id") or message.get("id")
-        keys.add(
-            ("parent_agent_message", str(message_id))
-            if message_id
-            else ("parent_agent_message", str(message.get("timestamp") or ""), str(message.get("text") or ""))
-        )
+        if _is_requirement_agent_row(message):
+            message_id = message.get("message_id") or message.get("id")
+            keys.add(
+                ("id", str(message_id))
+                if message_id
+                else ("legacy", str(message.get("timestamp") or ""), str(message.get("text") or ""))
+            )
     return keys
 
 
@@ -2865,7 +2871,7 @@ def _verifier_superseded_by_user_feedback(
 ) -> bool:
     """Version the verdict without rewriting the provider's judgment or usage."""
     judged_keys = result.get("_verified_user_requirement_keys")
-    if judged_keys is not None and (_verifier_requirement_keys(context) - set(map(tuple, judged_keys))):
+    if judged_keys is not None and (_requirement_keys(context) - set(map(tuple, judged_keys))):
         result["superseded_by_user_feedback"] = True
     judged_revision = result.get("_verified_requirement_revision")
     if judged_revision is not None and requirement_revision is not None and judged_revision != requirement_revision:
@@ -2899,6 +2905,49 @@ def _with_authored_result(context: List[Dict], authored_result: Optional[str], c
     ]
 
 
+# Model-visible result of an attempt_completion whose check a new message cancelled.
+VERIFIER_INTERRUPTED_MESSAGE = (
+    "Verification interrupted: a new message arrived. Read it, then call attempt_completion again "
+    "when the task is done."
+)
+
+
+class _VerifierInterrupted(Exception):
+    """A user or agent message arrived while the verifier was judging."""
+
+
+async def _await_unless_new_message(awaitable: Awaitable[Any], interrupts: Optional[Any]) -> Any:
+    """Await ``awaitable``; cancel it when a user / agent message arrives.
+
+    ``interrupts`` is the workflow's DAG interrupt hook (loop.dag_executor.DagInterrupts):
+    the same wake counter and user/agent-message filter that hand a running plan
+    back to the loop. None (explore activities, Fast Mode, simulate) waits normally.
+    """
+    if interrupts is None:
+        return await awaitable
+    if interrupts.message_pending():
+        if asyncio.iscoroutine(awaitable):
+            awaitable.close()
+        raise _VerifierInterrupted()
+    task = asyncio.ensure_future(awaitable)
+    waiter: Optional["asyncio.Future[Any]"] = None
+    try:
+        seq = interrupts.seq()
+        while True:
+            waiter = asyncio.ensure_future(interrupts.wait(seq))
+            done, _ = await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+            if task in done:
+                return task.result()
+            seq = interrupts.seq()
+            if interrupts.message_pending():
+                raise _VerifierInterrupted()
+    finally:
+        for pending in (waiter, task):
+            if pending is not None and not pending.done():
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+
+
 async def _run_verifier(
     execute_activity,
     context: List[Dict],
@@ -2929,8 +2978,13 @@ async def _run_verifier(
     get_requirement_revision: Optional[Callable[[], int]] = None,
     pending_background_status: Optional[str] = None,
     authored_result: Optional[str] = None,
+    interrupts: Optional[Any] = None,
 ) -> Dict:
-    """Run verifier to check completion."""
+    """Run verifier to check completion.
+
+    With ``interrupts`` a user or agent message arriving mid-verification cancels
+    the check: the attempt is closed as superseded and the caller continues.
+    """
     verifier_call_id = tool_call_id or str(_safe_uuid4())
 
     # Post IN_PROGRESS
@@ -3000,7 +3054,7 @@ async def _run_verifier(
                     error=extract_error_message(post_error),
                 )
         raise
-    judged_user_keys = _verifier_requirement_keys(context)
+    judged_user_keys = _requirement_keys(context)
     verification_cursor = datetime.fromtimestamp(0, tz=timezone.utc)
     for message in context:
         try:
@@ -3049,12 +3103,48 @@ async def _run_verifier(
         # Appended only when background agents are still running, so every
         # other verifier call keeps its exact arguments and cached prefix.
         check_progress_args.append(pending_background_status)
-    result = await execute_activity(
-        check_progress,
-        args=check_progress_args,
-        start_to_close_timeout=timedelta(seconds=VERIFIER_ACTIVITY_TIMEOUT_SECONDS),
-        retry_policy=RetryPolicy(maximum_attempts=3),
-    )
+    try:
+        result = await _await_unless_new_message(
+            execute_activity(
+                check_progress,
+                args=check_progress_args,
+                start_to_close_timeout=timedelta(seconds=VERIFIER_ACTIVITY_TIMEOUT_SECONDS),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            ),
+            interrupts,
+        )
+    except _VerifierInterrupted:
+        logger.info(
+            "Verifier interrupted by a new user/agent message", agent_id=agent_id, tool_call_id=verifier_call_id
+        )
+        if post_message:
+            await post_message(
+                VERIFIER_INTERRUPTED_MESSAGE,
+                "TOOL",
+                {
+                    "toolCallId": verifier_call_id,
+                    "toolName": "attempt_completion",
+                    "toolStatus": "FINISHED",
+                    "title": "⚖️ Verification interrupted by a new message",
+                    "subAgentId": task_id,
+                    "verifierMessage": True,
+                    "supersededByUserFeedback": True,
+                    "interrupted": True,
+                },
+            )
+        if poll_messages:
+            await poll_and_update_context(poll_messages, context, verification_cursor)
+        return {
+            "score": 0.0,
+            "reasoning": VERIFIER_INTERRUPTED_MESSAGE,
+            "usage": {},
+            "structured_response": None,
+            "superseded_by_user_feedback": True,
+            "interrupted_by_message": True,
+            "_verified_user_requirement_keys": sorted(judged_user_keys),
+            "_verified_requirement_revision": judged_revision,
+            "resolved_response_schema": current_response_schema,
+        }
 
     result["_verified_user_requirement_keys"] = sorted(judged_user_keys)
     result["_verified_requirement_revision"] = judged_revision
