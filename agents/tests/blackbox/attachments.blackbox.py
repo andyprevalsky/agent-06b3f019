@@ -729,9 +729,304 @@ async def test_parent_attachment_success_preserves_metadata_and_logs():
             assert pointer["original_filename"] not in str(vars(records[0]))
 
 
+async def test_build_llm_messages_bounds_materialized_text_attachments():
+    """Large and aggregate-small attachments must not overflow the model window."""
+    from helpers.attachments import _file_cache
+    from helpers.llm import build_llm_messages
+    from helpers.model_info import _DEFAULT_CONTEXT_WINDOW
+    from helpers.summarize import estimate_context_tokens
+    import json
+
+    # UTF-8 serialized bytes conservatively upper-bound byte-token input cost.
+    # The request also reserves the existing maximum 32768-token escalation and
+    # 13000-token protocol/compaction buffer; these are not actual token counts.
+    maximum_input_tokens = _DEFAULT_CONTEXT_WINDOW - 32768 - 13000
+    for sizes in ((411514, 2108794, 973978), (80000, 80000, 80000)):
+        _clear_cache()
+        context = [{"role": "USER", "text": "Compare the attached company data."}]
+        pointers = []
+        try:
+            for index, size in enumerate(sizes):
+                filename = f"companies-{index}.json"
+                pointer = {
+                    "id": f"bounded-{index}", "storage_path": f"fixture/{filename}",
+                    "original_filename": filename, "mime_type": "application/json",
+                    "size_bytes": size, "created_at": "2026-10-17T00:00:00Z",
+                }
+                body = b'{"companies":[' + b"0," * ((size - 18) // 2) + b"0]}"
+                pointers.append(pointer)
+                _file_cache[pointer["id"]] = (body, {})
+                context.append({"role": "USER", "text": "", "file_pointer": pointer})
+            assert estimate_context_tokens(context) < 1000
+            with patch("helpers.attachments.get_file_content", side_effect=AssertionError("Network forbidden")):
+                messages = await build_llm_messages(
+                    context, "Compare company data using available files.",
+                    pre_resolved_ids={pointer["id"] for pointer in pointers},
+                )
+            rendered = "\n".join(message["content"] for message in messages)
+            for pointer in pointers:
+                assert f"original_filename: {pointer['original_filename']}" in rendered
+            assert context[0]["text"] in rendered
+            input_token_upper_bound = len(json.dumps({"messages": messages}, ensure_ascii=False).encode("utf-8"))
+            assert input_token_upper_bound <= maximum_input_tokens, (
+                "Attachment expansion exceeds the input token upper bound while its pointer-only "
+                f"estimate remains small: {input_token_upper_bound} > {maximum_input_tokens}"
+            )
+            assert "Not inlined for the parent LLM" in rendered
+        finally:
+            _clear_cache()
+
+
+async def test_oversized_baseline_keeps_attachment_bodies_out():
+    """A request already past the allowance never gains attachment bodies.
+
+    Without attachments the request is passed through exactly as on main: the
+    window here is only the 200k fallback, and test-mass-agent-run-0 replays
+    production requests above it. A required inline source still fails closed.
+    """
+    from helpers.attachments import _file_cache
+    from helpers.llm import build_llm_messages
+    from helpers.attachment_context import AttachmentContextLimitError
+
+    pointer = {"id": "baseline-source", "storage_path": "fixture/source.txt", "original_filename": "source.txt", "mime_type": "text/plain", "size_bytes": 11}
+    for attached in (False, True):
+        for overflow in ("messages", "schema"):
+            _clear_cache()
+            _file_cache[pointer["id"]] = (b"unique-body", {})
+            context = [{"role": "USER", "text": "x" * 480000 if overflow == "messages" else "read"}]
+            if attached:
+                context[0]["file_pointer"] = pointer
+            overhead = {"tools": [{"description": "x" * 480000}]} if overflow == "schema" else None
+            try:
+                with patch("helpers.attachments.get_file_content", side_effect=AssertionError("Network forbidden")):
+                    messages = await build_llm_messages(context, "system", pre_resolved_ids={pointer["id"]}, request_overhead=overhead)
+                    rendered = "\n".join(message["content"] for message in messages)
+                    assert "unique-body" not in rendered
+                    if overflow == "messages":
+                        assert "x" * 480000 in rendered
+                    if attached:
+                        assert "original_filename: source.txt" in rendered
+                        try:
+                            await build_llm_messages(
+                                context, "system", pre_resolved_ids={pointer["id"]},
+                                request_overhead=overhead, require_inline_attachments=True,
+                            )
+                        except AttachmentContextLimitError as error:
+                            assert "source.txt" in str(error)
+                        else:
+                            raise AssertionError(f"Required source silently dropped; overflow={overflow}")
+            finally:
+                _clear_cache()
+
+
+async def test_reasoning_preserves_old_required_file_after_materialization():
+    from domains.reasoning.service import build_reasoning_messages
+    from domains.reasoning.config import MAX_CONTEXT_MESSAGES
+    from helpers.attachments import _file_cache
+    pointer = {"id": "old-source", "storage_path": "fixture/old.csv", "original_filename": "old.csv", "mime_type": "text/csv", "size_bytes": 23}
+    context = [{"role": "USER", "text": "Required source", "file_pointer": pointer}]
+    context += [{"role": "USER", "text": f"later message {index}"} for index in range(MAX_CONTEXT_MESSAGES + 20)]
+    _clear_cache()
+    _file_cache[pointer["id"]] = (b"heading\nunique source row", {})
+    try:
+        with patch("helpers.llm.activity.in_activity", return_value=True), patch("helpers.llm.get_file_from_pointer", return_value=(b"heading\nunique source row", {})):
+            messages = await build_reasoning_messages(context, "system", "compare")
+        rendered = "\n".join(message["content"] for message in messages)
+        assert "unique source row" in rendered
+        assert "old.csv" in rendered
+    finally:
+        _clear_cache()
+
+
+async def test_attachment_admission_counts_overhead_and_actual_download_bytes():
+    from helpers.attachments import _file_cache
+    from helpers.llm import build_llm_messages
+    from helpers.attachment_context import serialized_token_upper_bound
+    from helpers.context_limits import MAX_LLM_ESCALATION_TOKENS, AUTOCOMPACT_BUFFER_TOKENS
+
+    _clear_cache()
+    body = b"company-data," * 5500
+    pointer = {"id": "actual-size", "storage_path": "fixture/companies.csv", "original_filename": "companies.csv", "mime_type": "text/csv", "size_bytes": 1}
+    _file_cache[pointer["id"]] = (body, {})
+    context = [{"role": "USER", "text": "Compare companies", "file_pointer": pointer}]
+    overhead = {"tools": [{"description": "schema" * 16000}], "extra_user_message": "extra" * 1000}
+    try:
+        with patch("helpers.attachments.get_file_content", side_effect=AssertionError("Network forbidden")):
+            small = await build_llm_messages(context, "system", pre_resolved_ids={pointer["id"]})
+            bounded = await build_llm_messages(context, "system", pre_resolved_ids={pointer["id"]}, request_overhead=overhead)
+        assert "company-data," in small[1]["content"]
+        assert "company-data," not in bounded[1]["content"]
+        assert "original_filename: companies.csv" in bounded[1]["content"]
+        assert serialized_token_upper_bound({"messages": bounded, "overhead": overhead}) <= 200000 - MAX_LLM_ESCALATION_TOKENS - AUTOCOMPACT_BUFFER_TOKENS
+        assert _file_cache[pointer["id"]][0] == body
+        assert pointer["size_bytes"] == 1
+    finally:
+        _clear_cache()
+
+
+async def test_attachment_resolver_and_message_builder_share_smaller_budget():
+    from helpers.attachments import FilePointer, resolve_attachments_for_llm, _file_cache
+    from helpers.llm import build_llm_messages
+
+    _clear_cache()
+    body = b"company-data," * 2000
+    pointer = {"id": "small-window", "storage_path": "fixture/small.csv", "original_filename": "small.csv", "mime_type": "text/csv", "size_bytes": len(body)}
+    _file_cache[pointer["id"]] = (body, {})
+    try:
+        blocks, metadata = await resolve_attachments_for_llm([FilePointer.from_dict(pointer)], {pointer["id"]: body}, max_context_tokens=64000)
+        messages = await build_llm_messages([{"role": "USER", "text": "read", "file_pointer": pointer}], "system", pre_resolved_ids={pointer["id"]}, max_context_tokens=64000)
+        assert not blocks
+        assert "Not inlined" in metadata[0]
+        assert "Not inlined" in messages[1]["content"]
+        assert "company-data," not in "\n".join(metadata)
+        assert "company-data," not in messages[1]["content"]
+    finally:
+        _clear_cache()
+
+
+async def test_required_attachment_sources_fail_observably():
+    from helpers.attachments import FilePointer, INLINE_THRESHOLD, resolve_attachments_for_llm, _file_cache
+    from helpers.llm import build_llm_messages
+    from helpers.attachment_context import AttachmentContextLimitError
+
+    for case, body, reported_size in (("too-large", b"small", INLINE_THRESHOLD + 1), ("missing", None, 1), ("invalid-utf8", b"\xff", 1), ("budget", b"company-data," * 20000, 1)):
+        _clear_cache()
+        pointer = {"id": case, "storage_path": f"fixture/{case}.txt", "original_filename": f"{case}.txt", "mime_type": "text/plain", "size_bytes": reported_size}
+        if body is not None:
+            _file_cache[case] = (body, {})
+        try:
+            with patch("helpers.attachments.get_file_content", side_effect=OSError("fixture download unavailable")):
+                for assembler in ("messages", "resolver"):
+                    try:
+                        if assembler == "messages":
+                            await build_llm_messages([{"role": "USER", "text": "read", "file_pointer": pointer}], "system", pre_resolved_ids={case}, require_inline_attachments=True)
+                        else:
+                            cache = {case: body} if body is not None else {}
+                            await resolve_attachments_for_llm([FilePointer.from_dict(pointer)], cache, require_inline=True)
+                    except AttachmentContextLimitError as error:
+                        assert pointer["original_filename"] in str(error)
+                    else:
+                        raise AssertionError(f"{assembler} accepted inaccessible required source {case}")
+        finally:
+            _clear_cache()
+
+
+async def test_attachment_projection_rechecks_reference_growth_and_identity():
+    from helpers.attachment_context import PreparedTextAttachment, AttachmentContextLimitError, admit_text_attachments
+
+    candidate = PreparedTextAttachment("source body", "file pointer", "source.txt")
+    for changed_identity in (False, True):
+        for strict in (False, True):
+            calls = 0
+            async def render(project):
+                nonlocal calls
+                calls += 1
+                current = PreparedTextAttachment("changed body", "file pointer", "other.txt") if changed_identity and calls == 2 else candidate
+                selected = project(current)
+                if calls == 2 and not changed_identity:
+                    selected += "reference" * 30000
+                return [{"role": "user", "content": selected}]
+            if strict:
+                try:
+                    await admit_text_attachments(render, require_inline=True)
+                except AttachmentContextLimitError:
+                    pass
+                else:
+                    raise AssertionError("Required source projection changed without an error")
+            else:
+                result = await admit_text_attachments(render)
+                assert result == [{"role": "user", "content": "file pointer"}]
+            assert calls == 2
+
+
+async def test_hidden_assistant_attachment_does_not_consume_admission():
+    from helpers.attachments import _file_cache
+    from helpers.llm import build_llm_messages
+
+    _clear_cache()
+    context = []
+    for role, identifier, size in (("ASSISTANT", "hidden", 100000), ("USER", "visible", 70000)):
+        pointer = {"id": identifier, "storage_path": f"fixture/{identifier}.txt", "original_filename": f"{identifier}.txt", "mime_type": "text/plain", "size_bytes": size}
+        _file_cache[identifier] = ((identifier.encode() * (size // len(identifier) + 1))[:size], {})
+        context.append({"role": role, "text": "", "file_pointer": pointer})
+    try:
+        messages = await build_llm_messages(context, "system", pre_resolved_ids={"hidden", "visible"})
+        rendered = "\n".join(message["content"] for message in messages)
+        assert "hidden.txt" not in rendered
+        assert "visiblevisible" in rendered
+    finally:
+        _clear_cache()
+
+
+async def test_legacy_prebuilt_request_without_attachments_reaches_provider():
+    """Prebuilt reasoning/DAG requests carry no attachments; pass them through unchanged.
+
+    The 200k window is only a fallback for unknown models. Rejecting here
+    failed test-mass-agent-run-0 roots whose production requests exceed it.
+    """
+    from helpers.llm import call_llm_activity
+    from unittest.mock import AsyncMock
+    provider = AsyncMock(return_value={"response": "ok", "tool_calls": []})
+    prebuilt = [{"role": "user", "content": "x" * 480000}]
+    with patch("helpers.llm.call_llm_structured_streaming", new=provider), patch("helpers.llm.activity.in_activity", return_value=True):
+        try:
+            await call_llm_activity(prebuilt, "rose-labs/rose-1-flash", ["attempt_completion"], extra_user_message="required instruction")
+        except Exception:
+            pass
+    provider.assert_awaited()
+    sent = provider.await_args.args[0] if provider.await_args.args else provider.await_args.kwargs.get("messages")
+    assert sent[0]["content"] == "x" * 480000
+
+
+async def test_attachment_admission_on_pending_and_backend_activity_paths():
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from helpers.attachments import _file_cache
+    from helpers.llm import _pending_llm_context, call_llm_activity
+
+    pointer = {"id": "activity-source", "storage_path": "fixture/activity.json", "original_filename": "activity.json", "mime_type": "application/json", "size_bytes": 2100000}
+    body = b"[" + b"0," * 1049998 + b"0]"
+    context = [{"role": "USER", "text": "Read the source", "file_pointer": pointer}]
+    for backend in (False, True):
+        _clear_cache()
+        key = f"attachment-admission-{backend}"
+        _file_cache[pointer["id"]] = (body, {})
+        _pending_llm_context[key] = (context, "System context", {pointer["id"]}, None)
+        captured = []
+        async def model_boundary(**kwargs):
+            captured.append(kwargs)
+            return SimpleNamespace(response="fixture result", tool_calls=[]), {}, []
+        try:
+            with patch("helpers.llm.call_llm_structured_streaming", side_effect=model_boundary), patch("helpers.llm.activity.in_activity", return_value=True), patch("helpers.fetch_config._fetch_agent_data_impl", new=AsyncMock(return_value={"messages": context})), patch("helpers.attachments.get_file_content", side_effect=AssertionError("Network forbidden")):
+                await call_llm_activity(key, "rose-labs/rose-1-flash", ["attempt_completion"], system_prompt="System context", extra_user_message="Follow the requested schema", force_backend_context=backend)
+            assert len(captured) == 1
+            actual_messages = captured[0]["messages"]
+            upper_bound = len(json.dumps({"messages": actual_messages}, ensure_ascii=False).encode("utf-8"))
+            assert upper_bound <= 200000 - 32768 - 13000, f"activity materialized {upper_bound} token upper bound"
+            rendered = "\n".join(message["content"] for message in actual_messages)
+            assert "original_filename: activity.json" in rendered
+            assert "Not inlined" in rendered
+            assert actual_messages[-1]["content"] == "Follow the requested schema"
+        finally:
+            _pending_llm_context.pop(key, None)
+            _clear_cache()
+
+
 async def run_all_tests():
     print("attachments blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("reasoning_preserves_old_required_file_after_materialization", test_reasoning_preserves_old_required_file_after_materialization)
+    await r.record_async("oversized_baseline_keeps_attachment_bodies_out", test_oversized_baseline_keeps_attachment_bodies_out)
+    await r.record_async("bounds_materialized_text_attachments", test_build_llm_messages_bounds_materialized_text_attachments)
+    await r.record_async("legacy_prebuilt_request_without_attachments_reaches_provider", test_legacy_prebuilt_request_without_attachments_reaches_provider)
+    await r.record_async("attachment_admission_on_pending_and_backend_activity_paths", test_attachment_admission_on_pending_and_backend_activity_paths)
+    await r.record_async("attachment_admission_counts_overhead_and_actual_download_bytes", test_attachment_admission_counts_overhead_and_actual_download_bytes)
+    await r.record_async("attachment_resolver_and_message_builder_share_smaller_budget", test_attachment_resolver_and_message_builder_share_smaller_budget)
+    await r.record_async("required_attachment_sources_fail_observably", test_required_attachment_sources_fail_observably)
+    await r.record_async("attachment_projection_rechecks_reference_growth_and_identity", test_attachment_projection_rechecks_reference_growth_and_identity)
+    await r.record_async("hidden_assistant_attachment_does_not_consume_admission", test_hidden_assistant_attachment_does_not_consume_admission)
+
     await r.record_async("parent_attachment_success_logging", test_parent_attachment_success_preserves_metadata_and_logs)
     await r.record_async("extract_attachments", test_extract_attachments_from_context)
     await r.record_async("build_metadata_text", test_build_attachment_metadata_text)

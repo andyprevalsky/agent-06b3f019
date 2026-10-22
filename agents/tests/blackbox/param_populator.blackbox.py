@@ -179,6 +179,12 @@ async def test_populate_uses_agent_model():
         seen.update(kwargs)
         return _FakePydanticResult([_FakeToolCall({"tool": "web_search", "query": "q"})]), {"total_tokens": 1}, []
 
+    async def fake_model_context(model):
+        seen["budget_model"] = model
+        return 200000
+
+    original_window = svc.get_model_context_window
+    svc.get_model_context_window = fake_model_context
     original_fetch = svc.fetch_agent_context
     original_call = svc.call_llm_structured_streaming
     svc.fetch_agent_context = fake_fetch_agent_context
@@ -186,10 +192,11 @@ async def test_populate_uses_agent_model():
     try:
         await populate_tool_params(tool_name="web_search", goal="Find AI news", agent_id="agent-1", model="rose-fast")
     finally:
+        svc.get_model_context_window = original_window
         svc.fetch_agent_context = original_fetch
         svc.call_llm_structured_streaming = original_call
 
-    assert seen["model"] == "rose-fast"
+    assert seen["budget_model"] == seen["model"] == "rose-fast"
     assert seen["call_site"] == "dag_param_populator"
 
 

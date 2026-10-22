@@ -490,6 +490,7 @@ class _FakeSpawnWF:
         self._activity_results = activity_results or {}
         self.activity_calls = []
         self.start_activity_calls = []
+        self.patch_calls = []
         self._uuid_counter = 0
         self._start_activity_result = start_activity_result or _Activity(
             result={
@@ -536,6 +537,11 @@ class _FakeSpawnWF:
                 ]
             }
         return ""
+
+    def patched(self, change_id):
+        # The agent runtime must not accumulate workflow.patched branches.
+        self.patch_calls.append(change_id)
+        return True
 
     def uuid4(self):
         self._uuid_counter += 1
@@ -725,12 +731,12 @@ async def test_handler_explore_happy_path():
     statuses = [e.status for e in events]
     assert MessageStatus.IN_PROGRESS in statuses
     assert fake.activity_calls[0]["name"] == "fetch_local_data_summary"
-    assert fake.start_activity_calls[0]["args"][-4] == "local"
-    assert fake.start_activity_calls[0]["args"][-3] is False
+    assert fake.start_activity_calls[0]["args"][16] == "local"
+    assert fake.start_activity_calls[0]["args"][17] is False
     # The spawning tool call id is the explore's agent-to-agent inbox address.
-    assert fake.start_activity_calls[0]["args"][-2] == "tc"
+    assert fake.start_activity_calls[0]["args"][18] == "tc"
     # Its task_name names it <owner path>/<task_name> for list_agents.
-    assert fake.start_activity_calls[0]["args"][-1] == "quantum"
+    assert fake.start_activity_calls[0]["args"][19] == "quantum"
     assert MessageStatus.FINISHED in statuses
     # FINISHED event carries result + usage
     finished = next(e for e in events if e.status == MessageStatus.FINISHED)
@@ -776,10 +782,10 @@ async def test_handler_explore_reuses_cached_local_data_summary():
     fetches = [call for call in fake.activity_calls if call["name"] == "fetch_local_data_summary"]
     assert len(fetches) == 1
     assert wf._cached_local_data_summary == "local-once"
-    assert fake.start_activity_calls[0]["args"][-4] == "local-once"
-    assert fake.start_activity_calls[1]["args"][-4] == "local-once"
-    assert fake.start_activity_calls[0]["args"][-3] is False
-    assert fake.start_activity_calls[1]["args"][-3] is False
+    assert fake.start_activity_calls[0]["args"][16] == "local-once"
+    assert fake.start_activity_calls[1]["args"][16] == "local-once"
+    assert fake.start_activity_calls[0]["args"][17] is False
+    assert fake.start_activity_calls[1]["args"][17] is False
     assert any(event.status == MessageStatus.FINISHED for event in first)
     assert any(event.status == MessageStatus.FINISHED for event in second)
 
@@ -825,8 +831,9 @@ async def test_handler_explore_passes_canonical_oai_demo_flag():
 
     fn = inspect.unwrap(spawn_explore_agent_activity)
     params = list(inspect.signature(fn).parameters)
+    assert params[17] == "oai_demo"
     # New args append after oai_demo so older positional callers stay compatible.
-    assert params[-3:] == ["oai_demo", "inbox_address", "task_name"]
+    assert params[-4:] == ["oai_demo", "inbox_address", "task_name", "attachment_pointers"]
     assert inspect.signature(fn).parameters["oai_demo"].default is None
     assert inspect.signature(fn).parameters["inbox_address"].default is None
     assert inspect.signature(fn).parameters["task_name"].default is None
@@ -4251,7 +4258,16 @@ async def test_spawn_explore_agent_activity_runs_run_agent_and_returns_result():
             task_id="task-99",
             init_tool_call_id="init-tc",
             claude_token="ctok",
-            attachment_texts=["[file:doc.txt] short"],
+            attachment_pointers=[
+                {
+                    "id": "doc-id",
+                    "storage_path": "owner/doc.txt",
+                    "original_filename": "doc.txt",
+                    "mime_type": "text/plain",
+                    "size_bytes": 4_000_000,
+                    "created_at": "2026-10-17",
+                }
+            ],
             local_data_summary="messages/ 3 threads, 42 messages",
         )
 
@@ -4273,12 +4289,18 @@ async def test_spawn_explore_agent_activity_runs_run_agent_and_returns_result():
     assert captured["cache_sequence_id"] == "agent:a-7:task:task-99:call:explore_agent"
     assert captured["max_iterations"] >= 1
     assert captured["skip_verification"] is True
+    assert captured["require_inline_attachments"] is True
 
-    # initial_context contains the [STATE: ...] line, the goal, and attachment text
+    # File pointers keep their identity until message assembly inside the activity.
     [user_msg] = captured["initial_context"]
     assert "[STATE:" in user_msg["text"]
     assert "research X" in user_msg["text"]
-    assert "doc.txt" in user_msg["text"]
+    assert "doc.txt" not in user_msg["text"]
+    [pointer] = user_msg["metadata"]["attachments"]
+    assert pointer["id"] == "doc-id"
+    assert pointer["original_filename"] == "doc.txt"
+    assert pointer["size_bytes"] == 4_000_000
+    assert len(json.dumps(captured["initial_context"])) < 10_000
     assert "LOCAL DATA SUMMARY" in user_msg["text"]
     assert "42 messages" in user_msg["text"]
 
@@ -5460,7 +5482,7 @@ async def test_spawn_explore_agent_activity_execute_tool_dispatch():
 
 
 async def test_handler_explore_resolves_attachments():
-    """Explore with attachments triggers _resolve_explore_attachments_activity."""
+    """Explore transports exact pointers without expanding source bytes across Temporal."""
     from unittest.mock import patch
 
     from helpers.attachments import FilePointer
@@ -5473,7 +5495,7 @@ async def test_handler_explore_resolves_attachments():
         storage_path="/x/y",
         original_filename="report.csv",
         mime_type="text/csv",
-        size_bytes=100,
+        size_bytes=4_000_000,
         created_at="2026-05-01",
     )
 
@@ -5482,7 +5504,6 @@ async def test_handler_explore_resolves_attachments():
         activity_results={
             "fetch_full_network_metadata": "",
             "fetch_local_data_summary": "",
-            "_resolve_explore_attachments_activity": ([], ["[file: report.csv] inline content"]),
         },
         start_activity_result=_Activity(
             result={
@@ -5512,6 +5533,212 @@ async def test_handler_explore_resolves_attachments():
     finally:
         restore()
     assert any(e.status == MessageStatus.FINISHED for e in events)
+
+    assert not any(call["name"] == "_resolve_explore_attachments_activity" for call in fake.activity_calls)
+    [spawn] = fake.start_activity_calls
+    assert spawn["name"] == "spawn_explore_agent_activity"
+    assert spawn["args"][11] == []
+    [pointer] = spawn["args"][-1]
+    assert pointer == {
+        "id": fp.id,
+        "storage_path": fp.storage_path,
+        "original_filename": fp.original_filename,
+        "mime_type": fp.mime_type,
+        "size_bytes": fp.size_bytes,
+        "created_at": fp.created_at,
+    }
+    assert len(json.dumps(spawn["args"])) < 10_000
+    assert fake.patch_calls == []
+    import inspect
+    from typing import get_type_hints
+    from temporalio.converter import DataConverter
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    fn = inspect.unwrap(spawn_explore_agent_activity)
+    hints = get_type_hints(fn)
+    types = [hints[name] for name in inspect.signature(fn).parameters]
+    converter = DataConverter.default
+    payloads = await converter.encode(spawn["args"])
+    assert await converter.decode(payloads, types) == spawn["args"]
+
+
+async def test_explore_legacy_temporal_attachment_payload_decodes_and_runs():
+    """Recorded string payloads keep the same type and positional argument."""
+    import inspect
+    from typing import get_type_hints
+    from unittest.mock import patch
+
+    from temporalio.converter import DataConverter
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    legacy_args = [
+        "legacy-agent",
+        "owner",
+        "summarize",
+        "rose-1-flash",
+        "task",
+        "init",
+        None,
+        None,
+        None,
+        None,
+        None,
+        ["file_pointer: legacy.txt\nlegacy source"],
+        200_000,
+        "quick",
+        3,
+        "real",
+        "",
+        False,
+    ]
+    fn = inspect.unwrap(spawn_explore_agent_activity)
+    hints = get_type_hints(fn)
+    types = [hints[name] for name in inspect.signature(fn).parameters]
+    converter = DataConverter.default
+    encoded = await converter.encode(legacy_args)
+    decoded = await converter.decode(encoded, types[: len(legacy_args)])
+    assert decoded == legacy_args
+    captured = {}
+
+    async def fake_run_agent(**kwargs):
+        captured.update(kwargs)
+        return {"status": "completed", "final_response": "legacy summary"}
+
+    with patch("temporalio.activity.heartbeat"), patch("loop.run_agent.run_agent", new=fake_run_agent):
+        result = await spawn_explore_agent_activity(*decoded)
+    [message] = captured["initial_context"]
+    assert "legacy source" in message["text"]
+    assert not message.get("metadata", {}).get("attachments")
+    assert result["status"] == "completed"
+
+
+async def test_explore_pointer_sources_preserve_text_only_messages():
+    from unittest.mock import AsyncMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+    from helpers.llm import build_llm_messages
+
+    pointers = [
+        {
+            "id": name,
+            "storage_path": "owner/" + name,
+            "original_filename": name,
+            "mime_type": mime,
+            "size_bytes": 128,
+            "created_at": "2026-10-17",
+        }
+        for name, mime in [
+            ("data.csv", "text/csv"),
+            ("image.png", "image/png"),
+            ("paper.pdf", "application/pdf"),
+            ("binary.zip", "application/zip"),
+        ]
+    ]
+    from helpers.attachment_context import AttachmentContextLimitError
+    for pointer in pointers[1:]:
+        with patch("temporalio.activity.heartbeat"), patch("temporalio.activity.in_activity", return_value=True):
+            try:
+                await spawn_explore_agent_activity("agent", "owner", "summarize source", "rose-1-flash", attachment_pointers=[pointer])
+            except AttachmentContextLimitError as error:
+                assert pointer["original_filename"] in str(error)
+            else:
+                raise AssertionError("Explore accepted an inaccessible required nontext source")
+    captured = {}
+
+    async def fake_run_agent(**kwargs):
+        captured.update(kwargs)
+        captured["messages"] = await build_llm_messages(
+            kwargs["initial_context"],
+            await kwargs["system_prompt"](),
+            max_context_tokens=kwargs["max_context_tokens"],
+            require_inline_attachments=kwargs["require_inline_attachments"],
+        )
+        return {"status": "completed", "final_response": "source summary"}
+
+    download = AsyncMock(return_value=(b"heading\nactual source row", {}))
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("temporalio.activity.in_activity", return_value=True),
+        patch("helpers.llm.get_file_from_pointer", new=download),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("domains.spawn_agent.service.get_model_context_window", new=AsyncMock(return_value=64_000)),
+    ):
+        result = await spawn_explore_agent_activity(
+            "agent",
+            "owner",
+            "summarize source",
+            "rose-1-flash",
+            attachment_pointers=[pointers[0]],
+        )
+    assert result["status"] == "completed"
+    assert captured["max_context_tokens"] == 64_000
+    [message] = captured["initial_context"]
+    assert message["metadata"]["attachments"] == [pointers[0]]
+    for call in download.await_args_list:
+        assert call.args[0].id == "data.csv"
+    assert download.await_count > 0
+    text_parts = []
+    for message in captured["messages"]:
+        content = message["content"]
+        if isinstance(content, str):
+            text_parts.append(content)
+        else:
+            assert all(block.get("type") == "text" for block in content)
+            text_parts.extend(block["text"] for block in content)
+    flattened = "\n".join(text_parts)
+    assert "actual source row" in flattened
+    assert pointers[0]["original_filename"] in flattened
+    assert all(pointer["original_filename"] not in flattened for pointer in pointers[1:])
+
+
+async def test_explore_required_text_failure_never_returns_source_claim():
+    from unittest.mock import AsyncMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+    from helpers.attachment_context import AttachmentContextLimitError
+    from helpers.llm import build_llm_messages
+
+    pointer = {
+        "id": "required-source",
+        "storage_path": "owner/source",
+        "original_filename": "required.json",
+        "mime_type": "application/json",
+        "size_bytes": 80_000,
+        "created_at": "2026-10-17",
+    }
+    for failure in ("context", "download", "encoding"):
+        model_calls = []
+
+        async def fake_run_agent(**kwargs):
+            await build_llm_messages(
+                kwargs["initial_context"],
+                await kwargs["system_prompt"](),
+                max_context_tokens=kwargs["max_context_tokens"],
+                require_inline_attachments=kwargs["require_inline_attachments"],
+            )
+            model_calls.append("model invoked")
+            return {"status": "completed", "final_response": "unsupported claim"}
+
+        download = AsyncMock(
+            side_effect=RuntimeError("unreadable") if failure == "download" else None,
+            return_value=((b"x" * 80_000 if failure == "context" else b"\xff"), {}),
+        )
+        with (
+            patch("temporalio.activity.heartbeat"),
+            patch("temporalio.activity.in_activity", return_value=True),
+            patch("helpers.llm.get_file_from_pointer", new=download),
+            patch("loop.run_agent.run_agent", new=fake_run_agent),
+        ):
+            with pytest.raises(AttachmentContextLimitError, match="required.json"):
+                await spawn_explore_agent_activity(
+                    "agent",
+                    "owner",
+                    "read required source",
+                    "rose-1-flash",
+                    attachment_pointers=[pointer],
+                    max_context_tokens=64_000,
+                )
+        assert model_calls == []
 
 
 async def test_handler_explore_unknown_attachment_warns():
@@ -6232,6 +6459,13 @@ async def run_all_tests():
     await r.record_async("explore_activity_dispatch", test_spawn_explore_agent_activity_execute_tool_dispatch)
     # handler.py
     await r.record_async("handler_explore_resolves_attachments", test_handler_explore_resolves_attachments)
+    await r.record_async(
+        "explore_legacy_temporal_payload", test_explore_legacy_temporal_attachment_payload_decodes_and_runs
+    )
+    await r.record_async("explore_text_only_sources", test_explore_pointer_sources_preserve_text_only_messages)
+    await r.record_async(
+        "explore_required_source_errors", test_explore_required_text_failure_never_returns_source_claim
+    )
     await r.record_async("handler_explore_unknown_attachment", test_handler_explore_unknown_attachment_warns)
     await r.record_async("handler_for_each_drain_exception", test_handler_for_each_drain_exception_counts_as_failure)
     await r.record_async("handler_for_each_spawn_exception", test_handler_for_each_spawn_exception_counts_as_failure)

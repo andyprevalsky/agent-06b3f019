@@ -9,12 +9,14 @@ import logging
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import httpx
 from temporalio import activity
 
 from config import load_config
+from helpers.attachment_context import AttachmentContextLimitError, PreparedTextAttachment, admit_text_attachments
+from helpers.model_info import _DEFAULT_CONTEXT_WINDOW
 
 logger = logging.getLogger(__name__)
 
@@ -323,6 +325,26 @@ def build_attachment_text_content(file_pointer: FilePointer, text_content: str) 
 async def resolve_attachments_for_llm(
     attachments: List[FilePointer],
     file_cache: Optional[Dict[str, bytes]] = None,
+    *,
+    max_context_tokens: int = _DEFAULT_CONTEXT_WINDOW,
+    request_overhead: Any = None,
+    require_inline: bool = False,
+) -> Tuple[List[Dict], List[str]]:
+    cache = file_cache if file_cache is not None else {}
+
+    async def render(render_text):
+        return await _render_attachments_for_llm(attachments, cache, render_text, require_inline)
+
+    return await admit_text_attachments(
+        render, max_context_tokens=max_context_tokens, request_overhead=request_overhead, require_inline=require_inline
+    )
+
+
+async def _render_attachments_for_llm(
+    attachments: List[FilePointer],
+    file_cache: Optional[Dict[str, bytes]] = None,
+    render_text: Callable[[PreparedTextAttachment], str] = lambda item: item.inline,
+    require_inline: bool = False,
 ) -> Tuple[List[Dict], List[str]]:
     """
     Resolve file attachments to LLM content blocks.
@@ -340,6 +362,8 @@ async def resolve_attachments_for_llm(
     for fp in attachments:
         # Large files or binary files -> metadata only
         if not fp.is_small_enough_for_llm() or not fp.can_be_read_by_llm():
+            if require_inline:
+                raise AttachmentContextLimitError(f"Required text attachment cannot be inlined: {fp.original_filename}")
             metadata_texts.append(build_attachment_metadata_text(fp))
             continue
 
@@ -376,11 +400,17 @@ async def resolve_attachments_for_llm(
                 # Text: inject as text content with the same keyed filename field
                 try:
                     text_content = content.decode("utf-8")
-                    metadata_texts.append(build_attachment_text_content(fp, text_content))
+                    metadata_texts.append(render_text(PreparedTextAttachment(
+                        build_attachment_text_content(fp, text_content), build_attachment_metadata_text(fp), fp.original_filename
+                    )))
                 except UnicodeDecodeError:
+                    if require_inline:
+                        raise AttachmentContextLimitError(f"Required text attachment is not UTF-8: {fp.original_filename}")
                     metadata_texts.append(build_attachment_metadata_text(fp))
 
         except Exception as e:
+            if require_inline:
+                raise AttachmentContextLimitError(f"Required text attachment could not be read: {fp.original_filename}") from e
             logger.warning(f"Failed to resolve attachment {fp.original_filename}: {e}")
             metadata_texts.append(build_attachment_metadata_text(fp))
 
@@ -400,7 +430,7 @@ async def build_multimodal_user_message(
     if not attachments:
         return {"role": "user", "content": text}
 
-    content_blocks, metadata_texts = await resolve_attachments_for_llm(attachments, file_cache)
+    content_blocks, metadata_texts = await resolve_attachments_for_llm(attachments, file_cache, request_overhead={"role": "user", "content": text})
 
     # Build the content array
     content = []

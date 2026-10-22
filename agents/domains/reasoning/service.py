@@ -9,14 +9,15 @@ from typing import TYPE_CHECKING
 import structlog
 
 from domains.reasoning.config import (
-    MAX_CONTEXT_MESSAGES,
     REASONING_MAX_TOKENS,
     REASONING_SYSTEM_PROMPT_TEMPLATE,
     REASONING_TEMPERATURE,
 )
 from domains.reasoning.types import ReasoningResponse
+from helpers.attachment_context import attachment_request_overhead
 from helpers.llm import build_llm_messages, call_llm, call_llm_structured_streaming
 from helpers.messages import stream_assistant_chunk
+from helpers.model_info import _DEFAULT_CONTEXT_WINDOW, get_model_context_window
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -48,17 +49,15 @@ async def build_reasoning_messages(
     context: list[dict[str, Any]],
     system_prompt: str,
     goal: str,
+    max_context_tokens: int = _DEFAULT_CONTEXT_WINDOW,
 ) -> list[dict[str, Any]]:
-    """Build and trim the message list for a reasoning LLM call.
-
-    Uses build_llm_messages to handle file attachments, then trims to
-    MAX_CONTEXT_MESSAGES (preserving the system prompt at index 0),
-    and appends the final user instruction.
-    """
-    messages = await build_llm_messages(context, system_prompt)
-
-    if len(messages) > MAX_CONTEXT_MESSAGES + 1:
-        messages = [messages[0], *messages[-(MAX_CONTEXT_MESSAGES):]]
+    """Preserve required sources and admit the complete reasoning request."""
+    messages = await build_llm_messages(
+        context, system_prompt,
+        max_context_tokens=max_context_tokens,
+        require_inline_attachments=True,
+        request_overhead=attachment_request_overhead(ReasoningResponse, f"Please complete this reasoning task: {goal}"),
+    )
 
     messages.append({"role": "user", "content": f"Please complete this reasoning task: {goal}"})
 
@@ -100,7 +99,10 @@ async def execute_reasoning(
         Dict with 'content' string and 'usage' dict for cost tracking
     """
     system_prompt = system_prompt_text or build_system_prompt(goal)
-    messages = await build_reasoning_messages(context, system_prompt, goal)
+    messages = await build_reasoning_messages(
+        context, system_prompt, goal,
+        max_context_tokens=await get_model_context_window(model),
+    )
 
     if heartbeat_fn:
         heartbeat_fn("Starting reasoning task")

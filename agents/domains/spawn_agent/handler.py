@@ -34,7 +34,6 @@ from domains.spawn_agent.config import (
     should_skip_oai_demo_browser_spawn,
 )
 from domains.spawn_agent.service import (
-    _resolve_explore_attachments_activity,
     build_for_each_goal,
     coerce_for_each_items,
     compile_explore_grep_evidence,
@@ -823,8 +822,10 @@ class SpawnAgentManager(ToolManager):
                     local_data_summary = ""
                     workflow_instance._cached_local_data_summary = ""
 
-            # Resolve requested attachments from workflow context
+            # Keep pointers across Temporal; attachment bytes are resolved by the
+            # explore activity with the rest of its model context.
             attachment_texts: List[str] = []
+            attachment_pointers: List[Dict[str, Any]] = []
             requested_attachments = tool_call.get("attachments")
             if isinstance(requested_attachments, str):
                 requested_attachments = [requested_attachments]
@@ -844,25 +845,18 @@ class SpawnAgentManager(ToolManager):
                         )
 
                 if matched_pointers:
-                    _, metadata_texts = await workflow.execute_activity(
-                        _resolve_explore_attachments_activity,
-                        args=[
-                            [
-                                {
-                                    "id": fp.id,
-                                    "storage_path": fp.storage_path,
-                                    "original_filename": fp.original_filename,
-                                    "mime_type": fp.mime_type,
-                                    "size_bytes": fp.size_bytes,
-                                    "created_at": fp.created_at,
-                                }
-                                for fp in matched_pointers
-                            ]
-                        ],
-                        start_to_close_timeout=SUB_ACTIVITY_TIMEOUT,
-                        retry_policy=RetryPolicy(maximum_attempts=SUB_ACTIVITY_MAX_ATTEMPTS),
-                    )
-                    attachment_texts = metadata_texts
+                    pointer_dicts = [
+                        {
+                            "id": fp.id,
+                            "storage_path": fp.storage_path,
+                            "original_filename": fp.original_filename,
+                            "mime_type": fp.mime_type,
+                            "size_bytes": fp.size_bytes,
+                            "created_at": fp.created_at,
+                        }
+                        for fp in matched_pointers
+                    ]
+                    attachment_pointers = pointer_dicts
 
             # Explore is a bounded research worker with its own model-tier
             # contract. Inheriting the parent's Ultra tier multiplies cost for
@@ -919,6 +913,7 @@ class SpawnAgentManager(ToolManager):
                 # list_agents names this task <owner path>/<task_name>.
                 tool_call.get("task_name"),
             ]
+            activity_args.append(attachment_pointers)
             activity_handle = workflow.start_activity(
                 spawn_explore_agent_activity,
                 args=activity_args,

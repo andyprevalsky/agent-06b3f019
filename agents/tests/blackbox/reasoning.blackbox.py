@@ -54,7 +54,7 @@ def test_build_system_prompt_includes_goal():
     assert "reasoning task" in prompt.lower()
 
 
-async def test_build_reasoning_messages_trims_to_max():
+async def test_build_reasoning_messages_preserves_sources_within_budget():
     from domains.reasoning.service import build_reasoning_messages
     from domains.reasoning.config import MAX_CONTEXT_MESSAGES
 
@@ -67,8 +67,10 @@ async def test_build_reasoning_messages_trims_to_max():
     assert msgs[0]["role"] == "system" or "SYSTEM" in str(msgs[0]).upper() or msgs[0].get("content") == "SYSTEM"
     assert msgs[-1]["role"] == "user"
     assert "do stuff" in msgs[-1]["content"]
-    # keeps at most MAX_CONTEXT_MESSAGES + 2 entries (system + context + final user)
-    assert len(msgs) <= MAX_CONTEXT_MESSAGES + 2
+    # Message count alone must not discard a source that fits the full budget.
+    assert len(msgs) == len(context) + 2
+    assert "msg 0" in msgs[1]["content"]
+
 
 
 async def test_build_reasoning_messages_small_context():
@@ -327,7 +329,7 @@ async def run_all_tests():
     r.record("reasoning_response_validates", test_reasoning_response_validates)
     r.record("safe_heartbeat_outside_activity", test_safe_heartbeat_outside_activity)
     r.record("build_system_prompt_includes_goal", test_build_system_prompt_includes_goal)
-    await r.record_async("build_reasoning_messages_trims", test_build_reasoning_messages_trims_to_max)
+    await r.record_async("build_reasoning_messages_trims", test_build_reasoning_messages_preserves_sources_within_budget)
     await r.record_async("build_reasoning_messages_small", test_build_reasoning_messages_small_context)
     await r.record_async("execute_reasoning_happy_path", test_execute_reasoning_happy_path)
     await r.record_async("execute_reasoning_marks_gpt_streams", test_execute_reasoning_marks_gpt_streams)
