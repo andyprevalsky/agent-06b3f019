@@ -1384,6 +1384,107 @@ async def test_multiplexer_reapplies_overrides_when_their_holder_detaches():
                 await multiplexer.close()
 
 
+class LateFirstMouseGateway(FakeTilionGateway):
+    """Answers the first Input.dispatchMouseEvent of a page session only after
+    ``delay`` seconds (Tilion left one unanswered, then replied late)."""
+
+    def __init__(self, endpoint: str, delay: float) -> None:
+        super().__init__(endpoint)
+        self.delay = delay
+        self.late_key: Optional[Tuple[Any, Any]] = None
+        self.late_sent = asyncio.Event()
+
+    async def _handle(self, downstream):
+        self.active += 1
+        self.accepted += 1
+        try:
+            async with websockets.connect(self.endpoint, max_size=None, proxy=None) as upstream:
+
+                async def up():
+                    async for raw in downstream:
+                        message = json.loads(raw)
+                        if (
+                            self.late_key is None
+                            and message.get("method") == "Input.dispatchMouseEvent"
+                            and message.get("sessionId")
+                        ):
+                            self.late_key = (message.get("sessionId"), message.get("id"))
+                        await upstream.send(raw)
+
+                async def deliver_late(raw):
+                    await asyncio.sleep(self.delay)
+                    with contextlib.suppress(Exception):
+                        await downstream.send(raw)
+                    self.late_sent.set()
+
+                async def down():
+                    async for raw in upstream:
+                        message = json.loads(raw)
+                        if self.late_key is not None and (message.get("sessionId"), message.get("id")) == self.late_key:
+                            asyncio.create_task(deliver_late(raw))
+                            continue
+                        await downstream.send(raw)
+
+                tasks = [asyncio.create_task(up()), asyncio.create_task(down())]
+                try:
+                    await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            self.active -= 1
+
+
+async def test_playwright_survives_an_expired_input_and_its_late_reply():
+    """A page-session Input the provider leaves unanswered is failed back on THAT
+    session (flat-session clients route replies by sessionId; a root-level reply
+    for a child's id killed Playwright's driver live), and the provider's late
+    reply is swallowed. The Playwright connection keeps working."""
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
+
+    async with _chromium() as (playwright, _browser, endpoint):
+        async with LateFirstMouseGateway(endpoint, delay=2.5) as gateway:
+            multiplexer = SingleCdpConnectionMultiplexer(gateway.cdp_url, input_answer_timeout=1.0)
+            browser = await playwright.chromium.connect_over_cdp(await multiplexer.start())
+            try:
+                context = browser.contexts[0]
+                page = context.pages[0] if context.pages else await context.new_page()
+                await page.set_content('<input id="field" autofocus>')
+                session = await context.new_cdp_session(page)
+                started = time.monotonic()
+                try:
+                    await asyncio.wait_for(
+                        session.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 5, "y": 5}), timeout=5
+                    )
+                    raise AssertionError("an unanswered input must be failed back to the client")
+                except AssertionError:
+                    raise
+                except Exception as error:
+                    assert "not answered" in str(error), error
+                assert time.monotonic() - started < 3
+                await asyncio.wait_for(gateway.late_sent.wait(), timeout=10)
+                for _ in range(50):  # the late real reply reaches the multiplexer and is dropped
+                    if multiplexer.late_input_replies_dropped:
+                        break
+                    await asyncio.sleep(0.1)
+                assert multiplexer.late_input_replies_dropped == 1, "late reply was forwarded to the client"
+                # The connection survived: Playwright input, page calls and screenshots still work.
+                await asyncio.wait_for(page.mouse.move(30, 30), timeout=10)
+                await asyncio.wait_for(page.mouse.wheel(0, 50), timeout=10)
+                await page.focus("#field")
+                await asyncio.wait_for(page.keyboard.type("ok"), timeout=10)
+                assert await page.evaluate("document.getElementById('field').value") == "ok"
+                assert len(await asyncio.wait_for(page.screenshot(), timeout=15)) > 0
+                await asyncio.wait_for(
+                    session.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 6, "y": 6}), timeout=10
+                )
+                assert multiplexer.input_unanswered == 1
+            finally:
+                await browser.close()
+                await multiplexer.close()
+
+
 async def test_multiplexer_holds_new_targets_until_emulation_lands():
     """A client that does NOT wait for the debugger (browser-use) still gets
     popups whose first script sees the emulation: the multiplexer holds new
@@ -1940,6 +2041,7 @@ async def run_all_tests():
         ("multiplexer_resumes_workers", test_multiplexer_never_leaves_workers_paused_for_non_waiting_clients),
         ("multiplexer_serialises_input_per_session", test_multiplexer_serialises_input_per_session_so_keys_are_not_dropped),
         ("multiplexer_fails_unanswered_input", test_multiplexer_fails_unanswered_input_instead_of_hanging),
+        ("playwright_survives_expired_input", test_playwright_survives_an_expired_input_and_its_late_reply),
         ("multiplexer_arms_webauthn_popups", test_multiplexer_arms_webauthn_so_unarmed_popups_reject_instead_of_hanging),
         ("multiplexer_webauthn_keeps_seeded_passkeys", test_multiplexer_webauthn_arming_keeps_seeded_passkeys_working),
         ("multiplexer_reapplies_detached_overrides", test_multiplexer_reapplies_overrides_when_their_holder_detaches),
