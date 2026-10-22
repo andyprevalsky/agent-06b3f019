@@ -130,7 +130,8 @@ def test_existing_catalog_rows_unchanged():
     root = Path(__file__).resolve().parents[2]
     old = json.loads(subprocess.check_output(['git', 'show', 'HEAD:agents/benchmarks/tasks.json'], cwd=root, text=True))
     current = json.loads((root / 'agents/benchmarks/tasks.json').read_text())
-    assert current[:len(old)] == old
+    # Only the user-requested reset/boot protocol is revised in this change.
+    assert [t for t in current[:len(old)] if t['name'] != 'phone-daily-full-boot'] == [t for t in old if t['name'] != 'phone-daily-full-boot']
 
 
 def test_private_boot_collector_rejects_production_before_subprocess(monkeypatch):

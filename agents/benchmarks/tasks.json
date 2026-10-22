@@ -10009,7 +10009,7 @@
 {
   "name": "phone-daily-full-boot",
   "title": "Fresh unattended cloud iPhone boot",
-  "prompt": "Complete the dedicated cloud iPhone boot setup from its independently verified reset state. Use connected saved credentials securely before requesting critical user-only authentication. Verify intended Apple identity, iCloud Messages, Keychain and Contacts, iMessage, intended receive address, portrait lock, device passcode or explicitly authorized Google exception, and installed usable Gmail for the intended Google account. Preserve existing accounts and provider management. Do not infer ready from a click or password fill. Report actual blockers honestly.",
+  "prompt": "Complete the dedicated cloud iPhone boot setup after the test fixture has verified a provider API reset and the provider has restored passcode support. Do not reset or erase the phone yourself. Use connected saved credentials securely before requesting critical user-only authentication. Verify intended Apple identity, iCloud Messages, Keychain and Contacts, iMessage, intended receive address, portrait lock, device passcode before Gmail (or only the explicitly authorized alternative), and installed usable Gmail for the intended Google account. Use current matching Messages codes autonomously; never stale or unrelated codes. Preserve provider management. Do not infer ready from a click or password fill. If passcode creation is still prohibited, report the provider prerequisite as blocked rather than claiming readiness. Report actual blockers and release your owned phone when finished.",
   "timeout_seconds": 900,
   "price_limit_cents": 300,
   "is_chat_mode": false,
@@ -10036,7 +10036,7 @@
   "min_steps": {
     "browser": 1
   },
-  "description": "Daily acceptance definition. Fails closed before paid execution until independent live fixtures and private persisted-proof collector are provisioned; no live pass claimed.",
+  "description": "Fresh boot after an explicit provider reset; provider-assisted passcode restoration is reported separately from agent boot. Requires signed, observed reset transition and unused run-bound journal before allocation.",
   "environment": {
     "mode": "live",
     "live_fixtures": [
@@ -10046,7 +10046,7 @@
     "base_images": [],
     "services": [
       "phone-harness-cloud-iphone",
-      "independent-phone-challenge-fixture"
+      "provider-passcode-restoration"
     ],
     "secrets": [
       "PHONE_HARNESS_DEVICE_ID",
@@ -10055,8 +10055,18 @@
     "live_targets": [
       "dedicated owner cloud iPhone"
     ],
-    "context_notes": "Provider key backend-only. Requires exclusive per-device scheduler ownership, isolated durable custody/private-vault preservation, trusted configured identities and independent run-bound reset/challenge/delivery proof. Current collector unavailable: preflight must ERROR/unexercised, never skip or fabricate PASS."
-  }
+    "context_notes": "Explicit operator reset fixture only; no model reset command. Require observed resetting then available and provider passcode-restoration report. Report is not enabled-passcode proof: verify actual Settings during boot. Preserve provider management; do not send provider messages automatically. No full historical download required."
+  },
+  "enforce_declared_evaluators": true,
+  "evaluators": [
+    {
+      "id": "fresh-boot-protocol",
+      "criteria": [
+        "PASS only if this fresh run actually performed all required boot steps using the assigned cloud iPhone, verified the intended Apple and Google accounts, iCloud Messages/Keychain/Contacts, iMessage and intended receive address, portrait lock, actual enabled device passcode before Gmail or explicitly authorized verified alternative, installed usable Gmail, used saved credentials securely before help, and never bypassed provider policy or exposed secrets. Provider reset/passcode restoration is assisted preparation, not agent achievement; disclose it separately. Any user-only authentication or incomplete setting means unattended boot FAIL. A retained state audit, labels, successful inputs, or agent prose alone cannot pass. Require actual current tool evidence and final backend settings verification."
+      ],
+      "method": "single_turn_llm_judge"
+    }
+  ]
 },
 {
   "name": "phone-daily-sms-challenge",

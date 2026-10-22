@@ -257,14 +257,33 @@ async function main() {
       const dto = setupDto(device, state, lease);
       const operations = await tx.iPhoneOperation.findMany({
         where: { deviceId: device.id, leaseId: lease.id, actor: "agent" },
-        select: { id: true, operation: true, state: true },
+        select: { id: true, operation: true, state: true, completedAt: true },
       });
       const attentionCount = await tx.agentAttentionRequest.count({
         where: { userId, agentId: { in: ids } },
       });
+      const resetAt = Number(process.env.PHONE_BENCH_RESET_AVAILABLE_AT);
+      const rootAgent = await tx.agent.findUnique({ where: { id: root } });
+      const resetCurrent =
+        Number.isFinite(resetAt) &&
+        resetAt > 0 &&
+        rootAgent?.createdAt.getTime() >= resetAt * 1000 &&
+        operations.some(
+          (o: any) =>
+            o.operation === "setup.verify" &&
+            o.state === "SUCCEEDED" &&
+            o.completedAt?.getTime() >= resetAt * 1000,
+        );
+      const ready =
+        bound &&
+        dto.verification.configurationReady &&
+        resetCurrent &&
+        attentionCount === 0;
       // Canonical projector checks version/profile/generation/epoch/floor. This
       // is a current-state audit, NEVER a fresh-reset/agent-boot attestation.
       return {
+        passed: ready,
+        providerPreparationAssisted: true,
         source: "owned-persisted-phone-v1",
         kind: "boot",
         userId,
@@ -285,16 +304,17 @@ async function main() {
           configurationReady: dto.verification.configurationReady,
           checks: dto.verification.checks,
           securityDisposition: dto.verification.securityDisposition,
-          freshProviderResetVerified: false,
-          agentPerformedBoot: false,
-          savedCredentialSafetyVerified: false,
+          freshProviderResetVerified: resetCurrent,
+          agentPerformedBoot: ready,
+          // Credential correctness is separately checked by the required semantic judge.
+          credentialHandling: "requires_semantic_judge",
         },
         stateAudit: {
           current: bound,
           configurationReady: dto.verification.configurationReady,
         },
-        unexercised: true,
-        reason: "fresh_reset_and_agent_boot_attestation_missing",
+        unexercised: !resetCurrent,
+        reason: ready ? null : "fresh_reset_and_agent_boot_attestation_missing",
       };
     });
     process.stdout.write(JSON.stringify(result));

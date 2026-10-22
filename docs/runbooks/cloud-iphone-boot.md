@@ -159,3 +159,71 @@ failed end-to-end attempt and does not establish a code-entry defect or SMS
 arrival. Safe evidence: `.context/phone-harness/automatic-sms-live-result.json`.
 The browser closed, the phone lease was released and provider returned idle;
 the private vault and existing phone accounts/data were preserved.
+
+## Fresh reset test protocol (provider API, 2026-10-22)
+
+The provider now supports `POST /me/devices/{deviceId}/reset`. This **erases all
+apps, accounts and data** while retaining the device assignment. It is an
+explicit fixture-owner operation, not a model tool and not an automatic action
+when the ordinary DAILY suite starts. Preserve connected server-side password
+storage and private journals; never erase or manipulate the phone from Settings
+as a substitute.
+
+1. Finish/release the existing owned phone session through its normal broker.
+   Confirm provider cleanup and that the selected device is `available`. Never
+   kill someone else's session or infer cleanup from a closed browser window.
+2. Use a dedicated isolated `victoria_bench_...` backend database and the same
+   owner, device and private environment that the boot benchmark will use.
+   Provider credentials remain in environment; never put them in a command,
+   journal, prompt, screenshot or log. The reset bridge checks local custody and
+   the provider catalog, then the provider rejects a racing active session.
+3. Start a new explicit reset journal (choose a new path for each intended reset):
+
+   ```sh
+   PYTHONPATH=agents agents/venv/bin/python -m benchmarks.phone_boot_reset start \
+     --journal /private/path/fresh-boot-reset.json \
+     --device "$PHONE_HARNESS_DEVICE_ID" --owner "$BENCHMARK_RUN_USER_ID" \
+     --confirm-erases-device "$PHONE_HARNESS_DEVICE_ID"
+   ```
+
+   The intent is durably saved before the single POST. If the response is lost,
+   do not POST again or delete the journal. Use `observe` on that same journal.
+   A successful POST alone is not proof of a completed reset.
+4. Poll with the `observe` action using the same `--journal` and device/owner
+   environment. Require a recorded `resetting` state followed by `available`.
+   A device that is merely available without the observed transition does not
+   establish a fresh reset. No arbitrary delay substitutes for provider state.
+5. **Current provider limitation:** after every reset Shawn's team must re-enable
+   passcodes. The CLI writes a concise `.provider-request.txt` beside the journal
+   when the reset completes. Send that request through an authorized channel;
+   this tooling does not send email or SMS. Remain blocked until the provider
+   reports restoration. Record that report with action `provider-ready`.
+   This is operator-reported preparation, never proof that an OS passcode exists.
+6. Set `PHONE_DAILY_RESET_JOURNAL` to that signed private journal and
+   `PHONE_DAILY_PROFILE_FILE` to the normal private identity-only profile. Run:
+
+   ```sh
+   scripts/run-bench --local phone-daily-full-boot
+   ```
+
+   The journal must match the owner/device, be at most 24 hours old, and can be
+   claimed by only one run. A new root must begin after reset availability. The
+   agent cannot reset the device; it must configure and verify actual settings.
+   The static evaluator requires current backend configuration proofs after the
+   reset. The mandatory semantic evaluator also checks real boot actions, saved
+   credential handling and absence of user-only intervention. It must separately
+   report provider-assisted preparation. Old proofs, cached screenshots, a
+   provider acknowledgment or an input receipt cannot establish boot success.
+7. Follow the startup order above: Apple sign-in; iCloud Messages/Keychain/Contacts,
+   iMessage/receive address and portrait lock; actual device passcode before
+   Gmail; install/login Gmail; verify exact usable account. If passcodes are still
+   restricted, stop with that actual blocker—never remove MDM or silently change
+   Workspace policy. Existing explicitly authorized policy-exception rules still
+   require their own current evidence.
+8. Release the run's phone lease and verify provider cleanup before removing its
+   isolated database. Keep reset evidence and the recording. Report fresh boot,
+   subsequent SMS delivery, Google approval and message roundtrip separately.
+
+This protocol is implemented and tested with synthetic provider responses. A
+fresh physical reset and unattended boot have **not** been certified by those
+unit tests. The DoorDash retry still waits for the separate Tillion integration.

@@ -88,6 +88,19 @@ def preflight_daily(task_name: str, base_url: str, user_id: str) -> None:
         'google': 'multi-realm fresh browser and persisted approval-to-target binding',
         'messages': 'independent recipient/inbound receipt and durable run marker',
     }
+    if TASK_KINDS[task_name] == 'boot':
+        import os
+
+        from benchmarks.phone_boot_reset import ResetBlocked, validate_for_boot
+        try:
+            if os.environ.get('BENCHMARK_ISOLATED_RUN', '').lower() not in {'1', 'true'}:
+                raise ResetBlocked('Isolated run required')
+            validate_for_boot(os.environ.get('PHONE_DAILY_RESET_JOURNAL', ''),
+                              os.environ.get('PHONE_HARNESS_DEVICE_ID'), user_id,
+                              os.environ.get('BENCHMARK_CONTEXT_DIR', ''))
+            return
+        except ResetBlocked:
+            raise PhoneDailyConfigurationError('phone_daily_configuration_unavailable: verified reset and provider passcode restoration required') from None
     if TASK_KINDS[task_name] in {'google', 'messages'}:
         import os
         if os.environ.get('BENCHMARK_ISOLATED_RUN', '').lower() in {'1', 'true'} and os.environ.get('PHONE_HARNESS_DEVICE_ID'):
@@ -105,6 +118,17 @@ def evaluate_daily(task_name: str, base_url: str = "", user_id: str = "", root_a
         raise PhoneDailyConfigurationError('Caller proof is not a collector configuration')
     if task_name not in TASK_KINDS:
         raise PhoneDailyConfigurationError('Unknown daily phone task')
+    if TASK_KINDS[task_name] == 'boot':
+        import os
+
+        from benchmarks.phone_boot_reset import validate_for_boot
+        receipt = validate_for_boot(os.environ.get('PHONE_DAILY_RESET_JOURNAL', ''),
+                                    os.environ.get('PHONE_HARNESS_DEVICE_ID'), user_id,
+                                    os.environ.get('BENCHMARK_CONTEXT_DIR', ''))
+        if receipt['claimedBy'] != os.environ.get('BENCHMARK_CONTEXT_DIR', ''):
+            raise PhoneDailyConfigurationError('Reset journal was not claimed by this run')
+        proof = collect_boot_audit(base_url, user_id, root_agent_id, database_url, mode='boot', reset_available_at=receipt['availableAt'])
+        return proof.get('passed') is True, None if proof.get('passed') is True else 'phone_daily_fresh_boot_evidence_missing', proof
     if TASK_KINDS[task_name] in {'google', 'messages'}:
         proof = collect_boot_audit(base_url, user_id, root_agent_id, database_url, mode=TASK_KINDS[task_name])
         return proof.get('passed') is True, None if proof.get('passed') is True else 'phone_daily_persisted_evidence_missing', proof
@@ -114,7 +138,7 @@ def evaluate_daily(task_name: str, base_url: str = "", user_id: str = "", root_a
     }
 
 
-def collect_boot_audit(base_url: str, user_id: str, root_agent_id: str, database_url: str, *, mode: str = "boot") -> dict:
+def collect_boot_audit(base_url: str, user_id: str, root_agent_id: str, database_url: str, *, mode: str = "boot", reset_available_at: float | None = None) -> dict:
     """Runnable private DB adapter; retained audit does not pass fresh-boot task."""
     import json
     import os
@@ -132,6 +156,8 @@ def collect_boot_audit(base_url: str, user_id: str, root_agent_id: str, database
     env = dict(os.environ)
     env.update(DATABASE_URL=database_url, DIRECT_URL=database_url,
                PHONE_BENCH_USER_ID=user_id, PHONE_BENCH_AGENT_ID=root_agent_id, PHONE_BENCH_MODE=mode)
+    if reset_available_at is not None:
+        env['PHONE_BENCH_RESET_AVAILABLE_AT'] = str(reset_available_at)
     env.pop("PHONE_HARNESS_API_KEY", None)
     key = load_env_var("CLAUDE_CREDENTIAL_DECRYPTION_KEY", root / "back-end/.env")
     if not key:
@@ -186,6 +212,10 @@ async def apply_daily_fixture(task_name: str, base_url: str, user_id: str, backe
 
     import httpx
     preflight_daily(task_name, base_url, user_id)
+    if TASK_KINDS[task_name] == 'boot':
+        from benchmarks.phone_boot_reset import validate_for_boot
+        validate_for_boot(os.environ['PHONE_DAILY_RESET_JOURNAL'], os.environ['PHONE_HARNESS_DEVICE_ID'],
+                          user_id, os.environ['BENCHMARK_CONTEXT_DIR'], claim=True)
     async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
         response = await client.put(base_url.rstrip('/') + '/api/iphone/device',
             headers={'X-API-Key': backend_key, 'X-User-Id': user_id},

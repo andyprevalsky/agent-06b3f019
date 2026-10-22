@@ -79,6 +79,15 @@ export class PhoneHarnessClient {
         return { id: string(entry.id), label: string(entry.label), state: string(entry.state) };
       });
   }
+  /** Destructive owner action. Caller must prove idle custody and never replay an unknown POST. */
+  async resetDevice(deviceId: string): Promise<{ accepted: true }> {
+    await exchange(this.#fetch, `${this.#apiUrl}/me/devices/${segment(deviceId)}/reset`, {
+      method: 'POST',
+      token: this.#apiKey,
+      allowEmptySuccess: true,
+    });
+    return { accepted: true };
+  }
   async create(
     deviceId: string,
     requestKey: string,
