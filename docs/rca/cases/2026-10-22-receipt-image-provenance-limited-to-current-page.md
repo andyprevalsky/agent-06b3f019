@@ -100,8 +100,12 @@ HTML-spec srcset parser (Python + JS, plus `picture source[srcset]`), and `_imag
 keys a `/cdn-cgi/image/<options>/<absolute origin>` path structurally by its exact embedded
 origin. Regressions: real-Chromium srcset fixture fails on da1468598 and passes 5/5; the real
 URL pair is rejected on da1468598 and accepted patched, while drifted, never-rendered and
-malformed origins are still rejected (5/5). Open: lane F's evidence on where the model saw
-the exact 1200x672 string (rendered on checkout, or composed).
+malformed origins are still rejected (5/5). Run evidence (lane F, dump step 75): the exact
+1200x672 URL appears only in a `read_network_requests` GraphQL item payload (`imageUrl`); the
+item dialog rendered the `width=600` cdn-cgi derivative of the same S3 original; the checkout
+page renders no item image; `read_browser_state` shows only the basename
+(`image_src=09f09e4f-...-retina-large.jpeg`). So the receipt named an image this browser
+rendered, through a different resize of the same origin, which defect B's identity accepts.
 
 ## Human feedback
 
