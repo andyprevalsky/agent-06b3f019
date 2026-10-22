@@ -158,7 +158,13 @@ async def prepare(path, device, owner, confirmation, run_id, *, call=provider,
     with path.with_suffix('.lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if not path.exists():
-            await start(path, device, owner, confirmation, call=call)
+            try:
+                await start(path, device, owner, confirmation, call=call)
+            except ResetBlocked:
+                if not path.exists() or load(path).get('phase') != 'unknown':
+                    raise
+                # A lost POST response does not permit replay. Observe the
+                # provider transition using this same durable reset intent.
         data = load(path)
         if data['deviceId'] != device or data['userId'] != owner or data['claimedBy'] not in (None, run_id):
             raise ResetBlocked('Reset journal belongs to another owner/device/run')

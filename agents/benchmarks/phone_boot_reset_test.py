@@ -141,3 +141,20 @@ def test_authorized_google_exception_resumes_boot_without_false_passcode_report(
     with pytest.raises(reset.ResetBlocked):
         reset.validate_for_boot(path, 'device', 'owner', 'run')
     assert reset.validate_for_boot(path, 'device', 'owner', 'run', allow_google_exception=True)
+
+
+def test_prepare_observes_uncertain_reset_instead_of_aborting_or_resubmitting(tmp_path):
+    path = tmp_path / 'reset.json'
+    calls = []
+    states = iter(['available', 'resetting', 'available'])
+    async def provider(action, device):
+        calls.append(action)
+        if action == 'reset':
+            raise reset.ResetBlocked('lost reset response')
+        return {'state': next(states)}
+    async def sleep(_):
+        pass
+    data = asyncio.run(reset.prepare(path, 'device', 'owner', 'device', 'run', call=provider,
+                                     sleep=sleep, allow_google_exception=True))
+    assert data['phase'] == 'ready'
+    assert calls.count('reset') == 1
