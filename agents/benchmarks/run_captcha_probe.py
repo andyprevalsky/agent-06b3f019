@@ -308,6 +308,14 @@ def _keep_head_and_tail(text: str, chars: int) -> str:
     return text[:head] + "\n...[truncated]...\n" + text[-(chars - head) :]
 
 
+def _is_browser_row(message: Dict[str, Any]) -> bool:
+    metadata = _metadata(message)
+    return bool(metadata.get("subAgentId") or metadata.get("sub_agent_id")) or metadata.get("toolName") in (
+        "spawn_browser_agent",
+        *_OBSERVATION_TOOLS,
+    )
+
+
 def build_judge_evidence(root_messages: List[Dict[str, Any]], child_messages: List[Dict[str, Any]]) -> Dict[str, Any]:
     """What the judge sees, built so a terse final answer cannot starve it.
 
@@ -327,7 +335,10 @@ def build_judge_evidence(root_messages: List[Dict[str, Any]], child_messages: Li
         if str(m.get("role") or "").upper() == "TOOL" and text.strip()
     ][-4:]
 
-    child_rows = [(m, _row_text(m)) for m in child_messages]
+    # Browser steps usually live in the ROOT transcript: TOOL rows with toolName spawn_browser_agent and
+    # metadata.subAgentId (the browser task id is not a fetchable agent). Use those plus any child rows.
+    browser_source = [m for m in root_messages if _is_browser_row(m)] + list(child_messages)
+    child_rows = [(m, _row_text(m)) for m in browser_source]
     browser = [(m, text) for m, text in child_rows if text.strip() or _message_url(m)]
     tabs: List[Dict[str, str]] = []
     seen_urls = set()
