@@ -2015,6 +2015,55 @@ async def _reap_playwright_driver_process(process: Optional[Any], agent_id: str)
         logger.warning("Failed to kill Playwright driver process", agent_id=agent_id, error=str(e))
 
 
+_PROMOTED_REATTACH_RETRY_DELAY_SECONDS = 2.0
+
+
+class BrowserStackUnavailableError(RuntimeError):
+    """A reattach to the (promoted) browser session failed: no live browser stack."""
+
+
+async def _retry_promoted_browser_reattach(
+    *,
+    first_error: BaseException,
+    new_cdp_url: str,
+    released_dom_service: Any,
+    fingerprint_injection: Any,
+    exit_geo_locale: Optional[Dict[str, Any]],
+    agent_id: str,
+    provider: Optional[str],
+    config: Any,
+    task_id: Optional[str],
+    delay_seconds: Optional[float] = None,
+) -> Dict[str, Any]:
+    """One delayed retry of the attach to a promoted session, else a typed error.
+
+    The first attempt already tore down the old stack, so there is no Playwright
+    left to stop; the released DOMService still carries redaction and
+    receipt-image state for the replacement. A provider slot can free late
+    (Tilion 4409), which the delay covers.
+    """
+    await asyncio.sleep(_PROMOTED_REATTACH_RETRY_DELAY_SECONDS if delay_seconds is None else delay_seconds)
+    try:
+        return await _reconnect_browser_stack_after_rotation(
+            new_cdp_url=new_cdp_url,
+            old_dom_service=released_dom_service,
+            old_playwright_browser=None,
+            old_playwright_instance=None,
+            old_driver_pid=None,
+            fingerprint_injection=fingerprint_injection,
+            exit_geo_locale=exit_geo_locale,
+            agent_id=agent_id,
+            provider=provider,
+            config=config,
+            task_id=task_id,
+        )
+    except Exception as retry_error:
+        raise BrowserStackUnavailableError(
+            "reattach to promoted session failed twice: "
+            f"{extract_error_message(first_error)}; {extract_error_message(retry_error)}"
+        ) from retry_error
+
+
 class BrowserStorageCaptureTimeoutError(RuntimeError):
     """Raised when auth-preserving browser storage capture exceeds its hard bound."""
 
@@ -9318,6 +9367,12 @@ async def _spawn_browser_agent_activity_v3_real(
 
             # One guarded state fetch supplies URL + observe text (avoid double DOM).
             browser_activity_checkpoint(f"Step {iteration} - resolving page state")
+            if dom_service is None:
+                # A failed reattach left no browser stack: end the activity with a typed
+                # error instead of AttributeError plus supervisor recovery on dead handles.
+                raise BrowserStackUnavailableError(
+                    f"browser stack unavailable for session {session_id} after a failed reattach"
+                )
             try:
                 # Kernel drops the WebAuthn VA environment ~5s after seed (agent
                 # c1ebd389 median 5.6s). Re-arm before every state observe so the
@@ -10340,11 +10395,12 @@ async def _spawn_browser_agent_activity_v3_real(
                                 config=config,
                                 task_id=task_id,
                             )
-                        except Exception:
+                        except Exception as reconnect_error:
                             # The reconnect helper disconnects the old stack before attaching to
                             # the promoted session. Drop every dead handle so the error path cannot
                             # attempt a screenshot/action against the disconnected browser and mask
                             # the original reconnect failure.
+                            released_dom_service = dom_service
                             if humanizer is not None:
                                 with contextlib.suppress(Exception):
                                     await humanizer.close()
@@ -10355,7 +10411,33 @@ async def _spawn_browser_agent_activity_v3_real(
                             playwright_browser = None
                             playwright_instance = None
                             playwright_driver_pid = None
-                            raise
+                            # The backend already swapped to the promoted session and released
+                            # the old one: never keep pointing at it (a later close would 500).
+                            session_id = config_result.get("session_id", session_id)
+                            browser_url = config_result.get("debug_url", browser_url)
+                            cdp_url = new_cdp_url
+                            browser_session_metadata = promoted_metadata
+                            logger.warning(
+                                "Reattach to promoted browser session failed; retrying once",
+                                agent_id=agent_id,
+                                task_id=task_id,
+                                session_id=session_id,
+                                error=extract_error_message(reconnect_error),
+                            )
+                            # One delayed retry covers a provider slot that frees late (Tilion
+                            # 4409). The released DOMService still carries redaction and
+                            # receipt-image state for the replacement.
+                            reconnected = await _retry_promoted_browser_reattach(
+                                first_error=reconnect_error,
+                                new_cdp_url=new_cdp_url,
+                                released_dom_service=released_dom_service,
+                                fingerprint_injection=fingerprint_injection,
+                                exit_geo_locale=session_exit_geo_locale,
+                                agent_id=agent_id,
+                                provider=promoted_metadata.get("provider") or config_result.get("provider"),
+                                config=config,
+                                task_id=task_id,
+                            )
                         dom_service = reconnected["dom_service"]
                         if hasattr(dom_service, "model_visible_value"):
                             action_history.bind_dom_service(dom_service)

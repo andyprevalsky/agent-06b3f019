@@ -8362,6 +8362,61 @@ def test_recovery_preflight_failures_resolve_the_in_progress_tool():
     assert 'action_result = {"success": False, "error": error_message}' in recovery_block
     assert recovery_block.count("tool_call_id=recovery_call_id") >= 2
 
+async def test_promoted_session_reattach_retries_once_then_fails_typed():
+    """T74 (lane G bfbc983c): the attach to a challenge-recovery promoted Tilion
+    session failed (4409). The worker kept the released session ids and later
+    dereferenced dom_service=None. Now: adopt the promoted ids, retry once, and
+    otherwise end with BrowserStackUnavailableError; the step loop never uses a
+    missing browser stack."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    released = SimpleNamespace(secret_redaction_state=lambda: {}, rendered_image_state=lambda: ["https://i/1.png"])
+    replacement = {"dom_service": object()}
+    reconnect = AsyncMock(return_value=replacement)
+    kwargs = dict(
+        first_error=ConnectionError("provider CDP socket closed: code=4409"),
+        new_cdp_url="wss://tilion.invalid/v1/session/sess_promoted/cdp?token=t",
+        released_dom_service=released,
+        fingerprint_injection=None,
+        exit_geo_locale=None,
+        agent_id="agent-t74",
+        provider="tilion",
+        config=None,
+        task_id="task-t74",
+        delay_seconds=0,
+    )
+    with patch.object(handler, "_reconnect_browser_stack_after_rotation", reconnect):
+        assert await handler._retry_promoted_browser_reattach(**kwargs) is replacement
+    call = reconnect.await_args.kwargs
+    assert call["old_dom_service"] is released, "the replacement inherits redaction/image state"
+    assert call["old_playwright_browser"] is None and call["old_driver_pid"] is None
+    assert call["new_cdp_url"] == kwargs["new_cdp_url"] and call["provider"] == "tilion"
+
+    failing = AsyncMock(side_effect=ConnectionError("provider CDP socket closed: code=4409 again"))
+    with patch.object(handler, "_reconnect_browser_stack_after_rotation", failing):
+        with pytest.raises(handler.BrowserStackUnavailableError) as raised:
+            await handler._retry_promoted_browser_reattach(**kwargs)
+    assert "failed twice" in str(raised.value) and "again" in str(raised.value)
+    assert not isinstance(raised.value, AttributeError)
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    recovery = source.split('if action_name == "recover_from_challenge":', 1)[1].split(
+        'if action_name in ("attempt_completion", "done"):', 1
+    )[0]
+    failure = recovery.index("except Exception as reconnect_error:")
+    cleared = recovery.index("dom_service = None", failure)
+    adopted = recovery.index('session_id = config_result.get("session_id", session_id)', failure)
+    retried = recovery.index("reconnected = await _retry_promoted_browser_reattach(", failure)
+    success = recovery.index('dom_service = reconnected["dom_service"]', failure)
+    assert failure < cleared < adopted < retried < success, "adopt promoted ids before retrying"
+    loop_guard = source.index("if dom_service is None:\n                # A failed reattach left no browser stack")
+    overlays = source.index("dom_service.ensure_browser_overlays_suppressed()")
+    assert loop_guard < overlays
+    assert "raise BrowserStackUnavailableError(" in source[loop_guard:overlays]
+
+
 def test_recovery_reconnect_failure_drops_disconnected_browser_handles():
     """A failed promoted-session attach must preserve its real error result."""
     import inspect
@@ -30177,6 +30232,10 @@ async def run_all_tests():
     r.record(
         "recovery_reconnect_failure_drops_handles",
         test_recovery_reconnect_failure_drops_disconnected_browser_handles,
+    )
+    await r.record_async(
+        "promoted_session_reattach_retries_once_then_fails_typed",
+        test_promoted_session_reattach_retries_once_then_fails_typed,
     )
     r.record(
         "recovery_guest_cookie_commit_from_tool_param",
