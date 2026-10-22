@@ -9,7 +9,7 @@ challenge recovery, promoted preferred config) keeps the switched provider and
 its browser state; the default never overrides a run's persisted provider.
 
 Credentials: `TILION_API_KEY`, `TILION_BASE_URL` in `agents/.env` and
-`back-end/.env` (never print). Prod surfaces (Render, Fly, Codex cloud, boxes
+`back-end/.env` (never print). Prod surfaces (Render, Fly, boxes
 managed env, bench guest secrets) need user approval; queued for /deploy.
 
 ## System context
@@ -159,7 +159,7 @@ Source of truth: `/home/boxes/tilion-coord/issues.json` (105 items).
 ### Open: needs a decision or action outside the code (6)
 
 - **T51 [critical] K2** (open-decision): COST: Tilion bills residential egress at ~3 credits/MB (wallet-debited even inside the 50 GB included premium) and CDP/direct egress at 1 credit/MB; MTD spend 28,663 credits (~$57): residential 83.7%, CDP/direct egress 11.8%, creates 3.3%, minutes 1.0%, solves 0. Account average ~98 credits/browser-minute (~$11.70/browser-hour) vs our 12c/hour cost row (~98x low) and Kernel row 48c/hour. Per 10-min run: residential ~690 cr (~$1.40), direct ~115 cr (~$0.23). Wallet capacity: ~360 residential runs, ~2,100 direct runs, ~255 at the observed mix; wallet at F close 216,648 (33,207 credits spent, ~$66); final wallet 215,304 (34,696 credits spent, ~$69); the anti-bot experiment (5 lanes, ~37 runs) used ~56,000 credits (~$112): wallet 215,241 -> 159,094; total pilot spend so far ~91,000 credits (~$182) of 250,000. Handling: A2 cost-row fix sent to C (creates, CDP bytes counter, residential flag; residential page bytes not observable per run). KNOBS (product decisions): default to tilion_direct unless the site needs residential (~5-6x), JPEG step screenshots + drop redundant AX/getDocument (~2.2 -> 0.6 MB/step), recording frame interval 2s -> 5s idle (-60% frame bytes)
-- **T13 [high] A3** (approval): Prod is pinned to BROWSER_PROVIDER=kernel on Render; Tilion is not the prod default until approved env writes land (Render, Fly, Codex cloud, boxes managed env, bench secrets). Handling: queued for user approval at deploy
+- **T13 [high] A3** (approval): Prod is pinned to BROWSER_PROVIDER=kernel on Render; Tilion is not the prod default until approved env writes land (Render, Fly, boxes managed env, bench secrets). Handling: queued for user approval at deploy
 - **T78 [high] L coverage** (decision): Acceptance tasks NOT RUNNABLE on Tilion without definition changes: browser-rotate-ip-escalation (status incomplete; hard-codes the Kernel->Steel ladder), linkedin-data-download (status incomplete), browser-agent-amazon-passkey (expected_browser_provider: kernel). Handling: not edited (rule 25); G2 and I3 covered instead by live parity/passkey gates; user decision whether to make these provider-neutral
 - **T27 [medium] deploy** (deploy-prereq): New BrowserSession.pausedBrowserState column changes the canonical seed cache key; there is no published fixture, so every benchmark fails until it is published (PG16 built locally by lane F; PG15 needed for cloud). Handling: deploy prerequisite
 - **T28 [medium] A1/default** (approval): boxes managed env pins BROWSER_PROVIDER=kernel and its sync rewrites local .env files a few minutes after an edit, so dev/bench runs silently use Kernel unless BROWSER_PROVIDER=tilion is set in the process env; a first browser-smoke 'pass' actually ran on Kernel (recorded invalid). Handling: process-env override in lanes; managed-env flip queued until the code is on main (main rejects 'tilion')
