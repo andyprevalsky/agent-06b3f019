@@ -697,9 +697,10 @@ async def test_tilion_cost_row_is_12_cents_per_hour_plus_create():
         tilion_captcha_solves=1,
     )
     expected_credits = 2 + 5 * 1 + (10 + 2) * 3 + 3 * 1 + 20
-    assert abs(
-        next(i for i in with_bytes if i["type"] == "service")["cost_cents"] - (12.0 + expected_credits * 0.2)
-    ) < 1e-6
+    assert (
+        abs(next(i for i in with_bytes if i["type"] == "service")["cost_cents"] - (12.0 + expected_credits * 0.2))
+        < 1e-6
+    )
     # Kernel/Steel rows ignore Tilion inputs.
     kernel = build_usage_items(1000, 100, pricing, 3_600_000, provider="kernel", tilion_premium_bytes=10 * megabyte)
     assert kernel == build_usage_items(1000, 100, pricing, 3_600_000, provider="kernel")
@@ -1333,10 +1334,13 @@ async def test_multiplexer_webauthn_arming_keeps_seeded_passkeys_working():
                 context = browser.contexts[0]
                 page = await context.new_page()  # held and armed by the multiplexer
                 await page.goto(base + "/")
-                assert await page.evaluate(
-                    "navigator.credentials.get({publicKey:{challenge:new Uint8Array(32),timeout:5000}})"
-                    ".then(()=>'resolved').catch(e=>e.name)"
-                ) == "NotAllowedError"
+                assert (
+                    await page.evaluate(
+                        "navigator.credentials.get({publicKey:{challenge:new Uint8Array(32),timeout:5000}})"
+                        ".then(()=>'resolved').catch(e=>e.name)"
+                    )
+                    == "NotAllowedError"
+                )
                 # DOMService._arm_target + its "one internal authenticator" recovery.
                 session = await context.new_cdp_session(page)
                 await session.send("WebAuthn.enable", {"enableUI": False})
@@ -2340,7 +2344,9 @@ async def test_pause_context_carries_downloads_and_image_provenance_without_secr
 
     handler_source = (Path(__file__).resolve().parents[2] / "domains/spawn_browser_agent_v3/handler.py").read_text()
     assert handler_source.count("durable_runtime_state={") == 1
-    assert 'dom_service.restore_rendered_image_state(durable_browser_runtime.get("rendered_image_urls"))' in handler_source
+    assert (
+        'dom_service.restore_rendered_image_state(durable_browser_runtime.get("rendered_image_urls"))' in handler_source
+    )
     assert '"rendered_image_urls": (' in handler_source
 
 
@@ -2462,12 +2468,18 @@ async def run_all_tests():
         ("click_path_cdp_awaits_bounded", test_click_path_cdp_awaits_are_bounded_when_replies_are_withheld),
         ("tilion_upload_input_reset_on_change", test_tilion_upload_verified_when_page_resets_input_on_change),
         ("multiplexer_resumes_workers", test_multiplexer_never_leaves_workers_paused_for_non_waiting_clients),
-        ("multiplexer_serialises_input_per_session", test_multiplexer_serialises_input_per_session_so_keys_are_not_dropped),
+        (
+            "multiplexer_serialises_input_per_session",
+            test_multiplexer_serialises_input_per_session_so_keys_are_not_dropped,
+        ),
         ("multiplexer_fails_unanswered_input", test_multiplexer_fails_unanswered_input_instead_of_hanging),
         ("playwright_survives_expired_input", test_playwright_survives_an_expired_input_and_its_late_reply),
         ("multiplexer_redials_late_freed_slot", test_multiplexer_redials_when_the_slot_frees_late),
         ("multiplexer_gives_up_on_busy_slot", test_multiplexer_gives_up_on_a_busy_slot_after_its_backoff),
-        ("multiplexer_arms_webauthn_popups", test_multiplexer_arms_webauthn_so_unarmed_popups_reject_instead_of_hanging),
+        (
+            "multiplexer_arms_webauthn_popups",
+            test_multiplexer_arms_webauthn_so_unarmed_popups_reject_instead_of_hanging,
+        ),
         ("multiplexer_webauthn_keeps_seeded_passkeys", test_multiplexer_webauthn_arming_keeps_seeded_passkeys_working),
         ("multiplexer_reapplies_detached_overrides", test_multiplexer_reapplies_overrides_when_their_holder_detaches),
         ("tilion_live_view_token_redacted", test_tilion_live_view_token_is_redacted_before_persisting),
