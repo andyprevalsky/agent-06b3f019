@@ -53,6 +53,61 @@ Suite selection (`run_benchmark.py --suite ...`) runs only `status: "ready"` ben
 
 ## Quick Start
 
+### Process Bench and continuous learning
+
+`scripts/run-bench process` (alias `process-bench`) selects exactly ten synthetic
+process cases; `scripts/run-bench list` shows their `Process Bench` titles.
+`scripts/run-bench eval --bench process-bench` uses the ordinary evaluator
+runtime. Cases execute the attached, network-free business fixture in a code
+sandbox. Reading fixture data or writing a completion summary is not execution.
+
+Each `process_spec` in `tasks.json` declares versioned steps, exact actor/entity
+bindings, prerequisite order, business days, input/output domains, evidence,
+conditional branches, forbidden shortcuts, blocked outcomes and final success.
+`python -m benchmarks.process_bench` (from `agents/`) rejects invalid graphs,
+impossible condition values, evaluator drift and fixture drift; `--write`
+regenerates only changed Process Bench evaluator entries. Existing task bytes
+are preserved. Catalog loading and canonical evaluation enforce that generated
+contract. Native SDK command/result checks precede the existing tree-aware
+semantic judge, which receives the original available rows without further tail
+truncation. Process checks require the native full event count to match the
+retained events. The existing producer caps SDK rows at 200 events; longer or
+missing-count histories fail closed before judging rather than hiding a prefix.
+The fixture permits incorrect order so the evaluator, rather than the fixture,
+must catch skipped work. A successful operation is still insufficient when
+substantive input, original scope, handoff or process evidence is missing.
+
+**NEVER FORGET TO LET THE LEARNINGS FLOW.** While developing WHM task1/fundraiser,
+carry confirmed failures and fixes into the applicable Process Bench specs,
+reusable checks and regression traces; carry Process Bench findings back to
+task1. Record immutable source/trace references, preserve original results and
+distinguish verified cause from hypothesis. Domain findings affect applicable
+cases; general process failures become suite-wide checks. Regenerate evaluators
+from the same versioned spec after every case change. Never change obligations
+or expected outcomes merely to turn a failed trace green.
+
+The initial sanitized learning ledger is `fixtures/process-learnings.json`.
+It cites saved `0ab5620a5` evidence without copying private investor data:
+original scope versus weakened subgoals, material handoff, full follow-up
+waterfall, valid declined subresults versus settlement, and separate business
+and wall clocks. The 25-iteration cap and 1,666.184 seconds in two waits are
+observations, not a diagnosed clock bug or a claimed runtime fix. Use a replay
+before making that claim. This feature does not change or relaunch task1.
+
+Owning proof: `python -m pytest -q benchmarks/process_bench_test.py`; the same
+controls run in the existing `benchmark` blackbox domain and deploy coverage.
+They execute real fixture operations with captured native-event envelopes and
+mock only the semantic provider boundary. This proves enforcement and complete
+judge input, not model judgment accuracy or a live ten-task success rate.
+The sanitized `fixtures/process-native-sdk-events.json` also records an actual
+E2B success and explicit error-string result, with source/template provenance.
+Errors remain failed evidence; numeric exit codes are not inferred from prose.
+Original batch result blocks are retained, but association with shared metadata
+is unsupported and fails closed. Local writable fixtures are not cryptographic
+proof: recorded mutations are rejected and the full semantic evidence remains
+required. The learning ledger records these implementation findings separately
+from the saved task1 observations, without claiming a task1 cause or fix.
+
 Every detached launcher prints the private log and exact controller exit marker.
 The controller log prints `scripts/run-bench monitor <run-directory>` for its
 own run. Poll that command every 30 seconds; its `--controller-status` marker

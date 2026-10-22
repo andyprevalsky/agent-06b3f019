@@ -23,6 +23,11 @@ SELF = Path(__file__).resolve()
 IDENTITY = runpy.run_path(str(REPO / "scripts/process-identity.py"))
 PAIR = ["agent-payment-abandonment", "agent-payment-idempotent-abandonment"]
 EXCLUSIVE_PAIR = ["agent-payment-abandonment", "agent-payment-setup-resume"]
+# Host breathing room for observing the fixture controller (cancel readiness and
+# exit), matching the deploy fixture-observation policy. A busy deploy host (load
+# ~50 during parallel coverage, 2026-10-20) missed the former 12 s/15 s deadlines
+# although every task finished; outcome and ownership assertions are unchanged.
+FIXTURE_OBSERVATION_S = 60
 USER = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 
 
@@ -354,7 +359,7 @@ def run_case(folder, names, cancel=False, overlap=True):
     process = spawn(folder, ["local", str(folder), *names, "--max-concurrency", "2", "--no-dashboard"], env=env)
     try:
         if cancel:
-            until = time.monotonic() + 12
+            until = time.monotonic() + FIXTURE_OBSERVATION_S
             while sum(
                 json.loads(p.read_text())["event"] == "task_observed" for p in (folder / "events").glob("*.json")
             ) < len(names):
@@ -369,7 +374,7 @@ def run_case(folder, names, cancel=False, overlap=True):
                 if json.loads(p.read_text())["pid"] == process.pid
             )
             assert exact_signal(ident, "TERM") == 0
-        code = process.wait(timeout=15)
+        code = process.wait(timeout=FIXTURE_OBSERVATION_S)
         events = sorted([json.loads(p.read_text()) for p in (folder / "events").glob("*.json")], key=lambda e: e["at"])
         worlds = [e for e in events if e["event"] == "world_created"]
         observations = [e for e in events if e["event"] == "task_observed"]

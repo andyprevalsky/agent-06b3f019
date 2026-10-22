@@ -20,7 +20,9 @@ ROOT = (
 )
 
 
-def run_campaign(tmp_path: Path, *, strict=True, runs=3, concurrency=3, fail_job=0, fail_jobs=()):
+def run_campaign(
+    tmp_path: Path, *, strict=True, runs=3, concurrency=3, fail_job=0, fail_jobs=(), holdout_jobs=(), extra_env=None
+):
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     binary = tmp_path / "bin"
@@ -61,8 +63,11 @@ def run_campaign(tmp_path: Path, *, strict=True, runs=3, concurrency=3, fail_job
         'case " $FIXTURE_FAIL_JOBS " in *" $index "*) sleep 1; exit 7 ;; esac\n'
         'out=$FIXTURE_ROOT/$RUN_BENCH_CAMPAIGN_JOB_ID\nmkdir -p "$out"\n'
         "RUN_ID=$RUN_BENCH_CAMPAIGN_JOB_ID\n"
+        # A holdout reaches its own barrier later (slower provisioning) and its
+        # live stack never becomes ready, so only its per-box window excludes it.
+        'case " $FIXTURE_HOLDOUT_JOBS " in *" $index "*) sleep "$FIXTURE_HOLDOUT_SKEW"; : > "$out/fleet-child.log" ;; *)\n'
         'printf \'synchronized start barrier ready: %s\\n\' "$RUN_ID" > "$out/fleet-child.log"\n'
-        "printf '12345\\n' > \"$out/status-proxy.port\"\n"
+        "printf '12345\\n' > \"$out/status-proxy.port\" ;; esac\n"
         "SYNCHRONIZED_START=1\nSTART_BARRIER_WAIT_SECONDS=20\n"
         "PER_BOX_BARRIER_WAIT_SECONDS=20\nSTRICT_BARRIER=1\n"
         "CLOUDBENCH_BARRIER_TOKEN=fixture-only\nCLOUDBENCH_BARRIER_RELEASE_ATTEMPTS=1\n"
@@ -80,10 +85,17 @@ def run_campaign(tmp_path: Path, *, strict=True, runs=3, concurrency=3, fail_job
     env.update(
         PATH=str(binary) + os.pathsep + str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", ""),
         CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY="0",
+        # This fixture tests barrier ordering, not physical disk reserve sizing.
+        CLOUDBENCH_CLEANUP_DISK_RESERVE_MB="1",
+        CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB="1",
+        CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB="0",
         FIXTURE_ROOT=str(tmp_path),
         FIXTURE_EVENTS=str(events),
         FIXTURE_FAIL_JOBS=" ".join(map(str, fail_jobs or (fail_job,))),
         FIXTURE_STRICT=str(int(strict)),
+        FIXTURE_HOLDOUT_JOBS=" ".join(map(str, holdout_jobs)),
+        FIXTURE_HOLDOUT_SKEW="4",
+        **(extra_env or {}),
     )
     command = [
         sys.executable,
@@ -149,6 +161,7 @@ def run_campaign(tmp_path: Path, *, strict=True, runs=3, concurrency=3, fail_job
         if strict:
             shutil.rmtree(admission, ignore_errors=True)
     summary = json.loads(next((tmp_path / ".context/benchmarks/campaigns").glob("*/summary.json")).read_text())
+    assert events.exists(), (result.returncode, result.stdout, result.stderr, summary)
     records = [json.loads(line) for line in events.read_text().splitlines()]
     return result, summary, records
 
@@ -187,6 +200,38 @@ def test_campaign_start_barrier_child_failure_releases_only_ready_survivors(tmp_
     )
     assert len(release["jobs"]) == 2
     assert summary["jobs"][2]["job_id"] not in release["jobs"]
+
+
+def test_campaign_start_barrier_excludes_a_late_holdout_before_ready_copies_expire(tmp_path):
+    """2026-10-20 #16: 39/40 copies were ready, one SIM copy never was. Each
+    fleet's per-box exclusion and its campaign barrier deadline are the same
+    window from its own barrier start, so the holdout (which reached its barrier
+    later) could only be excluded after every ready copy had already expired:
+    the whole cohort failed. The campaign must exclude the holdout before the
+    earliest ready copy's deadline and release the ready survivors."""
+    result, summary, events = run_campaign(
+        tmp_path, holdout_jobs=(3,), extra_env={"CLOUDBENCH_CAMPAIGN_HOLDOUT_MARGIN_SECONDS": "6"}
+    )
+    assert result.returncode != 0, "a holdout is still an infrastructure failure of the campaign"
+    executed = {event["job"] for event in events if event["event"] == "execute"}
+    assert executed == {"r001-j0001", "r002-j0002"}, result.stdout + result.stderr
+    ready = [event["at"] for event in events if event["event"] == "ready"]
+    assert min(event["at"] for event in events if event["event"] == "execute") > max(ready)
+    assert [job["status"] for job in summary["jobs"]] == ["passed", "passed", "failed"]
+    cohort = summary["startup_cohorts"][0]
+    assert cohort["released_count"] == 2 and cohort["failed_count"] == 1
+    assert [entry["job_id"] for entry in cohort["holdouts_excluded"]] == ["r003-j0003"]
+    release = json.loads(
+        next((tmp_path / ".context/benchmarks/campaigns").glob("*/startup-cohorts/*/release.json")).read_text()
+    )
+    assert sorted(release["jobs"]) == ["r001-j0001", "r002-j0002"]
+    # The holdout leaves through its own owned teardown, never a KILL.
+    assert {event["job"] for event in events if event["event"] == "teardown"} == {
+        "r001-j0001",
+        "r002-j0002",
+        "r003-j0003",
+    }
+    assert "excluding holdout r003-j0003" in result.stdout
 
 
 def test_campaign_start_barrier_all_failed_cohort_settles_and_later_cohort_progresses(tmp_path):

@@ -266,6 +266,11 @@ Set `status` honestly: `open` when the repro gap was never closed, `mitigated`
 when the symptom was contained but the cause was not fixed. A dishonest `fixed`
 teaches the archive to lie.
 
+**After the user approves and the fix lands, update that same case file.** Set
+`status` to the verified outcome, make `## Solution` describe the fix that
+actually shipped (add its PR/commit to `sources`), and record approval-time
+corrections in `## Human feedback`. Then reindex and validate again.
+
 ## Output
 
 When the correct generalizable fix requires an approval-gated change, present

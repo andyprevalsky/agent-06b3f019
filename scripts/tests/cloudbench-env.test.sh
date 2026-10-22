@@ -66,7 +66,9 @@ def run(script, values=None):
                           text=True, capture_output=True)
 
 # Donor free space as `df -PB1` reports it; DF_AVAIL sets the available bytes.
-DF_FAKE = "df() { printf 'Filesystem 1-blocks Used Available Capacity Mounted\\nfake 0 0 %s 0%% /data\\n' \"$DF_AVAIL\"; };\n"
+# DF_AVAIL_FREED (optional) is reported once $REMOTE_WMH_NATIVE no longer exists.
+DF_FAKE = ("df() { a=\"$DF_AVAIL\"; if [ -n \"${DF_AVAIL_FREED:-}\" ] && [ ! -e \"$REMOTE_WMH_NATIVE\" ]; then a=\"$DF_AVAIL_FREED\"; fi; "
+           "printf 'Filesystem 1-blocks Used Available Capacity Mounted\\nfake 0 0 %s 0%% /data\\n' \"$a\"; };\n")
 
 class WorldModelLaunch(unittest.TestCase):
     def assert_handoff(self, values, *, engine="experiential", pool="rose-1-mini",
@@ -187,6 +189,15 @@ class WorldModelLaunch(unittest.TestCase):
         self.assertNotIn("$REMOTE_WMH/", outside)
         self.assertNotIn("$REMOTE_WMH.", outside)
         self.assertIn("create_volume_snapshot_exact", refresh[refresh.index('BUILD_CMD="$NATIVE_REFRESH_CMD"'):])
+        # The restored tree is flushed after the swap and before the donor stops
+        # for its snapshot (2026-10-20 an unflushed blob tail was snapshotted
+        # truncated and every SIM guest failed the native artifact digest).
+        swap = fragment.index("mv '$REMOTE_WMH_NATIVE.incoming' '$REMOTE_WMH_NATIVE'")
+        # Separate commands: under set -e a failed `sync -f` in `a && b` would not
+        # stop the refresh before the DONE marker (CodeRabbit, PR #1560).
+        flush = fragment.index("sync -f '$REMOTE_WMH_NATIVE'\nsync\n")
+        self.assertLess(swap, flush)
+        self.assertLess(flush, fragment.index("echo '::WMH-REFRESH-DONE::'"))
         # Fleets rehydrate the donor proof from Machine metadata (observed
         # 2026-10-19: a refreshed WMH snapshot was never forked because only the
         # local state file named it). Publication must name the new snapshot
@@ -276,6 +287,72 @@ class WorldModelLaunch(unittest.TestCase):
                 self.assertEqual(setup, [{"tool": "setup", "uv_python": str(scratch / "uv-python"),
                                           "cwd": str(repo)}])
                 self.assertTrue((scratch / "uv-python").is_dir())
+
+    def test_native_refresh_replaces_a_previous_native_tree_that_leaves_too_little_room(self):
+        # 2026-10-20 re-refreshing a donor that already held a ~16 GB native tree
+        # failed its headroom check (7.1 GB free, 20.5 GB needed), so a corrupt
+        # native model could never be replaced. The previous tree is dropped only
+        # when the staged pull would not otherwise fit, and only after proving the
+        # drop frees enough: a refresh that cannot fit keeps the previous tree.
+        fragment = re.search(r'^    NATIVE_REFRESH_CMD="set -e\n.*?^ {4}# Legacy', source, re.M | re.S).group(0)
+        fragment = fragment[:fragment.rfind("    # Legacy")]
+        fake_python = (
+            "#!" + sys.executable + "\nimport json,os,sys\nfrom pathlib import Path\nargv=sys.argv[1:]\n"
+            "if argv[:1]==['-c']:\n    os.execv(sys.executable,[sys.executable]+argv)\n"
+            "open(os.environ['CALLS'],'a').write(json.dumps(argv)+'\\n')\n"
+            "if argv[:4]==['-m','pip','install','--quiet']:\n"
+            "    uv=Path(sys.argv[0]).parent/'uv'; uv.write_text('#!/bin/sh\\n'); uv.chmod(0o755); sys.exit(0)\n"
+            "if 'status' in argv:\n"
+            "    print(json.dumps({'plaintext_bytes':19*10**9})); sys.exit(0)\n"
+            "root=Path(argv[argv.index('--build-dir')+1])\n"
+            "(root/'models/rose-archive').mkdir(parents=True)\n"
+            "(root/'models/rose-archive/experiential.json').write_text('fresh')\n"
+            "(root/'build.manifest.json').write_text('native-manifest')\n"
+        )
+        gib = 1 << 30
+        for case, freed, ok, sync_fails in (("room-after-drop", 30 * gib, True, ""),
+                                            ("no-room-even-after-drop", 10 * gib, False, ""),
+                                            ("flush-fails", 30 * gib, False, "1")):
+            with self.subTest(case=case), tempfile.TemporaryDirectory(prefix="wmh-native-replace-") as temporary:
+                scratch = Path(temporary)
+                repo = scratch / "repo"
+                python = repo / "agents/venv/bin/python"
+                python.parent.mkdir(parents=True)
+                (repo / "back-end").mkdir()
+                (repo / "scripts").mkdir()
+                (repo / "scripts/setup-world-model.sh").write_text(":\n")
+                python.write_text(fake_python)
+                python.chmod(0o755)
+                world = scratch / "world-model"
+                (world / "models/rose-r2-archive-anthropic").mkdir(parents=True)
+                (world / "models/rose-r2-archive-anthropic/model.json").write_text("donor-legacy")
+                (world / "build.manifest.json").write_text("donor-legacy-manifest")
+                native = scratch / "world-model-native"
+                (native / "models/rose-archive").mkdir(parents=True)
+                (native / "models/rose-archive/experiential.json").write_text("corrupt-previous")
+                calls = scratch / "calls.jsonl"
+                result = run(
+                    "gosu() { shift; \"$@\"; }; chown() { :; }; rsync() { return 1; };\n"
+                    "sync() { [ -z \"$SYNC_FAILS\" ] || [ \"${1:-}\" != -f ]; };\n"
+                    # The previous tree occupies exactly what dropping it frees.
+                    "du() { printf '%s\\t%s\\n' \"$((DF_AVAIL_FREED - DF_AVAIL))\" \"${@: -1}\"; };\n" + DF_FAKE + fragment
+                    + '\neval "$NATIVE_REFRESH_CMD"',
+                    {"REMOTE_REPO": str(repo), "REMOTE_WMH": str(world), "REMOTE_WMH_NATIVE": str(native),
+                     "WMH_MODEL_NAME": "rose-archive", "WMH_CACHE_NAME": "rose-archive-serving",
+                     "WMH_LEGACY_CACHE_NAME": "rose-r2-archive-legacy",
+                     "WMH_LEGACY_MODEL_NAME": "rose-r2-archive-anthropic",
+                     "REMOTE_UV_PYTHON": str(scratch / "uv-python"), "CALLS": str(calls),
+                     "DF_AVAIL": str(7 * gib), "DF_AVAIL_FREED": str(freed), "SYNC_FAILS": sync_fails},
+                )
+                self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
+                self.assertEqual("::WMH-REFRESH-DONE::" in result.stdout, ok)
+                pulls = [json.loads(line) for line in calls.read_text().splitlines() if '"pull"' in line]
+                pulled = ok or bool(sync_fails)
+                self.assertEqual(len(pulls), 1 if pulled else 0)
+                self.assertEqual((native / "models/rose-archive/experiential.json").read_text(),
+                                 "fresh" if pulled else "corrupt-previous")
+                self.assertEqual("dropping the previous native WMH tree" in result.stdout, pulled)
+                self.assertEqual((world / "models/rose-r2-archive-anthropic/model.json").read_text(), "donor-legacy")
 
     def test_native_refresh_restores_a_lost_legacy_model_beside_the_native_one(self):
         # 2026-10-19 a native restore overwrote /data/world-model, so main's
@@ -3044,11 +3121,11 @@ PY
 # used to burn a full fleet launch and then die on a bare "BACKEND_API_KEY is
 # required" line that named neither the file it read nor the provisioning step.
 hub_key_guard="$(sed -n '/^require_in_app_hub_visibility()/,/^}/p' "$ROOT_DIR/scripts/run-bench-fleet")"
-printf '%s' "$hub_key_guard" | grep -q 'looked in:' ||
+grep -q 'looked in:' <<<"$hub_key_guard" ||
   fail "the in-app Hub key failure must name every source it searched"
-printf '%s' "$hub_key_guard" | grep -q 'back-end/.env does not exist' ||
+grep -q 'back-end/.env does not exist' <<<"$hub_key_guard" ||
   fail "the in-app Hub key failure must distinguish a missing .env from an empty key"
-printf '%s' "$hub_key_guard" | grep -q 'prepare-deploy-worktree.sh' ||
+grep -q 'prepare-deploy-worktree.sh' <<<"$hub_key_guard" ||
   fail "the in-app Hub key failure must name the provisioning command that fixes it"
 
 # ── Validated GitHub token for private-repo git-sync (descend I-01 + #1034) ──
@@ -3393,10 +3470,14 @@ guest_temporal_case() {  # <case> ; prints nothing on success
   fi
   chmod 600 "$dir/repo/agents/.env" "$dir/repo/back-end/.env"
   local override="$dir/repo/agents/.env.benchmark-temporal"
+  # bench-* cases stage the real bench app, whose guest namespace is committed.
+  local app=cloudbench-guest-temporal guest_namespace=bench-ns.acct
+  case "$case_name" in bench-*) app=navi-whisper-lux-bench ;; esac
+  [ "$case_name" != bench-applied ] || guest_namespace=rose-labs-bench.tch2n
   case "$case_name" in
-    missing) ;;
+    missing|bench-missing|bench-off) ;;
     *)
-      printf '# guest only\nCLOUDBENCH_GUEST_TEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\nCLOUDBENCH_GUEST_TEMPORAL_NAMESPACE=bench-ns.acct\nCLOUDBENCH_GUEST_TEMPORAL_API_KEY=guest-secret-key\n' > "$override"
+      printf '# guest only\nCLOUDBENCH_GUEST_TEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\nCLOUDBENCH_GUEST_TEMPORAL_NAMESPACE=%s\nCLOUDBENCH_GUEST_TEMPORAL_API_KEY=guest-secret-key\n' "$guest_namespace" > "$override"
       chmod 600 "$override"
       ;;
   esac
@@ -3415,11 +3496,11 @@ guest_temporal_case() {  # <case> ; prints nothing on success
   (
     cd "$dir/repo"
     eval "$function_body"
-    APP=cloudbench-guest-temporal
+    APP="$app"
     ROOT_DIR="$dir/repo"
     export TMPDIR="$dir/tmp"
     case "$case_name" in
-      off) export CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE=off ;;
+      off|bench-off) export CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE=off ;;
       explicit-missing) export CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE="$dir/absent" ;;
       *) unset CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE ;;
     esac
@@ -3454,6 +3535,17 @@ guest_temporal_case() {  # <case> ; prints nothing on success
         fail "$case_name: unusable override must stage and activate nothing"
       return 0
       ;;
+    bench-missing|bench-off|bench-wrong-ns)
+      # 2026-10-19: a host without the private override restaged the bench app
+      # with the production namespace; guests refused only at launch.
+      [ "$rc" -ne 0 ] || fail "$case_name: bench app staging without its committed guest namespace must fail closed"
+      [ ! -e "$dir/staged-agents.env" ] && [ ! -e "$dir/activated" ] ||
+        fail "$case_name: refused bench staging must stage and activate nothing"
+      grep -Fq 'rose-labs-bench.tch2n' "$dir/stderr" || fail "$case_name: refusal must name the expected bench namespace"
+      [ "$case_name" = bench-wrong-ns ] || grep -Fq '.env.benchmark-temporal' "$dir/stderr" ||
+        fail "$case_name: refusal must say how to provide the guest override"
+      return 0
+      ;;
   esac
   [ "$rc" -eq 0 ] || fail "$case_name: staging failed: $(cat "$dir/stderr")"
   [ "$(cat "$dir/activated")" = pool-1 ] || fail "$case_name: pool machine was not activated"
@@ -3478,13 +3570,18 @@ guest_temporal_case() {  # <case> ; prints nothing on success
       grep -Fq 'guest Temporal namespace override: bench-ns.acct' "$dir/stdout" || fail "applied: staging must report the guest namespace"
       [ "$manifest_namespace" = bench-ns.acct ] || fail "applied: manifest must record the guest namespace"
       ;;
+    bench-applied)
+      [ "$manifest_namespace" = rose-labs-bench.tch2n ] || fail "bench-applied: manifest must record the committed bench namespace"
+      [ "$(cloudbench_env_value "$dir/staged-agents.env" TEMPORAL_NAMESPACE)" = rose-labs-bench.tch2n ] ||
+        fail "bench-applied: staged guest agents env must carry the committed bench namespace"
+      ;;
     appended)
       printf 'DATABASE_URL=postgres://prod\nTEMPORAL_TASK_QUEUE=navi-agent-tasks\nTEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\nTEMPORAL_NAMESPACE=bench-ns.acct\nTEMPORAL_API_KEY=guest-secret-key\n' > "$dir/expected-backend"
       cmp -s "$dir/staged-backend.env" "$dir/expected-backend" || fail "appended: absent guest Temporal keys must be appended"
       ;;
   esac
 }
-for guest_case in applied appended missing off explicit-missing loose-mode incomplete; do
+for guest_case in applied appended missing off explicit-missing loose-mode incomplete bench-applied bench-missing bench-off bench-wrong-ns; do
   guest_temporal_case "$guest_case"
 done
 # A linked worktree env finds the override beside the authoritative file.
@@ -3521,13 +3618,34 @@ done
   printf 'TEMPORAL_NAMESPACE=rose-labs-bench.acct\nTEMPORAL_API_KEY=bench-secret\n' > "$dir/agents.env"
   printf 'DATABASE_URL=x\nTEMPORAL_NAMESPACE="rose-labs-bench.acct"\n' > "$dir/backend.env"
   printf 'TEMPORAL_NAMESPACE=prod-ns.acct\nTEMPORAL_API_KEY=prod-secret\n' > "$dir/stale-agents.env"
+  printf 'DATABASE_URL=x\r\nexport TEMPORAL_NAMESPACE=rose-labs-bench.acct\r\n' > "$dir/export-backend.env"
   : > "$dir/unset.env"
   cloudbench_require_guest_temporal_namespace "$dir/agents.env" "$dir/backend.env" rose-labs-bench.acct
+  # dotenv's `export KEY=value` form is the same key to the guest's loaders.
+  cloudbench_require_guest_temporal_namespace "$dir/agents.env" "$dir/export-backend.env" rose-labs-bench.acct
+  [ "$(cloudbench_expected_guest_temporal_namespace navi-whisper-lux-bench)" = rose-labs-bench.tch2n ]
+  [ -z "$(cloudbench_expected_guest_temporal_namespace some-other-app)" ]
   cloudbench_require_guest_temporal_namespace "$dir/stale-agents.env" "$dir/backend.env" ""
   ! cloudbench_require_guest_temporal_namespace "$dir/stale-agents.env" "$dir/backend.env" rose-labs-bench.acct 2> "$dir/stale.err"
   grep -q 'TEMPORAL_NAMESPACE=prod-ns.acct differs' "$dir/stale.err"
   ! grep -q -e prod-secret -e bench-secret "$dir/stale.err"
   ! cloudbench_require_guest_temporal_namespace "$dir/agents.env" "$dir/unset.env" rose-labs-bench.acct 2>/dev/null
+  # Conflicting repeats: the first value matches, but dotenv loaders apply the
+  # last one. Guest and staging checks both refuse them. Identical repeats (real
+  # env files repeat the key; the override rewrites every line) still pass.
+  printf 'TEMPORAL_NAMESPACE=rose-labs-bench.tch2n\nexport TEMPORAL_NAMESPACE=prod-ns.acct\n' > "$dir/dup-agents.env"
+  printf 'TEMPORAL_NAMESPACE=rose-labs-bench.tch2n\nTEMPORAL_NAMESPACE="rose-labs-bench.tch2n"\n' > "$dir/same-agents.env"
+  printf 'export TEMPORAL_NAMESPACE=rose-labs-bench.tch2n\n' > "$dir/one-backend.env"
+  [ "$(cloudbench_env_distinct_value_count "$dir/dup-agents.env" TEMPORAL_NAMESPACE)" = 2 ]
+  [ "$(cloudbench_env_distinct_value_count "$dir/same-agents.env" TEMPORAL_NAMESPACE)" = 1 ]
+  [ "$(cloudbench_env_distinct_value_count "$dir/unset.env" TEMPORAL_NAMESPACE)" = 0 ]
+  ! cloudbench_require_guest_temporal_namespace "$dir/dup-agents.env" "$dir/one-backend.env" rose-labs-bench.tch2n 2> "$dir/dup-guest.err"
+  grep -q 'assigns 2 different TEMPORAL_NAMESPACE values' "$dir/dup-guest.err"
+  ! cloudbench_require_staged_guest_temporal_namespace navi-whisper-lux-bench "" "$dir/dup-agents.env" "$dir/one-backend.env" 2> "$dir/dup-stage.err"
+  grep -q 'assigns 2 different TEMPORAL_NAMESPACE values' "$dir/dup-stage.err"
+  ! grep -q prod-ns.acct "$dir/dup-stage.err"
+  cloudbench_require_staged_guest_temporal_namespace navi-whisper-lux-bench "" "$dir/same-agents.env" "$dir/one-backend.env"
+  cloudbench_require_guest_temporal_namespace "$dir/same-agents.env" "$dir/one-backend.env" rose-labs-bench.tch2n
   python3 - "$ROOT_DIR/scripts/cloudbench-run.sh" "$ROOT_DIR/scripts/run-bench-cloud" <<'PYWIRE'
 import sys
 from pathlib import Path
@@ -3536,6 +3654,11 @@ check = 'cloudbench_require_guest_temporal_namespace "$REPO_DIR/agents/.env" "$R
 verify = 'cloudbench_verify_env_file "$REPO_DIR/back-end/.env"'
 assert run.count(check) == 1 and run.index(verify) < run.index(check) < run.index('step stack_launch'), 'guest check after digest verify, before stack'
 assert '--env "CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE=${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-}"' in cloud
+default = 'CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE="${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-$(cloudbench_expected_guest_temporal_namespace "$APP")}"'
+assert cloud.count(default) == 1 and cloud.index('cloudbench-env.sh"') < cloud.index(default) < cloud.index('--env "CLOUDBENCH_EXPECTED_GUEST'), 'launches bind the committed guest namespace by default'
+stage_check = 'cloudbench_require_staged_guest_temporal_namespace "$APP" "$guest_temporal_override"'
+body = cloud[cloud.index('_inject_secrets_locked() {'):]
+assert body.index(stage_check) < body.index('FLY secrets set --stage'), 'staging refuses a wrong guest namespace before any secret is set'
 assert 'echo "export CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE=$(printf \'%q\' "${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-}")"' in cloud
 PYWIRE
 ) || fail "a launcher-bound guest Temporal namespace must reject stale bench-app secrets"

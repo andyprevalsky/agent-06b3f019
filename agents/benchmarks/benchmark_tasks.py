@@ -96,6 +96,7 @@ class BenchmarkTask:
     context_gates: Optional[dict] = None  # Per-task user-context gates (helpers/get_user_context.py keys → bool), forwarded at agent creation
     model: Optional[str] = None  # Pin the ROOT agent to one Rose pool (e.g. 'rose-labs/rose-1-oss'). Only for tasks whose prompt a default-pool primary declines; forwarded at agent creation.
     evaluators: List[dict] = field(default_factory=list)  # Declared evaluator contract (static_check | single_turn_llm_judge | agentic_llm_judge | polar)
+    process_spec: Optional[dict] = None  # Authored Process Bench obligations; evaluators are generated and drift-checked
     enforce_declared_evaluators: bool = False  # Execute evaluators[] and require them to pass in run_benchmark.py
     source: List[str] = field(default_factory=list)  # Provenance pointers (origin task/test-prompt/smoke/agent_id)
     group: Optional[str] = None  # Benchmarks-page group label the UI groups off (canonical tokens: pre-deploy | daily | rose-bench | polar-bench | incomplete). Absent → backend derives from status/tags/bench.
@@ -231,6 +232,10 @@ def _load_tasks() -> List[BenchmarkTask]:
     overlap = sorted(base_names & {t["name"] for t in polar_raw})
     if overlap:
         raise ValueError(f"polar catalog name collision with tasks.json: {overlap[:5]}")
+    from benchmarks.process_bench import validate_task_process
+
+    for item in raw:
+        validate_task_process(item)
     tasks = [BenchmarkTask(**t) for t in [*raw, *polar_raw]]
     for t in tasks:
         if t.browser_profile_mode not in {"persistent", "fresh"}:
@@ -331,6 +336,7 @@ def selected_tasks_require_gate_type(task_names: List[str], gate_type: str) -> b
 
 def get_tasks_by_tag(tag: str) -> List[BenchmarkTask]:
     aliases = {
+        "process-bench": "process",
         "attachments": "attachment",
         "code-agent": "claude-code",
         "sub-agent-fan-out": "mass-agent",

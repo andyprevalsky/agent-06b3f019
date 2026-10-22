@@ -48,6 +48,7 @@ CATALOG_VERSION = "0.1"
 EVALUATION_METHODS = {"static_check", "single_turn_llm_judge", "agentic_llm_judge", "polar"}
 RUNTIME_EVALUATION_METHODS = {"static_check", "single_turn_llm_judge", "agentic_llm_judge", "polar"}
 RUNTIME_STATIC_CHECK_TYPES = {
+    "process_trace",
     "lantern_people_trace",
     "agent_status",
     "approval_request_count",
@@ -352,6 +353,9 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
     Base BenchmarkTask fields are enforced by the dataclass loader in
     benchmark_tasks.py; this validates the unified-catalog extensions.
     """
+    from benchmarks.process_bench import validate_task_process
+
+    validate_task_process(raw)
     item_id = _require_non_empty_string(raw, "name", "<task>")
     status = raw.get("status", "ready")
     if status not in TASK_STATUSES:

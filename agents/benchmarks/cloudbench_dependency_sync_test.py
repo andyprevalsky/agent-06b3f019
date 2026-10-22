@@ -20523,6 +20523,13 @@ def test_refresh_deps_mode_contract() -> None:
     snapshot_helper = _extract_fleet_function(cloud, "create_volume_snapshot_exact() {")
     assert "cloudbench-sync-deps.sh' /app" in mode
     assert "::DEPS-REFRESH-DONE::" in mode
+    # 2026-10-20 #16: the sharded launcher refreshes deps automatically and the
+    # donor is stopped by signal, then snapshotted. Dirty page cache is lost on
+    # that stop (truncated WMH blobs, wmh-donor-snapshot-unflushed-blobs), so
+    # the remote command must flush before it reports DONE.
+    # Separate commands: under set -e a failed `sync -f` in `a && b` would not
+    # stop the command before DONE (CodeRabbit on the WMH refresh, PR #1560).
+    assert mode.index("sync -f '$REMOTE_REPO'\nsync\n") < mode.index("echo '::DEPS-REFRESH-DONE::'")
     # stop precedes the snapshot cut
     assert mode.index('stop_machine_strict "$mid"') < mode.index('create_volume_snapshot_exact "$VOL_ID"')
     # bounded wait for a COMPLETE fresh snapshot: a measured donor snapshot ran

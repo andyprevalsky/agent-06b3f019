@@ -20,6 +20,7 @@ import { runPlaidTransactionSyncJob } from './domains/integrations/service.plaid
 import { runGmailSyncJob } from './services/integrations/gmailSync';
 import { runGoogleDataPurgeJob } from './services/integrations/googleDataPurge';
 import { reconcileWorkflowLiveness } from './providers/workflowLivenessReconciler';
+import { runStuckAgentBugReports } from './domains/agents/stuckAgentBugReportService';
 import { cleanupTerminalAgentWorkflowZombies } from './providers/workflowTerminalCleanup';
 import { runTerminalAgentBrowserReleaseReconcileWithLease } from './providers/agentCleanup';
 import { runTraceArchiveFinalizationRetries } from './providers/traceArchiveFinalizationRetry';
@@ -165,6 +166,41 @@ function scheduleWorkflowLivenessReconcile(isProduction: boolean): void {
       });
   };
   setInterval(run, 60_000).unref?.();
+}
+
+/** Hourly: real prod agent runs not COMPLETED 24h after start get one Report Bug /rca. */
+function scheduleStuckAgentBugReports(isProduction: boolean): void {
+  const cronLog = createLogger('Cron');
+  if (!isProduction || process.env.DISABLE_STUCK_AGENT_BUG_REPORTS === '1') {
+    cronLog.info('Stuck-agent bug reports disabled', {
+      reason: !isProduction ? 'non-production' : 'DISABLE_STUCK_AGENT_BUG_REPORTS',
+    });
+    return;
+  }
+  let running = false;
+  const run = () => {
+    if (running) {
+      cronLog.info('Stuck-agent bug reports already running; skipping overlapping tick');
+      return;
+    }
+    running = true;
+    runStuckAgentBugReports()
+      .then((summary) => {
+        // Logged every tick so a quiet hour still proves the job ran.
+        cronLog.info('Stuck-agent bug reports summary', { ...summary });
+      })
+      .catch((error) => {
+        cronLog.error('Stuck-agent bug reports failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        running = false;
+      });
+  };
+  run();
+  cron.schedule('23 * * * *', run);
+  cronLog.info('Stuck-agent bug reports scheduled (hourly)');
 }
 
 function scheduleTemporalWorkflowCleanup(isProduction: boolean): void {
@@ -446,6 +482,7 @@ export function registerCronJobs(isProduction: boolean): void {
   scheduleTraceArchiveFinalizationRetries(isProduction);
   scheduleTemporalWorkflowCleanup(isProduction);
   scheduleWorkflowLivenessReconcile(isProduction);
+  scheduleStuckAgentBugReports(isProduction);
   scheduleTerminalBrowserReleaseReconcile(isProduction);
   scheduleSteelSessionReaper();
   scheduleGmailSync();

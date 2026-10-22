@@ -2,6 +2,7 @@
 
 import nodeAssert from 'node:assert/strict';
 import { assertSteelProfileReplacementLifecycle } from './browser-provider.steel-profile-lifecycle.support';
+import { assertKernelProxyHealthFallback } from './browser-provider.kernel-health.support';
 import { createSessionWithContextUsingDependencies } from '../../providers/browser';
 import { computeGrantBrowserProvider } from '../../domains/compute-grants/config';
 import { selectedBrowserProvider } from '../../providers/browser/config';
@@ -33,6 +34,7 @@ import {
 import { runLiveKernelSteelAuthPersist } from './browser-provider.auth-persist.live';
 import { assertAuthPersistFailedInitCustody } from './browser-provider.auth-persist.cleanup.support';
 import { runLiveProviderParity } from './browser-provider.live.support';
+import { assertKernelUnhealthyProxyRelaxesLocation } from './browser-provider-proxy-health.support';
 import { runOptionalLiveBrowserUseProvider } from './browser-provider.browser-use-live.support';
 import {
   createBrowserUseRecoverySession,
@@ -48,6 +50,10 @@ const browserUseFlagBeforeContractTests = process.env.BROWSER_AGENT_BROWSER_USE_
 process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'true';
 
 const tests: Array<[string, () => void | Promise<void>]> = [
+  [
+    'Kernel proxy health errors preserve bounded geo fallback and cache custody',
+    assertKernelProxyHealthFallback,
+  ],
   [
     'Steel first-profile replacement preserves its full binding and the source on failure',
     assertSteelProfileReplacementLifecycle,
@@ -402,6 +408,10 @@ const tests: Array<[string, () => void | Promise<void>]> = [
     },
   ],
   ['Kernel city inventory errors trigger location fallback', assertKernelCityInventoryFallback],
+  [
+    'Kernel proxy marked unavailable by its health check relaxes location and drops the cached row',
+    assertKernelUnhealthyProxyRelaxesLocation,
+  ],
   ['Kernel SDK request timeouts trigger location fallback', assertKernelTimeoutFallback],
   [
     'Kernel navigation retries only transient proxy failures',

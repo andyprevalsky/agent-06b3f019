@@ -865,6 +865,7 @@ async def test_handler_execute_tool_happy_path():
         tool_call_id="tc-wf",
         agent_id="a-1",
         user_id="u-1",
+        compute_token_lineage_key="agent:lineage-1",
         fast_mode_cache_enabled=True,
         fast_mode_goal="root goal",
     )
@@ -876,7 +877,8 @@ async def test_handler_execute_tool_happy_path():
     scrape_call = next(call for call in calls if call["activity"] == "web_fetch_activity")
     assert scrape_call["kwargs"]["retry_policy"].maximum_attempts == 2
     summary_call = next(call for call in calls if call["activity"] == "summarize_and_filter_links")
-    assert summary_call["args"][-1] == "agent:a-1:tool:tc-wf:call:summarize_web_fetch"
+    assert summary_call["args"][-2] == "agent:a-1:tool:tc-wf:call:summarize_web_fetch"
+    assert summary_call["args"][-1] == "agent:lineage-1"
     download_call = next(call for call in calls if call["activity"] == "web_fetch_download_activity")
     assert download_call["args"] == [
         ["https://example.com/file.pdf"],

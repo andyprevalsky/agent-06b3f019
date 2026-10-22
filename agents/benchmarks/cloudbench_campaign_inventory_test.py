@@ -166,6 +166,10 @@ sys.exit(2 if mode == 'lifecycle-failed' and task == 'broken' else 0 if status =
            if not key.startswith("RUN_BENCH_CAMPAIGN_") and not key.startswith("BENCHMARK_HUB_")}
     env.update(FIXTURE_ROOT=str(tmp_path), FIXTURE_FAILURE=failure, CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY="0",
                FIXTURE_BARRIER=str(ROOT / 'scripts/cloudbench-campaign-barrier.py'))
+    # Match the owning cleanup-ticket fixture: test retries, not host disk capacity.
+    env.update(CLOUDBENCH_CLEANUP_DISK_RESERVE_MB="1",
+               CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB="1",
+               CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB="0")
     if failure == "infra-parent-owned":
         # A Hub-dispatched campaign (run-bench-hub-poller) leaves group publication to its parent.
         env["BENCHMARK_HUB_PARENT_RUN_ID"] = "fixture-parent"
@@ -182,7 +186,7 @@ sys.exit(2 if mode == 'lifecycle-failed' and task == 'broken' else 0 if status =
         assert summary['e2e_timeout_exceeded']
         assert (summaries[0].parent / 'hub-group-publication-ack.private.json').is_file(), 'cutoff skipped terminal group publication'
     elif failure in {'infra', 'infra-strict', 'infra-parent-owned', 'exhausted', 'retry-unverified', 'retry-handle-missing'}:
-        assert len([event for event in started if event['task'] == 'broken']) == 2
+        assert len([event for event in started if event['task'] == 'broken']) == 2, (result.returncode, result.stdout, result.stderr, summary)
         assert len([event for event in started if event['task'] == 'healthy']) == 1
         assert len(broken['attempts']) == 2 and broken['attempts'][0]['task_status'] == 'INFRA_ERROR'
         assert len({attempt['log'] for attempt in broken['attempts']}) == 2
@@ -642,6 +646,13 @@ def seed_fixture(tmp_path, monkeypatch):
     # The publisher's Machines list uses its direct HTTP transport; this offline
     # fixture controls only that boundary with an empty app inventory.
     (root / "scripts/cloudbench-campaign-machines.py").write_text("import sys\nsys.stdout.buffer.write(b'[]')\n")
+    # These controls run the real host seed GET (cloudbench-seed-get.sh -> tsx)
+    # through the checkout's installed Node trees. An unprovisioned worktree used
+    # to fail six cases with a bare FileNotFoundError on the missing seed probe.
+    assert any((ROOT / tree / "node_modules/.bin/tsx").exists() for tree in (".", "back-end")), (
+        f"seed preflight controls need this checkout's Node dependencies: no tsx under {ROOT}/node_modules "
+        "or back-end/node_modules; install them or run scripts/prepare-deploy-worktree.sh"
+    )
     (root / "node_modules").symlink_to(ROOT / "node_modules", target_is_directory=True)
     (root / "back-end/node_modules").symlink_to(ROOT / "back-end/node_modules", target_is_directory=True)
     for command in (

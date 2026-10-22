@@ -349,6 +349,50 @@ class Scorecard(unittest.TestCase):
         document = self.valid(data)
         self.assertIn("RUNNING", document)
 
+    def test_sharded_unknown_counters_without_ids_preserve_outcomes_and_clocks(self):
+        # Archived pre-barrier failures have counts but no per-job identities/results.
+        admission = self.f.sharded(result=False, audit=False, live=True)
+        coordination = json.loads((admission / "coordination.json").read_text())
+        coordination.update(scheduled_total=40, released_at=None, aborted_at=T0 + 2000,
+                            abort_reason="shards failed before global release")
+        write(admission / "coordination.json", coordination)
+        for index in (0, 1):
+            write(admission / f"shard-{index:02d}/run/shard-status.json", {
+                "state": "JOINED", "infra": {"progress": {"combos": [["failed", None, None, 20]],
+                "jobs": 20, "terminal_attempts": 20, "infra_attempts": 0, "reasons": []}}})
+        data = render(admission, self.f)
+        exp = data["experiment"]
+        self.assertEqual(exp["rows_source"], "live shard-status counters")
+        self.assertEqual(exp["unknown_jobs"], [None] * 6)
+        self.assertEqual(exp["outcomes"], {category: 40 if category == "UNKNOWN" else 0
+                                          for category in CARD["CATEGORIES"]})
+        self.assertEqual(exp["progress"], {"queued": 0, "in_progress": 0, "completed": 40, "unobserved": 0})
+        self.assertEqual((exp["state"], exp["triggered_at"], exp["released_at"], exp["ended_at"]),
+                         ("ABORTED", T0, None, None))
+        self.assertIsNone(exp["wall"])
+        self.assertIsNone(exp["exec"])
+        self.assertIsNone(exp["cost"]["metered_usd"])
+        for output in (CARD["render_text"](data), self.valid(data)):
+            self.assertIn("No recorded task result: " + ", ".join(["job ID UNRECORDED"] * 6) + ".", output)
+
+    def test_missing_ids_in_unknown_and_unreleased_rows_render_without_changing_names(self):
+        admission = self.f.sharded(audit=False)
+        for verdict in (None, "PASSED"):
+            with self.subTest(verdict=verdict):
+                rows = [{"status": "failed", "task_status": verdict, "released": False, **identity}
+                        for identity in ({"task": "recorded-task"}, {"job_id": "recorded-job"},
+                                         {}, {"task": "", "job_id": None})]
+                write(admission / "result.json", {"jobs": rows})
+                data = render(admission, self.f)
+                exp = data["experiment"]
+                self.assertEqual(exp["unreleased_jobs"], ["recorded-task", "recorded-job", None, None])
+                labels = "recorded-task, recorded-job, job ID UNRECORDED, job ID UNRECORDED."
+                for output in (CARD["render_text"](data), self.valid(data)):
+                    self.assertIn("Release unverified: " + labels, output)
+                    if verdict is None:
+                        self.assertIn("No recorded task result: " + labels, output)
+                self.assertEqual(exp["outcomes"]["UNKNOWN" if verdict is None else "PASS"], 4)
+
     def test_missing_data_renders_explicit_states(self):
         empty = self.tmp / "empty"
         empty.mkdir()

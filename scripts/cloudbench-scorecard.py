@@ -837,10 +837,12 @@ def _issues(exp: dict) -> list[dict]:
         out.append({"severity": "amber", "text": f"{exp['infra_jobs']} infra-failed job(s) below the stop threshold.",
                     "owner": "parent", "action": "/RCA the first authentic failure now"})
     if exp.get("unknown_jobs"):
-        out.append({"severity": "amber", "text": "No recorded task result: " + ", ".join(exp["unknown_jobs"]) + ".",
+        out.append({"severity": "amber", "text": "No recorded task result: "
+                    + ", ".join(job or "job ID UNRECORDED" for job in exp["unknown_jobs"]) + ".",
                     "owner": "parent", "action": "/RCA from the job log and controller receipts"})
     if exp.get("unreleased_jobs") and not exp.get("native_audit"):
-        out.append({"severity": "amber", "text": "Release unverified: " + ", ".join(exp["unreleased_jobs"]) + ".",
+        out.append({"severity": "amber", "text": "Release unverified: "
+                    + ", ".join(job or "job ID UNRECORDED" for job in exp["unreleased_jobs"]) + ".",
                     "owner": "parent", "action": "native exact-owner audit before the next launch"})
     for item in exp["lifecycle"]:
         if item["state"] == "fail" and item.get("issue", True):

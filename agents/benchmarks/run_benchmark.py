@@ -12048,7 +12048,12 @@ async def _call_declared_agentic_llm_judge(
     tool_call_id = str(uuid.uuid4())
     token_data = await _fetch_agentic_judge_compute_token(user_id, judge_agent_id)
 
-    evidence = _declared_agentic_evaluator_evidence(data)
+    if getattr(task, "process_spec", None) is not None:
+        from benchmarks.process_bench import process_evidence
+
+        evidence = {"process_spec": task.process_spec, "full_trajectory": process_evidence(data)}
+    else:
+        evidence = _declared_agentic_evaluator_evidence(data)
     evidence_bytes = json.dumps(evidence, default=str, indent=2).encode("utf-8")
     attachment = await upload_to_storage(
         user_id,
@@ -13704,6 +13709,15 @@ def _run_declared_static_check(
             if not ok:
                 return False, reason
             continue
+        if check_type == "process_trace":
+            from benchmarks.process_bench import check_process_trace, spec_hash
+
+            if task is None or getattr(task, "process_spec", None) is None or check.get("spec_sha256") != spec_hash(task.process_spec):
+                return False, "Process specification missing or changed"
+            ok, reason = check_process_trace(task.process_spec, data)
+            if not ok:
+                return False, reason
+            continue
         if check_type == "lantern_people_trace":
             from benchmarks.lantern_people_trace import check_lantern_people_trace
 
@@ -14199,6 +14213,10 @@ async def _run_declared_evaluators(
     static_only: bool = False,
 ) -> tuple[bool, Optional[str], list[dict]]:
     """Run required catalog evaluators; unsupported/erroring evaluators fail closed."""
+    if getattr(task, "process_spec", None) is not None or "process" in getattr(task, "tags", []):
+        from benchmarks.process_bench import validate_task_process
+
+        validate_task_process(vars(task))
     if not task.enforce_declared_evaluators:
         return True, None, []
 
@@ -14279,7 +14297,12 @@ async def _run_declared_evaluators(
                     single_turn_evidence_exceeds_budget,
                 )
 
-                evidence = _declared_evaluator_evidence(data)
+                if getattr(task, "process_spec", None) is not None:
+                    from benchmarks.process_bench import process_evidence
+
+                    evidence = process_evidence(data)
+                else:
+                    evidence = _declared_evaluator_evidence(data)
                 if single_turn_evidence_exceeds_budget(evidence):
                     judged = await _call_declared_agentic_llm_judge(task, evaluator, data)
                     evidence_mode = "agentic_llm_judge"

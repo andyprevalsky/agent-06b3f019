@@ -450,9 +450,17 @@ function emitClaudeMessage(message) {
   }
 
   if (message.type === "user" && message.tool_use_result !== undefined) {
+    const results = (message.message?.content || []).filter(
+      (part) => part?.type === "tool_result",
+    );
+    const result = results.length === 1 ? results[0] : null;
     appendEvent({
       type: "tool_result",
       raw_type: "user.tool_result",
+      tool_use_id: result?.tool_use_id ?? null,
+      is_error: result ? result.is_error === true : null,
+      // Keep each original block; shared metadata cannot be assigned by position.
+      ...(results.length > 1 ? { tool_results: results } : {}),
       tool_use_result: message.tool_use_result,
     });
     return;
