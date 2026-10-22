@@ -20744,6 +20744,108 @@ async def test_receipt_image_rendered_on_an_earlier_page_of_the_activity_validat
             raise AssertionError(f"never-rendered image accepted: {never_rendered}")
 
 
+async def test_receipt_image_provenance_survives_session_switch():
+    """Eventim (agent fe68bf12, 2026-10-22): the event page rendered the seetickets image on the
+    residential session; challenge recovery switched to a tilion_direct session; the card was
+    requested from checkout on the new session. The rebind must carry the activity's
+    rendered-image provenance, and the exact-match rule still rejects anything never rendered."""
+    import browser_tools.dom_service as dom_module
+    import domains.spawn_browser_agent_v3.handler as handler
+    from browser_tools.dom_service import DOMService
+    from utils.purchase_approval import validate_image_url_for_page
+
+    event_page = "https://wl.eventim.us/event/yaego/707562?afflky=1015Folsom"
+    checkout_page = "https://checkout.eventim.us/?afflky=1015Folsom"
+    event_image = (
+        "https://prod-images.seetickets.us/eyJidWNrZXQiOiJwcm9kLXNpaC5zZWV0aWNrZXRzdXNhLnVzIiwia2V5IjoiMDBhYTY4YzMtZWU0"
+        "Ni00YjYxLTk1YTEtNmI3MmZiN2IyYjYzIiwiZWRpdHMiOnt9fQ=="
+    )
+    checkout_logo = "https://checkout.eventim.us/assets/eventim-logo.png"
+
+    def img(src):
+        return SimpleNamespace(
+            original_node=SimpleNamespace(tag_name="img", attributes={"src": src}, snapshot_node=None),
+            children=[],
+            should_display=True,
+        )
+
+    def state(url, images):
+        root = SimpleNamespace(
+            original_node=SimpleNamespace(tag_name="body", attributes={}), children=[img(s) for s in images]
+        )
+        return SimpleNamespace(
+            url=url,
+            title="",
+            dom_state=SimpleNamespace(_root=root, selector_map={}),
+            recent_events=None,
+            closed_popup_messages=None,
+        )
+
+    def summary(states):
+        return SimpleNamespace(get_browser_state_summary=AsyncMock(side_effect=lambda **_: states[0]))
+
+    def quiet(service):
+        service._page_geometry = lambda _state: {
+            "viewport_width": 1280,
+            "viewport_height": 800,
+            "scroll_x": 0,
+            "scroll_y": 0,
+            "pages_above": 0.0,
+            "pages_below": 0.0,
+            "total_pages": 1.0,
+        }
+        service._serialized_dom_tree = lambda *_args: ""
+        service._summarized_tabs = lambda _state: []
+        return service
+
+    # Residential generation: the model reads the event page.
+    old = quiet(DOMService(cdp_url="ws://old.invalid/devtools/browser/x"))
+    old._session = summary([state(event_page, [event_image])])
+    await old.get_browser_state(include_screenshot=False)
+    old.disconnect = AsyncMock()
+
+    # Challenge recovery rebinds the worker onto the promoted session (the real handler path).
+    created = []
+
+    class ReplacementDOMService(DOMService):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            created.append(self)
+
+        async def connect(self):
+            raise RuntimeError("stop after the replacement is built")
+
+    with patch.object(dom_module, "DOMService", ReplacementDOMService), patch.object(
+        handler, "open_browser_cdp_connection", AsyncMock(return_value=("ws://new.invalid/devtools/browser/y", None))
+    ), patch.object(handler, "_stop_playwright_resources", AsyncMock()):
+        try:
+            await handler._reconnect_browser_stack_after_rotation(
+                new_cdp_url="wss://tilion.invalid/v1/session/sess_new/cdp?token=t",
+                old_dom_service=old,
+                old_playwright_browser=None,
+                old_playwright_instance=None,
+                old_driver_pid=None,
+                fingerprint_injection=None,
+                agent_id="agent-t44",
+                provider="tilion",
+            )
+        except RuntimeError:
+            pass
+    assert created, "the rebind did not build a replacement DOMService"
+    new = quiet(created[0])
+    new._session = summary([state(checkout_page, [checkout_logo])])
+    rendered = await new.get_page_image_urls()
+
+    assert validate_image_url_for_page(event_image, rendered, checkout_page) == event_image
+    drifted = event_image[:-6] + "Ab9fQ=="
+    try:
+        validate_image_url_for_page(drifted, rendered, checkout_page)
+    except ValueError as error:
+        assert "image_url must be copied exactly" in str(error)
+    else:
+        raise AssertionError("a never-rendered image was accepted")
+
+
 async def test_dom_service_get_page_image_urls_reads_fresh_snapshot_without_screenshot():
     from browser_tools.dom_service import DOMService
 
@@ -31427,6 +31529,10 @@ async def run_all_tests():
     await r.record_async(
         "receipt_image_rendered_on_an_earlier_page_validates",
         test_receipt_image_rendered_on_an_earlier_page_of_the_activity_validates,
+    )
+    await r.record_async(
+        "receipt_image_provenance_survives_session_switch",
+        test_receipt_image_provenance_survives_session_switch,
     )
     r.record(
         "write_lock_notification_prompt_media_candidates",

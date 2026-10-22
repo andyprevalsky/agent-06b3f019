@@ -378,6 +378,24 @@ async def _fixture_site():
         )
 
     app.router.add_get("/worker", worker_page)
+
+    async def gallery(_request):
+        return web.Response(
+            content_type="text/html",
+            text=(
+                "<title>gallery</title>"
+                '<img src="/static/logo.png?near=1" width="40" height="40">'
+                '<div style="height:5000px"></div>'
+                '<img src="/static/logo.png?far=1" width="40" height="40"'
+                ' srcset="/static/logo.png?far=2x 2x">'
+                # Off-screen in a horizontal carousel: browser-use's snapshot tree
+                # omits it (probe 2026-10-22), document.images has it.
+                '<div style="display:flex;overflow-x:auto;width:200px"><div style="min-width:3000px"></div>'
+                '<img src="/static/logo.png?carousel=1" width="40" height="40"></div>'
+            ),
+        )
+
+    app.router.add_get("/gallery", gallery)
     app.router.add_get("/files/report.pdf", report)
     app.router.add_get("/static/logo.png", logo)
     runner = web.AppRunner(app, access_log=None)
@@ -2022,6 +2040,37 @@ async def test_supervisor_cap_logs_blocked_stack_and_classifies_action_timeouts(
     assert "asyncio.wait_for(\n                    action_task," not in handler_source
 
 
+async def test_document_images_count_as_rendered_through_the_worker_socket():
+    """Receipt-image provenance means 'rendered by this browser': <img>s far below
+    the viewport, which browser-use's snapshot tree prunes, are recorded from
+    document.images via one bounded Runtime.evaluate on the worker's socket."""
+    import time
+
+    import browser_tools.dom_service as dom_module
+
+    async with _fixture_site() as base, _tilion_worker_stack() as (service, pw_browser, gateway):
+        page = pw_browser.contexts[0].pages[0]
+        await page.goto(base + "/gallery")
+        await service.get_browser_state(include_screenshot=False)
+        remembered = service.rendered_image_state()
+        for url in (
+            "/static/logo.png?near=1",
+            "/static/logo.png?far=1",
+            "/static/logo.png?far=2x",
+            "/static/logo.png?carousel=1",
+        ):
+            assert base + url in remembered, (url, remembered)
+        assert gateway.rejected_4409 == 0 and service.cdp_multiplexer.upstream_connections_opened == 1
+
+        # A withheld reply never stalls a state read: bounded, records nothing new.
+        gateway.withhold = lambda raw: "document.images" in raw
+        with patch.object(dom_module, "_DOCUMENT_IMAGES_TIMEOUT_SECONDS", 0.5):
+            started = time.monotonic()
+            assert await service._remember_document_images() == []
+            assert time.monotonic() - started < 2
+        assert gateway.withheld_ids, "the fixture really withheld the reply"
+
+
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
@@ -2056,6 +2105,7 @@ async def run_all_tests():
         ("multiplexer_webauthn_keeps_seeded_passkeys", test_multiplexer_webauthn_arming_keeps_seeded_passkeys_working),
         ("multiplexer_reapplies_detached_overrides", test_multiplexer_reapplies_overrides_when_their_holder_detaches),
         ("tilion_live_view_token_redacted", test_tilion_live_view_token_is_redacted_before_persisting),
+        ("document_images_count_as_rendered", test_document_images_count_as_rendered_through_the_worker_socket),
         (
             "supervisor_cap_logs_stack_and_classifies",
             test_supervisor_cap_logs_blocked_stack_and_classifies_action_timeouts,
