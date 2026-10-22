@@ -57,6 +57,7 @@ def private(path, value):
 
 PROVIDER_CAPACITY_MEMBERS = ('cloudbench-provider-capacity.py', 'cloudbench-provider-limits.json')
 MANIFEST_CATALOG_MEMBERS = ('fleet_infra_sample.py', 'cloudbench_catalog.py')
+CANONICAL_SEED_MEMBERS = ('back-end/prisma/schema.prisma', 'agents/benchmarks/seed_cache_path.py')
 # Import closure of scripts/cloudbench-timeout-policy.py inside agents/benchmarks.
 TIMEOUT_POLICY_MODULES = ('__init__', 'benchmark_tasks', 'fixtures', 'live_fixtures',
                           'polar_catalog', 'timeout_history')
@@ -1797,11 +1798,15 @@ class Portable(unittest.TestCase):
             # The committed provider rate-limit helper and its reviewed registry.
             for member in PROVIDER_CAPACITY_MEMBERS + MANIFEST_CATALOG_MEMBERS:
                 (root/'scripts'/member).write_bytes((ROOT/'scripts'/member).read_bytes())
+            # The guests' canonical base-fixture token is derived from these at the source ref.
+            for member in CANONICAL_SEED_MEMBERS:
+                (root/member).parent.mkdir(parents=True, exist_ok=True)
+                (root/member).write_bytes((ROOT/member).read_bytes())
             subprocess.run(['git', 'init', '-q', str(root)], check=True)
             # The manifest eligibility check reads the runner's TASK_REF catalog: borrow its objects read-only.
             common = Path(subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', '--path-format=absolute', '--git-common-dir'], text=True).strip())
             (root/'.git/objects/info/alternates').write_text(str(common/'objects') + '\n')
-            subprocess.run(['git', '-C', str(root), 'add', 'scripts'], check=True)
+            subprocess.run(['git', '-C', str(root), 'add', 'scripts', *CANONICAL_SEED_MEMBERS], check=True)
             subprocess.run(['git', '-C', str(root), '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test',
                             '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture'], check=True)
             ref = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
@@ -1824,10 +1829,15 @@ class Portable(unittest.TestCase):
                                ('tasks', tasks), ('snapshot-inventory', fixture['inventory']), ('warm-deps', fixture['warm_deps'])]:
                 args += ['--'+flag, str(private(inputs/flag, data))]
             gh=fakebin/'gh';gh.write_text('#!/bin/sh\nexit 1\n');gh.chmod(0o700)
+            # The shared seed cache's CLI boundary: record each head read; present unless told otherwise.
+            seed_cli = fakebin/'seed-dump-cache'
+            seed_cli.write_text('#!/bin/sh\necho "$@" >> "$FIXTURE_SEED_CALLS"\nexit "${FIXTURE_SEED_HEAD_EXIT:-0}"\n')
+            seed_cli.chmod(0o700)
             env = dict(os.environ, PATH=str(fakebin)+':'+os.environ['PATH'], PROVIDER_MARKER=str(marker),
+                       CLOUDBENCH_SEED_CACHE_CLI_UNDER_TEST=str(seed_cli), FIXTURE_SEED_CALLS=str(inputs/'seed-calls'),
                        GIT_CONFIG_GLOBAL='/dev/null',GIT_CONFIG_NOSYSTEM='1',
                        FLY_API_HOSTNAME='http://127.0.0.1:'+str(server.server_port))
-            for key in ['GITHUB_TOKEN','GH_TOKEN','CLOUDBENCH_GITHUB_TOKEN_B64']:env.pop(key,None)
+            for key in ['GITHUB_TOKEN','GH_TOKEN','CLOUDBENCH_GITHUB_TOKEN_B64','CLOUDBENCH_GUEST_PG_MAJOR','FIXTURE_SEED_HEAD_EXIT']:env.pop(key,None)
             if limits is not None:
                 env['CLOUDBENCH_PROVIDER_LIMITS_FILE'] = str(private(inputs/'provider-limits.json', limits))
             yield types.SimpleNamespace(root=root, args=args, env=env, marker=marker, state=state, inputs=inputs, fakebin=fakebin)
@@ -1986,6 +1996,46 @@ class Portable(unittest.TestCase):
             self.assertNotIn('❌', fits.stderr)
             self.assertEqual(len(requests), 2)
             self.assertEqual(list(fx.state.iterdir()), [])
+
+    def test_missing_canonical_seed_refuses_check_and_run_before_any_fly_read(self):
+        # A branch whose schema has no published PG15 base aborted after a warm refresh
+        # and three controller boots; the bound --check now refuses it first.
+        requests = []
+        with self.public_check(warm_fixture(time.time()), requests, limits=wide_provider_limits()) as fx:
+            seed = runpy.run_path(str(ROOT/'agents/benchmarks/seed_cache_path.py'))
+            token = seed['seed_cache_token'](ROOT/'back-end/prisma/schema.prisma', pg_major='15')
+            calls = fx.inputs/'seed-calls'
+            fx.env['FIXTURE_SEED_HEAD_EXIT'] = '3'
+            for mode in ([], ['--run']):
+                result = subprocess.run(fx.args + mode + ['--task-count', '35', '--repetitions', '2'], cwd='/',
+                                        env=fx.env, capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(json.loads(result.stdout), dict(status='REFUSED_CANONICAL_SEED_MISSING',
+                                                                 source_ref=fx.args[3], token=token))
+                self.assertIn('Missing canonical base fixture for cloud guests: ' + token, result.stderr)
+                self.assertIn('scripts/validate-canonical-seed-dump.sh', result.stderr)
+                self.assertNotIn('CHECKED_NOT_LAUNCHED', result.stdout)
+            self.assertEqual(calls.read_text().splitlines(), ['head ' + token] * 2)
+            # Refused before any Fly API read, warm refresh, Machine or state.
+            self.assertEqual(requests, [])
+            self.assertFalse(fx.marker.exists())
+            self.assertEqual(list(fx.state.iterdir()), [])
+            # An unreadable cache is not a miss: warn and keep the ordinary read-only check.
+            fx.env['FIXTURE_SEED_HEAD_EXIT'] = '1'
+            unreadable = subprocess.run(fx.args + ['--task-count', '35', '--repetitions', '2'], cwd='/',
+                                        env=fx.env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(unreadable.returncode, 0, unreadable.stderr)
+            self.assertEqual(json.loads(unreadable.stdout)['status'], 'CHECKED_NOT_LAUNCHED')
+            self.assertIn(token + ' is unverified', unreadable.stderr)
+            # The guests' PG major override binds the same token rule.
+            fx.env['FIXTURE_SEED_HEAD_EXIT'] = '0'
+            fx.env['CLOUDBENCH_GUEST_PG_MAJOR'] = '16'
+            present = subprocess.run(fx.args + ['--task-count', '35', '--repetitions', '2'], cwd='/',
+                                     env=fx.env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(present.returncode, 0, present.stderr)
+            self.assertNotIn('canonical base fixture', present.stderr)
+            self.assertEqual(calls.read_text().splitlines()[-1],
+                             'head ' + seed['seed_cache_token'](ROOT/'back-end/prisma/schema.prisma', pg_major='16'))
 
     def test_warm_snapshot_preflight_refuses_expired_or_unproven_pin_before_allocation(self):
         now = time.time()

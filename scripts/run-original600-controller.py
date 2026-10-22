@@ -131,6 +131,38 @@ def github_token(root, backend_env, agents_env):
     return token
 
 
+CANONICAL_SEED_ABSENT = 3  # seed-dump-cache.ts head: definite absence
+
+
+def canonical_seed_token(root, ref):
+    """The token every cloud guest restores at the bound source ref (cloudbench-campaign-seed.py)."""
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix='canonical-seed-token-') as scratch:
+        for member in ('back-end/prisma/schema.prisma', 'agents/benchmarks/seed_cache_path.py'):
+            target = Path(scratch, member)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(subprocess.check_output(['git', '--no-replace-objects', '-C', str(root), 'show',
+                                                        ref + ':' + member]))
+        module = runpy.run_path(str(Path(scratch, 'agents/benchmarks/seed_cache_path.py')))
+        return module['seed_cache_token'](Path(scratch, 'back-end/prisma/schema.prisma'),
+                                          pg_major=os.environ.get('CLOUDBENCH_GUEST_PG_MAJOR') or '15')
+
+
+def canonical_seed_head(root, token):
+    """The shared cache's own bounded metadata read: 0 present, 3 absent, anything else unreadable."""
+    under_test = os.environ.get('CLOUDBENCH_SEED_CACHE_CLI_UNDER_TEST')
+    if under_test:
+        command, cwd = [under_test, 'head', token], root
+    else:
+        tsx = next((str(p) for p in (root/'back-end/node_modules/.bin/tsx', root/'node_modules/.bin/tsx') if p.exists()), None)
+        command, cwd = ([tsx] if tsx else ['npx', '--yes', 'tsx']) + ['scripts/seed-dump-cache.ts', 'head', token], root/'back-end'
+    try:
+        return subprocess.run(command, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.PIPE, text=True, timeout=90).returncode
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
 def guest_temporal_env(root, agents_env, backend_env):
     """The guest env copies this launch expects, rendered by the canonical helper.
 
@@ -2476,6 +2508,21 @@ def main():
     if discover and (args.archive_run or recovery or bound or args.resume_admission or args.resume_incomplete_admission
                      or args.prepare_admission_request):
         raise ValueError('archived reuse and continuations bind their original explicit inputs')
+    # Every guest restores this canonical base before its stack starts. A missing key
+    # otherwise surfaces only after the warm refresh and every controller boot.
+    seed_token = canonical_seed_token(root, args.source_ref)
+    seed = canonical_seed_head(root, seed_token)
+    if seed == CANONICAL_SEED_ABSENT:
+        print(json.dumps(dict(status='REFUSED_CANONICAL_SEED_MISSING', source_ref=args.source_ref, token=seed_token)))
+        print('❌ Missing canonical base fixture for cloud guests: ' + seed_token + '\n'
+              '   This source ref\'s back-end/prisma/schema.prisma has no published PG15 base. Publish it as\n'
+              '   CLAUDE.md describes: migrate the reviewed canonical fixture in an isolated PG15 database,\n'
+              '   validate with scripts/validate-canonical-seed-dump.sh, save with scripts/save-seed-dump.sh,\n'
+              '   put it with back-end/scripts/seed-dump-cache.ts and verify a restore/read-back.', file=sys.stderr)
+        return 2
+    if seed != 0:
+        print('⚠️  canonical base fixture ' + seed_token + ' is unverified (cache read failed); guests still fail closed on a miss',
+              file=sys.stderr)
     # Last local refusal precedes this; it is the first provider read for every mode.
     if discover:
         discovery, paths = discover_inputs(args, root, runner, token_from_agents(runner['read'](args.agents_env)), args.run)

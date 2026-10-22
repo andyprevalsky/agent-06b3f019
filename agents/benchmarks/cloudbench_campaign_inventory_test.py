@@ -954,6 +954,34 @@ def test_campaign_inventory_seed_preflight_late_hash_cancellation_refuses_proof(
         thread.join()
 
 
+def test_campaign_inventory_seed_miss_is_a_typed_refusal_not_a_traceback(tmp_path, monkeypatch):
+    # A branch schema without a published canonical base crashed the guest preflight
+    # with FileNotFoundError on its removed probe instead of naming the missing key.
+    root, module, server, thread, calls, _body = seed_fixture(tmp_path, monkeypatch)
+    directory = root / "standalone"
+    directory.mkdir()
+    # The host GET helper's miss contract at its CLI boundary: remove the probe, exit 1.
+    (root / "scripts/cloudbench-seed-get.sh").write_text('rm -f "$3"\nexit 1\n')
+    try:
+        with pytest.raises(ValueError, match="canonical fixture key missing or unreadable: owned-fixture"):
+            module.get(root, root / "scripts", {"token": "owned-fixture"}, directory, time.time() + 60)
+        assert not list(directory.glob("seed-probe-*"))
+        token = module.fixture(root, root / "scripts")["token"]
+        result = subprocess.run(
+            [sys.executable, str(root / "scripts/cloudbench-campaign-seed.py"), "standalone", "--root", str(root),
+             "--out-dir", str(directory), "--deadline", str(time.time() + 60)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 1, result.stderr
+        assert "Traceback" not in result.stderr, result.stderr
+        assert f"cloudbench-campaign-seed: canonical fixture key missing or unreadable: {token}" in result.stderr
+        assert not list(directory.glob("seed-probe-*")) and calls == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
 @pytest.mark.parametrize("e2e_limit", [False, True])
 def test_campaign_inventory_seed_preflight_full_get_once_for_exact_50_and_standalone(tmp_path, monkeypatch, e2e_limit):
     root, module, server, thread, calls, body = seed_fixture(tmp_path, monkeypatch)
