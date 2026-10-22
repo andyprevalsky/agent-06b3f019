@@ -17,6 +17,7 @@ export { useSmallTileAnimations } from '@/hooks/useSmallTileAnimations';
 export {
   useAgentTree,
   filterTreeBySpawn,
+  indexTreeChildren,
   getCircleState,
   getStatusText,
   type TreeNode,

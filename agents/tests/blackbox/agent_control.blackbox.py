@@ -314,6 +314,52 @@ async def test_kill_own_background_task_and_kill_signal_for_task():
         assert status.value == "ERROR" and "cannot kill your parent" in text, text
 
 
+async def test_kill_own_activity_task_keeps_kill_reason_when_executor_absorbs_cancel():
+    """A killed explore task reports "Killed by <killer>" even when its executor absorbs the cancel.
+
+    The real spawn handlers catch the activity cancellation (Temporal surfaces it
+    as ActivityError) and post their own ERROR row, so ``_run_background_task``
+    finishes the record before the kill path does. The one FAILED notification
+    must still carry the kill reason the parent needs.
+    """
+    from domains.agent_messaging.handler import kill_agent
+    from tools.base import EventType, MessageStatus, ToolEvent
+
+    async def _absorbing_spawn_executor(workflow_instance, tool_call, tool_call_id):
+        # Legacy-signature executor run through the real _execute_tool → _execute_tool_once.
+        gate = asyncio.Event()
+        try:
+            await gate.wait()
+        except asyncio.CancelledError:
+            text = "Explore agent cancelled by user"
+            await workflow_instance._handle_tool_event(
+                ToolEvent(
+                    type=EventType.POST_MESSAGE, title="Research cancelled", message=text, status=MessageStatus.ERROR
+                ),
+                tool_call_id,
+                "spawn_agent",
+            )
+            return MessageStatus.ERROR, text
+        return MessageStatus.FINISHED, "done"
+
+    harness = _Harness()
+    with (
+        _env(harness),
+        patch.dict("workflows.agent_workflow.TOOL_EXECUTORS", {"spawn_agent": _absorbing_spawn_executor}),
+    ):
+        wf = _workflow(harness)
+        own_path = await wf._notification_recipient()
+        await wf._execute_tool_once("spawn_agent", dict(EXPLORE_ARGS), "toolu_a")
+        await asyncio.sleep(0.01)  # the executor is running inside its activity wait
+        assert "toolu_a" in wf._background_handles
+        status, text = await kill_agent(wf, {"to": "/root/tokyo"}, "toolu_kill")
+        assert status.value == "FINISHED" and text == "Killed /root/tokyo.", text
+        assert wf._background_finished["toolu_a"]["status"] == "failed"
+        notes = harness.notifications()
+        assert len(notes) == 1 and notes[0]["metadata"]["messageType"] == "FAILED", notes
+        assert f"Killed by {own_path}" in notes[0]["text"], notes[0]["text"]
+
+
 async def test_rewoken_child_completion_appends_a_new_notification():
     harness = _Harness()
     with _env(harness):
@@ -692,6 +738,10 @@ async def run_all_tests():
         "kill_fails_with_killed_by_reason", test_kill_fails_through_the_normal_failure_path_with_killed_by_reason
     )
     await r.record_async("kill_own_task_and_task_kill_signal", test_kill_own_background_task_and_kill_signal_for_task)
+    await r.record_async(
+        "kill_own_task_reason_survives_absorbed_cancel",
+        test_kill_own_activity_task_keeps_kill_reason_when_executor_absorbs_cancel,
+    )
     await r.record_async("rewoken_child_appends_notification", test_rewoken_child_completion_appends_a_new_notification)
     await r.record_async(
         "carried_child_killed_notifies_failed", test_carried_child_killed_by_other_agent_notifies_failed

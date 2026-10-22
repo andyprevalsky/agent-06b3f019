@@ -8,6 +8,7 @@
  *   path name (mono) · relationship tag · muted goal (full on hover).
  * YOUR row is highlighted ("you are here"). Collapsed subtrees show
  *   "N children · k active"; agent rows and those counts navigate to the agent.
+ * Navigable rows are keyboard buttons (tab stop; Enter/Space → navigate).
  */
 import { Bot, Code2, Globe, Phone, Search, type LucideIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -69,6 +70,19 @@ function Row({
         canOpen && 'cursor-pointer hover:bg-muted/60',
       )}
       onClick={canOpen ? () => onNavigate!(row.id) : undefined}
+      role={canOpen ? 'button' : undefined}
+      tabIndex={canOpen ? 0 : undefined}
+      onKeyDown={
+        canOpen
+          ? (event) => {
+              // Keys on the nested "N children" button are that button's own.
+              if (event.target !== event.currentTarget) return;
+              if (event.key !== 'Enter' && event.key !== ' ') return;
+              event.preventDefault();
+              onNavigate!(row.id);
+            }
+          : undefined
+      }
       title={[row.path ?? row.id, row.goal].filter(Boolean).join('\n')}
       data-testid="agent-listing-row"
       data-self={row.isSelf ? 'true' : undefined}

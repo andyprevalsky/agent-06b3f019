@@ -80,6 +80,7 @@ interface RawChildRow {
   createdAt: Date;
   backgroundTasks: Prisma.JsonValue;
   taskPath: string | null;
+  toolsInUse: string[];
 }
 
 /**
@@ -96,7 +97,7 @@ export async function findFirstChildrenOf(
   const rows = await prisma.$queryRaw<RawChildRow[]>(Prisma.sql`
     SELECT c.id, c."userId", c."busId", c."parentAgentId", c.depth,
            LEFT(c.goal, ${TREE_GOAL_MAX_CHARS}::int) AS goal, c.status::text AS status, c."createdAt",
-           c."backgroundTasks", c."taskPath"
+           c."backgroundTasks", c."taskPath", c."toolsInUse"
     FROM unnest(ARRAY[${Prisma.join(parentIds)}]::text[]) AS p(id)
     CROSS JOIN LATERAL (
       SELECT a.* FROM "Agent" a

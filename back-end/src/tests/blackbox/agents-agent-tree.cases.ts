@@ -222,6 +222,7 @@ test('GET /:id/tree — node expansion with depth=2 stays bounded by limit', asy
   const fx = await createFixture('tree-expand');
   const { ids } = fx;
   try {
+    await prisma.agent.update({ where: { id: ids.rKid }, data: { toolsInUse: ['web_fetch'] } });
     const view = await getView(fx.userId, ids.aKid, { node: ids.root, depth: '2', limit: '5' });
     assert(
       same(idsOf(view.caller_path), [ids.root, ids.outreach, ids.draftA, ids.aKid]),
@@ -242,6 +243,16 @@ test('GET /:id/tree — node expansion with depth=2 stays bounded by limit', asy
     ];
     assert(same(nodeIds, expected), `depth-2 expansion, got ${JSON.stringify(nodeIds)}`);
     assert(!nodeIds.includes(ids.aKid), 'level 3 is not expanded at depth=2');
+    const missingTools = view.nodes.filter((node) => !Array.isArray(node.tools_in_use));
+    assert(
+      missingTools.length === 0,
+      `every expanded node carries tools_in_use, missing on ${JSON.stringify(idsOf(missingTools))}`
+    );
+    const rKid = view.nodes.find((node) => node.agent_id === ids.rKid);
+    assert(
+      same(rKid?.tools_in_use, ['web_fetch']),
+      `a depth-2 node keeps its toolsInUse, got ${JSON.stringify(rKid?.tools_in_use)}`
+    );
     assert(view.next_cursor === null, 'root has fewer direct children than limit');
   } finally {
     await deleteFixture(fx);

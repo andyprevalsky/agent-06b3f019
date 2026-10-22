@@ -52,7 +52,7 @@ with workflow.unsafe.imports_passed_through():
         resolve_fast_cache_context_activity,
         update_agent_status,
     )
-    from helpers.agent_addressing import background_tree_entries
+    from helpers.agent_addressing import background_tree_entries, with_legacy_spawn_task_name
     from helpers.background_agents import CHILD_WORKFLOW_AGENT_TYPES, is_agent_authored_user_metadata
     from helpers.completion_summary_contract import (
         is_ablated_completion_summary,
@@ -1204,8 +1204,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self._restore_background_state(runtime.get("background_agents"))
         pending_tool_resumes = runtime.get("pending_tool_resumes")
         if isinstance(pending_tool_resumes, list):
+            # A spawn_agent parked by a generation before task_name gets a stable one.
             self._pending_tool_resumes = [
-                record
+                with_legacy_spawn_task_name(record)
                 for record in pending_tool_resumes
                 if isinstance(record, dict)
                 and isinstance(record.get("tool_name"), str)
@@ -5471,15 +5472,14 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         # In-flight activity-backed background tasks, persisted as
         # Agent.backgroundTasks so other agents' list_agents can see and
         # message them. A change is always written, even without a bus.
-        background_tasks = background_tree_entries(
-            getattr(self, "_background_tasks", {}),
-            CHILD_WORKFLOW_AGENT_TYPES,
-            getattr(self, "_background_finished", {}),
-        )
-        background_changed = background_tasks != getattr(self, "_persisted_background_tasks", [])
+        # Only a write that carries a changed snapshot sends backgroundTasks, and
+        # those writes are serialized (_background_tasks_write_lock) with the
+        # snapshot taken inside the lock: the backend applies writes in arrival
+        # order, so an older snapshot must never be in flight beside a newer one.
+        background_changed = self._background_tree_snapshot() != getattr(self, "_persisted_background_tasks", [])
         if not self.bus_id:
             if background_changed:
-                await self._persist_background_tasks(background_tasks)
+                await self._persist_background_tasks()
             return
 
         # Per-message broadcasts from 50 parallel children melt the 10s tree
@@ -5522,7 +5522,6 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             "costCents": int(self.subtree_cost_cents),
             # Track if status was explicitly set (for DB persistence decision)
             "_statusExplicit": status is not None,
-            "backgroundTasks": background_tasks,
             # Codex-style address ("/root/venue_capacities_0") once known.
             "taskPath": getattr(self, "_own_task_path", None) or ("/root" if not self.depth else None),
         }
@@ -5541,6 +5540,20 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
 
         # Execute activity that does both broadcast AND DB persist
         # (broadcast must be in activity to avoid workflow sandbox httpx issues)
+        if not background_changed:
+            await self._send_tree_state(tools_list, broadcast_payload)
+            return
+        async with self._background_tasks_write_lock:
+            background_tasks = self._background_tree_snapshot()
+            if background_tasks == getattr(self, "_persisted_background_tasks", []):
+                # The write ahead of this one already carried this snapshot.
+                await self._send_tree_state(tools_list, broadcast_payload)
+                return
+            broadcast_payload["backgroundTasks"] = background_tasks
+            if await self._send_tree_state(tools_list, broadcast_payload):
+                self._persisted_background_tasks = background_tasks
+
+    async def _send_tree_state(self, tools_list: List[str], broadcast_payload: Dict[str, Any]) -> bool:
         try:
             await workflow.execute_activity(
                 update_agent_tree_state,
@@ -5548,22 +5561,38 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 start_to_close_timeout=timedelta(seconds=10),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
-            self._persisted_background_tasks = background_tasks
+            return True
         except Exception as e:
             workflow.logger.debug(f"Tree state update failed (non-fatal): {e}")
+            return False
 
-    async def _persist_background_tasks(self, background_tasks: List[Dict[str, Any]]) -> None:
-        """Bus-less agents (a root before its first spawn) still persist their in-flight tasks."""
-        try:
-            await workflow.execute_activity(
-                update_agent_tree_state,
-                args=[self.agent_id, list(self.tools_in_use), None, {"backgroundTasks": background_tasks}],
-                start_to_close_timeout=timedelta(seconds=10),
-                retry_policy=RetryPolicy(maximum_attempts=2),
-            )
-            self._persisted_background_tasks = background_tasks
-        except Exception as e:
-            workflow.logger.debug(f"Background task persistence failed (non-fatal): {e}")
+    def _background_tree_snapshot(self) -> List[Dict[str, Any]]:
+        return background_tree_entries(
+            getattr(self, "_background_tasks", {}),
+            CHILD_WORKFLOW_AGENT_TYPES,
+            getattr(self, "_background_finished", {}),
+        )
+
+    async def _persist_background_tasks(self) -> None:
+        """Bus-less agents (a root before its first spawn) still persist their in-flight tasks.
+
+        Serialized with every other backgroundTasks write; the snapshot is read
+        inside the lock, so writes reach the backend in snapshot order.
+        """
+        async with self._background_tasks_write_lock:
+            background_tasks = self._background_tree_snapshot()
+            if background_tasks == getattr(self, "_persisted_background_tasks", []):
+                return
+            try:
+                await workflow.execute_activity(
+                    update_agent_tree_state,
+                    args=[self.agent_id, list(self.tools_in_use), None, {"backgroundTasks": background_tasks}],
+                    start_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+                self._persisted_background_tasks = background_tasks
+            except Exception as e:
+                workflow.logger.debug(f"Background task persistence failed (non-fatal): {e}")
 
     async def _handle_incomplete(self, result: Dict, phase: str) -> Dict:
         """Handle non-completed phase result."""

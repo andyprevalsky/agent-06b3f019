@@ -12,8 +12,12 @@
  * In-activity explore/browser/code tasks have no Agent row; they become
  * synthetic TreeNodes (`task:<address>`, never navigable) so they render with
  * the same circle/progress/status language.
+ *
+ * 10k-agent note: each build indexes `parentAgentId → children` in one pass
+ * over the bus tree; counts, for_each totals and every rendered row then look
+ * children up (memoized per parent), so a realtime rebuild is O(nodes).
  */
-import { filterTreeBySpawn, type TreeNode, type TreeBackgroundTask } from '../../hooks';
+import { indexTreeChildren, type TreeNode, type TreeBackgroundTask } from '../../hooks';
 import { agentPathShortName, type BackgroundSpawn } from '../../hooks/backgroundSpawns';
 import { makePendingNode, isTerminalNode } from '../subAgentTree.helpers';
 import { singleLine } from './backgroundAgentLabels';
@@ -158,6 +162,23 @@ function runningFirst(nodes: TreeNode[]): TreeNode[] {
   return [...nodes].sort((a, b) => Number(isRunningNode(b)) - Number(isRunningNode(a)));
 }
 
+/** Real tree nodes under (and including) `rootIds` — filterTreeBySpawn's count, via the index. */
+function subtreeSize(
+  nodes: ReadonlyMap<string, TreeNode>,
+  childIndex: ReadonlyMap<string, TreeNode[]>,
+  rootIds: string[],
+): number {
+  const seen = new Set<string>();
+  const stack = rootIds.filter((id) => nodes.has(id));
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    for (const child of childIndex.get(id) ?? []) stack.push(child.agentId);
+  }
+  return seen.size;
+}
+
 interface BuildArgs {
   nodes: ReadonlyMap<string, TreeNode>;
   selectedAgentId: string;
@@ -170,12 +191,18 @@ export function buildAgentPanelModel({
   selectedAgentId,
   spawns,
 }: BuildArgs): AgentPanelModel {
+  const childIndex = indexTreeChildren(nodes.values());
+  const childCache = new Map<string, TreeNode[]>();
   const getChildren = (parentId: string): TreeNode[] => {
-    const kids = [...nodes.values()].filter((n) => n.parentAgentId === parentId);
+    const cached = childCache.get(parentId);
+    if (cached) return cached;
+    const kids = childIndex.get(parentId) ?? [];
     const tasks = (nodes.get(parentId)?.backgroundTasks ?? [])
       .filter((task) => !nodes.has(task.address))
       .map((task) => fromTreeTask(task, parentId));
-    return runningFirst([...kids, ...tasks]);
+    const children = runningFirst([...kids, ...tasks]);
+    childCache.set(parentId, children);
+    return children;
   };
   const claimed = new Set<string>();
   const groups: PanelGroup[] = [];
@@ -184,7 +211,7 @@ export function buildAgentPanelModel({
       withSpawnGoal(nodes.get(id), id, selectedAgentId, spawn.goal),
     );
     roots.forEach((root) => claimed.add(root.agentId));
-    const total = Math.max(filterTreeBySpawn(nodes, spawn.subAgentIds).size, roots.length);
+    const total = Math.max(subtreeSize(nodes, childIndex, spawn.subAgentIds), roots.length);
     groups.push({
       key: `for_each:${spawn.ownerToolCallId}`,
       header: forEachHeader(spawn, roots, total),

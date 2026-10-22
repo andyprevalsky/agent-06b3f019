@@ -19,6 +19,8 @@ import {
   request,
   test,
 } from './agents-blackbox-harness';
+import { TEMPORAL_CONTROL_RPC_TIMEOUT_MS } from '../../providers/temporal';
+import { lockAgentWorkflowGeneration } from '../../providers/workflowGeneration';
 
 interface Tree {
   userId: string;
@@ -132,6 +134,72 @@ test('POST /:id/send-agent-message — a finished agent wakes with the message a
       retried.temporalWorkflowId === woken.temporalWorkflowId,
       'a retried send must not start a second run'
     );
+  } finally {
+    await deleteTree(tree);
+  }
+});
+
+test('POST /:id/send-agent-message — a failed wake start restores the finished agent', async () => {
+  const tree = await createTree('a2a-wake-fail');
+  try {
+    const before = await prisma.agent.update({
+      where: { id: tree.grandchildId },
+      data: {
+        status: 'COMPLETED',
+        progress: 1,
+        structuredResponse: { venue: 'Napa' },
+        statusMessage: 'Booked the Napa venue',
+        toolsInUse: ['gmail_send'],
+      },
+    });
+    const text = 'Now also ask the Napa venue about parking.';
+    // Hold the target's workflow-generation lock past the start-admission
+    // deadline: the wake reactivates the row, then its workflow start fails.
+    let pending: ReturnType<typeof post> | undefined;
+    await prisma.$transaction(
+      async (tx) => {
+        await lockAgentWorkflowGeneration(tx, tree.grandchildId);
+        pending = post(tree.userId, tree.childId, 'send-agent-message', {
+          to: '/root/outreach/napa',
+          message: text,
+          idempotency_key: `wake-fail-${randomUUID()}`,
+        });
+        pending.catch(() => undefined);
+        await new Promise((resolve) =>
+          setTimeout(resolve, TEMPORAL_CONTROL_RPC_TIMEOUT_MS + 1_000)
+        );
+      },
+      { maxWait: 10_000, timeout: TEMPORAL_CONTROL_RPC_TIMEOUT_MS + 30_000 }
+    );
+    assert(pending !== undefined, 'send must have been issued');
+    const res = await pending;
+    assertStatus(res.status, 201, res.data);
+    const sent = res.data as { message_id: string; woke?: boolean; wake_error?: string };
+    assert(
+      sent.woke === false && typeof sent.wake_error === 'string' && sent.wake_error.length > 0,
+      `expected a failed wake, got ${JSON.stringify(sent)}`
+    );
+
+    const after = await prisma.agent.findUniqueOrThrow({ where: { id: tree.grandchildId } });
+    const snapshot = (agent: typeof before) => ({
+      status: agent.status,
+      temporalWorkflowId: agent.temporalWorkflowId,
+      temporalFirstExecutionRunId: agent.temporalFirstExecutionRunId,
+      goal: agent.goal,
+      progress: agent.progress,
+      structuredResponse: agent.structuredResponse,
+      responseSchema: agent.responseSchema,
+      statusMessage: agent.statusMessage,
+      toolsInUse: agent.toolsInUse,
+    });
+    assert(
+      JSON.stringify(snapshot(after)) === JSON.stringify(snapshot(before)),
+      `a failed wake must leave the finished agent as it was: before ${JSON.stringify(
+        snapshot(before)
+      )}, after ${JSON.stringify(snapshot(after))}`
+    );
+    const row = await prisma.message.findUniqueOrThrow({ where: { id: sent.message_id } });
+    assert(row.text === text, 'the message stays stored for a later wake');
   } finally {
     await deleteTree(tree);
   }

@@ -29,12 +29,14 @@ from temporalio.common import RetryPolicy
 
 from helpers.attachments import extract_file_pointer_dicts, resolve_attachments_activity
 from helpers.background_agents import is_agent_authored_user_metadata
+from helpers.context_compaction import is_excluded_from_model
 from helpers.context_pointers import annotate_with_pointer
 from helpers.handle_tool_event import handle_tool_event
 from helpers.llm import (
     LLMStructuredOutputError,
     _completed_child_handoff_identity,
     _completed_child_task_structured_handoff,
+    _is_from_ancestor_agent,
     _pending_llm_context,
     build_llm_messages,
     call_llm_activity,
@@ -2828,12 +2830,42 @@ def _real_user_requirement_keys(context: List[Dict]) -> set:
     return keys
 
 
+def _verifier_requirement_keys(context: List[Dict]) -> set:
+    """Rows that can change what the verifier judges against.
+
+    Real user rows plus task updates from an ancestor agent: the verifier reads
+    those as ``TASK_UPDATE_FROM_PARENT_AGENT`` lines that change requirements
+    (helpers.llm). Response-schema feedback stays ``_real_user_requirement_keys``
+    (agent rows are never user feedback); sibling chatter, child notifications
+    and task-addressed inbox rows are not requirements for this agent.
+    """
+    keys = _real_user_requirement_keys(context)
+    for message in context:
+        metadata = message.get("metadata") or {}
+        if (
+            (message.get("role") or "").upper() != "USER"
+            or not isinstance(metadata, dict)
+            or metadata.get("hidden")
+            or metadata.get("agentMessage") is not True
+            or is_excluded_from_model(message)
+            or not _is_from_ancestor_agent(metadata)
+        ):
+            continue
+        message_id = message.get("message_id") or message.get("id")
+        keys.add(
+            ("parent_agent_message", str(message_id))
+            if message_id
+            else ("parent_agent_message", str(message.get("timestamp") or ""), str(message.get("text") or ""))
+        )
+    return keys
+
+
 def _verifier_superseded_by_user_feedback(
     result: Dict, context: List[Dict], requirement_revision: Optional[int] = None
 ) -> bool:
     """Version the verdict without rewriting the provider's judgment or usage."""
     judged_keys = result.get("_verified_user_requirement_keys")
-    if judged_keys is not None and (_real_user_requirement_keys(context) - set(map(tuple, judged_keys))):
+    if judged_keys is not None and (_verifier_requirement_keys(context) - set(map(tuple, judged_keys))):
         result["superseded_by_user_feedback"] = True
     judged_revision = result.get("_verified_requirement_revision")
     if judged_revision is not None and requirement_revision is not None and judged_revision != requirement_revision:
@@ -2968,7 +3000,7 @@ async def _run_verifier(
                     error=extract_error_message(post_error),
                 )
         raise
-    judged_user_keys = _real_user_requirement_keys(context)
+    judged_user_keys = _verifier_requirement_keys(context)
     verification_cursor = datetime.fromtimestamp(0, tz=timezone.utc)
     for message in context:
         try:

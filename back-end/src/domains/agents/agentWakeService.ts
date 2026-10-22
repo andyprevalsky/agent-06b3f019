@@ -12,6 +12,10 @@
  *   agent's own tree launch config (parent workflow, depth, bus, gates)
  *        ▼
  *   record the run identity (acceptChatWorkflowExecution, ACTIVE only)
+ *        │ start throws
+ *        ▼
+ *   restore the observed terminal row (status, workflow identity, goal,
+ *   derived run state) while it is still unclaimed; the message stays stored
  *
  * The new run reads its whole conversation from the database, so the message
  * is its newest input. A sub-agent reports to its parent again through
@@ -85,9 +89,12 @@ async function launchParams(
   };
 }
 
-/** Put a reactivated agent back to its observed terminal state after a failed start. */
+/**
+ * Put a reactivated agent back to its observed terminal state after a failed
+ * start: status, workflow identity, goal and the derived run state the wake reset.
+ */
 async function rollBackWake(agent: WakeAgent): Promise<void> {
-  await restoreTerminalAgentAfterFailedWake(agent.id, agent.status, agent.temporalWorkflowId);
+  await restoreTerminalAgentAfterFailedWake(agent.id, agent);
 }
 
 /**

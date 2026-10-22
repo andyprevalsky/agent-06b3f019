@@ -27,6 +27,7 @@ from temporalio.common import RetryPolicy
 from domains.reasoning.config import MAX_CONTEXT_MESSAGES as REASONING_MAX_CONTEXT_MESSAGES
 from helpers.agent_addressing import ensure_planned_task_name
 from helpers.background_agents import is_agent_authored_user_metadata
+from helpers.context_compaction import is_excluded_from_model
 from helpers.llm import _pending_llm_context, call_llm_activity
 from loop.context_utils import poll_and_update_context
 from loop.payload_guard import check_activity_payload
@@ -665,14 +666,19 @@ def is_dag_interrupt_message(msg: Dict[str, Any]) -> bool:
     A real user instruction or an agent-to-agent message interrupts. Agent
     notifications (a planned background spawn's completion is its DAG
     dependency, not new input), hidden/schema-refresh rows and attention-gate
-    answers (they resolve a waiting tool, not the plan) do not. Metadata only,
-    never message text.
+    answers (they resolve a waiting tool, not the plan) do not. Neither do rows
+    hidden from this agent's model: a task-addressed agent message
+    (``recipientTaskId`` + ``excludeFromModel``) is read by that task's own
+    activity inbox, and the backend never signals the owner's loop for it.
+    Metadata only, never message text.
     """
     if not isinstance(msg, dict) or str(msg.get("role") or "").upper() != "USER":
         return False
     metadata = msg.get("metadata") or {}
     if not isinstance(metadata, dict):
         metadata = {}
+    if is_excluded_from_model(msg) or metadata.get("recipientTaskId"):
+        return False
     if metadata.get("agentMessage") is True:
         return True
     if metadata.get("source") == "attention_response" or metadata.get("attentionRequestId"):

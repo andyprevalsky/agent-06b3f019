@@ -4004,6 +4004,75 @@ async def test_explore_list_agents_renders_the_tree_from_the_explore_task():
     assert any(n["agent_id"] == "/root/outreach/venues" and n["parent_agent_id"] == "owner-1" for n in tree["nodes"])
 
 
+async def test_explore_list_agents_alone_is_not_completion_evidence():
+    """Tree navigation is not research: an explore that only lists agents cannot complete.
+
+    The completion guard names the evidence tools (web_search, people_search,
+    web_fetch, grep, api_request); a successful list_agents must neither satisfy
+    it nor let the activity report a completed result without tool evidence. The
+    listing stays a readable trace (wait_for's judge reads raw tool results).
+    """
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+
+    import domains.agent_messaging.repo as messaging_repo
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    root = {
+        "agent_id": "agent-root",
+        "path": "/root",
+        "parent_agent_id": None,
+        "depth": 0,
+        "goal": "Plan the offsite",
+        "type": "agent",
+        "status": "ACTIVE",
+        "child_count": 0,
+        "active_child_count": 0,
+    }
+    owner_view = {"root_agent_id": "agent-root", "caller_path": [root], "node_path": [root], "nodes": [root]}
+
+    class FakeClient:
+        async def get(self, url, params=None, headers=None, timeout=None):
+            return SimpleNamespace(status_code=200, json=lambda: owner_view, raise_for_status=lambda: None)
+
+    async def fake_call(_activity_fn, args=None, **_kwargs):
+        return None
+
+    calls: dict = {}
+
+    async def fake_run_agent(**kwargs):
+        calls["listed"] = await kwargs["execute_tool"]("list_agents", {}, "toolu_list")
+        calls["completion"] = await kwargs["execute_tool"](
+            "attempt_completion_with_result", {"result": "Venues: none found"}, "toolu_done"
+        )
+        return {"status": "completed", "final_response": "Venues: none found", "tokens_in": 1, "tokens_out": 1}
+
+    config = SimpleNamespace(backend=SimpleNamespace(api_key="k", api_url="http://backend"))
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("loop.activity_helper.call_temporal_activity_from_activity", new=AsyncMock(side_effect=fake_call)),
+        patch.object(messaging_repo, "get_http_client", return_value=FakeClient()),
+        patch.object(messaging_repo, "load_config", return_value=config),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="agent-root",
+            user_id="u",
+            goal="Find three venues in Napa",
+            model="m",
+            task_id="task-1",
+            inbox_address="toolu_spawn",
+            task_name="venues",
+        )
+
+    assert calls["listed"].get("success") is True, calls["listed"]
+    assert calls["completion"].get("error") is True, calls["completion"]
+    assert "no evidence tool has succeeded" in calls["completion"]["message"], calls["completion"]
+    assert result["status"] == "error", result
+    assert result["error_reason"] == "explore completed without tool evidence", result
+    assert any(item.startswith("[list_agents] ") for item in result["tool_call_results"]), result["tool_call_results"]
+
+
 async def test_explore_inbox_rides_the_progress_post_and_gets_only_as_fallback():
     """At 10k explore agents the per-step inbox GET is gone: the progress post carries the read.
 
@@ -6042,6 +6111,10 @@ async def run_all_tests():
     await r.record_async(
         "explore_list_agents_renders_tree_from_explore_task",
         test_explore_list_agents_renders_the_tree_from_the_explore_task,
+    )
+    await r.record_async(
+        "explore_list_agents_alone_is_not_completion_evidence",
+        test_explore_list_agents_alone_is_not_completion_evidence,
     )
     await r.record_async(
         "explore_inbox_rides_progress_post_get_only_fallback",

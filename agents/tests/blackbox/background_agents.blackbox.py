@@ -1523,6 +1523,111 @@ async def test_background_tasks_persist_in_tree_state_and_names_stay_unique():
         assert again.get("error"), "a finished sibling still owns its task_name"
 
 
+async def test_background_task_snapshots_persist_in_order():
+    """A slow write of an older backgroundTasks snapshot never lands after a newer one.
+
+    The spawn's start persists "running" while the task (already able to finish)
+    persists "completed"; the backend applies writes in arrival order, so the
+    stored Agent.backgroundTasks must end as the newest snapshot, with or
+    without a tree bus.
+    """
+    from temporalio import workflow as temporal_workflow
+
+    for bus_id in (None, "bus-1"):
+        harness = _Harness()
+        stored = {"backgroundTasks": None, "writes": []}
+
+        async def fake_execute_activity(fn, args=None, **_kwargs):
+            if getattr(fn, "__name__", "") != "update_agent_tree_state":
+                return None
+            tasks = (args[3] or {}).get("backgroundTasks")
+            if isinstance(tasks, list) and any(task.get("status") == "running" for task in tasks):
+                await asyncio.sleep(0.03)  # the older snapshot's request is slow to reach the backend
+            if isinstance(tasks, list):
+                stored["backgroundTasks"] = tasks
+                stored["writes"].append([task.get("status") for task in tasks])
+            return None
+
+        with _workflow_env(harness), patch.object(temporal_workflow, "execute_activity", fake_execute_activity):
+            wf = _workflow(harness)
+            wf.bus_id = bus_id
+            gate = asyncio.Event()
+            gate.set()  # the task finishes while the start's persistence is in flight
+            wf._execute_tool = _gated_executor(wf, harness, gate)
+            await wf._execute_tool_once("spawn_agent", dict(EXPLORE_ARGS), "toolu_1")
+            handle = wf._background_handles.get("toolu_1")
+            if handle is not None:
+                await handle
+            for _ in range(20):  # let any in-flight write land
+                await asyncio.sleep(0.01)
+            assert wf._background_finished["toolu_1"]["status"] == "completed"
+            final = [task.get("status") for task in stored["backgroundTasks"] or []]
+            assert final == ["completed"], (bus_id, stored["writes"])
+
+
+async def test_concurrent_same_turn_spawns_cannot_share_a_task_name():
+    """Two same-turn spawns with one task_name: the own-path lookup suspends, yet only one gets the name."""
+    from temporalio import workflow as temporal_workflow
+
+    harness = _Harness()
+    lookups = []
+
+    async def fake_execute_activity(fn, args=None, **_kwargs):
+        if getattr(fn, "__name__", "") == "resolve_agent_address_activity":
+            lookups.append(args)
+            await asyncio.sleep(0.01)  # an uncached non-root agent's own-path read is a real activity
+            return {"path": "/root/mid"}
+        return None
+
+    with _workflow_env(harness), patch.object(temporal_workflow, "execute_activity", fake_execute_activity):
+        wf = _workflow(harness)
+        wf.depth = 1
+        gate = asyncio.Event()
+        wf._execute_tool = _gated_executor(wf, harness, gate)
+        first, second = await asyncio.gather(
+            wf._execute_tool_once("spawn_agent", dict(EXPLORE_ARGS), "toolu_a"),
+            wf._execute_tool_once("spawn_agent", dict(EXPLORE_ARGS), "toolu_b"),
+        )
+        assert lookups, "the own task path was resolved through the activity"
+        named = [key for key, record in wf._background_tasks.items() if record.get("task_name") == "tokyo"]
+        assert named == ["toolu_a"], wf._background_tasks
+        assert first.get("success") is True, first
+        assert second.get("error") and "task_name 'tokyo' is already used" in second["message"], second
+        assert wf._background_task_for_address("/root/mid/tokyo")["background_task_id"] == "toolu_a"
+        gate.set()
+        await wf._background_handles["toolu_a"]
+
+
+async def test_evicted_finished_task_name_stays_reserved():
+    """A name from a finished record evicted from the bounded registry still cannot be reused (or after continue_as_new)."""
+    from temporalio import workflow as temporal_workflow
+    from workflows.background_agents import MAX_FINISHED_BACKGROUND_TASKS
+
+    harness = _Harness()
+
+    async def fake_execute_activity(fn, args=None, **_kwargs):
+        if getattr(fn, "__name__", "") == "resolve_agent_address_activity":
+            return {"path": "/root"}
+        return None
+
+    with _workflow_env(harness), patch.object(temporal_workflow, "execute_activity", fake_execute_activity):
+        wf = _workflow(harness)
+        for index in range(MAX_FINISHED_BACKGROUND_TASKS + 1):
+            wf._remember_finished_background_task(
+                f"toolu_old_{index}",
+                {"task_name": f"child_{index}", "agent_type": "general_purpose", "status": "completed"},
+            )
+        assert "toolu_old_0" not in wf._background_finished, "the oldest finished record is evicted"
+        restored = _workflow(harness)
+        restored._restore_background_state(wf._background_state_snapshot())
+        for owner in (wf, restored):
+            result = await owner._execute_tool_once(
+                "spawn_agent", dict(EXPLORE_ARGS, task_name="child_0"), "toolu_reuse"
+            )
+            assert result.get("error") and "task_name 'child_0' is already used" in result["message"], result
+            assert "toolu_reuse" not in owner._background_tasks
+
+
 # ------------------------------------------------------------ environment context
 
 
@@ -2198,6 +2303,11 @@ async def run_all_tests():
     await r.record_async(
         "bg_tasks_persist_and_names_unique", test_background_tasks_persist_in_tree_state_and_names_stay_unique
     )
+    await r.record_async("bg_task_snapshots_persist_in_order", test_background_task_snapshots_persist_in_order)
+    await r.record_async(
+        "concurrent_spawns_cannot_share_task_name", test_concurrent_same_turn_spawns_cannot_share_a_task_name
+    )
+    await r.record_async("evicted_finished_task_name_stays_reserved", test_evicted_finished_task_name_stays_reserved)
     await r.record_async(
         "agent_messaging_tools_decode_in_real_sandbox", test_agent_messaging_tools_decode_results_in_real_sandbox
     )

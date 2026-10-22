@@ -266,6 +266,31 @@ describe('trajectory: main spawn UI for background rows', () => {
   });
 });
 
+/** Node map that records how many entries each full iteration scans. */
+class ScanCountingMap<K, V> extends Map<K, V> {
+  scanned = 0;
+  override values() {
+    this.scanned += this.size;
+    return super.values();
+  }
+  override keys() {
+    this.scanned += this.size;
+    return super.keys();
+  }
+  override entries() {
+    this.scanned += this.size;
+    return super.entries();
+  }
+  override [Symbol.iterator]() {
+    this.scanned += this.size;
+    return super[Symbol.iterator]();
+  }
+  override forEach(callback: (value: V, key: K, map: Map<K, V>) => void, thisArg?: unknown) {
+    this.scanned += this.size;
+    super.forEach(callback, thisArg);
+  }
+}
+
 function renderDock(messages: Message[], onNavigate = vi.fn()) {
   return render(
     <BackgroundAgentsBanner selectedAgentId="root-1" messages={messages} onNavigate={onNavigate} />,
@@ -381,5 +406,49 @@ describe('running-agents dock', () => {
     expect(within(table).getAllByRole('row')).toHaveLength(2);
     expect(table).toHaveTextContent('Fair Market');
     expect(table).toHaveTextContent('string · required');
+  });
+
+  it('builds and renders a wide tree with a linear number of node scans', () => {
+    const nodes = new ScanCountingMap<string, unknown>();
+    nodes.set(
+      'child-1',
+      makeAgentTreeNode({
+        agentId: 'child-1',
+        parentAgentId: 'root-1',
+        goal: 'Draft budget',
+        backgroundTasks: [
+          {
+            address: '/root/budget_planner/scan',
+            type: 'browser',
+            goal: 'Scan',
+            status: 'running',
+          },
+        ],
+      }),
+    );
+    for (let i = 0; i < 120; i += 1) {
+      const status = i % 2 === 0 ? 'ACTIVE' : 'COMPLETED';
+      nodes.set(
+        `g-${i}`,
+        makeAgentTreeNode({ agentId: `g-${i}`, parentAgentId: 'child-1', status }),
+      );
+    }
+    for (const id of ['fe-a', 'fe-b', 'fe-c']) {
+      nodes.set(id, makeAgentTreeNode({ agentId: id, parentAgentId: 'root-1' }));
+    }
+    for (let i = 0; i < 60; i += 1) {
+      nodes.set(`fe-a-${i}`, makeAgentTreeNode({ agentId: `fe-a-${i}`, parentAgentId: 'fe-a' }));
+    }
+    tree.nodes = nodes;
+    renderDock([...gp(), ...forEach()]);
+    const toggle = screen.getByRole('button', { name: /Running 125 agents/ });
+    expect(toggle).toHaveTextContent('185 total');
+    fireEvent.click(toggle);
+    const panel = screen.getByTestId('background-agents-panel');
+    expect(within(panel).getAllByText('Some goal')).toHaveLength(183);
+    expect(panel).toHaveTextContent('browser · scan');
+    expect(within(panel).getAllByTestId('agent-panel-group')).toHaveLength(2);
+    // One child index per model build; rows look children up instead of rescanning.
+    expect(nodes.scanned).toBeLessThanOrEqual(2 * nodes.size);
   });
 });

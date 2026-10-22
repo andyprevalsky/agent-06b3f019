@@ -12,6 +12,7 @@ paths for what it spawns and recognizes its own background tasks.
 Pure functions; safe inside the Temporal workflow sandbox.
 """
 
+import hashlib
 import re
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -56,6 +57,22 @@ def ensure_planned_task_name(params: Dict[str, Any], task_index: int) -> Dict[st
     if task_name_error(params.get("task_name")):
         params["task_name"] = planned_task_name(params.get("goal"), task_index)
     return params
+
+
+def with_legacy_spawn_task_name(record: Dict[str, Any]) -> Dict[str, Any]:
+    """A parked ``spawn_agent`` record from a generation before task_name, given a stable valid name.
+
+    Such records replay through the spawn schema, which now requires task_name.
+    The name is ``<goal slug>_<8 hex of the tool_call_id>``, so a re-restore of the
+    same record yields the same address. Records that carry a task_name, and
+    other tools, are returned unchanged (never mutated in place).
+    """
+    tool_args = record.get("tool_args")
+    if record.get("tool_name") != "spawn_agent" or not isinstance(tool_args, dict) or "task_name" in tool_args:
+        return record
+    suffix = hashlib.sha256(str(record.get("tool_call_id") or "").encode()).hexdigest()[:8]
+    stem = planned_task_name(tool_args.get("goal"), 0).rsplit("_", 1)[0]
+    return {**record, "tool_args": {**tool_args, "task_name": f"{stem[:31].rstrip('_')}_{suffix}"}}
 
 
 def is_task_path(value: Any) -> bool:

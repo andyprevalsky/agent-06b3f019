@@ -233,6 +233,56 @@ async function proveTrajectoryScope(headers: Record<string, string>, tree: Tree)
   );
 }
 
+/**
+ * Task paths are unique only among live agents, so an archived agent can share
+ * /root/outreach with the live one. A path scope must resolve to live agents.
+ */
+async function proveArchivedPathHolderExcluded(
+  userId: string,
+  headers: Record<string, string>,
+  tree: Tree
+): Promise<void> {
+  const archived = await prisma.agent.create({
+    data: {
+      userId,
+      goal: 'Earlier venue outreach (archived)',
+      parentAgentId: tree.rootId,
+      busId: tree.rootId,
+      depth: 1,
+      taskPath: '/root/outreach',
+      status: 'COMPLETED',
+      deletedAt: new Date(),
+    },
+  });
+  await prisma.message.create({
+    data: {
+      agentId: archived.id,
+      role: 'ASSISTANT',
+      text: `${tree.marker} evidence from the archived /root/outreach`,
+    },
+  });
+  const expected = JSON.stringify([tree.childId, tree.grandchildId].sort());
+  for (const [source, callerId] of [
+    ['agent_network', tree.grandchildId],
+    ['agent_trajectories', tree.siblingId],
+  ] as const) {
+    const res = await grep(headers, {
+      pattern: tree.marker,
+      sources: [source],
+      agent_id: callerId,
+      trace_path: '/root/outreach',
+    });
+    assert(
+      res.status === 200,
+      `${source} with an archived path holder: ${JSON.stringify(res.data)}`
+    );
+    assert(
+      JSON.stringify(agentIds(res.data)) === expected,
+      `${source} /root/outreach excludes the archived agent at that path, got ${JSON.stringify(res.data)}`
+    );
+  }
+}
+
 export async function testGrepAgentTaskPaths(
   userId: string,
   headers: Record<string, string>
@@ -241,6 +291,7 @@ export async function testGrepAgentTaskPaths(
   try {
     await proveAgentNetworkScope(headers, tree);
     await proveTrajectoryScope(headers, tree);
+    await proveArchivedPathHolderExcluded(userId, headers, tree);
   } finally {
     await deleteTree(tree);
   }

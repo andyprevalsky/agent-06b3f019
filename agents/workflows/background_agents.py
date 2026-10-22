@@ -94,6 +94,9 @@ BACKGROUND_GOAL_RECORD_LEN = 500
 DAG_MESSAGE_WAKE_KINDS = frozenset({"user_message", "agent_message"})
 # Finished tasks kept for addressing (send_message_to_agent / kill_agent / rewake); bounded so a long run cannot grow it.
 MAX_FINISHED_BACKGROUND_TASKS = 50
+# task_names of evicted finished records stay reserved: their addresses (and durable
+# child rows) still exist, so a later spawn must not reuse them. Names only, bounded.
+MAX_RETIRED_TASK_NAMES = 1000
 # Activity-backed types a message can wake for another run (durable children wake via the backend).
 WAKEABLE_TASK_TYPES = frozenset({"explore", "browser", "code"})
 # Finished explore/browser/code tasks that keep what a wake needs (args + previous result).
@@ -144,8 +147,13 @@ class BackgroundAgentsMixin:
         self._background_tasks: Dict[str, Dict[str, Any]] = {}
         # spawn tool-call id -> compact summary of finished tasks (durable, bounded)
         self._background_finished: Dict[str, Dict[str, Any]] = {}
+        # task_names of finished records evicted from that bounded registry (durable)
+        self._retired_task_names: List[str] = []
         # Notification idempotency keys already posted (durable)
         self._background_notified: Set[str] = set()
+        # Agent.backgroundTasks writes run one at a time, each with the snapshot
+        # current when it starts, so an older snapshot never lands after a newer one.
+        self._background_tasks_write_lock = asyncio.Lock()
         # Live asyncio tasks (this generation only)
         self._background_handles: Dict[str, "asyncio.Task[Any]"] = {}
         # Terminal outcome observed through _handle_tool_event (this generation only)
@@ -176,6 +184,7 @@ class BackgroundAgentsMixin:
             "tasks": {key: dict(value) for key, value in self._background_tasks.items()},
             "finished": {key: dict(value) for key, value in self._background_finished.items()},
             "notified": sorted(self._background_notified),
+            "retired_task_names": list(self._retired_task_names),
             "seen_agent_message_ids": list(self._seen_agent_message_ids),
         }
 
@@ -188,6 +197,9 @@ class BackgroundAgentsMixin:
         finished = snapshot.get("finished")
         if isinstance(finished, dict):
             self._background_finished = {str(k): dict(v) for k, v in finished.items() if isinstance(v, dict)}
+        retired = snapshot.get("retired_task_names")
+        if isinstance(retired, list):
+            self._retired_task_names = [value for value in retired if isinstance(value, str)][-MAX_RETIRED_TASK_NAMES:]
         notified = snapshot.get("notified")
         if isinstance(notified, list):
             self._background_notified = {value for value in notified if isinstance(value, str)}
@@ -401,8 +413,14 @@ class BackgroundAgentsMixin:
         record = self._background_tasks.get(task_id) or self._background_finished.get(task_id)
         if record is None:
             task_name = args.get("task_name")
-            if task_name and task_name_in_use(
-                [*self._background_tasks.values(), *self._background_finished.values()], task_name
+            # Address = task path (<own path>/<task_name>). Resolve it first: the
+            # lookup can suspend on an activity, and the uniqueness check below
+            # must run with the record insertion (no await between them) so
+            # concurrent same-turn spawns cannot both claim one task_name.
+            path = child_task_path(await resolve_own_task_path(self), task_name)
+            if task_name and (
+                task_name in self._retired_task_names
+                or task_name_in_use([*self._background_tasks.values(), *self._background_finished.values()], task_name)
             ):
                 error = (
                     f"task_name '{task_name}' is already used by another agent you spawned; "
@@ -419,9 +437,7 @@ class BackgroundAgentsMixin:
                     "spawn_agent",
                 )
                 return {"error": True, "message": error}
-            # Address = task path (<own path>/<task_name>). A general_purpose
-            # child's agent id is minted here so the executor spawns it under it.
-            path = child_task_path(await resolve_own_task_path(self), task_name)
+            # A general_purpose child's agent id is minted here so the executor spawns it under it.
             child_agent_id = str(workflow.uuid4()) if agent_type == "general_purpose" else None
             address = path or child_agent_id or task_id
             record = {
@@ -569,6 +585,10 @@ class BackgroundAgentsMixin:
             run = 1
         self._background_finishing.add(task_id)
         outcome = self._background_outcomes.pop(task_id, {})
+        kill_reason = record.get("kill_reason")
+        if isinstance(kill_reason, str) and kill_reason:
+            # kill_agent cancelled this task: whichever path finishes it reports the kill.
+            failed, summary = True, kill_reason
         if failed is None:
             failed = (isinstance(result, dict) and bool(result.get("error"))) or outcome.get(
                 "status"
@@ -639,12 +659,20 @@ class BackgroundAgentsMixin:
             status=status,
         )
 
+    def _evict_finished_overflow(self) -> None:
+        """Drop the oldest finished records past the bound, keeping their task_names reserved."""
+        while len(self._background_finished) > MAX_FINISHED_BACKGROUND_TASKS:
+            evicted = self._background_finished.pop(next(iter(self._background_finished)))
+            name = evicted.get("task_name")
+            if isinstance(name, str) and name and name not in self._retired_task_names:
+                self._retired_task_names.append(name)
+                del self._retired_task_names[:-MAX_RETIRED_TASK_NAMES]
+
     def _remember_finished_background_task(self, task_id: str, finished: Dict[str, Any]) -> None:
         """Keep a finished record (bounded); only the newest few keep their wake context."""
         self._background_finished.pop(task_id, None)
         self._background_finished[task_id] = finished
-        while len(self._background_finished) > MAX_FINISHED_BACKGROUND_TASKS:
-            self._background_finished.pop(next(iter(self._background_finished)))
+        self._evict_finished_overflow()
         wakeable = [key for key, value in self._background_finished.items() if isinstance(value.get("wake"), dict)]
         for stale in wakeable[:-MAX_WAKEABLE_FINISHED_TASKS]:
             self._background_finished[stale].pop("wake", None)
@@ -859,8 +887,7 @@ class BackgroundAgentsMixin:
                 f"[background] stopped {task_id} ({record.get('agent_type')}, address={record.get('address')}, "
                 f"children={len(children)}) because the parent finished"
             )
-        while len(self._background_finished) > MAX_FINISHED_BACKGROUND_TASKS:
-            self._background_finished.pop(next(iter(self._background_finished)))
+        self._evict_finished_overflow()
         if handles:
             # Let the cancelled tasks settle (their outcomes are discarded).
             await asyncio.gather(*handles, return_exceptions=True)

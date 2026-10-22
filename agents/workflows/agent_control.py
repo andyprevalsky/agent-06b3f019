@@ -283,6 +283,9 @@ class AgentControlMixin:
                 except Exception as exc:
                     workflow.logger.warning(f"[agent_control] kill signal to {child_agent_id} failed: {exc}")
         if not delivered:
+            # The executor usually absorbs the cancellation (Temporal surfaces it as
+            # ActivityError) and finishes the record itself first: it must report this reason.
+            record["kill_reason"] = reason
             handle = self._background_handles.pop(task_id, None)
             if handle is not None and not handle.done():
                 handle.cancel()

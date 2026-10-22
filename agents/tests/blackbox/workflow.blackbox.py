@@ -2365,6 +2365,48 @@ def test_workflow_continuation_carries_parked_tools_and_drops_malformed_records(
     assert restored._pending_tool_resumes == [parked]
 
 
+def test_workflow_continuation_backfills_task_name_for_legacy_parked_spawns():
+    """A spawn_agent parked by a generation without task_name re-enters validation with a stable valid name."""
+    import re
+
+    from utils.tool_schemas import TOOL_MODELS
+
+    def _restore(records):
+        wf = _bare_workflow_instance()
+        wf.max_iterations = None
+        wf.context_gates = {}
+        wf._pending_tool_resumes = records
+        restored = _bare_workflow_instance()
+        restored._restore_deployment_state(wf._continuation_resume_state([{"role": "USER", "text": "buy socks"}]))
+        return restored._pending_tool_resumes
+
+    legacy = {
+        "tool_name": "spawn_agent",
+        "tool_args": {
+            "type": "browser",
+            "goal": "Buy wool socks",
+            "start_url": "https://example.com",
+            "output_schema": {"type": "object"},
+        },
+        "tool_call_id": "toolu_01LegacyBrowser",
+        "resume": {"phase": "activity", "resume_state": {"step_count": 4}},
+    }
+    named = {**legacy, "tool_call_id": "toolu_02Named", "tool_args": {**legacy["tool_args"], "task_name": "socks"}}
+    other = {"tool_name": "web_search", "tool_args": {"query": "socks"}, "tool_call_id": "tc-3", "resume": {}}
+    restored = _restore([legacy, named, other])
+
+    task_name = restored[0]["tool_args"].get("task_name")
+    assert isinstance(task_name, str) and re.match(r"^[a-z][a-z0-9_]{0,39}$", task_name), restored[0]
+    assert {k: v for k, v in restored[0]["tool_args"].items() if k != "task_name"} == legacy["tool_args"]
+    assert restored[0]["resume"] == legacy["resume"] and restored[0]["tool_call_id"] == legacy["tool_call_id"]
+    # The replay's own validation gate (_execute_tool_once) accepts it.
+    TOOL_MODELS["spawn_agent"](**{"tool": "spawn_agent", **restored[0]["tool_args"]})
+    assert restored[1] == named, "an existing task_name is preserved"
+    assert restored[2] == other, "only spawn_agent records are touched"
+    assert _restore([legacy])[0]["tool_args"]["task_name"] == task_name, "the backfill is deterministic"
+    assert "task_name" not in legacy["tool_args"], "the carried record is not mutated in place"
+
+
 def test_restart_safe_child_tool_counts_survive_memory_loss_without_duplication():
     from helpers.summarize import _restart_safe_child_tool_counts
 
@@ -11913,6 +11955,10 @@ async def run_all_tests():
     r.record(
         "wf_continuation_carries_parked_tools",
         test_workflow_continuation_carries_parked_tools_and_drops_malformed_records,
+    )
+    r.record(
+        "wf_continuation_backfills_legacy_spawn_task_name",
+        test_workflow_continuation_backfills_task_name_for_legacy_parked_spawns,
     )
     r.record(
         "wf_restart_safe_child_counts",

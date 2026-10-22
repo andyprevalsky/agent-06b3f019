@@ -443,6 +443,13 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(exp["cache"]["avg"], 0.938)
         self.assertIn("Timeout after 300s", CARD["render_text"](data))
         self.valid(data)
+        # The run ends when its last required cleanup receipt lands, including a
+        # benchmark cleanup that finishes after the stack cleanup and run.json.
+        for name, mtime in (("run.json", T0), ("local-stack-cleanup.status", T0 + 5),
+                            ("benchmark-cleanup-bench-owned.status", T0 + 30)):
+            os.utime(run / name, (mtime, mtime))
+        late = CARD["build"](run, ledger=self.tmp / "none.jsonl", now=NOW)["experiment"]
+        self.assertEqual(late["ended_at"], T0 + 30)
         write(run / "local-stack-cleanup.status", "version=2\ntoken=wrong-owner\nstate=clean\n")
         unverified = CARD["build"](run, ledger=self.tmp / "none.jsonl", now=NOW)["experiment"]
         self.assertEqual(unverified["state"], "INCOMPLETE")

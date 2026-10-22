@@ -1378,6 +1378,100 @@ async def test_superseded_verifier_keeps_actual_provider_result():
     assert "Actual provider verdict" in posted[-1]["text"] and "Verifier score: 0%" not in posted[-1]["text"]
 
 
+async def test_parent_agent_task_update_supersedes_verdict_but_other_agent_rows_do_not():
+    """A parent's TASK_UPDATE_FROM_PARENT_AGENT during check_progress outdates the verdict.
+
+    The verifier treats an ancestor's agentMessage as a later requirement. One
+    that lands while check_progress runs was not judged, so the verdict must be
+    superseded. Sibling chatter, child notifications and task-addressed inbox rows
+    are not requirements for this agent; they keep the verdict. Response-schema
+    feedback still never counts agent rows (_real_user_requirement_keys).
+    """
+    from loop.run_agent import _real_user_requirement_keys, _run_verifier
+
+    def agent_row(row_id, metadata):
+        return {
+            "id": row_id,
+            "role": "USER",
+            "text": "Use the Shinjuku hotel instead.",
+            "timestamp": "2026-10-22T10:00:05Z",
+            "metadata": metadata,
+        }
+
+    parent_update = agent_row(
+        "parent-update",
+        {"agentMessage": True, "fromAgentId": "agent-root", "fromAgentPath": "/root", "toAgentPath": "/root/hotels"},
+    )
+    cases = [
+        ("parent_update", parent_update, True),
+        (
+            "sibling_message",
+            agent_row(
+                "sibling",
+                {
+                    "agentMessage": True,
+                    "fromAgentId": "agent-flights",
+                    "fromAgentPath": "/root/flights",
+                    "toAgentPath": "/root/hotels",
+                },
+            ),
+            False,
+        ),
+        (
+            "child_notification",
+            agent_row("notification", {"agentNotification": True, "toolName": "agent_notification"}),
+            False,
+        ),
+        (
+            "task_addressed_inbox_row",
+            agent_row(
+                "task-inbox",
+                {
+                    "agentMessage": True,
+                    "fromAgentId": "agent-root",
+                    "fromAgentPath": "/root",
+                    "toAgentPath": "/root/hotels/search",
+                    "recipientTaskId": "toolu_search",
+                    "excludeFromModel": True,
+                },
+            ),
+            False,
+        ),
+    ]
+    for name, arriving, expect_superseded in cases:
+        context = [{"id": "goal", "role": "USER", "text": "Book a Tokyo hotel", "timestamp": "2026-10-22T10:00:00Z"}]
+
+        async def execute(_activity, _arriving=arriving, _context=context, **_kwargs):
+            _context.append(_arriving)
+            return {"score": 1.0, "reasoning": "Hotel booked", "usage": {"prompt_tokens": 5}}
+
+        result = await _run_verifier(
+            execute_activity=execute,
+            context=context,
+            verifier_prompt_generator=AsyncMock(return_value="Verify the booking"),
+            model="test-model",
+            agent_id="agent-hotels",
+            task_id=None,
+            post_message=None,
+        )
+        assert (result.get("superseded_by_user_feedback") is True) is expect_superseded, (name, result)
+        assert result["score"] == 1.0 and result["reasoning"] == "Hotel booked", (name, result)
+
+    # A parent update already in context when the verifier ran was judged.
+    judged = await _run_verifier(
+        execute_activity=AsyncMock(return_value={"score": 1.0, "reasoning": "ok", "usage": {}}),
+        context=[parent_update],
+        verifier_prompt_generator=AsyncMock(return_value="Verify"),
+        model="test-model",
+        agent_id="agent-hotels",
+        task_id=None,
+        post_message=None,
+        poll_messages=AsyncMock(return_value=[dict(parent_update)]),
+    )
+    assert judged.get("superseded_by_user_feedback") is not True, judged
+    assert _real_user_requirement_keys([parent_update]) == set(), "agent rows are never response-schema feedback"
+
+
 async def test_keyed_feedback_revision_supersedes_verdict_without_user_row():
     """Attention responses can change requirements without creating USER rows."""
     for final in (False, True):
@@ -3965,6 +4059,10 @@ async def run_all_tests():
     )
     await r.record_async(
         "superseded_verifier_preserves_provider_result", test_superseded_verifier_keeps_actual_provider_result
+    )
+    await r.record_async(
+        "parent_agent_task_update_supersedes_verdict",
+        test_parent_agent_task_update_supersedes_verdict_but_other_agent_rows_do_not,
     )
     await r.record_async(
         "keyed_feedback_revision_versions_verdict", test_keyed_feedback_revision_supersedes_verdict_without_user_row

@@ -247,6 +247,12 @@ _SOURCE_GOAL_TERMS = {
 }
 
 
+# Tree navigation, not research: a successful listing never satisfies the
+# completion guard, whose rejection names the evidence tools. The listing still
+# stays a readable trace in tool_call_results (wait_for's judge reads them).
+_NON_EVIDENCE_EXPLORE_TOOLS = frozenset({"list_agents"})
+
+
 def _has_usable_tool_evidence(value: Any) -> bool:
     """Return whether a successful tool result contains non-empty evidence."""
     if value is None or isinstance(value, bool):
@@ -919,7 +925,7 @@ async def spawn_explore_agent_activity(
         if failure:
             return {"error": True, "message": failure}
 
-        if _has_usable_tool_evidence(actual_result):
+        if tool_name not in _NON_EVIDENCE_EXPLORE_TOOLS and _has_usable_tool_evidence(actual_result):
             has_usable_tool_evidence = True
         result_str = _render_explore_tool_result(tool_name, actual_result)
 

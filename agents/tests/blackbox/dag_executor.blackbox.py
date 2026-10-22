@@ -1788,6 +1788,35 @@ async def test_execute_dag_agent_message_interrupts_but_notifications_do_not():
         assert all(task.state.value == "COMPLETED" for task in dag.tasks), metadata
 
 
+async def test_execute_dag_task_addressed_inbox_row_does_not_interrupt():
+    """A row for one of this agent's task inboxes is not input for this agent's LLM.
+
+    The backend stores ``{agentMessage, recipientTaskId, excludeFromModel}`` on the
+    task's owner and never signals its loop; the explore/browser activity reads it.
+    It must not cancel the planned work (possibly the addressed task itself) and
+    hand an invisible row back to the LLM.
+    """
+    for metadata in (
+        {
+            "agentMessage": True,
+            "fromAgentId": "sibling-1",
+            "fromAgentPath": "/root/hotels",
+            "toAgentPath": "/root/outreach",
+            "recipientTaskId": "toolu_task_1",
+            "excludeFromModel": True,
+        },
+        {"agentMessage": True, "fromAgentId": "sibling-1", "excludeFromModel": True},
+    ):
+        source, _gate, outcome, result, _events, dag, _calls = await _drive_interrupted_dag(
+            metadata, expect_interrupt=False
+        )
+        assert result["status"] == "completed", (metadata, result)
+        assert result.get("interrupted_by_message") is not True, (metadata, result)
+        assert outcome == ["finished"], (metadata, outcome)
+        assert len(source.awaited) == 1, metadata
+        assert all(task.state.value == "COMPLETED" for task in dag.tasks), metadata
+
+
 async def test_execute_dag_interrupts_without_messages_keep_behavior_identical():
     """No message → the same activities, tool calls and rows as a DAG without interrupts."""
     import uuid
@@ -2167,6 +2196,10 @@ async def run_all_tests():
     await r.record_async(
         "execute_dag_agent_message_interrupts_but_notifications_do_not",
         test_execute_dag_agent_message_interrupts_but_notifications_do_not,
+    )
+    await r.record_async(
+        "execute_dag_task_addressed_inbox_row_does_not_interrupt",
+        test_execute_dag_task_addressed_inbox_row_does_not_interrupt,
     )
     await r.record_async(
         "execute_dag_interrupts_without_messages_keep_behavior_identical",

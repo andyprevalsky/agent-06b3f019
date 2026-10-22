@@ -455,6 +455,7 @@ def load_fleet(run_dir: Path) -> dict:
             if local_run and local_released:
                 exp["state"] = "COMPLETE"
                 exp["ended_at"] = max((run_dir / "local-stack-cleanup.status").stat().st_mtime,
+                                      (run_dir / f"benchmark-cleanup-{benchmark_token}.status").stat().st_mtime,
                                       (run_dir / "run.json").stat().st_mtime)
                 exp["end_evidence"] = "run.json and local cleanup receipts"
             else:

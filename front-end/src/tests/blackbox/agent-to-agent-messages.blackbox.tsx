@@ -16,7 +16,7 @@
  *    the "Started…" row carries `hidden: true` and never renders.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { renderHook, screen, within } from '@testing-library/react';
+import { fireEvent, renderHook, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Info } from 'lucide-react';
 import MessageBubble from '@/features/terminal-component-group/components/MessageBubble';
@@ -309,6 +309,36 @@ describe('list_agents structured tree (metadata.agentTree)', () => {
     expect(onNavigate).toHaveBeenCalledWith('a-venues');
     await userEvent.click(byName('budget'));
     expect(onNavigate).toHaveBeenCalledWith('a-budget');
+  });
+
+  it('opens navigable rows from the keyboard (Enter/Space) and leaves others inert', async () => {
+    const onNavigate = renderTree(view);
+    await expand('Listed agent tree · 5 agents');
+    const rows = screen.getAllByTestId('agent-listing-row');
+    const byName = (name: string) => rows.find((row) => row.textContent?.includes(name))!;
+    const budget = byName('budget');
+    expect(budget).toHaveAttribute('role', 'button');
+    expect(budget).toHaveAttribute('tabindex', '0');
+    for (const inert of [byName('outreach'), byName('scan')]) {
+      expect(inert).not.toHaveAttribute('role');
+      expect(inert).not.toHaveAttribute('tabindex');
+    }
+    budget.focus();
+    await userEvent.keyboard('{Enter}');
+    expect(onNavigate).toHaveBeenLastCalledWith('a-budget');
+    byName('draft_a').focus();
+    await userEvent.keyboard(' ');
+    expect(onNavigate).toHaveBeenLastCalledWith('a-draft');
+    expect(onNavigate).toHaveBeenCalledTimes(2);
+    onNavigate.mockClear();
+    within(byName('venues')).getByTestId('agent-listing-hidden-children').focus();
+    await userEvent.keyboard('{Enter}');
+    expect(onNavigate).toHaveBeenCalledTimes(1);
+    expect(onNavigate).toHaveBeenCalledWith('a-venues');
+    onNavigate.mockClear();
+    fireEvent.keyDown(byName('scan'), { key: 'Enter' });
+    fireEvent.keyDown(byName('outreach'), { key: ' ' });
+    expect(onNavigate).not.toHaveBeenCalled();
   });
 
   it('shows search matches with breadcrumbs', async () => {
