@@ -491,6 +491,9 @@ def test_assemble_accepts_a_manifest_with_entries(tmp_path):
     assert [(e["probe"], e["verdict"], e["agent_id"], e["provenance"]["lane"]) for e in entries] == [
         ("proton-signup", "FAILED_CAPTCHA", "1abb9bc3", "D")]
     assert stacks == []
+    _write(lane / "manifest.json", {"probes": [{"probe": "proton-signup", "result_file": "r.json"}]})
+    entries, _ = probe_module.assemble_entries([str(lane / "manifest.json")], tmp_path / "out")
+    assert [e["probe"] for e in entries] == ["proton-signup"]
 
 
 def test_assemble_rejects_a_manifest_row_without_a_recorded_verdict(tmp_path):
