@@ -10,7 +10,7 @@ export function respondIfCarriedStateRequired(error: unknown, res: Response): bo
     task_id: error.taskId,
     message:
       'The live Tilion session holds browser state only the worker can capture; ' +
-      'retry with storage_state (Playwright storageState) in the request body.',
+      'pause it first (the paused snapshot is carried) or recover via /recover-challenge.',
   });
   return true;
 }

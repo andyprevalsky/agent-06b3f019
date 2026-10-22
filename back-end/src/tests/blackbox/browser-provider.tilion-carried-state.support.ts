@@ -1,8 +1,7 @@
-/** Worker-carried Tilion state on rotate-proxy / resume (single CDP client); never a 500. */
+/** rotate-proxy / resume carry no request state; a live uncarried Tilion swap is a typed 409. */
 import nodeAssert from 'node:assert/strict';
 import type { Response } from 'express';
 import { TilionUncarriedStateError } from '../../providers/browser/tilion';
-import { carriedStateFromRequest } from '../../domains/browser-session/service.carried-state';
 import { respondIfCarriedStateRequired } from '../../domains/browser-session/routes.carried-state';
 import { resumeSessionSchema, rotateProxySchema } from '../../domains/browser-session/types';
 
@@ -21,25 +20,18 @@ function fakeResponse() {
   return { res, sent };
 }
 
-/** rotate-proxy and resume carry the worker's storage_state; an uncarried live Tilion swap is a 409. */
+/**
+ * rotate-proxy and resume take no request-level browser state (the worker
+ * rotates via /recover-challenge, and resume runs before it attaches); a live
+ * Tilion swap without state fails closed as a typed 409, never a 500.
+ */
 export async function assertTilionCarriedStateReachesReplacementsAndNever500s(): Promise<void> {
   const taskId = '00000000-0000-4000-8000-000000000001';
-  const storage_state = {
-    cookies: [{ name: 'sid', value: 'v', domain: '.example.com', path: '/' }],
-    origins: [{ origin: 'https://example.com', localStorage: [{ name: 'k', value: 'v' }] }],
-  };
+  const storage_state = { cookies: [], origins: [] };
   const rotate = rotateProxySchema.parse({ task_id: taskId, storage_state });
   const resume = resumeSessionSchema.parse({ task_id: taskId, storage_state });
-  nodeAssert.deepEqual(carriedStateFromRequest(rotate.storage_state).carriedState, storage_state);
-  nodeAssert.deepEqual(carriedStateFromRequest(resume.storage_state).carriedState, storage_state);
-  // Old clients (no state) still parse and carry nothing.
-  nodeAssert.deepEqual(
-    carriedStateFromRequest(rotateProxySchema.parse({ task_id: taskId }).storage_state),
-    {}
-  );
-  nodeAssert.throws(() =>
-    rotateProxySchema.parse({ task_id: taskId, storage_state: { cookies: 'x' } })
-  );
+  nodeAssert.equal('storage_state' in rotate, false, 'rotate-proxy must not accept storage_state');
+  nodeAssert.equal('storage_state' in resume, false, 'resume must not accept storage_state');
 
   const { res, sent } = fakeResponse();
   nodeAssert.equal(
