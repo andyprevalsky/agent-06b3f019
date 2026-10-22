@@ -2816,6 +2816,36 @@ async def test_multiplexer_reports_a_worker_event_loop_stall():
         await multiplexer.close()
 
 
+async def test_multiplexer_silence_bookkeeping_for_held_input_expiry_and_detach():
+    """B's review of T83: a key the mux holds behind in-flight input is not provider silence (it
+    ages from when it is sent); a silent session whose last command expires, or which detaches,
+    leaves the silent set with a closing line instead of lingering until rotation."""
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer, _Client
+
+    multiplexer = SingleCdpConnectionMultiplexer("ws://127.0.0.1:9/unused", silence_threshold=1.0, silence_check_interval=0.05)
+    loop = asyncio.get_running_loop()
+    client = _Client(websocket=None, number=1, browser_session_id="BROWSER")
+    multiplexer._clients.add(client)
+    # A held key: in _pending, never sent, so not aged.
+    multiplexer._pending[1] = (client, 1, "Input.dispatchKeyEvent")
+    # A sent Input command on page session P, old enough to be silent.
+    multiplexer._pending[2] = (client, 2, "Input.dispatchMouseEvent")
+    multiplexer._pending_since[2] = (loop.time() - 5, "P")
+    multiplexer._input_done[2] = (loop.create_future(), None)
+    multiplexer._input_session[2] = "P"
+    # A detaching session D with an old pending evaluate.
+    multiplexer._pending[3] = (client, 3, "Runtime.evaluate")
+    multiplexer._pending_since[3] = (loop.time() - 5, "D")
+    report = {item["session"]: item for item in multiplexer.silence_report()}
+    assert set(report) == {"P", "D"} and report["P"]["oldest_method"] == "Input.dispatchMouseEvent"
+    multiplexer._silent_since.update({"P": loop.time() - 5, "D": loop.time() - 5})
+    multiplexer._expire_input(2)
+    assert "P" not in multiplexer._silent_since
+    multiplexer._drop_session_silence("D", "it detached")
+    assert "D" not in multiplexer._silent_since and 3 not in multiplexer._pending_since
+    assert multiplexer.silence_report() == []
+
+
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
@@ -2851,6 +2881,7 @@ async def run_all_tests():
         ("multiplexer_fails_unanswered_input", test_multiplexer_fails_unanswered_input_instead_of_hanging),
         ("multiplexer_names_silent_busy_renderer", test_multiplexer_names_a_session_silenced_by_a_busy_challenge_renderer),
         ("multiplexer_reports_event_loop_stall", test_multiplexer_reports_a_worker_event_loop_stall),
+        ("multiplexer_silence_bookkeeping", test_multiplexer_silence_bookkeeping_for_held_input_expiry_and_detach),
         (
             "multiplexer_pipelines_mouse_isolates_keys",
             test_multiplexer_pipelines_mouse_and_isolates_keys_on_a_slow_provider,
