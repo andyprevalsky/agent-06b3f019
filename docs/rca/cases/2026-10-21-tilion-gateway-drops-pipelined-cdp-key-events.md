@@ -24,6 +24,7 @@ sources:
   - agent 91514d73-d944-4922-847a-d8b2aef71e8e (sess_9e309868b0d246d1adefb2fde390738d, integration 08339e80d)
   - agent b0f841a5-5d35-4c79-8b13-f20ecf54bdcb (sess_3d245e7ef1c84d49a3bb9973d9f6b352, integration f5ece1e59)
   - agent 4ea62dd1 (sess_3d245e2aa8704c98ad7db5fd9d3a7714), agent f3f6a7c8-f72f-4756-afaf-427e9628eec7 (sess_9e30988253584f1fb9490a64cf0ddf3e)
+  - agent ae817ca5-5f7b-4045-9f0d-d0cf6135cd18
   - commit 658e9db36 (agents/scripts/tilion_cdp_input_probe.py live vendor repro)
 repro: agents/scripts/tilion_cdp_input_probe.py (live Tilion) plus the BrowserHumanizer serial-keyboard regression handed to lane C for agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py
 status: open
@@ -86,6 +87,28 @@ single-client gateway that never answers a key sent while another is in flight
 report to Tilion with `agents/scripts/tilion_cdp_input_probe.py`. Outcome gate
 (`run-bench --local` webdecoy/passkey-preferred on the patched SHA) is pending;
 status stays open until it passes.
+
+### 2026-10-22 recurrence after the serial-keyboard fix
+
+The serial fix (C cabf9d2dc) did not clear browser-auth-passkey-preferred
+(agent ae817ca5, sess_9e3098527dd5437a9c09103fd3256d1d) or webdecoy (agent
+56d5b744): the first serial `rawKeyDown` after Playwright's Control+a/Backspace
+went unanswered. Refined live drop rule (two flatten sessions on one target):
+keys overlapping keys, mouse or Runtime on ANOTHER session were all answered
+(0/20 lost); keys overlapping `mouseMoved` on the SAME session lost a key. So
+Tilion drops a key event while any other Input event is in flight on the same
+CDP session. The humanizer's idle drift (`start_idle_movement`, every 45-85 ms)
+sends `mouseMoved` on the humanizer session while `type_text`/`press_key` run
+without `_movement_lock`; after the drain failure invalidates the CDP
+transports, idle drift moves to Playwright's page session and overlaps
+Playwright `keyboard.press`, which awaits forever (the 5-minute silences). Live
+repro on integration 4927729a7: initialize_cursor + start_idle_movement, then
+press_key, press_key, type_text -> TimeoutError, empty field. Holding
+`_movement_lock` during keyboard dispatch when `serial_cdp_keyboard` -> PASS.
+Recommended general fix: the CDP mux serialises Input.* per session for every
+client, with a bounded wait that answers the client with an error instead of
+hanging. Why the first fix did not hold: it serialised keys against keys only;
+the drop condition is any concurrent Input on the session.
 
 ## Human feedback
 

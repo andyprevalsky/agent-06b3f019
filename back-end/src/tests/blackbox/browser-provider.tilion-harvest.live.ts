@@ -16,6 +16,7 @@ import {
   harvestBrowserState,
   restoreTilionBrowserState,
 } from '../../providers/browser/tilionState';
+import { navigateKernelPage } from './browser-provider.helpers';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -33,7 +34,8 @@ export async function runLiveTilionHarvest(): Promise<number> {
     // The "agent": drives the tab, writes localStorage, then detaches.
     const agent = source.validationBrowser ?? (await chromium.connectOverCDP(source.wsUrl));
     const page = agent.contexts()[0]?.pages()[0] ?? (await agent.contexts()[0]!.newPage());
-    await page.goto('https://example.com/', { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    // Retries the known transient first-tunnel failures of a fresh residential exit.
+    await navigateKernelPage(page, 'https://example.com/');
     await page.evaluate(() => localStorage.setItem('rose_tilion_harvest', 'kept'));
     await agent.close();
 
@@ -62,7 +64,7 @@ export async function runLiveTilionHarvest(): Promise<number> {
     try {
       const restored = await restoreTilionBrowserState(browser, state!);
       const target = browser.contexts()[0]!.pages()[0]!;
-      await target.goto('https://example.com/', { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      await navigateKernelPage(target, 'https://example.com/');
       const value = await target.evaluate(() => localStorage.getItem('rose_tilion_harvest'));
       console.log(`live restore: origins=${restored.origins} rose_tilion_harvest=${String(value)}`);
       assert(value === 'kept', 'Tilion replacement lost the carried localStorage');
