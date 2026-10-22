@@ -2899,6 +2899,33 @@ async def test_challenge_patience_and_classifier_reads_are_bounded_on_a_busy_ren
         await runner.cleanup()
 
 
+async def test_worker_logs_never_carry_raw_browser_urls():
+    """Lane D webdecoy 3d714847: 'Action click failed' logged the Tilion
+    live-view URL with its ?token=. No worker logger call may pass a browser,
+    CDP or WebSocket URL without redaction."""
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    raw_names = {"browser_url", "debug_url", "live_view_url", "ws_url", "cdp_url", "new_cdp_url"}
+    offenders = []
+    for path in sorted(
+        [*(root / "domains/spawn_browser_agent_v3").glob("*.py"), *(root / "browser_tools").glob("*.py")]
+    ):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "logger"
+            ):
+                continue
+            for keyword in node.keywords:
+                if isinstance(keyword.value, ast.Name) and keyword.value.id in raw_names:
+                    offenders.append(f"{path.relative_to(root)}:{node.lineno} {keyword.arg}={keyword.value.id}")
+    assert not offenders, offenders
+
+
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
@@ -2907,6 +2934,7 @@ async def run_all_tests():
         ("multiplexer_releases_and_reattaches", test_multiplexer_releases_upstream_when_clients_leave_and_reattaches),
         ("multiplexer_propagates_provider_close_code", test_multiplexer_propagates_provider_close_code),
         ("tilion_cdp_url_detection_and_redaction", test_tilion_cdp_url_detection_and_redaction),
+        ("worker_logs_never_carry_raw_browser_urls", test_worker_logs_never_carry_raw_browser_urls),
         ("tilion_download_lands_in_worker_ledger", test_tilion_download_lands_in_worker_ledger_not_static_assets),
         ("tilion_upload_sets_worker_bytes_on_file_input", test_tilion_upload_sets_worker_bytes_on_file_input),
         ("tilion_worker_apply_contract", test_tilion_worker_apply_contract_sets_cookies_and_local_storage),

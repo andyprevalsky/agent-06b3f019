@@ -12106,7 +12106,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     task_id=task_id,
                     message=result.get("error", "Failed"),
                     status=MessageStatus.ERROR,
-                    browser_url=browser_url,
+                    browser_url=redact_url_secrets(browser_url),
                     action_type="error",
                     tool_call_id=tool_call_id_action,
                 )
