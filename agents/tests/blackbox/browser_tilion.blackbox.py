@@ -1505,6 +1505,84 @@ async def test_playwright_survives_an_expired_input_and_its_late_reply():
                 await multiplexer.close()
 
 
+class HeldSlotGateway(FakeTilionGateway):
+    """Tilion frees a session's single client slot asynchronously: for ``hold``
+    seconds after a client disconnects, a new socket is accepted and then closed
+    with 4409 (as for a second client)."""
+
+    def __init__(self, endpoint: str, hold: float) -> None:
+        super().__init__(endpoint)
+        self.hold = hold
+        self._held_until = 0.0
+
+    async def _handle(self, downstream):
+        if self.active or time.monotonic() < self._held_until:
+            self.rejected_4409 += 1
+            await asyncio.sleep(0.2)
+            await downstream.close(code=4409, reason="another client is attached to this session")
+            return
+        try:
+            await super()._handle(downstream)
+        finally:
+            self._held_until = time.monotonic() + self.hold
+
+
+async def test_multiplexer_redials_when_the_slot_frees_late():
+    """T74: recover-challenge closed its probe client on the promoted Tilion
+    session and answered; the worker's mux dialled while Tilion still held the
+    slot, got 4409, and the reattach failed. The multiplexer confirms a fresh
+    upstream and redials an early 4409 with bounded backoff."""
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
+
+    async with _chromium() as (_playwright, _browser, endpoint):
+        async with HeldSlotGateway(endpoint, hold=1.5) as gateway:
+            # The backend's validation/probe client: connects, works, closes.
+            async with websockets.connect(gateway.cdp_url, max_size=None, proxy=None) as probe:
+                await probe.send(json.dumps({"id": 1, "method": "Browser.getVersion"}))
+                await asyncio.wait_for(probe.recv(), 10)
+            multiplexer = SingleCdpConnectionMultiplexer(gateway.cdp_url, slot_retry_delays=(0.5, 0.5, 0.5, 1.0))
+            local_url = await multiplexer.start()
+            try:
+                async with websockets.connect(local_url, max_size=None, proxy=None) as socket_:
+                    client = _RawCdpClient(socket_)
+                    try:
+                        version = await client.send("Browser.getVersion")
+                        assert version.get("product"), version
+                        targets = await client.send("Target.getTargets")
+                        assert isinstance(targets.get("targetInfos"), list)
+                    finally:
+                        await client.close()
+                assert gateway.rejected_4409 >= 1, "the slot was never busy"
+                assert multiplexer.slot_busy_retries >= 1
+                assert multiplexer.upstream_connections_opened == 1
+            finally:
+                await multiplexer.close()
+
+
+async def test_multiplexer_gives_up_on_a_busy_slot_after_its_backoff():
+    """A session that stays busy is reported with 4409 to the client after the
+    bounded backoff, never retried forever."""
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
+
+    async with _chromium() as (_playwright, _browser, endpoint):
+        async with HeldSlotGateway(endpoint, hold=60) as gateway:
+            async with websockets.connect(gateway.cdp_url, max_size=None, proxy=None) as probe:
+                await probe.send(json.dumps({"id": 1, "method": "Browser.getVersion"}))
+                await asyncio.wait_for(probe.recv(), 10)
+            multiplexer = SingleCdpConnectionMultiplexer(gateway.cdp_url, slot_retry_delays=(0.2, 0.2))
+            local_url = await multiplexer.start()
+            try:
+                started = time.monotonic()
+                async with websockets.connect(local_url, max_size=None, proxy=None) as socket_:
+                    with contextlib.suppress(websockets.ConnectionClosed):
+                        await asyncio.wait_for(socket_.recv(), 15)
+                    assert socket_.close_code == 4409, socket_.close_code
+                assert time.monotonic() - started < 10
+                assert multiplexer.slot_busy_retries == 2
+            finally:
+                await multiplexer.close()
+
+
 async def test_multiplexer_holds_new_targets_until_emulation_lands():
     """A client that does NOT wait for the debugger (browser-use) still gets
     popups whose first script sees the emulation: the multiplexer holds new
@@ -2159,6 +2237,8 @@ async def run_all_tests():
         ("multiplexer_serialises_input_per_session", test_multiplexer_serialises_input_per_session_so_keys_are_not_dropped),
         ("multiplexer_fails_unanswered_input", test_multiplexer_fails_unanswered_input_instead_of_hanging),
         ("playwright_survives_expired_input", test_playwright_survives_an_expired_input_and_its_late_reply),
+        ("multiplexer_redials_late_freed_slot", test_multiplexer_redials_when_the_slot_frees_late),
+        ("multiplexer_gives_up_on_busy_slot", test_multiplexer_gives_up_on_a_busy_slot_after_its_backoff),
         ("multiplexer_arms_webauthn_popups", test_multiplexer_arms_webauthn_so_unarmed_popups_reject_instead_of_hanging),
         ("multiplexer_webauthn_keeps_seeded_passkeys", test_multiplexer_webauthn_arming_keeps_seeded_passkeys_working),
         ("multiplexer_reapplies_detached_overrides", test_multiplexer_reapplies_overrides_when_their_holder_detaches),
