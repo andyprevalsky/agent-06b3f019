@@ -1171,6 +1171,8 @@ async def test_multiplexer_fails_unanswered_input_instead_of_hanging():
                         mouse = await asyncio.wait_for(replies[9001], timeout=5)
                         key = await asyncio.wait_for(replies[9002], timeout=5)
                         assert "error" in mouse and "not answered" in mouse["error"]["message"], mouse
+                        # Answered on the session it was sent on, like a real reply (A1).
+                        assert mouse.get("sessionId") == child, mouse
                         assert "error" not in key, key
                         assert time.monotonic() - started < 4
                         assert multiplexer.input_unanswered == 1
