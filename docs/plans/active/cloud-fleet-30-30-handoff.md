@@ -128,7 +128,7 @@ death, then ~60 s; exit the instant it completes or is clearly failing.)
 - **Do not fake-pass**: `NORESULT` is not a pass; `actual_model` = gemini/google/
   a silent fallback is not a Claude pass — assert the `claude-*` family for the
   Claude path.
-- **Env-var writes need user approval** (Render/Fly/Vercel/Supabase/Codex-cloud).
+- **Env-var writes need user approval** (Render/Fly/Vercel/Supabase).
 - **RCA gate (rule 6):** never report a root cause without a LOCAL REPRO you ran and
   watched fail, plus a fix that makes that same repro pass. No theories ("probably
   load / a race / a 404").
