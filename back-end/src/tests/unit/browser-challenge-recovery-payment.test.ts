@@ -32,6 +32,7 @@ function testTransportFailureTriesAlternateProviderBeforeSameProviderTiers(): vo
       'browser_use_residential_country',
       'tilion_residential',
       'tilion_mobile',
+      'tilion_direct',
       ...configs.filter((config) => config.provider === 'kernel').map((config) => config.key),
     ]
   );

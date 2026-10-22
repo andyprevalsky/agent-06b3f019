@@ -41,6 +41,7 @@ export function recoveryConfigKeyForSession(
       : undefined;
   }
   if ((provider || '').toLowerCase() === 'tilion') {
+    if (tier === 'direct') return 'tilion_direct';
     if (tier.startsWith('mobile')) return 'tilion_mobile';
     if (tier === '' || tier.startsWith('residential')) return 'tilion_residential';
     return undefined;

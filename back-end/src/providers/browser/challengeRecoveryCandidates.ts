@@ -18,7 +18,8 @@ export interface BrowserRecoveryConfig {
   tilionProxyType?: TilionRecoveryProxyType;
 }
 
-export type TilionRecoveryProxyType = 'residential' | 'mobile';
+/** `direct` is Tilion's own datacenter egress (no residential/mobile proxy). */
+export type TilionRecoveryProxyType = 'residential' | 'mobile' | 'direct';
 
 /** A transport failure can affect a provider's whole proxy fleet, so try the
  * other provider's exits before spending time on more tiers of the same one.
@@ -32,6 +33,27 @@ export function alternateProviderFirst(
     ...configs.filter((config) => config.provider !== failedProvider),
     ...configs.filter((config) => config.provider === failedProvider),
   ];
+}
+
+/**
+ * Candidate order after a proxy-transport failure (tunnel refusal) on
+ * `failedProvider`. Tilion's residential/mobile egress refuses CONNECT to some
+ * third-party hosts (live 2026-10-21: Stripe/PayPal/anti-fraud CDNs with
+ * net::ERR_TUNNEL_CONNECTION_FAILED) while its direct egress reaches them, so a
+ * Tilion session that is not already direct tries `tilion_direct` first: same
+ * provider and state, another egress. The candidate probe and classifier still
+ * decide; sites that challenge datacenter IPs fall through to other providers.
+ * The trigger is the observed transport failure, never a host list.
+ */
+export function transportFailureOrder(
+  configs: BrowserRecoveryConfig[],
+  failedProvider: BrowserProviderName,
+  failedConfigKey?: string
+): BrowserRecoveryConfig[] {
+  const ordered = alternateProviderFirst(configs, failedProvider);
+  if (failedProvider !== 'tilion' || failedConfigKey === 'tilion_direct') return ordered;
+  const direct = ordered.filter((config) => config.key === 'tilion_direct');
+  return [...direct, ...ordered.filter((config) => config.key !== 'tilion_direct')];
 }
 
 export function bestSpecificity(location: ProxyGeoLocation): KernelRecoveryProxySpecificity {
@@ -119,7 +141,7 @@ export function recoverySearchPlan(options: {
  *
  * Probe order (sequential within each cookie lane):
  *   steel_fixed → kernel_mobile → kernel residential → steel_managed → kernel_isp
- *   → tilion_residential → tilion_mobile (only with TILION_MOBILE_ENABLED)
+ *   → tilion_residential → tilion_mobile (only with TILION_MOBILE_ENABLED) → tilion_direct
  *
  * Residential is one geo tier: city and state when available, else country.
  * Prefer-Steel (payment CDN) keeps this relative order among Steel entries only.
@@ -203,6 +225,12 @@ export function browserRecoveryCandidates(
       provider: 'tilion',
       proxyMode: `mobile_${fallbackSpecificity}`,
       tilionProxyType: 'mobile',
+    },
+    {
+      key: 'tilion_direct',
+      provider: 'tilion',
+      proxyMode: 'direct',
+      tilionProxyType: 'direct',
     },
   ];
   if (!options?.preferSteel) return candidates;

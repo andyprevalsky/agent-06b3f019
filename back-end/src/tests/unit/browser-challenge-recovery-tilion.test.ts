@@ -15,6 +15,7 @@ import {
   recoveryConfigKeyForSession,
   type BrowserConfigSearchRuntimeDependencies,
 } from '../../providers/browser/challengeRecovery';
+import { transportFailureOrder } from '../../providers/browser/challengeRecoveryCandidates';
 
 const LOCATION = { country: 'US', state: 'CA', city: 'SAN FRANCISCO' };
 
@@ -55,12 +56,13 @@ function testTilionCandidates(): void {
       proxyMode: 'mobile_city',
       tilionProxyType: 'mobile',
     },
+    { key: 'tilion_direct', provider: 'tilion', proxyMode: 'direct', tilionProxyType: 'direct' },
   ]);
   assert.deepStrictEqual(
     browserRecoveryCandidates({ country: 'DE' })
       .filter((c) => c.provider === 'tilion')
       .map((c) => c.proxyMode),
-    ['residential_country', 'mobile_country']
+    ['residential_country', 'mobile_country', 'direct']
   );
   // The Stripe-capable Steel focus is unchanged by Tilion.
   assert.ok(
@@ -74,10 +76,10 @@ function testTilionCandidates(): void {
       BROWSER_AGENT_TILION_ENABLED: undefined,
       TILION_MOBILE_ENABLED: undefined,
     },
-    () => assert.deepStrictEqual(tilionKeys(), ['tilion_residential'])
+    () => assert.deepStrictEqual(tilionKeys(), ['tilion_residential', 'tilion_direct'])
   );
   withEnv({ TILION_API_KEY: 'test-key', TILION_MOBILE_ENABLED: 'true' }, () =>
-    assert.deepStrictEqual(tilionKeys(), ['tilion_residential', 'tilion_mobile'])
+    assert.deepStrictEqual(tilionKeys(), ['tilion_residential', 'tilion_mobile', 'tilion_direct'])
   );
   withEnv({ TILION_API_KEY: 'test-key', BROWSER_AGENT_TILION_ENABLED: 'false' }, () =>
     assert.deepStrictEqual(tilionKeys(), [], 'kill switch must keep Tilion out of recovery')
@@ -207,7 +209,54 @@ async function testFailedConnectReleasesPaidSession(): Promise<void> {
   assert.deepStrictEqual(released, ['tilion-candidate']);
 }
 
+function testTilionTunnelFailureTriesDirectEgressFirst(): void {
+  const configs = browserRecoveryCandidates(LOCATION);
+  const keys = (ordered: typeof configs) => ordered.map((config) => config.key);
+  // Live 2026-10-21: Tilion residential refused CONNECT to Stripe/PayPal hosts
+  // (ERR_TUNNEL_CONNECTION_FAILED) while its direct egress reached all of them.
+  const afterResidential = keys(transportFailureOrder(configs, 'tilion', 'tilion_residential'));
+  assert.strictEqual(afterResidential[0], 'tilion_direct');
+  assert.deepStrictEqual(
+    afterResidential.slice(1, afterResidential.indexOf('tilion_residential')),
+    configs.filter((config) => config.provider !== 'tilion').map((config) => config.key),
+    'other providers keep their order right after tilion_direct'
+  );
+  assert.deepStrictEqual(afterResidential.slice(-2), ['tilion_residential', 'tilion_mobile']);
+  // Every candidate stays available as a fallback.
+  assert.deepStrictEqual([...afterResidential].sort(), keys(configs).sort());
+  assert.strictEqual(
+    keys(transportFailureOrder(configs, 'tilion', 'tilion_mobile'))[0],
+    'tilion_direct'
+  );
+  // A failing direct session gets no special case: other providers first.
+  const afterDirect = keys(transportFailureOrder(configs, 'tilion', 'tilion_direct'));
+  assert.strictEqual(afterDirect[0], 'steel_fixed');
+  assert.deepStrictEqual(afterDirect.slice(-3), [
+    'tilion_residential',
+    'tilion_mobile',
+    'tilion_direct',
+  ]);
+  // Kernel/Steel transport failures keep the existing alternate-provider order,
+  // with Tilion direct among the alternates in catalog order.
+  const afterKernel = keys(transportFailureOrder(configs, 'kernel', 'kernel_residential_city'));
+  assert.strictEqual(afterKernel[0], 'steel_fixed');
+  assert.ok(afterKernel.indexOf('tilion_direct') < afterKernel.indexOf('kernel_mobile'));
+}
+
+function testDirectPreferenceAndSessionKey(): void {
+  const direct = browserRecoveryCandidates(LOCATION).find((c) => c.key === 'tilion_direct')!;
+  const preferred = JSON.parse(
+    JSON.stringify(buildPreferredBrowserConfig(direct, LOCATION))
+  ) as unknown;
+  const compatible = compatiblePreferredBrowserConfig(preferred, LOCATION);
+  assert.strictEqual(compatible?.provider, 'tilion');
+  assert.strictEqual(compatible?.tilionProxyType, 'direct');
+  assert.strictEqual(recoveryConfigKeyForSession('tilion', 'direct'), 'tilion_direct');
+}
+
 async function main(): Promise<void> {
+  testTilionTunnelFailureTriesDirectEgressFirst();
+  testDirectPreferenceAndSessionKey();
   testTilionCandidates();
   testPreferredConfig();
   testRecoveryConfigKeyForTilionSession();
