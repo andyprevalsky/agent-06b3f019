@@ -12,9 +12,12 @@ import contextlib
 import json
 import logging
 import os
+import shutil
 import socket
+import subprocess
+import tempfile
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from unittest.mock import patch
 
 import httpx
@@ -101,22 +104,56 @@ class FakeTilionGateway:
 
 
 @contextlib.asynccontextmanager
-async def _chromium():
+async def _chromium(full: bool = False):
+    """Local Chromium with a CDP endpoint.
+
+    ``full`` starts the full build in new headless mode as a plain process: the
+    default headless shell has no WebAuthn, and a Playwright-launched browser
+    keeps Playwright's own pipe client attached to every target, a second CDP
+    client the single-client provider never has.
+    """
     async with async_playwright() as playwright:
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
             port = reservation.getsockname()[1]
-        browser = await playwright.chromium.launch(headless=True, args=[f"--remote-debugging-port={port}"])
-        try:
-            async with httpx.AsyncClient(trust_env=False) as client:
-                version = await client.get(f"http://127.0.0.1:{port}/json/version")
-            payload = version.json()
-            assert "webSocketDebuggerUrl" in payload, (
-                f"/json/version on 127.0.0.1:{port} -> {version.status_code} {str(payload)[:300]}"
+        process = None
+        browser = None
+        if full:
+            profile = tempfile.mkdtemp(prefix="tilion-full-chromium-")
+            process = subprocess.Popen(
+                [
+                    playwright.chromium.executable_path,
+                    "--headless=new",
+                    "--no-sandbox",
+                    "--no-first-run",
+                    f"--remote-debugging-port={port}",
+                    f"--user-data-dir={profile}",
+                    "about:blank",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
+        else:
+            browser = await playwright.chromium.launch(headless=True, args=[f"--remote-debugging-port={port}"])
+        try:
+            payload: Dict[str, Any] = {}
+            async with httpx.AsyncClient(trust_env=False) as client:
+                for _ in range(100):
+                    with contextlib.suppress(httpx.HTTPError):
+                        version = await client.get(f"http://127.0.0.1:{port}/json/version")
+                        payload = version.json()
+                        break
+                    await asyncio.sleep(0.1)
+            assert "webSocketDebuggerUrl" in payload, f"/json/version on 127.0.0.1:{port} -> {str(payload)[:300]}"
             yield playwright, browser, payload["webSocketDebuggerUrl"]
         finally:
-            await browser.close()
+            if browser is not None:
+                await browser.close()
+            if process is not None:
+                process.kill()
+                with contextlib.suppress(Exception):
+                    process.wait(timeout=10)
+                shutil.rmtree(profile, ignore_errors=True)
 
 
 def _tilion_env(gateway: FakeTilionGateway):
@@ -962,8 +999,11 @@ async def test_multiplexer_hides_and_releases_browser_ui_targets():
             assert resumed, "browser_ui target left paused by waitForDebuggerOnStart"
             assert [m["method"] for m in released] == ["Target.detachFromTarget"], sent_upstream
             assert released[0]["sessionId"] == "BROWSER-SESSION"
-            assert not [m for m in sent_upstream if m.get("sessionId") == "PAGE-SESSION"], (
-                "page must stay with its client"
+            # The multiplexer's only own commands on a user page arm WebAuthn (D4).
+            own_page_commands = [m["method"] for m in sent_upstream if m.get("sessionId") == "PAGE-SESSION"]
+            assert own_page_commands == ["WebAuthn.enable", "WebAuthn.addVirtualAuthenticator"], (
+                "page must stay with its client",
+                own_page_commands,
             )
         finally:
             await multiplexer.close()
@@ -1136,6 +1176,210 @@ async def test_multiplexer_fails_unanswered_input_instead_of_hanging():
                         assert multiplexer.input_unanswered == 1
                     finally:
                         await client.close()
+            finally:
+                await multiplexer.close()
+
+
+@contextlib.asynccontextmanager
+async def _webauthn_site():
+    """localhost (a valid WebAuthn RP id) page that opens a popup calling
+    navigator.credentials.get on load and recording how it settles."""
+    from aiohttp import web
+
+    popup = (
+        "<title>popup</title><script>window.webauthn='pending';"
+        "navigator.credentials.get({publicKey:{challenge:new Uint8Array(32),timeout:60000}})"
+        ".then(()=>{window.webauthn='resolved'}).catch(e=>{window.webauthn=e.name});</script>"
+    )
+    app = web.Application()
+    app.router.add_get("/", lambda _r: web.Response(content_type="text/html", text="<title>main</title>"))
+    app.router.add_get("/popup", lambda _r: web.Response(content_type="text/html", text=popup))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    try:
+        yield f"http://localhost:{port}"
+    finally:
+        await runner.cleanup()
+
+
+async def _popup_webauthn_outcome(arm_webauthn: bool) -> str:
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
+
+    async with _webauthn_site() as base, _chromium(full=True) as (playwright, _browser, endpoint):
+        async with FakeTilionGateway(endpoint) as gateway:
+            multiplexer = SingleCdpConnectionMultiplexer(gateway.cdp_url, arm_webauthn=arm_webauthn)
+            browser = await playwright.chromium.connect_over_cdp(await multiplexer.start())
+            try:
+                context = browser.contexts[0]
+                page = context.pages[0] if context.pages else await context.new_page()
+                await page.goto(base + "/")
+                async with context.expect_page(timeout=15000) as popup_info:
+                    await page.evaluate(f"window.open({json.dumps(base + '/popup')}, 'p', 'width=400,height=300')")
+                popup = await popup_info.value
+                await popup.wait_for_load_state("load")
+                outcome = "pending"
+                for _ in range(40):
+                    outcome = await popup.evaluate("window.webauthn")
+                    if outcome != "pending":
+                        break
+                    await asyncio.sleep(0.1)
+                return outcome
+            finally:
+                await browser.close()
+                await multiplexer.close()
+
+
+async def test_multiplexer_arms_webauthn_so_unarmed_popups_reject_instead_of_hanging():
+    """D4: a page the worker never armed opened Chrome's native passkey chooser,
+    which Tilion cannot dismiss. The multiplexer arms every new target first."""
+    assert await _popup_webauthn_outcome(arm_webauthn=False) == "pending", "control: unarmed chooser hangs"
+    assert await _popup_webauthn_outcome(arm_webauthn=True) == "NotAllowedError"
+
+
+async def test_multiplexer_webauthn_arming_keeps_seeded_passkeys_working():
+    """I3 with D4: DOMService seeds its own internal authenticator after the
+    multiplexer's empty one (its one-internal-authenticator recovery), and a
+    real assertion still resolves."""
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
+
+    internal = {
+        "protocol": "ctap2",
+        "transport": "internal",
+        "hasResidentKey": True,
+        "hasUserVerification": True,
+        "isUserVerified": True,
+        "automaticPresenceSimulation": True,
+    }
+    async with _webauthn_site() as base, _chromium(full=True) as (playwright, _browser, endpoint):
+        async with FakeTilionGateway(endpoint) as gateway:
+            multiplexer = SingleCdpConnectionMultiplexer(gateway.cdp_url)
+            browser = await playwright.chromium.connect_over_cdp(await multiplexer.start())
+            try:
+                context = browser.contexts[0]
+                page = await context.new_page()  # held and armed by the multiplexer
+                await page.goto(base + "/")
+                assert await page.evaluate(
+                    "navigator.credentials.get({publicKey:{challenge:new Uint8Array(32),timeout:5000}})"
+                    ".then(()=>'resolved').catch(e=>e.name)"
+                ) == "NotAllowedError"
+                # DOMService._arm_target + its "one internal authenticator" recovery.
+                session = await context.new_cdp_session(page)
+                await session.send("WebAuthn.enable", {"enableUI": False})
+                try:
+                    await session.send("WebAuthn.addVirtualAuthenticator", {"options": internal})
+                except Exception as error:
+                    assert "only supports one internal authenticator" in str(error), error
+                    await session.send("WebAuthn.disable", {})
+                    await session.send("WebAuthn.enable", {"enableUI": False})
+                    await session.send("WebAuthn.addVirtualAuthenticator", {"options": internal})
+                credential_id = await page.evaluate(
+                    "navigator.credentials.create({publicKey:{challenge:new Uint8Array(32),"
+                    "rp:{id:'localhost',name:'t'},user:{id:new Uint8Array([1]),name:'u',displayName:'u'},"
+                    "pubKeyCredParams:[{type:'public-key',alg:-7}],authenticatorSelection:{"
+                    "authenticatorAttachment:'platform',residentKey:'required',userVerification:'required'}}})"
+                    ".then(c=>btoa(String.fromCharCode(...new Uint8Array(c.rawId))))"
+                )
+                outcome = await page.evaluate(
+                    "(id) => navigator.credentials.get({publicKey:{challenge:new Uint8Array(32),rpId:'localhost',"
+                    "userVerification:'required',timeout:5000,allowCredentials:[{type:'public-key',"
+                    "id:Uint8Array.from(atob(id),c=>c.charCodeAt(0))}]}}).then(()=>'resolved').catch(e=>e.name)",
+                    credential_id,
+                )
+                assert outcome == "resolved", outcome
+            finally:
+                await browser.close()
+                await multiplexer.close()
+
+
+async def test_multiplexer_reapplies_overrides_when_their_holder_detaches():
+    """G3: Chrome keeps one timezone/locale override per target, owned by the
+    session that set it, and drops it when that session detaches (browser-use
+    session churn, client release, rotation). The page then reverted to en-US on
+    reload. The multiplexer re-applies the override on a surviving session."""
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
+
+    emulation = {"timezone": "Asia/Tokyo", "locale": "de-DE"}
+    async with _chromium(full=True) as (_playwright, _browser, endpoint):
+        async with FakeTilionGateway(endpoint) as gateway:
+            multiplexer = SingleCdpConnectionMultiplexer(gateway.cdp_url, emulation=emulation, arm_webauthn=False)
+            sent_overrides: List[Tuple[str, str]] = []
+            send_session_command = multiplexer._send_session_command
+
+            async def recording_send(session_id, method, params):
+                if method in ("Emulation.setLocaleOverride", "Emulation.setTimezoneOverride"):
+                    sent_overrides.append((session_id, method))
+                return await send_session_command(session_id, method, params)
+
+            multiplexer._send_session_command = recording_send
+            local_url = await multiplexer.start()
+            try:
+                async with (
+                    websockets.connect(local_url, max_size=None, proxy=None) as first_socket,
+                    websockets.connect(local_url, max_size=None, proxy=None) as second_socket,
+                ):
+                    first, second = _RawCdpClient(first_socket), _RawCdpClient(second_socket)
+                    try:
+                        auto = {"autoAttach": True, "waitForDebuggerOnStart": False, "flatten": True}
+                        await first.send("Target.setAutoAttach", auto)
+                        await second.send("Target.setAutoAttach", auto)
+                        created = await first.send("Target.createTarget", {"url": "about:blank"})
+                        mine = await first.attached(lambda p: p["targetInfo"]["targetId"] == created["targetId"])
+                        theirs = await second.attached(lambda p: p["targetInfo"]["targetId"] == created["targetId"])
+                        holder = None
+                        for _ in range(50):
+                            holder = multiplexer._override_holder.get(
+                                (created["targetId"], "Emulation.setLocaleOverride")
+                            )
+                            if holder:
+                                break
+                            await asyncio.sleep(0.1)
+                        assert holder in (mine["sessionId"], theirs["sessionId"]), holder
+                        holder_client, other, other_session = (
+                            (first, second, theirs["sessionId"])
+                            if holder == mine["sessionId"]
+                            else (second, first, mine["sessionId"])
+                        )
+                        locale = "Intl.DateTimeFormat().resolvedOptions().locale"
+                        before = await other.send(
+                            "Runtime.evaluate", {"expression": locale, "returnByValue": True}, other_session
+                        )
+                        assert before["result"]["value"] == "de-DE", before
+                        # Hygiene: both clients attached the page, but each exclusive
+                        # override went to it once (no 'already in effect' churn).
+                        page_sessions = {mine["sessionId"], theirs["sessionId"]}
+                        page_sends = [method for session, method in sent_overrides if session in page_sessions]
+                        assert sorted(page_sends) == [
+                            "Emulation.setLocaleOverride",
+                            "Emulation.setTimezoneOverride",
+                        ], sent_overrides
+                        assert multiplexer.emulation_failures == 0, multiplexer.emulation_failures
+                        await holder_client.send("Target.detachFromTarget", {"sessionId": holder})
+                        for _ in range(50):
+                            if multiplexer.overrides_reapplied >= 2:
+                                break
+                            await asyncio.sleep(0.1)
+                        await other.send("Page.reload", {}, other_session)
+                        await asyncio.sleep(0.5)
+                        after = await other.send(
+                            "Runtime.evaluate",
+                            {
+                                "expression": "[Intl.DateTimeFormat().resolvedOptions().locale,"
+                                " Intl.DateTimeFormat().resolvedOptions().timeZone]",
+                                "returnByValue": True,
+                            },
+                            other_session,
+                        )
+                        assert after["result"]["value"] == ["de-DE", "Asia/Tokyo"], (
+                            after["result"]["value"],
+                            multiplexer.overrides_reapplied,
+                        )
+                        assert multiplexer.locale_mismatches == 0
+                    finally:
+                        await first.close()
+                        await second.close()
             finally:
                 await multiplexer.close()
 
@@ -1696,6 +1940,9 @@ async def run_all_tests():
         ("multiplexer_resumes_workers", test_multiplexer_never_leaves_workers_paused_for_non_waiting_clients),
         ("multiplexer_serialises_input_per_session", test_multiplexer_serialises_input_per_session_so_keys_are_not_dropped),
         ("multiplexer_fails_unanswered_input", test_multiplexer_fails_unanswered_input_instead_of_hanging),
+        ("multiplexer_arms_webauthn_popups", test_multiplexer_arms_webauthn_so_unarmed_popups_reject_instead_of_hanging),
+        ("multiplexer_webauthn_keeps_seeded_passkeys", test_multiplexer_webauthn_arming_keeps_seeded_passkeys_working),
+        ("multiplexer_reapplies_detached_overrides", test_multiplexer_reapplies_overrides_when_their_holder_detaches),
         ("tilion_live_view_token_redacted", test_tilion_live_view_token_is_redacted_before_persisting),
         (
             "supervisor_cap_logs_stack_and_classifies",
