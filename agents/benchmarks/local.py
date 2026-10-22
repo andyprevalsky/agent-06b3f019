@@ -2065,9 +2065,17 @@ def stop_services(process: subprocess.Popen | None = None, *, stack: ServiceStac
             if code != 0 or not _wait_for_pid_exit(owner["pid"], timeout):
                 raise RuntimeError("owned stack shutdown remains unverified")
             verified_native_identity = owner["native_identity"]
-    receipt = _read_cleanup_receipt(
-        stack.context_dir / "local-stack-cleanup.status", owner["token"], allowed_versions=("1", "2")
-    )
+    try:
+        receipt = _read_cleanup_receipt(
+            stack.context_dir / "local-stack-cleanup.status", owner["token"], allowed_versions=("1", "2")
+        )
+    except RuntimeError as error:
+        # An owner that died inside its EXIT trap leaves state=pending forever.
+        # The supported recovery re-verifies the real leftovers and rewrites it.
+        raise RuntimeError(
+            f"{error}. If the stack owner exited, run: scripts/run-bench --local --run-id {stack.run_id} "
+            "--reconcile-cleanup"
+        ) from error
     _validate_stack_cleanup_receipt(receipt, owner, verified_native_identity=verified_native_identity)
 
 
@@ -2851,6 +2859,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="Use the default .context/services.json stack instead of a per-run isolated stack",
     )
     parser.add_argument("--run-id", help="Stable id for the isolated benchmark stack")
+    parser.add_argument(
+        "--reconcile-cleanup",
+        action="store_true",
+        help="Verify an exited --run-id stack left nothing behind and resolve its pending cleanup receipt",
+    )
     parser.add_argument("--cohort-task", action="append", dest="cohort_tasks", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--world-ready-fd", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--base-port", type=int, help="Preferred base port for an isolated benchmark stack")
@@ -2999,6 +3012,10 @@ def enforce_provider_capacity(benches: int) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
+    if getattr(args, "reconcile_cleanup", False):
+        from benchmarks import local_cleanup_reconcile
+
+        return local_cleanup_reconcile.main(sys.modules[__name__], args)
     world_ready_fd = getattr(args, "world_ready_fd", None)
     if bool(getattr(args, "cohort_tasks", [])) != (world_ready_fd is not None):
         raise ValueError("a child world requires its coordinator ownership handshake")
