@@ -138,3 +138,23 @@ def test_every_worker_log_of_a_multi_worker_stack_is_read(tmp_path):
     lines = [line for path in paths for line in path.read_text().splitlines()]
     summary = summarize_events(collect_antibot_events(lines, [BROWSER]))
     assert summary["stuck"] == 1 and summary["recovery_failed"] == 1
+
+
+def test_stack_log_dir_finds_run_bench_and_run_sh_logs(tmp_path):
+    """--stack-log-dir takes a run-bench context dir (logs/ inside) or a run.sh checkout root."""
+    logs = tmp_path / "ctx" / "logs"
+    logs.mkdir(parents=True)
+    for name in ("worker.log", "worker.1.log", "worker.7.log", "backend.log"):
+        (logs / name).write_text("")
+    assert [path.name for path in log_paths([], [], str(tmp_path / "ctx"))] == [
+        "worker.1.log",
+        "worker.7.log",
+        "worker.log",
+        "backend.log",
+    ]
+    checkout = tmp_path / "checkout"
+    (checkout / "agents").mkdir(parents=True)
+    (checkout / "back-end").mkdir()
+    (checkout / "agents" / "navi-worker-log.txt").write_text("")
+    (checkout / "back-end" / "backend-logs.log").write_text("")
+    assert [path.name for path in log_paths([], [], str(checkout))] == ["navi-worker-log.txt", "backend-logs.log"]

@@ -13,8 +13,9 @@ Pending questions and approvals end the run; nothing is ever approved.
 Usage (from agents/, venv active, local stack running):
     python benchmarks/run_captcha_probe.py --base-url http://localhost:3001 google-search \
         --worker-log navi-worker-log.txt [--backend-log ../back-end/backend-logs.log] [--cap-minutes 30]
-    Isolated run-bench stacks run several workers: pass the log directory with
-    --log-dir <ctx>/logs (reads worker*.log and backend*.log), or repeat --worker-log / use a glob.
+    Stacks with several workers split logs across worker.log and worker.1..N.log: pass
+    --stack-log-dir <run-bench context dir, its logs/ dir, or a run.sh checkout root>,
+    or repeat --worker-log / give a glob such as --worker-log '<dir>/worker*.log'.
     python benchmarks/run_captcha_probe.py --list
 """
 
@@ -174,7 +175,12 @@ def log_paths(worker_logs: Iterable[str], backend_logs: Iterable[str], log_dir: 
     probe lands in whichever worker ran its activity, so all of them must be read."""
     patterns = [pattern for pattern in [*worker_logs, *backend_logs] if pattern]
     if log_dir:
-        patterns += [str(Path(log_dir) / "worker*.log"), str(Path(log_dir) / "backend*.log")]
+        root = Path(log_dir)
+        # run-bench isolated stack: <ctx>/logs/{worker*.log,backend.log}; run.sh checkout:
+        # agents/navi-worker-log.txt + back-end/backend-logs.log.
+        for sub in ("", "logs/"):
+            patterns += [str(root / f"{sub}worker*.log"), str(root / f"{sub}backend*.log")]
+        patterns += [str(root / "agents" / "navi-worker-log*.txt"), str(root / "back-end" / "backend-logs*.log")]
     found: List[Path] = []
     for pattern in patterns:
         matches = sorted(Path().glob(pattern)) if not Path(pattern).is_absolute() else sorted(
@@ -330,7 +336,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--frontend-url", default="", help="FE origin for links and {frontend_url} goals (default: base URL)")
     parser.add_argument("--worker-log", action="append", default=[], help="repeatable; globs allowed")
     parser.add_argument("--backend-log", action="append", default=[], help="repeatable; globs allowed")
-    parser.add_argument("--log-dir", default="", help="stack log directory: reads worker*.log and backend*.log")
+    parser.add_argument(
+        "--stack-log-dir",
+        "--log-dir",
+        dest="log_dir",
+        default="",
+        help="run-bench context dir (or its logs/) or run.sh checkout root: reads every worker and backend log",
+    )
     parser.add_argument("--cap-minutes", type=float, default=30.0)
     parser.add_argument("--poll-seconds", type=float, default=10.0)
     parser.add_argument("--user-id", default=DEFAULT_USER_ID)
