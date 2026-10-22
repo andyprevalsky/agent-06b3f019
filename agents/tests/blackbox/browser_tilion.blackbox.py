@@ -2846,6 +2846,59 @@ async def test_multiplexer_silence_bookkeeping_for_held_input_expiry_and_detach(
     assert multiplexer.silence_report() == []
 
 
+async def test_challenge_patience_and_classifier_reads_are_bounded_on_a_busy_renderer():
+    """T100 (kokkari 0addd068): BROWSER_CHALLENGE_PATIENCE_SECONDS=120 took 996 s. The page's
+    renderer was busy on Cloudflare challenge JS (T83), and the classifier's page reads
+    (title, evaluate, screenshot) never answered. Real Chromium behind the worker mux: the patience
+    wait ends at its deadline, and the classifier context comes back within its read bound."""
+    from aiohttp import web
+
+    from domains.spawn_browser_agent_v3 import challenge_llm_classifier, handler
+
+    async def page(_request):
+        return web.Response(
+            content_type="text/html",
+            text="<title>Just a moment...</title><script>document.title = 'busy';"
+            "setTimeout(() => { const end = Date.now() + 60000; while (Date.now() < end) {} }, 300);</script>",
+        )
+
+    app = web.Application()
+    app.router.add_get("/{tail:.*}", page)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    try:
+        emulation = {"timezone": "America/Los_Angeles", "locale": "en-US"}
+        async with _tilion_worker_stack(emulation) as (_service, pw_browser, _gateway):
+            tab = pw_browser.contexts[0].pages[0]
+            await tab.goto(f"http://127.0.0.1:{port}/api/menu", wait_until="domcontentloaded")
+            await tab.wait_for_function("document.title === 'busy'", timeout=10_000)
+            await asyncio.sleep(1)
+
+            async def classifier():
+                context = await challenge_llm_classifier.capture_challenge_classifier_context(tab)
+                return bool(context)
+
+            started = time.monotonic()
+            with patch.object(handler, "browser_activity_checkpoint", lambda *_args, **_kwargs: None):
+                result = await handler._challenge_patience_wait(
+                    page=tab, patience_seconds=2.0, poll_seconds=0.2, still_challenged=classifier
+                )
+            elapsed = time.monotonic() - started
+            assert result["cleared"] is False and elapsed < 3.5, (result, elapsed)
+
+            with patch.object(challenge_llm_classifier, "CHALLENGE_CONTEXT_READ_SECONDS", 1.5):
+                started = time.monotonic()
+                context = await asyncio.wait_for(challenge_llm_classifier.capture_challenge_classifier_context(tab), 20)
+                elapsed = time.monotonic() - started
+            assert elapsed < 4.5, f"classifier context reads took {elapsed:.1f}s on a busy renderer"
+            assert isinstance(context, dict), context
+    finally:
+        await runner.cleanup()
+
+
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
@@ -2881,6 +2934,7 @@ async def run_all_tests():
         ("multiplexer_fails_unanswered_input", test_multiplexer_fails_unanswered_input_instead_of_hanging),
         ("multiplexer_names_silent_busy_renderer", test_multiplexer_names_a_session_silenced_by_a_busy_challenge_renderer),
         ("multiplexer_reports_event_loop_stall", test_multiplexer_reports_a_worker_event_loop_stall),
+        ("challenge_patience_bounded_on_busy_renderer", test_challenge_patience_and_classifier_reads_are_bounded_on_a_busy_renderer),
         ("multiplexer_silence_bookkeeping", test_multiplexer_silence_bookkeeping_for_held_input_expiry_and_detach),
         (
             "multiplexer_pipelines_mouse_isolates_keys",

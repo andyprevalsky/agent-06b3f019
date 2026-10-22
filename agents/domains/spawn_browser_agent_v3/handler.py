@@ -2966,6 +2966,26 @@ async def _page_heuristically_challenged(page: Any) -> bool:
     )
 
 
+_PATIENCE_POLL_TIMED_OUT = object()
+
+
+async def _within_deadline(awaitable: Awaitable[Any], timeout: float) -> Any:
+    """Await ``awaitable`` for at most ``timeout`` seconds; on expiry return
+    _PATIENCE_POLL_TIMED_OUT without waiting for it to finish cancelling.
+
+    asyncio.wait_for waits for the cancelled call to unwind; a page whose renderer
+    is busy on challenge JS (T83) can hold that unwinding, so the deadline would
+    slip (kokkari 0addd068 waited 996 s against a 120 s patience).
+    """
+    task = asyncio.ensure_future(awaitable)
+    done, _ = await asyncio.wait({task}, timeout=max(0.0, timeout))
+    if task in done:
+        return task.result()
+    task.cancel()
+    task.add_done_callback(lambda finished: finished.cancelled() or finished.exception())
+    return _PATIENCE_POLL_TIMED_OUT
+
+
 async def _challenge_patience_wait(
     *,
     page: Any,
@@ -2975,22 +2995,39 @@ async def _challenge_patience_wait(
 ) -> Dict[str, Any]:
     """Poll the live tab for up to ``patience_seconds`` while the provider's own
     auto-solve runs. Cheap heuristic polls; the existing LLM page classifier
-    (``still_challenged``) confirms a clear before recovery is skipped."""
+    (``still_challenged``) confirms a clear before recovery is skipped.
+
+    The deadline holds even when the page never answers: every poll is bounded
+    by the patience left, and a poll that runs out counts as still challenged.
+    """
     loop = asyncio.get_running_loop()
     started = loop.time()
+    deadline = started + patience_seconds
     polls = 0
+    timed_out_polls = 0
     while True:
-        remaining = patience_seconds - (loop.time() - started)
+        remaining = deadline - loop.time()
         if remaining <= 0:
             break
         browser_activity_checkpoint("Waiting for the provider challenge auto-solve")
         await asyncio.sleep(min(poll_seconds, remaining))
         polls += 1
-        if await _page_heuristically_challenged(page):
+        challenged = await _within_deadline(_page_heuristically_challenged(page), deadline - loop.time())
+        if challenged is _PATIENCE_POLL_TIMED_OUT:
+            timed_out_polls += 1
+            break
+        if challenged:
             continue
-        if not await still_challenged():
+        still = await _within_deadline(still_challenged(), deadline - loop.time())
+        if still is _PATIENCE_POLL_TIMED_OUT:
+            timed_out_polls += 1
+            break
+        if not still:
             return {"cleared": True, "waited_seconds": round(loop.time() - started, 1), "polls": polls}
-    return {"cleared": False, "waited_seconds": round(loop.time() - started, 1), "polls": polls}
+    result = {"cleared": False, "waited_seconds": round(loop.time() - started, 1), "polls": polls}
+    if timed_out_polls:
+        result["timed_out_polls"] = timed_out_polls
+    return result
 
 
 async def _live_tab_still_challenged_after_patience(

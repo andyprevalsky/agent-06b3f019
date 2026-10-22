@@ -8532,6 +8532,71 @@ async def test_challenge_patience_waits_for_provider_auto_solve_and_logs_episode
     assert '_log_antibot_event("antibot.stuck"' in source
 
 
+async def test_challenge_patience_deadline_holds_when_the_page_never_answers():
+    """T100 (kokkari 0addd068): with BROWSER_CHALLENGE_PATIENCE_SECONDS=120 the patience wait took
+    996 s. Its polls awaited the page and the classifier without a bound, and a renderer busy on
+    challenge JS (T83) never answers. Each poll is bounded by the patience left, even when the
+    call resists cancellation; a poll that runs out counts as still challenged."""
+    import time
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    class _SilentPage:
+        url = "https://www.kokkari.com/api/menu"
+
+        async def title(self):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await asyncio.sleep(5)  # a busy renderer holds the unwinding too
+                raise
+
+        def locator(self, _selector):
+            page = self
+
+            class _Body:
+                async def inner_text(self, timeout=None):
+                    return await page.title()
+
+            return _Body()
+
+        async def content(self):
+            return await self.title()
+
+    class _CleanPage:
+        url = "https://www.kokkari.com/"
+
+        async def title(self):
+            return "Kokkari Estiatorio"
+
+        def locator(self, _selector):
+            class _Body:
+                async def inner_text(self, timeout=None):
+                    return "Menu Reservations"
+
+            return _Body()
+
+        async def content(self):
+            return "<html><body>menu</body></html>"
+
+    async def classifier_never_returns():
+        await asyncio.Event().wait()
+        return True
+
+    async def classifier_says_challenged():
+        return True
+
+    with patch.object(handler, "browser_activity_checkpoint", lambda *_args, **_kwargs: None):
+        for page, classifier in ((_SilentPage(), classifier_says_challenged), (_CleanPage(), classifier_never_returns)):
+            started = time.monotonic()
+            result = await handler._challenge_patience_wait(
+                page=page, patience_seconds=0.6, poll_seconds=0.1, still_challenged=classifier
+            )
+            elapsed = time.monotonic() - started
+            assert result["cleared"] is False and result.get("timed_out_polls") == 1, result
+            assert elapsed < 1.2, f"patience deadline slipped to {elapsed:.1f}s ({type(page).__name__})"
+
+
 def test_recovery_reconnect_failure_drops_disconnected_browser_handles():
     """A failed promoted-session attach must preserve its real error result."""
     import inspect
@@ -30414,6 +30479,10 @@ async def run_all_tests():
     await r.record_async(
         "challenge_patience_waits_and_logs_episodes",
         test_challenge_patience_waits_for_provider_auto_solve_and_logs_episodes,
+    )
+    await r.record_async(
+        "challenge_patience_deadline_holds_when_page_silent",
+        test_challenge_patience_deadline_holds_when_the_page_never_answers,
     )
     r.record(
         "recovery_guest_cookie_commit_from_tool_param",
