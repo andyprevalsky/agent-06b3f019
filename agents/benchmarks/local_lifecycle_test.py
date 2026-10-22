@@ -1361,6 +1361,17 @@ def test_local_stack_reconcile_resolves_pending_receipt_only_when_nothing_is_lef
     def absent(database):
         return None
 
+    # The supported CLI form selects no benchmark and requires the exact stack.
+    cli = local.parse_args(["--run-id", "a2-probe", "--reconcile-cleanup"])
+    assert cli.reconcile_cleanup and cli.run_id == "a2-probe" and not cli.tasks
+    for bad in (["--reconcile-cleanup"], ["chat-mode", "--run-id", "x", "--reconcile-cleanup"]):
+        try:
+            local.parse_args(bad)
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError(f"accepted {bad}")
+
     # Owner gone and nothing left: a clean receipt the normal reader accepts.
     stack, owner, _, _, port = fixture()
     result = reconcile.reconcile_stack_cleanup(local, stack, database_present=absent)

@@ -2947,6 +2947,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="Fast Mode cache flag for the resumed checkpoint agent",
     )
     args = parser.parse_args(argv)
+    if args.reconcile_cleanup:
+        # Recovery of an exited stack's receipt: no benchmark selection, no services.
+        if not args.run_id or args.tasks or args.suite or args.full or args.rerun_failed or args.eval_suite:
+            parser.error("--reconcile-cleanup takes only --run-id <stack-run-id>")
+        return args
     selected_modes = sum(
         1
         for enabled in (bool(args.tasks), bool(args.suite), args.full, bool(args.rerun_failed), args.eval_suite)
