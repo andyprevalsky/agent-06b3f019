@@ -104,7 +104,9 @@ export async function markFoundryDeploymentCooldown(
       throw new InvalidFoundryCooldownRequest('retryAfterSeconds must be a positive number');
     }
     if (!Number.isFinite(new Date(Date.now() + retryAfterSeconds * 1000).getTime())) {
-      throw new InvalidFoundryCooldownRequest('retryAfterSeconds must produce a representable deadline');
+      throw new InvalidFoundryCooldownRequest(
+        'retryAfterSeconds must produce a representable deadline'
+      );
     }
     hint = retryAfterSeconds;
   }
@@ -136,7 +138,9 @@ export async function markFoundryDeploymentCooldown(
     }
     const until = new Date(untilMs);
     if (!Number.isFinite(until.getTime())) {
-      throw new InvalidFoundryCooldownRequest('retryAfterSeconds must produce a representable deadline');
+      throw new InvalidFoundryCooldownRequest(
+        'retryAfterSeconds must produce a representable deadline'
+      );
     }
     const config = { strikes, lastFailureAt: new Date(now).toISOString() };
     await tx.integration.upsert({
