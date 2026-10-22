@@ -9972,7 +9972,7 @@ def test_blue_bottle_catalog_stops_at_unresolved_payment_card_request():
     )
     assert task.group == "daily"
     assert "ecommerce" in task.tags
-    assert "anti-bot" in task.tags
+    assert "antibot" in task.tags
     assert task.approval_handling == "ignore"
     assert task.expected_approval_count == 1
     assert task.expected_attention_kind == "payment_approval"
@@ -21361,7 +21361,7 @@ def test_browser_search_single_result_tasks_use_browser_only():
         assert task.expected_tools == ["spawn_agent"]
         assert task.requires_browser_agent is True
         assert task.requires_claude_code is False
-        assert "anti-bot" in task.tags
+        assert "antibot" in task.tags
         assert task.world_model_mode == "real"
         assert task.forbidden_tools == ["web_search", "web_fetch", "spawn_claude_code_agent"]
         assert "Use a browser agent" in task.prompt
@@ -21384,7 +21384,7 @@ def test_indeed_account_creation_benchmark_contract():
     assert task.expected_tools == ["spawn_agent"]
     assert task.requires_browser_agent is True
     assert task.requires_claude_code is False
-    assert {"browser", "auth", "anti-bot"} <= set(task.tags)
+    assert {"browser", "auth", "antibot"} <= set(task.tags)
     assert task.forbidden_tools == ["web_search", "web_fetch", "spawn_claude_code_agent"]
     assert "create a new Indeed job-seeker account" in task.prompt
     assert "Do not apply for jobs" in task.prompt
@@ -22506,7 +22506,7 @@ def test_tag_slices_still_resolve():
     for tag, minimum in {
         "browser": 8,
         "auth": 5,
-        "anti-bot": 1,
+        "antibot": 1,
         "smoke": 5,
         "outreach": 3,
         "attachments": 5,
@@ -22521,14 +22521,14 @@ def test_tag_slices_still_resolve():
 
 
 def test_antibot_slice_includes_daily_toast_and_amazon_commerce():
-    """The anti-bot slice uses one canonical tag spelling ("anti-bot"): the curated commerce
+    """The anti-bot slice uses one canonical tag spelling ("antibot"): the curated commerce
     benches plus one probe per site on the production CAPTCHA list (captcha_probe_sites.json)."""
     import json
     from pathlib import Path
 
     from benchmarks.benchmark_tasks import all_tasks, get_tasks_by_tag
 
-    tasks = get_tasks_by_tag("anti-bot")
+    tasks = get_tasks_by_tag("antibot")
     by_name = {task.name: task for task in tasks}
     probes = json.loads((Path(__file__).resolve().parents[2] / "benchmarks/captcha_probe_sites.json").read_text())["probes"]
     assert set(by_name) == {
@@ -22544,9 +22544,9 @@ def test_antibot_slice_includes_daily_toast_and_amazon_commerce():
     assert "ecommerce" in by_name["browser-agent-amazon-cookie-payment"].tags
     assert "ecommerce" in by_name["browser-blue-bottle-challenge-recovery"].tags
     assert "ticketing" in by_name["browser-1015-eventim-request-card"].tags
-    assert all(task.tags.count("anti-bot") == 1 for task in tasks)
+    assert all(task.tags.count("antibot") == 1 for task in tasks)
     all_tags = {tag for task in all_tasks() for tag in task.tags}
-    assert not ({"antibot", "anti_bot", "bot-challenge"} & all_tags)
+    assert not ({"anti-bot", "anti_bot", "bot-challenge"} & all_tags)
     # Every probe is a catalog task with the probe's exact goal and an LLM judge on its
     # post-wall evidence; probes held for a missing account stay incomplete.
     for probe in probes:
@@ -22584,7 +22584,7 @@ def test_eventim_1015_request_card_benchmark_contract():
     judge = semantic["judge_prompt"].lower()
     assert "do not require a cheapest-tier comparison dump" in judge
     assert "pending payment approval" in judge and "sufficient grounding" in judge
-    assert {"browser", "anti-bot", "ecommerce", "ticketing"} <= set(task.tags)
+    assert {"browser", "antibot", "ecommerce", "ticketing"} <= set(task.tags)
     assert task.expected_payment_receipt["merchant"] == "1015 Folsom (Eventim - eventim.us)"
     assert "eventim.us" in task.environment["live_targets"][1] or any(
         "eventim.us" in target for target in task.environment["live_targets"]

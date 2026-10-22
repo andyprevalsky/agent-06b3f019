@@ -51,7 +51,7 @@ export const KNOWN_TAGS = [
   'plaid',
   'transactions',
   'bot-challenge',
-  'anti-bot',
+  'antibot',
   'documents',
   'prod-data',
   'external',

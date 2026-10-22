@@ -2148,7 +2148,7 @@
     "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "ecommerce", "anti-bot", "browser-auth"],
+    "tags": ["browser", "auth", "ecommerce", "antibot", "browser-auth"],
     "group": "daily",
     "price_limit_cents": 200,
     "requires_browser_agent": true,
@@ -2328,7 +2328,7 @@
     "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "anti-bot", "ecommerce"],
+    "tags": ["browser", "auth", "antibot", "ecommerce"],
     "group": "daily",
     "price_limit_cents": 200,
     "requires_browser_agent": true,
@@ -6798,7 +6798,7 @@
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "anti-bot", "browser-auth"],
+    "tags": ["browser", "auth", "antibot", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -6904,7 +6904,7 @@
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "anti-bot"],
+    "tags": ["browser", "antibot"],
     "price_limit_cents": 50,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -6952,7 +6952,7 @@
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "anti-bot"],
+    "tags": ["browser", "antibot"],
     "price_limit_cents": 50,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -7777,7 +7777,7 @@
     "timeout_seconds": 420,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "anti-bot", "smoke"],
+    "tags": ["browser", "antibot", "smoke"],
     "price_limit_cents": 120,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -9322,7 +9322,7 @@
     "timeout_seconds": 1200,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "ecommerce", "anti-bot"],
+    "tags": ["browser", "auth", "ecommerce", "antibot"],
     "group": "daily",
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -9714,7 +9714,7 @@
     "timeout_seconds": 1200,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "anti-bot", "ecommerce", "ticketing"],
+    "tags": ["browser", "auth", "antibot", "ecommerce", "ticketing"],
     "group": "daily",
     "price_limit_cents": 200,
     "requires_browser_agent": true,
@@ -18003,7 +18003,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -18068,7 +18068,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot",
+      "antibot",
       "payment"
     ],
     "price_limit_cents": 500,
@@ -18143,7 +18143,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -18208,7 +18208,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -18273,7 +18273,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -18338,7 +18338,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -18411,7 +18411,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -18476,7 +18476,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -18541,7 +18541,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -18606,7 +18606,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -18679,7 +18679,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -18752,7 +18752,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -18817,7 +18817,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -18882,7 +18882,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -18947,7 +18947,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -19020,7 +19020,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -19085,7 +19085,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -19150,7 +19150,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -19215,7 +19215,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -19280,7 +19280,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -19347,7 +19347,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -19412,7 +19412,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -19479,7 +19479,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -19544,7 +19544,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -19609,7 +19609,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -19674,7 +19674,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -19739,7 +19739,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -19804,7 +19804,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -19869,7 +19869,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -19934,7 +19934,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -19999,7 +19999,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -20064,7 +20064,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -20129,7 +20129,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -20194,7 +20194,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -20259,7 +20259,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -20324,7 +20324,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -20390,7 +20390,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -20453,7 +20453,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -20518,7 +20518,7 @@
     ],
     "tags": [
       "browser",
-      "anti-bot"
+      "antibot"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
