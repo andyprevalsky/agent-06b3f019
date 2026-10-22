@@ -66,8 +66,13 @@ _EXCLUSIVE_OVERRIDES = ("Emulation.setTimezoneOverride", "Emulation.setLocaleOve
 # Key events are therefore isolated per session (see _forward_input_in_order);
 # mouse events still pipeline. Any Input the provider leaves unanswered is
 # failed back to its client after this bound instead of hanging it (Playwright
-# awaits input forever).
+# awaits input forever). A late mouse event is usually still delivered: a page
+# whose renderer is starved (e.g. FCaptcha's PoW workers) acks input, DOM and
+# Runtime calls only once its main thread frees, so clients must treat this
+# error as "sent, ack late" for mouse input and must not re-send it.
 _INPUT_ANSWER_TIMEOUT_SECONDS = 10.0
+# Stable text of that error reply; the humanizer keys its skip-and-continue on it.
+UNANSWERED_INPUT_MARKER = "was not answered by the browser provider"
 # A CDP session whose oldest forwarded command has had no reply for this long is
 # reported once, naming its target and the pending methods, with the age of the
 # newest reply on ANY session: a busy renderer (challenge JS) silences only the
@@ -511,6 +516,7 @@ class SingleCdpConnectionMultiplexer:
                 self._webauthn_armed_targets.discard(armed_target)
             self._session_owner.pop(params["sessionId"], None)
             self._session_info.pop(str(params["sessionId"]), None)
+            self._drop_session_silence(str(params["sessionId"]), "it detached")
             client.child_sessions.discard(params["sessionId"])
 
     def _hide_target(self, info: Any) -> bool:
@@ -785,6 +791,24 @@ class SingleCdpConnectionMultiplexer:
                 if target_id and target_id == info.get("targetId"):
                     self._session_info[session] = (target_id, target_type, str(info.get("url") or ""))
 
+    def _end_silence_if_idle(self, session_id: str, why: str) -> None:
+        if session_id in self._silent_since and not any(entry[1] == session_id for entry in self._pending_since.values()):
+            self._drop_session_silence(session_id, why)
+
+    def _drop_session_silence(self, session_id: str, why: str) -> None:
+        for message_id, entry in list(self._pending_since.items()):
+            if entry[1] == session_id and why == "it detached":
+                self._pending_since.pop(message_id, None)
+        since = self._silent_since.pop(session_id, None)
+        if since is not None:
+            logger.warning(
+                "[CdpMux] Session %s no longer silent after %.0fs: %s (label=%s)",
+                session_id[:12],
+                asyncio.get_running_loop().time() - since,
+                why,
+                self._label,
+            )
+
     def _describe_session(self, session_id: str) -> str:
         if any(client.browser_session_id == session_id for client in self._clients):
             return "browser-level"
@@ -914,7 +938,9 @@ class SingleCdpConnectionMultiplexer:
         message["id"] = message_id
         if not message.get("sessionId"):
             message["sessionId"] = client.browser_session_id
-        self._pending_since[message_id] = (asyncio.get_running_loop().time(), str(message["sessionId"]))
+        if not method.startswith("Input."):
+            # Input ages from _send_input: a key the mux holds behind in-flight input is not provider silence.
+            self._pending_since[message_id] = (asyncio.get_running_loop().time(), str(message["sessionId"]))
         if method.startswith("Input."):
             await self._forward_input_in_order(upstream, message_id, message)
             return
@@ -986,6 +1012,7 @@ class SingleCdpConnectionMultiplexer:
         if entry is not None:
             timer = asyncio.get_running_loop().call_later(self._input_answer_timeout, self._expire_input, message_id)
             self._input_done[message_id] = (entry[0], timer)
+        self._pending_since[message_id] = (asyncio.get_running_loop().time(), str(message["sessionId"]))
         await upstream.send(json.dumps(message))
 
     def _finish_input(self, message_id: int) -> None:
@@ -1004,9 +1031,11 @@ class SingleCdpConnectionMultiplexer:
 
         Removing it from _pending also drops the provider's late real reply."""
         pending = self._pending.pop(message_id, None)
-        self._pending_since.pop(message_id, None)
+        expired = self._pending_since.pop(message_id, None)
         session_id = self._input_session.get(message_id)
         self._finish_input(message_id)
+        if expired is not None:
+            self._end_silence_if_idle(expired[1], "its last pending command expired")
         if pending is None:
             return
         client, original_id, method = pending
@@ -1024,7 +1053,7 @@ class SingleCdpConnectionMultiplexer:
             "id": original_id,
             "error": {
                 "code": -32000,
-                "message": f"{method} was not answered by the browser provider within "
+                "message": f"{method} {UNANSWERED_INPUT_MARKER} within "
                 f"{self._input_answer_timeout:g}s (dropped input event)",
             },
         }
