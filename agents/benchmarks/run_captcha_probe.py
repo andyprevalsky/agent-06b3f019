@@ -118,12 +118,31 @@ def summarize_events(events: List[Dict[str, Any]]) -> Dict[str, Any]:
         for episode in episodes
         if str(episode.get("recovery_outcome") or "").startswith(("failed", "exhausted"))
     ]
+    # Patience: the provider's own auto-solve cleared it while we waited. Recovery: the recovery path
+    # (config_selected, cookie fix, ...) ran and succeeded. Both are clears; a recovery success has
+    # cleared=False in the episode, so counting only `cleared` made it look like nothing happened.
+    by_patience = [
+        episode
+        for episode in episodes
+        if episode.get("recovery_outcome") == "cleared_after_patience" or episode.get("cleared") is True
+    ]
+    by_recovery = [
+        episode
+        for episode in episodes
+        if episode not in by_patience
+        and episode.get("recovery_invoked") is True
+        and str(episode.get("recovery_outcome") or "")
+        and episode not in recovery_failed
+        and not str(episode.get("recovery_outcome")).startswith("failed")
+    ]
     return {
         "episodes": len(episodes),
         "stuck": len(stuck),
         "recovery_failed": len(recovery_failed),
         "classifier_challenged": sum(1 for item in classifier if item.get("challenged") is True),
-        "cleared": sum(1 for episode in episodes if episode.get("cleared") is True),
+        "cleared": len(by_patience) + len(by_recovery),
+        "cleared_by_patience": len(by_patience),
+        "cleared_by_recovery": len(by_recovery),
         "last_stuck_host": (stuck[-1].get("final_url_host") or stuck[-1].get("host")) if stuck else "",
     }
 

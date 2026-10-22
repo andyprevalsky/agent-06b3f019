@@ -72,6 +72,8 @@ def test_log_collection_is_scoped_to_the_agent_tree():
         "recovery_failed": 1,
         "classifier_challenged": 1,
         "cleared": 0,
+        "cleared_by_patience": 0,
+        "cleared_by_recovery": 0,
         "last_stuck_host": "www.google.com",
     }
 
@@ -366,3 +368,19 @@ def test_rejudge_reports_when_no_log_facts_were_available(tmp_path, capsys, monk
     assert probe_module.main(["--rejudge", str(export)]) == 0
     line = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert (line["probe"], line["verdict"], line["antibot_source"]) == ("ticketmaster-nyc", "PASSED_CAPTCHA", "none")
+
+
+def test_recovery_clears_are_reported_apart_from_patience_clears():
+    """Tilion-only recovery (recovery_outcome=config_selected) has cleared=False in its episode;
+    it must not read as 'nothing happened'. stuck and recovery_failed keep their meaning."""
+    lines = [
+        _line("antibot.episode", agent_id=BROWSER, host="a.com", cleared=True, recovery_outcome="cleared_after_patience"),
+        _line("antibot.episode", agent_id=BROWSER, host="b.com", cleared=False, recovery_invoked=True, recovery_outcome="config_selected"),
+        _line("antibot.episode", agent_id=BROWSER, host="c.com", cleared=False, recovery_invoked=True, recovery_outcome="cookie_fix"),
+        _line("antibot.episode", agent_id=BROWSER, host="d.com", cleared=False, recovery_invoked=True, recovery_outcome="failed: no config cleared it"),
+    ]
+    summary = summarize_events(collect_antibot_events(lines, [BROWSER]))
+    assert (summary["episodes"], summary["cleared_by_patience"], summary["cleared_by_recovery"], summary["cleared"]) == (4, 1, 2, 3)
+    assert (summary["stuck"], summary["recovery_failed"]) == (0, 1)
+    only_recovery = summarize_events(collect_antibot_events(lines[1:2], [BROWSER]))
+    assert (only_recovery["cleared_by_patience"], only_recovery["cleared_by_recovery"], only_recovery["stuck"]) == (0, 1, 0)
