@@ -65,6 +65,11 @@ _COOLDOWN_LADDER_S = (30.0, 60.0, 300.0)
 # Bounds how long another process's fresh mark can go unseen here.
 _SHARED_RECHECK_S = 5.0
 _SHARED_RPC_TIMEOUT_S = 2.0
+# A failed refresh may reuse this process's last authority snapshot for at most
+# the first cooldown rung; a starved guest loop can outlast the RPC budget while
+# the authority is healthy. Synced external state is reused within a TTL
+# (openclaw/src/agents/auth-profiles/constants.ts:27).
+_SHARED_STALE_GRACE_S = _COOLDOWN_LADDER_S[0]
 # codex-rs/codex-api/src/sse/responses_error.rs:137-143 (used at :90-125).
 _TRY_AGAIN_RE = re.compile(r"(?i)try again in\s*(\d+(?:\.\d+)?)\s*(s|ms|seconds?)")
 
@@ -358,9 +363,13 @@ async def _refresh_shared_cooldowns(keys: list[tuple[str, str]]) -> None:
                 if _state_generation.get(key, 0) == generations[key] and _read_can_replace_mark(key):
                     _apply_shared_state(key, validated.get(_shared_key(key), (0, 0.0)))
         except Exception as exc:
+            logger.warning("rose.foundry.shared_cooldown_read_failed", error_type=type(exc).__name__)
+            # A recent snapshot plus local marks stays authoritative briefly; the
+            # failed read is not recorded, so the next call reads again.
+            if all(time.monotonic() - _shared_checked_at.get(key, -1e18) < _SHARED_STALE_GRACE_S for key in stale):
+                return
             # With a configured authority, unknown shared state must not send
             # traffic to a deployment another worker may already have cooled.
-            logger.warning("rose.foundry.shared_cooldown_read_failed", error_type=type(exc).__name__)
             raise RoseServerError("Foundry shared cooldown authority unavailable") from exc
         checked = time.monotonic()
         for key in stale:

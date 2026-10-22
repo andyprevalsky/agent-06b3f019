@@ -9740,6 +9740,47 @@ async def _check_foundry_shared_state_case(case):
                         await f._refresh_shared_cooldowns([key])
                         assert key not in f._cooldown_until, "expired local guard cannot clear"
                         assert key in f._shared_checked_at
+            if case == "stall_after_healthy_read":
+                # SAME60 2026-10-22: guest event-loop stalls consumed the 2 s read
+                # budget after healthy reads; failing closed sent browser steps to
+                # the slower waterfall. A recent authority snapshot stays usable.
+                f._reset_foundry_cooldown_cache()
+                stall = {"on": False}
+
+                async def stalled(req):
+                    if stall["on"]:
+                        # A starved guest freezes the loop mid-request; the reply is
+                        # ready, but the read deadline passes before it is consumed.
+                        asyncio.get_running_loop().call_soon(time.sleep, 0.3)
+                        for _ in range(3):
+                            await asyncio.sleep(0)
+                    return httpx.Response(200, json={"cooldowns": {}})
+
+                with patch.object(f, "httpx", client(stalled)), patch.object(f, "_SHARED_RPC_TIMEOUT_S", 0.2):
+                    await f._refresh_shared_cooldowns([key])
+                    assert key in f._shared_checked_at
+                    healthy_at = f._shared_checked_at[key]
+                    f._shared_checked_at[key] = healthy_at - (f._SHARED_RECHECK_S + 1)
+                    stall["on"] = True
+                    await f._refresh_shared_cooldowns([key])  # recent snapshot: no fail-closed
+                    assert key not in f._cooldown_until, "a failed refresh invented a cooldown"
+                    assert f._shared_checked_at[key] < healthy_at, "a failed read was recorded as fresh"
+                    # Past the bounded grace, an unavailable authority still fails closed.
+                    f._shared_checked_at[key] = healthy_at - (f._SHARED_STALE_GRACE_S + 1)
+                    try:
+                        await f._refresh_shared_cooldowns([key])
+                    except RoseServerError as exc:
+                        assert "authority unavailable" in str(exc)
+                    else:
+                        raise AssertionError("an expired snapshot must fail closed")
+                    # A process that never read the authority has no snapshot to reuse.
+                    f._reset_foundry_cooldown_cache()
+                    try:
+                        await f._refresh_shared_cooldowns([key])
+                    except RoseServerError:
+                        pass
+                    else:
+                        raise AssertionError("no snapshot must fail closed")
             if case == "malformed":
                 for payload in (
                     {},
@@ -9848,7 +9889,10 @@ async def _check_foundry_shared_state_case(case):
 
 
 async def test_foundry_shared_state_interleavings_and_validation():
-    for case in ("overlap", "pending_mark", "pending_mark_failure", "malformed", "reset", "new_mark", "mark_order", "clock"):
+    for case in (
+        "overlap", "pending_mark", "pending_mark_failure", "stall_after_healthy_read",
+        "malformed", "reset", "new_mark", "mark_order", "clock",
+    ):
         await _check_foundry_shared_state_case(case)
 
 
