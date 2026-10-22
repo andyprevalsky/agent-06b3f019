@@ -267,7 +267,23 @@ export async function searchAndPromoteBrowserConfig(
       if (!updated) throw new Error(`Browser task ${input.taskId} changed during config search`);
       // Tilion accepts one CDP client per session: the probe's client must be
       // gone before the agent reattaches to the promoted winner.
-      if (session.provider === 'tilion') await closeValidationBrowser(session);
+      if (session.provider === 'tilion') {
+        const closeStarted = Date.now();
+        await closeValidationBrowser(session);
+        // Evidence for T74 (worker reattach refused 4409 after promotion): the
+        // promoted Tilion session must have no backend CDP client left.
+        const stillConnected = session.validationBrowser?.isConnected?.() ?? null;
+        (stillConnected ? log.error : log.info).call(
+          log,
+          'Closed the promoted Tilion candidate CDP client before handing the session to the worker',
+          {
+            taskId: input.taskId,
+            sessionId: session.sessionId,
+            closeMs: Date.now() - closeStarted,
+            stillConnected,
+          }
+        );
+      }
       await (dependencies.announceBinding ?? announceBrowserSessionBinding)({ id: current.id });
       await releaseRecoveryProviderSession(dependencies, current.provider, current.sessionId).catch(
         () => {}
