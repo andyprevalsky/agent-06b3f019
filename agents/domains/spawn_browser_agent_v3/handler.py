@@ -1443,6 +1443,7 @@ def _browser_resume_continuity_state(
     response_schema: Optional[Dict[str, Any]] = None,
     schema_user_instruction_count: int = 0,
     private_runtime_state: Optional[Dict[str, Any]] = None,
+    durable_runtime_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Serialize exact task continuity for inline or encrypted storage."""
     state = {
@@ -1488,6 +1489,11 @@ def _browser_resume_continuity_state(
             if privacy_state.get("secret_redaction_refs") and private_runtime_state:
                 # Only the encrypted archive may carry exact routing/grant data.
                 state["private_browser_runtime"] = private_runtime_state
+    if durable_runtime_state:
+        # Carried on EVERY pause (private_browser_runtime exists only with
+        # secret bindings): worker-memory provenance the resumed activity, maybe
+        # on another worker, needs. Large states move to the encrypted archive.
+        state["durable_browser_runtime"] = durable_runtime_state
     return state
 
 
@@ -7162,11 +7168,17 @@ async def _spawn_browser_agent_activity_v3_real(
         }
 
     private_browser_runtime: Dict[str, Any] = {}
+    durable_browser_runtime: Dict[str, Any] = {}
     if write_lock_resume_state:
         hydrated_resume = dict(await hydrate_resume_context(
             agent_id=agent_id, resume_state=write_lock_resume_state
         ))
         private_browser_runtime = hydrated_resume.pop("private_browser_runtime", {})
+        durable_browser_runtime = dict(hydrated_resume.pop("durable_browser_runtime", None) or {})
+        for key in ("tilion_downloads", "rendered_image_urls"):
+            # Earlier pauses carried these only in the private (secret-bound) runtime.
+            if key not in durable_browser_runtime and key in private_browser_runtime:
+                durable_browser_runtime[key] = private_browser_runtime[key]
         if "browser_output_schema" in private_browser_runtime:
             hydrated_resume["browser_output_schema"] = private_browser_runtime["browser_output_schema"]
         write_lock_resume_state = hydrated_resume
@@ -7265,11 +7277,19 @@ async def _spawn_browser_agent_activity_v3_real(
                 "current_url": current_url, "auth_realm": auth_realm,
                 "browser_output_schema": response_schema,
                 "write_lock_approvals": dict(write_lock_approvals), "grant_url": grant_url,
+
+                **({"pending_action_target": approval_result["pending_action_target"]}
+                   if approval_result and approval_result.get("pending_action_target") else {}),
+            },
+            durable_runtime_state={
                 # Tilion downloads are durable in attachment storage; the
                 # resumed activity (maybe on another worker) extracts them.
                 "tilion_downloads": durable_tilion_downloads(session_id),
-                **({"pending_action_target": approval_result["pending_action_target"]}
-                   if approval_result and approval_result.get("pending_action_target") else {}),
+                # Receipt-image provenance (bounded at 400 in DOMService): images
+                # this browser rendered before the pause stay valid after resume.
+                "rendered_image_urls": (
+                    dom_service.rendered_image_state() if hasattr(dom_service, "rendered_image_state") else []
+                ),
             },
         )
 
@@ -7927,7 +7947,7 @@ async def _spawn_browser_agent_activity_v3_real(
         _record_timing("session_init", t_session)
         # Durable Tilion downloads from before a write-lock/payment/auth pause,
         # keyed by the session this activity actually runs on.
-        restore_tilion_downloads(session_id, private_browser_runtime.get("tilion_downloads"))
+        restore_tilion_downloads(session_id, durable_browser_runtime.get("tilion_downloads"))
 
         if not cdp_url:
             raise RuntimeError("No CDP URL provided - backend must return provider ws_url")
@@ -8464,6 +8484,11 @@ async def _spawn_browser_agent_activity_v3_real(
 
         # ===== PHASE 3: POST-SETUP =====
         t_post = time.monotonic()
+
+        if hasattr(dom_service, "restore_rendered_image_state"):
+            # Pause/resume (write-lock, payment, auth) runs in a new activity,
+            # possibly on another worker; the resume context carries provenance.
+            dom_service.restore_rendered_image_state(durable_browser_runtime.get("rendered_image_urls"))
 
         if session_worker_apply:
             # Tilion: the backend returned saved state instead of connecting to
