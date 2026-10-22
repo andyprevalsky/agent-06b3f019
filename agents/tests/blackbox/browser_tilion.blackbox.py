@@ -1580,6 +1580,93 @@ async def test_tilion_live_view_token_is_redacted_before_persisting():
     assert '"browser_url": redact_url_secrets(self.browser_url)' in (root / "recording.py").read_text()
 
 
+async def test_supervisor_cap_logs_blocked_stack_and_classifies_action_timeouts():
+    """Lane B T37: (1) a TimeoutError the action raises itself (humanizer drain)
+    is an action error, not the supervisor cap; (2) at the cap, the stack where
+    the action is blocked is logged before it is cancelled, and the wait for the
+    cancellation is bounded."""
+    import time
+
+    from structlog.testing import capture_logs
+
+    from domains.spawn_browser_agent_v3.handler import (
+        BrowserActionRaisedTimeout,
+        BrowserSupervisorCapExceeded,
+        _await_browser_action_within_cap,
+    )
+    from domains.spawn_browser_agent_v3.service_actions import BrowserEvaluateDeadlineExceeded
+
+    context = {"agent_id": "agent-1", "action_name": "click"}
+
+    async def blocked_on_a_lost_cdp_reply():
+        await asyncio.get_running_loop().create_future()  # never answered
+
+    started = time.monotonic()
+    with capture_logs() as logs:
+        try:
+            await _await_browser_action_within_cap(
+                asyncio.create_task(blocked_on_a_lost_cdp_reply()), timeout=0.3, log_context=context
+            )
+        except BrowserSupervisorCapExceeded as error:
+            assert error.cancelled is True and error.timeout_seconds == 0.3
+        else:
+            raise AssertionError("the supervisor cap must fire")
+    assert time.monotonic() - started < 0.3 + 5
+    blocked = [entry for entry in logs if entry["event"] == "Browser action blocked at supervisor cap"]
+    assert blocked and "blocked_on_a_lost_cdp_reply" in blocked[0]["blocked_stack"], logs
+    assert len(blocked[0]["blocked_stack"]) <= 4096 and blocked[0]["action_name"] == "click"
+
+    async def ignores_cancellation():
+        while True:
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                continue
+
+    stubborn = asyncio.create_task(ignores_cancellation())
+    started = time.monotonic()
+    try:
+        await _await_browser_action_within_cap(stubborn, timeout=0.1, log_context=context, drain_seconds=0.3)
+    except BrowserSupervisorCapExceeded as error:
+        assert error.cancelled is False, "unknown timeout source when the action ignores cancellation"
+    assert time.monotonic() - started < 2, "the cancellation wait is bounded"
+    stubborn.get_coro().close()  # a task that ignores cancel; end it for the fixture
+
+    async def drain_times_out():
+        raise asyncio.TimeoutError("CDP keyboard input drain timed out after 15s")
+
+    try:
+        await _await_browser_action_within_cap(asyncio.create_task(drain_times_out()), timeout=5, log_context=context)
+    except BrowserActionRaisedTimeout as error:
+        assert not isinstance(error, asyncio.TimeoutError), "must reach the generic action-error path"
+        assert "drain timed out" in str(error)
+    else:
+        raise AssertionError("an action-raised TimeoutError must be reclassified")
+
+    async def evaluate_deadline():
+        raise BrowserEvaluateDeadlineExceeded(30, 30.1)
+
+    try:
+        await _await_browser_action_within_cap(asyncio.create_task(evaluate_deadline()), timeout=5, log_context=context)
+    except BrowserEvaluateDeadlineExceeded:
+        pass
+    else:
+        raise AssertionError("the evaluate deadline keeps its timeout semantics")
+
+    async def succeeds():
+        return {"success": True}
+
+    assert await _await_browser_action_within_cap(asyncio.create_task(succeeds()), timeout=5, log_context=context) == {
+        "success": True
+    }
+
+    from pathlib import Path
+
+    handler_source = (Path(__file__).resolve().parents[2] / "domains/spawn_browser_agent_v3/handler.py").read_text()
+    assert "result = await _await_browser_action_within_cap(" in handler_source
+    assert "asyncio.wait_for(\n                    action_task," not in handler_source
+
+
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
@@ -1610,6 +1697,10 @@ async def run_all_tests():
         ("multiplexer_serialises_input_per_session", test_multiplexer_serialises_input_per_session_so_keys_are_not_dropped),
         ("multiplexer_fails_unanswered_input", test_multiplexer_fails_unanswered_input_instead_of_hanging),
         ("tilion_live_view_token_redacted", test_tilion_live_view_token_is_redacted_before_persisting),
+        (
+            "supervisor_cap_logs_stack_and_classifies",
+            test_supervisor_cap_logs_blocked_stack_and_classifies_action_timeouts,
+        ),
     ]:
         await result.record_async(name, test)
     return result.all_passed

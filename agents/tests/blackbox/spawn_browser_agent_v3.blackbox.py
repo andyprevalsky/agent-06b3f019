@@ -4811,6 +4811,155 @@ async def test_browser_humanizer_single_cdp_client_types_keys_serially():
         humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS = original_drain
 
 
+async def test_browser_humanizer_single_cdp_client_keys_never_overlap_idle_drift():
+    """Tilion drops a key event while ANY Input event is in flight on the same CDP
+    session (A1, live 2026-10-22: idle mouseMoved every 45-85 ms overlapped
+    type_text/press_key -> empty field, keyboard transport invalidated). With
+    serial_cdp_keyboard, typing holds the movement lock so idle drift skips."""
+    import browser_tools.humanizer as humanizer_module
+    from browser_tools.humanizer import BrowserHumanizer
+
+    class SameSessionInputGateway:
+        """A key arriving while any Input.* is in flight is dropped (never answered)."""
+
+        def __init__(self):
+            self.in_flight = 0
+            self.delivered = []
+            self.mouse_events = 0
+
+        async def send(self, method, payload):
+            if method == "Input.dispatchKeyEvent" and self.in_flight:
+                await asyncio.Event().wait()  # dropped
+            self.in_flight += 1
+            try:
+                await asyncio.sleep(0.004)
+                if method == "Input.dispatchMouseEvent":
+                    self.mouse_events += 1
+                elif payload.get("type") == "char":
+                    self.delivered.append(payload["text"])
+                return {}
+            finally:
+                self.in_flight -= 1
+
+    def humanizer_for(gateway):
+        class FakeContext:
+            async def new_cdp_session(self, page):
+                return gateway
+
+        page = SimpleNamespace(
+            keyboard=SimpleNamespace(),
+            mouse=SimpleNamespace(),
+            viewport_size={"width": 1280, "height": 800},
+            context=FakeContext(),
+        )
+        humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True, serial_cdp_keyboard=True)
+        humanizer._keycap = SimpleNamespace(next=lambda char: SimpleNamespace(dwell_s=0.002, interval_s=0.002))
+        humanizer._idle_mouse_enabled = True
+        humanizer._cdp_mouse_transport_enabled = True
+        humanizer._keyboard_synthesis_enabled = True
+        return humanizer
+
+    async def drift(humanizer, stop):
+        while not stop.is_set():  # idle drift at a tiny cadence
+            await humanizer._idle_mouse_step()
+            await asyncio.sleep(0.001)
+
+    original_drain = humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS
+    humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS = 1.0
+    try:
+        gateway = SameSessionInputGateway()
+        humanizer = humanizer_for(gateway)
+        stop = asyncio.Event()
+        drifter = asyncio.create_task(drift(humanizer, stop))
+        await asyncio.sleep(0.05)
+        moves_before = gateway.mouse_events
+        assert moves_before > 0, "idle drift must really dispatch mouse events"
+        await humanizer.type_text("you@example.com")
+        assert "".join(gateway.delivered) == "you@example.com"
+        assert humanizer._cdp_keyboard_transport_enabled, "CDP keyboard stays enabled"
+        await asyncio.sleep(0.05)
+        assert gateway.mouse_events > moves_before, "idle drift resumes after typing"
+
+        # Control: the same typing without the movement lock loses keys to drift.
+        control_gateway = SameSessionInputGateway()
+        control = humanizer_for(control_gateway)
+        control_drifter = asyncio.create_task(drift(control, stop := asyncio.Event()))
+        await asyncio.sleep(0.05)
+        try:
+            await control._type_text_with_cdp_fire_and_drain("you@example.com")
+            raise AssertionError("keys overlapping idle drift should be dropped on this gateway model")
+        except asyncio.TimeoutError:
+            pass
+        stop.set()
+        for task in (drifter, control_drifter):
+            task.cancel()
+        await asyncio.gather(drifter, control_drifter, return_exceptions=True)
+    finally:
+        humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS = original_drain
+
+
+async def test_browser_humanizer_single_cdp_client_typing_excludes_idle_mouse_drift():
+    """Tilion drops a key event that arrives while any other Input event is in flight on the
+    same CDP session (live 2026-10-22: same-session mouseMoved overlap lost keys; other
+    sessions did not). Idle drift sends mouseMoved on the humanizer's session every
+    45-85 ms, so with serial_cdp_keyboard typing must exclude it."""
+    import browser_tools.humanizer as humanizer_module
+    from browser_tools.humanizer import BrowserHumanizer
+
+    class SameSessionInputGateway:
+        """Models Tilion: a key event sent while any Input event is unanswered is never answered or delivered."""
+
+        def __init__(self):
+            self.in_flight = 0
+            self.delivered = []
+            self.mouse_moves = 0
+
+        async def send(self, method, payload):
+            if method == "Input.dispatchKeyEvent" and self.in_flight:
+                await asyncio.Event().wait()
+            self.in_flight += 1
+            try:
+                await asyncio.sleep(0.05 if method == "Input.dispatchMouseEvent" else 0.005)
+                if method == "Input.dispatchMouseEvent":
+                    self.mouse_moves += 1
+                elif payload.get("type") == "char":
+                    self.delivered.append(payload["text"])
+                return {}
+            finally:
+                self.in_flight -= 1
+
+    gateway = SameSessionInputGateway()
+
+    class FakeContext:
+        async def new_cdp_session(self, page):
+            return gateway
+
+    async def no_playwright_mouse(*_args, **_kwargs):
+        raise AssertionError("idle drift must use the CDP transport in this test")
+
+    page = SimpleNamespace(
+        keyboard=SimpleNamespace(),
+        mouse=SimpleNamespace(move=no_playwright_mouse),
+        viewport_size={"width": 1280, "height": 800},
+        context=FakeContext(),
+    )
+    humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True, serial_cdp_keyboard=True)
+    humanizer._keycap = SimpleNamespace(next=lambda char: SimpleNamespace(dwell_s=0.01, interval_s=0.02))
+    original_drain = humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS
+    humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS = 1.0
+    try:
+        humanizer.start_idle_movement()
+        await asyncio.sleep(0.3)
+        assert gateway.mouse_moves > 0, "idle drift did not run"
+        text = "benchmark-human@example.com"
+        await asyncio.wait_for(humanizer.type_text(text), timeout=10)
+        assert "".join(gateway.delivered) == text
+        assert humanizer._cdp_keyboard_transport_enabled
+    finally:
+        humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS = original_drain
+        await humanizer.close()
+
+
 async def test_browser_humanizer_cdp_idle_mouse_failure_enables_fallback():
     from browser_tools.humanizer import BrowserHumanizer
 
@@ -20514,6 +20663,87 @@ def test_extract_image_urls_from_dom_state_is_uncapped_and_keeps_every_srcset_ca
     assert len(urls) == len(set(urls)) == 19
     assert _extract_image_urls_from_dom_state(SimpleNamespace(_root=None), page_url="https://shop.example/") == []
 
+async def test_receipt_image_rendered_on_an_earlier_page_of_the_activity_validates():
+    """Eventim (agent 2cf378ca, 2026-10-21): the event page renders the seetickets image,
+    the checkout page that requests the card does not. A receipt image copied exactly from
+    an image this browser activity rendered must validate; an unrendered URL must not."""
+    from browser_tools.dom_service import DOMService
+    from utils.purchase_approval import validate_image_url_for_page
+
+    event_page = "https://wl.eventim.us/event/yaego/707562?afflky=1015Folsom"
+    checkout_page = "https://checkout.eventim.us/?afflky=1015Folsom"
+    event_image = (
+        "https://prod-images.seetickets.us/eyJidWNrZXQiOiJwcm9kLXNpaC5zZWV0aWNrZXRzdXNhLnVzIiwia2V5IjoiMDBhYTY4YzMtZWU0"
+        "Ni00YjYxLTk1YTEtNmI3MmZiN2IyYjYzIiwiZWRpdHMiOnt9fQ=="
+    )
+    event_image_600 = (
+        "https://prod-images.seetickets.us/eyJidWNrZXQiOiJwcm9kLXNpaC5zZWV0aWNrZXRzdXNhLnVzIiwia2V5IjoiMDBhYTY4YzMtZWU0"
+        "Ni00YjYxLTk1YTEtNmI3MmZiN2IyYjYzIiwiZWRpdHMiOnsicmVzaXplIjp7IndpZHRoIjo2MDB9LCJqcGVnIjp7InF1YWxpdHkiOjYwfSwicG5n"
+        "Ijp7ImNvbXByZXNzaW9uTGV2ZWwiOjksInF1YWxpdHkiOjYwfSwid2VicCI6eyJxdWFsaXR5Ijo2MH19fQ=="
+    )
+    checkout_logo = "https://checkout.eventim.us/assets/eventim-logo.png"
+
+    def img(src):
+        return SimpleNamespace(
+            original_node=SimpleNamespace(tag_name="img", attributes={"src": src, "alt": "yaego"}, snapshot_node=None),
+            children=[],
+            should_display=True,
+        )
+
+    def state(url, images):
+        root = SimpleNamespace(
+            original_node=SimpleNamespace(tag_name="body", attributes={}),
+            children=[img(src) for src in images],
+        )
+        return SimpleNamespace(
+            url=url,
+            title="",
+            dom_state=SimpleNamespace(_root=root, selector_map={}),
+            recent_events=None,
+            closed_popup_messages=None,
+        )
+
+    states = [state(event_page, [event_image, event_image_600]), state(checkout_page, [checkout_logo])]
+
+    class FakeSession:
+        async def get_browser_state_summary(self, include_screenshot=False):
+            return states[0]
+
+    service = DOMService(cdp_url="ws://unused.invalid/devtools/browser/x")
+    service._session = FakeSession()
+    service._page_geometry = lambda _state: {
+        "viewport_width": 1280,
+        "viewport_height": 800,
+        "scroll_x": 0,
+        "scroll_y": 0,
+        "pages_above": 0.0,
+        "pages_below": 0.0,
+        "total_pages": 1.0,
+    }
+    service._serialized_dom_tree = lambda *_args: ""
+    service._summarized_tabs = lambda _state: []
+
+    # The model reads the event page (where it copies the image URL)...
+    observed = await service.get_browser_state(include_screenshot=False)
+    assert event_image in [candidate["url"] for candidate in observed.get("media_candidates", [])]
+    # ...then requests the card on checkout, which renders only a logo.
+    states.pop(0)
+    rendered = await service.get_page_image_urls()
+
+    assert validate_image_url_for_page(event_image, rendered, checkout_page) == event_image
+    assert validate_image_url_for_page(event_image_600, rendered, checkout_page) == event_image_600
+    # The rule is unchanged for anything this browser never rendered: one drifted
+    # character, or an asset from nowhere, is still rejected.
+    drifted = event_image[:-6] + "Ab9fQ=="
+    for never_rendered in (drifted, "https://prod-images.seetickets.us/eyJmYWtlIjp0cnVlfQ=="):
+        try:
+            validate_image_url_for_page(never_rendered, rendered, checkout_page)
+        except ValueError as error:
+            assert "image_url must be copied exactly" in str(error)
+        else:
+            raise AssertionError(f"never-rendered image accepted: {never_rendered}")
+
+
 async def test_dom_service_get_page_image_urls_reads_fresh_snapshot_without_screenshot():
     from browser_tools.dom_service import DOMService
 
@@ -31087,6 +31317,14 @@ async def run_all_tests():
         test_browser_humanizer_single_cdp_client_types_keys_serially,
     )
     await r.record_async(
+        "browser_humanizer_single_cdp_client_keys_never_overlap_idle_drift",
+        test_browser_humanizer_single_cdp_client_keys_never_overlap_idle_drift,
+    )
+    await r.record_async(
+        "browser_humanizer_single_cdp_client_typing_excludes_idle_mouse_drift",
+        test_browser_humanizer_single_cdp_client_typing_excludes_idle_mouse_drift,
+    )
+    await r.record_async(
         "browser_network_recording_captures_body",
         test_browser_network_recording_captures_response_body,
     )
@@ -31185,6 +31423,10 @@ async def run_all_tests():
     await r.record_async(
         "dom_service_get_page_image_urls_fresh_snapshot",
         test_dom_service_get_page_image_urls_reads_fresh_snapshot_without_screenshot,
+    )
+    await r.record_async(
+        "receipt_image_rendered_on_an_earlier_page_validates",
+        test_receipt_image_rendered_on_an_earlier_page_of_the_activity_validates,
     )
     r.record(
         "write_lock_notification_prompt_media_candidates",
