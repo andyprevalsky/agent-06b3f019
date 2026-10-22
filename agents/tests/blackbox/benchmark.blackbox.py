@@ -22556,6 +22556,19 @@ def test_antibot_slice_includes_daily_toast_and_amazon_commerce():
         assert task.status == ("incomplete" if probe.get("hold") else "ready")
         assert probe["post_wall_evidence"] in task.evaluators[0]["criteria"]
         assert task.evaluators[0]["method"] == "single_turn_llm_judge"
+        assert task.enforce_declared_evaluators is True
+        # Full use of the service: purchase flows end at one pending payment-card request,
+        # bookings at one pending write lock at the final confirm (approvals left unresolved).
+        if probe.get("ends_at_payment_approval"):
+            assert (task.expected_attention_kind, task.approval_handling, task.expected_approval_count) == (
+                "payment_approval", "ignore", 1)
+            assert task.success_on_payment_card_request is True
+            assert "request_payment_card" in task.prompt
+        if probe.get("ends_at_write_lock"):
+            assert (task.expected_attention_kind, task.approval_handling, task.expected_approval_count) == (
+                "write_lock", "ignore", 1)
+    assert sum(bool(p.get("ends_at_payment_approval")) for p in probes) == 11
+    assert sum(bool(p.get("ends_at_write_lock")) for p in probes) == 3
 
 
 def test_eventim_1015_request_card_benchmark_contract():

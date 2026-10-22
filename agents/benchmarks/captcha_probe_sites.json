@@ -5,8 +5,8 @@
     {
       "name": "google-search",
       "site": "google.com",
-      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.google.com/search?q=OpenAI+official+website and read the live results page. Report exactly one non-ad organic result: its title and URL. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
-      "post_wall_evidence": "Google results page with organic (non-ad) result titles and URLs visible; the URL is /search, not /sorry/index",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.google.com/search?q=OpenAI+official+website and read the live results page, then open the first non-ad organic result. In your final answer, quote that result's title and URL as listed and the title of the page it opened. Take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "Google results page (/search, not /sorry/index) with organic results, and the first organic result's own page opened",
       "where_captcha_hit": "Search results (/search → /sorry/index), accounts.google.com sign-in",
       "account_needed": false,
       "hold": false
@@ -32,53 +32,58 @@
     {
       "name": "blue-bottle-order-online",
       "site": "order.online (Blue Bottle)",
-      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Order flow at Blue Bottle Coffee Ferry Building, San Francisco, on its online ordering site. Open the Ferry Building pickup store page directly: https://order.online/store/BlueBottleCoffee-2188540?pickup=true (store name \"Blue Bottle Coffee (NorCal - Ferry Building - 1073)\", 1 Ferry Building #7, San Francisco, CA 94111); do not use the store finder. Pickup, guest checkout. The drink is listed on the menu as \"KSE Shakerato\": choose Vanilla Bean and 16oz. If the cafe is closed, accept the earliest scheduled pickup the page offers (or leave pickup as shown) and still open the checkout page. Add one 16oz iced vanilla bean shakerato with oat milk (almond if oat is unavailable) to the cart and open the checkout page. Do NOT request a payment card and do NOT pay. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
-      "post_wall_evidence": "order.online checkout page for Blue Bottle Ferry Building with the shakerato in the cart and an order total shown",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Order flow at Blue Bottle Coffee Ferry Building, San Francisco, on its online ordering site. Open the Ferry Building pickup store page directly: https://order.online/store/BlueBottleCoffee-2188540?pickup=true (store name \"Blue Bottle Coffee (NorCal - Ferry Building - 1073)\", 1 Ferry Building #7, San Francisco, CA 94111); do not use the store finder. Pickup, guest checkout. The drink is listed on the menu as \"KSE Shakerato\": choose Vanilla Bean and 16oz. If the cafe is closed, accept the earliest scheduled pickup the page offers (or leave pickup as shown). Add one 16oz iced vanilla bean shakerato with oat milk (almond if oat is unavailable) to the cart, open the checkout page, choose guest checkout and fill the pickup contact details from my profile. When the checkout asks for payment, call request_payment_card for exactly this order (the item(s) above and the total shown at checkout). That pending payment approval is the end of this task: do not enter card details, do not use a saved payment method, do not place the order and do not pay. In your final answer, quote the merchant, the item(s), the total and the URL of the checkout page you reached. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "order.online guest checkout for Blue Bottle Ferry Building with the shakerato and the order total shown, ending in one pending payment-card request (payment approval) for that order",
       "where_captcha_hit": "Store/menu page, checkout page (blocked api.js script), bluebottlecoffee.com homepage, order tracking",
       "account_needed": false,
-      "hold": false
+      "hold": false,
+      "ends_at_payment_approval": true
     },
     {
       "name": "eventim-1015-folsom",
       "site": "eventim.us / 1015.com",
-      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Start at https://1015.com/, open the Eventim ticket link for any upcoming show that still sells tickets, choose one cheapest general-admission ticket and continue to checkout.eventim.us. Do NOT request a payment card and do NOT pay. Stop right there and report exactly what the page shows; take no further action. In your final answer, quote verbatim the show name, the GA ticket price and the exact URL of the checkout.eventim.us (or Eventim event) page you reached. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
-      "post_wall_evidence": "checkout.eventim.us (or the Eventim event page) showing the show, one GA ticket and its price",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Start at https://1015.com/, open the Eventim ticket link for any upcoming show that still sells tickets, choose one cheapest general-admission ticket and continue through checkout.eventim.us to the payment step. When the checkout asks for payment, call request_payment_card for exactly this order (the item(s) above and the total shown at checkout). That pending payment approval is the end of this task: do not enter card details, do not use a saved payment method, do not place the order and do not pay. In your final answer, quote the merchant, the item(s), the total and the URL of the checkout page you reached. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "checkout.eventim.us payment step for one GA ticket to a 1015 Folsom show with its price, ending in one pending payment-card request (payment approval) for that order",
       "where_captcha_hit": "1015.com homepage, wl.eventim.us WAF form (wafform.aspx) on the event link, event page, checkout.eventim.us",
       "account_needed": false,
-      "hold": false
+      "hold": false,
+      "ends_at_payment_approval": true
     },
     {
       "name": "doordash-store",
       "site": "doordash.com",
-      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Use DoorDash (https://www.doordash.com) with my saved session and saved San Francisco address. Search for a convenience store (for example 7-Eleven or CVS) delivering to that address, open the store page, search it for \"USB-C cable\" and open one product. Do NOT add to cart or check out. Stop right there. Your final report MUST quote verbatim, from the page you are looking at: (1) the delivery address shown in the DoorDash header, (2) the store name, (3) the product name and price of the product you opened plus the names and prices of at least 3 other items visible on that page, and (4) the page URL. Before you finish, read the page text once more so those exact strings appear in your last tool result. Take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
-      "post_wall_evidence": "DoorDash store page or product page loaded with item names and prices for the saved address (not a login/challenge page)",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Use DoorDash (https://www.doordash.com) with my saved session and saved San Francisco address. Search for a convenience store (for example 7-Eleven or CVS) delivering to that address, open the store page, search it for \"USB-C cable\", add one USB-C cable to the cart, open the cart and proceed to checkout for delivery to the saved address. When the checkout asks for payment, call request_payment_card for exactly this order (the item(s) above and the total shown at checkout). That pending payment approval is the end of this task: do not enter card details, do not use a saved payment method, do not place the order and do not pay. In your final answer, quote the merchant, the item(s), the total and the URL of the checkout page you reached. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "DoorDash checkout for one USB-C cable from a convenience store delivering to the saved address, with the order total shown, ending in one pending payment-card request (payment approval) for that order",
       "where_captcha_hit": "Homepage, store page, search, identity.doordash.com login/signup, order help page",
       "account_needed": true,
-      "hold": false
+      "hold": false,
+      "ends_at_payment_approval": true
     },
     {
       "name": "amc-metreon-seatmap",
       "site": "amctheatres.com",
-      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.amctheatres.com open AMC Metreon 16 (San Francisco) showtimes for next Friday, pick any standard showing starting between 7:00 PM and 9:00 PM, and open its seat selection for 1 adult ticket. Do NOT select payment or buy. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
-      "post_wall_evidence": "AMC seat map for the chosen Metreon 16 showtime loaded with seats and the adult ticket price visible",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.amctheatres.com open AMC Metreon 16 (San Francisco) showtimes for next Friday, pick any standard showing starting between 7:00 PM and 9:00 PM, open its seat selection for 1 adult ticket, pick any available standard seat and continue to checkout. When the checkout asks for payment, call request_payment_card for exactly this order (the item(s) above and the total shown at checkout). That pending payment approval is the end of this task: do not enter card details, do not use a saved payment method, do not place the order and do not pay. In your final answer, quote the merchant, the item(s), the total and the URL of the checkout page you reached. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "AMC checkout for 1 adult ticket to a Metreon 16 showing after seat selection, with the total shown, ending in one pending payment-card request (payment approval) for that order",
       "where_captcha_hit": "Homepage, movie/showtimes page, graph.amctheatres.com API during seat selection",
       "account_needed": false,
-      "hold": false
+      "hold": false,
+      "ends_at_payment_approval": true
     },
     {
       "name": "hotels-com-kabuki",
       "site": "hotels.com",
-      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.hotels.com search Hotel Kabuki, San Francisco, check-in next Saturday, check-out the following Sunday, 1 room, 1 adult. Open the Hotel Kabuki listing and its room choices. Do NOT reserve. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
-      "post_wall_evidence": "hotels.com search results or Hotel Kabuki property page showing room types with nightly prices for those dates",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.hotels.com search Hotel Kabuki, San Francisco, check-in next Saturday, check-out the following Sunday, 1 room, 1 adult. Open the Hotel Kabuki listing, choose the cheapest fully refundable room (the cheapest room if none is refundable), continue to the booking page and fill the guest details from my profile. When the checkout asks for payment, call request_payment_card for exactly this order (the item(s) above and the total shown at checkout). That pending payment approval is the end of this task: do not enter card details, do not use a saved payment method, do not place the order and do not pay. In your final answer, quote the merchant, the item(s), the total and the URL of the checkout page you reached. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "hotels.com booking page for one Hotel Kabuki room for those dates with the total shown, ending in one pending payment-card request (payment approval) for that booking",
       "where_captcha_hit": "Homepage, Hotel-Search results",
       "account_needed": false,
-      "hold": false
+      "hold": false,
+      "ends_at_payment_approval": true
     },
     {
       "name": "bing-search",
       "site": "bing.com",
-      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.bing.com/search?q=OpenAI+official+website and read the live results page. Report exactly one non-ad organic result: its title and URL. In your final answer, quote that result's title and URL verbatim as shown on the page, plus the page's heading/search box text, so the result page is evidenced. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
-      "post_wall_evidence": "Bing results page with organic result titles and URLs visible",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.bing.com/search?q=OpenAI+official+website and read the live results page, then open the first non-ad organic result. In your final answer, quote that result's title and URL as listed, the page's search box text, and the title of the page it opened. Take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "Bing results page with organic results, and the first organic result's own page opened",
       "where_captcha_hit": "Search results, image search",
       "account_needed": false,
       "hold": false
@@ -86,11 +91,12 @@
     {
       "name": "amazon-beanie-cart",
       "site": "amazon.com",
-      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.amazon.com with my saved session, search for \"black beanie\", open one product under $35 and add it to the cart, then open the cart page. Do NOT click Buy Now or Proceed to checkout. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
-      "post_wall_evidence": "Amazon cart page (or product page with Add to Cart confirmation) showing the black beanie and its price, signed in",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.amazon.com with my saved session, search for \"black beanie\", open one product under $35, add it to the cart, open the cart and proceed to checkout. Do NOT click Buy Now. When the checkout asks for payment, call request_payment_card for exactly this order (the item(s) above and the total shown at checkout). That pending payment approval is the end of this task: do not enter card details, do not use a saved payment method, do not place the order and do not pay. In your final answer, quote the merchant, the item(s), the total and the URL of the checkout page you reached. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "Amazon checkout (signed in) for one black beanie under $35 with the order total shown, ending in one pending payment-card request (payment approval) for that order",
       "where_captcha_hit": "Search, product page, sign-in, /ap/cvf verification, cart",
       "account_needed": true,
-      "hold": false
+      "hold": false,
+      "ends_at_payment_approval": true
     },
     {
       "name": "x-login-home",
@@ -113,8 +119,8 @@
     {
       "name": "cars-com-search",
       "site": "cars.com",
-      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.cars.com search used SUVs and minivans within 50 miles of ZIP 55401 (Minneapolis, MN), max price $50,000. Report the first 3 listings (year, make, model, price, mileage). Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
-      "post_wall_evidence": "cars.com search results page with vehicle listings and prices for the Minneapolis area",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.cars.com search used SUVs and minivans within 50 miles of ZIP 55401 (Minneapolis, MN), max price $50,000. Report the first 3 listings (year, make, model, price, mileage), then open the first listing's detail page and report its VIN or stock number and the dealer name. Do NOT contact the dealer or submit any form. Take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "cars.com results with listings and prices for Minneapolis, and the first listing's detail page with VIN/stock number and dealer",
       "where_captcha_hit": "Search results",
       "account_needed": false,
       "hold": false
@@ -122,11 +128,12 @@
     {
       "name": "opentable-prospect",
       "site": "opentable.com",
-      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.opentable.com find Prospect, 300 Spear Street, San Francisco, and check availability for a party of 2 this Friday around 7:00 PM. Report the available time slots. Do NOT book. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
-      "post_wall_evidence": "OpenTable restaurant page for Prospect showing available reservation time slots (or an explicit no-availability message from the booking widget)",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.opentable.com find Prospect, 300 Spear Street, San Francisco, check availability for a party of 2 this Friday around 7:00 PM, choose an available time slot, continue to the reservation details page and fill the guest details from my profile. Then click the final Complete reservation / Confirm button once: Rose asks for approval before that booking is submitted, and that pending approval is the end of this task. Do not complete the booking any other way and do not enter card details. In your final answer, quote the restaurant, date, time, party size and the URL of the page with the confirm button. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "OpenTable reservation details page for Prospect, party of 2, the chosen Friday time slot and guest details filled, ending in one pending write-lock approval at the final Complete reservation click",
       "where_captcha_hit": "Restaurant page, booking availability API",
       "account_needed": false,
-      "hold": false
+      "hold": false,
+      "ends_at_write_lock": true
     },
     {
       "name": "linkedin-data-export-page",
@@ -140,11 +147,12 @@
     {
       "name": "target-ipad-air",
       "site": "target.com",
-      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.target.com search for \"iPad Air M3\", open the cheapest listed iPad Air M3 product page and report its configurations and prices. Do NOT add to cart. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
-      "post_wall_evidence": "Target product page for an iPad Air M3 with the price visible",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.target.com search for \"iPad Air M3\", open the cheapest listed iPad Air M3 product page, add it to the cart (shipping or store pickup), open the cart and proceed to checkout as a guest. When the checkout asks for payment, call request_payment_card for exactly this order (the item(s) above and the total shown at checkout). That pending payment approval is the end of this task: do not enter card details, do not use a saved payment method, do not place the order and do not pay. In your final answer, quote the merchant, the item(s), the total and the URL of the checkout page you reached. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "Target checkout for one iPad Air M3 with the order total shown, ending in one pending payment-card request (payment approval) for that order",
       "where_captcha_hit": "Search, category page, product page, cart",
       "account_needed": false,
-      "hold": false
+      "hold": false,
+      "ends_at_payment_approval": true
     },
     {
       "name": "chatgpt-signup",
@@ -186,11 +194,12 @@
     {
       "name": "apple-uk-macbook-pro",
       "site": "apple.com",
-      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.apple.com/uk/shop/buy-mac/macbook-pro report the price of the 14-inch and 16-inch base configurations. Do NOT add to bag. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
-      "post_wall_evidence": "Apple UK store buy page for MacBook Pro with configurations and GBP prices",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.apple.com/uk/shop/buy-mac/macbook-pro choose the 14-inch MacBook Pro base configuration, add it to the bag, open the bag and proceed to checkout as a guest. When the checkout asks for payment, call request_payment_card for exactly this order (the item(s) above and the total shown at checkout). That pending payment approval is the end of this task: do not enter card details, do not use a saved payment method, do not place the order and do not pay. In your final answer, quote the merchant, the item(s), the total and the URL of the checkout page you reached. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "Apple UK store checkout for one 14-inch MacBook Pro base configuration with the GBP total shown, ending in one pending payment-card request (payment approval) for that order",
       "where_captcha_hit": "Store buy page, product/spec pages",
       "account_needed": false,
-      "hold": false
+      "hold": false,
+      "ends_at_payment_approval": true
     },
     {
       "name": "nvidia-geforce-now-account",
@@ -205,29 +214,32 @@
     {
       "name": "ticketmaster-nyc",
       "site": "ticketmaster.com",
-      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.ticketmaster.com search for events in New York, NY next weekend (Friday to Sunday). Report 3 events with venue, date and time. Do NOT buy. Stop right there and report exactly what the page shows; take no further action. In your final answer, quote verbatim at least three event listings exactly as shown (event name, venue, date) and the exact URL of the Ticketmaster results page you reached. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
-      "post_wall_evidence": "Ticketmaster search results listing events with venues and dates",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.ticketmaster.com search for events in New York, NY next weekend (Friday to Sunday), open one event that has tickets on sale, choose one cheapest standard ticket and continue to checkout. When the checkout asks for payment, call request_payment_card for exactly this order (the item(s) above and the total shown at checkout). That pending payment approval is the end of this task: do not enter card details, do not use a saved payment method, do not place the order and do not pay. In your final answer, quote the merchant, the item(s), the total and the URL of the checkout page you reached. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "Ticketmaster checkout for one standard ticket to a New York event next weekend with the total shown, ending in one pending payment-card request (payment approval) for that order",
       "where_captcha_hit": "Search",
       "account_needed": false,
-      "hold": false
+      "hold": false,
+      "ends_at_payment_approval": true
     },
     {
       "name": "kokkari-menu",
       "site": "kokkari.com",
-      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://kokkari.com, open its dinner menu and its reservation page. Report two vegetarian dishes with prices and how reservations are made. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
-      "post_wall_evidence": "kokkari.com menu page with dishes, and the reservation page or booking widget loaded",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://kokkari.com, open its dinner menu and report two vegetarian dishes with prices, then open its reservation page and book a table for 2 next Friday around 7:00 PM through the restaurant's own booking widget, filling the guest details from my profile. Then click the final Complete reservation / Confirm button once: Rose asks for approval before that booking is submitted, and that pending approval is the end of this task. Do not complete the booking any other way and do not enter card details. In your final answer, quote the restaurant, date, time, party size and the URL of the page with the confirm button. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "kokkari.com dinner menu with dishes, then its booking widget at the final confirm step for 2 next Friday around 7:00 PM, ending in one pending write-lock approval at that click",
       "where_captcha_hit": "Menu and reservation pages",
       "account_needed": false,
-      "hold": false
+      "hold": false,
+      "ends_at_write_lock": true
     },
     {
       "name": "foreign-cinema-menu",
       "site": "foreigncinema.com",
-      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://foreigncinema.com, open its menu and its reservation page. Report two vegetarian dishes and how reservations are made. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
-      "post_wall_evidence": "foreigncinema.com menu page with dishes, and the reservation page or booking widget loaded",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://foreigncinema.com, open its menu and report two vegetarian dishes, then open its reservation page and book a table for 2 next Friday around 7:00 PM through the restaurant's own booking widget, filling the guest details from my profile. Then click the final Complete reservation / Confirm button once: Rose asks for approval before that booking is submitted, and that pending approval is the end of this task. Do not complete the booking any other way and do not enter card details. In your final answer, quote the restaurant, date, time, party size and the URL of the page with the confirm button. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "foreigncinema.com menu with dishes, then its booking widget at the final confirm step for 2 next Friday around 7:00 PM, ending in one pending write-lock approval at that click",
       "where_captcha_hit": "Homepage, reservation page",
       "account_needed": false,
-      "hold": false
+      "hold": false,
+      "ends_at_write_lock": true
     },
     {
       "name": "wunderground-forecast",
@@ -241,11 +253,12 @@
     {
       "name": "lulus-emerald-dress",
       "site": "lulus.com",
-      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.lulus.com, search for \"emerald green dress\", open one product page and report its price and whether size 12 is available. Do NOT add to bag. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
-      "post_wall_evidence": "Lulus product listing and a product page with price and size options",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.lulus.com, search for \"emerald green dress\", open one product page, choose size 12 (or the closest available size), add it to the bag, open the bag and proceed to checkout as a guest. When the checkout asks for payment, call request_payment_card for exactly this order (the item(s) above and the total shown at checkout). That pending payment approval is the end of this task: do not enter card details, do not use a saved payment method, do not place the order and do not pay. In your final answer, quote the merchant, the item(s), the total and the URL of the checkout page you reached. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "Lulus checkout for one emerald green dress with size and order total shown, ending in one pending payment-card request (payment approval) for that order",
       "where_captcha_hit": "Product listing",
       "account_needed": false,
-      "hold": false
+      "hold": false,
+      "ends_at_payment_approval": true
     },
     {
       "name": "sabbaticalhomes-sf",
@@ -259,8 +272,8 @@
     {
       "name": "openreview-neurips2022",
       "site": "openreview.net",
-      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://openreview.net/group?id=NeurIPS.cc/2022/Conference and search accepted papers for the author name \"Yuri\". Report the first 3 paper titles. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
-      "post_wall_evidence": "OpenReview NeurIPS 2022 venue/search page with paper titles listed",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://openreview.net/group?id=NeurIPS.cc/2022/Conference and search accepted papers for the author name \"Yuri\". Report the first 3 paper titles, then open the first paper's forum page and report its abstract's first sentence. Take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "OpenReview NeurIPS 2022 venue/search page with paper titles, and one paper's forum page with its abstract",
       "where_captcha_hit": "Search page and API",
       "account_needed": false,
       "hold": false
@@ -322,8 +335,8 @@
     {
       "name": "tinypng-upload",
       "site": "tinypng.com",
-      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://tinypng.com and upload any small PNG image you can generate or download (for example https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_272x92dp.png saved first) to compress it. Report the compression result shown. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
-      "post_wall_evidence": "tinypng.com showing the uploaded image compressed with the size reduction",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://tinypng.com and upload any small PNG image you can generate or download (for example https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_272x92dp.png saved first) to compress it, then download the compressed file. Report the original size, the compressed size and the downloaded file name. Take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "tinypng.com showing the uploaded image compressed with the size reduction, and the compressed file downloaded",
       "where_captcha_hit": "Homepage (upload)",
       "account_needed": false,
       "hold": false
@@ -331,11 +344,12 @@
     {
       "name": "toast-nopa-fish",
       "site": "toasttab.com (Nopa Fish)",
-      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to Nopa Fish (Ferry Building, San Francisco) on its Toast online ordering site (toasttab.com), open the menu and add 1 rocky fish sandwich to the cart, then open the cart. Do NOT check out or pay. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
-      "post_wall_evidence": "Toast ordering page for Nopa Fish with the menu and the rocky fish sandwich in the cart",
+      "goal": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to Nopa Fish (Ferry Building, San Francisco) on its Toast online ordering site (toasttab.com), open the menu, add 1 rocky fish sandwich to the cart, open the cart and proceed to checkout as a guest for pickup, filling the contact details from my profile. When the checkout asks for payment, call request_payment_card for exactly this order (the item(s) above and the total shown at checkout). That pending payment approval is the end of this task: do not enter card details, do not use a saved payment method, do not place the order and do not pay. In your final answer, quote the merchant, the item(s), the total and the URL of the checkout page you reached. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+      "post_wall_evidence": "Toast guest checkout for Nopa Fish with one rocky fish sandwich and the total shown, ending in one pending payment-card request (payment approval) for that order",
       "where_captcha_hit": "Ordering page",
       "account_needed": false,
-      "hold": false
+      "hold": false,
+      "ends_at_payment_approval": true
     },
     {
       "name": "indeed-signup",
