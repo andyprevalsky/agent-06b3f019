@@ -436,7 +436,7 @@ def reconciled_release(out,export,authority,mid,action,gate_joined,probe,probed_
  return r
 
 # The gate writes these only before any custody, workspace-volume or Machine intent.
-PREALLOCATION_REASONS=frozenset({'github-token-missing','controller-admission-refused'})
+PREALLOCATION_REASONS=frozenset({'github-token-missing','controller-admission-refused','source-ref-not-fetchable'})
 def preallocation_terminal(joined,gate_code,gate_pid,ref,export,receipt):
  # Directory/intent absence alone NEVER proves no allocation was attempted.
  # Only the exact gate's explicit early-failure receipt can end this owner.

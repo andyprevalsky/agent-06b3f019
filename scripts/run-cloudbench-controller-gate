@@ -174,7 +174,7 @@ import json, os
 from pathlib import Path
 import sys
 path=Path(sys.argv[1]).absolute();reason=sys.argv[2]
-assert reason in ('github-token-missing','controller-admission-refused')
+assert reason in ('github-token-missing','controller-admission-refused','source-ref-not-fetchable')
 assert path.parent.resolve(strict=True)==path.parent
 info=path.parent.stat()
 assert info.st_uid==os.getuid() and not info.st_mode&0o077
@@ -328,13 +328,20 @@ fi
 export FLY_API_TOKEN
 
 GATE_REF="${CLOUDBENCH_GATE_REF:-$(git rev-parse HEAD)}"
-# The machine fetches GATE_REF from REPO_URL. For the default repository that is
-# origin, so check containment here (after refreshing stale tracking refs) and
-# fail early; a fork URL is checked by the machine's own fetch (exit 90).
+# The machine fetches the exact GATE_REF from REPO_URL. For the default
+# repository that is origin: admit a commit on an origin branch or an exact
+# branch/tag tip origin advertises (the same rule run-bench's sharded admission
+# applies), and fail early otherwise; a fork URL is checked by the machine's
+# own fetch (exit 90). The refusal precedes any custody or Machine intent, so
+# it writes the typed no-effect receipt that lets the external owner end.
+gate_ref_advertised() {
+  git ls-remote --heads --tags origin 2>/dev/null | awk -v ref="$1" '$1 == ref { found = 1 } END { exit !found }'
+}
 if [ "$REPO_URL" = "https://github.com/Rose-Ai-Labs/rose.git" ]; then
   git fetch -q origin 2>/dev/null || true
-  if [ -z "$(git branch -r --contains "$GATE_REF" 2>/dev/null)" ]; then
-    echo "❌ $GATE_REF is not on any origin branch; push it first (the machine fetches from GitHub)." >&2
+  if [ -z "$(git branch -r --contains "$GATE_REF" 2>/dev/null)" ] && ! gate_ref_advertised "$GATE_REF"; then
+    echo "❌ $GATE_REF is not on any origin branch or advertised tag; push it first (the machine fetches from GitHub)." >&2
+    gate_no_effect_receipt source-ref-not-fetchable "$GATE_REF" || true
     exit 1
   fi
 fi
