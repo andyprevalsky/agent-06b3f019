@@ -22557,6 +22557,8 @@ def test_antibot_slice_includes_daily_toast_and_amazon_commerce():
         assert probe["post_wall_evidence"] in task.evaluators[0]["criteria"]
         assert task.evaluators[0]["method"] == "single_turn_llm_judge"
         assert task.enforce_declared_evaluators is True
+        # A plan-phase spawn_agent(type=browser) is recorded as the spawn_browser_agent tool row.
+        assert task.expected_tools == ["spawn_browser_agent"]
         # Full use of the service: purchase flows end at one pending payment-card request,
         # bookings at one pending write lock at the final confirm (approvals left unresolved).
         if probe.get("ends_at_payment_approval"):
