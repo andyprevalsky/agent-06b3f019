@@ -28,7 +28,10 @@ import { storedBrowserProvider, type BrowserGeoTargeting } from '../../providers
 import { resolveExitGeoLocale } from '../../providers/browser/exitGeoLocale';
 import { validateBrowserKeySymbols } from './service.browser-input';
 import { validateSessionFilePath } from './service.file-path';
-import { findRequiredSteelProfileForStart } from './service.profile-binding';
+import {
+  findRequiredSteelProfileForStart,
+  steelProfileForSelectedProvider,
+} from './service.profile-binding';
 import {
   injectLocalStorage,
   SessionNoUserError,
@@ -127,7 +130,7 @@ export async function initSession(userId: string, agentId: string, startUrl: str
   // Phase 1: Fetch session-independent data in parallel. Realm-scoped
   // credentials are collected by the same preparation boundary used for JIT
   // navigation after the provider session exists.
-  const [agent, contextId, user, fingerprintInjection, requiredSteelProfileId] = await Promise.all([
+  const [agent, contextId, user, fingerprintInjection, steelBoundProfileId] = await Promise.all([
     repo.findAgentProxy(agentId),
     getOrCreateContext(userId),
     repo.findUserSettings(userId),
@@ -154,6 +157,14 @@ export async function initSession(userId: string, agentId: string, startUrl: str
     state: proxyGeo.state ?? 'unknown',
     country: proxyGeo.country,
   });
+
+  // A sign-in bound to a Steel profile is shared with the selected provider
+  // (harvested once into the provider-neutral stores) instead of forcing Steel.
+  const requiredSteelProfileId = await steelProfileForSelectedProvider(
+    userId,
+    startUrl,
+    steelBoundProfileId
+  );
 
   // Phase 2: Create the session while retaining its validation CDP connection.
   const session = await createSessionWithContext(contextId, agentId, proxyGeo, startUrl, {

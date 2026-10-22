@@ -38,6 +38,7 @@ import { runLiveTilionHarvest } from './browser-provider.tilion-harvest.live';
 import { assertKernelUnhealthyProxyRelaxesLocation } from './browser-provider-proxy-health.support';
 import { runOptionalLiveBrowserUseProvider } from './browser-provider.browser-use-live.support';
 import { tilionWiringCases } from './browser-provider.tilion-wiring.support';
+import { steelAuthShareCases } from './browser-provider.steel-auth-share.support';
 import {
   createBrowserUseRecoverySession,
   browserUseProxyCountry,
@@ -74,6 +75,7 @@ const tests: Array<[string, () => void | Promise<void>]> = [
   ],
   // Tilion became the default for new sessions (docs/plans/active/tilion-browser-provider.md).
   ...tilionWiringCases,
+  ...steelAuthShareCases,
   [
     'Kernel is selected by one environment parameter',
     () =>
