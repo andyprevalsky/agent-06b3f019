@@ -60,6 +60,28 @@ run_drain_owned_agents() {
   fi
 }
 
+# A TERM/INT/HUP that kills run.sh runs its EXIT trap, but bash dies on a SECOND
+# signal in the middle of that trap: an operator re-sending TERM to a slow
+# teardown (T112: a worker held ~7 min by archive uploads) aborted cleanup after
+# its first step, stranding the backend, worker, vite and tunnel with a pending
+# cleanup receipt. Fatal signals therefore become an explicit `exit`, so cleanup
+# runs once from the EXIT trap, and cleanup silences further signals for itself.
+run_install_teardown_signal_traps() {
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+  trap 'exit 129' HUP
+}
+
+run_note_teardown_signal() {  # <name>
+  echo "⚠️  Ignoring repeated $1: stack teardown is already running; it is bounded by the worker drain deadline. If this run's owner is gone, recover with: scripts/run-bench --local --run-id <id> --reconcile-cleanup" >&2
+}
+
+run_ignore_repeated_teardown_signals() {
+  trap 'run_note_teardown_signal TERM' TERM
+  trap 'run_note_teardown_signal INT' INT
+  trap 'run_note_teardown_signal HUP' HUP
+}
+
 run_publish_stack_cleanup_status() {  # <state>
   local state="$1" path="${RUN_STACK_CLEANUP_STATUS_FILE:-}" temporary birth native_identity
   [ -n "$path" ] || return 0
