@@ -145,3 +145,43 @@ export function isTilionExitUnavailableError(error: unknown): boolean {
     (TILION_EXIT_UNAVAILABLE_SLUGS as readonly string[]).includes(error.slug ?? '')
   );
 }
+
+/**
+ * Experiment knob (default OFF): recovery never leaves the session's current
+ * provider. Used for provider-isolated anti-bot benchmarks; production keeps
+ * the cross-provider ladder.
+ */
+export function recoverySameProviderOnly(): boolean {
+  const raw = process.env.BROWSER_RECOVERY_SAME_PROVIDER_ONLY?.trim().toLowerCase();
+  return raw !== undefined && ['1', 'true', 'yes', 'on', 'enabled'].includes(raw);
+}
+
+/**
+ * The rung to take under BROWSER_RECOVERY_SAME_PROVIDER_ONLY: the ladder's own
+ * step when it stays on `currentProvider`, otherwise that provider's fresh
+ * residential exit (a new replacement session/IP), or null when the current
+ * provider cannot serve another rung (disabled / kill switch).
+ */
+export function sameProviderRotationStep(
+  step: RotationStep,
+  currentProvider: BrowserProviderName,
+  available: { browserUse: boolean; tilion: boolean }
+): RotationStep | null {
+  if (step.provider === currentProvider) return step;
+  if (currentProvider === 'tilion' && !available.tilion) return null;
+  if (currentProvider === 'browser-use' && !available.browserUse) return null;
+  return { provider: currentProvider, proxyType: 'residential', recoveryAction: 'ip_rotated' };
+}
+
+/** Label of the rung the next rotation would take (provider-locked when the knob is on). */
+export function nextRecoveryLabel(
+  position: number,
+  provider: BrowserProviderName,
+  providerLocked: boolean,
+  available: { browserUse: boolean; tilion: boolean }
+): string {
+  const ladder = selectRotationStep(position, provider, available.browserUse, available.tilion);
+  if (!providerLocked) return rotationStepLabel(ladder);
+  const locked = sameProviderRotationStep(ladder, provider, available);
+  return locked ? rotationStepLabel(locked) : 'no_same_provider_rung_left';
+}

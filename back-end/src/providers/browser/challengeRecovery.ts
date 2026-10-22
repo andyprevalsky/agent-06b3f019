@@ -31,6 +31,7 @@ export {
   browserRecoveryCandidates,
   paymentCdnFocusedCandidates,
   recoverySearchPlan,
+  lockCandidatesToProvider,
   shouldPreferSteelForChallengeTarget,
   tilionRecoveryAvailable,
   type BrowserRecoveryConfig,
@@ -38,6 +39,7 @@ export {
 } from './challengeRecoveryCandidates';
 import {
   bestSpecificity,
+  lockCandidatesToProvider,
   availableBrowserRecoveryCandidates,
   shouldPreferSteelForChallengeTarget,
   tilionRecoveryAvailable,
@@ -571,7 +573,11 @@ export async function probeCookieVariant(
             mod.getFingerprintInjectionData(billing.userId!)
           )
         : null;
-  const configs = availableBrowserRecoveryCandidates(proxyLocation, { preferSteel });
+  const configs = lockCandidatesToProvider(
+    availableBrowserRecoveryCandidates(proxyLocation, { preferSteel }),
+    current.provider,
+    { taskId: input.taskId, phase: 'cookie_variant_probe' }
+  );
   const cookieBlacklist = applyConfigBlacklist(configs, input.blockedConfigKeys);
   const config = cookieBlacklist.configs[0];
   if (!config) {

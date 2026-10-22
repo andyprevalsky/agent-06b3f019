@@ -1,9 +1,12 @@
-import { tilionMobileEnabled } from './rotation';
 import type { ProxyGeoLocation } from '../geoip';
 import type { KernelRecoveryProxySpecificity } from './kernel';
 import type { KernelProxyType } from './kernelProxy';
 import type { BrowserProviderName } from './types';
+import { createLogger } from '../logger';
 import { browserProviderEnabled, browserUseEnabled } from './config';
+import { recoverySameProviderOnly, tilionMobileEnabled } from './rotation';
+
+const log = createLogger('BrowserChallengeRecovery');
 
 export interface BrowserRecoveryConfig {
   key: string;
@@ -249,6 +252,28 @@ export function tilionRecoveryAvailable(): boolean {
     browserProviderEnabled('BROWSER_AGENT_TILION_ENABLED', true) &&
     Boolean(process.env.TILION_API_KEY?.trim())
   );
+}
+
+/**
+ * BROWSER_RECOVERY_SAME_PROVIDER_ONLY (experiment knob, default off): keep only
+ * the session's current provider's candidates, so other providers' sessions are
+ * never created or probed. Logs one line naming the knob and what it skipped.
+ */
+export function lockCandidatesToProvider(
+  configs: BrowserRecoveryConfig[],
+  currentProvider: string,
+  context: { taskId: string; phase: string }
+): BrowserRecoveryConfig[] {
+  if (!recoverySameProviderOnly()) return configs;
+  const kept = configs.filter((config) => config.provider === currentProvider);
+  const skipped = configs.filter((config) => config.provider !== currentProvider).map((c) => c.key);
+  log.info(
+    `recovery provider-locked (BROWSER_RECOVERY_SAME_PROVIDER_ONLY): kept ${
+      kept.map((config) => config.key).join(', ') || 'none'
+    }; skipped ${skipped.join(', ') || 'none'}`,
+    { taskId: context.taskId, phase: context.phase, currentProvider }
+  );
+  return kept;
 }
 
 /** Do not spend a recovery lane on a provider that cannot be provisioned. */
