@@ -38,6 +38,8 @@ class FakeTilionGateway:
         self.port = 0
         self._server = None
         self._sockets: set = set()
+        self.withhold = None  # predicate(raw request) -> True to never deliver its reply
+        self.withheld_ids: set = set()
 
     async def drop_all(self) -> None:
         """Simulate Tilion dropping the attached client (network blip, LB)."""
@@ -62,10 +64,15 @@ class FakeTilionGateway:
 
                 async def up():
                     async for raw in downstream:
+                        if self.withhold is not None and self.withhold(raw):
+                            self.withheld_ids.add((json.loads(raw).get("sessionId"), json.loads(raw).get("id")))
                         await upstream.send(raw)
 
                 async def down():
                     async for raw in upstream:
+                        message = json.loads(raw)
+                        if (message.get("sessionId"), message.get("id")) in self.withheld_ids:
+                            continue  # the provider never answers this command
                         await downstream.send(raw)
 
                 tasks = [asyncio.create_task(up()), asyncio.create_task(down())]
@@ -285,6 +292,12 @@ async def _fixture_site():
                 '<img src="/static/logo.png">'
                 '<a id="dl" href="/files/report.pdf">report</a>'
                 '<input id="file" type="file">'
+                # TinyPNG-style: the page reads the file, then resets the input.
+                '<input id="clearing" type="file" onchange="window.got=[this.files[0].name, this.files[0].size];'
+                " this.value='';\">"
+                # TinyPNG live (A2 probe): the handler replaces the input element.
+                '<input id="replacing" type="file" onchange="window.replaced=[this.files[0].name, this.files[0].size];'
+                ' this.replaceWith(this.cloneNode());">'
             ),
         )
 
@@ -315,6 +328,18 @@ async def _fixture_site():
     app.router.add_get("/", index)
     app.router.add_get("/headers", headers)
     app.router.add_get("/first-script", first_script)
+
+    async def worker_page(_request):
+        return web.Response(
+            content_type="text/html",
+            text=(
+                "<title>worker-pending</title><script>"
+                "const w = new Worker(URL.createObjectURL(new Blob([\"postMessage('pong')\"])));"
+                "w.onmessage = (e) => { document.title = 'worker-' + e.data; };</script>"
+            ),
+        )
+
+    app.router.add_get("/worker", worker_page)
     app.router.add_get("/files/report.pdf", report)
     app.router.add_get("/static/logo.png", logo)
     runner = web.AppRunner(app, access_log=None)
@@ -1170,6 +1195,229 @@ async def test_tilion_staged_uploads_are_bounded_per_session():
     assert session_id not in tilion_worker._staged_uploads
 
 
+async def test_click_path_cdp_awaits_are_bounded_when_replies_are_withheld():
+    """C3 hardening: a withheld Runtime.evaluate / Page.captureScreenshot reply
+    must not hang a step; the click receipt reads as unknown (None)."""
+    import time
+    from types import SimpleNamespace
+
+    import browser_tools.dom_service as dom_module
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    async with _fixture_site() as base, _tilion_worker_stack() as (service, pw_browser, gateway):
+        await pw_browser.contexts[0].pages[0].goto(base + "/")
+        gateway.withhold = lambda raw: "__roseBrowserClickReceipts" in raw or "Page.captureScreenshot" in raw
+
+        started = time.monotonic()
+        assert await service_actions._arm_click_receipt(service.session, {"x": 5, "y": 5}) is None
+        assert time.monotonic() - started < service_actions._CLICK_RECEIPT_TIMEOUT_SECONDS + 2
+        page = await service.session.get_current_page()
+        started = time.monotonic()
+        assert await service_actions._read_click_receipt((page, "token")) is None
+        assert time.monotonic() - started < service_actions._CLICK_RECEIPT_TIMEOUT_SECONDS + 2
+        assert len(gateway.withheld_ids) >= 2, "the fixture really withheld the replies"
+
+        with patch.object(dom_module, "VIEWPORT_SCREENSHOT_TIMEOUT_SECONDS", 1.0):
+            started = time.monotonic()
+            try:
+                await service.capture_viewport_png()
+            except TimeoutError as error:
+                assert "Page.captureScreenshot" in str(error)
+            else:
+                raise AssertionError("a withheld screenshot must raise, not hang")
+            assert time.monotonic() - started < 3
+
+    # Coordinates: a hung DOMService call ends as "no coordinates", not a hang.
+    class _History:
+        async def record_action(self, **_kwargs):
+            return None
+
+    class _Dom:
+        async def get_click_coordinates(self, _index):
+            await asyncio.sleep(3600)
+
+    class _Session:
+        async def highlight_interaction_element(self, _element):
+            return None
+
+    class _Humanizer:
+        async def click_at_coords(self, *_args):
+            raise AssertionError("must not click without coordinates")
+
+    with patch.object(service_actions, "_CLICK_COORDINATES_TIMEOUT_SECONDS", 0.5):
+        started = time.monotonic()
+        result = await service_actions._execute_click(
+            session=_Session(),
+            dom_service=_Dom(),
+            action_history=_History(),
+            element=SimpleNamespace(node_name="BUTTON", tag_name="button", attributes={}),
+            index=4,
+            coords=None,
+            thinking="",
+            humanizer=_Humanizer(),
+            write_lock_enabled=False,
+            write_lock_approvals=None,
+            current_url="https://example.com",
+            system_name="rose",
+        )
+    assert result["success"] is False and "no coordinates" in result["error"], result
+    assert time.monotonic() - started < 2
+
+
+async def test_tilion_upload_verified_when_page_resets_input_on_change():
+    """Lane F tinypng (agent ea613f83): the site's onchange read the file and
+    reset the input, so a post-hoc files[0] check saw -1. The delivered file is
+    the one the page's own change event carried."""
+    from types import SimpleNamespace
+
+    from domains.spawn_browser_agent_v3 import tilion_worker
+    from domains.spawn_browser_agent_v3.service_actions import _execute_upload_file
+
+    session_id = "tilion-upload-clearing"
+    async with _fixture_site() as base, _tilion_worker_stack() as (service, pw_browser, gateway):
+        page = pw_browser.contexts[0].pages[0]
+        await page.goto(base + "/")
+        for selector, page_record, input_gone in (
+            ("#clearing", "window.got", False),
+            ("#replacing", "window.replaced", True),
+        ):
+            await page.goto(base + "/")
+            staged = tilion_worker.stage_upload(session_id, "rs.jpeg", UPLOAD_BYTES, "image/jpeg")
+            cdp_session = await service.session.get_or_create_cdp_session(focus=False)
+            send = cdp_session.cdp_client.send
+            document = await send.DOM.getDocument(params={}, session_id=cdp_session.session_id)
+            node = await send.DOM.querySelector(
+                params={"nodeId": document["root"]["nodeId"], "selector": selector}, session_id=cdp_session.session_id
+            )
+            described = await send.DOM.describeNode(
+                params={"nodeId": node["nodeId"]}, session_id=cdp_session.session_id
+            )
+            element = SimpleNamespace(
+                backend_node_id=described["node"]["backendNodeId"], node_name="INPUT", attributes={"type": "file"}
+            )
+
+            class _History:
+                async def record_action(self, **_kwargs):
+                    return None
+
+            class _Humanizer:
+                def __init__(self, input_page):
+                    self.input_page = input_page
+
+                async def click_at_coords(self, *_args):
+                    return None
+
+            async def no_coordinates(_index):
+                return None
+
+            service.get_element_coordinates = no_coordinates
+            result = await _execute_upload_file(
+                session=service.session,
+                dom_service=service,
+                action_history=_History(),
+                element=element,
+                index=7,
+                params={"filename": "rs.jpeg"},
+                thinking="",
+                humanizer=_Humanizer(page),
+                available_file_paths={"rs.jpeg": staged["path"]},
+            )
+            assert result.get("success") is True, result
+            assert await page.evaluate(page_record) == ["rs.jpeg", len(UPLOAD_BYTES)]
+            if not input_gone:
+                assert await page.evaluate("document.querySelector('#clearing').files.length") == 0, "the page reset it"
+            assert await page.evaluate("document.querySelector('[data-rose-upload]')") is None
+            assert gateway.rejected_4409 == 0
+    tilion_worker.release_session(session_id)
+
+
+async def test_multiplexer_never_leaves_workers_paused_for_non_waiting_clients():
+    """The multiplexer forces waitForDebuggerOnStart to hold pages for emulation.
+    Targets it does not emulate (workers) must be resumed for a client that asked
+    not to wait (browser-use), or they stay paused and the page hangs."""
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
+
+    async with _fixture_site() as base, _chromium() as (_playwright, _browser, endpoint):
+        async with FakeTilionGateway(endpoint) as gateway:
+            multiplexer = SingleCdpConnectionMultiplexer(gateway.cdp_url, emulation={"timezone": "Asia/Tokyo"})
+            local_url = await multiplexer.start()
+            try:
+                async with websockets.connect(local_url, max_size=None, proxy=None) as socket_:
+                    client = _RawCdpClient(socket_)
+                    try:
+                        auto_attach = {"autoAttach": True, "waitForDebuggerOnStart": False, "flatten": True}
+                        await client.send("Target.setAutoAttach", auto_attach)
+                        created = await client.send("Target.createTarget", {"url": "about:blank"})
+                        page = await client.attached(lambda p: p["targetInfo"]["targetId"] == created["targetId"])
+                        # browser-use also auto-attaches inside each page (workers, OOPIFs).
+                        await client.send("Target.setAutoAttach", auto_attach, page["sessionId"])
+                        await client.send("Page.navigate", {"url": base + "/worker"}, page["sessionId"])
+                        worker = await client.attached(lambda p: p["targetInfo"]["type"] == "worker")
+                        assert worker["waitingForDebugger"] is False
+                        title = None
+                        for _ in range(100):
+                            with contextlib.suppress(AssertionError):
+                                result = await client.send(
+                                    "Runtime.evaluate",
+                                    {"expression": "document.title", "returnByValue": True},
+                                    page["sessionId"],
+                                )
+                                title = result["result"].get("value")
+                                if title == "worker-pong":
+                                    break
+                            await asyncio.sleep(0.05)
+                        assert title == "worker-pong", f"worker stayed paused: {title}"
+                    finally:
+                        await client.close()
+            finally:
+                await multiplexer.close()
+
+
+async def test_tilion_live_view_token_is_redacted_before_persisting():
+    """The live-view URL's ?token= must not reach message metadata, recording
+    manifests or activity results; other providers' URLs are unchanged."""
+    from domains.spawn_browser_agent_v3 import repo
+    from domains.spawn_browser_agent_v3.cdp_urls import redact_url_secrets
+
+    live_view = f"https://back.tilion.dev/v1/session/{TILION_SESSION}/live-view?token={TILION_TOKEN}"
+    kernel_view = "https://live.onkernel.com/browser/abc?jwt=kernel-jwt"
+    with patch.dict(os.environ, {"TILION_BASE_URL": "https://back.tilion.dev"}):
+        assert redact_url_secrets(live_view) == live_view.replace(TILION_TOKEN, "REDACTED")
+        assert redact_url_secrets(kernel_view) == kernel_view
+        assert redact_url_secrets("") == "" and redact_url_secrets(None) is None
+        posted: List[Dict[str, Any]] = []
+
+        class _Client:
+            async def post(self, url, *, timeout, headers, json):
+                posted.append(json)
+                return httpx.Response(201, json={"id": "m1"})
+
+        from tools.base import MessageStatus
+
+        with patch.object(repo, "get_http_client", lambda: _Client()):
+            await repo.save_browser_action_message(
+                agent_id="agent-1",
+                title="t",
+                message="m",
+                status=MessageStatus.IN_PROGRESS,
+                task_id="task-1",
+                browser_url=live_view,
+            )
+        assert posted and posted[0]["metadata"]["browser_url"] == redact_url_secrets(live_view)
+        assert TILION_TOKEN not in json.dumps(posted)
+
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2] / "domains/spawn_browser_agent_v3"
+    handler_source = (root / "handler.py").read_text()
+    assert '"browser_url": browser_url,' not in handler_source, "activity results must redact browser_url"
+    # Serial Tilion keyboard (A1 RCA): the initial humanizer and every rebind after a
+    # provider handoff (rotation, recovery, auth restart) carry the flag.
+    assert handler_source.count("serial_cdp_keyboard=is_single_cdp_client_provider(") == 4
+    assert handler_source.count("humanizer = await _replace_browser_humanizer(") == 3
+    assert '"browser_url": redact_url_secrets(self.browser_url)' in (root / "recording.py").read_text()
+
+
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
@@ -1194,6 +1442,10 @@ async def run_all_tests():
         ("multiplexer_holds_new_targets_for_emulation", test_multiplexer_holds_new_targets_until_emulation_lands),
         ("tilion_downloads_survive_switch_and_pause", test_tilion_downloads_survive_provider_switch_and_pause),
         ("tilion_staged_uploads_bounded", test_tilion_staged_uploads_are_bounded_per_session),
+        ("click_path_cdp_awaits_bounded", test_click_path_cdp_awaits_are_bounded_when_replies_are_withheld),
+        ("tilion_upload_input_reset_on_change", test_tilion_upload_verified_when_page_resets_input_on_change),
+        ("multiplexer_resumes_workers", test_multiplexer_never_leaves_workers_paused_for_non_waiting_clients),
+        ("tilion_live_view_token_redacted", test_tilion_live_view_token_is_redacted_before_persisting),
     ]:
         await result.record_async(name, test)
     return result.all_passed

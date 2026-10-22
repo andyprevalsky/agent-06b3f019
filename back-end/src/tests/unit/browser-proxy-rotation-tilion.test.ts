@@ -1,40 +1,115 @@
 #!/usr/bin/env tsx
 /**
- * Tilion rotate_ip ladder: Tilion residential → Tilion mobile → Kernel
- * residential → Steel, kill-switch path, labels and agent-facing messages.
+ * Tilion rotate_ip ladder: Tilion residential (in place) → Kernel mobile →
+ * Steel → Browser Use (Steel when disabled). Tilion mobile only behind
+ * TILION_MOBILE_ENABLED (not served on our account: 409 proxy_type_unavailable).
+ * Kill-switch path, same-request fallback rung, labels and agent-facing messages.
  * The Kernel, Steel and Browser Use ladders are covered (unchanged) in
  * browser-proxy-rotation.test.ts.
  */
 import assert from 'node:assert';
 import { buildRotationMessage } from '../../providers/browserSessionResume';
 import {
+  isTilionExitUnavailableError,
   ROTATION_CAP,
   rotationStepLabel,
+  rungAfterTilionUnavailable,
   selectRotationStep,
+  tilionMobileEnabled,
   type RotationStep,
 } from '../../providers/browser/rotation';
+import { TilionApiError } from '../../providers/browser/tilionClient';
 
 function testTilionLadder(): void {
   const ladder = [1, 2, 3, 4].map((position) => selectRotationStep(position, 'tilion'));
   assert.deepStrictEqual(ladder, [
     { provider: 'tilion', proxyType: 'residential', recoveryAction: 'ip_rotated' },
-    { provider: 'tilion', proxyType: 'mobile', recoveryAction: 'ip_rotated' },
-    { provider: 'kernel', proxyType: 'residential', recoveryAction: 'provider_switched' },
+    { provider: 'kernel', proxyType: 'mobile', recoveryAction: 'provider_switched' },
     { provider: 'steel', proxyType: 'residential', recoveryAction: 'provider_switched' },
+    { provider: 'browser-use', proxyType: 'residential', recoveryAction: 'provider_switched' },
   ]);
   assert.deepStrictEqual(ladder.map(rotationStepLabel), [
     'rotate_tilion_residential_ip',
-    'rotate_tilion_mobile_ip',
     'switch_provider_to_kernel',
     'switch_provider_to_steel',
+    'switch_provider_to_browser_use',
   ]);
-  // Browser Use availability never changes the Tilion ladder.
-  assert.deepStrictEqual(
-    [1, 2, 3, 4].map((position) => selectRotationStep(position, 'tilion', false)),
-    ladder
-  );
+  // Browser Use disabled: step 4 is Steel.
+  assert.deepStrictEqual(selectRotationStep(4, 'tilion', false), {
+    provider: 'steel',
+    proxyType: 'residential',
+    recoveryAction: 'provider_switched',
+  });
   assert.throws(() => selectRotationStep(0, 'tilion'), RangeError);
   assert.throws(() => selectRotationStep(ROTATION_CAP + 1, 'tilion'), RangeError);
+}
+
+function testTilionMobileOnlyBehindFlag(): void {
+  const previous = process.env.TILION_MOBILE_ENABLED;
+  try {
+    delete process.env.TILION_MOBILE_ENABLED;
+    assert.strictEqual(tilionMobileEnabled(), false, 'Tilion mobile defaults off');
+    process.env.TILION_MOBILE_ENABLED = 'true';
+    assert.strictEqual(tilionMobileEnabled(), true);
+    assert.deepStrictEqual(selectRotationStep(2, 'tilion'), {
+      provider: 'tilion',
+      proxyType: 'mobile',
+      recoveryAction: 'ip_rotated',
+    });
+    // The kill switch still wins over the mobile flag.
+    assert.strictEqual(selectRotationStep(2, 'tilion', true, false).provider, 'kernel');
+  } finally {
+    if (previous === undefined) delete process.env.TILION_MOBILE_ENABLED;
+    else process.env.TILION_MOBILE_ENABLED = previous;
+  }
+}
+
+function tilionError(status: number, slug: string | null): TilionApiError {
+  return new TilionApiError({
+    status,
+    slug,
+    message: slug ?? 'x',
+    retryable: false,
+    requestId: null,
+    retryAfterMs: null,
+    detail: null,
+    method: 'POST',
+    path: '/v1/session',
+  });
+}
+
+function testUnavailableTilionExitAdvancesARung(): void {
+  for (const slug of [
+    'proxy_type_unavailable',
+    'residential_rotation_unavailable',
+    'exit_ladder_exhausted',
+  ]) {
+    assert.ok(isTilionExitUnavailableError(tilionError(409, slug)), slug);
+    assert.ok(
+      isTilionExitUnavailableError(new AggregateError([tilionError(409, slug)], 'wrapped'))
+    );
+  }
+  assert.ok(!isTilionExitUnavailableError(tilionError(409, 'session_busy')));
+  assert.ok(!isTilionExitUnavailableError(tilionError(503, 'proxy_type_unavailable')));
+  assert.ok(!isTilionExitUnavailableError(new Error('proxy_type_unavailable')));
+  // Residential (1) refused → Kernel mobile; mobile (2, flag on) refused → Steel. Never Tilion.
+  assert.deepStrictEqual(rungAfterTilionUnavailable(1), {
+    provider: 'kernel',
+    proxyType: 'mobile',
+    recoveryAction: 'provider_switched',
+  });
+  assert.deepStrictEqual(rungAfterTilionUnavailable(2), {
+    provider: 'steel',
+    proxyType: 'residential',
+    recoveryAction: 'provider_switched',
+  });
+  for (let position = 1; position <= ROTATION_CAP; position += 1) {
+    for (const browserUse of [true, false]) {
+      const next = rungAfterTilionUnavailable(position, browserUse);
+      assert.notStrictEqual(next.provider, 'tilion');
+      assert.strictEqual(next.recoveryAction, 'provider_switched');
+    }
+  }
 }
 
 function testTilionRunContinuesOnKernelLadderAfterSwitch(): void {
@@ -132,6 +207,8 @@ function testRotationMessages(): void {
 
 function main(): void {
   testTilionLadder();
+  testTilionMobileOnlyBehindFlag();
+  testUnavailableTilionExitAdvancesARung();
   testTilionRunContinuesOnKernelLadderAfterSwitch();
   testKillSwitchNeverRotatesIntoTilion();
   testOtherLaddersUnchangedByTilionFlag();

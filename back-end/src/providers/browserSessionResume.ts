@@ -13,7 +13,9 @@ import {
   rotateProxy,
 } from './browser';
 import {
+  isTilionExitUnavailableError,
   ROTATION_CAP,
+  rungAfterTilionUnavailable,
   rotationStepLabel,
   selectRotationStep,
   type RotationStep,
@@ -522,8 +524,27 @@ export async function rotateBrowserProxy(
   });
 
   let result: Awaited<ReturnType<typeof rotateProxy>>;
+  let rotationFallbackReason: string | null = null;
   try {
-    result = await dependencies.rotateProxy(taskId, step, replacementOptions(carry));
+    try {
+      result = await dependencies.rotateProxy(taskId, step, replacementOptions(carry));
+    } catch (error) {
+      // Tilion could not serve this exit (e.g. mobile: 409 proxy_type_unavailable).
+      // The reserved rotation still owes the agent a new IP: take the next rung now.
+      if (step.provider !== 'tilion' || !isTilionExitUnavailableError(error)) throw error;
+      const fallback = rungAfterTilionUnavailable(rotationsUsed, browserUseEnabled());
+      rotationFallbackReason = `tilion_${step.proxyType}_unavailable: ${
+        error instanceof Error ? error.message.slice(0, 200) : String(error)
+      }`;
+      log.warn('Tilion exit unavailable; advancing the rotation ladder', {
+        taskId,
+        rotationsUsed,
+        from: rotationStepLabel(step),
+        to: rotationStepLabel(fallback),
+        reason: rotationFallbackReason,
+      });
+      result = await dependencies.rotateProxy(taskId, fallback, replacementOptions(carry));
+    }
   } catch (error) {
     // A transient provider failure did not deliver a new IP, so return its
     // reservation to the shared budget. The decrement is atomic and composes
@@ -561,6 +582,7 @@ export async function rotateBrowserProxy(
     proxy_tier: effectiveStep.proxyType,
     rotations_used: rotationsUsed,
     rotations_remaining: rotationsRemaining,
+    rotation_fallback_reason: rotationFallbackReason,
     next_recovery: nextRecovery,
     rotation_message: buildRotationMessage(
       effectiveStep,

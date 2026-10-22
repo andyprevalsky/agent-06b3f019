@@ -3415,6 +3415,27 @@ _READ_CLICK_RECEIPT_JS = """
 """
 
 
+# CDP replies can be withheld (a busy renderer or the provider holding commands);
+# every await on the click path is bounded so one lost reply never hangs a step.
+_CLICK_RECEIPT_TIMEOUT_SECONDS = 3.0
+_CLICK_COORDINATES_TIMEOUT_SECONDS = 10.0
+
+
+async def _bounded_cdp(awaitable: Any, *, cdp_method: str, timeout: float) -> Any:
+    """Await one CDP-backed call within ``timeout``; log the method and elapsed time on expiry."""
+    started = time_module.monotonic()
+    try:
+        return await asyncio.wait_for(awaitable, timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Browser CDP call timed out",
+            cdp_method=cdp_method,
+            elapsed_ms=round((time_module.monotonic() - started) * 1000),
+            timeout_s=timeout,
+        )
+        raise
+
+
 async def _arm_click_receipt(session: Any, coords: Dict[str, int]) -> Optional[tuple[Any, str]]:
     """Observe DOM delivery on the authoritative browser-use page, not the input transport."""
     get_page = getattr(session, "get_page", None) or getattr(session, "get_current_page", None)
@@ -3425,8 +3446,10 @@ async def _arm_click_receipt(session: Any, coords: Dict[str, int]) -> Optional[t
         if page is None:
             return None
         token = uuid.uuid4().hex
-        armed = await page.evaluate(
-            _ARM_CLICK_RECEIPT_JS, {"token": token, "x": int(coords["x"]), "y": int(coords["y"])}
+        armed = await _bounded_cdp(
+            page.evaluate(_ARM_CLICK_RECEIPT_JS, {"token": token, "x": int(coords["x"]), "y": int(coords["y"])}),
+            cdp_method="Runtime.evaluate(arm click receipt)",
+            timeout=_CLICK_RECEIPT_TIMEOUT_SECONDS,
         )
         return (page, token) if armed is True else None
     except Exception as error:
@@ -3439,7 +3462,12 @@ async def _read_click_receipt(receipt: Optional[tuple[Any, str]]) -> Optional[bo
         return None
     page, token = receipt
     try:
-        delivered = await page.evaluate(_READ_CLICK_RECEIPT_JS, token)
+        # Timeout keeps "receipt unknown" (None), like a navigation would.
+        delivered = await _bounded_cdp(
+            page.evaluate(_READ_CLICK_RECEIPT_JS, token),
+            cdp_method="Runtime.evaluate(read click receipt)",
+            timeout=_CLICK_RECEIPT_TIMEOUT_SECONDS,
+        )
         return delivered if isinstance(delivered, bool) else None
     except Exception as error:
         # A navigation can destroy the old document immediately after a valid click.
@@ -3468,9 +3496,20 @@ async def _execute_click(
 
     element_coords = None
     if element:
-        coord_tuple = await _maybe_await(dom_service.get_click_coordinates(index))
-        if not coord_tuple:
-            coord_tuple = await _refresh_element_coordinates(dom_service, index, for_click=True)
+        try:
+            coord_tuple = await _bounded_cdp(
+                _maybe_await(dom_service.get_click_coordinates(index)),
+                cdp_method="DOM.getContentQuads(click coordinates)",
+                timeout=_CLICK_COORDINATES_TIMEOUT_SECONDS,
+            )
+            if not coord_tuple:
+                coord_tuple = await _bounded_cdp(
+                    _refresh_element_coordinates(dom_service, index, for_click=True),
+                    cdp_method="DOM refresh + coordinates",
+                    timeout=_CLICK_COORDINATES_TIMEOUT_SECONDS,
+                )
+        except asyncio.TimeoutError:
+            coord_tuple = None
         element_coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
 
     if write_lock_enabled and (element or coords):

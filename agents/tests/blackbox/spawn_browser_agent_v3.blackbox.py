@@ -4745,6 +4745,72 @@ async def test_browser_humanizer_cdp_mouse_path_failure_enables_fallback():
     assert mouse.moves
     assert mouse.moves[-1] == (25, 40)
 
+async def test_browser_humanizer_single_cdp_client_types_keys_serially():
+    """Tilion drops pipelined Input.dispatchKeyEvent (live 2026-10-21: 13/18 unanswered and
+    undelivered when pipelined, 0/18 sequential). With serial_cdp_keyboard the humanizer must
+    await each key event in order, keep CDP timestamps, and deliver the whole text."""
+    import browser_tools.humanizer as humanizer_module
+    from browser_tools.humanizer import BrowserHumanizer
+
+    class SingleClientGateway:
+        """Models Tilion: a key event sent while another is in flight is never answered or delivered."""
+
+        def __init__(self):
+            self.in_flight = 0
+            self.delivered = []
+            self.timestamps = []
+
+        async def send(self, method, payload):
+            assert method == "Input.dispatchKeyEvent"
+            if self.in_flight:
+                await asyncio.Event().wait()  # dropped: no response, never delivered
+            self.in_flight += 1
+            try:
+                await asyncio.sleep(0.01)
+                if payload["type"] == "char":
+                    self.delivered.append(payload["text"])
+                self.timestamps.append(payload["timestamp"])
+                return {}
+            finally:
+                self.in_flight -= 1
+
+    def humanizer_for(gateway, **kwargs):
+        class FakeContext:
+            async def new_cdp_session(self, page):
+                return gateway
+
+        page = SimpleNamespace(
+            keyboard=SimpleNamespace(),
+            viewport_size={"width": 1280, "height": 800},
+            context=FakeContext(),
+        )
+        humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True, **kwargs)
+        humanizer._keycap = SimpleNamespace(next=lambda char: SimpleNamespace(dwell_s=0.001, interval_s=0.001))
+        return humanizer
+
+    original_drain = humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS
+    humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS = 1.0
+    try:
+        serial_gateway = SingleClientGateway()
+        serial = humanizer_for(serial_gateway, serial_cdp_keyboard=True)
+        assert await serial._type_text_with_cdp_fire_and_drain("you@example.com")
+        assert "".join(serial_gateway.delivered) == "you@example.com"
+        assert serial_gateway.timestamps == sorted(serial_gateway.timestamps)
+        assert serial._cdp_keyboard_transport_enabled
+
+        # Control: the pipelined default loses keys on the same gateway model.
+        pipelined_gateway = SingleClientGateway()
+        pipelined = humanizer_for(pipelined_gateway)
+        try:
+            await pipelined._type_text_with_cdp_fire_and_drain("you@example.com")
+            raise AssertionError("pipelined key dispatch should not drain on a single-client gateway")
+        except asyncio.TimeoutError:
+            pass
+        assert "".join(pipelined_gateway.delivered) != "you@example.com"
+    finally:
+        humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS = original_drain
+
+
 async def test_browser_humanizer_cdp_idle_mouse_failure_enables_fallback():
     from browser_tools.humanizer import BrowserHumanizer
 
@@ -31015,6 +31081,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_humanizer_cdp_idle_mouse_failure_fallback",
         test_browser_humanizer_cdp_idle_mouse_failure_enables_fallback,
+    )
+    await r.record_async(
+        "browser_humanizer_single_cdp_client_types_keys_serially",
+        test_browser_humanizer_single_cdp_client_types_keys_serially,
     )
     await r.record_async(
         "browser_network_recording_captures_body",
