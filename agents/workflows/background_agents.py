@@ -754,11 +754,8 @@ class BackgroundAgentsMixin:
         if not isinstance(address, str) or not isinstance(message, str) or not message.strip():
             return
         message_id = data.get("message_id")
-        if isinstance(message_id, str) and message_id:
-            if message_id in self._seen_agent_message_ids:
-                return  # a retried send re-signals the same row
-            self._seen_agent_message_ids.append(message_id)
-            del self._seen_agent_message_ids[:-MAX_SEEN_AGENT_MESSAGE_IDS]
+        if isinstance(message_id, str) and message_id and message_id in self._seen_agent_message_ids:
+            return  # a retried send re-signals the same row
         record = self._background_task_for_address(address)
         if record is None or record.get("child_workflow"):
             return
@@ -769,7 +766,12 @@ class BackgroundAgentsMixin:
             sender=data.get("from_agent_path") if isinstance(data.get("from_agent_path"), str) else None,
         )
         if not result.get("woke"):
+            # Refused (paused / killed / cost limit): the id stays unseen so a retry after the owner recovers wakes it.
             workflow.logger.warning(f"[background] did not wake {address}: {result.get('reason')}")
+        elif isinstance(message_id, str) and message_id:
+            # _wake_background_task is itself idempotent per message id (it changes state before its only await).
+            self._seen_agent_message_ids.append(message_id)
+            del self._seen_agent_message_ids[:-MAX_SEEN_AGENT_MESSAGE_IDS]
 
     async def _notification_recipient(self) -> str:
         """ "Task name" of a notification this agent receives: its own task path."""

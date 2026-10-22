@@ -566,6 +566,29 @@ async def test_send_to_finished_explore_task_wakes_its_next_run():
         status, text = await send_message_to_agent(wf, {"to": "/root/tokyo", "message": "more"}, "toolu_s4")
         assert status.value == "ERROR" and "rate limit" in text and "toolu_a" not in wf._background_tasks, text
 
+        # A wake signal refused because the owner is paused is not remembered:
+        # the same message (same id), retried after the owner resumes, starts the run.
+        retried = {
+            "message_id": "m-7",
+            "from_agent_path": "/root/peer",
+            "wake_task_id": "/root/tokyo",
+            "message": "And Kyoto.",
+        }
+        bg_gate.set()
+        wf.is_paused = True
+        await wf.receive_agent_message(retried)
+        assert "toolu_a" not in wf._background_tasks and len(goals) == 3, "a paused owner must not wake the task"
+        assert "m-7" not in wf._seen_agent_message_ids, "a refused wake must not consume its message id"
+        wf.is_paused = False
+        await wf.receive_agent_message(retried)
+        assert wf._background_tasks["toolu_a"]["run"] == 4, "the retry after resume wakes the task"
+        for _ in range(200):
+            if len(goals) == 4:
+                break
+            await asyncio.sleep(0.002)
+        assert len(goals) == 4 and goals[3].startswith("And Kyoto."), goals
+        await asyncio.gather(*wf._background_handles.values(), return_exceptions=True)
+
 
 def test_prompts_schemas_and_registration():
     import worker
