@@ -199,6 +199,3 @@ and `/health` returned 200. Fly lists all three secrets as Deployed, and every
 started worker checked had the matching runtime values. The fallback was merged
 and deployed to both Render and Fly on 2026-10-01. The production semantic gate
 passed after rollout. These checks do not measure sustained throughput.
-The repo also requires these backend secrets mirrored to its
-Codex-cloud `rose` environment through that environment's settings UI; this
-workspace has no setter for it, so that mirror remains to be verified.
