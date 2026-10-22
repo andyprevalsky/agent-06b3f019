@@ -1961,10 +1961,14 @@ async def test_supervisor_cap_logs_blocked_stack_and_classifies_action_timeouts(
     assert blocked and "blocked_on_a_lost_cdp_reply" in blocked[0]["blocked_stack"], logs
     assert len(blocked[0]["blocked_stack"]) <= 4096 and blocked[0]["action_name"] == "click"
 
+    release = asyncio.Event()
+
     async def ignores_cancellation():
-        while True:
+        # Swallows cancellation until the fixture releases it, so the task
+        # always ends through the event loop (never by closing its coroutine).
+        while not release.is_set():
             try:
-                await asyncio.sleep(3600)
+                await release.wait()
             except asyncio.CancelledError:
                 continue
 
@@ -1974,8 +1978,12 @@ async def test_supervisor_cap_logs_blocked_stack_and_classifies_action_timeouts(
         await _await_browser_action_within_cap(stubborn, timeout=0.1, log_context=context, drain_seconds=0.3)
     except BrowserSupervisorCapExceeded as error:
         assert error.cancelled is False, "unknown timeout source when the action ignores cancellation"
+    else:
+        raise AssertionError("the supervisor cap must fire for an action that ignores cancellation")
     assert time.monotonic() - started < 2, "the cancellation wait is bounded"
-    stubborn.get_coro().close()  # a task that ignores cancel; end it for the fixture
+    assert not stubborn.done(), "the stubborn action outlived the bounded drain"
+    release.set()
+    await asyncio.wait_for(stubborn, timeout=2)
 
     async def drain_times_out():
         raise asyncio.TimeoutError("CDP keyboard input drain timed out after 15s")
