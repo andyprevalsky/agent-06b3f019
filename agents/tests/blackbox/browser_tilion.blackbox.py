@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import socket
+import time
 from typing import Any, Dict, List, Optional
 from unittest.mock import patch
 
@@ -1012,6 +1013,133 @@ class _RawCdpClient:
         await asyncio.gather(self._reader, return_exceptions=True)
 
 
+class DropOverlappingKeysGateway(FakeTilionGateway):
+    """Tilion's live drop rule (A1, 2026-10-22): a key event sent while another
+    Input event is unanswered on the SAME CDP session is never answered and
+    never delivered. Other traffic, and other sessions, are unaffected."""
+
+    def __init__(self, endpoint: str) -> None:
+        super().__init__(endpoint)
+        self.dropped_keys = 0
+        self._inflight: Dict[Any, set] = {}
+
+    async def _handle(self, downstream):
+        self.active += 1
+        self.accepted += 1
+        try:
+            async with websockets.connect(self.endpoint, max_size=None, proxy=None) as upstream:
+
+                async def up():
+                    async for raw in downstream:
+                        message = json.loads(raw)
+                        method = str(message.get("method") or "")
+                        session = message.get("sessionId")
+                        if method.startswith("Input."):
+                            inflight = self._inflight.setdefault(session, set())
+                            if method == "Input.dispatchKeyEvent" and inflight:
+                                self.dropped_keys += 1
+                                continue
+                            inflight.add(message.get("id"))
+                        await upstream.send(raw)
+
+                async def down():
+                    async for raw in upstream:
+                        message = json.loads(raw)
+                        self._inflight.get(message.get("sessionId"), set()).discard(message.get("id"))
+                        await downstream.send(raw)
+
+                tasks = [asyncio.create_task(up()), asyncio.create_task(down())]
+                try:
+                    await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            self.active -= 1
+
+
+async def test_multiplexer_serialises_input_per_session_so_keys_are_not_dropped():
+    """T37: idle-drift mouseMoved overlapping keys on one CDP session made Tilion
+    drop keys, and Playwright then awaited the dropped key forever. The
+    multiplexer forwards Input.* one at a time per session for every client."""
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
+
+    async with _chromium() as (playwright, _browser, endpoint):
+        async with DropOverlappingKeysGateway(endpoint) as gateway:
+            multiplexer = SingleCdpConnectionMultiplexer(gateway.cdp_url)
+            local_url = await multiplexer.start()
+            browser = await playwright.chromium.connect_over_cdp(local_url)
+            try:
+                context = browser.contexts[0]
+                page = context.pages[0] if context.pages else await context.new_page()
+                await page.set_content('<input id="field" autofocus>')
+                await page.focus("#field")
+                session = await context.new_cdp_session(page)
+                sends = []
+                for index, char in enumerate("abcdefghij"):
+                    # Pipelined like idle drift + typing: nothing awaited in between.
+                    sends.append(
+                        session.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 10 + index, "y": 10})
+                    )
+                    sends.append(session.send("Input.dispatchKeyEvent", {"type": "char", "text": char}))
+                await asyncio.wait_for(asyncio.gather(*sends), timeout=30)
+                value = await page.evaluate("document.getElementById('field').value")
+                assert value == "abcdefghij", (value, gateway.dropped_keys)
+                assert gateway.dropped_keys == 0, gateway.dropped_keys
+                # Playwright's own keyboard on the page session, overlapped by mouse moves.
+                await page.fill("#field", "")
+                moves = [page.mouse.move(20 + step, 20) for step in range(5)]
+                await asyncio.wait_for(asyncio.gather(page.keyboard.type("xyz"), *moves), timeout=30)
+                assert await page.evaluate("document.getElementById('field').value") == "xyz"
+                assert multiplexer.input_unanswered == 0
+            finally:
+                await browser.close()
+                await multiplexer.close()
+
+
+async def test_multiplexer_fails_unanswered_input_instead_of_hanging():
+    """An Input command the provider never answers is failed back to its client
+    within the bound, and the next Input on that session still goes through."""
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
+
+    async with _chromium() as (_playwright, _browser, endpoint):
+        async with FakeTilionGateway(endpoint) as gateway:
+            gateway.withhold = lambda raw: '"Input.dispatchMouseEvent"' in raw
+            multiplexer = SingleCdpConnectionMultiplexer(gateway.cdp_url, input_answer_timeout=1.0)
+            local_url = await multiplexer.start()
+            try:
+                async with websockets.connect(local_url, max_size=None, proxy=None) as socket_:
+                    client = _RawCdpClient(socket_)
+                    try:
+                        created = await client.send("Target.createTarget", {"url": "about:blank"})
+                        attached = await client.send(
+                            "Target.attachToTarget", {"targetId": created["targetId"], "flatten": True}
+                        )
+                        child = attached["sessionId"]
+                        replies = {}
+                        for message_id, method, params in [
+                            (9001, "Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 5, "y": 5}),
+                            (9002, "Input.dispatchKeyEvent", {"type": "char", "text": "q"}),
+                        ]:
+                            replies[message_id] = asyncio.get_running_loop().create_future()
+                            client._replies[message_id] = replies[message_id]
+                            await socket_.send(
+                                json.dumps({"id": message_id, "method": method, "params": params, "sessionId": child})
+                            )
+                        started = time.monotonic()
+                        mouse = await asyncio.wait_for(replies[9001], timeout=5)
+                        key = await asyncio.wait_for(replies[9002], timeout=5)
+                        assert "error" in mouse and "not answered" in mouse["error"]["message"], mouse
+                        assert "error" not in key, key
+                        assert time.monotonic() - started < 4
+                        assert multiplexer.input_unanswered == 1
+                    finally:
+                        await client.close()
+            finally:
+                await multiplexer.close()
+
+
 async def test_multiplexer_holds_new_targets_until_emulation_lands():
     """A client that does NOT wait for the debugger (browser-use) still gets
     popups whose first script sees the emulation: the multiplexer holds new
@@ -1479,6 +1607,8 @@ async def run_all_tests():
         ("click_path_cdp_awaits_bounded", test_click_path_cdp_awaits_are_bounded_when_replies_are_withheld),
         ("tilion_upload_input_reset_on_change", test_tilion_upload_verified_when_page_resets_input_on_change),
         ("multiplexer_resumes_workers", test_multiplexer_never_leaves_workers_paused_for_non_waiting_clients),
+        ("multiplexer_serialises_input_per_session", test_multiplexer_serialises_input_per_session_so_keys_are_not_dropped),
+        ("multiplexer_fails_unanswered_input", test_multiplexer_fails_unanswered_input_instead_of_hanging),
         ("tilion_live_view_token_redacted", test_tilion_live_view_token_is_redacted_before_persisting),
     ]:
         await result.record_async(name, test)
