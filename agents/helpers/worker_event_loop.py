@@ -2,13 +2,57 @@
 
 import asyncio
 import logging
+import os
 import sys
+import threading
 from collections.abc import Coroutine
 from typing import Any
 
 _BROWSER_TERMINAL_IO_PREFIX = "browser-terminal-io:"
 _TASK_DRAIN_SECONDS = 2.0
+# How long loop close waits for blocking jobs on the loop's default executor
+# (asyncio.to_thread: recording-archive uploads, checkpoint writes). Python 3.11's
+# shutdown_default_executor() has no deadline and joins its worker threads in a
+# finally block, so a cancelled wait still blocks. Local and benchmark stacks bound
+# it; production keeps the unbounded join, which Fly's kill_timeout already caps.
+_EXECUTOR_SHUTDOWN_SECONDS = 20.0
+
+
+def _executor_shutdown_seconds() -> float | None:
+    """Bound for the default-executor join; None keeps the unbounded production join."""
+    if os.environ.get("FLY_APP_NAME") is not None or os.environ.get("ENVIRONMENT") == "production":
+        return None
+    return _EXECUTOR_SHUTDOWN_SECONDS
 _LOG = logging.getLogger(__name__)
+
+
+async def _shutdown_default_executor_bounded(loop: asyncio.AbstractEventLoop, timeout: float) -> None:
+    """Close the default executor, waiting for running jobs at most ``timeout`` seconds.
+
+    Queued jobs that have not started are dropped. Their awaiting tasks were
+    already cancelled above and the archive callers keep their durable outbox.
+    Jobs still running at the deadline are left to the process exit, which
+    ``run_then_exit`` performs with ``os._exit`` and which does not join threads.
+    """
+    executor = getattr(loop, "_default_executor", None)
+    if executor is None:
+        return
+    executor.shutdown(wait=False, cancel_futures=True)
+    finished = threading.Event()
+
+    def join() -> None:
+        executor.shutdown(wait=True)
+        finished.set()
+
+    threading.Thread(target=join, name="default-executor-shutdown", daemon=True).start()
+    deadline = loop.time() + max(0.0, timeout)
+    while not finished.is_set() and loop.time() < deadline:
+        await asyncio.sleep(0.05)
+    if not finished.is_set():
+        _LOG.warning(
+            "Worker default executor still has running jobs after %.0fs; leaving them to the process exit",
+            timeout,
+        )
 
 
 async def _stop_loop_event_buses(loop: asyncio.AbstractEventLoop) -> list[str]:
@@ -79,7 +123,11 @@ def run_worker_event_loop(main: Coroutine[Any, Any, Any]) -> Any:
                     len(pending),
                 )
             loop.run_until_complete(loop.shutdown_asyncgens())
-            loop.run_until_complete(loop.shutdown_default_executor())
+            executor_bound = _executor_shutdown_seconds()
+            if executor_bound is None:
+                loop.run_until_complete(loop.shutdown_default_executor())
+            else:
+                loop.run_until_complete(_shutdown_default_executor_bounded(loop, executor_bound))
     finally:
         asyncio.set_event_loop(None)
         loop.close()
