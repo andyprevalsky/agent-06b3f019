@@ -2308,6 +2308,14 @@ def _tilion_egress_class(session_metadata: Dict[str, Any]) -> str:
     return "premium"  # unknown: the higher rate, so the row errs toward a ceiling
 
 
+def _with_downloaded_files(state: Any, persister: Optional[Any]) -> Any:
+    """Attach the files this activity downloaded to the step's browser state."""
+    if not isinstance(state, dict) or persister is None:
+        return state
+    files = persister.downloaded_files()
+    return {**state, "downloaded_files": files} if files else state
+
+
 def _cdp_multiplexer_kwargs(cdp_multiplexer: Optional[Any]) -> Dict[str, Any]:
     """DOMService kwargs: only single-CDP-client sessions hand over a multiplexer."""
     return {"cdp_multiplexer": cdp_multiplexer} if cdp_multiplexer is not None else {}
@@ -9400,6 +9408,15 @@ async def _spawn_browser_agent_activity_v3_real(
                     _observe_step_page(dom_service, needs_dom=observe_needs_dom),
                     timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
                 )
+                if (
+                    browser_download_persister is None
+                    and download_persister_task is not None
+                    and download_persister_task.done()
+                    and not download_persister_task.cancelled()
+                    and download_persister_task.exception() is None
+                ):
+                    browser_download_persister = download_persister_task.result()
+                observe_page_state = _with_downloaded_files(observe_page_state, browser_download_persister)
                 restored_transcript_unobserved = False
                 step_timer.annotate(observe_dom=observe_needs_dom)
                 current_url = _private_browser_runtime_url(dom_service, observe_page_state.get("url") or current_url)

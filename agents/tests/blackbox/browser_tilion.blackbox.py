@@ -2243,6 +2243,64 @@ async def test_pause_context_carries_downloads_and_image_provenance_without_secr
     assert '"rendered_image_urls": (' in handler_source
 
 
+async def test_downloaded_files_are_visible_to_the_agent_mid_run():
+    """T73 tinypng (agent 85ec29b8): the file was persisted, but the agent had no
+    mid-run signal (no files tool, no downloads section, chrome://downloads is
+    blocked), so it could not confirm the download. Every step's browser state
+    now lists this activity's downloads; read_browser_state keeps them."""
+    from types import SimpleNamespace
+
+    from domains.spawn_browser_agent_v3 import handler, tilion_worker
+    from domains.spawn_browser_agent_v3.download_persist import BrowserDownloadPersister
+    from domains.spawn_browser_agent_v3.service_actions import _execute_read_browser_state
+    from providers.rose.browser_use import format_browser_state_for_tool
+
+    session_id = "tilion-download-visible"
+    async with _fixture_site() as base, _tilion_worker_stack() as (service, pw_browser, gateway):
+        persister = await BrowserDownloadPersister.create(
+            browser_session=service.session, session_id=session_id, config=object(), provider="tilion"
+        )
+        try:
+            page = pw_browser.contexts[0].pages[0]
+            await page.goto(base + "/")
+            before = format_browser_state_for_tool(
+                handler._with_downloaded_files(await service.get_browser_state(include_screenshot=False), persister)
+            )
+            assert "Downloaded files" not in before, "no section until something was downloaded"
+            await page.click("#dl")
+            for _ in range(100):
+                if persister.downloaded_files():
+                    break
+                await asyncio.sleep(0.1)
+            assert [item["filename"] for item in tilion_worker.list_downloads(session_id)] == ["report.pdf"]
+            observed = handler._with_downloaded_files(
+                await service.get_browser_state(include_screenshot=False), persister
+            )
+            text = format_browser_state_for_tool(observed)
+            line = f"  - report.pdf ({len(DOWNLOAD_BYTES)} bytes)"
+            assert "Downloaded files (this browser session):" in text, text[:600]
+            assert text.count(line) == 1, text
+
+            # read_browser_state re-fetches when the step observe had no DOM; the
+            # download list must survive that re-fetch.
+            class _History:
+                async def record_action(self, **_kwargs):
+                    return None
+
+            context = SimpleNamespace(
+                prefetched_browser_state={"url": observed["url"], "downloaded_files": observed["downloaded_files"]},
+                dom_service=service,
+                action_history=_History(),
+                thinking="",
+            )
+            reread = await _execute_read_browser_state(context)
+            assert format_browser_state_for_tool(reread).count(line) == 1
+            assert gateway.rejected_4409 == 0
+        finally:
+            await persister.close()
+            tilion_worker.release_session(session_id)
+
+
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
@@ -2281,6 +2339,7 @@ async def run_all_tests():
         ("tilion_live_view_token_redacted", test_tilion_live_view_token_is_redacted_before_persisting),
         ("document_images_count_as_rendered", test_document_images_count_as_rendered_through_the_worker_socket),
         ("pause_context_carries_provenance", test_pause_context_carries_downloads_and_image_provenance_without_secrets),
+        ("downloaded_files_visible_mid_run", test_downloaded_files_are_visible_to_the_agent_mid_run),
         (
             "supervisor_cap_logs_stack_and_classifies",
             test_supervisor_cap_logs_blocked_stack_and_classifies_action_timeouts,
