@@ -35,6 +35,15 @@ logger = logging.getLogger(__name__)
 UpstreamConnect = Callable[[str], Awaitable[Any]]
 
 _ATTACH_TIMEOUT_SECONDS = 30.0
+# Tilion accepts a second CDP socket and closes it at once with 4409 while
+# another client still holds the session, and frees the slot asynchronously
+# after that client closes (e.g. the backend's recovery probe client right
+# before recover-challenge answers). A fresh upstream is therefore confirmed
+# quiet for a short window before any client command is forwarded, and an
+# early 4409 is redialled with bounded backoff, invisibly to the clients.
+_SLOT_CONFIRM_SECONDS = 0.6
+_SLOT_RETRY_DELAYS_SECONDS = (0.5, 1.0, 2.0, 3.0, 4.0)
+_SLOT_BUSY_CLOSE_CODE = 4409
 # Browser.close on a provider CDP endpoint only disconnects that client
 # (Tilion documents browser.close() as a disconnect); never forward it to the
 # shared browser on behalf of one local client.
@@ -112,6 +121,8 @@ class SingleCdpConnectionMultiplexer:
         refresh_url: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
         emulation: Optional[Dict[str, Any]] = None,
         input_answer_timeout: float = _INPUT_ANSWER_TIMEOUT_SECONDS,
+        slot_confirm_seconds: float = _SLOT_CONFIRM_SECONDS,
+        slot_retry_delays: Tuple[float, ...] = _SLOT_RETRY_DELAYS_SECONDS,
         arm_webauthn: bool = True,
         label: str = "",
     ) -> None:
@@ -191,6 +202,9 @@ class SingleCdpConnectionMultiplexer:
         self.overrides_reapplied = 0
         self._closed = False
         self.upstream_connections_opened = 0
+        self._slot_confirm_seconds = slot_confirm_seconds
+        self._slot_retry_delays = tuple(slot_retry_delays)
+        self.slot_busy_retries = 0
         self.last_upstream_close: Optional[Tuple[Optional[int], str]] = None
 
     @property
@@ -227,22 +241,54 @@ class SingleCdpConnectionMultiplexer:
 
     # ----- upstream -------------------------------------------------------
 
+    async def _dial_upstream(self) -> Any:
+        try:
+            return await self._upstream_connect(self._upstream_url)
+        except websockets.InvalidStatus as error:
+            # Tilion connect tokens last 1800 s; an expired one is refused
+            # with HTTP 403 at the handshake. Mint a fresh URL once.
+            status = getattr(getattr(error, "response", None), "status_code", None)
+            fresh = await self._refresh_url() if status == 403 and self._refresh_url else None
+            if not fresh or fresh == self._upstream_url:
+                raise CdpMultiplexerUpstreamClosed(status, "provider refused the CDP handshake") from error
+            logger.info("[CdpMux] Reattaching with a freshly minted CDP URL (label=%s)", self._label)
+            self._upstream_url = fresh
+            return await self._upstream_connect(self._upstream_url)
+
+    async def _dial_confirmed_upstream(self) -> Any:
+        """Dial, then confirm the provider did not refuse the slot (4409) within the
+        confirm window; redial with bounded backoff while it reports the slot busy."""
+        delays = list(self._slot_retry_delays)
+        while True:
+            upstream = await self._dial_upstream()
+            if self._slot_confirm_seconds <= 0:
+                return upstream
+            try:
+                # Nothing was sent yet, so any frame is unexpected; only a close matters.
+                await asyncio.wait_for(upstream.recv(), timeout=self._slot_confirm_seconds)
+                return upstream
+            except asyncio.TimeoutError:
+                return upstream
+            except websockets.ConnectionClosed:
+                code = getattr(upstream, "close_code", None)
+                reason = getattr(upstream, "close_reason", "") or ""
+                if code != _SLOT_BUSY_CLOSE_CODE or not delays:
+                    raise CdpMultiplexerUpstreamClosed(code, reason or "provider closed the CDP socket") from None
+                delay = delays.pop(0)
+                self.slot_busy_retries += 1
+                logger.warning(
+                    "[CdpMux] Provider reports the session busy (4409: %s); redialling in %.1fs (label=%s)",
+                    reason[:80],
+                    delay,
+                    self._label,
+                )
+                await asyncio.sleep(delay)
+
     async def _ensure_upstream(self) -> None:
         async with self._upstream_lock:
             if self._upstream is not None:
                 return
-            try:
-                self._upstream = await self._upstream_connect(self._upstream_url)
-            except websockets.InvalidStatus as error:
-                # Tilion connect tokens last 1800 s; an expired one is refused
-                # with HTTP 403 at the handshake. Mint a fresh URL once.
-                status = getattr(getattr(error, "response", None), "status_code", None)
-                fresh = await self._refresh_url() if status == 403 and self._refresh_url else None
-                if not fresh or fresh == self._upstream_url:
-                    raise CdpMultiplexerUpstreamClosed(status, "provider refused the CDP handshake") from error
-                logger.info("[CdpMux] Reattaching with a freshly minted CDP URL (label=%s)", self._label)
-                self._upstream_url = fresh
-                self._upstream = await self._upstream_connect(self._upstream_url)
+            self._upstream = await self._dial_confirmed_upstream()
             self.upstream_connections_opened += 1
             self._reader = asyncio.create_task(self._read_upstream(self._upstream))
             logger.info(
