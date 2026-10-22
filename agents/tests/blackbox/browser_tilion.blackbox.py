@@ -2616,6 +2616,60 @@ open.onsuccess = () => { const tx = open.result.transaction('tokens', 'readwrite
         await runner.cleanup()
 
 
+async def test_recovery_storage_capture_carries_cookies_when_challenge_frames_are_busy():
+    """OpenTable (agent f9ccfb4e): recovery failed with 'Browser storage capture timed out after
+    15s' after 'Failed to capture open-origin browser storage' with an empty (TimeoutError) error.
+    A challenge page and its Turnstile iframe run busy JS, so neither frame answers an evaluate;
+    the in-place pass read them one by one (5 s each) past its 7.5 s bound and was cancelled,
+    discarding the cookies it had already read. Cookies come from the browser and must be carried."""
+    from aiohttp import web
+
+    from domains.spawn_browser_agent_v3.handler import _capture_rotation_storage_state
+
+    busy = "setTimeout(() => { const end = Date.now() + 60000; while (Date.now() < end) {} }, 300);"
+
+    async def page(request):
+        if request.path == "/turnstile":
+            return web.Response(content_type="text/html", text=f"<script>{busy}</script>")
+        body = (
+            f'<title>Just a moment...</title><iframe src="http://localhost:{request.url.port}/turnstile"></iframe>'
+            f"<script>document.title = 'busy'; {busy}</script>"
+        )
+        response = web.Response(content_type="text/html", text=body)
+        response.set_cookie("cf_clearance", "abc")
+        return response
+
+    app = web.Application()
+    app.router.add_get("/{tail:.*}", page)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    previous = os.environ.get("BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS")
+    os.environ["BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS"] = "6"
+    try:
+        emulation = {"timezone": "America/Los_Angeles", "locale": "en-US"}
+        async with _tilion_worker_stack(emulation) as (_service, pw_browser, gateway):
+            tab = pw_browser.contexts[0].pages[0]
+            await tab.goto(f"http://127.0.0.1:{port}/challenge", wait_until="domcontentloaded")
+            await tab.wait_for_function("document.title === 'busy'", timeout=10_000)
+            await asyncio.sleep(1)
+            started = time.monotonic()
+            state = await asyncio.wait_for(_capture_rotation_storage_state(tab), 20)
+            elapsed = time.monotonic() - started
+            assert elapsed < 7.5, f"capture took {elapsed:.1f}s against a 6s bound"
+            assert [cookie["name"] for cookie in state["cookies"]] == ["cf_clearance"], state
+            assert state["origins"] == []
+            assert gateway.rejected_4409 == 0
+    finally:
+        if previous is None:
+            os.environ.pop("BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS", None)
+        else:
+            os.environ["BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS"] = previous
+        await runner.cleanup()
+
+
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
@@ -2667,6 +2721,10 @@ async def run_all_tests():
         (
             "recovery_storage_capture_bounded_with_service_worker",
             test_recovery_storage_capture_is_bounded_when_a_visited_origin_has_a_service_worker,
+        ),
+        (
+            "recovery_storage_capture_carries_cookies_when_frames_busy",
+            test_recovery_storage_capture_carries_cookies_when_challenge_frames_are_busy,
         ),
         (
             "supervisor_cap_logs_stack_and_classifies",

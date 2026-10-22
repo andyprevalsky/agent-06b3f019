@@ -2126,26 +2126,33 @@ _OPEN_ORIGIN_STORAGE_SCRIPT = """async () => {
 }"""
 
 
-async def _capture_open_origin_storage_state(context: Any, frame_timeout_seconds: float) -> Dict[str, Any]:
-    """Cookies plus storage of every origin open in an existing frame, read in place.
+async def _capture_open_origin_frames(context: Any, timeout_seconds: float) -> List[Dict[str, Any]]:
+    """Storage of every origin open in an existing frame, read in place and concurrently.
 
-    Uses only targets that already exist: no page is created or navigated, so a
-    provider with per-target setup or a slow exit (Tilion) cannot stall it.
+    Uses only targets that already exist: no page is created or navigated. A frame
+    whose main thread is busy (a Cloudflare/Turnstile challenge doing its work)
+    never answers its evaluate; that frame is skipped at the bound and the frames
+    that answered are kept.
     """
-    state: Dict[str, Any] = {"cookies": await context.cookies(), "origins": []}
+    frames = [frame for page in list(getattr(context, "pages", []) or []) for frame in list(getattr(page, "frames", []) or [])]
+    if not frames:
+        return []
+    tasks = [asyncio.ensure_future(frame.evaluate(_OPEN_ORIGIN_STORAGE_SCRIPT)) for frame in frames]
+    done, pending = await asyncio.wait(tasks, timeout=timeout_seconds)
+    for task in pending:
+        task.cancel()
+    origins: List[Dict[str, Any]] = []
     seen: Set[str] = set()
-    for page in list(getattr(context, "pages", []) or []):
-        for frame in list(getattr(page, "frames", []) or []):
-            try:
-                entry = await asyncio.wait_for(frame.evaluate(_OPEN_ORIGIN_STORAGE_SCRIPT), frame_timeout_seconds)
-            except Exception:
-                continue
-            if not isinstance(entry, dict) or not entry.get("origin") or entry["origin"] in seen:
-                continue
-            seen.add(entry["origin"])
-            if entry.get("localStorage") or entry.get("indexedDB"):
-                state["origins"].append(entry)
-    return state
+    for task in tasks:
+        if task not in done or task.cancelled() or task.exception() is not None:
+            continue
+        entry = task.result()
+        if not isinstance(entry, dict) or not entry.get("origin") or entry["origin"] in seen:
+            continue
+        seen.add(entry["origin"])
+        if entry.get("localStorage") or entry.get("indexedDB"):
+            origins.append(entry)
+    return origins
 
 
 async def _capture_rotation_storage_state(page: Optional[Any]) -> Optional[Dict[str, Any]]:
@@ -2171,29 +2178,40 @@ async def _capture_rotation_storage_state(page: Optional[Any]) -> Optional[Dict[
     )
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_seconds
-    open_state: Optional[Dict[str, Any]] = None
+    context = page.context
+    # Cookies come from the browser (Storage.getCookies), not from any page, so a
+    # wedged challenge page cannot block them; they are kept whatever happens next.
+    cookies: Optional[List[Dict[str, Any]]] = None
     try:
-        open_state = await asyncio.wait_for(
-            _capture_open_origin_storage_state(page.context, min(5.0, timeout_seconds / 3)),
-            timeout=timeout_seconds / 2,
-        )
+        cookies = await asyncio.wait_for(context.cookies(), timeout=timeout_seconds / 3)
     except Exception as exc:
-        logger.warning("Failed to capture open-origin browser storage before IP rotation", error=str(exc)[:200])
+        logger.warning("Failed to capture browser cookies before IP rotation", error=f"{type(exc).__name__}: {exc}"[:200])
+    origins: List[Dict[str, Any]] = []
+    if cookies is not None:
+        try:
+            origins = await _capture_open_origin_frames(context, min(5.0, timeout_seconds / 3))
+        except Exception as exc:
+            logger.warning("Failed to capture open-origin browser storage before IP rotation", error=f"{type(exc).__name__}: {exc}"[:200])
     try:
         return await asyncio.wait_for(
-            page.context.storage_state(indexed_db=True),
+            context.storage_state(indexed_db=True),
             timeout=max(0.0, deadline - loop.time()),
         )
-    except asyncio.TimeoutError:
-        if open_state is not None:
+    except Exception as exc:
+        timed_out = isinstance(exc, asyncio.TimeoutError)
+        if cookies is not None:
             logger.warning(
-                "Visited-origin storage capture exceeded its bound; carrying cookies and open-origin storage",
+                "Full browser storage capture did not finish; carrying cookies and the open-origin storage that answered",
                 timeout_seconds=timeout_seconds,
-                capture_scope="cookies_open_origin_localstorage_indexeddb",
-                cookies=len(open_state["cookies"]),
-                origins=[entry["origin"] for entry in open_state["origins"]][:20],
+                reason="timeout" if timed_out else f"{type(exc).__name__}: {exc}"[:200],
+                capture_scope="cookies_open_origin_localstorage_indexeddb" if origins else "cookies_only",
+                cookies=len(cookies),
+                origins=[entry["origin"] for entry in origins][:20],
             )
-            return open_state
+            return {"cookies": cookies, "origins": origins}
+        if not timed_out:
+            logger.warning("Failed to capture browser storage before IP rotation", error=str(exc))
+            return None
         logger.warning(
             "Timed out capturing browser storage before IP rotation",
             timeout_seconds=timeout_seconds,
@@ -2202,9 +2220,6 @@ async def _capture_rotation_storage_state(page: Optional[Any]) -> Optional[Dict[
         raise BrowserStorageCaptureTimeoutError(
             f"Browser storage capture timed out after {timeout_seconds:g}s before challenge recovery."
         )
-    except Exception as exc:
-        logger.warning("Failed to capture browser storage before IP rotation", error=str(exc))
-        return open_state
 
 
 def _rotation_storage_restore_script(storage_state: Dict[str, Any]) -> str:
