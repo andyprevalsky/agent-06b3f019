@@ -377,6 +377,9 @@ function fixtureRoot(name: string) {
     "cloudbench-production-only-tasks.py",
     // run-bench reads the sharded operator's per-controller copy bound.
     "cloudbench-shard-coordinator.py",
+    // run-bench resolves each launch's timeout; the symlink resolves to the
+    // project, whose agents/benchmarks package supplies caps and floors.
+    "cloudbench-timeout-policy.py",
   ])
     symlinkSync(
       path.join(project, "scripts", name),

@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from benchmarks.cloudbench_campaign_workspace_test import copy_timeout_policy
 from benchmarks.fixture_host_guard import FIXTURE_HOST_GUARD_SECONDS
 
 ROOT = Path(os.environ.get("CLOUDBENCH_INVENTORY_ROOT_UNDER_TEST", Path(__file__).resolve().parents[2]))
@@ -237,6 +238,7 @@ def test_campaign_inventory_normal_cli_forwards_original_clock_and_bounded_retry
     shutil.copyfile(ROOT / 'scripts/cloudbench_catalog.py', scripts / 'cloudbench_catalog.py')
     # run-bench reads the sharded operator's per-controller copy bound.
     shutil.copyfile(ROOT / 'scripts/cloudbench-shard-coordinator.py', scripts / 'cloudbench-shard-coordinator.py')
+    copy_timeout_policy(tmp_path)
     report_contract = tmp_path / '.claude/shared/benchmark-report-format.txt'
     report_contract.parent.mkdir(parents=True)
     shutil.copyfile(ROOT / '.claude/shared/benchmark-report-format.txt', report_contract)

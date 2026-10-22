@@ -1,3 +1,4 @@
+from benchmarks.cloudbench_campaign_workspace_test import copy_timeout_policy
 from benchmarks.fleet_aggregate_fixture import one_aggregate_tick
 import ast
 import base64
@@ -35406,10 +35407,11 @@ def test_normal_cli_forwards_owned_pool_reuse_policy(tmp_path: Path, args: list[
         "cloudbench-shard-coordinator.py",
     ):
         shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
+    copy_timeout_policy(root)
     shutil.copy2(ROOT / ".claude/shared/benchmark-report-format.txt", root / ".claude/shared/benchmark-report-format.txt")
     for name in ("tasks.json", "polar_tasks.json"):
         (root / "agents/benchmarks").mkdir(exist_ok=True)
-        (root / "agents/benchmarks" / name).write_text(json.dumps([{"name": "fixture-task", "status": "ready"}] if name == "tasks.json" else [{"name": "other-fixture-task", "status": "ready"}]))
+        (root / "agents/benchmarks" / name).write_text(json.dumps([{"name": "fixture-task", "status": "ready", "timeout_seconds": 600}] if name == "tasks.json" else [{"name": "other-fixture-task", "status": "ready", "timeout_seconds": 0}]))
     (root / "agents/venv/bin/python").symlink_to(sys.executable)
     output = tmp_path / "args.json"
     runner = tmp_path / "runner"

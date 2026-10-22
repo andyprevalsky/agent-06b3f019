@@ -13,6 +13,19 @@ import pytest
 from benchmarks.fixture_host_guard import FIXTURE_HOST_GUARD_SECONDS
 
 ROOT = Path(os.environ.get('CLOUDBENCH_INVENTORY_ROOT_UNDER_TEST', Path(__file__).resolve().parents[2]))
+# scripts/run-bench resolves every task launch's timeout through this script and its
+# import closure in agents/benchmarks (catalog caps, floors and the history reader).
+TIMEOUT_POLICY_SCRIPT = 'cloudbench-timeout-policy.py'
+TIMEOUT_POLICY_MODULES = ('__init__.py', 'benchmark_tasks.py', 'fixtures.py', 'live_fixtures.py',
+                          'polar_catalog.py', 'timeout_history.py')
+
+
+def copy_timeout_policy(source):
+    """Give a partial source checkout run-bench's timeout policy, without recorded history."""
+    shutil.copyfile(ROOT / 'scripts' / TIMEOUT_POLICY_SCRIPT, source / 'scripts' / TIMEOUT_POLICY_SCRIPT)
+    (source / 'agents/benchmarks').mkdir(parents=True, exist_ok=True)
+    for module in TIMEOUT_POLICY_MODULES:
+        shutil.copyfile(ROOT / 'agents/benchmarks' / module, source / 'agents/benchmarks' / module)
 
 
 def git(root, *args):
@@ -30,6 +43,7 @@ def bound_campaign(tmp_path):
     shutil.copyfile(ROOT / '.claude/shared/benchmark-report-format.txt', report)
     for catalog in (ROOT / 'agents/benchmarks').glob('*.json'):
         shutil.copyfile(catalog, source / 'agents/benchmarks' / catalog.name)
+    copy_timeout_policy(source)
     for name in ('run-bench', 'run-bench-campaign.py', 'cloudbench_catalog.py',
                  'cloudbench-production-only-tasks.py', 'cloudbench-campaign-seed.py',
                  'cloudbench-campaign-barrier.py', 'cloudbench-script-snapshot.py',
@@ -149,6 +163,7 @@ def test_campaign_workspace_normal_cli_preserves_original600_shape(tmp_path):
         shutil.copyfile(ROOT/'scripts'/name,scripts/name)
     for path in (ROOT/'agents/benchmarks').glob('*.json'):
         shutil.copyfile(path,source/'agents/benchmarks'/path.name)
+    copy_timeout_policy(source)
     override=os.environ.get('CLOUDBENCH_ORIGINAL600_TASK_FILE_UNDER_TEST')
     if override:
         import hashlib
