@@ -46,6 +46,35 @@ def git(repo, *args):
     return subprocess.check_output(["git", "-c", "safe.directory="+str(repo), "-C", str(repo), *args]).decode().strip()
 
 
+# A task that is exiting (address space released) or mid-exec briefly has a
+# root-owned /proc entry, so an unprivileged observer gets EACCES on its fd
+# list even for its own UID. Re-observe that exact task for a bounded time:
+# an exiting task vanishes and an exec settles, while a live task that stays
+# unreadable (another UID, non-dumpable) still fails closed.
+TASK_REOBSERVE_ATTEMPTS = 20
+TASK_REOBSERVE_SECONDS = 0.05
+
+
+def task_paths(task):
+    """Paths one thread holds open or mapped writable; None once it is gone."""
+    for attempt in range(TASK_REOBSERVE_ATTEMPTS):
+        try:
+            paths = [os.readlink(task / "cwd")]
+            for fd in (task / "fd").iterdir():
+                try: paths.append(os.readlink(fd))
+                except FileNotFoundError: continue
+            for line in (task / "maps").read_text().splitlines():
+                fields = line.split(None, 5)
+                if len(fields) == 6 and "w" in fields[1]: paths.append(fields[5])
+            return paths
+        except FileNotFoundError:
+            return None
+        except PermissionError:
+            if attempt + 1 == TASK_REOBSERVE_ATTEMPTS:
+                raise
+            time.sleep(TASK_REOBSERVE_SECONDS)
+
+
 def writers(roots, permitted):
     found = []
     for process in Path("/proc").iterdir():
@@ -56,16 +85,9 @@ def writers(roots, permitted):
             # write; read every live thread of the group, not only the leader.
             paths = []
             for task in (process / "task").iterdir():
-                try:
-                    paths.append(os.readlink(task / "cwd"))
-                    for fd in (task / "fd").iterdir():
-                        try: paths.append(os.readlink(fd))
-                        except FileNotFoundError: continue
-                    for line in (task / "maps").read_text().splitlines():
-                        fields = line.split(None, 5)
-                        if len(fields) == 6 and "w" in fields[1]: paths.append(fields[5])
-                except FileNotFoundError:
-                    continue
+                observed = task_paths(task)
+                if observed is not None:
+                    paths.extend(observed)
             if any(any(path == str(root) or path.startswith(str(root) + "/") for root in roots) for path in paths):
                 found.append({"pid": int(process.name), "birth": birth(int(process.name))})
         except FileNotFoundError:

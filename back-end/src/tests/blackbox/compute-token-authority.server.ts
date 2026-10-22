@@ -24,11 +24,14 @@ app.post('/test-foundry', async (req, res) => {
     return;
   }
   if (req.body.invalidHint) {
-    const { InvalidFoundryCooldownRequest, markFoundryDeploymentCooldown } = await import(
-      '../../providers/foundryDeploymentCooldown'
-    );
+    const { InvalidFoundryCooldownRequest, markFoundryDeploymentCooldown } =
+      await import('../../providers/foundryDeploymentCooldown');
     try {
-      await markFoundryDeploymentCooldown('overflow.example.test', 'overflow', req.body.invalidHint);
+      await markFoundryDeploymentCooldown(
+        'overflow.example.test',
+        'overflow',
+        req.body.invalidHint
+      );
       res.json({ rejected: false });
     } catch (error) {
       const invalidRequest = error instanceof InvalidFoundryCooldownRequest;
@@ -57,7 +60,9 @@ app.post('/test-foundry', async (req, res) => {
   global.fetch = async (input, init) => {
     if (new URL(String(input)).host === 'openrouter.ai') {
       fallbackRequests++;
-      return new Response('data: {"choices":[{"delta":{"content":"fallback"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+      return new Response(
+        'data: {"choices":[{"delta":{"content":"fallback"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+      );
     }
     if (String(input).startsWith('https://foundry-cta.example.test/')) {
       const model = (JSON.parse(String(init?.body)) as { model: string }).model;
@@ -79,8 +84,8 @@ app.post('/test-foundry', async (req, res) => {
         req.body.rejectKind === 'visible'
           ? 'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'
           : event.type === 'response.completed'
-          ? 'data: {"type":"response.output_text.delta","delta":"ok"}\n\n'
-          : '';
+            ? 'data: {"type":"response.output_text.delta","delta":"ok"}\n\n'
+            : '';
       return new Response(content + 'data: ' + JSON.stringify(event) + '\n\ndata: [DONE]\n\n', {
         headers: { 'content-type': 'text/event-stream' },
       });
@@ -113,11 +118,11 @@ app.post('/test-foundry', async (req, res) => {
           route_key: 'foundry-shared-cooldown-route',
         })
       : foundryComplete({
-      poolSpec: getPool('rose-1-ultra'),
-      messages: [{ role: 'user', content: 'hi' }],
-      requestId: 'ts-cooldown-fixture',
-      routeKey: 'foundry-shared-cooldown-route',
-      });
+          poolSpec: getPool('rose-1-ultra'),
+          messages: [{ role: 'user', content: 'hi' }],
+          requestId: 'ts-cooldown-fixture',
+          routeKey: 'foundry-shared-cooldown-route',
+        });
     for await (const _chunk of stream) {
       if ('kind' in _chunk && _chunk.kind === 'content') visible.push(String(_chunk.data.text));
       else if ('choices' in _chunk) {
@@ -127,7 +132,17 @@ app.post('/test-foundry', async (req, res) => {
     }
     res.json({ hits, reports, resets, visible, fallbackRequests });
   } catch (error) {
-    res.status(500).json({ error: String(error), hits, reports, resets, visible, fallbackRequests, isRoseServerError: error instanceof RoseServerError });
+    res
+      .status(500)
+      .json({
+        error: String(error),
+        hits,
+        reports,
+        resets,
+        visible,
+        fallbackRequests,
+        isRoseServerError: error instanceof RoseServerError,
+      });
   } finally {
     global.fetch = original;
     for (const [name, value] of Object.entries(originalEnv)) {
