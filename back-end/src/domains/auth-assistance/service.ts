@@ -111,9 +111,14 @@ export async function createAuthAssistanceRequest(
     throw new BadRequestError('A browser session is required for live_view assistance');
   }
 
-  const handoff = handoffForMode(input.mode, steelSessionId, session?.debugUrl);
+  // Tilion view tokens are minted here, never taken from the worker: it sends a
+  // redacted browserUrl, and the stored debugUrl expires after 1800 s.
+  const tilionViewUrl =
+    session?.provider === 'tilion' ? await getTilionLiveViewUrl(session.sessionId) : undefined;
+  const handoff = handoffForMode(input.mode, steelSessionId, tilionViewUrl ?? session?.debugUrl);
   const request = await repo.createRequest({
     ...input,
+    ...(tilionViewUrl !== undefined ? { browserUrl: tilionViewUrl } : {}),
     userId,
     authRealm,
     ...(browserSessionId !== null ? { browserSessionId } : {}),
