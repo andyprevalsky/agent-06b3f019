@@ -18,6 +18,7 @@ tags:
   - purchase-approval
   - checkout
 sources:
+  - agent 5516e75c-7a65-466b-bf1e-e8b1eea4bc8c
   - agent fe68bf12-2a1e-4b85-bf57-d67322480225
   - agent 2cf378ca-0771-4d46-b3ca-a89582d9a85e
   - commit 4ee9390b9
@@ -83,6 +84,24 @@ lane C: `DOMService.rendered_image_state()` / `restore_rendered_image_state()`
 fails on af169f352 with the production error and passes 5/5 patched. Separate gap
 found locally: the tracker reads browser-use's pruned snapshot tree, so `<img>`s
 far below the viewport are not recorded (9 of 12 on the eventim listing page).
+
+### 2026-10-22 third recurrence: resized derivatives and comma URLs in srcset
+
+Blue Bottle on Tilion (agent 5516e75c, da1468598) was rejected for
+`img.cdn4dd.com/cdn-cgi/image/fit=contain,width=1200,height=672,format=auto/<S3 original>`.
+Live on order.online, that image (09f09e4f) is rendered as `/p/fit=cover,...` on the store page
+and as `/cdn-cgi/image/fit=contain,width=600|1366|1600|1920,...,anim=false/<same S3 original>`
+in the item modal; the exact 1200x672 derivative was not found rendered (that option shape
+appears in the page JSON for other images). Two defects: (A) srcset parsing split on every
+comma, but `/cdn-cgi/image/` URLs contain commas, so junk URLs were recorded and the real
+1920w/1600w candidates dropped (the JS also ignored `<picture><source srcset>`); (B) a resize
+derivative was not treated as the same image as its embedded origin. Fix sent to lane C: an
+HTML-spec srcset parser (Python + JS, plus `picture source[srcset]`), and `_image_asset_key`
+keys a `/cdn-cgi/image/<options>/<absolute origin>` path structurally by its exact embedded
+origin. Regressions: real-Chromium srcset fixture fails on da1468598 and passes 5/5; the real
+URL pair is rejected on da1468598 and accepted patched, while drifted, never-rendered and
+malformed origins are still rejected (5/5). Open: lane F's evidence on where the model saw
+the exact 1200x672 string (rendered on checkout, or composed).
 
 ## Human feedback
 
