@@ -73,6 +73,15 @@ _EXCLUSIVE_OVERRIDES = ("Emulation.setTimezoneOverride", "Emulation.setLocaleOve
 _INPUT_ANSWER_TIMEOUT_SECONDS = 10.0
 # Stable text of that error reply; the humanizer keys its skip-and-continue on it.
 UNANSWERED_INPUT_MARKER = "was not answered by the browser provider"
+# A CDP session whose oldest forwarded command has had no reply for this long is
+# reported once, naming its target and the pending methods, with the age of the
+# newest reply on ANY session: a busy renderer (challenge JS) silences only the
+# pages it hosts, a dead provider socket silences everything (T83).
+_SILENCE_THRESHOLD_SECONDS = 30.0
+_SILENCE_CHECK_SECONDS = 5.0
+# The watchdog also notices the worker's own event loop stalling (several agents
+# share one worker process): a check that wakes this much later than scheduled.
+_LOOP_STALL_SECONDS = 5.0
 # Empty authenticator the multiplexer installs so an unarmed WebAuthn ceremony
 # rejects instead of opening the native chooser (see arm_webauthn).
 _EMPTY_AUTHENTICATOR = {
@@ -131,6 +140,9 @@ class SingleCdpConnectionMultiplexer:
         slot_retry_delays: Tuple[float, ...] = _SLOT_RETRY_DELAYS_SECONDS,
         arm_webauthn: bool = True,
         label: str = "",
+        silence_threshold: float = _SILENCE_THRESHOLD_SECONDS,
+        silence_check_interval: float = _SILENCE_CHECK_SECONDS,
+        loop_stall_threshold: float = _LOOP_STALL_SECONDS,
     ) -> None:
         self._upstream_url = upstream_url
         self._refresh_url = refresh_url
@@ -215,6 +227,19 @@ class SingleCdpConnectionMultiplexer:
         # Bytes Tilion relayed to us: what it bills as the session's CDP egress.
         self.upstream_bytes_received = 0
         self.last_upstream_close: Optional[Tuple[Optional[int], str]] = None
+        # Silence watchdog (T83): forwarded client commands awaiting a reply, the
+        # target behind each session, and the sessions currently reported silent.
+        self._silence_threshold = silence_threshold
+        self._silence_check_interval = silence_check_interval
+        self._pending_since: Dict[int, Tuple[float, str]] = {}
+        self._session_info: Dict[str, Tuple[str, str, str]] = {}
+        self._silent_since: Dict[str, float] = {}
+        self._last_reply_at: Optional[float] = None
+        self._watchdog: Optional[asyncio.Task] = None
+        self.silent_sessions = 0
+        self.silence_recoveries = 0
+        self._loop_stall_threshold = loop_stall_threshold
+        self.loop_stalls = 0
 
     @property
     def local_url(self) -> str:
@@ -232,10 +257,15 @@ class SingleCdpConnectionMultiplexer:
             self._server = await websockets.serve(self._serve_client, "127.0.0.1", 0, max_size=None, logger=quiet)
             port = self._server.sockets[0].getsockname()[1]
             self._local_url = f"ws://127.0.0.1:{port}/devtools/browser/rose-single-cdp"
+        if self._watchdog is None and self._silence_threshold > 0:
+            self._watchdog = asyncio.create_task(self._watch_silence())
         return self._local_url
 
     async def close(self) -> None:
         self._closed = True
+        if self._watchdog is not None:
+            self._watchdog.cancel()
+            self._watchdog = None
         for task in list(self._background):
             task.cancel()
         for client in list(self._clients):
@@ -312,6 +342,8 @@ class SingleCdpConnectionMultiplexer:
             self._upstream, self._reader = None, None
             self._fail_internal(CdpMultiplexerUpstreamClosed(1000, "released"))
             self._pending.clear()
+            self._pending_since.clear()
+            self._silent_since.clear()
             self._fail_pending_input()
             self._session_owner.clear()
             self._browser_session_owner.clear()
@@ -380,6 +412,8 @@ class SingleCdpConnectionMultiplexer:
         self._upstream, self._reader = None, None
         self._fail_internal(CdpMultiplexerUpstreamClosed(code, reason))
         self._pending.clear()
+        self._pending_since.clear()
+        self._silent_since.clear()
         self._fail_pending_input()
         self._session_owner.clear()
         self._browser_session_owner.clear()
@@ -403,6 +437,7 @@ class SingleCdpConnectionMultiplexer:
                     future.set_result(message)
                 return
             self._finish_input(message_id)
+            self._note_reply(message_id)
             pending = self._pending.pop(message_id, None)
             if pending is None:
                 if message_id in self._expired_inputs:
@@ -442,7 +477,14 @@ class SingleCdpConnectionMultiplexer:
         params = message.get("params") or {}
         if await self._drop_hidden_target_event(session_id, method, params):
             return
+        self._track_target_url(session_id, method, params)
         if method == "Target.attachedToTarget" and params.get("sessionId"):
+            info = params.get("targetInfo") or {}
+            self._session_info[str(params["sessionId"])] = (
+                str(info.get("targetId") or ""),
+                str(info.get("type") or ""),
+                str(info.get("url") or ""),
+            )
             self._own_session(client, params["sessionId"])
             target_type = (params.get("targetInfo") or {}).get("type")
             client_waits = self._wants_debugger_wait.get((client, session_id), True)
@@ -473,6 +515,7 @@ class SingleCdpConnectionMultiplexer:
             if armed_target is not None:
                 self._webauthn_armed_targets.discard(armed_target)
             self._session_owner.pop(params["sessionId"], None)
+            self._session_info.pop(str(params["sessionId"]), None)
             client.child_sessions.discard(params["sessionId"])
 
     def _hide_target(self, info: Any) -> bool:
@@ -716,6 +759,105 @@ class SingleCdpConnectionMultiplexer:
         self._background.add(task)
         task.add_done_callback(self._background.discard)
 
+    def _note_reply(self, message_id: int) -> None:
+        now = asyncio.get_running_loop().time()
+        self._last_reply_at = now
+        entry = self._pending_since.pop(message_id, None)
+        if entry is None:
+            return
+        session_id = entry[1]
+        since = self._silent_since.pop(session_id, None)
+        if since is not None:
+            self.silence_recoveries += 1
+            logger.warning(
+                "[CdpMux] Session %s (%s) answered again after %.0fs of silence (label=%s)",
+                session_id[:12],
+                self._describe_session(session_id),
+                now - since,
+                self._label,
+            )
+
+    def _track_target_url(self, session_id: str, method: Any, params: Dict[str, Any]) -> None:
+        """Keep each session's current URL so a silence report names the page, not about:blank."""
+        if method == "Page.frameNavigated":
+            frame = params.get("frame") or {}
+            if not frame.get("parentId") and session_id in self._session_info:
+                target_id, target_type, _ = self._session_info[session_id]
+                self._session_info[session_id] = (target_id, target_type, str(frame.get("url") or ""))
+        elif method == "Target.targetInfoChanged":
+            info = params.get("targetInfo") or {}
+            for session, (target_id, target_type, _) in list(self._session_info.items()):
+                if target_id and target_id == info.get("targetId"):
+                    self._session_info[session] = (target_id, target_type, str(info.get("url") or ""))
+
+    def _describe_session(self, session_id: str) -> str:
+        if any(client.browser_session_id == session_id for client in self._clients):
+            return "browser-level"
+        target_id, target_type, url = self._session_info.get(session_id, ("", "", ""))
+        return f"target {target_id[:12] or '?'} {target_type or '?'} {url[:120]}"
+
+    def silence_report(self) -> List[Dict[str, Any]]:
+        """Sessions whose oldest pending command exceeds the threshold, oldest first."""
+        now = asyncio.get_running_loop().time()
+        by_session: Dict[str, List[Tuple[float, str]]] = {}
+        for message_id, (sent_at, session_id) in list(self._pending_since.items()):
+            pending = self._pending.get(message_id)
+            if pending is None:
+                self._pending_since.pop(message_id, None)
+                continue
+            by_session.setdefault(session_id, []).append((sent_at, pending[2]))
+        report = []
+        for session_id, items in by_session.items():
+            items.sort()
+            oldest_at, oldest_method = items[0]
+            if now - oldest_at < self._silence_threshold:
+                continue
+            report.append(
+                {
+                    "session": session_id,
+                    "target": self._describe_session(session_id),
+                    "oldest_method": oldest_method,
+                    "oldest_age_s": round(now - oldest_at, 1),
+                    "pending": len(items),
+                    "pending_methods": sorted({method for _, method in items})[:8],
+                    "last_reply_any_session_s": None if self._last_reply_at is None else round(now - self._last_reply_at, 1),
+                }
+            )
+        report.sort(key=lambda item: -item["oldest_age_s"])
+        return report
+
+    async def _watch_silence(self) -> None:
+        loop = asyncio.get_running_loop()
+        while not self._closed:
+            scheduled = loop.time() + self._silence_check_interval
+            await asyncio.sleep(self._silence_check_interval)
+            lag = loop.time() - scheduled
+            if lag >= self._loop_stall_threshold:
+                self.loop_stalls += 1
+                logger.warning(
+                    "[CdpMux] Worker event loop stalled %.1fs (no CDP traffic was read meanwhile) (label=%s)",
+                    lag,
+                    self._label,
+                )
+            with contextlib.suppress(Exception):
+                for item in self.silence_report():
+                    if item["session"] in self._silent_since:
+                        continue
+                    self._silent_since[item["session"]] = asyncio.get_running_loop().time() - item["oldest_age_s"]
+                    self.silent_sessions += 1
+                    logger.warning(
+                        "[CdpMux] Session %s silent for %.0fs: %s; %d pending, oldest %s; methods %s; "
+                        "last reply on any session %ss ago (label=%s)",
+                        item["session"][:12],
+                        item["oldest_age_s"],
+                        item["target"],
+                        item["pending"],
+                        item["oldest_method"],
+                        ",".join(item["pending_methods"]),
+                        item["last_reply_any_session_s"],
+                        self._label,
+                    )
+
     def _own_session(self, client: _Client, session_id: str) -> None:
         self._session_owner[session_id] = client
         client.child_sessions.add(session_id)
@@ -777,6 +919,7 @@ class SingleCdpConnectionMultiplexer:
         message["id"] = message_id
         if not message.get("sessionId"):
             message["sessionId"] = client.browser_session_id
+        self._pending_since[message_id] = (asyncio.get_running_loop().time(), str(message["sessionId"]))
         if method.startswith("Input."):
             await self._forward_input_in_order(upstream, message_id, message)
             return
@@ -866,6 +1009,7 @@ class SingleCdpConnectionMultiplexer:
 
         Removing it from _pending also drops the provider's late real reply."""
         pending = self._pending.pop(message_id, None)
+        self._pending_since.pop(message_id, None)
         session_id = self._input_session.get(message_id)
         self._finish_input(message_id)
         if pending is None:

@@ -72,6 +72,8 @@ def test_log_collection_is_scoped_to_the_agent_tree():
         "recovery_failed": 1,
         "classifier_challenged": 1,
         "cleared": 0,
+        "cleared_by_patience": 0,
+        "cleared_by_recovery": 0,
         "last_stuck_host": "www.google.com",
     }
 
@@ -366,3 +368,61 @@ def test_rejudge_reports_when_no_log_facts_were_available(tmp_path, capsys, monk
     assert probe_module.main(["--rejudge", str(export)]) == 0
     line = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert (line["probe"], line["verdict"], line["antibot_source"]) == ("ticketmaster-nyc", "PASSED_CAPTCHA", "none")
+
+
+def test_recovery_clears_are_reported_apart_from_patience_clears():
+    """Tilion-only recovery (recovery_outcome=config_selected) has cleared=False in its episode;
+    it must not read as 'nothing happened'. stuck and recovery_failed keep their meaning."""
+    lines = [
+        _line("antibot.episode", agent_id=BROWSER, host="a.com", cleared=True, recovery_outcome="cleared_after_patience"),
+        _line("antibot.episode", agent_id=BROWSER, host="b.com", cleared=False, recovery_invoked=True, recovery_outcome="config_selected"),
+        _line("antibot.episode", agent_id=BROWSER, host="c.com", cleared=False, recovery_invoked=True, recovery_outcome="cookie_fix"),
+        _line("antibot.episode", agent_id=BROWSER, host="d.com", cleared=False, recovery_invoked=True, recovery_outcome="failed: no config cleared it"),
+    ]
+    summary = summarize_events(collect_antibot_events(lines, [BROWSER]))
+    assert (summary["episodes"], summary["cleared_by_patience"], summary["cleared_by_recovery"], summary["cleared"]) == (4, 1, 2, 3)
+    assert (summary["stuck"], summary["recovery_failed"]) == (0, 1)
+    only_recovery = summarize_events(collect_antibot_events(lines[1:2], [BROWSER]))
+    assert (only_recovery["cleared_by_patience"], only_recovery["cleared_by_recovery"], only_recovery["stuck"]) == (0, 1, 0)
+
+
+def test_browser_rows_inside_the_root_transcript_are_used_as_snapshots():
+    """Saved runs on a real stack: child_messages is empty; the browser's steps are root TOOL rows
+    (toolName spawn_browser_agent, metadata.subAgentId), the last one holding the page text."""
+    root = [{"role": "USER", "text": "search ticketmaster", "metadata": {}}]
+    root += [
+        {"role": "TOOL", "text": "", "metadata": {"toolName": "spawn_browser_agent", "subAgentId": "task-1", "title": "scroll", "browser_url": "https://www.ticketmaster.com/search?q=ny"}}
+        for _ in range(110)
+    ]
+    root.append({"role": "TOOL", "text": "", "metadata": {"toolName": "spawn_browser_agent", "subAgentId": "task-1", "title": "Read page", "browser_url": "https://www.ticketmaster.com/search?q=ny", "output": PAGE}})
+    root.append({"role": "ASSISTANT", "text": "", "metadata": {"sendMessageToUser": "Done."}})
+    evidence = build_judge_evidence(root, [])
+    assert evidence["browser_tabs_at_end_most_recent_last"][-1]["url"] == "https://www.ticketmaster.com/search?q=ny"
+    assert "3 events: Knicks vs Nets" in evidence["last_browser_observations"][-1]["text"]
+    assert "Done." in evidence["agent_final_answer"]
+
+
+def test_root_only_saved_run_reaches_high_confidence_when_the_snapshot_shows_evidence(tmp_path, capsys, monkeypatch):
+    """--rejudge on a saved run shaped like lane G's (child_messages empty, browser rows in the root):
+    the judge receives the final snapshot, so a judge that grades on it is not capped at low."""
+    root = [
+        {"role": "TOOL", "text": "", "metadata": {"toolName": "spawn_browser_agent", "subAgentId": "task-1", "browser_url": "https://www.ticketmaster.com/search?q=ny", "output": PAGE}},
+        {"role": "ASSISTANT", "text": "", "metadata": {"sendMessageToUser": "Done."}},
+    ]
+    path = save_run(str(tmp_path), {"probe": "ticketmaster-nyc", "agent_id": "850070ab", "end_reason": "agent COMPLETED", "antibot": _summary(CLEARED_LOG), "root_messages": root, "child_messages": []})
+
+    async def snapshot_judge(probe, observed, summary, end_reason, user_id):
+        snapshots = observed["last_browser_observations"]
+        shown = bool(snapshots) and "3 events" in snapshots[-1]["text"]
+        return {
+            "verdict": "PASSED_CAPTCHA" if shown else "INCONCLUSIVE",
+            "reason": "results page" if shown else "final browser snapshots unavailable",
+            "evidence_seen": "3 events listed" if shown else "",
+            "confidence": "high" if shown else "low",
+            "_model": "fake",
+        }
+
+    monkeypatch.setattr(probe_module, "_judge", snapshot_judge)
+    assert probe_module.main(["--rejudge", str(path)]) == 0
+    line = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert (line["verdict"], line["confidence"], line["judge_input"]["observations"]) == ("PASSED_CAPTCHA", "high", 1)

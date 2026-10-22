@@ -118,12 +118,31 @@ def summarize_events(events: List[Dict[str, Any]]) -> Dict[str, Any]:
         for episode in episodes
         if str(episode.get("recovery_outcome") or "").startswith(("failed", "exhausted"))
     ]
+    # Patience: the provider's own auto-solve cleared it while we waited. Recovery: the recovery path
+    # (config_selected, cookie fix, ...) ran and succeeded. Both are clears; a recovery success has
+    # cleared=False in the episode, so counting only `cleared` made it look like nothing happened.
+    by_patience = [
+        episode
+        for episode in episodes
+        if episode.get("recovery_outcome") == "cleared_after_patience" or episode.get("cleared") is True
+    ]
+    by_recovery = [
+        episode
+        for episode in episodes
+        if episode not in by_patience
+        and episode.get("recovery_invoked") is True
+        and str(episode.get("recovery_outcome") or "")
+        and episode not in recovery_failed
+        and not str(episode.get("recovery_outcome")).startswith("failed")
+    ]
     return {
         "episodes": len(episodes),
         "stuck": len(stuck),
         "recovery_failed": len(recovery_failed),
         "classifier_challenged": sum(1 for item in classifier if item.get("challenged") is True),
-        "cleared": sum(1 for episode in episodes if episode.get("cleared") is True),
+        "cleared": len(by_patience) + len(by_recovery),
+        "cleared_by_patience": len(by_patience),
+        "cleared_by_recovery": len(by_recovery),
         "last_stuck_host": (stuck[-1].get("final_url_host") or stuck[-1].get("host")) if stuck else "",
     }
 
@@ -289,6 +308,14 @@ def _keep_head_and_tail(text: str, chars: int) -> str:
     return text[:head] + "\n...[truncated]...\n" + text[-(chars - head) :]
 
 
+def _is_browser_row(message: Dict[str, Any]) -> bool:
+    metadata = _metadata(message)
+    return bool(metadata.get("subAgentId") or metadata.get("sub_agent_id")) or metadata.get("toolName") in (
+        "spawn_browser_agent",
+        *_OBSERVATION_TOOLS,
+    )
+
+
 def build_judge_evidence(root_messages: List[Dict[str, Any]], child_messages: List[Dict[str, Any]]) -> Dict[str, Any]:
     """What the judge sees, built so a terse final answer cannot starve it.
 
@@ -308,7 +335,10 @@ def build_judge_evidence(root_messages: List[Dict[str, Any]], child_messages: Li
         if str(m.get("role") or "").upper() == "TOOL" and text.strip()
     ][-4:]
 
-    child_rows = [(m, _row_text(m)) for m in child_messages]
+    # Browser steps usually live in the ROOT transcript: TOOL rows with toolName spawn_browser_agent and
+    # metadata.subAgentId (the browser task id is not a fetchable agent). Use those plus any child rows.
+    browser_source = [m for m in root_messages if _is_browser_row(m)] + list(child_messages)
+    child_rows = [(m, _row_text(m)) for m in browser_source]
     browser = [(m, text) for m, text in child_rows if text.strip() or _message_url(m)]
     tabs: List[Dict[str, str]] = []
     seen_urls = set()
