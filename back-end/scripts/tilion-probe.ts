@@ -1433,6 +1433,26 @@ check(
   }
 );
 
+check('mobile-exit', 'is proxy_type mobile served (no region, us, de, geo us)?', async (ctx) => {
+  const out: Json = {};
+  for (const [name, body] of [
+    ['mobile_default', { proxy_type: 'mobile' }],
+    ['mobile_region_us', { proxy_type: 'mobile', region: 'us' }],
+    ['mobile_geo_us', { proxy_type: 'mobile', geo: { country: 'us' } }],
+    ['mobile_region_de', { proxy_type: 'mobile', region: 'de' }],
+    ['residential_region_us', { proxy_type: 'residential', region: 'us' }],
+  ] as Array<[string, Json]>) {
+    const created = await ctx.createSession({ idle_timeout: 60, ttl: 300, ...body });
+    out[name] = {
+      status: created.status,
+      ms: created.ms,
+      body: created.sessionId ? null : redact(created.body),
+    };
+    if (created.sessionId) await ctx.release(created.sessionId);
+  }
+  return out;
+});
+
 check(
   'concurrency',
   'open up to the cap; next create gets 429 concurrency_limit; delete all',
