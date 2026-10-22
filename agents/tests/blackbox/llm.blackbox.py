@@ -9964,6 +9964,7 @@ async def run_all_tests():
         "structured_validation_candidate_eligibility",
         test_structured_validation_retries_exclude_only_repeated_known_candidate,
     )
+    r.record("legacy_cached_spawn_names_are_stable_and_scoped", test_legacy_cached_spawn_names_are_stable_and_scoped)
     r.record("prepare_schema_for_openai", test_prepare_schema_for_openai)
     r.record("prepare_schema_for_openai_nested_and_array", test_prepare_schema_for_openai_nested_and_array)
     r.record("convert_context_to_messages", test_convert_context_to_messages)
