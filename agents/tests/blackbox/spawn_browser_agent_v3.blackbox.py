@@ -8417,6 +8417,121 @@ async def test_promoted_session_reattach_retries_once_then_fails_typed():
     assert "raise BrowserStackUnavailableError(" in source[loop_guard:overlays]
 
 
+async def test_challenge_patience_waits_for_provider_auto_solve_and_logs_episodes():
+    """Anti-bot experiment knobs (default OFF): BROWSER_CHALLENGE_PATIENCE_SECONDS lets
+    the provider's own CAPTCHA auto-solve (Tilion cdp_observe) run before
+    recover-challenge or rotation; every challenge episode logs 'antibot.episode'
+    and a task ending unresolved logs 'antibot.stuck'. Uses the existing detectors."""
+    import inspect
+    import time
+
+    from structlog.testing import capture_logs
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("BROWSER_CHALLENGE_PATIENCE_SECONDS", None)
+        assert handler._challenge_patience_seconds() == 0.0, "default off: production unchanged"
+    for raw, expected in (("90", 90.0), ("-5", 0.0), ("soon", 0.0)):
+        with patch.dict(os.environ, {"BROWSER_CHALLENGE_PATIENCE_SECONDS": raw}):
+            assert handler._challenge_patience_seconds() == expected, raw
+
+    class _Page:
+        def __init__(self, titles):
+            self.titles = list(titles)
+            self.url = "https://shop.example/cart"
+
+        async def title(self):
+            return self.titles.pop(0) if len(self.titles) > 1 else self.titles[0]
+
+        def locator(self, _selector):
+            page = self
+
+            class _Body:
+                async def inner_text(self, timeout=None):
+                    return "Verifying you are human" if "moment" in page.titles[0] else "Your cart: 1 item"
+
+            return _Body()
+
+        async def content(self):
+            return "<html><body>cart</body></html>"
+
+    assert await handler._page_heuristically_challenged(_Page(["Just a moment..."])) is True
+
+    class _Broken:
+        def title(self):
+            raise RuntimeError("target closed")
+
+        def locator(self, _selector):
+            raise RuntimeError("target closed")
+
+        def content(self):
+            raise RuntimeError("target closed")
+
+    assert await handler._page_heuristically_challenged(_Broken()) is True, "unknown state is not 'clear'"
+
+    # Clears once the interstitial is gone and the existing classifier confirms.
+    classifier_calls = []
+
+    async def classifier_says_clean():
+        classifier_calls.append(1)
+        return False
+
+    checkpoint = patch.object(handler, "browser_activity_checkpoint", lambda *_args, **_kwargs: None)
+    checkpoint.start()
+    page = _Page(["Just a moment...", "Just a moment...", "Cart"])
+    result = await handler._challenge_patience_wait(
+        page=page, patience_seconds=5, poll_seconds=0.01, still_challenged=classifier_says_clean
+    )
+    assert result["cleared"] is True and result["polls"] == 3, result
+    assert classifier_calls == [1], "the LLM classifier only confirms a heuristic clear"
+
+    # Never clears: bounded by the patience window, then recovery proceeds.
+    async def classifier_says_challenged():
+        return True
+
+    started = time.monotonic()
+    stuck = await handler._challenge_patience_wait(
+        page=_Page(["Cart"]), patience_seconds=0.3, poll_seconds=0.05, still_challenged=classifier_says_challenged
+    )
+    assert stuck["cleared"] is False and 0.25 <= stuck["waited_seconds"] <= 1.0, stuck
+    assert time.monotonic() - started < 2
+    checkpoint.stop()
+
+    episode = {
+        "agent_id": "agent-1",
+        "host": "shop.example",
+        "detector": "llm_classifier",
+        "recovery_reason": "Cloudflare Turnstile interstitial",
+        "waited_seconds": 30.0,
+        "cleared": False,
+        "recovery_invoked": True,
+        "recovery_outcome": "failed: no viable configuration",
+        "provider": "tilion",
+    }
+    with capture_logs() as logs:
+        handler._log_antibot_event("antibot.episode", episode)
+        handler._log_antibot_event("antibot.stuck", {**episode, "final_url_host": "shop.example"})
+    assert [entry["event"] for entry in logs] == ["antibot.episode", "antibot.stuck"]
+    assert all(entry[key] == value for entry in logs for key, value in episode.items())
+
+    # Wiring: patience runs after the existing clean-page check and before any
+    # recover-challenge call; every path logs the episode; the end logs 'stuck'.
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    recovery = source.split('if action_name == "recover_from_challenge":', 1)[1].split(
+        'if action_name in ("attempt_completion", "done"):', 1
+    )[0]
+    clean_check = recovery.index("and not await live_tab_looks_challenged(")
+    patience = recovery.index("patience = await _challenge_patience_wait(")
+    first_recovery = recovery.index("await recover_browser_challenge(")
+    assert clean_check < patience < first_recovery
+    assert "if patience_seconds > 0 and input_page is not None:" in recovery
+    import re
+
+    assert len(re.findall(r'_log_antibot_event\(\s*"antibot\.episode"', recovery)) == 3
+    assert '_log_antibot_event("antibot.stuck"' in source
+
+
 def test_recovery_reconnect_failure_drops_disconnected_browser_handles():
     """A failed promoted-session attach must preserve its real error result."""
     import inspect
@@ -30294,6 +30409,10 @@ async def run_all_tests():
     await r.record_async(
         "promoted_session_reattach_retries_once_then_fails_typed",
         test_promoted_session_reattach_retries_once_then_fails_typed,
+    )
+    await r.record_async(
+        "challenge_patience_waits_and_logs_episodes",
+        test_challenge_patience_waits_for_provider_auto_solve_and_logs_episodes,
     )
     r.record(
         "recovery_guest_cookie_commit_from_tool_param",
