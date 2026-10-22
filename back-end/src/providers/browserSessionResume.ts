@@ -21,6 +21,7 @@ import {
   type RotationStep,
 } from './browser/rotation';
 import type { TilionCarriedState } from './browser/tilion';
+import { restoreTilionBrowserState } from './browser/tilionState';
 import { storedBrowserProvider } from './browser/types';
 import { browserProviderEnabled, browserUseEnabled } from './browser/config';
 
@@ -51,6 +52,8 @@ export interface BrowserSessionResumeDependencies {
   injectUserData: typeof injectUserData;
   closeSession: typeof closeSession;
   getBrowserCaptchaTelemetry: typeof getBrowserCaptchaTelemetry;
+  /** Writes worker-carried state into a non-Tilion replacement (defaults to the real restore). */
+  restoreCarriedState?: typeof restoreTilionBrowserState;
 }
 
 /**
@@ -271,7 +274,7 @@ export async function resumeBrowserSession(
       : {}),
   };
   const result = await dependencies.resumeSession(taskId, resumeOptions);
-  return assembleResumeResponse(taskId, result, dependencies);
+  return assembleResumeResponse(taskId, result, dependencies, options.carriedState);
 }
 
 type RecreatedSession = Awaited<ReturnType<typeof resumeSession>>;
@@ -285,11 +288,63 @@ type RecreatedSession = Awaited<ReturnType<typeof resumeSession>>;
 async function assembleResumeResponse(
   taskId: string,
   result: RecreatedSession,
-  dependencies: BrowserSessionResumeDependencies
+  dependencies: BrowserSessionResumeDependencies,
+  carriedState?: TilionCarriedState
 ) {
-  return withOwnedResumeTransport(result, () =>
-    assembleResumeResponseWithTransport(taskId, result, dependencies)
-  );
+  return withOwnedResumeTransport(result, async () => {
+    const response = await assembleResumeResponseWithTransport(taskId, result, dependencies);
+    await applyCarriedStateToReplacement(taskId, result, dependencies, carriedState);
+    return response;
+  });
+}
+
+/**
+ * The worker captured the live Tilion session's state (cookies, localStorage,
+ * IndexedDB) because the backend cannot connect to it. A Tilion replacement
+ * consumes it inside the Tilion adapter; a switch to another provider (Kernel,
+ * Steel) must write it here, after the DB state, since it is the fresher copy,
+ * then return the tab to the saved URL. Best effort: a failed restore never
+ * fails the rotation, but it is logged.
+ */
+async function applyCarriedStateToReplacement(
+  taskId: string,
+  result: RecreatedSession,
+  dependencies: BrowserSessionResumeDependencies,
+  carriedState: TilionCarriedState | undefined
+): Promise<void> {
+  if (carriedState === undefined || result.provider === 'tilion') return;
+  const browser = result.validationBrowser;
+  if (browser === undefined) {
+    log.warn('Carried browser state not restored: replacement has no validation client', {
+      taskId,
+      provider: result.provider,
+    });
+    return;
+  }
+  try {
+    const restore = dependencies.restoreCarriedState ?? restoreTilionBrowserState;
+    const restored = await restore(browser, carriedState);
+    const savedUrl = result.savedUrl;
+    // Restoring origins navigated the tab through them; put it back where the agent was.
+    if (restored.origins > 0 && savedUrl !== undefined && savedUrl !== '') {
+      await browser
+        .contexts()[0]
+        ?.pages()[0]
+        ?.goto(savedUrl, { waitUntil: 'domcontentloaded', timeout: 15_000 });
+    }
+    log.info('Carried browser state restored into the replacement', {
+      taskId,
+      provider: result.provider,
+      cookies: restored.cookies,
+      origins: restored.origins,
+    });
+  } catch (error) {
+    log.warn('Carried browser state restore failed', {
+      taskId,
+      provider: result.provider,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 async function assembleResumeResponseWithTransport(
@@ -555,7 +610,7 @@ export async function rotateBrowserProxy(
     });
     throw error;
   }
-  const response = await assembleResumeResponse(taskId, result, dependencies);
+  const response = await assembleResumeResponse(taskId, result, dependencies, carry.carriedState);
   const rotationsRemaining = ROTATION_CAP - rotationsUsed;
   const effectiveStep: RotationStep = {
     provider: result.provider === 'local' ? 'steel' : result.provider,

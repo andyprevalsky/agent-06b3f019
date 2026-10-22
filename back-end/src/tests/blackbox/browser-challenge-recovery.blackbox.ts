@@ -15,6 +15,7 @@ import {
 } from '../../providers/browser/challengeRecovery';
 import { registerTilionSwitchCases } from './browser-challenge-recovery-tilion.cases';
 import { registerTilionTransportCases } from './browser-challenge-recovery-tilion-transport.cases';
+import { registerTilionCarryCases } from './browser-challenge-recovery-tilion-carry.cases';
 
 config();
 
@@ -339,6 +340,7 @@ test(
 
 registerTilionSwitchCases(test);
 registerTilionTransportCases(test);
+registerTilionCarryCases(test);
 
 async function main(): Promise<void> {
   let failed = 0;
