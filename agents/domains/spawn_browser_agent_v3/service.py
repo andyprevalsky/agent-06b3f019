@@ -683,7 +683,9 @@ async def extract_session_files(
 
         logger.info(f"[Extract] Processing: {file_path}")
 
-        if str(file_path).startswith(tilion_files.TILION_DOWNLOAD_PATH_PREFIX):
+        # Route by ledger membership: Tilion paths are absolute like other providers'.
+        in_ledger = tilion_files.has_download(session_id, file_path)
+        if in_ledger:
             # Already durable in attachment storage when it landed: reuse it.
             stored_pointer = tilion_files.download_file_pointer(session_id, file_path)
             if stored_pointer is not None:
@@ -692,7 +694,7 @@ async def extract_session_files(
 
         downloaded = (
             tilion_files.read_download(session_id, file_path)
-            if str(file_path).startswith(tilion_files.TILION_DOWNLOAD_PATH_PREFIX)
+            if in_ledger
             else await download_session_file(config, session_id, file_path)
         )
         if not downloaded:

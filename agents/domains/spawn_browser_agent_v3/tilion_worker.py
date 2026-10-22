@@ -19,6 +19,7 @@ needs the browser mid-run happens over it:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
 import uuid
@@ -30,7 +31,12 @@ logger = structlog.get_logger()
 
 TILION_PROVIDER = "tilion"
 TILION_STAGED_UPLOAD_PREFIX = "tilion-staged://"
-TILION_DOWNLOAD_PATH_PREFIX = "tilion-download://"
+# Ledger paths are absolute remote-session paths, like other providers' downloads
+# (verifier file_pointer paths must start with '/'). Reads route by ledger
+# membership, never by this prefix.
+TILION_DOWNLOAD_ROOT = "/tilion-downloads/"
+# Earlier ledger paths, still found in persisted pause/resume contexts.
+LEGACY_TILION_DOWNLOAD_PATH_PREFIX = "tilion-download://"
 # Matches download_persist._MAX_PERSIST_BYTES; Tilion files/fetch caps at 32 MiB.
 _MAX_FILE_BYTES = 25 * 1024 * 1024
 _MAX_SESSION_BYTES = 100 * 1024 * 1024
@@ -41,6 +47,8 @@ _APPLY_TIMEOUT_SECONDS = 30.0
 
 _staged_uploads: Dict[str, Dict[str, Dict[str, Any]]] = {}
 _downloads: Dict[str, Dict[str, Dict[str, Any]]] = {}
+# session -> legacy path -> current ledger path, for paths persisted before the namespace change.
+_download_aliases: Dict[str, Dict[str, str]] = {}
 _tilion_sessions: Set[str] = set()
 
 
@@ -218,9 +226,11 @@ def record_download(
         return None
     ledger = _downloads.setdefault(session_id, {})
     safe_name = os.path.basename(filename) or "download.bin"
-    path = f"{TILION_DOWNLOAD_PATH_PREFIX}{safe_name}"
+    path = tilion_download_path(safe_name, content)
+    # Same basename replaces, like a provider downloads directory.
+    replaced = [key for key, item in ledger.items() if item["filename"] == safe_name and key != path]
     if file_pointer is None:
-        held = sum(len(item["content"] or b"") for key, item in ledger.items() if key != path)
+        held = sum(len(item["content"] or b"") for key, item in ledger.items() if key != path and key not in replaced)
         if held + len(content) > _MAX_SESSION_BYTES:
             logger.warning(
                 "[TilionFiles] Session download budget exhausted; not keeping file",
@@ -229,7 +239,12 @@ def record_download(
                 size=len(content),
             )
             return None
-    # Same basename overwrites, like a provider downloads directory.
+    for key in replaced:
+        ledger.pop(key, None)
+        aliases = _download_aliases.get(session_id) or {}
+        for legacy, current in list(aliases.items()):
+            if current == key:
+                aliases[legacy] = path
     ledger[path] = {
         "content": None if file_pointer is not None else bytes(content),
         "size": len(content),
@@ -243,6 +258,23 @@ def record_download(
     return recorded
 
 
+def tilion_download_path(filename: str, content: bytes) -> str:
+    """Absolute ledger path for a download: stable for the same bytes (retries map to one entry)."""
+    safe_name = os.path.basename(filename) or "download.bin"
+    return f"{TILION_DOWNLOAD_ROOT}{hashlib.sha256(content).hexdigest()[:16]}/{safe_name}"
+
+
+def _resolve_download_path(session_id: Optional[str], path: str) -> str:
+    return (_download_aliases.get(session_id or "") or {}).get(path, path)
+
+
+def has_download(session_id: Optional[str], path: Any) -> bool:
+    """Whether ``path`` names a file in this session's worker ledger (current or legacy path)."""
+    if not session_id or not isinstance(path, str) or not path:
+        return False
+    return _resolve_download_path(session_id, path) in (_downloads.get(session_id) or {})
+
+
 def list_downloads(session_id: str) -> List[Dict[str, Any]]:
     return [
         {"path": path, "size": item["size"], "filename": item["filename"]}
@@ -251,7 +283,7 @@ def list_downloads(session_id: str) -> List[Dict[str, Any]]:
 
 
 def read_download(session_id: str, path: str) -> Optional[Dict[str, Any]]:
-    item = (_downloads.get(session_id) or {}).get(path)
+    item = (_downloads.get(session_id) or {}).get(_resolve_download_path(session_id, path))
     if not item or item["content"] is None:
         return None
     return {"content": item["content"], "filename": item["filename"], "mime_type": item["mime_type"]}
@@ -259,7 +291,7 @@ def read_download(session_id: str, path: str) -> Optional[Dict[str, Any]]:
 
 def download_file_pointer(session_id: str, path: str) -> Optional[Dict[str, Any]]:
     """The durable attachment-storage pointer of a recorded download, if any."""
-    item = (_downloads.get(session_id) or {}).get(path)
+    item = (_downloads.get(session_id) or {}).get(_resolve_download_path(session_id, path))
     return dict(item["file_pointer"]) if item and item.get("file_pointer") else None
 
 
@@ -287,13 +319,21 @@ def restore_downloads(session_id: Optional[str], entries: Any) -> int:
         if not isinstance(entry, dict) or not isinstance(entry.get("file_pointer"), dict):
             continue
         path = str(entry.get("path") or "")
-        if not path.startswith(TILION_DOWNLOAD_PATH_PREFIX):
+        filename = str(entry.get("filename") or os.path.basename(path.rstrip("/")) or "download.bin")
+        if path.startswith(LEGACY_TILION_DOWNLOAD_PATH_PREFIX):
+            legacy = path
+            filename = str(entry.get("filename") or path[len(LEGACY_TILION_DOWNLOAD_PATH_PREFIX) :])
+            # Pointer-only entries have no bytes to digest; the stored object is the identity.
+            identity = str(entry["file_pointer"].get("storage_path") or legacy).encode()
+            path = tilion_download_path(filename, identity)
+            _download_aliases.setdefault(session_id, {})[legacy] = path
+        elif not path.startswith(TILION_DOWNLOAD_ROOT):
             continue
         _downloads.setdefault(session_id, {})[path] = {
             "content": None,
             "size": int(entry.get("size") or 0),
             "mime_type": str(entry.get("mime_type") or "application/octet-stream"),
-            "filename": str(entry.get("filename") or path[len(TILION_DOWNLOAD_PATH_PREFIX) :]),
+            "filename": filename,
             "file_pointer": dict(entry["file_pointer"]),
         }
         restored += 1
@@ -305,7 +345,7 @@ def move_session(previous_session_id: Optional[str], session_id: str) -> None:
     if not previous_session_id or previous_session_id == session_id:
         return
     _tilion_sessions.discard(previous_session_id)
-    for store in (_downloads, _staged_uploads):
+    for store in (_downloads, _staged_uploads, _download_aliases):
         previous = store.pop(previous_session_id, None)
         if previous is not None:
             store.setdefault(session_id, {}).update(previous)
@@ -315,6 +355,7 @@ def release_session(session_id: Optional[str]) -> None:
     if session_id:
         _tilion_sessions.discard(session_id)
         _downloads.pop(session_id, None)
+        _download_aliases.pop(session_id, None)
         _staged_uploads.pop(session_id, None)
 
 
