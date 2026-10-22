@@ -794,6 +794,7 @@ class DOMService:
         """
         self.cdp_url = cdp_url
         self.cdp_multiplexer = cdp_multiplexer
+        self._released_cdp_bytes = 0
         self.viewport_width = viewport_width
         self.viewport_height = viewport_height
         self.downloads_path = downloads_path or browser_downloads_path_for_provider()
@@ -1154,6 +1155,14 @@ class DOMService:
         self._captcha_indicator_task = asyncio.create_task(_loop())
 
     @property
+    def cdp_bytes_received(self) -> int:
+        """CDP bytes the provider relayed to this service (Tilion bills them as
+        egress); kept after disconnect for the activity's cost row."""
+        multiplexer = self.cdp_multiplexer
+        live = int(getattr(multiplexer, "upstream_bytes_received", 0) or 0) if multiplexer is not None else 0
+        return self._released_cdp_bytes + live
+
+    @property
     def single_cdp_client(self) -> bool:
         """True when the provider admits only this worker's CDP socket (Tilion).
 
@@ -1203,6 +1212,7 @@ class DOMService:
         finally:
             multiplexer, self.cdp_multiplexer = self.cdp_multiplexer, None
             if multiplexer is not None:
+                self._released_cdp_bytes += int(getattr(multiplexer, "upstream_bytes_received", 0) or 0)
                 with contextlib.suppress(Exception):
                     await multiplexer.close()
 

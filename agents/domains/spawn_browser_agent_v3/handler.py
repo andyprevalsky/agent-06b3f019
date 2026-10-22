@@ -2249,6 +2249,16 @@ async def _await_browser_action_within_cap(
         raise BrowserActionRaisedTimeout(extract_error_message(error) or type(error).__name__) from error
 
 
+def _tilion_egress_class(session_metadata: Dict[str, Any]) -> str:
+    """Tilion bills residential, ISP and mobile exits as premium egress."""
+    proxy_source = str((session_metadata or {}).get("proxy_source") or "").lower()
+    if any(kind in proxy_source for kind in ("residential", "isp", "mobile")):
+        return "premium"
+    if "direct" in proxy_source or "datacenter" in proxy_source:
+        return "direct"
+    return "premium"  # unknown: the higher rate, so the row errs toward a ceiling
+
+
 def _cdp_multiplexer_kwargs(cdp_multiplexer: Optional[Any]) -> Dict[str, Any]:
     """DOMService kwargs: only single-CDP-client sessions hand over a multiplexer."""
     return {"cdp_multiplexer": cdp_multiplexer} if cdp_multiplexer is not None else {}
@@ -7739,6 +7749,28 @@ async def _spawn_browser_agent_activity_v3_real(
         # Tilion bills 2 credits per session create; count this activity's creates
         # (initial, replacement on resume, rotation/recovery) for the cost row.
         tilion_creates = {"count": 0}
+        # CDP bytes Tilion relayed to this worker, by egress rate class, for
+        # sessions this activity has already left (rotation/recovery).
+        tilion_left_cdp_bytes = {"premium": 0, "direct": 0}
+
+        def _tilion_usage_kwargs() -> Dict[str, Any]:
+            """Cost-row inputs Tilion bills: creates and CDP bytes per rate class."""
+            totals = dict(tilion_left_cdp_bytes)
+            if browser_session_metadata.get("provider") == "tilion":
+                current = int(getattr(dom_service, "cdp_bytes_received", 0) or 0)
+                totals[_tilion_egress_class(browser_session_metadata)] += current
+            return {
+                "session_creates": tilion_creates["count"],
+                "tilion_premium_bytes": totals["premium"],
+                "tilion_direct_bytes": totals["direct"],
+            }
+
+        def _tilion_leave_session() -> None:
+            """Bank the outgoing Tilion session's CDP bytes before a rebind replaces it."""
+            if browser_session_metadata.get("provider") == "tilion":
+                current = int(getattr(dom_service, "cdp_bytes_received", 0) or 0)
+                tilion_left_cdp_bytes[_tilion_egress_class(browser_session_metadata)] += current
+
         fingerprint_injection = None
         user_profile = {}
         # Current backends return auth_options from the same realm-preparation
@@ -9145,7 +9177,7 @@ async def _spawn_browser_agent_activity_v3_real(
                                 pricing_pool=browser_pool,
                                 fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
                                 provider=browser_session_metadata.get("provider"),
-                                session_creates=tilion_creates["count"],
+                                **_tilion_usage_kwargs(),
                             ),
                             **drain_continuity,
                         })
@@ -9778,6 +9810,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             dict(replacement),
                         )
                         browser_stack_replacement_started = True
+                        _tilion_leave_session()
                         reconnected = await _reconnect_browser_stack_after_rotation(
                             new_cdp_url=new_cdp_url,
                             old_dom_service=dom_service,
@@ -10003,7 +10036,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     pricing_pool=browser_pool,
                     fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
                     provider=browser_session_metadata.get("provider"),
-                    session_creates=tilion_creates["count"],
+                    **_tilion_usage_kwargs(),
                 )
                 await _propagate_browser_credentials_with_progress(
                     redact=_redact_activity_value,
@@ -10292,6 +10325,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             dict(config_result),
                         )
                         try:
+                            _tilion_leave_session()
                             reconnected = await _reconnect_browser_stack_after_rotation(
                                 new_cdp_url=new_cdp_url,
                                 old_dom_service=dom_service,
@@ -10826,7 +10860,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             pricing_pool=browser_pool,
                             fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
                             provider=browser_session_metadata.get("provider"),
-                            session_creates=tilion_creates["count"],
+                            **_tilion_usage_kwargs(),
                         )
                         await _propagate_browser_credentials_with_progress(
                             redact=_redact_activity_value,
@@ -11854,7 +11888,7 @@ Based on this feedback, I need to continue working on the task and address the i
             pricing_pool=browser_pool,
             fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
             provider=browser_session_metadata.get("provider"),
-            session_creates=tilion_creates["count"],
+            **_tilion_usage_kwargs(),
         )
         await _propagate_browser_credentials_with_progress(
             redact=_redact_activity_value,
@@ -12055,7 +12089,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     execution_time_ms, usage_by_model, pricing_pool=browser_pool,
                     fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
                     provider=browser_session_metadata.get("provider"),
-                    session_creates=tilion_creates["count"],
+                    **_tilion_usage_kwargs(),
                 ),
                 "execution_time_ms": execution_time_ms,
             })

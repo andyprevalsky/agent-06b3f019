@@ -205,6 +205,8 @@ class SingleCdpConnectionMultiplexer:
         self._slot_confirm_seconds = slot_confirm_seconds
         self._slot_retry_delays = tuple(slot_retry_delays)
         self.slot_busy_retries = 0
+        # Bytes Tilion relayed to us: what it bills as the session's CDP egress.
+        self.upstream_bytes_received = 0
         self.last_upstream_close: Optional[Tuple[Optional[int], str]] = None
 
     @property
@@ -349,6 +351,7 @@ class SingleCdpConnectionMultiplexer:
         reason = ""
         try:
             async for raw in upstream:
+                self.upstream_bytes_received += len(raw) if isinstance(raw, bytes) else len(raw.encode("utf-8"))
                 await self._route_upstream(raw)
         except websockets.ConnectionClosed:
             pass
