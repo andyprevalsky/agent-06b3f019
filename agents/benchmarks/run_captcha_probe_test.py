@@ -6,6 +6,7 @@ from benchmarks.run_captcha_probe import (
     collect_antibot_events,
     decide_verdict,
     load_probes,
+    log_paths,
     summarize_events,
     tree_agent_ids,
 )
@@ -124,3 +125,16 @@ def test_probe_catalog_covers_every_production_site():
         assert ("{frontend_url}" in probe["goal"]) == (name == "stripe-test-payment"), name
         if probe["hold"]:
             assert probe.get("hold_reason"), name
+
+
+def test_every_worker_log_of_a_multi_worker_stack_is_read(tmp_path):
+    """run-bench stacks write worker.log plus worker.1..7.log; the stuck line can land in any of them."""
+    for name, lines in (("worker.log", STUCK_LOG[:2]), ("worker.3.log", STUCK_LOG[2:3]), ("backend.log", [])):
+        (tmp_path / name).write_text("\n".join(lines) + "\n")
+    (tmp_path / "unrelated.txt").write_text(STUCK_LOG[2])
+    paths = log_paths([], [], str(tmp_path))
+    assert [path.name for path in paths] == ["worker.3.log", "worker.log", "backend.log"]
+    assert log_paths([str(tmp_path / "worker*.log")], [], "") == paths[:2]
+    lines = [line for path in paths for line in path.read_text().splitlines()]
+    summary = summarize_events(collect_antibot_events(lines, [BROWSER]))
+    assert summary["stuck"] == 1 and summary["recovery_failed"] == 1
