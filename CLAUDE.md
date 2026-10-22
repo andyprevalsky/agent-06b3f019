@@ -38,6 +38,7 @@ links. A file pointer never substitutes for the diff.
   reset it. A missing end stays UNRECORDED; an active benchmark shows RUNNING.
 - Show the live HTML scorecard inline in the answer, with readable text and a
   compact first view; keep QA screenshots private and never send image previews.
+- By default, publish every scorecard as HTML and place its Markdown visual link alone in a final-answer paragraph so boxes.dev embeds the UI; use text or code blocks only when embedding is unavailable.
 - Show **current-assignment tokens spent** and rolling **15-minute tokens/min**
   in worker and parent rows, replacing percentages and pp/min. Use actual
   timestamped harness counters (input + output, including cached input), with a
@@ -693,7 +694,11 @@ of truth; do not duplicate them into other files.
 - **Database:** Docker is typically unavailable on the Cloud VM, so the stack uses
   **system PostgreSQL** at `localhost:5432` (`postgres`/`postgres`, db `victoria`);
   `scripts/run.sh` and the blackbox runner auto-fall back to it. Start it with
-  `sudo service postgresql start` if needed.
+  `sudo service postgresql start` if needed. `victoria` belongs to the
+  `.cloud-env` identity (same name and port); any other workspace or port gets
+  its own `victoria_stack_<workspace>[_p<port>]`
+  (`workspace_system_pg_db_name`). Set `ROSE_SYSTEM_PG_DB_NAME` only to target
+  a specific database deliberately.
 - **Toolchain:** `agents/venv` uses Python 3.11 (the pinned version; system
   `python3` may be newer). A few suites also need `ruby` + `rsync` installed
   (deploy-gate + cloudbench tests) — otherwise you'll see `ruby: command not

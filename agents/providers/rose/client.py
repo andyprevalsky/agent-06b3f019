@@ -64,6 +64,7 @@ from providers.rose.errors import (
 )
 from providers.rose.foundry import foundry_candidates, foundry_complete, foundry_configured
 from providers.rose.gpt_auth import gpt_auth_complete, openai_api_key_complete
+from providers.rose.inter_agent_context import settle_trailing_inter_agent_messages
 from providers.rose.legacy_adapter import classify_claude_token_error, classify_gpt_token_error
 from providers.rose.policy import anthropic_family_excluded
 from providers.rose.pools import PoolName, foundry_model, get_pool
@@ -656,6 +657,11 @@ class RoseClient:
 
         call_site = kwargs.get("call_site", "unspecified")
         agent_id = kwargs.get("agent_id")
+        # A trailing inter-agent (assistant-role) message would be stripped as
+        # assistant prefill by every transport; send it as user role instead.
+        settled_messages = settle_trailing_inter_agent_messages(kwargs.get("messages"))
+        if settled_messages is not kwargs.get("messages"):
+            kwargs = {**kwargs, "messages": settled_messages}
         messages = kwargs.get("messages")
         pool = kwargs.get("pool")
         probe_read_only = os.environ.get("BENCHMARK_DEMO_CACHE_READ_ONLY") == "1" and os.environ.get(

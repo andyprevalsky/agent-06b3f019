@@ -714,6 +714,8 @@ def test_leaving_a_blocking_child_wait_without_the_result_releases_the_hold(monk
     clock.register('child', parent='root')
     clock.commit('root', started_ms=clock.action_time('root'), elapsed_ms=DAY)
     root = _simulated_workflow('root')
+    # A delivered generation_handoff_available signal makes the park read the pointer.
+    importlib.import_module('helpers.wait_condition_or_handoff').note_generation_handoff(root, 'new-queue', 'old-queue')
     root.__dict__.update(child_tool_ids={}, child_results={}, pending_children=set(), child_workflow_ids={},
                          simulated_world_time_ms=DAY)
 
@@ -770,6 +772,8 @@ def test_cancelling_a_blocking_child_wait_releases_the_hold_and_keeps_the_cancel
     clock.register('child', parent='root')
     clock.commit('root', started_ms=clock.action_time('root'), elapsed_ms=DAY)
     root = _simulated_workflow('root')
+    # A delivered generation_handoff_available signal makes the park read the pointer.
+    importlib.import_module('helpers.wait_condition_or_handoff').note_generation_handoff(root, 'new-queue', 'old-queue')
     root.__dict__.update(child_tool_ids={}, child_results={}, pending_children=set(), child_workflow_ids={},
                          simulated_world_time_ms=DAY)
 

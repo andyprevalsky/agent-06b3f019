@@ -8,6 +8,7 @@ import { config } from 'dotenv';
 import { WorkflowNotFoundError } from '@temporalio/client';
 import { prisma } from '../src/providers/database';
 import { readAgentQueuePointer, setCurrentAgentQueue } from '../src/providers/agentQueuePointer';
+import { broadcastGenerationHandoff } from '../src/providers/generationHandoffBroadcast';
 import {
   activateTemporalWorkerBuild,
   getTemporalClient,
@@ -276,6 +277,20 @@ async function activate(plan: WorkerProcessPlan): Promise<void> {
   }
 }
 
+/** Wake old-generation idle waits now; best-effort, after the lease is released. */
+async function broadcastAfterActivation(plan: WorkerProcessPlan): Promise<void> {
+  const liveQueue = `${plan.artifact.baseTaskQueue}@${plan.artifact.surfaceHash}`;
+  if (!plan.previousQueue || plan.previousQueue === liveQueue) return;
+  try {
+    const report = await broadcastGenerationHandoff({ fromQueue: plan.previousQueue, liveQueue });
+    process.stdout.write(`${JSON.stringify({ generationHandoffBroadcast: report })}\n`);
+  } catch (error) {
+    process.stderr.write(
+      `Generation handoff broadcast failed; agents hand off at their next re-check: ${String(error)}\n`
+    );
+  }
+}
+
 async function main(): Promise<void> {
   config();
   if (!process.argv.includes('--execute'))
@@ -305,6 +320,7 @@ async function main(): Promise<void> {
     throw new Error('Process controller database differs from retained custody');
   if (action === 'activate') {
     await activate(plan);
+    await broadcastAfterActivation(plan);
     return;
   }
   if (action === 'stage') {

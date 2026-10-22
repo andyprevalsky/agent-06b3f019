@@ -25,11 +25,11 @@ from providers.rose.errors import RoseError, RoseRateLimitError
 from providers.rose.streaming import parse_openai_sse
 from providers.rose.transforms import transform_messages_for_openai
 from providers.rose.transport import post_cerebras_stream
+from providers.rose.types import StreamChunk
 from providers.rose.waterfall import _openrouter_tool_choice, _openrouter_tools
 
 if TYPE_CHECKING:
     from providers.rose.pools import PoolSpec
-    from providers.rose.types import StreamChunk
 
 logger = structlog.get_logger()
 
@@ -244,6 +244,33 @@ def build_cerebras_body(
     return body
 
 
+def _limit_reached_as_length(
+    chunk: StreamChunk, max_tokens: Optional[int], *, request_id: str, call_site: Optional[str]
+) -> StreamChunk:
+    """Report a reply that spent the whole output limit as ``finish_reason="length"``.
+
+    With strict tool grammars Cerebras can stop at ``max_completion_tokens``
+    yet report ``tool_calls`` for a call whose arguments were closed early, so
+    the cut-off reply would be accepted as complete. The used token count is
+    the provider's own evidence that the limit, not the model, ended the reply.
+    """
+    if chunk.kind != "usage" or not max_tokens:
+        return chunk
+    completion_tokens = int(chunk.data.get("completion_tokens") or 0)
+    reported = str(chunk.data.get("finish_reason") or "")
+    if completion_tokens < max_tokens or reported == "length":
+        return chunk
+    logger.warning(
+        "rose.cerebras.output_limit_reached",
+        request_id=request_id,
+        call_site=call_site,
+        reported_finish_reason=reported,
+        completion_tokens=completion_tokens,
+        max_tokens=max_tokens,
+    )
+    return StreamChunk(kind="usage", data={**chunk.data, "finish_reason": "length"})
+
+
 async def cerebras_complete(
     *,
     pool_spec: PoolSpec,
@@ -326,7 +353,7 @@ async def cerebras_complete(
                 request_id=request_id,
                 idle_timeout_s=idle_timeout_s,
             ):
-                yield chunk
+                yield _limit_reached_as_length(chunk, max_tokens, request_id=request_id, call_site=call_site)
             stream_completed = True
     # TLS record alerts can escape httpx as raw SSLError while reading headers.
     except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError, ssl.SSLError) as exc:

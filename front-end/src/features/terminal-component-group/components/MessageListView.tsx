@@ -3,8 +3,10 @@
  *
  * [TOOL ACTIVE] -> render tool last; thinking hidden
  * [FINAL ANSWER STREAM] -> render attention independently of thinking state
- * [NO TOOL + THINKING] -> render banners, then thinking last
+ * [NO TOOL + THINKING] -> render banners, then thinking
  * [IDLE] -> render persisted content only
+ * Web preview notice ("Preview Mode… Open Mac App") is ALWAYS the final item,
+ * after live tools and the Thinking indicator.
  *
  * Presentational shell for MessageList. Receives all state/derived values
  * as props; performs no hook calls of its own. Extracted to keep the
@@ -199,7 +201,6 @@ export function MessageListView(props: MessageListViewProps) {
       {showAttention && streaming.attention && (
         <StreamingAttentionBubble attention={streaming.attention} onSendMessage={onSendMessage} />
       )}
-      {showWebPreview && agent !== null && <WebPreviewBanner agentId={agent.agent_id} />}
       <StreamingTools tools={tailTools(streaming.tools, webSearchGrouping)} compact={compact} />
       <ThinkingIndicators
         visible={thinkingVisible}
@@ -208,6 +209,8 @@ export function MessageListView(props: MessageListViewProps) {
         streamingTokenCount={thinkingStreamTokenCount}
         animatedTokenCount={animatedTokenCount}
       />
+      {/* Always the very last transcript item, after live tools and Thinking. */}
+      {showWebPreview && agent !== null && <WebPreviewBanner agentId={agent.agent_id} />}
       <div ref={scrollEndRef} />
     </div>
   );

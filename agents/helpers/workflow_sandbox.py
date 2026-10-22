@@ -33,6 +33,12 @@ def workflow_sandbox_restrictions() -> SandboxRestrictions:
         # Tool schemas and prompts built inside run_agent read these env
         # switches; they are fixed for the life of the worker process.
         "utils.kill_switches",
+        # Env-backed settings, also fixed for the life of the worker process.
+        # Re-importing config per workflow instance re-ran load_dotenv on
+        # every sandbox instance (activity modules call load_config() at
+        # import); through the sandbox's os.environ proxy that cost ~0.4s per
+        # workflow task, so cache-miss replays slowed by an order of magnitude.
+        "config",
     )
 
 

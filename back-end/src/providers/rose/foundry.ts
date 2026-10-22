@@ -320,7 +320,9 @@ async function reportRateLimitOrFail(
   try {
     await reportSharedFoundryRateLimit(region.host.toLowerCase(), deployment, retryAfterSeconds);
   } catch (cause) {
-    throw Object.assign(new RoseServerError('Foundry shared cooldown authority unavailable'), { cause });
+    throw Object.assign(new RoseServerError('Foundry shared cooldown authority unavailable'), {
+      cause,
+    });
   }
 }
 
@@ -401,11 +403,7 @@ export async function* foundryComplete(opts: FoundryOptions): AsyncIterable<Rose
       const status = response.status;
       lastError = recordHttpFailure(status, region, deployment, response.headers);
       if (status === 429)
-        await reportRateLimitOrFail(
-          region,
-          deployment,
-          retryHintSeconds(response.headers)
-        );
+        await reportRateLimitOrFail(region, deployment, retryHintSeconds(response.headers));
       log.warn('foundry.attempt_failed', { ...where, status });
       // A request-shape error applies to every region and deployment.
       if (status === 400) break;

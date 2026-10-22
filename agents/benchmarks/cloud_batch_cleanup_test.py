@@ -194,7 +194,7 @@ async def _assert_evaluated_before_teardown(
                 events.append("native-joined")
                 return receipt
 
-        async def settled_usage(*_args):
+        async def settled_usage(*_args, **_kwargs):
             assert events == ["native-joined"], "native provider work must join before cost is frozen"
             return {}
 

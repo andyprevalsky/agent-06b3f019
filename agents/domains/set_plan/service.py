@@ -22,11 +22,14 @@ from domains.set_plan.config import (
 )
 from domains.set_plan.types import PlanData, TaskObject
 from helpers.attachments import FilePointer
+from helpers.background_agents import model_agent_row_text
+from helpers.context_compaction import is_excluded_from_model
 from helpers.context_scope import is_internal_subagent_message
+from providers.rose.inter_agent_context import inter_agent_message, settle_trailing_inter_agent_messages
 from providers.rose.pools import PLANNER_MODEL
 from tools.prompts import TOOL_PROMPTS
 from utils.simulated_clock import world_time_cursor_ms
-from utils.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS, TOOL_MODELS
+from utils.tool_schemas import PLAN_PHASE_TOOLS, PLANNER_EXECUTE_TOOLS, TOOL_MODELS
 
 PLANNER_CONTEXT_FULL_TEXT_LIMIT = 6000
 PLANNER_CONTEXT_HEAD_CHARS = 3000
@@ -323,12 +326,12 @@ def _render_llm_tool_schema(name: str, description: str, model: Any) -> str:
 def get_planner_tools_description() -> str:
     """Get compact execute-tool schemas and descriptions for the planner.
 
-    Single source of truth: execute-phase tools, their prompt fragments, and
-    their Pydantic schemas. Planner-only spawn aliases are documented in the
-    planner prompt itself.
+    Single source of truth: the execute tools a DAG task can be assigned
+    (PLANNER_EXECUTE_TOOLS), their prompt fragments, and their Pydantic
+    schemas. Planner-only spawn aliases are documented in the planner prompt.
     """
     sections = []
-    for name in EXECUTE_PHASE_TOOLS:
+    for name in PLANNER_EXECUTE_TOOLS:
         model = TOOL_MODELS.get(name)
         if name in TOOL_PROMPTS:
             description = TOOL_PROMPTS[name].strip()
@@ -545,7 +548,7 @@ def build_planner_messages(context: list[dict[str, Any]]) -> tuple[list[dict[str
     declared_calls: dict[str, str] = {}
 
     for msg in context:
-        if is_internal_subagent_message(msg):
+        if is_internal_subagent_message(msg) or is_excluded_from_model(msg):
             continue
 
         role = msg.get("role", "").upper()
@@ -553,6 +556,12 @@ def build_planner_messages(context: list[dict[str, Any]]) -> tuple[list[dict[str
         message_id = msg.get("message_id")
         text = _strip_reference_annotation(text, message_id if isinstance(message_id, str) else None)
         metadata = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
+
+        agent_text = model_agent_row_text(msg) if role == "USER" else None
+        if agent_text is not None:
+            # Agent-to-agent content: assistant-role (Codex), never the user's goal.
+            base_messages.append(inter_agent_message(_compact_planner_text("ASSISTANT", agent_text)))
+            continue
 
         if role == "USER" and text:
             user_messages.append(text)
@@ -625,7 +634,10 @@ def build_planner_messages(context: list[dict[str, Any]]) -> tuple[list[dict[str
         for message in repaired
         if not (message.get("role") == "assistant" and not message.get("content") and not message.get("tool_calls"))
     ]
-    return repaired, user_messages
+    # The str marker does not survive the activity boundary, so a trailing
+    # inter-agent message is settled to user role here (RoseClient does the
+    # same for in-activity callers).
+    return settle_trailing_inter_agent_messages(repaired), user_messages
 
 
 async def run_planner_attempt(

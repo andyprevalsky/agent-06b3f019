@@ -80,9 +80,13 @@ STEP_PROMPT_TOKENS = 900
 BROWSER_TOOL_CALL = {
     "tool": "spawn_agent",
     "type": "browser",
+    "task_name": "checkout",
     "goal": "Buy the $12 item on shop.example.com and report the confirmation number",
     "start_url": "https://shop.example.com",
     "output_schema": {"fields": [{"name": "confirmation", "type": "str", "required": True}]},
+    # Foreground parking contract; background cutover is covered by
+    # workflow.blackbox wf_cutover_background_browser_resumes_in_background_and_notifies_once.
+    "run_in_background": False,
 }
 
 ACTIVITIES = [
@@ -135,7 +139,7 @@ def _long_activity_outcomes(outcomes: list[tuple[str, str, Any]], name: str) -> 
 
 
 class _Backend:
-    """The backend and Supabase as the workers see them: live queue pointer, browser control, realtime."""
+    """The backend and Supabase as the workers see them: queue pointer, browser control + inbox, realtime."""
 
     def __init__(self, live_queue: str) -> None:
         self.live_queue = live_queue
@@ -145,6 +149,9 @@ class _Backend:
         path = request.url.path
         if path == "/api/agent-queue-pointer":
             return httpx.Response(200, json={"taskQueue": self.live_queue, "surfaceHash": "deploy-e2e"})
+        if request.method == "GET" and path.startswith("/api/agents/") and path.endswith("/agent-inbox"):
+            # The browser step loop polls its agent-to-agent inbox every step.
+            return httpx.Response(200, json={"messages": []})
         if request.method == "GET" and path.startswith("/api/agents/"):
             agent_id = path.removeprefix("/api/agents/")
             if agent_id in wf.CUTOVER_MESSAGES:

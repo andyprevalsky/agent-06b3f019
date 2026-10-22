@@ -555,9 +555,70 @@ def test_every_scheduled_activity_is_registered():
                     continue
                 if name not in registered:
                     violations.append(f"{path.relative_to(AGENTS_ROOT)}:{node.lineno}: {name}")
-    assert not violations, (
-        "Scheduled activities missing from worker.py registered_activities:\n" + "\n".join(violations)
+    assert not violations, "Scheduled activities missing from worker.py registered_activities:\n" + "\n".join(
+        violations
     )
+
+
+def _repo_typeddict_names() -> set[str]:
+    names: set[str] = set()
+    for dirname in _ACTIVITY_SCAN_DIRS + ("providers", "utils"):
+        root = AGENTS_ROOT / dirname
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            stringified = any(
+                isinstance(node, ast.ImportFrom)
+                and node.module == "__future__"
+                and any(alias.name == "annotations" for alias in node.names)
+                for node in tree.body
+            )
+            if not stringified:
+                continue  # field annotations are real objects; decoding resolves them
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef) and any(
+                    (isinstance(base, ast.Name) and base.id == "TypedDict")
+                    or (isinstance(base, ast.Attribute) and base.attr == "TypedDict")
+                    for base in node.bases
+                ):
+                    names.add(node.name)
+    return names
+
+
+def test_activity_return_types_decode_in_workflow_sandbox():
+    """No @activity.defn returns a TypedDict whose fields are stringified annotations.
+
+    The workflow sandbox decodes activity results with get_type_hints; a
+    TypedDict from a pass-through module with stringified annotations raised
+    NameError there ("Failed decoding arguments") and retried the workflow
+    task forever (send_agent_message_activity, 2026-10-19). Return plain
+    Dict[str, Any] and document the shape, or define the TypedDict in a
+    module without ``from __future__ import annotations``.
+    """
+    typeddicts = _repo_typeddict_names()
+    violations: list[str] = []
+    for dirname in _ACTIVITY_SCAN_DIRS + ("providers",):
+        root = AGENTS_ROOT / dirname
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*.py")):
+            if "test" in path.parts or "tests" in path.parts:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or node.returns is None:
+                    continue
+                if not any("activity.defn" in ast.unparse(dec) for dec in node.decorator_list):
+                    continue
+                used = {n.id for n in ast.walk(node.returns) if isinstance(n, ast.Name)}
+                used |= {
+                    n.value for n in ast.walk(node.returns) if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                }
+                bad = sorted(used & typeddicts)
+                if bad:
+                    violations.append(f"{path.relative_to(AGENTS_ROOT)}:{node.lineno}: {node.name} -> {bad}")
+    assert not violations, "Activities must not return TypedDicts (sandbox decode):\n" + "\n".join(violations)
 
 
 _WORKFLOW_SANDBOX_MODULE = AGENTS_ROOT / "helpers" / "workflow_sandbox.py"
@@ -584,8 +645,8 @@ def test_workflow_sandbox_is_production_only():
                     violations.append(f"{path.relative_to(AGENTS_ROOT)}:{node.lineno}: imports {sorted(names)}")
             elif isinstance(node, ast.Attribute) and node.attr in _SANDBOX_CONFIG_NAMES:
                 violations.append(f"{path.relative_to(AGENTS_ROOT)}:{node.lineno}: uses {node.attr}")
-    assert not violations, (
-        "Run workflows with helpers.workflow_sandbox.production_workflow_runner():\n" + "\n".join(violations)
+    assert not violations, "Run workflows with helpers.workflow_sandbox.production_workflow_runner():\n" + "\n".join(
+        violations
     )
 
 
@@ -601,6 +662,7 @@ async def run_all_tests():
     r.record("every_workflow_park_is_cutover_classified", test_every_workflow_park_is_cutover_classified)
     r.record("every_scheduled_activity_is_registered", test_every_scheduled_activity_is_registered)
     r.record("workflow_sandbox_is_production_only", test_workflow_sandbox_is_production_only)
+    r.record("activity_return_types_decode_in_sandbox", test_activity_return_types_decode_in_workflow_sandbox)
     return r.all_passed
 
 

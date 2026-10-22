@@ -10,6 +10,11 @@
  *   - useAttachments     : attachment lifecycle + paste/drag
  *   - usePriceLimit      : edit/save/cancel cost-limit flow
  *
+ * TOP ATTACHMENT (props.topAttachment, e.g. BackgroundAgentsBanner):
+ *   [NONE]     -> box has all corners rounded
+ *   [RENDERED] -> attachment sits flush above (same column/edges), box top
+ *                 corners square off via `data-query-input-attachment`
+ *
  * INPUT STATE:
  *   [EMPTY] -> (type) -> [HAS_TEXT] -> (submit/clear) -> [EMPTY]
  *
@@ -66,7 +71,8 @@ export default function QueryInput(props: QueryInputProps) {
 
   return (
     <div className="w-full md:px-0">
-      <div className="max-w-4xl mx-auto">
+      <div className="group/query-input max-w-4xl mx-auto">
+        {props.topAttachment}
         <QueryInputShell
           dripStyles={dripStyles}
           drippiness={drippiness}
@@ -240,6 +246,8 @@ function QueryInputShell({
     <div
       className={cn(
         'relative rounded-xl p-3 shadow-lg border overflow-hidden transition-colors',
+        // Attached banner above (topAttachment): join flush, square top corners.
+        'group-has-[[data-query-input-attachment]]/query-input:rounded-t-none',
         isDragOver ? 'border-primary border-2 bg-primary/5' : 'border-border',
       )}
       style={buildDripContainerStyle(dripStyles, drippiness, isDragOver)}

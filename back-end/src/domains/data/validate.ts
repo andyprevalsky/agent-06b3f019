@@ -26,6 +26,7 @@ import {
   parseAgentPaging,
 } from './validate.agent';
 import { googleSourceOfPath, parseGoogleSourceFilters } from './validate.google';
+import { agentTaskPathParam } from './path';
 
 function databaseRegexPattern(pattern: string, multiline: boolean): string {
   if (!multiline) return pattern;
@@ -97,12 +98,15 @@ function parseBoolean(value: unknown, defaultValue: boolean): boolean {
 
 function validateAgentSourceSelection(params: GrepParams, sources: ValidSource[]): void {
   const hasTrajectories = sources.includes('agent_trajectories');
+  // An agent task path (/root/...) also scopes agent_network.
+  const networkTracePath =
+    sources.includes('agent_network') && agentTaskPathParam(params.trace_path) !== undefined;
   if (
     !hasTrajectories &&
     [
       params.record_kind,
       params.surface,
-      params.trace_path,
+      networkTracePath ? undefined : params.trace_path,
       params.until,
       params.order,
       params.page_after,

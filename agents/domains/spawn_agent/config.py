@@ -37,6 +37,12 @@ EXPLORE_FAST_MODE_DEPTH = "deep"
 # Turns before the cap at which the graceful wind-down nudge is injected.
 EXPLORE_WINDDOWN_WINDOW = 1
 
+# Model-visible result of an explore completion deferred because an agent
+# message arrived before the answer was delivered (the message follows it).
+EXPLORE_COMPLETION_DEFERRED_FOR_MESSAGE = (
+    "Result not delivered: a new message for you arrived before it; the message follows."
+)
+
 
 def explore_limits_for_depth(depth: str | None) -> tuple[int, timedelta]:
     """Resolve an explore depth to (max_iterations, activity_timeout).

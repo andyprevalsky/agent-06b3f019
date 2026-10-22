@@ -16,6 +16,7 @@ from domains.knowledge_base.config import (
     URL_DISPLAY_MAX_LENGTH,
     USER_MESSAGE_TRUNCATE_LENGTH,
 )
+from helpers.background_agents import is_agent_authored_user_metadata
 
 if TYPE_CHECKING:
     from domains.knowledge_base.types import ContextMessage
@@ -100,7 +101,13 @@ def build_trajectory_blueprint(  # noqa: C901
         text = msg.get("text", "")
 
         # Collect user messages (skip hidden/system messages)
-        if role == "USER" and text and not metadata.get("hidden") and not metadata.get("isCustomSystemPrompt"):
+        if (
+            role == "USER"
+            and text
+            and not metadata.get("hidden")
+            and not metadata.get("isCustomSystemPrompt")
+            and not is_agent_authored_user_metadata(metadata)
+        ):
             user_messages.append(text)
 
         # Track reasoning steps (ASSISTANT messages without tool calls)

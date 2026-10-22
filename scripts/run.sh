@@ -931,6 +931,10 @@ else
     if [ "$BENCHMARK_ISOLATED_RUN" = "true" ] && [ -n "${BENCHMARK_RUN_ID:-}" ]; then
         SAFE_BENCHMARK_RUN_ID=$(printf '%s' "$BENCHMARK_RUN_ID" | tr -c '[:alnum:]' '_')
         LOCAL_DB_NAME="victoria_bench_${SAFE_BENCHMARK_RUN_ID}"
+    else
+        # One server serves every workspace on this host; never default a named
+        # workspace onto the shared `victoria` (same resolver as setup-db.sh).
+        LOCAL_DB_NAME="$(workspace_system_pg_db_name "$SCRIPT_DIR/..")" || exit 1
     fi
     LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$SYSTEM_PG_PORT/$LOCAL_DB_NAME"
 

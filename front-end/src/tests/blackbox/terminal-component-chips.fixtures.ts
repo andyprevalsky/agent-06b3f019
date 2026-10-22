@@ -21,5 +21,29 @@ export function makeAgentTreeNode(overrides: Record<string, unknown> = {}) {
     outputSchema: overrides.outputSchema,
     structuredOutput: overrides.structuredOutput,
     failureContext: overrides.failureContext,
+    createdAt: overrides.createdAt,
+    updatedAt: overrides.updatedAt,
+    taskPath: overrides.taskPath,
+    backgroundTasks: overrides.backgroundTasks,
   };
+}
+
+/**
+ * Counts reads of `parentAgentId` on the given tree nodes. Every tree scan
+ * visits a node by reading its parent, so `reads` measures total scan work.
+ */
+export function countParentReads(nodes: Iterable<object>): { reads: number } {
+  const counter = { reads: 0 };
+  for (const node of nodes) {
+    const parent = (node as { parentAgentId?: unknown }).parentAgentId;
+    Object.defineProperty(node, 'parentAgentId', {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        counter.reads += 1;
+        return parent;
+      },
+    });
+  }
+  return counter;
 }

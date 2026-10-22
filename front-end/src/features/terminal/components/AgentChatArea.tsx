@@ -12,6 +12,10 @@
  *   pendingApproval === null  → show QueryInput
  *   pendingApproval !== null  → replace QueryInput with ApprovalChip
  *
+ * AGENTS BANNER (BackgroundAgentsBanner, attached to the top of QueryInput):
+ *   0 running agents → hidden (brief "All agents finished" after the last one)
+ *   N running        → "Running N agents" ⇄ expanded live hierarchy
+ *
  * TEST OBSERVABILITY:
  *   terminal-input-area[data-chat-mode] mirrors the rendered chat/agent mode
  *   transition without changing interaction or visual behavior.
@@ -25,7 +29,7 @@ import * as analytics from '@/lib/analytics';
 import { isBenchmarkSharedView } from '@/lib/benchmarkShare';
 
 import { ApprovalChip } from '@/features/terminal-component-group';
-import { QueryInput } from '@/features/terminal-component-group';
+import { QueryInput, BackgroundAgentsBanner } from '@/features/terminal-component-group';
 import { GateStack } from './GateStack';
 
 import { useTickerCarousel } from '../hooks/useTickerCarousel';
@@ -249,6 +253,14 @@ function ChatQueryInputBox({
   return (
     <div className="relative z-10">
       <QueryInput
+        topAttachment={
+          <BackgroundAgentsBanner
+            key={a.selectedAgentId ?? 'no-agent'}
+            selectedAgentId={a.selectedAgentId}
+            messages={a.messages}
+            onNavigate={(agentId) => a.handleSelectAgent(agentId)}
+          />
+        }
         value={a.messageInput}
         onChange={a.setMessageInput}
         onSubmit={(attachments) => {

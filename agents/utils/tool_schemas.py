@@ -34,6 +34,12 @@ from utils.response_schema_constraints import (
     coerce_direct_bounds_to_entries,
 )
 from utils.user_facing_writing_prompt import user_facing_text_description
+from utils.wait_for_bounds import (
+    WAIT_FOR_AGENTS_DEFAULT_TIMEOUT_SECONDS,
+    WAIT_FOR_AGENTS_MAX_TIMEOUT_SECONDS,
+    WAIT_FOR_AGENTS_MIN_TIMEOUT_SECONDS,
+    resolve_wait_for_agents_timeout,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -42,6 +48,19 @@ logger = structlog.get_logger(__name__)
 # Phase Tool Lists (source of truth for agent phases)
 # Must be defined early so PlanActionType can be used in PlannerTask
 # ============================================================================
+
+# Mirrors helpers.agent_addressing.TASK_NAME_PATTERN (utils may not
+# import domains; background_agents.blackbox asserts the two stay equal).
+SPAWN_TASK_NAME_PATTERN = r"^[a-z][a-z0-9_]{0,39}$"
+SPAWN_TASK_NAME_DESCRIPTION = (
+    "Required. Short lowercase slug for this child (a-z, 0-9, _; e.g. 'venue_research'), unique among "
+    "the agents you spawn. Its address becomes <your path>/<task_name>, e.g. /root/outreach/draft_a."
+)
+RUN_IN_BACKGROUND_DESCRIPTION = (
+    "Default true: the call returns immediately with the agent's address and the agent keeps "
+    "working while you continue. Set false only when you need this agent's result before you can "
+    "do anything else."
+)
 
 # Tools available during PLAN phase (research + create execution plan)
 PLAN_PHASE_TOOLS = [
@@ -58,6 +77,8 @@ EXECUTE_PHASE_TOOLS = [
     "send_message_to_user_execute_phase",
     "call_phone_number",
     "message_person",
+    "send_message_to_agent",
+    "kill_agent",
     "attempt_completion",
 ]
 
@@ -82,6 +103,25 @@ PLANNER_ASSIGNABLE_TOOLS = [
     "message_person",
     "send_message_to_user_execute_phase",
     "reasoning",  # Pure thinking/analysis step (no tool call)
+]
+
+# Planner alias -> the execute tool the DAG executor actually runs.
+TOOL_ALIASES = {
+    "spawn_explore_agent": "spawn_agent",
+    "spawn_browser_agent": "spawn_agent",
+    "spawn_code_agent": "spawn_agent",
+    "spawn_general_purpose_agent": "spawn_agent",
+    "spawn_general_purpose_agent_for_each": "spawn_agent",
+    "wait_seconds": "wait_for",  # Backward compat for old plans
+}
+
+# Execute tools the planner can assign (via TOOL_ALIASES), in EXECUTE_PHASE_TOOLS
+# order. Tools a DAG task cannot be assigned (kill_agent, send_message_to_agent,
+# attempt_completion) are excluded, so the planner prompt never describes them.
+PLANNER_EXECUTE_TOOLS = [
+    name
+    for name in EXECUTE_PHASE_TOOLS
+    if name in {TOOL_ALIASES.get(alias, alias) for alias in PLANNER_ASSIGNABLE_TOOLS}
 ]
 
 
@@ -284,7 +324,7 @@ class ResponseSchemaConfig(BaseModel):
 
 
 class WaitForTool(BaseModel):
-    """Pause execution until a timestamp or natural-language condition is met."""
+    """Pause until a timestamp, a natural-language condition, or other agents finish or message you."""
 
     tool: Literal["wait_for"]
     description: str = Field(
@@ -296,11 +336,27 @@ class WaitForTool(BaseModel):
     )
     until_timestamp: Optional[str] = Field(
         default=None,
-        description="ISO 8601 timestamp to wait until. Mutually exclusive with condition.",
+        description="ISO 8601 timestamp to wait until. Mutually exclusive with condition and agents.",
     )
     condition: Optional[str] = Field(
         default=None,
         description="Natural language condition for an explore agent to check on periodically.",
+    )
+    agents: Optional[Union[List[str], Literal["any"]]] = Field(
+        default=None,
+        description=(
+            'Agents to wait on: addresses like "/root/outreach/draft_a", "parent" or agent ids, or "any" '
+            "for any agent you spawned. Wakes when one finishes or messages you. Mutually exclusive with "
+            "until_timestamp and condition."
+        ),
+    )
+    timeout_seconds: Optional[int] = Field(
+        default=None,
+        description=(
+            f"Maximum seconds to wait for agents (default {WAIT_FOR_AGENTS_DEFAULT_TIMEOUT_SECONDS}, at most "
+            f"{WAIT_FOR_AGENTS_MAX_TIMEOUT_SECONDS}; values below {WAIT_FOR_AGENTS_MIN_TIMEOUT_SECONDS} are raised "
+            f"to {WAIT_FOR_AGENTS_MIN_TIMEOUT_SECONDS}). Only valid with agents."
+        ),
     )
     check_interval_seconds: int = Field(
         default=900,
@@ -314,6 +370,14 @@ class WaitForTool(BaseModel):
         le=100,
         description="Maximum number of condition checks before giving up (1-100, default 20). Only used with condition.",
     )
+
+    @field_validator("timeout_seconds", mode="before")
+    @classmethod
+    def _clamp_agents_timeout(cls, value: Any) -> Any:
+        # Codex wait floor: below the minimum is clamped (the handler notes it), above the maximum rejected.
+        if value is None:
+            return None
+        return resolve_wait_for_agents_timeout(value)[0]
 
     @model_validator(mode="before")
     @classmethod
@@ -337,10 +401,23 @@ class WaitForTool(BaseModel):
 
     @model_validator(mode="after")
     def check_mutual_exclusion(self) -> "WaitForTool":
-        if self.until_timestamp and self.condition:
-            raise ValueError("until_timestamp and condition are mutually exclusive.")
-        if not self.until_timestamp and not self.condition:
-            raise ValueError("Either until_timestamp or condition must be provided.")
+        modes = [name for name in ("until_timestamp", "condition") if getattr(self, name)]
+        if self.agents is not None:
+            modes.append("agents")
+        if len(modes) > 1:
+            raise ValueError(
+                f"{' and '.join(modes)} are mutually exclusive: pass exactly one of until_timestamp, condition "
+                "or agents. To wait on agents, call wait_for(agents=[...]) alone (no condition polling needed)."
+            )
+        if not modes:
+            raise ValueError("One of until_timestamp, condition or agents must be provided.")
+        if self.timeout_seconds is not None and not self.agents:
+            raise ValueError(
+                "timeout_seconds is only valid with agents. For a timed wait use until_timestamp; "
+                "for condition polling use check_interval_seconds and max_checks."
+            )
+        if isinstance(self.agents, list) and not [agent for agent in self.agents if agent.strip()]:
+            raise ValueError('agents must list at least one address, or be "any".')
         return self
 
 
@@ -636,7 +713,11 @@ class GrepTool(BaseModel):
     )
     trace_path: Optional[str] = Field(
         default=None,
-        description="Agent trajectory root path/UUID searches its entire child tree; a child path narrows to that agent, and a message path to one message.",
+        description=(
+            "Agent trajectory root path/UUID searches its entire child tree; a child path narrows to that agent, "
+            "and a message path to one message. An agent address in your tree (/root/outreach, as list_agents "
+            "prints) scopes agent_network or agent_trajectories to that agent and every agent below it."
+        ),
     )
     order: Optional[Literal["newest_first", "oldest_first"]] = Field(
         default=None,
@@ -915,6 +996,7 @@ class SpawnAgentTool(BaseModel):
             "user's name, is write-only to it."
         )
     )
+    task_name: str = Field(pattern=SPAWN_TASK_NAME_PATTERN, description=SPAWN_TASK_NAME_DESCRIPTION)
     goal: str = Field(
         description=(
             "The self-contained task/prompt and description for the spawned agent. "
@@ -1002,6 +1084,7 @@ class SpawnAgentTool(BaseModel):
             "that context is clearly unnecessary."
         ),
     )
+    run_in_background: bool = Field(default=True, description=RUN_IN_BACKGROUND_DESCRIPTION)
     depth: Optional[Literal["quick", "medium", "deep"]] = Field(
         default="quick",
         description=(
@@ -1073,6 +1156,7 @@ class SpawnAgentToolNoGP(BaseModel):
             "type='code' for GitHub discovery/ranking work."
         )
     )
+    task_name: str = Field(pattern=SPAWN_TASK_NAME_PATTERN, description=SPAWN_TASK_NAME_DESCRIPTION)
     goal: str = Field(
         description=(
             "The self-contained task/prompt and description for the spawned agent. "
@@ -1113,6 +1197,7 @@ class SpawnAgentToolNoGP(BaseModel):
             "'recent_communications'. Missing keys default to true."
         ),
     )
+    run_in_background: bool = Field(default=True, description=RUN_IN_BACKGROUND_DESCRIPTION)
     depth: Optional[Literal["quick", "medium", "deep"]] = Field(
         default="quick",
         description=(
@@ -1159,6 +1244,7 @@ class SpawnExploreAgentTool(BaseModel):
             "attempt_completion first."
         ),
     )
+    task_name: str = Field(pattern=SPAWN_TASK_NAME_PATTERN, description=SPAWN_TASK_NAME_DESCRIPTION)
     goal: str = Field(
         description=(
             "The self-contained task/prompt and description for the spawned agent. "
@@ -1183,6 +1269,8 @@ class SpawnExploreAgentTool(BaseModel):
             "Set a key to false only when that context is clearly unnecessary."
         ),
     )
+    # No run_in_background: PLAN-phase explore agents always run in the foreground
+    # (workflows/background_agents.py) so their findings are in context before set_plan.
     depth: Optional[Literal["quick", "medium", "deep"]] = Field(
         default="quick",
         description=(
@@ -1197,6 +1285,43 @@ class SpawnExploreAgentTool(BaseModel):
 # ============================================================================
 # Plan Phase Tools
 # ============================================================================
+
+
+class ListAgentsTool(BaseModel):
+    """Browse your agent tree like a table of contents: where you are, nearby agents, drill-down hints."""
+
+    tool: Literal["list_agents"]
+    node: Optional[str] = Field(
+        default=None,
+        description='Address to expand (a /root/... path, "parent", or an agent id). Default: you.',
+    )
+    depth: Optional[int] = Field(default=None, description="Levels of children to show under node (1-3, default 1).")
+    cursor: Optional[str] = Field(default=None, description="Next-page cursor from a previous list_agents result.")
+    query: Optional[str] = Field(default=None, description="Search agent goals in your tree (words, any order).")
+    path_prefix: Optional[str] = Field(
+        default=None, description="List agents at or below this path, e.g. /root/outreach."
+    )
+
+
+_AGENT_ADDRESS_DESCRIPTION = (
+    "Agent address: a path like /root/outreach/draft_a (agents and their background tasks), "
+    "'parent' for the agent that spawned you, or '/root'."
+)
+
+
+class SendMessageToAgentTool(BaseModel):
+    """Ask another agent in your tree for new work or give it new information, a redirect or a handoff (to learn what it already did, spawn an explore agent to grep the agent tree); a finished agent wakes with it as its next task."""
+
+    tool: Literal["send_message_to_agent"]
+    to: str = Field(description=_AGENT_ADDRESS_DESCRIPTION)
+    message: str = Field(description="The message. Self-contained: the recipient has not seen your conversation.")
+
+
+class KillAgentTool(BaseModel):
+    """Kill an agent below you and everything it spawned, or one of your background tasks."""
+
+    tool: Literal["kill_agent"]
+    to: str = Field(description="Address of one of your descendants or background tasks (see your environment block).")
 
 
 class SetPlanTool(BaseModel):
@@ -1215,6 +1340,13 @@ class AttemptCompletionTool(BaseModel):
     """Trigger completion for verified agent loops."""
 
     tool: Literal["attempt_completion"]
+    result: Optional[str] = Field(
+        default=None,
+        description=(
+            "Content the task asks you to write yourself (a draft, message or summary), in full. "
+            "The grader reads it as your own work; facts in it must come from earlier tool results."
+        ),
+    )
 
 
 class AttemptCompletionWithResultTool(BaseModel):
@@ -1284,6 +1416,10 @@ TOOL_MODELS: ToolRegistry = {
     "send_message_to_user_execute_phase": SendMessageToUserExecutePhaseTool,
     "spawn_agent": SpawnAgentTool,
     "message_person": MessagePersonTool,
+    # Agent-to-agent
+    "list_agents": ListAgentsTool,
+    "send_message_to_agent": SendMessageToAgentTool,
+    "kill_agent": KillAgentTool,
     # Plan phase tools
     "set_plan": SetPlanTool,
     # Universal completion tool (available in both phases)
@@ -1312,6 +1448,7 @@ EXPLORE_AGENT_TOOLS = [
     "people_search",
     "web_fetch",
     "grep",
+    "list_agents",
     "api_request",
     "attempt_completion_with_result",
 ]
@@ -1560,6 +1697,8 @@ __all__ = [
     "MessagePersonTool",
     "SpawnAgentTool",
     "SpawnAgentToolNoGP",
+    "ListAgentsTool",
+    "SendMessageToAgentTool",
     "SetPlanTool",
     "AttemptCompletionTool",
     "AttemptCompletionWithResultTool",

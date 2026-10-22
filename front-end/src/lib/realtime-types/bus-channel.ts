@@ -73,4 +73,8 @@ export interface AgentStateChangedPayload {
   structuredOutput?: Record<string, unknown>;
   /** Failure context for failed agents */
   failureContext?: FailureContext;
+  /** Background explore/browser/code tasks owned by this agent (optional). */
+  backgroundTasks?: unknown;
+  /** Codex-style tree address, e.g. `/root/outreach/draft_a` (optional). */
+  taskPath?: string | null;
 }

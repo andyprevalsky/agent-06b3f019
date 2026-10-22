@@ -214,6 +214,8 @@ export interface GrepLocation {
   source: ValidSource;
   path: string;
   agent_id?: string;
+  /** The agent's task path (/root/...) when known. */
+  agent_path?: string;
   root_agent_id?: string;
   surface?: string;
   message_id?: string;

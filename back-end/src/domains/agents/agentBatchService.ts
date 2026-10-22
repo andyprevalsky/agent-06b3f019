@@ -1,3 +1,4 @@
+import { resolveCreateTaskPaths } from './agentTaskPathCreate';
 import { isWorkflowStartAdmissionPending } from '../../providers/workflowQueueAdmission';
 /**
  * Agent batch-create service — POST /api/agents/batch.
@@ -317,6 +318,10 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
     )
   );
 
+  const taskPaths = await resolveCreateTaskPaths(newBodies);
+  newItems.forEach((item, index) => {
+    item.taskPath = taskPaths[index];
+  });
   if (newItems.length > 0) {
     // Phase 1: atomic create. Rolls back on any error.
     await repo.createAgentBatchTransaction(newItems);

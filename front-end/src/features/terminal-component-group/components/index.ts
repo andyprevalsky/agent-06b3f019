@@ -65,6 +65,7 @@ export * from './PlanChip';
 export { default as PlanChip } from './PlanChip';
 export * from './QueryInput';
 export { default as QueryInput } from './QueryInput';
+export { BackgroundAgentsBanner } from './background-agents/BackgroundAgentsBanner';
 export * from './RoseToolSetChip';
 export { default as RoseToolSetChip } from './RoseToolSetChip';
 export * from './SignupPromptBubble';

@@ -6,6 +6,7 @@
  * own near-copy.
  */
 
+import { TaskPathConflictError } from './agentTaskPath';
 import { type Response } from 'express';
 import { z } from 'zod';
 import { createLogger } from '../../providers/logger';
@@ -33,6 +34,10 @@ export function handleRouteError(
   }
   if (error instanceof StaleParentWorkflowGenerationError) {
     res.status(409).json({ error: error.message });
+    return;
+  }
+  if (error instanceof TaskPathConflictError) {
+    res.status(409).json({ error: error.message, task_path: error.taskPath });
     return;
   }
   if (error instanceof WorldModelModeAccessError) {

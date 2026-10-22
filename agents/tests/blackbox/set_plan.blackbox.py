@@ -374,6 +374,28 @@ def test_get_planner_tools_description_non_empty():
     assert "$defs" not in desc
 
 
+def test_planner_tools_description_lists_only_assignable_tools():
+    """The planner sees only execute tools a DAG task can be assigned (via TOOL_ALIASES)."""
+    from domains.set_plan.service import get_planner_tools_description
+    from utils.tool_schemas import PLANNER_ASSIGNABLE_TOOLS, PLANNER_EXECUTE_TOOLS, TOOL_ALIASES
+
+    desc = get_planner_tools_description()
+    headers = {line[4:] for line in desc.splitlines() if line.startswith("### ")}
+    assert headers == set(PLANNER_EXECUTE_TOOLS), headers
+    assert headers == {
+        "spawn_agent",
+        "wait_for",
+        "call_phone_number",
+        "message_person",
+        "send_message_to_user_execute_phase",
+    }, headers
+    assert all(TOOL_ALIASES.get(name, name) in headers or name == "reasoning" for name in PLANNER_ASSIGNABLE_TOOLS)
+    for hidden in ("kill_agent", "send_message_to_agent", "attempt_completion"):
+        assert hidden not in desc, hidden
+    wait_for_section = desc.split("### wait_for\n", 1)[1].split("\n### ", 1)[0]
+    assert '"agents"' in wait_for_section and '"timeout_seconds"' in wait_for_section, wait_for_section
+
+
 # ── build_planner_messages ──────────────────────────────────────────────
 
 
@@ -392,6 +414,48 @@ def test_build_planner_messages_basic():
     assert len(base_messages) == 4
     assert base_messages[0]["content"].startswith("GOAL: Find me a flight to Paris")
     assert user_messages == ["Find me a flight to Paris", "Under $500"]
+
+
+def test_build_planner_messages_agent_rows_are_assistant_and_never_the_goal():
+    """Agent messages / notifications: assistant-role Codex bodies, never user_messages / GOAL;
+    FE-only (excludeFromModel) rows never reach the planner; a trailing one is settled to user."""
+    from domains.set_plan.service import build_planner_messages
+
+    agent_message = {
+        "role": "USER",
+        "text": "Only pre-seed funds.",
+        "metadata": {
+            "agentMessage": True,
+            "fromAgentPath": "/root",
+            "toAgentPath": "/root/funds",
+            "messageType": "NEW_TASK",
+        },
+    }
+    notification = {
+        "role": "USER",
+        "text": "Message Type: FINAL_ANSWER\nTask name: /root/funds\nSender: /root/funds/scan\nPayload:\n4 funds",
+        "metadata": {"agentNotification": True, "status": "completed"},
+    }
+    context = [
+        agent_message,
+        {"role": "USER", "text": "Find Austin seed funds"},
+        {
+            "role": "TOOL",
+            "text": "bg progress",
+            "metadata": {"toolCallId": "t1", "toolStatus": "FINISHED", "excludeFromModel": True},
+        },
+        notification,
+    ]
+    base_messages, user_messages = build_planner_messages(context)
+    assert user_messages == ["Find Austin seed funds"], user_messages
+    assert base_messages[0]["content"].startswith("GOAL: Find Austin seed funds")
+    assert not any("bg progress" in str(m["content"]) for m in base_messages)
+    assert base_messages[1] == {
+        "role": "assistant",
+        "content": "Message Type: NEW_TASK\nTask name: /root/funds\nSender: /root\nPayload:\nOnly pre-seed funds.",
+    }, base_messages
+    # The last message would be stripped as assistant prefill: it is sent as user.
+    assert base_messages[-1] == {"role": "user", "content": notification["text"]}, base_messages
 
 
 def test_build_planner_messages_empty_context():
@@ -1033,8 +1097,13 @@ async def run_all_tests():
     r.record("build_plan_message_dag", test_build_plan_message_dag)
     # tools description
     r.record("planner_tools_description", test_get_planner_tools_description_non_empty)
+    r.record("planner_tools_description_assignable_only", test_planner_tools_description_lists_only_assignable_tools)
     # build_planner_messages
     r.record("build_planner_messages_basic", test_build_planner_messages_basic)
+    r.record(
+        "build_planner_messages_agent_rows_assistant",
+        test_build_planner_messages_agent_rows_are_assistant_and_never_the_goal,
+    )
     r.record("build_planner_messages_empty", test_build_planner_messages_empty_context)
     r.record("build_planner_messages_tool_system", test_build_planner_messages_tool_and_system_roles)
     r.record(

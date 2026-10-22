@@ -508,11 +508,6 @@ class _FakeSpawnWF:
         self.ActivityCancellationType = real.ActivityCancellationType
         self.current_time = datetime(2026, 9, 9, 12, 0, 0, tzinfo=timezone.utc)
 
-    def now(self):
-        from datetime import datetime, timezone
-
-        return datetime.now(timezone.utc)
-
     async def execute_activity(self, fn, args=None, **kwargs):
         name = getattr(fn, "__name__", "?")
         self.activity_calls.append({"name": name, "args": args or [], "kwargs": kwargs})
@@ -721,7 +716,7 @@ async def test_handler_explore_happy_path():
         events = await _collect(
             SpawnAgentManager().execute_tool(
                 workflow_instance=_FakeWFInstance(),
-                tool_call={"type": "explore", "goal": "research quantum computing"},
+                tool_call={"type": "explore", "goal": "research quantum computing", "task_name": "quantum"},
                 tool_call_id="tc",
             )
         )
@@ -730,8 +725,12 @@ async def test_handler_explore_happy_path():
     statuses = [e.status for e in events]
     assert MessageStatus.IN_PROGRESS in statuses
     assert fake.activity_calls[0]["name"] == "fetch_local_data_summary"
-    assert fake.start_activity_calls[0]["args"][-2] == "local"
-    assert fake.start_activity_calls[0]["args"][-1] is False
+    assert fake.start_activity_calls[0]["args"][-4] == "local"
+    assert fake.start_activity_calls[0]["args"][-3] is False
+    # The spawning tool call id is the explore's agent-to-agent inbox address.
+    assert fake.start_activity_calls[0]["args"][-2] == "tc"
+    # Its task_name names it <owner path>/<task_name> for list_agents.
+    assert fake.start_activity_calls[0]["args"][-1] == "quantum"
     assert MessageStatus.FINISHED in statuses
     # FINISHED event carries result + usage
     finished = next(e for e in events if e.status == MessageStatus.FINISHED)
@@ -777,10 +776,10 @@ async def test_handler_explore_reuses_cached_local_data_summary():
     fetches = [call for call in fake.activity_calls if call["name"] == "fetch_local_data_summary"]
     assert len(fetches) == 1
     assert wf._cached_local_data_summary == "local-once"
-    assert fake.start_activity_calls[0]["args"][-2] == "local-once"
-    assert fake.start_activity_calls[1]["args"][-2] == "local-once"
-    assert fake.start_activity_calls[0]["args"][-1] is False
-    assert fake.start_activity_calls[1]["args"][-1] is False
+    assert fake.start_activity_calls[0]["args"][-4] == "local-once"
+    assert fake.start_activity_calls[1]["args"][-4] == "local-once"
+    assert fake.start_activity_calls[0]["args"][-3] is False
+    assert fake.start_activity_calls[1]["args"][-3] is False
     assert any(event.status == MessageStatus.FINISHED for event in first)
     assert any(event.status == MessageStatus.FINISHED for event in second)
 
@@ -826,8 +825,11 @@ async def test_handler_explore_passes_canonical_oai_demo_flag():
 
     fn = inspect.unwrap(spawn_explore_agent_activity)
     params = list(inspect.signature(fn).parameters)
-    assert params[-1] == "oai_demo"
+    # New args append after oai_demo so older positional callers stay compatible.
+    assert params[-3:] == ["oai_demo", "inbox_address", "task_name"]
     assert inspect.signature(fn).parameters["oai_demo"].default is None
+    assert inspect.signature(fn).parameters["inbox_address"].default is None
+    assert inspect.signature(fn).parameters["task_name"].default is None
 
     demo_wf = _FakeWFInstance(goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky — Huberman")
     demo_wf.fast_mode_cache_enabled = True
@@ -863,8 +865,10 @@ async def test_handler_explore_passes_canonical_oai_demo_flag():
     live_args = live_fake.start_activity_calls[0]["args"]
     assert len(demo_args) == len(params)
     assert demo_args[2] == short_goal
-    assert demo_args[-1] is True
-    assert live_args[-1] is False
+    assert demo_args[params.index("oai_demo")] is True
+    assert live_args[params.index("oai_demo")] is False
+    assert demo_args[params.index("inbox_address")] == "tc-demo-class"
+    assert live_args[params.index("inbox_address")] == "tc-live-class"
     assert demo_args[13] == resolve_explore_depth("quick", fast_mode_cache_enabled=True, oai_demo=True)
     assert live_args[13] == resolve_explore_depth("quick", fast_mode_cache_enabled=True, oai_demo=False)
     assert demo_args[13] == "deep"
@@ -1294,11 +1298,7 @@ async def test_handler_explore_synthesis_checkpoint_requires_two_grounded_prior_
             "role": "ASSISTANT",
             "text": "",
             "timestamp": "2026-09-30T00:00:01Z",
-            "metadata": {
-                "tool_calls": [
-                    {"tool": "spawn_agent", "type": "explore", "tool_call_id": "followup"}
-                ]
-            },
+            "metadata": {"tool_calls": [{"tool": "spawn_agent", "type": "explore", "tool_call_id": "followup"}]},
         },
         {
             "role": "TOOL",
@@ -1440,9 +1440,7 @@ async def test_handler_explore_timeout_finishes_with_heartbeat_tool_evidence():
 
     evidence = {
         "result": "",
-        "tool_call_results": [
-            "[web_fetch] **Result:** Denver single-person monthly costs excluding rent: $1,303.8."
-        ],
+        "tool_call_results": ["[web_fetch] **Result:** Denver single-person monthly costs excluding rent: $1,303.8."],
     }
     fake = _FakeSpawnWF(
         activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
@@ -1624,9 +1622,7 @@ async def test_handler_explore_cancel_grace_wraps_up_without_awaiting_handle():
     assert not handle._awaited
     from temporalio import workflow
 
-    assert fake.start_activity_calls[0]["kwargs"]["cancellation_type"] == (
-        workflow.ActivityCancellationType.TRY_CANCEL
-    )
+    assert fake.start_activity_calls[0]["kwargs"]["cancellation_type"] == (workflow.ActivityCancellationType.TRY_CANCEL)
     assert fake.wait_condition_timeouts == [timedelta(seconds=600), EXPLORE_CANCEL_GRACE]
 
 
@@ -1832,6 +1828,8 @@ async def test_handler_browser_delegates():
     assert any(e.status == MessageStatus.FINISHED for e in events)
     # Delegate received browser-shaped call
     assert fake_mgr.last_call["tool_call"]["tool"] == "spawn_browser_agent"
+    # The spawning tool call id is the browser task's agent-to-agent inbox address.
+    assert fake_mgr.last_call["tool_call"]["inbox_address"] == "tc"
 
 
 async def test_handler_code_delegates():
@@ -1978,8 +1976,7 @@ async def test_simulate_mocks_specialized_agents_but_keeps_general_purpose_real(
         h.get_sub_agent_manager = original_sub
 
     simulated_calls = [
-        call for call in fake_workflow.activity_calls
-        if call["name"] == "world_model_specialized_agent_activity"
+        call for call in fake_workflow.activity_calls if call["name"] == "world_model_specialized_agent_activity"
     ]
     assert [call["args"][2] for call in simulated_calls] == [
         "spawn_explore_agent",
@@ -2019,9 +2016,7 @@ async def test_simulated_specialized_agent_reraises_cancellation():
     def cancelled_activity(*_args, **_kwargs):
         raise asyncio.CancelledError()
 
-    fake_workflow = _FakeSpawnWF(
-        activity_results={"world_model_specialized_agent_activity": cancelled_activity}
-    )
+    fake_workflow = _FakeSpawnWF(activity_results={"world_model_specialized_agent_activity": cancelled_activity})
     restore = _patch_spawn_workflow(fake_workflow)
     events = []
     try:
@@ -2051,14 +2046,13 @@ async def test_simulated_code_posts_code_chip_lifecycle():
         RuntimeError("Prediction transport failed"),
     ]
     for result in cases:
+
         def completed_activity(*_args, **_kwargs):
             if isinstance(result, Exception):
                 raise result
             return result
 
-        fake_workflow = _FakeSpawnWF(
-            activity_results={"world_model_specialized_agent_activity": completed_activity}
-        )
+        fake_workflow = _FakeSpawnWF(activity_results={"world_model_specialized_agent_activity": completed_activity})
         restore = _patch_spawn_workflow(fake_workflow)
         try:
             wf = _FakeWFInstance(goal="root task")
@@ -2162,9 +2156,7 @@ def test_world_model_specialized_result_text_normalizes_embedded_structured_resp
         "size_bytes": 245812,
         "created_at": "2026-09-28T12:13:00Z",
     }
-    raw = "Code agent execution complete.\n\nStructured Response: " + json.dumps(
-        {"artifact_files": [pointer]}
-    )
+    raw = "Code agent execution complete.\n\nStructured Response: " + json.dumps({"artifact_files": [pointer]})
 
     normalized = _world_model_specialized_result_text({"output": raw})
     structured = json.loads(normalized.split("Structured Response: ", 1)[1])
@@ -3765,6 +3757,470 @@ async def test_explore_web_tool_messages_are_readable_and_skip_failed_fetch():
     assert "Page not found" not in result["result"]
 
 
+async def test_explore_agent_inbox_delivers_each_message_once_and_tolerates_failures():
+    """Agent messages addressed to an explore task become one USER context row each.
+
+    The real activity's poll_inbox hook reads the parent-owned inbox at its
+    address, dedupes re-read rows by id, advances ``since``, and a failed read
+    returns nothing instead of ending the explore.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    m1 = {
+        "id": "m1",
+        "text": "Focus on Denver only.",
+        "from_agent_id": "root-1",
+        "from_agent_path": "/root",
+        "to_agent_path": "/root/scan",
+        "message_type": "MESSAGE",
+        "from_goal": "Plan   a\ntrip " + "x" * 300,
+        "created_at": "2026-10-19T10:00:00.000Z",
+    }
+    m2 = {
+        "id": "m2",
+        "text": "Also check hotels.",
+        "from_agent_id": "root-1",
+        "from_goal": "",
+        "created_at": "2026-10-19T10:00:05.000Z",
+    }
+    fetch = AsyncMock(side_effect=[[m1], [m1, m2], RuntimeError("backend down"), []])
+    polled: list = []
+    captured: dict = {}
+
+    async def fake_run_agent(**kwargs):
+        captured.update(kwargs)
+        for _ in range(4):
+            polled.append(await kwargs["poll_inbox"]())
+        return {"status": "completed", "final_response": "done"}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("helpers.agent_inbox.fetch_agent_inbox", new=fetch),
+        # No progress posts here: every step is past the GET fallback window.
+        patch("helpers.agent_inbox.INBOX_FALLBACK_POLL_SECONDS", 0.0),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="parent-1",
+            user_id="u",
+            goal="research X",
+            model="m",
+            task_id="task-1",
+            inbox_address="bg-tc-1",
+        )
+    assert result["status"] != "failed", result
+    assert [len(rows) for rows in polled] == [1, 1, 0, 0]
+    first, second = polled[0][0], polled[1][0]
+    assert first["role"] == "USER" and second["role"] == "USER"
+    # Stored like a backend agent-message row: raw payload + metadata; the
+    # model context renders it (assistant role, Codex body).
+    assert first["text"] == "Focus on Denver only." and second["text"] == "Also check hotels."
+    assert first["metadata"] == {
+        "agentMessage": True,
+        "agentMessageId": "m1",
+        "fromAgentId": "root-1",
+        "fromAgentPath": "/root",
+        "toAgentPath": "/root/scan",
+        "messageType": "MESSAGE",
+        "inboxAddress": "bg-tc-1",
+    }
+    from helpers.llm import build_llm_messages
+
+    rendered = await build_llm_messages([first, second], "SYSTEM")
+    assert [m["role"] for m in rendered] == ["system", "assistant", "assistant"], rendered
+    assert rendered[1]["content"].endswith(
+        "Message Type: MESSAGE\nTask name: /root/scan\nSender: /root\nPayload:\nFocus on Denver only."
+    ), rendered[1]
+    assert rendered[2]["content"].endswith(
+        "Message Type: MESSAGE\nTask name: unknown\nSender: root-1\nPayload:\nAlso check hotels."
+    ), rendered[2]
+    # In the explore's real context: after the step's tool result, assistant role,
+    # and settled to user only while it trails the request (providers drop a trailing assistant).
+    from providers.rose.inter_agent_context import is_inter_agent_message, settle_trailing_inter_agent_messages
+
+    step = [
+        {"role": "USER", "text": "research X", "timestamp": "2026-01-01T00:00:00+00:00", "metadata": {}},
+        {
+            "role": "ASSISTANT",
+            "text": "Searching.",
+            "timestamp": "2026-01-01T00:00:01+00:00",
+            "metadata": {"tool_calls": [{"tool": "web_search", "tool_call_id": "call_a", "query": "X"}]},
+        },
+        {
+            "role": "TOOL",
+            "text": "results",
+            "timestamp": "2026-01-01T00:00:02+00:00",
+            "metadata": {"toolCallId": "call_a", "toolName": "web_search", "toolStatus": "FINISHED"},
+        },
+    ]
+    in_context = await build_llm_messages([*step, first], "SYSTEM")
+    assert [m["role"] for m in in_context] == ["system", "user", "assistant", "tool", "assistant"], in_context
+    assert is_inter_agent_message(in_context[-1]) and in_context[-1]["content"] == rendered[1]["content"]
+    assert settle_trailing_inter_agent_messages(in_context)[-1] == {"role": "user", "content": rendered[1]["content"]}
+    later = await build_llm_messages(
+        [
+            *step,
+            first,
+            {"role": "ASSISTANT", "text": "Denver only.", "timestamp": "2099-01-01T00:00:00+00:00", "metadata": {}},
+        ],
+        "SYSTEM",
+    )
+    assert [m["role"] for m in later][-2:] == ["assistant", "assistant"] and is_inter_agent_message(later[-2])
+    assert later[-1]["content"].endswith("Denver only."), "never merged into the model's turn"
+    assert settle_trailing_inter_agent_messages(later) is later
+    assert [c.args for c in fetch.await_args_list] == [
+        ("parent-1", "bg-tc-1", None),
+        ("parent-1", "bg-tc-1", m1["created_at"]),
+        ("parent-1", "bg-tc-1", m2["created_at"]),
+        ("parent-1", "bg-tc-1", m2["created_at"]),
+    ]
+
+
+async def test_explore_list_agents_renders_the_tree_from_the_explore_task():
+    """list_agents inside the real explore activity (no workflow): one backend tree read as the owner.
+
+    The explore task is the caller (YOU ARE HERE at <owner path>/<task_name>), its
+    owner is its parent, the owner's children are its siblings, and the posted
+    tool row carries metadata.agentTree for the FE. "parent" reads the owner's view.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+
+    import domains.agent_messaging.repo as messaging_repo
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+    from utils.tool_schemas import EXECUTE_PHASE_TOOLS, get_explore_agent_tools
+
+    def node(agent_id, path, parent, depth, goal, kind="agent", status="ACTIVE", children=0):
+        return {
+            "agent_id": agent_id,
+            "path": path,
+            "parent_agent_id": parent,
+            "depth": depth,
+            "goal": goal,
+            "type": kind,
+            "status": status,
+            "child_count": children,
+            "active_child_count": 0,
+        }
+
+    root = node("agent-root", "/root", None, 0, "Plan the offsite", children=1)
+    owner = node("owner-1", "/root/outreach", "agent-root", 1, "Venue outreach", children=3)
+    owner_view = {
+        "root_agent_id": "agent-root",
+        "caller_path": [root, owner],
+        "node_path": [root, owner],
+        "nodes": [
+            root,
+            owner,
+            node("agent-draft", "/root/outreach/draft_a", "owner-1", 2, "Draft the venue email"),
+            node(
+                "/root/outreach/news",
+                "/root/outreach/news",
+                "owner-1",
+                2,
+                "Scan venue news",
+                kind="explore",
+                status="running",
+            ),
+        ],
+        "next_cursor": "cur-2",
+        "sibling_next_cursor": None,
+    }
+    requests: list = []
+
+    class FakeClient:
+        async def get(self, url, params=None, headers=None, timeout=None):
+            requests.append((url, dict(params or {}), headers.get("X-User-Id")))
+            return SimpleNamespace(status_code=200, json=lambda: owner_view, raise_for_status=lambda: None)
+
+    posts: list = []
+
+    async def fake_call(activity_fn, args=None, **_kwargs):
+        posts.append((activity_fn.__name__, args))
+        return None
+
+    results: dict = {}
+    captured: dict = {}
+
+    async def fake_run_agent(**kwargs):
+        captured.update(kwargs)
+        results["default"] = await kwargs["execute_tool"]("list_agents", {}, "toolu_list")
+        results["parent"] = await kwargs["execute_tool"]("list_agents", {"node": "parent"}, "toolu_list2")
+        results["drill"] = await kwargs["execute_tool"]("list_agents", {"node": "/root/outreach/draft_a"}, "toolu_l3")
+        return {"status": "completed", "final_response": "done"}
+
+    config = SimpleNamespace(backend=SimpleNamespace(api_key="k", api_url="http://backend"))
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("loop.activity_helper.call_temporal_activity_from_activity", new=AsyncMock(side_effect=fake_call)),
+        patch.object(messaging_repo, "get_http_client", return_value=FakeClient()),
+        patch.object(messaging_repo, "load_config", return_value=config),
+    ):
+        await spawn_explore_agent_activity(
+            agent_id="owner-1",
+            user_id="u",
+            goal="Find three venues in Napa",
+            model="m",
+            task_id="task-1",
+            inbox_address="toolu_spawn",
+            task_name="venues",
+        )
+
+    assert "list_agents" in captured["tools"] and "list_agents" in get_explore_agent_tools()
+    assert "list_agents" not in EXECUTE_PHASE_TOOLS, "list_agents is explore-only"
+    assert requests[0] == ("http://backend/api/agents/owner-1/tree", {}, "u"), requests
+    assert requests[1] == ("http://backend/api/agents/owner-1/tree", {}, "u"), '"parent" = the owner\'s own view'
+    assert requests[2][1] == {"node": "/root/outreach/draft_a"}, requests
+    default = results["default"]
+    assert default.get("success") is True, default
+    lines = default["message"].splitlines()
+    assert lines[0] == (
+        'You are /root/outreach/venues (depth 2). Path: /root "Plan the offsite" › '
+        '/root/outreach "Venue outreach" › YOU /root/outreach/venues'
+    ), lines
+    assert lines[2:] == [
+        "- /root [your ancestor (root)] agent ACTIVE: Plan the offsite",
+        "  - /root/outreach [your parent] agent ACTIVE: Venue outreach",
+        "    - /root/outreach/draft_a [your sibling] agent ACTIVE: Draft the venue email",
+        "    - /root/outreach/news [task of your parent] explore running: Scan venue news",
+        "    ▶ /root/outreach/venues [YOU ARE HERE] explore running: Find three venues in Napa",
+        '    … 2 children not shown → list_agents(node="/root/outreach", cursor="cur-2")',
+    ], lines
+    assert results["parent"]["message"] == default["message"]
+    # A drill-down keeps the backend's node focus (the fake answers with the owner node).
+    drill = results["drill"]["message"].splitlines()
+    assert drill[2] == "Viewing /root/outreach: /root › /root/outreach", drill
+    assert "    ▶ /root/outreach/venues [YOU ARE HERE] explore running: Find three venues in Napa" in drill
+    rows = [args for name, args in posts if name == "post_agent_message" and args[3].get("toolCallId") == "toolu_list"]
+    meta = rows[-1][3]
+    assert rows[-1][2] == "TOOL" and meta["toolName"] == "list_agents" and meta["toolStatus"] == "FINISHED", meta
+    assert meta["agentType"] == "explore" and meta["taskId"] == "task-1", meta
+    tree = meta["agentTree"]
+    assert tree["self_agent_id"] == "/root/outreach/venues" and tree["own_tasks"] == []
+    assert tree["caller_path"][-1]["path"] == "/root/outreach/venues", tree
+    assert any(n["agent_id"] == "/root/outreach/venues" and n["parent_agent_id"] == "owner-1" for n in tree["nodes"])
+
+
+async def test_explore_list_agents_alone_is_not_completion_evidence():
+    """Tree navigation is not research: an explore that only lists agents cannot complete.
+
+    The completion guard names the evidence tools (web_search, people_search,
+    web_fetch, grep, api_request); a successful list_agents must neither satisfy
+    it nor let the activity report a completed result without tool evidence. The
+    listing stays a readable trace (wait_for's judge reads raw tool results).
+    """
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+
+    import domains.agent_messaging.repo as messaging_repo
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    root = {
+        "agent_id": "agent-root",
+        "path": "/root",
+        "parent_agent_id": None,
+        "depth": 0,
+        "goal": "Plan the offsite",
+        "type": "agent",
+        "status": "ACTIVE",
+        "child_count": 0,
+        "active_child_count": 0,
+    }
+    owner_view = {"root_agent_id": "agent-root", "caller_path": [root], "node_path": [root], "nodes": [root]}
+
+    class FakeClient:
+        async def get(self, url, params=None, headers=None, timeout=None):
+            return SimpleNamespace(status_code=200, json=lambda: owner_view, raise_for_status=lambda: None)
+
+    async def fake_call(_activity_fn, args=None, **_kwargs):
+        return None
+
+    calls: dict = {}
+
+    async def fake_run_agent(**kwargs):
+        calls["listed"] = await kwargs["execute_tool"]("list_agents", {}, "toolu_list")
+        calls["completion"] = await kwargs["execute_tool"](
+            "attempt_completion_with_result", {"result": "Venues: none found"}, "toolu_done"
+        )
+        return {"status": "completed", "final_response": "Venues: none found", "tokens_in": 1, "tokens_out": 1}
+
+    config = SimpleNamespace(backend=SimpleNamespace(api_key="k", api_url="http://backend"))
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("loop.activity_helper.call_temporal_activity_from_activity", new=AsyncMock(side_effect=fake_call)),
+        patch.object(messaging_repo, "get_http_client", return_value=FakeClient()),
+        patch.object(messaging_repo, "load_config", return_value=config),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="agent-root",
+            user_id="u",
+            goal="Find three venues in Napa",
+            model="m",
+            task_id="task-1",
+            inbox_address="toolu_spawn",
+            task_name="venues",
+        )
+
+    assert calls["listed"].get("success") is True, calls["listed"]
+    assert calls["completion"].get("error") is True, calls["completion"]
+    assert "no evidence tool has succeeded" in calls["completion"]["message"], calls["completion"]
+    assert result["status"] == "error", result
+    assert result["error_reason"] == "explore completed without tool evidence", result
+    assert any(item.startswith("[list_agents] ") for item in result["tool_call_results"]), result["tool_call_results"]
+
+
+async def test_explore_inbox_rides_the_progress_post_and_gets_only_as_fallback():
+    """At 10k explore agents the per-step inbox GET is gone: the progress post carries the read.
+
+    Each fire-and-forget post sends {inbox: {task_id, since}}; its pending_inbox
+    rows are delivered at the next step (one step late), deduped by id with the
+    cursor advanced. No GET runs while posts answer; after 30s without an
+    answered read, one GET runs.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    import helpers.agent_inbox as agent_inbox_module
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    m1 = {
+        "id": "m1",
+        "text": "Focus on Denver only.",
+        "from_agent_id": "root-1",
+        "from_agent_path": "/root",
+        "created_at": "2026-10-19T10:00:00.000Z",
+    }
+    m2 = {
+        "id": "m2",
+        "text": "Also check hotels.",
+        "from_agent_id": "root-1",
+        "from_agent_path": "/root",
+        "created_at": "2026-10-19T10:00:05.000Z",
+    }
+    answers = [[m1], [m1, m2], None, []]
+    posted: list = []
+
+    async def fake_save(**kwargs):
+        posted.append(kwargs.get("inbox"))
+        return answers[len(posted) - 1] if len(posted) <= len(answers) else []
+
+    fetch = AsyncMock(return_value=[])
+    polled: list = []
+    clock = {"now": 1000.0}
+
+    async def fake_run_agent(**kwargs):
+        for step in range(4):
+            await kwargs["post_message"](f"step {step}", "ASSISTANT", {"title": "thinking"})
+            for _ in range(5):
+                await asyncio.sleep(0)  # the fire-and-forget post completes during the step
+            clock["now"] += 5
+            polled.append([row["text"] for row in await kwargs["poll_inbox"]()])
+        assert fetch.await_count == 0, "an inbox GET ran while progress posts answered"
+        clock["now"] += 31  # no answered read for 30s → one fallback GET
+        polled.append([row["text"] for row in await kwargs["poll_inbox"]()])
+        return {"status": "completed", "final_response": "done"}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("domains.spawn_agent.service.save_explore_message", new=fake_save),
+        patch("helpers.agent_inbox.fetch_agent_inbox", new=fetch),
+        patch.object(agent_inbox_module.time, "monotonic", lambda: clock["now"]),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="parent-1",
+            user_id="u",
+            goal="research X",
+            model="m",
+            task_id="task-1",
+            inbox_address="tc-1",
+        )
+    assert result["status"] != "failed", result
+    assert polled == [["Focus on Denver only."], ["Also check hotels."], [], [], []], polled
+    assert posted[0] == {"task_id": "tc-1"}, posted
+    assert posted[1] == {"task_id": "tc-1", "since": m1["created_at"]}, posted
+    assert posted[2] == {"task_id": "tc-1", "since": m2["created_at"]}, posted
+    assert [c.args for c in fetch.await_args_list] == [("parent-1", "tc-1", m2["created_at"])]
+
+
+async def test_explore_reads_a_message_stored_before_its_final_answer():
+    """A message stored while the final LLM call runs is read before the answer is accepted.
+
+    Regression for explore-agent-mid-run-message 7166707a: the root stored
+    "include who led the round" 4s into the explore's final call; the
+    progress-post read would only deliver it at the next step, so the explore
+    finished without it and the root could no longer reach the task. Completion
+    now does one inbox read (once per completion, not per step); unread
+    messages defer it and arrive at the next step, exactly once.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    late = {
+        "id": "m-late",
+        "text": "Also say who led each round.",
+        "from_agent_id": "root-1",
+        "from_agent_path": "/root",
+        "created_at": "2026-10-20T02:18:31.952Z",
+    }
+    fetch = AsyncMock(side_effect=[[late], []])
+    fake_ws = MagicMock()
+    fake_ws.execute_tool = AsyncMock(return_value={"result": "Ringg AI raised $5.5M (Jan 23, 2026)."})
+    steps: dict = {}
+
+    async def fake_run_agent(**kwargs):
+        execute_tool = kwargs["execute_tool"]
+        await execute_tool("web_search", {"query": "AI agent funding rounds"}, "tc-search")
+        steps["first"] = await execute_tool("attempt_completion_with_result", {"result": "8 rounds"}, "tc-done-1")
+        steps["delivered"] = [row["text"] for row in await kwargs["poll_inbox"]()]
+        steps["second"] = await execute_tool("attempt_completion_with_result", {"result": "8 led"}, "tc-done-2")
+        steps["after"] = [row["text"] for row in await kwargs["poll_inbox"]()]
+        return {"status": "completed", "final_response": "8 led"}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("tools.web_search.WebSearchManager", return_value=fake_ws),
+        patch("domains.spawn_agent.service.save_explore_message", new=AsyncMock(return_value=None)),
+        patch("helpers.agent_inbox.fetch_agent_inbox", new=fetch),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="root-1",
+            user_id="u",
+            goal="Compile 8 funding rounds",
+            model="m",
+            task_id="task-1",
+            inbox_address="call_bg",
+        )
+
+    assert result["status"] != "failed", result
+    assert steps["first"].get("error") is True, "a final answer must not be accepted over an unread message"
+    assert steps["delivered"] == ["Also say who led each round."], steps
+    assert steps["second"] == {"success": True, "message": "Completion accepted"}, steps
+    assert steps["after"] == [], "the message is delivered exactly once"
+    assert fetch.await_count == 2, "one inbox read per completion attempt, none per step"
+
+
+async def test_explore_without_inbox_address_has_no_inbox_hook():
+    from unittest.mock import patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    captured: dict = {}
+
+    async def fake_run_agent(**kwargs):
+        captured.update(kwargs)
+        return {"status": "completed", "final_response": "done"}
+
+    with patch("temporalio.activity.heartbeat"), patch("loop.run_agent.run_agent", new=fake_run_agent):
+        await spawn_explore_agent_activity(agent_id="a", user_id="u", goal="g", model="m")
+    assert captured["poll_inbox"] is None
+
+
 async def test_spawn_explore_agent_activity_runs_run_agent_and_returns_result():
     """spawn_explore_agent_activity calls run_agent with proper args, returns shaped dict."""
     from unittest.mock import AsyncMock, patch
@@ -4177,9 +4633,7 @@ async def test_spawn_explore_self_wrap_returns_collected_tool_evidence():
     )
 
     async def fake_run_agent(**kwargs):
-        await kwargs["execute_tool"](
-            "grep", {"pattern": "Denver cost", "sources": ["agent_trajectories"]}, "tc1"
-        )
+        await kwargs["execute_tool"]("grep", {"pattern": "Denver cost", "sources": ["agent_trajectories"]}, "tc1")
         await asyncio.Event().wait()
 
     with (
@@ -4189,9 +4643,7 @@ async def test_spawn_explore_self_wrap_returns_collected_tool_evidence():
         patch("domains.spawn_agent.service.explore_limits_for_depth", return_value=(5, timedelta(milliseconds=50))),
         patch("domains.spawn_agent.service.LIVE_EXPLORE_DRAIN_SLACK_SECONDS", 0.01),
     ):
-        result = await spawn_explore_agent_activity(
-            agent_id="a", user_id="u", goal="research Denver cost", model="m"
-        )
+        result = await spawn_explore_agent_activity(agent_id="a", user_id="u", goal="research Denver cost", model="m")
 
     assert result["status"] == "completed"
     assert "$1,303.8" in result["result"]
@@ -4216,9 +4668,7 @@ async def test_spawn_explore_self_wrap_recovers_paused_loop_result():
 
     async def fake_run_agent(**kwargs):
         nonlocal caught_cancel
-        await kwargs["execute_tool"](
-            "grep", {"pattern": "Denver cost", "sources": ["agent_trajectories"]}, "tc1"
-        )
+        await kwargs["execute_tool"]("grep", {"pattern": "Denver cost", "sources": ["agent_trajectories"]}, "tc1")
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
@@ -4232,9 +4682,7 @@ async def test_spawn_explore_self_wrap_recovers_paused_loop_result():
         patch("domains.spawn_agent.service.explore_limits_for_depth", return_value=(5, timedelta(milliseconds=50))),
         patch("domains.spawn_agent.service.LIVE_EXPLORE_DRAIN_SLACK_SECONDS", 0.01),
     ):
-        result = await spawn_explore_agent_activity(
-            agent_id="a", user_id="u", goal="research Denver cost", model="m"
-        )
+        result = await spawn_explore_agent_activity(agent_id="a", user_id="u", goal="research Denver cost", model="m")
 
     assert caught_cancel
     assert result["status"] == "completed"
@@ -4263,9 +4711,7 @@ async def test_spawn_explore_external_pause_is_not_self_wrap():
         patch("domains.spawn_agent.service.explore_limits_for_depth", return_value=(5, timedelta(seconds=5))),
         patch("domains.spawn_agent.service.LIVE_EXPLORE_DRAIN_SLACK_SECONDS", 0.01),
     ):
-        task = asyncio.create_task(
-            spawn_explore_agent_activity(agent_id="a", user_id="u", goal="research", model="m")
-        )
+        task = asyncio.create_task(spawn_explore_agent_activity(agent_id="a", user_id="u", goal="research", model="m"))
         await started.wait()
         task.cancel()
         result = await task
@@ -4290,9 +4736,7 @@ async def test_spawn_explore_self_wrap_without_evidence_fails():
         patch("domains.spawn_agent.service.explore_limits_for_depth", return_value=(5, timedelta(milliseconds=50))),
         patch("domains.spawn_agent.service.LIVE_EXPLORE_DRAIN_SLACK_SECONDS", 0.01),
     ):
-        result = await spawn_explore_agent_activity(
-            agent_id="a", user_id="u", goal="research Denver cost", model="m"
-        )
+        result = await spawn_explore_agent_activity(agent_id="a", user_id="u", goal="research Denver cost", model="m")
 
     assert result["status"] == "error"
     assert result["result"] == ""
@@ -5660,6 +6104,29 @@ async def run_all_tests():
     await r.record_async("network_metadata_empty", test_fetch_network_metadata_empty_people)
     # service.py
     await r.record_async("explore_activity_happy", test_spawn_explore_agent_activity_runs_run_agent_and_returns_result)
+    await r.record_async(
+        "explore_agent_inbox_delivers_once_tolerates_failures",
+        test_explore_agent_inbox_delivers_each_message_once_and_tolerates_failures,
+    )
+    await r.record_async(
+        "explore_list_agents_renders_tree_from_explore_task",
+        test_explore_list_agents_renders_the_tree_from_the_explore_task,
+    )
+    await r.record_async(
+        "explore_list_agents_alone_is_not_completion_evidence",
+        test_explore_list_agents_alone_is_not_completion_evidence,
+    )
+    await r.record_async(
+        "explore_inbox_rides_progress_post_get_only_fallback",
+        test_explore_inbox_rides_the_progress_post_and_gets_only_as_fallback,
+    )
+    await r.record_async(
+        "explore_reads_message_stored_before_final_answer",
+        test_explore_reads_a_message_stored_before_its_final_answer,
+    )
+    await r.record_async(
+        "explore_without_inbox_address_has_no_inbox_hook", test_explore_without_inbox_address_has_no_inbox_hook
+    )
     await r.record_async(
         "explore_activity_replaces_fast_mode_stub",
         test_spawn_explore_agent_activity_replaces_fast_mode_stub_with_tool_evidence,

@@ -578,6 +578,15 @@ FAST_MODE_ENABLED_CAPTURE: Dict[str, List[bool]] = {}
 RESOLVE_FAST_CACHE_GOAL_CALLS: List[str] = []
 LEFTOVER_CHILD_AGENT_ID = "agent-test-leftover-child"
 LEFTOVER_CHILD_GOAL = "Produce fresh tool-grounded evidence for Andy Prevalsky's brand task."
+# A finished drafting sub-agent woken by its parent's send_message_to_agent
+# (NEW_TASK). The backend wake clears Agent.responseSchema and stores the
+# message as Agent.goal (tree-feedback-routing run 4, agent 7304d3f1).
+WOKEN_SUBAGENT_ID = "agent-test-woken-subagent"
+WOKEN_ORIGINAL_GOAL = "Draft one cold email to Garry Tan; return investor_name, investor_firm, subject, body."
+WOKEN_NEW_TASK = "Correction: re-sign your draft as 'Andy Prevalskii, Founder, Rose Labs' and return it."
+WOKEN_SCHEMA = {"fields": [{"name": "body", "type": "str", "required": True}]}
+SCHEMA_GENERATION_CAPTURE: Dict[str, List[List[str]]] = {}
+VERIFIER_SCHEMA_CAPTURE: Dict[str, List[Optional[Dict[str, Any]]]] = {}
 
 
 @activity.defn(name="resolve_fast_cache_goal_activity")
@@ -720,6 +729,8 @@ async def mock_check_progress(
 ) -> Dict[str, Any]:
     if agent_id in CUTOVER_VERIFIER_CONTEXTS:
         CUTOVER_VERIFIER_CONTEXTS[agent_id].append(list(context))
+    if agent_id in VERIFIER_SCHEMA_CAPTURE:
+        VERIFIER_SCHEMA_CAPTURE[agent_id].append(response_schema)
     return {
         "score": 1.0,
         "reasoning": "Complete",
@@ -815,7 +826,15 @@ async def mock_set_response_schema_activity(
     *args: Any,
     **kwargs: Any,
 ) -> Optional[Dict[str, Any]]:
+    if agent_id in SCHEMA_GENERATION_CAPTURE:
+        SCHEMA_GENERATION_CAPTURE[agent_id].append(list(user_messages))
+        return {"schema": WOKEN_SCHEMA, "usage": {}}
     return None
+
+
+@activity.defn(name="resolve_agent_address_activity")
+async def mock_resolve_agent_address_activity(agent_id: str, address: str, user_id: Optional[str]) -> Dict[str, Any]:
+    return {"agent_id": agent_id, "path": f"/root/{agent_id}"}
 
 
 @activity.defn(name="persist_response_schema_activity")
@@ -889,6 +908,7 @@ async def mock_spawn_browser_agent_activity_v3(
     fast_mode_cache_enabled: bool = False,
     world_model_mode: Optional[str] = None,
     agent_model: Optional[str] = None,
+    inbox_address: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Browser task that checkpoints once (drain yield or write approval), then completes.
 
@@ -1046,6 +1066,7 @@ async def mock_spawn_claude_code_activity(
 
 # Collect all mock activities for Worker registration
 MOCK_ACTIVITIES = [
+    mock_resolve_agent_address_activity,
     mock_get_model_context_window,
     mock_update_agent_status,
     mock_acknowledge_workflow_replacement_bootstrap,
@@ -1520,6 +1541,83 @@ async def _run_all_workflow_tests() -> List[tuple]:
             except Exception as e:
                 results.append((name, e))
 
+            # A woken sub-agent's verifier must judge the NEW_TASK it was woken
+            # with. The wake clears the previous run's schema; the verifier sees
+            # no goal row and drops agent-message rows, so without a regenerated
+            # schema it scores correct work 0% and the agent detours (run 4:
+            # 10-minute browser re-verification → tree timeout at 900s).
+            name = "wf_woken_subagent_verifier_judges_new_task_schema"
+            try:
+                woken_id = WOKEN_SUBAGENT_ID
+                CUTOVER_MESSAGES[woken_id] = [
+                    {
+                        "id": "woken-goal",
+                        "role": "USER",
+                        "text": WOKEN_ORIGINAL_GOAL,
+                        "timestamp": "2026-10-19T22:01:10+00:00",
+                        "metadata": {},
+                    },
+                    {
+                        "id": "woken-summary",
+                        "role": "TOOL",
+                        "text": "",
+                        "timestamp": "2026-10-19T22:02:41+00:00",
+                        "metadata": {"toolName": "completion_summary", "toolStatus": "FINISHED"},
+                    },
+                    {
+                        "id": "woken-new-task",
+                        "role": "USER",
+                        "text": WOKEN_NEW_TASK,
+                        "timestamp": "2026-10-19T22:02:50+00:00",
+                        "metadata": {
+                            "agentMessage": True,
+                            "messageType": "NEW_TASK",
+                            "fromAgentPath": "/root/outreach_coordinator",
+                            "toAgentPath": "/root/outreach_coordinator/draft_garry_tan",
+                        },
+                    },
+                ]
+                SCHEMA_GENERATION_CAPTURE[woken_id] = []
+                VERIFIER_SCHEMA_CAPTURE[woken_id] = []
+                handle = await env.client.start_workflow(
+                    AgentWorkflow.run,
+                    args=[
+                        woken_id,
+                        "user-test-1",
+                        WOKEN_NEW_TASK,
+                        "rose-labs/rose-1-flash",
+                        256,
+                        {"type": "FLOAT_LLM_JUDGE"},
+                        None,  # context
+                        "parent-wf-woken",  # parent_workflow_id
+                        "parent-agent-woken",  # parent_agent_id
+                        2,  # depth
+                        None,  # bus_id
+                        "execute",  # start_phase
+                    ],
+                    id=f"{woken_id}:wake:woken-new-task",
+                    task_queue=TASK_QUEUE,
+                )
+                for _ in range(60):
+                    if VERIFIER_SCHEMA_CAPTURE[woken_id]:
+                        break
+                    await asyncio.sleep(0.5)
+                judged = VERIFIER_SCHEMA_CAPTURE[woken_id]
+                assert judged, "woken sub-agent never reached its verifier"
+                assert judged[0] == WOKEN_SCHEMA, (
+                    f"woken sub-agent verifier judged without the new task's schema: {judged[0]!r}"
+                )
+                generated = SCHEMA_GENERATION_CAPTURE[woken_id]
+                assert len(generated) == 1, f"expected one startup schema generation, got {generated!r}"
+                assert generated[0][0] == WOKEN_NEW_TASK and WOKEN_ORIGINAL_GOAL in generated[0], generated
+                await _cancel_workflow(handle)
+                results.append((name, None))
+            except Exception as e:
+                results.append((name, e))
+            finally:
+                for capture in (CUTOVER_MESSAGES, SCHEMA_GENERATION_CAPTURE, VERIFIER_SCHEMA_CAPTURE):
+                    capture.pop(WOKEN_SUBAGENT_ID, None)
+
     return results
 
 
@@ -1531,8 +1629,11 @@ CUTOVER_BROWSER_GOAL = "Buy the $12 item on shop.example.com and report the conf
 CUTOVER_CODE_TOOL_CALL = {
     "tool": "spawn_agent",
     "type": "code",
+    "task_name": "puzzle",
     "goal": "Write answer.txt containing the answer to the puzzle",
     "output_schema": {"fields": [{"name": "answer", "type": "str", "required": True}]},
+    # Foreground parking contract; background cutover is covered by background_agents.
+    "run_in_background": False,
 }
 
 
@@ -1558,9 +1659,12 @@ def _opt_in_cutover_agent(
             or {
                 "tool": "spawn_agent",
                 "type": "browser",
+                "task_name": "checkout",
                 "goal": CUTOVER_BROWSER_GOAL,
                 "start_url": "https://shop.example.com",
                 "output_schema": {"fields": [{"name": "confirmation", "type": "str", "required": True}]},
+                # Foreground parking contract; background cutover is covered by background_agents.
+                "run_in_background": False,
             }
         ]
     ]
@@ -1667,6 +1771,8 @@ async def _run_parked_tool_cutover_tests() -> List[tuple]:
     results: List[tuple] = []
 
     async with await WorkflowEnvironment.start_time_skipping() as env:
+        # max_cached_workflows=0 replays full history on every workflow task, as a
+        # sticky-cache miss under load does; tool-call ids must survive replay.
         async with (
             Worker(
                 env.client,
@@ -1674,6 +1780,7 @@ async def _run_parked_tool_cutover_tests() -> List[tuple]:
                 workflows=[AgentWorkflow],
                 activities=MOCK_ACTIVITIES,
                 workflow_runner=_WORKFLOW_RUNNER,
+                max_cached_workflows=0,
             ),
             Worker(
                 env.client,
@@ -1681,6 +1788,7 @@ async def _run_parked_tool_cutover_tests() -> List[tuple]:
                 workflows=[AgentWorkflow],
                 activities=MOCK_ACTIVITIES,
                 workflow_runner=_WORKFLOW_RUNNER,
+                max_cached_workflows=0,
             ),
         ):
             name = "wf_cutover_drained_browser_resumes_same_step_on_new_generation"
@@ -1729,20 +1837,33 @@ async def _run_parked_tool_cutover_tests() -> List[tuple]:
                 )
                 handle = await _start_cutover_workflow(env.client, agent_id, workflow_id)
                 for _ in range(400):
-                    if CUTOVER_NEW_QUEUE in CUTOVER_POINTER_FETCHES.get(workflow_id, []):
+                    if CUTOVER_APPROVAL_REQUESTS[agent_id]:
                         break
                     await asyncio.sleep(0.05)
-                assert CUTOVER_NEW_QUEUE in CUTOVER_POINTER_FETCHES.get(workflow_id, []), (
+                # The deploy flipped the pointer while the approval is pending; its
+                # cutover owner broadcasts the live queue to old-queue workflows.
+                from helpers.wait_condition_or_handoff import GENERATION_HANDOFF_SIGNAL
+
+                await handle.signal(GENERATION_HANDOFF_SIGNAL, CUTOVER_NEW_QUEUE)
+                current_queue = None
+                for _ in range(400):
+                    current_queue = (await handle.describe()).task_queue
+                    if current_queue == CUTOVER_NEW_QUEUE:
+                        break
+                    await asyncio.sleep(0.05)
+                assert current_queue == CUTOVER_NEW_QUEUE, (
                     "workflow never reached the new generation while the approval was pending"
                 )
                 request_id = f"attn-{agent_id}-1"
                 await handle.signal(
                     AgentWorkflow.receive_user_response,
-                    json.dumps({
-                        "request_id": request_id,
-                        "response": "approve",
-                        "user_message": None,
-                    }),
+                    json.dumps(
+                        {
+                            "request_id": request_id,
+                            "response": "approve",
+                            "user_message": None,
+                        }
+                    ),
                 )
                 outcome = await asyncio.wait_for(handle.result(), timeout=60)
                 assert isinstance(outcome, dict) and outcome.get("status") == "completed", outcome
@@ -1792,6 +1913,70 @@ async def _run_parked_tool_cutover_tests() -> List[tuple]:
                 outcome = await asyncio.wait_for(handle.result(), timeout=60)
                 assert isinstance(outcome, dict) and outcome.get("status") == "completed", outcome
                 _assert_code_agent_reattached_on_new_generation(agent_id)
+                results.append((name, None))
+            except Exception as e:
+                if handle is not None:
+                    await _cancel_workflow(handle)
+                results.append((name, e))
+
+            name = "wf_cutover_background_browser_resumes_in_background_and_notifies_once"
+            agent_id = "agent-cutover-background"
+            workflow_id = _next_wf_id("cutover-background")
+            handle = None
+            try:
+                background_spawn = {
+                    "tool": "spawn_agent",
+                    "type": "browser",
+                    "task_name": "checkout",
+                    "goal": CUTOVER_BROWSER_GOAL,
+                    "start_url": "https://shop.example.com",
+                    "output_schema": {"fields": [{"name": "confirmation", "type": "str", "required": True}]},
+                }
+                _opt_in_cutover_agent(
+                    agent_id,
+                    workflow_id,
+                    {"mode": "drain", "new_queue": CUTOVER_NEW_QUEUE},
+                    tool_call=background_spawn,
+                )
+                # Turn 2 ends without tool calls: the agent waits for its background browser.
+                CUTOVER_LLM_SCRIPTS[agent_id].append([])
+                handle = await _start_cutover_workflow(env.client, agent_id, workflow_id)
+                outcome = await asyncio.wait_for(handle.result(), timeout=60)
+                assert isinstance(outcome, dict) and outcome.get("status") == "completed", outcome
+
+                first, second = _assert_browser_resumed_on_new_generation(agent_id)
+                # The executor runs under the spawn's own tool-call id.
+                original_id = first["tool_call_id"]
+                rows = CUTOVER_MESSAGES[agent_id]
+                started = [
+                    row
+                    for row in rows
+                    if row["metadata"].get("toolCallId") == original_id and row["metadata"].get("runInBackground")
+                ]
+                assert [row["metadata"].get("toolStatus") for row in started] == ["FINISHED"], started
+                executor_rows = [
+                    row
+                    for row in rows
+                    if row["metadata"].get("toolCallId") == original_id and not row["metadata"].get("runInBackground")
+                ]
+                assert executor_rows and all(row["metadata"].get("excludeFromModel") for row in executor_rows)
+                assert "Started browser agent in background" in started[0]["text"], started[0]["text"]
+                assert started[0]["task_queue"] == CUTOVER_OLD_QUEUE
+                notes = [row for row in rows if row["metadata"].get("agentNotification") is True]
+                assert len(notes) == 1, notes
+                assert notes[0]["role"] == "USER" and notes[0]["task_queue"] == CUTOVER_NEW_QUEUE, notes[0]
+                # Same task id across the generation handoff, addressed by its task path.
+                assert notes[0]["metadata"].get("fromAgentAddress") == "/root/checkout", notes[0]
+                assert notes[0]["metadata"].get("backgroundTaskId") == first["tool_call_id"], notes[0]
+                assert notes[0]["metadata"].get("status") == "completed", notes[0]
+                assert "SHOP-4242" in notes[0]["text"], notes[0]["text"]
+                completion_rejections = [
+                    row
+                    for row in rows
+                    if row["metadata"].get("toolName") == "attempt_completion"
+                    and row["metadata"].get("toolStatus") == "ERROR"
+                ]
+                assert not completion_rejections, "the agent waited instead of completing early"
                 results.append((name, None))
             except Exception as e:
                 if handle is not None:
@@ -2180,6 +2365,48 @@ def test_workflow_continuation_carries_parked_tools_and_drops_malformed_records(
     assert restored._pending_tool_resumes == [parked]
 
 
+def test_workflow_continuation_backfills_task_name_for_legacy_parked_spawns():
+    """A spawn_agent parked by a generation without task_name re-enters validation with a stable valid name."""
+    import re
+
+    from utils.tool_schemas import TOOL_MODELS
+
+    def _restore(records):
+        wf = _bare_workflow_instance()
+        wf.max_iterations = None
+        wf.context_gates = {}
+        wf._pending_tool_resumes = records
+        restored = _bare_workflow_instance()
+        restored._restore_deployment_state(wf._continuation_resume_state([{"role": "USER", "text": "buy socks"}]))
+        return restored._pending_tool_resumes
+
+    legacy = {
+        "tool_name": "spawn_agent",
+        "tool_args": {
+            "type": "browser",
+            "goal": "Buy wool socks",
+            "start_url": "https://example.com",
+            "output_schema": {"type": "object"},
+        },
+        "tool_call_id": "toolu_01LegacyBrowser",
+        "resume": {"phase": "activity", "resume_state": {"step_count": 4}},
+    }
+    named = {**legacy, "tool_call_id": "toolu_02Named", "tool_args": {**legacy["tool_args"], "task_name": "socks"}}
+    other = {"tool_name": "web_search", "tool_args": {"query": "socks"}, "tool_call_id": "tc-3", "resume": {}}
+    restored = _restore([legacy, named, other])
+
+    task_name = restored[0]["tool_args"].get("task_name")
+    assert isinstance(task_name, str) and re.match(r"^[a-z][a-z0-9_]{0,39}$", task_name), restored[0]
+    assert {k: v for k, v in restored[0]["tool_args"].items() if k != "task_name"} == legacy["tool_args"]
+    assert restored[0]["resume"] == legacy["resume"] and restored[0]["tool_call_id"] == legacy["tool_call_id"]
+    # The replay's own validation gate (_execute_tool_once) accepts it.
+    TOOL_MODELS["spawn_agent"](**{"tool": "spawn_agent", **restored[0]["tool_args"]})
+    assert restored[1] == named, "an existing task_name is preserved"
+    assert restored[2] == other, "only spawn_agent records are touched"
+    assert _restore([legacy])[0]["tool_args"]["task_name"] == task_name, "the backfill is deterministic"
+    assert "task_name" not in legacy["tool_args"], "the carried record is not mutated in place"
+
+
 def test_restart_safe_child_tool_counts_survive_memory_loss_without_duplication():
     from helpers.summarize import _restart_safe_child_tool_counts
 
@@ -2362,12 +2589,13 @@ def test_workflow_parent_state_query():
     wf = _bare_workflow_instance()
     wf.is_paused = True
     wf._cost_limit_reached = True
-    assert wf.parent_state_query() == {"is_paused": True, "is_cost_limit_reached": True}
+    wf._is_finished = True
+    assert wf.parent_state_query() == {"is_paused": True, "is_cost_limit_reached": True, "is_finished": True}
 
 
 def test_workflow_parent_state_query_all_false():
     wf = _bare_workflow_instance()
-    assert wf.parent_state_query() == {"is_paused": False, "is_cost_limit_reached": False}
+    assert wf.parent_state_query() == {"is_paused": False, "is_cost_limit_reached": False, "is_finished": False}
 
 
 def test_workflow_format_outputs_no_schema_emits_response_keys():
@@ -3155,10 +3383,17 @@ async def test_workflow_signal_control_reply_does_not_refresh_schema():
     fake = _FakeWorkflowModule()
     original = _patch_workflow(fake)
     try:
-        for index, response in enumerate([
-            "__AUTH_ASSISTANCE_COMPLETED__", "__REJECTED__", "RESOLVED",
-            "SOURCE_CONNECTED", "SUBSCRIPTION_ACTIVE", "", None,
-        ]):
+        for index, response in enumerate(
+            [
+                "__AUTH_ASSISTANCE_COMPLETED__",
+                "__REJECTED__",
+                "RESOLVED",
+                "SOURCE_CONNECTED",
+                "SUBSCRIPTION_ACTIVE",
+                "",
+                None,
+            ]
+        ):
             request_id = f"control-request-{index}"
             await wf.receive_user_response(json.dumps({"request_id": request_id, "response": response}))
             assert wf._signal_responses[request_id] == response
@@ -3172,8 +3407,15 @@ async def test_workflow_signal_control_reply_does_not_refresh_schema():
 
 
 async def test_workflow_signal_normalized_controls_do_not_refresh_schema():
-    controls = ["  __REJECTED__\n", "\t__AUTH_ASSISTANCE_COMPLETED__  ",
-                " RESOLVED ", " SOURCE_CONNECTED\n", " SUBSCRIPTION_ACTIVE ", "", " \n"]
+    controls = [
+        "  __REJECTED__\n",
+        "\t__AUTH_ASSISTANCE_COMPLETED__  ",
+        " RESOLVED ",
+        " SOURCE_CONNECTED\n",
+        " SUBSCRIPTION_ACTIVE ",
+        "",
+        " \n",
+    ]
     for keyed in (True, False):
         wf = _bare_workflow_instance()
         fake = _FakeWorkflowModule()
@@ -3293,9 +3535,15 @@ async def test_workflow_authored_approval_words_remain_actual_requirements():
                     wf._admit_durable_response_schema_feedback()
                     wf._admit_durable_response_schema_feedback()
                 else:
-                    await wf.receive_user_response(json.dumps({
-                        "request_id": "actual-authored-approval", "response": "RESOLVED", "user_message": value,
-                    }))
+                    await wf.receive_user_response(
+                        json.dumps(
+                            {
+                                "request_id": "actual-authored-approval",
+                                "response": "RESOLVED",
+                                "user_message": value,
+                            }
+                        )
+                    )
                 assert wf._response_schema_feedback == [value], "actual authored bytes were excluded or normalized"
                 assert wf._response_schema_revision == 1
             finally:
@@ -3320,10 +3568,9 @@ async def test_workflow_keyed_user_message_updates_native_schema_without_injecti
         assert json.dumps(wf.context, sort_keys=True) == original_context
         assert await wf._make_response_schema_getter()() == replacement
         assert "venue_prices" in await wf.build_system_prompt()
-        assert not any(
-            call[0] == "post_agent_message" and call[1][2] == "USER"
-            for call in fake.activity_calls
-        ), "schema refresh fabricated a USER message"
+        assert not any(call[0] == "post_agent_message" and call[1][2] == "USER" for call in fake.activity_calls), (
+            "schema refresh fabricated a USER message"
+        )
     finally:
         _restore_workflow(original)
 
@@ -3334,19 +3581,24 @@ async def test_workflow_keyed_authored_message_refreshes_schema_separately_from_
         wf, fake, replacement = _user_schema_refresh_fixture()
         original = _patch_workflow(fake)
         try:
-            await wf.receive_user_response(json.dumps({
-                "request_id": "authored-control", "response": control, "user_message": feedback,
-            }))
+            await wf.receive_user_response(
+                json.dumps(
+                    {
+                        "request_id": "authored-control",
+                        "response": control,
+                        "user_message": feedback,
+                    }
+                )
+            )
             await wf._wait_for_response_schema_refresh()
             assert wf._signal_responses["authored-control"] == control, "authored input overwrote the gate protocol"
             assert wf._response_schema_feedback == [feedback], "protocol reply dropped or rewrote actual user input"
             assert wf.output_schema == replacement, "authored input beside a protocol reply left the root schema stale"
             generation = [call for call in fake.activity_calls if call[0] == "set_response_schema_activity"]
             assert len(generation) == 1 and feedback in generation[0][1][1]
-            assert not any(
-                call[0] == "post_agent_message" and call[1][2] == "USER"
-                for call in fake.activity_calls
-            ), "schema refresh invented a USER row"
+            assert not any(call[0] == "post_agent_message" and call[1][2] == "USER" for call in fake.activity_calls), (
+                "schema refresh invented a USER row"
+            )
         finally:
             _restore_workflow(original)
 
@@ -3357,9 +3609,15 @@ async def test_workflow_explicit_protocol_only_reply_does_not_refresh_schema():
     original = _patch_workflow(fake)
     try:
         for control in ("Approved", "Message sent via Mac app ✅", "Authentication complete"):
-            await wf.receive_user_response(json.dumps({
-                "request_id": "protocol-only", "response": control, "user_message": None,
-            }))
+            await wf.receive_user_response(
+                json.dumps(
+                    {
+                        "request_id": "protocol-only",
+                        "response": control,
+                        "user_message": None,
+                    }
+                )
+            )
             assert wf._signal_responses["protocol-only"] == control
         assert wf._response_schema_revision == 0 and wf._response_schema_feedback == []
         assert wf._has_new_messages is False and fake.activity_calls == []
@@ -3375,7 +3633,12 @@ async def test_workflow_keyed_rejection_admits_already_polled_durable_feedback()
     wf, fake, replacement = _user_schema_refresh_fixture()
     wf.context = [
         {"id": "goal", "role": "USER", "text": wf.goal, "timestamp": "2026-10-14T17:21:00Z"},
-        {"id": "rejection-feedback", "role": "USER", "text": "Use the shared account and include venue prices", "timestamp": "2026-10-14T17:28:00Z"},
+        {
+            "id": "rejection-feedback",
+            "role": "USER",
+            "text": "Use the shared account and include venue prices",
+            "timestamp": "2026-10-14T17:28:00Z",
+        },
     ]
     before = json.dumps(wf.context, sort_keys=True)
     fake.activity_returns["poll_new_messages"] = []
@@ -3404,7 +3667,12 @@ async def test_workflow_keyed_rejection_admits_already_polled_durable_feedback()
 async def test_workflow_keyed_rejection_polls_durable_user_feedback_without_schema_narration():
     wf, fake, replacement = _user_schema_refresh_fixture()
     wf.context = [{"id": "goal", "role": "USER", "text": wf.goal, "timestamp": "2026-10-14T17:21:00Z"}]
-    correction = {"id": "correction", "role": "USER", "text": "Also include venue prices", "timestamp": "2026-10-14T17:28:00Z"}
+    correction = {
+        "id": "correction",
+        "role": "USER",
+        "text": "Also include venue prices",
+        "timestamp": "2026-10-14T17:28:00Z",
+    }
     fake.activity_returns["poll_new_messages"] = [correction]
     original = _patch_workflow(fake)
     try:
@@ -3421,7 +3689,8 @@ async def _assert_keyed_rejection_waiter_orders_feedback(*, poll_fails: bool):
     wf, fake, replacement = _user_schema_refresh_fixture()
     request_id = "ordered-rejection"
     correction = {
-        "id": "ordered-correction", "role": "USER",
+        "id": "ordered-correction",
+        "role": "USER",
         "text": "  Use Andy's shared account.\nInclude venue prices.  ",
         "timestamp": "2026-10-14T17:28:00Z",
         "metadata": {"source": "attention_response", "attentionRequestId": request_id},
@@ -3440,16 +3709,25 @@ async def _assert_keyed_rejection_waiter_orders_feedback(*, poll_fails: bool):
             await asyncio.sleep(0)
         return wf._signal_responses[request_id], list(wf._response_schema_feedback), wf._response_schema_revision
 
-    signal_task = asyncio.create_task(wf.receive_user_response(json.dumps({
-        "request_id": request_id, "response": "__REJECTED__",
-    })))
+    signal_task = asyncio.create_task(
+        wf.receive_user_response(
+            json.dumps(
+                {
+                    "request_id": request_id,
+                    "response": "__REJECTED__",
+                }
+            )
+        )
+    )
     waiter = asyncio.create_task(await_request_response())
     try:
         for _ in range(20):
             if any(call[0] == "poll_new_messages" for call in fake.activity_calls):
                 break
             await asyncio.sleep(0)
-        assert any(call[0] == "poll_new_messages" for call in fake.activity_calls), "rejection did not reach its durable poll"
+        assert any(call[0] == "poll_new_messages" for call in fake.activity_calls), (
+            "rejection did not reach its durable poll"
+        )
         await asyncio.sleep(0)
         assert not signal_task.done(), "durable poll was not blocked"
         assert request_id not in wf._signal_responses and not waiter.done(), (
@@ -3469,7 +3747,9 @@ async def _assert_keyed_rejection_waiter_orders_feedback(*, poll_fails: bool):
             await signal_task
             response, feedback, revision = await waiter
             assert response == "__REJECTED__"
-            assert feedback == [correction["text"]] and revision == 1, "waiter observed rejection before its authored revision"
+            assert feedback == [correction["text"]] and revision == 1, (
+                "waiter observed rejection before its authored revision"
+            )
             await wf._wait_for_response_schema_refresh()
             assert wf.output_schema == replacement
             assert correction in wf.context
@@ -3496,9 +3776,15 @@ async def test_workflow_failed_rejection_intake_does_not_release_waiter():
 def _rejection_poll_activity_error(cause=None):
     from temporalio.exceptions import ActivityError, ApplicationError, RetryState
 
-    error = ActivityError("durable USER poll exhausted retries", scheduled_event_id=11, started_event_id=12,
-                          identity="test-worker", activity_type="poll_new_messages", activity_id="poll-user-input",
-                          retry_state=RetryState.MAXIMUM_ATTEMPTS_REACHED)
+    error = ActivityError(
+        "durable USER poll exhausted retries",
+        scheduled_event_id=11,
+        started_event_id=12,
+        identity="test-worker",
+        activity_type="poll_new_messages",
+        activity_id="poll-user-input",
+        retry_state=RetryState.MAXIMUM_ATTEMPTS_REACHED,
+    )
     error.__cause__ = cause or ApplicationError("message store unavailable", type="MessageReadUnavailable")
     return error
 
@@ -3507,11 +3793,18 @@ async def _exercise_rejection_poll_failure_custody(*, existing_feedback):
     wf, fake, _ = _user_schema_refresh_fixture()
     wf._response_schema_initialized = False
     request_id = "poll-unavailable-rejection"
-    correction = {"id": "deferred-rejection-input", "role": "USER", "text": "  Keep the shared account.\nReturn venue prices.  ",
-                  "timestamp": "2026-10-15T01:01:00Z",
-                  "metadata": {"source": "attention_response", "attentionRequestId": request_id}}
-    wf.context = ([{"id": "goal", "role": "USER", "text": wf.goal, "timestamp": "2026-10-15T01:00:00Z"}, correction]
-                  if existing_feedback else [])
+    correction = {
+        "id": "deferred-rejection-input",
+        "role": "USER",
+        "text": "  Keep the shared account.\nReturn venue prices.  ",
+        "timestamp": "2026-10-15T01:01:00Z",
+        "metadata": {"source": "attention_response", "attentionRequestId": request_id},
+    }
+    wf.context = (
+        [{"id": "goal", "role": "USER", "text": wf.goal, "timestamp": "2026-10-15T01:00:00Z"}, correction]
+        if existing_feedback
+        else []
+    )
     original_context = list(wf.context)
     fake.activity_returns["poll_new_messages"] = [correction]
     native_execute = fake.execute_activity
@@ -3527,7 +3820,9 @@ async def _exercise_rejection_poll_failure_custody(*, existing_feedback):
     original = _patch_workflow(fake)
     try:
         await wf.receive_user_response(json.dumps({"request_id": request_id, "response": "__REJECTED__"}))
-        assert wf._signal_responses[request_id] == "__REJECTED__", "exhausted optional read lost the request-scoped rejection"
+        assert wf._signal_responses[request_id] == "__REJECTED__", (
+            "exhausted optional read lost the request-scoped rejection"
+        )
         assert wf.context == original_context, "failed read fabricated or rewrote a USER row"
         assert wf._response_schema_feedback == ([correction["text"]] if existing_feedback else []), (
             "failed read lost already-known authored input or invented unavailable feedback"
@@ -3538,7 +3833,9 @@ async def _exercise_rejection_poll_failure_custody(*, existing_feedback):
         await wf._poll_messages(datetime.fromtimestamp(0, tz=timezone.utc))
         await wf._poll_messages(datetime.fromtimestamp(0, tz=timezone.utc))
         assert wf._response_schema_feedback == [correction["text"]]
-        assert wf._response_schema_revision == 1, "later successful polling repeated or lost the deferred authored event"
+        assert wf._response_schema_revision == 1, (
+            "later successful polling repeated or lost the deferred authored event"
+        )
         assert sum(row.get("id") == correction["id"] for row in wf.context) == 1
     finally:
         _restore_workflow(original)
@@ -3557,11 +3854,14 @@ async def test_workflow_rejection_read_does_not_swallow_cancellation_or_generati
     from helpers.generation_handoff import GenerationHandoffRequested
     from helpers.workflow_generation import WorkflowGenerationSealed
 
-    for failure in (asyncio.CancelledError(), WorkflowGenerationSealed("replaced generation"),
-                    GenerationHandoffRequested("replacement-queue"),
-                    _rejection_poll_activity_error(TemporalCancelledError("poll was cancelled")),
-                    _rejection_poll_activity_error(ApplicationError("replaced generation", type="WorkflowGenerationSealed")),
-                    _rejection_poll_activity_error(ApplicationError("handoff requested", type="GenerationHandoffRequested"))):
+    for failure in (
+        asyncio.CancelledError(),
+        WorkflowGenerationSealed("replaced generation"),
+        GenerationHandoffRequested("replacement-queue"),
+        _rejection_poll_activity_error(TemporalCancelledError("poll was cancelled")),
+        _rejection_poll_activity_error(ApplicationError("replaced generation", type="WorkflowGenerationSealed")),
+        _rejection_poll_activity_error(ApplicationError("handoff requested", type="GenerationHandoffRequested")),
+    ):
         wf, fake, _ = _user_schema_refresh_fixture()
         wf._response_schema_initialized = False
 
@@ -3572,7 +3872,9 @@ async def test_workflow_rejection_read_does_not_swallow_cancellation_or_generati
         original = _patch_workflow(fake)
         try:
             try:
-                await wf.receive_user_response(json.dumps({"request_id": "cancelled-rejection", "response": "__REJECTED__"}))
+                await wf.receive_user_response(
+                    json.dumps({"request_id": "cancelled-rejection", "response": "__REJECTED__"})
+                )
             except BaseException as observed:
                 assert observed is failure, "lifecycle failure was replaced with another error"
             else:
@@ -3605,7 +3907,9 @@ async def test_workflow_schema_requirements_preserve_distinct_durable_reversions
 
 def _attention_authored_row(request_id, text, index):
     return {
-        "id": f"attention-row-{index}", "role": "USER", "text": text,
+        "id": f"attention-row-{index}",
+        "role": "USER",
+        "text": text,
         "timestamp": f"2026-10-14T17:2{index}:00Z",
         "metadata": {"source": "attention_response", "attentionRequestId": request_id},
     }
@@ -3627,7 +3931,9 @@ async def test_workflow_attention_row_before_signal_is_one_requirement_event():
         await wf._wait_for_response_schema_refresh()
         assert wf._response_schema_revision == 1
         await _deliver_authored_attention_signal(wf, "request-A", row["text"])
-        assert wf._response_schema_revision == 1, "the durable attention row and its keyed signal generated two revisions"
+        assert wf._response_schema_revision == 1, (
+            "the durable attention row and its keyed signal generated two revisions"
+        )
         assert len([call for call in fake.activity_calls if call[0] == "set_response_schema_activity"]) == 1
     finally:
         _restore_workflow(original)
@@ -3643,7 +3949,9 @@ async def test_workflow_attention_signal_does_not_consume_another_identical_even
         fake.activity_returns["poll_new_messages"] = [_attention_authored_row("request-B", text, 2)]
         await wf._poll_messages(datetime.fromtimestamp(0, timezone.utc))
         await wf._wait_for_response_schema_refresh()
-        assert wf._response_schema_revision == 2, "text matching attributed a distinct attention event to an older pending signal"
+        assert wf._response_schema_revision == 2, (
+            "text matching attributed a distinct attention event to an older pending signal"
+        )
         fake.activity_returns["poll_new_messages"] += [_attention_authored_row("request-A", text, 1)]
         await wf._poll_messages(datetime.fromtimestamp(0, timezone.utc))
         await wf._wait_for_response_schema_refresh()
@@ -3670,7 +3978,9 @@ async def test_workflow_attention_distinct_a_b_a_events_preserve_chronology_once
             await wf._wait_for_response_schema_refresh()
             if index != 2:
                 await _deliver_authored_attention_signal(wf, request_id, text)
-        assert wf._response_schema_revision == 3, "transport copies changed the revision count for three authored events"
+        assert wf._response_schema_revision == 3, (
+            "transport copies changed the revision count for three authored events"
+        )
         assert wf._response_schema_feedback == texts
         assert (await wf._response_schema_user_messages())[-3:] == texts
     finally:
@@ -3714,7 +4024,9 @@ async def test_workflow_attention_duplicate_physical_rows_in_one_batch_are_one_e
     try:
         await wf._poll_messages(datetime.fromtimestamp(0, timezone.utc))
         await wf._wait_for_response_schema_refresh()
-        assert wf._response_schema_revision == 1, "two physical rows for one attention event created two revisions in one batch"
+        assert wf._response_schema_revision == 1, (
+            "two physical rows for one attention event created two revisions in one batch"
+        )
         assert wf._response_schema_feedback == [row["text"]]
         assert ("attention_response", "request-A") in wf._response_schema_feedback_rows
         assert (await wf._response_schema_user_messages()).count(row["text"]) == 1
@@ -3732,12 +4044,18 @@ async def test_workflow_attention_authored_control_word_is_real_feedback_verbati
     try:
         await wf._poll_messages(datetime.fromtimestamp(0, timezone.utc))
         await wf._wait_for_response_schema_refresh()
-        assert wf._response_schema_revision == 1, "a protocol control word in an explicitly authored USER event was discarded"
+        assert wf._response_schema_revision == 1, (
+            "a protocol control word in an explicitly authored USER event was discarded"
+        )
         assert wf._response_schema_feedback == [text], "authored bytes were normalized before admission"
-        assert (await wf._response_schema_user_messages())[-1] == text, "schema intake normalized explicitly authored bytes"
+        assert (await wf._response_schema_user_messages())[-1] == text, (
+            "schema intake normalized explicitly authored bytes"
+        )
         wf._record_response_schema_feedback(text, request_id="authored-control-word")
         assert wf._response_schema_revision == 1
-        await wf.receive_user_response(json.dumps({"request_id": "protocol-only", "response": "RESOLVED", "user_message": None}))
+        await wf.receive_user_response(
+            json.dumps({"request_id": "protocol-only", "response": "RESOLVED", "user_message": None})
+        )
         await wf.receive_user_response(json.dumps({"request_id": "legacy-control", "response": "RESOLVED"}))
         assert wf._response_schema_revision == 1, "protocol-only or legacy control transport became authored feedback"
     finally:
@@ -3753,10 +4071,9 @@ async def test_workflow_schema_change_updates_native_contract_without_user_row()
 
         assert wf.output_schema == replacement
         assert "venue_prices" in await wf.build_system_prompt(), "actor retained the old native schema"
-        assert not any(
-            call[0] == "post_agent_message" and call[1][2] == "USER"
-            for call in fake.activity_calls
-        ), "schema refresh fabricated a USER message"
+        assert not any(call[0] == "post_agent_message" and call[1][2] == "USER" for call in fake.activity_calls), (
+            "schema refresh fabricated a USER message"
+        )
     finally:
         _restore_workflow(original)
 
@@ -3766,16 +4083,17 @@ async def test_workflow_new_instruction_schema_uses_native_state_without_user_ro
     followup = "Research venue prices"
     original = _patch_workflow(fake)
     try:
-        await wf._regenerate_output_schema_for_new_instruction([
-            {"role": "USER", "text": followup, "metadata": None},
-        ])
+        await wf._regenerate_output_schema_for_new_instruction(
+            [
+                {"role": "USER", "text": followup, "metadata": None},
+            ]
+        )
 
         assert wf.output_schema == replacement
         assert "venue_prices" in await wf.build_system_prompt()
-        assert not any(
-            call[0] == "post_agent_message" and call[1][2] == "USER"
-            for call in fake.activity_calls
-        ), "new-instruction schema regeneration fabricated a USER message"
+        assert not any(call[0] == "post_agent_message" and call[1][2] == "USER" for call in fake.activity_calls), (
+            "new-instruction schema regeneration fabricated a USER message"
+        )
     finally:
         _restore_workflow(original)
 
@@ -3946,7 +4264,11 @@ async def test_workflow_generation_failure_blocks_actual_verifier_provider_call(
 
     wf, fake, _replacement = _user_schema_refresh_fixture()
     fake.activity_fail_for.add("set_response_schema_activity")
-    fake.activity_returns["check_progress"] = {"score": 1.0, "reasoning": "Old venues satisfied", "structured_response": {"venues": ["Old venue"]}}
+    fake.activity_returns["check_progress"] = {
+        "score": 1.0,
+        "reasoning": "Old venues satisfied",
+        "structured_response": {"venues": ["Old venue"]},
+    }
     original = _patch_workflow(fake)
     try:
         await wf.receive_user_response("Also include venue prices")
@@ -3956,14 +4278,22 @@ async def test_workflow_generation_failure_blocks_actual_verifier_provider_call(
             assert "set_response_schema_activity failed" in str(error)
         try:
             await _run_verifier(
-                execute_activity=fake.execute_activity, context=[], verifier_prompt_generator=wf._make_verifier_prompt_generator(),
-                model="rose-labs/rose-1-flash", agent_id=wf.agent_id, task_id=None, post_message=None,
-                get_response_schema=wf._make_response_schema_getter(), get_requirement_revision=lambda: wf._response_schema_revision,
+                execute_activity=fake.execute_activity,
+                context=[],
+                verifier_prompt_generator=wf._make_verifier_prompt_generator(),
+                model="rose-labs/rose-1-flash",
+                agent_id=wf.agent_id,
+                task_id=None,
+                post_message=None,
+                get_response_schema=wf._make_response_schema_getter(),
+                get_requirement_revision=lambda: wf._response_schema_revision,
             )
         except RuntimeError as error:
             assert "set_response_schema_activity failed" in str(error)
         else:
-            raise AssertionError("the actual verifier judged an older native contract after latest schema generation failed")
+            raise AssertionError(
+                "the actual verifier judged an older native contract after latest schema generation failed"
+            )
         assert not any(call[0] == "check_progress" for call in fake.activity_calls)
     finally:
         _restore_workflow(original)
@@ -4007,7 +4337,9 @@ async def test_workflow_accepted_native_schema_survives_lost_persistence_ack():
     try:
         await wf.receive_user_response("Also include venue prices")
         await wf._wait_for_response_schema_refresh()
-        assert await wf._make_response_schema_getter()() == replacement, "a lost DB acknowledgement invalidated a native accepted contract"
+        assert await wf._make_response_schema_getter()() == replacement, (
+            "a lost DB acknowledgement invalidated a native accepted contract"
+        )
         assert getattr(wf, "_response_schema_accepted_revision", None) == 1
     finally:
         _restore_workflow(original)
@@ -4126,7 +4458,8 @@ async def test_workflow_schema_refresh_lifecycle_stop_propagates_without_respawn
 
     for stop_at in ("poll_new_messages", "set_response_schema_activity"):
         for error in (
-            asyncio.CancelledError(), CancelledError("cancelled"),
+            asyncio.CancelledError(),
+            CancelledError("cancelled"),
             ApplicationError("sealed", type="WorkflowGenerationSealed"),
             ApplicationError("handoff", type="GenerationHandoffRequested"),
             _rejection_poll_activity_error(CancelledError("wrapped cancellation")),
@@ -4161,8 +4494,11 @@ async def test_workflow_schema_refresh_lifecycle_stop_propagates_without_respawn
                 else:
                     raise AssertionError("lifecycle stop became a retryable schema failure")
                 await asyncio.sleep(0)
-                assert calls == (["poll_new_messages"] if stop_at == "poll_new_messages"
-                                 else ["poll_new_messages", "set_response_schema_activity"])
+                assert calls == (
+                    ["poll_new_messages"]
+                    if stop_at == "poll_new_messages"
+                    else ["poll_new_messages", "set_response_schema_activity"]
+                )
                 assert wf._response_schema_refresh_task is None
                 assert wf._response_schema_applied_revision == 0
             finally:
@@ -4295,8 +4631,11 @@ async def test_workflow_schema_refresh_coalesces_rapid_feedback():
 
 
 async def _exercise_schema_refresh_persistence(
-    *, latest_fails: bool, feedback_during_persist: bool = False,
-    persist_ack_lost: bool = False, persist_fails_before_commit: bool = False,
+    *,
+    latest_fails: bool,
+    feedback_during_persist: bool = False,
+    persist_ack_lost: bool = False,
+    persist_fails_before_commit: bool = False,
     completion_calls: Optional[List] = None,
 ):
     """Run real schema generation/persistence through the workflow's revision gate."""
@@ -4361,8 +4700,7 @@ async def _exercise_schema_refresh_persistence(
 
     async def resumed_agent(**kwargs):
         observed_resume_schema.append(copy.deepcopy(kwargs["response_schema"]))
-        return {"status": "completed", "context": [], "structured_response": None,
-                "token_count": 0, "context_size": 0}
+        return {"status": "completed", "context": [], "structured_response": None, "token_count": 0, "context_size": 0}
 
     config = SimpleNamespace(backend=SimpleNamespace(api_url="https://schema-fixture.test", api_key="fixture-key"))
     try:
@@ -4370,7 +4708,10 @@ async def _exercise_schema_refresh_persistence(
         with (
             patch("helpers.llm.load_config", return_value=config),
             patch("helpers.llm._generate_response_schema_with_rose", generate_schema),
-            patch("providers.fast_cache.client.resolve_agent_fast_mode", AsyncMock(return_value=(False, "", False, "", "", False))),
+            patch(
+                "providers.fast_cache.client.resolve_agent_fast_mode",
+                AsyncMock(return_value=(False, "", False, "", "", False)),
+            ),
         ):
             await wf.receive_user_response("Include prices")
             await asyncio.wait_for(first_started.wait(), timeout=2)
@@ -4384,25 +4725,38 @@ async def _exercise_schema_refresh_persistence(
 
             accepted_schema = copy.deepcopy(wf.output_schema)
             state = wf._continuation_resume_state(wf.context)
-            fake.activity_returns.update({
-                "fetch_agent_config": {"response_schema": copy.deepcopy(database["schema"]), "write_lock_enabled": True},
-                "get_model_context_window": 200_000,
-                "get_agent_source": "WEB",
-                "get_user_context": "",
-                "get_user_system_name": "Rose",
-                "generate_completion_summary": {"summary": "done", "tool_counts": {}, "usage": {}},
-            })
+            fake.activity_returns.update(
+                {
+                    "fetch_agent_config": {
+                        "response_schema": copy.deepcopy(database["schema"]),
+                        "write_lock_enabled": True,
+                    },
+                    "get_model_context_window": 200_000,
+                    "get_agent_source": "WEB",
+                    "get_user_context": "",
+                    "get_user_system_name": "Rose",
+                    "generate_completion_summary": {"summary": "done", "tool_counts": {}, "usage": {}},
+                }
+            )
             workflow_module.run_agent = resumed_agent
             restored = _bare_workflow_instance()
             if completion_calls is not None:
+
                 async def observe_complete(*args, **kwargs):
                     completion_calls.append((args, kwargs))
+
                 restored._mark_complete = observe_complete
             try:
                 terminal_result = await restored.run(
-                    wf.agent_id, wf.user_id, wf.goal, "rose-labs/rose-1-flash", 256,
-                    {"type": "FLOAT_LLM_JUDGE"}, context=wf.context,
-                    start_phase="execute_continued", resume_state=state,
+                    wf.agent_id,
+                    wf.user_id,
+                    wf.goal,
+                    "rose-labs/rose-1-flash",
+                    256,
+                    {"type": "FLOAT_LLM_JUDGE"},
+                    context=wf.context,
+                    start_phase="execute_continued",
+                    resume_state=state,
                 )
                 assert not (latest_fails or feedback_during_persist), "unaccepted schema produced a terminal result"
             except RuntimeError as error:
@@ -4429,50 +4783,91 @@ async def _exercise_unaccepted_schema_terminal_outcome(path):
     from utils.oai_demo import OAI_DEMO_CHILD_GOAL_PREFIX
 
     wf, fake, _replacement = _user_schema_refresh_fixture()
-    fake.activity_returns.update({
-        "poll_new_messages": [], "get_model_context_window": 200_000,
-        "get_agent_source": "WEB", "get_user_context": "", "get_user_system_name": "Navi",
-        "get_user_custom_system_prompt": None, "fetch_compute_token_activity": None,
-        "fetch_agent_config": {"response_schema": wf.output_schema, "write_lock_enabled": True},
-    })
+    fake.activity_returns.update(
+        {
+            "poll_new_messages": [],
+            "get_model_context_window": 200_000,
+            "get_agent_source": "WEB",
+            "get_user_context": "",
+            "get_user_system_name": "Navi",
+            "get_user_custom_system_prompt": None,
+            "fetch_compute_token_activity": None,
+            "fetch_agent_config": {"response_schema": wf.output_schema, "write_lock_enabled": True},
+        }
+    )
     fake.activity_fail_for.add("set_response_schema_activity")
     if path == "fast_mode":
         wf.goal = f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky — Huberman"
     failure_message = "set_response_schema_activity failed"
+
     async def invalidate():
         await wf.receive_user_response("Also return venue prices")
         await wf._wait_for_response_schema_refresh()
+
     async def loop(**kwargs):
         if path == "unrelated":
             raise RuntimeError("unrelated implementation defect")
         if path != "deferred":
             await invalidate()
-        return {"status": "max_iterations" if path == "fast_mode" else "completed",
-                "context": [], "structured_response": {"venues": ["Previous contract"]},
-                "verifier_progress": 1.0, "verifier_reasoning": "Fast Mode cache trajectory ended",
-                "token_count": 3, "context_size": 30}
+        return {
+            "status": "max_iterations" if path == "fast_mode" else "completed",
+            "context": [],
+            "structured_response": {"venues": ["Previous contract"]},
+            "verifier_progress": 1.0,
+            "verifier_reasoning": "Fast Mode cache trajectory ended",
+            "token_count": 3,
+            "context_size": 30,
+        }
+
     async def post_dag(**kwargs):
         await invalidate()
         return {"score": 1.0, "reasoning": "Previous contract passed", "usage": {}}
+
     async def deferred():
         if path == "deferred":
             await invalidate()
+
     original = _patch_workflow(fake)
-    original_loop, original_extract, original_dag = module.run_agent, module.extract_plan_from_context, module.execute_dag
+    original_loop, original_extract, original_dag = (
+        module.run_agent,
+        module.extract_plan_from_context,
+        module.execute_dag,
+    )
     module.run_agent = loop
-    module.extract_plan_from_context = lambda context: ({"tasks": [{"goal": "Find venues", "tool_name": "spawn_explore_agent"}], "dependencies": {}} if path == "post_dag" else None)
+    module.extract_plan_from_context = lambda context: (
+        {"tasks": [{"goal": "Find venues", "tool_name": "spawn_explore_agent"}], "dependencies": {}}
+        if path == "post_dag"
+        else None
+    )
     module.execute_dag = AsyncMock(return_value={"status": "completed", "context": []})
     wf._attempt_post_dag_completion = post_dag
     wf._await_deferred_startup = deferred
     try:
         try:
             if path == "fast_mode":
-                with patch.object(module, "is_demo_cache_task", return_value=True), patch.object(module, "is_oai_demo_mass_agent_task", return_value=True):
-                    result = await wf.run(wf.agent_id, wf.user_id, wf.goal, "rose-labs/rose-1-flash", 256,
-                                          {"type": "FLOAT_LLM_JUDGE"}, start_phase="execute_continued")
+                with (
+                    patch.object(module, "is_demo_cache_task", return_value=True),
+                    patch.object(module, "is_oai_demo_mass_agent_task", return_value=True),
+                ):
+                    result = await wf.run(
+                        wf.agent_id,
+                        wf.user_id,
+                        wf.goal,
+                        "rose-labs/rose-1-flash",
+                        256,
+                        {"type": "FLOAT_LLM_JUDGE"},
+                        start_phase="execute_continued",
+                    )
             else:
-                result = await wf.run(wf.agent_id, wf.user_id, wf.goal, "rose-labs/rose-1-flash", 256,
-                                      {"type": "FLOAT_LLM_JUDGE"}, start_phase="execute_continued")
+                result = await wf.run(
+                    wf.agent_id,
+                    wf.user_id,
+                    wf.goal,
+                    "rose-labs/rose-1-flash",
+                    256,
+                    {"type": "FLOAT_LLM_JUDGE"},
+                    start_phase="execute_continued",
+                )
         except RuntimeError as error:
             if path == "unrelated":
                 raise
@@ -4485,11 +4880,17 @@ async def _exercise_unaccepted_schema_terminal_outcome(path):
         assert wf._response_schema_accepted_revision < wf._response_schema_revision
         assert wf._response_schema_applied_revision < wf._response_schema_revision
     finally:
-        module.run_agent, module.extract_plan_from_context, module.execute_dag = original_loop, original_extract, original_dag
+        module.run_agent, module.extract_plan_from_context, module.execute_dag = (
+            original_loop,
+            original_extract,
+            original_dag,
+        )
         _restore_workflow(original)
 
 
-async def _exercise_healthy_input_during_terminal_wait(*, schema_changed, boundary="sms", path="execute", feedback=True):
+async def _exercise_healthy_input_during_terminal_wait(
+    *, schema_changed, boundary="sms", path="execute", feedback=True
+):
     from unittest.mock import AsyncMock, patch
     import workflows.agent_workflow as module
     from domains.spawn_agent.handler import track_fast_mode_explore
@@ -4501,14 +4902,20 @@ async def _exercise_healthy_input_during_terminal_wait(*, schema_changed, bounda
     initial = wf.output_schema
     accepted = replacement if schema_changed else initial
     correction = "Use the updated venue evidence and include prices where available"
-    fake.activity_returns.update({
-        "poll_new_messages": [], "get_model_context_window": 200_000,
-        "get_agent_source": "WEB", "get_user_context": "", "get_user_system_name": "Rose",
-        "get_user_custom_system_prompt": None, "fetch_compute_token_activity": None,
-        "fetch_agent_config": {"response_schema": initial, "write_lock_enabled": True},
-        "set_response_schema_activity": {"schema": accepted, "usage": {}},
-        "generate_completion_summary": {"summary": "Old completion", "tool_counts": {}, "usage": {}},
-    })
+    fake.activity_returns.update(
+        {
+            "poll_new_messages": [],
+            "get_model_context_window": 200_000,
+            "get_agent_source": "WEB",
+            "get_user_context": "",
+            "get_user_system_name": "Rose",
+            "get_user_custom_system_prompt": None,
+            "fetch_compute_token_activity": None,
+            "fetch_agent_config": {"response_schema": initial, "write_lock_enabled": True},
+            "set_response_schema_activity": {"schema": accepted, "usage": {}},
+            "generate_completion_summary": {"summary": "Old completion", "tool_counts": {}, "usage": {}},
+        }
+    )
     started, released, generation_released = asyncio.Event(), asyncio.Event(), asyncio.Event()
     fake.activity_blockers["set_response_schema_activity"] = generation_released
     continuations = []
@@ -4544,43 +4951,82 @@ async def _exercise_healthy_input_during_terminal_wait(*, schema_changed, bounda
         if path == "post_dag":
             recovered.append(wf._response_schema_revision)
             assert wf._response_schema_accepted_revision == wf._response_schema_revision > 0
-            return {"status": "completed", "context": [], "structured_response": {"venues": ["Current verdict"], "venue_prices": [10]},
-                    "_verified_user_requirement_keys": [], "_verified_requirement_revision": wf._response_schema_revision,
-                    "token_count": 3, "context_size": 30}
+            return {
+                "status": "completed",
+                "context": [],
+                "structured_response": {"venues": ["Current verdict"], "venue_prices": [10]},
+                "_verified_user_requirement_keys": [],
+                "_verified_requirement_revision": wf._response_schema_revision,
+                "token_count": 3,
+                "context_size": 30,
+            }
         if boundary == "sms":
             wf._deferred_startup_sms_handle = sms_handle()
         else:
-            track_fast_mode_explore(wf, explore_handle(), task_id="pending-explore",
-                                    tool_call_id="pending-explore-call", ui_goal="Read venues")
-        return {"status": "max_iterations" if path == "fast_cap" else "completed", "context": [], "structured_response": {"venues": ["Old verdict"]},
-                "_verified_user_requirement_keys": [], "_verified_requirement_revision": wf._response_schema_revision,
-                "verifier_progress": 1.0, "verifier_reasoning": "Fast Mode cache trajectory ended",
-                "token_count": 3, "context_size": 30}
+            track_fast_mode_explore(
+                wf,
+                explore_handle(),
+                task_id="pending-explore",
+                tool_call_id="pending-explore-call",
+                ui_goal="Read venues",
+            )
+        return {
+            "status": "max_iterations" if path == "fast_cap" else "completed",
+            "context": [],
+            "structured_response": {"venues": ["Old verdict"]},
+            "_verified_user_requirement_keys": [],
+            "_verified_requirement_revision": wf._response_schema_revision,
+            "verifier_progress": 1.0,
+            "verifier_reasoning": "Fast Mode cache trajectory ended",
+            "token_count": 3,
+            "context_size": 30,
+        }
 
     async def post_dag(**kwargs):
         wf._deferred_startup_sms_handle = sms_handle()
-        return {"score": 1.0, "structured_response": {"venues": ["Old verdict"]},
-                "_verified_user_requirement_keys": [], "_verified_requirement_revision": wf._response_schema_revision}
+        return {
+            "score": 1.0,
+            "structured_response": {"venues": ["Old verdict"]},
+            "_verified_user_requirement_keys": [],
+            "_verified_requirement_revision": wf._response_schema_revision,
+        }
 
     original = _patch_workflow(fake)
     delivery = asyncio.create_task(deliver())
     did_continue = False
     try:
-        plan = {"tasks": [{"goal": "Read venues", "tool_name": "spawn_explore_agent"}], "dependencies": {}} if path == "post_dag" else None
-        with patch.object(module, "run_agent", loop), patch.object(module, "extract_plan_from_context", return_value=plan), \
-             patch.object(module, "execute_dag", AsyncMock(return_value={"status": "completed", "context": []})), \
-             patch.object(wf, "_attempt_post_dag_completion", post_dag), \
-             patch.object(module, "is_demo_cache_task", return_value=boundary == "drain" or path == "fast_cap"), \
-             patch.object(module, "is_oai_demo_mass_agent_task", return_value=boundary == "drain" or path == "fast_cap"):
+        plan = (
+            {"tasks": [{"goal": "Read venues", "tool_name": "spawn_explore_agent"}], "dependencies": {}}
+            if path == "post_dag"
+            else None
+        )
+        with (
+            patch.object(module, "run_agent", loop),
+            patch.object(module, "extract_plan_from_context", return_value=plan),
+            patch.object(module, "execute_dag", AsyncMock(return_value={"status": "completed", "context": []})),
+            patch.object(wf, "_attempt_post_dag_completion", post_dag),
+            patch.object(module, "is_demo_cache_task", return_value=boundary == "drain" or path == "fast_cap"),
+            patch.object(module, "is_oai_demo_mass_agent_task", return_value=boundary == "drain" or path == "fast_cap"),
+        ):
             try:
-                result = await wf.run(wf.agent_id, wf.user_id, wf.goal, "rose-labs/rose-1-flash", 256,
-                             {"type": "FLOAT_LLM_JUDGE"}, start_phase="execute" if path == "post_dag" else "execute_continued")
+                result = await wf.run(
+                    wf.agent_id,
+                    wf.user_id,
+                    wf.goal,
+                    "rose-labs/rose-1-flash",
+                    256,
+                    {"type": "FLOAT_LLM_JUDGE"},
+                    start_phase="execute" if path == "post_dag" else "execute_continued",
+                )
             except Continued:
                 did_continue = True
         await delivery
         await wf._wait_for_response_schema_refresh()
-        terminal_writes = [args for name, args in fake.activity_calls
-                           if name == "update_agent_status" and args[1] in ("FAILED", "COMPLETED")]
+        terminal_writes = [
+            args
+            for name, args in fake.activity_calls
+            if name == "update_agent_status" and args[1] in ("FAILED", "COMPLETED")
+        ]
         if path == "fast_cap":
             assert result == {"status": "failed", "reason": "max_iterations", "goal": wf.goal}, (
                 "pending healthy feedback was reported as schema failure instead of the existing step limit"
@@ -4588,7 +5034,9 @@ async def _exercise_healthy_input_during_terminal_wait(*, schema_changed, bounda
             assert len(terminal_writes) == 1 and terminal_writes[0][3] == "Max Steps Reached", (
                 "healthy late input changed the existing step-budget failure into a schema error"
             )
-            assert not any(name in ("mark_finished", "generate_completion_summary") for name, _args in fake.activity_calls)
+            assert not any(
+                name in ("mark_finished", "generate_completion_summary") for name, _args in fake.activity_calls
+            )
             return
         if path == "post_dag" or not feedback:
             assert result["status"] == "completed" and not any(args[1] == "FAILED" for args in terminal_writes), (
@@ -4599,9 +5047,9 @@ async def _exercise_healthy_input_during_terminal_wait(*, schema_changed, bounda
                 assert wf.output_schema == accepted, "post-DAG recovery lost the new contract"
             return
         assert terminal_writes == [], "healthy late input produced terminal success/failure instead of continuing"
-        assert not any(name in ("mark_finished", "generate_completion_summary") for name, _args in fake.activity_calls), (
-            "the old verdict produced completion side effects after healthy late input"
-        )
+        assert not any(
+            name in ("mark_finished", "generate_completion_summary") for name, _args in fake.activity_calls
+        ), "the old verdict produced completion side effects after healthy late input"
         assert did_continue and not wf._is_finished, "superseded completion did not resume native reasoning"
         state = continuations[0][16]["runtime_state"]
         assert state["output_schema"] == accepted
@@ -4680,10 +5128,15 @@ async def test_workflow_fast_mode_completion_refuses_unaccepted_latest_contract(
             await wf._wait_for_response_schema_refresh()
         except RuntimeError as error:
             assert "set_response_schema_activity failed" in str(error)
-        result = await wf._handle_incomplete({
-            "status": "max_iterations", "context": [], "verifier_progress": 1.0,
-            "verifier_reasoning": "Fast Mode cache trajectory ended",
-        }, phase="EXECUTE")
+        result = await wf._handle_incomplete(
+            {
+                "status": "max_iterations",
+                "context": [],
+                "verifier_progress": 1.0,
+                "verifier_reasoning": "Fast Mode cache trajectory ended",
+            },
+            phase="EXECUTE",
+        )
         assert result["reason"] == "max_iterations", "pending schema replaced the existing step-cap decision"
         assert completed == []
     finally:
@@ -4691,7 +5144,9 @@ async def test_workflow_fast_mode_completion_refuses_unaccepted_latest_contract(
 
 
 async def test_workflow_superseded_schema_never_persists_when_latest_generation_fails():
-    initial, _latest, accepted, persisted, writes, resumed = await _exercise_schema_refresh_persistence(latest_fails=True)
+    initial, _latest, accepted, persisted, writes, resumed = await _exercise_schema_refresh_persistence(
+        latest_fails=True
+    )
     assert (accepted, persisted, resumed) == (initial, initial, [initial]), (
         "Superseded schema reached durable state or the resumed native contract: "
         f"accepted={accepted!r}, persisted={persisted!r}, resumed={resumed!r}, writes={writes!r}"
@@ -4700,7 +5155,9 @@ async def test_workflow_superseded_schema_never_persists_when_latest_generation_
 
 
 async def test_workflow_only_accepted_latest_schema_persists_and_resumes():
-    _initial, latest, accepted, persisted, writes, resumed = await _exercise_schema_refresh_persistence(latest_fails=False)
+    _initial, latest, accepted, persisted, writes, resumed = await _exercise_schema_refresh_persistence(
+        latest_fails=False
+    )
     assert (accepted, persisted, resumed, writes) == (latest, latest, [latest], [latest]), (
         "The revision gate must persist only the accepted latest schema and preserve it across continuation"
     )
@@ -4708,7 +5165,8 @@ async def test_workflow_only_accepted_latest_schema_persists_and_resumes():
 
 async def test_workflow_feedback_during_schema_persistence_keeps_accepted_contract():
     _initial, latest, accepted, persisted, _writes, resumed = await _exercise_schema_refresh_persistence(
-        latest_fails=False, feedback_during_persist=True,
+        latest_fails=False,
+        feedback_during_persist=True,
     )
     assert (accepted, persisted, resumed) == (latest, latest, [latest]), (
         "Input arriving during persistence discarded a schema that had already been accepted"
@@ -4717,7 +5175,8 @@ async def test_workflow_feedback_during_schema_persistence_keeps_accepted_contra
 
 async def test_workflow_schema_commit_with_lost_acknowledgement_keeps_accepted_contract():
     _initial, latest, accepted, persisted, _writes, resumed = await _exercise_schema_refresh_persistence(
-        latest_fails=False, persist_ack_lost=True,
+        latest_fails=False,
+        persist_ack_lost=True,
     )
     assert (accepted, persisted, resumed) == (latest, latest, [latest]), (
         "A committed schema was treated as discarded after its acknowledgement was lost"
@@ -4726,7 +5185,8 @@ async def test_workflow_schema_commit_with_lost_acknowledgement_keeps_accepted_c
 
 async def test_workflow_restored_accepted_schema_wins_over_stale_database_config():
     initial, latest, accepted, persisted, _writes, resumed = await _exercise_schema_refresh_persistence(
-        latest_fails=False, persist_fails_before_commit=True,
+        latest_fails=False,
+        persist_fails_before_commit=True,
     )
     assert (accepted, persisted, resumed) == (latest, initial, [latest]), (
         "Continuation replaced the accepted native contract with an older database snapshot"
@@ -6063,8 +6523,13 @@ async def test_workflow_wait_for_unpause_or_handoff_returns_handoff_queue():
         "surface_hash": "newgen",
     }
 
+    slices: List[Any] = []
+
     async def fake_wait_condition(condition, timeout=None):
         assert condition() is False
+        slices.append(timeout)
+        # No cutover signal arrived: the idle safety slice expires.
+        raise asyncio.TimeoutError()
 
     fake.wait_condition = fake_wait_condition
     original = _patch_workflow(fake)
@@ -6072,6 +6537,21 @@ async def test_workflow_wait_for_unpause_or_handoff_returns_handoff_queue():
         handoff = await wf._wait_for_unpause_or_handoff()
         assert handoff == "navi-agent-tasks@newgen"
         assert wf.is_paused is True
+        from helpers.wait_condition_or_handoff import IDLE_HANDOFF_SAFETY_SECONDS
+
+        # No 30s polling while paused: one pointer read, after one safety slice.
+        assert [t.total_seconds() for t in slices] == [IDLE_HANDOFF_SAFETY_SECONDS], slices
+        assert [name for name, _ in fake.activity_calls] == ["fetch_agent_queue_pointer"]
+
+        # A cutover signal hands a paused agent off before any slice elapses.
+        signalled = _bare_workflow_instance()
+        signalled.is_paused = True
+        signalled.generation_handoff_available("navi-agent-tasks@newgen")
+        signalled.generation_handoff_available("navi-agent-tasks@newgen")  # duplicate: no-op
+        assert signalled._generation_handoff_hint_seq == 1
+        slices.clear()
+        assert await signalled._wait_for_unpause_or_handoff() == "navi-agent-tasks@newgen"
+        assert slices == []
     finally:
         _restore_workflow(original)
 
@@ -6166,6 +6646,164 @@ async def test_workflow_context_overflow_uses_complete_continuation_contract():
         assert "claude_max_token" not in args[16]["runtime_state"]
     finally:
         _restore_workflow(original)
+
+
+class _ContinuationFakeWorkflow(_FakeWorkflowModule):
+    """Fake workflow module with history size and a settle-aware wait_condition."""
+
+    def __init__(self, history_length: int = 100, history_size: int = 10_000):
+        super().__init__()
+        self.history_length = history_length
+        self.history_size = history_size
+        self.continued: List[Dict[str, Any]] = []
+        self.waits: List[Any] = []
+        self.on_wait: Any = None
+
+    def info(self):
+        fake = self
+
+        class _Info:
+            task_queue = "navi-agent-tasks@testgen"
+
+            def get_current_history_length(self):
+                return fake.history_length
+
+            def get_current_history_size(self):
+                return fake.history_size
+
+        return _Info()
+
+    async def wait_condition(self, condition, timeout=None):
+        self.waits.append(timeout)
+        if self.on_wait is not None:
+            await self.on_wait()
+        if not condition():
+            raise asyncio.TimeoutError()
+
+    def continue_as_new(self, *, args, task_queue=None):
+        self.continued.append({"args": args, "task_queue": task_queue})
+
+
+def _overflow_workflow_with_background(agent_type: str):
+    """Bare workflow with one in-flight activity-backed background task (bg_t1)."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-overflow-bg"
+    wf.user_id = "user-1"
+    wf.goal = "keep the background browser"
+    wf.model = "rose-labs/rose-1-flash"
+    wf.reasoning_max_tokens = 256
+    wf.verifier = {"type": "FLOAT_LLM_JUDGE"}
+    wf.max_iterations = None
+    wf.price_limit_cents = 100
+    wf.context_gates = {}
+
+    async def wait_for_refresh():
+        return None
+
+    wf._wait_for_response_schema_refresh = wait_for_refresh
+    release = asyncio.Event()
+    wf._background_tasks["t1"] = {
+        "tool_call_id": "t1",
+        "tool_args": {"type": agent_type, "goal": "checkout"},
+        "agent_type": agent_type,
+        "address": "/root/checkout",
+        "status": "running",
+        "child_agent_ids": [],
+    }
+
+    async def background_activity():
+        await release.wait()
+        # A drained browser parks with its step resume state before returning.
+        wf._background_tasks["t1"]["resume"] = {"activity": {"step_count": 7}}
+
+    wf._background_handles["t1"] = asyncio.create_task(background_activity())
+    return wf, release
+
+
+async def test_context_overflow_defers_continue_as_new_while_background_task_runs():
+    """Overflow must not abandon an in-flight background browser/explore (it would restart from scratch)."""
+    for agent_type in ("browser", "explore", "code"):
+        wf, release = _overflow_workflow_with_background(agent_type)
+        fake = _ContinuationFakeWorkflow()
+        original = _patch_workflow(fake)
+        try:
+            compressed = [{"role": "SYSTEM", "text": "compressed"}]
+            wf.context = [{"role": "USER", "text": f"uncompressed {i}"} for i in range(50)]
+            await wf._handle_context_overflow(compressed)
+            handle = wf._background_handles["t1"]
+            assert fake.continued == [], f"{agent_type}: continue_as_new abandoned the in-flight task"
+            # The run keeps going on the compressed context, exactly as the continued run
+            # would: later continue_as_new(self.context) paths must not carry the old history.
+            assert wf.context == compressed and wf.context is not compressed, agent_type
+            assert not handle.done() and not handle.cancelled(), agent_type
+            assert fake.waits == [], f"{agent_type}: deferral must not block the LLM loop"
+            assert any(name == "post_agent_message" for name, _ in fake.activity_calls), "context reset chip"
+            # Once the task has finished, the next overflow continues as new normally.
+            release.set()
+            await handle
+            wf._background_handles.pop("t1", None)
+            await wf._handle_context_overflow(compressed)
+            assert len(fake.continued) == 1 and fake.continued[0]["args"][6] == compressed, agent_type
+        finally:
+            _restore_workflow(original)
+            release.set()
+
+
+async def test_context_overflow_at_history_limit_settles_background_task_then_continues():
+    """History pressure forces continue_as_new, but only after a bounded settle for in-flight tasks."""
+    from workflows.agent_workflow import CONTINUATION_BACKGROUND_SETTLE_SECONDS, OVERFLOW_DEFER_MAX_HISTORY_EVENTS
+
+    wf, release = _overflow_workflow_with_background("browser")
+    fake = _ContinuationFakeWorkflow(history_length=OVERFLOW_DEFER_MAX_HISTORY_EVENTS)
+    handle = wf._background_handles["t1"]
+
+    async def task_parks_during_settle():
+        release.set()
+        await handle
+        wf._background_handles.pop("t1", None)
+
+    fake.on_wait = task_parks_during_settle
+    original = _patch_workflow(fake)
+    try:
+        await wf._handle_context_overflow([{"role": "SYSTEM", "text": "compressed"}])
+        assert [t.total_seconds() for t in fake.waits] == [CONTINUATION_BACKGROUND_SETTLE_SECONDS]
+        assert len(fake.continued) == 1
+        snapshot = fake.continued[0]["args"][16]["runtime_state"]["background_agents"]["tasks"]["t1"]
+        assert snapshot.get("resume") == {"activity": {"step_count": 7}}, snapshot
+    finally:
+        _restore_workflow(original)
+        release.set()
+
+
+async def test_generation_handoff_settles_in_flight_background_task_before_continue_as_new():
+    """Root handoff racing a background browser's park must carry its resume state (flake root cause)."""
+    from workflows.agent_workflow import CONTINUATION_BACKGROUND_SETTLE_SECONDS
+
+    wf, release = _overflow_workflow_with_background("browser")
+    fake = _ContinuationFakeWorkflow()
+    handle = wf._background_handles["t1"]
+
+    async def task_parks_during_settle():
+        release.set()
+        await handle
+        wf._background_handles.pop("t1", None)
+
+    fake.on_wait = task_parks_during_settle
+    original = _patch_workflow(fake)
+    try:
+        await wf._handle_incomplete(
+            {"status": "generation_handoff", "handoff_task_queue": "navi-agent-tasks@newgen", "context": []},
+            "EXECUTE",
+        )
+        assert [t.total_seconds() for t in fake.waits] == [CONTINUATION_BACKGROUND_SETTLE_SECONDS]
+        assert len(fake.continued) == 1 and fake.continued[0]["task_queue"] == "navi-agent-tasks@newgen"
+        snapshot = fake.continued[0]["args"][16]["runtime_state"]["background_agents"]["tasks"]["t1"]
+        assert snapshot.get("resume") == {"activity": {"step_count": 7}}, (
+            f"handoff continued before the background browser parked: {snapshot}"
+        )
+    finally:
+        _restore_workflow(original)
+        release.set()
 
 
 async def test_workflow_handle_incomplete_max_iterations():
@@ -7126,6 +7764,115 @@ async def test_workflow_run_missing_parent_stops_before_agent_loop():
         _restore_workflow(original_workflow)
 
 
+async def test_workflow_dag_user_message_interrupt_reaches_run_agent():
+    """A user message mid-DAG: the run wires the interrupt hooks and falls through to run_agent.
+
+    RCA (root 439c77dd): a user correction sat unread >5 min while planned GP
+    spawns ran in the foreground. execute_dag now returns needs_llm on the
+    first message wake; the workflow must pass its signal-driven hooks and the
+    LLM loop must then read the message from the DB.
+    """
+    from loop.dag_executor import DagInterrupts
+
+    wf = _bare_workflow_instance()
+    fake = _FakeWorkflowModule()
+    fake.activity_returns.update(
+        {
+            "poll_new_messages": [],
+            "get_model_context_window": 200_000,
+            "get_agent_source": "WEB",
+            "get_user_context": "",
+            "get_user_system_name": "Navi",
+            "get_user_custom_system_prompt": None,
+            "fetch_compute_token_activity": None,
+            "fetch_agent_config": {"response_schema": {"fields": []}, "write_lock_enabled": True},
+            # The correction is ordinary feedback: the schema refresh runs as usual.
+            "set_response_schema_activity": {
+                "schema": {"fields": [{"name": "investors", "type": "str", "required": True}]}
+            },
+            "generate_completion_summary": {
+                "summary": "Handled the correction.",
+                "tool_counts": {},
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            },
+        }
+    )
+
+    import workflows.agent_workflow as workflow_module
+
+    original_workflow = _patch_workflow(fake)
+    original_extract_plan = workflow_module.extract_plan_from_context
+    original_execute_dag = workflow_module.execute_dag
+    original_run_agent = workflow_module.run_agent
+    run_agent_seen = []
+    user_row = {
+        "message_id": "msg-correction",
+        "role": "USER",
+        "text": "Only funds that lead pre-seed rounds.",
+        "metadata": {},
+        "timestamp": "2026-10-19T03:01:57+00:00",
+    }
+
+    workflow_module.extract_plan_from_context = lambda _context: {
+        "tasks": [{"goal": "Research investors", "tool_name": "spawn_general_purpose_agent"}],
+        "dependencies": {},
+    }
+
+    async def fake_execute_dag(**kwargs):
+        interrupts = kwargs["interrupts"]
+        assert isinstance(interrupts, DagInterrupts)
+        assert interrupts.await_background == wf._await_dag_background_spawn
+        assert interrupts.wait == wf._wait_for_dag_interrupt
+        # Planned spawns start in the background during the DAG (like LLM spawns).
+        assert wf._background_spawns_enabled is True
+        seq = interrupts.seq()
+        fake.activity_returns["poll_new_messages"] = [user_row]  # backend wrote the row
+        await wf.receive_user_response(user_row["text"])  # then signaled
+        assert interrupts.seq() != seq, "a user message must wake the DAG wait"
+        return {"status": "needs_llm", "interrupted_by_message": True, "context": kwargs["context"]}
+
+    async def fake_run_agent(**kwargs):
+        rows = await kwargs["poll_messages"](datetime.fromtimestamp(0, tz=timezone.utc))
+        run_agent_seen.append(rows)
+        assert "wait_for_background_agents" not in kwargs  # no idle wait; wait_for owns waiting
+        return {
+            "status": "completed",
+            "context": [{"role": "ASSISTANT", "text": "Updated the plan.", "metadata": None}],
+            "structured_response": None,
+            "token_count": 3,
+            "context_size": 30,
+        }
+
+    workflow_module.execute_dag = fake_execute_dag
+    workflow_module.run_agent = fake_run_agent
+    try:
+        result = await wf.run(
+            "agent-dag-interrupt",
+            "user-run-1",
+            "Research investors",
+            "anthropic/claude-sonnet-4.5",
+            256,
+            {"type": "FLOAT_LLM_JUDGE"},
+            None,
+            None,
+            None,
+            0,
+            None,
+            "execute",
+            25,
+            250,
+            {},
+        )
+        assert run_agent_seen, "an interrupted DAG must fall through to run_agent"
+        assert any(row.get("message_id") == "msg-correction" for row in run_agent_seen[0]), run_agent_seen
+        assert result == {"status": "completed", "goal": "Research investors"}
+    finally:
+        workflow_module.extract_plan_from_context = original_extract_plan
+        workflow_module.execute_dag = original_execute_dag
+        workflow_module.run_agent = original_run_agent
+        _restore_workflow(original_workflow)
+
+
 async def test_workflow_dag_failure_recovers_via_run_agent():
     """A single failed planned task must NOT terminate the run.
 
@@ -7382,13 +8129,21 @@ async def test_workflow_fresh_task_poll_and_reload_exclude_prior_requirements():
     history = _completed_plan_followup_context(followup_text=followup)
     history.insert(1, {"id": "previous-correction", "role": "USER", "text": prior})
     replacement = {"fields": [{"name": "refund_status", "type": "str", "required": True}]}
-    fake.activity_returns.update({
-        "poll_new_messages": history, "get_model_context_window": 200_000,
-        "get_agent_source": "WEB", "get_user_context": "", "get_user_system_name": "Rose",
-        "fetch_agent_config": {"response_schema": {"fields": [{"name": "order_id", "type": "str"}]}, "write_lock_enabled": True},
-        "set_response_schema_activity": {"schema": replacement, "usage": {}},
-        "generate_completion_summary": {"summary": "Refund handled", "tool_counts": {}, "usage": {}},
-    })
+    fake.activity_returns.update(
+        {
+            "poll_new_messages": history,
+            "get_model_context_window": 200_000,
+            "get_agent_source": "WEB",
+            "get_user_context": "",
+            "get_user_system_name": "Rose",
+            "fetch_agent_config": {
+                "response_schema": {"fields": [{"name": "order_id", "type": "str"}]},
+                "write_lock_enabled": True,
+            },
+            "set_response_schema_activity": {"schema": replacement, "usage": {}},
+            "generate_completion_summary": {"summary": "Refund handled", "tool_counts": {}, "usage": {}},
+        }
+    )
     original = _patch_workflow(fake)
     original_run_agent = module.run_agent
 
@@ -7402,14 +8157,33 @@ async def test_workflow_fresh_task_poll_and_reload_exclude_prior_requirements():
         requirements = await wf._response_schema_user_messages()
         assert requirements[0] == followup
         assert prior not in requirements and "order me glide floss from doordash" not in requirements
-        return {"status": "completed", "context": history, "structured_response": {"refund_status": "refunded"},
-                "token_count": 3, "context_size": 30}
+        return {
+            "status": "completed",
+            "context": history,
+            "structured_response": {"refund_status": "refunded"},
+            "token_count": 3,
+            "context_size": 30,
+        }
 
     module.run_agent = execute
     try:
-        result = await wf.run("fresh-boundary-agent", "user-1", "order me glide floss from doordash",
-                              "anthropic/claude-sonnet-4.5", 256, {"type": "FLOAT_LLM_JUDGE"},
-                              None, None, None, 0, None, "execute", 25, 250, {})
+        result = await wf.run(
+            "fresh-boundary-agent",
+            "user-1",
+            "order me glide floss from doordash",
+            "anthropic/claude-sonnet-4.5",
+            256,
+            {"type": "FLOAT_LLM_JUDGE"},
+            None,
+            None,
+            None,
+            0,
+            None,
+            "execute",
+            25,
+            250,
+            {},
+        )
         assert result["status"] == "completed"
     finally:
         module.run_agent = original_run_agent
@@ -7423,20 +8197,40 @@ async def test_workflow_fresh_task_boundary_preserves_source_identity_and_contin
     wf._response_schema_initialized = False
     stamp = "2026-10-15T00:00:00+00:00"
     base = "Return the refund status"
-    previous = {"id": "prior", "role": "USER", "text": "Find restaurant address", "timestamp": stamp,
-                "metadata": {"source": "attention_response", "attentionRequestId": "prior-request"}}
+    previous = {
+        "id": "prior",
+        "role": "USER",
+        "text": "Find restaurant address",
+        "timestamp": stamp,
+        "metadata": {"source": "attention_response", "attentionRequestId": "prior-request"},
+    }
     initial = {"id": "base", "role": "USER", "text": base, "timestamp": stamp}
     wf._establish_response_schema_task_boundary([previous, initial])
     assert wf._response_schema_revision == 0
     # A physical retry of a past canonical event is historical, while a new
     # event with identical text can intentionally restore A after B.
     retry = {**previous, "id": "prior-physical-retry", "timestamp": "2026-10-15T00:00:02+00:00"}
-    delayed = {"id": "late-commit", "role": "USER", "text": "Keep the receipt", "timestamp": "2026-10-14T23:59:59+00:00"}
+    delayed = {
+        "id": "late-commit",
+        "role": "USER",
+        "text": "Keep the receipt",
+        "timestamp": "2026-10-14T23:59:59+00:00",
+    }
     changes = [
-        {"id": "change-B", "role": "USER", "text": "Return the refund amount", "timestamp": stamp,
-         "metadata": {"source": "attention_response", "attentionRequestId": "request-B"}},
-        {"id": "change-A", "role": "USER", "text": base, "timestamp": stamp,
-         "metadata": {"source": "attention_response", "attentionRequestId": "request-A"}},
+        {
+            "id": "change-B",
+            "role": "USER",
+            "text": "Return the refund amount",
+            "timestamp": stamp,
+            "metadata": {"source": "attention_response", "attentionRequestId": "request-B"},
+        },
+        {
+            "id": "change-A",
+            "role": "USER",
+            "text": base,
+            "timestamp": stamp,
+            "metadata": {"source": "attention_response", "attentionRequestId": "request-A"},
+        },
     ]
     wf.context = [previous, initial, delayed, *changes, retry]
     wf._admit_durable_response_schema_feedback()
@@ -7461,13 +8255,17 @@ async def test_workflow_fresh_task_boundary_preserves_source_identity_and_contin
         restored._response_schema_feedback = []
         fake.activity_returns["poll_new_messages"] = restored.context
         repeated_base = await restored._response_schema_user_messages()
-        assert repeated_base[2:] == [base], "a later real instruction repeating the task base was mistaken for the initial row"
+        assert repeated_base[2:] == [base], (
+            "a later real instruction repeating the task base was mistaken for the initial row"
+        )
         normal = _bare_workflow_instance()
         normal.goal = "Original task"
         normal.context = [previous, initial]
         fake.activity_returns["poll_new_messages"] = normal.context
         unchanged = await normal._response_schema_user_messages()
-        assert unchanged == [normal.goal, previous["text"], base], "ordinary resume unexpectedly acquired a fresh-task boundary"
+        assert unchanged == [normal.goal, previous["text"], base], (
+            "ordinary resume unexpectedly acquired a fresh-task boundary"
+        )
     finally:
         _restore_workflow(original)
 
@@ -7481,19 +8279,36 @@ async def test_workflow_fresh_boundary_filters_only_proven_queued_feedback_sourc
     wf._response_schema_initialized = False
     base = "Return the refund status"
     text_a, text_b = "Find restaurant address", "Return the refund amount"
-    old = {"id": "old-row", "role": "USER", "text": text_a,
-           "metadata": {"source": "attention_response", "attentionRequestId": "old-request"}}
+    old = {
+        "id": "old-row",
+        "role": "USER",
+        "text": text_a,
+        "metadata": {"source": "attention_response", "attentionRequestId": "old-request"},
+    }
     initial = {"id": "fresh-base", "role": "USER", "text": base}
-    future = [{"id": f"future-row-{index}", "role": "USER", "text": text,
-               "metadata": {"source": "attention_response", "attentionRequestId": f"future-request-{index}"}}
-              for index, text in enumerate((text_a, text_b, text_a))]
+    future = [
+        {
+            "id": f"future-row-{index}",
+            "role": "USER",
+            "text": text,
+            "metadata": {"source": "attention_response", "attentionRequestId": f"future-request-{index}"},
+        }
+        for index, text in enumerate((text_a, text_b, text_a))
+    ]
     original = _patch_workflow(fake)
     try:
         # All signals can be queued during startup before its durable snapshot
         # establishes a task boundary. Only the old source is in that prefix.
         for row in [old, *future]:
-            await wf.receive_user_response(json.dumps({"request_id": row["metadata"]["attentionRequestId"],
-                "response": "RESOLVED", "user_message": row["text"]}))
+            await wf.receive_user_response(
+                json.dumps(
+                    {
+                        "request_id": row["metadata"]["attentionRequestId"],
+                        "response": "RESOLVED",
+                        "user_message": row["text"],
+                    }
+                )
+            )
         wf._establish_response_schema_task_boundary([old, initial])
         wf.context = [old, initial, *future]
         fake.activity_returns["poll_new_messages"] = wf.context
@@ -7503,7 +8318,9 @@ async def test_workflow_fresh_boundary_filters_only_proven_queued_feedback_sourc
             "a known pre-boundary signal consumed current-source coverage or reintroduced historical requirements"
         )
         revision = wf._response_schema_revision
-        await wf.receive_user_response(json.dumps({"request_id": "old-request", "response": "RESOLVED", "user_message": text_a}))
+        await wf.receive_user_response(
+            json.dumps({"request_id": "old-request", "response": "RESOLVED", "user_message": text_a})
+        )
         assert wf._response_schema_revision == revision
         carried = wf._continuation_resume_state(wf.context)
         restored = _bare_workflow_instance()
@@ -7518,7 +8335,11 @@ async def test_workflow_fresh_boundary_filters_only_proven_queued_feedback_sourc
         assert legacy._response_schema_feedback_sources == [None, ("attention_response", "new-source")]
         malformed = copy.deepcopy(carried)
         malformed["runtime_state"]["response_schema_feedback"] = [text_a, 17, text_b]
-        malformed["runtime_state"]["response_schema_feedback_sources"] = ["unknown", ["id", "invalid-text"], ["attention_response", "new-source"]]
+        malformed["runtime_state"]["response_schema_feedback_sources"] = [
+            "unknown",
+            ["id", "invalid-text"],
+            ["attention_response", "new-source"],
+        ]
         legacy._restore_deployment_state(malformed)
         assert legacy._response_schema_feedback == [text_a, text_b]
         assert legacy._response_schema_feedback_sources == [None, ("attention_response", "new-source")]
@@ -8321,9 +9142,7 @@ async def test_workflow_execute_skips_plan_after_user_followup_without_summary()
             250,
             {},
         )
-        assert dag_calls == [], (
-            "a USER message after set_plan without completion_summary must not replay the DAG"
-        )
+        assert dag_calls == [], "a USER message after set_plan without completion_summary must not replay the DAG"
         schema_calls = [c for c in fake.activity_calls if c[0] == "set_response_schema_activity"]
         assert schema_calls, "a USER follow-up after set_plan must regenerate output_schema"
         assert schema_calls[0][1][1] == [followup]
@@ -8470,10 +9289,12 @@ async def test_workflow_post_dag_verdict_detects_keyed_feedback_without_user_row
 
     async def verify(**kwargs):
         return {
-            "score": 1.0, "reasoning": "The original venues requirement is satisfied",
+            "score": 1.0,
+            "reasoning": "The original venues requirement is satisfied",
             "structured_response": {"venues": ["Old result"]},
             "usage": {"prompt_tokens": 5, "completion_tokens": 2},
-            "_verified_user_requirement_keys": set(), "_verified_requirement_revision": 0,
+            "_verified_user_requirement_keys": set(),
+            "_verified_requirement_revision": 0,
         }
 
     async def account_tokens(*args, **kwargs):
@@ -8490,7 +9311,9 @@ async def test_workflow_post_dag_verdict_detects_keyed_feedback_without_user_row
     original_verifier = workflow_module._run_verifier
     workflow_module._run_verifier = verify
     try:
-        result = await wf._attempt_post_dag_completion(agent_id=wf.agent_id, user_id=wf.user_id, model="rose-labs/rose-1-flash")
+        result = await wf._attempt_post_dag_completion(
+            agent_id=wf.agent_id, user_id=wf.user_id, model="rose-labs/rose-1-flash"
+        )
         assert wf.output_schema == replacement and wf._response_schema_revision == 1
         assert wf.context == [], "keyed feedback manufactured a USER row"
         assert result.get("superseded_by_user_feedback") is True, (
@@ -8531,13 +9354,18 @@ async def _exercise_completion_schema_wait_race(path: str):
     from utils.oai_demo import OAI_DEMO_CHILD_GOAL_PREFIX
 
     wf, fake, replacement = _user_schema_refresh_fixture()
-    fake.activity_returns.update({
-        "poll_new_messages": [], "get_model_context_window": 200_000,
-        "get_agent_source": "WEB", "get_user_context": "",
-        "get_user_system_name": "Navi", "get_user_custom_system_prompt": None,
-        "fetch_compute_token_activity": None,
-        "fetch_agent_config": {"response_schema": wf.output_schema, "write_lock_enabled": True},
-    })
+    fake.activity_returns.update(
+        {
+            "poll_new_messages": [],
+            "get_model_context_window": 200_000,
+            "get_agent_source": "WEB",
+            "get_user_context": "",
+            "get_user_system_name": "Navi",
+            "get_user_custom_system_prompt": None,
+            "fetch_compute_token_activity": None,
+            "fetch_agent_config": {"response_schema": wf.output_schema, "write_lock_enabled": True},
+        }
+    )
     original_wait = wf._wait_for_response_schema_refresh
     armed = False
     injected = False
@@ -8548,8 +9376,10 @@ async def _exercise_completion_schema_wait_race(path: str):
     old_output = {"venues": ["Original requirement only"]}
     new_output = {"venues": ["Updated result"], "venue_prices": [12]}
     verdict = {
-        "score": 1.0, "reasoning": "Original requirement is satisfied",
-        "structured_response": old_output, "_verified_user_requirement_keys": set(),
+        "score": 1.0,
+        "reasoning": "Original requirement is satisfied",
+        "structured_response": old_output,
+        "_verified_user_requirement_keys": set(),
         "_verified_requirement_revision": 0,
     }
 
@@ -8558,10 +9388,15 @@ async def _exercise_completion_schema_wait_race(path: str):
         if armed and not injected:
             injected = True
             armed = False
-            await wf.receive_user_response(json.dumps({
-                "request_id": "caller-wait-update", "response": "RESOLVED",
-                "user_message": "Also return venue prices",
-            }))
+            await wf.receive_user_response(
+                json.dumps(
+                    {
+                        "request_id": "caller-wait-update",
+                        "response": "RESOLVED",
+                        "user_message": "Also return venue prices",
+                    }
+                )
+            )
         await original_wait()
 
     async def mark_complete(_context, response):
@@ -8577,9 +9412,13 @@ async def _exercise_completion_schema_wait_race(path: str):
             armed = True
             return dict(verdict, status="completed", context=[], token_count=0, context_size=0)
         return {
-            "status": "completed", "context": [], "structured_response": new_output,
-            "_verified_user_requirement_keys": set(), "_verified_requirement_revision": 1,
-            "token_count": 0, "context_size": 0,
+            "status": "completed",
+            "context": [],
+            "structured_response": new_output,
+            "_verified_user_requirement_keys": set(),
+            "_verified_requirement_revision": 1,
+            "token_count": 0,
+            "context_size": 0,
         }
 
     async def completed_dag(**kwargs):
@@ -8603,31 +9442,50 @@ async def _exercise_completion_schema_wait_race(path: str):
     workflow_module.execute_dag = completed_dag
     workflow_module.extract_plan_from_context = lambda _context: (
         {"tasks": [{"goal": "Research venues", "tool_name": "spawn_explore_agent"}], "dependencies": {}}
-        if path == "post_dag" else None
+        if path == "post_dag"
+        else None
     )
     try:
         if path == "fast_mode":
             wf.goal = f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky — Huberman"
             wf.fast_mode_cache_enabled = True
             armed = True
-            await wf._handle_incomplete(dict(
-                verdict, status="max_iterations", context=[], verifier_progress=1.0,
-                verifier_reasoning="Fast Mode cache trajectory ended", partial_structured_response=old_output,
-            ), phase="EXECUTE")
+            await wf._handle_incomplete(
+                dict(
+                    verdict,
+                    status="max_iterations",
+                    context=[],
+                    verifier_progress=1.0,
+                    verifier_reasoning="Fast Mode cache trajectory ended",
+                    partial_structured_response=old_output,
+                ),
+                phase="EXECUTE",
+            )
         else:
             await wf.run(
-                wf.agent_id, wf.user_id, wf.goal, "rose-labs/rose-1-flash", 256,
-                {"type": "FLOAT_LLM_JUDGE"}, start_phase="execute",
+                wf.agent_id,
+                wf.user_id,
+                wf.goal,
+                "rose-labs/rose-1-flash",
+                256,
+                {"type": "FLOAT_LLM_JUDGE"},
+                start_phase="execute",
             )
         assert injected and wf._response_schema_revision == wf._response_schema_accepted_revision == 1
         assert wf.output_schema == replacement
-        assert not any(row.get("role") == "USER" for row in wf.context), "keyed authored feedback manufactured a USER row"
+        assert not any(row.get("role") == "USER" for row in wf.context), (
+            "keyed authored feedback manufactured a USER row"
+        )
         assert verdict["score"] == 1.0 and verdict["structured_response"] == old_output
         if path == "post_dag":
-            assert completions == [new_output], "post-DAG completion accepted the verdict superseded during its final schema await"
+            assert completions == [new_output], (
+                "post-DAG completion accepted the verdict superseded during its final schema await"
+            )
             assert len(loop_calls) == 1, "the stale DAG verdict did not reach existing loop recovery"
         else:
-            assert completions == [], f"{path} accepted an old verdict after current requirements changed during the final schema await"
+            assert completions == [], (
+                f"{path} accepted an old verdict after current requirements changed during the final schema await"
+            )
         if path == "execute":
             assert len(continued) == 1 and continued[0][11] == "execute_continued"
         elif path == "fast_mode":
@@ -10055,7 +10913,7 @@ async def test_plan_phase_spawn_agent_schema_rejects_non_explore_types():
     AgentAction = create_agent_action_model(PLAN_PHASE_TOOLS, tool_registry=PLAN_TOOL_MODELS)
 
     valid = AgentAction.model_validate(
-        {"response": "ok", "tool_calls": [{"tool": "spawn_agent", "type": "explore", "goal": "x"}]}
+        {"response": "ok", "tool_calls": [{"tool": "spawn_agent", "type": "explore", "task_name": "x", "goal": "x"}]}
     )
     assert valid is not None
 
@@ -10175,6 +11033,7 @@ async def test_workflow_execute_tool_legacy_spawn_agent_receives_phase():
             "spawn_agent",
             {
                 "type": "general_purpose",
+                "task_name": "population",
                 "goal": "research city populations",
                 "start_phase": "EXECUTE",
                 "output_schema": {"fields": [{"name": "population", "type": "int", "required": True}]},
@@ -10210,7 +11069,7 @@ async def test_workflow_execute_tool_handoff_includes_task_queue():
     try:
         result = await wf._execute_tool(
             "spawn_agent",
-            {"type": "explore", "goal": "parked child"},
+            {"type": "explore", "task_name": "parked", "goal": "parked child"},
             "tc-handoff",
         )
         assert result.get("success") is True
@@ -11098,6 +11957,10 @@ async def run_all_tests():
         test_workflow_continuation_carries_parked_tools_and_drops_malformed_records,
     )
     r.record(
+        "wf_continuation_backfills_legacy_spawn_task_name",
+        test_workflow_continuation_backfills_task_name_for_legacy_parked_spawns,
+    )
+    r.record(
         "wf_restart_safe_child_counts",
         test_restart_safe_child_tool_counts_survive_memory_loss_without_duplication,
     )
@@ -11213,20 +12076,58 @@ async def run_all_tests():
         "wf_refresh_schema_from_feedback",
         test_workflow_refreshes_response_schema_from_user_feedback,
     )
-    await r.record_async("wf_keyed_rejection_already_polled_feedback", test_workflow_keyed_rejection_admits_already_polled_durable_feedback)
-    await r.record_async("wf_keyed_rejection_durable_feedback", test_workflow_keyed_rejection_polls_durable_user_feedback_without_schema_narration)
-    await r.record_async("wf_keyed_rejection_waiter_after_feedback", test_workflow_keyed_rejection_waiter_releases_after_feedback_admission)
-    await r.record_async("wf_failed_rejection_intake_keeps_waiter", test_workflow_failed_rejection_intake_does_not_release_waiter)
-    await r.record_async("wf_rejection_activity_failure_known_feedback", test_workflow_rejection_activity_read_failure_preserves_known_feedback_and_response)
-    await r.record_async("wf_rejection_activity_failure_deferred_feedback", test_workflow_rejection_activity_read_failure_defers_unknown_feedback_once)
-    await r.record_async("wf_rejection_read_lifecycle_fences", test_workflow_rejection_read_does_not_swallow_cancellation_or_generation_fence)
-    await r.record_async("wf_schema_durable_reversions", test_workflow_schema_requirements_preserve_distinct_durable_reversions)
-    await r.record_async("wf_attention_row_before_signal_event_identity", test_workflow_attention_row_before_signal_is_one_requirement_event)
-    await r.record_async("wf_attention_signal_distinct_identical_row", test_workflow_attention_signal_does_not_consume_another_identical_event_row)
-    await r.record_async("wf_attention_a_b_a_event_chronology", test_workflow_attention_distinct_a_b_a_events_preserve_chronology_once)
-    await r.record_async("wf_attention_event_ledger_continue_as_new", test_workflow_attention_event_ledger_survives_continue_as_new)
-    await r.record_async("wf_attention_duplicate_batch_physical_rows", test_workflow_attention_duplicate_physical_rows_in_one_batch_are_one_event)
-    await r.record_async("wf_attention_authored_control_word_verbatim", test_workflow_attention_authored_control_word_is_real_feedback_verbatim)
+    await r.record_async(
+        "wf_keyed_rejection_already_polled_feedback",
+        test_workflow_keyed_rejection_admits_already_polled_durable_feedback,
+    )
+    await r.record_async(
+        "wf_keyed_rejection_durable_feedback",
+        test_workflow_keyed_rejection_polls_durable_user_feedback_without_schema_narration,
+    )
+    await r.record_async(
+        "wf_keyed_rejection_waiter_after_feedback",
+        test_workflow_keyed_rejection_waiter_releases_after_feedback_admission,
+    )
+    await r.record_async(
+        "wf_failed_rejection_intake_keeps_waiter", test_workflow_failed_rejection_intake_does_not_release_waiter
+    )
+    await r.record_async(
+        "wf_rejection_activity_failure_known_feedback",
+        test_workflow_rejection_activity_read_failure_preserves_known_feedback_and_response,
+    )
+    await r.record_async(
+        "wf_rejection_activity_failure_deferred_feedback",
+        test_workflow_rejection_activity_read_failure_defers_unknown_feedback_once,
+    )
+    await r.record_async(
+        "wf_rejection_read_lifecycle_fences",
+        test_workflow_rejection_read_does_not_swallow_cancellation_or_generation_fence,
+    )
+    await r.record_async(
+        "wf_schema_durable_reversions", test_workflow_schema_requirements_preserve_distinct_durable_reversions
+    )
+    await r.record_async(
+        "wf_attention_row_before_signal_event_identity",
+        test_workflow_attention_row_before_signal_is_one_requirement_event,
+    )
+    await r.record_async(
+        "wf_attention_signal_distinct_identical_row",
+        test_workflow_attention_signal_does_not_consume_another_identical_event_row,
+    )
+    await r.record_async(
+        "wf_attention_a_b_a_event_chronology", test_workflow_attention_distinct_a_b_a_events_preserve_chronology_once
+    )
+    await r.record_async(
+        "wf_attention_event_ledger_continue_as_new", test_workflow_attention_event_ledger_survives_continue_as_new
+    )
+    await r.record_async(
+        "wf_attention_duplicate_batch_physical_rows",
+        test_workflow_attention_duplicate_physical_rows_in_one_batch_are_one_event,
+    )
+    await r.record_async(
+        "wf_attention_authored_control_word_verbatim",
+        test_workflow_attention_authored_control_word_is_real_feedback_verbatim,
+    )
     await r.record_async(
         "wf_keyed_user_native_schema",
         test_workflow_keyed_user_message_updates_native_schema_without_injection,
@@ -11299,24 +12200,72 @@ async def run_all_tests():
         "wf_schema_refresh_failure_native_retry",
         test_workflow_schema_refresh_failure_remains_pending_for_native_retry,
     )
-    await r.record_async("wf_schema_failure_continuation_native_retry", test_workflow_failed_schema_continuation_retries_original_input_without_new_feedback)
-    await r.record_async("wf_schema_refresh_lifecycle_no_respawn", test_workflow_schema_refresh_lifecycle_stop_propagates_without_respawn)
-    await r.record_async("wf_legacy_approval_protocol_no_schema_feedback", test_workflow_legacy_approval_protocol_does_not_change_requirements)
-    await r.record_async("wf_authored_approval_words_preserved", test_workflow_authored_approval_words_remain_actual_requirements)
-    await r.record_async("wf_schema_getter_refuses_failed_generation", test_workflow_schema_getter_refuses_old_contract_after_generation_failure)
-    await r.record_async("wf_generation_failure_blocks_verifier_provider", test_workflow_generation_failure_blocks_actual_verifier_provider_call)
-    await r.record_async("wf_unchanged_contract_accepted_before_db_ack", test_workflow_valid_unchanged_schema_is_accepted_before_persistence_ack)
-    await r.record_async("wf_native_acceptance_survives_lost_db_ack", test_workflow_accepted_native_schema_survives_lost_persistence_ack)
-    await r.record_async("wf_direct_completion_requires_native_acceptance", test_workflow_direct_completion_bypass_refuses_unaccepted_latest_contract)
-    await r.record_async("wf_unaccepted_schema_no_invented_terminal_failure", test_workflow_unaccepted_schema_does_not_invent_terminal_failure)
-    await r.record_async("wf_healthy_native_sms_changed_schema", test_workflow_healthy_feedback_during_native_sms_wait_continues_with_changed_schema)
-    await r.record_async("wf_healthy_native_sms_unchanged_schema", test_workflow_healthy_feedback_during_native_sms_wait_continues_with_unchanged_schema)
-    await r.record_async("wf_healthy_native_explore_drain", test_workflow_healthy_feedback_during_native_explore_drain_discards_old_completion)
-    await r.record_async("wf_healthy_sms_post_dag_recovery", test_workflow_healthy_sms_feedback_post_dag_recovers_current_contract)
-    await r.record_async("wf_healthy_sms_fast_mode_budget", test_workflow_healthy_sms_feedback_keeps_fast_mode_step_budget)
-    await r.record_async("wf_native_sms_no_new_feedback", test_workflow_native_sms_completion_without_new_feedback_still_completes)
-    await r.record_async("wf_schema_failure_preserves_unrelated_error", test_workflow_schema_failure_handler_does_not_swallow_unrelated_errors)
-    await r.record_async("wf_fast_mode_completion_requires_native_acceptance", test_workflow_fast_mode_completion_refuses_unaccepted_latest_contract)
+    await r.record_async(
+        "wf_schema_failure_continuation_native_retry",
+        test_workflow_failed_schema_continuation_retries_original_input_without_new_feedback,
+    )
+    await r.record_async(
+        "wf_schema_refresh_lifecycle_no_respawn", test_workflow_schema_refresh_lifecycle_stop_propagates_without_respawn
+    )
+    await r.record_async(
+        "wf_legacy_approval_protocol_no_schema_feedback",
+        test_workflow_legacy_approval_protocol_does_not_change_requirements,
+    )
+    await r.record_async(
+        "wf_authored_approval_words_preserved", test_workflow_authored_approval_words_remain_actual_requirements
+    )
+    await r.record_async(
+        "wf_schema_getter_refuses_failed_generation",
+        test_workflow_schema_getter_refuses_old_contract_after_generation_failure,
+    )
+    await r.record_async(
+        "wf_generation_failure_blocks_verifier_provider",
+        test_workflow_generation_failure_blocks_actual_verifier_provider_call,
+    )
+    await r.record_async(
+        "wf_unchanged_contract_accepted_before_db_ack",
+        test_workflow_valid_unchanged_schema_is_accepted_before_persistence_ack,
+    )
+    await r.record_async(
+        "wf_native_acceptance_survives_lost_db_ack", test_workflow_accepted_native_schema_survives_lost_persistence_ack
+    )
+    await r.record_async(
+        "wf_direct_completion_requires_native_acceptance",
+        test_workflow_direct_completion_bypass_refuses_unaccepted_latest_contract,
+    )
+    await r.record_async(
+        "wf_unaccepted_schema_no_invented_terminal_failure",
+        test_workflow_unaccepted_schema_does_not_invent_terminal_failure,
+    )
+    await r.record_async(
+        "wf_healthy_native_sms_changed_schema",
+        test_workflow_healthy_feedback_during_native_sms_wait_continues_with_changed_schema,
+    )
+    await r.record_async(
+        "wf_healthy_native_sms_unchanged_schema",
+        test_workflow_healthy_feedback_during_native_sms_wait_continues_with_unchanged_schema,
+    )
+    await r.record_async(
+        "wf_healthy_native_explore_drain",
+        test_workflow_healthy_feedback_during_native_explore_drain_discards_old_completion,
+    )
+    await r.record_async(
+        "wf_healthy_sms_post_dag_recovery", test_workflow_healthy_sms_feedback_post_dag_recovers_current_contract
+    )
+    await r.record_async(
+        "wf_healthy_sms_fast_mode_budget", test_workflow_healthy_sms_feedback_keeps_fast_mode_step_budget
+    )
+    await r.record_async(
+        "wf_native_sms_no_new_feedback", test_workflow_native_sms_completion_without_new_feedback_still_completes
+    )
+    await r.record_async(
+        "wf_schema_failure_preserves_unrelated_error",
+        test_workflow_schema_failure_handler_does_not_swallow_unrelated_errors,
+    )
+    await r.record_async(
+        "wf_fast_mode_completion_requires_native_acceptance",
+        test_workflow_fast_mode_completion_refuses_unaccepted_latest_contract,
+    )
     await r.record_async(
         "wf_schema_refresh_no_message_dependency",
         test_workflow_schema_refresh_does_not_depend_on_message_write,
@@ -11458,6 +12407,18 @@ async def run_all_tests():
         "wf_context_overflow_continuation_preserves_state",
         test_workflow_context_overflow_uses_complete_continuation_contract,
     )
+    await r.record_async(
+        "wf_context_overflow_defers_while_background_task_runs",
+        test_context_overflow_defers_continue_as_new_while_background_task_runs,
+    )
+    await r.record_async(
+        "wf_context_overflow_history_limit_settles_background_task",
+        test_context_overflow_at_history_limit_settles_background_task_then_continues,
+    )
+    await r.record_async(
+        "wf_generation_handoff_settles_in_flight_background_task",
+        test_generation_handoff_settles_in_flight_background_task_before_continue_as_new,
+    )
     await r.record_async("wf_handle_incomplete_max_iterations", test_workflow_handle_incomplete_max_iterations)
     await r.record_async(
         "wf_handle_incomplete_max_iterations_fast_mode_completes",
@@ -11516,6 +12477,10 @@ async def run_all_tests():
         test_workflow_dag_failure_recovers_via_run_agent,
     )
     await r.record_async(
+        "workflow_dag_user_message_interrupt_reaches_run_agent",
+        test_workflow_dag_user_message_interrupt_reaches_run_agent,
+    )
+    await r.record_async(
         "wf_execute_skips_stale_plan_after_completion_followup",
         test_workflow_execute_skips_stale_plan_after_completion_followup,
     )
@@ -11544,11 +12509,21 @@ async def run_all_tests():
         "wf_post_dag_completion_attempt_tool",
         test_workflow_post_dag_completion_dispatches_attempt_completion_tool,
     )
-    await r.record_async("wf_post_dag_keyed_revision_race", test_workflow_post_dag_verdict_detects_keyed_feedback_without_user_row)
-    await r.record_async("wf_loop_live_requirement_revision", test_workflow_all_loop_phases_forward_live_requirement_revision)
-    await r.record_async("wf_execute_verdict_schema_wait_race", test_workflow_execute_completion_rechecks_verdict_after_schema_wait)
-    await r.record_async("wf_post_dag_verdict_schema_wait_race", test_workflow_post_dag_completion_rechecks_verdict_after_schema_wait)
-    await r.record_async("wf_fast_mode_verdict_schema_wait_race", test_workflow_fast_mode_completion_rechecks_verdict_after_schema_wait)
+    await r.record_async(
+        "wf_post_dag_keyed_revision_race", test_workflow_post_dag_verdict_detects_keyed_feedback_without_user_row
+    )
+    await r.record_async(
+        "wf_loop_live_requirement_revision", test_workflow_all_loop_phases_forward_live_requirement_revision
+    )
+    await r.record_async(
+        "wf_execute_verdict_schema_wait_race", test_workflow_execute_completion_rechecks_verdict_after_schema_wait
+    )
+    await r.record_async(
+        "wf_post_dag_verdict_schema_wait_race", test_workflow_post_dag_completion_rechecks_verdict_after_schema_wait
+    )
+    await r.record_async(
+        "wf_fast_mode_verdict_schema_wait_race", test_workflow_fast_mode_completion_rechecks_verdict_after_schema_wait
+    )
     await r.record_async(
         "wf_post_dag_completion_error_closes_attempt",
         test_workflow_post_dag_completion_verifier_error_closes_attempt_tool,

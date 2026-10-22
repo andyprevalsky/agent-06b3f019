@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import benchmarks.run_benchmark as rb
 from benchmarks.benchmark_tasks import (
     all_tasks,
     get_task_by_name,
@@ -20,7 +21,6 @@ from benchmarks.polar_catalog import (
     load_polar_tasks_file,
     write_polar_tasks_file,
 )
-import benchmarks.run_benchmark as rb
 
 
 def test_polar_tasks_file_matches_sources(tmp_path):
@@ -51,12 +51,9 @@ def test_polar_bench_group_and_tags_never_daily():
     assert all(t.enforce_declared_evaluators for t in polar)
     assert all(t.approval_handling is None for t in polar)
     # Polar slice uses the isolated Odysseys-faithful evaluator only.
+    assert all(e.get("method") == "polar" for t in polar for e in (t.evaluators or []))
     assert all(
-        e.get("method") == "polar" for t in polar for e in (t.evaluators or [])
-    )
-    assert all(
-        isinstance((t.evaluators or [{}])[0].get("rubrics"), list)
-        and (t.evaluators or [{}])[0]["rubrics"]
+        isinstance((t.evaluators or [{}])[0].get("rubrics"), list) and (t.evaluators or [{}])[0]["rubrics"]
         for t in polar
     )
 
@@ -139,9 +136,7 @@ def test_validate_catalog_includes_polar_slice():
     assert len(polar) == 300
     assert all(t.get("group") == POLAR_GROUP for t in polar)
     # Ground-truth answers stay in evaluators, never in the agent prompt.
-    bu_with_answer = json.loads(
-        (Path(__file__).resolve().parent / "polar" / "bu_bench_v1.json").read_text()
-    )
+    bu_with_answer = json.loads((Path(__file__).resolve().parent / "polar" / "bu_bench_v1.json").read_text())
     answered = [t for t in bu_with_answer if t.get("answer")]
     assert answered
     for src in answered[:5]:

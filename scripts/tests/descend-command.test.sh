@@ -390,13 +390,17 @@ shutil.copyfile(
     root / ".claude/shared/benchmark-report-format.txt",
 )
 for name in ("run-bench", "cloudbench_catalog.py", "cloudbench-production-only-tasks.py",
-             "cloudbench-shard-coordinator.py"):
+             "cloudbench-shard-coordinator.py", "cloudbench-timeout-policy.py"):
     shutil.copyfile(source / "scripts" / name, root / "scripts" / name)
+# run-bench resolves every launch's timeout from the catalog's caps and floors.
+for name in ("__init__.py", "benchmark_tasks.py", "fixtures.py", "live_fixtures.py",
+             "polar_catalog.py", "timeout_history.py"):
+    shutil.copyfile(source / "agents/benchmarks" / name, root / "agents/benchmarks" / name)
 (root / "agents/benchmarks/tasks.json").write_text(json.dumps([
-    {"name": "production-route", "status": "ready", "production_only": True}
+    {"name": "production-route", "status": "ready", "production_only": True, "timeout_seconds": 600}
 ]))
 (root / "agents/benchmarks/polar_tasks.json").write_text(json.dumps([
-    {"name": "polar-routing-control", "status": "ready", "bench": "polar-bench"}
+    {"name": "polar-routing-control", "status": "ready", "bench": "polar-bench", "timeout_seconds": 0}
 ]))
 interpreter = root / "agents/venv/bin/python"
 interpreter.write_text("""#!/usr/bin/env python3
@@ -404,8 +408,8 @@ import json, os, sys
 args = sys.argv[1:]
 if args[1].endswith(('cloudbench_catalog.py', 'cloudbench-production-only-tasks.py')) or (
     args[0] == '-c' and args[-1].endswith('/scripts/cloudbench-shard-coordinator.py')
-):
-    # Catalog, production classifier and the sharded copy-bound read are real.
+) or args[0].endswith('/scripts/cloudbench-timeout-policy.py'):
+    # Catalog, production classifier, timeout policy and the sharded copy-bound read are real.
     os.execv(os.environ['ROUTING_REAL_PYTHON'], [os.environ['ROUTING_REAL_PYTHON'], *args])
 assert args[1] == 'benchmarks/run_benchmark.py', args
 with open(os.environ['ROUTING_CAPTURE'], 'a') as stream:
@@ -448,13 +452,13 @@ PY
 mkdir -p "$tmp/catalog"
 cat >"$tmp/catalog/tasks.json" <<'JSON'
 [
-  {"name":"slice-smoke","status":"ready","tags":["smoke"]},
-  {"name":"slice-daily","status":"ready","bench":"pipeline-e2e"}
+  {"name":"slice-smoke","status":"ready","tags":["smoke"],"timeout_seconds":300},
+  {"name":"slice-daily","status":"ready","bench":"pipeline-e2e","timeout_seconds":600}
 ]
 JSON
 cat >"$tmp/catalog/polar_tasks.json" <<'JSON'
 [
-  {"name":"slice-polar","status":"ready","group":"polar-bench","tags":["polar-bench"]}
+  {"name":"slice-polar","status":"ready","group":"polar-bench","tags":["polar-bench"],"timeout_seconds":0}
 ]
 JSON
 RUN_BENCH_CATALOG_UNDER_TEST="$tmp/catalog/tasks.json" \

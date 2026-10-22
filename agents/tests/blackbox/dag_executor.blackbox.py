@@ -118,6 +118,47 @@ def test_task_dag_get_ready_tasks_initial():
     assert indexes == [0, 1]  # task 2 is blocked
 
 
+def test_resume_completed_tasks_ignores_background_executor_rows():
+    """A planned background spawn's executor rows share its id but are FE-only: only the
+    completion notification completes the task on resume (never the hidden executor result)."""
+    from loop.dag_executor import TaskDAG, TaskState
+
+    plan_data = {"tasks": [{"goal": "scan", "tool_name": "spawn_explore_agent"}], "dependencies": {}}
+    started = {
+        "role": "TOOL",
+        "text": "Started explore agent in background. Address: /root/scan.",
+        "metadata": {
+            "toolCallId": "dag-t0",
+            "toolName": "spawn_agent",
+            "toolStatus": "FINISHED",
+            "dagTaskIndex": 0,
+            "runInBackground": True,
+            "hidden": True,
+            "backgroundTaskId": "dag-t0",
+        },
+    }
+    executor_result = {
+        "role": "TOOL",
+        "text": "4 funds",
+        "metadata": {
+            "toolCallId": "dag-t0",
+            "toolName": "spawn_agent",
+            "toolStatus": "FINISHED",
+            "excludeFromModel": True,
+        },
+    }
+    notification = {
+        "role": "USER",
+        "text": "Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/scan\nPayload:\n4 funds",
+        "metadata": {"agentNotification": True, "backgroundTaskId": "dag-t0", "status": "completed"},
+    }
+    dag = TaskDAG(plan_data)
+    assert dag.resume_completed_tasks_from_context([started, executor_result]) == []
+    assert dag.tasks[0].state == TaskState.PENDING
+    dag = TaskDAG(plan_data)
+    assert dag.resume_completed_tasks_from_context([started, executor_result, notification]) == [0]
+
+
 def test_task_dag_state_transitions():
     """mark_in_progress/completed/failed update state correctly."""
     from loop.dag_executor import TaskDAG, TaskState
@@ -253,27 +294,21 @@ def test_plan_superseded_by_user_after_final_summary():
     """USER after Task Complete makes the historical plan stale."""
     from loop.dag_executor import plan_superseded_by_new_user_instruction
 
-    assert plan_superseded_by_new_user_instruction(
-        _plan_followup_context(include_final_summary=True, later_user=True)
-    )
+    assert plan_superseded_by_new_user_instruction(_plan_followup_context(include_final_summary=True, later_user=True))
 
 
 def test_plan_superseded_by_final_summary_without_later_user():
     """Task Complete alone makes the historical plan stale for a new execute."""
     from loop.dag_executor import plan_superseded_by_new_user_instruction
 
-    assert plan_superseded_by_new_user_instruction(
-        _plan_followup_context(include_final_summary=True, later_user=False)
-    )
+    assert plan_superseded_by_new_user_instruction(_plan_followup_context(include_final_summary=True, later_user=False))
 
 
 def test_plan_superseded_by_user_after_set_plan_without_summary():
     """FAILED / credit-kill follow-up after set_plan stales the DAG without Task Complete."""
     from loop.dag_executor import plan_superseded_by_new_user_instruction
 
-    assert plan_superseded_by_new_user_instruction(
-        _plan_followup_context(include_final_summary=False, later_user=True)
-    )
+    assert plan_superseded_by_new_user_instruction(_plan_followup_context(include_final_summary=False, later_user=True))
 
 
 def test_plan_not_superseded_by_hidden_user_after_set_plan():
@@ -461,7 +496,7 @@ def test_dag_foreach_alias_override_passes_spawn_agent_validation():
         # type is set but start_phase is not → SpawnAgentTool rejects it.
         raised = False
         try:
-            SpawnAgentTool(**{**params, "type": agent_type})
+            SpawnAgentTool(**{**params, "type": agent_type, "task_name": "creator"})
         except Exception as exc:  # pydantic ValidationError (not a ValueError subclass)
             raised = True
             assert "start_phase is required" in str(exc), str(exc)
@@ -473,6 +508,10 @@ def test_dag_foreach_alias_override_passes_spawn_agent_validation():
         tool = SpawnAgentTool(**filled)
         assert tool.type == agent_type
         assert tool.start_phase == "EXECUTE"
+        # task_name (required) is filled deterministically from the goal + task number.
+        assert tool.task_name == "analyze_one_creator_1"
+        assert _apply_alias_override(dict(params), alias, 4)["task_name"] == "analyze_one_creator_5"
+        assert _apply_alias_override({**params, "task_name": "mine"}, alias)["task_name"] == "mine"
 
         # Preserve: a populator-chosen start_phase must NOT be overwritten (keeps
         # already-cached fan-out children on their existing keys).
@@ -1457,6 +1496,357 @@ async def test_execute_dag_terminalizes_canceled_sibling_tool_event():
     assert sibling_terminal[0]["metadata"].get("canceled") is True
 
 
+# ---------------------------------------------------------------------------
+# New-message interrupt: a user / agent message mid-DAG hands back to run_agent
+# (RCA: root 439c77dd left a user correction unread >5 min while planned GP
+# spawns ran in the foreground of execute_dag's FIRST_COMPLETED wait).
+# ---------------------------------------------------------------------------
+
+_GP_PARAMS = {
+    "tool": "spawn_agent",
+    "type": "general_purpose",
+    "goal": "Research seed investors",
+    "start_phase": "EXECUTE",
+    "output_schema": {"fields": [{"name": "names", "type": "str", "required": True}]},
+}
+
+
+class _InterruptSource:
+    """Stands in for the workflow's wake counter + wait_condition + background wait."""
+
+    def __init__(self, background_outcome=None):
+        self.value = 0
+        self._changed = asyncio.Event()
+        self.awaited = []
+        self.background_gate = asyncio.Event()
+        self._background_outcome = background_outcome
+
+    def seq(self):
+        return self.value
+
+    async def wait(self, seq):
+        while self.value == seq:
+            self._changed.clear()
+            await self._changed.wait()
+
+    def bump(self):
+        self.value += 1
+        self._changed.set()
+
+    async def await_background(self, bg_id):
+        self.awaited.append(bg_id)
+        await self.background_gate.wait()
+        if self._background_outcome is not None:
+            return await self._background_outcome(bg_id)
+        return True
+
+    def hooks(self):
+        from loop.dag_executor import DagInterrupts
+
+        return DagInterrupts(seq=self.seq, wait=self.wait, await_background=self.await_background)
+
+
+_SECOND_TOOL_PARAMS = {
+    "web_search": {"query": "seed funds"},
+    "call_phone_number": {"phone_number": "+15125550100", "objective": "Confirm the meeting time"},
+    "message_person": {"person": "Dana Lee", "message": "Can we meet Tuesday?"},
+    "send_message_to_user_execute_phase": {"message": "Which city should I target?", "is_question": True},
+}
+
+
+def _interrupt_plan(second_tool="web_search"):
+    return {
+        "tasks": [
+            {"goal": "Research seed investors", "tool_name": "spawn_general_purpose_agent"},
+            {"goal": "Second planned step", "tool_name": second_tool},
+            {"goal": "Draft outreach", "tool_name": "reasoning"},
+        ],
+        "dependencies": {"2": ["0", "1"]},
+    }
+
+
+def _interrupt_param_calls_for(second_tool):
+    def _calls(args):
+        if "spawn_agent" == args[11]:
+            return [dict(_GP_PARAMS)]
+        return [{"tool": second_tool, **_SECOND_TOOL_PARAMS[second_tool]}]
+
+    return _calls
+
+
+_interrupt_param_calls = _interrupt_param_calls_for("web_search")
+
+
+async def _drive_interrupted_dag(row_metadata, *, expect_interrupt, second_tool="web_search"):
+    """Run a DAG whose planned GP spawn runs in the background while a second
+    planned step blocks; post one USER row mid-wait.
+
+    The spawn's executor returns at once (the workflow's background start);
+    its DAG dependency waits in ``await_background`` until ``spawn_gate``.
+    Returns the second step's gate and its asyncio-visible outcome list.
+    """
+    source = _InterruptSource()
+    spawn_gate = source.background_gate
+    second_gate = asyncio.Event()
+    spawn_started = asyncio.Event()
+    second_started = asyncio.Event()
+    second_outcome = []
+    db_rows = []
+    tool_calls = []
+
+    async def execute_tool(name, params, tool_call_id):
+        tool_calls.append((name, params.get("type"), tool_call_id))
+        if name == "spawn_agent":
+            spawn_started.set()
+            return {"success": True, "message": "Started", "background_task_id": tool_call_id}
+        second_started.set()
+        try:
+            await second_gate.wait()
+        except asyncio.CancelledError:
+            second_outcome.append("cancelled")
+            raise
+        second_outcome.append("finished")
+        return {"success": True, "message": f"{name} done"}
+
+    async def poll_messages(_since):
+        return list(db_rows)
+
+    dag_task = asyncio.create_task(
+        _run_execute_dag(
+            _interrupt_plan(second_tool),
+            execute_tool_impl=execute_tool,
+            param_tool_calls=_interrupt_param_calls_for(second_tool),
+            poll_messages=poll_messages,
+            interrupts=source.hooks(),
+        )
+    )
+    await asyncio.wait_for(asyncio.gather(spawn_started.wait(), second_started.wait()), 2)
+    db_rows.append(
+        {
+            "message_id": "msg-user-1",
+            "role": "USER",
+            "text": "Only target funds that lead pre-seed rounds.",
+            "metadata": row_metadata,
+            "timestamp": "2026-10-19T03:01:57+00:00",
+        }
+    )
+    source.bump()  # receive_user_response / receive_agent_message wake
+    if expect_interrupt:
+        # Immediate: returns while the spawn and the second step are still blocked.
+        result, events, dag = await asyncio.wait_for(dag_task, 1)
+    else:
+        await asyncio.sleep(0.05)
+        assert not dag_task.done(), "a non-interrupting row must not end the DAG"
+        second_gate.set()
+        spawn_gate.set()
+        result, events, dag = await asyncio.wait_for(dag_task, 2)
+    return source, second_gate, second_outcome, result, events, dag, tool_calls
+
+
+async def test_execute_dag_user_message_hands_back_and_leaves_background_spawn_running():
+    """A real user message mid-plan returns needs_llm at once; the background child keeps running."""
+    source, _gate, _outcome, result, events, dag, tool_calls = await _drive_interrupted_dag({}, expect_interrupt=True)
+    assert result["status"] == "needs_llm", result
+    assert result.get("interrupted_by_message") is True, result
+    # The user row is in the returned context for run_agent.
+    assert any(row.get("message_id") == "msg-user-1" for row in result["context"])
+    # The planned GP spawn started in the background; only the DAG's wait ended.
+    planned_id = dag.tasks[0].tool_call_id
+    assert source.awaited == [planned_id]
+    assert dag.tasks[0].background_task_id == planned_id
+    assert not any(e.get("tool_call_id") == planned_id and e["status"] == "ERROR" for e in events), events
+    # The dependent never started.
+    assert dag.tasks[2].state.value == "PENDING"
+    assert not any(e.get("metadata", {}).get("dagTaskIndex") == 2 for e in events), events
+    assert [name for name, *_ in tool_calls] == ["spawn_agent", "web_search"]
+
+
+async def test_execute_dag_interrupt_cancels_blocking_tool_immediately_with_paired_row():
+    """A blocking non-spawn tool is cancelled at once (no grace) with an ERROR "interrupted" row."""
+    _source, _gate, outcome, result, events, dag, _calls = await _drive_interrupted_dag({}, expect_interrupt=True)
+    assert result["status"] == "needs_llm" and result.get("interrupted_by_message") is True, result
+    assert outcome == ["cancelled"], outcome
+    search_id = dag.tasks[1].tool_call_id
+    search_rows = [e for e in events if e["type"] == "tool_event" and e["tool_call_id"] == search_id]
+    assert [row["status"] for row in search_rows] == ["IN_PROGRESS", "ERROR"], search_rows
+    terminal = search_rows[-1]
+    assert terminal["tool_name"] == search_rows[0]["tool_name"] == "web_search", search_rows  # same chip
+    assert terminal["metadata"].get("interrupted") is True and terminal["metadata"].get("canceled") is True
+    assert terminal["metadata"].get("dagTaskIndex") == 1
+    assert "Interrupted" in terminal["message"], terminal
+    assert dag.tasks[2].state.value == "PENDING"
+
+
+async def test_execute_dag_interrupt_never_cancels_live_call_or_pending_question():
+    """A live phone call and a pending approval / user question keep running and report normally."""
+    for tool in ("call_phone_number", "message_person", "send_message_to_user_execute_phase"):
+        _source, gate, outcome, result, events, dag, _calls = await _drive_interrupted_dag(
+            {}, expect_interrupt=True, second_tool=tool
+        )
+        assert result["status"] == "needs_llm" and result.get("interrupted_by_message") is True, (tool, result)
+        assert outcome == [], (tool, outcome)
+        assert dag.tasks[1].uninterruptible is True, tool
+        assert not any(e["status"] == "ERROR" for e in events if e["type"] == "tool_event"), (tool, events)
+        assert len(dag.detached_tasks) == 1, tool
+        gate.set()
+        assert await asyncio.wait_for(dag.detached_tasks[0], 2) is True, tool  # reports as it normally would
+        assert outcome == ["finished"], (tool, outcome)
+    # A plain send_message_to_user (not a question) is an ordinary blocking step.
+    from loop.dag_executor import _is_uninterruptible_dag_call
+
+    assert _is_uninterruptible_dag_call("send_message_to_user_execute_phase", {"message": "FYI"}) is False
+    assert _is_uninterruptible_dag_call("web_search", {"query": "x"}) is False
+
+
+async def test_execute_dag_planned_spawn_completes_with_child_and_dependent_sees_result():
+    """The DAG task for a background spawn completes when the child does; dependents see its notification."""
+    db_rows = []
+    reasoning_contexts = []
+    order = []
+
+    async def notify(bg_id):
+        order.append("child-completed")
+        db_rows.append(
+            {
+                "message_id": "note-1",
+                "role": "USER",
+                "text": "Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/task_1\nPayload:\n"
+                "4 seed funds: Alpha, Beta, Gamma, Delta.",
+                "metadata": {"agentNotification": True, "backgroundTaskId": bg_id, "status": "completed"},
+                "timestamp": "2026-10-19T03:05:00+00:00",
+            }
+        )
+        return True
+
+    source = _InterruptSource(background_outcome=notify)
+
+    async def execute_tool(name, params, tool_call_id):
+        return {"success": True, "message": "Started", "background_task_id": tool_call_id}
+
+    async def poll_messages(_since):
+        return list(db_rows)
+
+    calls = []
+
+    def explore_params(args):
+        return [{"tool": "spawn_agent", "type": "explore", "goal": "Find seed funds", "task_name": "funds"}]
+
+    plan = {
+        "tasks": [
+            {"goal": "Find seed funds", "tool_name": "spawn_explore_agent"},
+            {"goal": "Draft outreach", "tool_name": "reasoning"},
+        ],
+        "dependencies": {"1": ["0"]},
+    }
+    running = asyncio.create_task(
+        _run_execute_dag(
+            plan,
+            execute_tool_impl=execute_tool,
+            param_tool_calls=explore_params,
+            execute_activity_calls=calls,
+            poll_messages=poll_messages,
+            interrupts=source.hooks(),
+        )
+    )
+    for _ in range(200):
+        if source.awaited:
+            break
+        await asyncio.sleep(0.005)
+    await asyncio.sleep(0.02)
+    assert source.awaited and not running.done(), "the DAG must wait for the background child"
+    assert not any("reasoning" in c["fn"] for c in calls), "dependent started before the child completed"
+    source.background_gate.set()
+    result, events, dag = await asyncio.wait_for(running, 2)
+    assert result["status"] == "completed", result
+    assert [task.state.value for task in dag.tasks] == ["COMPLETED", "COMPLETED"]
+    reasoning_calls = [c for c in calls if "reasoning" in c["fn"]]
+    assert len(reasoning_calls) == 1
+    reasoning_contexts.append(reasoning_calls[0]["args"][1])
+    assert any("Alpha, Beta, Gamma, Delta" in str(row.get("text")) for row in reasoning_contexts[0]), reasoning_contexts
+    assert order == ["child-completed"]
+
+
+async def test_execute_dag_agent_message_interrupts_but_notifications_do_not():
+    """agentMessage rows interrupt; agent notifications / hidden / attention rows do not."""
+    source, _gate, _outcome, result, _events, _dag, _calls = await _drive_interrupted_dag(
+        {"agentMessage": True, "fromAgentId": "sibling-1"}, expect_interrupt=True
+    )
+    assert result["status"] == "needs_llm" and result.get("interrupted_by_message") is True, result
+    assert len(source.awaited) == 1
+
+    for metadata in (
+        {"agentNotification": True, "toolName": "agent_notification"},
+        {"hidden": True},
+        {"isResponseSchemaUpdate": True},
+        {"source": "attention_response", "attentionRequestId": "req-1"},
+    ):
+        source, _gate, _outcome, result, _events, dag, _calls = await _drive_interrupted_dag(
+            metadata, expect_interrupt=False
+        )
+        assert result["status"] == "completed", (metadata, result)
+        assert len(source.awaited) == 1, metadata  # the spawn's own dependency wait only
+        assert all(task.state.value == "COMPLETED" for task in dag.tasks), metadata
+
+
+async def test_execute_dag_task_addressed_inbox_row_does_not_interrupt():
+    """A row for one of this agent's task inboxes is not input for this agent's LLM.
+
+    The backend stores ``{agentMessage, recipientTaskId, excludeFromModel}`` on the
+    task's owner and never signals its loop; the explore/browser activity reads it.
+    It must not cancel the planned work (possibly the addressed task itself) and
+    hand an invisible row back to the LLM.
+    """
+    for metadata in (
+        {
+            "agentMessage": True,
+            "fromAgentId": "sibling-1",
+            "fromAgentPath": "/root/hotels",
+            "toAgentPath": "/root/outreach",
+            "recipientTaskId": "toolu_task_1",
+            "excludeFromModel": True,
+        },
+        {"agentMessage": True, "fromAgentId": "sibling-1", "excludeFromModel": True},
+    ):
+        source, _gate, outcome, result, _events, dag, _calls = await _drive_interrupted_dag(
+            metadata, expect_interrupt=False
+        )
+        assert result["status"] == "completed", (metadata, result)
+        assert result.get("interrupted_by_message") is not True, (metadata, result)
+        assert outcome == ["finished"], (metadata, outcome)
+        assert len(source.awaited) == 1, metadata
+        assert all(task.state.value == "COMPLETED" for task in dag.tasks), metadata
+
+
+async def test_execute_dag_interrupts_without_messages_keep_behavior_identical():
+    """No message → the same activities, tool calls and rows as a DAG without interrupts."""
+    import uuid
+
+    async def run(with_interrupts):
+        counter = iter(range(1, 1000))
+        calls = []
+        source = _InterruptSource()
+
+        async def poll_messages(_since):
+            return []
+
+        with patch("loop.dag_executor.workflow.uuid4", lambda: uuid.UUID(int=next(counter))):
+            result, events, dag = await _run_execute_dag(
+                _interrupt_plan(),
+                param_tool_calls=_interrupt_param_calls,
+                execute_activity_calls=calls,
+                poll_messages=poll_messages,
+                **({"interrupts": source.hooks()} if with_interrupts else {}),
+            )
+        return result["status"], events, [(c["fn"], c["args"]) for c in calls], source.awaited
+
+    baseline = await run(False)
+    interrupted = await run(True)
+    assert baseline[0] == interrupted[0] == "completed"
+    assert interrupted[1] == baseline[1]
+    assert interrupted[2] == baseline[2]
+    assert interrupted[3] == []
+
+
 def test_oai_demo_reasoning_fast_mode_step_uses_july_slot():
     """Leftover GPs must not shift catalog-demo assemble-final off July p:6."""
     from utils.oai_demo import OAI_DEMO_ROOT_GOAL_PREFIX
@@ -1657,6 +2047,10 @@ async def run_all_tests():
     r.record("task_dag_parses_dict_tasks", test_task_dag_parses_dict_tasks)
     r.record("task_dag_get_ready_tasks_initial", test_task_dag_get_ready_tasks_initial)
     r.record("task_dag_state_transitions", test_task_dag_state_transitions)
+    r.record(
+        "resume_completed_ignores_background_executor_rows",
+        test_resume_completed_tasks_ignores_background_executor_rows,
+    )
     r.record("task_dag_is_complete_join_any", test_task_dag_is_complete_join_any)
     r.record("task_dag_get_ready_respects_deps", test_task_dag_get_ready_respects_deps)
     r.record("extract_plan_from_context_found", test_extract_plan_from_context_found)
@@ -1782,6 +2176,34 @@ async def run_all_tests():
     await r.record_async(
         "execute_dag_terminalizes_canceled_sibling_tool_event",
         test_execute_dag_terminalizes_canceled_sibling_tool_event,
+    )
+    await r.record_async(
+        "execute_dag_user_message_hands_back_and_leaves_background_spawn_running",
+        test_execute_dag_user_message_hands_back_and_leaves_background_spawn_running,
+    )
+    await r.record_async(
+        "execute_dag_interrupt_cancels_blocking_tool_immediately",
+        test_execute_dag_interrupt_cancels_blocking_tool_immediately_with_paired_row,
+    )
+    await r.record_async(
+        "execute_dag_interrupt_never_cancels_call_or_pending_question",
+        test_execute_dag_interrupt_never_cancels_live_call_or_pending_question,
+    )
+    await r.record_async(
+        "execute_dag_planned_spawn_completes_with_child_dependent_sees_result",
+        test_execute_dag_planned_spawn_completes_with_child_and_dependent_sees_result,
+    )
+    await r.record_async(
+        "execute_dag_agent_message_interrupts_but_notifications_do_not",
+        test_execute_dag_agent_message_interrupts_but_notifications_do_not,
+    )
+    await r.record_async(
+        "execute_dag_task_addressed_inbox_row_does_not_interrupt",
+        test_execute_dag_task_addressed_inbox_row_does_not_interrupt,
+    )
+    await r.record_async(
+        "execute_dag_interrupts_without_messages_keep_behavior_identical",
+        test_execute_dag_interrupts_without_messages_keep_behavior_identical,
     )
     teardown_mock()
     return r.summary()

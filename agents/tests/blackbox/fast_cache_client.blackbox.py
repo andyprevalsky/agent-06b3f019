@@ -243,7 +243,11 @@ async def _native_demo_recording_case(*, compatibility: bool, recording: bool, s
             assert url == "http://cache.test/api/fast-cache/set", url
             if status == 200:
                 rows[json["key"]] = json["value"]
-            return type("Response", (), {"status_code": status, "json": lambda self: {"ok": status == 200, "stored": status == 200}})()
+            return type(
+                "Response",
+                (),
+                {"status_code": status, "json": lambda self: {"ok": status == 200, "stored": status == 200}},
+            )()
 
     async def read_first(keys):
         return next(((rows[key], key) for key in keys if key in rows), (None, None))
@@ -256,7 +260,11 @@ async def _native_demo_recording_case(*, compatibility: bool, recording: bool, s
     tasks = json.loads((Path(__file__).parents[2] / "benchmarks/tasks.json").read_text())
     goal = next(task["prompt"] for task in tasks if task["name"] == "raise-5m-rose-labs-brex")
     context = native._WMHFastCacheContext(
-        enabled=True, goal=goal, root_goal=goal, write_enabled=True, provider_fast_mode=False,
+        enabled=True,
+        goal=goal,
+        root_goal=goal,
+        write_enabled=True,
+        provider_fast_mode=False,
     )
     assert context.read_enabled and context.soft_complete_allowed
     client = rose_module.RoseClient(openrouter_key="offline")
@@ -265,28 +273,37 @@ async def _native_demo_recording_case(*, compatibility: bool, recording: bool, s
         "FAST_MODE_CACHE_DISABLE_WRITE_THROUGH": "0",
         "BENCHMARK_DEMO_CACHE_READ_ONLY": "0",
     }
-    with patch.dict("os.environ", env), \
-            patch.object(cache_client, "_backend", return_value=("http://cache.test", "offline")), \
-            patch.object(cache_client, "_shared_client", return_value=_CacheBackend()), \
-            patch.object(cache_client, "_archive_cache_write", new=AsyncMock()), \
-            patch.object(cache_client, "cache_get_first", side_effect=read_first), \
-            patch.object(cache_client, "cache_get_position_fallback", new=AsyncMock(return_value=(None, None))), \
-            patch.object(client, "_complete_impl", new=stream), \
-            patch.object(rose_module.logger, "info", side_effect=lambda event, **kw: events.append(event)), \
-            patch.object(cache_wrapper.logger, "info", side_effect=lambda event, **kw: events.append(event)):
+    with (
+        patch.dict("os.environ", env),
+        patch.object(cache_client, "_backend", return_value=("http://cache.test", "offline")),
+        patch.object(cache_client, "_shared_client", return_value=_CacheBackend()),
+        patch.object(cache_client, "_archive_cache_write", new=AsyncMock()),
+        patch.object(cache_client, "cache_get_first", side_effect=read_first),
+        patch.object(cache_client, "cache_get_position_fallback", new=AsyncMock(return_value=(None, None))),
+        patch.object(client, "_complete_impl", new=stream),
+        patch.object(rose_module.logger, "info", side_effect=lambda event, **kw: events.append(event)),
+        patch.object(cache_wrapper.logger, "info", side_effect=lambda event, **kw: events.append(event)),
+    ):
         token = set_context(context)
         try:
             for _ in range(2):
                 kwargs = {
-                    "pool": "rose-1-flash", "messages": [{"role": "user", "content": "same request"}],
+                    "pool": "rose-1-flash",
+                    "messages": [{"role": "user", "content": "same request"}],
                     "dump_context": False,
                 }
                 if compatibility:
-                    result = [chunk async for chunk in cache_wrapper.cached_complete(
-                        client, call_site="wmh_world_model_timed_distribution_v1", **kwargs)]
+                    result = [
+                        chunk
+                        async for chunk in cache_wrapper.cached_complete(
+                            client, call_site="wmh_world_model_timed_distribution_v1", **kwargs
+                        )
+                    ]
                 else:
-                    result = [chunk async for chunk in client.complete(
-                        call_site="wmh_world_model_timed_distribution_v1", **kwargs)]
+                    result = [
+                        chunk
+                        async for chunk in client.complete(call_site="wmh_world_model_timed_distribution_v1", **kwargs)
+                    ]
                 assert result[-1].kind == "done"
                 assert any(chunk.kind == "content" for chunk in result)
         finally:
@@ -294,7 +311,9 @@ async def _native_demo_recording_case(*, compatibility: bool, recording: bool, s
     accepted = recording and status == 200
     assert len(rows) == int(accepted), rows
     assert events.count("llm.cache.stored") == int(accepted), (
-        "Rose reported a stored response without an accepted cache write", events)
+        "Rose reported a stored response without an accepted cache write",
+        events,
+    )
     assert events.count("llm.cache.store_skipped") == (0 if accepted else 2), events
     assert events.count("llm.cache.replay") == int(accepted), events
     assert len(provider_calls) == (1 if accepted else 2), provider_calls
@@ -327,16 +346,23 @@ async def test_compatibility_native_recording_replays_exact_key_with_provider_fa
 
 async def test_http_200_skipped_persistence_never_reports_store():
     import providers.fast_cache.client as client
+
     class Response:
         status_code = 200
+
         def json(self):
             return {"ok": True, "stored": False}
+
     backend = AsyncMock()
     backend.post.return_value = Response()
-    with patch.object(client, "_shared_client", return_value=backend), patch.object(
-        client, "_backend", return_value=("http://cache.test", "offline")
-    ), patch.object(client, "_archive_cache_write", new=AsyncMock()):
+    with (
+        patch.object(client, "_shared_client", return_value=backend),
+        patch.object(client, "_backend", return_value=("http://cache.test", "offline")),
+        patch.object(client, "_archive_cache_write", new=AsyncMock()),
+    ):
         assert await client.cache_set("ack-control", "llm", "ack-control", {}) is False
+
+
 def test_candidate_exclusions_shape_cache_request_material():
     from providers.fast_cache.rose_cache import request_key_material
     from providers.rose.truncation import model_key
@@ -368,6 +394,74 @@ async def test_excluded_cached_actual_candidate_is_not_replayed():
         assert (value is not None) is expected
 
 
+class _AgentFlagBackend:
+    """/api/fast-cache/agent-flag returning the agent row's current goal."""
+
+    def __init__(self, goal: str) -> None:
+        self.goal = goal
+        self.posts = 0
+
+    async def post(self, url, **kwargs):
+        assert url.endswith("/api/fast-cache/agent-flag"), url
+        self.posts += 1
+        goal = self.goal
+
+        class _FlagResp:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {
+                    "enabled": False,
+                    "goal": goal,
+                    "writeEnabled": True,
+                    "rootAgentId": "root-agent",
+                    "rootGoal": "Root goal",
+                    "providerFastMode": True,
+                }
+
+        return _FlagResp()
+
+
+async def test_workflow_start_reads_the_goal_a_wake_persisted():
+    """RCA 2026-10-19 tree-feedback-routing run 4 (agent 7304d3f1).
+
+    A wake (send_message_to_agent NEW_TASK) persists the message as Agent.goal
+    and starts a new workflow run, often on the worker process that ran the
+    previous run. Its per-process memo still held the old goal, so the new
+    run's fast_cache_goal was the previous task: the schema baseline consumed
+    the original goal row, no schema was regenerated, and the verifier judged
+    with neither goal nor schema (0% on correct work).
+    """
+    import providers.fast_cache.client as cache_client
+    from helpers.fast_cache_goal import resolve_fast_cache_context_activity
+
+    agent_id = "woken-drafter"
+    backend = _AgentFlagBackend("Draft one cold email to Garry Tan.")
+    orig_backend, orig_shared = cache_client._backend, cache_client._shared_client
+    cache_client._AGENT_FASTMODE.pop(agent_id, None)
+    cache_client._backend = lambda: ("http://fast-cache.test", "key")
+    cache_client._shared_client = lambda: backend
+    try:
+        first = await resolve_fast_cache_context_activity(agent_id)
+        assert first["goal"] == "Draft one cold email to Garry Tan."
+        # Activities inside the run keep the memo (one lookup per run).
+        assert (await cache_client.resolve_agent_fast_mode(agent_id))[1] == first["goal"]
+        assert backend.posts == 1, backend.posts
+
+        backend.goal = "Correction: re-sign your draft as Andy Prevalskii and return it."
+        second = await resolve_fast_cache_context_activity(agent_id)
+        assert second["goal"] == backend.goal, (
+            f"new workflow run resolved the previous run's goal from the process memo: {second['goal']!r}"
+        )
+        assert (await cache_client.resolve_agent_fast_mode(agent_id))[1] == backend.goal, (
+            "later activities in the woken run still see the stale memoized goal"
+        )
+    finally:
+        cache_client._AGENT_FASTMODE.pop(agent_id, None)
+        cache_client._backend, cache_client._shared_client = orig_backend, orig_shared
+
+
 async def run_all_tests():
     print("fast-cache-client blackbox tests:")
     r = BlackboxResult()
@@ -385,14 +479,16 @@ async def run_all_tests():
         test_shared_fetch_failure_is_a_plain_exception_for_every_waiter,
     )
     await r.record_async(
-        "native_frozen_namespace_never_reports_a_store", test_native_frozen_namespace_never_reports_a_store,
+        "native_frozen_namespace_never_reports_a_store",
+        test_native_frozen_namespace_never_reports_a_store,
     )
     await r.record_async(
         "compatibility_native_frozen_namespace_never_reports_a_store",
         test_compatibility_native_frozen_namespace_never_reports_a_store,
     )
     await r.record_async(
-        "native_rejected_cache_write_never_reports_a_store", test_native_rejected_cache_write_never_reports_a_store,
+        "native_rejected_cache_write_never_reports_a_store",
+        test_native_rejected_cache_write_never_reports_a_store,
     )
     await r.record_async(
         "compatibility_native_rejected_cache_write_never_reports_a_store",
@@ -406,7 +502,12 @@ async def run_all_tests():
         "compatibility_native_recording_replays_exact_key_with_provider_fast_button_off",
         test_compatibility_native_recording_replays_exact_key_with_provider_fast_button_off,
     )
-    await r.record_async("http_200_skipped_persistence_never_reports_store", test_http_200_skipped_persistence_never_reports_store)
+    await r.record_async(
+        "http_200_skipped_persistence_never_reports_store", test_http_200_skipped_persistence_never_reports_store
+    )
+    await r.record_async(
+        "workflow_start_reads_the_goal_a_wake_persisted", test_workflow_start_reads_the_goal_a_wake_persisted
+    )
     teardown_mock()
     return r.all_passed
 

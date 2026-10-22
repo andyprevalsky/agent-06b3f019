@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { type TreeNode, getStatusText } from '../../hooks';
 import { TREE_BRANCH, TREE_LAST, TREE_VERT } from '../subAgentTree.helpers';
 import { NodeRowBody } from './NodeRowBody';
@@ -10,12 +10,25 @@ interface TreeNodeRowProps {
   prefix: string;
   getChildren: (parentId: string) => TreeNode[];
   onNavigate: (agentId: string) => void;
+  /**
+   * Optional extra content under a node's row (indented with the same tree
+   * prefix), e.g. the running-agents dock's output-schema disclosure. Unset in
+   * the trajectory SubAgentTree, which renders exactly as before.
+   */
+  renderAfterNode?: (node: TreeNode, childPrefix: string) => ReactNode;
 }
 
 /**
  * Renders a single node in the full tree with its children recursively.
  */
-export function TreeNodeRow({ node, isLast, prefix, getChildren, onNavigate }: TreeNodeRowProps) {
+export function TreeNodeRow({
+  node,
+  isLast,
+  prefix,
+  getChildren,
+  onNavigate,
+  renderAfterNode,
+}: TreeNodeRowProps) {
   const [isHovered, setIsHovered] = useState(false);
   const children = getChildren(node.agentId);
   const statusText = getStatusText(node);
@@ -49,6 +62,8 @@ export function TreeNodeRow({ node, isLast, prefix, getChildren, onNavigate }: T
         </div>
       )}
 
+      {renderAfterNode?.(node, childPrefix)}
+
       {children.map((child, index) => (
         <TreeNodeRow
           key={child.agentId}
@@ -57,6 +72,7 @@ export function TreeNodeRow({ node, isLast, prefix, getChildren, onNavigate }: T
           prefix={childPrefix}
           getChildren={getChildren}
           onNavigate={onNavigate}
+          renderAfterNode={renderAfterNode}
         />
       ))}
     </div>
