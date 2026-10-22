@@ -119,10 +119,41 @@ def validate_product_url_for_pages(value: Any, trusted_page_urls: Iterable[Any])
     return text
 
 
+_IMAGE_TRANSFORM_PREFIX = "/cdn-cgi/image/"
+
+
+def _transformed_image_origin(parsed: Any) -> str:
+    """The exact origin URL inside an image-resizing path ``/cdn-cgi/image/<options>/<origin>``.
+
+    The options segment only resizes/re-encodes; the embedded absolute URL names the
+    image. Returns '' for any other path shape.
+    """
+    if not parsed.path.startswith(_IMAGE_TRANSFORM_PREFIX):
+        return ""
+    rest = parsed.path[len(_IMAGE_TRANSFORM_PREFIX) :]
+    options, _, origin = rest.partition("/")
+    if not options or "=" not in options or not origin:
+        return ""
+    # A path normalizer may have collapsed the scheme's double slash ("https:/host").
+    for scheme in ("https:/", "http:/"):
+        if origin.startswith(scheme) and not origin.startswith(scheme + "/"):
+            origin = scheme + "/" + origin[len(scheme) :]
+    if not origin.startswith(("https://", "http://")):
+        return ""
+    return origin + (f"?{parsed.query}" if parsed.query else "")
+
+
 def _image_asset_key(value: Any, page_url: Any) -> str:
-    """Scheme-insensitive identity of an image asset, or '' when not an http(s) URL."""
+    """Scheme-insensitive identity of an image asset, or '' when not an http(s) URL.
+
+    A resized derivative (``/cdn-cgi/image/<options>/<origin>``) is the same image
+    as its exact embedded origin, so it is keyed by that origin URL.
+    """
     try:
         parsed = urlparse(urljoin(str(page_url or ""), str(value or "").strip()))
+        origin = _transformed_image_origin(parsed)
+        if origin:
+            return _image_asset_key(origin, "")
         hostname = parsed.hostname
         port = parsed.port
     except ValueError:

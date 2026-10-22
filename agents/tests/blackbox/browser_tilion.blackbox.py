@@ -400,6 +400,22 @@ async def _fixture_site():
         )
 
     app.router.add_get("/gallery", gallery)
+
+    async def cdn_srcset(_request):
+        origin = "https://s3.example/media/09f09e4f-shakerato.png"
+        derivative = "/cdn-cgi/image/fit=contain,width={w},format=auto,anim=false/" + origin
+        return web.Response(
+            content_type="text/html",
+            text=(
+                "<title>cdn</title>"
+                f'<img src="/static/logo.png?item=1" srcset="{derivative.format(w=600)} 600w, '
+                f'{derivative.format(w=1920)} 1920w">'
+                f'<picture><source srcset="{derivative.format(w=1366)} 1366w">'
+                '<img src="/static/logo.png?pic=1"></picture>'
+            ),
+        )
+
+    app.router.add_get("/cdn-srcset", cdn_srcset)
     app.router.add_get("/files/report.pdf", report)
     app.router.add_get("/static/logo.png", logo)
     runner = web.AppRunner(app, access_log=None)
@@ -2386,6 +2402,38 @@ async def test_downloaded_files_are_visible_to_the_agent_mid_run():
             tilion_worker.release_session(session_id)
 
 
+async def test_srcset_urls_with_commas_are_recorded_whole():
+    """Blue Bottle (agent 5516e75c): /cdn-cgi/image/fit=contain,width=600,.../<origin>
+    srcset candidates contain commas. Splitting on every comma recorded junk and
+    dropped the real candidates; <picture><source srcset> was ignored."""
+    from browser_tools.dom_service import _best_url_from_srcset, _srcset_candidates
+
+    origin = "https://s3.example/media/09f09e4f-shakerato.png"
+    srcset = (
+        f"/cdn-cgi/image/fit=contain,width=600,format=auto,anim=false/{origin} 600w, "
+        f"/cdn-cgi/image/fit=contain,width=1920,format=auto,anim=false/{origin} 1920w,plain.png 2x, last.png"
+    )
+    assert _srcset_candidates(srcset) == [
+        (f"/cdn-cgi/image/fit=contain,width=600,format=auto,anim=false/{origin}", "600w"),
+        (f"/cdn-cgi/image/fit=contain,width=1920,format=auto,anim=false/{origin}", "1920w"),
+        ("plain.png", "2x"),
+        ("last.png", ""),
+    ]
+    assert _best_url_from_srcset(srcset) == f"/cdn-cgi/image/fit=contain,width=1920,format=auto,anim=false/{origin}"
+    assert _srcset_candidates("a.png,, b.png 1x") == [("a.png", ""), ("b.png", "1x")]
+
+    async with _fixture_site() as base, _tilion_worker_stack() as (service, pw_browser, gateway):
+        await pw_browser.contexts[0].pages[0].goto(base + "/cdn-srcset")
+        await service.get_browser_state(include_screenshot=False)
+        remembered = service.rendered_image_state()
+        for width in (600, 1920, 1366):
+            url = f"{base}/cdn-cgi/image/fit=contain,width={width},format=auto,anim=false/{origin}"
+            assert url in remembered, (width, remembered)
+        junk = [url for url in remembered if "anim=false/https:/s3" in url or url.endswith("/width=1920")]
+        assert not junk, junk
+        assert gateway.rejected_4409 == 0
+
+
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
@@ -2426,6 +2474,7 @@ async def run_all_tests():
         ("document_images_count_as_rendered", test_document_images_count_as_rendered_through_the_worker_socket),
         ("pause_context_carries_provenance", test_pause_context_carries_downloads_and_image_provenance_without_secrets),
         ("downloaded_files_visible_mid_run", test_downloaded_files_are_visible_to_the_agent_mid_run),
+        ("srcset_urls_with_commas_recorded_whole", test_srcset_urls_with_commas_are_recorded_whole),
         (
             "supervisor_cap_logs_stack_and_classifies",
             test_supervisor_cap_logs_blocked_stack_and_classifies_action_timeouts,

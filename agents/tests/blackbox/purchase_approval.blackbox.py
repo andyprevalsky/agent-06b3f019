@@ -167,6 +167,37 @@ def test_image_url_must_be_an_image_the_page_renders():
     assert validate_image_url_for_page("https://cdn.example/x.jpg", [], page) == "https://cdn.example/x.jpg"
 
 
+def test_resized_cdn_derivative_is_the_same_image_as_its_origin():
+    """Blue Bottle (agent 5516e75c): the store renders an item image as
+    /cdn-cgi/image/<options>/<S3 origin> derivatives; the model submitted
+    another size of the same origin. A resizing derivative is the same image as
+    its exact embedded origin; anything else is still rejected."""
+    page = "https://order.online/store/blue-bottle"
+    origin = "https://doordash-static.s3.amazonaws.com/media/photosV2/09f09e4f-shakerato.png"
+    rendered = [
+        f"https://img.cdn4dd.com/cdn-cgi/image/fit=contain,width=1920,format=auto,anim=false/{origin}",
+        "https://img.cdn4dd.com/p/fit=cover,width=150,height=150,format=auto/logo.png",
+    ]
+    requested = f"https://img.cdn4dd.com/cdn-cgi/image/fit=contain,width=1200,height=672,format=auto/{origin}"
+    assert validate_image_url_for_page(requested, rendered, page) == requested
+    # The origin itself, and a path normalizer's collapsed "https:/" form, are the same image.
+    assert validate_image_url_for_page(origin, rendered, page) == origin
+    collapsed = requested.replace("/https://", "/https:/")
+    assert validate_image_url_for_page(collapsed, rendered, page) == collapsed
+
+    for not_rendered in (
+        requested.replace("09f09e4f", "09f09e4e"),  # a drifted origin
+        "https://img.cdn4dd.com/cdn-cgi/image/fit=contain,width=1200/https://doordash-static.s3.amazonaws.com/other.png",
+        "https://img.cdn4dd.com/cdn-cgi/image/noequals/" + origin,  # malformed options: not a wrapper
+        "https://img.cdn4dd.com/cdn-cgi/image/fit=contain/relative/path.png",
+    ):
+        try:
+            validate_image_url_for_page(not_rendered, rendered, page)
+        except ValueError:
+            continue
+        raise AssertionError(f"never-rendered image accepted: {not_rendered!r}")
+
+
 async def run_all_tests():
     print("purchase-approval blackbox tests:")
     r = BlackboxResult()
@@ -177,6 +208,7 @@ async def run_all_tests():
     r.record("page_context_constrains_host", test_page_context_constrains_the_host_only)
     r.record("wrappers_reject_non_urls", test_page_context_helpers_still_reject_non_urls)
     r.record("image_url_must_be_rendered_on_page", test_image_url_must_be_an_image_the_page_renders)
+    r.record("resized_cdn_derivative_is_same_image", test_resized_cdn_derivative_is_the_same_image_as_its_origin)
     return r.all_passed
 
 
