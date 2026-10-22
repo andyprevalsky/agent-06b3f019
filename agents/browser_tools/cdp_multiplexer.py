@@ -165,6 +165,14 @@ class SingleCdpConnectionMultiplexer:
         self._input_answer_timeout = input_answer_timeout
         self._input_tail: Dict[str, asyncio.Future] = {}
         self._input_done: Dict[int, Tuple[asyncio.Future, Optional[asyncio.TimerHandle]]] = {}
+        # Upstream session of each in-flight Input command: an expiry error must
+        # carry it, because flat-session clients route replies by sessionId (a
+        # root-level reply to a page-session id killed Playwright's driver).
+        self._input_session: Dict[int, str] = {}
+        # Upstream ids failed back on expiry; their late real reply is dropped
+        # (the client already got an answer for that id). Bounded.
+        self._expired_inputs: Set[int] = set()
+        self.late_input_replies_dropped = 0
         self.input_unanswered = 0
         self.locale_mismatches = 0
         # Chrome keeps one locale override per target, owned by the session that
@@ -341,6 +349,10 @@ class SingleCdpConnectionMultiplexer:
             self._finish_input(message_id)
             pending = self._pending.pop(message_id, None)
             if pending is None:
+                if message_id in self._expired_inputs:
+                    self._expired_inputs.discard(message_id)
+                    self.late_input_replies_dropped += 1
+                    logger.info("[CdpMux] Dropped a late provider reply to an expired input (label=%s)", self._label)
                 return
             client, original_id, method = pending
             message["id"] = original_id
@@ -732,6 +744,7 @@ class SingleCdpConnectionMultiplexer:
             lambda _: self._input_tail.pop(session_id, None) if self._input_tail.get(session_id) is done else None
         )
         self._input_done[message_id] = (done, None)
+        self._input_session[message_id] = session_id
         if previous is None or previous.done():
             await self._send_input(upstream, message_id, message)
             return
@@ -759,6 +772,7 @@ class SingleCdpConnectionMultiplexer:
         await upstream.send(json.dumps(message))
 
     def _finish_input(self, message_id: int) -> None:
+        self._input_session.pop(message_id, None)
         entry = self._input_done.pop(message_id, None)
         if entry is None:
             return
@@ -769,34 +783,45 @@ class SingleCdpConnectionMultiplexer:
             done.set_result(None)
 
     def _expire_input(self, message_id: int) -> None:
-        """The provider never answered: fail the command back to its client and let the next one go."""
+        """The provider never answered: fail the command back to its client and let the next one go.
+
+        Removing it from _pending also drops the provider's late real reply."""
         pending = self._pending.pop(message_id, None)
+        session_id = self._input_session.get(message_id)
         self._finish_input(message_id)
         if pending is None:
             return
         client, original_id, method = pending
         self.input_unanswered += 1
+        if len(self._expired_inputs) >= 1000:
+            self._expired_inputs.clear()
+        self._expired_inputs.add(message_id)
         logger.warning(
             "[CdpMux] %s not answered by the provider within %gs; failing it to the client (label=%s)",
             method,
             self._input_answer_timeout,
             self._label,
         )
-        client.outbox.put_nowait(
-            {
-                "id": original_id,
-                "error": {
-                    "code": -32000,
-                    "message": f"{method} was not answered by the browser provider within "
-                    f"{self._input_answer_timeout:g}s (dropped input event)",
-                },
-            }
-        )
+        error_reply: Dict[str, Any] = {
+            "id": original_id,
+            "error": {
+                "code": -32000,
+                "message": f"{method} was not answered by the browser provider within "
+                f"{self._input_answer_timeout:g}s (dropped input event)",
+            },
+        }
+        # Same shape as a real reply routed by _route_upstream: the child session
+        # stays, the client's own browser session (sent at root level) is dropped.
+        if session_id and session_id != client.browser_session_id:
+            error_reply["sessionId"] = session_id
+        client.outbox.put_nowait(error_reply)
 
     def _fail_pending_input(self) -> None:
         for message_id in list(self._input_done):
             self._finish_input(message_id)
         self._input_tail.clear()
+        self._input_session.clear()
+        self._expired_inputs.clear()
 
     async def _release_client(self, client: _Client) -> None:
         self._browser_session_owner.pop(client.browser_session_id, None)
