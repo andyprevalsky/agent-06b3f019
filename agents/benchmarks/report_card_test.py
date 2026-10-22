@@ -46,6 +46,7 @@ from benchmarks.report_card import (
     RunState,
     TaskCard,
     build_report_card,
+    clean_source_sha,
     render_report_card,
     write_report_card,
 )
@@ -571,3 +572,32 @@ def test_exactly_at_interval_emits(tmp_path):
     card = emitter.maybe_emit(_sample_state())
     assert card is not None
     assert len(captured) == 2
+
+
+def test_report_card_records_source_clock_and_agent_id():
+    card = build_report_card(_sample_state(
+        source_sha="a" * 40, started_at=1792629049.0, finished_at=1792630155.5,
+        per_task=[TaskCard(name="chat-mode", status="passed", agent_id="aaa",
+                           agent_url="http://localhost:5050/?agent-id=aaa")]))
+    assert (card["source_sha"], card["started_at"], card["finished_at"]) == ("a" * 40, 1792629049.0, 1792630155.5)
+    assert (card["per_task"][0]["agent_id"], card["per_task"][0]["agent_url"]) == (
+        "aaa", "http://localhost:5050/?agent-id=aaa")
+    unknown = build_report_card(_sample_state())
+    assert (unknown["source_sha"], unknown["started_at"], unknown["finished_at"]) == (None, None, None)
+    assert unknown["per_task"][2]["agent_id"] is None
+
+
+def test_clean_source_sha_only_for_clean_git_head(tmp_path):
+    import subprocess
+
+    assert clean_source_sha(tmp_path) is None  # not a repository
+    git = ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    (tmp_path / "f.txt").write_text("a")
+    subprocess.run([*git, "add", "f.txt"], check=True)
+    subprocess.run([*git, "commit", "-qm", "init"], check=True)
+    head = subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    (tmp_path / "untracked.txt").write_text("ignored")
+    assert clean_source_sha(tmp_path) == head
+    (tmp_path / "f.txt").write_text("b")
+    assert clean_source_sha(tmp_path) is None  # dirty tracked file: HEAD is not what ran

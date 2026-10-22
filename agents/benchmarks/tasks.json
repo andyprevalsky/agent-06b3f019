@@ -2148,7 +2148,7 @@
     "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "ecommerce", "antibot", "browser-auth"],
+    "tags": ["browser", "auth", "ecommerce", "anti-bot", "browser-auth"],
     "group": "daily",
     "price_limit_cents": 200,
     "requires_browser_agent": true,
@@ -2328,7 +2328,7 @@
     "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "antibot", "ecommerce"],
+    "tags": ["browser", "auth", "anti-bot", "ecommerce"],
     "group": "daily",
     "price_limit_cents": 200,
     "requires_browser_agent": true,
@@ -6798,7 +6798,7 @@
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "antibot", "browser-auth"],
+    "tags": ["browser", "auth", "anti-bot", "browser-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -6904,7 +6904,7 @@
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "antibot"],
+    "tags": ["browser", "anti-bot"],
     "price_limit_cents": 50,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -6952,7 +6952,7 @@
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "antibot"],
+    "tags": ["browser", "anti-bot"],
     "price_limit_cents": 50,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -7777,7 +7777,7 @@
     "timeout_seconds": 420,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "antibot", "smoke"],
+    "tags": ["browser", "anti-bot", "smoke"],
     "price_limit_cents": 120,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -9322,7 +9322,7 @@
     "timeout_seconds": 1200,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "ecommerce", "antibot"],
+    "tags": ["browser", "auth", "ecommerce", "anti-bot"],
     "group": "daily",
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -9714,7 +9714,7 @@
     "timeout_seconds": 1200,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "antibot", "ecommerce", "ticketing"],
+    "tags": ["browser", "auth", "anti-bot", "ecommerce", "ticketing"],
     "group": "daily",
     "price_limit_cents": 200,
     "requires_browser_agent": true,
@@ -17990,5 +17990,2585 @@
       "user:Process-Bench-2026-10-21",
       "trace:0ab5620a5 (synthetic regression only; private originals remain outside repository)"
     ]
+  },
+  {
+    "name": "anti-bot-google-search",
+    "title": "Anti-bot: google-search",
+    "description": "Reach the page past google.com's CAPTCHA / bot wall (Search results (/search \u2192 /sorry/index), accounts.google.com sign-in) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.google.com/search?q=OpenAI+official+website and read the live results page. Report exactly one non-ad organic result: its title and URL. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "google.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.google.com/search?q=OpenAI+official+website"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Search results (/search \u2192 /sorry/index), accounts.google.com sign-in. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): FAILED_CAPTCHA, agent ffb7cc3f. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "Google results page with organic (non-ad) result titles and URLs visible; the URL is /search, not /sorry/index",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on google.com (CAPTCHA / bot wall at: Search results (/search \u2192 /sorry/index), accounts.google.com sign-in). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (Google results page with organic (non-ad) result titles and URLs visible; the URL is /search, not /sorry/index), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:google-search",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-stripe-test-payment",
+    "title": "Anti-bot: stripe-test-payment",
+    "description": "Reach the page past checkout.stripe.com (from roselabs.ai/test_payment)'s CAPTCHA / bot wall (Stripe hosted checkout page, right after Place order) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to {frontend_url}/test_payment?benchmark=agentcard-live-lifecycle. The page sells exactly one item, \"Agent Card Lifecycle Probe\" ($1.00, merchant Rose Labs Test Payment). Request a payment card for exactly this one $1.00 checkout with request_payment_card, then click Place order and wait for the Stripe hosted checkout page (checkout.stripe.com) to load. Before entering anything, confirm the Stripe page is in TEST mode (its URL contains cs_test_ or it shows a \"Test mode\" / \"Sandbox\" badge); if it is not test mode, stop immediately and report. On the test-mode Stripe page, pay with the card you were issued for this checkout only, and report the Stripe confirmation. In your final answer, quote the Stripe page host, whether the URL contains cs_test_, the order total shown, and the confirmation text. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot",
+      "payment"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "hybrid",
+      "db_fixtures": [
+        "agent_payment_lifecycle_v1"
+      ],
+      "base_images": [],
+      "services": [
+        "checkout.stripe.com (from roselabs.ai/test_payment)",
+        "test_payment",
+        "purchases",
+        "agentcard",
+        "attention_requests"
+      ],
+      "secrets": [
+        "STRIPE_SECRET_KEY",
+        "AGENTCARD_ORG_OAUTH_CLIENT_ID",
+        "AGENTCARD_ORG_OAUTH_CLIENT_SECRET"
+      ],
+      "live_targets": [],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Stripe hosted checkout page, right after Place order. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent b75b6093. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "Stripe hosted checkout (checkout.stripe.com) showing the order total and an interactive card/payment form",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The Stripe page was confirmed to be in TEST mode before any card entry, and only the card issued for this checkout was used"
+        ],
+        "judge_prompt": "Anti-bot probe on checkout.stripe.com (from roselabs.ai/test_payment) (CAPTCHA / bot wall at: Stripe hosted checkout page, right after Place order). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (Stripe hosted checkout (checkout.stripe.com) showing the order total and an interactive card/payment form), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:stripe-test-payment",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser",
+    "expected_attention_kind": "payment_approval"
+  },
+  {
+    "name": "anti-bot-webdecoy-fcaptcha",
+    "title": "Anti-bot: webdecoy-fcaptcha",
+    "description": "Reach the page past webdecoy.com's CAPTCHA / bot wall (Demo page (the CAPTCHA is the test)) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://webdecoy.com/product/fcaptcha-demo/. This live demo is a CAPTCHA test, and its \"I'm not a robot\" FCaptcha checkbox is the widget being tested (it is part of the demo, not a block page): interact like a person, click that checkbox yourself and wait for it to show its result, then submit the invisible-mode demo form (it is a demo form; submitting it is the step being tested). In your final answer, quote the checkbox's result and the invisible-mode result exactly as the page shows them. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "webdecoy.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://webdecoy.com/product/fcaptcha-demo/"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Demo page (the CAPTCHA is the test). Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent fb1572f0. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "webdecoy demo shows the FCaptcha checkbox verified (success/human result) and/or the invisible-mode form submitted with a passing verdict",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on webdecoy.com (CAPTCHA / bot wall at: Demo page (the CAPTCHA is the test)). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (webdecoy demo shows the FCaptcha checkbox verified (success/human result) and/or the invisible-mode form submitted with a passing verdict), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:webdecoy-fcaptcha",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-blue-bottle-order-online",
+    "title": "Anti-bot: blue-bottle-order-online",
+    "description": "Reach the page past order.online (Blue Bottle)'s CAPTCHA / bot wall (Store/menu page, checkout page (blocked api.js script), bluebottlecoffee.com homepage, order tracking) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Order flow at Blue Bottle Coffee Ferry Building, San Francisco, on its online ordering site. Open the Ferry Building pickup store page directly: https://order.online/store/BlueBottleCoffee-2188540?pickup=true (store name \"Blue Bottle Coffee (NorCal - Ferry Building - 1073)\", 1 Ferry Building #7, San Francisco, CA 94111); do not use the store finder. Pickup, guest checkout. The drink is listed on the menu as \"KSE Shakerato\": choose Vanilla Bean and 16oz. If the cafe is closed, accept the earliest scheduled pickup the page offers (or leave pickup as shown) and still open the checkout page. Add one 16oz iced vanilla bean shakerato with oat milk (almond if oat is unavailable) to the cart and open the checkout page. Do NOT request a payment card and do NOT pay. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "order.online (Blue Bottle)"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://order.online/store/BlueBottleCoffee-2188540?pickup=true"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Store/menu page, checkout page (blocked api.js script), bluebottlecoffee.com homepage, order tracking. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent 36bd4613. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "order.online checkout page for Blue Bottle Ferry Building with the shakerato in the cart and an order total shown",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on order.online (Blue Bottle) (CAPTCHA / bot wall at: Store/menu page, checkout page (blocked api.js script), bluebottlecoffee.com homepage, order tracking). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (order.online checkout page for Blue Bottle Ferry Building with the shakerato in the cart and an order total shown), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:blue-bottle-order-online",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-eventim-1015-folsom",
+    "title": "Anti-bot: eventim-1015-folsom",
+    "description": "Reach the page past eventim.us / 1015.com's CAPTCHA / bot wall (1015.com homepage, wl.eventim.us WAF form (wafform.aspx) on the event link, event page, checkout.eventim.us) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Start at https://1015.com/, open the Eventim ticket link for any upcoming show that still sells tickets, choose one cheapest general-admission ticket and continue to checkout.eventim.us. Do NOT request a payment card and do NOT pay. Stop right there and report exactly what the page shows; take no further action. In your final answer, quote verbatim the show name, the GA ticket price and the exact URL of the checkout.eventim.us (or Eventim event) page you reached. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "eventim.us / 1015.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://1015.com/"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: 1015.com homepage, wl.eventim.us WAF form (wafform.aspx) on the event link, event page, checkout.eventim.us. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent 2ee22be8. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "checkout.eventim.us (or the Eventim event page) showing the show, one GA ticket and its price",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on eventim.us / 1015.com (CAPTCHA / bot wall at: 1015.com homepage, wl.eventim.us WAF form (wafform.aspx) on the event link, event page, checkout.eventim.us). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (checkout.eventim.us (or the Eventim event page) showing the show, one GA ticket and its price), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:eventim-1015-folsom",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-doordash-store",
+    "title": "Anti-bot: doordash-store",
+    "description": "Reach the page past doordash.com's CAPTCHA / bot wall (Homepage, store page, search, identity.doordash.com login/signup, order help page) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Use DoorDash (https://www.doordash.com) with my saved session and saved San Francisco address. Search for a convenience store (for example 7-Eleven or CVS) delivering to that address, open the store page, search it for \"USB-C cable\" and open one product. Do NOT add to cart or check out. Stop right there. Your final report MUST quote verbatim, from the page you are looking at: (1) the delivery address shown in the DoorDash header, (2) the store name, (3) the product name and price of the product you opened plus the names and prices of at least 3 other items visible on that page, and (4) the page URL. Before you finish, read the page text once more so those exact strings appear in your last tool result. Take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "doordash.com"
+      ],
+      "secrets": [
+        "live_browser_auth"
+      ],
+      "live_targets": [
+        "https://www.doordash.com"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Homepage, store page, search, identity.doordash.com login/signup, order help page. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent 21adf17e. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes.",
+      "live_fixtures": [
+        "live"
+      ],
+      "live_cookie_domains": [
+        "doordash.com"
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "DoorDash store page or product page loaded with item names and prices for the saved address (not a login/challenge page)",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on doordash.com (CAPTCHA / bot wall at: Homepage, store page, search, identity.doordash.com login/signup, order help page). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (DoorDash store page or product page loaded with item names and prices for the saved address (not a login/challenge page)), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:doordash-store",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-amc-metreon-seatmap",
+    "title": "Anti-bot: amc-metreon-seatmap",
+    "description": "Reach the page past amctheatres.com's CAPTCHA / bot wall (Homepage, movie/showtimes page, graph.amctheatres.com API during seat selection) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.amctheatres.com open AMC Metreon 16 (San Francisco) showtimes for next Friday, pick any standard showing starting between 7:00 PM and 9:00 PM, and open its seat selection for 1 adult ticket. Do NOT select payment or buy. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "amctheatres.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.amctheatres.com"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Homepage, movie/showtimes page, graph.amctheatres.com API during seat selection. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent e0d5c4a0. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "AMC seat map for the chosen Metreon 16 showtime loaded with seats and the adult ticket price visible",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on amctheatres.com (CAPTCHA / bot wall at: Homepage, movie/showtimes page, graph.amctheatres.com API during seat selection). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (AMC seat map for the chosen Metreon 16 showtime loaded with seats and the adult ticket price visible), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:amc-metreon-seatmap",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-hotels-com-kabuki",
+    "title": "Anti-bot: hotels-com-kabuki",
+    "description": "Reach the page past hotels.com's CAPTCHA / bot wall (Homepage, Hotel-Search results) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.hotels.com search Hotel Kabuki, San Francisco, check-in next Saturday, check-out the following Sunday, 1 room, 1 adult. Open the Hotel Kabuki listing and its room choices. Do NOT reserve. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "hotels.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.hotels.com"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Homepage, Hotel-Search results. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent 71d11131. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "hotels.com search results or Hotel Kabuki property page showing room types with nightly prices for those dates",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on hotels.com (CAPTCHA / bot wall at: Homepage, Hotel-Search results). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (hotels.com search results or Hotel Kabuki property page showing room types with nightly prices for those dates), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:hotels-com-kabuki",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-bing-search",
+    "title": "Anti-bot: bing-search",
+    "description": "Reach the page past bing.com's CAPTCHA / bot wall (Search results, image search) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.bing.com/search?q=OpenAI+official+website and read the live results page. Report exactly one non-ad organic result: its title and URL. In your final answer, quote that result's title and URL verbatim as shown on the page, plus the page's heading/search box text, so the result page is evidenced. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "bing.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.bing.com/search?q=OpenAI+official+website"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Search results, image search. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent d79bee33. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "Bing results page with organic result titles and URLs visible",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on bing.com (CAPTCHA / bot wall at: Search results, image search). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (Bing results page with organic result titles and URLs visible), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:bing-search",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-amazon-beanie-cart",
+    "title": "Anti-bot: amazon-beanie-cart",
+    "description": "Reach the page past amazon.com's CAPTCHA / bot wall (Search, product page, sign-in, /ap/cvf verification, cart) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.amazon.com with my saved session, search for \"black beanie\", open one product under $35 and add it to the cart, then open the cart page. Do NOT click Buy Now or Proceed to checkout. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "amazon.com"
+      ],
+      "secrets": [
+        "live_browser_auth"
+      ],
+      "live_targets": [
+        "https://www.amazon.com"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Search, product page, sign-in, /ap/cvf verification, cart. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent 94e6e501. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes.",
+      "live_fixtures": [
+        "live"
+      ],
+      "live_cookie_domains": [
+        "amazon.com"
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "Amazon cart page (or product page with Add to Cart confirmation) showing the black beanie and its price, signed in",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on amazon.com (CAPTCHA / bot wall at: Search, product page, sign-in, /ap/cvf verification, cart). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (Amazon cart page (or product page with Add to Cart confirmation) showing the black beanie and its price, signed in), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:amazon-beanie-cart",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-x-login-home",
+    "title": "Anti-bot: x-login-home",
+    "description": "Reach the page past x.com's CAPTCHA / bot wall (Login) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://x.com/home using my saved X session (sign in through the normal login page only if the session is not active). Do NOT post, like, follow or send anything. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "x.com"
+      ],
+      "secrets": [
+        "live_browser_auth"
+      ],
+      "live_targets": [
+        "https://x.com/home"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Login. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent e9c232c8. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes.",
+      "live_fixtures": [
+        "live"
+      ],
+      "live_cookie_domains": [
+        "x.com"
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "x.com/home timeline visible for the signed-in account (tweets and the post composer visible), not the login/challenge page",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on x.com (CAPTCHA / bot wall at: Login). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (x.com/home timeline visible for the signed-in account (tweets and the post composer visible), not the login/challenge page), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:x-login-home",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-pubmed-article",
+    "title": "Anti-bot: pubmed-article",
+    "description": "Reach the page past pubmed.ncbi.nlm.nih.gov / pmc's CAPTCHA / bot wall (Article pages) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://pubmed.ncbi.nlm.nih.gov/?term=eating+disorders+onset+adolescence, open the first article result, then open its free full text on PMC (pmc.ncbi.nlm.nih.gov) if available. Report the article title, journal and year. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "pubmed.ncbi.nlm.nih.gov / pmc"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://pubmed.ncbi.nlm.nih.gov/?term=eating+disorders+onset+adolescence"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Article pages. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent ec421d25. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "A PubMed abstract page and/or PMC full-text article page loaded with title, authors and journal",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on pubmed.ncbi.nlm.nih.gov / pmc (CAPTCHA / bot wall at: Article pages). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (A PubMed abstract page and/or PMC full-text article page loaded with title, authors and journal), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:pubmed-article",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-cars-com-search",
+    "title": "Anti-bot: cars-com-search",
+    "description": "Reach the page past cars.com's CAPTCHA / bot wall (Search results) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.cars.com search used SUVs and minivans within 50 miles of ZIP 55401 (Minneapolis, MN), max price $50,000. Report the first 3 listings (year, make, model, price, mileage). Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "cars.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.cars.com"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Search results. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent 1e02f7c2. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "cars.com search results page with vehicle listings and prices for the Minneapolis area",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on cars.com (CAPTCHA / bot wall at: Search results). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (cars.com search results page with vehicle listings and prices for the Minneapolis area), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:cars-com-search",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-opentable-prospect",
+    "title": "Anti-bot: opentable-prospect",
+    "description": "Reach the page past opentable.com's CAPTCHA / bot wall (Restaurant page, booking availability API) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.opentable.com find Prospect, 300 Spear Street, San Francisco, and check availability for a party of 2 this Friday around 7:00 PM. Report the available time slots. Do NOT book. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "opentable.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.opentable.com"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Restaurant page, booking availability API. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent f9ccfb4e. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "OpenTable restaurant page for Prospect showing available reservation time slots (or an explicit no-availability message from the booking widget)",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on opentable.com (CAPTCHA / bot wall at: Restaurant page, booking availability API). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (OpenTable restaurant page for Prospect showing available reservation time slots (or an explicit no-availability message from the booking widget)), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:opentable-prospect",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-linkedin-data-export-page",
+    "title": "Anti-bot: linkedin-data-export-page",
+    "description": "Reach the page past linkedin.com's CAPTCHA / bot wall (Login, then /checkpoint/challengesV2) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. With my saved LinkedIn session, go to https://www.linkedin.com/mypreferences/d/download-my-data (sign in through the normal login page only if needed). Report the export options shown. Do NOT click Request archive, Request new archive or any other button on that page; only read it. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "linkedin.com"
+      ],
+      "secrets": [
+        "live_browser_auth"
+      ],
+      "live_targets": [
+        "https://www.linkedin.com/mypreferences/d/download-my-data"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Login, then /checkpoint/challengesV2. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent dccd351b. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes.",
+      "live_fixtures": [
+        "live"
+      ],
+      "live_cookie_domains": [
+        "linkedin.com"
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "LinkedIn \"Download your data\" settings page loaded for the signed-in account (not /checkpoint/challengesV2 or the login page)",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on linkedin.com (CAPTCHA / bot wall at: Login, then /checkpoint/challengesV2). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (LinkedIn \"Download your data\" settings page loaded for the signed-in account (not /checkpoint/challengesV2 or the login page)), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:linkedin-data-export-page",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-target-ipad-air",
+    "title": "Anti-bot: target-ipad-air",
+    "description": "Reach the page past target.com's CAPTCHA / bot wall (Search, category page, product page, cart) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.target.com search for \"iPad Air M3\", open the cheapest listed iPad Air M3 product page and report its configurations and prices. Do NOT add to cart. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "target.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.target.com"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Search, category page, product page, cart. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): FAILED_CAPTCHA, agent b677dfc4. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "Target product page for an iPad Air M3 with the price visible",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on target.com (CAPTCHA / bot wall at: Search, category page, product page, cart). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (Target product page for an iPad Air M3 with the price visible), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:target-ipad-air",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-chatgpt-signup",
+    "title": "Anti-bot: chatgpt-signup",
+    "description": "Reach the page past chatgpt.com's CAPTCHA / bot wall (Homepage / signup) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://chatgpt.com and start creating a new account: click Sign up and enter the email address captcha-probe-chatgpt@roselabs.ai. The account-creation step is the step being tested. Continue only until the page asks for a password or an email verification code, then stop. Do NOT set up payment or upgrade. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "chatgpt.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://chatgpt.com"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Homepage / signup. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent ce2381e9. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "ChatGPT/OpenAI signup flow advanced past the email entry to the password or email-verification-code step",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on chatgpt.com (CAPTCHA / bot wall at: Homepage / signup). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (ChatGPT/OpenAI signup flow advanced past the email entry to the password or email-verification-code step), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:chatgpt-signup",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-netflix-mystery",
+    "title": "Anti-bot: netflix-mystery",
+    "description": "Reach the page past netflix.com's CAPTCHA / bot wall (Homepage, title page, login redirect) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.netflix.com/browse/genre/9994 (Netflix mystery TV, public pages; do not sign in) and report 5 mystery series titles shown, opening one title page. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "netflix.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.netflix.com/browse/genre/9994"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Homepage, title page, login redirect. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent 58750c56. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "Netflix public genre or title page loaded with show titles (not a bot-check page); a sign-in wall on a public page counts as reached only if the page itself loaded",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on netflix.com (CAPTCHA / bot wall at: Homepage, title page, login redirect). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (Netflix public genre or title page loaded with show titles (not a bot-check page); a sign-in wall on a public page counts as reached only if the page itself loaded), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:netflix-mystery",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-proton-signup",
+    "title": "Anti-bot: proton-signup",
+    "description": "Reach the page past proton.me's CAPTCHA / bot wall (Signup (human verification)) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://account.proton.me/mail/signup?plan=free. Create a free Proton Mail account: username captchaprobe followed by 6 random digits, any strong password. Creating the account is the step being tested: submit; if a \"Special Offer\" or upgrade dialog appears, decline it with \"No, thanks\" (never accept an offer or a paid plan), then continue to the human-verification step, choose the CAPTCHA option if a choice is offered, complete it, and stop at the next step after verification (or report the verification outcome). Do NOT add payment or recovery details. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "proton.me"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://account.proton.me/mail/signup?plan=free"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Signup (human verification). Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): FAILED_CAPTCHA, agent 1abb9bc3. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "Proton signup passed human verification: the next step after verification (account setup, display name, recovery or welcome) is shown",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on proton.me (CAPTCHA / bot wall at: Signup (human verification)). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (Proton signup passed human verification: the next step after verification (account setup, display name, recovery or welcome) is shown), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:proton-signup",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-uber-login",
+    "title": "Anti-bot: uber-login",
+    "description": "Reach the page past uber.com's CAPTCHA / bot wall (Login) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. With my Uber session, open https://m.uber.com/ and the ride request screen from 88 Howard Street, San Francisco, CA 94105 to 425 Mission Street, San Francisco, CA 94105. Do NOT request a ride. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "incomplete",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "uber.com"
+      ],
+      "secrets": [
+        "live_browser_auth"
+      ],
+      "live_targets": [
+        "https://m.uber.com/"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Login. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): held. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes. HELD: no injectable uber.com credential in the local seed (needs human login)"
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "Uber ride request screen with ride options and prices for that route, signed in",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on uber.com (CAPTCHA / bot wall at: Login). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (Uber ride request screen with ride options and prices for that route, signed in), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:uber-login",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "incomplete",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-apple-uk-macbook-pro",
+    "title": "Anti-bot: apple-uk-macbook-pro",
+    "description": "Reach the page past apple.com's CAPTCHA / bot wall (Store buy page, product/spec pages) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.apple.com/uk/shop/buy-mac/macbook-pro report the price of the 14-inch and 16-inch base configurations. Do NOT add to bag. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "apple.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.apple.com/uk/shop/buy-mac/macbook-pro"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Store buy page, product/spec pages. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent 4889749f. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "Apple UK store buy page for MacBook Pro with configurations and GBP prices",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on apple.com (CAPTCHA / bot wall at: Store buy page, product/spec pages). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (Apple UK store buy page for MacBook Pro with configurations and GBP prices), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:apple-uk-macbook-pro",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-nvidia-geforce-now-account",
+    "title": "Anti-bot: nvidia-geforce-now-account",
+    "description": "Reach the page past nvidia.custhelp.com's CAPTCHA / bot wall (Support portal home, ask, chat and account pages) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. With my NVIDIA session, open https://nvidia.custhelp.com/app/home and then the GeForce NOW membership/account page. Do NOT cancel anything. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "incomplete",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "nvidia.custhelp.com"
+      ],
+      "secrets": [
+        "live_browser_auth"
+      ],
+      "live_targets": [
+        "https://nvidia.custhelp.com/app/home"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Support portal home, ask, chat and account pages. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): held. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes. HELD: no saved NVIDIA login in the local seed"
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "NVIDIA support portal / account page showing the GeForce NOW membership, signed in",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on nvidia.custhelp.com (CAPTCHA / bot wall at: Support portal home, ask, chat and account pages). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (NVIDIA support portal / account page showing the GeForce NOW membership, signed in), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:nvidia-geforce-now-account",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "incomplete",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-ticketmaster-nyc",
+    "title": "Anti-bot: ticketmaster-nyc",
+    "description": "Reach the page past ticketmaster.com's CAPTCHA / bot wall (Search) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. On https://www.ticketmaster.com search for events in New York, NY next weekend (Friday to Sunday). Report 3 events with venue, date and time. Do NOT buy. Stop right there and report exactly what the page shows; take no further action. In your final answer, quote verbatim at least three event listings exactly as shown (event name, venue, date) and the exact URL of the Ticketmaster results page you reached. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "ticketmaster.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.ticketmaster.com"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Search. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent 850070ab. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "Ticketmaster search results listing events with venues and dates",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on ticketmaster.com (CAPTCHA / bot wall at: Search). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (Ticketmaster search results listing events with venues and dates), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:ticketmaster-nyc",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-kokkari-menu",
+    "title": "Anti-bot: kokkari-menu",
+    "description": "Reach the page past kokkari.com's CAPTCHA / bot wall (Menu and reservation pages) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://kokkari.com, open its dinner menu and its reservation page. Report two vegetarian dishes with prices and how reservations are made. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "kokkari.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://kokkari.com"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Menu and reservation pages. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent ddd11a99. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "kokkari.com menu page with dishes, and the reservation page or booking widget loaded",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on kokkari.com (CAPTCHA / bot wall at: Menu and reservation pages). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (kokkari.com menu page with dishes, and the reservation page or booking widget loaded), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:kokkari-menu",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-foreign-cinema-menu",
+    "title": "Anti-bot: foreign-cinema-menu",
+    "description": "Reach the page past foreigncinema.com's CAPTCHA / bot wall (Homepage, reservation page) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://foreigncinema.com, open its menu and its reservation page. Report two vegetarian dishes and how reservations are made. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "foreigncinema.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://foreigncinema.com"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Homepage, reservation page. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent 06c57bef. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "foreigncinema.com menu page with dishes, and the reservation page or booking widget loaded",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on foreigncinema.com (CAPTCHA / bot wall at: Homepage, reservation page). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (foreigncinema.com menu page with dishes, and the reservation page or booking widget loaded), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:foreign-cinema-menu",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-wunderground-forecast",
+    "title": "Anti-bot: wunderground-forecast",
+    "description": "Reach the page past wunderground.com's CAPTCHA / bot wall (Forecast pages) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.wunderground.com/forecast/us/md/baltimore and report the current temperature and the 3-day forecast. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "wunderground.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.wunderground.com/forecast/us/md/baltimore"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Forecast pages. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent c7ea9f75. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "Weather Underground Baltimore forecast page with current conditions and forecast values",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on wunderground.com (CAPTCHA / bot wall at: Forecast pages). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (Weather Underground Baltimore forecast page with current conditions and forecast values), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:wunderground-forecast",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-lulus-emerald-dress",
+    "title": "Anti-bot: lulus-emerald-dress",
+    "description": "Reach the page past lulus.com's CAPTCHA / bot wall (Product listing) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.lulus.com, search for \"emerald green dress\", open one product page and report its price and whether size 12 is available. Do NOT add to bag. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "lulus.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.lulus.com"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Product listing. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): FAILED_CAPTCHA, agent 6747a6cb. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "Lulus product listing and a product page with price and size options",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on lulus.com (CAPTCHA / bot wall at: Product listing). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (Lulus product listing and a product page with price and size options), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:lulus-emerald-dress",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-sabbaticalhomes-sf",
+    "title": "Anti-bot: sabbaticalhomes-sf",
+    "description": "Reach the page past sabbaticalhomes.com's CAPTCHA / bot wall (Homepage, listing pages) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.sabbaticalhomes.com, search for homes for rent in San Francisco, CA for the next full calendar month, and open one listing. Report its monthly price. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "sabbaticalhomes.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.sabbaticalhomes.com"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Homepage, listing pages. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent ceb0b909. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "sabbaticalhomes.com search results and a listing page with a monthly price",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on sabbaticalhomes.com (CAPTCHA / bot wall at: Homepage, listing pages). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (sabbaticalhomes.com search results and a listing page with a monthly price), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:sabbaticalhomes-sf",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-openreview-neurips2022",
+    "title": "Anti-bot: openreview-neurips2022",
+    "description": "Reach the page past openreview.net's CAPTCHA / bot wall (Search page and API) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://openreview.net/group?id=NeurIPS.cc/2022/Conference and search accepted papers for the author name \"Yuri\". Report the first 3 paper titles. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "openreview.net"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://openreview.net/group?id=NeurIPS.cc/2022/Conference"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Search page and API. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): FAILED_CAPTCHA, agent 1b7a837c. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "OpenReview NeurIPS 2022 venue/search page with paper titles listed",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on openreview.net (CAPTCHA / bot wall at: Search page and API). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (OpenReview NeurIPS 2022 venue/search page with paper titles listed), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:openreview-neurips2022",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-hulu-the-pitt",
+    "title": "Anti-bot: hulu-the-pitt",
+    "description": "Reach the page past hulu.com's CAPTCHA / bot wall (Show page) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.hulu.com/search?q=The%20Pitt (or search Hulu for \"The Pitt\") and open the show page for The Pitt. Report what the page says about availability. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "hulu.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.hulu.com/search?q=The%20Pitt"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Show page. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent 9adc739c. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "Hulu show page or search result for The Pitt loaded",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on hulu.com (CAPTCHA / bot wall at: Show page). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (Hulu show page or search result for The Pitt loaded), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:hulu-the-pitt",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-reddit-thread",
+    "title": "Anti-bot: reddit-thread",
+    "description": "Reach the page past reddit.com's CAPTCHA / bot wall (Thread page) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.reddit.com/r/applehelp/ and open the top thread about a MacBook not charging or a similar device fix. Report the thread title and the top answer. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "reddit.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.reddit.com/r/applehelp/"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Thread page. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent 773a8e80. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "A reddit thread page with the post and comments visible",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on reddit.com (CAPTCHA / bot wall at: Thread page). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (A reddit thread page with the post and comments visible), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:reddit-thread",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-asus-b650e-i",
+    "title": "Anti-bot: asus-b650e-i",
+    "description": "Reach the page past asus.com's CAPTCHA / bot wall (Homepage) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.asus.com and open the official product page for the ROG Strix B650E-I Gaming WiFi motherboard. Report its form factor and memory support. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "asus.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.asus.com"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Homepage. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent 1dd0495a. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "ASUS product page for ROG Strix B650E-I Gaming WiFi with specs",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on asus.com (CAPTCHA / bot wall at: Homepage). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (ASUS product page for ROG Strix B650E-I Gaming WiFi with specs), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:asus-b650e-i",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-usga-handicap-rules",
+    "title": "Anti-bot: usga-handicap-rules",
+    "description": "Reach the page past usga.org's CAPTCHA / bot wall (Content pages) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.usga.org and open the Rules of Handicapping page. Report what the maximum Handicap Index is. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "usga.org"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.usga.org"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Content pages. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent ebe39f94. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "usga.org Rules of Handicapping content page loaded",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on usga.org (CAPTCHA / bot wall at: Content pages). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (usga.org Rules of Handicapping content page loaded), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:usga-handicap-rules",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-apa-databases",
+    "title": "Anti-bot: apa-databases",
+    "description": "Reach the page past apa.org's CAPTCHA / bot wall (Database portal) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.apa.org/pubs/databases and list the APA research databases shown (for example PsycINFO, PsycARTICLES, PsycTESTS) with one-line descriptions. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "apa.org"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.apa.org/pubs/databases"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Database portal. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent d8a9343c. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "apa.org databases portal page listing the databases",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on apa.org (CAPTCHA / bot wall at: Database portal). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (apa.org databases portal page listing the databases), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:apa-databases",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-weather-gov-forecast",
+    "title": "Anti-bot: weather-gov-forecast",
+    "description": "Reach the page past weather.gov's CAPTCHA / bot wall (Forecast page) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://forecast.weather.gov/MapClick.php?lat=39.2904&lon=-76.6122 (Baltimore, MD) and report tonight and tomorrow's forecast. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "weather.gov"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://forecast.weather.gov/MapClick.php?lat=39.2904&lon=-76.6122"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Forecast page. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent 3d2eef00. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "weather.gov forecast page for Baltimore with the 7-day forecast",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on weather.gov (CAPTCHA / bot wall at: Forecast page). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (weather.gov forecast page for Baltimore with the 7-day forecast), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:weather-gov-forecast",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-tinypng-upload",
+    "title": "Anti-bot: tinypng-upload",
+    "description": "Reach the page past tinypng.com's CAPTCHA / bot wall (Homepage (upload)) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://tinypng.com and upload any small PNG image you can generate or download (for example https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_272x92dp.png saved first) to compress it. Report the compression result shown. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "tinypng.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://tinypng.com",
+        "https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_272x92dp.png"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Homepage (upload). Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent d1592b28. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "tinypng.com showing the uploaded image compressed with the size reduction",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on tinypng.com (CAPTCHA / bot wall at: Homepage (upload)). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (tinypng.com showing the uploaded image compressed with the size reduction), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:tinypng-upload",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-toast-nopa-fish",
+    "title": "Anti-bot: toast-nopa-fish",
+    "description": "Reach the page past toasttab.com (Nopa Fish)'s CAPTCHA / bot wall (Ordering page) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to Nopa Fish (Ferry Building, San Francisco) on its Toast online ordering site (toasttab.com), open the menu and add 1 rocky fish sandwich to the cart, then open the cart. Do NOT check out or pay. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "toasttab.com (Nopa Fish)"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Ordering page. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent 145e203d. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "Toast ordering page for Nopa Fish with the menu and the rocky fish sandwich in the cart",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on toasttab.com (Nopa Fish) (CAPTCHA / bot wall at: Ordering page). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (Toast ordering page for Nopa Fish with the menu and the rocky fish sandwich in the cart), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:toast-nopa-fish",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-indeed-signup",
+    "title": "Anti-bot: indeed-signup",
+    "description": "Reach the page past indeed.com's CAPTCHA / bot wall (Signup) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://www.indeed.com and start creating a job-seeker account with the email address captcha-probe-indeed@roselabs.ai. Creating the account is the step being tested: continue until Indeed asks for a verification code or password, then stop. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "indeed.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.indeed.com"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Signup. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent 7704ea4c. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "Indeed signup advanced past the email step to a verification-code or password step",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on indeed.com (CAPTCHA / bot wall at: Signup). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (Indeed signup advanced past the email step to a verification-code or password step), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:indeed-signup",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
+  },
+  {
+    "name": "anti-bot-ds160-start",
+    "title": "Anti-bot: ds160-start",
+    "description": "Reach the page past ceac.state.gov (US visa DS-160)'s CAPTCHA / bot wall (Start page) and report it; passes when the post-wall evidence is observed.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\"); do not use web_search or web_fetch and do not delegate to a general-purpose agent. Do not ask me any questions: every detail you need is below. Go to https://ceac.state.gov/genniv/, select the location \"Mexico, Mexico City\", solve the page's CAPTCHA and click Start an Application. Stop at the page that shows the Application ID and the security question; report the Application ID. Do NOT fill in or submit the application. Stop right there and report exactly what the page shows; take no further action. If a CAPTCHA, \"unusual traffic\", \"verify you are human\", access-denied or bot-check page appears, get past it with the browser's normal challenge handling and continue to that point.",
+    "timeout_seconds": 1800,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "anti-bot"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "min_steps": {
+      "browser": 1
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "world_model_mode": "real",
+    "anti_bot": "yes",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "ceac.state.gov (US visa DS-160)"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://ceac.state.gov/genniv/"
+      ],
+      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Start page. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): FAILED_CAPTCHA, agent 0f4c4693. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+    },
+    "evaluators": [
+      {
+        "id": "past_the_wall",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "DS-160 page showing an Application ID and/or the security question step after Start an Application",
+          "No CAPTCHA, bot check, \"unusual traffic\", access-denied or challenge page is still blocking at the end",
+          "The agent took no action beyond what the task allows (no purchase, payment, sign-up submission or message unless the task says so)"
+        ],
+        "judge_prompt": "Anti-bot probe on ceac.state.gov (US visa DS-160) (CAPTCHA / bot wall at: Start page). Judge from the agent's final answer, its browser observations and tool results. Score 1.0 only if the post-wall evidence was observed (DS-160 page showing an Application ID and/or the security question step after Start an Application), whether a challenge appeared and was cleared or no challenge appeared at all, and the agent stayed within the task's limits. Score 0.0 if a CAPTCHA, bot check, unusual-traffic, access-denied or challenge page was still blocking at the end, if challenge recovery was exhausted, or if the post-wall evidence was never observed."
+      }
+    ],
+    "source": [
+      "captcha_probe_sites.json:ds160-start",
+      "rose-captcha-sites-handoff.csv (2026-10-22)"
+    ],
+    "group": "rose-bench",
+    "deploy_category": "browser"
   }
 ]

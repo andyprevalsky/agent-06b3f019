@@ -279,7 +279,7 @@ def test_open_agent_redirects_to_running_archive_frontend(tmp_path):
     args = _link_server_args(tmp_path)
     args.context_dir.mkdir(parents=True)
     (args.context_dir / "archive-frontend-live.json").write_text(
-        json.dumps({"supervisor_pid": os.getpid(), "frontend_url": fake_url, "live": True})
+        json.dumps({"supervisor_pid": os.getpid(), "frontend_url": fake_url, "api_url": fake_url, "live": True})
     )
     link, link_url = _serve(_make_handler(args))
     try:
