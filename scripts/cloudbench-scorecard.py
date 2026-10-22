@@ -414,6 +414,22 @@ def load_fleet(run_dir: Path) -> dict:
                                  local_cleanup_clean(run_dir / f"benchmark-cleanup-{benchmark_token}.status",
                                                      benchmark_token))
     local_released = bool(local_stack_clean and local_benchmark_clean)
+    # A run context assembled from several lanes' stacks (run_captcha_probe.py --assemble) carries
+    # each stack's own cleanup receipts under sources/; it is released only when every one is clean.
+    assembled = read_json(run_dir / "assembled-from.json") if local else None
+    unclean_stacks: list = []
+    if isinstance(assembled, dict):
+        for stack in assembled.get("stacks") or []:
+            receipts = run_dir / str(stack.get("receipts") or "") if stack.get("receipts") else None
+            owner = read_json(receipts / "local-stack-owner.json") if receipts else None
+            clean = bool(owner and local_cleanup_clean(receipts / "local-stack-cleanup.status", owner.get("token")))
+            bench_owner = read_json(receipts / "local-benchmark-owner.json") if receipts else None
+            if clean and bench_owner:
+                clean = local_cleanup_clean(receipts / f"benchmark-cleanup-{bench_owner.get('token')}.status",
+                                            bench_owner.get("token"))
+            if not clean:
+                unclean_stacks.append(f"{stack.get('lane')}/{stack.get('stack_run_id')}")
+        local_released = bool(assembled.get("stacks")) and not unclean_stacks
     rows = []
     stage_status = {"queued": "queued", "starting": "running", "ready": "running", "running": "running",
                     "evaluated": "running", "teardown": "running"}
@@ -461,6 +477,18 @@ def load_fleet(run_dir: Path) -> dict:
         lifecycle_item(exp, "fail" if lifecycle.get("hub_publication_failed") else "ok", "Final Hub publication")
         lifecycle_item(exp, "ok" if lifecycle.get("controller_exit_code") in (0, 1) else "fail", "Controller exited",
                        f"exit {lifecycle.get('controller_exit_code')}")
+    elif local and isinstance(assembled, dict):
+        stacks = len(assembled.get("stacks") or [])
+        lifecycle_item(exp, "ok" if local_released else "warn", "Owned resources released",
+                       f"all {stacks} lane stacks have clean cleanup receipts" if local_released else
+                       "cleanup receipt not clean: " + ", ".join(unclean_stacks or ["no stacks recorded"]))
+        if rows and all(r["status"] in TERMINAL_JOB for r in rows):
+            exp["ended_at"] = epoch_of(card.get("finished_at"))
+            exp["end_evidence"] = "report-card.json finished_at (last recorded agent message)"
+            if local_released:
+                exp["state"] = "COMPLETE"
+            else:
+                exp["state"], exp["state_reason"] = "INCOMPLETE", "results recorded; a lane stack's cleanup receipt is not clean"
     elif local:
         lifecycle_item(exp, "ok" if local_released else "warn", "Owned resources released",
                        "local stack and benchmark cleanup clean" if local_released else "local cleanup receipt pending")

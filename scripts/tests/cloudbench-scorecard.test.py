@@ -482,6 +482,40 @@ class Scorecard(unittest.TestCase):
         self.assertIn(url, html)
         self.valid(data)
 
+    def test_assembled_local_card_needs_every_lane_stack_receipt(self):
+        # run_captcha_probe.py --assemble: one run context from several lanes' stacks, each
+        # stack's own cleanup receipts copied under sources/<lane>/<stack>.
+        run = self.tmp / "tilion-captcha-round2"
+        write(run / "report-card.json", {
+            "run_id": "tilion-captcha-round2", "source_sha": None, "started_at": T0, "finished_at": T0 + 900,
+            "tasks": {"total": 3},
+            "per_task": [{"name": "alpha", "status": "passed", "agent_id": "7d7be967-eecf-4fca-80af-d1973327fdd6"},
+                         {"name": "beta", "status": "failed", "agent_id": "b0f841a5-5d35-4c79-8b13-f20ecf54bdcb"},
+                         {"name": "held", "status": "skipped"}],
+        })
+        write(run / "run.json", {"run_id": "tilion-captcha-round2",
+                                "tasks": [{"name": "beta", "failure_reason": "PerimeterX press and hold still blocking"}]})
+        stacks = []
+        for lane, stack in (("F", "stack-f"), ("A2", "stack-a2")):
+            receipts = run / "sources" / lane / stack
+            write(receipts / "local-stack-owner.json", {"run_id": stack, "token": f"{stack}-tok"})
+            write(receipts / "local-stack-cleanup.status", f"version=2\ntoken={stack}-tok\nstate=clean\n")
+            stacks.append({"lane": lane, "stack_run_id": stack, "receipts": f"sources/{lane}/{stack}"})
+        write(run / "assembled-from.json", {"stacks": stacks})
+        data = CARD["build"](run, ledger=self.tmp / "none.jsonl", now=NOW)
+        exp = data["experiment"]
+        self.assertEqual((exp["state"], exp["ended_at"]), ("COMPLETE", T0 + 900))
+        self.assertEqual((exp["outcomes"]["PASS"], exp["outcomes"]["AGENT FAIL"], exp["outcomes"]["SKIPPED"]), (1, 1, 1))
+        text = CARD["render_text"](data)
+        self.assertIn("all 2 lane stacks have clean cleanup receipts", text)
+        self.assertIn("PerimeterX press and hold still blocking", text)
+        self.valid(data)
+        # One lane stack whose receipt is still pending keeps the run INCOMPLETE and names it.
+        write(run / "sources/A2/stack-a2/local-stack-cleanup.status", "version=2\ntoken=stack-a2-tok\nstate=pending\n")
+        data = CARD["build"](run, ledger=self.tmp / "none.jsonl", now=NOW)
+        self.assertEqual(data["experiment"]["state"], "INCOMPLETE")
+        self.assertIn("cleanup receipt not clean: A2/stack-a2", CARD["render_text"](data))
+
     def test_local_card_reads_recorded_source_and_clock(self):
         run = self.tmp / "local-run-without-epoch-name"
         sha = "a873eae49" + "0" * 31
