@@ -6,6 +6,7 @@ import { createLogger } from './logger';
 import { cleanupAgentPurchaseCards } from './purchaseCleanup';
 import { closeSession } from './browser';
 import { reconcileOrphanedTilionSessions } from './browser/tilionReaper';
+import { abortRecoverySearchesFor } from './browser/challengeRecoveryLaneSearch';
 import { closeLocalClaudeCodeSession, isLocalClaudeCodeSandboxId } from './claudeCodeLocalSession';
 
 const log = createLogger('Cleanup');
@@ -272,6 +273,7 @@ export async function releaseAgentBrowserSessions(
   overrides: Partial<BrowserSessionReleaseDependencies> = {}
 ): Promise<number> {
   const dependencies = { ...browserSessionReleaseDependencies(), ...overrides };
+  abortRecoverySearchesFor(agentId);
   let released = 0;
   const failures: unknown[] = [];
   let activeBrowserSessions: Array<{ sessionId: string }>;

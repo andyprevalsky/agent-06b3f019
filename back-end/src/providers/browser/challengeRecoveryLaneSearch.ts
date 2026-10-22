@@ -33,6 +33,103 @@ export interface LaneConfigSearchOptions {
   candidateDeadlineMs?: number;
   /** End the whole candidate search before its HTTP caller's read deadline. */
   searchDeadlineMs?: number;
+  /** Agent the search recovers for: its cleanup aborts the search (abortRecoverySearchesFor). */
+  ownerKey?: string;
+}
+
+/**
+ * Candidate sessions created by every in-flight recovery search, so a backend
+ * shutdown can release them (T107: two tilion_direct probes outlived SIGTERM and
+ * kept billing against the shared account cap). Release is idempotent: a session
+ * is DELETEd only while this registry still owns it.
+ */
+const liveProbeSessions = new Map<RecoveryCandidateSession, () => Promise<void>>();
+const inFlightProbeCreates = new Set<Promise<unknown>>();
+const inFlightProbeReleases = new Set<Promise<void>>();
+const liveSearchAborts = new Map<AbortController, string | undefined>();
+
+function withProbeSessionRegistry(
+  dependencies: ConfigSearchDependencies
+): ConfigSearchDependencies {
+  const releaseOwned = (config: BrowserRecoveryConfig, session: RecoveryCandidateSession) => {
+    if (!liveProbeSessions.delete(session)) return Promise.resolve();
+    const releasing = dependencies.release(config, session);
+    inFlightProbeReleases.add(releasing);
+    void releasing.catch(() => {}).finally(() => inFlightProbeReleases.delete(releasing));
+    return releasing;
+  };
+  return {
+    ...dependencies,
+    create: async (config, signal) => {
+      const creating = dependencies.create(config, signal);
+      inFlightProbeCreates.add(creating);
+      try {
+        const session = await creating;
+        liveProbeSessions.set(session, () => releaseOwned(config, session));
+        return session;
+      } finally {
+        inFlightProbeCreates.delete(creating);
+      }
+    },
+    release: (config, session) => releaseOwned(config, session),
+    promote: async (winner) => {
+      // The promoted session becomes the task's own browser (reconciled with the agent).
+      const release = liveProbeSessions.get(winner.session);
+      liveProbeSessions.delete(winner.session);
+      try {
+        await dependencies.promote(winner);
+      } catch (error) {
+        if (release) liveProbeSessions.set(winner.session, release);
+        throw error;
+      }
+    },
+  };
+}
+
+/**
+ * An agent stopped (cleanup/delete): abort its running recovery searches so they
+ * create no further candidates and release the ones they hold (T107: a search
+ * allocated a new Tilion probe 4 s after its agent's browsers were closed).
+ */
+export function abortRecoverySearchesFor(ownerKey: string): number {
+  let aborted = 0;
+  for (const [controller, owner] of liveSearchAborts) {
+    if (owner !== ownerKey || controller.signal.aborted) continue;
+    controller.abort();
+    aborted += 1;
+  }
+  if (aborted > 0)
+    log.info('Challenge recovery search aborted for stopped agent', { ownerKey, aborted });
+  return aborted;
+}
+
+/** Recovery candidate sessions currently owned by a search (diagnostics/tests). */
+export function liveRecoveryProbeSessionCount(): number {
+  return liveProbeSessions.size;
+}
+
+/**
+ * Backend shutdown: abort every live recovery search and release each candidate
+ * session it still owns, including ones whose create lands meanwhile. Bounded
+ * best-effort; returns how many sessions were released.
+ */
+export async function releaseAllRecoveryProbeSessions(timeoutMs = 8_000): Promise<number> {
+  const deadline = new Promise<void>((resolve) => setTimeout(resolve, timeoutMs).unref());
+  const owned = liveProbeSessions.size + inFlightProbeCreates.size;
+  for (const controller of [...liveSearchAborts.keys()]) controller.abort();
+  await Promise.race([Promise.allSettled([...inFlightProbeCreates]), deadline]);
+  for (const release of [...liveProbeSessions.values()]) void release();
+  const releases = [...inFlightProbeReleases];
+  const settled = await Promise.race([Promise.allSettled(releases), deadline.then(() => null)]);
+  const released = settled ? settled.filter((result) => result.status === 'fulfilled').length : 0;
+  if (owned > 0 || releases.length > 0) {
+    log.info('Challenge recovery probe sessions released on shutdown', {
+      owned,
+      released,
+      timedOut: settled === null,
+    });
+  }
+  return released;
 }
 
 /**
@@ -86,9 +183,11 @@ export async function runLaneConfigSearch(
   if (lanes.length === 0) {
     throw new Error('Challenge recovery requires at least one cookie storage lane');
   }
+  dependencies = withProbeSessionRegistry(dependencies);
   const avoidConfigKey = options.avoidConfigKey;
   const orderedConfigs = orderConfigsForLane(configs, avoidConfigKey, options.blockedConfigKeys);
   const abort = new AbortController();
+  liveSearchAborts.set(abort, options.ownerKey);
   const claimLock = { claimed: false };
   /** Sessions still owned by in-flight sibling lanes — released on winner claim. */
   const activeSessions = new Set<{
@@ -232,96 +331,100 @@ export async function runLaneConfigSearch(
     throw new Error(`No stable browser configuration in lane ${lane.key}`);
   };
 
-  return await new Promise<SuccessfulRecoveryCandidate>((resolve, reject) => {
-    let settled = false;
-    let deadlineExpired = false;
-    const laneErrors: string[] = [];
-    let pendingLanes = lanes.length;
-    const failDeadline = () => {
-      if (settled) return;
-      settled = true;
-      abort.abort();
-      log.error('Challenge recovery search deadline exceeded', {
-        candidateCount: configs.length,
-        laneCount: lanes.length,
-        searchDeadlineMs: options.searchDeadlineMs,
-      });
-      reject(new Error('Challenge recovery search deadline exceeded'));
-    };
-    const searchDeadlineTimer = options.searchDeadlineMs
-      ? setTimeout(() => {
-          deadlineExpired = true;
-          if (!claimLock.claimed) failDeadline();
-        }, options.searchDeadlineMs)
-      : undefined;
+  try {
+    return await new Promise<SuccessfulRecoveryCandidate>((resolve, reject) => {
+      let settled = false;
+      let deadlineExpired = false;
+      const laneErrors: string[] = [];
+      let pendingLanes = lanes.length;
+      const failDeadline = () => {
+        if (settled) return;
+        settled = true;
+        abort.abort();
+        log.error('Challenge recovery search deadline exceeded', {
+          candidateCount: configs.length,
+          laneCount: lanes.length,
+          searchDeadlineMs: options.searchDeadlineMs,
+        });
+        reject(new Error('Challenge recovery search deadline exceeded'));
+      };
+      const searchDeadlineTimer = options.searchDeadlineMs
+        ? setTimeout(() => {
+            deadlineExpired = true;
+            if (!claimLock.claimed) failDeadline();
+          }, options.searchDeadlineMs)
+        : undefined;
 
-    const clearSearchDeadline = () => {
-      if (searchDeadlineTimer !== undefined) clearTimeout(searchDeadlineTimer);
-    };
+      const clearSearchDeadline = () => {
+        if (searchDeadlineTimer !== undefined) clearTimeout(searchDeadlineTimer);
+      };
 
-    const finishFailure = () => {
-      if (settled || claimLock.claimed) return;
-      settled = true;
-      clearSearchDeadline();
-      log.error('Challenge recovery found no stable browser configuration', {
-        candidateCount: configs.length,
-        laneCount: lanes.length,
-        laneKeys: lanes.map((lane) => lane.key),
-        configKeys: configs.map((config) => config.key),
-        errors: laneErrors.slice(0, 8),
-      });
-      reject(new Error('No stable browser configuration cleared the challenge'));
-    };
+      const finishFailure = () => {
+        if (settled || claimLock.claimed) return;
+        settled = true;
+        clearSearchDeadline();
+        log.error('Challenge recovery found no stable browser configuration', {
+          candidateCount: configs.length,
+          laneCount: lanes.length,
+          laneKeys: lanes.map((lane) => lane.key),
+          configKeys: configs.map((config) => config.key),
+          errors: laneErrors.slice(0, 8),
+        });
+        reject(new Error('No stable browser configuration cleared the challenge'));
+      };
 
-    const onLaneSettled = () => {
-      pendingLanes -= 1;
-      if (pendingLanes <= 0) finishFailure();
-    };
+      const onLaneSettled = () => {
+        pendingLanes -= 1;
+        if (pendingLanes <= 0) finishFailure();
+      };
 
-    for (const lane of lanes) {
-      void (async () => {
-        try {
-          const candidate = await runLane(lane);
-          if (claimLock.claimed || settled) {
-            await dependencies.release(candidate.config, candidate.session).catch(() => {});
-            return;
-          }
-          claimLock.claimed = true;
-          abort.abort();
-          log.info('Challenge recovery promoting lane winner', {
-            laneKey: lane.key,
-            configKey: candidate.config.key,
-            provider: candidate.config.provider,
-            proxyMode: candidate.config.proxyMode,
-            stablePasses: candidate.probe.stablePasses,
-            attempts: candidate.probe.attempts,
-            avoidConfigKey: avoidConfigKey ?? null,
-            latencyMs: candidate.probe.latencyMs,
-          });
+      for (const lane of lanes) {
+        void (async () => {
           try {
-            await dependencies.promote(candidate);
+            const candidate = await runLane(lane);
+            if (claimLock.claimed || settled) {
+              await dependencies.release(candidate.config, candidate.session).catch(() => {});
+              return;
+            }
+            claimLock.claimed = true;
+            abort.abort();
+            log.info('Challenge recovery promoting lane winner', {
+              laneKey: lane.key,
+              configKey: candidate.config.key,
+              provider: candidate.config.provider,
+              proxyMode: candidate.config.proxyMode,
+              stablePasses: candidate.probe.stablePasses,
+              attempts: candidate.probe.attempts,
+              avoidConfigKey: avoidConfigKey ?? null,
+              latencyMs: candidate.probe.latencyMs,
+            });
+            try {
+              await dependencies.promote(candidate);
+            } catch (error) {
+              await dependencies.release(candidate.config, candidate.session).catch(() => {});
+              claimLock.claimed = false;
+              if (deadlineExpired) failDeadline();
+              throw error;
+            }
+            clearSearchDeadline();
+            if (!settled) {
+              settled = true;
+              resolve(candidate);
+            }
           } catch (error) {
-            await dependencies.release(candidate.config, candidate.session).catch(() => {});
-            claimLock.claimed = false;
-            if (deadlineExpired) failDeadline();
-            throw error;
+            const message = error instanceof Error ? error.message : String(error);
+            if (message !== 'lane_aborted') {
+              laneErrors.push(message);
+            }
+          } finally {
+            onLaneSettled();
           }
-          clearSearchDeadline();
-          if (!settled) {
-            settled = true;
-            resolve(candidate);
-          }
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          if (message !== 'lane_aborted') {
-            laneErrors.push(message);
-          }
-        } finally {
-          onLaneSettled();
-        }
-      })();
-    }
-  });
+        })();
+      }
+    });
+  } finally {
+    liveSearchAborts.delete(abort);
+  }
 }
 
 /**
